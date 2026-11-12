@@ -26,48 +26,70 @@ __device__ __forceinline__ float fp8_level(unsigned c) {
     return (c & 0x80u) != 0 ? -v : v;
 }
 
-// A warp's sum of one lane's value: a tree, so the order is the same for every row count.
 __device__ __forceinline__ float fp8_warp_sum(float v) {
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
     return v;
 }
 
-// A warp an output element: its lanes read one column's four-code words, so a warp reads 128 bytes a step.
-__device__ __forceinline__ void fp8_product(ModelFp8 a) {
+// A warp R rows of one output column: its lanes read four-code words, so a column loads once and serves the R rows.
+template <int R>
+__device__ __forceinline__ void fp8_rows(ModelFp8 a) {
     const int lane = threadIdx.x & 31;
     const int warps = blockDim.x >> 5;
-    const long long total = static_cast<long long>(a.m) * a.n;
+    const int row_blocks = (a.m + R - 1) / R;
+    const long long total = static_cast<long long>(row_blocks) * a.n;
     const unsigned char* codes = static_cast<const unsigned char*>(a.codes);
-    const int words_row = a.k / 4;  // four codes a word
     const bool wide = (a.k & 3) == 0;
+    const int words_row = a.k / 4;
     const long long stride = static_cast<long long>(gridDim.x) * warps;
     for (long long item = static_cast<long long>(blockIdx.x) * warps + (threadIdx.x >> 5); item < total;
          item += stride) {
-        const int row = static_cast<int>(item / a.n);
+        const int rb = static_cast<int>(item / a.n);
         const int col = static_cast<int>(item % a.n);
+        const int row0 = rb * R;
+        const int rows = a.m - row0 < R ? a.m - row0 : R;
         const unsigned char* w = codes + static_cast<long long>(col) * a.k;
-        const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row) * a.k;
-        float sum = 0.f;
+        const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0) * a.k;
+        float acc[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r) acc[r] = 0.f;
         if (wide) {
             const uint32_t* w32 = reinterpret_cast<const uint32_t*>(w);
             for (int base = 0; base < words_row; base += 32) {
                 const int wd = base + lane;
                 if (wd < words_row) {
                     const uint32_t word = w32[wd];
-                    float q = 0.f;
+                    float lvl[4];
 #pragma unroll
-                    for (int c = 0; c < 4; ++c) {
-                        q = fmaf(fp8_level(word >> (8 * c)), static_cast<float>(x[wd * 4 + c]), q);
+                    for (int c = 0; c < 4; ++c) lvl[c] = fp8_level(word >> (8 * c));
+#pragma unroll
+                    for (int r = 0; r < R; ++r) {
+                        if (r < rows) {
+                            float q = 0.f;
+#pragma unroll
+                            for (int c = 0; c < 4; ++c) {
+                                q = fmaf(lvl[c], static_cast<float>(x[static_cast<long long>(r) * a.k + wd * 4 + c]), q);
+                            }
+                            acc[r] += q;
+                        }
                     }
-                    sum += q;
                 }
             }
         } else {
-            for (int j = lane; j < a.k; j += 32) sum = fmaf(fp8_level(w[j]), static_cast<float>(x[j]), sum);
+            for (int j = lane; j < a.k; j += 32) {
+                const float lvl = fp8_level(w[j]);
+#pragma unroll
+                for (int r = 0; r < R; ++r) {
+                    if (r < rows) acc[r] = fmaf(lvl, static_cast<float>(x[static_cast<long long>(r) * a.k + j]), acc[r]);
+                }
+            }
         }
-        sum = fp8_warp_sum(sum);
-        if (lane == 0) a.out[item] = sum * a.scale[0];
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            const float sum = fp8_warp_sum(acc[r]);
+            if (lane == 0 and r < rows) a.out[static_cast<long long>(row0 + r) * a.n + col] = sum * a.scale[0];
+        }
     }
 }
 
@@ -76,5 +98,7 @@ __device__ __forceinline__ void fp8_product(ModelFp8 a) {
 
 // This path serves bf16 activations only, as the NVFP4 product does.
 extern "C" __global__ void __launch_bounds__(256) tf_fp8_gemm(tf::rocm::ModelFp8 a) {
-    tf::rocm::fp8_product(a);
+    if (a.m >= 8) tf::rocm::fp8_rows<8>(a);
+    else if (a.m >= 4) tf::rocm::fp8_rows<4>(a);
+    else tf::rocm::fp8_rows<1>(a);
 }
