@@ -91,7 +91,7 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
-/// `project` over weights repacked by `tile`: one dispatch. The tiled image reads and stores packed bf16, or f32 for both x and out (the wide layers).
+/// `project` over weights repacked by `tile`: one dispatch; bf16 or f32 (both x and out) activations.
 pub fn tiledActivation(out: View, x: View) Error!void {
     if (out.kind != x.kind or (x.kind != .bf16 and x.kind != .f32)) return error.Invalid;
 }
