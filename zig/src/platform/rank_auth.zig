@@ -2,6 +2,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 pub const key = @import("rank_key.zig");
+/// Sealed records for every byte after the proof, under the session key the proof leaves at both ends.
+pub const seal = @import("rank_seal.zig");
 const environment = @import("environment.zig");
 const windows = builtin.os.tag == .windows;
 const posix = if (windows) @import("win_posix.zig") else std.posix;
@@ -405,4 +407,5 @@ test "rank auth: this host is loopback, a local socket, or the address the conne
 test {
     _ = fixture;
     _ = key;
+    _ = seal;
 }
