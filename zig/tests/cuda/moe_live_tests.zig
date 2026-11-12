@@ -75,8 +75,8 @@ const Chain = struct {
         try c.f.route(c.s, x, dims, rows, c.w, c.logits, dims, count, params);
         try c.f.pick(c.s, c.logits, c.picks, c.wts, rows, routed, top_k, params);
         try c.router.routeRows(c.s, c.picks, pairs, count, 16, c.plan, if (params == 0) 0 else params + 8, slots);
-        try c.grouped.decode(c.s, .up, .{ .x = x, .stride = dims, .slots = slots }, c.layer, c.plan, c.act, items, -1);
-        try c.grouped.decode(c.s, .down_f32, .{ .x = c.act, .stride = ni }, c.layer, c.plan, c.y, items, -1);
+        try c.grouped.decode(c.s, .up, .{ .x = x, .stride = dims, .slots = slots }, c.layer, c.plan, c.act, items, pairs, 16, -1);
+        try c.grouped.decode(c.s, .down_f32, .{ .x = c.act, .stride = ni }, c.layer, c.plan, c.y, items, pairs, 16, -1);
         try c.f.combine(c.s, c.y, true, c.wts, out, rows, slots, dims, params);
     }
 

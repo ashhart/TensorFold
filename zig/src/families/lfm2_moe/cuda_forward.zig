@@ -133,11 +133,11 @@ const Pass = struct {
         const rows_in: cuda.experts.Rows = .{ .x = x.x, .stride = c.hidden, .slots = c.topk };
         const act_in: cuda.experts.Rows = .{ .x = x.eact, .stride = c.moe_intermediate };
         if (p.prompt) {
-            try grouped.prompt(p.s, .up, rows_in, e.experts, plan, x.eact, items, -1);
-            try grouped.prompt(p.s, .down_bf16, act_in, e.experts, plan, x.ey, items, -1);
+            try grouped.prompt(p.s, .up, rows_in, e.experts, plan, x.eact, items, pairs, tile, -1);
+            try grouped.prompt(p.s, .down_bf16, act_in, e.experts, plan, x.ey, items, pairs, tile, -1);
         } else {
-            try grouped.decode(p.s, .up, rows_in, e.experts, plan, x.eact, items, -1);
-            try grouped.decode(p.s, .down_f32, act_in, e.experts, plan, x.ey, items, -1);
+            try grouped.decode(p.s, .up, rows_in, e.experts, plan, x.eact, items, pairs, tile, -1);
+            try grouped.decode(p.s, .down_f32, act_in, e.experts, plan, x.ey, items, pairs, tile, -1);
         }
         try k.moe.combine(p.s, x.ey, !p.prompt, x.wts, x.r, p.rows, c.topk, c.hidden, 0);
     }
