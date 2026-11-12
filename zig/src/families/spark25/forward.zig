@@ -345,6 +345,7 @@ pub const Model = struct {
         for (chains) |c| {
             if (c.tokens.len == 0 or c.slot >= m.slots or c.p0 + c.tokens.len > m.context) return error.BadChain;
             if (m.paged and c.p0 + c.tokens.len > m.caps[c.slot]) return error.PastPages; // rows past the slot's pages
+            for (c.tokens) |t| if (t >= cfg.vocab) return error.InvalidSparkToken; // embed reads the table at id unchecked
             rows += c.tokens.len;
         }
         if (rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;

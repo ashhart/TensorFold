@@ -372,6 +372,7 @@ pub const Mtp = struct {
 
     pub fn putIds(d: *Mtp, ids: []const u32) !void {
         const e = d.e;
+        for (ids) |id| if (id >= e.g.vocab) return error.InvalidQwenToken; // embed reads the table at id unchecked
         try e.stream.synchronize(); // the previous upload from this staging area has run: an absorb queues one a chunk
         @memcpy(std.mem.bytesAsSlice(u32, d.staged.bytes[ids_at..][0 .. ids.len * 4]), ids);
         try cuda.copy_source.enqueue(e.d, d.ids, d.staged.bytes[ids_at..][0 .. ids.len * 4], e.stream);

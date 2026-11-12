@@ -98,11 +98,11 @@ fn fill(p: *Pending, io: std.Io, dir: []const u8, c: Config, with_mtp: bool) !vo
         _ = try reading.check();
     }
     if (c.format == .modelopt) w.embed = try modelopt.embed(L, &ck, c) else {
-        const emb = try ck.get("backbone.embeddings.weight");
+        const emb = try ck.expect("backbone.embeddings.weight", .u32, &.{ c.vocab, c.hidden / 8 }); // embed reads row id of each
         w.embed = .{
             .w = try L.raw("embed.weight", emb),
-            .s = try L.raw("embed.scales", try ck.get("backbone.embeddings.scales")),
-            .b = try L.raw("embed.biases", try ck.get("backbone.embeddings.biases")),
+            .s = try L.raw("embed.scales", try ck.expect("backbone.embeddings.scales", .bf16, &.{ c.vocab, c.hidden / 64 })),
+            .b = try L.raw("embed.biases", try ck.expect("backbone.embeddings.biases", .bf16, &.{ c.vocab, c.hidden / 64 })),
             .n = emb.dim(0),
             .k = emb.dim(1) * 8,
         };

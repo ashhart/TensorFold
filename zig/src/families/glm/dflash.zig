@@ -285,6 +285,7 @@ pub const Drafter = struct {
         if (active.len == 0) return;
         const S = active.len;
         for (active, 0..) |q, i| {
+            if (q.anchor >= VOCAB) return error.TokenOutsideVocabulary; // the embedding and the codebooks read row `anchor` unchecked
             const s = &dr.slots.items[q.slot];
             dr.h_rings[i] = s.ring.?.ptr;
             dr.h_starts[i] = q.pos;

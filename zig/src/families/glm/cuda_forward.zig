@@ -412,7 +412,7 @@ pub const Forward = struct {
 
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
-        const R = ids.len;
+        const R = (try @import("cuda_forward_pair.zig").vocabIds(ids, f.ranks[0].w.config.vocab)).len; // refused before any state moves
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
             if (r.segs.len == 0) {
@@ -500,7 +500,7 @@ pub const Forward = struct {
     }
 
     pub fn mtpMode(f: *const Forward, ids: []const i32, hidden: []const u64, propose: bool) !void {
-        const n = ids.len;
+        const n = (try @import("cuda_forward_pair.zig").vocabIds(ids, f.ranks[0].w.config.vocab)).len; // refused before any state moves
         const c = &f.ranks[0].w.config;
         const D: usize = c.hidden;
         // every rank shares this buffer and this row count, so every rank takes the same path and the gathers match

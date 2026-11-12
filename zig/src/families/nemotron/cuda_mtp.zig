@@ -369,10 +369,16 @@ pub const Head = struct {
         }
     }
 
+    /// `follow` staged for the head, which embeds each kept row's next token: ids past the table are refused here.
+    pub fn stage(h: *Head, follow: []const u32) !void {
+        for (follow) |id| if (id >= h.e.c.vocab) return error.TokenOutsideVocabulary;
+        try h.e.ops().upload(h.e.b.sampled, std.mem.sliceAsBytes(follow));
+    }
+
     /// The lane core's draft request: absorb `follow.len` kept rows (follow: token after each), then `depth` levels.
     pub fn chain(h: *Head, follow: []const u32, depth: usize, v: Vocab) !void {
         if (follow.len < 1 or follow.len > state.windowRows(h.e.c) or depth >= state.windowRows(h.e.c)) return error.BadDraftRequest;
-        try h.e.ops().upload(h.e.b.sampled, std.mem.sliceAsBytes(follow));
+        try h.stage(follow);
         try h.begin(follow.len);
         if (depth == 0) return h.launch(0, v);
         for (1..depth + 1) |j| try h.launch(j, v);

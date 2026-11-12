@@ -334,6 +334,7 @@ pub const Model = struct {
             if (ch.tokens.len > m.ring - m.c.window) return error.ChainOverrunsRing;
             if (ch.p0 + ch.tokens.len > m.context) return error.PastContext;
             if (ch.slot >= m.slots) return error.NoSuchSlot;
+            for (ch.tokens) |t| if (t >= m.c.vocab) return error.TokenOutsideVocabulary; // embed reads w[id] unchecked
             if (m.paged and ch.p0 + ch.tokens.len > m.caps[ch.slot]) return error.PastPages; // past its pages
             n += ch.tokens.len;
         }

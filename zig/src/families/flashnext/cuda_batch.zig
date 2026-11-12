@@ -469,6 +469,7 @@ pub fn Pass(comptime Tri: type) type {
         pub fn stage(self: *Self, ids: []const u32) !void {
             const s = self.s;
             const n = ids.len;
+            for (ids) |v| if (v >= vocab) return error.InvalidToken; // embed reads the table at id unchecked
             if (!self.prepared) try s.ready();
             const id32 = s.hostIds(n);
             for (id32, ids) |*o, v| o.* = @intCast(v);

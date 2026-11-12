@@ -35,6 +35,7 @@ pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, h
     if (prompt.len == 0) return error.EmptyPrompt;
     if (from >= prompt.len) return error.BadReuse;
     if (prompt.len + state.max_rows > e.cap()) return error.ContextFull;
+    for (prompt) |id| if (id >= e.c.vocab) return error.TokenOutsideVocabulary; // the chunks and the head embed them unchecked
     if (from == 0) {
         try e.reset();
         if (head) |h| try h.reset();
