@@ -279,7 +279,6 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Draft several lanes through the shared operator loop.
         pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidences: []const f64, outs: []const *Chain) !void {
-            for (ds) |d| try o.flushStash(d);
             return module.draftMany(o, ds, nexts, rows, counts, positions, sms, confidences, outs);
         }
 
@@ -429,6 +428,7 @@ pub fn Ops(comptime Tri: type) type {
 
 /// One shared head loop over its operator boundary: forward work, reductions, guarded picks and stop policy.
 pub fn draftMany(o: anytype, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidences: []const f64, outs: []const *Chain) !void {
+    for (ds) |d| try o.flushStash(d);
     const h = o.h;
     const n_l = ds.len;
     for (ds, outs) |d, out| {
