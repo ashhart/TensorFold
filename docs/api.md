@@ -718,9 +718,12 @@ and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and
 the template's own default. An explicit `chat_template_kwargs.enable_thinking` takes
 precedence. A request without an effort gets `--reasoning-effort` when the server was started with one; otherwise
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
-to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
-the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
-token budget. With thinking off, native passes no reasoning effort to the template. If its generation prefix ends
+to the system prompt; `medium` adds none). Both backends render the same prompt for the same request.
+Effort support depends on the checkpoint's template, and effort does not set a
+token budget. With thinking off, native passes the template only an effort that was named: the request's
+`reasoning_effort` (other than `none`) or `--reasoning-effort`; with neither, it passes none, as before. So a GLM-5.3
+request can send `reasoning_effort: "high"` beside `chat_template_kwargs.enable_thinking: false` (or `thinking: false`)
+to render `Reasoning Effort: High` instead of the template's Max head. If its generation prefix ends
 in a single `<think>` token, native appends the single `</think>` token, leaving an empty think block. This handles
 GLM-5.3 and LFM2 templates without their own off switch. Other template text stays unchanged: GLM-5.3's
 `Reasoning Effort` head stays as the template writes it, and an older GLM-5.3 template still writes its default
