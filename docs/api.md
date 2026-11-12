@@ -383,9 +383,10 @@ are the exception: absent both, replies take 0.8 of that time and a filling prom
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
-hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
-and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
+on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, DeepSeek-V4.1 Metal and
+hip_serve servers pass the flag to their lane host and take its time share (DeepSeek-V4.1 on Metal also runs prompts in
+steps with it, replies taking 0.25 when it is absent and steps are on; `TF_DSV41_PREFILL_PIECES`); the DeepSeek CUDA,
+Spark-X on Metal, Qwen4 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens

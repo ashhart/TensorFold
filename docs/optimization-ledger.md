@@ -97,7 +97,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 17. DSpark | yes | yes | yes | done¹ | done [#1751] |
 | 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | done¹ |
 | 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
-| 20. Solo chunks | yes | yes | yes | yes | yes |
+| 20. Solo chunks | yes | yes | yes | yes | open M[#2950] |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
 | 22. Direct load | yes | open [#2449] | open [#2449] | yes | open [#1924] |
 | 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | done [#1884] |
@@ -408,6 +408,7 @@ below; these are estimates for planning a port, not results.
     | flashnext (C), one GPU | prompts 15–23 % faster at `--parallel 1`, up to 8,192 rows a pass | [#2246] |
     | glm (C), TP=2 | prompts about 2 % sooner at 8K–128K, two chunks a step, replies unchanged | [#1423] |
     | gemma4 (C) | first token 31B −4..−5 %, E4B −9..−10 %, opt-in with `TF_GEMMA4_CHUNK_SOLO` | [#2391] |
+    | deepseek_v41 (M) | a reply's longest pause beside a 131K prompt 203 → 7 s, prompt's first token level (M3 Ultra, opt-in) | [#2950] |
 
     `TF_GLM_CHUNK_SOLO=4096` is slower with GLM's NVFP4 checkpoint on two GB10s ([#2288]).
 
@@ -614,4 +615,5 @@ below; these are estimates for planning a port, not results.
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
+[#2950]: https://github.com/ashhart/TensorFold/pull/2950
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764

@@ -166,6 +166,9 @@ that each setting changed a reply. Each stable fallback is null. The release bac
 | `debug` | `TF_DSV41_LAYERS`, `TF_DSV41_NEEDS_POOL` |
 | `experimental` | `TF_DSV41_EXPERT_TOPP`, `TF_DSV41_OWN_PREFILL`, `TF_DSV41_PREFILL_PIECES`, `TF_DSV41_SLOTS`, `TF_DSV41_MHC_DEFER`, `TF_DSV41_DRAFTS`, `TF_DSV41_SAMPLING`, `TF_DSV41_IMAGES`, `TF_DSV41_BIAS_VL`, `TF_DSV41_ENGRAM_DIR`, `TF_DSV41_SCHEMA_PROMPT`, `TF_DSV41_TOOL_GRAMMAR` |
 
+The DeepSeek-V4.1 Metal server also reads `TF_DSV41_PREFILL_PIECES`: there `1` runs a prompt in steps between the
+other streams' rounds ([environment](environment.md)); `stable` leaves it absent, so prompts run whole.
+
 The pool settings have separate rows because each can be set independently. `NEEDS_POOL` forces pool geometry
 in the AOT asset planner; it does not select the served engine's pool. Its class is therefore `debug`.
 The other pool classes conservatively retain the audit's `arithmetic` classification, without claiming exactness.

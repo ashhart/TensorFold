@@ -73,6 +73,15 @@ fn applyShare(h: *api.LaneHost, backend: Model) void {
     h.share.p = 1 - steps_decode_share;
 }
 
+/// Prompt steps with `decode_share` (--decode-share, refused outside [0, 1)): above 0, or as `stepsFromEnv` says.
+pub fn stepsFor(decode_share: ?f64) !bool {
+    if (decode_share) |x| {
+        if (!(x >= 0 and x < 1)) return error.BadDecodeShare;
+        if (x > 0) return true;
+    }
+    return stepsFromEnv();
+}
+
 /// Prompt steps for a target with pieces: TF_DSV41_PREFILL_PIECES=1, or LaneHost's srpt order or a prompt share set.
 pub fn stepsFromEnv() !bool {
     if (try @import("sys").environment.read(bool, "TF_DSV41_PREFILL_PIECES", false)) return true;
