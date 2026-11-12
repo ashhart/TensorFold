@@ -46,3 +46,11 @@ test "flag deps: flags the build does not serve are refused with the Python engi
     try std.testing.expectEqualStrings("auto", (try parse(a, &.{ "m", "--backend", "auto" }, &u)).backend);
     try std.testing.expectEqualStrings(native, (try parse(a, &.{ "m", "--backend", native }, &u)).backend);
 }
+
+test "flag deps: --backend cpu on a GPU build names the CPU engine's own build" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var u: Usage = .{};
+    try std.testing.expectError(error.Usage, parse(arena.allocator(), &.{ "m", "--backend", "cpu" }, &u));
+    try std.testing.expectEqualStrings("--backend cpu is served by the CPU engine's own build: zig build native-cpu puts its tensorfold-native in zig-out/native-cpu/bin", u.message);
+}
