@@ -464,6 +464,7 @@ await (async () => {
   const pairedRoomStarts: any[] = []
   const pairedArchiveCalls: string[] = []
   const pairedListDirCalls: Array<{ dir: string; options?: { confineToHome?: boolean } }> = []
+  const pairedApprovals: Array<{ callId: string; decision: string }> = []
   const server = createRemoteControlServer(remoteDeps(s, {
     getSnapshot: async () => ({ scope: 'owner', secret: 'owner-only' }) as any,
     getPairedSnapshot: async () => ({ scope: 'paired', secret: undefined }) as any,
@@ -479,6 +480,7 @@ await (async () => {
     deleteTicket: async (id) => { pairedArchiveCalls.push(`ticket:archive:${id}`); return { id, archivedAt: 1 } as any },
     restoreTicket: async (id) => { pairedArchiveCalls.push(`ticket:restore:${id}`); return { id, archivedAt: null } as any },
     listDirectories: async (dir, options) => { pairedListDirCalls.push({ dir, options }); return { ok: true, path: '/tmp', parent: '/', entries: [] } },
+    approve: async (callId, decision) => { pairedApprovals.push({ callId, decision }) },
     pairing: {
       issuePairingLink: (label: string) => reg.issuePairingLink(label),
       authorizeSessionToken: (token: string) => reg.authorizeSessionToken(token),
@@ -507,6 +509,17 @@ await (async () => {
     assert.equal(ownerSnapshot.secret, 'owner-only', 'the owner token retains the full local snapshot')
     const pairedArchives = await fetch(`${base}/v1/archives`, { headers: { Authorization: `Bearer ${paired.token}` } })
     assert.equal(pairedArchives.status, 200, 'paired tokens can enumerate the redacted recovery archive')
+
+    // …but never resolves a tool approval: that stays with the owner token.
+    for (const decision of ['allow', 'allow_always', 'deny']) {
+      const asDevice = await fetch(`${base}/v1/approvals/call%201`, { method: 'POST', headers: { Authorization: `Bearer ${paired.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ decision }) })
+      assert.equal(asDevice.status, 403, `a paired device token cannot ${decision} a tool approval`)
+      assert.deepEqual(await asDevice.json(), { error: 'owner_token_required' })
+    }
+    assert.equal(pairedApprovals.length, 0, 'no approval reached the host from a paired device')
+    const asOwner = await fetch(`${base}/v1/approvals/call%201`, { method: 'POST', headers: { ...owner, 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'allow' }) })
+    assert.equal(asOwner.status, 202, 'the owner token still resolves approvals')
+    assert.deepEqual(pairedApprovals, [{ callId: 'call 1', decision: 'allow' }])
 
     // Directory listing follows the same least-privilege split: a paired device is confined
     // to the home subtree (enforced in listHostDirectories), the owner browses unrestricted.
