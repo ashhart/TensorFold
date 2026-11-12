@@ -51,6 +51,7 @@ fn countTokens(srv: *Server, cx: *Cx, chat: Value, client_thinking: bool) errors
     const thinking = try fields.thinkingFields(cx, chat, srv.effort_levels);
     const on = thinking.enable orelse srv.config.enable_thinking;
     cx.clear_thinking = thinking.clear;
+    cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels); // as the chat route sets it
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
     const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
     const explicit_off = client_thinking and !(thinking.enable orelse true);
