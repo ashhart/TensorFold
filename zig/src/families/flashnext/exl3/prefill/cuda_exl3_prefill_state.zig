@@ -95,14 +95,15 @@ pub fn deviceBytesAt(rows: usize, world: usize) usize {
     return Layout.of(rows, world).total;
 }
 
-/// The reduction's branch [rows, D] fp32, then the ranks' block partials as the combine leaves them and the all-gather
-/// carries them: fp64, `leaves.partials(world)` of [rows, D] a rank (a lone rank's finish rounds its one block to fp32).
+/// The reduction's branch [rows, D] fp32, then TP ranks' fp64 block partials (`leaves.partials(world)` per rank).
+/// A lone rank writes the canonical root directly to the branch and allocates no partial region.
 pub fn sumBytes(rows: usize, world: usize) usize {
     return rows * dims * 4 + gatherBytes(rows, world);
 }
 
 /// The fp64 partials of every rank after the branch in `sumBytes`.
 pub fn gatherBytes(rows: usize, world: usize) usize {
+    if (world == 1) return 0;
     return world * leaves.partials(world) * rows * dims * @sizeOf(f64);
 }
 
