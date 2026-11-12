@@ -383,7 +383,7 @@ pub const Server = struct {
         const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
         if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
         const ready = g.budgetReady() catch false;
-        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules, or its states took too long to explore");
         st.budget = true;
     }
 
