@@ -17,6 +17,7 @@ pub const Shaders = struct {
     qmm_q4_vec4: []align(4) const u8,
     qmm_f32: []align(4) const u8,
     qmm_q4_tile: []align(4) const u8,
+    qmm_q4_tile_f32: []align(4) const u8,
     dequant_bf16: []align(4) const u8,
     gather_u32: []align(4) const u8,
     gather_u16: []align(4) const u8,
@@ -81,6 +82,7 @@ pub const Ops = struct {
     qmm_q4_vec4: dispatch.Pipeline,
     qmm_f32: dispatch.Pipeline,
     qmm_q4_tile: dispatch.Pipeline,
+    qmm_q4_tile_f32: dispatch.Pipeline,
     dequant_bf16: dispatch.Pipeline,
     gather_u32: dispatch.Pipeline,
     gather_u16: dispatch.Pipeline,
@@ -101,6 +103,7 @@ pub const Ops = struct {
             .qmm_q4_vec4 = undefined,
             .qmm_f32 = undefined,
             .qmm_q4_tile = undefined,
+            .qmm_q4_tile_f32 = undefined,
             .dequant_bf16 = undefined,
             .gather_u32 = undefined,
             .gather_u16 = undefined,
@@ -120,6 +123,8 @@ pub const Ops = struct {
         errdefer o.qmm_f32.deinit();
         o.qmm_q4_tile = try dispatch.Pipeline.init(dev, shaders.qmm_q4_tile, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = 1 << 4 });
         errdefer o.qmm_q4_tile.deinit();
+        o.qmm_q4_tile_f32 = try dispatch.Pipeline.init(dev, shaders.qmm_q4_tile_f32, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = 1 << 4 });
+        errdefer o.qmm_q4_tile_f32.deinit();
         o.dequant_bf16 = try dispatch.Pipeline.init(dev, shaders.dequant_bf16, .{ .bindings = 4, .push_bytes = params.push_bytes, .writes = 1 << 3 });
         errdefer o.dequant_bf16.deinit();
         o.gather_u32 = try dispatch.Pipeline.init(dev, shaders.gather_u32, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 2 });
@@ -143,6 +148,7 @@ pub const Ops = struct {
         o.qmm_bf16.deinit();
         o.qmm_q4_vec4.deinit();
         o.qmm_q4_tile.deinit();
+        o.qmm_q4_tile_f32.deinit();
         o.dequant_bf16.deinit();
         o.gather_u32.deinit();
         o.gather_u16.deinit();
