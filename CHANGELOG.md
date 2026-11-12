@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
+
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.
 
 - DeepSeek-V4.1: both ranks print the startup settings line, and its transport field now reads `comm=roce` or `comm=nccl` with its source from `TF_COMM_BACKEND`; DeepSeek says once at startup that it does not read `TF_ROCE` when that is set, where the line used to report `roce=1(set)` for `TF_ROCE=0` (#2877, for #2715).
@@ -21,7 +23,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: the cancelled-benchmark test checks that a cancelled run saves one cancelled sample and never publishes, instead of counting requests that race the stop, so it no longer fails on a busy runner (#2865, fixes #2853).
 
 - HIP Flash Next: a decode round's n-gram table gather spreads over the parked host workers and asks for its pages first (`MADV_POPULATE_READ`), so first-time page faults overlap; on one Radeon 8060S (gfx1151) with Qwen3.8-Flash-Next oQ4e at 4 streams, cold decode is about 45% faster sampled and 18% greedy and the cold 8K first token about 10% sooner, with warm decode level and tokens unchanged (#2695). Thanks to @gilby.
-- CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - Cortheon (`--cortheon`): DuckDuckGo results are kept, and its ads still skipped, when only the spelling differs (either quote style, a `class` attribute in any letter case, an unquoted `href`, spaces around its `=`, or a line break before it); a duplicate whose scheme or host differs only in letter case is dropped while paths and queries keep their case, and the PyPI, npm and crates.io allow-list takes the host in any case with the path exact (#2750). Thanks to @ppardus.
 
