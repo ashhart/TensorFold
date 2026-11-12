@@ -49,7 +49,8 @@ pub const Kernels = struct {
         var args: hl.Args = .{};
         try args.add(a);
         const total = a.m * a.n;
-        try go(r, k.gemm, .{ .x = cdiv(total, threads) }, .{ .x = @intCast(threads) }, s, &args);
+        // a warp an output element: eight a 256-thread block
+        try go(r, k.gemm, .{ .x = cdiv(total, threads / 32) }, .{ .x = @intCast(threads) }, s, &args);
     }
 
     fn go(r: *const runtime.Runtime, f: Function, grid: hl.Dim3, block: hl.Dim3, s: abi.Stream, args: *hl.Args) Error!void {
