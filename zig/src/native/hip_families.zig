@@ -50,6 +50,11 @@ pub fn confidenceFloor(comptime F: type, o: api.Open, rdna3_5_alone: bool, fallb
     return if (rdna3_5_alone) F.mtp_confidence_rdna3_5 else fallback;
 }
 
+/// Most `--mtp-drafts` the family's head takes: its `mtp_max_drafts`, else three.
+pub fn mtpMost(comptime F: type) u32 {
+    return if (@hasDecl(F, "mtp_max_drafts")) F.mtp_max_drafts else 3;
+}
+
 /// The family's offer, or the empty one (text, the host's defaults) when its Loaded carries none.
 pub fn offerOf(loaded: anytype) Offer {
     return if (comptime @hasField(@TypeOf(loaded), "offer")) loaded.offer else .{};
@@ -118,4 +123,12 @@ test "a Loaded without an offer gives the empty one; --vision with no offered im
     const seen: api.Open = .{ .dir = "d", .model_type = "plain", .vision = .{} };
     try std.testing.expect(textOnly(seen, empty));
     try std.testing.expect(!textOnly(.{ .dir = "d", .model_type = "plain" }, empty));
+}
+
+test "a family takes three MTP drafts unless it declares `mtp_max_drafts`" {
+    const Deep = struct {
+        pub const mtp_max_drafts: u32 = 7;
+    };
+    try std.testing.expectEqual(@as(u32, 3), mtpMost(Plain));
+    try std.testing.expectEqual(@as(u32, 7), mtpMost(Deep));
 }
