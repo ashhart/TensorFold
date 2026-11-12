@@ -39,12 +39,13 @@ comptime {
 fn depth(s: c.Shape) usize {
     return s.k + 2;
 }
-// Qwen3.5-2B's projection shapes (K 2048/6144, N 16 to 248320, M 1 to 32) and the small fixture shapes.
+// Qwen3.5-2B's shapes (K 2048/6144, N 16 to 248320, M 1 to 33) and small fixtures; M 5 and 33 leave a row tail.
 const served = [_]c.Shape{
     .{ .rows = 1, .n = 16, .k = 64 },      .{ .rows = 2, .n = 257, .k = 128 },
     .{ .rows = 1, .n = 16, .k = 2048 },    .{ .rows = 2, .n = 16, .k = 6144 },
     .{ .rows = 1, .n = 6144, .k = 2048 },  .{ .rows = 32, .n = 6144, .k = 2048 },
     .{ .rows = 32, .n = 2048, .k = 6144 }, .{ .rows = 1, .n = 248320, .k = 2048 },
+    .{ .rows = 5, .n = 257, .k = 128 },    .{ .rows = 33, .n = 6144, .k = 2048 },
 };
 pub const spec: c.Spec = .{
     .name = "vulkan qmm_bf16 affine q4 g64 transposed",
@@ -112,6 +113,12 @@ pub const Fixture = struct {
     name: ?[]const u8 = null,
     /// Tiled image: inputs are repacked into 32-column tiles before upload; shapes that cannot be tiled are refused.
     tiled: bool = false,
+    /// Rows of x a thread computes (qmm_q4_tile_rows: 4).
+    rows_per_thread: usize = 1,
+    /// Columns a thread computes (qmm_q4_tile_rows: 2, 16 apart in a tile); 2 makes 16 threads a tile a row block.
+    columns_per_thread: usize = 1,
+    /// Planted control: rows past the last full block are not computed; gate 3 must catch it at a shape with a tail.
+    skip_tail: bool = false,
     /// f32 activations: x is stored as f32 (the bf16 values widened exactly) and the output is f32.
     act_f32: bool = false,
 
@@ -155,6 +162,11 @@ pub const Fixture = struct {
             var planted = spec;
             planted.name = corrupt_names[i];
             return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
+        }
+        if (f.skip_tail) {
+            var planted = spec;
+            planted.name = "control: qmm_q4_tile_rows skips its tail rows";
+            return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .shapes };
         }
         var named = if (f.act_f32) spec_f32 else spec;
         if (f.name) |n| named.name = n;
@@ -258,9 +270,12 @@ pub const Fixture = struct {
     }
     pub fn run(f: *Fixture) !void {
         const s = f.shape;
-        const p = Params{ .count = @intCast(s.rows * s.n), .output_size = @intCast(s.rows * s.n), .matrix_m = @intCast(s.rows), .matrix_n = @intCast(s.n), .matrix_k = @intCast(s.k) };
+        const tail = if (f.skip_tail and s.rows > f.rows_per_thread) s.rows % f.rows_per_thread else 0;
+        const p = Params{ .count = @intCast(s.rows * s.n), .output_size = @intCast(s.rows * s.n), .matrix_m = @intCast(s.rows - tail), .matrix_n = @intCast(s.n), .matrix_k = @intCast(s.k) };
         try vk.orExit(vk.upload(f.cmds, f.buffers[4], 0, f.staging, std.mem.sliceAsBytes(f.out), timeout_ns));
-        try vk.orExit(f.pipeline.run(f.cmds, std.mem.asBytes(&p), .{ @intCast((s.rows * s.n + local_size_x - 1) / local_size_x), 1, 1 }, timeout_ns));
+        const per_block = if (f.columns_per_thread == 2) (s.n + 31) / 32 * 16 else s.n;
+        const threads = (s.rows + f.rows_per_thread - 1) / f.rows_per_thread * per_block;
+        try vk.orExit(f.pipeline.run(f.cmds, std.mem.asBytes(&p), .{ @intCast((threads + local_size_x - 1) / local_size_x), 1, 1 }, timeout_ns));
         if (f.corrupt) |i| {
             var from: usize = 0;
             for (f.bindings[0..i]) |b| from += b.len;
