@@ -14,7 +14,7 @@ pub const tokens: u64 = 8;
 /// `worst` is |got - want| OVER its budget (a ratio; >1 fails), with `where`.
 pub const Report = struct { worst: f64 = 0, where: usize = 0 };
 
-// First failing element, probe print. `want` = HOST Ash-chain ref; sp/exp never stored; negative plants pass null.
+// First failing element, probe print. `want` = HOST oracle-chain ref; sp/exp never stored; negative plants pass null.
 pub const Output = enum { soa, g, beta, y, state, snapshot };
 pub const Violation = struct {
     index: usize,
@@ -75,8 +75,8 @@ pub fn gateRef(a_in: f64, b_in: f64, a_log: f64, dt: f64) gdn_mod.GateF64 {
     return gdn_mod.gateReferenceF64(a_in, b_in, a_log, dt);
 }
 
-// ASH: s=BF16(a+dt); sp=BF16(max(s,0)+log(1+exp(-|s|))); g f32; beta=BF16(sigmoid(b)); residual = exp/log ulps
-pub fn gateRefAsh(a_in: u16, b_in: u16, a_log: f64, dt_in: u16) gdn_mod.GateF64 {
+// Oracle: s=BF16(a+dt); sp=BF16(max(s,0)+log(1+exp(-|s|))); g f32; beta=BF16(sigmoid(b)); residual = exp/log ulps
+pub fn gateRefOracle(a_in: u16, b_in: u16, a_log: f64, dt_in: u16) gdn_mod.GateF64 {
     const a = c.fromBf16(a_in);
     const dt = c.fromBf16(dt_in);
     const s = c.fromBf16(c.toBf16(a + dt));

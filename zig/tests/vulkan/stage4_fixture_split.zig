@@ -7,7 +7,7 @@ const c = core.c;
 const Model = core.Model;
 const tokens = core.tokens;
 const budget = core.budget;
-const gateRefAsh = core.gateRefAsh;
+const gateRefOracle = core.gateRefOracle;
 const f32Of = core.f32Of;
 const poisonedShell = core.poisonedShell;
 const violated = core.violated;
@@ -103,8 +103,8 @@ pub const Split = struct {
                 }
             }
             for (0..@intCast(Model.heads)) |hv| {
-                // HOST Ash chain: the exact bf16 rounds the shader does
-                const ref = gateRefAsh(
+                // HOST oracle chain: the exact bf16 rounds the shader does
+                const ref = gateRefOracle(
                     f.a_bits[t * 16 + hv],
                     f.b_bits[t * 16 + hv],
                     f32Of(f.a_log_bits, hv),
@@ -193,8 +193,8 @@ pub const SplitOne = struct {
     pub fn checkGates(f: SplitOne, g_pairs: []const u16, beta_bits: []const u16, violation: ?*Violation) !Report {
         var r: Report = .{};
         for (0..@intCast(Model.heads)) |hv| {
-            // HOST Ash chain: the exact bf16 rounds the shader does
-            const ref = gateRefAsh(
+            // HOST oracle chain: the exact bf16 rounds the shader does
+            const ref = gateRefOracle(
                 f.a_bits[hv],
                 f.b_bits[hv],
                 f32Of(f.a_log_bits, hv),
