@@ -48,9 +48,10 @@ fn timedBatch(g: *gpu.Gpu, mps: ?*Mps, small: bool, x: gpu.Tensor, w: gpu.Tensor
 pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !void {
     if (args.len != 2 and args.len != 3) return error.ExpectedProjectionCaptureAndReceipt;
     const use_mps = args.len == 3 and std.mem.eql(u8, args[2], "--mps-ndarray");
+    const baseline_gemm = args.len == 3 and std.mem.eql(u8, args[2], "--baseline-gemm");
     const small_baseline = args.len == 3 and std.mem.eql(u8, args[2], "--compensated-baseline");
     const use_small = small_baseline or (args.len == 3 and std.mem.eql(u8, args[2], "--compensated"));
-    if (args.len == 3 and !use_mps and !use_small) return error.UnexpectedProjectionBackend;
+    if (args.len == 3 and !use_mps and !use_small and !baseline_gemm) return error.UnexpectedProjectionBackend;
     var mps = if (use_mps) try Mps.init(g.device) else null;
     defer if (mps) |*backend| backend.deinit();
     const backend: ?*Mps = if (mps) |*value| value else null;
@@ -82,7 +83,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     g.compact_gemm = false;
     const baseline = try linear(g, null, false, x, w, bias, rows, cols, depth);
     defer baseline.deinit();
-    g.compact_gemm = true;
+    g.compact_gemm = !baseline_gemm;
     const actual = try linear(g, backend, use_small, x, w, bias, rows, cols, depth);
     defer actual.deinit();
     const bytes = actual.slice(u8, actual.count * 4);
@@ -131,11 +132,12 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     const source_hash = std.fmt.bytesToHex(digest, .lower);
     std.crypto.hash.sha2.Sha256.hash(if (small_baseline) @import("sam3_kernels").baseline_source else @import("sam3_kernels").source, &digest, .{});
     const shader_hash = std.fmt.bytesToHex(digest, .lower);
+    const backend_name = if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else if (baseline_gemm) "tensor_64_rows" else "tensor_32_rows";
     const json = try std.json.Stringify.valueAlloc(a, .{
         .shape = .{ rows, cols, depth },
         .capture_sha256 = source_hash[0..],
         .sam3_metal_source_sha256 = shader_hash[0..],
-        .backend = if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else "tensor_16_rows",
+        .backend = backend_name,
         .replacement_equal = replacement_equal,
         .pytorch_equal = reference_equal,
         .buffer_cache_limit = g.buffer_cache_limit,
@@ -157,6 +159,6 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     defer receipt.close(init.io);
     try receipt.writeStreamingAll(init.io, json);
     try receipt.writeStreamingAll(init.io, "\n");
-    std.debug.print("Projection {d}x{d}x{d}, {s}: replacement equal {}, PyTorch equal {}, five repeat runs; FP64 max native {e}, PyTorch {e}; {d}/{d} columns worse\n", .{ rows, cols, depth, if (use_small) "compensated" else if (use_mps) "MPS" else "tensor", replacement_equal, reference_equal, std.mem.max(f64, native_columns), std.mem.max(f64, torch_columns), worse, cols });
+    std.debug.print("Projection {d}x{d}x{d}, {s}: replacement equal {}, PyTorch equal {}, five repeat runs; FP64 max native {e}, PyTorch {e}; {d}/{d} columns worse\n", .{ rows, cols, depth, backend_name, replacement_equal, reference_equal, std.mem.max(f64, native_columns), std.mem.max(f64, torch_columns), worse, cols });
     if (worse != 0) return error.ProjectionReferenceWorse;
 }

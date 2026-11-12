@@ -394,9 +394,34 @@ pub const Runtime = struct {
         try self.constants.put(self.g.allocator, name_, table);
         return self.constant(key).?;
     }
-    pub fn visionQkv(self: *Runtime, x: Tensor, global: bool) ![3]Tensor {
+    pub fn visionRotaryTable(self: *Runtime, key: []const u8, global: bool) !Tensor {
+        if (self.constant(key)) |cached| return cached;
         const side: usize = if (global) 72 else 24;
-        const table = try self.rotaryTable(64, side, global);
+        const source = try self.store.rotaryPairs(key, side * side, 64) orelse return self.rotaryTable(64, side, global);
+        var constants = self.constants.iterator();
+        while (constants.next()) |entry| {
+            if (!std.mem.endsWith(u8, entry.key_ptr.*, ".attn.freqs_cis") or entry.value_ptr.count != source.numel()) continue;
+            if (!std.mem.eql(u8, source.bytes, entry.value_ptr.slice(u8, source.bytes.len))) continue;
+            const name_ = try self.g.allocator.dupe(u8, key);
+            errdefer self.g.allocator.free(name_);
+            const table = self.constant(entry.key_ptr.*).?;
+            try self.constants.put(self.g.allocator, name_, table);
+            return table;
+        }
+        const limit = self.g.buffer_cache_limit;
+        self.g.buffer_cache_limit = 0;
+        defer self.g.buffer_cache_limit = limit;
+        const table = try self.g.alloc(source.numel(), .f32);
+        errdefer table.deinit();
+        @memcpy(table.slice(u8, source.bytes.len), source.bytes);
+        const name_ = try self.g.allocator.dupe(u8, key);
+        errdefer self.g.allocator.free(name_);
+        try self.constants.put(self.g.allocator, name_, table);
+        return self.constant(key).?;
+    }
+    pub fn visionQkv(self: *Runtime, key: []const u8, x: Tensor, global: bool) ![3]Tensor {
+        const side: usize = if (global) 72 else 24;
+        const table = try self.visionRotaryTable(key, global);
         var out: [3]Tensor = undefined;
         const half = self.precision == .mixed and global;
         for (&out) |*t| t.* = try self.own(try self.g.allocDevice(5184 * 1024, if (half) .f16 else .f32));

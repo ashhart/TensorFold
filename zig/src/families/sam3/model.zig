@@ -13,6 +13,7 @@ pub const LoadOptions = struct {
     tokenizer_path: ?[]const u8 = null,
     version: ?@import("config.zig").Version = null,
     precision: enum { checkpoint, float32 } = .checkpoint,
+    compact_gemm: bool = true,
     scratch_cache_bytes: usize = 2 << 30,
 };
 
@@ -50,7 +51,8 @@ pub const Model = struct {
         device.* = try gpu.Gpu.init(allocator, @import("sam3_kernels").source);
         errdefer device.deinit();
         device.cache_weights = true;
-        device.map_weights = store.source == .safetensors;
+        device.map_weights = true;
+        device.compact_gemm = options.compact_gemm;
         device.buffer_cache_limit = options.scratch_cache_bytes;
         var text: ?tokenizer.Tokenizer = null;
         if (options.tokenizer_path) |file| text = try tokenizer.loadTokenizer(io, allocator, file);

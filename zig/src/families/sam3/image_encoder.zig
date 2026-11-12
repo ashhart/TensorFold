@@ -24,7 +24,7 @@ fn block(layer: Layer, input: ops.Tensor, global: bool) !ops.Tensor {
     const width = r.config.vision_width;
     const normalized = try r.visionNorm(try layer.named("norm1"), input, !global);
     const projections = try r.visionLinear(try layer.named("attn.qkv"), normalized, width, false);
-    const qkv = try r.visionQkv(projections, global);
+    const qkv = try r.visionQkv(try layer.named("attn.freqs_cis"), projections, global);
     const attended = try r.visionAttention(qkv[0], qkv[1], qkv[2], global);
     const residual = try r.visionResidual(try layer.named("attn.proj"), attended, width, input, !global);
     const hidden = try r.visionLinear(try layer.named("mlp.fc1"), try r.visionNorm(try layer.named("norm2"), residual, false), width, true);
@@ -36,21 +36,23 @@ pub fn encode(r: *ops.Runtime, input: ops.Feature) !ops.Feature {
     const mark = r.mark();
     errdefer r.trim(mark, &.{});
     const positional = try absolutePosition(root);
-    _ = try r.rotaryTable(64, r.config.window, false);
-    _ = try r.rotaryTable(64, r.config.featureSide(), true);
+    for (0..r.config.vision_layers) |index| {
+        const layer = try root.indexed("blocks", index);
+        _ = try r.visionRotaryTable(try layer.named("attn.freqs_cis"), (index + 1) % 8 == 0);
+    }
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     const patches = try r.conv(try root.named("patch_embed.proj"), input, r.config.patch_size, 0, false, false);
     const side = r.config.featureSide();
     const width = r.config.vision_width;
     if (patches.height != side or patches.width != side or patches.channels != width) return error.SamImagePatchShape;
-    try r.observe("trunk.patch_embed", patches.tensor, &.{ side, side, width });
+    try r.observe("trunk.patch_embed", patches.tensor, &.{ 1, side, side, width });
     var value = try root.norm("ln_pre", try r.add(patches.tensor, positional), 1e-5);
-    try r.observe("trunk.ln_pre", value, &.{ side, side, width });
+    try r.observe("trunk.ln_pre", value, &.{ 1, side, side, width });
     r.trim(mark, &.{value});
     for (0..r.config.vision_layers) |index| {
         value = try block(try root.indexed("blocks", index), value, (index + 1) % 8 == 0);
-        try r.observe(try r.name("trunk.blocks.{d}", .{index}), value, &.{ side, side, width });
+        try r.observe(try r.name("trunk.blocks.{d}", .{index}), value, &.{ 1, side, side, width });
         r.trim(mark, &.{value});
         if (!r.vision_ready and (index + 1) % 4 == 0) {
             try r.g.endBatch();
