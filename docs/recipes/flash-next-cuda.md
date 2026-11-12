@@ -41,6 +41,9 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
   hold other addresses too, set `NCCL_IB_ADDR_RANGE` to a range that covers both; NCCL then puts half its channels on
   each. On two GB10s joined by one cable this made cold 2,048 to 32,768-token prompts 26.5% to 28.1% faster (1,147
   to 1,469 tokens/s at 8,192, NCCL 2.32.3), with decode speed and token hashes unchanged.
+- Ranks on two hosts prove a shared key before they exchange anything: add `--rank-secret rank.key` to both commands,
+  with the same owner-only file on each host. Without it, a rank that reaches another host refuses to start. See
+  [Ranks on more than one host](../../SECURITY.md#ranks-on-more-than-one-host).
 - Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
