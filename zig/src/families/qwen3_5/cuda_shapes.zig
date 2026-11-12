@@ -68,6 +68,19 @@ test "Qwen stage: the head piece keys its own graph, apart from the layers' and 
     };
 }
 
+test "dense read cost: hidden and slot variants have distinct graph keys" {
+    var seen: [32]u32 = undefined;
+    var n: usize = 0;
+    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
+        for ([_]bool{ false, true }) |hidden| {
+            const shape: Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
+            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
+            seen[n] = shape.key();
+            n += 1;
+        }
+    }
+}
+
 test "every captured verify shape keys its own graph: a shape after another never replays the other's (#2138)" {
     const gpa = std.testing.allocator;
     var keys: std.AutoHashMapUnmanaged(u32, Shape) = .empty;
