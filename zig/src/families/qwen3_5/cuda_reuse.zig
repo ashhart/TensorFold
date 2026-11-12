@@ -4,7 +4,6 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
-const caches = @import("cuda_cache.zig");
 
 const Engine = engine.Engine;
 const Cache = engine.Cache;
@@ -99,39 +98,47 @@ pub const Layout = struct {
     }
 };
 
-/// A piece's device spans: one, or with a page table a run a page (the host copy keeps the contiguous order).
-const Runs = struct {
-    base: u64,
-    pages: ?caches.Paged,
-    page_bytes: usize,
-    in_page: usize,
-    span: usize = 0, // a full page's run of the piece
-    len: usize,
-    page: usize = 0,
-    done: usize = 0,
+const W = @import("core").state_walk.Device;
 
-    const Run = struct { dev: u64, at: usize, len: usize };
+/// Piece `i` as a walk part: its bytes in the cache, or with a page table a span a page (the copy keeps them in a row).
+fn partOf(cache: *const Cache, l: Layout, i: usize, p: Piece) W.Part {
+    const buf = if (p.kv) cache.kv.ptr else cache.state.ptr;
+    if (!p.kv or cache.paged == null) return .{ .live = buf + p.off, .len = p.len };
+    const pg = cache.paged.?;
+    // the piece's offset inside a page: its layout at cap = tokens (Layout.piece), a run of tokens rows a page
+    const in_page: Layout = .{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens };
+    const q = in_page.piece(i);
+    return .{ .live = pg.base + q.off, .len = p.len, .span = q.len, .page = in_page.kvBytes() };
+}
 
-    fn of(cache: *const Cache, l: Layout, i: usize, p: Piece) Runs {
-        if (!p.kv or cache.paged == null) return .{ .base = (if (p.kv) cache.kv.ptr else cache.state.ptr) + p.off, .pages = null, .page_bytes = 0, .in_page = 0, .len = p.len };
-        const pg = cache.paged.?;
-        // the piece's offset inside a page: its layout at cap = tokens (Layout.piece), a run of tokens rows a page
-        const in_page: Layout = .{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens };
-        const q = in_page.piece(i);
-        return .{ .base = pg.base, .pages = pg, .page_bytes = in_page.kvBytes(), .in_page = q.off, .span = q.len, .len = p.len };
+/// Pieces 0..`n` of `cache` to (`out`) or from `copy`'s bytes on the engine's stream: the core walk, a call a piece.
+fn walkKept(e: *Engine, cache: *const Cache, l: Layout, copy: *const Copy, n: usize, out: bool) !void {
+    const ids: []const u32 = if (cache.paged) |pg| pg.ids else &.{};
+    const h: KeptCopy = .{ .e = e, .out = out, .device = copy.dev != null };
+    const base: u64 = if (copy.dev) |b| b.ptr else @intFromPtr(copy.host.bytes.ptr);
+    var off: usize = 0;
+    for (0..n) |i| {
+        const p = l.piece(i);
+        const part = partOf(cache, l, i, p);
+        try W.each((&part)[0..1], ids, .{ .base = base + off }, h, KeptCopy.run);
+        off += p.len;
     }
+}
 
-    fn next(r: *Runs) ?Run {
-        if (r.done >= r.len) return null;
-        const pg = r.pages orelse {
-            r.done = r.len;
-            return .{ .dev = r.base, .at = 0, .len = r.len };
-        };
-        const n = @min(r.span, r.len - r.done);
-        const run: Run = .{ .dev = r.base + pg.ids[r.page] * r.page_bytes + r.in_page, .at = r.done, .len = n };
-        r.page += 1;
-        r.done += n;
-        return run;
+/// The walk's hook: `kept` is the state's device bytes (`device`) or its pinned host bytes; `out`: live to kept.
+const KeptCopy = struct {
+    e: *Engine,
+    out: bool,
+    device: bool,
+    fn run(h: KeptCopy, live: u64, kept: u64, n: usize) anyerror!void {
+        const d, const s = .{ h.e.d, h.e.stream.handle };
+        if (h.device) {
+            const dst, const src = if (h.out) .{ kept, live } else .{ live, kept };
+            return d.check(d.api.cuMemcpyDtoDAsync_v2(dst, src, n, s), "cuMemcpyDtoDAsync");
+        }
+        const at: [*]u8 = @ptrFromInt(kept);
+        if (h.out) return d.check(d.api.cuMemcpyDtoHAsync_v2(at, live, n, s), "cuMemcpyDtoHAsync");
+        try d.check(d.api.cuMemcpyHtoDAsync_v2(live, at, n, s), "cuMemcpyHtoDAsync");
     }
 };
 
@@ -223,23 +230,10 @@ pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, devic
         .images = images,
     };
     errdefer drainThenFree(e, copy);
-    var off: usize = 0;
-    for (0..l.count()) |i| {
-        const p = l.piece(i);
-        if (i == 1 and wholePages(cache, l)) {
-            try pageCopies(e, cache, l, copy, off, .save);
-            break;
-        }
-        var it = Runs.of(cache, l, i, p);
-        while (it.next()) |r| {
-            const s, const o = .{ e.stream.handle, off + r.at };
-            if (dev) |b|
-                try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(b.ptr + o, r.dev, r.len, s), "cuMemcpyDtoDAsync")
-            else
-                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(host.bytes.ptr + o, r.dev, r.len, s), "cuMemcpyDtoHAsync");
-        }
-        off += p.len;
-    }
+    // bf16 pages: the state through the walk, keys and values one 2D copy a page (main's pageCopies)
+    const whole = wholePages(cache, l);
+    try walkKept(e, cache, l, copy, if (whole) 1 else l.count(), true);
+    if (whole) try pageCopies(e, cache, l, copy, l.piece(0).len, .save);
     try e.stream.synchronize();
     return copy;
 }
@@ -276,24 +270,10 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     errdefer if (e.stream.synchronize()) |_| {
         copy.reading = false;
     } else |_| std.log.warn("qwen3_5: a failed restore's stream did not drain: its kept state's copy stays", .{});
-    const host = copy.host.bytes.ptr;
-    var off: usize = 0;
-    for (0..l.count()) |i| {
-        const p = l.piece(i);
-        if (i == 1 and wholePages(cache, l)) {
-            try pageCopies(e, cache, l, copy, off, .restore);
-            break;
-        }
-        var it = Runs.of(cache, l, i, p);
-        while (it.next()) |r| {
-            const s, const o = .{ e.stream.handle, off + r.at };
-            if (copy.dev) |b|
-                try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(r.dev, b.ptr + o, r.len, s), "cuMemcpyDtoDAsync")
-            else
-                try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(r.dev, host + o, r.len, s), "cuMemcpyHtoDAsync");
-        }
-        off += p.len;
-    }
+    // bf16 pages: the state through the walk, keys and values one 2D copy a page (main's pageCopies)
+    const whole = wholePages(cache, l);
+    try walkKept(e, cache, l, copy, if (whole) 1 else l.count(), false);
+    if (whole) try pageCopies(e, cache, l, copy, l.piece(0).len, .restore);
     try e.stream.synchronize(); // the copy may be dropped once this returns
     copy.reading = false;
     cache.len = copy.at;
@@ -583,4 +563,8 @@ test "a device save pins nothing: it copies on the device both ways, and its dro
     dropCopy(&e, copy);
     try std.testing.expectEqual(@as(usize, 1), DeviceFake.frees);
     try std.testing.expectEqual(@as(usize, 0), DeviceFake.pinned + DeviceFake.host_copies);
+}
+
+test {
+    _ = @import("cuda_reuse_paged_test.zig");
 }

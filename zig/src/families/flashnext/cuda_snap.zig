@@ -86,50 +86,72 @@ fn attnOrder(layers: usize, at: usize, h: Heads) [4]Piece {
     };
 }
 
-/// Each piece of the sequence (and the head's cache) to or from the buffer at `base`; .rows: the attention rows only.
-fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
-    const dr = stream.d;
-    var off: u64 = 0;
+const W = @import("core").state_walk.Device;
+
+/// A state's parts at most: every layer of the 11 pieces `order` names.
+const max_parts = 2 * wt.linear_n + 4 * wt.attn_n + 1 + 4;
+
+/// The sequence's pieces (the head's too, with `d`) as walk parts in `order`'s order, `of[k]` part k's piece.
+fn parts(seq: *prompt.Seq, d: ?*Draft, at: usize, out: *[max_parts]W.Part, of: *[max_parts]u8) ![]const W.Part {
     const o = order(at, d != null, seq.heads);
     var bufs: [11][]cuda.DeviceBuffer = undefined;
     bufs[0..7].* = .{ seq.conv, seq.state, seq.kc, seq.vc, seq.ikc, seq.pooled, (&seq.tail)[0..1] };
     if (d) |h| bufs[7..11].* = .{ (&h.kc)[0..1], (&h.vc)[0..1], (&h.ikc)[0..1], (&h.pooled)[0..1] };
+    var n: usize = 0;
     for (o.p[0..o.len], bufs[0..o.len], 0..) |p, layers, pi| {
         if (layers.len != p.layers) return error.SnapShape;
         for (layers, 0..) |b, layer| {
             if (p.n == 0) continue;
-            if (way == .rows and (pi < 2 or pi == 6)) {
-                off += p.n;
-                continue;
-            }
+            of[n] = @intCast(pi);
             // the model's caches on the stream's pages; the head's too in a pool lane (the layer after the model's)
             const head = pi >= 7 and d != null and d.?.pg.pt != 0;
             if ((pi >= 2 and pi < 6) or head) if (seq.paged) |*pg| {
-                // the same bytes in the same order as a contiguous cache's, a run a page
                 const part: pages.Part = @fromBackingInt(@intCast(if (head) pi - 7 else pi - 2));
-                const at_layer = if (head) wt.attn_n else layer;
                 const row = pages.rowBytes(part);
                 if (row != p.row) return error.SnapShape;
-                const per = pages.rows(part, pg.tokens);
-                const n = p.n / row;
-                var r: usize = 0;
-                while (r < n) {
-                    const run = @min(per - r % per, n - r);
-                    const at_row = pg.rowAt(at_layer, part, r);
-                    const dst, const src = if (way != .restore) .{ base + off, at_row } else .{ at_row, base + off };
-                    try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
-                    off += run * row;
-                    r += run;
-                }
+                const span = pages.rows(part, pg.tokens) * row;
+                const live = pg.at(if (head) wt.attn_n else layer, part);
+                out[n] = .{ .live = live, .len = p.n, .span = span, .page = pages.pageBytesOf(pg.tokens, pg.layers) };
+                n += 1;
                 continue;
             };
-            const dst, const src = if (way != .restore) .{ base + off, b.ptr } else .{ b.ptr, base + off };
-            try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, p.n, stream.handle), "cuMemcpyDtoDAsync");
-            off += p.n;
+            out[n] = .{ .live = b.ptr, .len = p.n };
+            n += 1;
         }
     }
-    std.debug.assert(off == bytes(at, d != null, seq.heads));
+    return out[0..n];
 }
+
+/// Whether `.rows` passes over piece `pi`: the DeltaNet conv windows and states and the n-gram tail.
+fn notRows(pi: u8) bool {
+    return pi < 2 or pi == 6;
+}
+
+/// The parts to (`save`, `rows`) or from the buffer at `base` on `stream`; `.rows`: the ones it takes, at kept offsets.
+fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
+    var store: [max_parts]W.Part = undefined;
+    var of: [max_parts]u8 = undefined;
+    const ps = try parts(seq, d, at, &store, &of);
+    std.debug.assert(W.total(ps) == bytes(at, d != null, seq.heads));
+    const ids: []const u32 = if (seq.paged) |*pg| pg.ids else &.{};
+    const c: Copy = .{ .s = stream, .out = way != .restore };
+    if (way != .rows) return W.each(ps, ids, .{ .base = base }, c, Copy.run);
+    var off: u64 = 0;
+    for (ps, of[0..ps.len]) |p, pi| {
+        if (!notRows(pi)) try W.each((&p)[0..1], ids, .{ .base = base + off }, c, Copy.run);
+        off += p.len;
+    }
+}
+
+/// The walk's hook: `out` copies live to kept (save, rows), else kept to live (restore).
+const Copy = struct {
+    s: cuda.Stream,
+    out: bool,
+    fn run(c: Copy, live: u64, kept: u64, n: usize) anyerror!void {
+        const dst, const src = if (c.out) .{ kept, live } else .{ live, kept };
+        try c.s.d.check(c.s.d.api.cuMemcpyDtoDAsync_v2(dst, src, n, c.s.handle), "cuMemcpyDtoDAsync");
+    }
+};
 
 /// A copy of `seq` (and of the head's cache, with `d`) as it stands after `seq.fed` tokens.
 pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft) !*Snap {
