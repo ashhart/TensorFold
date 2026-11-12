@@ -36,6 +36,7 @@ __device__ float block_sum(float v) {
     return total;
 }
 
+#if __CUDA_ARCH__ >= 900
 // block_sum over a cluster of 8 blocks of 128: the same warp sums read back in warp order, block_sum's bits.
 __device__ __forceinline__ float cluster_sum(float v, float* part) {
     namespace cg = cooperative_groups;
@@ -47,8 +48,16 @@ __device__ __forceinline__ float cluster_sum(float v, float* part) {
     const float* rp = cl.map_shared_rank(part, lane >> 2);
     return warp_sum(rp[lane & 3]);
 }
+#endif
 
 }  // namespace
+
+// Clusters exist from sm_90; on the release fatbins' sm_80/86 the cluster forms trap (Muse never launches them there).
+#if __CUDA_ARCH__ >= 900
+#define MUSE_CLUSTER8 __cluster_dims__(8, 1, 1)
+#else
+#define MUSE_CLUSTER8
+#endif
 
 // x = rms(embed[ids].float()) (Embedding then the weightless embed_norm, fp32 out). A block a row.
 extern "C" __global__ void muse_embed_norm(const uint16_t* __restrict__ table, const int64_t* __restrict__ ids,
@@ -128,11 +137,14 @@ extern "C" __global__ void muse_gate_norm(float* __restrict__ res, const float* 
 }
 
 // muse_gate_norm on a cluster of 8 blocks of 128 threads a row: each thread's columns and sums, its bits.
-extern "C" __global__ void __cluster_dims__(8, 1, 1) __launch_bounds__(128)
+extern "C" __global__ void MUSE_CLUSTER8 __launch_bounds__(128)
     muse_gate_norm_c(float* __restrict__ res, const float* __restrict__ y, const float* __restrict__ y2,
                      const float* __restrict__ scale, int round_bf16, float post_eps, const float* __restrict__ ab,
                      const float* __restrict__ w_next, float next_eps, __half* __restrict__ x,
                      float* __restrict__ xf, int D) {
+#if __CUDA_ARCH__ < 900
+    __trap();  // no clusters before sm_90: the host never launches this
+#else
     __shared__ float part[2][4];
     const int64_t r = blockIdx.x >> 3;
     const int t0 = cooperative_groups::this_cluster().block_rank() * 128 + threadIdx.x;
@@ -167,6 +179,7 @@ extern "C" __global__ void __cluster_dims__(8, 1, 1) __launch_bounds__(128)
         if (xf) xf[r * D + d] = o;
     }
     cooperative_groups::this_cluster().sync();  // no block leaves while another reads its partials
+#endif
 }
 
 // Router logits in fp32 (x . W[e], W bf16 or fp32): a warp an expert, a lane's columns d = lane + 32 j in order.
@@ -287,10 +300,13 @@ extern "C" __global__ void muse_expert_sum(const float* __restrict__ y, const fl
 }
 
 // muse_expert_sum on a cluster of 8 blocks of 128 threads a row, its bits (as muse_gate_norm_c); K <= 16.
-extern "C" __global__ void __cluster_dims__(8, 1, 1) __launch_bounds__(128)
+extern "C" __global__ void MUSE_CLUSTER8 __launch_bounds__(128)
     muse_expert_sum_c(const float* __restrict__ y, const float* __restrict__ y2, const float* __restrict__ wts,
                       const float* __restrict__ scale, float eps, __half* __restrict__ out, int L, int K, int out_lo,
                       int out_w) {
+#if __CUDA_ARCH__ < 900
+    __trap();  // no clusters before sm_90: the host never launches this
+#else
     __shared__ float part[16][4];
     const int64_t r = blockIdx.x >> 3;
     const int t0 = cooperative_groups::this_cluster().block_rank() * 128 + threadIdx.x;
@@ -318,6 +334,7 @@ extern "C" __global__ void __cluster_dims__(8, 1, 1) __launch_bounds__(128)
     for (int d = t0; d < L; d += 1024, ++n)
         if (d >= out_lo && d < out_lo + out_w) out[r * out_w + d - out_lo] = __float2half_rn(acc[n]);
     cooperative_groups::this_cluster().sync();
+#endif
 }
 
 // The head: x = x * mult, then cap * tanh(x / cap) when cap > 0 (Linear pre_scale, ext.softcap), in place.
