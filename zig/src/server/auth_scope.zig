@@ -94,7 +94,7 @@ fn oneOf(route: []const u8, names: []const []const u8) bool {
     return false;
 }
 
-pub const Denial = enum { route, response_history, response_storage };
+pub const Denial = enum { route, response_history, response_storage, execution_witness };
 
 /// The stored Responses are the server's, so a restricted key's request must be stateless: store false, no parent.
 pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
@@ -103,4 +103,11 @@ pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
     const store = body.get("store") orelse return .response_storage;
     if (store != .bool or store.bool) return .response_storage;
     return null;
+}
+
+/// The witness is read-scoped, so a reply binds it only for a key that may read it: admin, or one with read.
+pub fn witnessDenial(scopes: Scopes, body: json.Value) ?Denial {
+    if (scopes.admin or scopes.read or body != .object) return null;
+    const asked = body.get("execution_witness") orelse return null;
+    return if (asked == .bool and asked.bool) .execution_witness else null;
 }

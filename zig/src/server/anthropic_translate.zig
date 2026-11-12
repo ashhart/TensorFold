@@ -206,6 +206,7 @@ fn positiveInt(v: ?Value) ?i64 {
 pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
     const a = cx.a;
     if (body != .object) return cx.refuse("request body must be an object");
+    if (json.truthyField(body, "execution_witness")) return cx.refuse("execution_witness is supported on /v1/chat/completions and /v1/completions only");
     const model = try string(cx, body.get("model"), "model", false);
     const chat = try json.newObject(a);
     try chat.put(a, "model", .{ .string = model });

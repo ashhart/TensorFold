@@ -60,6 +60,9 @@ a Responses socket, a `previous_response_id` that the socket's own cache holds i
 it was accepted with if the file changes while it runs. Scopes are authorization only: every key shares one model,
 its prompt cache and the metrics.
 
+A reply's binding carries the read-scoped execution witness, so `"execution_witness": true` needs `read` beside
+`inference`; a key without `read` answers 403 `insufficient_scope` naming the field before the request is planned.
+
 
 ## Browser request headers
 
@@ -385,7 +388,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
-| `execution_witness` | Boolean, default false. True binds the reply to the execution witness; see [Reply binding](#reply-binding). A server without `--execution-witness` answers 400 | Both |
+| `execution_witness` | Boolean, default false. True binds the reply to the execution witness; see [Reply binding](#reply-binding). A server without `--execution-witness` answers 400, a key with `inference` but not `read` 403 | Both |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -1238,7 +1241,10 @@ does not qualify a response cache.
 
 A chat completion or completion with `"execution_witness": true` carries a top-level `execution_witness` object on the
 whole reply, or on a stream's finish chunk (not on the separate usage chunk). It is read just before the engine takes
-the request and again once the reply ends; the request keeps the engine from parking in between.
+the request and again once the reply ends; the request keeps the engine from parking in between. The witness is
+read-scoped, so a scoped key needs `read` beside `inference` to ask (else 403 `insufficient_scope`); a full or `[admin]`
+key may always ask. Only these two routes carry the binding: `/v1/responses` and `/v1/messages` (and its
+`count_tokens`) rebuild the request and answer a true `execution_witness` with HTTP 400.
 
 | Field | Meaning |
 | --- | --- |
@@ -1326,7 +1332,7 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `top_logprobs`, file IDs and
+others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `top_logprobs`, `execution_witness`, file IDs and
 remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
 `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
@@ -1401,7 +1407,8 @@ is an explicit off, which returns HTTP 400 when the template cannot honor it (se
 `/v1/messages` submits. Thinking round-trips as plaintext with an empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
-system messages, per-message output configuration and inline tool changes are unsupported.
+system messages, per-message output configuration and inline tool changes are unsupported, and a true
+`execution_witness` answers HTTP 400 (see [Reply binding](#reply-binding)).
 JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
 That install is the Python 0.6.6 engine's; the native server uses `libtfgrammar` from the release archive instead
 ([structured output](#structured-output)).

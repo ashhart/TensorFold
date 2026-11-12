@@ -16,6 +16,7 @@ const refused = [_][2][]const u8{
     .{ "conversation", "conversations are not supported: send previous_response_id or the items" },
     .{ "prompt", "prompt templates are not supported: send input and instructions" },
     .{ "context_management", "context management is not supported" },
+    .{ "execution_witness", "execution_witness is supported on /v1/chat/completions and /v1/completions only" },
 };
 
 pub const Request = struct {

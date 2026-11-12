@@ -50,6 +50,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
+    // a reply's binding carries the read-scoped witness: checked before the request is planned
+    if (@import("auth_scope.zig").witnessDenial(conn.key_scopes, body)) |why| return @import("auth_scope_reply.zig").deny(conn, false, why);
     var client: ClientOut = .{ .conn = conn, .a = a, .startup_at = startup_at };
     run(srv, a, client.out(), .{ .conn = conn }, is_chat, body);
 }
