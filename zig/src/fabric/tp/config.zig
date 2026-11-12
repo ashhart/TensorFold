@@ -2,6 +2,7 @@
 const std = @import("std");
 const log = @import("log.zig");
 const graph_cache = @import("cuda").graph_cache;
+const auth = @import("sys").rank_auth;
 
 pub const Backend = enum {
     /// NCCL for everything (the default).
@@ -75,6 +76,8 @@ pub const Config = struct {
     graph_cache: ?graph_cache.Settings = null,
     /// TF_GRAPH_CACHE as read (`Cache.init` applies the same value); only its effect on `graph_cache` is compared.
     graph_cache_env: ?[]const u8 = null,
+    /// TF_RANK_SECRET_FILE's key, proven on every bootstrap connection; none meets ranks on this host only.
+    secret: auth.Secret = .none,
 
     /// Reads every setting from `get` (the environment in `fromEnv`); unset names keep the defaults.
     pub fn parse(get: *const fn ([]const u8) ?[]const u8) Error!Config {
@@ -165,6 +168,10 @@ pub const Config = struct {
             }
         }
         c.graph_cache_env = get("TF_GRAPH_CACHE");
+        if (get(auth.env_name)) |path| c.secret = keyFile(path) catch |e| {
+            log.warn("{s}={s}: {s}", .{ auth.env_name, path, auth.explain(e) orelse @errorName(e) });
+            return error.BadSetting;
+        };
         return c;
     }
 
@@ -211,6 +218,14 @@ pub const Config = struct {
         return buf[0..n];
     }
 };
+
+fn keyFile(path: []const u8) auth.key.Error!auth.Secret {
+    var buf: [4096]u8 = undefined;
+    if (path.len >= buf.len) return error.SecretUnreadable;
+    @memcpy(buf[0..path.len], path);
+    buf[path.len] = 0;
+    return auth.Secret.fromFile(buf[0..path.len :0]);
+}
 
 fn envGet(name: []const u8) ?[]const u8 {
     var buf: [64]u8 = undefined;
