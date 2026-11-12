@@ -37,7 +37,7 @@ test "a round planner: prompts in pieces between the other streams' decode round
             const p = self(ctx);
             for (p.seqs.items) |x| if (!x.decoding) {
                 p.waits += 1;
-                return .wait;
+                return .{ .wait = .engine_busy };
             };
             p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
             return .admit;
@@ -249,7 +249,7 @@ test "under a round planner a learn request still steps while no request waits o
     const Idle = struct {
         fn none(_: *anyopaque) void {}
         fn admit(_: *anyopaque, _: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
-            return .wait;
+            return .{ .wait = .engine_busy };
         }
         fn admitted(_: *anyopaque) anyerror!void {}
         fn key(_: *anyopaque, _: usize) void {}
@@ -416,7 +416,7 @@ test "a failed round ends the prompts whose finals it never ran: their lanes fre
         fn beginAdmit(_: *anyopaque) void {}
         fn admit(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
             const p = self(ctx);
-            for (p.seqs.items) |x| if (!x.decoding) return .wait;
+            for (p.seqs.items) |x| if (!x.decoding) return .{ .wait = .engine_busy };
             p.seqs.append(gpa, .{ .key = ask.key, .n = ask.prompt.len }) catch return .refuse;
             return .admit;
         }

@@ -4,6 +4,8 @@ const ledger = @import("load_ledger.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 
+pub const Failure = ledger.reasons.Failure;
+
 const Published = struct { requests: ?ledger.Requests = null, work: ?ledger.Work = null, capacity: ?ledger.Capacity = null };
 
 /// The host's ledger state; counters move under the host mutex, the producer and `last` under `mutex`.
@@ -20,6 +22,8 @@ pub const State = struct {
     prefill_cache: u64 = 0,
     decode: u64 = 0,
     busy_ns: u64 = 0,
+    failures: [ledger.reasons.failures]u64 = @splat(0),
+    restore_fallbacks: u64 = 0,
     /// The pool's last census, from the thread that changed the pool (under `mutex`); null: no pool watched.
     pool: ?ledger.Pool = null,
 };
@@ -114,6 +118,7 @@ pub fn progress(h: *LaneHost, job: *Job) void {
 
 /// The pass reported: its remaining computed tokens, its restored ones and its time; the caller holds the host mutex.
 pub fn credit(h: *LaneHost, job: *Job) void {
+    h.load.restore_fallbacks += @intFromBool(job.stream.reuse_failed); // once a job: its pass reports once
     const p = &job.load;
     if (!p.on) return;
     take(h, p);
@@ -185,6 +190,20 @@ fn capacity(h: *const LaneHost) ?ledger.Capacity {
     return .{ .mode = c.mode, .lanes_free = @intCast(lanes -| h.admitted.items.len) };
 }
 
+/// A request the host took ends failed for `why`; the caller does not hold the host mutex.
+pub fn failed(h: *LaneHost, why: Failure) void {
+    h.lock();
+    defer h.unlock();
+    h.load.failures[@backingInt(why)] += 1;
+}
+
+/// A saved prefix could not be restored: the request prefills from zero and is still served (no host mutex held).
+pub fn fellBack(h: *LaneHost) void {
+    h.lock();
+    defer h.unlock();
+    h.load.restore_fallbacks += 1;
+}
+
 /// A background pass gave its lane up to foreground work.
 pub fn yielded(h: *LaneHost) void {
     h.lock();
@@ -195,7 +214,11 @@ pub fn yielded(h: *LaneHost) void {
 /// The `requests` group from the host's lists; the caller holds the host mutex.
 fn requests(h: *const LaneHost) ledger.Requests {
     var waiting_tokens: u64 = 0;
-    for (h.queued.items) |job| waiting_tokens += job.request.prompt.len;
+    var by_reason: [ledger.reasons.waits]u32 = @splat(0);
+    for (h.queued.items) |job| {
+        waiting_tokens += job.request.prompt.len;
+        by_reason[@backingInt(job.wait_reason)] += 1; // stored on the admission path: nothing is asked here
+    }
     const left = filling(h);
     return .{
         .running = @intCast(h.admitted.items.len),
@@ -206,6 +229,9 @@ fn requests(h: *const LaneHost) ledger.Requests {
         .started = h.load.started,
         .requeued = h.load.requeued,
         .yields = h.load.yields,
+        .waiting_by_reason = by_reason,
+        .failures = h.load.failures,
+        .restore_fallbacks = h.load.restore_fallbacks,
     };
 }
 

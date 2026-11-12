@@ -358,11 +358,13 @@ pub const LaneHost = struct {
         };
         if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
             const job = h.queued.orderedRemove(at);
+            h.load.failures[@backingInt(load.Failure.prompt_too_large)] += 1;
             h.unlock();
             h.finish(job, .failed, ledger.too_big);
             return .failed;
         }
         if (!ledger.promise(h, h.queued.items[at])) { // bytes before any stream: the job stays queued, nothing taken
+            h.queued.items[at].wait_reason = .ledger_bytes;
             h.unlock();
             return .none;
         }

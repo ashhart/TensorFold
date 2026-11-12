@@ -887,13 +887,16 @@ publishes `server_info{model,backend,version,instance}` (always 1; `instance` is
 so counters restart only with a new `instance`), `process_start_time_seconds`, `engine_parked` (1 while
 `--idle-unload` has closed the engine), `lanes`, and `http_requests_active{route}`: model requests from the end of
 their headers to the end of their reply, by route group (`chat_completions`, `completions`, `responses`,
-`messages`, `embeddings`, `speech`, `other`).
+`messages`, `embeddings`, `speech`, `other`), and `request_refusals_total{reason}`: requests refused with a client
+code, one of `engine_busy`, `engine_unavailable` and `memory_pressure` (the [Waits](#waits) codes, counted where
+the chat, embeddings, rerank and speech routes answer with them) or `invalid_request` (the 400 when the engine
+itself refuses the request it was handed), every label always present.
 
 An engine on the shared lane host adds these groups, each complete or absent:
 
 | Group | Families |
 | --- | --- |
-| Requests | `waiting_prompt_tokens` (prompt tokens of queued requests, before any kept prefix restores part of them), `filling_prompt_tokens_left` (absent while a backend without fill progress fills), `requests_started_total`, `requests_requeued_total`, `background_yields_total` |
+| Requests | `requests_waiting_by_reason{reason}` (queued requests by the one wait reason each holds, every reason always present; they sum to `requests_waiting`), `request_failures_total{reason}` (requests the engine took and ended failed: `backend_prompt`, `backend_round`, `lane_memory_alone`, `prompt_too_large`), `restore_fallbacks_total` (requests whose saved prefix could not be restored, so they prefilled from zero and were served), `waiting_prompt_tokens` (prompt tokens of queued requests, before any kept prefix restores part of them), `filling_prompt_tokens_left` (absent while a backend without fill progress fills), `requests_started_total`, `requests_requeued_total`, `background_yields_total` |
 | Work | `scheduler_tokens_total{mode}` with `prefill_compute`, `prefill_cache` and `decode` (output tokens after each request's first), counted as the work happens, and `prefill_busy_seconds_total`: engine seconds in prompt calls whose work `prefill_compute` counted. The `prefill_compute` delta over its delta is the prefill rate. A family round planner publishes no work group |
 | Capacity | `kv_capacity_mode{mode}` (`window` or `paged`), `lanes_free`, and for a paged engine `kv_pool_capacity_tokens`, `kv_pool_available_tokens`, `kv_pool_reclaimable_tokens`, `kv_pool_promised_tokens` with `pool="main"`, and `kv_pool_run_available` where the family needs a contiguous run. Published by the CUDA lane host: `window` for an engine without a page plan, `paged` with GLM-5.3-Flash's pool on rank 0; other paged families leave the group out until they name their pool |
 
@@ -903,9 +906,21 @@ While the engine is parked, none of these engine values is shown: neither the gr
 unload closes the engine, the engine values are already gone and `engine_parked` is still 0, since a request then
 gets 503 with a retry; it turns 1 once a request can reload the engine.
 
+A queued request holds one wait reason, decided where the engine last tried to admit it and kept until it starts
+or leaves; reading the ledger never asks the engine again. Three reasons are client codes, the same strings as in
+[Waits](#waits): `engine_busy` (no lane is free, or nothing more specific held it yet), `engine_unavailable` (the
+device is stale until a put-back reaches it) and `memory_pressure` (memory pressure holds admission to the streams
+already running). The rest are internal reasons, never a client code: `kv_pool`, `memory_floor` and
+`prefill_concurrent` (a family round planner waits for KV pool pages, for the memory floor, or passes a long prompt
+over while others prefill; DeepSeek-V4.1 names them), `prefix_cut` (it waits for a cut another prompt is filling),
+`state_read` (it waits for its disk state's read ahead), `ledger_bytes` (its caches' bytes do not fit the KV ledger
+now) and `pool_room` (the family's pool has no room for it now). A request behind one that waits for the pool, the
+ledger or the planner holds that request's reason. `memory_floor` is never counted under `memory_pressure`.
+
 `GET /v1/load` returns the same ledger as one JSON object from one read: `instance`, `timestamp` (the read's wall
-time), `model`, `parked`, `lanes`, `http_active` by route group, and, when present, the request counts,
-`capacity` with its `pools`, `tokens` and `busy_us`. Keys of a group no host fills are left out. It follows the
+time), `model`, `parked`, `lanes`, `http_active` by route group, `refusals` by code, and, when present, the request
+counts with `waiting_by_reason` (the same reasons, summing to `waiting`), `capacity` with its `pools`, `tokens` and
+`busy_us`. Keys of a group no host fills are left out. It follows the
 `/metrics` access rule, and `--metrics-open` opens it too.
 
 ## Admission

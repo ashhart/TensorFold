@@ -1,6 +1,8 @@
 //! The server's load ledger: scheduler load a host publishes as it happens, read whole by /metrics and /v1/load.
 const std = @import("std");
 const api = @import("engine_api.zig");
+/// The fixed wait, refusal and failure reasons the ledger counts by (wait_reason.zig).
+pub const reasons = @import("wait_reason.zig");
 
 /// The model routes `http_requests_active` counts apart; a fixed set, so the label never grows.
 pub const RouteGroup = enum { chat_completions, completions, responses, messages, embeddings, speech, other };
@@ -20,6 +22,19 @@ pub const Requests = struct {
     started: u64 = 0,
     requeued: u64 = 0,
     yields: u64 = 0,
+    /// The queued requests by their stored wait reason: they sum to `waiting`.
+    waiting_by_reason: [reasons.waits]u32 = @splat(0),
+    /// Requests the host took and ended failed, by reason.
+    failures: [reasons.failures]u64 = @splat(0),
+    /// Saved prefixes that could not be restored, so the request prefilled from zero and was served.
+    restore_fallbacks: u64 = 0,
+
+    /// The queued requests over every wait reason: `waiting` when each queued request holds one reason.
+    pub fn waitingTotal(r: Requests) u64 {
+        var n: u64 = 0;
+        for (r.waiting_by_reason) |x| n += x;
+        return n;
+    }
 };
 
 /// The `work` group: prompt and output tokens as they are computed, and the engine time of their prompt calls.
@@ -64,6 +79,8 @@ pub const Snapshot = struct {
     parked: bool,
     lanes: u32,
     http: [groups]u32,
+    /// What clients were refused, by code: the server counts these, attached engine or not.
+    refusals: [reasons.refusals]u64 = @splat(0),
     requests: ?Requests = null,
     work: ?Work = null,
     capacity: ?Capacity = null,
@@ -86,6 +103,7 @@ pub const Ledger = struct {
     parked: bool = false,
     lanes: u32 = 0,
     http: [groups]u32 = @splat(0),
+    refusals: [reasons.refusals]u64 = @splat(0),
     /// Raised by every attach and detach: a handle from before it writes nothing.
     epoch: u64 = 0,
     attached: ?api.Engine = null,
@@ -159,12 +177,22 @@ pub const Ledger = struct {
         l.http[@backingInt(g)] -|= 1;
     }
 
+    /// A client was refused with `r`'s code.
+    pub fn refused(l: *Ledger, r: reasons.Refusal) void {
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        l.refusals[@backingInt(r)] += 1;
+    }
+
     /// The ledger at one instant; counters carry every earlier host's.
     pub fn read(l: *Ledger) Snapshot {
         l.mutex.lockUncancelable(l.io);
         defer l.mutex.unlock(l.io);
-        var s: Snapshot = .{ .instance = l.instance, .start_s = l.start_s, .parked = l.parked, .lanes = l.lanes, .http = l.http };
-        if (l.cur.requests) |r| s.requests = addRequests(r, l.base.requests.?);
+        var s: Snapshot = .{ .instance = l.instance, .start_s = l.start_s, .parked = l.parked, .lanes = l.lanes, .http = l.http, .refusals = l.refusals };
+        if (l.cur.requests) |r| {
+            std.debug.assert(r.waitingTotal() == r.waiting); // one stored reason a queued request
+            s.requests = addRequests(r, l.base.requests.?);
+        }
         if (l.cur.work) |w| s.work = addWork(w, l.base.work.?);
         if (l.cur.capacity) |c| if (c.mode == .window or l.cur.pool != null) {
             s.capacity = c;
@@ -181,6 +209,8 @@ fn fold(base: *Groups, cur: Groups) void {
         b.started += r.started;
         b.requeued += r.requeued;
         b.yields += r.yields;
+        for (&b.failures, r.failures) |*x, y| x.* += y;
+        b.restore_fallbacks += r.restore_fallbacks;
     }
     if (cur.work) |w| base.work = addWork(w, base.work.?);
 }
@@ -191,6 +221,8 @@ fn addRequests(r: Requests, base: Requests) Requests {
     out.started += base.started;
     out.requeued += base.requeued;
     out.yields += base.yields;
+    for (&out.failures, base.failures) |*x, y| x.* += y;
+    out.restore_fallbacks += base.restore_fallbacks;
     return out;
 }
 
