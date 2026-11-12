@@ -364,6 +364,15 @@ Each settings file names `rank`, `library` and `links`; each link names its peer
 [Speed-up settings](docs/speed-up-mode.md#4-write-the-settings-files) has the schema and link setup.
 That guide's two-Mac Flash Next commands load the checkpoint directly, as one Mac does.
 
+Qwen3.8-27B serves the same way: the same `$HOME/models/qwen3.8-27b` checkpoint on both Macs, one settings file per rank, rank 1 started first and rank 0 within five minutes, with `--parallel 1` because a pair serves one greedy stream.
+Send requests to rank 0 only, and expect no prompt cache, no images and no learning: `--prompt-cache-gib`, `--learn` and `--vision` are refused on a pair, and so is `TF_QWEN27_LANES=0` with `--drafter`.
+`--drafter` runs on a pair when both ranks pass the same one.
+Each rank waits up to five minutes for the other's ready word, then exits with `the peer never signalled ready in five minutes`.
+Two Macs that differ in engine build, GPU family, checkpoint, weight format or command protocol both refuse to start at that point and name the difference.
+When rank 0 stops, rank 1 stops following and exits by itself within about three seconds: each rank runs a link watchdog that ends the process when the peer stops signalling for three seconds, so a dead link never leaves a rank serving alone. Restart both after a link failure: that fails the request in flight and leaves the pair down until both ranks run again.
+The link is trusted, so run a pair only over a dedicated cable between two Macs you control.
+[Qwen3.8-27B on two Macs](docs/recipes/qwen3.8-27b.md#two-macs-over-thunderbolt) has the commands, the measured speed against one Mac and what the split covers.
+
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
 Past 70% of RAM the server warns at startup: a load that wires most of the RAM can stall macOS until its watchdog restarts the Mac, so run nothing else large beside it.
