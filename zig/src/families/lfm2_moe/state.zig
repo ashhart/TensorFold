@@ -69,6 +69,8 @@ pub const Cache = struct {
     /// The stream's latest tapped rows in the scratch, and its prompt's last row's taps (kept for the first draft).
     tap: ?TapRows = null,
     last_tap: ?mtl.Buffer = null,
+    /// A stepped prompt pass's latest chunk's tapped rows in the scratch (#3021): featuresFn serves them while current.
+    chunk_tap: ?TapRows = null,
 
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, attention: *const [c.layers]bool, capacity: usize) !Cache {
         var out: Cache = .{ .memory = .{ .gpa = gpa, .device = device }, .capacity = capacity, .blocks = undefined, .logits = undefined };
