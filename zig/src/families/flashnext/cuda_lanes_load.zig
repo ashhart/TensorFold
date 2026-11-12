@@ -64,13 +64,13 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         r.deinit();
     };
     own.engine = try prompt.Engine.initRank(gpa, io, driver, &own.stream, dir, o.tp, o.rank);
+    errdefer own.engine.deinit();
     own.engine.chunk = chunk;
     if (own.ranks) |r| {
         r.engine = own.engine;
         own.engine.collective = &r.collective;
         try r.afterLoad(io, ctx, own.stream);
     }
-    errdefer own.engine.deinit();
     const e = own.engine;
     if (e.chunk != e.busy_chunk) std.log.info("flashnext: prompt passes of {d} rows, {d} while another stream decodes", .{ e.chunk, e.busy_chunk });
     if (o.vision) |limits| {
