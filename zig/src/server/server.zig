@@ -105,6 +105,8 @@ pub const Config = struct {
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
+    /// --max-connections-per-address, --trusted-proxy: one address's share from three quarters full.
+    peering: @import("http_admission.zig").Peering = .{},
     /// --max-inflight, --max-inflight-per-key, --requests-per-second, --request-burst; all zero: no admission.
     admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
@@ -434,7 +436,7 @@ pub const Server = struct {
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
             if (!srv.admitConnection(c.fd)) continue;
-            const slot = admission.peerSlot(&srv.peers, srv.io, &srv.open_connections, srv.config.max_connections, c.fd, c.peer) orelse continue;
+            const slot = admission.peerSlot(&srv.peers, srv.io, &srv.open_connections, srv.config.max_connections, srv.config.peering, c.fd, c.peer) orelse continue;
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind, slot }) catch {
                 admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
                 _ = platform.posix.system.close(c.fd);
