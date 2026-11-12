@@ -60,6 +60,44 @@ pub fn label(c: *const Config, buf: []u8) []const u8 {
     return w.buffered();
 }
 
+/// The MTP head file's width from its `__metadata__` quantization text (null: the stock head, 4-bit in groups of 64).
+pub fn headOf(a: std.mem.Allocator, quantization: ?[]const u8) !Width {
+    const text = quantization orelse return .{};
+    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch return error.BadHeadWidth;
+    if (doc != .object) return error.BadHeadWidth;
+    const bits = doc.object.get("bits") orelse return error.BadHeadWidth;
+    const group = doc.object.get("group_size") orelse return error.BadHeadWidth;
+    if (bits != .integer or group != .integer) return error.BadHeadWidth;
+    if (doc.object.get("mode")) |m| if (m != .string or !std.mem.eql(u8, m.string, "affine")) return error.BadHeadWidth;
+    return .{
+        .bits = std.math.cast(u8, bits.integer) orelse return error.BadHeadWidth,
+        .group = std.math.cast(u16, group.integer) orelse return error.BadHeadWidth,
+    };
+}
+
+/// The `__metadata__` quantization text of the safetensors file at `path`, or null when it states none.
+pub fn headQuantization(a: std.mem.Allocator, io: std.Io, path: []const u8) !?[]const u8 {
+    var f = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer f.close(io);
+    var lead: [8]u8 = undefined;
+    if (try f.readPositionalAll(io, &lead, 0) != 8) return error.BadHeader;
+    const n = std.mem.readInt(u64, &lead, .little);
+    if (n > 1 << 26) return error.BadHeader;
+    const text = try a.alloc(u8, @intCast(n));
+    if (try f.readPositionalAll(io, text, 8) != n) return error.BadHeader;
+    return metadataQuantization(a, text);
+}
+
+/// `__metadata__.quantization` of a safetensors header's JSON, or null.
+pub fn metadataQuantization(a: std.mem.Allocator, header: []const u8) !?[]const u8 {
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, header, .{});
+    if (doc != .object) return error.BadHeader;
+    const meta = doc.object.get("__metadata__") orelse return null;
+    if (meta != .object) return null;
+    const q = meta.object.get("quantization") orelse return null;
+    return if (q == .string) q.string else null;
+}
+
 const testing = std.testing;
 
 fn parsed(a: std.mem.Allocator, text: []const u8) !Config {
@@ -120,4 +158,20 @@ test "a width the launches do not read is named, the first one found" {
     const n = unserved(&c, &buf).?;
     try testing.expectEqualStrings("backbone.layers.5.mixer.q_proj", n.name);
     try testing.expectEqual(@as(u8, 3), n.width.bits);
+}
+
+test "the MTP head's width comes from its own metadata, the stock 4/64 when it states none" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqual(Width{ .bits = 4, .group = 64 }, try headOf(a, null));
+    try testing.expectEqual(Width{ .bits = 4, .group = 64 }, try headOf(a, "{\"group_size\": 64, \"bits\": 4}"));
+    try testing.expectEqual(Width{ .bits = 8, .group = 32 }, try headOf(a, "{\"group_size\": 32, \"bits\": 8}"));
+    try testing.expectError(error.BadHeadWidth, headOf(a, "{\"bits\": 4}"));
+    try testing.expectError(error.BadHeadWidth, headOf(a, "{\"bits\": 4, \"group_size\": 64, \"mode\": \"mxfp4\"}"));
+    const header = "{\"__metadata__\": {\"format\": \"tensorfold-nemotron-mtp\", " ++
+        "\"quantization\": \"{\\\"group_size\\\": 64, \\\"bits\\\": 4}\"}, \"a\": {}}";
+    const q = (try metadataQuantization(a, header)).?;
+    try testing.expectEqual(Width{ .bits = 4, .group = 64 }, try headOf(a, q));
+    try testing.expectEqual(@as(?[]const u8, null), try metadataQuantization(a, "{\"a\": {}}"));
 }
