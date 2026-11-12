@@ -282,7 +282,8 @@ pub const Generation = struct {
         const decode_tokens = g.collected.items.len -| 1;
         const runtime = try json.newObject(a);
         try runtime.put(a, "enable_thinking", .{ .bool = thinking });
-        try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = "none" } else if (effort) |e| .{ .string = e } else .null);
+        // the effort the template heard: with thinking off, only one the request named
+        try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = cx.named_effort orelse "none" } else if (effort) |e| .{ .string = e } else .null);
         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
         try runtime.put(a, "tokens_per_second", .{ .float = if (decode_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_s else 0 });
         try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them

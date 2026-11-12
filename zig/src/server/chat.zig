@@ -159,7 +159,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
     const asked = if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null;
     const effort = srv.effortFor(asked);
-    cx.named_effort = fields_mod.namedEffort(asked, srv.config.reasoning_effort, srv.effort_levels);
+    cx.named_effort = if (input.prompt == null) fields_mod.namedEffort(asked, srv.effort_levels) else null; // a raw prompt has no template
     cx.clear_thinking = flag(f, "clear_thinking");
     cx.template_fields = f;
     const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
