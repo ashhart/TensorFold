@@ -1,5 +1,24 @@
 # Hazard-tracked barriers receipts, Apple M1 (13-inch)
 
+## At the #2017 head (12 November, restacked)
+
+Old build is #2017's head `cf73ab96`, new build is this PR's head `240216fe`. Each case ran three old and three new processes in the order old, new, new, old, old, new; every process exited 0 and no GPU timeout was logged. The logits digests of all six processes of a case are equal and equal #2017's. Files: `restack-20261112/`.
+
+| Chip | Case | Old run 2 (range) | New run 2 (range) | Gain, median | Logits digest |
+|---|---|---|---|---:|---|
+| 13-inch M1 | unicode-24 | 3.46 s (3.45 to 3.48) | 3.26 s (3.24 to 3.27) | 5.9% | `e946185d64ae` |
+| 13-inch M1 | document-256 | 5.40 s (5.38 to 5.41) | 5.17 s (5.16 to 5.17) | 4.3% | `3188aaae7d11` |
+| 13-inch M1 | document-1024 | 12.53 s (12.51 to 12.73) | 12.24 s (12.23 to 12.26) | 2.3% | `82c353787e89` |
+| 16-inch M1 Max | unicode-24 | 1.44 s (1.43 to 1.44) | 1.16 s (1.15 to 1.19) | 19.7% | `e946185d64ae` |
+| 16-inch M1 Max | document-256 | 2.05 s (2.03 to 2.06) | 1.79 s (1.78 to 1.86) | 12.6% | `3188aaae7d11` |
+| 16-inch M1 Max | document-1024 | 4.88 s (4.63 to 4.94) | 4.19 s (4.17 to 4.32) | 14.0% | `82c353787e89` |
+
+The 16-inch document-1024 old arm spans 6.2%, over the 5% spread I registered before the run as a falsifier for a cell; the new arm spans 3.6%.
+
+The ten runners at this head on the 13-inch M1, all exit 0 (`restack-20261112/ten-runners-m1-13-inch/`, binaries in `restack-20261112/SHA256SUMS`): attention-contract 15 of 15, contract-pointwise 16 passed 1 known of 17, datamove 7 of 7, stage 1 25 of 25, stage 2 9 of 9, stage 3 4 of 4, stage 4 6 of 6, stage 5 7 of 7, the greedy contract 1 pass and 1 control red as planted, and the kernel contract with 5 kernels passing gates 1 to 4 and 9 controls caught (#2017 adds the `qmm_q4_tile_rows` kernel and its control). `zig build vulkan-host-test -Dvulkan=true` exits 0 at this head: `restack-20261112/host-test.txt`.
+
+## Earlier run at the old base (10 November)
+
 Qwen3.5-2B 4-bit, 64 greedy steps, two runs per process. Old build is the two-columns build (`9eef5a52`, #2017); new build records a barrier between dispatches only when they conflict (`c03ebda7`).
 Each case ran three old and three new processes, interleaved in both orders. Run 2 is the prefill plus 63 decode steps plus the per-step logits readback.
 

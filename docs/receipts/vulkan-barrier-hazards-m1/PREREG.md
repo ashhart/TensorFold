@@ -61,3 +61,10 @@ The first build of this change failed its digest gate on unicode-24: logits dige
 Cause: `greedy.zig` records its three dependent dispatches with `Pipeline.record` and relied on the barrier that call used to add, and its first fill needs the dispatches run before it fenced.
 Fix: `record` keeps its barrier (it is the API of direct recorders); only `Pipeline.run` elides; `Commands.sync` fences open dispatches before a direct recorder starts. The corrected build is
 a new pair under the same arms, decision rule and forecast.
+
+## Restack on #2017's head `cf73ab96` (12 November)
+
+Written to the idle-guard queue before the runs, as the row text. Arms: `cf73ab96` against `240216fe`, three inputs, old, new, new, old, old, new, a 13-inch M1 and a 16-inch M1 Max.
+Forecast: a median gain of 5% to 25% at document-256 and document-1024 and under 5% at unicode-24, equal digests (the 16-inch figure at the old head was 22.4% at document-256).
+Falsifier: a median gain under 0% at document-1024, any differing digest, or a cell whose three old (or three new) run 2 times differ by more than 5%.
+Result: digests equal everywhere. 13-inch M1: 5.9%, 4.3%, 2.3% at unicode-24, document-256, document-1024, so document-256 and document-1024 fall under the 5% floor of the forecast and unicode-24 over its 5% ceiling; the 16-inch M1 Max: 19.7%, 12.6%, 14.0%, with unicode-24 over its ceiling and document-1024 old arm spread 6.2% (a falsifier hit). The forecast did not hold on the 13-inch M1.

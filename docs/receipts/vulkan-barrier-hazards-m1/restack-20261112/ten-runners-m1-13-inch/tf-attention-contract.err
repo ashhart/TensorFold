@@ -1,0 +1,17 @@
+MILESTONE device-found elapsed_ms=9 name="Apple M1 (G13G B1)" vendor=0x10005 device=0x0000 api=1.4.362 storage16=true int16=true shared=32768 fence-timeout=10000ms
+MILESTONE rope elapsed_ms=188 case="queries rows4 base0" rows=4 base=0 worst=4.964008589780876e-1 of bound, repeats byte-identical, passthrough tail bit-exact, input unchanged, planted outputs refused
+MILESTONE rope elapsed_ms=190 case="queries rows2 base5" rows=2 base=5 worst=4.8822881879460084e-1 of bound, repeats byte-identical, passthrough tail bit-exact, input unchanged, planted outputs refused
+MILESTONE sdpa elapsed_ms=192 case="decode n=1" rows=1 prefix=0 visible=[1..1] worst=0e0 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=195 case="decode n=16 tile" rows=1 prefix=15 visible=[16..16] worst=3.5347427802135684e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=198 case="decode n=17 tile+1" rows=1 prefix=16 visible=[17..17] worst=3.9242733174609323e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=212 case="decode n=255 scan" rows=1 prefix=254 visible=[255..255] worst=3.2373066331518274e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=226 case="decode n=256 scan" rows=1 prefix=255 visible=[256..256] worst=3.5630466330042704e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=240 case="decode n=257 scan+1" rows=1 prefix=256 visible=[257..257] worst=3.44416466623321e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=292 case="decode n=1024 stride" rows=1 prefix=1023 visible=[1024..1024] worst=3.371824275163813e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=344 case="decode n=1025 stride+1" rows=1 prefix=1024 visible=[1025..1025] worst=3.1211365844085626e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=691 case="decode n=7167 stream-1" rows=1 prefix=7166 visible=[7167..7167] worst=3.099820299106263e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=1039 case="decode n=7168 stream" rows=1 prefix=7167 visible=[7168..7168] worst=3.0423502310343786e-1 of bound, repeats byte-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=1070 case="prefill rows32 n1..32" rows=32 prefix=0 visible=[1..32] worst=3.8573441919364143e-1 of bound, repeats byte-identical, rows decode alone bit-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=1482 case="prefill rows17 across 1024" rows=17 prefix=1007 visible=[1008..1024] worst=3.454415083464824e-1 of bound, repeats byte-identical, rows decode alone bit-identical, planted outputs refused, inputs unchanged
+MILESTONE sdpa elapsed_ms=6730 case="prefill rows32 to 7168" rows=32 prefix=7136 visible=[7137..7168] worst=3.1143891982294897e-1 of bound, repeats byte-identical, rows decode alone bit-identical, planted outputs refused, inputs unchanged
+RESULT attention-contract elapsed_ms=6730 on "Apple M1 (G13G B1)": passed=15 total=15
