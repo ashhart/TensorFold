@@ -1,0 +1,30 @@
+MILESTONE device-found name="Apple M1 (G13G B1)" vendor=0x10005 storage16=true int16=true timeout=10000ms
+PASS nonfinite vulkan cast_f32_bf16 (RNE): the stated rule holds: outputs equal the contract's RNE bytes: ties to even, bf16 subnormals included, a NaN keeps its class
+PASS repeat vulkan cast_f32_bf16 (RNE): five runs byte-identical (292 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan cast_f32_bf16 (RNE): 4 shapes exact by its own check (worst 0.000 of the bound), 3 edges refused by the kernel
+N/A  sums vulkan cast_f32_bf16 (RNE): declares none sums
+PASS nonfinite vulkan cast_bf16_f32 (exact widening): the stated rule holds: outputs equal the reference bits: bf16 widening is exact, every value and NaN byte copies
+PASS repeat vulkan cast_bf16_f32 (exact widening): five runs byte-identical (584 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan cast_bf16_f32 (exact widening): 4 shapes exact by its own check (worst 0.000 of the bound), 3 edges refused by the kernel
+N/A  sums vulkan cast_bf16_f32 (exact widening): declares none sums
+PASS nonfinite vulkan copy_u32 (bit copy): the stated rule holds: outputs equal the source bytes: a raw bit copy, every value and NaN pattern included
+PASS repeat vulkan copy_u32 (bit copy): five runs byte-identical (1200 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan copy_u32 (bit copy): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums vulkan copy_u32 (bit copy): declares none sums
+PASS nonfinite vulkan copy_u16 (bit copy): the stated rule holds: outputs equal the source bytes: a raw bit copy, every value and NaN pattern included
+PASS repeat vulkan copy_u16 (bit copy): five runs byte-identical (600 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan copy_u16 (bit copy): 4 shapes exact by its own check (worst 0.000 of the bound), 3 edges refused by the kernel
+N/A  sums vulkan copy_u16 (bit copy): declares none sums
+PASS nonfinite vulkan gather_u32 (bit rows): the stated rule holds: outputs equal the addressed row's bytes; an out-of-range id's row is zeros, never another row (ops_q4.zig)
+PASS repeat vulkan gather_u32 (bit rows): five runs byte-identical (160 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan gather_u32 (bit rows): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums vulkan gather_u32 (bit rows): declares none sums
+PASS nonfinite vulkan gather_u16 (bit rows): the stated rule holds: outputs equal the addressed row's bytes; an out-of-range id's row is zeros, never another row (ops_q4.zig)
+PASS repeat vulkan gather_u16 (bit rows): five runs byte-identical (80 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan gather_u16 (bit rows): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums vulkan gather_u16 (bit rows): declares none sums
+PASS nonfinite vulkan dequant_bf16 (q4 g64 RNE): the stated rule holds: one fp32 expression, then the contract's RNE: a non-finite scale or bias makes the output the fp32 expression's class
+PASS repeat vulkan dequant_bf16 (q4 g64 RNE): five runs byte-identical (1536 bytes), inputs and guards untouched, no overlap
+PASS shapes vulkan dequant_bf16 (q4 g64 RNE): 7 shapes exact by its own check (worst 0.000 of the bound), 0 edges refused by the kernel
+N/A  sums vulkan dequant_bf16 (q4 g64 RNE): declares none sums
+RESULT datamove on "Apple M1 (G13G B1)": kernels=7 passed=7 failed=0 controls=0 known=0
