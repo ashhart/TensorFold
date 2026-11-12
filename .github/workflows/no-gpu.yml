@@ -13,10 +13,11 @@ on:
 permissions:
   contents: read
 
-# A pull request's newer push cancels its older run; every push to main keeps its own.
+# A pull request's newer push cancels its older run. A newer push to main cancels main's older run too: a landing
+# train tested its tip before landing, so only main's newest commit needs a full run. Scheduled runs keep their own.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
   benchmark-clients:
