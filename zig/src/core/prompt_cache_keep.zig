@@ -26,6 +26,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
         if (shared) learned.learn(s, e, starts);
         return true;
     };
+    const image_noted = s.disk != null and rows.write.imageNoted(s, prompt[0..n]);
     const image_ids = images.prefix(s.gpa, s.image_query orelse &.{}, @intCast(n)) catch |err| return s.fail(at, err);
     var owns_images = true;
     defer if (owns_images) s.gpa.free(image_ids);
@@ -73,7 +74,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
         return s.fail(at, err);
     };
     const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-    e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .seen = .of(s, last[0..n], decoded, starts, at), .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .intermediate = @import("prompt_intermediate.zig").is(s.rules, prompt.len, at), .own = last };
+    e.* = .{ .image_noted = image_noted, .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .seen = .of(s, last[0..n], decoded, starts, at), .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .intermediate = @import("prompt_intermediate.zig").is(s.rules, prompt.len, at), .own = last };
     owns_decoded = false;
     owns_images = false;
     index.add(s, e) catch {

@@ -26,10 +26,18 @@ pub const Failures = struct {
     }
 };
 
+/// Carry the notice along an exact image prefix before keeping its extension can evict it.
+pub fn imageNoted(s: *const pc.Store, tokens: []const u32) bool {
+    for (s.entries.items) |e| if (e.image_noted and std.mem.startsWith(u32, tokens, e.tokens) and
+        @import("cache_images.zig").matches(s, e)) return true;
+    return false;
+}
+
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
     if (r.stopped) return;
     if (e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) {
-        pc.note("imprint: {d} tokens kept RAM-only (ImageConversation); image states are not written to disk", .{e.at});
+        if (!e.image_noted) pc.note("imprint: {d} tokens kept RAM-only (ImageConversation); image states are not written to disk", .{e.at});
+        e.image_noted = true;
         return;
     }
     sync.queued(r, e, starts);
