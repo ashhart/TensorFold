@@ -189,3 +189,20 @@ test "qwen27 pair: the GPU family is the generation the Metal device names" {
     try std.testing.expectEqual(@as(u64, 0), pair_mod.chipGeneration("Apple"));
     try std.testing.expectEqual(@as(u64, 0), pair_mod.chipGeneration("AMD Radeon Pro"));
 }
+
+test "qwen27 pair: a pair's /health names the two-Mac mode, and one Mac's Info is unchanged" {
+    const api = @import("engine_api");
+    // `attach` builds its Info and passes it through `withPolicy`: one Mac's comes back as it went in
+    const info: api.Info = .{ .name = "qwen27", .lanes = 4, .context_window = 32768, .prefill_step = 512 };
+    try std.testing.expect(std.meta.eql(info, pair_flags.withPolicy(info, false)));
+    // main's default policy is empty, and `/health` prints a policy only when it is not, so one Mac shows none
+    try std.testing.expectEqualStrings((api.Info{}).policy, pair_flags.withPolicy(info, false).policy);
+    // a pair's line carries "pair", the word record_oracle.py refuses on, and says what the pair answers
+    const pair = pair_flags.withPolicy(info, true);
+    try std.testing.expectEqualStrings(pair_flags.healthPolicy(true), pair.policy);
+    try std.testing.expect(std.mem.indexOf(u8, pair.policy, "pair") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pair.policy, "greedy") != null);
+    var rest = pair;
+    rest.policy = info.policy;
+    try std.testing.expect(std.meta.eql(info, rest)); // the policy is the only field a pair changes
+}
