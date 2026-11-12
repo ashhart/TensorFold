@@ -290,3 +290,138 @@ test "security: a rank with another key or with none is refused by name, and ran
     mine.got.?.close();
     lead.got.?.close();
 }
+
+/// A host on the path between rank 1 and rank 0: it passes every byte, keeps what rank 0 sent, and can change a bit.
+const Relay = struct {
+    server: posix.socket_t,
+    to: u16,
+    seen: [1 << 14]u8 = undefined,
+    len: usize = 0,
+    tamper: std.atomic.Value(bool) = .init(false),
+
+    fn listen(port: u16) !posix.socket_t {
+        const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+        var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+        if (posix.errno(posix.system.bind(@intCast(rc), @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) != .SUCCESS) return error.BindFailed;
+        if (posix.errno(posix.system.listen(@intCast(rc), 1)) != .SUCCESS) return error.BindFailed;
+        return @intCast(rc);
+    }
+
+    fn run(r: *Relay) void {
+        const down: posix.socket_t = @intCast(posix.system.accept(r.server, null, null));
+        defer _ = posix.system.close(down);
+        var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, r.to), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+        const up: posix.socket_t = @intCast(posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0));
+        defer _ = posix.system.close(up);
+        while (posix.errno(posix.system.connect(up, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) != .SUCCESS) {
+            std.Io.sleep(std.testing.io, .fromMilliseconds(5), .awake) catch {};
+        }
+        var fds = [_]posix.pollfd{ .{ .fd = down, .events = posix.POLL.IN, .revents = 0 }, .{ .fd = up, .events = posix.POLL.IN, .revents = 0 } };
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            _ = posix.poll(&fds, -1) catch return;
+            for (fds, 0..) |f, i| {
+                if (f.revents == 0) continue;
+                const rc = posix.system.read(f.fd, &buf, buf.len);
+                if (posix.errno(rc) != .SUCCESS or rc == 0) return;
+                const n: usize = @intCast(rc);
+                if (i == 1) {
+                    // the last byte it holds is the end of a record's tag
+                    if (r.tamper.swap(false, .acq_rel)) buf[n - 1] ^= 1;
+                    @memcpy(r.seen[r.len..][0..n], buf[0..n]);
+                    r.len += n;
+                }
+                var at: usize = 0;
+                while (at < n) {
+                    const w = posix.system.write(fds[1 - i].fd, buf[at..].ptr, n - at);
+                    if (posix.errno(w) != .SUCCESS) return;
+                    at += @intCast(w);
+                }
+            }
+        }
+    }
+};
+
+/// Rank 0 of a pair: it joins, waits to be told, and sends `words`.
+const Sender = struct {
+    port: u16,
+    secret: auth.Secret,
+    words: []const u32,
+    go: std.atomic.Value(bool) = .init(false),
+    err: ?link.Error = null,
+
+    fn run(s: *Sender) void {
+        var fault: agree.Fault = .{};
+        const out = link.Link.open(std.testing.io, "127.0.0.1", s.port, .{ .internal = @splat(7) }, hello(0, 2), @splat(100), &fault, &s.secret) catch |err| {
+            s.err = err;
+            return;
+        };
+        var l = out[0];
+        defer l.close();
+        while (!s.go.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        l.send(s.words) catch |err| {
+            s.err = err;
+        };
+    }
+};
+
+/// Rank 1 joins rank 0 through a relay and reads one message; `tamper` has the relay change a bit of it.
+fn throughRelay(words: []const u32, key: auth.Secret, tamper: bool, relay: *Relay, got: *std.ArrayList(u32)) !void {
+    loopback.ignorePipe();
+    var sender: Sender = .{ .port = try loopback.freePort(), .secret = key, .words = words };
+    const relay_port = try loopback.freePort();
+    relay.* = .{ .server = try Relay.listen(relay_port), .to = sender.port };
+    defer _ = posix.system.close(relay.server);
+    const lead = try std.Thread.spawn(.{}, Sender.run, .{&sender});
+    const path = try std.Thread.spawn(.{}, Relay.run, .{relay});
+    var fault: agree.Fault = .{};
+    const out = try link.Link.open(std.testing.io, "127.0.0.1", relay_port, .{ .internal = @splat(7) }, hello(1, 2), @splat(101), &fault, &key);
+    var mine = out[0];
+    if (tamper) relay.tamper.store(true, .release);
+    sender.go.store(true, .release);
+    const result = mine.recv(std.testing.allocator, got);
+    mine.close();
+    lead.join();
+    path.join();
+    try std.testing.expectEqual(@as(?link.Error, null), sender.err);
+    return result;
+}
+
+test "security: rank 0's words cross the link sealed, and a bit changed on the way closes it" {
+    const words = [_]u32{ 0x51525354, 0x61626364, 0x51525354, 0x71727374, 17, 4021, 9, 88213 };
+    var got: std.ArrayList(u32) = .empty;
+    defer got.deinit(std.testing.allocator);
+    var relay: Relay = undefined;
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    try throughRelay(&words, key, false, &relay, &got);
+    try std.testing.expectEqualSlices(u32, &words, got.items);
+    // a host on the path saw the key proof and then records: none of the words, and not the policy words either
+    const seen = relay.seen[0..relay.len];
+    try std.testing.expect(seen.len > words.len * 4);
+    for ([_]u32{ 0x51525354, 0x61626364, 0x71727374, 88213 }) |w| try std.testing.expect(std.mem.indexOf(u8, seen, std.mem.asBytes(&w)) == null);
+    try std.testing.expectError(error.LinkClosed, throughRelay(&words, key, true, &relay, &got));
+}
+
+test "security: a group with no key, on one host, is not sealed: after the proof rank 0's bytes cross as they are" {
+    const words = [_]u32{ 0x51525354, 0x61626364, 17, 4021 };
+    var got: std.ArrayList(u32) = .empty;
+    defer got.deinit(std.testing.allocator);
+    var relay: Relay = undefined;
+    try throughRelay(&words, .none, false, &relay, &got);
+    try std.testing.expectEqualSlices(u32, &words, got.items);
+    // the proof's challenge, then the answer, RCCL's id, the policy words and the message: no record heads, no tags
+    const id: rccl.UniqueId = .{ .internal = @splat(7) };
+    const policy: [Policy.word_count]u32 = @splat(100);
+    const n: u32 = words.len;
+    const want = try std.mem.concat(std.testing.allocator, u8, &.{
+        std.mem.asBytes(&link.Answer{}),
+        std.mem.asBytes(&id),
+        std.mem.sliceAsBytes(&policy),
+        std.mem.asBytes(&n),
+        std.mem.sliceAsBytes(&words),
+    });
+    defer std.testing.allocator.free(want);
+    try std.testing.expect(relay.len > auth.challenge_len);
+    try std.testing.expectEqualSlices(u8, want, relay.seen[auth.challenge_len..relay.len]);
+}

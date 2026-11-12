@@ -9,6 +9,7 @@ const Identity = agree_.Identity;
 const Field = agree_.Field;
 const Fault = agree_.Fault;
 const auth = @import("sys").rank_auth;
+const Seal = auth.seal.Seal;
 
 pub const Error = error{
     SocketFailed,
@@ -43,7 +44,7 @@ pub const Hello = extern struct {
 };
 
 /// Rank 0's answer to a hello: `field` 0 when the group formed, else the differing field + 1 and its rank.
-const Answer = extern struct { magic: u32 = magic, field: u32 = 0, rank: u32 = 0, pad: u32 = 0 };
+pub const Answer = extern struct { magic: u32 = magic, field: u32 = 0, rank: u32 = 0, pad: u32 = 0 };
 
 /// The first field where `h` differs from rank 0's `lead`, given the ranks already `taken`; null when it may join.
 pub fn differs(lead: Hello, h: Hello, taken: []const bool) ?Field {
@@ -63,6 +64,8 @@ pub const Link = struct {
     world: usize,
     /// Rank 0: the follower of rank r + 1 at index r. A follower: rank 0's socket at index 0.
     fds: [max_world - 1]posix.socket_t = undefined,
+    /// Each socket's seal in a keyed group: every byte after the key proof crosses in its records. Null with no key.
+    seals: [max_world - 1]?*Seal = undefined,
 
     /// Rank 0 listens on `host:port`, answers once every proven hello matches its own; `fault` names one that does not.
     pub fn open(
@@ -84,10 +87,10 @@ pub const Link = struct {
         var link: Link = .{ .rank = rank, .world = world };
         if (rank == 0) {
             try link.lead(&addr, hello, fault, secret);
-            for (link.fds[0 .. world - 1]) |fd| {
-                try writeAll(fd, std.mem.asBytes(&Answer{}));
-                try writeAll(fd, std.mem.asBytes(&id));
-                try writeAll(fd, std.mem.sliceAsBytes(&policy));
+            for (0..world - 1) |i| {
+                try link.peer(i).write(std.mem.asBytes(&Answer{}));
+                try link.peer(i).write(std.mem.asBytes(&id));
+                try link.peer(i).write(std.mem.sliceAsBytes(&policy));
             }
             return .{ link, id, policy };
         }
@@ -103,10 +106,13 @@ pub const Link = struct {
             std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
         }
         errdefer _ = posix.system.close(link.fds[0]);
-        _ = try auth.connect(link.fds[0], secret, .rocm, rank, world, proof_ms);
-        try writeAll(link.fds[0], std.mem.asBytes(&hello));
+        const session = try auth.connect(link.fds[0], secret, .rocm, rank, world, proof_ms);
+        const lead_ = try Peer.init(link.fds[0], &session, true, secret.keyed);
+        errdefer if (lead_.seal) |s| std.heap.page_allocator.destroy(s);
+        link.seals[0] = lead_.seal;
+        try lead_.write(std.mem.asBytes(&hello));
         var answer: Answer = undefined;
-        try readAll(link.fds[0], std.mem.asBytes(&answer));
+        try lead_.read(std.mem.asBytes(&answer), null);
         if (answer.magic != magic) {
             fault.* = .{ .field = .layout, .rank = 0 };
             return error.RanksDiffer;
@@ -120,9 +126,9 @@ pub const Link = struct {
             return error.RanksDiffer;
         }
         var got: rccl.UniqueId = undefined;
-        try readAll(link.fds[0], std.mem.asBytes(&got));
+        try lead_.read(std.mem.asBytes(&got), null);
         var theirs: [Policy.word_count]u32 = undefined;
-        try readAll(link.fds[0], std.mem.sliceAsBytes(&theirs));
+        try lead_.read(std.mem.sliceAsBytes(&theirs), null);
         return .{ link, got, theirs };
     }
 
@@ -158,21 +164,26 @@ pub const Link = struct {
                 _ = posix.system.close(fd);
                 continue;
             };
+            const from = Peer.init(fd, &who.session, false, secret.keyed) catch {
+                _ = posix.system.close(fd);
+                continue;
+            };
             arrived += 1;
             var h = std.mem.zeroes(Hello);
-            const field = if (readHello(fd, &h)) |_| (if (h.rank != who.rank or h.world != who.world) Field.rank else differs(hello, h, &taken)) else |_| Field.layout;
+            const field = if (readHello(from, &h)) |_| (if (h.rank != who.rank or h.world != who.world) Field.rank else differs(hello, h, &taken)) else |_| Field.layout;
             if (refused == null) {
                 if (field) |f| {
                     refused = .{ .field = f, .rank = h.rank };
                     linger_until = auth.nowMs() + linger_ms;
-                    for (1..l.world) |r| if (taken[r]) tell(l.fds[r - 1], refused.?);
+                    for (1..l.world) |r| if (taken[r]) tell(l.peer(r - 1), refused.?);
                 } else {
                     taken[h.rank] = true;
                     l.fds[h.rank - 1] = fd;
+                    l.seals[h.rank - 1] = from.seal;
                     continue;
                 }
             }
-            tell(fd, refused.?);
+            tell(from, refused.?);
         }
         if (refused) |f| {
             fault.* = f;
@@ -182,53 +193,113 @@ pub const Link = struct {
 
     pub fn close(l: *Link) void {
         const n = if (l.rank == 0) l.world - 1 else 1;
-        for (l.fds[0..n]) |fd| _ = posix.system.close(fd);
+        for (0..n) |i| l.peer(i).deinit();
+    }
+
+    fn peer(l: *const Link, i: usize) Peer {
+        return .{ .fd = l.fds[i], .seal = l.seals[i] };
     }
 
     /// Rank 0: `words` to every follower, behind their count.
     pub fn send(l: *const Link, words: []const u32) Error!void {
         const n: u32 = @intCast(words.len);
-        for (l.fds[0 .. l.world - 1]) |fd| {
-            try writeAll(fd, std.mem.asBytes(&n));
-            try writeAll(fd, std.mem.sliceAsBytes(words));
+        for (0..l.world - 1) |i| {
+            try l.peer(i).write(std.mem.asBytes(&n));
+            try l.peer(i).write(std.mem.sliceAsBytes(words));
         }
     }
 
     /// A follower: rank 0's next message, appended to `out` (cleared first).
     pub fn recv(l: *const Link, gpa: std.mem.Allocator, out: *std.ArrayList(u32)) Error!void {
         var n: u32 = undefined;
-        try readAll(l.fds[0], std.mem.asBytes(&n));
+        try l.peer(0).read(std.mem.asBytes(&n), null);
         out.clearRetainingCapacity();
         try out.resize(gpa, n);
-        try readAll(l.fds[0], std.mem.sliceAsBytes(out.items));
+        try l.peer(0).read(std.mem.sliceAsBytes(out.items), null);
     }
 
     /// A startup step: each follower's outcome to rank 0, rank 0's verdict to all; a rank whose link closed refuses.
     pub fn agree(l: *const Link, mine: agree_.Step, how: agree_.How) Error!agree_.Verdict {
         if (l.rank != 0) {
-            try writeAll(l.fds[0], std.mem.asBytes(&mine));
+            try l.peer(0).write(std.mem.asBytes(&mine));
             var v: agree_.Verdict = undefined;
-            try readAll(l.fds[0], std.mem.asBytes(&v));
+            try l.peer(0).read(std.mem.asBytes(&v), null);
             return v;
         }
         var steps: [max_world]agree_.Step = undefined;
         steps[0] = mine;
-        for (1..l.world) |r| readAll(l.fds[r - 1], std.mem.asBytes(&steps[r])) catch {
+        for (1..l.world) |r| l.peer(r - 1).read(std.mem.asBytes(&steps[r]), null) catch {
             steps[r] = .refuse("its link to rank 0 closed");
         };
         const v = agree_.combine(steps[0..l.world], how);
-        for (l.fds[0 .. l.world - 1]) |fd| writeAll(fd, std.mem.asBytes(&v)) catch {};
+        for (0..l.world - 1) |i| l.peer(i).write(std.mem.asBytes(&v)) catch {};
         return v;
     }
 };
 
+/// One proven connection: in a keyed group every byte on it crosses in its seal's records.
+const Peer = struct {
+    fd: posix.socket_t,
+    /// Null with no key: the proof's session key is then public, so the bytes cross as they did before seals.
+    seal: ?*Seal,
+
+    /// The seal is kept off the stack: a link's sockets outlive the call that opens them.
+    fn init(fd: posix.socket_t, session: *const auth.Key, connector: bool, keyed: bool) Error!Peer {
+        if (!keyed) return .{ .fd = fd, .seal = null };
+        const seal = try std.heap.page_allocator.create(Seal);
+        seal.* = .init(session, connector);
+        return .{ .fd = fd, .seal = seal };
+    }
+
+    fn deinit(p: Peer) void {
+        if (p.seal) |s| std.heap.page_allocator.destroy(s);
+        _ = posix.system.close(p.fd);
+    }
+
+    fn write(p: Peer, bytes: []const u8) Error!void {
+        const s = p.seal orelse return writeAll(p.fd, bytes);
+        var wire: [auth.seal.max_record]u8 = undefined;
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const n = @min(bytes.len - at, auth.seal.max_plain);
+            try writeAll(p.fd, wire[0..s.seal(bytes[at..][0..n], &wire)]);
+            at += n;
+        }
+    }
+
+    /// Fills `bytes`; each wait ends at `until` (auth.nowMs's clock) when one is given.
+    fn read(p: Peer, bytes: []u8, until: ?u64) Error!void {
+        const s = p.seal orelse return fill(p.fd, bytes, until);
+        var at = s.take(bytes);
+        while (at < bytes.len) {
+            var head: [auth.seal.head_len]u8 = undefined;
+            try fill(p.fd, &head, until);
+            var body: [auth.seal.max_plain + auth.seal.tag_len]u8 = undefined;
+            const n = Seal.bodyLen(&head) catch return unsealed();
+            try fill(p.fd, body[0..n], until);
+            s.open(&head, body[0..n]) catch return unsealed();
+            at += s.take(bytes[at..]);
+        }
+    }
+};
+
+/// A record that does not open ends the link: something between the ranks changed it, or sent it.
+fn unsealed() Error {
+    std.log.warn("hip: a frame on the ranks' link did not open under the group's key, so the link is closed", .{});
+    return error.LinkClosed;
+}
+
+fn fill(fd: posix.socket_t, bytes: []u8, until: ?u64) Error!void {
+    return if (until) |end| readBefore(fd, bytes, end) else readAll(fd, bytes);
+}
+
 /// A proven rank's hello, its layout checked before the rest is read; a rank that stalls is not waited on.
-fn readHello(fd: posix.socket_t, h: *Hello) Error!void {
+fn readHello(from: Peer, h: *Hello) Error!void {
     const until = auth.nowMs() + auth.budget_ms;
     const bytes = std.mem.asBytes(h);
-    try readBefore(fd, bytes[0..8], until);
+    try from.read(bytes[0..8], until);
     if (h.magic != magic or h.layout != layout) return;
-    try readBefore(fd, bytes[8..], until);
+    try from.read(bytes[8..], until);
 }
 
 /// Fills `bytes` before `until` (auth.nowMs's clock); a peer that sends too little in time counts as gone.
@@ -251,9 +322,9 @@ fn readBefore(fd: posix.socket_t, bytes: []u8, until: u64) Error!void {
 }
 
 /// Tells a rank that the group was refused, and why; it may already be gone.
-fn tell(fd: posix.socket_t, f: Fault) void {
-    writeAll(fd, std.mem.asBytes(&Answer{ .field = @backingInt(f.field) + 1, .rank = f.rank })) catch {};
-    _ = posix.system.close(fd);
+fn tell(to: Peer, f: Fault) void {
+    to.write(std.mem.asBytes(&Answer{ .field = @backingInt(f.field) + 1, .rank = f.rank })) catch {};
+    to.deinit();
 }
 
 /// The next rank to connect, or null when none came within `ms` (negative: wait for one).
