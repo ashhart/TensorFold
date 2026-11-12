@@ -6,6 +6,7 @@ const lanes = tf.lanes;
 const lb = @import("qwen27_lanes.zig");
 const pair_mod = @import("qwen27_pair.zig");
 const pair_flags = @import("qwen27_pair_flags.zig");
+const slot_mod = @import("qwen27_slots.zig");
 const served = @import("qwen27_served.zig");
 const fabric = @import("fabric");
 const Fingerprint = tf.pair_rows.Fingerprint;
@@ -304,4 +305,64 @@ test "qwen27 pair: one Mac measures before its lane config, as on main; a pair m
     var pair: lb.Pair = undefined;
     pair.rank = 0;
     try std.testing.expect(!lb.measuresFirst(&pair));
+}
+
+test "qwen27 pair: the chunked prefill refuses as prefill does, and rank 1 names rank 0 first" {
+    // `link` is the only `Metal` field and the stream's two: the rest staying undefined proves no other step ran
+    var pair: lb.Pair = undefined;
+    pair.rank = 0;
+    var l: lb.Link = undefined;
+    l.pair = &pair;
+    var m: lb.Metal = undefined;
+    m.link = &l;
+    var s: lanes.Stream = undefined;
+    s.sampling = std.mem.zeroes(lanes.Sampling);
+    s.grammar = null;
+    // `prefill_step` is the lane host's other way into a prompt: a sampled stream on rank 0 stops at its head too
+    try std.testing.expectError(error.PairGreedyOnly, slot_mod.prefillStep(&m, &s, 0));
+    try std.testing.expectError(error.PairGreedyOnly, pair_mod.refuseRequest(m.link, &s));
+    // rank 1 serves no request: it says where to send it before what the request asked for
+    pair.rank = 1;
+    try std.testing.expectError(error.FollowsPeer, slot_mod.prefillStep(&m, &s, 0));
+    try std.testing.expectError(error.FollowsPeer, pair_mod.refuseRequest(m.link, &s));
+    s.sampling = null;
+    try std.testing.expectError(error.FollowsPeer, pair_mod.refuseRequest(m.link, &s));
+    pair.rank = 0;
+    try pair_mod.refuseRequest(m.link, &s); // rank 0's greedy stream runs
+    m.link = null;
+    s.sampling = std.mem.zeroes(lanes.Sampling);
+    try pair_mod.refuseRequest(m.link, &s); // one Mac samples freely
+}
+
+test "qwen27 pair: a GPU generation or checkpoint identity a rank cannot read refuses by name, never a 0" {
+    const a = std.testing.allocator;
+    var why: []const u8 = "";
+    const digest: [32]u8 = @splat(0xA1);
+    const fp = try pair_mod.identityFacts("Apple M4 Max", digest, 64, a, &why);
+    try std.testing.expectEqual(@as(u64, 4), fp.chip);
+    try std.testing.expectEqual(std.mem.readInt(u64, digest[0..8], .little), fp.checkpoint);
+    try std.testing.expectEqual(@as(u64, 64), fp.format);
+    try std.testing.expectEqual(pair_mod.protocol, fp.protocol);
+    // a 0 would travel as 1, as the peer's unreadable fact would, and `ready` would pass the two: refuse here instead
+    try std.testing.expectError(error.PairIdentityUnreadable, pair_mod.identityFacts("AMD Radeon Pro", digest, 64, a, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "names no Apple generation") != null);
+    a.free(why);
+    const unread: anyerror![32]u8 = error.FileNotFound;
+    try std.testing.expectError(error.PairIdentityUnreadable, pair_mod.identityFacts("Apple M5 Ultra", unread, 64, a, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "checkpoint's identity (FileNotFound)") != null);
+    a.free(why);
+}
+
+test "qwen27 pair: a pair serves one stream and refuses --learn, by name" {
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PairOneStream, pair_flags.refuseStreams(true, 2, &why));
+    try std.testing.expectEqualStrings("--speed-up serves one greedy stream: pass --parallel 1", why);
+    try pair_flags.refuseStreams(true, 1, &why);
+    try pair_flags.refuseStreams(false, 8, &why); // one Mac serves its streams
+    try std.testing.expectError(error.PairNoLearn, pair_flags.refuse(false, false, true, false, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "--learn does not run on a pair"));
+    var learn = served.Options{ .context = 4096, .streams = 1, .pair = "rank0.json", .learn = .{ .root = "learned", .dir = "model", .drafter = null, .cap = 1 << 30, .floor = 0, .daily = 0 } };
+    try std.testing.expectError(error.PairNoLearn, pair_flags.refuseOptions(true, learn, false, &why));
+    learn.pair = null;
+    try pair_flags.refuseOptions(false, learn, false, &why); // one Mac learns as on main
 }
