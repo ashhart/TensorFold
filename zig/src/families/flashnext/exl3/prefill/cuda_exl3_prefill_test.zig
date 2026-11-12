@@ -57,7 +57,7 @@ test "exl3: two-chunk arenas retain hidden and deferred HC operands without alia
     const rows = 4096;
     const layout = Layout.of(rows, 2);
     const persistent = Persistent.of(rows);
-    try std.testing.expectEqual(@as(usize, 811285504), layout.total);
+    try std.testing.expectEqual(@as(usize, 895171584), layout.total);
     const host_layout = HostLayout.of(rows);
     try std.testing.expectEqual(@as(usize, 160 << 20), 2 * rows * wide * 2);
     var driver: cuda.Driver = undefined;
@@ -219,8 +219,8 @@ test "exl3: expert-parallel prefill masks the other rank's picks and keeps the s
     try std.testing.expectEqualSlices(i32, &picks, &c);
     // every pick lands on exactly one rank
     for (picks, a, b) |p, x, y| if (p >= 0) try std.testing.expect((x == p) != (y == p));
-    // two ranks add the gathered partials: one [rows, D] fp32 per rank
-    try std.testing.expectEqual(deviceBytesAt(4096, 1) + 2 * 4096 * 2560 * 4, deviceBytesAt(4096, 2));
+    // each rank's partial is [rows, D] fp64 (a lone rank's one block too): two ranks hold one more than a lone rank
+    try std.testing.expectEqual(deviceBytesAt(4096, 1) + 4096 * 2560 * 8, deviceBytesAt(4096, 2));
 }
 
 test "exl3: prefetch history follows deep engine ownership reuse replacement and release" {

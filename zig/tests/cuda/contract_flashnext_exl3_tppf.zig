@@ -33,7 +33,7 @@ fn Dev(comptime Case: type, comptime launch: anytype) type {
         const vt = g.hooks(Self);
 
         pub fn kernel(self: *Self) g.Kernel {
-            return .{ .spec = self.case.spec(), .ctx = self, .vt = &vt, .control = ref.controlGate(self.case.fault) };
+            return .{ .spec = self.case.spec(), .ctx = self, .vt = &vt, .control = ref.controlGate(Case, self.case.fault) };
         }
 
         pub fn prepare(self: *Self, shape: core.contract.spec.Shape, fill: g.Fill, seed: u64) !bool {
@@ -134,8 +134,8 @@ const RotateDev = Dev(rows_ref.Rotate, launchRotate);
 
 const Plan = struct { fault: Fault, symbol: [:0]const u8 };
 
-const combine_plan = [_]Plan{ .{ .fault = .none, .symbol = "" }, .{ .fault = .none, .symbol = "" }, .{ .fault = .flat, .symbol = "tf_ctl_tppf_combine_flat" }, .{ .fault = .nan_dropped, .symbol = "tf_ctl_tppf_combine_nan_dropped" }, .{ .fault = .writes_input, .symbol = "tf_ctl_tppf_combine_writes_input" }, .{ .fault = .bf16_adds, .symbol = "tf_ctl_tppf_combine_bf16_adds" } };
-const finish_plan = [_]Plan{ .{ .fault = .none, .symbol = "" }, .{ .fault = .flat, .symbol = "tf_ctl_tppf_finish_flat" }, .{ .fault = .bf16_adds, .symbol = "tf_ctl_tppf_finish_bf16_adds" }, .{ .fault = .writes_input, .symbol = "tf_ctl_tppf_finish_writes_input" } };
+const combine_plan = [_]Plan{ .{ .fault = .none, .symbol = "" }, .{ .fault = .none, .symbol = "" }, .{ .fault = .flat, .symbol = "tf_ctl_tppf_combine_flat" }, .{ .fault = .nan_dropped, .symbol = "tf_ctl_tppf_combine_nan_dropped" }, .{ .fault = .writes_input, .symbol = "tf_ctl_tppf_combine_writes_input" }, .{ .fault = .bf16_adds, .symbol = "tf_ctl_tppf_combine_bf16_adds" }, .{ .fault = .f32_partials, .symbol = "tf_ctl_tppf_combine_f32_partials" } };
+const finish_plan = [_]Plan{ .{ .fault = .none, .symbol = "" }, .{ .fault = .flat, .symbol = "tf_ctl_tppf_finish_flat" }, .{ .fault = .bf16_adds, .symbol = "tf_ctl_tppf_finish_bf16_adds" }, .{ .fault = .writes_input, .symbol = "tf_ctl_tppf_finish_writes_input" }, .{ .fault = .f32_partials, .symbol = "tf_ctl_tppf_finish_f32_partials" } };
 const place_plan = [_]Plan{ .{ .fault = .none, .symbol = "" }, .{ .fault = .nan_dropped, .symbol = "tf_ctl_tppf_place_nan_dropped" }, .{ .fault = .writes_input, .symbol = "tf_ctl_tppf_place_writes_input" }, .{ .fault = .wrong, .symbol = "tf_ctl_tppf_place_wrong" } };
 const rotate_plan = [_]Plan{ .{ .fault = .none, .symbol = "" }, .{ .fault = .nan_dropped, .symbol = "tf_ctl_tppf_rotate_nan_dropped" }, .{ .fault = .writes_input, .symbol = "tf_ctl_tppf_rotate_writes_input" }, .{ .fault = .wrong, .symbol = "tf_ctl_tppf_rotate_wrong" }, .{ .fault = .bf16_adds, .symbol = "tf_ctl_tppf_rotate_bf16_adds" } };
 
