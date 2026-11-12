@@ -204,8 +204,9 @@ which libjpeg-turbo writes into the file, is exactly `3.1.4.1`:
 2. `lib/` in the folder above the executable's (`../lib/` from `bin/`).
 3. The executable's own folder.
 4. On macOS only, `/opt/homebrew/opt/jpeg-turbo/lib/`, then `/usr/local/opt/jpeg-turbo/lib/`.
-5. The file name alone, through the system loader's search: `LD_LIBRARY_PATH` and the system directories on Linux,
-   `DYLD_LIBRARY_PATH` and dyld's defaults on macOS, the DLL search order with `PATH` on Windows.
+5. The file name alone, through the system loader's search, never from the working directory: `LD_LIBRARY_PATH` and
+   the system directories on Linux, `DYLD_LIBRARY_PATH` and then `DYLD_FALLBACK_LIBRARY_PATH` (or `/usr/local/lib` and
+   `/usr/lib`) on macOS, the DLL search order with `PATH` on Windows.
 
 | Platform | File name |
 | --- | --- |
