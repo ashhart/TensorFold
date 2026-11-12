@@ -23,7 +23,8 @@ pub fn replyBorn(keepEnd: anytype, snapshots: pc.Snapshots, live: *usize) !void 
         for (&tokens, 0..) |*word, i| word.* = @intCast(1_000_000 + i);
         const prompt = tokens[0 .. at + 7];
         try t.expect(store.keep(prompt, at, null, &.{}, &.{}));
-        var s = try lanes.Stream.init(a, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
+        // the request's rendered history ends at its mark: what keepEnd pins while both states fit
+        var s = try lanes.Stream.init(a, .{ .id = "reply", .prompt = prompt, .max_new = 100, .history_len = at });
         defer s.deinit(a);
         try s.context.appendSlice(a, tokens[at + 7 ..]);
         keepEnd(&store, a, &s, tokens.len);
