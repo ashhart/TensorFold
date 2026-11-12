@@ -81,6 +81,19 @@ test "dsv41 metal calib: three fresh starts each price a pass that is plausible 
     }
 }
 
+test "dsv41 metal calib: with TF_DSV41_CALIB unset the timed table is reported and the defaults price the rounds" {
+    const m = try fs.open(gpa, io, seed, .{ .measure_costs = true });
+    const md = m.model();
+    try testing.expect(std.c.getenv("TF_DSV41_CALIB") == null);
+    try testing.expect(!md.table_prices);
+    const s = try Served.open(gpa, io, md, ".", null);
+    var defaults = try host.costs.defaults(gpa, 64);
+    defer defaults.deinit(gpa);
+    try testing.expectEqualSlices(f64, defaults.verify, s.costs.verify);
+    try testing.expectEqual(defaults.draft, s.costs.draft);
+    Served.close(s);
+}
+
 test "dsv41 metal calib: the work a measurement does is bounded: a few prompt rows, the planned windows, only the slots it used" {
     const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
     const md = m.model();

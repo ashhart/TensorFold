@@ -131,6 +131,7 @@ pub const Metal = struct {
             .close = close,
             // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
             .calib_id = m.opt.identity,
+            .table_prices = host.calib_env.Knobs.fromEnv().mode != null,
             .calib = m.knobs(),
             .steps = m.opt.steps,
             .decode_share = m.opt.decode_share,
