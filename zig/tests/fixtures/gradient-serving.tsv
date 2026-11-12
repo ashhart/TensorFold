@@ -119,7 +119,7 @@ zig/src/cuda/vit.zig	222f8151384518297c157e6dd270c04674ae288d8a180e5e1d117a5ce41
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	318500bd273d45ed2a2021252ee447e0a25a390f85c7534a79d9781883e19301	
 zig/src/families/flashnext/cuda_batch_state.zig	a2ec8aa19551587fc034fe2791493e95a502e37e5f78e0cfd3c360308bf65a52	
-zig/src/families/flashnext/cuda_collective.zig	90be2ce364658c8f61c3a034e5b41f9e11c71b12fdd75dfdbf1cff4999e1e938	
+zig/src/families/flashnext/cuda_collective.zig	ab8b518784c66561c7f61d9f6272fe4331241a50d1033c321828e6bca6ebd4c1	
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	566b351b5fbb5a373e48e4e71486301bf362e9d9d6edfb600aa8e6484bcf17f0	raw	#3368 (num_experts_per_tok and shared_expert_intermediate_size select a supported shape, any other refused by name; default-shape replies unchanged)
 zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41deeb452d1a679661351a473652b5f39f2da8	raw
@@ -164,7 +164,7 @@ zig/src/families/flashnext/cuda_qmm.zig	6d035feb053691cc9750a369c86a5463d41ed942
 zig/src/families/flashnext/cuda_rank_engine.zig	3fb788530aaa9a98eb1aaf1f36e2c6d92e84903cc5fd7bd241f5401b0454560a	raw	#5188 (environment settings through the registry; accepted values and replies unchanged)
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
-zig/src/families/flashnext/cuda_rank_wire.zig	154e5384e310550125145f6b310f4c6688eadf0b75ef3d4b4d94e0683e9b871b	
+zig/src/families/flashnext/cuda_rank_wire.zig	ccabe0f06babc1c1ba6ced699b203406a0b98127b5c4b3ca4bdd54157e88fcc2	
 zig/src/families/flashnext/cuda_round_graph.zig	b110b9e405b8786afd777a7f43cf7f1f9f93ce46dc4e4ee1e333ee0b70f396f3	
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
