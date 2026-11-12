@@ -12,6 +12,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CI: the Linux no-GPU job runs `zig build test-host`, which collects the named host tests and compile checks apart from nine reviewed exclusions (the optional xgrammar steps, the release-path check, the two large-state timing commands, which stay available for explicit runs, and four fixture and source-pin checks held back under #2031); the build graph refuses empty checks, stale exclusions and aliases that bring excluded work back (#2095, part of #2031). Thanks to @garvrao80.
 
+- Docs: `docs/environment.md` says that `TF_GLM_PROF=1` runs GLM's prompt steps one chunk at a time, with no pair or solo steps, so its prompt timings are of that shape (#N). Thanks to @Bizuayeu.
+
 - Tests: the TCP bootstrap's three-rank gather test and the multi-rank RoCE vote test join every rank they started before returning, so a failed spawn or check no longer leaves threads writing to a finished test's frame (#2963). Thanks to @Defilan.
 
 ## 1.2.8
