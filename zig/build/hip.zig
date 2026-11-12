@@ -128,7 +128,8 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     @import("flashnext_reach.zig").wire(b, target, kernel_module, coreModule(b, target));
     const kernel_test = b.addTest(.{ .root_module = kernel_module });
     b.step("hip-kernel-build", "Compile the model-free kernels and their GPU tests without running them").dependOn(&kernel_test.step);
-    b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU").dependOn(&b.addRunArtifact(kernel_test).step);
+    const kernel_test_step = b.step("hip-kernel-test", "Every model-free kernel against its host reference on the GPU");
+    kernel_test_step.dependOn(&b.addRunArtifact(kernel_test).step);
     const tune_module = b.createModule(.{ .root_source_file = b.path("zig/src/hip/affine_tune.zig"), .target = target, .link_libc = true });
     tune_module.addIncludePath(.{ .cwd_relative = hip_include });
     tune_module.addCSourceFile(.{ .file = b.path("zig/src/hip/device_arch.c"), .flags = &.{"-D__HIP_PLATFORM_AMD__"} });
@@ -222,6 +223,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     qwen3_run.has_side_effects = true; // the checkpoints and oracle files named by TF_QWEN3_* are not cached inputs
     b.step("qwen3-hip-gpu-build", "Compile the Qwen3 dense GPU checks without running them").dependOn(&qwen3_gpu.step);
     b.step("qwen3-hip-gpu-test", "Qwen3 lastRows on the GPU against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&qwen3_run.step);
+    @import("flashnext_gpu.zig").draftBatch(b, target, optimize, gpu, kernel_test_step);
     const parse_object = compile(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib }, hip_arch, b.path("zig/kernels/hip/ops/vision.hip"), "parse-vision.hsaco");
     @import("nemotron_parse_gpu.zig").gpuTests(b, target, host.hip, parse_object);
     @import("nemotron_parse_gpu.zig").modelTests(b, target, optimize, gpu.hip);
