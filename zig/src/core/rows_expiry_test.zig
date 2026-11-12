@@ -40,7 +40,11 @@ fn run(sync: bool, spill: rows.Spill) !void {
     try std.testing.expect(s.keep(&tokens, 900, null, &.{}, &.{}));
     const e = s.entries.items[0];
     const before = f.gathered;
-    s.expired(e.saved); // must neither gather nor allocate here
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    s.gpa = failing.allocator();
+    s.expired(e.saved); // expiry must only flag the entry, even with no allocation available
+    s.gpa = a;
+    try std.testing.expect(!failing.has_induced_failure);
     try std.testing.expectEqual(before, f.gathered);
     const k: *fake.Kept = @ptrCast(@alignCast(e.saved));
     @memset(k.img, 0xa5); // the shared pool reused its rows, without keeping any old contents
