@@ -250,6 +250,7 @@ pub const Win = struct {
 
     /// Runs `tokens` (1..16) at m.pos; last head_rows rows get logits. inplace advances states and pos, else commit(c).
     pub fn uploadIds(w: *Win, m: *model.Model, tokens: []const u32) !void {
+        for (tokens) |t| if (t >= m.cfg.vocab_size) return error.TokenOutsideVocabulary; // embed4 reads the table at id unchecked
         try m.r.sync();
         @memcpy(w.host_ids[0..tokens.len], tokens);
         try m.r.upload(w.ids, std.mem.sliceAsBytes(w.host_ids[0..tokens.len]));

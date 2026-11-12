@@ -262,6 +262,8 @@ pub const Model = struct {
             .device_bytes = l.total,
             .qg = c.quant.global.group,
         };
+        // embed4 and the tied head read rows below V unchecked: [V, H / 8] words, [V, H / 64] bf16 scales and biases
+        if (m.emb.w.len != V * (H / 8) * 4 or m.emb.s.len != V * (H / 64) * 2 or m.emb.b.len != m.emb.s.len) return error.UnexpectedShape;
         m.fuse = try @import("sys").environment.read(u32, "LFM3_FUSE", m.fuse);
         m.own = try m.newSeq();
         m.seq = m.own;
@@ -471,6 +473,7 @@ pub const Model = struct {
         for (segs) |g| {
             if (g.ids.len == 0 or (hist and g.ids.len > window_rows)) return error.Invalid;
             if (g.q.pos + g.ids.len > m.cap) return error.ContextFull;
+            for (g.ids) |id| if (id >= V) return error.InvalidLfmToken; // embed4 reads the table at id unchecked
             n += @intCast(g.ids.len);
         }
         if (n > m.max_rows or (out == .rows and n > window_rows)) return error.Invalid;
