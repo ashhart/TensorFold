@@ -3,44 +3,29 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "common/reduce.cuh"
 #include "idol_attention.cuh"
 
 namespace tf_idol {
+
+using tf_common::warp_sum;
 
 typedef __half f16;
 
 __device__ __forceinline__ float h(float x) { return __half2float(__float2half_rn(x)); }
 __device__ __forceinline__ float ld(const f16* p) { return __half2float(*p); }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
-
-// A block of 256's sum of every thread's `v`, returned to all of them: lanes, then the 8 warps in order.
-__device__ __forceinline__ float block_sum(float v, float* part) {
-  v = warp_sum(v);
-  __syncthreads();
-  if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = v;
-  __syncthreads();
-  float total = 0.0f;
-#pragma unroll
-  for (int w = 0; w < 8; ++w) total += part[w];
-  return total;
-}
-
 // The row's mean and 1 / sqrt(var + eps), each sum in fp32: LayerNorm32's statistics.
 __device__ __forceinline__ void stats(const f16* x, int width, float eps, float* part, float& mean, float& inv) {
   float a = 0.0f;
   for (int i = threadIdx.x; i < width; i += 256) a += ld(x + i);
-  mean = block_sum(a, part) / (float)width;
+  mean = tf_common::block_sum_serial(a, part) / (float)width;
   float q = 0.0f;
   for (int i = threadIdx.x; i < width; i += 256) {
     const float d = ld(x + i) - mean;
     q += d * d;
   }
-  inv = 1.0f / sqrtf(block_sum(q, part) / (float)width + eps);
+  inv = 1.0f / sqrtf(tf_common::block_sum_serial(q, part) / (float)width + eps);
 }
 
 // F.normalize's clamp_min(1e-12) as torch does it: a NaN norm stays NaN (fmaxf would drop it).
