@@ -70,7 +70,8 @@ pub fn follow(gpa: std.mem.Allocator, e: *Engine, link: hip.collective.Link) !vo
             .fill => {
                 const lane = lanes.get(w[1]) orelse return error.UnknownStream;
                 const n = w[3];
-                if (n == 0 or n > w.len - 4) return error.ShortMessage;
+                // a zero-row chunk is legal (a cache mark at the resume point); only the last chunk needs a row
+                if (n > w.len - 4 or (n == 0 and w[2] != 0)) return error.ShortMessage;
                 const out = try e.prompt(&lane.caches, w[4..][0..n]);
                 if (w[2] != 0) _ = try e.logits(e.ops(&e.arena), forward.at(out.mixed, (n - 1) * d.hidden), 1);
                 try e.stream.synchronize();
