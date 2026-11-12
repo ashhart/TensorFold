@@ -525,3 +525,10 @@ by measuring torch's output on the release's tables bit for bit.
 
 TensorFold ships none of these files and no Unlimited-OCR-2 weights; `tools/zig/uocr_reference.py` runs the release's
 own code as the reference.
+
+## Indian-script tokenizer fixture
+
+`INDIC` in `tools/zig/tokenizer_parity.py` holds one sentence of
+[IN22-Gen](https://huggingface.co/datasets/ai4bharat/IN22-Gen) (AI4Bharat) in its 22 languages, unchanged, under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
+and ZWJ/ZWNJ conjuncts after it are TensorFold's own.
