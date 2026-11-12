@@ -130,6 +130,7 @@ pub fn mtp(m: *const Model, s: *st.Scratch, cache: *st.Cache, k: usize, hidden: 
     const n = tokens.len;
     if (n == 0 or n > s.rows or k >= c.mtp) return error.Step5RowsExceeded;
     if (start + n > cache.capacity) return error.Step5ContextFull;
+    for (tokens) |id| if (id >= c.vocab) return error.InvalidStep5Token;
     @memcpy(s.ids.slice(u32, n), tokens);
     const h: usize = c.hidden;
     const nr: u32 = @intCast(n);

@@ -21,6 +21,7 @@ pub const Watch = struct {
 
     pub fn init(t: Think) !Watch {
         if (t.close.len > MAX_CLOSE) return error.ThinkCloseTooLong;
+        if (!fz.Model.inVocab(t.close)) return error.TokenOutsideVocabulary; // the close is forced into window ids on the GPU
         return .{ .close = t.close, .end = t.end, .cut = t.budget -| 1, .armed = t.budget > 0 and t.close.len > 0 };
     }
 

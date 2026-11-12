@@ -371,6 +371,7 @@ pub const Backend = struct {
         for (windows, out, 0..) |w, o, i| {
             const s = try b.session(w.stream);
             if (w.parents != null or w.early or w.held > s.held_n) return error.WindowOutOfStep;
+            if (w.pending >= fz.VOCAB or !fz.Model.inVocab(w.tokens)) return error.TokenOutsideVocabulary;
             if (w.rows() > fz.MAXR or w.rows() > s.m.cap - s.m.pos or
                 w.positions.len != w.rows() or o.sampled.len != w.rows() or o.drafts.len != w.rows() - 1)
                 return error.WindowOutOfStep;
@@ -456,8 +457,8 @@ pub const Backend = struct {
                     .value => |v| v,
                     .handle => |h| @intCast(h),
                 };
-                break :blk one[0..];
-            } else r.follow;
+                break :blk if (one[0] < fz.VOCAB) one[0..] else return error.TokenOutsideVocabulary;
+            } else if (fz.Model.inVocab(r.follow)) r.follow else return error.TokenOutsideVocabulary;
             const hidden = if (r.rows) |path| blk: {
                 try s.round.draft(r.start, path, follow.len);
                 break :blk b.hidden.at(s.row0 * fz.WIDE * 2);
@@ -506,8 +507,8 @@ pub const Backend = struct {
                     .value => |v| v,
                     .handle => |h| @intCast(h),
                 };
-                break :blk ones[k][0..];
-            } else r.follow;
+                break :blk if (ones[k][0] < fz.VOCAB) ones[k][0..] else return error.TokenOutsideVocabulary;
+            } else if (fz.Model.inVocab(r.follow)) r.follow else return error.TokenOutsideVocabulary;
             if (follows[k].len == 0) return error.DraftOutOfStep;
             hiddens[k] = if (r.rows) |path| blk: {
                 try s.round.draft(r.start, path, follows[k].len);

@@ -292,6 +292,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
             @field(l, field) = try ref(c, try std.fmt.bufPrint(&name, "{s}{s}", .{ pre, t }));
     }
     w.head = try pack(gpa, device, c, &w.owned, geo, "language_model.model.", &.{"embed_tokens"}, ws.embed, false);
+    if (w.head.n != cfg.vocab or w.head.k != geo.hidden) return error.BadGemmaWeight; // gemma_embed reads it by id
     w.embed_bits = ws.embed.bits;
     w.embed_w = try ref(c, "language_model.model.embed_tokens.weight");
     w.embed_s = try ref(c, "language_model.model.embed_tokens.scales");

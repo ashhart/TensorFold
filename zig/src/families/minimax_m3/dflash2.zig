@@ -193,7 +193,7 @@ pub const Drafter = struct {
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .target = target, .config = config, .w = try load(&target.checkpoint, &config, target.config.vocab), .pipes = undefined };
         const c = &d.config;
-        if (c.hidden != target.config.hidden) return error.DFlash2ForAnotherTarget;
+        if (c.hidden != target.config.hidden or c.mask >= target.config.vocab) return error.DFlash2ForAnotherTarget;
         for (c.taps) |l| if (l >= target.config.layers) return error.DFlash2ForAnotherTarget;
         {
             const lib = try mtl.Library.fromSource(target.device, ks.minimax_m3_dflash2, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
@@ -478,6 +478,7 @@ pub const Drafter = struct {
         for (items) |it| {
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             if (it.depth == 0 or it.depth > c.block - 1 or it.position == 0) return error.DraftDepth;
+            if (it.pending >= d.target.config.vocab) return error.InvalidMiniMaxToken; // embed reads row id unchecked
             const anchor = it.position - 1;
             if (l.end != anchor) return error.DraftContextGap;
             const pool = mtl.objc.Pool.push();

@@ -108,6 +108,7 @@ pub const Backend = struct {
         if (e.ep != null and s.sampling != null and s.sampling.?.temperature > 0) return error.SampledPeerUnsupported;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
+        for (prompt) |t| if (t >= e.c.vocab) return error.TokenOutsideVocabulary; // before rank 1 hears of the prompt
         if (prompt.len + s.max_new + st.max_rows + 1 > pool.capacity(b.sl)) return error.ContextFull;
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
@@ -349,7 +350,7 @@ pub const Backend = struct {
         if (position != b.sl.length(i) + 1) return error.PositionMismatch;
         const from = switch (feed) {
             .handle => |h| @as(u32, @intCast(h)),
-            .value => |v| b.sl.ringPut(v),
+            .value => |v| if (v < b.sl.e.c.vocab) b.sl.ringPut(v) else return error.TokenOutsideVocabulary,
         };
         // The stream's sampling arms the queued round's keyed draw (a positive temperature); greedy streams stay plain.
         return try b.sl.queueRound(i, from, s.sampling);
@@ -373,6 +374,7 @@ pub const Backend = struct {
             try b.wins.append(b.gpa, .{ .slot = i, .pending = w.pending, .held = w.held, .tokens = w.tokens });
         }
         if (total > st.max_rows) return error.WindowOutOfStep;
+        try b.sl.checkWindows(b.wins.items); // before rank 1 hears of them
         const draws = @import("draw_rule.zig").windowDraws(windows, b.sl.e.c.vocab);
         try mirror.windowWords(&b.words, b.gpa, b.sl.digest, b.wins.items);
         try mirror.send(b.sl.e, .window, b.words.items);
