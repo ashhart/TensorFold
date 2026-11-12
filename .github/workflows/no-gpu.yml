@@ -127,6 +127,9 @@ jobs:
       # A unit test that hangs fails by name after 10 minutes instead of holding the runner until the job's limit.
       - name: zig build test
         run: zig build -Dfixed-cpu test --test-timeout 10m
+      # The CPU engine's tensorfold-native compiled and linked; its tests (test-cpu) run under test above.
+      - name: zig build native-cpu
+        run: zig build -Dfixed-cpu native-cpu
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
         run: zig build -Dfixed-cpu test-kernel-contract
@@ -192,6 +195,9 @@ jobs:
       # The same host unit tests on Windows: the platform layer (zig/src/platform) over the UCRT, Win32 and Winsock.
       - name: zig build test
         run: zig build -Dfixed-cpu test --test-timeout 10m
+      # The CPU engine's tensorfold-native on Windows; its tests (test-cpu) run under test above.
+      - name: zig build native-cpu
+        run: zig build -Dfixed-cpu native-cpu
       # The server goldens and the Cortheon fuzz harness on Windows too; the goldens skip the signal-driven cases.
       - name: zig build test-golden
         run: zig build -Dfixed-cpu test-golden
@@ -287,6 +293,9 @@ jobs:
       # Every tf-* developer tool compiled and linked, none installed or run: an engine API change that breaks one fails.
       - name: zig build dev-tools
         run: zig build dev-tools -Doptimize=Debug  # compile and link only: Debug builds about 30% faster
+      # The CPU engine's tests and its tensorfold-native on macOS, as the zig and zig-windows jobs run them.
+      - name: zig build test-cpu native-cpu
+        run: zig build test-cpu native-cpu
       - name: Save the build cache
         if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
