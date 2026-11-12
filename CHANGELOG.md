@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Bolt on CUDA: the shared expert runs on the side stream in decode windows, as on Super, so decode on a GB10 is 2.9-3.0% faster at one stream and 1.4-2.1% at four, with identical replies (#2847, for #2840).
+
 - Flash Next on CUDA: sampled draws take one launch and one wait a step, with the same tokens (#2927, #2753).
 
 - Qwen 3.5 on CUDA: prompts from 2,048 rows run the a and b projections in one launch, with the same tokens (#2925, #2911).
