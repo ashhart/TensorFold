@@ -61,8 +61,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
-| `TF_SLIDE_FIT_REDUCE` | Exactly `ordered` or `tree`: a fit's lane sums in order (the default) or as halves, quarters and pairs |
-| `TF_SLIDE_TAKE_OUT_CHECK` | Exactly `0` or `1`; `1` takes every kept lesson out again to check the facts before it come back; default off |
+| `TF_SLIDE_TAKE_OUT_CHECK` | Exactly `0` or `1`, read once when the server starts with `--slide`; `1` takes every kept lesson out again to check that the facts before it come back as they were; default off |
 | `TF_SLIDE_TAP_CHECK` | Exactly `0` or `1`; `1` checks a pass's tapped rows against a fresh run's; default off |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
@@ -138,8 +137,8 @@ These settings retain their existing boolean policies rather than gaining new al
 - Kolibri pages: exact `TENSORFOLD_KOLIBRI_KV_PAGES=0` disables requested pages; other text keeps the option unchanged.
 - Dory pages: unset or exact `TENSORFOLD_DORY_KV_PAGES=0` uses windows; every other present value selects pages.
 - `TF_SLIDE_EDIT`, `TF_SLIDE_PROBE` and `TF_SLIDE_ROUTED` select modes by presence, even empty or `0`; probe wins over edit.
-- `TF_COOP_SPLIT` retains its first-character `0` disabling rule and `TF_NEMOTRON_TRACE` its first-character `1` trace
-  rule. These developer switches keep their existing semantics.
+- `TF_COOP_SPLIT` retains its first-character `0` disabling rule, `TF_NEMOTRON_TRACE` its first-character `1` trace rule,
+  and `TF_SLIDE_FIT_REDUCE` its exact `tree` reduction selection. These developer switches keep their existing semantics.
 - GLM: `GLM_EHPROJ_NAX` retains its first-character `0` disabling rule, `TF_GLM_DFLASH2_PROF` enables by presence,
   even empty or `0`, and `TF_KV_POISON` (also read by Nemotron) is on only for exact `1`.
 - The existing tool-grammar, rows-sync, log-time, memory-pressure and XPU-MTP boolean policies are unchanged.

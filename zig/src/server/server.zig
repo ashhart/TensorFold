@@ -95,6 +95,7 @@ pub const Config = struct {
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
     slide_drift_gate: bool = false,
+    slide_take_out_check: bool = false, // TF_SLIDE_TAKE_OUT_CHECK=1 with --slide, read once at start
     /// A fact whose check a delete fails, to test its put-back (0: none); only -Dslide-test-hooks builds set it.
     slide_forget_fail: u32 = 0,
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.

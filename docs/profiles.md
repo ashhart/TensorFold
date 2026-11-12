@@ -61,7 +61,6 @@ Coverage includes:
   and values in the core pool's pages.
 - Qwen on Metal: `TF_QWEN27_METAL_KV_PAGES` (the 27B) and `TF_QWEN35_METAL_KV_PAGES`, where exactly `1` puts keys and
   values in the core pool's pages; `arithmetic` until a main-against-branch token-hash run says otherwise.
-- Qwen3.5 slide learning on CUDA: `TF_SLIDE_FIT_REDUCE=tree` (`arithmetic`), which sums a fit's lanes in another order.
 - DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the

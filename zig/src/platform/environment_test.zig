@@ -105,8 +105,6 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "subject", .n = 2 },
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .n = 3 },
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
-    .{ .name = "TF_SLIDE_FIT_REDUCE", .raw = "ordered", .n = 0 },
-    .{ .name = "TF_SLIDE_FIT_REDUCE", .raw = "tree", .n = 1 },
     .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .raw = "0", .n = 0 },
     .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_SLIDE_TAP_CHECK", .raw = "0", .n = 0 },
@@ -320,13 +318,4 @@ test "environment: the Metal Qwen and slide-learning switches take their forms, 
     try t.expect(!(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "0", true)));
     try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
     try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
-    try t.expectEqual(@as(?u64, 0), try e.parse("TF_SLIDE_FIT_REDUCE", "ordered"));
-    try t.expectEqual(@as(?u64, 1), try e.parse("TF_SLIDE_FIT_REDUCE", "tree"));
-    try t.expectEqual(@as(?u64, null), try e.parse("TF_SLIDE_FIT_REDUCE", ""));
-    for ([_][]const u8{ "Tree", "trees", "tre", "ordred" }) |raw| {
-        try t.expectError(error.InvalidEnvironment, e.parse("TF_SLIDE_FIT_REDUCE", raw));
-        const why = (try e.refusal(a, Env{ .name = "TF_SLIDE_FIT_REDUCE", .raw = raw }, all)).?;
-        defer a.free(why);
-        try t.expect(std.mem.indexOf(u8, why, "TF_SLIDE_FIT_REDUCE") != null);
-    }
 }
