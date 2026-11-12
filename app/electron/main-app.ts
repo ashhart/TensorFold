@@ -796,6 +796,7 @@ handle('attachments:extractText', (_event, input) => { requireSecurityRole('oper
 const appWindowRuntime = createAppWindowRuntime({
   BrowserWindow,
   baseDir: __dirname,
+  packaged: app.isPackaged,
   openExternalSafely,
   session,
   onWindowClosed: () => sshManager.cancelPendingPrompts(),
