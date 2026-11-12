@@ -290,7 +290,8 @@ test "Flash Next batch draws: four draft steps preserve eight serial chains and 
     D.vals = &vals;
     D.cols = &cols;
     D.best = f.reduction(mtp.promote(vals[19]), 4, 19);
-    var host: [8][mtp.max_rows * draw.topk_max * 3]u16 = undefined;
+    // candidates() reads i32 columns from host past its u16 values, so a stack buffer needs i32 alignment.
+    var host: [8][mtp.max_rows * draw.topk_max * 3]u16 align(4) = undefined;
     var ds: [8]mtp.Draft = undefined;
     var refs: [8]*mtp.Draft = undefined;
     var sms: [8]?mtp.Sampling = undefined;
@@ -350,7 +351,7 @@ test "Flash Next batch draws: lone sampled pick joins both launches before one r
     defer cuda.download_stage.closeDriver(&driver);
     var h = try f.head(&driver);
     defer h.artifact.deinit();
-    var host: [mtp.max_rows * draw.topk_max * 3]u16 = undefined;
+    var host: [mtp.max_rows * draw.topk_max * 3]u16 align(4) = undefined;
     var d = f.draft(&driver, &host);
     const st: cuda.Stream = .{ .d = &driver, .handle = null };
     const sm: mtp.Sampling = .{ .seed = 73, .temperature = 0.7, .top_k = 2 };
