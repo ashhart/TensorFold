@@ -159,7 +159,7 @@ fn settingName(name: []const u8) bool {
 pub fn secret(name: []const u8) bool {
     const exact = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_TOOL_ID_KEY_FILE" };
     for (exact) |x| if (std.mem.eql(u8, name, x)) return true;
-    for ([_][]const u8{ "_API_KEY", "_SECRET", "_PASSWORD" }) |tail| if (std.mem.endsWith(u8, name, tail)) return true;
+    for ([_][]const u8{ "_API_KEY", "_SECRET", "_PASSWORD", "_TOKEN" }) |tail| if (std.mem.endsWith(u8, name, tail)) return true;
     return false;
 }
 
