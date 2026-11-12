@@ -113,3 +113,14 @@ test "newSeqIn with no carve plan: no carved planes, every buffer its own" {
     try std.testing.expect(seq.carved.carve == null);
     try std.testing.expect(!seq.kc[0].borrowed);
 }
+
+test "carveout.open refuses tp 2 before it touches the context" {
+    const env = @import("sys").env;
+    _ = env.setenv("TF_CUDA_CARVEOUT", "1", 1);
+    defer _ = env.unsetenv("TF_CUDA_CARVEOUT");
+    _ = env.setenv("TF_CUDA_CARVEOUT_MIB", "64", 1);
+    defer _ = env.unsetenv("TF_CUDA_CARVEOUT_MIB");
+    // A context pointer the refusal path never dereferences: open() checks tp first.
+    var ctx: cuda.Context = undefined;
+    try std.testing.expectError(error.FlashNextCarveoutUnsupported, carve_mod.open(std.testing.allocator, &ctx, 2));
+}
