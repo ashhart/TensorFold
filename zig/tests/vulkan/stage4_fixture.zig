@@ -19,7 +19,7 @@ pub const budget = core.budget;
 pub const sampleDyadic = core.sampleDyadic;
 pub const sampleDyadicF32 = core.sampleDyadicF32;
 pub const gateRef = core.gateRef;
-pub const gateRefAsh = core.gateRefAsh;
+pub const gateRefOracle = core.gateRefOracle;
 pub const Split = split_mod.Split;
 pub const SplitOne = split_mod.SplitOne;
 pub const Conv = split_mod.Conv;
@@ -30,7 +30,7 @@ pub const Norm = state_mod.Norm;
 const f32Of = core.f32Of;
 
 // Replay the decode seed through the production gate checker; report old-reference drift, not a GPU-failure cause.
-test "gateRefAsh replays the fixture seed and diagnoses g and beta separately" {
+test "gateRefOracle replays the fixture seed and diagnoses g and beta separately" {
     const a = testing.allocator;
     const f = try SplitOne.init(a, 0x57ac);
     defer f.deinit();
@@ -41,7 +41,7 @@ test "gateRefAsh replays the fixture seed and diagnoses g and beta separately" {
     defer a.free(beta_bits);
     var old_worst: f64 = 0;
     for (0..@intCast(Model.heads)) |hv| {
-        const ash = gateRefAsh(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+        const ash = gateRefOracle(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
         const gbits: u32 = @bitCast(@as(f32, @floatCast(ash.g)));
         g_pairs[2 * hv] = @truncate(gbits);
         g_pairs[2 * hv + 1] = @truncate(gbits >> 16);
@@ -81,7 +81,7 @@ test "gateRefAsh replays the fixture seed and diagnoses g and beta separately" {
     var min_g: f32 = std.math.floatMax(f32);
     var subnormals: usize = 0;
     for (0..@intCast(Model.heads)) |hv| {
-        const ash = gateRefAsh(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+        const ash = gateRefOracle(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
         const g: f32 = @floatCast(ash.g);
         if (g > 0) min_g = @min(min_g, g);
         const bits: u32 = @bitCast(g);
@@ -274,7 +274,7 @@ test "decode seed replays the measured wrong raw-gates branch at y zero" {
     }.first;
     const wrong = replay(f, c.fromBf16(f.a_bits[0]), c.fromBf16(f.b_bits[0]));
     try testing.expectEqual(c.toBf16(892), wrong);
-    const gates = gateRefAsh(f.a_bits[0], f.b_bits[0], f32Of(f.a_log_bits, 0), f.dt_bits[0]);
+    const gates = gateRefOracle(f.a_bits[0], f.b_bits[0], f32Of(f.a_log_bits, 0), f.dt_bits[0]);
     const corrected = replay(f, @floatCast(gates.g), @floatCast(gates.beta));
     const bound = budget(260, 4, 0, f.want_y[0], f.max_state);
     try testing.expect(@abs(c.fromBf16(corrected) - f.want_y[0]) <= bound);

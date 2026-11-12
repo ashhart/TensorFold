@@ -129,7 +129,7 @@ pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offse
     dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
 }
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+/// Synchronous vkCmdFillBuffer of a device buffer range, with barriers; submits and waits.
 pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
     if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
     try fillRange(dst.len, offset, len);

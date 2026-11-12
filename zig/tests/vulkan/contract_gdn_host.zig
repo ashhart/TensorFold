@@ -446,7 +446,7 @@ pub fn computeWant(f: *Gdn) !void {
         .split_soa => splitReference(T, f.conv_out_bits, f.a_bits, f.b_bits, f.a_log_bits, f.dt_bits, f.want, f.mag),
         .split_g => {
             for (0..T * heads) |i| {
-                const ref = fx.gateRefAsh(f.a_bits[i], f.b_bits[i], f32Of(f.a_log_bits, i % heads), f.dt_bits[i % heads]);
+                const ref = fx.gateRefOracle(f.a_bits[i], f.b_bits[i], f32Of(f.a_log_bits, i % heads), f.dt_bits[i % heads]);
                 f.want[i] = ref.g;
                 f.mag[i] = @abs(ref.g);
             }

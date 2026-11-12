@@ -1,4 +1,3 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -46,7 +45,7 @@ test "sdpa per-row visible counts and per-row poison windows" {
     }
 }
 
-test "rope reference matches the ASH half-split form on a hand vector" {
+test "rope reference matches the oracle half-split form on a hand vector" {
     // Unit input yields cos/sin in rotated halves and zero passthrough tail.
     var row: [head_dim]u16 = @splat(0);
     for (0..32) |i| row[i] = c.toBf16(1.0);
@@ -302,7 +301,6 @@ test "gate diagnostic reports a planted bad first element with unchanged OverBou
     try testing.expectEqual(c.toBf16(1.0), diag.ctx_bits);
 }
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 test "gate sigmoid widen: bf16 0x3f00 widens once to 0.5; the old double shift gives 0" {
     const bits: u32 = 0x3f00; // what bf16_bits(0.5) produces
     const once: f32 = @bitCast(bits << 16); // bf16_lane(word, 0): the correct widen

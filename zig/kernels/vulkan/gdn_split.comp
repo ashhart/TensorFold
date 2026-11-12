@@ -1,4 +1,4 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// Splits the conv output into q, k and v (SoA by head-row) and computes the gates g and beta from a, b, A_log and dt.
 
 #version 460
 
