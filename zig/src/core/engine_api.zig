@@ -16,6 +16,7 @@ pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
 pub const kv_ledger = @import("kv_ledger.zig");
+pub const execution_witness = @import("engine_witness.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
@@ -231,6 +232,8 @@ pub const Info = struct {
     admit: ?Admit = null,
     /// A byte budget each request promises its caches from as it is admitted (null: none); never beside `admit`.
     ledger: ?Ledger = null,
+    /// --execution-witness: this engine's attestation of its supported path (null: an unsupported path).
+    witness: ?execution_witness.Source = null,
 
     pub const Capability = @import("engine_capabilities.zig").Capability;
 
@@ -248,15 +251,8 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
-
-/// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
-pub const Ledger = struct {
-    ctx: *anyopaque,
-    total: u64,
-    cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
-    standing: kv_ledger.Standing = .{}, // streams paid at load, in `total`: the engine's own sequence (#1943)
-};
+pub const Admit = @import("engine_admission.zig").Admit;
+pub const Ledger = @import("engine_admission.zig").Ledger;
 
 pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
 pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
@@ -343,6 +339,7 @@ pub const Open = struct {
     keep: ?i64 = null,
     /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
     tp: u32 = 1,
+    execution_witness: bool = false, // --execution-witness: an engine on a supported path attests it (Info.witness)
     rank: u32 = 0,
     master: []const u8 = "",
     master_port: u16 = 29551,

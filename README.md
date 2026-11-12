@@ -302,6 +302,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--api-key-file FILE` | Read keys from a restricted-permission file; a key can be limited to [some routes](docs/api.md#key-scopes). |
 | `--metrics-open` | Allow `/metrics`, `/v1/metrics` and `/v1/load` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
+| `--execution-witness` | Serve `GET /v1/execution/witness` to read-scoped keys: a snapshot of the running binary, the checkpoint's text files, the serve defaults and settings, or why it is unknown. Needs an API key or `--unix-socket`; see [execution witness](docs/api.md#execution-witness). |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](docs/api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |
 | `--context N` | Bound prompt plus reply tokens; the model's window and memory checks still apply. Qwen3.8-27B defaults to 32,768 and takes up to 262,144. |

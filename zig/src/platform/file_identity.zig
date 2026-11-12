@@ -4,12 +4,23 @@ const std = @import("std");
 pub fn hash(io: std.Io, path: []const u8, maximum: u64) ![32]u8 {
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
+    return hashFile(io, file, maximum);
+}
+
+/// An open file's bytes, checked against its stamps across the read; an open file keeps its inode if its path moves.
+pub fn hashFile(io: std.Io, file: std.Io.File, maximum: u64) ![32]u8 {
+    return hashUntil(io, file, maximum, null);
+}
+
+/// `hashFile`, ending with error.Stopped at the next block once `stop` is set.
+pub fn hashUntil(io: std.Io, file: std.Io.File, maximum: u64, stop: ?*const std.atomic.Value(bool)) ![32]u8 {
     const before = try file.stat(io);
     if (before.size > maximum) return error.IdentityFileTooLarge;
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [32768]u8 = undefined;
     var at: u64 = 0;
     while (at < before.size) {
+        if (stop) |s| if (s.load(.acquire)) return error.Stopped;
         const n = try file.readPositionalAll(io, buf[0..@intCast(@min(buf.len, before.size - at))], at);
         if (n == 0) return error.IdentityFileChanged;
         h.update(buf[0..n]);
@@ -22,14 +33,20 @@ pub fn hash(io: std.Io, path: []const u8, maximum: u64) ![32]u8 {
     return h.finalResult();
 }
 
-pub fn bind(h: *std.hash.Wyhash, digest: [32]u8) void {
+/// `h`: any hasher with `update(bytes)`, a kept key's Wyhash or a SHA-256.
+pub fn bind(h: anytype, digest: [32]u8) void {
     h.update("serving-binary-v1");
     h.update(&digest);
 }
 
 /// The running binary includes compiled host code, embedded GPU images, compiler options and snapshot layouts.
-pub fn current(h: *std.hash.Wyhash, a: std.mem.Allocator, io: std.Io) !void {
+pub fn current(h: anytype, a: std.mem.Allocator, io: std.Io) !void {
+    bind(h, try running(a, io));
+}
+
+/// The running binary's SHA-256, read by its path.
+pub fn running(a: std.mem.Allocator, io: std.Io) ![32]u8 {
     const path = try std.process.executablePathAlloc(io, a);
     defer a.free(path);
-    bind(h, try hash(io, path, 1 << 31));
+    return hash(io, path, 1 << 31);
 }

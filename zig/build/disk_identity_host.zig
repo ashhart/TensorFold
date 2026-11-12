@@ -7,6 +7,10 @@ pub fn steps(b: *std.Build, native: *std.Build.Module, all: *std.Build.Step) voi
     const identity = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"disk identity:"} }));
     b.step("test-disk-identity-host", "Actual CUDA identity, resolved profile values and stale disk misses").dependOn(&identity.step);
     all.dependOn(&identity.step);
+    const witnessed = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"execution witness"} }));
+    witnessed.has_side_effects = true;
+    b.step("test-execution-witness-cuda-host", "The witness's first CUDA path: hook, every weight byte, stamps, reloads").dependOn(&witnessed.step);
+    all.dependOn(&witnessed.step);
 }
 
 /// Compile the actual four Metal identity bodies without a shader producer, link or execution.
