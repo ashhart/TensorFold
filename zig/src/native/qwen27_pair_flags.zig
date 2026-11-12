@@ -17,6 +17,13 @@ pub fn refuse(drafter: bool, cache_gib: bool, learn: bool, vision: bool, why: *[
     }
 }
 
+/// A pair serves one greedy stream: its slot's states are two Macs' halves, and each round crosses the seam alone.
+pub fn refuseStreams(pair: bool, slots: u32, why: *[]const u8) !void {
+    if (!pair or slots == 1) return;
+    why.* = "--speed-up serves one greedy stream: pass --parallel 1";
+    return error.PairOneStream;
+}
+
 /// TF_QWEN27_LANES=0's serial draft loop sends rank 1 no rounds: a drafted pair refuses it rather than wait on rank 1.
 pub fn refuseSerial(pair: bool, drafting: bool, serial: bool, why: *[]const u8) !void {
     if (!(pair and drafting and serial)) return;
