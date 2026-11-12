@@ -33,8 +33,6 @@ pub const Options = struct {
     drafts: bool = true,
     cache_bytes: u64 = 0,
     prompt: prompt.Opts = .{},
-    /// the draft cost table is timed at load unless TF_DSV41_CALIB names another source (false: the defaults)
-    measure_costs: bool = false,
     /// the device and weights a stored cost table is specific to (0: none named)
     identity: u64 = 0,
 };
@@ -83,8 +81,7 @@ pub const Metal = struct {
             .health = .{ .ctx = m, .read = healthy },
             .close = close,
             .calib_id = m.opt.identity,
-            .table_prices = host.calib_env.Knobs.fromEnv().mode != null,
-            .calib = m.knobs(),
+            .calib = knobs(),
         };
     }
 
@@ -93,10 +90,10 @@ pub const Metal = struct {
         return .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
     }
 
-    /// TF_DSV41_CALIB and its neighbours as the environment gives them; unset: timed when asked for, else defaults.
-    fn knobs(m: *const Metal) host.calib_env.Knobs {
+    /// TF_DSV41_CALIB and its neighbours as the environment gives them; unset or blank: nothing is timed.
+    fn knobs() host.calib_env.Knobs {
         var k = host.calib_env.Knobs.fromEnv();
-        if (k.mode == null) k.mode = if (m.opt.measure_costs) "measure" else "default";
+        if (std.mem.trim(u8, k.mode orelse "", " \t\r\n").len == 0) k.mode = "default";
         return k;
     }
 

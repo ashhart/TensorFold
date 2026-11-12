@@ -81,17 +81,34 @@ test "dsv41 metal calib: three fresh starts each price a pass that is plausible 
     }
 }
 
-test "dsv41 metal calib: with TF_DSV41_CALIB unset the timed table is reported and the defaults price the rounds" {
-    const m = try fs.open(gpa, io, seed, .{ .measure_costs = true });
-    const md = m.model();
-    try testing.expect(std.c.getenv("TF_DSV41_CALIB") == null);
-    try testing.expect(!md.table_prices);
-    const s = try Served.open(gpa, io, md, ".", null);
+test "dsv41 metal calib: with TF_DSV41_CALIB unset or blank nothing is timed and the default table prices the rounds" {
     var defaults = try host.costs.defaults(gpa, 64);
     defer defaults.deinit(gpa);
-    try testing.expectEqualSlices(f64, defaults.verify, s.costs.verify);
-    try testing.expectEqual(defaults.draft, s.costs.draft);
-    Served.close(s);
+    for ([_]?[:0]const u8{ null, "", " \t" }) |value| {
+        if (value) |v| _ = setenv("TF_DSV41_CALIB", v, 1);
+        defer _ = unsetenv("TF_DSV41_CALIB");
+        const m = try fs.open(gpa, io, seed, .{});
+        const md = m.model();
+        try testing.expectEqualStrings("default", md.calib.?.mode.?);
+        const s = try Served.open(gpa, io, md, ".", null);
+        defer Served.close(s);
+        // a timed table has 32 rows and the pass of this model, not the defaults' 64 rows and 5.6 ms
+        try testing.expectEqualSlices(f64, defaults.verify, s.costs.verify);
+        try testing.expectEqual(defaults.draft, s.costs.draft);
+    }
+}
+
+test "dsv41 metal calib: TF_DSV41_CALIB=measure times the table at start and prices the rounds from it" {
+    _ = setenv("TF_DSV41_CALIB", "measure", 1);
+    defer _ = unsetenv("TF_DSV41_CALIB");
+    const m = try fs.open(gpa, io, seed, .{});
+    const md = m.model();
+    try testing.expectEqualStrings("measure", md.calib.?.mode.?);
+    const s = try Served.open(gpa, io, md, ".", null);
+    defer Served.close(s);
+    say(s.costs.verify.len == 32 and s.costs.plausible(), "priced from a table of {d} rows, pass {d:.3} ms, 1 row {d:.3} ms", .{ s.costs.verify.len, s.costs.draft, s.costs.windowMs(1) });
+    try testing.expectEqual(@as(usize, 32), s.costs.verify.len);
+    try testing.expect(s.costs.draft != 5.6 and s.costs.plausible());
 }
 
 test "dsv41 metal calib: the work a measurement does is bounded: a few prompt rows, the planned windows, only the slots it used" {
@@ -144,9 +161,11 @@ test "dsv41 metal calib: a reply after the measurement equals the serial decode,
     const want_tokens = try ref.t.serial(0, prompt, 40, null);
     defer gpa.free(want_tokens);
     fs.close(ref);
-    const m = try fs.open(gpa, io, seed, .{ .measure_costs = true });
+    _ = setenv("TF_DSV41_CALIB", "measure", 1);
+    defer _ = unsetenv("TF_DSV41_CALIB");
+    const m = try fs.open(gpa, io, seed, .{});
     const md = m.model();
-    // Served.open times the table (mode `measure` from the model's own knobs) before its first request
+    // Served.open times the table (TF_DSV41_CALIB=measure) before its first request
     const s = try Served.open(gpa, io, md, ".", null);
     defer Served.close(s);
     const e = s.engine();

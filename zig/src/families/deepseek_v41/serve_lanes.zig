@@ -58,8 +58,6 @@ pub const Model = struct {
     vision: ?api.Vision = null,
     /// the device and weights a stored cost table is specific to (0: none named)
     calib_id: u64 = 0,
-    /// false: a table the engine times is reported but the default table prices the rounds
-    table_prices: bool = true,
     /// the calibration knobs (null: TF_DSV41_CALIB / _DIR / _FILE and HOME, as read at open)
     calib: ?calib_env.Knobs = null,
 };
@@ -108,14 +106,6 @@ pub const Served = struct {
             cal.source = .measured;
             if (cal.path) |p| gpa.free(p);
             cal.path = got.path;
-        }
-        if (cal.source == .measured and !backend.table_prices) {
-            std.log.info("dsv41 draft costs: the timed table is reported only; the default table prices the rounds", .{});
-            cal.costs.deinit(gpa);
-            cal.costs = try costs_mod.defaults(gpa, 64);
-            cal.source = .default;
-            if (cal.path) |p| gpa.free(p);
-            cal.path = null;
         }
         s.costs = cal.costs;
         std.log.info("dsv41 draft costs: {t}{s}{s}, verify 1 / 16 rows {d:.3} / {d:.3} ms, pass {d:.3} ms", .{ cal.source, if (cal.path != null) " " else "", cal.path orelse "", s.costs.windowMs(1), s.costs.windowMs(16), s.costs.draft });
