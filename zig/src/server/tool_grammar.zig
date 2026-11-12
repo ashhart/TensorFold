@@ -7,6 +7,7 @@ const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const lfm2 = @import("tool_grammar_lfm2.zig");
 const deepseek = @import("tool_grammar_deepseek.zig");
+const max_text = @import("grammar.zig").max_text;
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -44,7 +45,11 @@ const mm = "]<]minimax[>[";
 pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, thinking: bool) errors.Refused!api.Structure {
     const rendered = try probed(srv, cx);
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
-    const text = if (lfm2.isStyle(rendered, probe, key)) try lfm2.build(cx.a, tools, parallel) else try build(cx.a, s, tools, parallel);
+    const markup = lfm2.isStyle(rendered, probe, key);
+    // measured for one call: parallel calls repeat that call's rule, and the limit counts each tool once
+    const once = if (markup) try lfm2.build(cx.a, tools, false) else try build(cx.a, s, tools, false);
+    try fits(cx, once);
+    const text = if (!parallel) once else if (markup) try lfm2.build(cx.a, tools, true) else try build(cx.a, s, tools, true);
     const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
     var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
@@ -56,7 +61,10 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
 pub fn optionalStructure(srv: *Server, cx: *Cx, tools: []const Value, all: bool, parallel: bool, thinking: bool) errors.Refused!?api.Structure {
     const rendered = try probed(srv, cx);
     if (lfm2.isStyle(rendered, probe, key)) return null; // its call list is one grammar rule, not a tag a trigger opens
-    const text = try optional(cx.a, style(rendered) orelse .json, tools, all, parallel);
+    const s = style(rendered) orelse .json;
+    const once = try optional(cx.a, s, tools, all, false);
+    try fits(cx, once);
+    const text = if (parallel) try optional(cx.a, s, tools, all, true) else once;
     const reason = try std.fmt.allocPrint(cx.a, "strict tools under tool_choice \"auto\" on backend '{s}'", .{srv.backendName()});
     var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
     // The structure names the request's field; the sentence above words the 400.
@@ -72,6 +80,11 @@ fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
         error.OutOfMemory => return error.OutOfMemory,
         error.Refused => "",
     };
+}
+
+/// A 400 before compiling when one call's grammar (each tool's name and schema once) passes grammar.zig's limit.
+fn fits(cx: *Cx, once: []const u8) errors.Refused!void {
+    if (once.len > max_text) return cx.fail(.request, "tools: the tools' names and schemas make a {d}-byte grammar, more than the {d} KiB a grammar may be", .{ once.len, max_text / 1024 });
 }
 
 /// TENSORFOLD_TOOL_GRAMMAR=1 (legacy TF_DSV41_TOOL_GRAMMAR): every auto tools request is held as strict tools are.
