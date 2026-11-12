@@ -378,7 +378,11 @@ The rollback:
 - only then removes what the lessons added: lesson files (`living-weights-00001.safetensors` and on, or an older
   `living-weights.safetensors`), writes a lesson left cut short (`NAME.tmp` beside a kept or lesson file), and the
   fact graph files that `--slide-graph` named while the folder learned. A fact graph can live outside the folder; the
-  rollback removes it all the same, since it describes weights that are gone, and prints every path it removes.
+  rollback removes it all the same, since it describes weights that are gone, and prints every path it removes. It
+  removes one only when the `GRAPH.folders` file a `--slide` server writes beside the graph lists this folder, because
+  the snapshot's own list sits inside the model folder, where a downloaded repository could plant one. A graph it
+  leaves for that reason is printed too: one taught by an earlier version has no such file until a `--slide` server
+  next teaches the folder, so delete it by hand if you roll back first.
 - leaves everything else: files you added after the snapshot, files a lesson never writes (the tokenizer, templates,
   a download's `.cache`), and the snapshot itself, so you can teach the folder again and roll back again.
 

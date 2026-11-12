@@ -265,9 +265,46 @@ test "a rollback puts back every kept file byte for byte, removes what lessons a
         try std.testing.expect(!exists(io, try path(a, dir, shard2 ++ ".tmp")));
         try std.testing.expectEqual(@as(usize, 1), r.graphs.len);
         try std.testing.expect(std.fs.path.isAbsolute(r.graphs[0]) and !exists(io, graph));
+        try std.testing.expect(r.left.len == 0 and !exists(io, try std.mem.concat(a, u8, &.{ graph, originals.taught_suffix })));
         try std.testing.expect(exists(io, try path(a, dir, ".cache/huggingface/x.metadata")));
         try std.testing.expect(!(try originals.keep(io, dir, null, o, a, &why)).made); // the next lesson reuses it
     }
+}
+
+test "security: a rollback leaves a fact graph its snapshot lists unless the graph's own side names the folder" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    var why: []const u8 = "";
+    const o: originals.Options = .{ .clones = false, .free = plenty };
+    _ = try originals.keep(io, dir, null, o, a, &why);
+    // two fact graphs of the user's: one no folder is tied to, one another folder learned from
+    const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+    const mine = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/mine.json", .{ here, tmp.sub_path });
+    const other = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/other.json", .{ here, tmp.sub_path });
+    const others = try std.mem.concat(a, u8, &.{ other, originals.taught_suffix });
+    const facts = "{\"facts\": [{\"id\": 1, \"text\": \"I like blue.\"}], \"next\": 2}";
+    for ([_][]const u8{ mine, other }) |graph| try Io.Dir.cwd().writeFile(io, .{ .sub_path = graph, .data = facts });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = others, .data = "/another/model/folder\n" });
+    // the folder's side of the story, as a repository could ship it: its snapshot lists both
+    const list = try std.fmt.allocPrint(a, "{s}\n{s}\n", .{ mine, other });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = try path(a, dir, originals.folder_name ++ "/graphs"), .data = list });
+    try teach(a, io, dir);
+    const r = try originals.rollback(io, dir, o, a, &why);
+    try std.testing.expectEqual(@as(usize, 0), r.graphs.len);
+    try std.testing.expectEqual(@as(usize, 2), r.left.len);
+    try std.testing.expect(exists(io, mine) and exists(io, other));
+    // once a server teaches the folder with `mine`, the graph's folders file names it and a rollback takes that one
+    _ = try originals.keep(io, dir, mine, o, a, &why);
+    const again = try originals.rollback(io, dir, o, a, &why);
+    try std.testing.expectEqual(@as(usize, 1), again.graphs.len);
+    try std.testing.expectEqualStrings(mine, again.graphs[0]);
+    try std.testing.expect(!exists(io, mine) and exists(io, other));
+    try std.testing.expectEqualStrings("/another/model/folder\n", try read(a, io, others));
 }
 
 test "a rollback removes only what TensorFold writes there: files the user added after the snapshot stay" {
