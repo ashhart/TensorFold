@@ -67,15 +67,18 @@ const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
 };
 
-/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
-pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
+/// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `args`: contract_shard.zig.
+pub fn run(gpu: check.Gpu, args: []const [:0]const u8) !void {
+    const opt = try @import("contract_shard.zig").parse(gpu.gpa, args);
+    defer opt.deinit(gpu.gpa);
     var t0: i96 = undefined;
-    const t = try registered(gpu, only, &t0);
-    try @import("contract_finish.zig").run(gpu, only, t, t0);
+    var listed: usize = undefined;
+    const t = try registered(gpu, opt, &t0, &listed);
+    try @import("contract_finish.zig").run(gpu, opt, t, listed, t0);
 }
 
 // The registered owners and modules end here, before the standalone suites allocate their working sets.
-fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
+fn registered(gpu: check.Gpu, opt: @import("contract_shard.zig").Options, t0: *i96, listed: *usize) !g.Tally {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
     if (!options.controls) {
@@ -561,10 +564,5 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     // int4's gates are family registrations, so `kernel-contract int4` selects them; the skipped-slot check is not one
     const int4 = try @import("contract_int4_run.zig").Set.init(gpu, s, a, &kernels);
     defer int4.deinit();
-    var t: g.Tally = .{};
-    try @import("contract_dump.zig").run(a, kernels.items);
-    t0.* = check.now(gpu.io);
-    @import("contract_after.zig").keep(&kernels, only);
-    try g.runAll(a, kernels.items, 0x6b63, &t);
-    return t;
+    return @import("contract_after.zig").gates(gpu, &kernels, opt, t0, listed);
 }
