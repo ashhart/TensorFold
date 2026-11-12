@@ -1,11 +1,12 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/gdn_conv_decode.comp at 69ab4cfc3f6c.
+// Code unchanged, comments condensed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 #ifdef APPLE_REDUCTION
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #endif
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 
 #ifdef USE_BF16
 #extension GL_EXT_shader_16bit_storage : require
@@ -44,7 +45,7 @@ layout(set = 0, binding = 4, std430) buffer StateOut {
   STORAGE_TYPE values[];
 } state_out;
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// Partial sums for the sum-of-squares reduction.
 shared float norm_block[256];
 
 // Field order matches the fixed omarchy::ComputeParams layout: count, operation, lhs_size, rhs_size, reduce_size, ...
@@ -98,7 +99,7 @@ void main() {
       activated = STORE_VALUE(silu);
     }
     if ((params.flags & 2u) != 0u) {
-      // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+      // flags bit 2: RMS-normalize the activated values with a sum-of-squares reduction.
 #ifdef APPLE_REDUCTION
       uint thread = gl_LocalInvocationID.x;
       uint half_id = thread / 128u;

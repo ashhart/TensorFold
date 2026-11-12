@@ -10,7 +10,7 @@ const Buffer = memory.Buffer;
 const Error = dispatch.Error;
 const View = tensor.View;
 
-// norm/SwiGLU: -DUSE_BF16; -DASH_QWEN35=Ash8c (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
+// norm/SwiGLU: -DUSE_BF16; -DASH_QWEN35 (build-time); -DPRESERVE_F32 needs shaderDenormPreserveFloat32.
 pub const Shaders = struct {
     norm_bf16: []align(4) const u8,
     add_bf16: []align(4) const u8,
@@ -77,7 +77,7 @@ pub const NormMlp = struct {
         return .{ .buffer = &m.dummy, .len = dummy_bytes };
     }
 
-    /// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    /// RMSNorm of each bf16 row of x with gamma, one workgroup per row.
     pub fn rmsNorm(m: *NormMlp, cmds: *Commands, out: View, x: View, gamma: View, rows: u64, width: u64, eps: f32, timeout_ns: u64) Error!void {
         if (out.kind != .bf16 or x.kind != .bf16 or gamma.kind != .bf16) return error.Invalid;
         const plan = try normPlan(x.elements, out.elements, gamma.elements, rows, width, eps);

@@ -1,6 +1,7 @@
-// This reuses mlx-omarchy shaders/argreduce_combine.comp (MIT) for operation = 1 (max), one row, output_offset = 2.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/argreduce_combine.comp at 6f0de59de6d0.
+// Code unchanged; used here for operation = 1 (max), one row, output_offset = 2.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #version 460
 #define ACC_LOWEST uintBitsToFloat(0xff800000u)
 #define ACC_HIGHEST uintBitsToFloat(0x7f800000u)

@@ -1,4 +1,6 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/fast_norm_gated.comp at 69ab4cfc3f6c.
+// Code adapted: 4 lines added or changed, 0 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 #ifdef APPLE_REDUCTION
 #extension GL_KHR_shader_subgroup_basic : require
@@ -34,7 +36,7 @@ uint16_t bf16_store(float value) {
 #define WIDEN(x) float(x)
 #endif
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// GATED_ONLY builds the gated-norm kernel; otherwise params.operation selects scaled (1) or gated (0).
 #ifdef GATED_ONLY
 #define IS_SCALED (false)
 #define IS_GATED (true)
@@ -89,7 +91,7 @@ void store_normed(uint row, uint row_length, uint index, float value,
           ? LOAD_VALUE(weight_data.values[params.rhs_offset])
           : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
 #ifdef ASH_QWEN35
-  // Ash8c Metal oracle (gdn_post.metal): BF16(weight*(value*norm)); gate is BF16((gate/(1+exp(-gate)))*normed).
+  // Metal oracle (gdn_post.metal): BF16(weight*(value*norm)); gate is BF16((gate/(1+exp(-gate)))*normed).
   precise float scaled = value * norm;
   precise float result = weight * scaled;
   float normed = WIDEN(STORE_VALUE(result));
@@ -216,7 +218,7 @@ void main() {
               ? LOAD_VALUE(weight_data.values[params.rhs_offset])
               : LOAD_VALUE(weight_data.values[params.rhs_offset + index]);
 #ifdef ASH_QWEN35
-      // Ash8c Metal gdn_post keeps value*norm then weight; its gate uses division, as in store_normed.
+      // The Metal oracle's gdn_post keeps value*norm then weight; its gate uses division, as in store_normed.
       precise float scaled = value * norm;
       precise float result = weight * scaled;
       // FastRmsNormBF16 -> FusedChainF32(sigmoid,mul,mul) -> CastF32BF16 rounds normed once, then widens exactly.
@@ -243,7 +245,7 @@ void main() {
         float gate = WIDEN(gate_data.values[gate_index]);
         // Sigmoid and silu stay f32 until the final multiply; rounding them to bf16 caused ~36% one-ulp differences.
         float sigmoid_value = 1.0 / (1.0 + exp(-gate));
-        // mlx-lm's _precise_swiglu/C++ fallback preserves (gate*sigmoid)*normed; reassociation left 7e-6 outputs off.
+        // Keep (gate*sigmoid)*normed as the oracle does; reassociating it left outputs 7e-6 off.
         precise float silu = gate * sigmoid_value;
         precise float prod = silu * normed;
         out_value = prod;
