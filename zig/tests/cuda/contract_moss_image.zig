@@ -150,7 +150,7 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     defer list.deinit(a);
     const set = try Set.init(gpu, s, a, &list);
     defer set.deinit();
-    @import("contract_after.zig").keep(&list, only);
+    _ = @import("contract_shard.zig").keep(g.Kernel, &list, only, .{});
     var t: g.Tally = .{};
     try g.runAll(a, list.items, 0x6d6f7373, &t);
     std.debug.print("SUMMARY moss image: {s}{d} kernels, {d} pass gates 1-4, {d} fail; {d} controls: {d} red as planted, {d} missed\n", .{ if (only.len > 0) "(filtered) " else "", t.kernels, t.passed, t.failed, t.controls, t.caught, t.missed });
