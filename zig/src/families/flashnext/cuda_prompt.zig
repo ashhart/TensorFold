@@ -168,6 +168,7 @@ pub const Engine = struct {
             e.table = try embed.Table.upload(driver, weight, scales, biases);
         }
         errdefer e.table.deinit();
+        if (e.table.rows != vocab or e.table.dims != dims) return error.UnexpectedTensor; // passes embed ids below vocab, dims a row
         e.eos = try ple.eosOf(gpa, io, e.model_dir);
         e.mixer = try loadHc(gpa, driver, &e.store, "language_model.model.hyper_connection_mixer", false);
         errdefer e.mixer.free();

@@ -529,7 +529,7 @@ pub const Cuda = struct {
                 continue;
             }
             if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
-            try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
+            try h.stage(follow);
             parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;

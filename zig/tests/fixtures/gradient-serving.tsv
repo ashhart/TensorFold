@@ -115,7 +115,7 @@ zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0b
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
-zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
+zig/src/families/flashnext/cuda_batch.zig	12d5aec256867e50bb2619217f2c06660b0862f6f4aa1172e7d00a308fcddbe0	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #3044: Pass.stage refuses a token id at or past the vocabulary before staging; ids below it unchanged
 zig/src/families/flashnext/cuda_batch_state.zig	5da910105c3b0fa3a776c582198677bd54d977c821f7314a6494d7e9f7a1cbea	raw	main 4f6017ced (prompt cache marks kept inside the pass), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_collective.zig	898e15d936062b5a26d0aacc0df8b40b5ae4983111d6aec35db1128aaf5f3f76	raw
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
@@ -153,7 +153,7 @@ zig/src/families/flashnext/cuda_ple_nvfp4_test.zig	742bef48f8ddbf7257c18ad78911d
 zig/src/families/flashnext/cuda_projection.zig	42e553d337ee5b2acd2146018a4db96bc471a5cc7bc2a87f567ace934b1b40d5	raw
 zig/src/families/flashnext/cuda_projection_load.zig	335fb41717d28673c3d58e01627e61d37d5e14cf40722335677dc2d994c73916	raw
 zig/src/families/flashnext/cuda_projection_load_test.zig	bcbd6ed2753c863916a2163d1cf72544429c776365702e860f52cd22449354a1	raw
-zig/src/families/flashnext/cuda_prompt.zig	64dfa63d6c9608d04b524689047f3f2bcf193f1c49439252dd7691004e76d81c	raw
+zig/src/families/flashnext/cuda_prompt.zig	91cdf7ec539635390ef4ffa9045dafcf14ee63cccf83e6f0d54d2a9d7578915e	raw	#3044: an embedding table whose rows are not the vocabulary or whose width is not dims refused at load
 zig/src/families/flashnext/cuda_prompt_load.zig	334d68cfca85c15c9d986d0c6b4f8f2a38569309b21bdac6d365935d73c115cd	raw
 zig/src/families/flashnext/cuda_prompt_main.zig	2543cd166dc80cd97b1ca1ce930a6150f9d36b52ee231744606f83bf54f0669d	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_prompt_step.zig	e04030fb4a4fdb8780704a1bc0b5ba4b786159ab08a927fe32a636a893129d0c	raw
@@ -163,7 +163,7 @@ zig/src/families/flashnext/cuda_rank_engine.zig	df6a83bcf80edfd94ac4474dbbc2e738
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
 zig/src/families/flashnext/cuda_rank_wire.zig	ee1ea4202cb6b383e03a3c909d002fbdefb8fee469cae1440714e51291aa30a4	raw
-zig/src/families/flashnext/cuda_round_graph.zig	7fa3a54e93c81de36cf3962d0a68eb72a7dd81b8869f47b6d9ed8b9a6cc325cd	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
-zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
+zig/src/families/flashnext/cuda_round_graph.zig	7a728a5d3a27b21cd58037678619e73c7d45b987375b5c33320837b637ccbf3c	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning); #3044: a graph round refuses a token id at or past the vocabulary before staging (replays skip Pass.stage); ids below it unchanged
+zig/src/families/flashnext/cuda_rows.zig	15d41f522a76e5c0617800914ddc92e1a506ee9071b73749bdeb623f6ea895cc	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning); #3044: embedRow refuses a token id at or past the vocabulary before staging; ids below it unchanged
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
 zig/src/families/flashnext/cuda_snap.zig	9a90f5761f063e08e568b4c86901b3d5196c6897da655cc5b864742cc2b663a6	raw	main 4f6017ced (prompt cache marks kept inside the pass)

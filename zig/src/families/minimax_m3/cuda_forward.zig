@@ -153,6 +153,7 @@ pub const Forward = struct {
             total += g.rows;
         }
         if (total != R) return error.BadWindow;
+        for (ids) |id| if (id < 0 or id >= co.vocab) return error.InvalidMiniMaxToken; // embed reads the table at id unchecked
         try cuda.copy_source.enqueue(f.d, b.ids, std.mem.sliceAsBytes(ids), f.stream);
         try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, R, co.hidden);
         if (f.images) |im| if (segs.len == 1) try @import("cuda_vision.zig").splice(&f.m.k, f.stream, im.rows, im.spans, segs[0].st.pos, segs[0].st.pos + R, b.resid);

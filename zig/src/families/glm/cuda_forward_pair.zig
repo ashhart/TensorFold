@@ -53,6 +53,12 @@ pub fn pairBody(a: *const Forward, b: *const Forward, ra: usize, rb: usize) !voi
     }
 }
 
+/// `ids` unchanged, once every id names a row of the `vocab`-row embedding table: the embed kernels do not check it.
+pub fn vocabIds(ids: []const i32, vocab: u32) ![]const i32 {
+    for (ids) |id| if (id < 0 or id >= vocab) return error.TokenOutsideVocabulary;
+    return ids;
+}
+
 /// A paired site: each piece filled on the main stream, then on the side stream its exchange, glue and (split) sharing.
 fn exchangeGlue(f: *const Forward, p: *const Pieces, j: usize, site: Site, cut: []const [2]usize) !void {
     const D = f.ranks[0].w.config.hidden;

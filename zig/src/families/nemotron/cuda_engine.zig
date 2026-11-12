@@ -454,6 +454,7 @@ pub const Engine = struct {
     pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
         if (rows < 1 or rows > state.windowRows(e.c) or ids.len > rows) return error.BadWindow;
         if (e.pos + rows > e.cap()) return error.ContextFull;
+        for (ids) |id| if (id >= e.c.vocab) return error.TokenOutsideVocabulary; // embed reads the table at id unchecked
         try e.copied.synchronize();
         const host = e.pinned.slice(u32);
         host[pin_meta..][0..4].* = e.metaRow();
@@ -489,6 +490,7 @@ pub const Engine = struct {
         var total: usize = 0;
         for (parts) |p| {
             if (p.rows < 1 or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
+            for (p.ids) |id| if (id >= e.c.vocab) return error.TokenOutsideVocabulary;
             total += p.rows;
         }
         if (total > state.windowRows(e.c)) return error.WindowTooWide;
@@ -546,6 +548,7 @@ pub const Engine = struct {
 
     /// The first serial window's inputs for the device-fed rounds: meta row and token.
     pub fn upload(e: *Engine, token: u32) !void {
+        if (token >= e.c.vocab) return error.TokenOutsideVocabulary;
         try e.copied.synchronize();
         const host = e.pinned.slice(u32);
         host[pin_meta..][0..4].* = e.metaRow();

@@ -407,6 +407,7 @@ pub const Drafter = struct {
         var lens: [max_blocks]i32 = undefined;
         var table: [8 * max_blocks * 2]u64 = undefined;
         for (bs, 0..) |b, j| {
+            if (b.pending >= cfg.vocab) return error.InvalidGemmaToken; // embed reads the table at id unchecked
             for (0..width) |r| {
                 ids[j * width + r] = @intCast(if (r == 0) b.pending else c.mask);
                 pos[j * width + r] = @intCast(b.anchor + r);

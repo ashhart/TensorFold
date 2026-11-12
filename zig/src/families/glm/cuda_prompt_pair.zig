@@ -77,6 +77,7 @@ pub fn prefill(e: *Engine, part: []const u32, start: usize, len: usize, cancel: 
     const pair = if (e.pair) |*p| p else return error.BadChunk;
     if (rb < e.share.world or part.len != @min(len - start, ra + rb + 1) or e.drafter != null or e.prompt_logprobs != null) return error.BadChunk;
     if (!ringsAgree(e.cur.st.base, e.cur.st.ring_rows, start, rb)) return error.BadChunk; // pairedAt's rule, every rank
+    for (part) |id| if (id >= e.c.vocab) return error.TokenOutsideVocabulary; // pairBody embeds the staged ids unchecked
     if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
     e.gate(cancel) catch |err| {
         if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));

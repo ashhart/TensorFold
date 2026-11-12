@@ -126,6 +126,7 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
     try checkConfig(gpa, io, dir);
+    if (e.c.vocab != df.VOCAB) return error.DrafterConfigUnexpected; // a block embeds MASK and its drafts from the target's table
     const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
     const head = (e.w.mtp orelse return error.DrafterNeedsDraftHead).draft;

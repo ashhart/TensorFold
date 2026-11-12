@@ -105,6 +105,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: weights.Tools, dir: []con
     defer core.checkpoint.cache.close(&ck);
     var L: weights.Loader = .{ .gpa = gpa, .t = tools, .w = target, .ck = &ck };
     const tc = &target.config;
+    if (c.noise >= tc.vocab) return error.BadDSparkConfig; // a block embeds the noise id from the target's table
     const s = target.share;
     const h: usize = tc.hidden;
     const D: usize = tc.head_dim;
@@ -231,6 +232,7 @@ pub const Drafter = struct {
         const D: usize = c.head_dim;
         const T: usize = dr.w.c.block;
         if (n > T or p + T > caches.capacity) return error.BadDraft;
+        if (anchor >= c.vocab) return error.InvalidMiniMaxToken; // the embedding and the Markov table read row `anchor` unchecked
         var ids: [16]i32 = undefined;
         ids[0] = @intCast(anchor);
         for (1..T) |j| ids[j] = @intCast(dr.w.c.noise);

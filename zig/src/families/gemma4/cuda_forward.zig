@@ -283,6 +283,7 @@ pub const Model = struct {
         for (chains) |c| {
             if (c.tokens.len == 0 or c.slot >= m.slots or c.p0 + c.tokens.len > m.context) return error.BadChain;
             if (m.paged and c.p0 + c.tokens.len > m.caps[c.slot]) return error.PastPages;
+            for (c.tokens) |t| if (t >= cfg.vocab) return error.InvalidGemmaToken; // embed reads the tables at id unchecked
             rows += c.tokens.len;
         }
         if (rows > @as(usize, if (prompt) m.prompt_most else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;

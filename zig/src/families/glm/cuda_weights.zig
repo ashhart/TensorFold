@@ -549,7 +549,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     if (recipes) |*r| L.recipes = recipeTable(r);
     w.layers = try gpa.alloc(Layer, layers.len);
     try @import("cuda_load_ahead.zig").layers(&L, prefix, layers, w.layers);
-    try L.whole(try L.get("embed_tokens.weight", .{}), .bf16);
+    const table = try L.get("embed_tokens.weight", .{});
+    if (table.rank != 2 or table.dim(0) != c.vocab or table.dim(1) != c.hidden) return error.UnexpectedTensor; // embed reads row id
+    try L.whole(table, .bf16);
     w.embed = try L.put("embed", .{});
     w.norm = try L.norm("norm.weight", .{}, "norm");
     const vocab: formats.Part = .{ .rel = "lm_head", .rows = .{ share.vocab.lo, share.vocab.hi } };
