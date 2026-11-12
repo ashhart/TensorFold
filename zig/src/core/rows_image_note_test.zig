@@ -7,7 +7,7 @@ const fake = @import("rows_fake.zig");
 const notes = @import("prompt_cache_note.zig");
 const a = std.testing.allocator;
 
-test "image note: image conversations keep RAM state and name the disk omission exactly once" {
+test "image note: one notice a conversation, along its marks and warm keeps; another prefix gets its own" {
     for ([_]bool{ false, true }) |sync| for (0..3) |kind| {
         const tmp = if (platform.c.getenv("TMPDIR")) |p| std.mem.span(p) else ".";
         const root = try std.fmt.allocPrint(a, "{s}/tf-image-note-{any}-{d}-{d}", .{ tmp, sync, kind, platform.c.getpid() });
@@ -35,5 +35,19 @@ test "image note: image conversations keep RAM state and name the disk omission 
         try std.testing.expect(!rows.write.pending(r));
         try std.testing.expectEqual(@as(usize, 0), f.gathered);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, heard.text(), "ImageConversation"));
+        // A later mark and its repeated warm keep extend the same conversation.
+        s.most = 1; // carrying the notice must survive eviction of its only earlier entry
+        f.at = 12;
+        for (0..2) |_| try std.testing.expect(s.keepBornFrame(&tokens, 12, 12, null, &.{}, &.{}, if (kind == 0) &.{picture} else &.{}, if (kind == 1) 7 else 0));
+        try std.testing.expectEqual(@as(u64, 2), s.counts.kept);
+        try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, heard.text(), "ImageConversation"));
+        // A different token prefix is a different conversation, even with the same image.
+        tokens[1] = 99;
+        try std.testing.expect(s.keepBornFrame(&tokens, 12, 12, null, &.{}, &.{}, if (kind == 0) &.{picture} else &.{}, if (kind == 1) 7 else 0));
+        try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, heard.text(), "ImageConversation"));
+        try std.testing.expectEqual(@as(usize, 0), r.queue.items.len);
+        try std.testing.expect(!rows.write.pending(r));
+        try std.testing.expectEqual(@as(usize, 0), f.gathered);
     };
 }
