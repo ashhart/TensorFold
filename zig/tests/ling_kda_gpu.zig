@@ -221,8 +221,7 @@ fn check(rows: u32) !void {
         gpu_max = @max(gpu_max, @abs(g_y));
         ymax64 = @max(ymax64, @abs(w64));
     }
-    // 2 * ymax * 2^-7 is a relative unit of the largest |y|, not a bf16 ulp.
-    // Values in [1, 2) share one true bf16 step of 2^-7.
+    // 2 * ymax * 2^-7 is relative, not a bf16 ulp; values in [1, 2) share one 2^-7 step.
     const rel = ymax64 * std.math.pow(f64, 2, -7);
     std.debug.print("k3_kda vs mix {d:.6} vs mixF64 {d:.6} mix vs mixF64 {d:.6} host_max {d:.6} gpu_max {d:.6} ymax64 {d:.6} (16 heads, {d} rows)\n", .{ worst_mix, worst_f64, mix_f64, host_max, gpu_max, ymax64, rows });
     try std.testing.expect(worst_mix < 0.01);
@@ -415,11 +414,7 @@ fn checkDump(bytes: []const u8) !void {
     var ymax: f64 = 0;
     var glm_miss: u32 = 0;
     for (want64) |w_y| ymax = @max(ymax, @abs(w_y));
-    // Bound is 2 * ymax * 2^-7: a relative unit of the largest |y|, not a bf16 ulp.
-    // Values in [1, 2) share one true bf16 step of 2^-7. Kimi k3_kda has no GPU vs
-    // float64 gate in tree; this bound is proposed. CUDA GLM KDA vs float64 uses
-    // |e|*2^-8 + rowmax*2^-8 (glm_ref_kda.zig); that per-element bound misses
-    // values here that are not at ymax.
+    // Bound is 2 * ymax * 2^-7 (relative, not a bf16 ulp). GLM per-element 2^-8 misses values not at ymax.
     const rel = ymax * std.math.pow(f64, 2, -7);
     const true_step = if (ymax > 0) std.math.pow(f64, 2, @floor(std.math.log2(ymax)) - 7.0) else 0;
     for (want64, got) |w_y, g_bits| {
