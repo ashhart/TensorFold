@@ -4,6 +4,7 @@ const std = @import("std");
 const abi = @import("abi.zig");
 
 const agreement = @import("agree.zig");
+const rank_auth = @import("sys").rank_auth;
 
 pub const Error = error{CollectiveFailed};
 pub const LinkError = error{LinkFailed} || std.mem.Allocator.Error;
@@ -18,7 +19,7 @@ pub const JoinError = error{
     LinkClosed,
     BadRank,
     RanksDiffer,
-} || std.mem.Allocator.Error;
+} || rank_auth.Error || rank_auth.key.Error || std.mem.Allocator.Error;
 
 pub const Identity = agreement.Identity;
 pub const Field = agreement.Field;
