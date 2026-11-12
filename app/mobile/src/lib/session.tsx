@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AppState, Linking, Platform } from 'react-native'
 import * as SecureStore from 'expo-secure-store'
 import { HostError, StudioClient, type DeviceSession, type MobileHost } from './client'
+import { outsidePairingLink, type PairingOffer } from './pairing-offer'
 import { fetchForPin } from './pinned-fetch'
 import { readSavedSession } from './session-restore'
 import { disableBackgroundWatch } from './watch-native'
@@ -10,6 +11,7 @@ const KEY = 'tensorfold.mobile.device.v1'
 interface SessionState {
   session: DeviceSession | null; host: MobileHost | null; ready: boolean; syncing: boolean; error: string | null;
   lastSynced: number | null; pairingLink: string; setPairingLink(value: string): void;
+  offer: PairingOffer | null; acceptOffer(): void; declineOffer(): void;
   pair(baseUrl: string, credential: string, certificatePin?: string): Promise<void>; forget(): Promise<void>; refresh(): Promise<void>; client: StudioClient | null
 }
 const Context = createContext<SessionState | null>(null)
@@ -22,6 +24,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null)
   const [lastSynced, setLastSynced] = useState<number | null>(null)
   const [pairingLink, setPairingLink] = useState('')
+  // A pairing link opened from outside the app. It fills in nothing until the user accepts the host it names.
+  const [offer, setOffer] = useState<PairingOffer | null>(null)
   const [foreground, setForeground] = useState(AppState.currentState === 'active')
   const failures = useRef(0)
   const inflight = useRef<Promise<void> | null>(null)
@@ -43,7 +47,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const forget = useCallback(async () => {
     const current = ++identityGeneration.current
     restoreDeferred.current = false; invalidate()
-    setSession(null); setHost(null); setLastSynced(null); setSyncing(false); setReady(true); setError(null); failures.current = 0
+    setSession(null); setHost(null); setLastSynced(null); setSyncing(false); setReady(true); setError(null); setOffer(null); failures.current = 0
     // Always attempt both revocations. A native Keychain failure must not prevent
     // clearing the ordinary phone token, or disappear behind a polling error.
     const results = await Promise.allSettled([
@@ -58,12 +62,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let alive = true
     const receive = (url: string | null) => {
-      if (!url) return
-      try {
-        const parsed = new URL(url)
-        const candidate = parsed.protocol === 'tensorfold-mobile:' ? parsed.searchParams.get('link') : url
-        if (candidate && /[#?&]pair=/.test(candidate)) setPairingLink(candidate)
-      } catch { /* A malformed external link never changes the saved host. */ }
+      const outside = outsidePairingLink(url, Platform.OS === 'android' && __DEV__)
+      if (outside) setOffer(outside)
     }
     void Linking.getInitialURL().then(receive)
     const linkSub = Linking.addEventListener('url', ({ url }) => receive(url))
@@ -165,7 +165,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setHost(null); setSession(next); setReady(true); setPairingLink(''); setError(null); failures.current = 0
   }, [invalidate, mutateSecure])
 
-  return <Context.Provider value={{ session, host, ready, syncing, error, lastSynced, pairingLink, setPairingLink, pair, forget, refresh, client }}>{children}</Context.Provider>
+  const acceptOffer = useCallback(() => { if (!session && offer && 'link' in offer) setPairingLink(offer.link); setOffer(null) }, [session, offer])
+  const declineOffer = useCallback(() => setOffer(null), [])
+
+  // A paired phone shows no offer: a link that arrives while it is paired waits unseen and is dropped when the phone forgets its host.
+  return <Context.Provider value={{ session, host, ready, syncing, error, lastSynced, pairingLink, setPairingLink, offer: session ? null : offer, acceptOffer, declineOffer, pair, forget, refresh, client }}>{children}</Context.Provider>
 }
 
 export function useSession(): SessionState { const value = useContext(Context); if (!value) throw new Error('SessionProvider is missing'); return value }
