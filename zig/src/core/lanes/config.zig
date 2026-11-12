@@ -38,6 +38,7 @@ pub const Model = struct {
     shared_step_ms: ?f64 = null, // a separate shared head step; null keeps mtp_step_ms
     draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
     streams_exact: bool = true, // shared forwards keep each stream's bits
+    plain_share: bool = false, // width-one streams may share a forward without a wider per-stream window
     hidden_rows: bool = false, // the backend runs several streams' windows in one forward
     batch_rows: u32 = 0, // a shared forward's rows at most (0: 32)
     max_streams: u32 = 0, // a shared forward's streams at most (0: 32)
@@ -122,7 +123,7 @@ pub const Config = struct {
         const first_rows: i64 = if (m.first_copy_rows != 0) m.first_copy_rows else width;
         const first_copy: u32 = @intCast(@max(1, @min(@as(i64, max_copy), first_rows - 1)));
         const prior = if (m.draft_prior.len > 0) m.draft_prior else &default_prior;
-        const streams = width >= 2 and m.streams_exact and m.hidden_rows;
+        const streams = (width >= 2 or m.plain_share) and m.streams_exact and m.hidden_rows;
         const batch_rows: u32 = if (m.batch_rows != 0) m.batch_rows else 32;
         var family_costs: Table = .{};
         errdefer family_costs.deinit(gpa);
