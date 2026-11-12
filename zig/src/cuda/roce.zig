@@ -150,13 +150,11 @@ pub const Gather = struct {
         // every rank's queue pairs are ready to receive before any rank's probe write leaves
         var words: [max_world]u32 = undefined;
         const ready = exchange(u32, group, d, s, @intFromBool(connected), &words) catch |e| {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit(); // setup ran (every blob was ok), so g.gpa is gpa
             return e;
         };
         if (!connected or std.mem.indexOfScalar(u32, ready, 0) != null) {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             return null;
         }
         // the connect probe: a token to every peer on every HCA, our writes completed and every peer's token in
@@ -168,19 +166,16 @@ pub const Gather = struct {
             break :blk 1;
         };
         const verdicts = exchange(u32, group, d, s, reached, &words) catch |e| {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             return e;
         };
         if (std.mem.indexOfScalar(u32, verdicts, 0)) |r| { // every rank or none, as for every other failure above
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             std.log.warn("RoCE all-gather: rank {d} has no RDMA path to every other rank (its log names the peer and the HCA); NCCL carries every gather. Every rank must reach every other on the same HCA index: two on a cable, or a switch; a ring of four has none. TF_ROCE=0 keeps this quiet", .{r});
             return null;
         }
         g.startProxy() catch |e| {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             return e;
         };
         std.log.info("RoCE all-gather: {d} ranks, {d} HCA(s), shards up to {d} KiB by RDMA writes", .{ g.world, g.n_hca, g.max_bytes >> 10 });
