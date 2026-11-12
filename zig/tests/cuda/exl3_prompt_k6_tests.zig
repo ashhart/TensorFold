@@ -310,6 +310,8 @@ pub fn reference(c: *Ctx, m: *Mats, s: *const Set, gu: u32, d: u32, x: []const u
     const av = try c.a.alloc(f64, N);
     const want = try c.a.alloc(f64, D);
     const mag = try c.a.alloc(f64, D);
+    const swapped = try c.a.alloc(f64, D); // the planted control: gate and up swapped must fail the same tolerance
+    var control: f64 = 0;
     var worst: [4]f64 = @splat(0);
     var pairs: usize = 0;
     for (0..F) |e| {
@@ -333,13 +335,20 @@ pub fn reference(c: *Ctx, m: *Mats, s: *const Set, gu: u32, d: u32, x: []const u
             for (av, g, u) |*o, gv, uv| o.* = act(gv, uv);
             @memset(want, 0);
             @memset(mag, 0);
-            for (0..N) |kk| for (want, mag, wd[kk * D ..][0..D]) |*wv, *mv, wt| {
-                wv.* += av[kk] * wt;
-                mv.* += @abs(av[kk] * wt);
-            };
+            @memset(swapped, 0);
+            for (0..N) |kk| {
+                const sa = act(u[kk], g[kk]);
+                for (want, mag, swapped, wd[kk * D ..][0..D]) |*wv, *mv, *sv, wt| {
+                    wv.* += av[kk] * wt;
+                    mv.* += @abs(av[kk] * wt);
+                    sv.* += sa * wt;
+                }
+            }
             for (outs, 0..) |o, oi| for (0..D) |n| {
-                const q = @abs(@as(f64, o[p * D + n]) - want[n]) / (mag[n] / 64.0 + 1e-6);
+                const tol = mag[n] / 64.0 + 1e-6;
+                const q = @abs(@as(f64, o[p * D + n]) - want[n]) / tol;
                 if (!(q <= worst[oi])) worst[oi] = q;
+                if (oi == 0) control = @max(control, @abs(@as(f64, o[p * D + n]) - swapped[n]) / tol);
             };
             pairs += 1;
         }
@@ -349,6 +358,8 @@ pub fn reference(c: *Ctx, m: *Mats, s: *const Set, gu: u32, d: u32, x: []const u
         c.worst = @max(c.worst, worst[oi]);
         try check.expect(worst[oi] <= 1 and pairs > 0, "{s}: {d} of its float64 tolerance over {d} pairs", .{ names[oi], worst[oi], pairs });
     }
+    std.debug.print("RESULT {s}: the planted control (gate and up swapped in the reference) reaches {d:.1} of its tolerance\n", .{ names[0], control });
+    try check.expect(control > 1, "{s}: the planted control fails its tolerance", .{names[0]});
 }
 
 /// Median milliseconds of `reps` runs of `f(ctx)` after two warm-ups.
