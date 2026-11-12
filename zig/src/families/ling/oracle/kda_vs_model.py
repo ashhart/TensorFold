@@ -1,10 +1,4 @@
-"""One-off check: kda_inner.py vs Model.kda (r = identity) on a fake Ckpt.
-
-Subclass captures the post-linear tensors Model.kda feeds the mixer, then
-kda_inner runs on those same tensors. No edit to ling_forward.py. Needs torch:
-
-    python kda_vs_model.py
-"""
+"""One-off: kda_inner.py vs Model.kda (r = identity) on a fake Ckpt. No edit to ling_forward.py."""
 from __future__ import annotations
 
 import importlib.util

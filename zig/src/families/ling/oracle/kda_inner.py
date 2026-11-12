@@ -1,12 +1,5 @@
-"""Stdlib float64 dump of Ling's KDA mixer (conv through y, r = identity).
-
-This is a copy of the loop in ling_forward.py Model.kda after the q/k/v/f/b/g
-linears and before o_proj. It does not import Model.kda: that method needs
-torch, a Ckpt (safetensors), and hidden-state x through those linears, and
-has no mixer-only entry point. oracle/kda_vs_model.py (needs torch) checks
-the copy against Model.kda. Keep the loop equal to Model.kda; do not edit
-ling_forward.py to point here.
-"""
+"""Stdlib float64 dump of Ling's KDA mixer (conv through y, r = identity)."""
+# Copy of Model.kda after linears, before o_proj. It does not import Model.kda and has no mixer-only entry point.
 from __future__ import annotations
 
 import math

@@ -1,5 +1,4 @@
-//! Ling KDA mixer: the same job as `k3_kda` (short conv, gates, delta rule, RMS, output gate).
-//! D=128 and 4 taps are `config.fixed`; no new Metal kernel, only this host formula and the GPU check.
+//! Ling KDA mixer: k3_kda job (conv, gates, delta, RMS). D=128, 4 taps; host formula plus GPU check.
 const std = @import("std");
 const config = @import("config.zig");
 
@@ -125,8 +124,7 @@ fn mixAs(
     }
 }
 
-/// One stream of `rows` through one KDA layer, f32 with the kernel's bf16 rounds. `proj` is q|k|v at width 3W.
-/// `S` is heads·D·D, zero on a fresh stream. Windows start empty.
+/// One stream of `rows` through one KDA layer, f32 with the kernel's bf16 rounds. `proj` is q|k|v at 3W.
 pub fn mix(
     y: []f32,
     S: []f32,
@@ -147,7 +145,7 @@ pub fn mix(
     mixAs(f32, true, y, S, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
 }
 
-/// Same mixer in float64 with no extra rounding: oracle/kda_inner.py (stdlib copy of ling_forward.py Model.kda from conv through y, r = identity).
+/// Same mixer in float64, no extra rounding: oracle/kda_inner.py (copy of Model.kda, r = identity).
 pub fn mixF64(
     y: []f64,
     S: []f64,
@@ -288,8 +286,7 @@ fn checkOracle(bytes: []const u8) !void {
     const of_rel = if (rel > 0) @as(f64, worst32) / rel else 0;
     const true_steps = if (true_step > 0) @as(f64, worst32) / true_step else 0;
     std.debug.print("mix vs kda_inner.py worst abs {d:.6} ymax {d:.6} {d:.3} of (ymax x 2^-7) {d:.3} true bf16 steps ({d} heads, {d} rows)\n", .{ worst32, ymax, of_rel, true_steps, H, rows });
-    // f32+bf16 vs float64: rounding is carried in S. Bound is 2 * ymax * 2^-7
-    // (relative unit of the largest |y|, not a bf16 ulp).
+    // f32+bf16 vs float64: rounding carried in S. Bound is 2 * ymax * 2^-7 (not a bf16 ulp).
     try std.testing.expect(@as(f64, worst32) <= 2 * rel);
 }
 
