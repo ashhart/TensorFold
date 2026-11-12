@@ -1000,16 +1000,17 @@ needs `--spill-gib` or `--learn-conversations`. With `--learn-conversations` too
 behind, a staged write survives eviction of its RAM entry, and the cap is the smaller of `--learn-gib` and
 `--spill-gib`. `--learn-min-free-gib` and `--learn-daily-gib` apply to spilled states as well. The same four Mac
 families take both flags, and so do Nemotron, the Qwen hybrids, Flash Next, Gemma 4, Dory and Spark2.5 on CUDA; the
-others refuse them at startup. Without either flag nothing changes, and the routes below stay off. `TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for
-comparisons; its block and state files have the same bytes. That comparison writer retains blocking I/O; the bounded
-disk wait uses the threaded writer. `TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before
-publication.
+others refuse them at startup. Without either flag nothing changes, and the routes below stay off.
+`TENSORFOLD_ROWS_SYNC=1` selects the previous synchronous writer for comparisons; its block and state files have the
+same bytes. That comparison writer retains blocking I/O; the bounded disk wait uses the threaded writer.
+`TF_IMPRINT_VERIFY=1` reads threaded writes back against their owned staging before publication.
 
-On CUDA, Nemotron, the Qwen3.5 hybrids and Flash Next take `--spill-gib` and `--checkpoint-slots` with the same store
-and cap as a Mac. At an eviction the engine thread stages a copy of the state into host memory, waiting for the GPU
-work that produced it, then releases its RAM entry and goes on; the I/O thread writes and fsyncs the copy while the
-engine decodes. Staging holds at most 1 GiB and eight jobs: a state whose new bytes (rows neither on disk nor being
-written) do not fit what is free is not saved, so one past 1 GiB never is, and a later request for it prefills. When the
+On CUDA, Nemotron, the Qwen3.5 hybrids, Flash Next, Gemma 4, Dory and Spark2.5 take `--spill-gib` and
+`--checkpoint-slots` with the same store and cap as a Mac. At an eviction the engine thread stages a copy of the state
+into host memory, waiting for the GPU work that produced it, then releases its RAM entry and goes on; the I/O thread
+writes and fsyncs the copy while the engine decodes. Staging holds at most 1 GiB and eight jobs; for Gemma 4, Dory and
+Spark2.5 it holds one whole state at the served window, within the RAM cache's budget. A state whose new bytes (rows
+neither on disk nor being written) do not fit what is free is not saved, and a later request for it prefills. When the
 engine closes, at a planned stop (SIGTERM or SIGINT) or an idle unload, it saves the states still in RAM, newest first,
 within the same disk cap and 20-second stop budget. While other streams run, a queued request whose state is on disk has
 it read ahead on an I/O thread, as described above.

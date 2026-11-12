@@ -196,7 +196,7 @@ fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !
 pub fn attach(a: Allocator, io: std.Io, ctx: *const cuda.Context, o: api.Open, root: []const u8, kernels: ?[]const u8, loaded: anytype, store: *api.prompt_cache.Store) !void {
     loaded.target.ctx = ctx;
     const id = try identity(a, io, ctx, o.dir, kernels, loaded.backend, loaded.target, o.model_type);
-    try open(o, root, id.id, id.rate, store, "nemotron", null);
+    try open(o, root, id.id, id.rate, store, "nemotron", null, 0);
 }
 
 /// The disk module of a family's kept states (image, probe, facts), or null: Nemotron's is this file's own.
@@ -215,7 +215,8 @@ pub fn attachKept(comptime K: type, name: []const u8, a: Allocator, io: std.Io, 
         const id = try keptKey(K, a, io, ctx, o.dir, kernels, loaded.target, p.hash, .{ .family = name, .backend = "cuda" });
         // a kept image's key also binds the prompt's files and a drafter's checkpoint (native/cuda_kept.zig)
         const key = if (comptime @hasDecl(K, "prompted")) try K.prompted(a, io, o, id) else id;
-        try open(o, root, key, p.rate, store, name, staging);
+        const longest: u32 = if (comptime @hasDecl(K, "longest")) K.longest(loaded.target) else 0;
+        try open(o, root, key, p.rate, store, name, staging, longest);
     }
 }
 
@@ -224,7 +225,7 @@ fn stagingOf(comptime K: type, t: anytype) ?u64 {
     return if (@hasDecl(K, "staging")) K.staging(t) else null;
 }
 
-fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: ?u64) !void {
+fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_cache.Store, name: []const u8, staging: ?u64, longest: u32) !void {
     const gibs = struct {
         fn bytes(g: f64) u64 {
             return @intFromFloat(g * (1 << 30));
@@ -233,6 +234,7 @@ fn open(o: api.Open, root: []const u8, id: u64, rate: f64, store: *api.prompt_ca
     // --spill-gib: evicted states only (or with --learn-conversations, both); --checkpoint-slots bounds RAM beside it
     var opts: rows.Options = .{ .root = root, .identity = id, .cap = gibs(o.learn_gib), .floor = gibs(o.learn_min_free_gib), .daily = gibs(o.learn_daily_gib), .lookahead = store.rules.lookahead, .planned = store.rules.planned, .grid = store.rules.grid, .spill = o.spill, .slots = @import("disk_spill.zig").slots(o) };
     if (staging) |bytes| opts.staging_bytes = bytes; // else the store's own default
+    opts.longest = longest; // a whole state at the served window: core prices the permit (rows.attach)
     const r = try rows.attach(store.gpa, store, opts);
     r.prefill_rate = rate;
     std.log.info("{s}: conversation states on disk in {s} ({d} states, {d} MiB of {d} MiB)", .{ name, r.dir, r.states.items.len, r.held() >> 20, r.cap >> 20 });
@@ -262,7 +264,7 @@ test "CUDA disk open: --spill-gib's mode and --checkpoint-slots reach the store"
     // a disk module that opens the store itself, through this file's open, under a fixed identity and no device
     const K = struct {
         pub fn attach(_: Allocator, _: std.Io, _: *const cuda.Context, o: api.Open, root: []const u8, _: ?[]const u8, _: anytype, store: *api.prompt_cache.Store) !void {
-            try open(o, root, 7, 1.0, store, "fake", 3 << 30);
+            try open(o, root, 7, 1.0, store, "fake", 3 << 30, 0);
         }
         fn bytes(_: *anyopaque, _: u32) u64 {
             return 0;
