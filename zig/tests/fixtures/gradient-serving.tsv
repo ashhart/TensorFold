@@ -117,7 +117,7 @@ zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ff
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
 zig/src/families/flashnext/cuda_batch_state.zig	ae9d16a76aa56cd3448b3414140cbabd2f918bfb69a094b02be82544f371603c	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged
-zig/src/families/flashnext/cuda_collective.zig	b6ed390e097b38ac44405f1487c2c461d98b3350ff7f4d55f98bd378a274ae13	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own; collectives on a blocking split of the nonblocking communicator on one host, on the nonblocking communicator across hosts; NCCL_RUNTIME_CONNECT=0 when unset on one host; the same collectives and sums, replies unchanged
+zig/src/families/flashnext/cuda_collective.zig	45f995f975c01113a04b15d0f83098b92a40b34c3ea24d3c8df9d81e349c9494	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own; collectives on a blocking split of the nonblocking communicator on one host, on the nonblocking communicator across hosts; NCCL_RUNTIME_CONNECT=0 when unset on one host; the same collectives and sums, replies unchanged
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	19366ee591270c719fa6f710af0efd4d5a55cfc3e30c923f5ed08771b5c14001	raw
 zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41deeb452d1a679661351a473652b5f39f2da8	raw
@@ -162,7 +162,7 @@ zig/src/families/flashnext/cuda_qmm.zig	6d035feb053691cc9750a369c86a5463d41ed942
 zig/src/families/flashnext/cuda_rank_engine.zig	df6a83bcf80edfd94ac4474dbbc2e73818d40b7532430399af73f2eb95ccfa33	raw
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
-zig/src/families/flashnext/cuda_rank_wire.zig	b14747f6178a76ae2b974ec9b12515452533725392c422c65ab97c4ccf50144c	raw	Link.oneHost: whether both ranks share a host, from the link's two addresses; framing and waits unchanged
+zig/src/families/flashnext/cuda_rank_wire.zig	20980642342b78387f45e3218a419ef07a5c7e99412a88933d1ee4687bf0a679	raw	Link.oneHost: whether both ranks share a host, from the link's two addresses; framing and waits unchanged
 zig/src/families/flashnext/cuda_round_graph.zig	7fa3a54e93c81de36cf3962d0a68eb72a7dd81b8869f47b6d9ed8b9a6cc325cd	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
