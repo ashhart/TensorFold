@@ -470,10 +470,11 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         // The follower must listen before either rank signals ready: rank 0's measure seams follow the handshake.
         try h.workers.startFollower(p, h.back, a, why);
     }
-    if (pair) |p| p.ready(fp.?) catch |err| {
-        why.* = if (err == error.PairPeerSilent)
-            "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file"
-        else if (err == error.PairFingerprintMismatch) "the pair's Macs do not match on the engine version, GPU family, checkpoint or weight format" else try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
+    // a mismatch's words name the fact that differs (`Pair.ready`); the other failures are worded here
+    if (pair) |p| p.ready(fp.?, a, why) catch |err| {
+        if (err == error.PairPeerSilent) {
+            why.* = "the peer never signalled ready in five minutes: start rank 1 first, with the same build on both Macs and each rank's own settings file";
+        } else if (err != error.PairFingerprintMismatch) why.* = try std.fmt.allocPrint(a, "the pair link was not ready ({s}): restart both ranks", .{@errorName(err)});
         return err;
     };
     // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
@@ -581,4 +582,8 @@ pub fn close(ptr: *anyopaque) void {
 
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
     try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
+}
+
+test {
+    _ = @import("qwen27_served_cache_test.zig");
 }

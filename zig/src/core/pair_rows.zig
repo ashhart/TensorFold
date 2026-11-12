@@ -31,7 +31,7 @@ fn wireWord(w: u64) u64 {
 }
 
 /// A fingerprint fact's mismatch: names the fact and both sides' values, so the restart message says what differed.
-pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerprint) ?[]const u8 {
+pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerprint) !?[]const u8 {
     const facts = .{ .{ "engine version", "version" }, .{ "GPU family", "chip" }, .{ "checkpoint", "checkpoint" }, .{ "weight format", "format" } };
     inline for (facts) |f| {
         const name = f[0];
@@ -39,16 +39,15 @@ pub fn fingerprintProblem(a: std.mem.Allocator, mine: Fingerprint, peer: Fingerp
         const my = wireWord(@field(mine, field));
         const their = wireWord(@field(peer, field));
         if (my != their)
-            return std.fmt.allocPrint(a, "the pair's Macs do not match on the {s} ({x} against {x}): the bits come from the {s}," ++ " so the pair would serve tokens that match neither Mac alone; run the same build, checkpoint and format on both ranks", .{ name, my, their, name }) catch null;
+            return try std.fmt.allocPrint(a, "the pair's Macs do not match on the {s} ({x} against {x}): the bits come from the {s}," ++ " so the pair would serve tokens that match neither Mac alone; run the same build, checkpoint and format on both ranks", .{ name, my, their, name });
     }
     return null;
 }
 
-fn refuseFingerprint(mine: Fingerprint, peer: Fingerprint) !void {
-    if (fingerprintProblem(std.heap.page_allocator, mine, peer)) |text| {
-        std.log.err("pair rank: {s}", .{text});
-        return error.PairFingerprintMismatch;
-    }
+/// The fingerprint's words, in field order, at `FINGERPRINT` in the flag page: they must end before the beat word.
+const fingerprint_fields = @typeInfo(Fingerprint).@"struct".field_names;
+comptime {
+    std.debug.assert(pair_layout.FINGERPRINT + 8 * fingerprint_fields.len <= pair_layout.BEAT);
 }
 
 pub const command_words = pair_layout.command_words;
@@ -410,21 +409,20 @@ pub const Pair = struct {
         return if (kind == 0) null else kind;
     }
 
-    /// Both Macs loaded and alike where it changes the bits, before the first command: a mismatch refuses by name.
-    pub fn ready(p: *Pair, fp: Fingerprint) !void {
-        const mine = [4]u64{ fp.version, fp.chip, fp.checkpoint, fp.format };
+    /// Both Macs loaded and alike where it changes the bits, before the first command: `why` names a mismatched fact.
+    pub fn ready(p: *Pair, fp: Fingerprint, a: std.mem.Allocator, why: *[]const u8) !void {
         try p.rd.signal(p.peer, p.l.flags() + READY, 1);
-        for (mine, 0..) |w, i| try p.rd.signal(p.peer, p.l.flags() + FINGERPRINT + 8 * i, @max(w, 1));
+        inline for (fingerprint_fields, 0..) |name, i| try p.rd.signal(p.peer, p.l.flags() + FINGERPRINT + 8 * i, wireWord(@field(fp, name)));
         try p.reach(p.l.flags() + READY, 1, ready_timeout_ms);
         var peer: Fingerprint = .{};
-        switch (@typeInfo(Fingerprint)) {
-            .@"struct" => |st| inline for (st.field_names, 0..) |name, i| {
-                try p.reach(p.l.flags() + FINGERPRINT + 8 * i, 1, ready_timeout_ms);
-                @field(peer, name) = p.word64(p.l.flags() + FINGERPRINT + 8 * i).*;
-            },
-            else => unreachable,
+        inline for (fingerprint_fields, 0..) |name, i| {
+            try p.reach(p.l.flags() + FINGERPRINT + 8 * i, 1, ready_timeout_ms);
+            @field(peer, name) = @atomicLoad(u64, p.word64(p.l.flags() + FINGERPRINT + 8 * i), .acquire);
         }
-        try refuseFingerprint(fp, peer);
+        if (try fingerprintProblem(a, fp, peer)) |text| {
+            why.* = text;
+            return error.PairFingerprintMismatch;
+        }
     }
 
     /// This Mac's command wait ends (rank 1 at close).

@@ -113,6 +113,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-projection-cases", "Build real-input production projection precision replay", "zig/tests/qwen27/projection_cases.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
+    // the TP gate before any wire: ranks = 1 parity, then two rank-local shards through the loopback link
+    const tp_check = program(b, "tf-qwen27-tp-check", "The 27B TP gate: ranks = 1 parity, then the two-rank loopback stream (SKIP without a checkpoint)", "zig/tests/qwen27/tp_check.zig", target, true, engine_only);
+    test_step.dependOn(&b.addRunArtifact(tp_check).step);
     _ = program(b, "tf-qwen27-pages-resume", "Build kept states saved, restored and moved through KV pages against main's, no models", "zig/tests/qwen27/pages_resume.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-empty-keep", "Build shared empty/full keep state checks", "zig/tests/qwen27/empty_keep.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-keep-error", "Build the check that a failing keep returns its error, never aborting", "zig/tests/qwen27/keep_error.zig", target, false, engine_only);
