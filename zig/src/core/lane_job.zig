@@ -44,9 +44,11 @@ pub const Job = struct {
     prefix: @import("lane_host_prefix.zig").Waiting = .{}, // its wait for another fill's cut, while queued
     fetch: @import("lane_host_fetch.zig").Ticket = .{}, // its disk state read ahead, while queued
     lease: @import("kv_ledger.zig").Lease = .{}, // its caches' bytes in the host's ledger, from admission to its end
+    wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
 
-    /// Record first admission once, including a family planner and a background pass that later yields.
+    /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
+        job.wait_reason = .engine_busy;
         if (job.admitted_ns == null) job.admitted_ns = std.Io.Clock.awake.now(job.host.io).toNanoseconds();
     }
 

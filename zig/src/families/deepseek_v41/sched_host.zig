@@ -101,8 +101,9 @@ pub const SchedHost = struct {
                 };
                 return .admit;
             },
-            .wait => return .wait,
-            .skip => return .skip,
+            // the planner's own counters say which hold it met: the KV pool's pages or the memory floor
+            .wait => return .{ .wait = if (h.p.counts.pool_waits > before.pool_waits) .kv_pool else .memory_floor },
+            .skip => return .{ .skip = .prefill_concurrent }, // its one skip: a long prompt past the concurrent bound
             .refuse => |r| {
                 words.* = switch (r) {
                     .too_large => "the request needs more KV pool pages than the pool has",
