@@ -147,3 +147,62 @@ test "a short prompt or a cache-off store plans no ladder" {
         try std.testing.expectEqual(fresh(prompt), f.pass(&s, prompt, p));
     }
 }
+
+fn none(_: *anyopaque, _: *const pc.Entry) bool {
+    return false;
+}
+
+fn put(f: *Fake, s: *pc.Store, words: []const u32, at: u32) !void {
+    _ = f.pass(s, words[0..at], .{});
+    try std.testing.expect(s.keepBorn(words, @intCast(words.len), at, null, &.{}, &.{}));
+}
+
+test "a superseded ladder checkpoint goes after other redundant copies but before any conversation's newest state" {
+    const gpa = std.testing.allocator;
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), .{ .min_prompt = 0, .intermediate = 8, .intermediate_most = 4, .intermediate_min = 16 }, 1 << 20);
+    defer s.deinit();
+    var other: [40]u32 = undefined;
+    var own: [40]u32 = undefined;
+    for (&other, &own, 0..) |*o, *w, i| {
+        o.* = @intCast(9000 + i);
+        w.* = @intCast(1 + i);
+    }
+    try put(&f, &s, &other, 36); // the other conversation's newest state, and the oldest
+    try put(&f, &s, &own, 20); // a plain copy its own later states supersede
+    try put(&f, &s, &own, 32); // a ladder position: 32 is 8 times 4
+    try put(&f, &s, &own, 36); // this conversation's newest state
+    var order: [4]u32 = undefined;
+    var from: [4]u32 = undefined;
+    for (&order, &from) |*at, *first| {
+        const i = s.victimBut(null, &.{}, 0).?;
+        at.* = s.entries.items[i].at;
+        first.* = s.entries.items[i].tokens[0];
+        s.remove(i);
+    }
+    try std.testing.expectEqualSlices(u32, &.{ 20, 32, 36, 36 }, &order);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1, 9000, 1 }, &from);
+}
+
+test "ladder checkpoints fit only in the room the endpoint, the rewind state and other passes' promises leave" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const prompt = try a.alloc(u32, 160 * 1024);
+    for (prompt, 0..) |*t, i| t.* = @intCast(i % 65521);
+    const history: u32 = @intCast(prompt.len - 8);
+    const rewind: u32 = history - 4096;
+    var f: Fake = .{ .gpa = gpa };
+    var s = pc.Store.init(gpa, f.snapshots(), ladder, 1 << 20);
+    defer s.deinit();
+    const open = try s.lookupRewind(a, prompt, @intCast(prompt.len), history, rewind, &.{}, &.{}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ 32768, 65536, 131072, rewind, history }, open.marks);
+    // Other admitted passes hold all but the endpoint's and the rewind state's bytes, and a little more.
+    const left = (100 + @as(u64, history)) + (100 + @as(u64, rewind)) + 1000;
+    s.reservation_guard = .{ .ctx = &f, .needed = none, .promised = .{ .bytes = s.budget - left } };
+    defer s.reservation_guard = null;
+    const tight = try s.lookupRewind(a, prompt, @intCast(prompt.len), history, rewind, &.{}, &.{}, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ rewind, history }, tight.marks);
+    try std.testing.expectEqual(@as(u64, 3), s.counts.trimmed);
+}
