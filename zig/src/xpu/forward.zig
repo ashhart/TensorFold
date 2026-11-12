@@ -313,6 +313,7 @@ pub const Mode = struct { prompt: bool = false, want: Want = .last, stash: bool 
 pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mode) !?i32 {
     const want = mode.want != .none;
     if (ids.len > q.maxRows()) return error.TooManyRows; // the scratch holds maxRows, padded to 64
+    for (ids) |id| if (id < 0 or id >= VOCAB) return error.InvalidQwenToken; // embed reads the table at id unchecked
     const T: u32 = @intCast(ids.len);
     const wide = T > 16 or mode.prompt; // the prompt kernels: a prompt chunk cuts the same bits at any length
     const t32: i32 = @intCast(T);
