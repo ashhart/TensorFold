@@ -206,6 +206,42 @@ pub const Extra = struct {
     tap: ?Tap = null,
 };
 
+/// Refuses a start or head on several inputs or without caches, a head over 0 or too many rows, positions past cap.
+pub fn admit(x: Extra, ends: []const u32, cap: usize) !void {
+    if (ends.len == 0) return error.InvalidBatch;
+    const total = ends[ends.len - 1];
+    if ((x.start > 0 or x.head != null) and (ends.len != 1 or x.cache == null)) return error.InvalidBatch;
+    if (x.start + total > cap) return error.ContextFull;
+    if (x.head) |h| if (h.rows == 0 or h.rows > total) return error.InvalidBatch;
+}
+
+test "admit: the embeddings' call passes; a start or head needs one input and its caches, and stays in them" {
+    const c: Cache = .{ .kc = 256, .vc = 512, .stride = 256 };
+    try admit(.{}, &.{ 3, 7 }, 512);
+    try admit(.{ .start = 5, .cache = c, .head = .{ .rows = 7, .logits = 0 } }, &.{7}, 512);
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .start = 5 }, &.{7}, 512)); // no caches to resume
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .start = 5, .cache = c }, &.{ 3, 7 }, 512));
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .head = .{ .rows = 1, .logits = 0 } }, &.{7}, 512));
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .cache = c, .head = .{ .rows = 8, .logits = 0 } }, &.{7}, 512));
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .cache = c, .head = .{ .rows = 0, .logits = 0 } }, &.{7}, 512));
+    try std.testing.expectError(error.ContextFull, admit(.{ .start = 506, .cache = c }, &.{7}, 512));
+    try admit(.{ .start = 505, .cache = c }, &.{7}, 512);
+}
+
+test "a splice is cut to the pass: the rows inside its positions, none outside" {
+    const sp: Splice = .{ .ptr = 0, .at = 3, .n = 4 }; // positions 3..6
+    const in = sp.within(0, 10).?;
+    try std.testing.expectEqual(@as(usize, 0), in.src);
+    try std.testing.expectEqual(@as(usize, 3), in.dst);
+    try std.testing.expectEqual(@as(usize, 4), in.len);
+    const tail = sp.within(5, 1).?; // a one-row pass at position 5: the splice's row 2
+    try std.testing.expectEqual(@as(usize, 2), tail.src);
+    try std.testing.expectEqual(@as(usize, 0), tail.dst);
+    try std.testing.expectEqual(@as(usize, 1), tail.len);
+    try std.testing.expect(sp.within(7, 3) == null);
+    try std.testing.expect(sp.within(0, 3) == null);
+}
+
 /// Which of the CUDA kernels' geometry limits a spec breaks: the attention's heads, the row kernels' widths, or none.
 pub const Geometry = enum { ok, heads, widths };
 
@@ -306,10 +342,8 @@ pub const Lm = struct {
     /// forward with `x`'s start, caches, splice, head and taps; refused before any launch when they do not fit.
     pub fn forwardFrom(lm: *Lm, m: *const weights.Model, a: Addrs, cap: usize, ends: []const u32, x: Extra) !void {
         const s = m.spec;
+        try admit(x, ends, cap); // before any launch: a refused pass queues nothing
         const total = ends[ends.len - 1];
-        if ((x.start > 0 or x.head != null) and (ends.len != 1 or x.cache == null)) return error.InvalidBatch;
-        if (x.start + total > cap) return error.ContextFull;
-        if (x.head) |h| if (h.rows == 0 or h.rows > total) return error.InvalidBatch;
         try lm.emb.bf16(lm.s, a.ids, m.embed, a.x, total, s.hidden);
         if (x.splice) |sp| if (sp.within(x.start, total)) |in| {
             const row = s.hidden * 2;

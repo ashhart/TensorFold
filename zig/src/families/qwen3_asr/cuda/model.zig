@@ -91,7 +91,7 @@ pub const Model = struct {
         try m.lm.g.prepare(&.{.{ sp.vocab, sp.hidden }}); // the tied head: one more (n, k), which embeddings never run
         try m.lm.g.checkRows(1);
         try m.lm.g.checkRows(o.pass_rows);
-        // the scratch block sized to the positions: its RoPE and position tables and the chunk partials cover the caches
+        // the scratch sized to the positions: its RoPE, position tables and chunk partials cover the caches
         const sc = q3.lm.Scratch.of(sp, cap, 1);
         m.a = sc.at(try m.st.alloc(sc.total));
         try q3.lm.tables(gpa, d, m.a, sp, cap);
