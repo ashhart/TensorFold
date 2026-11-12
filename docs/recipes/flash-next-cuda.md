@@ -35,6 +35,9 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 
 - Both ranks run the same executable (they compare it) and need NCCL 2.30 or later; set `NCCL_SOCKET_IFNAME` and
   `NCCL_IB_HCA` for the link between the hosts. `--master-port` (default 29551) names rank 0's control port.
+- Ranks on two hosts prove a shared key before they exchange anything: add `--rank-secret rank.key` to both commands,
+  with the same owner-only file on each host. Without it, a rank that reaches another host refuses to start. See
+  [Ranks on more than one host](../../SECURITY.md#ranks-on-more-than-one-host).
 - A GB10's ConnectX-7 reaches the chip over two PCIe links, so each cabled port is two RDMA devices (`rocep1s0f0` and
   `roceP2p1s0f0` for the first port), and one device alone carries about 112 of the port's 200 Gb/s. Give both
   devices' interfaces an address, list both (`NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1`) and, when the interfaces

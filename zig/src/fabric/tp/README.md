@@ -26,6 +26,7 @@ The `INFO` line `tf-tp-test` prints at start shows the embedded kernel's size; `
 | `NCCL_IB_HCA` | NCCL | the same as above; NCCL otherwise picks its own devices |
 | `NCCL_SOCKET_IFNAME` | NCCL bootstrap | the host has several IP interfaces and NCCL picks one the peer cannot reach |
 | `TF_TP_MASTER` | the TCP bootstrap | always on two hosts: rank 0's address as the other rank reaches it |
+| `TF_RANK_SECRET_FILE` | the TCP bootstrap | always on two hosts: the same owner-only key file on each, proven on every connection |
 
 `TF_TP_ROCE_HCA` is `name[:gid],name[:gid]`: up to two devices, and optionally each one's RoCE v2 GID index.
 Without it the rank picks the devices itself, at most `TF_TP_ROCE_HCAS` (default 2).
