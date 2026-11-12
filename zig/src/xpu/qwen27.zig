@@ -418,7 +418,7 @@ pub const Runner = struct {
     /// One decoded token in; the next one's logits kept.
     pub fn step(r: *Runner, token: u32) !void {
         if (r.pos + 1 > r.context) return error.ContextFull;
-        const id: i32 = @intCast(token);
+        const id: i32 = @bitCast(token); // an id past i32 turns negative, which forward refuses
         r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on })).?);
         r.pos += 1;
         if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, 1);
