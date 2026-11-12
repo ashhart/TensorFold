@@ -38,8 +38,7 @@ pub const Blas = struct {
     api: Api,
     h: Handle,
 
-    /// The CUDA 13 soname first, then the unversioned link name, as cuda/cublaslt.zig opens cuBLASLt; on Windows
-    /// the CUDA 13 runtime DLL.
+    /// The CUDA 13 soname then the link name (on Windows the CUDA 13 DLL), as cuda/cublaslt.zig opens cuBLASLt.
     pub fn open(workspace: Ptr, workspace_bytes: usize) Error!Blas {
         const names: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{"cublas64_13.dll"} else &.{ "libcublas.so.13", "libcublas.so" };
         for (names) |path| {
