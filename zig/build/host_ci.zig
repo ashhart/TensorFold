@@ -275,6 +275,7 @@ const macos_adapters = [_][]const u8{
     "test-masked-values-host",
     "test-metal-counters-host",
     "test-minimax-info-host",
+    "test-moss-image-rotary-host",
     "test-qwen-dense-geometry-host",
     "test-qwen-dense-route-host",
     "test-qwen27-draft-tree-host",

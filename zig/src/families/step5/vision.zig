@@ -388,12 +388,12 @@ fn replacedRope(cs: []u16, sn: []u16, g: usize) void {
 
 const Diff = struct { differ: usize, ulps: u32 };
 
-/// Prints both tables' words and values side by side, then the largest absolute and relative difference.
-fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
+/// Counts the words that differ; when `loud`, prints both tables side by side and the largest differences.
+fn sideBySide(label: []const u8, old: []const f32, new: []const f32, loud: bool) Diff {
     var r: Diff = .{ .differ = 0, .ulps = 0 };
     var abs: f64 = 0;
     var rel: f64 = 0;
-    std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
+    if (loud) std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
     for (old, new, 0..) |o, n, i| {
         const a: u32 = @bitCast(o);
         const b: u32 = @bitCast(n);
@@ -404,16 +404,16 @@ fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
         abs = @max(abs, d);
         rel = @max(rel, d / @abs(@as(f64, o)));
         const sign = if (b > a) "+" else if (b < a) "-" else " ";
-        std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
+        if (loud) std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
     }
-    std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
+    if (loud) std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
         label, r.differ, old.len, r.ulps, abs, rel,
     });
     return r;
 }
 
-/// The bf16 entries of two tables that differ, printed with the largest difference and the first patch hit.
-fn tableDiff(label: []const u8, old: []const u16, new: []const u16) usize {
+/// The bf16 entries of two tables that differ; when `loud`, printed with the largest and the first patch hit.
+fn tableDiff(label: []const u8, old: []const u16, new: []const u16, loud: bool) usize {
     var differ: usize = 0;
     var most: f32 = 0;
     var first: ?usize = null;
@@ -422,13 +422,13 @@ fn tableDiff(label: []const u8, old: []const u16, new: []const u16) usize {
         most = @max(most, @abs(f32of(n) - f32of(o)));
         if (first == null) first = i / head_dim;
     };
-    std.debug.print("{s}: {d} of {d} entries differ, largest {e:.3}, first at patch {?d}\n", .{
+    if (loud) std.debug.print("{s}: {d} of {d} entries differ, largest {e:.3}, first at patch {?d}\n", .{
         label, differ, old.len, most, first,
     });
     return differ;
 }
 
-test "step5 host: tower RoPE frequencies (theta 1e4 over 48) on rope_freq, printed beside the fp32-pow form" {
+test "step5 host: tower RoPE frequencies (theta 1e4 over 48) on rope_freq, beside the fp32-pow form" {
     // transformers' form in exact arithmetic, rn32(1 / rn32(1e4^rn32(2i / 48))): it gives rope_freq.zig's torch words
     const want = [24]u32{
         0x3f800000, 0x3f2e6928, 0x3eeda63c, 0x3ea1e89b, 0x3e5c9d35, 0x3e164d7a, 0x3dcccccd, 0x3d8b8754,
@@ -437,11 +437,20 @@ test "step5 host: tower RoPE frequencies (theta 1e4 over 48) on rope_freq, print
     };
     var new: [head_dim / 4]f32 = undefined;
     rope_freq.inverseFrequencies(10000.0, head_dim / 2, &new);
-    for (want, new) |w, f| try std.testing.expectEqual(w, @as(u32, @bitCast(f)));
     var old: [head_dim / 4]f32 = undefined;
     for (&old, 0..) |*f, i| f.* = replacedInv(i);
-    const got = sideBySide("Step-5 tower (theta 1e4, 48 dims an axis)", &old, &new);
-    try std.testing.expectEqual(Diff{ .differ = 8, .ulps = 2 }, got);
+    const label = "Step-5 tower (theta 1e4, 48 dims an axis)";
+    for (want, new, 0..) |w, f, i| std.testing.expectEqual(w, @as(u32, @bitCast(f))) catch |e| {
+        std.debug.print("\n{s}: word {d}: expected 0x{x:0>8}, got 0x{x:0>8}\n", .{ label, i, w, @as(u32, @bitCast(f)) });
+        _ = sideBySide(label, &old, &new, true);
+        return e;
+    };
+    const got = sideBySide(label, &old, &new, false);
+    std.testing.expectEqual(Diff{ .differ = 8, .ulps = 2 }, got) catch |e| {
+        std.debug.print("\n{s}: expected 8 words to move by at most 2 ulp, got {d} by {d}\n", .{ label, got.differ, got.ulps });
+        _ = sideBySide(label, &old, &new, true);
+        return e;
+    };
     const a = std.testing.allocator;
     var counts: [2][2]usize = undefined;
     for ([_]usize{ big, small }, &counts) |g, *count| {
@@ -453,7 +462,12 @@ test "step5 host: tower RoPE frequencies (theta 1e4 over 48) on rope_freq, print
         var names: [2][64]u8 = undefined;
         const cos = try std.fmt.bufPrint(&names[0], "Step-5 tower bf16 cos, {d} x {d}", .{ g, g });
         const sin = try std.fmt.bufPrint(&names[1], "Step-5 tower bf16 sin, {d} x {d}", .{ g, g });
-        count.* = .{ tableDiff(cos, t[2 * n ..][0..n], t[0..n]), tableDiff(sin, t[3 * n ..][0..n], t[n..][0..n]) };
+        count.* = .{ tableDiff(cos, t[2 * n ..][0..n], t[0..n], false), tableDiff(sin, t[3 * n ..][0..n], t[n..][0..n], false) };
+        std.testing.expectEqual([2]usize{ 0, 0 }, count.*) catch |e| {
+            _ = tableDiff(cos, t[2 * n ..][0..n], t[0..n], true);
+            _ = tableDiff(sin, t[3 * n ..][0..n], t[n..][0..n], true);
+            return e;
+        };
     }
     try std.testing.expectEqual([2][2]usize{ .{ 0, 0 }, .{ 0, 0 } }, counts);
 }

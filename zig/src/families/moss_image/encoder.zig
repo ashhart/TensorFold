@@ -295,12 +295,12 @@ fn replacedRotary(cos: []f32, sin: []f32, rows: usize) void {
 
 const Diff = struct { differ: usize, ulps: u32 };
 
-/// Prints both tables' words and values side by side, then the largest absolute and relative difference.
-fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
+/// Counts the words that differ; when `loud`, prints both tables side by side and the largest differences.
+fn sideBySide(label: []const u8, old: []const f32, new: []const f32, loud: bool) Diff {
     var r: Diff = .{ .differ = 0, .ulps = 0 };
     var abs: f64 = 0;
     var rel: f64 = 0;
-    std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
+    if (loud) std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
     for (old, new, 0..) |o, n, i| {
         const a: u32 = @bitCast(o);
         const b: u32 = @bitCast(n);
@@ -311,9 +311,9 @@ fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
         abs = @max(abs, d);
         rel = @max(rel, d / @abs(@as(f64, o)));
         const sign = if (b > a) "+" else if (b < a) "-" else " ";
-        std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
+        if (loud) std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
     }
-    std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
+    if (loud) std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
         label, r.differ, old.len, r.ulps, abs, rel,
     });
     return r;
@@ -321,8 +321,8 @@ fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
 
 const TableDiff = struct { differ: usize, first: ?usize };
 
-/// The entries of two bf16-valued tables that differ, printed with the largest difference and the first row hit.
-fn tableDiff(label: []const u8, old: []const f32, new: []const f32, width: usize) TableDiff {
+/// The entries of two bf16-valued tables that differ; when `loud`, printed with the largest and the first row hit.
+fn tableDiff(label: []const u8, old: []const f32, new: []const f32, width: usize, loud: bool) TableDiff {
     var r: TableDiff = .{ .differ = 0, .first = null };
     var most: f32 = 0;
     for (old, new, 0..) |o, n, i| if (o != n) {
@@ -330,13 +330,13 @@ fn tableDiff(label: []const u8, old: []const f32, new: []const f32, width: usize
         most = @max(most, @abs(n - o));
         if (r.first == null) r.first = i / width;
     };
-    std.debug.print("{s}: {d} of {d} entries differ, largest {e:.3}, first at row {?d}\n", .{
+    if (loud) std.debug.print("{s}: {d} of {d} entries differ, largest {e:.3}, first at row {?d}\n", .{
         label, r.differ, old.len, most, r.first,
     });
     return r;
 }
 
-test "rotary: transformers' frequencies (theta 1e7 over 64), printed beside the fp32-pow form they replace" {
+test "moss image rotary: transformers' frequencies (theta 1e7 over 64), beside the fp32-pow form they replace" {
     // transformers 5.22.1's words for this config, as rope_freq.zig's first test has them
     const torch = [32]u32{
         0x3f800000, 0x3f1ab32b, 0x3ebaf81b, 0x3e61f835, 0x3e088d77, 0x3da50956, 0x3d47763f, 0x3cf11177,
@@ -347,20 +347,36 @@ test "rotary: transformers' frequencies (theta 1e7 over 64), printed beside the 
     const half = cfg.rotary / 2;
     var new: [half]f32 = undefined;
     rope_freq.inverseFrequencies(cfg.theta, cfg.rotary, &new);
-    for (torch, new) |w, f| try std.testing.expectEqual(w, @as(u32, @bitCast(f)));
     var old: [half]f32 = undefined;
     for (&old, 0..) |*f, i| f.* = replacedFrequency(i);
-    const got = sideBySide("MOSS-Image encoder (theta 1e7, rotary 64)", &old, &new);
-    try std.testing.expectEqual(Diff{ .differ = 15, .ulps = 5 }, got);
+    const label = "MOSS-Image encoder (theta 1e7, rotary 64)";
+    for (torch, new, 0..) |w, f, i| std.testing.expectEqual(w, @as(u32, @bitCast(f))) catch |e| {
+        std.debug.print("\n{s}: word {d}: expected 0x{x:0>8}, got 0x{x:0>8}\n", .{ label, i, w, @as(u32, @bitCast(f)) });
+        _ = sideBySide(label, &old, &new, true);
+        return e;
+    };
+    const got = sideBySide(label, &old, &new, false);
+    std.testing.expectEqual(Diff{ .differ = 15, .ulps = 5 }, got) catch |e| {
+        std.debug.print("\n{s}: expected 15 words to move by at most 5 ulp, got {d} by {d}\n", .{ label, got.differ, got.ulps });
+        _ = sideBySide(label, &old, &new, true);
+        return e;
+    };
     const a = std.testing.allocator;
     const n = cfg.max_rows * half;
     const t = try a.alloc(f32, 4 * n);
     defer a.free(t);
     rotary(t[0..n], t[n..][0..n], cfg.max_rows);
     replacedRotary(t[2 * n ..][0..n], t[3 * n ..][0..n], cfg.max_rows);
-    const cos = tableDiff("MOSS-Image encoder bf16 cos over 4096 rows", t[2 * n ..][0..n], t[0..n], half);
-    const sin = tableDiff("MOSS-Image encoder bf16 sin over 4096 rows", t[3 * n ..][0..n], t[n..][0..n], half);
+    const names = [2][]const u8{ "MOSS-Image encoder bf16 cos over 4096 rows", "MOSS-Image encoder bf16 sin over 4096 rows" };
+    const olds = [2][]const f32{ t[2 * n ..][0..n], t[3 * n ..][0..n] };
+    const news = [2][]const f32{ t[0..n], t[n..][0..n] };
     // a prompt of up to 565 rows (its formatted ids) reads the same tables as before
-    try std.testing.expectEqual(TableDiff{ .differ = 76, .first = 565 }, cos);
-    try std.testing.expectEqual(TableDiff{ .differ = 65, .first = 860 }, sin);
+    const want = [2]TableDiff{ .{ .differ = 76, .first = 565 }, .{ .differ = 65, .first = 860 } };
+    for (names, olds, news, want) |name, o, w, expected| {
+        const diff = tableDiff(name, o, w, half, false);
+        std.testing.expectEqual(expected, diff) catch |e| {
+            _ = tableDiff(name, o, w, half, true);
+            return e;
+        };
+    }
 }
