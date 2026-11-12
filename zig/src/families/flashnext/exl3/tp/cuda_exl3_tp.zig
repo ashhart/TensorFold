@@ -141,7 +141,7 @@ pub const Scratch = struct {
     d: *const cuda.Driver,
     mod: cuda.Module,
     mask_fn: cuda.Function,
-    /// The rank's masked picks [rows, 11] int32, then the finish's piece table and the all-gather buffer (gatherAt).
+    /// The rank's masked picks [rows, 11] int32, then the finish's piece table and the all-gather buffer of FP64 partials (gatherAt).
     picks: ?cuda.DeviceBuffer = null,
     rows: usize = 0,
     world: usize = 1,
@@ -172,13 +172,10 @@ pub const Scratch = struct {
             t.picks = null;
             t.rows = 0;
             t.world = world;
-            t.picks = try cuda.DeviceBuffer.alloc(t.d, gatherAt(rows) + world * canon.maxPartials(world) * rows * dims * 4);
+            t.picks = try cuda.DeviceBuffer.alloc(t.d, gatherAt(rows) + Partials.init(world, rows).bytes(world));
             t.rows = rows;
-            var meta: [3 * canon.max_pieces]i32 = undefined;
-            var ps: [canon.max_pieces]canon.Piece = undefined;
-            const np = canon.pieces(&ps, world);
-            if (np > 32) return error.TensorParallelUnavailable;
-            for (ps[0..np], 0..) |q, i| meta[3 * i ..][0..3].* = .{ q.start, q.log, @as(i32, q.rank) * @as(i32, @intCast(canon.maxPartials(world))) + q.idx };
+            var meta: [3 * meta_pieces]i32 = undefined;
+            const np = try pieceTable(&meta, world);
             try t.picks.?.upload(gatherAt(rows) - meta_bytes, std.mem.sliceAsBytes(meta[0 .. 3 * np]));
         }
         const cap = @min(rows, moe_rows);
@@ -206,12 +203,55 @@ pub const Scratch = struct {
     }
 };
 
+/// Most pieces the finish's table holds.
+const meta_pieces: usize = 32;
+
 /// Bytes of the finish's piece table, kept in front of the gather buffer.
-const meta_bytes: usize = 3 * 32 * 4;
+const meta_bytes: usize = 3 * meta_pieces * 4;
 
 /// Where the gather buffer starts in the picks allocation of `rows` rows: after the picks and the piece table.
 fn gatherAt(rows: usize) usize {
     return align256(rows * slots * 4) + meta_bytes;
+}
+
+/// The canonical exchange's partials: each rank's `most` subtrees of `n` rows as FP64 values, rank by rank in the one
+/// all-gather buffer. The finish merges them in FP64 and rounds once to f32 at the root.
+const Partials = struct {
+    /// Subtrees a rank computes at most: the all-gather's fixed width in partials.
+    most: usize,
+    /// FP64 elements a partial holds ([rows, dims]), and the finish's stride between pieces.
+    piece: usize,
+
+    const element = @sizeOf(f64);
+
+    fn init(world: usize, n: usize) Partials {
+        return .{ .most = canon.maxPartials(world), .piece = n * dims };
+    }
+
+    /// Bytes of every rank's block.
+    fn bytes(q: Partials, world: usize) usize {
+        return world * q.block() * element;
+    }
+
+    /// FP64 elements of one rank's block: what the typed all-gather counts.
+    fn block(q: Partials) usize {
+        return q.most * q.piece;
+    }
+
+    /// Byte offset in the gather buffer of rank `rank`'s `j`th partial.
+    fn at(q: Partials, rank: usize, j: usize) usize {
+        return (rank * q.most + j) * q.piece * element;
+    }
+};
+
+/// The finish's table into `meta`, a piece's start leaf, log and partial index (rank * most + idx) in leaf order; returns the count.
+fn pieceTable(meta: *[3 * meta_pieces]i32, world: usize) !usize {
+    var ps: [canon.max_pieces]canon.Piece = undefined;
+    const np = canon.pieces(&ps, world);
+    if (np > meta_pieces) return error.TensorParallelUnavailable;
+    const most: i32 = @intCast(canon.maxPartials(world));
+    for (ps[0..np], 0..) |q, i| meta[3 * i ..][0..3].* = .{ q.start, q.log, @as(i32, q.rank) * most + q.idx };
+    return np;
 }
 
 /// The Ops' expert-parallel scratch, made on first use.
@@ -285,21 +325,20 @@ pub fn canonical(p: anytype) !void {
     m.kept(p);
 }
 
-/// The canonical branch on `world` ranks: own subtrees, one fixed-size all-gather, every rank finishes the tree.
+/// The canonical branch on `world` ranks: own subtrees as FP64 partials, one fixed-size typed all-gather, every rank
+/// finishes the tree in FP64 and rounds once to f32.
 fn exchange(p: anytype, t: *Scratch, c: anytype, r: Rank) !void {
     const m = @import("../../cuda_batch_moe.zig");
-    const n = p.rows;
-    const most = canon.maxPartials(r.world);
-    const piece = n * dims; // floats a partial
+    const q = Partials.init(r.world, p.rows);
     const base = t.picks.?.ptr + gatherAt(t.rows);
     const run = canon.run(r.world, r.rank);
     var blk: [canon.max_blocks]canon.Block = undefined;
     const nb = canon.blocks(&blk, run.lo, run.hi);
-    for (blk[0..nb], 0..) |b, j| try m.leafTree(p, base + (r.rank * most + j) * piece * 4, b.start, b.log);
-    try c.gatherF32(p.stream, base + r.rank * most * piece * 4, base, most * piece);
+    for (blk[0..nb], 0..) |b, j| try m.leafPartial(p, base + q.at(r.rank, j), b.start, b.log);
+    try c.gatherF64(p.stream, base + q.at(r.rank, 0), base, q.block());
     var ps: [canon.max_pieces]canon.Piece = undefined;
     const np = canon.pieces(&ps, r.world);
-    try m.leafFinish(p, base, p.s.moe_f32, t.picks.?.ptr + gatherAt(t.rows) - meta_bytes, np, piece);
+    try m.leafFinish(p, base, p.s.moe_f32, t.picks.?.ptr + gatherAt(t.rows) - meta_bytes, np, q.piece);
     m.kept(p);
 }
 
@@ -469,6 +508,47 @@ test "exl3: tensor parallel placement opens at world 2 and still refuses other w
     }
     try std.testing.expectError(error.BadRank, memory.placement(a, std.testing.io, dir, 3, 0, false));
     try std.testing.expectError(error.BadRank, memory.placement(a, std.testing.io, dir, 2, 2, false));
+}
+
+test "exl3: each rank's FP64 partials sit where the finish's table reads them, at every world" {
+    const bytes = @sizeOf(f64);
+    for (1..9) |world| for ([_]usize{ 1, 5, moe_rows }) |rows| {
+        const q = Partials.init(world, rows);
+        var meta: [3 * meta_pieces]i32 = undefined;
+        const np = try pieceTable(&meta, world);
+        // the buffer is every rank's block of `most` partials, each [rows, dims] doubles; its start keeps NCCL's 16-byte alignment
+        try std.testing.expectEqual(world * q.most * rows * dims * bytes, q.bytes(world));
+        try std.testing.expectEqual(@as(usize, 0), gatherAt(rows) % 16);
+        // the table's pieces tile the 64 leaves in order
+        var leaf: usize = 0;
+        for (0..np) |i| {
+            try std.testing.expectEqual(leaf, @as(usize, @intCast(meta[3 * i])));
+            leaf += @as(usize, 1) << @intCast(meta[3 * i + 1]);
+        }
+        try std.testing.expectEqual(canon.leaves, leaf);
+        // each partial a rank writes is the piece the table reads at that offset, inside the rank's own gathered block
+        var read: usize = 0;
+        for (0..world) |rank| {
+            const own = canon.run(world, rank);
+            var blk: [canon.max_blocks]canon.Block = undefined;
+            const nb = canon.blocks(&blk, own.lo, own.hi);
+            try std.testing.expect(nb <= q.most);
+            try std.testing.expectEqual(rank * q.block() * bytes, q.at(rank, 0));
+            for (blk[0..nb], 0..) |b, j| {
+                try std.testing.expect(q.at(rank, j) + q.piece * bytes <= (rank + 1) * q.block() * bytes);
+                var matches: usize = 0;
+                for (0..np) |i| {
+                    if (@as(usize, @intCast(meta[3 * i + 2])) * q.piece * bytes != q.at(rank, j)) continue;
+                    try std.testing.expectEqual(@as(usize, b.start), @as(usize, @intCast(meta[3 * i])));
+                    try std.testing.expectEqual(@as(usize, b.log), @as(usize, @intCast(meta[3 * i + 1])));
+                    matches += 1;
+                }
+                try std.testing.expectEqual(@as(usize, 1), matches);
+                read += 1;
+            }
+        }
+        try std.testing.expectEqual(np, read);
+    };
 }
 
 test "exl3: the head splits at 128-column blocks and a shard's tiles are the full matrix's columns" {
