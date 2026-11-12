@@ -85,6 +85,6 @@ graphed decode equals eager decode, the prompt path equals decode rows, and a re
   `MUSE_PAIR=1` (both ranks on one GPU). At TP=2 set `TF_TP_*` on both nodes; rank 0 writes the outputs.
 - `tf-muse prompt MODEL IN_DIR OUT_DIR`: each chunk plan of `MUSE_PROMPT_PLANS` against decode rows, byte for byte.
 - `tf-muse dflash|drafted MODEL IN_DIR OUT_DIR`: the drafter's fixed protocol and drafted == plain greedy
-  (`TF_MUSE_DRAFTER` names a DFlash2 pack, `TF_MUSE_DRAFT_TAPS` overrides its taps on truncated packs); they need a
+  (`MUSE_DRAFTER` names a DFlash2 pack, `MUSE_DRAFT_TAPS` overrides its taps on truncated packs); they need a
   drafter, which is not part of the served setup (see Checkpoints).
 - Graphs against eager: `m1` with `MUSE_GRAPHS=1` against an eager run; the logits files must be byte-equal.
