@@ -537,6 +537,18 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
 }
 
+test "--mtp-drafts past three is refused by name before any load; three and fewer are not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var o: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 3 };
+    try checkGroup(a, o, &problem);
+    o.mtp_drafts = 4;
+    try std.testing.expectError(error.Refused, checkGroup(a, o, &problem));
+    try std.testing.expectEqualStrings("--mtp-drafts 4: the HIP engine drafts at most 3", problem);
+}
+
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
     const fp8: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .kv8 = true };
     try std.testing.expectEqualStrings(kv8_refusal, cacheRefused(fp8).?);
