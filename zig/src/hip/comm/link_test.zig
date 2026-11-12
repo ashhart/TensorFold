@@ -367,9 +367,8 @@ const Sender = struct {
 };
 
 /// Rank 1 joins rank 0 through a relay and reads one message; `tamper` has the relay change a bit of it.
-fn throughRelay(words: []const u32, tamper: bool, relay: *Relay, got: *std.ArrayList(u32)) !void {
+fn throughRelay(words: []const u32, key: auth.Secret, tamper: bool, relay: *Relay, got: *std.ArrayList(u32)) !void {
     loopback.ignorePipe();
-    const key = try auth.Secret.fromBytes("the group's rank secret");
     var sender: Sender = .{ .port = try loopback.freePort(), .secret = key, .words = words };
     const relay_port = try loopback.freePort();
     relay.* = .{ .server = try Relay.listen(relay_port), .to = sender.port };
@@ -394,11 +393,35 @@ test "security: rank 0's words cross the link sealed, and a bit changed on the w
     var got: std.ArrayList(u32) = .empty;
     defer got.deinit(std.testing.allocator);
     var relay: Relay = undefined;
-    try throughRelay(&words, false, &relay, &got);
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    try throughRelay(&words, key, false, &relay, &got);
     try std.testing.expectEqualSlices(u32, &words, got.items);
     // a host on the path saw the key proof and then records: none of the words, and not the policy words either
     const seen = relay.seen[0..relay.len];
     try std.testing.expect(seen.len > words.len * 4);
     for ([_]u32{ 0x51525354, 0x61626364, 0x71727374, 88213 }) |w| try std.testing.expect(std.mem.indexOf(u8, seen, std.mem.asBytes(&w)) == null);
-    try std.testing.expectError(error.LinkClosed, throughRelay(&words, true, &relay, &got));
+    try std.testing.expectError(error.LinkClosed, throughRelay(&words, key, true, &relay, &got));
+}
+
+test "security: a group with no key, on one host, is not sealed: after the proof rank 0's bytes cross as they are" {
+    const words = [_]u32{ 0x51525354, 0x61626364, 17, 4021 };
+    var got: std.ArrayList(u32) = .empty;
+    defer got.deinit(std.testing.allocator);
+    var relay: Relay = undefined;
+    try throughRelay(&words, .none, false, &relay, &got);
+    try std.testing.expectEqualSlices(u32, &words, got.items);
+    // the proof's challenge, then the answer, RCCL's id, the policy words and the message: no record heads, no tags
+    const id: rccl.UniqueId = .{ .internal = @splat(7) };
+    const policy: [Policy.word_count]u32 = @splat(100);
+    const n: u32 = words.len;
+    const want = try std.mem.concat(std.testing.allocator, u8, &.{
+        std.mem.asBytes(&link.Answer{}),
+        std.mem.asBytes(&id),
+        std.mem.sliceAsBytes(&policy),
+        std.mem.asBytes(&n),
+        std.mem.sliceAsBytes(&words),
+    });
+    defer std.testing.allocator.free(want);
+    try std.testing.expect(relay.len > auth.challenge_len);
+    try std.testing.expectEqualSlices(u8, want, relay.seen[auth.challenge_len..relay.len]);
 }

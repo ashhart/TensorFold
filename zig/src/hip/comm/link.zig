@@ -44,7 +44,7 @@ pub const Hello = extern struct {
 };
 
 /// Rank 0's answer to a hello: `field` 0 when the group formed, else the differing field + 1 and its rank.
-const Answer = extern struct { magic: u32 = magic, field: u32 = 0, rank: u32 = 0, pad: u32 = 0 };
+pub const Answer = extern struct { magic: u32 = magic, field: u32 = 0, rank: u32 = 0, pad: u32 = 0 };
 
 /// The first field where `h` differs from rank 0's `lead`, given the ranks already `taken`; null when it may join.
 pub fn differs(lead: Hello, h: Hello, taken: []const bool) ?Field {
@@ -64,8 +64,8 @@ pub const Link = struct {
     world: usize,
     /// Rank 0: the follower of rank r + 1 at index r. A follower: rank 0's socket at index 0.
     fds: [max_world - 1]posix.socket_t = undefined,
-    /// Each socket's seal: every byte after the key proof crosses in its records.
-    seals: [max_world - 1]*Seal = undefined,
+    /// Each socket's seal in a keyed group: every byte after the key proof crosses in its records. Null with no key.
+    seals: [max_world - 1]?*Seal = undefined,
 
     /// Rank 0 listens on `host:port`, answers once every proven hello matches its own; `fault` names one that does not.
     pub fn open(
@@ -107,8 +107,8 @@ pub const Link = struct {
         }
         errdefer _ = posix.system.close(link.fds[0]);
         const session = try auth.connect(link.fds[0], secret, .rocm, rank, world, proof_ms);
-        const lead_ = try Peer.init(link.fds[0], &session, true);
-        errdefer std.heap.page_allocator.destroy(lead_.seal);
+        const lead_ = try Peer.init(link.fds[0], &session, true, secret.keyed);
+        errdefer if (lead_.seal) |s| std.heap.page_allocator.destroy(s);
         link.seals[0] = lead_.seal;
         try lead_.write(std.mem.asBytes(&hello));
         var answer: Answer = undefined;
@@ -164,7 +164,7 @@ pub const Link = struct {
                 _ = posix.system.close(fd);
                 continue;
             };
-            const from = Peer.init(fd, &who.session, false) catch {
+            const from = Peer.init(fd, &who.session, false, secret.keyed) catch {
                 _ = posix.system.close(fd);
                 continue;
             };
@@ -237,44 +237,48 @@ pub const Link = struct {
     }
 };
 
-/// One proven connection: every byte on it crosses in its seal's records.
+/// One proven connection: in a keyed group every byte on it crosses in its seal's records.
 const Peer = struct {
     fd: posix.socket_t,
-    seal: *Seal,
+    /// Null with no key: the proof's session key is then public, so the bytes cross as they did before seals.
+    seal: ?*Seal,
 
     /// The seal is kept off the stack: a link's sockets outlive the call that opens them.
-    fn init(fd: posix.socket_t, session: *const auth.Key, connector: bool) Error!Peer {
+    fn init(fd: posix.socket_t, session: *const auth.Key, connector: bool, keyed: bool) Error!Peer {
+        if (!keyed) return .{ .fd = fd, .seal = null };
         const seal = try std.heap.page_allocator.create(Seal);
         seal.* = .init(session, connector);
         return .{ .fd = fd, .seal = seal };
     }
 
     fn deinit(p: Peer) void {
-        std.heap.page_allocator.destroy(p.seal);
+        if (p.seal) |s| std.heap.page_allocator.destroy(s);
         _ = posix.system.close(p.fd);
     }
 
     fn write(p: Peer, bytes: []const u8) Error!void {
+        const s = p.seal orelse return writeAll(p.fd, bytes);
         var wire: [auth.seal.max_record]u8 = undefined;
         var at: usize = 0;
         while (at < bytes.len) {
             const n = @min(bytes.len - at, auth.seal.max_plain);
-            try writeAll(p.fd, wire[0..p.seal.seal(bytes[at..][0..n], &wire)]);
+            try writeAll(p.fd, wire[0..s.seal(bytes[at..][0..n], &wire)]);
             at += n;
         }
     }
 
     /// Fills `bytes`; each wait ends at `until` (auth.nowMs's clock) when one is given.
     fn read(p: Peer, bytes: []u8, until: ?u64) Error!void {
-        var at = p.seal.take(bytes);
+        const s = p.seal orelse return fill(p.fd, bytes, until);
+        var at = s.take(bytes);
         while (at < bytes.len) {
             var head: [auth.seal.head_len]u8 = undefined;
             try fill(p.fd, &head, until);
             var body: [auth.seal.max_plain + auth.seal.tag_len]u8 = undefined;
             const n = Seal.bodyLen(&head) catch return unsealed();
             try fill(p.fd, body[0..n], until);
-            p.seal.open(&head, body[0..n]) catch return unsealed();
-            at += p.seal.take(bytes[at..]);
+            s.open(&head, body[0..n]) catch return unsealed();
+            at += s.take(bytes[at..]);
         }
     }
 };
