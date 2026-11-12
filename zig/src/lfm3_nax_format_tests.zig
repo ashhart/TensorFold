@@ -16,6 +16,8 @@ fn gated(a: std.mem.Allocator, list: []const limits.MetalLaunch, f: nax.Format) 
     };
     // the route dispatches nax.threads threads and nax.threadgroup_bytes bytes: the record must not understate either
     if (d.threads < nax.threads or d.tg_memory < nax.threadgroup_bytes) return error.NaxRecordUnderstatesLaunch;
+    // the route adds no dynamic threadgroup memory, holds its threads' registers and is a tensor-op kernel
+    if (d.dynamic != 0 or d.reserved != nax.threads or d.offline) return error.NaxRecordMispinned;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(a);
     for (limits.apple) |chip| {
@@ -44,5 +46,11 @@ test "LFM3 NAX prompt: q6g32 and q8g32 are formats the route builds, and each fa
             n += 1;
         }
         try std.testing.expectError(error.MissingNaxLaunchRecord, gated(a, kept[0..n], f));
+    }
+}
+
+test "LFM3 NAX prompt: formats outside the table are refused" {
+    for ([_]nax.Format{ .{ .bits = 2, .group = 64 }, .{ .bits = 3, .group = 64 }, .{ .bits = 5, .group = 32 }, .{ .bits = 4, .group = 128 }, .{ .bits = 8, .group = 16 } }) |f| {
+        try std.testing.expect(!nax.supported(f.bits, f.group));
     }
 }
