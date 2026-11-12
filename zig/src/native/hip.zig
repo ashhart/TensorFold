@@ -194,7 +194,7 @@ fn join(
             a,
             problem,
             "the ranks' link at {s}:{d} failed ({s})",
-            .{ o.master, o.master_port, @errorName(err) },
+            .{ o.master, o.master_port, @import("sys").rank_auth.explain(err) orelse @errorName(err) },
         ),
     };
 }

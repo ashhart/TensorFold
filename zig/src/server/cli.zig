@@ -134,6 +134,7 @@ pub const flags = [_]Flag{
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
     .{ .name = "--master-port", .native = served("--tp") },
+    .{ .name = "--rank-secret", .native = served("--tp") },
     // the GPU engine's policy switches as key=value pairs, repeatable
     .{ .name = "--policy", .kind = .append, .native = served("--policy") },
     .{ .name = "--kv-dtype", .choices = &.{ "bf16", "int8", "int4" } },
