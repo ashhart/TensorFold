@@ -211,6 +211,7 @@ const linux_host = [_][]const u8{
     "test-qwen27-plans-host",
     "test-qwen27-speed-host",
     "test-qwen27-window-host",
+    "test-qwen3-cuda-host",
     "test-qwen35-cache-host",
     "test-qwen35-copies-host",
     "test-qwen35-decode-records-host",

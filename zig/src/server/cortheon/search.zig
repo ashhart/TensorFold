@@ -57,6 +57,87 @@ fn fragmentText(a: Allocator, fragment: []const u8) Allocator.Error![]const u8 {
     return std.mem.trim(u8, t.text, " \n");
 }
 
+/// The last start of `needle` in `hay`, matching letters in either case; null when none.
+fn lastIgnoreCase(hay: []const u8, needle: []const u8) ?usize {
+    var last: ?usize = null;
+    var from: usize = 0;
+    while (std.ascii.findIgnoreCasePos(hay, from, needle)) |at| {
+        last = at;
+        from = at + 1;
+    }
+    return last;
+}
+
+/// `marker` with each `"` and `'` swapped into `buf`, or null when it has neither.
+fn otherQuotes(marker: []const u8, buf: []u8) ?[]const u8 {
+    if (marker.len > buf.len) return null;
+    var changed = false;
+    for (marker, buf[0..marker.len]) |c, *o| {
+        o.* = if (c == '"') blk: {
+            changed = true;
+            break :blk '\'';
+        } else if (c == '\'') blk: {
+            changed = true;
+            break :blk '"';
+        } else c;
+    }
+    return if (changed) buf[0..marker.len] else null;
+}
+
+/// Next mark at or after `from`, either quote style, walked once as `from` advances.
+fn findMark(page: []const u8, from: usize, marker: []const u8) ?usize {
+    var alt_buf: [64]u8 = undefined;
+    const alt = otherQuotes(marker, &alt_buf);
+    var i = from;
+    while (i < page.len) : (i += 1) {
+        if (std.ascii.startsWithIgnoreCase(page[i..], marker)) return i;
+        if (alt) |a| if (std.ascii.startsWithIgnoreCase(page[i..], a)) return i;
+    }
+    return null;
+}
+
+/// Whether two result URLs name the same page: scheme and host without case, path and query as written.
+fn sameResultUrl(a: []const u8, b: []const u8) bool {
+    const a_sep = std.mem.indexOf(u8, a, "://") orelse return std.mem.eql(u8, a, b);
+    const b_sep = std.mem.indexOf(u8, b, "://") orelse return std.mem.eql(u8, a, b);
+    if (!std.ascii.eqlIgnoreCase(a[0..a_sep], b[0..b_sep])) return false;
+    const a_rest = a[a_sep + 3 ..];
+    const b_rest = b[b_sep + 3 ..];
+    const a_host = std.mem.indexOfAny(u8, a_rest, "/?#") orelse a_rest.len;
+    const b_host = std.mem.indexOfAny(u8, b_rest, "/?#") orelse b_rest.len;
+    if (!std.ascii.eqlIgnoreCase(a_rest[0..a_host], b_rest[0..b_host])) return false;
+    return std.mem.eql(u8, a_rest[a_host..], b_rest[b_host..]);
+}
+
+/// The href in a tag. Whitespace bounds the name, and a quote with no closer drops it.
+fn hrefValue(tag: []const u8) ?[]const u8 {
+    var from: usize = 0;
+    while (std.ascii.findIgnoreCasePos(tag, from, "href")) |href_name| { // HREF is the same attribute
+        if (href_name > 0 and !std.ascii.isWhitespace(tag[href_name - 1])) { // data-href is not this attribute
+            from = href_name + 1;
+            continue;
+        }
+        var after = href_name + 4;
+        while (after < tag.len and std.ascii.isWhitespace(tag[after])) after += 1; // href = is the same attribute
+        if (after >= tag.len or tag[after] != '=') {
+            from = href_name + 1;
+            continue;
+        }
+        var v = tag[after + 1 ..];
+        while (v.len > 0 and std.ascii.isWhitespace(v[0])) v = v[1..];
+        if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) {
+            const q = v[0];
+            v = v[1..];
+            // the rest of the tag is inside this value, so a later href there is not an attribute
+            const end = std.mem.indexOfScalar(u8, v, q) orelse return null;
+            return v[0..end];
+        }
+        const end = std.mem.indexOfAny(u8, v, " \t\r\n>") orelse v.len; // unquoted ends at whitespace or >
+        return std.mem.trim(u8, v[0..end], " \t\r\n");
+    }
+    return null;
+}
+
 /// `text` with each `&amp;` entity turned into `&`, matching the entity's letters in either case.
 fn decodeAmp(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -108,7 +189,7 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
     var from: usize = 0;
     var last: usize = 0; // where the previous link ended: every search back stops there, so each byte is read once
     while (out.items.len < limit) {
-        const at = std.ascii.findIgnoreCasePos(page, from, marker) orelse break; // CLASS="result__a" is the same mark
+        const at = findMark(page, from, marker) orelse break; // CLASS="result__a" or class='result__a' is the same mark
         const lt = std.mem.lastIndexOfScalar(u8, page[last..at], '<') orelse { // a mark outside any tag: skip it
             from = at + marker.len;
             last = at;
@@ -116,32 +197,29 @@ fn parseMarked(a: Allocator, page: []const u8, limit: usize, m: Marks) Allocator
         };
         const tag_start = last + lt;
         const tag_end = std.mem.indexOfScalarPos(u8, page, at, '>') orelse break;
-        const next = std.ascii.findIgnoreCasePos(page, tag_end, marker) orelse page.len;
+        const next = findMark(page, tag_end, marker) orelse page.len;
         from = tag_end;
         const lo = last;
         last = tag_end;
-        const block = std.mem.lastIndexOf(u8, page[lo..tag_start], "class=\"result ");
+        const block_dq = lastIgnoreCase(page[lo..tag_start], "class=\"result "); // CLASS="result is the same wrapper
+        const block_sq = lastIgnoreCase(page[lo..tag_start], "class='result "); // class='result is the same wrapper
+        const block = if (block_dq != null and block_sq != null) @max(block_dq.?, block_sq.?) else block_dq orelse block_sq;
         const block_start = if (block) |b| lo + b else tag_start;
         if (std.ascii.findIgnoreCase(page[block_start..tag_start], "result--ad") != null) continue; // Result--ad is still an ad
         const tag = page[tag_start..tag_end];
-        const href_at = std.ascii.findIgnoreCase(tag, "href=") orelse continue; // HREF= is the same attribute
-        var v = tag[href_at + 5 ..];
-        const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else 0; // a single-quoted target is still a link
-        if (q == 0) continue;
-        v = v[1..];
-        const href_end = std.mem.indexOfScalar(u8, v, q) orelse continue;
-        const url = (try resultTarget(a, v[0..href_end])) orelse continue;
+        const href_raw = hrefValue(tag) orelse continue;
+        const url = (try resultTarget(a, href_raw)) orelse continue;
         const close = std.ascii.findIgnoreCasePos(page[0..next], tag_end, "</a>") orelse continue; // </A> closes the title too
         const title = try fragmentText(a, page[tag_end + 1 .. close]);
         var snippet: []const u8 = "";
-        if (std.ascii.findIgnoreCasePos(page[0..next], close, m.snippet)) |s| { // CLASS="result__snippet" is the same mark
+        if (findMark(page[0..next], close, m.snippet)) |s| { // CLASS="result__snippet" or class='…' is the same mark
             const s_open = (std.mem.indexOfScalarPos(u8, page[0..next], s, '>') orelse s) + 1;
             // a snippet with no end (a page cut at its size cap) is left out rather than sliced backwards
             if (std.ascii.findIgnoreCasePos(page[0..next], s_open, m.snippet_end)) |s_close|
                 snippet = try fragmentText(a, page[s_open..s_close]);
         }
         var seen = false;
-        for (out.items) |r| seen = seen or std.mem.eql(u8, r.url, url);
+        for (out.items) |r| seen = seen or sameResultUrl(r.url, url); // Example.org is the same host; paths keep their case
         if (!seen and title.len > 0) try out.append(a, .{ .title = title, .url = url, .snippet = snippet });
     }
     return out.items;
@@ -237,6 +315,151 @@ test "a search ad is skipped when the mark's letters differ" {
         \\<div class="result results_links Result--ad"><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
         \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
     ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search ad is skipped when the wrapper's class letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div CLASS="result results_links result--ad"><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search ad is skipped when the wrapper uses single quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class='result results_links result--ad'><h2><a class="result__a" href="https://ads.example/buy">Buy now</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result is found when its class uses single quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class='result__a' href=\"https://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search snippet is found when its class uses single quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Example</a></h2>
+        \\<a class='result__snippet' href="https://example.org/page">A short blurb.</a></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("A short blurb.", results[0].snippet);
+}
+
+test "a lite search result is found when its class uses double quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<tr><td><a rel=\"nofollow\" href='https://example.org/page' class=\"result-link\">Example</a></td></tr>";
+    const results = try parseDuckDuckGoLite(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps an unquoted href" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=https://example.org/page>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps a link when spaces surround href's equals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href = \"https://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search drops a duplicate when only the host's letters differ" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://Example.org/page">One</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/page">Two</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("One", results[0].title);
+}
+
+test "a search keeps two results that differ only in path case" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page =
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/wiki/Apple">One</a></h2></div>
+        \\<div class="result results_links web-result"><h2><a class="result__a" href="https://example.org/wiki/APPLE">Two</a></h2></div>
+    ;
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("https://example.org/wiki/Apple", results[0].url);
+    try std.testing.expectEqualStrings("https://example.org/wiki/APPLE", results[1].url);
+}
+
+test "a search result keeps a link when an earlier attribute contains href" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" data-href=\"https://other.example/x\" href=\"https://example.org/page\">Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result keeps an unquoted href that ends at a tab" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=https://example.org/page\ttitle=x>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("https://example.org/page", results[0].url);
+}
+
+test "a search result drops a quoted href that never closes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\" href=\"https://bad.example/x href='https://example.org/page'>Example</a></h2></div>";
+    const results = try parseDuckDuckGo(a, page, 5);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "a search result keeps a link when a newline precedes href" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const page = "<div class=\"result results_links web-result\"><h2><a class=\"result__a\"\nhref=\"https://example.org/page\">Example</a></h2></div>";
     const results = try parseDuckDuckGo(a, page, 5);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqualStrings("https://example.org/page", results[0].url);

@@ -117,6 +117,7 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .n = 3 },
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .raw = "/tmp/pocket rows", .n = 0 },
+    .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
 };
 

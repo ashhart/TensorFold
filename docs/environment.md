@@ -18,6 +18,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_STARTUP_RECEIPT` | Exactly `0` or `1`; default off. `1` writes the startup and first completion receipts |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
+| `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
 | `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
 | `TF_FLASHNEXT_SHARD_HEAD` | Exactly `0` or `1`; default on; only TP=2 splits the head, while TP=1 remains whole |
@@ -79,6 +80,7 @@ CUDA device/segments and the slide test hook retain their space trimming.
 Other numeric readers do not gain whitespace aliases. Empty or whitespace-only text means unset for every variable, as it did before.
 `TF_GEMMA4_CHUNK_SOLO` is the exception to "as before": its old reader refused blank text, and now reads it as off.
 The table checks only that it is a whole number; the lane core's `solo_chunk.parse` judges it against the family's grid.
+`TENSORFOLD_CUDA_KERNELS` is an exception to the blank rule: the main CUDA open takes a blank value as a folder name and refuses it (it holds no `aot.json`), and the Qwen4 and Drama 3 opens refuse a value of only whitespace; Qwen3 reads a blank value as unset.
 The two `TF_DRAMA_*` settings are another: their old reader refused text of only tabs or line breaks, and now reads it as unset.
 
 An explicit `--device` or `--segments` wins over its environment value, even if the ignored value is malformed.
