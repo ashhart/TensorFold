@@ -689,11 +689,29 @@ const EXPLORE_TOOLS = TOOL_SCHEMAS.filter((t) => EXPLORE_TOOL_NAMES.includes(t.f
 // Resolve a requested tool-name subset down to ones that are both known (have a schema)
 // and provably read-only. Pure + exported so the safety filtering is unit-testable without
 // driving a real model. Empty/absent `requested` => the Explore default toolset.
-export function delegateChildToolSchemas(requested?: string[] | null) {
+// `parentOffered` is the parent run's own tool set: a child never gets a tool its parent was
+// not offered, so disabled tools and local-only modes stay off for the child too.
+export function delegateChildToolSchemas(requested?: string[] | null, parentOffered?: ReadonlySet<string>) {
   if (!requested || !requested.length) return EXPLORE_TOOLS
-  const allowed = requested.filter((name) => isReadOnlyTool(name))
+  const allowed = requested.filter((name) => isReadOnlyTool(name) && (!parentOffered || parentOffered.has(name)))
   const schemas = TOOL_SCHEMAS.filter((t) => allowed.includes(t.function.name))
   return schemas.length ? schemas : EXPLORE_TOOLS
+}
+
+// A child runs unattended on untrusted files, and a model can name a tool it was never offered.
+// Returns why a child tool call must not run, or null: only an offered tool runs, and web_fetch
+// keeps the parent's rule that it only reaches hosts the user typed.
+export function childToolRefusal(
+  name: string,
+  args: Record<string, any>,
+  offered: ReadonlyArray<{ function?: { name?: string } }>,
+  userTexts: string[],
+): string | null {
+  if (!offered.some((tool) => tool.function?.name === name)) return `Denied: ${name} is not one of this read-only child's tools.`
+  if (name === 'web_fetch' && webFetchNeedsApproval(args, userTexts)) {
+    return 'Denied for a read-only child: web_fetch only reaches hosts the user typed. Ask the user to share the link.'
+  }
+  return null
 }
 
 // Child research tools must execute against the same workspace backend as their parent.
@@ -715,6 +733,7 @@ async function runDelegateChild(
   signal: AbortSignal,
   tools: ReturnType<typeof buildToolSchemas> = EXPLORE_TOOLS,
   maxSteps: number = DEFAULT_DELEGATE_MAX_STEPS,
+  userTexts: string[] = [],
   toolContext?: Partial<ToolContext>,
   assertRequestAllowed?: () => void,
 ): Promise<string> {
@@ -748,7 +767,9 @@ async function runDelegateChild(
       const matchedSchema = tools.find((t: any) => t.function?.name === call.function.name)
       if (matchedSchema?.function?.parameters) args = coerceToolArgs(args, matchedSchema.function.parameters as Record<string, unknown>)
       let result: Pick<ToolResult, 'output' | 'ok' | 'meta'>
-      try { result = await executeTool(call.function.name, args, auxiliaryToolContext(cwd, toolContext, signal)) } catch (e: any) { result = { ok: false, output: `error: ${e?.message ?? e}` } }
+      const refusal = childToolRefusal(call.function.name, args, tools, userTexts)
+      if (refusal) result = { ok: false, output: refusal }
+      else try { result = await executeTool(call.function.name, args, auxiliaryToolContext(cwd, toolContext, signal)) } catch (e: any) { result = { ok: false, output: `error: ${e?.message ?? e}` } }
       const view = compressToolOutput({ tool: call.function.name, ...result, args, maxChars: 8_000, maxBytes: 24_000 })
       messages.push(rememberPreparedToolOutput({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: wrapUntrustedToolOutput(call.function.name, view.content) }))
     }
@@ -758,7 +779,7 @@ async function runDelegateChild(
 }
 
 async function runExplore(provider: Provider, model: string, cwd: string, query: string, signal: AbortSignal, toolContext?: Partial<ToolContext>, assertRequestAllowed?: () => void): Promise<string> {
-  return runDelegateChild(provider, model, cwd, query, signal, EXPLORE_TOOLS, 8, toolContext, assertRequestAllowed)
+  return runDelegateChild(provider, model, cwd, query, signal, EXPLORE_TOOLS, 8, [], toolContext, assertRequestAllowed)
 }
 
 const ORACLE_MAX_STEPS = 6
@@ -793,7 +814,9 @@ async function runOracle(provider: Provider, model: string, cwd: string, query: 
       const matched = EXPLORE_TOOLS.find((t: any) => t.function?.name === call.function.name)
       if (matched?.function?.parameters) a = coerceToolArgs(a, matched.function.parameters as Record<string, unknown>)
       let result: Pick<ToolResult, 'output' | 'ok' | 'meta'>
-      try { result = await executeTool(call.function.name, a, auxiliaryToolContext(cwd, toolContext, signal)) } catch (e: any) { result = { ok: false, output: `error: ${e?.message ?? e}` } }
+      const refusal = childToolRefusal(call.function.name, a, EXPLORE_TOOLS, [])
+      if (refusal) result = { ok: false, output: refusal }
+      else try { result = await executeTool(call.function.name, a, auxiliaryToolContext(cwd, toolContext, signal)) } catch (e: any) { result = { ok: false, output: `error: ${e?.message ?? e}` } }
       const view = compressToolOutput({ tool: call.function.name, ...result, args: a, maxChars: 8_000, maxBytes: 24_000 })
       messages.push(rememberPreparedToolOutput({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: wrapUntrustedToolOutput(call.function.name, view.content) }))
     }
@@ -1979,8 +2002,10 @@ export async function runAgent(deps: RunDeps): Promise<void> {
                 maxConcurrent: DELEGATE_TASK_MAX_CONCURRENT,
                 runOneChild: async (input) => {
                   try {
-                    const tools = delegateChildToolSchemas(input.toolNames)
-                    const result = await runDelegateChild(provider, model, cwd, input.task, signal, tools, input.maxSteps, deps.toolContext, assertRequestAllowed)
+                    const parentOffered = new Set<string>(turnSchemas.map((schema: any) => schema.function?.name).filter(Boolean))
+                    const userTexts = thread.timeline.filter((entry) => entry.kind === 'user').map((entry) => entry.text ?? '')
+                    const tools = delegateChildToolSchemas(input.toolNames, parentOffered)
+                    const result = await runDelegateChild(provider, model, cwd, input.task, signal, tools, input.maxSteps, userTexts, deps.toolContext, assertRequestAllowed)
                     return { result }
                   } catch (e: any) {
                     return { result: '', error: e?.message ?? String(e) }
