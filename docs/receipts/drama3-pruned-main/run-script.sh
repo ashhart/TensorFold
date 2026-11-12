@@ -15,6 +15,8 @@ out=/work/out/drama3
 zig_out=$out/zig-out
 # the checkout may be read-only: caches and builds go to the output
 export ZIG_GLOBAL_CACHE_DIR=$out/zig-cache ZIG_LOCAL_CACHE_DIR=$out/zig-cache
+# the job sets no library path; cuBLAS comes with the CUDA mount
+export LD_LIBRARY_PATH=/usr/local/cuda/targets/sbsa-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$fatbins/SHA256SUMS" "$(command -v zig)"; do
     [ -e "$path" ] || { echo "missing $path; /assets holds:" >&2; find /assets -maxdepth 3 >&2; exit 1; }
 done
