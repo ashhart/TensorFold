@@ -20,12 +20,13 @@ GLM-5.3-Flash.
 - This page's format description and arithmetic came with that module. The native decoder and the CUDA operators in
   review follow them.
 
-The first native CUDA Flash Next slice uses the canonical fp32 expert reduction: 64 leaves of 8 expert IDs,
-the shared expert in leaf 63, an FMA chain in pick order inside each leaf, and a fixed balanced tree above them.
-This differs from the unreleased 11-slot-chain prototype. The later TP slice partitions this same tree rather than
-changing the one-rank arithmetic. Other Flash Next formats retain their existing reduction.
-Empty siblings contribute their actual `+0` additions, including when a product underflows to negative zero,
-so partitioning the tree does not change its zero sign.
+The first native CUDA Flash Next slice uses 64 leaves of 8 expert IDs, the shared expert in leaf 63,
+an FMA chain in pick order inside each leaf, and a fixed balanced tree above them. Leaf sums and tree
+additions stay in float64; only the root rounds once to float32, round-to-nearest-even.
+This differs from the unreleased 11-slot-chain prototype. The later TP slice partitions the same tree and
+transports float64 partials without narrowing. Other Flash Next formats retain their existing reduction.
+Empty siblings contribute their actual `+0` additions before the root's conversion, preserving the same
+zero sign at every partition.
 
 ## Engine versions
 
