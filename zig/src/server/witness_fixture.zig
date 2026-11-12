@@ -8,6 +8,7 @@ const cli = @import("cli.zig");
 const listener = @import("listener.zig");
 const witness = @import("witness.zig");
 const parts = @import("witness_parts.zig");
+const model_text = @import("model_text.zig");
 const ByteText = @import("embedding_protocol_test.zig").ByteText;
 const posix = @import("sys").posix;
 const t = std.testing;
@@ -48,6 +49,21 @@ pub const Engine = struct {
     }
     fn memory(_: *anyopaque, _: bool) ?api.Memory {
         return null;
+    }
+};
+
+/// ByteText whose template renders, for the routes that run a chat.
+pub const ChatText = struct {
+    const table = blk: {
+        var base = ByteText.model().vtable.*;
+        base.render = render;
+        break :blk base;
+    };
+    pub fn model() model_text.Text {
+        return .{ .ctx = undefined, .vtable = &table };
+    }
+    fn render(_: *anyopaque, a: Allocator, _: json.Value, _: model_text.RenderOptions, _: *[]const u8) model_text.Error!model_text.Rendered {
+        return .{ .text = try a.dupe(u8, "prompt") };
     }
 };
 
@@ -110,9 +126,10 @@ pub const Harness = struct {
     text: ?*parts.Text = null,
     binary: ?parts.Binary = null,
     state: ?*witness.State = null,
+    model: model_text.Text = ByteText.model(),
 
     pub fn start(h: *Harness, engine: *Engine, keys: ?*auth.Store, checkpoint: ?*Checkpoint, args: cli.Args) !void {
-        h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), ByteText.model(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .keep_warm_s = 0 }, keys);
+        h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), h.model, .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .keep_warm_s = 0 }, keys);
         errdefer h.srv.deinit();
         if (checkpoint) |c| {
             h.text = try parts.Text.stamp(t.allocator, t.io, c.path, null);
