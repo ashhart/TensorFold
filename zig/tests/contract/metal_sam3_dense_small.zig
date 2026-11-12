@@ -13,6 +13,9 @@ fn depth(shape: c.Shape) usize {
 const served = [_]c.Shape{
     .{ .rows = 4, .n = 17, .k = 33 },
     .{ .rows = 3, .n = 17, .k = 33 },
+    .{ .rows = 7, .n = 17, .k = 33 },
+    .{ .rows = 8, .n = 17, .k = 33 },
+    .{ .rows = 9, .n = 17, .k = 33 },
     .{ .rows = 3, .n = 1024, .k = 4096 },
     .{ .rows = 3, .n = 4096, .k = 1024 },
     .{ .rows = 32, .n = 256, .k = 2048 },
@@ -20,11 +23,20 @@ const served = [_]c.Shape{
     .{ .rows = 1, .n = 4736, .k = 1024 },
 };
 
+const Kind = enum { fused, baseline, control };
+const labels = [_][]const u8{
+    "metal sam3 small compensated projection",
+    "metal sam3 small compensated projection baseline",
+    "control: sam3 small projection drops last K",
+};
+
 const Probe = struct {
     allocator: std.mem.Allocator,
     rig: rig_.Rig,
+    baseline_rig: rig_.Rig,
     pipeline: mtl.Pipeline,
-    control: bool,
+    baseline_pipeline: ?mtl.Pipeline = null,
+    kind: Kind,
     shape: c.Shape = undefined,
     fill: g.Fill = .random,
     x: []f32 = &.{},
@@ -32,20 +44,23 @@ const Probe = struct {
     bias: []f32 = &.{},
     inputs: [3]rig_.Ref = undefined,
     output: rig_.Ref = undefined,
+    baseline_inputs: [3]rig_.Ref = undefined,
+    baseline_output: rig_.Ref = undefined,
 
     fn kernel(self: *Probe) g.Kernel {
         return .{
             .spec = .{
-                .name = if (self.control) "control: sam3 small projection drops last K" else "metal sam3 small compensated projection",
+                .name = labels[@backingInt(self.kind)],
                 .accum = .f32,
                 .depth = depth,
                 .out = .f32,
                 .served = &served,
-                .tiles = .{ .{ .size = 32 }, .{ .size = 4 }, .{ .size = 32 } },
+                .tiles = .{ .{ .size = 1 }, .{ .size = 4 }, .{ .size = 32 } },
+                .replaces = if (self.kind == .fused) labels[@backingInt(Kind.baseline)] else null,
             },
             .ctx = self,
             .vt = &vt,
-            .control = if (self.control) .shapes else null,
+            .control = if (self.kind == .control) .shapes else null,
         };
     }
 
@@ -53,6 +68,7 @@ const Probe = struct {
 
     pub fn reset(self: *Probe) void {
         self.rig.reset();
+        self.baseline_rig.reset();
         self.allocator.free(self.x);
         self.allocator.free(self.weight);
         self.allocator.free(self.bias);
@@ -124,17 +140,31 @@ const Probe = struct {
         }
         self.inputs = .{ try self.rig.input(std.mem.sliceAsBytes(self.x)), try self.rig.input(std.mem.sliceAsBytes(self.weight)), try self.rig.input(std.mem.sliceAsBytes(self.bias)) };
         self.output = try self.rig.output(self.count() * 4);
+        if (self.kind == .fused) {
+            self.baseline_inputs = .{ try self.baseline_rig.input(std.mem.sliceAsBytes(self.x)), try self.baseline_rig.input(std.mem.sliceAsBytes(self.weight)), try self.baseline_rig.input(std.mem.sliceAsBytes(self.bias)) };
+            self.baseline_output = try self.baseline_rig.output(self.count() * 4);
+        }
         return true;
     }
 
     pub fn run(self: *Probe) !void {
-        const pass = self.rig.begin();
-        pass.e.setPipeline(self.pipeline);
-        for (self.inputs, 0..) |input, index| pass.e.setBuffer(input.buf, input.off, index);
-        pass.e.setBuffer(self.output.buf, self.output.off, 3);
+        return self.launch(&self.rig, self.pipeline, self.inputs, self.output);
+    }
+
+    fn launch(self: *Probe, rig: *rig_.Rig, pipeline: mtl.Pipeline, inputs: [3]rig_.Ref, output: rig_.Ref) !void {
+        const pass = rig.begin();
+        pass.e.setPipeline(pipeline);
+        for (inputs, 0..) |input, index| pass.e.setBuffer(input.buf, input.off, index);
+        pass.e.setBuffer(output.buf, output.off, 3);
         pass.e.setValue([3]u32{ @intCast(self.shape.rows), @intCast(self.shape.n), @intCast(self.shape.k) }, 4);
         pass.e.dispatchGroups(mtl.Size.of((self.shape.n + 3) / 4, self.shape.rows, 1), mtl.Size.of(128, 1, 1));
-        try self.rig.finish(pass);
+        try rig.finish(pass);
+    }
+
+    pub fn replaced(self: *Probe) ![]const u8 {
+        try self.launch(&self.baseline_rig, self.baseline_pipeline.?, self.baseline_inputs, self.baseline_output);
+        if (!try self.baseline_rig.intact()) return error.BaselineGuardsChanged;
+        return self.baseline_rig.outputBytes();
     }
 
     pub fn count(self: *Probe) usize {
@@ -184,14 +214,23 @@ const Probe = struct {
 
 pub const Suite = struct {
     allocator: std.mem.Allocator,
-    probes: [2]?Probe = @splat(null),
+    probes: [3]?Probe = @splat(null),
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         for (&self.probes, 0..) |*entry, index| {
-            const label = if (index == 0) "metal sam3 small compensated projection" else "control: sam3 small projection drops last K";
+            const label = labels[index];
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
-            entry.* = .{ .allocator = self.allocator, .rig = .{ .a = self.allocator, .device = device, .queue = queue }, .pipeline = try rig_.pipeline(device, sources.sam3_dense_small, if (index == 0) "tf_sam3_dense_small" else "tf_sam3_dense_small_drop_tail"), .control = index != 0 };
-            if (entry.*) |*probe| try kernels.append(self.allocator, probe.kernel());
+            entry.* = .{
+                .allocator = self.allocator,
+                .rig = .{ .a = self.allocator, .device = device, .queue = queue },
+                .baseline_rig = .{ .a = self.allocator, .device = device, .queue = queue },
+                .pipeline = try rig_.pipeline(device, if (index == 1) sources.sam3_dense_small_baseline else sources.sam3_dense_small, if (index == 2) "tf_sam3_dense_small_drop_tail" else "tf_sam3_dense_small"),
+                .kind = @fromBackingInt(@intCast(index)),
+            };
+            if (entry.*) |*probe| {
+                if (probe.kind == .fused) probe.baseline_pipeline = try rig_.pipeline(device, sources.sam3_dense_small_baseline, "tf_sam3_dense_small");
+                try kernels.append(self.allocator, probe.kernel());
+            }
         }
     }
 
@@ -199,7 +238,9 @@ pub const Suite = struct {
         for (&self.probes) |*entry| if (entry.*) |*probe| {
             probe.reset();
             probe.rig.deinit();
+            probe.baseline_rig.deinit();
             probe.pipeline.deinit();
+            if (probe.baseline_pipeline) |pipeline| pipeline.deinit();
         };
     }
 };
