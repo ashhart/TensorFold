@@ -256,6 +256,7 @@ pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");
 
 pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
 pub const sam3_contract = @embedFile("sam3/contract.metal");
-pub const sam3_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal");
+pub const sam3_dense_small = @embedFile("sam3/dense_small.metal");
+pub const sam3_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal") ++ sam3_dense_small;
 pub const sam3_deconv = @embedFile("sam3/deconv.metal");
 pub const sam3_deconv_baseline = @embedFile("sam3/deconv_baseline.metal");

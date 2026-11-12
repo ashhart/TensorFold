@@ -466,6 +466,9 @@ pub fn main(init: std.process.Init) !u8 {
     var sam3_gemm: @import("metal_sam3_gemm.zig").Suite = .{ .a = a };
     defer sam3_gemm.deinit();
     try sam3_gemm.collect(device, queue, &kernels, o.only);
+    var sam3_small: @import("metal_sam3_dense_small.zig").Suite = .{ .allocator = a };
+    defer sam3_small.deinit();
+    try sam3_small.collect(device, queue, &kernels, o.only);
     var sam3_attention: @import("metal_sam3_attention.zig").Suite = .{ .a = a };
     defer sam3_attention.deinit();
     try sam3_attention.collect(device, queue, &kernels, o.only);

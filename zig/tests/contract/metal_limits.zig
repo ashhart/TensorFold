@@ -69,6 +69,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device, std.mem.indexOf(u8, fun, "_exact_") != null, std.mem.indexOf(u8, fun, "_compact_") != null), .pre_m5 = "" };
     }
+    if (std.mem.startsWith(u8, d.name, "sam3 small compensated projection ")) {
+        if (!assemble) return undefined;
+        const source = try a.dupe(u8, sources.sam3_dense_small);
+        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
+    }
     if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
         if (!assemble) return undefined;
         const source = try a.dupe(u8, sources.sam3_deconv ++ sources.sam3_deconv_baseline);

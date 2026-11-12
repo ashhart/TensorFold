@@ -58,6 +58,11 @@ An M3 Ultra on macOS 26.6.2 exercised stage sampling and passed all 13 dedicated
 host/device tests. Dispatch-boundary sampling was unavailable and was not exercised.
 This probe does not establish model fidelity, decode speed or serving support.
 
+## SAM3 segmentation tools
+
+The experimental SAM3/SAM3.1 Metal implementation runs through `tf-sam3-image` and `tf-sam3-video`; no HTTP route is registered.
+Build them with `zig build sam3 -Dcpu=apple_m1` and use each tool's `--help` for checkpoint, input and prompt arguments.
+
 ## Standalone Metal EXL3 projections
 
 With the Zig version from `.zig-version` and Xcode's Metal toolchain:

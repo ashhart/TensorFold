@@ -19,6 +19,8 @@ pub const metal = blk: {
     }
     break :blk out;
 } ++ [_]M{
+    .{ .name = "sam3 small compensated projection tf_sam3_dense_small", .threads = 128, .tg_memory = 0, .reserved = 128 },
+    .{ .name = "sam3 small compensated projection control tf_sam3_dense_small_drop_tail", .threads = 128, .tg_memory = 0, .reserved = 128 },
     .{ .name = "sam3 deconvolution im_sam_deconv", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 deconvolution baseline im_sam_deconv_baseline", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 attention im_attention_f32_full256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },

@@ -85,6 +85,14 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
     install(b, tools, tensor_compare);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = tensor_compare.root_module })).step);
+    const frames = b.addExecutable(.{ .name = "tf-sam3-frames", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/sam3_frames.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{ .{ .name = "safetensors", .module = safetensors }, .{ .name = "checkpoint_fixture", .module = video.root_module.import_table.get("checkpoint_fixture").? } },
+    }) });
+    install(b, tools, frames);
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = frames.root_module })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module.import_table.get("tokenizer").? })).step);
     const run = b.addRunArtifact(kernels);
     if (b.option(bool, "benchmark", "Time the SAM attention shapes") orelse false) run.addArg("--benchmark");
