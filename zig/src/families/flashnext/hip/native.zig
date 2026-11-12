@@ -12,6 +12,8 @@ const lanes_mod = @import("lanes.zig");
 const worker = @import("worker.zig");
 
 pub const model_type = "qwen4_exp";
+/// Most MTP drafts `--mtp-drafts` may ask of the head.
+pub const mtp_max_drafts = lanes_mod.mtp_max_drafts;
 /// The MLX affine checkpoints the plan admits; the HIP products read 2- to 8-bit codes in groups of 32 to 128.
 pub const formats: []const []const u8 = &.{ "mlx-q3g32", "mlx-q4g32", "mlx-q6g32" };
 /// Positions a stream holds when neither --context nor the checkpoint's config names a window.

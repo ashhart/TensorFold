@@ -20,8 +20,8 @@ const draw = serve.draw;
 const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
-/// MTP drafts the HIP head takes at most: `--mtp-drafts` is refused past it (native/hip.zig's check).
-pub const mtp_max_drafts: u32 = 3;
+/// MTP drafts the HIP head takes at most: the window's rows less the pending one; `--mtp-drafts` is refused past it.
+pub const mtp_max_drafts: u32 = max_depth;
 
 /// The policy's `--mtp-drafts` capped at the head's.
 pub fn capDrafts(asked: u8) u32 {
@@ -588,13 +588,13 @@ pub const Fx = struct {
     }
 };
 
-test "MTP stays at three: the constant, the cap and the facts never report more" {
-    try std.testing.expectEqual(@as(u32, 3), mtp_max_drafts);
-    try std.testing.expectEqual(@as(u32, 3), capDrafts(3));
-    try std.testing.expectEqual(@as(u32, 3), capDrafts(7));
+test "MTP drafts reach the window's seven, and the policy's default stays three" {
+    try std.testing.expectEqual(@as(u32, 7), mtp_max_drafts);
+    try std.testing.expectEqual(@as(u32, 3), capDrafts((hip.Policy{}).mtp.drafts));
+    try std.testing.expectEqual(@as(u32, 7), capDrafts(200));
     const m = facts_mod.factsFor(cache.max_window, 2, true, capDrafts(7));
-    try std.testing.expectEqual(@as(u32, 3), m.drafts);
+    try std.testing.expectEqual(@as(u32, 7), m.drafts);
     var cfg = try lanes.Config.init(std.testing.allocator, m, cache.max_window, cache.max_window - 1);
     defer cfg.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(u32, 3), cfg.most_drafts);
+    try std.testing.expectEqual(@as(u32, 7), cfg.most_drafts);
 }

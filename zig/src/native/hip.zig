@@ -63,7 +63,7 @@ fn checkGroup(a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.tp == 1 and o.rank != 0) return refuse(a, problem, "--rank must be 0 when --tp 1", .{});
     if (o.rank >= o.tp) return refuse(a, problem, "--rank {d} not in [0, --tp {d})", .{ o.rank, o.tp });
     if (o.keep) |n| if (n < 0) return refuse(a, problem, "--checkpoint-slots must be 0 or more", .{});
-    if (o.mtp_drafts) |n| if (n > 3) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most 3", .{n});
+    if (o.mtp_drafts) |n| if (n > flashnext.native.mtp_max_drafts) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most {d}", .{ n, flashnext.native.mtp_max_drafts });
     if (o.mtp_confidence) |c| if (c < 0 or c > 1) return refuse(a, problem, "--mtp-confidence must be from 0 to 1", .{});
     if (o.prompt_cache_gib) |g| if (g < 0) return refuse(a, problem, "--prompt-cache-gib must be 0 or more", .{});
 }
@@ -531,16 +531,18 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
 }
 
-test "--mtp-drafts past three is refused by name before any load; three and fewer are not" {
+test "--mtp-drafts past the head's most is refused by name before any load; that many and fewer are not" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var problem: []const u8 = "";
-    var o: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 3 };
+    const most = flashnext.native.mtp_max_drafts;
+    try std.testing.expectEqual(@as(u32, 7), most);
+    var o: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = most };
     try checkGroup(a, o, &problem);
-    o.mtp_drafts = 4;
+    o.mtp_drafts = most + 1;
     try std.testing.expectError(error.Refused, checkGroup(a, o, &problem));
-    try std.testing.expectEqualStrings("--mtp-drafts 4: the HIP engine drafts at most 3", problem);
+    try std.testing.expectEqualStrings("--mtp-drafts 8: the HIP engine drafts at most 7", problem);
 }
 
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
