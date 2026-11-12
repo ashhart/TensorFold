@@ -20,6 +20,23 @@ pub fn step(m: []const u32) error{LinkFailed}!Op {
     return op;
 }
 
+/// Rank 0's table from page `first` on: no gap past this rank's `held` pages, inside its `room`, ids in its pool.
+pub fn pagesFit(first: usize, ids: []const u32, held: usize, room: usize, pool: usize) bool {
+    if (first > held or ids.len > room or first > room - ids.len) return false;
+    for (ids) |id| if (id >= pool) return false;
+    return true;
+}
+
+/// A page rank 0 names, against this rank's pool of `pool` pages (every rank's pool is sized from the same options).
+pub fn pageFits(page: u32, pool: usize) bool {
+    return page < pool;
+}
+
+/// A snapshot slot rank 0 names: one this rank holds, or the next one (rank 0 claims the lowest free slot).
+pub fn slotFits(slot: u32, slots: usize) bool {
+    return slot <= slots;
+}
+
 /// The prefill message's snapshot slot when the pass starts from nothing.
 pub const no_snapshot: u32 = std.math.maxInt(u32);
 
@@ -269,4 +286,24 @@ test "security: a step from the link is refused unless its message holds the wor
     try t.expectEqual(Op.pages, try step(&.{ pages, 1, 0, 2, 7, 8 }));
     try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0, 3, 7, 8 }));
     try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0, 0xffff_ffff, 7 }));
+}
+
+test "security: rank 0's page and slot indices are refused past this rank's own pool, table and slots" {
+    const t = std.testing;
+    // a table of 4 pages held, room for 6, a pool of 100: the largest legal sends pass
+    try t.expect(pagesFit(4, &.{ 98, 99 }, 4, 6, 100));
+    try t.expect(pagesFit(0, &.{}, 0, 0, 100));
+    try t.expect(pagesFit(3, &.{0}, 4, 6, 100));
+    try t.expect(!pagesFit(5, &.{0}, 4, 6, 100)); // a gap after the held pages
+    try t.expect(!pagesFit(4, &.{ 1, 2, 3 }, 4, 6, 100)); // past the stream's room
+    try t.expect(!pagesFit(0xffff_ffff, &.{1}, 4, 6, 100));
+    try t.expect(!pagesFit(0, &.{ 1, 100 }, 4, 6, 100)); // a page past the pool
+    try t.expect(!pagesFit(0, &.{0xffff_ffff}, 4, 6, 100));
+    try t.expect(pageFits(99, 100));
+    try t.expect(!pageFits(100, 100));
+    try t.expect(!pageFits(0xffff_ffff, 100));
+    try t.expect(slotFits(3, 3));
+    try t.expect(slotFits(0, 0));
+    try t.expect(!slotFits(4, 3));
+    try t.expect(!slotFits(0xffff_ffff, 3));
 }
