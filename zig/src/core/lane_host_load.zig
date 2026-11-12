@@ -118,7 +118,7 @@ pub fn progress(h: *LaneHost, job: *Job) void {
 
 /// The pass reported: its remaining computed tokens, its restored ones and its time; the caller holds the host mutex.
 pub fn credit(h: *LaneHost, job: *Job) void {
-    h.load.restore_fallbacks += @intFromBool(job.stream.reuse_failed); // once a job: its pass reports once
+    if (job.stream.reuse_failed) fallback(h, job);
     const p = &job.load;
     if (!p.on) return;
     take(h, p);
@@ -198,10 +198,16 @@ pub fn failed(h: *LaneHost, why: Failure) void {
 }
 
 /// A saved prefix could not be restored: the request prefills from zero and is still served (no host mutex held).
-pub fn fellBack(h: *LaneHost) void {
+pub fn fellBack(h: *LaneHost, job: *Job) void {
     h.lock();
     defer h.unlock();
-    h.load.restore_fallbacks += 1;
+    fallback(h, job);
+}
+
+/// One restore fallback a request, under the host mutex: a damaged begin and its pass's `reuse_failed` count once.
+fn fallback(h: *LaneHost, job: *Job) void {
+    h.load.restore_fallbacks += @intFromBool(!job.fell_back);
+    job.fell_back = true;
 }
 
 /// A background pass gave its lane up to foreground work.

@@ -25,11 +25,20 @@ pub const Wait = enum {
     pool_room,
 };
 
-/// What a client sees as a refusal: the three capacity codes and the engine's 400 for a request it cannot take.
-pub const Refusal = enum { engine_busy, engine_unavailable, memory_pressure, invalid_request };
+/// A refusal by the code its client sees: the capacity codes, the engine's 400, the admission flags' 429s.
+pub const Refusal = enum {
+    engine_busy,
+    engine_unavailable,
+    memory_pressure,
+    invalid_request,
+    max_inflight_exceeded,
+    max_inflight_per_key_exceeded,
+    admission_capacity_exceeded,
+    requests_per_second_exceeded,
+};
 
-/// A request the host took and then ended failed, with its own words: not a refusal a client can retry by code.
-pub const Failure = enum { backend_prompt, backend_round, lane_memory_alone, prompt_too_large };
+/// Ended failed with its own words, no refusal code: the host's four, its planner's refusal, a stale device at submit.
+pub const Failure = enum { backend_prompt, backend_round, lane_memory_alone, prompt_too_large, planner_refused, engine_stale };
 
 pub const waits = std.enums.values(Wait).len;
 pub const refusals = std.enums.values(Refusal).len;

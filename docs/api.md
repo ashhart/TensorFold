@@ -887,16 +887,22 @@ publishes `server_info{model,backend,version,instance}` (always 1; `instance` is
 so counters restart only with a new `instance`), `process_start_time_seconds`, `engine_parked` (1 while
 `--idle-unload` has closed the engine), `lanes`, and `http_requests_active{route}`: model requests from the end of
 their headers to the end of their reply, by route group (`chat_completions`, `completions`, `responses`,
-`messages`, `embeddings`, `speech`, `other`), and `request_refusals_total{reason}`: requests refused with a client
+`messages`, `embeddings`, `speech`, `other`), `request_refusals_total{reason}`: requests refused with a client
 code, one of `engine_busy`, `engine_unavailable` and `memory_pressure` (the [Waits](#waits) codes, counted where
-the chat, embeddings, rerank and speech routes answer with them) or `invalid_request` (the 400 when the engine
-itself refuses the request it was handed), every label always present.
+the chat, embeddings, rerank and speech routes answer with them, and an images engine's busy 503 as `engine_busy`),
+`invalid_request` (the 400 when the engine itself refuses the request it was handed), or an admission flag's 429 by
+its code (`max_inflight_exceeded`, `max_inflight_per_key_exceeded`, `admission_capacity_exceeded`,
+`requests_per_second_exceeded`; see [Admission](#admission)), and `request_failures_total{reason}`: requests that
+ended failed with no refusal code. Its reasons are `backend_prompt`, `backend_round`, `lane_memory_alone` and
+`prompt_too_large` (the engine took the request and it failed), `planner_refused` (a family round planner refused it
+with its own words, as DeepSeek-V4.1 does for a request past its KV pool or its hard memory floor) and
+`engine_stale` (the chat routes' 500 while the device is stale). Every label of both families is always present.
 
 An engine on the shared lane host adds these groups, each complete or absent:
 
 | Group | Families |
 | --- | --- |
-| Requests | `requests_waiting_by_reason{reason}` (queued requests by the one wait reason each holds, every reason always present; they sum to `requests_waiting`), `request_failures_total{reason}` (requests the engine took and ended failed: `backend_prompt`, `backend_round`, `lane_memory_alone`, `prompt_too_large`), `restore_fallbacks_total` (requests whose saved prefix could not be restored, so they prefilled from zero and were served), `waiting_prompt_tokens` (prompt tokens of queued requests, before any kept prefix restores part of them), `filling_prompt_tokens_left` (absent while a backend without fill progress fills), `requests_started_total`, `requests_requeued_total`, `background_yields_total` |
+| Requests | `requests_waiting_by_reason{reason}` (queued requests by the one wait reason each holds, every reason always present; they sum to `requests_waiting`), `restore_fallbacks_total` (requests whose saved prefix could not be restored, so they prefilled from zero and were served; once a request), `waiting_prompt_tokens` (prompt tokens of queued requests, before any kept prefix restores part of them), `filling_prompt_tokens_left` (absent while a backend without fill progress fills), `requests_started_total`, `requests_requeued_total`, `background_yields_total` |
 | Work | `scheduler_tokens_total{mode}` with `prefill_compute`, `prefill_cache` and `decode` (output tokens after each request's first), counted as the work happens, and `prefill_busy_seconds_total`: engine seconds in prompt calls whose work `prefill_compute` counted. The `prefill_compute` delta over its delta is the prefill rate. A family round planner publishes no work group |
 | Capacity | `kv_capacity_mode{mode}` (`window` or `paged`), `lanes_free`, and for a paged engine `kv_pool_capacity_tokens`, `kv_pool_available_tokens`, `kv_pool_reclaimable_tokens`, `kv_pool_promised_tokens` with `pool="main"`, and `kv_pool_run_available` where the family needs a contiguous run. Published by the CUDA lane host: `window` for an engine without a page plan, `paged` with GLM-5.3-Flash's pool on rank 0; other paged families leave the group out until they name their pool |
 
@@ -915,7 +921,9 @@ already running). The rest are internal reasons, never a client code: `kv_pool`,
 over while others prefill; DeepSeek-V4.1 names them), `prefix_cut` (it waits for a cut another prompt is filling),
 `state_read` (it waits for its disk state's read ahead), `ledger_bytes` (its caches' bytes do not fit the KV ledger
 now) and `pool_room` (the family's pool has no room for it now). A request behind one that waits for the pool, the
-ledger or the planner holds that request's reason. `memory_floor` is never counted under `memory_pressure`.
+ledger or the planner holds that request's reason. `memory_floor` is never counted under `memory_pressure`. The
+reasons are as of the engine's last admission attempt: a request queued behind one just admitted keeps its earlier
+reason until the engine next tries to admit it.
 
 `GET /v1/load` returns the same ledger as one JSON object from one read: `instance`, `timestamp` (the read's wall
 time), `model`, `parked`, `lanes`, `http_active` by route group, `refusals` by code, and, when present, the request

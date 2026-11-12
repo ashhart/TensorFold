@@ -81,6 +81,8 @@ pub const Snapshot = struct {
     http: [groups]u32,
     /// What clients were refused, by code: the server counts these, attached engine or not.
     refusals: [reasons.refusals]u64 = @splat(0),
+    /// Failures the server answered without the host (`engine_stale`); `failed` adds the host's.
+    failures: [reasons.failures]u64 = @splat(0),
     requests: ?Requests = null,
     work: ?Work = null,
     capacity: ?Capacity = null,
@@ -88,6 +90,12 @@ pub const Snapshot = struct {
 
     pub fn active(s: Snapshot, g: RouteGroup) u32 {
         return s.http[@backingInt(g)];
+    }
+
+    /// Requests that ended failed for `r`: the server's count and the attached host's.
+    pub fn failed(s: Snapshot, r: reasons.Failure) u64 {
+        const host: u64 = if (s.requests) |q| q.failures[@backingInt(r)] else 0;
+        return s.failures[@backingInt(r)] + host;
     }
 };
 
@@ -104,6 +112,7 @@ pub const Ledger = struct {
     lanes: u32 = 0,
     http: [groups]u32 = @splat(0),
     refusals: [reasons.refusals]u64 = @splat(0),
+    failures: [reasons.failures]u64 = @splat(0),
     /// Raised by every attach and detach: a handle from before it writes nothing.
     epoch: u64 = 0,
     attached: ?api.Engine = null,
@@ -184,11 +193,18 @@ pub const Ledger = struct {
         l.refusals[@backingInt(r)] += 1;
     }
 
+    /// A request ended failed for `r` before the host took it (the server's own count).
+    pub fn failed(l: *Ledger, r: reasons.Failure) void {
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        l.failures[@backingInt(r)] += 1;
+    }
+
     /// The ledger at one instant; counters carry every earlier host's.
     pub fn read(l: *Ledger) Snapshot {
         l.mutex.lockUncancelable(l.io);
         defer l.mutex.unlock(l.io);
-        var s: Snapshot = .{ .instance = l.instance, .start_s = l.start_s, .parked = l.parked, .lanes = l.lanes, .http = l.http, .refusals = l.refusals };
+        var s: Snapshot = .{ .instance = l.instance, .start_s = l.start_s, .parked = l.parked, .lanes = l.lanes, .http = l.http, .refusals = l.refusals, .failures = l.failures };
         if (l.cur.requests) |r| {
             std.debug.assert(r.waitingTotal() == r.waiting); // one stored reason a queued request
             s.requests = addRequests(r, l.base.requests.?);

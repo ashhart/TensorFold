@@ -252,7 +252,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         error.Closed => refusals.count(srv, .engine_unavailable, cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{})),
         error.InvalidSpans => refusals.count(srv, .invalid_request, cx.fail(.request, "the prompt span layout is invalid", .{})),
         error.InvalidRequest => refusals.count(srv, .invalid_request, cx.fail(.request, "the request does not match the loaded model", .{})),
-        error.Stale => cx.fail(.server, "{s}", .{api.stale_message}),
+        error.Stale => refusals.failure(srv, .engine_stale, cx.fail(.server, "{s}", .{api.stale_message})),
         error.MemoryPressure => refusals.count(srv, .memory_pressure, cx.wait(wait.memory_pressure, "{s}", .{api.pressure_message})),
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares

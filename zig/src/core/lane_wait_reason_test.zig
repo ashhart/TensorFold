@@ -214,3 +214,104 @@ test "wait reason ledger: publishing the ledger reads stored reasons and never a
     try std.testing.expectEqual(@as(u32, 0), calls);
     ends.closeAll(&rig.host);
 }
+
+/// A planner that admits every request and fills each prompt in one piece, its final in the same round.
+const Whole = struct {
+    keys: [4]usize = undefined,
+    lens: [4]u64 = undefined,
+    n: usize = 0,
+    planned: usize = 0,
+
+    fn self(ctx: *anyopaque) *Whole {
+        return @ptrCast(@alignCast(ctx));
+    }
+    fn none(_: *anyopaque) void {}
+    fn admitFn(ctx: *anyopaque, ask: api.Rounds.Ask, _: *[]const u8) api.Rounds.Verdict {
+        const p = self(ctx);
+        p.keys[p.n] = ask.key;
+        p.lens[p.n] = ask.prompt.len;
+        p.n += 1;
+        return .admit;
+    }
+    fn admitted(_: *anyopaque) anyerror!void {}
+    fn key(_: *anyopaque, _: usize) void {}
+    fn began(_: *anyopaque, _: usize, _: bool) void {}
+    fn plan(ctx: *anyopaque, pieces: *std.ArrayList(api.Rounds.Piece), finals: *std.ArrayList(usize)) anyerror!void {
+        const p = self(ctx);
+        pieces.clearRetainingCapacity();
+        finals.clearRetainingCapacity();
+        while (p.planned < p.n) : (p.planned += 1) {
+            try pieces.append(std.testing.allocator, .{ .key = p.keys[p.planned], .start = 0, .end = p.lens[p.planned] - 1, .save = false });
+            try finals.append(std.testing.allocator, p.keys[p.planned]);
+        }
+    }
+    fn after(_: *anyopaque, _: f64, _: f64) void {}
+    fn rounds(p: *Whole) api.Rounds {
+        return .{ .ctx = p, .vtable = &.{ .begin_admit = none, .admit = admitFn, .admitted = admitted, .arm = key, .began = began, .plan = plan, .left = key, .after = after } };
+    }
+};
+
+/// The fake target's begin with its saved entry damaged and its restore failed: both ways a fallback shows.
+const Damaged = struct {
+    var base: *const lanes.backend.Backend.VTable = undefined;
+    var vt: lanes.backend.Backend.VTable = undefined;
+    fn begin(ptr: *anyopaque, s: *lanes.Stream) anyerror!lanes.backend.Backend.Begun {
+        var b = try base.begin.?(ptr, s);
+        b.damaged = true;
+        s.reuse_failed = true;
+        return b;
+    }
+    fn install(core: *lanes.Engine) void {
+        base = core.backend.vtable;
+        vt = base.*;
+        vt.begin = begin;
+        core.backend.vtable = &vt;
+    }
+};
+
+test "wait reason ledger: a damaged begin whose pass also reports the failed restore is one fallback" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 2 }, true);
+    defer rig.deinit();
+    Damaged.install(&rig.core);
+    var pl: Whole = .{};
+    rig.host.rounds = pl.rounds();
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    defer ledger.detach(false);
+    const ra: Request = .{ .prompt = &second, .max_tokens = 4 };
+    try rig.submit(1, &ra);
+    errdefer ends.closeAll(&rig.host);
+    _ = api.Rounds.Test.step(&rig.host);
+    const r = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u32, 1), r.running); // begun, filled and reported in the one round
+    try std.testing.expectEqual(@as(u64, 1), r.restore_fallbacks);
+    ends.closeAll(&rig.host);
+}
+
+test "wait reason ledger: a planner's refusal counts as a planner_refused failure and leaves the queue" {
+    var rig: Rig = undefined;
+    try rig.init(.{ .lanes = 2 }, true);
+    defer rig.deinit();
+    const Refuse = struct {
+        fn admit(_: *anyopaque, _: api.Rounds.Ask, words: *[]const u8) api.Rounds.Verdict {
+            words.* = "too large for this server";
+            return .refuse;
+        }
+    };
+    var pl: Plan = .{};
+    rig.host.rounds = pl.rounds();
+    var vt = rig.host.rounds.?.vtable.*;
+    vt.admit = Refuse.admit;
+    rig.host.rounds.?.vtable = &vt;
+    var ledger: Ledger = .init(std.testing.io);
+    ledger.attach(rig.host.engine());
+    defer ledger.detach(false);
+    const ra: Request = .{ .prompt = &second, .max_tokens = 4 };
+    try rig.submit(1, &ra);
+    errdefer ends.closeAll(&rig.host);
+    _ = api.Rounds.Test.step(&rig.host);
+    const r = ledger.read().requests.?;
+    try std.testing.expectEqual(@as(u32, 0), r.waiting);
+    try std.testing.expectEqual(@as(u64, 1), r.failures[@backingInt(api.load_ledger.reasons.Failure.planner_refused)]);
+}
