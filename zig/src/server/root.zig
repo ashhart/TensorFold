@@ -45,6 +45,7 @@ test {
     _ = @import("keepalive_test.zig");
     _ = @import("request_deadline_test.zig");
     _ = @import("request_deadline_http_test.zig");
+    _ = @import("gpu_turn.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");

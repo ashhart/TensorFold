@@ -1,6 +1,7 @@
 //! MiniMax-H3-Image's prompt path on Metal: Qwen3-VL's text model to layer 50, then condition_proj and the refiner.
 const std = @import("std");
 const mtl = @import("metal");
+const gpu_turn = @import("gpu_turn");
 pub const rules = @import("picture_prompt.zig");
 pub const picture = @import("picture.zig");
 pub const tensors = @import("tensors.zig");
@@ -64,6 +65,10 @@ pub const Runner = struct {
     k: kernels.Kernels,
     /// GPU seconds of the last encode and refine.
     gpu: f64 = 0,
+    /// When set, passes wait while live speech holds the turn: a few queued, never the whole run ahead of it.
+    give_way: ?gpu_turn.Turn = null,
+    /// Seconds the last encode or refine waited for speech.
+    paused: f64 = 0,
 
     pub fn init(device: mtl.Device) !Runner {
         const queue = try device.queue();
@@ -80,9 +85,18 @@ pub const Runner = struct {
     const Passes = struct {
         list: [80]mtl.CommandBuffer = undefined,
         n: usize = 0,
+        give_way: ?gpu_turn.Turn,
+        paused: f64 = 0,
+
+        /// Passes ahead of the host before the next waits for speech: enough to hide its wake-up.
+        const queued = 3;
 
         fn next(p: *Passes, q: mtl.Queue) !mtl.ComputeEncoder {
             if (p.n == p.list.len) return error.H3TooManyPasses;
+            if (p.give_way) |t| {
+                if (p.n >= queued) try check(p.list[p.n - queued]);
+                p.paused += gpu_turn.yield(t.io, t.at);
+            }
             p.list[p.n] = q.commandBuffer();
             p.n += 1;
             return p.list[p.n - 1].compute(.serial);
@@ -96,14 +110,18 @@ pub const Runner = struct {
         fn finish(p: *Passes) !f64 {
             var gpu: f64 = 0;
             for (p.list[0..p.n]) |cb| {
-                cb.wait();
-                if (cb.failure()) |msg| {
-                    std.log.err("h3 prompt: a pass failed on the GPU: {s}", .{msg});
-                    return error.GpuFailed;
-                }
+                try check(cb);
                 gpu += cb.gpuSeconds();
             }
             return gpu;
+        }
+
+        fn check(cb: mtl.CommandBuffer) !void {
+            cb.wait();
+            if (cb.failure()) |msg| {
+                std.log.err("h3 prompt: a pass failed on the GPU: {s}", .{msg});
+                return error.GpuFailed;
+            }
         }
     };
 
@@ -136,7 +154,7 @@ pub const Runner = struct {
         }
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        var passes: Passes = .{};
+        var passes: Passes = .{ .give_way = r.give_way };
         for (w.layers, 0..) |l, li| {
             const e = try passes.next(r.queue);
             const k = &r.k;
@@ -158,6 +176,7 @@ pub const Runner = struct {
             passes.commit(e);
         }
         r.gpu = try passes.finish();
+        r.paused = passes.paused;
         @memcpy(out, s.slice(u16, .x, T * H));
     }
 
@@ -177,7 +196,7 @@ pub const Runner = struct {
         @memcpy(s.slice(u16, .in, rows.len), rows);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        var passes: Passes = .{};
+        var passes: Passes = .{ .give_way = r.give_way };
         const k = &r.k;
         var e = try passes.next(r.queue);
         k.gemm(e, s.at(.in), w.cond_w, w.cond_b, s.at(.x), T, H, g.text);
@@ -205,6 +224,7 @@ pub const Runner = struct {
         k.norm(e, s.at(.x), w.final_norm, s.at(.out), T, H, g.final_eps, .h3);
         passes.commit(e);
         r.gpu = try passes.finish();
+        r.paused = passes.paused;
         @memcpy(out, s.slice(u16, .out, T * H));
     }
 };

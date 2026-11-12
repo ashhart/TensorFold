@@ -20,6 +20,7 @@ const log = @import("log.zig");
 const clock = @import("clock.zig");
 const wait = @import("wait_reason.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
+const gpu_turn = @import("gpu_turn.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -201,6 +202,9 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         }
         if (srv.speech_inflight.cmpxchgWeak(held, held + 1, .acq_rel, .acquire)) |now| held = now else break;
     }
+    // a render or benchmark on this GPU pauses at its next short command buffer until this voice has finished
+    const turn = gpu_turn.speak(srv.io, gpu_turn.path);
+    defer gpu_turn.done(srv.io, turn);
     var lane_released = false;
     defer releaseLane(srv, &lane_released);
     const pcm_len = std.math.mul(usize, sp.max_frames, sp.frame_length) catch 0;
