@@ -28,12 +28,17 @@ const Stepped = struct {
     /// decode rounds of other slots while each slot's prompt ran in pieces (begin to finish), the last one's
     began_windows: [4]u64 = @splat(0),
     between: u64 = 0,
+    /// decode rounds since a slot's last piece, and the most seen between two pieces of one prompt
+    mark: [4]u64 = @splat(0),
+    most_between: u64 = 0,
+    /// --decode-share as the model passes it
+    decode_share: ?f64 = null,
     /// prompt lengths in the order their first choice was drawn
     order: std.ArrayList(usize) = .empty,
     at: [4]?u64 = @splat(null),
 
     fn model(x: *Stepped, slots: u32) serve_lanes.Model {
-        return .{ .ptr = x, .name = "dsv41-twin-steps", .slots = slots, .limit = 4096, .world = 1, .prefill_step = step_rows, .forward_rows = 16, .shape = x.d.shape, .target = targetFn, .pass = passFn, .calibrate = calibrate, .close = close, .calib = .{ .mode = "default" }, .steps = x.steps };
+        return .{ .ptr = x, .name = "dsv41-twin-steps", .slots = slots, .limit = 4096, .world = 1, .prefill_step = step_rows, .forward_rows = 16, .shape = x.d.shape, .target = targetFn, .pass = passFn, .calibrate = calibrate, .close = close, .calib = .{ .mode = "default" }, .steps = x.steps, .decode_share = x.decode_share };
     }
 
     fn of(p: *anyopaque) *Stepped {
@@ -77,6 +82,7 @@ const Stepped = struct {
         _ = x.prompts.fetchAdd(1, .monotonic);
         x.at[slot] = 0;
         x.began_windows[slot] = x.windows.load(.monotonic);
+        x.mark[slot] = x.began_windows[slot];
         return .{};
     }
 
@@ -86,8 +92,11 @@ const Stepped = struct {
         if (start != at or end <= start or end >= ids.len) return error.NotAChain;
         const n = x.pieces.fetchAdd(1, .monotonic) + 1;
         if (n == x.fail_at) return error.Planted;
+        const w = x.windows.load(.monotonic);
+        if (start > 0) x.most_between = @max(x.most_between, w - x.mark[slot]);
         x.wait(end - start);
         x.at[slot] = end;
+        x.mark[slot] = x.windows.load(.monotonic);
     }
 
     fn finish(p: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
@@ -161,11 +170,15 @@ const Rig = struct {
     s: *serve_lanes.Served = undefined,
 
     fn open(r: *Rig, slots: u32, steps: bool) !void {
+        return r.openShared(slots, steps, null);
+    }
+
+    fn openShared(r: *Rig, slots: u32, steps: bool, decode_share: ?f64) !void {
         const t = try twin.Twin.init(gpa, .{}, slots);
         errdefer t.deinit();
         const d = try twin.Drafter.init(gpa, t, slots);
         errdefer d.deinit();
-        r.x = .{ .t = t, .d = d, .steps = steps };
+        r.x = .{ .t = t, .d = d, .steps = steps, .decode_share = decode_share };
         r.s = try serve_lanes.Served.open(gpa, io, r.x.model(slots), ".", null);
     }
 
@@ -345,4 +358,54 @@ test "serve steps: TF_DSV41_PREFILL_PIECES, an srpt order or a prompt share turn
     const off = [_][2][:0]const u8{ .{ names[0], "0" }, .{ names[1], "fifo" }, .{ names[2], "stock" }, .{ names[3], "1" }, .{ names[4], "0" } };
     for (off) |kv| _ = env.setenv(kv[0], kv[1], 1);
     try t.expect(!try serve_lanes.stepsFromEnv());
+}
+
+test "serve steps: a decode share gives a decoding reply rounds between a prompt's pieces; replies == serial" {
+    const t = std.testing;
+    const p0 = try prompt(10, 7);
+    defer gpa.free(p0);
+    const long = try prompt(800, 8);
+    defer gpa.free(long);
+    const w0 = try serial(p0, 400);
+    defer gpa.free(w0);
+    const w1 = try serial(long, 8);
+    defer gpa.free(w1);
+    // a share of 0: one round a step; 0.75: each 5 ms step owes the reply 15 ms of rounds
+    for ([_]f64{ 0, 0.75 }) |share| {
+        var r: Rig = undefined;
+        try r.openShared(2, true, share);
+        defer r.close();
+        r.x.delay_ms = 5;
+        var boxes: [2]Box = @splat(.{});
+        defer for (&boxes) |*b| b.out.deinit(gpa);
+        const reqs = [2]api.Request{ .{ .prompt = p0, .max_tokens = 400, .drafts = false }, .{ .prompt = long, .max_tokens = 8 } };
+        try r.submit(1, &reqs[0], &boxes[0]);
+        try until(&r.x.windows, 1);
+        try r.submit(2, &reqs[1], &boxes[1]);
+        for (&boxes) |*b| try b.wait();
+        try t.expectEqualSlices(u32, w0, boxes[0].out.items);
+        try t.expectEqualSlices(u32, w1, boxes[1].out.items);
+        if (share > 0) try t.expect(r.x.most_between >= 3) else try t.expect(r.x.most_between <= 1);
+    }
+}
+
+test "serve steps: the prompt share in steps is the flag's, else the env's, else 0.25 to replies; whole prompts keep 1" {
+    const t = std.testing;
+    const env = @import("sys").env;
+    _ = env.unsetenv("TENSORFOLD_PREFILL_SHARE");
+    defer _ = env.unsetenv("TENSORFOLD_PREFILL_SHARE");
+    const cases = [_]struct { steps: bool, flag: ?f64, env: ?[:0]const u8, p: f64, cap: bool }{
+        .{ .steps = false, .flag = null, .env = null, .p = 1, .cap = false },
+        .{ .steps = true, .flag = null, .env = null, .p = 1 - serve_lanes.steps_decode_share, .cap = false },
+        .{ .steps = true, .flag = null, .env = "0.5", .p = 0.5, .cap = false },
+        .{ .steps = true, .flag = 0.4, .env = "0.5", .p = 0.6, .cap = true },
+    };
+    for (cases) |c| {
+        if (c.env) |v| _ = env.setenv("TENSORFOLD_PREFILL_SHARE", v, 1) else _ = env.unsetenv("TENSORFOLD_PREFILL_SHARE");
+        var r: Rig = undefined;
+        try r.openShared(2, c.steps, c.flag);
+        defer r.close();
+        try t.expectApproxEqAbs(c.p, r.s.host.share.p, 1e-9);
+        try t.expectEqual(c.cap, r.s.host.decode_cap);
+    }
 }
