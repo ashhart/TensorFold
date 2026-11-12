@@ -171,7 +171,7 @@ pub fn run(k: *const Kernels, s: cuda.Stream, l: exl3e.Layer, x: u64, stride: us
     try cuda.launch.launch(k.down, .{ .grid = .{ .x = @intCast(d / 256), .y = @intCast(n_items) }, .block = .{ .x = 256 } }, s, &dn);
 }
 
-/// The canonical reduction's block partials of one rank: `sub` rows per gather region, `m` partials per rank.
+/// The canonical reduction's block partials of one rank, fp64 words into `out`: `sub` rows per gather region, `m` partials per rank.
 pub fn tpCombine(k: *const Kernels, s: cuda.Stream, y: u64, wts: u64, picks: u64, out: u64, rows: usize, slots: usize, d: usize, sub: usize, world: usize, rank: usize, m: usize) !void {
     if (rows == 0) return;
     var a: cuda.Args = .{};
@@ -189,7 +189,7 @@ pub fn tpCombine(k: *const Kernels, s: cuda.Stream, y: u64, wts: u64, picks: u64
     try cuda.launch.launch(k.tp_combine, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
 }
 
-/// The tree finished from the gathered partials of `rows` rows (one gather region): sum[r] for each.
+/// The tree finished from the gathered fp64 partials of `rows` rows (one gather region), merged in fp64 and rounded once: sum[r] fp32 for each.
 pub fn tpFinish(k: *const Kernels, s: cuda.Stream, gath: u64, sum: u64, rows: usize, d: usize, world: usize, m: usize) !void {
     if (rows == 0) return;
     var a: cuda.Args = .{};
