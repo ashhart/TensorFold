@@ -299,8 +299,8 @@ below; these are estimates for planning a port, not results.
 
    | Family | Last layer, layers | Main blocker | Gain | Effort |
    | --- | --- | --- | --- | --- |
-   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer | −1.2..−1.6 % TTFT | done [#2229] |
-   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer | −1.3..−2.9 % TTFT (no drafter) | done [#2229] |
+   | qwen3_5 (27B) | full attention, 64 | MTP taps the last layer when drafting | −1.2..−1.6 % TTFT; unread chunks [#2941] | done [#2229] |
+   | qwen3_5 (35B-A3B) | full attention, 40 | MTP taps the last layer when drafting | −1.3..−2.9 % TTFT (no drafter); unread chunks [#2941] | done [#2229] |
    | gemma4 | global attention, 42–60 | drafter taps copy every row | ~1.5 % | easy |
    | dory | an MLP sublayer, 72 sublayers | none | ~1.3 % | easy |
    | spark25 | full attention, 36 | fused QKVG GEMM | ~2 % | medium |
@@ -707,3 +707,4 @@ below; these are estimates for planning a port, not results.
 [#2977]: https://github.com/ashhart/TensorFold/pull/2977
 [#2805]: https://github.com/ashhart/TensorFold/pull/2805
 [#3305]: https://github.com/ashhart/TensorFold/issues/3305
+[#2941]: https://github.com/ashhart/TensorFold/issues/2941
