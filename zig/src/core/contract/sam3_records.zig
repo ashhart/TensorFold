@@ -19,4 +19,6 @@ pub const metal = blk: {
 } ++ [_]M{
     .{ .name = "sam3 deconvolution im_sam_deconv", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 deconvolution baseline im_sam_deconv_baseline", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "sam3 attention im_attention_f32_full256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+    .{ .name = "sam3 attention control im_attention_f32_full256", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
 };

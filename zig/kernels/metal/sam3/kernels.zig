@@ -1,1 +1,1 @@
-pub const source = @embedFile("deconv.metal") ++ @embedFile("sam3.metal");
+pub const source = @import("kernel_sources").sam3_source;

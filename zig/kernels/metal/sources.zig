@@ -104,6 +104,7 @@ pub const tensor_ops = @embedFile("tensor_ops.metal");
 pub const tensor_exact_gemm = "#define TF_NAX_STRICT_FP32\n#define TF_NAX_EXACT_B\n" ++ @embedFile("prefill/gemm_nax.metal") ++ @embedFile("tensor_exact_gemm.metal");
 pub const tensor_attention = @embedFile("tensor_attention.metal");
 pub const tensor_attention_pv = @embedFile("tensor_attention_pv.metal");
+pub const tensor_library = @import("tensor_library.zig");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");
@@ -316,5 +317,6 @@ pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
 /// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
 pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
 pub const sam3_contract = @embedFile("sam3/contract.metal");
+pub const sam3_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal");
 pub const sam3_deconv = @embedFile("sam3/deconv.metal");
 pub const sam3_deconv_baseline = @embedFile("sam3/deconv_baseline.metal");

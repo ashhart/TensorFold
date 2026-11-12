@@ -15,6 +15,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     metal.linkSystemLibrary("objc", .{});
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const shaders = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sam3/kernels.zig") });
+    shaders.addImport("kernel_sources", sources);
     const rounding = b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_round.zig"), .target = target });
     const tensors = b.createModule(.{ .root_source_file = b.path("zig/src/core/tensor_metal/metal.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "safetensors", .module = safetensors }, .{ .name = "bf16_round", .module = rounding } } });
     const module = b.addModule("sam3", .{

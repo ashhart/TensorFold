@@ -75,6 +75,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     if (k.count != v.count) return error.AttentionReplayShape;
     const rows = q.count / 256;
     const keys = k.count / 256;
+    const gpu_before = g.gpu_seconds;
     const full = try gpu.ops.attentionCross(g, q, k, v, rows, keys, 1, 0.0625);
     defer full.deinit();
     for (1..5) |_| {
@@ -83,6 +84,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
         if (!std.mem.eql(u8, full.slice(u8, full.count * 4), repeated.slice(u8, repeated.count * 4)))
             return error.AttentionReplayNotRepeatable;
     }
+    const grid_seconds = (g.gpu_seconds - gpu_before) / 5;
     const bad = firstNonFinite(full);
     const row = if (args.len == 4) try std.fmt.parseInt(usize, args[3], 10) else if (bad) |i| i / 256 else 0;
     if (row >= rows) return error.AttentionReplayRow;
@@ -132,5 +134,5 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     }
     if (bad != null or firstNonFinite(single) != null) return error.NonFiniteAttentionReplay;
     if (!equal) return error.AttentionReplayRowsDiffer;
-    std.debug.print("Five full-grid runs are byte-identical\n", .{});
+    std.debug.print("Five full-grid runs are byte-identical; mean GPU time {d:.3} ms\n", .{grid_seconds * 1000});
 }
