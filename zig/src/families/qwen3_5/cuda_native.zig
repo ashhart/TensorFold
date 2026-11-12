@@ -168,9 +168,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
 pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
-    try @import("cuda_sm110_open.zig").check(gpa, io, ctx, o);
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
+    try @import("cuda_sm110_open.zig").check(gpa, io, ctx, o);
     const page_tokens = try pages_mod.paging();
     const engine_paged = page_tokens > 0 and pages_mod.pagedOnly();
     const page_test = try cache_mod.pageTest();
