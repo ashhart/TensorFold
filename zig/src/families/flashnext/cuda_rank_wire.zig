@@ -202,7 +202,8 @@ fn msLeft(until: u64) u64 {
 fn proven(peer: p.socket_t, secret: *const auth.Secret, until: u64) bool {
     noDelay(peer) catch return false;
     const who = auth.accept(peer, secret, &.{.flashnext}, msLeft(until)) catch |e| {
-        std.log.warn("flashnext: a connection proved no key and is ignored: {s}", .{auth.explain(e) orelse @errorName(e)});
+        var at: [64]u8 = undefined;
+        std.log.warn("flashnext: a connection from {s} proved no key and is ignored: {s}", .{ auth.peerText(peer, &at), auth.explain(e) orelse @errorName(e) });
         return false;
     };
     return who.rank == 1 and who.world == 2;
@@ -283,7 +284,7 @@ const TestRank = struct {
 
 test "security: rank 0 takes only the peer that proves the key, and a stranger that came first gets no frame" {
     if (builtin.os.tag != .linux) return error.SkipZigTest; // Link.open is Linux's
-    const secret = try auth.Secret.fromBytes("the pair's rank secret");
+    const secret = try auth.Secret.fromBytes("the pair's rank secret for the tests");
     const port = try testPort();
     var lead: TestRank = .{};
     const t0 = try std.Thread.spawn(.{}, TestRank.run, .{ port, 0, secret, &lead });
@@ -315,8 +316,8 @@ test "security: rank 0 takes only the peer that proves the key, and a stranger t
 
 test "security: a rank 1 with another key is refused and rank 0 keeps waiting for its peer" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const secret = try auth.Secret.fromBytes("the pair's rank secret");
-    const other = try auth.Secret.fromBytes("another pair's secret");
+    const secret = try auth.Secret.fromBytes("the pair's rank secret for the tests");
+    const other = try auth.Secret.fromBytes("another pair's secret for the tests");
     const port = try testPort();
     var lead: TestRank = .{};
     const t0 = try std.Thread.spawn(.{}, TestRank.run, .{ port, 0, secret, &lead });

@@ -81,7 +81,8 @@ pub const Bootstrap = struct {
             const fd = try sock.accept(l, until);
             // a connection that proves no key is closed and forgotten: it cannot take a rank's place or end the group
             const proven = auth.accept(fd, &b.secret, &.{ .tp_control, .tp_plan }, msUntil(until)) catch |e| {
-                log.warn("tp bootstrap: a connection proved no key and is ignored: {s}", .{auth.explain(e) orelse @errorName(e)});
+                var at: [64]u8 = undefined;
+                log.warn("tp bootstrap: a connection from {s} proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
                 sock.close(fd);
                 continue;
             };
@@ -357,7 +358,7 @@ fn testStranger(port: u16, bytes: []const u8) !sock.Fd {
 }
 
 test "security: a connection that proves no key cannot end the group or take a rank's place" {
-    const key = try auth.Secret.fromBytes("the group's rank secret");
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
     const l = try testListener();
     defer sock.close(l.fd);
     // an older build's hello for another world: it ended the group for every rank
@@ -393,8 +394,8 @@ test "security: a connection that proves no key cannot end the group or take a r
 }
 
 test "security: a rank with another key or with none joins no keyed group" {
-    const key = try auth.Secret.fromBytes("the group's rank secret");
-    const other = try auth.Secret.fromBytes("another group's secret");
+    const key = try auth.Secret.fromBytes("the group's rank secret for the tests");
+    const other = try auth.Secret.fromBytes("another group's secret for the tests");
     for ([_]auth.Secret{ other, auth.Secret.none }) |theirs| {
         const l = try testListener();
         defer sock.close(l.fd);
