@@ -94,7 +94,7 @@ fn expertsOrder(r: *Rig, kit: *const lw.Kit, ck: *core.Checkpoint, c: *const Con
         const out = try r.zeros(pairs * ni * 2);
         const in: ex.Rows = .{ .x = try r.dev(std.mem.sliceAsBytes(x)), .stride = d, .slots = slots };
         const items = cuda.grouped.maxItems(pairs, l.experts, tile);
-        if (prompt) try kit.grouped().prompt(r.s, .up, in, lc, p, out, items, -1) else try kit.grouped().decode(r.s, .up, in, lc, p, out, items, -1);
+        if (prompt) try kit.grouped().prompt(r.s, .up, in, lc, p, out, items, pairs, tile, -1) else try kit.grouped().decode(r.s, .up, in, lc, p, out, items, pairs, tile, -1);
         const want = try r.a.alloc(f64, pairs * ni);
         const tol = try r.a.alloc(f64, pairs * ni);
         var above: usize = 0;
