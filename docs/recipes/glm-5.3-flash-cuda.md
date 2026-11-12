@@ -184,6 +184,32 @@ missing link (#1971). The ring also needs these NCCL settings at start (#1971):
 - `NCCL_ALGO=Ring`, and a graph for each rank that receives on the port toward the previous rank and sends toward
   the next.
 
+For switchless RoCE links on separate IPv4 subnets, also check NCCL's subnet-aware routing capability. NCCL 2.28.9
+lacks it; native 1.2.6 was tested with NCCL 2.30.7. Do not assume every 2.30 build has it: the inspected 2.30.4 source
+lacked it. Setting `NCCL_IB_SUBNET_AWARE_ROUTING=1` cannot add the feature to an older library.
+
+Keep a trusted, architecture-compatible NCCL library in a private directory containing `libnccl.so.2`, without
+replacing the system library. Prefix each rank's existing launch with the following environment (replace the
+example directory, model and arguments, and retain that rank's placement, network and graph settings):
+
+```sh
+env LD_LIBRARY_PATH=/path/to/private/nccl/lib \
+  NCCL_IB_SUBNET_AWARE_ROUTING=1 NCCL_IB_SUBNET_PREFIX_LEN=24 \
+  tensorfold serve MODEL --context 65536 --parallel 1
+```
+
+The prefix length must match the links' IPv4 subnet layout; 24 was tested on disjoint /24 links, not arbitrary
+networks. This override affects only that process and replaces, rather than appends to, its inherited library path;
+keep any other required trusted library directories explicit. In the tested native 1.2.6 binary, `TF_NCCL_LIB` alone
+still selected the system NCCL. The [native GLM loader](../../zig/src/cuda/nccl.zig) opens `libnccl.so.2` by name;
+do not infer selection from an environment variable or from a library installed elsewhere.
+
+On **every rank**, inspect the running rank PID's `/proc/PID/maps` and verify the mapped NCCL pathname and file hash
+against the intended library. With `NCCL_DEBUG=INFO`, check `Using network IB` and subnet-aware routing overrides
+where a device changes. A graph-loaded message or channel's `NET/IB` device number alone does not prove the final
+NIC selection; require successful collectives and readiness too. This is a routing/library-selection check, not
+qualification of ring or split prefill above, or a performance recommendation.
+
 `TF_GLM_ROCE_MULTI=1` with `TF_TP_ROCE_RELAY=1` relays gathers through both neighbours on such a ring instead of
 NCCL (#2352, opt-in, four ranks only). Gathers up to `TF_TP_ROCE_RELAY_MAX_KB` a rank go on the wire (64 KiB by
 default, 4 to 1024); larger ones, reductions and exchanges stay on NCCL. On the ring with gather, @Bizuayeu measured
