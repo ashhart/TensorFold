@@ -101,6 +101,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     const rows = ids.len;
     if (rows == 0 or rows > R) return error.BadChunk;
     if (c.len + rows > c.capacity) return error.ContextFull;
+    for (ids) |id| if (id >= cfg.vocab) return error.InvalidGemmaToken; // gemma_embed reads row id unchecked
     const p0 = c.len;
     @memcpy(s.ids.slice(u32, rows), ids);
     for (s.pos.slice(i32, rows), s.hi.slice(i32, rows), 0..) |*p, *h, i| {
