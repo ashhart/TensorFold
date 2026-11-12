@@ -18,13 +18,13 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
     const missing = std.mem.eql(u8, mode, "missing");
     const started = wire.now();
     if (missing) {
-        try std.testing.expectError(error.RankTimeout, wire.Link.open(gpu.io, "127.0.0.1", port, rank, 200));
+        try std.testing.expectError(error.RankTimeout, wire.Link.open(gpu.io, "127.0.0.1", port, rank, 200, &.none));
         try check.expect(wire.now() - started < 3 * std.time.ns_per_s, "missing peer startup is bounded", .{});
         check.pass("rank {d}: missing peer startup timed out within bound", .{rank});
         return;
     }
     const master = if (std.mem.eql(u8, mode, "graph-eof")) @import("sys").getenv("TF_FLASHNEXT_RANK_TEST_MASTER") orelse "127.0.0.1" else "127.0.0.1";
-    const link = try wire.Link.open(gpu.io, master, port, rank, 30_000);
+    const link = try wire.Link.open(gpu.io, master, port, rank, 30_000, &.none);
     defer link.close();
     var no_delay: c_int = 0;
     var option_len: std.posix.socklen_t = @sizeOf(c_int);
