@@ -4,18 +4,11 @@
 #include <cuda_fp16.h>
 #include <math.h>
 
+#include "common/reduce.cuh"
+
 namespace tf_ctl_idol {
 __device__ __forceinline__ float h(float x) { return __half2float(__float2half_rn(x)); }
 __device__ __forceinline__ float ld(const __half* p) { return __half2float(*p); }
-__device__ __forceinline__ float block_sum(float v, float* part) {
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    __syncthreads();
-    if ((threadIdx.x & 31) == 0) part[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float total = 0.0f;
-    for (int w = 0; w < 8; ++w) total += part[w];
-    return total;
-}
 }  // namespace tf_ctl_idol
 
 // tf_idol_norm modulating the unrounded LayerNorm: fp16(fp16(y s1) + sh) where idol-sdk rounds y first.
@@ -27,9 +20,9 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_idol_norm_late(const __
     const __half* x = X + (size_t)blockIdx.x * width;
     float a = 0.0f, q = 0.0f;
     for (int i = threadIdx.x; i < width; i += 256) a += ld(x + i);
-    const float mean = block_sum(a, part) / (float)width;
+    const float mean = tf_common::block_sum_serial(a, part) / (float)width;
     for (int i = threadIdx.x; i < width; i += 256) q += (ld(x + i) - mean) * (ld(x + i) - mean);
-    const float inv = 1.0f / sqrtf(block_sum(q, part) / (float)width + eps);
+    const float inv = 1.0f / sqrtf(tf_common::block_sum_serial(q, part) / (float)width + eps);
     for (int i = threadIdx.x; i < width; i += 256) {
         float v = (ld(x + i) - mean) * inv;
         v = mode == 1 ? h(v * W[i] + B[i]) : h(h(v * ld(S1 + i)) + ld(SH + i));
