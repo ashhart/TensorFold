@@ -12,8 +12,20 @@ pub const Key = key.Key;
 /// The setting that names the key file: the same contents on every rank of a group that spans hosts.
 pub const env_name = "TF_RANK_SECRET_FILE";
 
+/// The fewest secret bytes a rank key file holds: the acceptor proves first, so a short key could be guessed offline.
+pub const least_bytes = 32;
+
 /// An unproven connection's whole budget in milliseconds: a silent socket holds an acceptor no longer.
 pub const budget_ms = 10_000;
+
+/// The connector's hello must arrive within this: an honest rank sends it at once, so silent sockets go fast.
+pub const first_ms = 2_000;
+
+/// How to make a key; every rank needs the same file. 32 random bytes in base64: trimming cannot shorten them.
+pub const make_key = "head -c 32 /dev/urandom | base64 > FILE && chmod 600 FILE";
+
+/// How a rank is given its key, named in every refusal that a missing or different key explains.
+const set_key = "pass serve --rank-secret FILE (or set " ++ env_name ++ ") on every rank, the same file on each; make one with: " ++ make_key;
 
 /// The most ranks a hello may claim.
 pub const max_world = 1024;
@@ -57,11 +69,11 @@ pub const Secret = struct {
     pub const none: Secret = .{ .key = unkeyed, .keyed = false };
 
     pub fn fromBytes(bytes: []const u8) key.Error!Secret {
-        return .{ .key = try key.fromBytes(bytes), .keyed = true };
+        return .{ .key = try key.fromBytes(bytes, least_bytes), .keyed = true };
     }
 
     pub fn fromFile(path: [:0]const u8) key.Error!Secret {
-        return .{ .key = try key.fromFile(path), .keyed = true };
+        return .{ .key = try key.fromFile(path, least_bytes), .keyed = true };
     }
 
     /// The key in the file TF_RANK_SECRET_FILE names, or `none` when it is unset or blank.
@@ -151,7 +163,8 @@ fn acceptAs(fd: posix.socket_t, secret: *const Secret, allowed: []const Purpose,
     const until = nowMs() +| @min(ms, budget_ms);
     const stranger = !secret.keyed and !local; // no key here, and the peer is on another host
     var h: [hello_len]u8 = undefined;
-    recvAll(fd, &h, until) catch |e| return if (stranger) error.RankAuthKeyRequired else e;
+    // the hello's own short budget: a silent connection holds the serial acceptor 2 s, not the whole budget
+    recvAll(fd, &h, @min(until, nowMs() +| first_ms)) catch |e| return if (stranger) error.RankAuthKeyRequired else e;
     if (!std.mem.eql(u8, h[0..8], magic) or read32(h[8..12]) != version) return error.RankAuthNotARank;
     const purpose = std.enums.fromInt(Purpose, read32(h[12..16])) orelse return error.RankAuthBadClaim;
     if (std.mem.indexOfScalar(Purpose, allowed, purpose) == null) return error.RankAuthBadClaim;
@@ -178,18 +191,18 @@ fn acceptAs(fd: posix.socket_t, secret: *const Secret, allowed: []const Purpose,
 /// What a failed proof or an unusable key file means, naming the setting; null for any other error.
 pub fn explain(e: anyerror) ?[]const u8 {
     return switch (e) {
-        error.RankAuthKeyRequired => "ranks on more than one host need a shared key: set " ++ env_name ++ " on every rank to an owner-only file with the same contents",
-        error.RankAuthWrongKey => "the other rank holds a different key: " ++ env_name ++ " must name a file with the same contents on every rank",
-        error.RankAuthPeerHasKey => "the other rank has a key and this rank has none: set " ++ env_name ++ " on every rank",
-        error.RankAuthPeerHasNoKey => "this rank has a key and the other rank has none: set " ++ env_name ++ " on every rank",
+        error.RankAuthKeyRequired => "ranks on more than one host need a shared key: " ++ set_key,
+        error.RankAuthWrongKey => "the other rank holds a different key: " ++ set_key,
+        error.RankAuthPeerHasKey => "the other rank has a key and this rank has none: " ++ set_key,
+        error.RankAuthPeerHasNoKey => "this rank has a key and the other rank has none: " ++ set_key,
         error.RankAuthNotARank => "the peer does not speak rank authentication: every rank must run this build",
         error.RankAuthClosed => "the peer closed during the key proof: it runs another build, holds another key, or is not a rank",
         error.RankAuthTimeout => "the peer did not finish the key proof in time",
         error.RankAuthBadClaim => "the peer claimed a link, rank or world this rank does not take",
-        error.SecretUnreadable => env_name ++ " names a file this rank cannot read: it is missing, a symbolic link, or another user's",
+        error.SecretUnreadable => env_name ++ " names a file this rank cannot read: it is missing or another user's",
         error.SecretNotAFile => env_name ++ " must name a regular file",
         error.SecretNotPrivate => env_name ++ " names a file other users can read or write: chmod 600 it",
-        error.SecretTooShort => env_name ++ " names a file with fewer than 16 bytes of secret",
+        error.SecretTooShort => std.fmt.comptimePrint("{s} names a file with fewer than {d} bytes of secret: make one with {s}", .{ env_name, least_bytes, make_key }),
         error.SecretTooLong => env_name ++ " names a file over 4 KiB",
         error.NoRandom => "the system's random source could not be read for the key proof",
         else => null,
@@ -270,6 +283,26 @@ fn sameAddress(peer: *const Address, mine: *const Address) bool {
     return family(mine) == f and std.mem.eql(u8, ip, mine[at..][0..ip.len]);
 }
 
+/// `fd`'s peer as text for a log line ("1.2.3.4", "[fe80:0:0:0:0:0:0:1]", "a local socket"), or "an unknown address".
+pub fn peerText(fd: posix.socket_t, buf: *[64]u8) []const u8 {
+    var peer: Address align(8) = @splat(0);
+    var len: posix.socklen_t = @sizeOf(Address);
+    if (posix.errno(posix.system.getpeername(fd, @ptrCast(&peer), &len)) != .SUCCESS) return "an unknown address";
+    return addressText(&peer, buf);
+}
+
+fn addressText(a: *const Address, buf: *[64]u8) []const u8 {
+    const f = family(a);
+    if (f == posix.AF.UNIX) return "a local socket";
+    if (f == posix.AF.INET) return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ a[4], a[5], a[6], a[7] }) catch unreachable;
+    if (f != posix.AF.INET6) return "an unknown address";
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeByte('[') catch unreachable;
+    for (0..8) |i| w.print("{s}{x}", .{ if (i == 0) "" else ":", std.mem.readInt(u16, a[8 + 2 * i ..][0..2], .big) }) catch unreachable;
+    w.writeByte(']') catch unreachable;
+    return w.buffered();
+}
+
 /// Whether `fd`'s peer is on this host. A peer whose address cannot be read counts as another host.
 fn sameHost(fd: posix.socket_t) bool {
     var peer: Address align(8) = @splat(0);
@@ -285,7 +318,7 @@ const fixture = @import("rank_auth_test.zig");
 
 test "rank auth: a group across hosts needs a key, and each end is told so" {
     if (windows) return error.SkipZigTest;
-    const k = try Secret.fromBytes("a shared rank secret");
+    const k = try Secret.fromBytes("a shared rank secret for the tests");
     const Go = struct {
         fn connector(fd: posix.socket_t, secret: Secret, local: bool, out: *?anyerror) void {
             _ = connectAs(fd, &secret, .rocm, 1, 2, 3000, local) catch |e| {
@@ -358,6 +391,12 @@ test "rank auth: this host is loopback, a local socket, or the address the conne
     const un: posix.sockaddr.un = .{ .path = @splat(0) };
     @memcpy(local[0..@sizeOf(posix.sockaddr.un)], std.mem.asBytes(&un));
     try std.testing.expect(sameAddress(&local, &lan));
+    // the same addresses as a refusal's log line names them
+    var text: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("10.0.0.5", addressText(&lan, &text));
+    try std.testing.expectEqualStrings("[2000:0:0:0:0:0:0:7]", addressText(&At.v6(far), &text));
+    try std.testing.expectEqualStrings("a local socket", addressText(&local, &text));
+    try std.testing.expectEqualStrings("an unknown address", addressText(&unknown, &text));
     const fds = try fixture.pair();
     defer fixture.close(fds);
     try std.testing.expect(sameHost(fds[0]) and sameHost(fds[1]));
