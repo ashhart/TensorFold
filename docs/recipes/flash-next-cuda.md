@@ -144,6 +144,9 @@ expert lines, and a CUDA graph capture cannot hold that wait: on such a pack the
 `TF_FLASHNEXT_WINDOW_GRAPH` notwithstanding. With `TF_FLASHNEXT_EXL3_ROUTED=device` no layer waits, and those graphs
 apply.
 
+The EXL3 layer diagnostic compares the float64 oracle with the canonical FP32 MoE branch
+consumed by writeback, not with a rank's local expert slots.
+
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
 
