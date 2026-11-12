@@ -120,6 +120,9 @@ pub const Compiler = struct {
     }
 };
 
+/// tfg_budget_ready's answer: explored and masked, not covered, or past the work limit (refused, never masked in part).
+pub const Readiness = enum { ready, uncovered, over_work };
+
 pub const Compiled = struct {
     f: Fns,
     h: *anyopaque,
@@ -134,10 +137,16 @@ pub const Compiled = struct {
 
     /// grammar_budget's tables explored for this grammar (once, the library keeps them): false where not covered.
     pub fn budgetReady(g: Compiled) !bool {
-        const ready = g.f.budget_ready orelse return false;
+        return try g.budgetReadiness() == .ready;
+    }
+
+    /// The same, saying why not: rules the budget mask does not cover, or exploring past the library's work limit.
+    pub fn budgetReadiness(g: Compiled) !Readiness {
+        const ready = g.f.budget_ready orelse return .uncovered;
         return switch (ready(g.h)) {
-            1 => true,
-            0 => false,
+            1 => .ready,
+            0 => .uncovered,
+            2 => .over_work,
             else => error.Grammar,
         };
     }

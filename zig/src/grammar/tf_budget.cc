@@ -2,7 +2,6 @@
 #include "tf_budget.h"
 
 #include <algorithm>
-#include <chrono>
 #include <cstring>
 #include <deque>
 #include <string>
@@ -38,11 +37,8 @@ using Names = std::unordered_map<std::vector<int32_t>, int32_t, VecHash>;
 // The chart's parent sets loop (left recursion), or a replayed path was refused: no budget mask then.
 struct Uncovered {};
 
-// Exploring took all the work it may: the states walked so far keep their masks.
+// Exploring took all the work it may: the grammar is refused, with no mask from the states walked so far.
 struct Spent {};
-
-// Exploring ran out of time: no budget mask then.
-struct Slow {};
 
 int32_t Find(Names& names, std::vector<int32_t>&& key, bool add) {
   auto it = names.find(key);
@@ -134,8 +130,7 @@ class Tables {
   Grammar grammar;
   std::shared_ptr<const Trie> trie;
   Limits limits;
-  int64_t work = 0;                              // the steps Explore has taken of limits.work
-  std::chrono::steady_clock::time_point until;  // when Explore gives up
+  int64_t work = 0;                             // the steps Explore has taken of limits.work
   Names items, parents, states;
   std::vector<uint8_t> done, explored;          // per state: the reply is complete there; its tokens were walked
   std::vector<uint16_t> next;                   // per state and byte
@@ -144,6 +139,7 @@ class Tables {
   std::vector<int32_t> need, worst;             // fewest tokens to complete; the most any one token leaves
   int32_t most = 0;
   bool ok = false;
+  bool spent = false;  // exploring passed limits.work: refused, never masked in part
   std::once_flag once;
 
   // The state named by `key` ({complete, items...}), -1 unknown, kUnknown past kMaxStates.
@@ -261,17 +257,14 @@ bool Tables::Covered() const {
   return true;
 }
 
-// Count n steps of exploring: Spent past the work it may take, Slow past its time (the clock is read every 2^20 steps).
+// Count n steps of exploring, Spent past limits.work. No clock is read: a grammar's count is the same on every machine.
 void Tables::Spend(int64_t n) {
-  int64_t before = work;
   work += n;
   if (work > limits.work) throw Spent{};
-  if ((before >> 20) != (work >> 20) && std::chrono::steady_clock::now() >= until) throw Slow{};
 }
 
 // One byte into the probe, counted: a parser step costs about what 64 walk steps do, and 4 more for each row state.
 bool Tables::Advance(Probe& p, uint8_t b) {
-  if (std::chrono::steady_clock::now() >= until) throw Slow{};
   Spend(64 + 4 * p.Row());
   if (!p.Step(b)) return false;
   Spend(4 * p.Row());
@@ -294,7 +287,6 @@ void Tables::Place(Probe& p, int32_t c) {
 // Breadth first from the root: each state's tokens walked once, its byte steps probed as the walk first needs them.
 void Tables::Explore() {
   if (!Covered()) return;
-  until = std::chrono::steady_clock::now() + std::chrono::milliseconds(limits.ms);
   try {
     Probe probe(grammar);
     std::vector<int32_t> key;
@@ -348,9 +340,9 @@ void Tables::Explore() {
       explored[c] = 1;
     }
   } catch (const Spent&) {
-  } catch (const Uncovered&) {
+    spent = true;  // partial tables would loosen masks where main's are exact: none go live
     return Drop();
-  } catch (const Slow&) {
+  } catch (const Uncovered&) {
     return Drop();
   }
   Need();
@@ -398,9 +390,9 @@ void Tables::Need() {
   }
 }
 
-bool Ready(Tables& t) {
+int Ready(Tables& t) {
   std::call_once(t.once, [&] { t.Explore(); });
-  return t.ok;
+  return t.ok ? 1 : t.spent ? 2 : 0;
 }
 
 std::shared_ptr<Tables> Cache::Get(const xgrammar::CompiledGrammar& g) {
@@ -469,7 +461,7 @@ void Follower::Rollback(int n) { s_->taken.resize(s_->taken.size() - std::min<si
 int Follower::Mask(int32_t* words, int n, int left) {
   Tables& t = *s_->t;
   if (left < 1) return 0;
-  if (!Ready(t)) return 1;
+  if (Ready(t) != 1) return 1;
   if (left - 1 >= t.most) return 0;
   if (!s_->Sync()) return 1;
   if (!s_->probe.Key(t, false, s_->key)) return 0;

@@ -575,14 +575,13 @@ binds. The mask depends only on the grammar's place and the tokens left, so
 drafted, `"draft": false` and concurrent replies stay the same with it on. When `max_tokens` is already below the
 grammar's shortest reply, the mask is not applied and the reply is cut as without it. The first request for a grammar
 explores its parser states over the tokenizer's tokens (on the request thread, then kept for the last eight grammars);
-a grammar with more than 16,384 such states, or one whose exploring takes more than a fixed amount of work (about
-twice what `json_object` takes over a 250,000-token vocabulary), is only masked where its explored states decide it,
-never beyond what completes. That work is counted in steps, not time, so the same grammar is always cut at the same
-place. A long bounded string reaches it early: over that vocabulary, a string with `maxLength` 500 or more is masked
-for about its first 300 characters, and one with `maxLength` 400 or less throughout. It is refused with HTTP 400 when
-the loaded `libtfgrammar` predates it, for grammars with token-level, budgeted, captured or left-recursive rules, and
-for a grammar still being explored after a minute. The masks follow from xgrammar's byte-level parse; with thinking on
-they start after the think end.
+a grammar with more than 16,384 such states is only masked where its explored states decide it, never beyond what
+completes. Exploring is also limited by a fixed amount of work, counted in parser and token steps rather than time, so
+the same grammar gets the same answer on every machine and under any load. The limit is about 256 times what
+`json_object` takes over a 250,000-token vocabulary; a grammar past it gets HTTP 400 that names the limit, and is never
+masked in part. It is also refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with
+token-level, budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with
+thinking on they start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
