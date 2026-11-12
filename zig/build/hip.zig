@@ -185,6 +185,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&vision_contract_host.step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
+    b.step("test-rank-link-hip-host", "The HIP ranks' link on the host: joins, refusals and the key proof").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "security:", "ranks that match join", "a rank started with another world", "a rank with other weights", "hellos differ", "startup steps:", "a rank that leaves", "a family's startup", "a change every rank makes" } })).step);
     b.step("test-qwen-hip-formats-host", "Qwen HIP format offers: the BF16 refusal, and discovery against actual config and matrix admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{ "a bf16 checkpoint without a joint head", "capability audit: HIP Qwen format" } })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
     test_step.dependOn(&family_host.step);

@@ -75,6 +75,11 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         portable }));
     const tp_step = b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests");
     tp_step.dependOn(&tests.step);
+    const rank_auth = b.createModule(.{ .root_source_file = b.path("zig/src/platform/rank_auth.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    const rank_auth_tests = b.addRunArtifact(b.addTest(.{ .root_module = rank_auth }));
+    b.step("test-rank-auth-host", "The rank links' key proof over loopback: ranks, strangers, replays and key files").dependOn(&rank_auth_tests.step);
+    tp_step.dependOn(&rank_auth_tests.step);
+    test_step.dependOn(&rank_auth_tests.step);
     tp_step.dependOn(cli_step);
     tp_step.dependOn(&suite_host.step);
     const multi_root = module(b, host, .debug, runtime(b, host, .debug));
