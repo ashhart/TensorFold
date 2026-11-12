@@ -95,8 +95,8 @@ pub fn printGateInputs(a_bits: []const u16, b_bits: []const u16, a_log_pairs: []
     const hv = gate_index % 16;
     const alog_word = @as(u32, a_log_pairs[2 * hv]) | (@as(u32, a_log_pairs[2 * hv + 1]) << 16);
     const alog: f32 = @bitCast(alog_word);
-    const ref = fx.gateRefAsh(a_bits[gate_index], b_bits[gate_index], alog, dt_bits[hv]);
-    std.debug.print("  HOST gate token={d} head={d} a=0x{x:0>4} ({e}) b=0x{x:0>4} ({e}) dt=0x{x:0>4} ({e}) A_log=0x{x:0>8} ({e}) Ash_g={e} Ash_beta={e}\n", .{
+    const ref = fx.gateRefOracle(a_bits[gate_index], b_bits[gate_index], alog, dt_bits[hv]);
+    std.debug.print("  HOST gate token={d} head={d} a=0x{x:0>4} ({e}) b=0x{x:0>4} ({e}) dt=0x{x:0>4} ({e}) A_log=0x{x:0>8} ({e}) oracle_g={e} oracle_beta={e}\n", .{
         gate_index / 16, hv, a_bits[gate_index], fx.c.fromBf16(a_bits[gate_index]), b_bits[gate_index], fx.c.fromBf16(b_bits[gate_index]), dt_bits[hv], fx.c.fromBf16(dt_bits[hv]), alog_word, alog, ref.g, ref.beta,
     });
 }

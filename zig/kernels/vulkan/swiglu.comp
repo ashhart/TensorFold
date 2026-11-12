@@ -1,3 +1,7 @@
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/swiglu.comp at 98650249f97f.
+// Code adapted: 5 lines added or changed, 0 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
+
 // Four-wide SwiGLU rounds each op; aligned host inputs; optional materialize writes sig/silu buffers.
 
 #version 460

@@ -268,7 +268,7 @@ pub fn splitReference(
             }
         }
         for (0..heads) |hv| {
-            const ref = fx.gateRefAsh(a_bits[t * heads + hv], b_bits[t * heads + hv], f32Of(a_log_bits, hv), dt_bits[hv]);
+            const ref = fx.gateRefOracle(a_bits[t * heads + hv], b_bits[t * heads + hv], f32Of(a_log_bits, hv), dt_bits[hv]);
             want[soa_elems + t * heads + hv] = ref.beta;
             mag[soa_elems + t * heads + hv] = @abs(ref.beta);
         }
@@ -318,10 +318,10 @@ pub const DecodeInput = struct {
     }
 };
 
-// The g/beta pair one decode token's raw-gates prologue produces (the Ash chain), as the walk reads them.
+// The g/beta pair one decode token's raw-gates prologue produces (the oracle chain), as the walk reads them.
 pub fn decodeGates(a_bits: []const u16, b_bits: []const u16, a_log_bits: []const u16, dt_bits: []const u16, t: usize, g_pairs: []u16, beta_bits: []u16) void {
     for (0..heads) |h| {
-        const ref = fx.gateRefAsh(a_bits[t * heads + h], b_bits[t * heads + h], f32Of(a_log_bits, h), dt_bits[h]);
+        const ref = fx.gateRefOracle(a_bits[t * heads + h], b_bits[t * heads + h], f32Of(a_log_bits, h), dt_bits[h]);
         putF32(g_pairs, h, @floatCast(ref.g));
         beta_bits[h] = c.toBf16(@floatCast(ref.beta));
     }
