@@ -65,6 +65,12 @@ fn mtpNames(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const []const
     return out.items;
 }
 
+/// The quantization the MTP head's file states, or null when the file is not there or states none.
+fn mtpQuantization(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    if (!exists(a, dir, tensors.mtp_file)) return null;
+    return widths.headQuantization(a, io, try std.fs.path.join(a, &.{ dir, tensors.mtp_file }));
+}
+
 /// What admission reads from `dir`.
 pub fn factsOf(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) Refused!admit.Facts {
     var lesson: [64]u8 = undefined;
@@ -85,6 +91,12 @@ pub fn factsOf(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]co
             a,
             problem,
             "cannot read {s}/{s} ({t})",
+            .{ dir, tensors.mtp_file, err },
+        ),
+        .mtp_quantization = mtpQuantization(a, io, dir) catch |err| return refuse(
+            a,
+            problem,
+            "cannot read {s}/{s}'s header ({t})",
             .{ dir, tensors.mtp_file, err },
         ),
         .living = exists(a, dir, living.fileName(&lesson, 0) catch unreachable),
