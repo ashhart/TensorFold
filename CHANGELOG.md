@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- XPU (Intel Arc Pro B70) with Qwen3.8-27B: a prompt chunk whose output nothing reads stops its last layer at the keys and values, and the chunk that is read runs the rest of that layer on its last 64-row tile only, as CUDA and Metal already do; logits, keys and values are byte-identical at ten prompt lengths, and the cold first token comes 1.4-2.5% sooner at 8K to 64K prompts with identical replies (#2854, fixes #2849). Thanks to @SergiioB for the B70 run.
+
 - Qwen 3.5 on CUDA: a stream's whole prompt fill runs exactly once, so with `--prompt-cache-disk` or `--learn-conversations` the startup probe no longer refuses with `ProbeUnmarked`, and a readout no longer runs a second, unread text pass; served replies are unchanged (#2838, fixes #2804).
 
 - HIP: the qwen3_5 engine has a DFlash2 draft engine for chains: it walks the core `draft_tree`, shares one `prior` table with CUDA, and refuses an absorb whose start differs from its features; in the drafter test with Qwen3.8-27B on gfx1151, 0.86 of first drafts are right and a round makes about 5 tokens (greedy), and without a drafter the 27B's and 35B-A3B's logits on HIP are byte-identical to main's; the server doesn't use it yet (#2726, part 4 of #1563). Thanks to @AbrahamCete.
