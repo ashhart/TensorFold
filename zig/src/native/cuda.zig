@@ -22,6 +22,7 @@ const cuda_disk = @import("cuda_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
+const kv_room = @import("cuda_kv_room.zig");
 const cuda_families = @import("cuda_families.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 pub const registry = cuda_families.registry;
@@ -351,8 +352,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const kv_room = kv_pages.streamsRoom(loaded, room); // and a first window's planes in a carveout
-    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = kv_room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
+    const streams_room = kv_room.streamsRoom(loaded, room); // and a first window's planes in a carveout
+    const counted = try @import("cuda_streams.zig").count(F, a, loaded, o, .{ .room = streams_room, .model = model, .reserve = after.reserve, .low = low, .window = window, .stream_bytes = served.stream_bytes, .host_cache = host_cache, .host_budget = staging_budget, .share = share }, problem) orelse return null;
     const streams = counted.streams;
     const held = served.stream_bytes * (streams -| free);
     const cache_room = @import("cuda_streams.zig").cacheRoom(room, served.stream_bytes, free, counted);
@@ -370,7 +371,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.readiness(F);
     h.kv_plan = counted.ledger;
     // a ledger's plan placed the cache already, beside --parallel full-window requests
-    const kept = if (host_cache) kv_pages.kept(F, loaded, paged, o, kv_room, held, final_host_budget, true) else if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, kv_room, held, 0, false);
+    const kept = if (host_cache) kv_pages.kept(F, loaded, paged, o, streams_room, held, final_host_budget, true) else if (counted.ledger) |lp| lp.kept else kv_pages.kept(F, loaded, paged, o, streams_room, held, 0, false);
     if (h.kv_plan) |*lp| lp.kept = kept;
     const cache = kept.copied;
     const cache_capacity = kv_pages.capacity(F, loaded, kept, @intCast(window));
