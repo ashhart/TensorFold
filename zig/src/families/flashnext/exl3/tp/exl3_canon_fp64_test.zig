@@ -1,4 +1,5 @@
-//! The canonical expert reduction against exact integer sums: the n u / (1 - n u) bound, other orders, TP independence.
+//! The canonical expert reduction against exact integer sums: rounding bounds, sampled error versus other orders,
+//! and TP independence. The f64 tree rounds once to f32; its intermediate additions can still round in f64.
 const std = @import("std");
 const canon = @import("exl3_canon.zig");
 
@@ -20,6 +21,7 @@ fn parts(x: f32) Parts {
 }
 
 fn place(m: u64, e: i32, neg: bool) i256 {
+    if (m == 0) return 0;
     std.debug.assert(e >= lsb and e - lsb < 200);
     const v: i256 = @as(i256, m) << @intCast(e - lsb);
     return if (neg) -v else v;
@@ -43,6 +45,8 @@ const Miss = struct {
     abs: u256,
     /// the sum of |y w|, in 2^-170.
     mag: u256,
+    /// |the exact sum|, in 2^-170.
+    sum: u256,
 };
 
 fn miss(r: canon.Row, got: f32) Miss {
@@ -53,12 +57,18 @@ fn miss(r: canon.Row, got: f32) Miss {
         sum += t;
         mag += @abs(t);
     }
-    return .{ .abs = @abs(exact(got) - sum), .mag = mag };
+    return .{ .abs = @abs(exact(got) - sum), .mag = mag, .sum = @abs(sum) };
 }
 
 /// |err| <= n u / (1 - n u) mag with u = 2^-24, in integers: |err| (2^24 - n) <= n mag.
 fn withinGamma(m: Miss, comptime n: u256) bool {
     return (m.abs << 24) - m.abs * n <= m.mag * n;
+}
+
+/// The root is one f32 rounding of an f64 value within 18 2^-53 of the terms' magnitude of the exact sum:
+/// |root - sum| <= 2^-24 |sum| + 18 2^-53 mag + half the least f32 subnormal (2^-150).
+fn withinRoot(m: Miss) bool {
+    return m.abs << 53 <= (m.sum << 29) + 18 * m.mag + (@as(u256, 1) << (53 - 150 - lsb));
 }
 
 /// The leading 64 bits of v as a float (the rest is under 2^-63 of it; the error figures need no more).
@@ -76,14 +86,22 @@ fn units(m: Miss) f64 {
 
 // ---- the orders --------------------------------------------------------------------------------------------------
 
+/// The canonical root: the f64 tree rounded once to f32.
 fn tree(r: canon.Row) f32 {
-    return canon.subtree(&r.y, &r.w, &r.p, 0, canon.leaf_log);
+    return canon.toF32(canon.subtree(&r.y, &r.w, &r.p, 0, canon.leaf_log));
 }
 
 /// The order before the tree: one fma chain over the slots, in slot order, from +0.
 fn chain(r: canon.Row) f32 {
     var acc: f32 = 0.0;
     for (0..slots) |k| acc = @mulAdd(f32, r.y[k], r.w[k], acc);
+    return acc;
+}
+
+/// The slot chain in f64: the leaf of an all-one-leaf row.
+fn chain64(r: canon.Row) f64 {
+    var acc: f64 = 0.0;
+    for (0..slots) |k| acc = @mulAdd(f64, r.y[k], r.w[k], acc);
     return acc;
 }
 
@@ -175,6 +193,10 @@ fn bits(f: f32) u32 {
     return @bitCast(f);
 }
 
+fn bits64(f: f64) u64 {
+    return @bitCast(f);
+}
+
 const kinds = [_]Kind{ .router, .wide, .boundary, .one_leaf };
 
 test "exl3: canon fp64 oracle sees what fp32 loses and nothing where fp32 is exact" {
@@ -186,7 +208,7 @@ test "exl3: canon fp64 oracle sees what fp32 loses and nothing where fp32 is exa
     try std.testing.expectEqual(@as(u256, 1) << -lsb, m.abs);
     try std.testing.expectEqual((@as(u256, 0x1p24 + 1)) << -lsb, m.mag);
     try std.testing.expect(withinGamma(m, 1));
-    try std.testing.expect(!withinGamma(.{ .abs = 2 * m.abs, .mag = m.mag }, 1));
+    try std.testing.expect(!withinGamma(.{ .abs = 2 * m.abs, .mag = m.mag, .sum = m.sum }, 1));
     // integers whose sums stay under 2^24 are exact in every order
     var prng = std.Random.DefaultPrng.init(0xf640);
     const rng = prng.random();
@@ -196,13 +218,13 @@ test "exl3: canon fp64 oracle sees what fp32 loses and nothing where fp32 is exa
             q.y[k] = @floatFromInt(rng.intRangeAtMost(i32, -4096, 4096));
             q.w[k] = @floatFromInt(rng.intRangeAtMost(i32, -64, 64));
         }
-        for ([_]f32{ tree(q), chain(q), rankSplit(q, 2), rankSplit(q, 8), canon.emulate(5, q) }) |got| {
+        for ([_]f32{ tree(q), chain(q), rankSplit(q, 2), rankSplit(q, 8), canon.toF32(canon.emulate(5, q)) }) |got| {
             try std.testing.expectEqual(@as(u256, 0), miss(q, got).abs);
         }
     }
 }
 
-test "exl3: canon fp64 tree meets n u / (1 - n u) at n = 11 and is no worse than the slot chain or rank splits" {
+test "exl3: canon fp64 root obeys its rounding bound and loses no sampled row to the slot chain or rank splits" {
     var prng = std.Random.DefaultPrng.init(0xf64c);
     const rng = prng.random();
     for (kinds) |kind| {
@@ -212,12 +234,15 @@ test "exl3: canon fp64 tree meets n u / (1 - n u) at n = 11 and is no worse than
         var s8: Stat = .{};
         for (0..20000) |_| {
             const r = row(rng, kind);
-            try t.add(miss(r, tree(r)));
+            const root = miss(r, tree(r));
+            try t.add(root);
+            try std.testing.expect(withinRoot(root));
+            for ([_]f32{ chain(r), rankSplit(r, 2), rankSplit(r, 8) }) |other| try std.testing.expect(root.abs <= miss(r, other).abs);
             try c.add(miss(r, chain(r)));
             try s2.add(miss(r, rankSplit(r, 2)));
             try s8.add(miss(r, rankSplit(r, 8)));
             // a leaf's chain is the slot chain: with every slot in one leaf the tree adds only zeros
-            if (kind == .one_leaf) try std.testing.expectEqual(bits(chain(r)), bits(tree(r)));
+            if (kind == .one_leaf) try std.testing.expectEqual(bits64(chain64(r)), bits64(canon.subtree(&r.y, &r.w, &r.p, 0, canon.leaf_log)));
         }
         // the worst output of the tree over these rows is at or under each other order's worst
         try std.testing.expect(t.worst <= c.worst and t.worst <= s2.worst and t.worst <= s8.worst);
@@ -232,14 +257,35 @@ test "exl3: canon fp64 tree bits are the same at TP 1 to 8 and as the halves of 
     var split_differs: usize = 0;
     for (kinds) |kind| for (0..20000) |_| {
         const r = row(rng, kind);
-        const whole = tree(r);
-        for (1..9) |world| try std.testing.expectEqual(bits(whole), bits(canon.emulate(world, r)));
+        const whole = canon.subtree(&r.y, &r.w, &r.p, 0, canon.leaf_log);
+        for (1..9) |world| {
+            // f64 partials gathered at any degree merge to the whole tree's f64 bits, hence the same f32 root
+            try std.testing.expectEqual(bits64(whole), bits64(canon.emulate(world, r)));
+            try std.testing.expectEqual(bits(tree(r)), bits(canon.toF32(canon.emulate(world, r))));
+        }
         const low = canon.subtree(&r.y, &r.w, &r.p, 0, canon.leaf_log - 1);
         const high = canon.subtree(&r.y, &r.w, &r.p, canon.leaves / 2, canon.leaf_log - 1);
-        try std.testing.expectEqual(bits(whole), bits(low + high));
+        try std.testing.expectEqual(bits64(whole), bits64(low + high));
         // the rank-split sums are not that: their bits move with the degree, so the check above has teeth
         const moved = bits(rankSplit(r, 2)) != bits(rankSplit(r, 1)) or bits(rankSplit(r, 8)) != bits(rankSplit(r, 3));
         split_differs += @intFromBool(moved);
     };
     try std.testing.expect(split_differs > 0);
+}
+
+test "exl3: canon fp64 root is exact where f32 cancellation loses (tree 0, slot chain 1, independent sum 2) at every degree" {
+    // 1e9/8, 1/1, -1e9/8, 1/1 one a leaf: 1.25e8 + 1 is not an f32 number, so the old f32 tree gave 0 and the slot chain 1
+    var r: canon.Row = .{
+        .y = .{ 1e9, 8, -1e9, 8, 0, 0, 0, 0, 0, 0, 0 },
+        .w = .{ 0.125, 0.125, 0.125, 0.125, 0, 0, 0, 0, 0, 0, 0 },
+        .p = .{ 0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 512 },
+    };
+    try std.testing.expectEqual(@as(f32, 1), chain(r));
+    try std.testing.expectEqual(@as(f32, 2), tree(r));
+    try std.testing.expectEqual(@as(u256, 0), miss(r, tree(r)).abs);
+    try std.testing.expect(miss(r, tree(r)).abs <= miss(r, chain(r)).abs);
+    for (1..9) |world| try std.testing.expectEqual(@as(f64, 2), canon.emulate(world, r));
+    // the cancelled pair apart on the two TP halves is the same sum
+    r.p[2] = 256;
+    for (1..9) |world| try std.testing.expectEqual(@as(f64, 2), canon.emulate(world, r));
 }
