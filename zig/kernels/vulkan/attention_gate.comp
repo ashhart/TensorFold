@@ -1,4 +1,3 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 #version 460
 #extension GL_EXT_shader_16bit_storage : require
 
