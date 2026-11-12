@@ -281,7 +281,7 @@ pub const Greedy = struct {
                 });
                 var push: [4]u8 align(4) = undefined;
                 std.mem.writeInt(u32, &push, @intCast(n), .little);
-                const cmd = try self.cmds.begin();
+                const cmd = try self.cmds.sync();
                 try pipe.record(cmd, &push, .{ @intCast(rows), 1, 1 });
                 // Timeout or InFlight leaves completion unknown: exit here, never unwind into the rig's frees.
                 try vk.orExit(self.cmds.submit(self.timeout));

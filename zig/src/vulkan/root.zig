@@ -39,4 +39,6 @@ test {
     const std = @import("std");
     inline for (.{ runtime, Runtime, device, Device, memory, Buffer, commands, Commands, dispatch, dispatch.Pipeline, params, tensor, tensor.View, arena, ops, ops_q4, tile, norm_mlp, norm_mlp.NormMlp, attention, Attention, gdn, Gdn, greedy, Greedy }) |T|
         std.testing.refAllDecls(T);
+    _ = @import("hazard.zig");
+    _ = @import("commands_test.zig");
 }

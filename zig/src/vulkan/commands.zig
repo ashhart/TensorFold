@@ -6,6 +6,7 @@ const runtime = @import("runtime.zig");
 const memory = @import("memory.zig");
 const Device = @import("device.zig").Device;
 const Buffer = memory.Buffer;
+const Hazards = @import("hazard.zig").Hazards;
 const Error = runtime.Error;
 const check = runtime.check;
 
@@ -18,7 +19,11 @@ pub const Commands = struct {
     recording: bool = false,
     /// Dispatches in the open command buffer; Pipeline.run submits when it reaches half a batch.
     pending: u32 = 0,
-    /// Set by a state-corrupting failure (signaled fence or invalid buffer): later begin and submit refuse.
+    /// Ranges the open command buffer's dispatches read or wrote since the last barrier; empty after a submission.
+    hazards: Hazards = .{},
+    /// Set by the first successful submit, never cleared: a later begin records a fence barrier, even after a discard.
+    submitted_before: bool = false,
+    /// Set by a state-corrupting failure (signaled fence, invalid buffer, or a failed submit or wait): begin and submit refuse.
     poison: ?Error = null,
 
     pub fn init(dev: *const Device) Error!Commands {
@@ -58,20 +63,33 @@ pub const Commands = struct {
         _ = self.dev.api.vkResetCommandBuffer(self.cmd, 0);
         self.recording = false;
         self.pending = 0;
+        self.hazards.clear();
     }
 
     /// The open command buffer; begun (and reset) only when nothing recorded earlier still waits for a submission.
     pub fn begin(self: *Commands) Error!c.VkCommandBuffer {
         if (self.poison) |p| return p;
         if (self.recording) return self.cmd;
+        self.hazards.clear();
         try check(self.dev.api.vkResetCommandBuffer(self.cmd, 0));
         const info: c.VkCommandBufferBeginInfo = .{
             .sType = c.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
             .flags = c.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         };
         try check(self.dev.api.vkBeginCommandBuffer(self.cmd, &info));
+        if (self.submitted_before) dispatchBarrier(self.dev, self.cmd);
         self.recording = true;
         return self.cmd;
+    }
+
+    /// The open command buffer after a barrier that fences every dispatch run since the last one; for direct recorders.
+    pub fn sync(self: *Commands) Error!c.VkCommandBuffer {
+        const cmd = try self.begin();
+        if (!self.hazards.empty()) {
+            dispatchBarrier(self.dev, cmd);
+            self.hazards.clear();
+        }
+        return cmd;
     }
 
     /// Submits what is recorded (nothing if none); timeout_ns covers the whole batch; Timeout and InFlight need orExit.
@@ -96,12 +114,17 @@ pub const Commands = struct {
         };
         const queued = api.vkQueueSubmit(self.dev.queue, 1, &info, self.fence);
         submitted(queued) catch |e| {
-            std.log.err("vulkan: vkQueueSubmit returned {d}", .{queued});
+            // Submit refused with a buffer pending on this stream: poison, so no begin resets it under the driver.
+            if (!builtin.is_test) std.log.err("vulkan: vkQueueSubmit returned {d}", .{queued});
+            self.poison = e;
             return e;
         };
+        self.submitted_before = true;
         const waited_on = api.vkWaitForFences(self.dev.handle, 1, &self.fence, 1, timeout_ns);
         waited(waited_on) catch |e| {
-            std.log.err("vulkan: vkWaitForFences returned {d} within {d} ns of a submission", .{ waited_on, timeout_ns });
+            // The wait failed after a live submission: the fence may signal later, so poison, not reset.
+            if (!builtin.is_test) std.log.err("vulkan: vkWaitForFences returned {d} within {d} ns of a submission", .{ waited_on, timeout_ns });
+            self.poison = e;
             return e;
         };
         const reset_done = api.vkResetFences(self.dev.handle, 1, &self.fence);
@@ -153,6 +176,13 @@ pub fn barrier(dev: *const Device, cmd: c.VkCommandBuffer, src_stage: u32, src_a
     dev.api.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 1, &b, 0, null, 0, null);
 }
 
+/// The barrier after a dispatch: its shader writes are visible to a later dispatch or copy.
+pub fn dispatchBarrier(dev: *const Device, cmd: c.VkCommandBuffer) void {
+    const reads = c.VK_ACCESS_SHADER_READ_BIT | c.VK_ACCESS_SHADER_WRITE_BIT | c.VK_ACCESS_TRANSFER_READ_BIT | c.VK_ACCESS_TRANSFER_WRITE_BIT;
+    const stages = c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | c.VK_PIPELINE_STAGE_TRANSFER_BIT;
+    barrier(dev, cmd, c.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, c.VK_ACCESS_SHADER_WRITE_BIT, stages, reads);
+}
+
 // Fill geometry requires nonzero 4-byte-aligned offset/length within the buffer; host-tested.
 pub fn fillRange(buf_len: u64, offset: u64, len: u64) Error!void {
     if (len == 0 or len % 4 != 0 or offset % 4 != 0) return error.Misaligned;
@@ -166,7 +196,7 @@ pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offse
     dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
 }
 
-/// Synchronous vkCmdFillBuffer of a device buffer range, with barriers; submits and waits.
+/// Fills `len` bytes of device buffer `dst` at `offset` with `value`, after earlier dispatches and copies; submits the batch.
 pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
     if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
     try fillRange(dst.len, offset, len);

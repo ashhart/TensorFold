@@ -127,7 +127,7 @@ pub const Greedy = struct {
         try g.finite_logits.bind(&.{ logits.bind(), .{ .buffer = &g.results, .len = 8 } });
         try g.chunk.bind(&.{ logits.bind(), .{ .buffer = &g.partials, .len = g.partials.len } });
         try g.combine.bind(&.{ .{ .buffer = &g.partials, .len = g.partials.len }, .{ .buffer = &g.results, .len = g.results.len } });
-        const cmd = try cmds.begin();
+        const cmd = try cmds.sync();
         // Each call resets flag=0 and bad/index=0xffffffff; a barrier orders fills before compute.
         try commands.recordFill(g.dev, cmd, g.results, 0, 4, 0);
         try commands.recordFill(g.dev, cmd, g.results, 4, 8, std.math.maxInt(u32));

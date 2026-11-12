@@ -276,37 +276,37 @@ pub const Gdn = struct {
         return soa_v.slice(t * 3 * linear_dim, 3 * linear_dim);
     }
 
-    // Fetch checked outputs, reread inputs for unchanged checks, then verify guard words.
+    // Fetch outputs, reread inputs, verify guard words; downloads use orExit so a fence Timeout stays a FAIL verdict.
     fn fetchOutputs(f: *Gdn) !void {
         const T = f.tokens;
         switch (f.which) {
             .split_soa => {
-                try vk.download(f.cmds, f.bufs[5], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 3 * T * linear_dim]), timeout_ns);
-                try vk.download(f.cmds, f.bufs[7], 0, f.staging, std.mem.sliceAsBytes(f.out[3 * T * linear_dim .. 3 * T * linear_dim + T * heads]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[5], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 3 * T * linear_dim]), timeout_ns));
+                try vk.orExit(vk.download(f.cmds, f.bufs[7], 0, f.staging, std.mem.sliceAsBytes(f.out[3 * T * linear_dim .. 3 * T * linear_dim + T * heads]), timeout_ns));
             },
             .split_g => {
-                try vk.download(f.cmds, f.bufs[6], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 2 * T * heads]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[6], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 2 * T * heads]), timeout_ns));
             },
             .conv_prefill => {
-                try vk.download(f.cmds, f.bufs[8], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * channels]), timeout_ns);
-                try vk.download(f.cmds, f.bufs[12], 0, f.staging, std.mem.sliceAsBytes(f.out[T * channels .. T * channels + 3 * channels]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[8], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * channels]), timeout_ns));
+                try vk.orExit(vk.download(f.cmds, f.bufs[12], 0, f.staging, std.mem.sliceAsBytes(f.out[T * channels .. T * channels + 3 * channels]), timeout_ns));
             },
             .conv_decode => {
-                try vk.download(f.cmds, f.bufs[9], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * channels]), timeout_ns);
-                try vk.download(f.cmds, f.bufs[f.final_state_idx], 0, f.staging, std.mem.sliceAsBytes(f.out[T * channels .. T * channels + 3 * channels]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[9], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * channels]), timeout_ns));
+                try vk.orExit(vk.download(f.cmds, f.bufs[f.final_state_idx], 0, f.staging, std.mem.sliceAsBytes(f.out[T * channels .. T * channels + 3 * channels]), timeout_ns));
             },
             .prefill_y => {
-                try vk.download(f.cmds, f.bufs[4], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * linear_dim]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[4], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * linear_dim]), timeout_ns));
             },
             .prefill_state => {
-                try vk.download(f.cmds, f.bufs[5], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 2 * state_elems]), timeout_ns);
-                if (f.chunks > 1) try vk.download(f.cmds, f.bufs[6], 0, f.staging, std.mem.sliceAsBytes(f.out[2 * state_elems .. 2 * state_elems * f.chunks]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[5], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 2 * state_elems]), timeout_ns));
+                if (f.chunks > 1) try vk.orExit(vk.download(f.cmds, f.bufs[6], 0, f.staging, std.mem.sliceAsBytes(f.out[2 * state_elems .. 2 * state_elems * f.chunks]), timeout_ns));
             },
             .decode_y => {
-                try vk.download(f.cmds, f.bufs[8], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * linear_dim]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[8], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. T * linear_dim]), timeout_ns));
             },
             .decode_state => {
-                try vk.download(f.cmds, f.bufs[f.final_state_idx], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 2 * state_elems]), timeout_ns);
+                try vk.orExit(vk.download(f.cmds, f.bufs[f.final_state_idx], 0, f.staging, std.mem.sliceAsBytes(f.out[0 .. 2 * state_elems]), timeout_ns));
             },
         }
         // inputs, post-run, in the snapshot's order
@@ -316,7 +316,7 @@ pub const Gdn = struct {
         const dev_idx = host.inputBufIndices(f, &idxs);
         var pos: usize = 0;
         for (inputs, dev_idx) |s, di| {
-            try vk.download(f.cmds, f.bufs[di], 0, f.staging, std.mem.sliceAsBytes(s), timeout_ns);
+            try vk.orExit(vk.download(f.cmds, f.bufs[di], 0, f.staging, std.mem.sliceAsBytes(s), timeout_ns));
             const bytes = std.mem.sliceAsBytes(s);
             @memcpy(f.input_now[pos..][0..bytes.len], bytes);
             pos += bytes.len;
