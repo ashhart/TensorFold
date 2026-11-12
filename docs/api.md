@@ -1104,7 +1104,8 @@ Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path: every engine but the
 one below), `feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`,
 `--spill-gib`, `--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`,
-`--vision`, `--tp` above 1 or `--speed-up`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
+`--vision`, `--tp` above 1, `--speed-up`, `--kv-cache` other than bf16, `--prompt-precision` other than bf16 or
+`--rope-yarn`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a
 text file or the executable, or a checkpoint file the engine stamped, changed after it was opened or stamped) or
 `hash_failed` (a file could not be read; when the binary cannot be opened or the text files cannot be stamped at
 startup, a startup line says why). The engine's facts and the epoch are read under the lock every reload takes, so one
@@ -1112,15 +1113,16 @@ snapshot never mixes two engines. The snapshot alone does not qualify a response
 
 The supported path so far is `qwen3_5-2b/cuda/tp1/mlx-q4g64/text`: native Qwen3.5-2B on a CUDA build at one rank,
 every module MLX affine 4-bit, text only, with none of the excluded flags. Any other checkpoint, format, backend or
-rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index and every shard the
-index names. Once the server is ready it reads every shard byte in full on one thread, with no digest cache, and reads
-`files_changed` if any stamp moved between the load and the end of the read, or if a Hugging Face snapshot's shard
+rank reads `unsupported_path`. Before the weights load, the engine stamps `config.json`, the index, every shard the
+index names and a captured cubin set's `aot.json` and each cubin it names; a file it cannot stamp makes the witness
+read `hash_failed` while the model still serves. Once the server is ready it reads every shard byte in full on one
+thread, with no digest cache, and reads `files_changed` if any stamp moved between the load and the end of the read, or if a Hugging Face snapshot's shard
 differs from its blob name. `components.engine` is a SHA-256 over the path, the checkpoint's structure (canonical
 `config.json`, the index, shard names, sizes and headers), every shard's bytes, and the components a kept state's key
 binds (the embedded kernel images, a captured cubin set, the GPU's name, compute capability and driver version, the
 family's resolved facts and the resolved profile values), then the GPU's SM count, the context window, the stream
 count and the staggered segments. An `--idle-unload` reload opens a new engine, which stamps again before its load and
-reads every byte again once it is published.
+reads every byte again once it is published. A server whose witness reads `feature_excluded` never reads the weights.
 
 ## The Responses API
 
