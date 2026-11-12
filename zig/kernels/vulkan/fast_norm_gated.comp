@@ -1,4 +1,6 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/fast_norm_gated.comp at 69ab4cfc3f6c.
+// Code adapted: 4 lines added or changed, 0 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 #ifdef APPLE_REDUCTION
 #extension GL_KHR_shader_subgroup_basic : require
@@ -258,7 +260,7 @@ void main() {
         float gate = ACT_WIDEN(gate_data.values[gate_index]);
         // Sigmoid and silu stay f32 until the final multiply; rounding them to bf16 caused ~36% one-ulp differences.
         float sigmoid_value = 1.0 / (1.0 + exp(-gate));
-        // mlx-lm's _precise_swiglu/C++ fallback preserves (gate*sigmoid)*normed; reassociation left 7e-6 outputs off.
+        // Keep (gate*sigmoid)*normed as the oracle does; reassociating it left outputs 7e-6 off.
         precise float silu = gate * sigmoid_value;
         precise float prod = silu * normed;
         out_value = prod;

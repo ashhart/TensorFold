@@ -246,7 +246,7 @@ test "gdn contract split reference replays clean through the fixture Split check
     for (0..3 * T8 * linear_dim) |i| soa_bits[i] = c.toBf16(@floatCast(want8[i]));
     for (0..T8 * heads) |i| beta_bits[i] = c.toBf16(@floatCast(want8[3 * T8 * linear_dim + i]));
     for (0..T8) |t| for (0..heads) |h| {
-        const ref = fx.gateRefAsh(f.a_bits[t * heads + h], f.b_bits[t * heads + h], f32Of(f.a_log_bits, h), f.dt_bits[h]);
+        const ref = fx.gateRefOracle(f.a_bits[t * heads + h], f.b_bits[t * heads + h], f32Of(f.a_log_bits, h), f.dt_bits[h]);
         putF32(g_pairs, t * heads + h, @floatCast(ref.g));
     };
     const rep = try f.check(soa_bits, g_pairs, beta_bits, null);
@@ -258,13 +258,13 @@ test "gdn contract split reference replays clean through the fixture Split check
     }
 }
 
-test "gdn contract split g reference equals the fixture's Ash chain" {
+test "gdn contract split g reference equals the fixture's oracle chain" {
     const a = testing.allocator;
     const f = try fx.SplitOne.init(a, 0x57ac);
     defer f.deinit();
-    // `splitReference` omits g; `split_g` must match fixture `gateRefAsh`, so replay it here.
+    // `splitReference` omits g; `split_g` must match fixture `gateRefOracle`, so replay it here.
     for (0..heads) |h| {
-        const ref = fx.gateRefAsh(f.a_bits[h], f.b_bits[h], f32Of(f.a_log_bits, h), f.dt_bits[h]);
+        const ref = fx.gateRefOracle(f.a_bits[h], f.b_bits[h], f32Of(f.a_log_bits, h), f.dt_bits[h]);
         try testing.expect(ref.g > 0 and ref.g < 1);
         try testing.expect(ref.beta > 0 and ref.beta < 1);
     }
