@@ -35,7 +35,7 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     const tensor_only = std.mem.startsWith(u8, d.name, "qwen27 q8 ") or
-        std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ");
+        std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ") or std.mem.startsWith(u8, d.name, "sam3 attention ");
     return !tensor_only or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
 }
 
@@ -73,6 +73,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const source = try a.dupe(u8, sources.sam3_deconv ++ sources.sam3_deconv_baseline);
         return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
+    }
+    if (std.mem.startsWith(u8, d.name, "sam3 attention ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ")) {
         if (!assemble) return undefined;
@@ -373,7 +377,9 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
-    if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
+    if (std.mem.startsWith(u8, l.decl.name, "sam3 attention ")) {
+        std.debug.print("PRECISION limits {s}: strict FP32 tensor library\n", .{l.decl.name});
+    } else if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
         const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
         std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
     }
