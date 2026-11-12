@@ -3,25 +3,28 @@
 #   ssh top-menu "job start gpu middle|bottom plotarmordev/TensorFold SHA docs/receipts/drama3-pruned-main/run-script.sh"
 # The door runs it in the commit's checkout with the Drama pilot folder at /assets/drama3-pilot (read-only) and no
 # network, inside a window only the Desk opens; it pauses nothing. Everything it writes lands in /work/out/drama3.
-# Without a GPU (`job start` without `gpu`) it checks the paths and tools, then stops at nvidia-smi.
+# Without a GPU (`job start` without `gpu`) it finds no /assets and stops at the path check. The job image has no C++
+# compiler for nvcc: prebuild-fatbins.sh builds this commit's kernel images into the pilot folder beforehand.
 set -eu
 pilot=/assets/drama3-pilot
 fp8=$pilot/checkpoint
 pruned=$pilot/models/drama-3-NVFP4-Pruned
 pruned5900=$pilot/models/drama-3-NVFP4-Pruned-5900
-nvcc=/usr/local/cuda/bin/nvcc
+fatbins=$pilot/tensorfold-fatbins-$(git -c safe.directory='*' rev-parse HEAD)
 out=/work/out/drama3
 zig_out=$out/zig-out
 # the checkout may be read-only: caches and builds go to the output
 export ZIG_GLOBAL_CACHE_DIR=$out/zig-cache ZIG_LOCAL_CACHE_DIR=$out/zig-cache
-for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$nvcc" "$(command -v zig)"; do
+for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$fatbins/SHA256SUMS" "$(command -v zig)"; do
     [ -e "$path" ] || { echo "missing $path; /assets holds:" >&2; find /assets -maxdepth 3 >&2; exit 1; }
 done
+(cd "$fatbins" && sha256sum --quiet -c SHA256SUMS)
+echo "fatbins $fatbins: $(sha256sum < "$fatbins/SHA256SUMS" | cut -d' ' -f1)"
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 mkdir -p "$out/voices"
-nice -n 10 zig build -Dgpu=spark -Dnvcc="$nvcc" --prefix "$zig_out"
+nice -n 10 zig build -Dgpu=spark -Dfatbins="$fatbins" --prefix "$zig_out"
 # -Dgpu builds the server alone; the voice tools come from the development build
-nice -n 10 zig build drama3-generate drama3-voice -Dsm=121 -Dnvcc="$nvcc" -Doptimize=ReleaseFast --prefix "$zig_out"
+nice -n 10 zig build drama3-generate drama3-voice -Dsm=121 -Dfatbins="$fatbins" -Doptimize=ReleaseFast --prefix "$zig_out"
 for model in "$fp8" "$pruned" "$pruned5900"; do
     sum=$(find "$model" -name '*.safetensors' -o -name codec.pth | sort | xargs cat | sha256sum | cut -d' ' -f1)
     echo "input $model: $sum"
