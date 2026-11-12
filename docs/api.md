@@ -690,9 +690,10 @@ token-level, budgeted, captured or left-recursive rules. The masks follow from x
 thinking on they start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
-server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
-a grammar sent with `tool_choice: "required"` or a named function. A reply whose
-grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other requests go on.
+grammar whose text is over 512 KiB on the native server (the schema, regex, grammar or choices as sent, or the grammar
+built from a request's tools), a server without xgrammar (with the install command; on the native server, a server that
+cannot load `libtfgrammar`), a grammar sent with `tool_choice: "required"` or a named function. A reply whose grammar fails while decoding ends with HTTP 500 (an error event when streaming); the
+other requests go on.
 
 ## Reasoning
 

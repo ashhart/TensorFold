@@ -10,6 +10,9 @@ const Cx = errors.Cx;
 
 pub const fields = [_][]const u8{ "response_format", "guided_json", "guided_regex", "guided_choice", "guided_grammar", "structured_outputs" };
 
+/// The most bytes a grammar's text may be: xgrammar compiles it under one lock, in time that grows with its square.
+pub const max_text = 512 * 1024;
+
 pub const Kind = @FieldType(api.Structure, "kind");
 pub const Spec = struct { kind: Kind, text: []const u8 = "", field: []const u8 = "response_format" };
 
