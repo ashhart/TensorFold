@@ -65,6 +65,8 @@ const valid = [_]Case{
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
+    .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "0", .n = 0 },
+    .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },

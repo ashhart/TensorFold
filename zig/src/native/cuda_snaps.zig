@@ -1,7 +1,6 @@
 //! A CUDA family's prompt cache in the native server: rules, budget and copies from the family's `snap_*` decls.
 const std = @import("std");
 const api = @import("engine_api");
-const env = @import("sys").env;
 
 /// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet, snap_fork, snap_tail.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
@@ -27,7 +26,7 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     rules.chunk = prompt_rows;
     if (@hasDecl(F, "snap_repeat_min")) rules.repeat_min = if (std.c.getenv("TF_FLASHNEXT_REPEAT_CACHE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else F.snap_repeat_min) else F.snap_repeat_min;
     // Opt-in until a served A/B shows the extra marks pay: TF_PROMPT_INTERMEDIATE=1 enables the family's ladder.
-    if (rules.intermediate > 0) rules.intermediate = if (std.c.getenv("TF_PROMPT_INTERMEDIATE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else rules.intermediate) else 0;
+    if (rules.intermediate > 0 and !(@import("sys").environment.read(bool, "TF_PROMPT_INTERMEDIATE", false) catch false)) rules.intermediate = 0;
     rules.chunk_starts = false;
     return rules;
 }
@@ -138,6 +137,7 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
 }
 
 test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
+    const env = @import("sys").env;
     const Ladder = struct {
         pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
     };
