@@ -17,7 +17,7 @@ test "low independent image and video budgets reach the actual tower boundary" {
         const count = c[2] / 256;
         for (images[0..count], 0..) |*img, i| img.* = .{ .pixels = &.{}, .gh = 32, .gw = 32, .tokens = 256, .at = @intCast(1 + i * 300) };
         try std.testing.expectError(error.RowShape, v.begin(undefined, images[0..count], 0));
-        try std.testing.expectEqual(c[2], radio.rows.total(v.spans));
+        try std.testing.expectEqual(@as(usize, 0), v.spans.len);
     }
 }
 
