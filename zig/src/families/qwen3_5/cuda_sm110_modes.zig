@@ -34,9 +34,8 @@ pub fn current(kv8: bool, prompt_int8: bool, rope_yarn: bool) Modes {
     };
 }
 
-pub fn initEngine(comptime Engine: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, prompt_int8: bool, rope_yarn: bool, fit: anytype) !*Engine {
+pub fn checkDevice(ctx: *const cuda.Context, kv8: bool, prompt_int8: bool, rope_yarn: bool) !void {
     try check(try ctx.capability(), current(kv8, prompt_int8, rope_yarn));
-    return Engine.init(gpa, io, ctx, dir, kv8, fit);
 }
 
 pub fn check(sm: u32, modes: Modes) !void {

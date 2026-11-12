@@ -166,9 +166,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     loaded.readouts = j.readout().info;
     return loaded;
 }
-
 /// `open` without the decision-only refusals: the runners open a BF16 backbone with a test readout through it.
 pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    try @import("cuda_sm110_modes.zig").checkDevice(ctx, o.kv8, o.prompt_int8, o.rope_yarn != null);
     if (kernels != null) return error.QwenHasNoCapturedKernels;
     if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const page_tokens = try pages_mod.paging();
@@ -179,7 +179,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
-    const e = try @import("cuda_sm110_modes.zig").initEngine(E.Engine, gpa, io, ctx, dir, o.kv8, o.prompt_int8, o.rope_yarn != null, fitOf(o));
+    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
