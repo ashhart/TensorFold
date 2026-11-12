@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
         std.debug.print(
             \\tf-sam3-video CHECKPOINT FRAMES OUTPUT_PREFIX --point ID X Y | --box ID X0 Y0 X1 Y1 | --seed-reference MASKS
-            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle
+            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle --baseline-attention --compact-gemm
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
             \\  --trace DIR --trace-frames N,N (NHWC tensors; recomputes preprocessing and trunk)
@@ -30,6 +30,8 @@ pub fn main(init: std.process.Init) !void {
     var reverse = false;
     var exercise = false;
     var fp32 = false;
+    var attention_two_pass = true;
+    var compact_gemm = false;
     var reference_path: ?[]const u8 = null;
     var seed_path: ?[]const u8 = null;
     var raw_path: ?[]const u8 = null;
@@ -57,6 +59,14 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, flag, "--fp32")) {
             fp32 = true;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--baseline-attention")) {
+            attention_two_pass = false;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--compact-gemm")) {
+            compact_gemm = true;
             continue;
         }
         if (std.mem.eql(u8, flag, "--box")) {
@@ -140,6 +150,9 @@ pub fn main(init: std.process.Init) !void {
         const masks = reference.?.get("masks") orelse return error.MissingMasks;
         if (!masks.is(.u8, &.{ frames.dim(0), height, width })) return error.BadReferenceShape;
     }
+    for (seeds.items) |seed| try unusedOutput(init.io, try std.fmt.allocPrint(a, "{s}-{d}.pgm", .{ args[3], seed.id }));
+    if (benchmark_path) |path| try unusedOutput(init.io, path);
+    if (raw_path) |path| try unusedOutput(init.io, path);
     const identity: ?receipt.Identity = if (benchmark_path != null) try receipt.Identity.load(a, init.io, args[1], frames.bytes, seeds.items) else null;
     const ids = try a.alloc(u64, seeds.items.len);
     for (seeds.items, ids) |seed, *id| id.* = seed.id;
@@ -153,6 +166,8 @@ pub fn main(init: std.process.Init) !void {
         .precision = if (fp32) .float32 else .checkpoint,
     });
     defer loaded.deinit();
+    loaded.gpu.attention_two_pass = attention_two_pass;
+    loaded.gpu.compact_gemm = compact_gemm;
     const started = clock.seconds();
     if (exercise) {
         if (count < 2) return error.LifecycleNeedsTwoFrames;
@@ -228,6 +243,8 @@ pub fn main(init: std.process.Init) !void {
             .frames = count,
             .reverse = reverse,
             .object_ids = ids,
+            .attention_two_pass = attention_two_pass,
+            .compact_gemm = compact_gemm,
         }, std.fmt.bytesToHex(digest, .lower));
     }
     std.debug.print("SAM {s}: {d} frames, {d:.3}s wall, {d:.3}s GPU, peak Metal allocation {d} bytes\n", .{ loaded.config.version.name(), count, clock.seconds() - started, loaded.gpu.gpu_seconds, loaded.gpu.peak_bytes });
@@ -235,6 +252,14 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("reference IoU (propagation only, seed excluded): {d} frames, mean {d:.6}, minimum {d:.6}, worst frame {?d}\n", .{ quality.frames, quality.meanIou(), quality.minimum_iou, quality.worst_frame });
         try gate.check(quality, count - 1);
     }
+}
+
+fn unusedOutput(io: std.Io, path: []const u8) !void {
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    return error.PathAlreadyExists;
 }
 
 test {

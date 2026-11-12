@@ -91,12 +91,6 @@ fn attentionBatchedWindow(g: *Gpu, q: Tensor, k: Tensor, v: Tensor, rows: usize,
     var name: [64]u8 = undefined;
     if (window != 0 and ((window != 128 and window != 512) or dim != 64 or q.dtype != .f32 or !causal)) return error.AttentionWindowShape;
     const key = if (window == 128) "im_attention_f32_window64" else if (window == 512) "im_attention_f32_window512" else try std.fmt.bufPrint(&name, "im_attention_{s}_{s}{s}", .{ @tagName(q.dtype), if (causal) "causal" else "full", if (dim == 32) "32" else if (dim == 64) "64" else if (dim == 96) "96" else if (dim == 256) "256" else "" });
-    const pipeline = try g.pipeline(key);
-    const pass = g.command();
-    const cb = pass.cb;
-    const enc = pass.enc;
-    enc.setPipeline(pipeline);
-    for ([_]Tensor{ q, k, v }, 0..) |t, i| enc.setBuffer(t.buffer, t.offset, i);
     const nq = (rows + 63) / 64;
     const nk = (keys + 31) / 32;
     const vals = [_]usize{
@@ -105,6 +99,16 @@ fn attentionBatchedWindow(g: *Gpu, q: Tensor, k: Tensor, v: Tensor, rows: usize,
     };
     var args: [24]i32 = undefined;
     for (vals, 0..) |value, i| args[i] = std.math.cast(i32, value) orelse return error.AttentionTooLarge;
+    if (g.attention_two_pass and dim == 256 and q.dtype == .f32 and !causal and window == 0) {
+        try @import("attention_two_pass.zig").run(g, q, k, v, out, args, scale);
+        return out;
+    }
+    const pipeline = try g.pipeline(key);
+    const pass = g.command();
+    const cb = pass.cb;
+    const enc = pass.enc;
+    enc.setPipeline(pipeline);
+    for ([_]Tensor{ q, k, v }, 0..) |t, i| enc.setBuffer(t.buffer, t.offset, i);
     enc.setValue(args, 3);
     enc.setValue([4]f32{ scale, 0, 0, 0 }, 4);
     enc.setBuffer(out.buffer, 0, 5);

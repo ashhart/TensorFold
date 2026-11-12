@@ -10,17 +10,27 @@ const flash = Runtime.flash;
 
 pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        std.debug.print("tf-sam3-kernels [--benchmark]\ntf-sam3-kernels --replay-attention Q.safetensors K.safetensors V.safetensors [ROW]\n", .{});
+        std.debug.print("tf-sam3-kernels [--benchmark | --benchmark-projections]\ntf-sam3-kernels --replay-attention[-two-pass] Q.safetensors K.safetensors V.safetensors [ROW]\ntf-sam3-kernels --replay-attention-operator CAPTURE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-projection CAPTURE.safetensors RECEIPT.json [--mps-ndarray]\ntf-sam3-kernels --check-mps-ndarray RECEIPT.json\n", .{});
         return;
     }
-    const replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention");
-    if (!replay and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
+    const two_pass = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention-two-pass");
+    const replay = two_pass or (args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention"));
+    const projections = args.len == 2 and std.mem.eql(u8, args[1], "--benchmark-projections");
+    const projection_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-projection");
+    const operator_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention-operator");
+    const mps_check = args.len == 3 and std.mem.eql(u8, args[1], "--check-mps-ndarray");
+    if (!replay and !projections and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     var g = try gpu.Gpu.init(init.gpa, @import("sam3_kernels").source);
     defer g.deinit();
     g.guards = true;
     g.buffer_cache_limit = 32 << 20;
+    if (projections) return @import("projection_checks.zig").run(&g);
+    if (mps_check) return @import("mps_ndarray_probe.zig").check(init, &g, args[2]);
+    if (projection_replay) return @import("projection_replay.zig").run(init, &g, args[2..]);
+    if (operator_replay) return @import("attention_operator_replay.zig").run(init, &g, args[2..]);
+    if (replay) g.attention_two_pass = two_pass;
     if (replay) return @import("attention_replay.zig").run(init, &g, args[2..]);
     if (args.len == 2) return benchmark(&g);
     try checkExactWeightProducts(&g);

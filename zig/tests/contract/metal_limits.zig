@@ -67,7 +67,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ")) {
         if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device, std.mem.indexOf(u8, fun, "_exact_") != null), .pre_m5 = "" };
+        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device, std.mem.indexOf(u8, fun, "_exact_") != null, std.mem.indexOf(u8, fun, "_compact_") != null), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
         if (!assemble) return undefined;
@@ -76,6 +76,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "sam3 attention ")) {
         if (!assemble) return undefined;
+        if (std.mem.indexOf(u8, d.name, " two-pass ") != null)
+            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").twoPassText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
         return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_attention.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ")) {

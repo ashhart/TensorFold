@@ -88,9 +88,11 @@ pub const train_mixers = @embedFile("train_mixers.metal");
 pub const nax = @embedFile("nax.h");
 pub const tensor_ops = @embedFile("tensor_ops.metal");
 pub const tensor_exact_gemm = "#define TF_NAX_STRICT_FP32\n#define TF_NAX_EXACT_B\n" ++ @embedFile("prefill/gemm_nax.metal") ++ @embedFile("tensor_exact_gemm.metal");
+pub const tensor_compact_gemm = "#define TF_NAX_STRICT_FP32\n#include \"../nax.h\"\n" ++ @embedFile("tensor_compact_gemm.metal");
 pub const tensor_attention = @embedFile("tensor_attention.metal");
 pub const tensor_attention_pv = @embedFile("tensor_attention_pv.metal");
 pub const tensor_library = @import("tensor_library.zig");
+pub const tensor_attention_passes = @import("tensor_attention_passes.zig");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");

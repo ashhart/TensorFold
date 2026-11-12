@@ -14,6 +14,7 @@ pub const Memory = struct {
     encoded: Tensor,
     image: Tensor,
     pointer: Tensor,
+    score: f32 = 0,
     projected: ?[4]Projected = null,
     spatial_live: bool = true,
 
@@ -130,7 +131,8 @@ pub fn encode(r: *Runtime, image: Tensor, result: decoder.Result, active: u16, c
     }
     if (!multiplex) f = try r.conv(try r.name("{s}.out_proj", .{key}), f, 1, 0, false, false);
     const encoded = try r.add(f.tensor, summed);
-    var memory = Memory{ .index = index, .conditioning = conditioning != 0, .encoded = encoded, .image = try copy(r, image), .pointer = try copy(r, result.pointer) };
+    const confidence = if (result.scores[0] > 0) (2 / (1 + @exp(-result.scores[0])) - 1) * result.ious[0] else 0;
+    var memory = Memory{ .index = index, .conditioning = conditioning != 0, .score = confidence, .encoded = encoded, .image = try copy(r, image), .pointer = try copy(r, result.pointer) };
     if (multiplex and r.precision == .mixed) {
         var layers: [4]Projected = undefined;
         for (&layers, 0..) |*cached, i| {

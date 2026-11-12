@@ -27,4 +27,5 @@ test {
     _ = @import("mask.zig");
     _ = session;
     _ = @import("tracker.zig");
+    _ = @import("memory_selection.zig");
 }
