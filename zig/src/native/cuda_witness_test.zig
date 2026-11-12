@@ -93,8 +93,8 @@ const Env = struct {
 
 /// A witness opened over `dir` and given the 2B's path and fixed device facts, as `bind` gives them.
 fn opened(dir: []const u8, kernels: ?[]const u8, capability: u64) !*witness.Witness {
-    const w = try witness.Witness.open(t.allocator, t.io, dir);
-    w.set("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", kernels, .{ .name = "fake", .capability = capability, .driver = 12040 }, &.{ 0, 0, 0, 7 }, .{ 108, 4096, 8, 1 });
+    const w = try witness.Witness.open(t.allocator, t.io, dir, kernels);
+    w.set("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = capability, .driver = 12040 }, &.{ 0, 0, 0, 7 }, .{ 108, 4096, 8, 1 });
     w.profile = .{ .family = "qwen3_5", .backend = "cuda", .entries = &.{row}, .environment = Env.read };
     return w;
 }
@@ -168,20 +168,20 @@ test "execution witness: the loaded 2B's uniform affine geometry gets a hook; ot
     };
     {
         var target = twoB(&e);
-        const w = try witness.Witness.open(t.allocator, t.io, c.dir);
+        const w = try witness.Witness.open(t.allocator, t.io, c.dir, null);
         defer w.close();
-        const got = witness.bound(qwen.native, w, .{ .target = &target }, &gpu, null, .{ 4096, 8, 1 }).?;
+        const got = witness.bound(qwen.native, w, .{ .target = &target }, &gpu, .{ 4096, 8, 1 }).?;
         try t.expectEqualStrings("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", got.path.?);
         try t.expectEqual(@as(u64, 108), got.words[0]);
         try t.expect(witness.source(got) != null);
-        try t.expectEqual(@as(?*witness.Witness, null), witness.bound(qwen.native_moe, w, .{ .target = &target }, &gpu, null, .{ 4096, 8, 1 }));
+        try t.expectEqual(@as(?*witness.Witness, null), witness.bound(qwen.native_moe, w, .{ .target = &target }, &gpu, .{ 4096, 8, 1 }));
     }
     for (variants) |change| {
         var target = twoB(&e);
         change(&e);
-        const w = try witness.Witness.open(t.allocator, t.io, c.dir);
+        const w = try witness.Witness.open(t.allocator, t.io, c.dir, null);
         defer w.close();
-        try t.expectEqual(@as(?*witness.Witness, null), witness.bound(qwen.native, w, .{ .target = &target }, &gpu, null, .{ 4096, 8, 1 }));
+        try t.expectEqual(@as(?*witness.Witness, null), witness.bound(qwen.native, w, .{ .target = &target }, &gpu, .{ 4096, 8, 1 }));
         try t.expect(witness.source(w) == null);
     }
     try t.expect(witness.source(null) == null);
@@ -227,11 +227,14 @@ test "execution witness: a captured cubin, a resolved profile value or the devic
     defer w.close();
     const base = try w.digest();
     try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/cubins/h.cubin", .data = "other cubin" });
-    const cubin = try w.digest();
+    try t.expectError(error.FilesChanged, w.digest()); // the cubins the load read are not the ones on disk now
+    const recaptured = try opened(c.dir, kernels, 80);
+    defer recaptured.close();
+    const cubin = try recaptured.digest();
     try t.expect(!std.mem.eql(u8, &base, &cubin));
     Env.value = "1";
     defer Env.value = null;
-    const profiled = try w.digest();
+    const profiled = try recaptured.digest();
     try t.expect(!std.mem.eql(u8, &cubin, &profiled));
     const other = try opened(c.dir, kernels, 86);
     defer other.close();
@@ -260,4 +263,21 @@ test "execution witness: each engine hashes once it is begun, and a reloaded one
     const busy = try opened(c.dir, null, 80);
     busy.source().start();
     busy.close();
+}
+
+test "execution witness: files that cannot be stamped read hash_failed and the load goes on" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var c = try Checkpoint.init(a, 4096);
+    defer c.tmp.cleanup();
+    try c.tmp.dir.createDir(t.io, "aot", .default_dir);
+    try c.tmp.dir.writeFile(t.io, .{ .sub_path = "aot/aot.json", .data = "not a manifest" });
+    const kernels = try std.fs.path.join(a, &.{ c.dir, "aot" });
+    try t.expect(std.meta.isError(witness.Witness.open(t.allocator, t.io, c.dir, kernels)));
+    const w = try witness.Witness.openOrFailed(t.allocator, t.io, c.dir, kernels);
+    defer w.close();
+    w.set("qwen3_5-2b/cuda/tp1/mlx-q4g64/text", .{ .name = "fake", .capability = 80, .driver = 12040 }, &.{}, .{ 108, 4096, 8, 1 });
+    w.source().start(); // nothing to read: it is already unknown
+    try t.expectEqual(api.execution_witness.Reason.hash_failed, settle(w).unknown);
 }

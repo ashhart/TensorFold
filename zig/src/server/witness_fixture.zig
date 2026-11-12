@@ -22,6 +22,8 @@ pub const Engine = struct {
     calls: std.atomic.Value(u32) = .init(0),
     /// A witness whose epoch moves inside submit, as a reload between admission and the end would move it.
     bump: ?*witness.State = null,
+    /// How many times the server began the hook's own hashing.
+    begins: std.atomic.Value(u32) = .init(0),
 
     pub fn engine(e: *Engine) api.Engine {
         return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
@@ -31,7 +33,10 @@ pub const Engine = struct {
     }
     fn info(ptr: *anyopaque) api.Info {
         const e = cast(ptr);
-        return .{ .context_window = 4096, .witness = if (e.hooked) .{ .ctx = e, .read = read } else null };
+        return .{ .context_window = 4096, .witness = if (e.hooked) .{ .ctx = e, .read = read, .begin = begin } else null };
+    }
+    fn begin(ptr: *anyopaque) void {
+        _ = cast(ptr).begins.fetchAdd(1, .monotonic);
     }
     fn read(ptr: *anyopaque) Facts {
         return cast(ptr).facts;
