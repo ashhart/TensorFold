@@ -7,10 +7,12 @@
 
 #include <cstdint>
 
-#include "common/dot2.hpp"
-
 namespace tf {
 namespace rocm {
+
+constexpr int kFpTileM = 64;
+constexpr int kFpTileN = 64;
+constexpr int kFpChunk = 64;  // codes a chunk
 
 struct ModelFp8 {
     const void* x;        // (m, k) row major, bf16
@@ -28,89 +30,65 @@ __device__ __forceinline__ float fp8_level(unsigned c) {
     return (c & 0x80u) != 0 ? -v : v;
 }
 
-// Its BF16 bits: exact, since three mantissa bits fit seven.
-__device__ __forceinline__ unsigned short fp8_bf16(unsigned c) {
-    return __bfloat16_as_ushort(__float2bfloat16(fp8_level(c)));
-}
-
-__device__ __forceinline__ float fp8_warp_sum(float v) {
+// A 64 x 64 block: a chunk of every column's codes and the block's rows of x staged in LDS once, each thread's 4 x 4
+// outputs accumulated over them; the projection's one scale multiplies each output once.
+__device__ __forceinline__ void fp8_block(ModelFp8 a) {
+    __shared__ unsigned char codes[kFpTileN][kFpChunk];
+    __shared__ hip_bfloat16 xs[kFpTileM][kFpChunk];
+    const int tid = threadIdx.x;
+    const int ty = tid & (kFpTileM / 4 - 1);
+    const int tx = tid / (kFpTileM / 4);
+    const int n0 = blockIdx.x * kFpTileN;
+    const int m0 = blockIdx.y * kFpTileM;
+    const unsigned char* w = static_cast<const unsigned char*>(a.codes);
+    const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x);
+    float acc[4][4];
 #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
-    return v;
-}
-
-// A warp R rows of one output column: its lanes read four-code words, so a column loads once and serves the R rows.
-template <int R>
-__device__ __forceinline__ void fp8_rows(ModelFp8 a) {
-    const int lane = threadIdx.x & 31;
-    const int warps = blockDim.x >> 5;
-    const int row_blocks = (a.m + R - 1) / R;
-    const long long total = static_cast<long long>(row_blocks) * a.n;
-    const unsigned char* codes = static_cast<const unsigned char*>(a.codes);
-    const bool wide = (a.k & 3) == 0;
-    const int words_row = a.k / 4;
-    const int k = a.k;
-    const long long stride = static_cast<long long>(gridDim.x) * warps;
-    for (long long item = static_cast<long long>(blockIdx.x) * warps + (threadIdx.x >> 5); item < total;
-         item += stride) {
-        const int rb = static_cast<int>(item / a.n);
-        const int col = static_cast<int>(item % a.n);
-        const int row0 = rb * R;
-        const int rows = a.m - row0 < R ? a.m - row0 : R;
-        const unsigned char* w = codes + static_cast<long long>(col) * k;
-        const hip_bfloat16* xr[R];
+    for (int r = 0; r < 4; ++r) {
 #pragma unroll
-        for (int r = 0; r < R; ++r) {
-            xr[r] = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0 + (r < rows ? r : 0)) * k;
+        for (int c = 0; c < 4; ++c) acc[r][c] = 0.f;
+    }
+    for (int kc = 0; kc < a.k; kc += kFpChunk) {
+        for (int i = tid; i < kFpTileN * kFpChunk; i += blockDim.x) {
+            const int col = i / kFpChunk, j = i % kFpChunk;
+            const int c = n0 + col < a.n ? n0 + col : a.n - 1;
+            codes[col][j] = w[static_cast<long long>(c) * a.k + kc + j];
         }
-        float acc[R];
+        for (int i = tid; i < kFpTileM * kFpChunk; i += blockDim.x) {
+            const int row = i / kFpChunk, j = i % kFpChunk;
+            const int r = m0 + row < a.m ? m0 + row : a.m - 1;
+            xs[row][j] = kc + j < a.k ? x[static_cast<long long>(r) * a.k + kc + j] : hip_bfloat16(0.f);
+        }
+        __syncthreads();
 #pragma unroll
-        for (int r = 0; r < R; ++r) acc[r] = 0.f;
-        if (wide) {
-            const uint32_t* w32 = reinterpret_cast<const uint32_t*>(w);
-            for (int base = 0; base < words_row; base += 32) {
-                const int wd = base + lane;
-                if (wd >= words_row) continue;
-                const uint32_t word = w32[wd];
-                const int at = wd * 4;
-                uint32_t lv[2];
-                lv[0] = static_cast<uint32_t>(fp8_bf16(word & 0xffu)) | (static_cast<uint32_t>(fp8_bf16((word >> 8) & 0xffu)) << 16);
-                lv[1] = static_cast<uint32_t>(fp8_bf16((word >> 16) & 0xffu)) | (static_cast<uint32_t>(fp8_bf16((word >> 24) & 0xffu)) << 16);
+        for (int c = 0; c < 4; ++c) {
+            const int col = tx * 4 + c;
+            float q[4];
 #pragma unroll
-                for (int r = 0; r < R; ++r) {
-                    float q = 0.f;
-                    if (r < rows) {
-#if TF_DEVICE_BF16_DOT2
-                        const uint32_t* xw = reinterpret_cast<const uint32_t*>(xr[r] + at);
+            for (int r = 0; r < 4; ++r) q[r] = 0.f;
 #pragma unroll
-                        for (int c = 0; c < 2; ++c) {
-                            q = DotBF16::dot(__builtin_bit_cast(bf16x2, xw[c]), __builtin_bit_cast(bf16x2, lv[c]), q);
-                        }
-#else
-                        const hip_bfloat16* xp = xr[r] + at;
+            for (int j = 0; j < kFpChunk; ++j) {
+                const float lvl = fp8_level(codes[col][j]);
 #pragma unroll
-                        for (int c = 0; c < 2; ++c) {
-                            q = fmaf(__uint_as_float(lv[c] << 16), static_cast<float>(xp[2 * c]), q);
-                            q = fmaf(__uint_as_float(lv[c] & 0xffff0000u), static_cast<float>(xp[2 * c + 1]), q);
-                        }
-#endif
-                    }
-                    acc[r] += q;
+                for (int r = 0; r < 4; ++r) {
+                    q[r] = fmaf(lvl, static_cast<float>(xs[ty * 4 + r][j]), q[r]);
                 }
             }
-        } else {
-            for (int j = lane; j < k; j += 32) {
-                const float lvl = fp8_level(w[j]);
 #pragma unroll
-                for (int r = 0; r < R; ++r) {
-                    if (r < rows) acc[r] = fmaf(lvl, static_cast<float>(xr[r][j]), acc[r]);
-                }
-            }
+            for (int r = 0; r < 4; ++r) acc[r][c] += q[r];
         }
+        __syncthreads();
+    }
+    const float scale = a.scale[0];
 #pragma unroll
-        for (int r = 0; r < R; ++r) {
-            const float sum = fp8_warp_sum(acc[r]);
-            if (lane == 0 and r < rows) a.out[static_cast<long long>(row0 + r) * a.n + col] = sum * a.scale[0];
+    for (int r = 0; r < 4; ++r) {
+        const int row = m0 + ty * 4 + r;
+        if (row >= a.m) continue;
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+            const int col = n0 + tx * 4 + c;
+            if (col >= a.n) continue;
+            a.out[static_cast<long long>(row) * a.n + col] = acc[r][c] * scale;
         }
     }
 }
@@ -120,7 +98,5 @@ __device__ __forceinline__ void fp8_rows(ModelFp8 a) {
 
 // This path serves bf16 activations only, as the NVFP4 product does.
 extern "C" __global__ void __launch_bounds__(256) tf_fp8_gemm(tf::rocm::ModelFp8 a) {
-    if (a.m >= 8) tf::rocm::fp8_rows<8>(a);
-    else if (a.m >= 4) tf::rocm::fp8_rows<4>(a);
-    else tf::rocm::fp8_rows<1>(a);
+    tf::rocm::fp8_block(a);
 }

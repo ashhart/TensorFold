@@ -62,9 +62,8 @@ pub const Kernels = struct {
         if (@rem(a.k, a.group) != 0) return error.Invalid;
         var args: hl.Args = .{};
         try args.add(a);
-        const total = a.m * a.n;
-        // a warp an output element: eight a 256-thread block
-        try go(r, k.gemm, .{ .x = cdiv(total, threads / 32) }, .{ .x = @intCast(threads) }, s, &args);
+        // a 64 x 64 block a launch: one an output tile, so a column's weights load once for the block's rows
+        try go(r, k.gemm, .{ .x = cdiv(a.n, 64), .y = cdiv(a.m, 64) }, .{ .x = @intCast(threads) }, s, &args);
     }
 
     /// Launches on `s`; the counting stream runs nothing.

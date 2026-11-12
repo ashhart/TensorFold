@@ -8,11 +8,14 @@
 
 #include <cstdint>
 
-#include "common/dot2.hpp"
 #include "quant/nvfp4.hpp"
 
 namespace tf {
 namespace rocm {
+
+constexpr int kNvTileM = 64;
+constexpr int kNvTileN = 64;
+constexpr int kNvChunk = 64;  // codes a chunk: four groups, eight words a column
 
 // The group table's entry at `i` as the float it holds: BF16's bits shifted into f32, FP16 converted, or F32 read.
 __device__ __forceinline__ float nvfp4_scale(const GroupTable& t, long long i) {
@@ -27,78 +30,80 @@ __device__ __forceinline__ float nvfp4_level(uint32_t code) {
     return __uint_as_float(static_cast<unsigned>(kE2m1Bf16[code & 0xfu]) << 16);
 }
 
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
-    return v;
-}
-
-// A warp R rows of one output column: its lanes read the column's consecutive words, so a column loads once and serves
-// the R rows; a group's two words are folded by a lane pair whose even lane applies the group's scale.
-template <int R>
-__device__ __forceinline__ void nvfp4_rows(Nvfp4 a) {
-    const int lane = threadIdx.x & 31;
-    const int warps = blockDim.x >> 5;
-    const int row_blocks = (a.m + R - 1) / R;
-    const long long total = static_cast<long long>(row_blocks) * a.n;
+// A 64 x 64 block: a chunk of every column's codes and its group scales, and the block's rows of x, staged in LDS once
+// and each thread's 4 x 4 outputs accumulated over them. A group folds its 16 inputs before its scale.
+__device__ __forceinline__ void nvfp4_block(Nvfp4 a) {
+    __shared__ uint32_t codes[kNvTileN][kNvChunk / 8];
+    __shared__ float sc[kNvTileN][kNvChunk / 16];
+    __shared__ hip_bfloat16 xs[kNvTileM][kNvChunk];
+    const int tid = threadIdx.x;
+    const int ty = tid & (kNvTileM / 4 - 1);
+    const int tx = tid / (kNvTileM / 4);
+    const int n0 = blockIdx.x * kNvTileN;
+    const int m0 = blockIdx.y * kNvTileM;
     const int words_row = a.k / 8;
     const int groups = a.k / a.group;
-    const int k = a.k;
-    const long long stride = static_cast<long long>(gridDim.x) * warps;
-    for (long long item = static_cast<long long>(blockIdx.x) * warps + (threadIdx.x >> 5); item < total;
-         item += stride) {
-        const int rb = static_cast<int>(item / a.n);
-        const int col = static_cast<int>(item % a.n);
-        const int row0 = rb * R;
-        const int rows = a.m - row0 < R ? a.m - row0 : R;
-        const uint32_t* w = a.words + static_cast<long long>(col) * words_row;
-        const hip_bfloat16* xr[R];
+    const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x);
+    float acc[4][4];
 #pragma unroll
-        for (int r = 0; r < R; ++r) {
-            xr[r] = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0 + (r < rows ? r : 0)) * k;
+    for (int r = 0; r < 4; ++r) {
+#pragma unroll
+        for (int c = 0; c < 4; ++c) acc[r][c] = 0.f;
+    }
+    for (int kc = 0; kc < a.k; kc += kNvChunk) {
+        for (int i = tid; i < kNvTileN * (kNvChunk / 8); i += blockDim.x) {
+            const int col = i / (kNvChunk / 8), wd = i % (kNvChunk / 8);
+            const int c = n0 + col < a.n ? n0 + col : a.n - 1;
+            const int at = kc / 8 + wd < words_row ? kc / 8 + wd : words_row - 1;
+            codes[col][wd] = a.words[static_cast<long long>(c) * words_row + at];
         }
-        float acc[R];
+        for (int i = tid; i < kNvTileN * (kNvChunk / 16); i += blockDim.x) {
+            const int col = i / (kNvChunk / 16), g = i % (kNvChunk / 16);
+            const int c = n0 + col < a.n ? n0 + col : a.n - 1;
+            const int gi = kc / 16 + g < groups ? kc / 16 + g : groups - 1;
+            sc[col][g] = nvfp4_scale(a.scale, static_cast<long long>(c) * groups + gi);
+        }
+        for (int i = tid; i < kNvTileM * kNvChunk; i += blockDim.x) {
+            const int row = i / kNvChunk, j = i % kNvChunk;
+            const int r = m0 + row < a.m ? m0 + row : a.m - 1;
+            // a last chunk past K reads zeros, so a K that is no multiple of the chunk adds nothing
+            xs[row][j] = kc + j < a.k ? x[static_cast<long long>(r) * a.k + kc + j] : hip_bfloat16(0.f);
+        }
+        __syncthreads();
 #pragma unroll
-        for (int r = 0; r < R; ++r) acc[r] = 0.f;
-        for (int base = 0; base < words_row; base += 32) {
-            const int wd = base + lane;
-            if (wd >= words_row) continue;
-            const uint32_t word = w[wd];
-            const float scale = nvfp4_scale(a.scale, static_cast<long long>(col) * groups + (wd >> 1));
-            const int at = wd * 8;
-            uint32_t lv[4];
+        for (int g = 0; g < kNvChunk / 16; ++g) {
 #pragma unroll
             for (int c = 0; c < 4; ++c) {
-                lv[c] = static_cast<uint32_t>(kE2m1Bf16[(word >> (8 * c)) & 0xfu]) |
-                        (static_cast<uint32_t>(kE2m1Bf16[(word >> (8 * c + 4)) & 0xfu]) << 16);
-            }
+                const int col = tx * 4 + c;
+                const float scale = sc[col][g];
+                float q[4];
 #pragma unroll
-            for (int r = 0; r < R; ++r) {
-                float q = 0.f;
-                if (r < rows) {
-#if TF_DEVICE_BF16_DOT2
-                    const uint32_t* xw = reinterpret_cast<const uint32_t*>(xr[r] + at);
+                for (int r = 0; r < 4; ++r) q[r] = 0.f;
 #pragma unroll
-                    for (int c = 0; c < 4; ++c) {
-                        q = DotBF16::dot(__builtin_bit_cast(bf16x2, xw[c]), __builtin_bit_cast(bf16x2, lv[c]), q);
+                for (int j = 0; j < 16; ++j) {
+                    const int code = g * 16 + j;
+                    const uint32_t word = codes[col][code / 8];
+                    const float lvl = nvfp4_level(word >> (4 * (code % 8)));
+#pragma unroll
+                    for (int r = 0; r < 4; ++r) {
+                        q[r] = fmaf(lvl, static_cast<float>(xs[ty * 4 + r][code]), q[r]);
                     }
-#else
-                    const hip_bfloat16* xp = xr[r] + at;
-#pragma unroll
-                    for (int c = 0; c < 4; ++c) {
-                        q = fmaf(__uint_as_float(lv[c] << 16), static_cast<float>(xp[2 * c]), q);
-                        q = fmaf(__uint_as_float(lv[c] & 0xffff0000u), static_cast<float>(xp[2 * c + 1]), q);
-                    }
-#endif
                 }
-                q += __shfl_xor_sync(0xffffffffu, q, 1);
-                if ((lane & 1) == 0) acc[r] = fmaf(q, scale, acc[r]);
+#pragma unroll
+                for (int r = 0; r < 4; ++r) acc[r][c] = fmaf(q[r], scale, acc[r][c]);
             }
         }
+        __syncthreads();
+    }
 #pragma unroll
-        for (int r = 0; r < R; ++r) {
-            const float sum = warp_sum(acc[r]);
-            if (lane == 0 and r < rows) a.out[static_cast<long long>(row0 + r) * a.n + col] = sum * a.global;
+    for (int r = 0; r < 4; ++r) {
+        const int row = m0 + ty * 4 + r;
+        if (row >= a.m) continue;
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+            const int col = n0 + tx * 4 + c;
+            if (col >= a.n) continue;
+            a.out[static_cast<long long>(row) * a.n + col] = acc[r][c] * a.global;
         }
     }
 }
@@ -108,7 +113,5 @@ __device__ __forceinline__ void nvfp4_rows(Nvfp4 a) {
 
 // This path serves bf16 activations only: the engine refuses an fp16 build for a ModelOpt checkpoint.
 extern "C" __global__ void __launch_bounds__(256) tf_nvfp4_gemm(tf::rocm::Nvfp4 a) {
-    if (a.m >= 8) tf::rocm::nvfp4_rows<8>(a);
-    else if (a.m >= 4) tf::rocm::nvfp4_rows<4>(a);
-    else tf::rocm::nvfp4_rows<1>(a);
+    tf::rocm::nvfp4_block(a);
 }
