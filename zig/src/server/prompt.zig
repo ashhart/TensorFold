@@ -41,7 +41,7 @@ pub fn renderRequest(srv: *Server, cx: *Cx, messages: Value, tools: []const Valu
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
         .add_generation_prompt = generation,
         .enable_thinking = thinking,
-        .reasoning_effort = if (thinking) effort else null,
+        .reasoning_effort = if (thinking) effort else cx.named_effort, // off: only an effort someone named
         .clear_thinking = cx.clear_thinking,
         .tool_choice = cx.template_fields.get("tool_choice"),
         .response_format = cx.template_fields.get("response_format"),
@@ -122,7 +122,7 @@ fn generationPrompt(srv: *Server, cx: *Cx, thinking: bool) errors.Refused![]cons
 /// Earlier replies' decoded rows: from each turn's generation prompt end through its closing stop token.
 pub fn replySpans(srv: *Server, cx: *Cx, prompt: []const u32) errors.Refused![]const [2]u32 {
     if (srv.eos.len == 0) return &.{};
-    var probe: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .template_fields = cx.template_fields }; // a template that refuses the probe leaves the request without spans, not failed
+    var probe: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .named_effort = cx.named_effort, .template_fields = cx.template_fields }; // a template that refuses the probe leaves the request without spans, not failed
     const openers = [2][]const u32{ generationPrompt(srv, &probe, false) catch &.{}, generationPrompt(srv, &probe, true) catch &.{} };
     var spans: std.ArrayList([2]u32) = .empty;
     var i: usize = 0;
@@ -175,7 +175,7 @@ fn continuedLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, th
     reply.put(cx.a, "role", .{ .string = "assistant" }) catch return history_len;
     reply.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return history_len;
     list[messages.array.len] = .{ .object = reply };
-    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .template_fields = cx.template_fields };
+    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .named_effort = cx.named_effort, .template_fields = cx.template_fields };
     const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, false) catch return history_len;
     const i = std.mem.indexOfDiff(u32, history, probe) orelse return history_len;
     return if (i > 0 and i < history_len) i else history_len;
@@ -214,7 +214,7 @@ pub fn rewindLen(srv: *Server, cx: *Cx, messages: Value, real_count: usize, tool
     const user = json.copyObject(cx.a, messages.array[user_index].object) catch return 0;
     user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
     list[user_index] = .{ .object = user };
-    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .template_fields = cx.template_fields };
+    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .named_effort = cx.named_effort, .template_fields = cx.template_fields };
     const probe = renderIds(srv, &scratch, .{ .array = list }, tools, thinking, effort, true) catch return 0;
     const i = std.mem.indexOfDiff(u32, prompt, probe) orelse return 0;
     return if (i < prompt.len) i else 0;
@@ -233,7 +233,7 @@ pub fn systemPrefixLen(srv: *Server, cx: *Cx, messages: Value, tools: []const Va
     user.put(cx.a, "role", .{ .string = "user" }) catch return 0;
     user.put(cx.a, "content", .{ .string = "\u{2063}probe" }) catch return 0;
     probe[first_user] = .{ .object = user };
-    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .template_fields = cx.template_fields };
+    var scratch: Cx = .{ .a = cx.a, .clear_thinking = cx.clear_thinking, .named_effort = cx.named_effort, .template_fields = cx.template_fields };
     const other = renderIds(srv, &scratch, .{ .array = probe }, tools, thinking, effort, true) catch return 0;
     var shared: usize = 0;
     while (shared < @min(prompt_ids.len, other.len) and prompt_ids[shared] == other[shared]) shared += 1;
