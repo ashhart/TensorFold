@@ -125,6 +125,7 @@ pub fn build(b: *std.Build) void {
         @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.engine, test_step);
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
+        b.step("test-token-ids-metal-host", "Drafted and fed ids past the embedding refused before any device work").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"token ids:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
