@@ -6,6 +6,7 @@ const ctx_ = @import("ctx.zig");
 const weights = @import("weights.zig");
 const pipelines = @import("pipelines.zig");
 const layer = @import("layer.zig");
+const segs = @import("segs.zig");
 
 const Config = host.config.Config;
 const Ctx = ctx_.Ctx;
@@ -190,6 +191,7 @@ pub fn encodeHead(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs
 pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs) !void {
     if (m.layers.len != x.c.layers) return error.LayerOrder;
     if (x.rows == 0 or x.rows > R or x.rows != x.total()) return error.BadRows;
+    segs.declare(x, e);
     try encodeEmbed(x, e, m, b);
     e.barrier();
     for (0..m.layers.len) |i| try encodeLayer(x, e, m, b, i);
@@ -221,6 +223,7 @@ pub fn run(x: *const Ctx, q: mtl.Queue, m: Model, b: *const Bufs) !void {
         if (n == max_buffers) return error.TooManyBuffers;
         const cb = q.commandBuffer();
         const e = cb.compute(.concurrent);
+        segs.declare(x, e);
         const ok = encodeRange(x, e, m, b, lo, hi);
         e.end();
         ok catch |err| {
