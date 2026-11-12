@@ -441,7 +441,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // no captured Triton set: Muse runs its own CUDA kernels
     if (o.lanes == 0 or o.lanes > 32) return error.Slots;
-    const c = (try tpConfig()) orelse return error.MuseSparkRequiresTwoRanks;
+    const c = (try tpRead()) orelse return error.MuseSparkRequiresTwoRanks;
     try config.admit(try ctx.capability(), c.world);
     if (c.rank != 0) return error.FollowerServes; // rank 1 runs `tf-muse follow`
     const drafting = o.drafts and o.drafter != null;
@@ -473,30 +473,26 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
 }
 
-/// TF_TP_* once TF_TP_WORLD is set (rank 0 serves; `tf-muse follow` on rank 1); null: unset. A bad setting refuses.
-fn tpConfig() tp.config.Error!?tp.Config {
-    return tpFrom(&envGet);
+/// The process's TF_TP_* through tp's own reader; null while TF_TP_WORLD is unset or blank (tp's default is two).
+fn tpRead() tp.config.Error!?tp.Config {
+    const world = @import("sys").environment.Process.get(.{}, "TF_TP_WORLD") orelse return null;
+    return if (world.len == 0) null else try tp.Config.fromEnv();
 }
 
+/// `get`'s TF_TP_*, as tpRead reads the process's (the tests' fake environments).
 fn tpFrom(get: *const fn ([]const u8) ?[]const u8) tp.config.Error!?tp.Config {
     if (get("TF_TP_WORLD") == null) return null;
     return try tp.Config.parse(get);
 }
 
-fn envGet(name: []const u8) ?[]const u8 {
-    var buf: [64]u8 = undefined;
-    const z = std.mem.printSentinel(&buf, "{s}", .{name}, 0) catch return null;
-    return std.mem.span(std.c.getenv(z) orelse return null);
-}
-
 /// Admission bytes of a rank: the checkpoint over the two TP ranks (the embedding stays in host memory).
 pub fn weightShare(_: std.mem.Allocator, _: std.Io, _: []const u8, total: u64, _: bool) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
-    return share(total, &envGet);
+    return share(total, tpRead());
 }
 
-/// weightShare under `get`'s TF_TP_*: a bad setting is BadSetting and one rank is refused, as `open` refuses them.
-fn share(total: u64, get: *const fn ([]const u8) ?[]const u8) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
-    const c = (try tpFrom(get)) orelse return error.MuseSparkRequiresTwoRanks;
+/// weightShare under TF_TP_* as read: a bad setting is BadSetting and one rank (unset too) is refused, as `open` does.
+fn share(total: u64, read: tp.config.Error!?tp.Config) (tp.config.Error || error{MuseSparkRequiresTwoRanks})!u64 {
+    const c = (try read) orelse return error.MuseSparkRequiresTwoRanks;
     if (c.world != 2) return error.MuseSparkRequiresTwoRanks;
     return total / c.world;
 }
@@ -547,11 +543,11 @@ test "a bad TF_TP_* refuses the weight share; one rank is refused by name" {
             return null;
         }
     }.get;
-    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, &unset));
-    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpEnv("1", "")));
-    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpEnv("4", "3")));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpFrom(&unset)));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpFrom(tpEnv("1", ""))));
+    try std.testing.expectError(error.MuseSparkRequiresTwoRanks, share(1000, tpFrom(tpEnv("4", "3"))));
     inline for (.{ .{ "two", "" }, .{ "0", "" }, .{ "65", "" }, .{ "2", "2" }, .{ "2", "-1" }, .{ "2", "one" } }) |bad| {
-        try std.testing.expectError(error.BadSetting, share(1000, tpEnv(bad[0], bad[1])));
+        try std.testing.expectError(error.BadSetting, share(1000, tpFrom(tpEnv(bad[0], bad[1]))));
     }
-    try std.testing.expectEqual(@as(u64, 500), try share(1000, tpEnv("2", "1")));
+    try std.testing.expectEqual(@as(u64, 500), try share(1000, tpFrom(tpEnv("2", "1"))));
 }
