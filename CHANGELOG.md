@@ -182,6 +182,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal on M5: prompt lane projections at every width (8-, 6-, 5-, 3- and 2-bit and the oQ mixes) take a chunk's 16-row blocks in one dispatch, as 4-bit already did; Qwen3.8-27B MLX 8-bit cold prompts are about 33% faster on an M5 Ultra (769 to 1,029 tok/s at 2K, 769 to 1,027 at 8K) with identical tokens, and decode is unchanged (#2851, for #2818).
 - Qwen3.8-Flash-Next on HIP: when several streams draft in one round, the MTP head drafts them together, one forward and one draw a step instead of one per stream, as on CUDA and Metal; on a Strix Halo iGPU distinct-prompt decode is about 3% faster at 2 streams and 7% at 4, and one stream is unchanged. Replies are unchanged.
+- Qwen3.8-Flash-Next on HIP: when several streams draft in one round, the MTP head drafts them together, one forward and one draw a step instead of one per stream, as on CUDA and Metal; on a Strix Halo iGPU distinct-prompt decode is about 3% faster at 2 streams and 7% at 4, and one stream is unchanged. Replies are unchanged (#2696). Thanks to @gilby.
 
 - GLM-5.3-Flash: the DFlash2 drafter's startup line and docs give its licence as Apache-2.0, as its model card now says (#3084, for #1583).
 
