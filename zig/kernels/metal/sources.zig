@@ -164,6 +164,7 @@ pub const glm_index_nax = @embedFile("glm_index_nax.metal");
 pub const glm_absorb_nax = @embedFile("glm_absorb_nax.metal");
 /// A MoE layer's route in two launches (core/moe_route.zig): router logits, then the top-k and the expert groups.
 pub const core_moe_route = @embedFile("core/moe_route.metal");
+pub const core_tree_round = @embedFile("core/tree_round.metal");
 pub const core_affine_mm = @embedFile("core/affine_mm.metal");
 /// A hyper-connection block boundary in two launches (core/hc.zig).
 pub const core_hc_boundary = @embedFile("core/hc_boundary.metal");
