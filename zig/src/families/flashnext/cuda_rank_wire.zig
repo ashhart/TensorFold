@@ -192,7 +192,7 @@ pub const Link = struct {
         };
     }
 
-    /// Whether both ranks run on one host; both ends of the link read the same answer.
+    /// Whether this end sees both ranks on one host; the collective splits only when both ends say so.
     pub fn oneHost(l: Link) !bool {
         var local: std.Io.Threaded.PosixAddress = undefined;
         var peer: std.Io.Threaded.PosixAddress = undefined;
