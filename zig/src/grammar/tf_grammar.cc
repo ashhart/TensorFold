@@ -210,18 +210,18 @@ int tfg_rollback(void* m, int n) {
     }
 }
 
-// grammar_budget's tables for a compiled grammar, explored once: 1 covered, 0 not, -1 failed.
+// grammar_budget's tables for a compiled grammar, explored once: 1 covered, 0 not, 2 over the work limit, -1 failed.
 int tfg_budget_ready(void* g) {
     try {
         auto* c = static_cast<Compiled*>(g);
-        return tfb::Ready(*c->owner->budgets.Get(c->g)) ? 1 : 0;
+        return tfb::Ready(*c->owner->budgets.Get(c->g));
     } catch (...) {
         return -1;
     }
 }
 
-// The work and the milliseconds exploring a grammar may take, for grammars first looked up after this (tfb::Limits).
-void tfg_budget_limits(void* c, int64_t work, int64_t ms) { static_cast<Compiler*>(c)->budgets.Limit({work, ms}); }
+// The work exploring a grammar may take, for grammars first looked up after this (tfb::Limits); tests lower it.
+void tfg_budget_limits(void* c, int64_t work) { static_cast<Compiler*>(c)->budgets.Limit({work}); }
 
 // n == 0 arms a fresh matcher, else clears bits that leave no completion in left - 1 more: 0, 1 not covered, -1 failed.
 int tfg_budget(void* m, int32_t* words, int n, int left) {
