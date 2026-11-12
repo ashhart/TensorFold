@@ -27,6 +27,23 @@ pub fn glmCudaShared(b: *std.Build, target: std.Build.ResolvedTarget, optimize: 
     return m;
 }
 
+/// Qwen3's dense embedding and reranker checkpoints on CUDA: the family module the native server's open dispatches to.
+pub fn qwen3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, api: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3/qwen3_cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    m.addImport("cuda", cuda);
+    m.addImport("core", core);
+    m.addImport("lanes", lanes);
+    m.addImport("engine_api", api); // the server's engine_api: family's (qwen3_5's), the shared one
+    return m;
+}
+
+/// The family module's GPU-free host tests, without a GPU; `all` (test-cuda-host and so `test`) runs them.
+pub fn qwen3HostTest(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) void {
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
+    b.step("test-qwen3-cuda-host", "Qwen3 CUDA host tests: config, folder head, prompt lane and reranker labels (no GPU)").dependOn(&run.step);
+    all.dependOn(&run.step);
+}
+
 /// LFM2 (d1's decision model) on CUDA: config, weights, kernels and the forward that scores labels.
 pub fn lfm2Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2/lfm2.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
@@ -64,6 +81,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api) },
             .{ .name = "glm_cuda", .module = glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canon, verbs) },
+            .{ .name = "qwen3_cuda", .module = qwen3Module(b, target, optimize, cuda, core, lanes, api) },
             .{ .name = "minimax_m3_cuda", .module = @import("minimax_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "qwen35", .module = qwen35 },
             .{ .name = "kolibri1", .module = @import("kolibri.zig").module(b, target, optimize, cuda, core, lanes) },
