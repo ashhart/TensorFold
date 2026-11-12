@@ -1,13 +1,20 @@
 #version 460
 // qmm_q4_vec4 over tiled weights, 32 columns a tile: words [tile][k/32][lane], scales [tile][group][lane].
+// ACT_F32: x rows and the output are f32 (two vec4 a group of eight), scales and biases stay bf16.
 #extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 
 layout(local_size_x = 256) in;
 
+#ifdef ACT_F32
+layout(set = 0, binding = 0, std430) readonly buffer InputX {
+  vec4 values[];
+} input_x;
+#else
 layout(set = 0, binding = 0, std430) readonly buffer InputX {
   uvec4 values[];
 } input_x;
+#endif
 layout(set = 0, binding = 1, std430) readonly buffer InputW {
   uvec4 values[];
 } input_w;
@@ -17,9 +24,15 @@ layout(set = 0, binding = 2, std430) readonly buffer Scales {
 layout(set = 0, binding = 3, std430) readonly buffer Biases {
   uint16_t values[];
 } biases;
+#ifdef ACT_F32
+layout(set = 0, binding = 4, std430) writeonly buffer Output {
+  float values[];
+} output_data;
+#else
 layout(set = 0, binding = 4, std430) writeonly buffer Output {
   uint16_t values[];
 } output_data;
+#endif
 
 layout(push_constant) uniform Params {
   uint count;
@@ -77,7 +90,16 @@ void main() {
         uvec4 w4 = input_w.values[w_base + (group * 2u + half_group) * 32u];
         for (uint t = 0u; t < 4u; ++t) {
           uint word = w4[t];
-          uvec4 x8 = input_x.values[x_vec + group * 8u + half_group * 4u + t];
+          uint x_at = x_vec + group * 8u + half_group * 4u + t;
+#ifdef ACT_F32
+          vec4 x_lo = input_x.values[x_at * 2u];
+          vec4 x_hi = input_x.values[x_at * 2u + 1u];
+          for (uint e = 0u; e < 8u; ++e) {
+            float xv = e < 4u ? x_lo[e] : x_hi[e - 4u];
+            accumulator += xv * (scale * float((word >> (e * 4u)) & 0xfu) + bias);
+          }
+#else
+          uvec4 x8 = input_x.values[x_at];
           for (uint pair = 0u; pair < 4u; ++pair) {
             uint x_pair = x8[pair];
             accumulator += uintBitsToFloat(x_pair << 16u) *
@@ -85,9 +107,14 @@ void main() {
             accumulator += uintBitsToFloat(x_pair & 0xffff0000u) *
                 (scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias);
           }
+#endif
         }
       }
     }
+#ifdef ACT_F32
+    output_data.values[params.output_offset + index] = accumulator;
+#else
     output_data.values[params.output_offset + index] = bf16_store(accumulator);
+#endif
   }
 }
