@@ -62,12 +62,15 @@ pub fn main(init: std.process.Init) !u8 {
     for (&tps, std.enums.values(tp_k.Which)) |*x, w| x.* = try tp_k.Tp.init(a, &dev, w);
     defer for (&tps) |*x| x.deinit();
     for (&tps) |*x| try kernels.append(a, x.kernel());
-    var attn = try attn_k.Attn.init(a, &dev, false);
+    var attn = try attn_k.Attn.init(a, &dev, .none);
     defer attn.deinit();
     try kernels.append(a, attn.kernel());
-    var attn_control = try attn_k.Attn.init(a, &dev, true);
+    var attn_control = try attn_k.Attn.init(a, &dev, .drop_slice);
     defer attn_control.deinit();
     try kernels.append(a, attn_control.kernel());
+    var attn_grid = try attn_k.Attn.init(a, &dev, .old_grid);
+    defer attn_grid.deinit();
+    try kernels.append(a, attn_grid.kernel());
     var controls: [std.enums.values(controls_k.Which).len]controls_k.Control = undefined;
     for (&controls, std.enums.values(controls_k.Which)) |*x, w| x.* = try controls_k.Control.init(a, &dev, w);
     defer for (&controls) |*x| x.deinit();

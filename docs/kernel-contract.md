@@ -115,8 +115,7 @@ On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `t
 linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over ten registrations of the Qwen3.8-27B glue's
 `add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax`, the top-k a sampled row draws from (`topk_part` and
 `topk_merge`) and `embed`, the seven planted controls (the top-k's two: a merge breaking ties the wrong way, red at
-`shapes`, and a flag read off the candidates only, red at `nonfinite`), and the decode attention pair with its planted final-slice control. Gate 5 checks
-live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
+`shapes`, and a flag read off the candidates only, red at `nonfinite`), and the decode attention pair with its two planted controls. Gate 5 checks the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
 native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
 another host made with the commands the receipt records.
@@ -126,8 +125,8 @@ bf16 K/V cache and a tree table to bf16 attention rows. Gate 3 requires the byte
 whose decode grid is retained in `zig/kernels/xpu/contract_attn_upstream.cl`. It covers single rows and branching
 trees of 2, 4, 8, 12 and 16 rows (heap-order parents; chains and other topologies are not fixtures), 32-key slice
 edges, and 8,193 through 32,770 visible keys at selected root positions. The positions include 32,768 and 32,769
-(zero-based). Its planted merge control
-drops the last non-empty slice. Gate 4 uses uniform attention with cancelling integer values; it tests the value
+(zero-based). One control drops the last non-empty slice. The other launches the new kernel on the old
+(slices, heads, rows) grid where the number of slices is at most the number of rows. Gate 4 uses uniform attention with cancelling integer values; it tests the value
 and normalization sums, without separately proving the query/key dot accumulator. The default NaN rule compares
 classes with the independent float64 formula. Int8 caches and multi-stream metadata are outside this registration.
 
