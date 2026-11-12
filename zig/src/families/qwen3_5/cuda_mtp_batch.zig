@@ -45,6 +45,7 @@ fn ringRow(d: *Mtp, ctx: *Ctx, end: u64, seg: usize) RingRow {
 /// One pass's tokens and ring table use a unique pinned staging slot until the round's final readback waits.
 fn upload(d: *Mtp, ids: []const u32, tab: []const RingRow, slot: usize) !void {
     const e = d.e;
+    for (ids) |id| if (id >= e.g.vocab) return error.InvalidQwenToken; // embed reads the table at id unchecked
     const st = d.staged.bytes;
     if (slot >= Mtp.batch_slots) return error.TooManyMtpBatchPasses;
     const at = Mtp.batch_stage_at + slot * Mtp.batch_stage_stride;

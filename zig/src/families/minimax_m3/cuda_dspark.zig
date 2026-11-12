@@ -105,6 +105,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: weights.Tools, dir: []con
     defer core.checkpoint.cache.close(&ck);
     var L: weights.Loader = .{ .gpa = gpa, .t = tools, .w = target, .ck = &ck };
     const tc = &target.config;
+    if (c.noise >= tc.vocab) return error.BadDSparkConfig; // a block embeds the noise id from the target's table
     const s = target.share;
     const h: usize = tc.hidden;
     const D: usize = tc.head_dim;
@@ -256,11 +257,12 @@ pub const Drafter = struct {
         var ids: [state.window_rows]i32 = undefined; // R <= window_rows: perPass
         for (items, 0..) |it, k| {
             if (it.out.len > T or it.p + T > it.caches.capacity) return error.BadDraft;
+            if (it.anchor >= c.vocab) return error.InvalidMiniMaxToken; // embed and the Markov table read it unchecked
             ids[k * T] = @intCast(it.anchor);
             for (1..T) |j| ids[k * T + j] = @intCast(dr.w.c.noise);
         }
         try cuda.copy_source.enqueue(f.d, b.ids, std.mem.sliceAsBytes(ids[0..R]), f.stream);
-        try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, R, h);
+        try kern.embed(&f.m.k, f.stream, b.ids, f.w.embed, b.resid, R, h, c.eps);
         const hq = s.queries(c).len();
         const hk = s.kv.len();
         const stride = (hq + 2 * hk) * D;
