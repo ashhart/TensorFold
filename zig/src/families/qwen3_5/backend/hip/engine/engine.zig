@@ -224,7 +224,7 @@ pub const Engine = struct {
                 std.log.err("a bf16 checkpoint runs on one rank", .{});
                 return error.UnsupportedQuantization;
             }
-            e.o.graphs = false;
+            if (e.plain() or chat) e.o.graphs = false; // a ModelOpt checkpoint keeps its graphs: they are the same launches
         }
         e.bridge = try bridge.Bridge.init(gpa, &e.driver, &e.weights, e.act);
         errdefer e.bridge.deinit();
