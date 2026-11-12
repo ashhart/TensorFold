@@ -42,6 +42,8 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     const a = p.arena.allocator();
     const clear = input.fields.get("clear_thinking");
     var cx: errors.Cx = .{ .a = a, .clear_thinking = if (clear != null and clear.? == .bool) clear.?.bool else null };
+    const asked = input.fields.get("reasoning_effort");
+    cx.named_effort = @import("fields.zig").namedEffort(if (asked != null and asked.? == .string) asked.?.string else null, srv.config.reasoning_effort, srv.effort_levels);
     const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
     var prompt = warm_prompt.ids;
     // an image conversation's pass holds its images as its turns did (data URLs only: no URL is fetched twice)

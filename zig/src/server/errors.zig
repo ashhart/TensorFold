@@ -32,6 +32,8 @@ pub const Cx = struct {
     param: ?[]const u8 = null,
     /// The request's ``chat_template_kwargs.clear_thinking``, over the server's (GLM-5.3 templates only).
     clear_thinking: ?bool = null,
+    /// The effort the request or --reasoning-effort named (no fallback): a thinking-off prompt renders only this one.
+    named_effort: ?[]const u8 = null,
     /// The request controls a native prompt renderer must retain in every prefix probe.
     template_fields: @import("json").Value = .null,
 
