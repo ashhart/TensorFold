@@ -202,6 +202,12 @@ pub fn Kept(comptime V: type) type {
             return V.facts(@as(*Target, @ptrCast(@alignCast(ptr))));
         }
 
+        /// The served window, a state the store's permit takes whole (rows.Options.longest); 0: the default permit.
+        pub fn longest(ptr: anytype) u32 {
+            if (comptime !@hasDecl(V, "context")) return 0;
+            return @intCast(V.context(@as(*Target, @ptrCast(@alignCast(ptr)))));
+        }
+
         /// The family's view: keptKey reads its policy there when it declares one.
         pub const view = V;
 
