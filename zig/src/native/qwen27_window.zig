@@ -61,6 +61,20 @@ pub fn serial(tensor_units: bool, window: u32, value: ?[]const u8) !bool {
 pub fn serialPolicy(tensor_units: bool, value: ?[]const u8) !bool {
     return serial(tensor_units, 16, value);
 }
+/// The narrow tensor-unit serial path uses its existing verify tail for dependent picks.
+pub fn serialTail(tensor_units: bool, window: u32) bool {
+    return tensor_units and window == 16;
+}
+/// The default narrow tensor stream requires a long suffix; explicit serial overrides retain their copy policy.
+pub fn serialCopyMatch(tensor_units: bool, window: u32, lanes_value: ?[]const u8) i64 {
+    return if (tensor_units and window == 16 and lanes_value == null) 24 else 5;
+}
+test "qwen27 window: only the narrow tensor serial driver fuses its dependent picks" {
+    for ([_]u32{ 16, 32, 64 }) |width| {
+        try std.testing.expectEqual(width == 16, serialTail(true, width));
+        try std.testing.expect(!serialTail(false, width));
+    }
+}
 pub fn problem(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.BadQwenWindow => "TF_QWEN27_WINDOW must be 16, 32 or 64",
