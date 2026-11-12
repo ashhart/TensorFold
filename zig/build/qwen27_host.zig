@@ -10,6 +10,12 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const quant_run = b.addRunArtifact(quant_test);
     test_step.dependOn(&quant_run.step);
     b.step("test-qwen27-quant-host", "Prepared head cache identity and prompt row capacity without a GPU").dependOn(&quant_run.step);
+    // the pair's start-up order on a fake kit: every failed step releases what it made, once (no Metal, no link)
+    const pair_start = b.createModule(.{ .root_source_file = b.path("zig/src/pair_rows_start_test.zig"), .target = b.graph.host, .optimize = .debug });
+    const pair_start_run = b.addRunArtifact(b.addTest(.{ .root_module = pair_start, .filters = &.{"pair start:"} }));
+    pair_start_run.has_side_effects = true;
+    test_step.dependOn(&pair_start_run.step);
+    b.step("test-qwen27-pair-start-host", "The pair's start-up releases each object once when any step fails").dependOn(&pair_start_run.step);
     const metrics = b.createModule(.{ .root_source_file = b.path("zig/src/metal/pass_metrics.zig"), .target = b.graph.host });
     b.step("test-qwen27-pass-metrics-host", "Pass timing and forwarding allocator without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metrics })).step);
     const window = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_window.zig"), .target = b.graph.host });
