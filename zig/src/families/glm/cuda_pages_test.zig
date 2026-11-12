@@ -519,6 +519,16 @@ fn made(gpa: std.mem.Allocator) !void {
     };
 }
 
+test "GLM FP8 KV: paged layout charges the actual E4M3 codes and scales" {
+    var f: Fake = undefined;
+    try f.init(std.testing.allocator);
+    defer f.deinit(null);
+    f.e.settings.kv8 = true;
+    f.e.mtp = true;
+    const l = try pages_mod.layout(std.testing.allocator, &f.e, 0);
+    try expectEqual(@as(u64, 1160), l.token_bytes);
+}
+
 test "every host allocation failure while making the pages leaves no device buffer behind" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(gpa: std.mem.Allocator) !void {

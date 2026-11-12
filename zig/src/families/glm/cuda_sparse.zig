@@ -126,7 +126,7 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
     args.add(@as(c_int, topk_pools));
     args.add(tokens);
     args.add(counts);
-    args.add(t.pt);
+    args.add(if (t.logical) @as(u64, 0) else t.pt);
     args.add(@as(i64, @intCast(t.page_rows)));
     try cuda.launch.launch(assemble, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
 }

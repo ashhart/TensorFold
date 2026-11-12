@@ -87,8 +87,9 @@ pub const Plan = struct {
         const latent = try std.math.mul(usize, at, @as(usize, c.kv_lora) * @as(usize, if (x.ls == 0) 2 else 1));
         const ring = try std.math.mul(usize, @min(at, st.ring_rows), st.ring_row);
         const pooled = try std.math.mul(usize, @min(at / sparse.pool + 2, x.pk_rows), @as(usize, c.i_dim) * 2);
-        try p.addCache(st, x, x.lc, latent, page_rows * @as(usize, c.kv_lora) * 2, x.ps);
-        if (x.ls != 0) try p.add(st, x.ls, try std.math.mul(usize, at, @sizeOf(f32)));
+        const row = @as(usize, c.kv_lora) * @as(usize, if (x.ls == 0) 2 else 1);
+        try p.addCache(st, x, x.lc, latent, page_rows * row, x.ps);
+        if (x.ls != 0) try p.addCache(st, x, x.ls, try std.math.mul(usize, at, @sizeOf(f32)), page_rows * @sizeOf(f32), x.ps);
         try p.add(st, st.rings[2 * j], ring);
         try p.add(st, st.rings[2 * j + 1], ring);
         try p.addCache(st, x, x.pk, pooled, page_rows / sparse.pool * @as(usize, c.i_dim) * 2, if (x.pks != 0) x.pks else x.ps);

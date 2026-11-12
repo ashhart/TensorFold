@@ -561,13 +561,13 @@ test "TF_KV_PAGES: auto pages from two ranks, off and 0 give windows, all and ot
     }
 }
 
-test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank count, on and all are refused by name" {
+test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows; explicit pages are accepted at every rank count" {
     for ([_]usize{ 1, 2, 3, 16 }) |w| {
         try std.testing.expect(!try paging(null, w, true));
         try std.testing.expect(!try paging("auto", w, true));
         try std.testing.expect(!try paging("off", w, true));
         try std.testing.expect(!try paging("0", w, true));
-        for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
+        for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expect(try paging(v, w, true));
     }
     try std.testing.expect(explain(null, error.Fp8OnPages) != null);
     try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);

@@ -136,22 +136,221 @@ test "GLM FP8 KV: real launchers preserve BF16 ABI and pass FP8 scale pointers f
     try t.expectEqual(@as(u64, 400), Launch.scales[0]);
 }
 
-test "GLM FP8 KV: an FP8 cache takes no page table, so its writes and reads refuse one before they launch" {
+const Rec = struct {
+    var n: usize = 0;
+    var arity: [128]u8 = @splat(0);
+    var ids: [16]usize = undefined;
+    var grid: [16][3]u32 = undefined;
+    var blocks: [16]u32 = undefined;
+    var shared: [16]u32 = undefined;
+    var args: [16][16]u64 = undefined;
+    fn run(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, sh: c_uint, _: cuda.abi.Stream, a: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
+        const k = @intFromPtr(f);
+        ids[n] = k;
+        grid[n] = .{ gx, gy, gz };
+        blocks[n] = bx;
+        shared[n] = sh;
+        for (0..arity[k]) |i| args[n][i] = std.mem.readInt(u64, @as(*const [8]u8, @ptrCast(a.?[i].?)), .little);
+        n += 1;
+        return 0;
+    }
+    fn word(launch: usize, i: usize) u32 {
+        return @truncate(args[launch][i]);
+    }
+};
+fn recording(d: *cuda.Driver, ks: anytype) void {
+    d.api.cuLaunchKernel = Rec.run;
+    d.api.cuModuleGetFunction = Ops.function;
+    inline for (@typeInfo(@TypeOf(ks.*)).@"struct".field_names, 0..) |name, i| @field(ks, name) = .{ .d = d, .handle = @ptrFromInt(16 + i) };
+    Rec.n = 0;
+    Rec.arity = @splat(0);
+}
+fn kid(f: cuda.Function) usize {
+    return @intFromPtr(f.handle);
+}
+
+test "GLM FP8 KV: on pages an FP8 cache's write takes lat_write_fp8_paged, the window's arguments then the table" {
     const glue = @import("cuda_glue.zig");
     const latent = @import("cuda_latent.zig");
     var d: cuda.Driver = undefined;
-    d.api.cuLaunchKernel = Launch.run;
     var ks: glue.Kernels = undefined;
-    inline for (@typeInfo(glue.Kernels).@"struct".field_names) |name| @field(ks, name) = .{ .d = &d, .handle = @ptrFromInt(10) };
+    recording(&d, &ks);
+    Rec.arity[kid(ks.lat_write_fp8)] = 5;
+    Rec.arity[kid(ks.lat_write_fp8_paged)] = 7;
     const set: glue.Set = .{ .glue = &ks };
     const stream: cuda.Stream = .{ .d = &d, .handle = null };
-    const paged: latent.Table = .{ .pt = 900, .ps = 6_684_672, .page_rows = 6_528 };
+    // 11 DSA parts of 296,960 bytes a page; this cache's codes in page 0, its scales 262,144 bytes on
+    const paged: latent.Table = .{ .pt = 900, .ps = 11 * 296_960, .page_rows = 11 * 296_960 / 1024, .logical = true };
+    try latent.latentWriteFormat(set, stream, 100, 576, 200, 200 + 262_144, paged, 300, 7, 512);
+    try latent.latentWriteFormat(set, stream, 100, 576, 200, 200 + 262_144, .{}, 300, 7, 512);
+    try t.expectEqual(@as(usize, 2), Rec.n);
+    try t.expectEqualSlices(usize, &.{ kid(ks.lat_write_fp8_paged), kid(ks.lat_write_fp8) }, Rec.ids[0..2]);
+    try t.expectEqualSlices(u64, &.{ 100, 576, 200, 200 + 262_144, 300, 900, 11 * 296_960 }, Rec.args[0][0..7]);
+    try t.expectEqualSlices(u64, &.{ 100, 576, 200, 200 + 262_144, 300 }, Rec.args[1][0..5]);
+    for (0..2) |i| {
+        try t.expectEqual([3]u32{ 7, 1, 1 }, Rec.grid[i]);
+        try t.expectEqual(@as(u32, 512), Rec.blocks[i]);
+        try t.expectEqual(@as(u32, 0), Rec.shared[i]);
+    }
+    try t.expectError(error.LatentShape, latent.latentWriteFormat(set, stream, 100, 576, 200, 400, paged, 300, 7, 256));
+    try t.expectEqual(@as(usize, 2), Rec.n);
+}
+
+test "GLM FP8 KV: on pages an FP8 cache's dense and sparse chunks take the _paged kernels, the window's arguments then the table" {
+    const glue = @import("cuda_glue.zig");
+    const latent = @import("cuda_latent.zig");
+    var d: cuda.Driver = undefined;
+    var ks: glue.Kernels = undefined;
+    recording(&d, &ks);
+    Rec.arity[kid(ks.chunks_16)] = 15;
+    Rec.arity[kid(ks.chunks_32)] = 15;
+    Rec.arity[kid(ks.chunks_16_fp8)] = 14;
+    Rec.arity[kid(ks.chunks_32_fp8)] = 14;
+    Rec.arity[kid(ks.chunks_16_fp8_paged)] = 16;
+    Rec.arity[kid(ks.chunks_32_fp8_paged)] = 16;
+    Rec.arity[kid(ks.merge)] = 9;
+    const set: glue.Set = .{ .glue = &ks };
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const ps: u64 = 11 * 296_960;
+    const paged: latent.Table = .{ .pt = 900, .ps = ps, .page_rows = ps / 1024, .logical = true };
     const p: latent.Partials = .{ .po = 1000, .pm = 2000, .pl = 3000 };
-    Launch.n = 0;
-    try t.expectError(error.Fp8OnPages, latent.latentWriteFormat(set, stream, 100, 512, 200, 400, paged, 300, 3, 512));
-    try t.expectError(error.Fp8OnPages, latent.attentionFormat(set, stream, 100, 200, 400, paged, 300, p, 500, 600, 3, 32, 512, 1, 0.125, 16));
-    try t.expectError(error.Fp8OnPages, latent.sparseAttentionFormat(set, stream, 100, 200, 400, paged, 500, 600, 2051, p, 700, 3, 32, 512, 0.125));
-    try t.expectEqual(@as(usize, 0), Launch.n);
+    const scale: f32 = 0.0625;
+    // dense: rows 3 at hb 16 (2 head blocks of 32 heads), rows 64 at hb 32; 5 chunks
+    for ([_]usize{ 16, 32 }) |hb| {
+        const rows: usize = if (hb == 16) 3 else 64;
+        Rec.n = 0;
+        try latent.attentionFormat(set, stream, 100, 200, 200 + 262_144, paged, 300, p, 500, 600, rows, 32, 512, 5, scale, hb);
+        try t.expectEqual(@as(usize, 2), Rec.n);
+        try t.expectEqual(kid(if (hb == 16) ks.chunks_16_fp8_paged else ks.chunks_32_fp8_paged), Rec.ids[0]);
+        try t.expectEqualSlices(u64, &.{ 100, 200, 200 + 262_144, 300, 0, 0, 1000, 2000, 3000, rows, 32, 0 }, Rec.args[0][0..12]);
+        try t.expectEqual(@as(u32, @bitCast(scale)), Rec.word(0, 12));
+        try t.expectEqual(@as(u32, 0), Rec.word(0, 13));
+        try t.expectEqualSlices(u64, &.{ 900, ps }, Rec.args[0][14..16]);
+        try t.expectEqual([3]u32{ @intCast(rows), @intCast(32 / hb), 5 }, Rec.grid[0]);
+        try t.expectEqual(@as(u32, 256), Rec.blocks[0]);
+        try t.expectEqual(if (hb == 16) glue.chunksSmem(16) else glue.chunksSmem(32), Rec.shared[0]);
+        try t.expectEqual(kid(ks.merge), Rec.ids[1]);
+    }
+    // sparse: logical lists of 2,051 tokens (5 chunks), rows 3 (hb 16) and 64 (hb 32)
+    for ([_]usize{ 3, 64 }) |rows| {
+        Rec.n = 0;
+        try latent.sparseAttentionFormat(set, stream, 100, 200, 200 + 262_144, paged, 500, 600, 2051, p, 700, rows, 32, 512, scale);
+        try t.expectEqual(@as(usize, 2), Rec.n);
+        try t.expectEqual(kid(if (rows < 64) ks.chunks_16_fp8_paged else ks.chunks_32_fp8_paged), Rec.ids[0]);
+        try t.expectEqualSlices(u64, &.{ 100, 200, 200 + 262_144, 0, 500, 600, 1000, 2000, 3000, rows, 32, 2051 }, Rec.args[0][0..12]);
+        try t.expectEqual(@as(u32, 1), Rec.word(0, 13));
+        try t.expectEqualSlices(u64, &.{ 900, ps }, Rec.args[0][14..16]);
+        try t.expectEqual([3]u32{ @intCast(rows), if (rows < 64) 2 else 1, 5 }, Rec.grid[0]);
+        try t.expectEqual(kid(ks.merge), Rec.ids[1]);
+        try t.expectEqual(@as(u64, 600), Rec.args[1][4]);
+    }
+    // the window's FP8 kernels keep their 14 arguments, BF16 its table, on pages or not
+    Rec.n = 0;
+    try latent.attentionFormat(set, stream, 100, 200, 400, .{}, 300, p, 500, 600, 3, 32, 512, 1, scale, 16);
+    try latent.sparseAttentionFormat(set, stream, 100, 200, 400, .{}, 500, 600, 2051, p, 700, 64, 32, 512, scale);
+    try latent.attentionFormat(set, stream, 100, 200, 0, .{ .pt = 900, .ps = 6_684_672, .page_rows = 6_528 }, 300, p, 500, 600, 3, 32, 512, 1, scale, 32);
+    try latent.sparseAttentionFormat(set, stream, 100, 200, 0, .{ .pt = 900, .ps = 6_684_672, .page_rows = 6_528 }, 500, 600, 2051, p, 700, 3, 32, 512, scale);
+    try t.expectEqual(@as(usize, 8), Rec.n);
+    try t.expectEqualSlices(usize, &.{ kid(ks.chunks_16_fp8), kid(ks.chunks_32_fp8), kid(ks.chunks_32), kid(ks.chunks_16) }, &.{ Rec.ids[0], Rec.ids[2], Rec.ids[4], Rec.ids[6] });
+    try t.expectEqualSlices(u64, &.{ 100, 200, 400, 300 }, Rec.args[0][0..4]);
+    try t.expectEqual(@as(u32, 0), Rec.word(0, 13));
+    try t.expectEqual(@as(u32, 1), Rec.word(2, 13));
+    try t.expectEqualSlices(u64, &.{ 900, 6_684_672 }, Rec.args[4][13..15]);
+    try t.expectEqualSlices(u64, &.{ 900, 6_684_672 }, Rec.args[6][13..15]);
+}
+
+test "GLM FP8 KV: a paged sparse list in the other cache's units refuses before any launch" {
+    const glue = @import("cuda_glue.zig");
+    const latent = @import("cuda_latent.zig");
+    var d: cuda.Driver = undefined;
+    var ks: glue.Kernels = undefined;
+    recording(&d, &ks);
+    const set: glue.Set = .{ .glue = &ks };
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const p: latent.Partials = .{ .po = 1000, .pm = 2000, .pl = 3000 };
+    // E4M3 on pages reads positions: a list of BF16 rows (logical false) would be read as positions
+    try t.expectError(error.TokenUnits, latent.sparseAttentionFormat(set, stream, 100, 200, 400, .{ .pt = 900, .ps = 3_266_560, .page_rows = 3_190 }, 500, 600, 2051, p, 700, 3, 32, 512, 0.125));
+    // BF16 on pages reads rows
+    try t.expectError(error.TokenUnits, latent.sparseAttentionFormat(set, stream, 100, 200, 0, .{ .pt = 900, .ps = 6_684_672, .page_rows = 6_528, .logical = true }, 500, 600, 2051, p, 700, 3, 32, 512, 0.125));
+    try t.expectEqual(@as(usize, 0), Rec.n);
+    // dense chunks read no list, and a window takes no table: neither refuses
+    try latent.attentionFormat(set, stream, 100, 200, 400, .{ .pt = 900, .ps = 3_266_560, .page_rows = 3_190 }, 300, p, 500, 600, 3, 32, 512, 1, 0.125, 16);
+    try latent.sparseAttentionFormat(set, stream, 100, 200, 400, .{ .logical = true }, 500, 600, 2051, p, 700, 3, 32, 512, 0.125);
+    try t.expectEqual(@as(usize, 4), Rec.n);
+    try t.expectEqual(kid(ks.chunks_16_fp8_paged), Rec.ids[0]);
+    try t.expectEqual(kid(ks.chunks_16_fp8), Rec.ids[2]);
+}
+
+test "GLM FP8 KV: a logical table keeps the assembled token lists positions, while the pooled keys still read the pages" {
+    const glue = @import("cuda_glue.zig");
+    const latent = @import("cuda_latent.zig");
+    const sparse = @import("cuda_sparse.zig");
+    var d: cuda.Driver = undefined;
+    var ks: glue.Kernels = undefined;
+    recording(&d, &ks);
+    Rec.arity[kid(ks.scores)] = 14;
+    Rec.arity[15] = 7; // tf_glm_dsa_tokens (Ops)
+    const set: glue.Set = .{ .glue = &ks };
+    const ops: cuda.Module = .{ .d = &d, .handle = null };
+    const stream: cuda.Stream = .{ .d = &d, .handle = null };
+    const s: sparse.Scratch = .{ .scores = 5000, .ls = 5100, .li = 5200, .pools = 5300, .at = 5400 };
+    for ([_]bool{ true, false }) |logical| {
+        Rec.n = 0;
+        const tab: latent.Table = .{ .pt = 900, .ps = 3_266_560, .page_rows = 3_190, .logical = logical };
+        try sparse.selectTokens(set, ops, stream, 100, 200, 576, 1000, tab, 300, 5000, 3, 32, 128, 2048, s, 6000, 7000);
+        try t.expectEqual(@as(usize, 3), Rec.n);
+        try t.expectEqual(kid(ks.scores), Rec.ids[0]);
+        try t.expectEqualSlices(u64, &.{ 900, 3_266_560 }, Rec.args[0][12..14]);
+        try t.expectEqual(@as(usize, 15), Rec.ids[2]);
+        try t.expectEqualSlices(u64, &.{ 5300, 300 }, Rec.args[2][0..2]);
+        try t.expectEqual(@as(u32, sparse.topk_pools), Rec.word(2, 2));
+        try t.expectEqualSlices(u64, &.{ 6000, 7000, if (logical) 0 else 900, 3_190 }, Rec.args[2][3..7]);
+    }
+}
+
+test "GLM FP8 KV: the glue resolves the paged symbols and opts their chunks into the window's shared memory" {
+    const glue = @import("cuda_glue.zig");
+    const Res = struct {
+        // room for every glue kernel and opt-in (the integrated stack: 66 kernels, 17 opt-ins)
+        var names: [128][]const u8 = undefined;
+        var n: usize = 0;
+        var set_on: [32]usize = undefined;
+        var set_bytes: [32]c_int = undefined;
+        var sets: usize = 0;
+        fn function(out: *cuda.abi.Function, _: cuda.abi.Module, name: [*:0]const u8) callconv(.c) c_int {
+            names[n] = std.mem.span(name);
+            n += 1;
+            out.* = @ptrFromInt(16 + n - 1);
+            return 0;
+        }
+        fn attr(f: cuda.abi.Function, _: cuda.abi.FunctionAttribute, v: c_int) callconv(.c) c_int {
+            set_on[sets] = @intFromPtr(f);
+            set_bytes[sets] = v;
+            sets += 1;
+            return 0;
+        }
+        fn handleOf(name: []const u8) ?usize {
+            for (names[0..n], 0..) |x, i| if (std.mem.eql(u8, x, name)) return 16 + i;
+            return null;
+        }
+        fn bytesOn(h: usize) ?c_int {
+            for (set_on[0..sets], set_bytes[0..sets]) |x, b| if (x == h) return b;
+            return null;
+        }
+    };
+    var d: cuda.Driver = undefined;
+    d.api.cuModuleGetFunction = Res.function;
+    d.api.cuFuncSetAttribute = Res.attr;
+    const ks = try glue.Kernels.load(.{ .d = &d, .handle = null });
+    inline for (.{ .{ "tf_glm_lat_write_fp8_paged", 0 }, .{ "tf_glm_chunks_16_fp8_paged", glue.chunksSmem(16) }, .{ "tf_glm_chunks_32_fp8_paged", glue.chunksSmem(32) } }) |e| {
+        const h = Res.handleOf(e[0]) orelse return error.SymbolNotResolved;
+        if (e[1] == 0) try t.expect(Res.bytesOn(h) == null) else try t.expectEqual(@as(?c_int, @intCast(e[1])), Res.bytesOn(h));
+    }
+    try t.expectEqual(Res.handleOf("tf_glm_lat_write_fp8_paged").?, kid(ks.lat_write_fp8_paged));
+    try t.expectEqual(Res.handleOf("tf_glm_chunks_16_fp8_paged").?, kid(ks.chunks_16_fp8_paged));
+    try t.expectEqual(Res.handleOf("tf_glm_chunks_32_fp8_paged").?, kid(ks.chunks_32_fp8_paged));
+    try t.expectEqual(Res.bytesOn(kid(ks.chunks_16_fp8)), Res.bytesOn(kid(ks.chunks_16_fp8_paged)));
+    try t.expectEqual(Res.bytesOn(kid(ks.chunks_32_fp8)), Res.bytesOn(kid(ks.chunks_32_fp8_paged)));
 }
 
 const Ops = struct {
@@ -354,4 +553,43 @@ test "GLM shared window: its KDA projection rows have their own room, even when 
     var window = try state.Buffers.init(&d, &w, rows, false, 8256);
     defer window.deinit();
     try t.expect(window.kda.ka - window.kproj < rows * row_bytes); // a lone window's rows stay in the state
+}
+
+test "GLM FP8 KV: paged snapshots copy codes and scales through shuffled pages and skip shared prefixes" {
+    const layout = @import("cuda_snapshot_layout.zig");
+    var d = Fake.driver();
+    var layers: [1]weights.Layer = undefined;
+    layers[0].mixer = .{ .mla = undefined };
+    var w: weights.Weights = undefined;
+    w.config = .{};
+    w.share = try shard.Share.of(&w.config, 0, 2);
+    w.layers = &layers;
+    const page = state.pageBytesFormat(&w, true);
+    var st = try state.State.initPagedFormat(t.allocator, &d, &w, 1024, .{ .kv = 0x80000000, .pages = 2, .page_bytes = page }, true);
+    defer st.deinit();
+    st.capacity = 1024;
+    st.pages = &.{ 3, 1 };
+    const x = st.caches[0];
+    try t.expectEqual(x.lc + 512 * 512, x.ls);
+    try t.expectEqual(x.ls + 512 * 4, x.pk);
+    const full = try layout.Plan.withHalf(&st, &w.config, 600, null, 0, null);
+    var found = false;
+    for (full.parts[0..full.count]) |part| if (part.live == x.ls) {
+        found = true;
+        try t.expectEqual(@as(usize, 600 * 4), part.len);
+        try t.expectEqual(@as(usize, 512 * 4), part.span);
+        try t.expectEqual(page, part.page);
+        const second = full.piece(part, 512 * 4);
+        try t.expectEqual(x.ls + page, second.live);
+    };
+    try t.expect(found);
+    const shared = try layout.Plan.withHalf(&st, &w.config, 600, null, 1, null);
+    found = false;
+    for (shared.parts[0..shared.count]) |part| if (part.live == x.ls) {
+        found = true;
+        try t.expectEqual(@as(usize, 88 * 4), part.len);
+        try t.expectEqual(@as(usize, 512 * 4), part.from);
+        try t.expectEqual(x.ls + page, shared.piece(part, 0).live);
+    };
+    try t.expect(found);
 }
