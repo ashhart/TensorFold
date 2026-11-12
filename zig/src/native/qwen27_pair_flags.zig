@@ -22,3 +22,16 @@ pub fn refuseOptions(pair: bool, o: anytype, bound_drafter: bool, why: *[]const 
     if (!pair) return;
     return refuse(bound_drafter or o.drafter != null, o.cache_gib != null, o.learn != null, o.vision != null or o.images != null, why);
 }
+
+/// The policy line a pair's `/health` shows; one Mac's is empty, which `/health` leaves out, as on main.
+pub fn healthPolicy(pair: bool) []const u8 {
+    return if (pair) "speed-up mode: a two-Mac pair, rank 0 answers greedy requests only" else "";
+}
+
+/// The host's `Info` with a pair's policy line: `attach` passes its own through, so one Mac's comes back unchanged.
+pub fn withPolicy(info: anytype, pair: bool) @TypeOf(info) {
+    if (!pair) return info;
+    var out = info;
+    out.policy = healthPolicy(true);
+    return out;
+}
