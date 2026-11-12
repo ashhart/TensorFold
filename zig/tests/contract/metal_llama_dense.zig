@@ -12,7 +12,7 @@ const family = llama.family;
 const G33 = family.nanbeige43;
 const G3 = family.nanbeige41;
 
-/// glue.metal's ll_mv_args, as forward.zig fills it.
+/// core/bf16_matvec.metal's tf_bf16_mv_args, as forward.zig fills it.
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
 /// A lane's dots over its 8-wide slices of the row, then the simd tree.

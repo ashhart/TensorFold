@@ -31,9 +31,10 @@ pub fn getenv(name: [:0]const u8) ?[]const u8 {
 }
 
 /// The same strict setting contract as the direct CLI, with flags taking precedence over environment text.
-pub fn setting(a: Allocator, flag: ?u32, name: [:0]const u8, default: u32, problem: *[]const u8) !?u32 {
-    if (flag) |v| return v;
+pub fn setting(a: Allocator, flag: ?u32, comptime name: [:0]const u8, default: u32, problem: *[]const u8) !?u32 {
     const settings = @import("sys").environment;
+    comptime settings.registered(name);
+    if (flag) |v| return v;
     const raw = getenv(name);
     const n = settings.parse(name, raw) catch {
         problem.* = try settings.describe(a, name, raw.?);

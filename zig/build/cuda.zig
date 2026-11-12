@@ -43,6 +43,7 @@ pub fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     joint.addImport("cuda", cuda);
     joint.addImport("core", core);
     qwen35.addImport("cuda_joint_schema", joint);
+    qwen35.addImport("stage", @import("stage.zig").module(b, target, optimize));
     qwen35.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} })); // core's prompt-cache types, the server's engine_api
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
@@ -138,6 +139,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     q35.addImport("core", mods.core);
     q35.addImport("qwen35", mods.qwen35);
     q35.addImport("lanes", mods.lanes);
+    q35.addImport("stage", mods.qwen35.import_table.get("stage").?);
     const q35_install = b.addInstallArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }), .{});
     b.getInstallStep().dependOn(&q35_install.step);
     b.step("qwen35-cuda", "Build the Qwen CUDA forward and raw state receipt tool").dependOn(&q35_install.step);
@@ -220,6 +222,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);
     @import("cuda_checkpoint_cache_host.zig").steps(b, step);
     b.step("test-lfm2-load-host", "LFM2 decision model metadata and load ownership without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lfm2Module(b, host, .debug, cuda, mods.core) })).step);
+    engines_build.qwen3HostTest(b, engines_build.qwen3Module(b, host, .debug, cuda, mods.core, mods.lanes, mods.api), step);
     const omni_slide = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Omni learner:"} }));
     const omni_slide_step = b.step("test-omni-slide-host", "Omni learner registration, widths and scoped tensors without devices");
     omni_slide_step.dependOn(&omni_slide.step);
@@ -288,6 +291,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-nemotron-grants-host", "Nemotron shared head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Nemotron shared prices:"} })).step);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
+    b.step("test-cuda-cache-budget-host", "CUDA cache defaults after stream sizing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA cache default"} })).step);
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
     @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);
     const copies = b.step("test-nemotron-copies-host", "Nemotron CUDA copy gates and plain equality without devices");
@@ -301,6 +305,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
     @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
     const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
+    @import("locate_host.zig").cudaTests(b, mods.nemotron, step);
     const adapter_tests = b.createModule(.{ .root_source_file = b.path("zig/src/native/slide_adapter_test.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = native_modules.api }} });
     b.step("test-slide-cuda-host", "Unsupported CUDA learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"slide admission:"} })).step);
     b.step("test-slide-adapter-host", "Slide adapter: initial learner progress, and --slide's startup refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter_tests })).step);
@@ -344,7 +349,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     @import("pull_tests.zig").add(b, host, .debug, native_modules.engines, mods.core, step);
     b.step("test-save-reopen-host", "Unresolved save through actual checkpoint admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"Save recovery:"} })).step);
     b.step("test-trainer-close-host", "Actual native close and real Flash Next trainer ownership sentinels").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Save recovery:"} })).step);
-    const template, const server_tests = @import("cuda_server_host.zig").steps(b, host, cuda, mods, native_modules, windows_port, step, server_steps);
+    const template, const server_tests = @import("cuda_server_host.zig").steps(b, host, cuda, mods, native_modules, build_options, windows_port, step, server_steps);
     // the tokenizer's own tests (memo, steps, regex, unicode) run here: no other test binary reaches them
     for ([_]*std.Build.Module{ cuda, mods.core, mods.lanes, mods.nemotron, mods.qwen35, mods.qwen_vision, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api), lfm2Module(b, host, .debug, cuda, mods.core), mods.radio, mods.heat, mods.tokenizer, native_modules.api, native, stagger(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const selected = b.option([]const u8, "modelopt-host-filter", "One portable ModelOpt regression") orelse "modelopt host:";
@@ -369,6 +374,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
+    // the mesh layer's groups, shard declarations and reduction contracts
+    const mesh = @import("mesh.zig").module(b, host, .debug, @import("cuda_engines.zig").canonModule(b, host, .debug));
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mesh })).step);
     // the tool-call parser's tests, run beside the server's on Macs: the GLM calls the CUDA port serves
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
     _ = @import("server.zig").addTo(b, parse_tests, host, .debug);

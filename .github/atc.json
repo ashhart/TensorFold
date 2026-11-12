@@ -45,5 +45,5 @@
     "app": 8,
     "xpu": 9
   },
-  "maxClaimsPerUser": 8
+  "maxClaimsPerUser": 25
 }

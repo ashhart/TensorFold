@@ -48,6 +48,11 @@ pub fn rps(n: usize) u8 {
     return if (n % 4 == 0) 4 else if (n % 2 == 0) 2 else 1;
 }
 
+/// Outputs a simdgroup at 8 values a lane step (6 and 8 bits): 2 keeps more simdgroups in flight, same sums; else 1.
+pub fn rps2(n: usize) u8 {
+    return if (n % 2 == 0) 2 else 1;
+}
+
 /// How 4-bit dots make nibbles at `rows` rows: converts at 1 row, then half (M3, M4) or the exponent trick.
 pub fn nib(generation: u32, rows: usize) u8 {
     if (rows < 2 or generation >= 17) return 0;
@@ -102,7 +107,7 @@ pub fn specOf(p: Product, generation: u32, rows: usize, ld: usize) Spec {
         .bits = p.bits,
         .group = p.group,
         .ld = ld,
-        .rps = if (q4(p)) 4 else rps(p.n),
+        .rps = if (q4(p)) 4 else if (vpt(p.bits) == 8) rps2(p.n) else rps(p.n),
         .nib = if (q4(p)) nib(generation, rows) else 0,
     };
 }
@@ -285,6 +290,25 @@ test "members back to back at one width merge into one product; a gap, a width o
     ms[1].p.bits = 4;
     ms[1].p.b.b = one;
     try std.testing.expectEqual(@as(?Product, null), merge(&ms));
+}
+
+test "6- and 8-bit products take 2 outputs a simdgroup, 1 at an odd width; 4/32 keeps 4, other widths keep rps" {
+    const one: mtl.Buffer = .{ .id = @ptrFromInt(0x1000) };
+    const q8: Product = .{ .w = .{ .b = one }, .s = .{ .b = one }, .b = .{ .b = one }, .n = 2560, .k = 6144, .bits = 8, .group = 64 };
+    try std.testing.expectEqual(@as(u8, 2), specOf(q8, 15, 4, q8.k).rps);
+    var odd = q8;
+    odd.n = 2561;
+    try std.testing.expectEqual(@as(u8, 1), specOf(odd, 15, 4, odd.k).rps);
+    var four = q8;
+    four.bits = 4;
+    four.group = 32;
+    try std.testing.expectEqual(@as(u8, 4), specOf(four, 15, 4, four.k).rps);
+    var six = q8;
+    six.bits = 6;
+    try std.testing.expectEqual(@as(u8, 2), specOf(six, 15, 4, six.k).rps);
+    var five = q8;
+    five.bits = 5;
+    try std.testing.expectEqual(rps(five.n), specOf(five, 15, 4, five.k).rps);
 }
 
 fn slot(bits: u8) usize {

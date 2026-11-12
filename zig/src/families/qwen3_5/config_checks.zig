@@ -2,8 +2,10 @@
 
 const std = @import("std");
 const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
 
-pub const Error = error{ UnsupportedActivation, UnsupportedAttentionGate, UnsupportedStateType, BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || layer_pattern.Error;
+pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || rules.Error || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
@@ -40,8 +42,7 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
 
 /// Unscaled rope only: a tower's `rope_scaling`, or a `rope_type`/`type` not default, would be read as plain rope.
 pub fn defaultRope(tower: std.json.ObjectMap, rope: std.json.ObjectMap) Error!void {
-    if (tower.get("rope_scaling")) |v| if (v != .null) return error.InvalidRotary;
-    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (!isString(v, "default")) return error.InvalidRotary;
+    if (rope_config.scaled(tower, rope) != null) return error.InvalidRotary;
 }
 
 /// `max_position_embeddings`: a positive token count, else the family's 262,144.
@@ -53,14 +54,7 @@ pub fn maxPosition(tower: std.json.ObjectMap) Error!usize {
 
 /// Refuses a tower whose activation, attention gate, attention bias or recurrent state type the kernels do not compute.
 pub fn computes(tower: std.json.ObjectMap) Error!void {
-    if (tower.get("hidden_act")) |v| if (!isString(v, "silu")) return error.UnsupportedActivation;
-    // "swish" is the gate the kernels apply, att * sigmoid(gate), as the qwen27 family reads it
-    if (tower.get("output_gate_type")) |v| if (!isString(v, "swish")) return error.UnsupportedAttentionGate;
-    if (tower.get("attn_output_gate")) |v| if (!isFlag(v, true)) return error.UnsupportedAttentionGate;
-    if (tower.get("attention_bias")) |v| if (!isFlag(v, false)) return error.UnsupportedAttentionGate;
-    inline for (.{ "linear_attn_state_dtype", "mamba_ssm_dtype" }) |key| {
-        if (tower.get(key)) |v| if (!isString(v, "float32")) return error.UnsupportedStateType;
-    }
+    return rules.check(tower, .hip);
 }
 
 /// The sizes the kernels index with 32-bit counts and the host multiplies: every product must fit.
@@ -125,10 +119,6 @@ fn mul(a: usize, b: usize) Error!usize {
 
 fn add(a: usize, b: usize) Error!usize {
     return std.math.add(usize, a, b) catch error.InvalidConfig;
-}
-
-fn isString(v: std.json.Value, want: []const u8) bool {
-    return v == .string and std.mem.eql(u8, v.string, want);
 }
 
 /// A JSON boolean, or the 0 / 1 some conversions write in its place.

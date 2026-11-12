@@ -2,3 +2,4 @@
 
 #include "contract_controls.cu"
 #include "contract_js_controls.cuh"
+#include "contract_dense_controls.cuh"

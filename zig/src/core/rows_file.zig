@@ -40,9 +40,45 @@ pub fn path(buf: []u8, dir: []const u8, stem: []const u8, ext: []const u8, part:
     return std.fmt.bufPrintSentinel(buf, "{s}/{s}{s}{s}", .{ dir, stem, ext, if (part) ".part" else "" }, 0);
 }
 
+/// A fixed-bucket latency histogram in milliseconds: the bucket edge a percentile reports.
+pub const Latency = struct {
+    pub const edges = [_]f64{ 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000 };
+    counts: [edges.len + 1]u64 = @splat(0), // the top bucket is past the last edge
+    n: u64 = 0,
+
+    pub fn observe(l: *Latency, ms: f64) void {
+        l.n += 1;
+        for (edges, 0..) |edge, i| if (ms <= edge) {
+            l.counts[i] += 1;
+            return;
+        };
+        l.counts[edges.len] += 1;
+    }
+
+    /// The edge of the bucket `p` of the observations fall under (0: none yet, past the top edge: the top edge).
+    pub fn percentile(l: *const Latency, p: f64) f64 {
+        if (l.n == 0) return 0;
+        const half = @as(f64, @floatFromInt(l.n)) * p;
+        var seen: f64 = 0;
+        for (edges, 0..) |edge, i| {
+            seen += @floatFromInt(l.counts[i]);
+            if (seen >= half) return edge;
+        }
+        return edges[edges.len - 1];
+    }
+};
+
 /// The filesystem calls for one writer; tests supply per-store faults without a process-wide hook.
 pub const IO = struct {
     ctx: ?*anyopaque = null,
+    read_ms_last: f64 = 0,
+    read_ms_ema: f64 = 0,
+    write_ms_last: f64 = 0,
+    write_ms_ema: f64 = 0, // last and smoothed read/write milliseconds (0: none yet)
+    read_lat: Latency = .{},
+    write_lat: Latency = .{}, // read/write latency histograms (percentiles are bucket edges)
+    last_read_ms: i64 = 0, // wall-clock ms since epoch of the last read (0: none)
+    last_write_ms: i64 = 0, // wall-clock ms since epoch of the last write (0: none)
     write: *const fn (?*anyopaque, c_int, []const u8) anyerror!usize = writeDefault,
     sync: *const fn (?*anyopaque, c_int) anyerror!void = syncDefault,
 
@@ -199,7 +235,9 @@ pub fn open(file: [:0]const u8, kind: Kind, name: ?Name) !Opened {
     if (n < @as(isize, @intCast(@as(u64, @intCast(end)) - lo))) return error.RowsRead;
     @memcpy(std.mem.asBytes(&t), raw[@intCast(at - lo)..][0..@sizeOf(Trailer)]);
     if (t.magic != MAGIC or t.version != VERSION or t.kind != @backingInt(kind)) return error.RowsRead;
-    if (t.payload + t.meta + @sizeOf(Trailer) != @as(u64, @intCast(end))) return error.RowsRead;
+    // the two sizes are the file's own bytes: a pair that wraps past 2^64 names no file of the store
+    const sizes = std.math.add(u64, t.payload, t.meta) catch return error.RowsRead;
+    if (sizes != @as(u64, @intCast(end)) - @sizeOf(Trailer)) return error.RowsRead;
     if (name) |want| if (!std.mem.eql(u8, &want, &t.name)) return error.RowsRead;
     return .{ .fd = fd, .trailer = t };
 }
@@ -260,6 +298,17 @@ fn readUnaligned(fd: c_int, dest: []u8, at: u64) bool {
 /// A staging buffer that holds `bytes` read in aligned spans.
 pub fn stage(a: std.mem.Allocator, bytes: u64) !Stage {
     return a.alignedAlloc(u8, .fromByteUnits(alignment), @intCast(std.mem.alignForward(u64, @max(bytes, 1), alignment)));
+}
+
+test "a latency histogram reports the bucket edges at p50 and p95, and nothing before any sample" {
+    var l: Latency = .{};
+    try std.testing.expectEqual(@as(f64, 0), l.percentile(0.5));
+    for ([_]f64{ 3, 4, 6, 7 }) |ms| l.observe(ms); // four of five under the 10 ms edge
+    l.observe(500);
+    try std.testing.expectEqual(@as(f64, 10), l.percentile(0.5));
+    try std.testing.expectEqual(@as(f64, 500), l.percentile(0.95)); // past 95%: the 500 ms edge it fell under
+    l.observe(99999);
+    try std.testing.expectEqual(@as(f64, 5000), l.percentile(0.95)); // past the top edge: the top edge, not a guess
 }
 
 test "a block file reads back byte for byte, and a flipped byte, a cut tail or another name is refused" {
@@ -326,4 +375,65 @@ test "a state file's metadata reads back checked, and an aborted write leaves no
     gone.abort();
     var part: [128]u8 = undefined;
     try std.testing.expectError(error.RowsMissing, open(try path(&part, dir, "g", ".st", true), .state, null));
+}
+
+test "a trailer whose two sizes wrap past 2^64 to the file's own size is refused, not read" {
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-wrap-{d}", .{platform.c.getpid()}, 0);
+    _ = platform.c.mkdir(dir, 0o700);
+    defer _ = platform.c.rmdir(dir);
+    const name: Name = @splat(3);
+    var w = try Writer.open(dir, "w", ".blk");
+    try w.append("payload");
+    _ = try w.finish(.{ .kind = @backingInt(Kind.block), .payload = 0, .payload_hash = 0, .name = name }, &.{}, false);
+    var buf: [128]u8 = undefined;
+    const file = try path(&buf, dir, "w", ".blk", false);
+    defer _ = platform.c.unlink(file);
+    const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = platform.c.close(fd);
+    const at = platform.c.lseek(fd, 0, platform.c.SEEK.END) - @sizeOf(Trailer);
+    var t: Trailer = undefined;
+    try std.testing.expectEqual(@as(isize, @sizeOf(Trailer)), platform.c.pread(fd, std.mem.asBytes(&t), @sizeOf(Trailer), at));
+    // each size alone claims more bytes than the file holds; together they add up to its size only by wrapping
+    t.payload += 1 << 63;
+    t.meta += 1 << 63;
+    try std.testing.expectEqual(@as(isize, @sizeOf(Trailer)), platform.c.pwrite(fd, std.mem.asBytes(&t), @sizeOf(Trailer), at));
+    try std.testing.expectError(error.RowsRead, open(file, .block, name));
+}
+
+test "a file shortened after open stops its payload or metadata read with RowsRead, off or on a 4 KiB boundary" {
+    const a = std.testing.allocator;
+    var dir_buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrintSentinel(&dir_buf, "/tmp/tf-rows-cut-{d}", .{platform.c.getpid()}, 0);
+    _ = platform.c.mkdir(dir, 0o700);
+    defer _ = platform.c.rmdir(dir);
+    const body = try a.alloc(u8, 70_000);
+    defer a.free(body);
+    for (body, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+    var tokens: [3000]u32 = undefined;
+    for (&tokens, 0..) |*x, i| x.* = @intCast(i * 7);
+    const s = try stage(a, body.len);
+    defer a.free(s);
+    // the metadata runs from 70000 to 82000: two cuts in the payload, two in the metadata
+    for ([_]u64{ 50_001, 12 * 4096, 75_001, 19 * 4096 }) |cut| {
+        var w = try Writer.open(dir, "c", ".st");
+        try w.append(body);
+        _ = try w.finish(.{ .kind = @backingInt(Kind.state), .payload = 0, .payload_hash = 0, .name = @splat(2) }, &.{std.mem.sliceAsBytes(&tokens)}, false);
+        var buf: [128]u8 = undefined;
+        const file = try path(&buf, dir, "c", ".st", false);
+        defer _ = platform.c.unlink(file);
+        var o = try open(file, .state, null);
+        defer o.close();
+        const fd = platform.c.open(file, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
+        try std.testing.expect(fd >= 0);
+        defer _ = platform.c.close(fd);
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.ftruncate(fd, @intCast(cut)));
+        if (cut < body.len) {
+            try std.testing.expectError(error.RowsRead, payload(&o, s));
+            continue;
+        }
+        try std.testing.expectEqualSlices(u8, body, try payload(&o, s));
+        try std.testing.expectError(error.RowsRead, meta(&o, a));
+    }
 }

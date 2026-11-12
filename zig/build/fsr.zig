@@ -13,6 +13,7 @@ pub fn steps(b: *std.Build, all: *std.Build.Step) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const cli = b.createModule(.{ .root_source_file = b.path("zig/fsr_cli_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = api }} });
+    _ = @import("server.zig").addTo(b, cli, b.graph.host, .debug); // the server files it reaches import the shared json
     const cli_run = b.addRunArtifact(b.addTest(.{ .root_module = cli, .filters = &.{"FSR CLI"} }));
     b.step("test-fsr-cli-host", "Actual native FSR CLI forwarding and capability refusals without devices").dependOn(&cli_run.step);
     all.dependOn(&cli_run.step);

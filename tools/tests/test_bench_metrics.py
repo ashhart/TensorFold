@@ -29,21 +29,28 @@ class Definitions(unittest.TestCase):
         self.assertAlmostEqual(got["itl_p50_ms"], 100)
         self.assertAlmostEqual(got["itl_p95_ms"], 200)
         self.assertEqual(got["tokens_per_chunk"], 1)
+        self.assertEqual(got["token_timing"], "token")
+        self.assertAlmostEqual(got["tpot_ms"], 400 / 3)
+        self.assertAlmostEqual(got["prompt_ttft_tps"], 10000)
         self.assertAlmostEqual(got["prefill_tps"], 10000)
 
-    def test_a_chunk_of_several_tokens_adds_zeros_and_keeps_the_mean(self):
-        got = metrics.request(run([0.1, 0.4, 0.7], 7))  # 3 chunks, 7 tokens: 2 gaps of 300 ms and 4 zeros
-        self.assertAlmostEqual(got["itl_mean_ms"], 600 / 6)
-        self.assertEqual(got["itl_p50_ms"], 0)
-        self.assertAlmostEqual(got["itl_p95_ms"], 300)
+    def test_a_chunk_of_several_tokens_leaves_token_itl_unknown(self):
+        got = metrics.request(run([0.1, 0.4, 0.7], 7))  # 3 chunks, 7 tokens: when the 4 unseen tokens came is unknown
+        for key in ("itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "tpot_ms"):
+            self.assertIsNone(got[key])
+        self.assertEqual(got["token_timing"], "chunk")
+        self.assertAlmostEqual(got["chunk_tpot_estimate_ms"], 600 / 6)
         self.assertAlmostEqual(got["round_gap_p50_ms"], 300)
         self.assertAlmostEqual(got["round_gap_mean_ms"], 300)
         self.assertAlmostEqual(got["tokens_per_chunk"], 7 / 3)
 
-    def test_the_itl_mean_is_the_decode_span_over_tokens_after_the_first(self):
+    def test_the_chunk_tpot_estimate_is_the_decode_span_over_tokens_after_the_first(self):
         times, tokens = [1.0, 1.05, 1.3, 1.31, 1.9], 11
         got = metrics.request(run(times, tokens))
-        self.assertAlmostEqual(got["itl_mean_ms"], (times[-1] - times[0]) * 1000 / (tokens - 1))
+        self.assertAlmostEqual(got["chunk_tpot_estimate_ms"], (times[-1] - times[0]) * 1000 / (tokens - 1))
+        one = metrics.request(run(times, len(times)))
+        self.assertAlmostEqual(one["itl_mean_ms"], (times[-1] - times[0]) * 1000 / (len(times) - 1))
+        self.assertAlmostEqual(one["tpot_ms"], one["chunk_tpot_estimate_ms"])
 
     def test_percentiles_are_nearest_rank(self):
         values = [float(v) for v in range(1, 21)]
@@ -97,13 +104,14 @@ def clock(*times):
 class Clients(unittest.TestCase):
     def test_bench_openai_times_each_chunk(self):
         with patch.object(bench_openai.urllib.request, "urlopen", return_value=response(completion=7)), \
-                patch.object(bench_openai.time, "perf_counter", clock(0.0, 0.5, 0.6, 0.8, 0.9)):
+                patch.object(bench_openai.time, "perf_counter", clock(0.0, 0.4, 0.5, 0.6, 0.8, 0.9)):
             got = bench_openai.stream("http://unused", "fixture", bench_openai.PROMPTS[0], 7, 0, 1)
         self.assertEqual(len(got["pieces"]), 4)
+        self.assertAlmostEqual(got["headers_s"], 0.4)
         self.assertAlmostEqual(got["ttft_s"], 0.5)
         self.assertAlmostEqual(got["prefill_tps"], 8 / 0.5)
-        self.assertAlmostEqual(got["itl_mean_ms"], 400 / 6)  # 3 chunk gaps and 3 zeros
-        self.assertEqual(got["itl_p50_ms"], 0)
+        self.assertIsNone(got["itl_mean_ms"])  # 4 chunks for 7 tokens
+        self.assertAlmostEqual(got["chunk_tpot_estimate_ms"], 400 / 6)
         self.assertAlmostEqual(got["round_gap_p50_ms"], 100)
         self.assertAlmostEqual(got["tokens_per_chunk"], 7 / 4)
 
@@ -144,7 +152,7 @@ class Clients(unittest.TestCase):
         for cell, line in zip(report["cells"], printed):
             for key in ("aggregate_tps", "per_stream_tps", "ttft_s_max", "timing_valid", "failed", "unmeasured"):
                 self.assertIn(key, line)
-            self.assertEqual(set(cell["request"]), {"ttft_s", "decode_tps", *FIGURES})
+            self.assertEqual({"ttft_s", "decode_tps", *FIGURES} - set(cell["request"]), set())
             self.assertEqual(cell["request"]["tokens_per_chunk"], 1)
             self.assertEqual(cell["pooled"]["tokens_per_chunk"], 1)
             self.assertIsNotNone(cell["pooled"]["aggregate_prefill_tps"])

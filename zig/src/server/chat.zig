@@ -26,6 +26,8 @@ pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 pub const Input = struct {
     /// The client itself asked for thinking off (no server, template or route default counts): it must be honored.
     explicit_off: bool = false,
+    /// The server's own request (a compaction summary, a lesson's wordings): it never takes --instruct-sampling's set.
+    own: bool = false,
     messages: Value = .{ .array = &.{} },
     tools: []const Value = &.{},
     prompt: ?Prompt = null,
@@ -145,6 +147,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     errdefer srv.release(preparing, null);
     if (gone.check()) return error.Cancelled;
     const thinking = input.prompt == null and (flag(f, "enable_thinking") orelse srv.config.enable_thinking);
+    const instruct = input.prompt == null and !thinking and !input.own; // a client's chat with thinking off may take --instruct-sampling's set
     const reasoning = thinking and srv.info.capability(.reasoning) and (srv.text.vtable.format != .kimi or input.prompt == null); // the prompt renders `thinking`; the reply reads `reasoning`
     const effort = srv.effortFor(if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null);
     cx.clear_thinking = flag(f, "clear_thinking");
@@ -165,14 +168,14 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (system_len > 0) for ([_]i64{ @as(i64, @intCast(system_len)) - 2048, @as(i64, @intCast(system_len)) - 512, @intCast(system_len) }) |cut| {
         if (cut >= 512) try shared.append(a, @intCast(cut));
     };
-    const sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids);
+    const sampling = try srv.resolveSampling(cx, f, input.temperature, rendered.ids, instruct);
     const draft_field = f.get("draft");
     const drafts = srv.config.use_drafts and !(draft_field != null and draft_field.? == .bool and !draft_field.?.bool);
     var request: api.Request = .{
         .prompt = rendered.ids,
         .max_tokens = @intCast(@min(limit, std.math.maxInt(u32))),
         .sampling = sampling,
-        .penalties = try srv.resolvePenalties(cx, f),
+        .penalties = try srv.resolvePenalties(cx, f, instruct),
         .eos = if (stops_opt.ignore_eos) &.{} else srv.eos,
         .drafts = drafts,
         .background = background,

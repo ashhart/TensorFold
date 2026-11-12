@@ -32,7 +32,8 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         }
         if (!s.drafts) continue;
         const cap = if (e.backend.vtable.draft_capacity) |f| f(e.backend.ptr, s) else e.cfg.most_drafts;
-        const most = @min(cap, e.cfg.most_drafts, if (limits) |l| l.depths[i] else e.cfg.most_drafts, @as(u32, @intCast(@max(0, s.draftRoom() - 1))));
+        const shared = if (e.cfg.shared_drafts > 0) e.cfg.shared_drafts else e.cfg.most_drafts; // Model.shared_drafts
+        const most = @min(cap, shared, e.cfg.most_drafts, if (limits) |l| l.depths[i] else e.cfg.most_drafts, @as(u32, @intCast(@max(0, s.draftRoom() - 1))));
         if (most == 0) continue;
         head.* = true;
         const cached = s.draft_chances.items;
@@ -56,7 +57,7 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         @memset(out, 0);
         return;
     }
-    const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .row_ms = e.rule.row_cost.extraMs(live, sampled) });
+    const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .row_ms = e.rule.row_cost.extraMs(live, sampled), .least_rows = e.rule.row_cost.leastRows(live, sampled) });
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }
@@ -124,6 +125,30 @@ test "shared draft prices: a short cached tree can grow when allocation returns 
     var out: [1]i64 = undefined;
     try budgets(&e, &.{p}, &.{0}, &out);
     try std.testing.expectEqual(@as(i64, 15), out[0]);
+}
+
+test "shared draft prices: shared_drafts caps each stream of a round with no shared prices" {
+    const a = std.testing.allocator;
+    const Cfg = @import("config.zig");
+    const S = @import("stream.zig").Stream;
+    var got: [2][2]i64 = undefined;
+    for ([_]u32{ 0, 3 }, &got) |cap, *out| {
+        var cfg = try Cfg.Config.init(a, .{ .exact_width = 32, .drafts = 15, .shared_drafts = cap, .batch_rows = 32 }, 32, 15);
+        defer cfg.deinit(a);
+        var fake: @import("fake.zig").Fake = .{ .gpa = a };
+        defer fake.deinit();
+        var clock: @import("fake.zig").FixedClock = .{};
+        var e = Engine.init(a, &cfg, fake.backend(), clock.clock());
+        defer e.deinit();
+        var one = try S.init(a, .{ .id = "one", .prompt = &.{ 7, 13, 29 }, .max_new = 64 });
+        defer one.deinit(a);
+        var two = try S.init(a, .{ .id = "two", .prompt = &.{ 7, 13, 29 }, .max_new = 64 });
+        defer two.deinit(a);
+        const plans = [_]win.Plan{ .{ .stream = &one, .position = 0, .kind = .none }, .{ .stream = &two, .position = 0, .kind = .none } };
+        try budgets(&e, &plans, &.{ 0, 1 }, out);
+    }
+    try std.testing.expectEqualSlices(i64, &.{ 15, 15 }, &got[0]); // unpriced rows: every row the round may hold
+    try std.testing.expectEqualSlices(i64, &.{ 3, 3 }, &got[1]);
 }
 
 test "shared draft prices: plain forced streams cost one row and paused streams release their rows" {

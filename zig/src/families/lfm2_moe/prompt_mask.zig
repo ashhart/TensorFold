@@ -11,9 +11,7 @@ pub const Pipelines = struct {
     pick: mtl.Pipeline,
     pub fn load(device: mtl.Device) !Pipelines {
         const a = std.heap.c_allocator;
-        const body = try frags.source(device, a, sources.lfm2_prompt_masked.source);
-        defer a.free(body);
-        const text = try std.mem.concat(a, u8, &.{ sources.lfm2, "\n", body });
+        const text = try @import("source.zig").prompt(device, a, true);
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();

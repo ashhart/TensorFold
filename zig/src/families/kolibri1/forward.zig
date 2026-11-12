@@ -464,11 +464,11 @@ pub const Model = struct {
             const up_in: experts.Rows = .{ .x = m.s.x, .stride = c.hidden, .slots = slots_e };
             const down_in: experts.Rows = .{ .x = m.s.act, .stride = c.moe_width };
             if (prompt) {
-                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, -1);
-                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, -1);
+                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
+                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
             } else {
-                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, -1);
-                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, -1);
+                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
+                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
             }
             try o.combine(m.s.y, prompt, m.s.wts, m.s.mo, n, slots_e, c.hidden);
             const after = if (i + 1 < w.layers.len) w.layers[i + 1].input_norm else w.norm;

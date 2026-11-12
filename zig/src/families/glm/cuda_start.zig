@@ -43,6 +43,11 @@ pub const Report = struct {
     }
 };
 
+/// TF_KV_PAGES as `open` takes it: empty or whitespace-only text is unset, so `auto`.
+pub fn pagesText() ?[:0]const u8 {
+    return @import("core").profile.given(.TF_KV_PAGES);
+}
+
 /// TF_KV_PAGES keeps FP8 on whole windows; explicit pages with FP8 are refused on every rank.
 pub fn paging(text: ?[]const u8, world: usize, kv8: bool) !bool {
     const v = text orelse "auto";

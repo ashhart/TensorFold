@@ -9,6 +9,13 @@ fn partial(comptime name: []const u8, comptime sg: usize) []const u8 {
         args ++ ") nemotron_attn_partial" ++ args ++ ";\n";
 }
 
+/// group_norm_xs.metal's template at MP rows, under the function name the hosts look up.
+fn groupNorm(comptime name: []const u8, comptime mp: usize) []const u8 {
+    const args = std.fmt.comptimePrint("<{d}>", .{mp});
+    return @embedFile("group_norm_xs.metal") ++ "template [[host_name(\"" ++ name ++ "\")]] [[kernel]] decltype(nemotron_group_norm_xs" ++
+        args ++ ") nemotron_group_norm_xs" ++ args ++ ";\n";
+}
+
 pub const Kernel = struct { key: []const u8, function: [:0]const u8, source: []const u8 };
 
 pub const all = [_]Kernel{
@@ -52,14 +59,14 @@ pub const all = [_]Kernel{
     .{ .key = "up_relu2_1_0", .function = "custom_kernel_nemotron_lane_up_relu2_090709f730e8c237_bfloat16_t_float_uint32_t_bfloat16_t_int32_t_bfloat16_t_float", .source = @embedFile("up_relu2_1_0.metal") },
     .{ .key = "up_relu2_2_0", .function = "custom_kernel_nemotron_lane_up_relu2_6b2e65a73d7027d0_bfloat16_t_float_uint32_t_bfloat16_t_int32_t_bfloat16_t_float", .source = @embedFile("up_relu2_2_0.metal") },
     .{ .key = "up_relu2_2_1", .function = "custom_kernel_nemotron_lane_up_relu2_d68559363a899336_bfloat16_t_float_uint32_t_bfloat16_t_int32_t_bfloat16_t_float", .source = @embedFile("up_relu2_2_1.metal") },
-    .{ .key = "group_norm_xs_16", .function = "custom_kernel_nemotron_group_norm_xs_d5ea27bb1dcaa1a5_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_16.metal") },
-    .{ .key = "group_norm_xs_32", .function = "custom_kernel_nemotron_group_norm_xs_ecb62fc8bae57a0c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_32.metal") },
-    .{ .key = "group_norm_xs_48", .function = "custom_kernel_nemotron_group_norm_xs_2eaf152cbecc189f_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_48.metal") },
-    .{ .key = "group_norm_xs_64", .function = "custom_kernel_nemotron_group_norm_xs_e6ad27e0e98b80d0_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_64.metal") },
-    .{ .key = "group_norm_xs_80", .function = "custom_kernel_nemotron_group_norm_xs_990d36bef878e5ae_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_80.metal") },
-    .{ .key = "group_norm_xs_96", .function = "custom_kernel_nemotron_group_norm_xs_a13cecd18562d797_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_96.metal") },
-    .{ .key = "group_norm_xs_112", .function = "custom_kernel_nemotron_group_norm_xs_f1410833a53def6c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_112.metal") },
-    .{ .key = "group_norm_xs_128", .function = "custom_kernel_nemotron_group_norm_xs_6588f0366ec0aaeb_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = @embedFile("group_norm_xs_128.metal") },
+    .{ .key = "group_norm_xs_16", .function = "custom_kernel_nemotron_group_norm_xs_d5ea27bb1dcaa1a5_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_d5ea27bb1dcaa1a5_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 16) },
+    .{ .key = "group_norm_xs_32", .function = "custom_kernel_nemotron_group_norm_xs_ecb62fc8bae57a0c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_ecb62fc8bae57a0c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 32) },
+    .{ .key = "group_norm_xs_48", .function = "custom_kernel_nemotron_group_norm_xs_2eaf152cbecc189f_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_2eaf152cbecc189f_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 48) },
+    .{ .key = "group_norm_xs_64", .function = "custom_kernel_nemotron_group_norm_xs_e6ad27e0e98b80d0_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_e6ad27e0e98b80d0_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 64) },
+    .{ .key = "group_norm_xs_80", .function = "custom_kernel_nemotron_group_norm_xs_990d36bef878e5ae_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_990d36bef878e5ae_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 80) },
+    .{ .key = "group_norm_xs_96", .function = "custom_kernel_nemotron_group_norm_xs_a13cecd18562d797_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_a13cecd18562d797_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 96) },
+    .{ .key = "group_norm_xs_112", .function = "custom_kernel_nemotron_group_norm_xs_f1410833a53def6c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_f1410833a53def6c_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 112) },
+    .{ .key = "group_norm_xs_128", .function = "custom_kernel_nemotron_group_norm_xs_6588f0366ec0aaeb_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", .source = groupNorm("custom_kernel_nemotron_group_norm_xs_6588f0366ec0aaeb_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float", 128) },
     .{ .key = "add_norm_xs", .function = "custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float", .source = @embedFile("add_norm_xs.metal") },
     .{ .key = "add_norm_moe_xs", .function = "custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float", .source = @embedFile("add_norm_moe_xs.metal") },
     .{ .key = "router", .function = "custom_kernel_nemotron_router_84d0c5e2f26dd05a__2688_128_8_16_bfloat16_t_bfloat16_t_int32_tc_bfloat16_t", .source = @embedFile("router.metal") },

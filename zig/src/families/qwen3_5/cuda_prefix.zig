@@ -10,9 +10,9 @@ const caches = @import("cuda_cache.zig");
 const Engine = engine.Engine;
 const Cache = caches.Cache;
 
-/// TF_QWEN_KV_SHARE=n: keep prompts as pool pages and at most n recurrent-state snapshots (0 or unset: off).
+/// TF_QWEN_KV_SHARE=n: keep prompts as pool pages and at most n recurrent-state snapshots (0, empty or unset: off).
 pub fn sharing() !usize {
-    const v = @import("core").profile.get(.TF_QWEN_KV_SHARE) orelse return 0;
+    const v = @import("core").profile.given(.TF_QWEN_KV_SHARE) orelse return 0;
     const snaps = std.fmt.parseInt(usize, v, 10) catch return error.BadQwenKvShare;
     if (snaps > 0) if (@import("core").profile.get(.TF_QWEN_REQUEST_STARTS)) |starts| {
         if (std.mem.eql(u8, starts, "1")) return error.QwenRequestStartsWithSharedKv;
@@ -30,6 +30,34 @@ test "TF_QWEN_KV_SHARE below 4 snapshots a stream is too few; off is not" {
     try std.testing.expect(fewSnapshots(31, 8));
     try std.testing.expect(!fewSnapshots(32, 8));
     try std.testing.expect(!fewSnapshots(0, 8));
+}
+
+test "TF_QWEN_KV_SHARE: unset, empty or whitespace-only text is off, a count keeps its meaning, other text is refused" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_QWEN_KV_SHARE";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(usize, 0), try sharing());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(usize, 0), try sharing());
+    }
+    for ([_][:0]const u8{ "0", "32", "016" }, [_]usize{ 0, 32, 16 }) |v, n| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(n, try sharing());
+    }
+    for ([_][:0]const u8{ "on", " 32", "32 ", "-1" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectError(error.BadQwenKvShare, sharing());
+    }
 }
 
 /// A stream the store keeps from or restores into: its lane's cache, or (before the lane opens) the state to restore.
@@ -50,13 +78,14 @@ pub const Prefix = struct {
         const rules: radix.Rules = .{ .page = p.layout.page_tokens, .min_gap = 256, .min_prompt = 0, .tail = true };
         const pool_pages = radix.pagesOf(kv.Pool, &p.pool, p.layout.pageBytes());
         x.* = .{ .gpa = gpa, .e = e, .pages = p, .store = try radix.Store.init(gpa, .{ .ptr = x, .vtable = &family }, pool_pages, rules) };
+        errdefer x.store.deinit();
         x.store.limit(.{ .pages = p.pool.total(), .snaps = snaps });
-        p.pool.reclaim = .{ .ctx = x, .call = reclaim }; // a promise evicts the store's idle pages before it fails
+        try p.pool.joinReclaim(.{ .ctx = x, .call = reclaim }); // a promise evicts its idle pages before it fails
         return x;
     }
 
     pub fn deinit(x: *Prefix) void {
-        x.pages.pool.reclaim = null;
+        x.pages.pool.leaveReclaim(x);
         x.store.deinit(); // drops every snapshot and releases the tree's pages
         x.gpa.destroy(x);
     }

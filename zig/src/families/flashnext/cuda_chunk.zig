@@ -33,15 +33,11 @@ pub fn passRows(lanes: anytype, own: anytype, solo: usize, busy: usize) usize {
     return solo_chunk.passRows(lanes, own, "filled", solo, busy);
 }
 
-var readout_rows: ?usize = null;
-
-/// Rows from which a read-out takes the tiles (TF_FLASHNEXT_READOUT_ROWS, default 64, 0 never): same bits, only speed.
+/// Rows from which a read-out takes the tiles (TF_FLASHNEXT_READOUT_ROWS, default 64, 0 never), read once at load.
 pub fn readoutTileRows() usize {
-    if (readout_rows == null) {
-        const r = if (std.c.getenv("TF_FLASHNEXT_READOUT_ROWS")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 64 else 64;
-        readout_rows = if (r == 0) std.math.maxInt(usize) else r;
-    }
-    return readout_rows.?;
+    // the startup check refused every malformed value already, so a plain default stands here
+    const r = @import("sys").environment.read(usize, "TF_FLASHNEXT_READOUT_ROWS", 64) catch 64;
+    return if (r == 0) std.math.maxInt(usize) else r;
 }
 
 test "TF_FLASHNEXT_CHUNK takes 1 to the largest measured pass and refuses the rest" {

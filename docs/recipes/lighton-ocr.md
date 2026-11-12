@@ -20,6 +20,8 @@ The implementation follows the existing ownership boundaries:
 | Device contracts | `zig/tests/hip/contract_lighton*.zig`, `contract_qwen*.zig` |
 | Model capture and state checks | `zig/tests/lighton_hip/` |
 | Pinned HF reference fixture capture | `tools/zig/lighton_ocr_reference.py` |
+| 0.8B/4B on CUDA: BF16 chat admission and preflight | `zig/src/families/qwen3_5/cuda_decide.zig`, `cuda_bf16_bytes.zig` |
+| Shared Qwen vision tower on CUDA | `zig/src/vision/qwen_cuda*.zig` |
 
 Weights stay outside the checkout. The HIP loader widens BF16 weights to
 FP32 without changing their values. Activations stay BF16. Allow room for
@@ -59,6 +61,34 @@ from `amd-smi` ordinals.
 Use image-only user content for transcription. Add a text part containing
 `grounding` for bounding boxes. Send images as OpenAI `image_url` data URLs.
 PDF rendering belongs in the client. The family does not run a PDF parser.
+
+## Native CUDA (0.8B and 4B)
+
+The native CUDA engine serves the 0.8B and 4B through the CUDA Qwen3.5
+family. Both are qualified on a GB10 (sm_121) only. The 1B is not served on
+CUDA yet. The weights load as stored, in BF16. The tied output head is a
+packed copy of the embedding rows, which adds 0.5 GB (0.8B) or 1.3 GB (4B)
+to the weights.
+
+```sh
+zig build native -Dnvcc=/usr/local/cuda/bin/nvcc
+zig-out/native/bin/tensorfold-native serve MODEL_DIRECTORY \
+  --vision --context 4096 --parallel 2 --no-thinking \
+  --name lighton --host 127.0.0.1 --port 8090
+```
+
+On the model card's receipt, greedy transcription gives the HF ids to EOS on
+both sizes. In grounding mode, the box digits differ from HF's greedy ids
+after near-ties; HF scores each native id at its top logit or one BF16 step
+below it, except two 4B ids at two steps.
+
+A BF16 Qwen3.5 checkpoint serves chat on CUDA only when it has an image
+tower that the CUDA tower reads and no `joint_head_config.json`. A BF16
+checkpoint with a joint head is a Clef decision model (`/v1/systemone`).
+A BF16 checkpoint without either is refused. The chat path refuses
+`--drafter`, `--slide`, `--kv-cache fp8` and `--prompt-precision int8` by
+name, because it is not qualified with them. Its own copy drafts and
+`--no-drafts` give the same tokens.
 
 ## Reference examples and diagnostics
 
@@ -137,7 +167,11 @@ drops unmatched edges after the encoder.
 
 The 1B host prompt cache compares exact image identities beside compact
 cache words. Image states are not written to disk formats that lack that
-metadata. Qwen image requests currently keep per-request pages and bypass
-cross-request radix reuse; text requests retain the existing cache path.
+metadata. On HIP, Qwen image requests currently keep per-request pages and
+bypass cross-request radix reuse; text requests retain the existing cache
+path. On CUDA, a Qwen image prompt resumes from a kept state on the
+4,096-row chunk grid only when the images before that cut are the same.
 
-CUDA, Metal and other AMD GPUs are not qualified. Issue #1927 tracks CUDA.
+On HIP, other AMD GPUs are not qualified. On CUDA, the 0.8B and 4B are
+qualified on a GB10 only, and the 1B is not served. Metal is not qualified.
+Issue #1927 tracks the rest of CUDA.

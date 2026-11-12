@@ -9,9 +9,9 @@ pub fn past(images: []const Image, from: usize) []const Image {
     return images[images.len..];
 }
 
-/// The stream's images past its restored prefix through the tower, unless its rows are already the shared ones.
-pub fn prepare(b: anytype, s: *Stream, slot: u32) !void {
-    const todo = past(s.images, s.cached);
+/// The images ending after `from` (the restore point, then each chunk's start) through the tower, unless held.
+pub fn prepare(b: anytype, s: *Stream, slot: u32, from: usize) !void {
+    const todo = past(s.images, from);
     if (todo.len == 0 or b.image_owner == s) return;
     b.image_owner = null;
     b.endImages();

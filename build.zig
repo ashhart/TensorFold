@@ -69,6 +69,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
+    @import("zig/build/cache_replay.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);
     @import("zig/build/dsv41_state.zig").steps(b);
@@ -121,7 +122,7 @@ pub fn build(b: *std.Build) void {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
-        @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.sources);
+        @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.engine, test_step);
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
@@ -193,10 +194,14 @@ pub fn build(b: *std.Build) void {
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
+    @import("zig/build/sessions_writes.zig").steps(b);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
+    @import("zig/build/tp_check.zig").add(b, target, test_step);
     @import("zig/build/gradient_host.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
+    @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
+    if (target.result.os.tag != .macos) @import("zig/build/qwen3_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
     xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
@@ -246,6 +251,7 @@ pub fn build(b: *std.Build) void {
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
+    @import("zig/build/cache_index_timing.zig").step(b);
     @import("zig/build/cpu.zig").steps(b, target, optimize, build_options, cuda_options.strip, test_step);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").tests(b);

@@ -3,7 +3,8 @@
 This implementation serves the BF16 `dots-studio/dots.mocr`
 checkpoint at revision `e539fbb52280393adc081b289ec597430a0f9031`.
 It runs the image tower and Qwen2 decoder in native Zig/HIP. Python is
-used only for the validation reference. CUDA and Metal are not qualified.
+used only for the validation reference. CUDA serves the text decoder only
+([dots.mocr on native CUDA](dots-mocr-cuda.md)); Metal is not qualified.
 
 Build for the local GPU architecture. The checked host uses `gfx1201`:
 

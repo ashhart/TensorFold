@@ -41,6 +41,7 @@ pub const Generation = struct {
     calls: ?tool_stream.Streamer = null,
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
+    kimi: ?@import("kimi_reply.zig").Stream = null,
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
     streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
     streamed_reasoning: reply_text.Shown = .{},

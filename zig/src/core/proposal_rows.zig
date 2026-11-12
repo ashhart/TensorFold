@@ -29,6 +29,13 @@ pub const Scores = struct {
         if (col >= v.logical) return error.ProposalPaddingPick;
         return if (v.ids) |ids| ids[col] else col;
     }
+    /// A GPU row reduction carries the top value, log-sum-exp and signed column bits, never a token ID.
+    pub fn pickBest(v: Scores, reduced: [4]f32) !u32 {
+        const col: i32 = @bitCast(reduced[2]);
+        if (!std.math.isFinite(reduced[0]) or !std.math.isFinite(reduced[1]) or col < 0 or col >= v.logical)
+            return error.ProposalNonfinite;
+        return v.global(@intCast(col));
+    }
     pub fn pick(v: Scores, row: []const u16) !u32 {
         try v.check();
         if (row.len != v.stride) return error.ProposalScoreShape;

@@ -126,6 +126,7 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
     try checkConfig(gpa, io, dir);
+    const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
     const head = (e.w.mtp orelse return error.DrafterNeedsDraftHead).draft;
     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
@@ -144,8 +145,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var ents = std.StringHashMap(Ent).init(gpa);
     defer ents.deinit();
     try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
-    const split = world == 2;
-    const ff: usize = if (split) FF / 2 else FF;
+    const mlp = df.mlpSplit(world, e.settings.roce_wide); // the MLP split across the ranks, or whole
+    const split = mlp.split;
+    const ff = mlp.ff;
     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
     const per: u64 = if (bits == 4) 1 else 4; // quarter-bytes a weight: 4 bits (plus scales and biases below) or bf16
     const lin_elems: u64 = df.QKV * D + 2 * KVW * D + D * D + 2 * ff * D + 2 * KVW * D + 5 * D * D / df.LAYERS;
@@ -154,7 +156,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world));
+    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world, e.settings.roce_wide));
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();
@@ -165,7 +167,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     }
     const dr = try gpa.create(Drafter);
     errdefer gpa.destroy(dr);
-    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
+    dr.* = .{ .checkpoint_digest = checkpoint_digest, .bits = bits, .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
     defer @import("cuda_load_owner.zig").drain(e.stream, d);
     var nb: [4][96]u8 = undefined;
     for (&dr.layers, 0..) |*lw, i| {
@@ -184,7 +186,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
         const gate = try layerName(&nb[1], i, "mlp.gate_proj.weight");
         const up = try layerName(&nb[2], i, "mlp.up_proj.weight");
         const down = try layerName(&nb[3], i, "mlp.down_proj.weight");
-        if (split) { // this rank's half of the MLP width: gate and up rows, down columns
+        if (split) { // this rank's share of the MLP width: gate and up rows, down columns, at rank * ff
             lw.gu = try l.linear(&.{ gate, up }, &.{ FF, FF }, D, .{ rank * ff, ff, 0, D });
             lw.down = try l.linearB(&.{down}, &.{D}, FF, .{ 0, 0, rank * ff, ff });
         } else {
@@ -202,7 +204,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var tail: Tail = .{ .loader = &l, .head_n = head.n };
     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
-    if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
+    dr.log = try @import("sys").environment.read(u64, "TF_GLM_DFLASH2_LOG", dr.log);
     if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
     std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
     return dr;
@@ -241,15 +243,15 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
     if (dr.fc == .bf16) part = @max(part, mm.partBytes(64, dr.fc.bf16));
     part = @max(part, mm.partBytes(64, dr.hproj));
     const fields = .{
-        .{ "x", M * D * 2 },                                                                     .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                .{ "dyn", M * KVW * 2 },
-        .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },              .{ "vb", M * KVW * 2 },
-        .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },           .{ "act", M * FF * 2 },
-        .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },           .{ "logits", M * head_n * 2 },
-        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
-        .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
-        .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
-        .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },
-        .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 }, .{ "pm", M * df.QH * df.CH * 4 },
+        .{ "x", M * D * 2 },                                                                     .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                                     .{ "dyn", M * KVW * 2 },
+        .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },                                   .{ "vb", M * KVW * 2 },
+        .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },                                .{ "act", M * FF * 2 },
+        .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },                                .{ "logits", M * head_n * 2 },
+        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", (if (dr.split) dr.world else 1) * M * D * 4 }, .{ "cin", C * df.TAP_ROW },
+        .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },                              .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
+        .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                                       .{ "rings", df.MAX_S * 8 },
+        .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                                       .{ "crings", C * 8 },
+        .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 },                      .{ "pm", M * df.QH * df.CH * 4 },
         .{ "pl", M * df.QH * df.CH * 4 },                                                        .{ "pacc", M * df.QH * df.CH * df.HD * 4 },
     };
     var at: u64 = 0;

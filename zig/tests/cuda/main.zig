@@ -168,7 +168,7 @@ const usage =
     \\  cublaslt                  bf16 GEMM through cuBLASLt against an fp64 reference
     \\  nccl                      one-rank NCCL all-reduce and all-gather
     \\  rank-scatter <rank> <n> [id]  rank-order reduce-scatter (NCCL_COMM_ID or an id file) against an all-gather
-    \\  roce-gather <rank>        two ranks (NCCL_COMM_ID): the RoCE all-gather against NCCL's, graph replays, time a call
+    \\  roce-gather <rank> [world]  the RoCE all-gather against NCCL's (NCCL_COMM_ID; world 2 by default, any on a switch): every size, graph replays, 3000 mixed calls, time a call
     \\  rank-sum                  the reduce-scatter's sum kernel alone, 2 to 5 ranks as each rank (one GPU, no NCCL)
     \\  nccl-pair <rank> <world> <idfile>  one rank of a multi-host communicator: send/recv with every peer, all-reduce, all-gather
     \\  gdn-replay <dir>          replay_kernel bits against the Python oracle's fixture
@@ -226,6 +226,7 @@ const usage =
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  moe                       softmax routing and SwiGLU experts against host references, then moe-live
     \\  moe-live                  a captured bucket's padding rows: never routed, planned or combined (synthetic)
+    \\  moe-router-bench          tf_moe_router against its register tiles by row count, alternating (35B-A3B shape)
     \\  experts3 [reps]           affine-3 packing and outputs against affine-4 and fp64; reps > 0 times decode
     \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
     \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
@@ -290,6 +291,7 @@ const usage =
     \\  dory-states MODEL LOOPS TEXT N  Dory kept prompt states at 8k and 32k resumed into wiped caches == fresh
     \\  dory-bench MODEL LOOPS TEXT N [STREAMS...]  Dory greedy decode tok/s at 1/2/4/8 streams (graphs on)
     \\  dory-pages MODEL LOOPS TEXT N   Dory with its full caches in pages == contiguous: fp32 logits bytes, then replies
+    \\  dory-store MODEL LOOPS TEXT N   Dory prompts as pool pages (DORY_PAGED=1): resumes and shared streams == fresh
     \\  dory-prefill MODEL LOOPS TEXT N  Dory prompt time alone at 512, 2k, 8k and 16k rows (DORY_PAGED=1: on pages)
     \\  gemma4-states MODEL DRAFTER TEXT N   Gemma 4 + DFlash: stepped passes keep the drafter's context, resumed == fresh
     \\  spark25-pages MODEL TEXT N   Spark2.5: full-layer caches in pool pages == linear ones, replies and logits
@@ -418,7 +420,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const world = try std.fmt.parseInt(usize, try arg(rest, 1), 10);
         return rank_scatter_tests.run(gpu, rank, world, if (rest.len > 2) rest[2] else null);
     }
-    if (std.mem.eql(u8, cmd, "roce-gather")) return roce_gather_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10));
+    if (std.mem.eql(u8, cmd, "roce-gather")) return roce_gather_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10), if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 2);
     if (std.mem.eql(u8, cmd, "rank-sum")) return rank_scatter_tests.sum(gpu);
     if (std.mem.eql(u8, cmd, "nccl-pair")) return libs_tests.ncclPair(gpu, try std.fmt.parseInt(c_int, try arg(rest, 0), 10), try std.fmt.parseInt(c_int, try arg(rest, 1), 10), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "gdn-replay")) return oracle_tests.gdnReplay(gpu, try arg(rest, 0));
@@ -446,6 +448,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe-live")) return @import("moe_live_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-router-bench")) return @import("moe_router_bench.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "ggml")) return ggml_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ggml-bench")) return ggml_tests.bench(gpu);
@@ -454,6 +457,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);
     if (std.mem.eql(u8, cmd, "exl3")) return exl3_tests.run(gpu, if (rest.len > 0) rest[0] else "none");
+    if (std.mem.eql(u8, cmd, "exl3-grouped-tile")) return @import("exl3_grouped_tile_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
@@ -526,6 +530,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "clef")) return @import("clef_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));

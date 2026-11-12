@@ -21,7 +21,7 @@ const MD1 = 24;
 const STEPS = replay.MAXR - 2; // a window of MAXR rows: the absorb's draft, then this many chain steps
 const WORDS = STEP + STEPS * STRIDE;
 
-const source =
+pub const source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\// Chain step j's words: whether it runs and its row counts (dims, four streams, one row).

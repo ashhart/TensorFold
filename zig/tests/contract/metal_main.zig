@@ -9,7 +9,6 @@ const gather_k = @import("metal_affine_gather.zig");
 const topk_k = @import("metal_topk.zig");
 const ling_route = @import("metal_ling_route.zig");
 const tile_k = @import("metal_tile.zig");
-const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
@@ -27,6 +26,7 @@ const q27_rows = @import("metal_qwen27_moe_rows.zig");
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const fsr = @import("metal_fsr.zig");
+const flash_index = @import("metal_flashnext_index.zig");
 const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
@@ -166,6 +166,7 @@ pub fn main(init: std.process.Init) !u8 {
             return err;
         };
     }
+    if (!o.gates and !o.repro) return @import("metal_limits_all.zig").run(a, init.io, device, o.limits, o.offline, o.only);
     const queue = try device.queue();
     defer queue.deinit();
     const tensor = device.tensorUnits();
@@ -190,10 +191,7 @@ pub fn main(init: std.process.Init) !u8 {
     try lfm3_suite.collect(o.only);
     for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
-        if (!tensor) {
-            std.debug.print("UNSUPPORTED {s}: tensor units required; Gemma coverage unchecked\n", .{v.name});
-            return error.TensorUnitsRequired;
-        }
+        if (!@import("metal_support.zig").gemma(tensor, v.kind, v.name)) continue;
         try gemma.append(a, device, queue, v, false, &gemma_list, &kernels);
         if (v.geo.hidden == 5376 and (v.kind != 1 or std.mem.endsWith(u8, v.name, "sliding"))) {
             try gemma.append(a, device, queue, v, true, &gemma_list, &kernels);
@@ -211,8 +209,7 @@ pub fn main(init: std.process.Init) !u8 {
     var mixed = gemma_mixed.Probe.init(a, device, queue);
     defer mixed.deinit();
     if (wanted(o, mixed.kernel().spec.name)) {
-        if (!tensor) return error.TensorUnitsRequired;
-        try kernels.append(a, mixed.kernel());
+        if (@import("metal_support.zig").tensor(tensor, mixed.kernel().spec.name)) try kernels.append(a, mixed.kernel());
     }
     var lfm2: @import("metal_lfm2_suite.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer lfm2.deinit();
@@ -287,6 +284,15 @@ pub fn main(init: std.process.Init) !u8 {
         fsr_made += 1;
         try kernels.append(a, fsr_probes[fsr_made - 1].kernel());
     };
+    var index_probes: [2]flash_index.Probe = undefined;
+    var index_made: usize = 0;
+    defer for (index_probes[0..index_made]) |*probe| probe.deinit();
+    for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_index.Probe.name(control))) continue;
+        index_probes[index_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
+        index_made += 1;
+        try kernels.append(a, index_probes[index_made - 1].kernel());
+    }
     var d3norm: ?drama3_k.Norm = null;
     defer if (d3norm) |*n| n.deinit();
     if (wanted(o, drama3_k.spec().name)) {
@@ -474,6 +480,16 @@ pub fn main(init: std.process.Init) !u8 {
     var attention_pv: @import("metal_attention_pv.zig").Suite = .{};
     defer attention_pv.deinit();
     try attention_pv.collect(a, device, queue, &kernels, o.only);
+    const flash_grouped = @import("metal_flashnext_grouped.zig");
+    var grouped_probes: [2]flash_grouped.Probe = undefined;
+    var grouped_made: usize = 0;
+    defer for (grouped_probes[0..grouped_made]) |*probe| probe.deinit();
+    for ([_]bool{ false, true }) |control| {
+        if (!wanted(o, flash_grouped.Probe.name(control))) continue;
+        grouped_probes[grouped_made] = .{ .a = a, .device = device, .queue = queue, .control = control };
+        grouped_made += 1;
+        try kernels.append(a, grouped_probes[grouped_made - 1].kernel());
+    }
     const weight_only = @import("metal_weight_only.zig");
     const weight_source = try weight_only.text(a);
     defer a.free(weight_source);
@@ -528,11 +544,7 @@ pub fn main(init: std.process.Init) !u8 {
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {
-        lim = try limits_k.gate(a, init.io, device, o.offline, o.only);
-        lim += try gemma.limits(a, device, o.only);
-        lim += try gemma_embed.limits(a, device, o.only);
-        lim += try gemma_mixed.limits(a, device, o.only);
-        lim += try llama_k.limits(a, device, tensor, o.only);
+        lim = try @import("metal_limits_all.zig").gate(a, init.io, device, o.offline, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

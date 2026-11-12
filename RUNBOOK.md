@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.2.4
+V=1.2.7
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -210,7 +210,7 @@ Qwen4 has synthetic gates only.
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.2.4
+V=1.2.7
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -233,8 +233,11 @@ pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
 A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
-request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
-them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
+request with the cache off. `--prompt-cache-gib` sizes kept states. The default takes half the room after streams,
+with a 16 GiB floor on Metal and CUDA device memory, or 8 GiB for unified CUDA host snapshots, clipped to the room.
+Discrete CUDA host snapshots default to 8 GiB. Flash Next's batch host keeps a 16 GiB ceiling before sizing sessions.
+An explicit value overrides it, and 0 turns them off. A state kept inside a prompt chunk costs no extra prompt call.
+A Nemotron 3.5 Lightning state takes 48 MiB plus
 7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
 budget free for the next states.
 Prompts fill a chunk at a time between decode rounds, so requests that arrive together on a new system prompt would each

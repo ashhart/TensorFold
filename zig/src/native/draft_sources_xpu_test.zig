@@ -2,6 +2,11 @@
 const check = @import("draft_sources_check.zig").check;
 const present = @import("draft_sources_check.zig").present;
 
+comptime {
+    _ = @import("xpu_dflash2_test.zig"); // its tests run under this file's "draft sources:" filter
+    _ = @import("xpu_dflash2_depth_test.zig"); // the core depth sweep on the XPU adapter
+}
+
 test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
     var b: @import("xpu_lanes.zig").Lanes = undefined;
     b.drafter = null;
@@ -11,6 +16,7 @@ test "draft sources: XPU Qwen27 copies and actual DFlash2 attachment" {
     try check(b.facts(), null, true, false);
     b.drafter = present(@TypeOf(b.drafter.?));
     try check(b.facts(), .{ .kind = "DFlash2", .name = "example/draft" }, true, false);
+    _ = &@TypeOf(b).backend; // the lane backend's operations compile on hosts without Level Zero
 }
 
 test "draft sources: XPU Nemotron follows the checkpoint head, with no copy window when absent" {

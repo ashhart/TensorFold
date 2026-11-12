@@ -43,17 +43,19 @@ pub const Out = struct {
 
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
+    const startup_at = @import("core").startup_receipt.offset();
     var cx: Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
-    var client: ClientOut = .{ .conn = conn, .a = a };
+    var client: ClientOut = .{ .conn = conn, .a = a, .startup_at = startup_at };
     run(srv, a, client.out(), .{ .conn = conn }, is_chat, body);
 }
 
 /// A chat reply written straight to the client.
 const ClientOut = struct {
+    startup_at: ?u64 = null,
     conn: *Conn,
     a: Allocator,
 
@@ -74,6 +76,7 @@ const ClientOut = struct {
     fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         routes.sendValue(c.conn, c.a, status, payload);
+        if (status == 200 and c.conn.response_complete and !c.conn.broken) @import("startup_receipt.zig").complete(c.startup_at, payload);
     }
 
     fn keepalive(ctx: *anyopaque) error{Closed}!void {
@@ -109,7 +112,7 @@ pub fn replyModel(srv: *const Server, body: Value) []const u8 {
     return srv.config.served_name;
 }
 
-const Plan = struct {
+pub const Plan = struct {
     input: chat.Input,
     stream: bool,
     separate_usage: bool,
@@ -123,7 +126,7 @@ pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
 }
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
-fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
+pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
@@ -248,7 +251,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     };
     p.input.id = id;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -270,6 +273,7 @@ const Run = struct {
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
+    call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -447,6 +451,7 @@ const Run = struct {
                 if (!r.is_chat and delta != .string and (delta != .object or delta.object.get("content") == null)) return;
                 return r.emit(r.chunk(delta, null) catch return error.Closed);
             }
+            @import("openai_calls.zig").streamed(r, delta) catch return error.Closed;
             const filtered = r.policyDelta(delta) catch return error.Closed;
             const d = filtered orelse return;
             try r.prose();

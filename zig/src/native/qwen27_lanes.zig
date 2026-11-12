@@ -1,4 +1,4 @@
-//! The 27B's lane core backend: a stream a runner slot, shared rounds across slots, DFlash2 trees for slot 0.
+//! The 27B's lane core: a stream a runner slot, shared rounds, DFlash2 trees for the first TF_Q27_DRAFT_SLOTS streams.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -35,6 +35,9 @@ comptime {
     std.debug.assert(max_rows <= q.attention_plan.max_rows and max_rows <= q.attention_plan.path_width);
     std.debug.assert(max_rows <= q.gpu_frame.logit_rows and batch_rows <= q.gpu_frame.max_rows);
 }
+
+/// A sampled window's logits rows, drawn by the 2B's draw (top-k candidates, then the shared keyed sampler).
+const Rows = @import("qwen27_draws.zig").Rows(tf.qwen35.backend.draw, lanes.Sampling);
 
 pub const Release = @import("qwen27_hooks.zig").Release;
 pub const Grow = @import("qwen27_hooks.zig").Grow;
@@ -156,7 +159,7 @@ pub const Metal = struct {
         return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
-    /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
+    /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
         const drafting = b.draft != null;
         const shared = b.runner.slots > 1;
@@ -254,12 +257,8 @@ pub const Metal = struct {
             const metric = mtl.pass_metrics.phase(.sampling);
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
-            // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token)
-            for (out[0..rows], positions[0..rows], 0..) |*t, p, row| {
-                const mask = if (masks.len == 0) &.{} else masks[row * width ..][0..width];
-                t.* = try @import("qwen27_masks.zig").draw(tf.qwen35.backend.draw, b.gpa, words[(first + row) * vocab ..][0..vocab], s.sampling, p, mask);
-            }
-            return;
+            // each row's whole-row draw at its own position, the window's rows on threads
+            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks }, rows);
         }
         try b.argmaxRows(first, rows);
         try b.picked(first, rows, out);

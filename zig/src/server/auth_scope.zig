@@ -59,12 +59,12 @@ fn validLabel(label: []const u8) bool {
 const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices" };
 const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest" };
 const inferring = [_][]const u8{
-    "/chat/completions", "/v1/chat/completions", "/completions",           "/v1/completions",
-    "/messages",         "/v1/messages",         "/messages/count_tokens", "/v1/messages/count_tokens",
-    "/responses",        "/v1/responses",        "/tokenize",              "/v1/tokenize",
-    "/detokenize",       "/v1/detokenize",       "/v1/audio/speech",       "/v1/embeddings",
-    "/decisions",        "/v1/decisions",        "/systemone",             "/v1/systemone",
-    "/rerank",           "/v1/rerank",
+    "/chat/completions",      "/v1/chat/completions", "/completions",           "/v1/completions",
+    "/messages",              "/v1/messages",         "/messages/count_tokens", "/v1/messages/count_tokens",
+    "/responses",             "/v1/responses",        "/tokenize",              "/v1/tokenize",
+    "/detokenize",            "/v1/detokenize",       "/v1/audio/speech",       "/v1/embeddings",
+    "/v1/images/generations", "/decisions",           "/v1/decisions",          "/systemone",
+    "/v1/systemone",          "/rerank",              "/v1/rerank",
 };
 
 /// A gated request a key may make: the route as the dispatcher reads it, matched exactly, never by suffix.
@@ -77,6 +77,11 @@ pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     }
     const put = std.mem.eql(u8, method, "PUT") and putRoute(route);
     return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and oneOf(route, &inferring);
+}
+
+/// A key that may open a Responses WebSocket: admin, or inference (each create is checked again over the socket).
+pub fn allowsUpgrade(scopes: Scopes) bool {
+    return scopes.admin or scopes.inference;
 }
 
 /// The routes a PUT reaches as it would by POST: SGLang's rerank route takes both.

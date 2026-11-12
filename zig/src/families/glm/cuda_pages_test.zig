@@ -413,12 +413,12 @@ const Store = struct {
         const rules: radix.Rules = .{ .page = page_rows, .planned = true, .grid = native.snap_grid, .lookahead = 1, .min_prompt = 0, .tail = true };
         x.* = .{ .gpa = gpa, .store = try radix.Store.init(gpa, states, radix.pagesOf(kv.Pool, pool, pool.page_bytes), rules) };
         x.store.limit(.{ .pages = pool.total(), .snaps = snaps });
-        pool.reclaim = .{ .ctx = x, .call = reclaim };
+        try pool.joinReclaim(.{ .ctx = x, .call = reclaim });
         native.share_attach(e, .{ .ctx = x, .vtable = &vtable });
     }
     fn close(x: *Store, e: *Engine) void {
         native.share_attach(e, null);
-        native.share_pool(e).?.reclaim = null;
+        native.share_pool(e).?.leaveReclaim(x);
         x.store.deinit();
     }
     fn reclaim(ctx: *anyopaque, want: usize) bool {

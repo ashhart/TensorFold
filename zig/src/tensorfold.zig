@@ -1,6 +1,7 @@
 //! The native engine: model loading, families and the lane core, over our Metal runtime.
 const std = @import("std");
 
+pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
 pub const gguf = @import("core/gguf.zig");
@@ -43,6 +44,8 @@ pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_vision_contract = @import("families/flashnext/vision_contract.zig");
 pub const flashnext_fsr_fixture = @import("families/flashnext/fsr_gpu_fixture.zig");
 pub const flashnext_fsr_contract = @import("families/flashnext/fsr_contract_source.zig");
+pub const flashnext_scale_index_fixture = @import("families/flashnext/scale_index_fixture.zig");
+pub const flashnext_grouped_fixture = @import("families/flashnext/grouped_fixture.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_sample = @import("families/flashnext/host_sample.zig");

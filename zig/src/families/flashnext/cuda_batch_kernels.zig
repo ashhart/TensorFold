@@ -34,7 +34,27 @@ pub const Gdn = struct {
     }
 };
 
+/// The prompt pass's kernel forms, each switch read once at load: the pass and the disk key read these.
+pub const Forms = struct {
+    gdn_fused: bool = true, // TF_FLASHNEXT_GDN_FUSED
+    hc_fuse: bool = true, // TF_FLASHNEXT_HC_FUSE
+    in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
+    readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
+    fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
+
+    pub fn resolve() Forms {
+        return .{
+            .gdn_fused = @import("cuda_gdn_fused.zig").on(),
+            .hc_fuse = @import("cuda_batch_hc.zig").on(),
+            .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
+            .readout_rows = @import("cuda_chunk.zig").readoutTileRows(),
+            .fact_rows = @import("cuda_nvfp4_tile.zig").factRows(),
+        };
+    }
+};
+
 pub const Kernels = struct {
+    forms: Forms = .{},
     qmm: cuda.Module,
     experts: cuda.Module,
     rows: cuda.Module,
@@ -77,6 +97,7 @@ pub const Kernels = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const tile_mode = try cuda.experts_tile.mode(if (std.c.getenv("TF_FLASHNEXT_PROMPT_EXPERT_TILE")) |v| std.mem.span(v) else null);
         var k: Kernels = undefined;
+        k.forms = Forms.resolve();
         k.expert_tile = null;
         k.qmm = try cuda.Module.load(d, cuda.kernels.qmm);
         errdefer k.qmm.unload();
@@ -94,7 +115,8 @@ pub const Kernels = struct {
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10); // the current device: its tiles
         errdefer k.native_lane.unload();
-        if (envOn("TF_FLASHNEXT_PROMPT_BF16")) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
+        const bf16 = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PROMPT_BF16", true);
+        if (bf16) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
         var device: c_int = 0;
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGet(&device, 0), "cuDeviceGet");
@@ -131,8 +153,8 @@ pub const Kernels = struct {
 
     /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
     pub fn profile() bool {
-        const v = std.c.getenv("TF_FLASHNEXT_PROFILE") orelse return false;
-        return std.mem.eql(u8, std.mem.span(v), "1");
+        // the startup check refused every malformed value already, so a plain default stands here
+        return @import("sys").environment.read(bool, "TF_FLASHNEXT_PROFILE", false) catch false;
     }
 
     /// The DeltaNet kernels for a layer's heads `h`: the full set, or the `_h8` twins for half; any other is refused.
@@ -154,12 +176,6 @@ pub const Kernels = struct {
         k.qmm.unload();
     }
 };
-
-/// A switch on unless its variable is "0".
-fn envOn(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
-}
 
 test "a split layer's DeltaNet launches, the rollback replay's front and chain too, take the _h8 twins; a whole one today's" {
     const want = [_][:0]const u8{ "fn_gdn_front_h8", "fn_gdn_rows_h8", "fn_gdn_rows_to_h8", "fn_gdn_chain_tpr_h8", "fn_gdn_fused_h8", "fn_gdn_norm_h8" };

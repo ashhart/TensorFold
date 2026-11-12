@@ -11,6 +11,10 @@ const mib: u64 = 1 << 20;
 /// Nemotron 3.5 Lightning on CUDA: 6 attention layers and the MTP head's, 2 KV heads of 128, Mamba states in a slot.
 const nemotron: kv.Layout = .{ .fixed_bytes = 64 * mib, .token_bytes = 7 << 10, .page_tokens = 512, .snap_bytes = 48 * mib };
 
+test {
+    _ = @import("kv_pool_band_test.zig");
+}
+
 test "a 2,048-token prompt with 4,096 reply tokens and a 16-row window reserves 13 pages of 512 rows, 45.5 MiB" {
     try expectEqual(@as(u64, 3584 * 1024), nemotron.pageBytes());
     try expectEqual(@as(usize, 13), nemotron.need(2048, 4096, 16));
@@ -323,7 +327,7 @@ test "a promise that does not fit asks the store to reclaim first, and fails onl
     try expectEqual(@as(usize, 1), p.available());
     try expectEqual(@as(usize, 3), p.reclaimable());
     try expect(p.fits(4) and !p.fits(5));
-    p.reclaim = .{ .ctx = &store, .call = Kept.call };
+    try p.joinReclaim(.{ .ctx = &store, .call = Kept.call });
     var b: Lease = .{};
     try std.testing.expectError(error.LaneMemory, p.promise(&b, 5));
     try expectEqual(@as(usize, 0), b.promised);
@@ -490,7 +494,7 @@ test "a hold past the free pages asks the store to reclaim first, as a promise d
     var old: [3]u32 = undefined;
     try expect(p.hold(&old)); // the store's own pages fill the pool
     var shed: Shed = .{ .pool = &p, .kept = &old };
-    p.reclaim = .{ .ctx = &shed, .call = Shed.call };
+    try p.joinReclaim(.{ .ctx = &shed, .call = Shed.call });
     var ids: [2]u32 = undefined;
     try expect(p.hold(&ids));
     try expectEqual(@as(usize, 1), shed.calls);

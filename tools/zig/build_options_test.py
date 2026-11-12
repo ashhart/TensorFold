@@ -11,12 +11,12 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCES = [ROOT / "build.zig"] + sorted((ROOT / "zig" / "build").glob("*.zig"))
 # the option names this target's option list holds, with their kind
 LISTED = re.compile(r"^  -D([A-Za-z0-9_-]+)=\[(\w+)\]", re.M)
-# the options only one platform reads: the Metal language version, the Step-5 and Metal persistence host filters
-PLATFORM_ONLY = {"metal-std", "step5-filter", "persistence-identity-filter"}
+# the options only one platform reads: Metal's language version and source gate, the Step-5 and persistence filters
+PLATFORM_ONLY = {"metal-std", "step5-filter", "persistence-identity-filter", "metal-source-family", "source-args"}
 # the options the acceptance test does not pass: a release version and the test hooks cannot be combined
 NOT_PASSED = {"version", "slide-test-hooks"}
 # the options whose value the build reads while it configures, with a value it accepts
-VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast", "fuzz-optimize": "safe"}
+VALUES = {"hip-arch": "gfx1151", "sm": "121", "optimize": "fast", "fuzz-optimize": "safe", "stream-scan-optimize": "safe"}
 
 
 def declared() -> dict[str, list[str]]:

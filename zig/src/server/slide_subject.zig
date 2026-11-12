@@ -40,9 +40,14 @@ pub fn subjectWord(phrase: []const u8) []const u8 {
 pub fn subjectWords(a: std.mem.Allocator, phrase: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var words = std.mem.tokenizeAny(u8, phrase, " \t\r\n");
+    var first = true;
     next: while (words.next()) |w| {
+        const opening = first;
+        first = false;
         const word = possessor(std.mem.trim(u8, w, ".,!?;:'\""));
         if (word.len < 2 or ownWord(word)) continue; // "Mój pies" (my dog) keys on pies, never on my
+        if (numbering(word)) continue; // a number group (12 500, 7,400) is never a subject
+        if (opening and opener(word)) continue; // a sentence's determiner or quantifier is never its subject
         for (unkeyed ++ small) |u| if (std.ascii.eqlIgnoreCase(word, u)) continue :next;
         try out.append(a, word);
     }
@@ -127,9 +132,13 @@ pub fn properWords(a: std.mem.Allocator, phrase_words: []const []const u8, fact:
     var out: std.ArrayList([]const u8) = .empty;
     try out.appendSlice(a, phrase_words);
     var it = std.mem.tokenizeAny(u8, fact, " \t\r\n,.!?;:\"()");
+    var first = true;
     next: while (it.next()) |t| {
+        const opening = first;
+        first = false;
         const w = possessor(t);
         if (w.len < 2 or !std.ascii.isUpper(w[0]) or ownWord(w)) continue;
+        if (opening and opener(w)) continue; // a sentence-opening determiner is never a subject
         for (unkeyed ++ small) |u| if (std.ascii.eqlIgnoreCase(w, u)) continue :next;
         for (out.items) |x| if (std.ascii.eqlIgnoreCase(x, w)) continue :next;
         try out.append(a, w);
@@ -275,6 +284,31 @@ test "a told fact's subject that most of its open questions never name is none: 
     try std.testing.expect(dog.len == 1 and std.mem.eql(u8, dog[0], "dog"));
 }
 
+/// Whether `word` opens a sentence as a determiner or quantifier, never the subject on its own.
+fn opener(word: []const u8) bool {
+    const openers = [_][]const u8{ "any", "every", "each", "all", "some", "no", "the", "a", "an" };
+    for (openers) |w| if (std.ascii.eqlIgnoreCase(word, w)) return true;
+    return false;
+}
+
+/// Whether `word` is a number group: digits joined by a space, thin space, no-break space or comma.
+fn numbering(word: []const u8) bool {
+    const thin = "\u{2009}";
+    const nbsp = "\u{00A0}";
+    var i: usize = 0;
+    var groups: usize = 0;
+    while (i < word.len) {
+        if (!std.ascii.isDigit(word[i])) return false;
+        while (i < word.len and std.ascii.isDigit(word[i])) i += 1;
+        groups += 1;
+        if (i == word.len) break;
+        const sep: usize = if (std.mem.startsWith(u8, word[i..], thin)) thin.len else if (std.mem.startsWith(u8, word[i..], nbsp)) nbsp.len else if (word[i] == ' ' or word[i] == ',') 1 else return false;
+        i += sep;
+        if (i == word.len or !std.ascii.isDigit(word[i])) return false;
+    }
+    return groups > 0;
+}
+
 const unkeyed = [_][]const u8{ "i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "you", "your", "yours", "it", "its", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "do", "does", "did", "is", "are", "am", "was", "like", "likes" };
 
 const small = [_][]const u8{ "the", "a", "an", "of", "on", "in", "at", "to", "for", "by", "with", "from", "and", "or" };
@@ -330,4 +364,29 @@ pub fn kindsList(srv: *Server, cx: *Cx, subject: []const u8, gone: anytype) ![]c
         if (out.items.len == 6) break;
     }
     return out.items;
+}
+
+test "a fact's subject is never a number group or a sentence-opening determiner" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pl = "W spółce Ortelka faktury powyżej {s} zł wymagają drugiego podpisu.";
+    // one question says the amount; none says another of the fact's subject words
+    const pl_q = "Czy {s} to limit?";
+    inline for (.{ "12 500", "12\u{2009}500", "12\u{00A0}500" }) |amount| {
+        const fact = try std.fmt.allocPrint(a, pl, .{amount});
+        const qs = [_][]const u8{ try std.fmt.allocPrint(a, pl_q, .{amount}), "Kiedy potrzebny jest podpis?", "Kto podpisuje umowę?" };
+        const words = try factSubject(a, fact, fact, &qs, true);
+        try std.testing.expectEqual(@as(usize, 1), words.len);
+        try std.testing.expectEqualStrings("Ortelka", words[0]);
+    }
+    // each number form alone is never a subject word, the comma form included
+    inline for (.{ "12 500", "12\u{2009}500", "12\u{00A0}500", "12,500" }) |amount|
+        try std.testing.expectEqual(@as(usize, 0), (try subjectWords(a, amount)).len);
+    const en = "Any invoice above 7,400 euros requires a second signature by Brightwell Logistics.";
+    const none = [_][]const u8{ "Who signed the agreement?", "When was the agreement signed?", "Where was the agreement signed?" };
+    const words = try factSubject(a, en, en, &none, true);
+    try std.testing.expectEqual(@as(usize, 2), words.len);
+    try std.testing.expectEqualStrings("Brightwell", words[0]);
+    try std.testing.expectEqualStrings("Logistics", words[1]);
 }

@@ -29,6 +29,7 @@ pub const Layer = struct {
     dims: usize, // D
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
+    after: bool = false, // exl3: clamp silu's output (min(silu(g), L): Ling), not its input (silu(min(g, L))); others refuse it
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up; iq2xxs: always
     swiglu: bool = false, // affine4: up is gate and up interleaved per group ([E][NI/32][D/64][2][288]) under SwiGLU
     shared: i32 = -1, // affine3: the expert whose tables are 4-bit (a SwiGLU pair at shared_up, down at shared_down)
@@ -52,10 +53,11 @@ pub const Grouped = struct {
     nvfp4_csf0: ?*const @import("experts32.zig").Nvfp4b32Experts = null,
     iq2xxs: ?*const Iq2xxsExperts = null,
 
-    /// Decode rows: `items` bounds the plan's items (grouped.maxItems at tile 16); `skip` an expert left out, or -1.
-    pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    /// Decode rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
+    pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
+        if (l.after and l.format != .exl3) return error.OptionNotBuilt; // the clamp-after order is built for EXL3 only
         switch (l.format) {
-            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip, false),
+            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, pairs, tile, skip),
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_bf16) return error.EpilogueNotBuilt;
@@ -78,10 +80,11 @@ pub const Grouped = struct {
         }
     }
 
-    /// Prompt rows: `items` bounds the plan's items at the format's prompt tile (prompt_tile).
-    pub fn prompt(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    /// Prompt rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
+    pub fn prompt(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
+        if (l.after and l.format != .exl3) return error.OptionNotBuilt; // the clamp-after order is built for EXL3 only
         switch (l.format) {
-            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip, true),
+            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, pairs, tile, skip),
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_f32) return error.EpilogueNotBuilt;
@@ -284,10 +287,7 @@ pub const Fp8Experts = struct {
         const n = if (gate) l.width else l.dims;
         const pi: usize = @intFromBool(prompt);
         const ei: usize = @backingInt(epi);
-        const grid: usize = if (prompt) blk: {
-            const cw: usize = if (gate) 2 else 4;
-            break :blk @min(items * (nb / cw), e.resident[pi][ei]);
-        } else @min((items * nb + 3) / 4, e.resident[pi][ei]);
+        const grid: usize = if (prompt) @min(items * (nb / @as(usize, if (gate) 2 else 4)), e.resident[pi][ei]) else @min((items * nb + 3) / 4, e.resident[pi][ei]);
         if (grid < 1) return;
         var a: launch_.Args = .{};
         a.add(in.x);
@@ -556,8 +556,8 @@ test "nvfp4 rows of either kind are refused when the format is not loaded" {
     const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2, .relu2 = true };
     const s: Stream = undefined; // never reached: the refusal comes first
     const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
-    try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
-    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
+    try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 64, -1));
+    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 16, -1));
     try std.testing.expectEqual(@as(usize, 2 * 2 * 3 * 144 * 4), Nvfp4Experts.bytes(2, 64, 96, 1));
     try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(1, 8)); // 64 rows x 64 inputs, 8 x 2 blocks
     try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(2, 4));
@@ -580,17 +580,6 @@ test "a packed fp8 expert puts each word where fp8/experts.py's pack does" {
     try std.testing.expectEqual(words[53 * (k / 4) + 23], out[idx]);
 }
 
-test "a format that is not loaded, or an option it was not built with, is refused before any launch" {
-    const g: Grouped = .{};
-    const l: Layer = .{ .format = .fp8g, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2 };
-    const s: Stream = undefined; // never reached: the refusal comes first
-    const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
-    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
-    const a4: Affine4Experts = undefined;
-    const h: Grouped = .{ .affine4 = &a4 };
-    var la = l;
-    la.format = .affine4;
-    try std.testing.expectError(error.EpilogueNotBuilt, h.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
-    try std.testing.expectError(error.EpilogueNotBuilt, h.prompt(s, .down_f32, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
-    try std.testing.expectError(error.OptionNotBuilt, h.decode(s, .up, .{ .x = 0, .stride = 64 }, la, p, 0, 1, 3));
+test {
+    _ = @import("experts_host_test.zig"); // Grouped's refusals before any launch
 }

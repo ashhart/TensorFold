@@ -38,9 +38,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
+    if (shape.part == .head) return finish(e, total, heads, shape.hidden, shape.rows); // a stage's head over the ring's rows
 
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
-    try e.embed(t_ids, e.h, total, t_params);
+    if (g.embeds) try e.embed(t_ids, e.h, total, t_params); // a later stage's h and r came over the ring
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
     const sums: u64 = if (prompt and total > 16) 0 else e.xs;
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
@@ -49,12 +50,13 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     var di: usize = 0;
     var ai: c_int = 0;
     // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
-    const tail_at: ?usize = if (prompt) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
+    const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
+    const tail_at: ?usize = if (prompt and ends) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
     for (e.layers, 0..) |l, i| {
         const tail = tail_at != null and i + 1 == e.layers.len;
         const t0: usize = if (tail) tail_at.? else 0;
         const rows: usize = total - t0;
-        try e.norm(i != 0, l.input_norm, total);
+        try e.norm(g.first + i != 0, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -140,7 +142,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
-    try finish(e, total, heads, shape.hidden, shape.rows);
+    if (shape.part == .whole) try finish(e, total, heads, shape.hidden, shape.rows);
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.

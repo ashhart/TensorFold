@@ -10,9 +10,11 @@ pub const proposer = @import("proposer.zig");
 pub const recall = @import("recall.zig");
 pub const recall_store = @import("recall_store.zig");
 pub const sampling = @import("sampling.zig");
+pub const sampling_row = @import("sampling_row.zig");
 pub const fill = @import("fill.zig");
 pub const prefill_widths = @import("prefill_widths.zig");
 pub const solo_chunk = @import("solo_chunk.zig");
+pub const step_cap = @import("step_cap.zig");
 pub const shape = @import("shape.zig");
 pub const plan_lanes = @import("plan_lanes.zig");
 pub const cost_cache = @import("cost_cache.zig");
@@ -39,6 +41,8 @@ pub const shared_head_cost_check = @import("shared_head_cost_check.zig");
 pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
+pub const draft_tree = @import("draft_tree.zig");
+pub const drafter_depth_sweep = @import("drafter_depth_sweep.zig"); // any family's Drafter at depths 1..block
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
@@ -68,6 +72,7 @@ test {
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafter_depth_sweep_test.zig");
     _ = @import("drafted_chances_test.zig");
     _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");
@@ -93,4 +98,5 @@ pub const learned_dirs = @import("learned_dirs.zig");
 
 test {
     _ = @import("context_copy_price_test.zig");
+    _ = @import("sampling_row.zig");
 }

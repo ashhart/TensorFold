@@ -38,7 +38,7 @@ pub fn assemble(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return m;
 }
 pub fn steps(b: *std.Build) void {
-    _ = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
+    const real = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
     _ = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, runtime(b, b.graph.host, false), null);
     const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const heads_check = b.addExecutable(.{ .name = "tf-dsv41-prefill-heads", .root_module = module(b, check_target, "prefill_heads_check.zig", false) });
@@ -87,13 +87,24 @@ pub fn steps(b: *std.Build) void {
     const output = record.captureStdOut(.{});
     b.step("emit-dsv41-catalog", "Record symbol resolution without CUDA device work").dependOn(&b.addInstallFile(output, "dsv41-launches.txt").step);
     const runner_base = module(b, target, "cuda_test.zig", true);
-    const runner = b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = b.createModule(.{
+    const runner = b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = runnerModule(b, target, runner_base.import_table.get("cuda").?, runner_base.import_table.get("dsv41_kernels").?) });
+    _ = runner.getEmittedBin();
+    b.step("compile-dsv41-runner", "Emit the supplied device fixture runner with nonexecuted synthetic images").dependOn(&runner.step);
+    const gpu = b.step("dsv41-test", "Install tf-dsv41-test for this host over the family images (-Ddsv41-nvcc or -Ddsv41-fatbins)");
+    const im = real orelse return gpu.dependOn(&b.addFail("dsv41-test needs -Ddsv41-nvcc=PATH or -Ddsv41-fatbins=DIR").step);
+    // the family's images only: the runner's commands launch no runtime kernels
+    const cuda = runtime(b, b.graph.host, false);
+    const dk = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, cuda, im);
+    gpu.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = runnerModule(b, b.graph.host, cuda, dk) }), .{}).step);
+}
+
+/// tests/cuda/dsv41_main.zig over `cuda` and `dk`, plus `tp` and the family's `partition.zig` for the exchanges.
+fn runnerModule(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/dsv41_main.zig"),
         .target = target,
         .optimize = .Debug,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = runner_base.import_table.get("cuda").? }, .{ .name = "dsv41_kernels", .module = runner_base.import_table.get("dsv41_kernels").? } },
-    }) });
-    _ = runner.getEmittedBin();
-    b.step("compile-dsv41-runner", "Emit the supplied device fixture runner with nonexecuted synthetic images").dependOn(&runner.step);
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "dsv41_kernels", .module = dk }, .{ .name = "tp", .module = @import("tp.zig").module(b, target, .Debug, cuda) }, .{ .name = "dsv41_partition", .module = shared.module(b, target, "partition.zig") } },
+    });
 }

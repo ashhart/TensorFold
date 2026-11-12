@@ -16,7 +16,20 @@ pub fn textWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?u64 
     for (ck.files.items) |*f| for (f.names.keys()) |name| {
         total += f.get(name).?.bytes.len;
     };
+    // a tied head packs the embedding's rows a second time (cuda_weights.zig)
+    if (g.tied) total += @as(u64, g.vocab) * g.hidden * 2;
     return total;
+}
+
+/// A BF16 chat tower's weights and one call's scratch; 0 for other formats (files count it) and for Clef.
+pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    const g = geometry.Geometry.read(a, io, dir) catch return 0;
+    if (!g.bf16 or @import("cuda_decide.zig").present(a, io, dir)) return 0;
+    const v = @import("qwen_vision");
+    // a tower the CUDA tower cannot read counts nothing here: cuda_decide refuses it by name in the family's open
+    const read = v.Settings.read(a, io, dir) catch |err| return if (err == error.OutOfMemory) err else 0;
+    const c = (read orelse return 0).tower;
+    return v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches);
 }
 
 const config_text =
@@ -74,4 +87,46 @@ test "plain BF16 preflight: text tensors counted, the tower, MTP and joint head 
     try std.testing.expect(!(try geometry.parse(a, mlx)).bf16);
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
     try std.testing.expectEqual(@as(?u64, null), try textWeightBytes(a, io, dir));
+}
+
+test "tied BF16 preflight: the head's packed copy of the embedding counts beside the text tensors" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = @embedFile("fixtures/lighton-ocr-0.8b.json") });
+    try writeShard(tmp.dir, io, "model.safetensors", &.{ "model.language_model.embed_tokens.weight", "model.visual.blocks.0.w" }, &.{ 64, 1000 });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const g = try geometry.Geometry.read(a, io, dir);
+    try std.testing.expect(g.bf16 and g.tied);
+    try std.testing.expectEqual(@as(?u64, 2 * 64 + @as(u64, g.vocab) * g.hidden * 2), try textWeightBytes(a, io, dir));
+}
+
+test "BF16 chat preflight: the tower's weights and scratch, none for a decision backbone or another format" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const lighton = @embedFile("fixtures/lighton-ocr-0.8b.json");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = lighton });
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer a.free(dir);
+    const v = @import("qwen_vision");
+    const c = (try v.Settings.read(a, io, dir)).?.tower;
+    try std.testing.expectEqual(@as(u64, v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches)), try visionBytes(a, io, dir));
+    // with a joint head beside it, --vision is the decision backbone's refusal (cuda_decide), not a tower budget
+    try tmp.dir.writeFile(io, .{ .sub_path = @import("cuda_decide.zig").head_file, .data = "{}" });
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir));
+    try tmp.dir.deleteFile(io, @import("cuda_decide.zig").head_file);
+    // an unreadable tower (14-pixel patches) counts nothing, so preflight leaves its refusal to the family's open
+    const patch14 = try std.mem.replaceOwned(u8, a, lighton, "\"patch_size\": 16", "\"patch_size\": 14");
+    defer a.free(patch14);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = patch14 });
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir));
+    // an MLX checkpoint's files count its tower already
+    const mlx = try std.mem.replaceOwned(u8, a, config_text, "\"tie_word_embeddings\":false,", "\"tie_word_embeddings\":false,\"quantization\":{\"group_size\":64,\"bits\":4},");
+    defer a.free(mlx);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
+    try std.testing.expectEqual(@as(u64, 0), try visionBytes(a, io, dir));
 }

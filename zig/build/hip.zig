@@ -53,6 +53,7 @@ pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
     }) }));
     loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
     test_step.dependOn(&loader.step);
+    loader.step.dependOn(@import("mesh.zig").qwenDeclTest(b, coreModule(b, b.graph.host))); // its cuts as declarations
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
 }
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
@@ -241,6 +242,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "tf-flashnext-hip-test",
         "Flash Next model checks on the GPU (-Dhip-arch)",
     ).dependOn(&b.addInstallArtifact(fx_test, .{}).step);
+    const fx_gpu = b.addTest(.{ .name = "tf-flashnext-hip-gpu-test", .root_module = gpu.flashnext, .filters = &.{"Flash Next fused prompt prep:"} });
+    b.step("flashnext-hip-gpu-build", "Compile the Flash Next GPU checks without running them").dependOn(&fx_gpu.step);
+    b.step("flashnext-hip-gpu-test", "Flash Next's DeltaNet through linear() on the GPU: the fused prompt prep against the unfused chain").dependOn(&b.addRunArtifact(fx_gpu).step);
     const nem_test = b.addExecutable(.{ .name = "tf-nemotron-hip-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/nemotron_hip/main.zig"),
         .target = target,
@@ -510,18 +514,19 @@ const groups = [_]Source{
     .{ .path = "joint_schema/joint_schema.hip" },
     .{ .path = "lighton_ocr.hip", .strict = true },
     .{ .path = "qwen_vision.hip", .strict = true },
+    .{ .path = "draft/draft.hip" },
 };
 /// What the group sources include, so an edit to one rebuilds them.
 const headers = [_][]const u8{
-    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",              "decode/plan.hpp",      "ops/attention.hpp",
-    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",                    "ops/elementwise.hpp",  "ops/linear.hpp",
-    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",                  "common/arch.hpp",      "common/dot2.hpp",
-    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",                 "quant/mlx.hpp",        "quant/mlx_decoder.hpp",
-    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",                "tiles/epilogue.hpp",   "tiles/gemm.hpp",
-    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",                "tiles/stream.hpp",     "flashnext/streams.hpp",
-    "flashnext/ngram.hpp",        "flashnext/indexer.hpp", "flashnext/sparse.hpp",          "ops/nemotron_moe.hpp", "quant/bf16_decoder.hpp",
-    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",      "columns_controls.hpp",
-    "ops/vision.hpp",             "ops/dense_text.hpp",    "ops/vl_position.hpp",
+    "attention/attention_fa.hip", "attention/prefill.hpp", "decode/pages.hpp",              "decode/plan.hpp",            "ops/attention.hpp",
+    "ops/common.hpp",             "ops/draw.hpp",          "ops/tp.hpp",                    "ops/elementwise.hpp",        "ops/linear.hpp",
+    "ops/moe.hpp",                "ops/norms.hpp",         "ops/rope.hpp",                  "common/arch.hpp",            "common/dot2.hpp",
+    "common/vec.hpp",             "common/wmma.hpp",       "quant/act.hpp",                 "quant/mlx.hpp",              "quant/mlx_decoder.hpp",
+    "quant/mlx_pieces.hpp",       "quant/mlx_tiles.hpp",   "tiles/dot2.hpp",                "tiles/epilogue.hpp",         "tiles/gemm.hpp",
+    "tiles/gemm_kp.hpp",          "tiles/matrix_gemm.hpp", "tiles/plan.hpp",                "tiles/stream.hpp",           "flashnext/streams.hpp",
+    "flashnext/ngram.hpp",        "flashnext/indexer.hpp", "flashnext/sparse.hpp",          "ops/nemotron_moe.hpp",       "quant/bf16_decoder.hpp",
+    "quant/dense_tiles.hpp",      "tiles/wmma12_gemm.hpp", "tiles/wmma12_gemm_k32_ref.hpp", "ops/columns.hpp",            "columns_controls.hpp",
+    "ops/vision.hpp",             "ops/dense_text.hpp",    "ops/vl_position.hpp",           "flashnext/sparse_lanes.hpp",
 };
 /// The flags of the kernels' first build: no contraction, wave32 on RDNA, C++20.
 const flags = [_][]const u8{ "-D__HIP_PLATFORM_AMD__=1", "-DUSE_ROCM=1", "-DHIPBLAS_V2", "-fPIC", "-DCUDA_HAS_FP16=1", "-DHIP_ENABLE_WARP_SYNC_BUILTINS=1", "-std=c++20", "-fno-gpu-rdc", "-mno-wavefrontsize64", "-ffp-contract=off" };

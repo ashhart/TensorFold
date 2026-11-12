@@ -97,3 +97,29 @@ test "stable profile: grouped lookups keep four simultaneous raw values separate
     }
     try t.expect(p.value(.stable, .slide_learn_mode) == null);
 }
+
+test "stable profile: given reads empty or whitespace-only text as unset and hands every other value on byte for byte" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const name = "TF_KV_SHARE";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = c_env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = c_env.unsetenv(name);
+    }
+    _ = c_env.unsetenv(name);
+    try t.expect(p.given(.TF_KV_SHARE) == null);
+    for ([_][:0]const u8{ "", " ", "\t", "\r\n", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), c_env.setenv(name, v, 1));
+        try t.expectEqualStrings(v, p.get(.TF_KV_SHARE).?);
+        try t.expect(p.given(.TF_KV_SHARE) == null);
+    }
+    for ([_][:0]const u8{ "0", "16", " 16", "x" }) |v| {
+        try t.expectEqual(@as(c_int, 0), c_env.setenv(name, v, 1));
+        const raw = std.c.getenv(name).?;
+        const got = p.given(.TF_KV_SHARE).?;
+        try t.expectEqualStrings(v, got);
+        try t.expectEqual(@as([*]const u8, raw), got.ptr);
+    }
+}

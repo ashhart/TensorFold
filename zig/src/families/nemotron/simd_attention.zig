@@ -60,7 +60,7 @@ pub fn unroll(a: std.mem.Allocator, source: []const u8) ![]u8 {
 }
 
 /// The attention's score (16 x 64) and output (16 x 128) results, and the tree tail's (16 x 32, threadgroup operands).
-const check_source =
+pub const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
     \\using namespace metal;

@@ -89,21 +89,7 @@ const Hca = struct {
 };
 
 /// Parses `name[:gid],name[:gid]` (TF_TP_ROCE_HCA).
-pub fn parseSpecs(text: []const u8, out: *[max_hcas]HcaSpec) !usize {
-    var n: usize = 0;
-    var it = std.mem.tokenizeScalar(u8, text, ',');
-    while (it.next()) |item| {
-        if (n == max_hcas) return error.TooManyHcas;
-        var parts = std.mem.splitScalar(u8, std.mem.trim(u8, item, " "), ':');
-        const name = parts.next().?;
-        if (name.len == 0 or name.len >= 64) return error.BadHcaName;
-        out[n] = .{ .name_len = @intCast(name.len) };
-        @memcpy(out[n].name[0..name.len], name);
-        if (parts.next()) |g| out[n].gid = try std.fmt.parseInt(u8, g, 10);
-        n += 1;
-    }
-    return n;
-}
+pub const parseSpecs = @import("roce_verbs.zig").parseSpecs;
 
 /// RoCE v2 by sysfs (the kernel's own word for each GID); null when sysfs cannot say.
 fn sysfsRoceV2(name: []const u8, index: u32) ?bool {
@@ -202,6 +188,7 @@ pub const VerbsWire = struct {
     via: [max_peers][max_hcas]u8 = @splat(.{ 0, 1 }),
     /// Stripes a post makes to each peer, every peer the same (0 before `connect`): the kernel's `n_hca`.
     stripes: u32 = 0,
+    relay: bool = false,
     /// Every rank's region has this layout.
     layout: Layout,
     region: []u8,
@@ -387,13 +374,17 @@ pub const VerbsWire = struct {
     fn shown(w: *const VerbsWire, i: usize) u32 {
         for (0..w.layout.world - 1) |k| {
             const p = guard.peerAt(w.me, w.layout.world, @intCast(k));
+            if (w.relay) {
+                if (w.peer_rkey[p][0] != 0 and w.via[p][0] == i) return p;
+                continue;
+            }
             for (w.via[p][0..w.stripes]) |v| if (v == i) return p;
         }
         return guard.peerAt(w.me, w.layout.world, 0);
     }
 
     pub fn record(w: *const VerbsWire) Record {
-        var r: Record = .{ .world = w.layout.world, .rank = w.me, .n_hca = w.n_hca, .region = @intFromPtr(w.region.ptr), .slot_bytes = w.layout.slot, .region_len = w.region.len };
+        var r: Record = .{ .magic = if (w.relay) @import("roce_relay_topology.zig").magic else record_magic, .world = w.layout.world, .rank = w.me, .n_hca = w.n_hca, .region = @intFromPtr(w.region.ptr), .slot_bytes = w.layout.slot, .region_len = w.region.len };
         for (w.hcas[0..w.n_hca], 0..) |h, i| {
             r.rkey[i] = h.mr.rkey;
             r.lid[i] = h.lid;
@@ -427,6 +418,10 @@ pub const VerbsWire = struct {
     /// Validate the complete peer table before changing any queue pair; the plan names each stripe's HCA to each peer.
     pub fn validateRecords(w: *const VerbsWire, all: []const Record) !pair.Plan {
         if (all.len != w.layout.world) return error.BadRecord;
+        if (w.relay) {
+            if (!std.meta.eql(all[w.me], w.record())) return error.BadRecord;
+            return @import("roce_relay_topology.zig").plan(all, w.me);
+        }
         const mine = w.record();
         var per: [max_peers]pair.Pairs = @splat(.{});
         for (all, 0..) |peer, p| {
@@ -472,6 +467,7 @@ pub const VerbsWire = struct {
 
     /// Slot `slot`'s first `padded` bytes to every peer, next rank first, striped over the HCAs to it; `seq` follows.
     pub fn post(w: *VerbsWire, slot: u32, seq: u32, padded: u32) !void {
+        if (w.relay) return error.BadRelay;
         const l = w.layout;
         // the guard's refusals first: a post no HCA may make must not wait on completions to say so
         if (padded > guard.max_write) return error.WriteTooLarge;
@@ -511,6 +507,10 @@ pub const VerbsWire = struct {
         w.posted += 1;
     }
 
+    pub fn segment(w: *VerbsWire, s: @import("roce_relay.zig").Segment) !void {
+        try @import("roce_relay_post.zig").segment(w, s);
+    }
+
     fn reapHca(w: *VerbsWire, h: *Hca) !void {
         var wc: [32]abi.Wc = undefined;
         const n = h.ctx.ops.poll_cq(h.cq, 32, &wc);
@@ -540,7 +540,7 @@ pub const VerbsWire = struct {
     }
 
     /// Reaps until some post completes (error.Completion when none does within `inflight_wait_ns`).
-    fn reapWait(w: *VerbsWire) !void {
+    pub fn reapWait(w: *VerbsWire) !void {
         const before = w.completed;
         const t0 = sock.nowNs();
         while (w.completed == before) {

@@ -357,12 +357,14 @@ const Reply = struct {
             try b.put(a, "text", t);
             try content.append(a, .{ .object = b });
         };
-        if (message.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| {
+        const cut = std.mem.eql(u8, json.strOr(choice.get("finish_reason")), "length");
+        if (message.get("tool_calls")) |calls| if (calls == .array) for (calls.array, 0..) |call, i| {
             const function = call.get("function").?;
             const raw = function.get("arguments").?;
             const args = if (raw == .string) switch (try json.parseText(a, raw.string)) {
                 .ok => |v| v,
-                .err => |m| {
+                .err => |m| blk: { // max_tokens cut the last call: its input closed as far as written, as the stream's
+                    if (cut and i + 1 == calls.array.len) if (try @import("tool_args_close.zig").close(a, raw.string)) |v| break :blk v;
                     r.problem = m;
                     return error.InvalidResponse;
                 },

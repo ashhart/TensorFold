@@ -3,6 +3,7 @@ const std = @import("std");
 const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
 const experts = @import("cuda_modelopt_experts.zig");
+const core = @import("core");
 const Kind = geometry.Kind;
 const a = std.testing.allocator;
 
@@ -102,4 +103,27 @@ test "a single-format NVFP4 MoE: experts NVFP4 unless ignored, the router ignore
     const ignored_expert = try std.mem.concat(a, u8, &.{ ok[0..std.mem.indexOf(u8, ok, "\"lm_head\"").?], "\"model.language_model.layers.2.mlp.experts.9*\",", ok[std.mem.indexOf(u8, ok, "\"lm_head\"").?..] });
     defer a.free(ignored_expert);
     try refused(ignored_expert);
+}
+
+test "Qwen ModelOpt experts: a zero, negative or NaN weight_scale_2 keeps Qwen's own UnsupportedQwenQuantization" {
+    const fixture = core.checkpoint_fixture;
+    const codes: [8 * 32]u8 = @splat(0x21);
+    const blocks: [8 * 4]u8 = @splat(0x38);
+    for ([_]f32{ 0, -0.5, std.math.nan(f32), 0.25 }) |v| {
+        const scale = std.mem.toBytes(v);
+        const entries = [_]fixture.Entry{
+            .{ .name = "e.weight", .shape = &.{ 8, 32 }, .bytes = &codes },
+            .{ .name = "e.weight_scale", .dtype = "F8_E4M3", .shape = &.{ 8, 4 }, .bytes = &blocks },
+            .{ .name = "e.weight_scale_2", .dtype = "F32", .shape = &.{}, .bytes = &scale },
+        };
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try fixture.write(a, std.testing.io, tmp.dir, "model.safetensors", &entries);
+        var path: [96]u8 = undefined;
+        var ck = try core.Checkpoint.openModel(a, std.testing.io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+        defer ck.close();
+        if (v > 0) {
+            try std.testing.expectEqual(v, (try experts.expert(&ck, "e", 8, 64)).scale);
+        } else try std.testing.expectError(error.UnsupportedQwenQuantization, experts.expert(&ck, "e", 8, 64));
+    }
 }

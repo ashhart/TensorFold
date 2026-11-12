@@ -1,5 +1,7 @@
 # Qwen3.8-27B
 
+For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
+
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
 the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,

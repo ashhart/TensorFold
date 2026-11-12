@@ -39,7 +39,7 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
     if (h.learn != null) h.host.learner = callbacks.learner(h);
     kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
     errdefer kv_pages.unwatch(&h.kv); // a host that never starts leaves the pool reporting to no one
-    if (h.kv_count) |p| h.host.countPool(p);
+    if (h.kv_count) |p| try h.host.countPool(p);
     errdefer h.host.uncountPool();
     try h.host.start();
     note(h, .ready);

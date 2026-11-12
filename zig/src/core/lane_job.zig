@@ -33,6 +33,7 @@ pub const Job = struct {
     load: @import("lane_host_load.zig").Pass = .{}, // this attempt's prompt pass in the load ledger
     prefilled: ?i96 = null,
     entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
+    cache_promise: @import("prompt_cache_reserve.zig").Room = .{}, // net room for this pass, until kept or ended
     marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
     frame: u32 = 0, // exact family frame, before its compact cache-word hash
     key: []u32 = &.{}, // the request's cache key with its image frame in the first word (gpa-owned); empty: its own
@@ -59,7 +60,7 @@ pub const Job = struct {
         const job: *Job = @ptrCast(@alignCast(ptr));
         job.reached = @max(job.reached, at); // a request waiting for this cut goes on, whether the store keeps it or not
         job.reported(); // before a keep can evict the entry the pass restored
-        if (job.host.cache) |store| _ = store.keepBornFrame(job.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request), job.request.images, job.frame);
+        @import("lane_cache_queue.zig").keep(job.host, job, s, at);
     }
 
     /// Report a restored prefix or its failed copy; an untouched prefix remains kept.

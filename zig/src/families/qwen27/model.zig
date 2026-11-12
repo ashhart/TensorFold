@@ -85,6 +85,9 @@ pub const Model = struct {
                 try platform.environment.check("TF_PROMPT_ROWS", raw);
             }
         }
+        const timing = core.startup_receipt;
+        timing.target();
+        const validation = timing.span(.model_config);
         const path = try std.fs.path.join(a, &.{ dir, "config.json" });
         defer a.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20));
@@ -111,25 +114,34 @@ pub const Model = struct {
             std.log.err("qwen27: {s} (layer {?d}) is {d}-bit group {d}; this chip's projection kernels do not run it ({s})", .{ why.module, why.layer, why.width.bits, why.width.group, @errorName(why.reason) });
             return err;
         };
+        validation.end();
         m.queue = try m.device.queue();
         errdefer m.queue.deinit();
         m.checkpoint = core.checkpoint_metal.Checkpoint.init(a);
         errdefer m.checkpoint.deinit();
+        const headers = timing.span(.checkpoint_headers);
         const files = try core.checkpoint_host.shardFiles(a, io, dir);
         defer core.checkpoint_host.freeShardFiles(a, files);
         // projections stay in the files until load repacks them: the weights live once, in their lane layouts
         for (files) |file| try m.checkpoint.addFileSplit(m.device, file, "", "language_model.", wts.repacked);
+        headers.end();
+        const packing = timing.span(.read_pack);
         m.weights = try wts.load(a, m.device, &m.checkpoint, &m.shard, &ws);
         errdefer m.weights.deinit();
+        packing.end();
+        const pipelines = timing.span(.weight_pipelines);
         m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
         m.moe = if (c.moe()) try moe_gpu.Kernels.init(a, m.device) else null;
         errdefer if (m.moe) |*k| k.deinit();
+        pipelines.end();
+        const allocation = timing.span(.initial_allocation);
         // Serving defers automatic widening until its context and streams are known; explicit widths stay exact.
         m.frame = try Frame.init(m.device, shard.local, @max(rows, promptRows(shard.local, if (later) 0 else m.device.generation())));
         errdefer m.frame.deinit();
+        allocation.end();
         m.ane = null;
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);

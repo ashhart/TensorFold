@@ -1,6 +1,7 @@
 //! TF_KV_SHARE: GLM's side of the shared prompt store (native/cuda_prompt_pages.zig) over rank 0's KV pages.
 const std = @import("std");
 const kp = @import("core").kv_prompts;
+const kv = @import("core").kv_pool;
 const engine = @import("cuda_engine.zig");
 const page_rows = @import("cuda_state.zig").page_rows;
 const Stream = @import("lanes").Stream;
@@ -15,11 +16,13 @@ pub fn cacheable(s: *const Stream) bool {
     return s.prompt_logprobs == null and !s.untaught and s.embedding == null and cacheKey(s) != null;
 }
 
-/// Below 4 states a stream, live streams evict each other's: that many, and the --prompt-cache-gib holding their slots.
-pub fn advice(states: usize, parallel: usize, slot: u64) ?struct { states: usize, gib: u64 } {
+/// Below 4 states a stream: that many, and their slots' --prompt-cache-gib where asking it keeps all, else the most.
+pub fn advice(states: usize, parallel: usize, l: kv.Layout, planned: ?kv.Budget) ?struct { states: usize, gib: ?u64, most: usize } {
     const want = 4 * parallel;
     if (states >= want) return null;
-    return .{ .states = want, .gib = @import("core").kv_pool.holdingGib(want, slot) };
+    const b = planned orelse return .{ .states = want, .gib = kv.holdingGib(want, l.snap_bytes), .most = want };
+    const h = kv.holding(l, b, want);
+    return .{ .states = want, .gib = h.gib, .most = h.most };
 }
 
 /// More kept states than a startup plan sets slots aside for (kv_pool.most_snaps): refused by name at start.
@@ -27,13 +30,25 @@ pub fn tooMany(states: usize) bool {
     return states > @import("core").kv_pool.most_snaps;
 }
 
-test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a stream and the cache their slots take" {
+test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a stream and, where it holds them, their cache" {
     const mib: u64 = 1 << 20;
-    try std.testing.expect(advice(16, 4, 180 * mib) == null);
-    const a = advice(13, 4, 180 * mib).?; // a 2.4 GiB cache holds 13 of the 16 at --parallel 4
+    const g: u64 = 1 << 30;
+    const l: kv.Layout = .{ .fixed_bytes = 340 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
+    try std.testing.expect(advice(16, 4, l, null) == null);
+    const a = advice(13, 4, l, null).?; // a 2.4 GiB cache holds 13 of the 16 at --parallel 4; no device plan to check
     try std.testing.expectEqual(@as(usize, 16), a.states);
-    try std.testing.expectEqual(@as(u64, 3), a.gib); // 16 x 180 MiB is 2.8 GiB
-    try std.testing.expectEqual(@as(usize, 32), advice(0, 8, 180 * mib).?.states); // a cache holding none
+    try std.testing.expectEqual(@as(?u64, 3), a.gib); // 16 x 180 MiB is 2.8 GiB
+    try std.testing.expectEqual(@as(usize, 32), advice(0, 8, l, null).?.states); // a cache holding none
+    const tight: kv.Budget = .{ .room = 16 * g + g / 2, .engine = 0, .lanes = 4, .fixed = true, .cache = 16 * g, .snaps = 16, .window = 1_048_576 + 8, .engine_paged = true, .slots_only = true };
+    const t = advice(15, 4, l, tight).?; // TP=2 at a 1M window: only the engine's own window comes before the cache
+    try std.testing.expectEqual(@as(?u64, null), t.gib); // 3 GiB keeps no more there
+    try std.testing.expectEqual(@as(usize, 15), t.most);
+    var wide = tight;
+    wide.room = 24 * g;
+    try std.testing.expectEqual(@as(?u64, 3), advice(15, 4, l, wide).?.gib);
+    var strip = tight;
+    strip.room = 16 * g + 11 * g / 16; // the 16 slots fit and 3 GiB doesn't: an asked 3 keeps all 16, so it is named
+    try std.testing.expectEqual(@as(?u64, 3), advice(15, 4, l, strip).?.gib);
 }
 
 test "TF_KV_SHARE: up to 64 states is a plan's, 65 is refused" {

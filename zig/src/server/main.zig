@@ -17,7 +17,7 @@ const checkpoint_cli = @import("checkpoint_cli");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
+const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--max-inflight N] [--max-inflight-per-key N] [--requests-per-second N] [--request-burst N]" ++
     " [--context CONTEXT] [--profile stable] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-disk DIR]" ++
@@ -49,6 +49,7 @@ pub const serves = engines.serves;
 pub const std_options = engines.std_options;
 
 pub fn main(init: std.process.Init) !u8 {
+    const entry = std.Io.Clock.awake.now(init.io).toNanoseconds();
     const gpa = init.gpa;
     const io = init.io;
     const a = init.arena.allocator();
@@ -108,10 +109,15 @@ pub fn main(init: std.process.Init) !u8 {
         else => |x| return x,
     };
     if (try engines.environment(a, args)) |why| return fail(why);
+    const receipt = @import("core").startup_receipt;
+    receipt.enable(io, entry, try @import("sys").environment.read(bool, "TF_STARTUP_RECEIPT", false));
+    defer receipt.disable();
+    const discovery = receipt.span(.discovery);
     if (try slide_key.slideKeyless(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
         std.debug.print("tensorfold: {s}\n", .{why});
         return 2;
     }
+    api.prompt_cache.status.named.store(args.dashboard, .monotonic); // before any store keeps a state
     if (args.vision) for (@import("core").picture.runtime.warnings(io, a)) |warning| {
         if (warning) |message| log.line("warning: {s}", .{message});
     };
@@ -137,6 +143,12 @@ pub fn main(init: std.process.Init) !u8 {
         if (!try engines.follow(a, gpa, io, dir, model_type, args, &problem)) return fail(problem);
         return 0;
     }
+    discovery.end();
+    const tool_id_key = @import("tool_id_key.zig");
+    var tool_ids = tool_id_key.load(a, init.environ_map.get(tool_id_key.name), &problem) catch |e| switch (e) {
+        error.OutOfMemory => |x| return x,
+        error.Refused => return fail(problem),
+    };
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
@@ -146,6 +158,7 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
+    _ = receipt.span(.server_setup);
     log.line("chat template: {s}", .{up.text.renderer()});
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
@@ -157,6 +170,8 @@ pub fn main(init: std.process.Init) !u8 {
         return if (problem.len > 0) fail(problem) else e;
     };
     if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
+    const instruct = try instructSampling(a, io, dir, args, model_type, up.engine.engine.info().capability(.penalties), &problem);
+    if (problem.len > 0) return fail(problem);
     return serve.run(gpa, io, args, .{
         .engine = up.engine.engine,
         .stop = .{ .ctx = &closer, .close = Closer.close, .halt = Closer.halt },
@@ -167,10 +182,12 @@ pub fn main(init: std.process.Init) !u8 {
         .model_type = model_type,
         .reopen = .{ .ctx = &closer, .open = Reopen.open, .close_held = Reopen.closeHeld, .halt_held = Closer.halt, .replace = Reopen.replace },
         .sampling = try sampling(a, io, dir, args, model_type),
+        .instruct = instruct,
         .environ = init.environ_map,
         .started = started,
         .identity = engines.identity(a, args),
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) try forgetFail(init.environ_map) else 0,
+        .tool_id_key = if (tool_ids) |*key| key else null,
     });
 }
 
@@ -197,6 +214,8 @@ fn forgetFail(env: *const std.process.Environ.Map) !u32 {
 
 /// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.
 fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) !*hf_text.HfText {
+    const timing = @import("core").startup_receipt.span(.tokenizer);
+    defer timing.end();
     return hf_text.HfText.load(gpa, io, dir, template, pa, problem) catch |e| {
         if (problem.len == 0) problem.* = @errorName(e);
         return e;
@@ -218,9 +237,25 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]cons
 
 /// The family's defaults, generation_config.json's sampling, then the serve flags (family_sampling.resolve).
 fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8) !?json.Value {
+    return @import("family_sampling.zig").resolve(a, model_type, try generationConfig(a, io, dir), samplingFlags(args));
+}
+
+/// --instruct-sampling's set for sampled chats with thinking off (family_sampling.startup), or ``problem``.
+fn instructSampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8, penalties: bool, problem: *[]const u8) !?json.Value {
+    const text = args.instruct_sampling orelse return null;
+    const got = try @import("family_sampling.zig").startup(a, model_type, try generationConfig(a, io, dir), samplingFlags(args), penalties, text);
+    if (got.note) |n| log.line("{s}", .{n});
+    if (got.problem) |p| problem.* = p;
+    return got.set;
+}
+
+fn generationConfig(a: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
     const path = try std.fs.path.join(a, &.{ dir, "generation_config.json" });
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch null;
-    return @import("family_sampling.zig").resolve(a, model_type, bytes, .{ .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p });
+    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch null;
+}
+
+fn samplingFlags(args: cli.Args) @import("family_sampling.zig").Flags {
+    return .{ .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p };
 }
 
 const Closer = @import("idle_unload_closer.zig").Closer;

@@ -5,10 +5,10 @@ const lesson_route = @import("lesson_route.zig");
 const pocket_fit = @import("pocket_fit.zig");
 const values = @import("pocket_values.zig");
 const joint = @import("pocket_joint.zig");
-const pocket_dump = @import("pocket_dump.zig");
+const locating = @import("pocket_locate.zig");
+const shrinking = @import("pocket_shrink.zig");
 const clock = @import("pocket_clock.zig");
 const reading = @import("pocket_read.zig");
-const quieting = @import("pocket_quiet.zig");
 const loading = @import("pocket_load.zig");
 const family = @import("family.zig");
 const forgetting = @import("pocket_forget.zig");
@@ -20,7 +20,6 @@ const Acting = lesson_route.Acting;
 const Kind = pocket_fit.Kind;
 const Fit = pocket_fit.Fit;
 const fit = pocket_fit.fit;
-const fitLayer = pocket_fit.fitLayer;
 const dotBf16 = pocket_fit.dotBf16;
 const fit_steps = pocket_fit.fit_steps;
 
@@ -74,16 +73,9 @@ pub fn kindFor(l: Label, key: Key) Kind {
 }
 
 /// Whether layer l may hold a `key` neuron: a fifth to seven eighths in; a subject's to five eighths, where facts sit.
-fn candidate(l: usize, layers: usize, key: Key) bool {
+fn legacyCandidate(l: usize, layers: usize, key: Key) bool {
     const last = if (key == .subject) layers * 5 / 8 else layers * 7 / 8;
     return l >= layers / 5 and l <= last;
-}
-
-/// Strict layers first (silent on every row read), then most of the fact's questions on, then the widest least margin.
-fn better(f: []const Fit, a: usize, b: usize) bool {
-    if (f[a].fires != f[b].fires) return f[a].fires < f[b].fires;
-    if (f[a].fact_on != f[b].fact_on) return f[a].fact_on > f[b].fact_on;
-    return f[a].fact_least > f[b].fact_least;
 }
 
 /// A pocket over trainer T (its inputs, residuals, nudges) for family F, and a host handing each layer to the forward.
@@ -98,6 +90,8 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         pub const gated = F.neuron.gated;
 
         gpa: std.mem.Allocator,
+        locate: locating.State = .{},
+        shrink: shrinking.State = .{},
         mode: Mode, // as asked (TF_SLIDE_POCKET_KEY), auto by default
         strict: bool = true, // the subject word after another token is someone else's (TF_SLIDE_POCKET_LEADS=off: anyone's)
         keeping: bool = true, // other answers its subject neurons fire on stay as they were (TF_SLIDE_POCKET_KEEPS=off: not held)
@@ -121,6 +115,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         scratch: std.ArrayList(f32) = .empty, // SwiGLU: [neurons, D], a slot's up rows (u / sharp) as handed over
         used: std.ArrayList(usize) = .empty, // [slots]: neurons in use, the first ones
         taken: std.ArrayList(Taken) = .empty, // the open fact's neurons
+        against: []const Example = &.{}, // old answers of a correction, owned by the enclosing lesson
         answered: []const Example = &.{}, // the fact's answers, which its neurons' outputs are fitted on
         prompts: []const Example = &.{}, // more wordings of its questions, prompts only
         held: []const Example = &.{}, // its held-out answers, judged and never fitted on
@@ -155,6 +150,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         snap: marks.Snap(Learned) = .{},
 
         pub fn mark(p: *Self) !void {
+            if (p.shrink.pending) return error.ShrinkPending;
             if (p.restore_pending or p.retire_pending or p.saved_mismatch or p.save_pending or p.forgot.stale) return error.PocketUnresolved;
             return marks.mark(p);
         }
@@ -166,6 +162,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
 
         pub fn deinit(p: *Self) void {
             inline for (.{ "moe", "up", "down", "gate", "scratch", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "refit_gate", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
+            p.shrink.deinit(p.gpa);
             p.read.deinit(p.gpa);
             p.v.deinit(p.gpa);
             p.snap.deinit(p.gpa);
@@ -206,8 +203,12 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             return p.split[0] > 0 or (p.split[1] > 0 and subjectRow(ex) != null) or (p.split[2] > 0 and valueRow(ex) != null);
         }
 
-        fn slots(p: *const Self) usize {
+        pub fn slots(p: *const Self) usize {
             return p.moe.items.len;
+        }
+
+        pub fn candidate(p: *const Self, slot: usize, l: usize, key: Key) bool {
+            return if (p.locate.enabled) p.locate.chosen[slot] else legacyCandidate(l, p.layers, key);
         }
 
         pub fn neuron(_: *const Self, which: []f32, slot: usize, n: usize, d: usize) []f32 {
@@ -286,7 +287,9 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             p.prompts = prompts;
             p.held = held;
             p.steady = steady;
-            p.split = p.pickSplit(&.{ answered, prompts }, answered);
+            p.locate = .{ .enabled = @hasDecl(T, "causalLogit") and !set("TF_SLIDE_PLACEMENT", "legacy") };
+            p.shrink.reset();
+            p.split = if (p.against.len > 0) .{ 0, per_fact, 0 } else p.pickSplit(&.{ answered, prompts }, answered);
             @import("pocket_selection.zig").log(p, &.{ answered, prompts }, answered);
             std.log.info("slide pocket: the fact's neurons: {d} at the reply's first row, {d} at its questions' subject, {d} before its answer's value", .{ p.split[0], p.split[1], p.split[2] });
             p.taken.clearRetainingCapacity();
@@ -330,7 +333,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             const before = t.count;
             const done = switch (p.phase) {
                 .read => try reading.once(p, t),
-                .fit => try p.fitAll(t, host),
+                .fit => if (try locating.once(p, t)) try @import("pocket_place.zig").all(p, t, host) else false,
                 .values => try values.valueOnce(p, t, host),
                 .check => try values.checkOnce(p, t, host),
                 .done => true,
@@ -350,6 +353,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             p.restore_pending = p.snap.valid;
             if (try marks.restore(p, t, host)) {
                 p.restore_pending = false;
+                p.shrink.reset();
                 inline for (.{ "refits", "refit_up", "refit_gate", "joint", "joint_down", "joint_answers", "taken" }) |f| @field(p, f).clearRetainingCapacity();
                 return;
             }
@@ -414,59 +418,8 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             }
         }
 
-        /// Every key's candidate layers fitted in threads, the best taken; then keeps found, earlier neurons refitted.
-        fn fitAll(p: *Self, t: *T, host: anytype) !bool {
-            const d = p.hidden;
-            const n = p.slots();
-            const m = p.labels.items.len;
-            if (@import("sys").c.getenv("TF_SLIDE_POCKET_DUMP")) |dir| pocket_dump.write(p, std.mem.span(dir), p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
-            const kinds = try p.gpa.alloc(Kind, 3 * m);
-            defer p.gpa.free(kinds);
-            for (p.labels.items, 0..) |l, i| for (0..3) |k| {
-                kinds[k * m + i] = kindFor(l, @fromBackingInt(@intCast(k)));
-            };
-            const us = try p.gpa.alloc(f32, 3 * n * d);
-            defer p.gpa.free(us);
-            const fits = try p.gpa.alloc(Fit, 3 * n);
-            defer p.gpa.free(fits);
-            @memset(fits, .{ .fires = std.math.maxInt(usize) });
-            const t0 = clock.now(host.io);
-            const threads = try p.gpa.alloc(?std.Thread, 3 * n);
-            defer p.gpa.free(threads);
-            @memset(threads, null);
-            var fitted: usize = 0;
-            const below = F.neuron.margin;
-            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, p.layers, @fromBackingInt(@intCast(k)))) {
-                threads[k * n + j] = std.Thread.spawn(.{}, fitLayer, .{ p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j], below }) catch null;
-                fitted += 1;
-            };
-            for (0..3) |k| for (p.moe.items, 0..) |l, j| if (p.split[k] > 0 and candidate(l, p.layers, @fromBackingInt(@intCast(k)))) {
-                if (threads[k * n + j]) |th| th.join() else fitLayer(p.gpa, p.rows.items, kinds[k * m ..][0..m], n, j, d, us[(k * n + j) * d ..][0..d], &fits[k * n + j], below);
-            };
-            const t1 = clock.now(host.io);
-            for (0..3) |k| if (p.split[k] > 0) {
-                const key: Key = @fromBackingInt(@intCast(k));
-                var order: std.ArrayList(usize) = .empty;
-                defer order.deinit(p.gpa);
-                // a layer whose pocket is full is passed over
-                for (p.moe.items, 0..) |l, j| if (candidate(l, p.layers, key) and p.used.items[j] < neurons) try order.append(p.gpa, j);
-                if (order.items.len == 0) return error.PocketFull;
-                std.mem.sort(usize, order.items, @as([]const Fit, fits[k * n ..][0..n]), better);
-                for (order.items[0..@min(p.split[k], order.items.len)]) |j| try p.take(j, key, us[(k * n + j) * d ..][0..d], fits[k * n + j], kinds[k * m ..][0..m], d);
-            };
-            p.logSources(d, m, kinds);
-            try p.findKeeps(d);
-            try quieting.quiet(p, t, host);
-            std.log.info("slide pocket: {d} candidate neurons fitted on {d} read rows in {d:.1} s; earlier neurons checked in {d:.1} s", .{ fitted, m, t1 - t0, clock.now(host.io) - t1 });
-            try joint.find(p, d);
-            try p.v.begin(p.gpa, p.taken.items.len + p.joint.items.len, d, p.answered.len + p.joint_answers.items.len + p.keeps.items.len);
-            joint.seed(p, d);
-            p.next(.values);
-            return false;
-        }
-
         /// Logs each key's first neuron's firing share by source: answers, short and long wordings, held-out answers.
-        fn logSources(p: *const Self, d: usize, m: usize, kinds: []const Kind) void {
+        pub fn logSources(p: *const Self, d: usize, m: usize, kinds: []const Kind) void {
             const n = p.slots();
             for (p.taken.items) |x| {
                 if (x.neuron + 1 != p.used.items[x.slot]) continue;
@@ -489,7 +442,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         }
 
         /// Slot j's next neuron taken for the open fact on `key`, its input weights `u` as fitted (`f`, on `kinds`).
-        fn take(p: *Self, j: usize, key: Key, u: []const f32, f: Fit, kinds: []const Kind, d: usize) !void {
+        pub fn take(p: *Self, j: usize, key: Key, u: []const f32, f: Fit, kinds: []const Kind, d: usize) !void {
             const n = p.slots();
             const k = p.used.items[j];
             p.used.items[j] += 1;
@@ -505,7 +458,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         }
 
         /// Other answers where the fact's subject neurons fire, each at its strongest row: these stay as they were.
-        fn findKeeps(p: *Self, d: usize) !void {
+        pub fn findKeeps(p: *Self, d: usize) !void {
             if (p.split[1] == 0 or !p.keeping) return;
             const n = p.slots();
             var i: usize = 0;
@@ -563,6 +516,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         pub fn progress(p: *const Self) Progress {
             return switch (p.phase) {
                 .read => .{ .phase = .read, .at = p.at, .of = p.reads() },
+                .fit => .{ .phase = .fit, .at = p.locate.example * (p.slots() + 1) + p.locate.slot + @intFromBool(p.locate.baseline != null), .of = if (p.locate.enabled and !p.locate.done) @min(locating.questions, locating.answers(p).len) * (p.slots() + 1) else 0 },
                 .values => .{ .phase = .values, .at = p.v.round, .loss = p.v.running },
                 .check => .{ .phase = .check, .at = p.at, .of = p.held.len },
                 else => .{ .phase = p.phase },

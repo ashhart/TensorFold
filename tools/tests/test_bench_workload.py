@@ -77,7 +77,7 @@ class CompleteTiming(unittest.TestCase):
             def __exit__(self, *args):
                 pass
         with patch.object(concurrent.urllib.request, "urlopen", return_value=Response()), \
-                patch.object(concurrent.time, "perf_counter", side_effect=[10, 11, 14, 18]):
+                patch.object(concurrent.time, "perf_counter", side_effect=[10, 10.5, 11, 14, 18]):
             run = concurrent.stream("http://unused", "fixture", concurrent.PROMPTS[0], 80, 0, 1)
         self.assertTrue(run["complete"])
         self.assertEqual(run.get("elapsed_s"), 8)

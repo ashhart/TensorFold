@@ -15,6 +15,25 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     b.step("test-kernel-seed-host", "Named contract fixtures keep their seed when entries are inserted").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug), .filters = &.{"contract seed:"} })).step);
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
+    const mapping_stub = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_mapping_host.zig") });
+    const mapping_tf = b.createModule(.{ .root_source_file = b.path("zig/lfm2_mapping_tf.zig"), .imports = &.{
+        .{ .name = "metal", .module = mapping_stub },
+        .{ .name = "kernel_sources", .module = mapping_stub },
+    } });
+    const mapping = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_mapping_test.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
+            .{ .name = "metal", .module = mapping_stub },
+            .{ .name = "tensorfold", .module = mapping_tf },
+            .{ .name = "kernel_sources", .module = mapping_stub },
+        },
+    }) }));
+    mapping.has_side_effects = true;
+    b.step("test-metal-launch-map-host", "Every registered Metal launch maps without a device or shader compiler").dependOn(&mapping.step);
+    step.dependOn(&mapping.step);
     const precision = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/attention_precision.zig"),
         .target = b.graph.host,
@@ -94,6 +113,10 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     }) });
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
+    const limits_run = b.addRunArtifact(exe);
+    limits_run.addArg("--no-gates");
+    limits_run.has_side_effects = true;
+    b.step("metal-kernel-contract-limits", "Run all Metal launch limits on this GPU, without numerical gates").dependOn(&limits_run.step);
     const run = b.addRunArtifact(exe);
     b.step("kernel-contract", "Every registered kernel through the contract's gates on this GPU, each control red").dependOn(&run.step);
     const ling_gpu = b.addTest(.{ .root_module = b.createModule(.{

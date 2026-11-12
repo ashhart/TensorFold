@@ -1,4 +1,5 @@
 //! Reviewed switch metadata and environment-first lookup; stable leaves every existing family default intact.
+pub const startup_receipt = @import("startup_receipt.zig");
 const std = @import("std");
 
 pub const Profile = enum { stable };
@@ -8,6 +9,7 @@ pub const Switch = enum {
     TF_QWEN_KV_PAGES_ALL,
     TF_QWEN_KV_SHARE,
     TF_QWEN_REQUEST_STARTS,
+    TF_GLM_REQUEST_STARTS,
     TF_KV_SHARE,
     TF_FLASHNEXT_KV_PAGES,
     TF_FLASHNEXT_KV_PAGES_ALL,
@@ -15,6 +17,11 @@ pub const Switch = enum {
     TF_GLM_KV_HOST,
     TF_GLM_KV_HOST_SHARED,
     TF_GLM_PROMPT_TAIL,
+    TF_GLM_HOST_CACHE,
+    TF_GLM_VISION_HOST,
+    TF_GLM_PDL,
+    TF_GLM_PROMPT_STEPS,
+    TF_GLM_SHARED,
     TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS,
     TENSORFOLD_KOLIBRI_KV_PAGES,
     TENSORFOLD_DORY_KV_PAGES,
@@ -86,6 +93,8 @@ pub const Entry = struct {
     evidence: []const u8,
     syntax: Syntax = .count,
     stable: ?[:0]const u8 = null,
+    /// Unset, the row counts as on ("1") while this switch is on: a family that turns it on by another name.
+    on_with: ?Switch = null,
 
     pub fn name(e: Entry) [:0]const u8 {
         return @tagName(e.id);
@@ -111,6 +120,13 @@ pub const Entry = struct {
         }
         return different(e.syntax, raw);
     }
+
+    /// The row's value as served: its own when present, else "1" when `on_with`'s value (`by`) turns it on.
+    pub fn served(e: Entry, own: ?[]const u8, by: ?[]const u8) ?[]const u8 {
+        if (own != null or e.on_with == null) return own;
+        const v = by orelse return null;
+        return if (!blank(v) and different(entry(e.on_with.?).syntax, v)) "1" else null;
+    }
 };
 
 const qwen: []const []const u8 = &.{ "qwen3_5", "qwen3_5_moe" };
@@ -122,20 +138,26 @@ pub const cuda_cache: []const []const u8 = &.{ "nemotron_h", "nemotron_h_omni", 
 
 pub const entries = [_]Entry{
     .{ .id = .TF_QWEN_REQUEST_STARTS, .families = qwen, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#1334; default-off; GB10 six-turn: resumed equals fresh, one reply differs from unset" },
+    .{ .id = .TF_GLM_REQUEST_STARTS, .families = &.{"glm5_next"}, .class = .arithmetic, .syntax = .one, .effect = "Opt into CUDA message-start prompt cuts", .evidence = "#2396; default-off; GB10 TP=2 receipts in #2404" },
     .{ .id = .TF_QWEN_KV_PAGES, .families = qwen, .class = .identical, .effect = "KV pool page size; memory and workload tradeoffs", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_PAGES_ALL, .families = qwen, .class = .debug, .syntax = .one, .effect = "Put the engine's own stream on pages too", .evidence = "#1357" },
     .{ .id = .TF_QWEN_KV_SHARE, .families = qwen, .class = .identical, .effect = "Keep prompt pages and bounded recurrent snapshots", .evidence = "#1357" },
-    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
-    .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; fast-profile qualification pending", .evidence = "#1660" },
+    .{ .id = .TF_KV_SHARE, .families = &.{ "gemma4", "gemma4_unified", "kolibri1", "spark2_5", "glm5_next", "dory" }, .class = .identical, .effect = "Keep prompt states over the core KV pool", .evidence = "#1657" },
+    .{ .id = .TF_FLASHNEXT_KV_PAGES, .families = flash, .class = .experimental, .effect = "KV pool page size; no profile qualifies it yet", .evidence = "#1660" },
     .{ .id = .TF_FLASHNEXT_KV_PAGES_ALL, .families = flash, .class = .debug, .syntax = .one, .effect = "Put every stream on pool pages for checks", .evidence = "#1660" },
     .{ .id = .TF_KV_PAGES, .families = &.{"glm5_next"}, .class = .identical, .syntax = .auto, .effect = "GLM KV pool pages; auto from two ranks with BF16, windows with FP8", .evidence = "#1322" },
     .{ .id = .TF_KV_PAGES, .families = &.{ "nemotron_h", "nemotron_h_omni" }, .class = .identical, .report_values = &.{ "0", "all" }, .effect = "Nemotron KV pool pages by default; exact 0 disables, exact all pages every stream", .evidence = "#781" },
     .{ .id = .TF_GLM_KV_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the DSA layers' latent rows on pinned host pages", .evidence = "#1795" },
     .{ .id = .TF_GLM_KV_HOST_SHARED, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "One copy of those host pages across the ranks on one host", .evidence = "#1795" },
     .{ .id = .TF_GLM_PROMPT_TAIL, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep a raw prompt's state at its last chunk start, from the chat states' budget", .evidence = "#2226" },
+    .{ .id = .TF_GLM_HOST_CACHE, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep kept prompt states in pinned host memory instead of on the device", .evidence = "#2370" },
+    .{ .id = .TF_GLM_VISION_HOST, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Keep the vision tower's weights in pinned host memory, staged a unit at a time", .evidence = "#2370" },
+    .{ .id = .TF_GLM_PDL, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 turns off the matmuls' dependent launches", .evidence = "#2370" },
+    .{ .id = .TF_GLM_PROMPT_STEPS, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs rank 0's prompt passes whole, not in chunks", .evidence = "#2370" },
+    .{ .id = .TF_GLM_SHARED, .families = &.{"glm5_next"}, .class = .identical, .report_values = &.{"0"}, .effect = "Exact 0 runs each of rank 0's windows in its own forward", .evidence = "#2370" },
     .{ .id = .TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS, .families = cuda_cache, .class = .identical, .syntax = .one, .effect = "A new prompt state that fits only by evicting another conversation's is not kept", .evidence = "#2346" },
     .{ .id = .TENSORFOLD_KOLIBRI_KV_PAGES, .families = &.{"kolibri1"}, .class = .arithmetic, .report_values = &.{"0"}, .effect = "Exact 0 disables requested pool pages; other text keeps the option", .evidence = "#2370" },
-    .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },
+    .{ .id = .TENSORFOLD_DORY_KV_PAGES, .families = &.{"dory"}, .class = .arithmetic, .syntax = .not_zero, .on_with = .TF_KV_SHARE, .effect = "Present text except exact 0 selects pool pages instead of default windows", .evidence = "#2370" },
     .{ .id = .GEMMA_DRAFT_BF16, .families = &.{ "gemma4", "gemma4_unified" }, .backend = "metal", .class = .debug, .report_values = &.{ "all", "fc", "self_attn.q_proj", "self_attn.k_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.down_proj" }, .effect = "Keep selected drafter stacks in stored BF16 instead of quantizing them", .evidence = "#2370" },
     .{ .id = .TF_ANE_COLUMNS, .families = &.{"qwen3_5"}, .backend = "metal", .class = .experimental, .effect = "FP16 Neural Engine prompt columns; exact output not qualified", .evidence = "#2370" },
     .{ .id = .TF_PROMPT_ROWS, .families = qwen, .backend = "metal", .class = .arithmetic, .syntax = .present, .effect = "Explicit prompt frame capacity and kept-state key geometry", .evidence = "#2370" },
@@ -203,6 +225,17 @@ pub fn resolve(profile: Profile, id: Switch, environment: ?[:0]const u8) ?[:0]co
 /// The only served profile is stable; no global setting or environment mutation is needed to select it.
 pub inline fn get(comptime id: Switch) ?[:0]const u8 {
     return value(.stable, id);
+}
+
+/// `get` for a reader that parses the text: empty or whitespace-only text reads as unset (`docs/environment.md`).
+pub inline fn given(comptime id: Switch) ?[:0]const u8 {
+    const v = get(id) orelse return null;
+    return if (blank(v)) resolve(.stable, id, null) else v;
+}
+
+/// Empty or whitespace-only text, which a parsing reader takes as unset.
+fn blank(v: []const u8) bool {
+    return std.mem.trim(u8, v, " \t\r\n").len == 0;
 }
 
 /// One switch's value for a profile chosen at runtime: the same environment-first rule as `get`.

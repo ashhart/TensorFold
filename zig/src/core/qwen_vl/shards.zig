@@ -119,3 +119,26 @@ test "Qwen-VL shards: a header length past 100 MB, past the file's end or cut sh
         try std.testing.expectError(case.want, headers(limited.allocator(), io, dir));
     }
 }
+
+test "Qwen-VL shards: a tensor read past a shard shortened after open stops with ShortRead" {
+    const io = std.testing.io;
+    var fixtures: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer fixtures.deinit();
+    const good = try shard(fixtures.allocator());
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = good });
+    const real = try tmp.dir.realPathFileAlloc(io, "model.safetensors", fixtures.allocator());
+    const fd = std.c.open(try fixtures.allocator().dupeSentinel(u8, real, 0), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    if (@import("builtin").os.tag == .macos) _ = std.c.fcntl(fd, 48, @as(c_int, 1)); // F_NOCACHE, as weights.zig reads it
+    const f = try tmp.dir.openFile(io, "model.safetensors", .{ .mode = .read_write });
+    try f.setLength(io, good.len - 3); // three bytes into vision_tower.b
+    f.close(io);
+    var b: [6]u8 = undefined;
+    try std.testing.expectError(error.ShortRead, readAll(fd, &b, good.len - 6));
+    try std.testing.expectError(error.ShortRead, readAll(fd, b[0..1], good.len - 3)); // at the new end: a zero read
+    try readAll(fd, b[0..3], good.len - 6);
+    try std.testing.expectEqualSlices(u8, &.{ 3, 3, 3 }, b[0..3]);
+}

@@ -51,7 +51,7 @@ pub const Encoder = struct {
 
     /// The checkpoint folder `dir`: its text_encoder/.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8) !*Encoder {
-        if (!device.tensorUnits()) {
+        if (!ks.available(device)) {
             std.log.err("moss image encoder: {s} has no tensor units; this family runs on the M5's alone, the only chip it was checked on", .{device.name()});
             return error.TensorUnitsRequired;
         }

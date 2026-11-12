@@ -4,6 +4,8 @@ const std = @import("std");
 const cuda = @import("cuda");
 const aot = cuda.aot;
 
+/// The TF_FLASHNEXT_* startup check; the tool mains take it here, as a file belongs to one module
+pub const env_validate = @import("env_validate.zig");
 pub const embed = @import("cuda_embed.zig");
 pub const projection = @import("cuda_projection.zig");
 pub const projection_load = @import("cuda_projection_load.zig");
@@ -443,6 +445,7 @@ pub const Tri = struct {
 
 test {
     _ = @import("cuda_split_lane_test.zig");
+    _ = @import("cuda_cap_test.zig");
     _ = embed;
     _ = hc;
     _ = qmm;

@@ -50,6 +50,9 @@ test "GLM copies and transforms join before shard eviction; errors and duplicate
     const bad = [_]fix.Copy{.{ .shard = 0, .off = data.len - 2, .len = 4, .dst = &short }};
     try std.testing.expectError(error.ShortRead, fix.runCopies(a, &.{z}, &bad, &.{}, 2));
     try std.testing.expectEqual(@as(usize, 0), try cached(file.handle, data.len));
+    // a transform's own read past the end (weights_fix.zig:49) fails the load too
+    const past = [_]fix.Transform{.{ .src = .{ .shard = 0, .off = data.len - 16, .len = 32, .dtype = .bf16, .shape = @splat(1), .rank = 1 }, .dst = @ptrCast(&widened), .fix = .to_f32 }};
+    try std.testing.expectError(error.TransformFailed, fix.runCopies(a, &.{z}, &.{}, &past, 2));
     var fd: platform.c.fd_t = undefined;
     {
         var files: fix.Files = .{ .a = a };

@@ -14,8 +14,9 @@ prompt cache off (mlx_lm: ``--prompt-cache-size 0``): a cached reply can arrive 
 the reply's usage. A request that fails to connect or errors counts in ``failed``; one whose text came in fewer than
 ``MIN_PIECES`` pieces counts in ``unmeasured``; neither enters the rates. ``--stagger-ms`` spaces the starts (a
 server with a small listen backlog resets simultaneous connections; those resets are reported, not hidden).
-Each request also carries bench_metrics' figures (prefill tok/s, ITL, round gaps; docs/cache-benchmarks.md defines
-them); each rep pools them over its streams, and each cell gives medians ("request" and "pooled").
+Each request also carries bench_metrics' figures (prompt/TTFT tok/s, token ITL/TPOT, chunk estimates, round gaps) and
+bench_stream's boundaries and completion class (docs/cache-benchmarks.md defines them); each rep pools them over its
+streams, and each cell gives medians ("request" and "pooled") and its completion classes.
 Every stream of a default cell sends the same prompt (greedy: and gets the same reply), so a mixture-of-experts
 model routes all of them to the same experts, which can flatter multi-stream rates. ``--prompts FILE`` (for example
 tools/bench_prompts.json) runs one "distinct" cell instead, where request i sends the file's item i (modulo its length).
@@ -32,10 +33,11 @@ import threading
 import time
 import urllib.request
 
-from bench_evidence import Evidence, token_equal
+from bench_evidence import token_equal
 from bench_auth import authorize, read_api_key, redact
 from bench_args import validate_temperatures
 import bench_metrics
+import bench_stream
 import bench_timing
 import bench_thinking
 
@@ -54,9 +56,10 @@ PROMPTS = [
 
 
 def stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None,
-           draft: bool = True, gate: threading.Barrier | None = None, *, api_key: str | None = None) -> dict:
+           draft: bool = True, gate: threading.Barrier | None = None, *, api_key: str | None = None,
+           cancel: threading.Event | None = None) -> dict:
     try:
-        return _stream(base, model, item, tokens, temperature, seed, draft, gate, api_key)
+        return _stream(base, model, item, tokens, temperature, seed, draft, gate, api_key, cancel)
     except Exception as exc:  # noqa: BLE001 - a failed request is reported, not fatal
         if gate is not None:
             gate.abort()
@@ -67,11 +70,12 @@ def failed_run(item: dict, seed: int | None, error: str) -> dict:
     return {"prompt": item["name"], "seed": seed, "sent": None, "first": None, "last": None, "tokens": None,
             "pieces": [], "ttft_s": None, "decode_tps": None, "token_sha": None, "token_sha256": None,
             "completed": None, "error": error, "complete": False, "prompt_tokens": None,
-            "cached_tokens": None, "cache_state": "unverified", "output_sha256": None, **bench_thinking.receipt(item)}
+            "cached_tokens": None, "cache_state": "unverified", "output_sha256": None, "tool_calls": None,
+            "tool_sha256": None, **bench_stream.EMPTY, **bench_thinking.receipt(item)}
 
 
 def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None, draft: bool,
-            gate: threading.Barrier | None, api_key: str | None = None) -> dict:
+            gate: threading.Barrier | None, api_key: str | None = None, cancel: threading.Event | None = None) -> dict:
     body = {"model": model, "max_tokens": tokens, "temperature": temperature, "stream": True,
             "stream_options": {"include_usage": True}, "ignore_eos": True}
     if seed is not None:
@@ -93,38 +97,22 @@ def _stream(base: str, model: str, item: dict, tokens: int, temperature: float, 
     if gate is not None:
         gate.wait(timeout=30)
     sent = time.perf_counter()
-    pieces: list[tuple[float, int]] = []           # (arrival, characters) of every text chunk
-    usage: dict = {}
-    runtime: dict = {}
-    evidence = Evidence()
-    complete = False
+    reply = bench_stream.Collector(sent)
     with urllib.request.urlopen(req, timeout=1800) as resp:
-        for raw in resp:
-            line = raw.decode().strip()
-            if line == "data: [DONE]":
-                complete = True
-                break
-            if not line.startswith("data:"):
-                continue
-            chunk = json.loads(line[5:])
-            if "error" in chunk:
-                raise RuntimeError("server_stream_error")
-            usage = chunk.get("usage") or usage
-            runtime = chunk.get("tensorfold") or runtime
-            for choice in chunk.get("choices", []):
-                evidence.add(choice)
-                delta = choice.get("delta") or {}
-                # reasoning counts: its tokens are in completion_tokens, so the clock starts with them
-                piece = choice.get("text") or delta.get("content") or delta.get("reasoning_content") or ""
-                if piece:
-                    pieces.append((time.perf_counter(), len(piece)))
+        reply.read(resp, cancel)
+    if reply.end == "error":
+        raise RuntimeError("server_stream_error")
     completed = time.perf_counter()
-    observed = evidence.finish(usage, runtime, complete)
+    complete = reply.end == "done"
+    # reasoning counts: its tokens are in completion_tokens, so the clock starts with them
+    pieces = reply.pieces
+    observed = reply.evidence.finish(reply.usage, reply.runtime, complete)
     n = observed["tokens"]
     out = {"prompt": item["name"], "seed": seed, "sent": sent, "first": None, "last": None, "tokens": n,
-           "pieces": pieces, "completed": completed, "ttft_s": None, "decode_tps": None, **observed}
+           "pieces": pieces, "completed": completed, "ttft_s": None, "decode_tps": None, **observed,
+           **reply.receipt()}
     if not complete:
-        out["error"] = "incomplete_stream"
+        out["error"] = "client_cancelled" if reply.end == "cancelled" else "incomplete_stream"
     if pieces:
         first, last = pieces[0][0], pieces[-1][0]
         out.update(first=first, last=last, ttft_s=first - sent if complete else None)
@@ -187,10 +175,11 @@ def aggregates(runs: list[dict]) -> dict:
     return out
 
 
-METRICS = ("prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
-           "tokens_per_chunk")
-POOLED = ("aggregate_prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "round_gap_p50_ms", "round_gap_p95_ms",
-          "tokens_per_chunk")
+METRICS = ("prompt_ttft_tps", "prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "tpot_ms",
+           "chunk_tpot_estimate_ms", "round_gap_p50_ms", "round_gap_p95_ms", "tokens_per_chunk",
+           *bench_stream.BOUNDARIES)
+POOLED = ("aggregate_prompt_ttft_tps", "aggregate_prefill_tps", "itl_mean_ms", "itl_p50_ms", "itl_p95_ms", "tpot_ms",
+          "chunk_tpot_estimate_ms", "round_gap_p50_ms", "round_gap_p95_ms", "tokens_per_chunk")
 
 
 def median(values) -> float | None:
@@ -267,7 +256,8 @@ def main() -> None:
     switch = capabilities["thinking_switch"]
     pool = bench_thinking.configure(pool, capabilities)
     cells = [None] if args.mixed or args.prompts else pool
-    report: dict = {"label": args.label, "tokens": args.tokens, "mixed": args.mixed, "cells": []}
+    report: dict = {"label": args.label, "tokens": args.tokens, "mixed": args.mixed, "cells": [],
+                    "deprecated_keys": bench_metrics.NOTE, "collector_us_per_chunk": round(bench_stream.overhead(), 2)}
     report["thinking_switch"] = switch
     report["thinking_applicable"] = capabilities["thinking_applicable"]
     if args.prompts:
@@ -305,11 +295,13 @@ def main() -> None:
                     rep["ttft_s"] = [round(r["ttft_s"], 2) if r["ttft_s"] is not None else None for r in runs]
                     rep["errors"] = [r["error"] for r in runs if r.get("error")]
                     rep["thinking_modes"] = sorted({r["thinking"] for r in runs if "thinking" in r})
-                    rep["requests"] = [{k: r.get(k) for k in ("prompt_tokens", "ttft_s", "decode_tps", "thinking", "thinking_off_requested", *METRICS)}
+                    rep["requests"] = [{k: r.get(k) for k in ("prompt_tokens", "ttft_s", "decode_tps", "thinking", "thinking_off_requested",
+                                                              "completion", "token_timing", *METRICS)}
                                        for r in runs]
                     rep["pooled"] = bench_metrics.pooled(runs)
                     rep["evidence"] = [{k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "tokens",
-                                       "cache_state", "complete", "token_sha", "token_sha256", "output_sha256")}
+                                       "cache_state", "complete", "token_sha", "token_sha256", "output_sha256",
+                                       "completion", "finish_reasons", "tool_calls", "tool_sha256")}
                                        for r in runs]
                     rep["client_intervals"] = [{"start": r["sent"], "first": r.get("first"),
                                                 "last": r.get("last"), "end": r.get("completed"),
@@ -336,6 +328,8 @@ def main() -> None:
                 asked = [q for r in reps for q in r["requests"]]
                 cell["request"] = {k: median(q.get(k) for q in asked) for k in ("ttft_s", "decode_tps", *METRICS)}
                 cell["pooled"] = {k: median(r["pooled"].get(k) for r in reps) for k in POOLED}
+                classes = [q["completion"] for q in asked]
+                cell["completions"] = {c: classes.count(c) for c in sorted(set(classes), key=str)}
                 valid = all(r["timing_valid"] for r in reps)
                 cell["timing_valid"] = valid
                 for key in ("end_to_end_tps", "makespan_s"):

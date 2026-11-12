@@ -207,7 +207,7 @@ fn actualFrame(block: usize) !void {
     d.scratch = .{ .d = &driver, .ptr = 0x100000, .len = measured };
     try std.testing.expectEqual(measured, try d.layout(true));
     try std.testing.expect(d.hp + F.max_streams * d.c.block * d.c.rank * 2 <= d.scratch.ptr + measured);
-    try std.testing.expect(d.po + F.max_streams * d.c.block * d.c.heads * F.chunks * 128 * 4 <= d.scratch.ptr + measured);
+    try std.testing.expect(d.po + F.max_streams * d.c.block * d.c.heads * d.c.chunks() * 128 * 4 <= d.scratch.ptr + measured);
     var contexts: [128]q.draft.Ctx = undefined;
     var holds: [128]lanes.drafter.Hold = undefined;
     const shape: lanes.shape.Shape = .{ .parents = @constCast(&[_]i32{ -1, -1, 0, 1, 2, 2, 3 }), .depths = @constCast(&[_]u8{ 0, 0, 1, 1, 2, 2, 2 }), .ranks = @constCast(&[_]u8{ 0, 1, 0, 1, 0, 1, 0 }), .expected = 0 };

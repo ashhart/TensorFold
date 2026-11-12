@@ -47,8 +47,9 @@ pub const Adapter = struct {
         rules.tail = true;
         const copies: radix.Snapshots = .{ .ptr = target, .vtable = &snaps.Snaps(F, null).vtable };
         x.* = .{ .gpa = gpa, .pool = pool, .store = try radix.Store.init(gpa, copies, radix.pagesOf(kv.Pool, pool, pool.page_bytes), rules), .detach = Detach(F).call, .target = target };
+        errdefer x.store.deinit();
         x.store.limit(.{ .pages = pool.total(), .snaps = snap_limit });
-        pool.reclaim = .{ .ctx = x, .call = reclaim }; // a promise or a hold evicts the tree's idle pages before it fails
+        try pool.joinReclaim(.{ .ctx = x, .call = reclaim }); // a promise or a hold evicts the tree's idle pages first
         F.share_attach(target, .{ .ctx = x, .vtable = &vtable });
         return x;
     }
@@ -64,7 +65,7 @@ pub const Adapter = struct {
     /// The family stops calling, the pool's reclaim goes, the tree drops its states and releases its pages.
     pub fn close(x: *Adapter) void {
         x.detach(x.target);
-        x.pool.reclaim = null;
+        x.pool.leaveReclaim(x);
         x.store.deinit();
         x.gpa.destroy(x);
     }

@@ -20,6 +20,7 @@ const window_k = @import("contract_window.zig");
 const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const tap_k = @import("contract_tap.zig");
+const draft_k = @import("contract_draft.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
@@ -37,6 +38,8 @@ const full_k = @import("contract_vision_attention.zig");
 const text_k = @import("contract_dense_text.zig");
 const vl_k = @import("contract_vl.zig");
 const pos_k = @import("contract_vl_position.zig");
+const sparse_k = @import("contract_sparse_lanes.zig");
+const skew_k = @import("contract_wmma_skew.zig");
 
 const g = core.contract.gates;
 
@@ -240,6 +243,11 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&taps, std.enums.values(tap_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&taps) |*m| m.deinit();
     for (&taps) |*m| try kernels.append(a, m.kernel());
+    const draft_modes = comptime std.enums.values(draft_k.Mode);
+    var drafts: [draft_modes.len]draft_k.Draft = undefined;
+    for (&drafts, draft_modes) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&drafts) |*m| m.deinit();
+    for (&drafts) |*m| try kernels.append(a, m.kernel());
     var argmax = argmax_k.Argmax.init(a, &r, s, &l);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
@@ -330,6 +338,26 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&pos, std.enums.values(pos_k.Which)) |*p, which_pos| p.* = .init(a, &r, s, vl_kernels, which_pos);
     defer for (&pos) |*p| p.deinit();
     for (&pos) |*p| try kernels.append(a, p.kernel());
+    var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
+    defer sparse.deinit();
+    try kernels.append(a, sparse.kernel());
+    var skews: [skew_k.cases.len]skew_k.Skew = undefined;
+    for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    defer for (&skews) |*x| x.deinit();
+    if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
+    const gdn_k = @import("contract_gdn.zig");
+    // y and the state, then a control on each: one row short (the state), one key head (y)
+    var gdn_prompts: [4]gdn_k.Prompt = undefined;
+    const gdn_parts = [_]gdn_k.Part{ .y, .state, .state, .y };
+    const gdn_faults = [_]gdn_k.Fault{ .none, .none, .short, .one_key };
+    for (&gdn_prompts, gdn_parts, gdn_faults) |*m, p, fault| m.* = .init(a, &r, s, &l, p, fault);
+    defer for (&gdn_prompts) |*m| m.deinit();
+    for (&gdn_prompts) |*m| try kernels.append(a, m.kernel());
+    const prep_k = @import("contract_gdn_prep.zig");
+    var gdn_preps: [std.enums.values(prep_k.Fault).len]prep_k.Prep = undefined;
+    for (&gdn_preps, std.enums.values(prep_k.Fault)) |*m, fault| m.* = .init(a, &r, s, &l, fault);
+    defer for (&gdn_preps) |*m| m.deinit();
+    for (&gdn_preps) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

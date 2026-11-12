@@ -1,7 +1,7 @@
 [
   {
     "calls": 278,
-    "learns": 3,
+    "learns": 4,
     "writes": 4,
     "requests_sha256": "c5a68d350b2830c5f8ddb225ae3ec7754f2496a3720214b025459f8055bd7999",
     "replies_sha256": "214f68ae8317ea06a4e270d4d97b0a8f9822cbee888cf909d27ef3a6427b45b1",

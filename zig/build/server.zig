@@ -79,10 +79,14 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
     const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
     b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
+    const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
+    b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
+    const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));
+    b.step("test-flag-deps-host", "Flag dependencies: needs, refusals and build gates at the CLI").dependOn(&deps.step);
     const models = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"model discovery"} }));
     b.step("test-model-discovery-host", "Loaded context and reasoning offers for each model discovery entry").dependOn(&models.step);
     b.step("test-decision-context-host", "Decision context classification through actual HTTP errors").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: decision context", "prompt past the context", "System One" } })).step);
-    b.step("test-capability-env-host", "Environment discovery subset and complete profile registry").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:" } })).step);
+    b.step("test-capability-env-host", "Environment discovery subset and complete profile registry").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "env defaults:" } })).step);
     b.step("test-model-idle-host", "Model discovery and idle reload snapshots without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery waits", "idle", "model discovery" } })).step);
     b.step("test-effort-capabilities-host", "CLI effort choices and parsed defaults against request fields").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: effort", "parse and capabilities share the table" } })).step);
     b.step("test-effort-discovery-host", "Effective reasoning defaults and template effort discovery").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: model discovery", "model discovery", "effort" } })).step);

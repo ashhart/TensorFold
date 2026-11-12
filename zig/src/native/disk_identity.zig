@@ -3,29 +3,42 @@ const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
-/// A checkpoint folder: its config and index files whole, then each safetensors file's name, size, inode and times.
+/// Config/index bytes, stamps of every indexed shard (IndexedShardMissing if absent) and top-level safetensors.
 pub fn checkpoint(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    var indexed: std.StringArrayHashMapUnmanaged(void) = .empty;
     for ([_][]const u8{ "config.json", "model.safetensors.index.json" }) |name| {
-        const path = try std.fs.path.join(a, &.{ dir, name });
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch |e| switch (e) {
+        const path = try std.fs.path.join(scratch, &.{ dir, name });
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, scratch, .limited(1 << 26)) catch |e| switch (e) {
             error.FileNotFound => continue,
             else => return e,
         };
         h.update(name);
         h.update(bytes);
+        if (std.mem.eql(u8, name, "model.safetensors.index.json")) {
+            const parsed = try std.json.parseFromSliceLeaky(std.json.Value, scratch, bytes, .{});
+            const map = try @import("checkpoint_config").index.weightMap(parsed);
+            for (map.values()) |value| try indexed.put(scratch, value.string, {});
+        }
     }
+    var names: std.ArrayList([]const u8) = .empty;
+    try names.appendSlice(scratch, indexed.keys());
     var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
-    var names: std.ArrayList([]const u8) = .empty;
     var it = d.iterate();
-    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors")) try names.append(a, try a.dupe(u8, e.name));
+    while (try it.next(io)) |e| if (std.mem.endsWith(u8, e.name, ".safetensors"))
+        try names.append(scratch, try scratch.dupe(u8, e.name));
     std.mem.sort([]const u8, names.items, {}, struct {
         fn lt(_: void, x: []const u8, y: []const u8) bool {
             return std.mem.lessThan(u8, x, y);
         }
     }.lt);
-    for (names.items) |name| {
-        const info = try d.statFile(io, name, .{});
+    for (names.items, 0..) |name, i| {
+        if (i > 0 and std.mem.eql(u8, name, names.items[i - 1])) continue;
+        const info = d.statFile(io, name, .{}) catch |e|
+            return if (e == error.FileNotFound and indexed.contains(name)) error.IndexedShardMissing else e;
         const stamp = [4]i128{ info.size, info.inode, info.mtime.nanoseconds, info.ctime.nanoseconds };
         h.update(name);
         h.update(std.mem.sliceAsBytes(&stamp));
@@ -51,7 +64,7 @@ pub const Profile = struct {
     }
 };
 
-/// Only applicable non-identical entries partition kept state; defaults resolve before their values are hashed.
+/// Only applicable non-identical entries partition kept state; defaults and `on_with` resolve before values are hashed.
 pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
     var began = false;
     for (p.entries) |e| {
@@ -72,7 +85,7 @@ pub fn profile(h: *std.hash.Wyhash, p: Profile) void {
             }
             continue;
         }
-        const value = p.environment(e.name()) orelse e.stable;
+        const value = e.served(p.environment(e.name()), if (e.on_with) |w| p.environment(@tagName(w)) else null) orelse e.stable;
         if (e.report_values != null) {
             field(h, if (value != null) "explicit" else "default");
             field(h, value orelse "");

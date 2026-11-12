@@ -120,3 +120,53 @@ test "the lone window table stays one window of each width to the widest" {
         }
     }
 }
+
+test "a lone window times one repeated token; shared rows carry a token a row inside the vocabulary" {
+    var tokens: [256]u32 = undefined;
+    costs.fillTokens(&tokens, 1, 248320);
+    for (tokens) |t| try T.expectEqual(@as(u32, 1), t);
+
+    costs.fillTokens(&tokens, 4, 248320);
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer seen.deinit(T.allocator);
+    for (tokens) |t| {
+        try T.expect(t > 0 and t < 248320);
+        try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
+    }
+
+    costs.fillTokens(tokens[0..16], 2, 1000);
+    for (tokens[0..16]) |t| try T.expect(t > 0 and t < 1000);
+}
+
+test "shared rows stay distinct over any vocabulary, spans 7919 or 7927 divide included" {
+    // 15839 and 15855 ids: spans of twice 7919 and twice 7927
+    for ([_]usize{ 15839, 15855, 65537, 151936, 248320 }) |vocab| {
+        var tokens: [256]u32 = undefined;
+        costs.fillTokens(&tokens, 2, vocab);
+        var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer seen.deinit(T.allocator);
+        for (tokens) |t| try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
+    }
+}
+
+test "a timed round's tokens and greedy draws follow its windows: one repeated token alone, a token a row shared" {
+    const draw = @import("hip_serve").draw;
+    var tokens: [8]u32 = undefined;
+    var reqs: [8]draw.Request = undefined;
+
+    try T.expectEqual(@as(usize, 5), costs.fillRound(&tokens, &reqs, &.{5}, 248320));
+    for (tokens[0..5]) |t| try T.expectEqual(@as(u32, 1), t);
+    for (reqs[0..5], 0..) |q, j| {
+        try T.expect(q.sampling == null);
+        try T.expectEqual(reqs[0].position + @as(u64, j), q.position);
+    }
+
+    try T.expectEqual(@as(usize, 5), costs.fillRound(&tokens, &reqs, &.{ 2, 3 }, 248320));
+    var seen: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer seen.deinit(T.allocator);
+    for (tokens[0..5]) |t| try T.expect(!(try seen.getOrPut(T.allocator, t)).found_existing);
+    // each window's draws start at the same position
+    for ([_][2]usize{ .{ 0, 2 }, .{ 1, 3 } }) |pair| try T.expectEqual(reqs[pair[0]].position, reqs[pair[1]].position);
+    try T.expectEqual(reqs[2].position + 2, reqs[4].position);
+    for (reqs[0..5]) |q| try T.expect(q.sampling == null);
+}

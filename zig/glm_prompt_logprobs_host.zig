@@ -33,10 +33,12 @@ test "GLM prompt rows: tiled packed heads use the forward policy" {
     try std.testing.expect(set.prompt);
 }
 test "GLM prompt rows: requests for rows cannot enter the unscored batch path" {
-    const S = struct { images: []const u8 = &.{}, reuse: struct { saved: ?*u8 = null } = .{}, prompt_len: usize = 19, prompt_logprobs: ?u8 = null };
+    const S = struct { images: []const u8 = &.{}, reuse: struct { saved: ?*u8 = null } = .{}, prompt_len: usize = 19, prompt_logprobs: ?u8 = null, chunks: []const u32 = &.{} };
     var s: S = .{};
     try std.testing.expect(glm.lanes.canBatch(&s));
     s.prompt_logprobs = 2;
+    try std.testing.expect(!glm.lanes.canBatch(&s));
+    s = .{ .chunks = &.{7} }; // TF_GLM_REQUEST_STARTS: a batched pass would not cut at the request's start
     try std.testing.expect(!glm.lanes.canBatch(&s));
 }
 

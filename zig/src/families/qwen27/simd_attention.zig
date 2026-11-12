@@ -81,7 +81,7 @@ pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
 }
 
 /// The tail kernel's ops (scores 16x32 over 256, outputs 16x128 over 64), each element where it is read.
-const check_source =
+pub const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
     \\using namespace metal;

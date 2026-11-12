@@ -61,10 +61,11 @@ pub const Modules = struct {
 
     /// The grouped experts' scratch for a window of `rows` (allocated before serving, never mid-forward).
     pub fn reserve(m: *const Modules, c: *const cfg.Config, share: anytype, rows: usize, prefill: bool) !void {
-        const items = cuda.grouped.maxItems(rows * c.topk, c.experts, if (prefill) 64 else 16);
+        const pairs = rows * c.topk;
+        const tile: usize = if (prefill) 64 else 16;
         const ni = share.moe.len();
-        const up = try cuda.exl3_grouped.Grouped.bytes(c.hidden, ni, items, try cuda.exl3_experts.plan(c.hidden, ni, true), 2);
-        const down = try cuda.exl3_grouped.Grouped.bytes(ni, c.hidden, items, try cuda.exl3_experts.plan(ni, c.hidden, false), 1);
+        const up = try cuda.exl3_grouped.Grouped.bytes(c.hidden, ni, pairs, tile, try cuda.exl3_experts.plan(c.hidden, ni, true), 2);
+        const down = try cuda.exl3_grouped.Grouped.bytes(ni, c.hidden, pairs, tile, try cuda.exl3_experts.plan(ni, c.hidden, false), 1);
         const need = @max(up, down);
         const g = &m.x3.grouped;
         if (g.storage != null and g.storage.?.len >= need) return;
@@ -243,8 +244,8 @@ pub const Forward = struct {
         const in_up: cuda.experts.Rows = .{ .x = b.x, .stride = h, .slots = topk };
         const in_down: cuda.experts.Rows = .{ .x = b.eact, .stride = m.routed.width };
         // one path for a prompt chunk and a window: every pick's down rows in fp32, so a row's bits never depend on it
-        try g.decode(f.stream, .up, in_up, m.routed, b.plan(), b.eact, b.max_items, -1);
-        try g.decode(f.stream, .down_f32, in_down, m.routed, b.plan(), b.ey, b.max_items, -1);
+        try g.decode(f.stream, .up, in_up, m.routed, b.plan(), b.eact, b.max_items, pairs, tile, -1);
+        try g.decode(f.stream, .down_f32, in_down, m.routed, b.plan(), b.ey, b.max_items, pairs, tile, -1);
         try f.mlp(m.shared, f.w.share.shared.len(), R, b.sy, .f32);
         try kern.moePartial(&f.m.k, f.stream, b.ey, b.wts, b.sy, f.slot(R, 2), R, topk, h);
     }

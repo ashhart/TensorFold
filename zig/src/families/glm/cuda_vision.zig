@@ -170,7 +170,7 @@ pub const Tower = struct {
                 total += std.mem.alignForward(u64, p.codes, 256) + std.mem.alignForward(u64, p.scales, 256);
             } else total += std.mem.alignForward(u64, (try ck.get(name)).bytes.len, 256);
         };
-        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
+        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, try weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
         errdefer t.deinit();
         t.bytes = t.mem.deviceBytes();
         t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);

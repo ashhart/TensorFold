@@ -174,23 +174,11 @@ pub const Spark = struct {
         if ((l.fill orelse l.len) != at) return error.NotAtMark; // a state is copied only where the pass stands
         if (x.prompts == null) return snap.save(x.gpa, x.m, x.s, l.slot, at, 0, &.{});
         // TF_KV_SHARE: the store holds [0, at) as pages, and the sliding rings in pages it holds too
-        const blob = try x.holdBlob(snap.blobPages(x.m, at, at));
+        var blob = try kp.holdBlob(x.gpa, &x.pool.?, snap.blobPages(x.m, at, at));
         return snap.save(x.gpa, x.m, x.s, l.slot, at, at, blob) catch |e| {
-            for (blob) |id| x.pool.?.release(id);
-            x.gpa.free(blob);
+            kp.dropBlob(x.gpa, &x.pool.?, &blob);
             return e;
         };
-    }
-
-    /// `n` free pool pages the store holds for a state's rings; NoCachePages: the pool has none, even reclaiming.
-    fn holdBlob(x: *Spark, n: usize) ![]u32 {
-        if (n == 0) return &.{};
-        const ids = try x.gpa.alloc(u32, n);
-        if (!x.pool.?.hold(ids)) {
-            x.gpa.free(ids);
-            return error.NoCachePages;
-        }
-        return ids;
     }
 
     /// The stream's slot made to hold `k`'s state; TF_KV_SHARE: before its lane opens, put in by opening.
@@ -209,9 +197,7 @@ pub const Spark = struct {
     pub fn dropState(x: *Spark, k: *snap.Saved) void {
         if (k.blob.len > 0) {
             x.s.synchronize() catch {}; // a restore's queued copies out of them are done
-            for (k.blob) |id| x.pool.?.release(id);
-            x.gpa.free(k.blob);
-            k.blob = &.{};
+            kp.dropBlob(x.gpa, &x.pool.?, &k.blob);
         }
         snap.drop(x.gpa, x.s, k);
     }
@@ -260,13 +246,7 @@ pub const Spark = struct {
     fn plan(x: *Spark, s: *Stream, adopt: *std.ArrayList(u32)) !kp.Plan {
         const pr = x.prompts orelse return .{};
         x.pending = null;
-        const got = try pr.begin(s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
-        defer pr.free(got.marks);
-        const marks = x.gpa.dupe(u32, got.marks) catch |e| {
-            for (adopt.items) |id| x.pool.?.release(id);
-            return e;
-        };
-        return .{ .from = got.from, .marks = marks };
+        return pr.plan(x.gpa, &x.pool.?, s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
     }
 
     /// A new lane's table starts with the kept pages, held once more by its lease (rows below `from`, never written).
@@ -306,11 +286,10 @@ pub const Spark = struct {
         const l = got.value_ptr;
         try x.reach(l, p.len); // the prompt's pages (a kept state's restore writes into them too)
         l.sampled = false;
-        if (s.sampling) |sp| if (sp.temperature > 0) {
-            const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+        if (cuda.sample.ruleFor(s.sampling)) |r| {
             try x.upload(l.rule, std.mem.asBytes(&r));
             l.sampled = true;
-        };
+        }
         s.cached = 0;
         l.fill = if (x.prompts != null) try x.resumeShared(s, l) else x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);
@@ -345,16 +324,8 @@ pub const Spark = struct {
 
     /// TF_KV_SHARE: at mark `at` the store takes the lane's pages and rings; pages it held already replace the lane's.
     fn keepPages(x: *Spark, pr: kp.Prompts, s: *Stream, l: *Lane, at: usize) !void {
-        const n = at / fwd.page_tokens;
-        const path = try x.gpa.alloc(u32, n);
-        defer x.gpa.free(path);
-        const mine = try x.gpa.dupe(u32, l.lease.ids.items[0..n]);
-        defer x.gpa.free(mine);
-        const shared = pr.keep(s.prompt(), @intCast(at), @ptrCast(s), mine, path);
-        if (shared == n) l.kept += 1;
-        if (std.mem.eql(u32, mine[0..shared], path[0..shared])) return;
-        try x.m.mapPages(x.s, l.slot, path[0..shared], 0); // the same tokens' rows: a resume from any row is exact
-        for (path[0..shared], 0..) |id, i| x.pool.?.share(&l.lease, i, id);
+        var map: Map = .{ .x = x, .slot = l.slot };
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, @ptrCast(s), fwd.page_tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
     }
 
     /// One chunk from `l.fill` to the next grid line or mark. `_: u32` keeps its grid.
@@ -514,11 +485,7 @@ pub const Spark = struct {
 
     /// The idle server's line: nothing promised, every page free (kept states are copies, not pages).
     fn report(x: *const Spark) void {
-        if (@import("builtin").is_test) return;
-        const p = x.pool orelse return;
-        const c = p.census();
-        const ok = p.idle() and (x.prompts != null or c.free == c.total); // TF_KV_SHARE: the store holds pages
-        std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
+        kp.idleLine(&(x.pool orelse return), x.prompts != null); // TF_KV_SHARE: the store holds pages
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {

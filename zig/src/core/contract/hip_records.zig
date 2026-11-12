@@ -493,12 +493,12 @@ const own_records = [own_count]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
-} ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records ++
-    @import("hip_records_score.zig").records ++ @import("hip_records_embed.zig").records ++ @import("hip_records_tail.zig").records ++ @import("hip_records_tap.zig").records;
+} ++ @import("hip_records_pair.zig").records ++ @import("hip_records_prompt.zig").records ++ @import("hip_records_draft.zig").records ++
+    @import("hip_records_score.zig").records ++ @import("hip_records_embed.zig").records ++ @import("hip_records_tail.zig").records ++ @import("hip_records_tap.zig").records ++ @import("hip_records_sparse.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records ++ @import("hip_records_router.zig").records ++
     @import("hip_records_item.zig").records ++ @import("hip_records_qwen3.zig").records ++ @import("hip_records_columns.zig").records ++
-    @import("hip_records_vision.zig").records ++ @import("hip_records_dense_text.zig").records ++ @import("hip_records_families.zig").all;
+    @import("hip_records_vision.zig").records ++ @import("hip_records_dense_text.zig").records ++ @import("hip_records_families.zig").all ++ @import("hip_records_skew.zig").records ++ @import("hip_records_gdn.zig").records;
 
 /// Gate 5's planted HIP controls: a launch past its __launch_bounds__, and 72 KiB of LDS where a workgroup has 64.
 pub const controls = [2]Record{

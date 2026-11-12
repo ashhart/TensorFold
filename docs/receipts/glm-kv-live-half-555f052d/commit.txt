@@ -1,0 +1,6 @@
+tested implementation: 555f052d93bbc60b1e7c83d011a1bb5637f225e1 (glm: TF_GLM_KV_LIVE_HALF=1 keeps the live half of the KDA state alone in a kept prompt state)
+on upstream main ca854daf31eff56c0412654d9c4e7e4246001d61
+rebased: onto upstream main 8f5eb7579; main's changes since ca854daf3 touch no file under zig/src/families/glm and the
+branch's own diff is byte-identical outside CHANGELOG.md
+implementation tree: 3b2a5e40549ff2c5ceef6e26a859d41aabb5d624
+after it: the receipt's commit adds this folder and changes no source

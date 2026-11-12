@@ -6,8 +6,8 @@ the same profile. It enables no additional optimization and supplies no new envi
 This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
 switches in its first table, their `_ALL` companions, the shared prompt store, GLM's and Nemotron's paging policies,
 the Dory, Gemma 4 and Spark2.5 pool-page switches, and Nemotron's paging on Metal. The registry also covers grouped learning modes.
-It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings keep their existing readers. `fast-exact` and `fast` are refused by name; they are not aliases for `stable` and cannot enable
-unqualified optimizations.
+It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings keep their existing readers. `fast-exact` is
+refused by name pending its token gates; `fast` is not planned: a speed mode that changes output tokens is not shipped.
 
 ## Explicit environment values win
 
@@ -42,9 +42,14 @@ profile supplies no value. Registry metadata comes directly from the table. Regi
 Coverage includes:
 
 - Qwen3.5 dense/MoE on CUDA: `TF_QWEN_KV_PAGES`, `TF_QWEN_KV_PAGES_ALL`, `TF_QWEN_KV_SHARE`.
-- GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`.
+- GLM on CUDA: `TF_KV_PAGES`, `TF_GLM_KV_HOST`, `TF_GLM_KV_HOST_SHARED`, `TF_GLM_PROMPT_TAIL`, and the exact 0/1
+  switches `TF_GLM_HOST_CACHE`, `TF_GLM_VISION_HOST` (off unless `1`) and `TF_GLM_PDL`, `TF_GLM_PROMPT_STEPS`,
+  `TF_GLM_SHARED` (on unless `0`).
 - Nemotron and Nemotron Omni on CUDA: `TF_KV_PAGES`, with their existing default-on parser.
-- Gemma 4, Kolibri-1, Spark2.5 and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
+- Gemma 4, Kolibri-1, Spark2.5, Dory and GLM on the core CUDA page adapter: `TF_KV_SHARE`, where the adapter is served.
+  Dory's `TF_KV_SHARE` also puts its full-attention caches in pool pages, as `TENSORFOLD_DORY_KV_PAGES=1` does;
+  with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
+  shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
   dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
@@ -236,6 +241,25 @@ the existing BF16 paging evidence is [#1322](https://github.com/ashhart/TensorFo
 ## Further profile work
 
 Migrate additional switch groups with their existing parsers and tests intact. A future `fast-exact` profile needs
-the issue's same-checkpoint token gates: solo, concurrent 1/2/4/8, and resumed runs for every affected family. An
-arithmetic-changing `fast` profile additionally needs each switch's measured quality gate and maintainer agreement.
+the issue's same-checkpoint token gates: solo, concurrent 1/2/4/8, and resumed runs for every affected family, plus a
+measurement where no served cell for that family gets slower. `fast` is not planned: a speed mode that changes output
+tokens is not shipped, so the arithmetic class has no profile to join.
 The host tests for this foundation establish lookup/CLI/reporting behavior, not those GPU or checkpoint gates.
+
+## Four-rank RoCE relay ceiling
+
+`TF_TP_ROCE_RELAY_MAX_KB` sets the largest all-gather shard per rank sent over an enabled four-rank relay.
+It defaults to 64 KiB and accepts integers from 4 to 1024 KiB. Larger gathers use NCCL, including variable-length
+gathers whose stride exceeds the ceiling. `TF_TP_MAILBOX_MAX_KB` still sizes the slots; the effective relay ceiling
+is the smaller of the two limits. Changing the relay ceiling does not resize those slots or change gathered bytes.
+
+This setting is read directly by the TP parser, outside the profile registry. Invalid values refuse by name, and
+relay ranks must agree on the value. GLM uses its actual `TF_GLM_WORLD` and rank for relay validation, so a four-rank
+GLM run does not also need `TF_TP_WORLD=4`. With `TF_GLM_ROCE_MULTI=1`, a relay outside four ranks is refused before
+weights load.
+The relay remains opt-in through `TF_TP_ROCE_RELAY=1`; mesh, two-rank paths and all-reduce routing keep their defaults.
+
+On a verified four-rank verbs relay with no opposite-rank link, `tf-tp-test suite` omits its NCCL send/recv and paired
+exchange references, including that exchange in graph replays. NCCL selects those receive ports by channel on this
+topology. The suite prints the reason, the two reference types and the number of comparisons left out; all sums,
+gathers, remaining graph nodes and timing sweeps still run. Other topologies keep the complete suite.

@@ -303,9 +303,10 @@ test "Gemma shared: ring restore precedes forced snapshot eviction in reservatio
         }
     };
     var reclaim: Reclaim = .{ .f = &f, .ids = ids };
-    const original = pool.reclaim;
-    pool.reclaim = .{ .ctx = &reclaim, .call = Reclaim.call };
-    defer pool.reclaim = original;
+    const original = pool.reclaims;
+    pool.reclaims = .{};
+    try pool.joinReclaim(.{ .ctx = &reclaim, .call = Reclaim.call });
+    defer pool.reclaims = original;
     var s = try stream(ids);
     defer s.deinit(a);
     const l = try f.g.opening(&s);

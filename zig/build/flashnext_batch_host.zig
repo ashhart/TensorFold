@@ -1,6 +1,9 @@
 //! Source and lane regressions with a recording Metal boundary, no shader compiler or GPU work.
 const std = @import("std");
 pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const rope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/rope_refusal_test.zig"), .target = b.graph.host }) }));
+    b.step("test-flashnext-rope-host", "The Metal/HIP config reader refuses scaled RoPE and keeps plain configs' rotary").dependOn(&rope.step);
+    all.dependOn(&rope.step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/load_memory.zig"), .target = b.graph.host });
     b.step("test-flashnext-memory-host", "Flash Next allocation floor and working-set refusal without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory })).step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/flashnext_recording_metal.zig"), .target = b.graph.host });

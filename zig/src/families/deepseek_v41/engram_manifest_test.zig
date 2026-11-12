@@ -221,3 +221,47 @@ test "engram manifest: no manifest beside the tables refuses the boot" {
     try out.dir.deleteFile(io, em.filename);
     try t.expectError(error.EngramManifestMissing, em.check(a, io, sdir, odir, false));
 }
+
+/// One packed table moved to rows [2^62, 2^62 + 300): shard header, manifest span and sample all shifted the same.
+fn checkShifted() !void {
+    const a = t.allocator;
+    const io = t.io;
+    var src = t.tmpDir(.{});
+    defer src.cleanup();
+    var out = t.tmpDir(.{});
+    defer out.cleanup();
+    try release(a, io, src.dir, 1, 7, 3);
+    const sdir = try src.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(sdir);
+    try packRelease(a, io, sdir, out.dir, 11);
+    const odir = try out.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(odir);
+    _ = try em.check(a, io, sdir, odir, false);
+    const shift: u64 = 1 << 62;
+    var f = try out.dir.openFile(io, "engram-l1-r0of1.bin", .{ .mode = .read_write });
+    defer f.close(io);
+    var hb: [48]u8 = undefined;
+    _ = try f.readPositionalAll(io, &hb, 0);
+    for ([_]usize{ 2, 3, 4 }) |w| std.mem.writeInt(u64, hb[8 * w ..][0..8], std.mem.readInt(u64, hb[8 * w ..][0..8], .little) + shift, .little);
+    try f.writePositionalAll(io, &hb, 0);
+    const mpath = try std.fs.path.join(a, &.{ odir, em.filename });
+    defer a.free(mpath);
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, mpath, a, .limited(1 << 22));
+    defer a.free(text);
+    var m = try em.Manifest.parse(a, text);
+    defer m.deinit();
+    const al = m.arena.allocator();
+    const samples = try al.alloc(u64, m.samples.len);
+    for (samples, m.samples) |*s, x| s.* = x + shift;
+    const tables = try al.dupe(em.Table, m.tables);
+    for (tables) |*x| x.* = .{ .layer = x.layer, .file = x.file, .lo = x.lo + shift, .hi = x.hi + shift, .total = x.total + shift, .size = x.size, .sha = x.sha };
+    m.samples = samples;
+    m.tables = tables;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = mpath, .data = try m.render() });
+    try t.expectError(error.EngramShardCorrupt, em.check(a, io, sdir, odir, false));
+}
+
+// In a child: if checkText's `x * er.row_bytes` is unchecked, a safe build panics and only this test fails
+test "engram manifest: a table whose rows start at 2^62 is refused, not read at offsets that wrap past 2^64" {
+    try t.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(checkShifted, .{}));
+}

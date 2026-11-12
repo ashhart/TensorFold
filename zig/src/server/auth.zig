@@ -221,6 +221,20 @@ pub const Store = struct {
         // the request's own copy: a reload frees the file's
         return .{ .label = a.dupe(u8, key.label) catch return null, .digest = key.digest, .scopes = key.scopes };
     }
+
+    /// The key with this digest in the current store, after its refresh; null once it is gone or the file is refused.
+    pub fn byDigest(s: *Store, a: Allocator, d: [32]u8) ?Matched {
+        const m = log.io();
+        s.mutex.lockUncancelable(m);
+        defer s.mutex.unlock(m);
+        s.refresh(std.Io.Clock.awake.now(m).toNanoseconds());
+        if (!s.valid) return null;
+        for ([_][]Key{ s.static.items, s.file }) |keys| for (keys) |key| {
+            if (std.crypto.timing_safe.eql([32]u8, key.digest, d))
+                return .{ .label = a.dupe(u8, key.label) catch return null, .digest = d, .scopes = key.scopes };
+        };
+        return null;
+    }
 };
 
 const latin1_space = " \t\r\n\x0b\x0c\x1c\x1d\x1e\x1f\x85\xa0";
@@ -334,14 +348,14 @@ test "auth cleanup on every initialization allocation failure" {
     try std.testing.checkAllAllocationFailures(gpa, Case.run, .{@as(?[]const u8, path)});
 }
 
-/// The key file opened for reading, never through a link.
-fn openKeys(pathz: [*:0]const u8) !platform.c.fd_t {
+/// The key file opened for reading, never through a link (tool_id_key.zig opens its key file the same way).
+pub fn openKeys(pathz: [*:0]const u8) !platform.c.fd_t {
     if (builtin.os.tag != .windows) return posix.openatZ(posix.AT.FDCWD, pathz, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true }, 0);
     const fd = platform.c.open(pathz, .{ .ACCMODE = .RDONLY });
     return if (fd < 0) error.OpenFailed else fd;
 }
 
-fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
+pub fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
     if (builtin.os.tag != .windows) return posix.read(fd, buf);
     const n = platform.c.read(fd, buf.ptr, buf.len);
     return if (n < 0) error.ReadFailed else @intCast(n);

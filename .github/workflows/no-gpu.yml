@@ -35,6 +35,26 @@ jobs:
           python-version: "3.11"
       - name: Model-free benchmark client tests
         run: python -m unittest discover -s tools/tests -p "test_bench*.py" -v
+      - name: Evidence index tests
+        run: python -m unittest discover -s tools/tests -p "test_evidence*.py" -v
+  # pytest from the root, as an outside evaluator runs it, on its own runner: its five minutes no longer add to zig's.
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Two of its tests run Zig (the build options and the cache tool), so it needs the compiler but no build.
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          use-cache: false
+      - name: pytest from the root, as an outside evaluator runs it
+        run: |
+          python3 -m venv "$RUNNER_TEMP/pytest"
+          "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest
+          "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
   zig:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -121,11 +141,6 @@ jobs:
         run: zig build -Dfixed-cpu fuzz-cortheon
       - name: Served Flash Next gate regressions
         run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
-      - name: pytest from the root, as an outside evaluator runs it
-        run: |
-          python3 -m venv "$RUNNER_TEMP/pytest"
-          "$RUNNER_TEMP/pytest/bin/pip" install --quiet pytest
-          "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
       # The generated Engram tables: committing a table that its generator no longer reproduces is a silent drift.
       # The generator refuses any unicodedata but the pinned 16.0.0, which 3.14 carries and 3.12/3.13 do not.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
@@ -287,7 +302,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, host, compile, hip]
+        suite: [fast, host, compile, hip, deepseek]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -303,9 +318,12 @@ jobs:
         run: |
           printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
           flags=()
+          limit=10m
           if [ "$SUITE" = hip ]; then flags=(-Dhip=true); fi
+          # One DeepSeek aot-needs test runs about 10 minutes on a fast core; macOS gives it 30 too.
+          if [ "$SUITE" = deepseek ]; then limit=30m; fi
           TIMEFORMAT='Host checks wall seconds: %R'
-          time zig build -Dfixed-cpu "${flags[@]}" "test-host-ci-linux-$SUITE" --test-timeout 10m
+          time zig build -Dfixed-cpu "${flags[@]}" "test-host-ci-linux-$SUITE" --test-timeout "$limit"
   host-nightly-macos:
     if: ${{ github.event_name == 'schedule' }}
     runs-on: macos-26
@@ -313,7 +331,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, adapters, deepseek, lanes]
+        suite: [fast, adapters, deepseek, lanes, deferred]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -330,4 +348,3 @@ jobs:
           printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
           TIMEFORMAT='Host checks wall seconds: %R'
           time zig build "test-host-ci-macos-$SUITE" --test-timeout 30m
-      # test-host-ci-macos-deferred is deliberately not invoked until its fixture fixes land.

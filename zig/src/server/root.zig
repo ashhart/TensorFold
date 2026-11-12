@@ -17,9 +17,11 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("startup_receipt.zig");
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");
     _ = @import("kimi_reply_test.zig");
+    _ = @import("kimi_stream_test.zig");
     _ = @import("kimi_http_test.zig");
     _ = @import("profile_line.zig");
     _ = @import("auth_scope_test.zig");
@@ -33,6 +35,7 @@ test {
     _ = @import("embedding_service_test.zig");
     _ = @import("readout_service_test.zig");
     _ = @import("http_limits_test.zig");
+    _ = @import("env_defaults_test.zig");
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
@@ -40,6 +43,13 @@ test {
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
     _ = @import("name_priority_http_test.zig");
+    _ = @import("ws_frame.zig");
+    _ = @import("ws_upgrade.zig");
+    _ = @import("ws_cache.zig");
+    _ = @import("responses_ws_read.zig");
+    _ = @import("responses_ws_events.zig");
+    _ = @import("responses_ws_turn.zig");
+    _ = @import("responses_ws_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
@@ -64,6 +74,8 @@ test {
     _ = @import("auth.zig");
     _ = @import("cli.zig");
     _ = @import("cli_test.zig");
+    _ = @import("cli_profile_test.zig");
+    _ = @import("unix_socket_cli_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
@@ -71,9 +83,11 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
+    _ = @import("images_generations.zig");
     _ = @import("drama_cfg.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_cfg_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_generations_test.zig"); // over a Unix socket pair
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_lane_release_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_speakers_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_sampling_test.zig");
@@ -104,9 +118,15 @@ test {
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
+    _ = @import("ids.zig");
+    _ = @import("tool_call_ids_test.zig");
+    _ = @import("tool_id_key.zig");
     _ = @import("engine_refusal_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("tool_cut_test.zig");
+    _ = @import("tool_args_close.zig");
+    _ = @import("tool_json_cut.zig");
+    _ = @import("tool_json_cut_routes_test.zig");
     _ = @import("tool_glm_stream_test.zig");
     _ = @import("tool_glm_messages_test.zig");
     _ = @import("tool_dsml_stream_test.zig");
@@ -114,7 +134,13 @@ test {
     _ = @import("tool_dsml_messages_test.zig");
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("limit_pins_test.zig");
+    _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
+    _ = @import("stream_scan_text.zig");
+    _ = @import("stream_scan_bench.zig");
+    _ = @import("stream_memory_wire_test.zig");
+    _ = @import("stream_scan_stages.zig");
     _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");
     _ = @import("thinking_reserve_test.zig");
@@ -188,6 +214,7 @@ test {
     _ = @import("slide_talks.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
+    _ = @import("responses_store.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
     _ = @import("cortheon/research.zig");
@@ -221,6 +248,8 @@ test {
 
 test {
     _ = @import("slide_retention_test.zig");
+    _ = @import("slide_shrink_test.zig");
+    _ = @import("slide_correction_test.zig");
 }
 
 test {

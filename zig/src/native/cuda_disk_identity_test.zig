@@ -178,6 +178,28 @@ test "disk identity: Dory's exact zero and absence agree while every other value
         try t.expectEqual(enabled, profileHash(&.{row}, "dory", "cuda", &.{.{ row.id, raw }}));
 }
 
+test "disk identity: Dory's pages count as on when TF_KV_SHARE turns them on with the switch unset" {
+    const rows = [_]api.profile.Entry{ api.profile.entry(.TF_KV_SHARE), api.profile.entry(.TENSORFOLD_DORY_KV_PAGES) };
+    const share: api.profile.Switch = .TF_KV_SHARE;
+    const pages: api.profile.Switch = .TENSORFOLD_DORY_KV_PAGES;
+    const unset = profileHash(&rows, "dory", "cuda", &.{});
+    const enabled = profileHash(&rows, "dory", "cuda", &.{.{ pages, "1" }});
+    try t.expectEqual(enabled, profileHash(&rows, "dory", "cuda", &.{.{ share, "4" }}));
+    try t.expectEqual(enabled, profileHash(&rows, "dory", "cuda", &.{ .{ share, "4" }, .{ pages, "1" } }));
+    try t.expectEqual(unset, profileHash(&rows, "dory", "cuda", &.{.{ share, "0" }}));
+    try t.expectEqual(unset, profileHash(&rows, "dory", "cuda", &.{.{ pages, "0" }}));
+    try t.expect(unset != enabled);
+    try t.expectEqual(profileHash(&rows, "gemma4", "cuda", &.{}), profileHash(&rows, "gemma4", "cuda", &.{.{ share, "4" }}));
+}
+
+test "disk identity: an empty or whitespace-only TF_KV_SHARE leaves Dory's pages unset, as the engine reads it" {
+    const rows = [_]api.profile.Entry{ api.profile.entry(.TF_KV_SHARE), api.profile.entry(.TENSORFOLD_DORY_KV_PAGES) };
+    const share: api.profile.Switch = .TF_KV_SHARE;
+    const unset = profileHash(&rows, "dory", "cuda", &.{});
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |raw|
+        try t.expectEqual(unset, profileHash(&rows, "dory", "cuda", &.{.{ share, raw }}));
+}
+
 const Members = struct {
     const Pair = struct { [:0]const u8, ?[:0]const u8 };
     var values: []const Pair = &.{};
@@ -241,4 +263,8 @@ test "disk identity: DeepSeek values hash their exact bytes and leave every othe
             }
         };
     }
+}
+
+test {
+    _ = @import("cuda_disk_policy_test.zig");
 }

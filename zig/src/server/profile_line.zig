@@ -25,22 +25,23 @@ pub fn format(a: std.mem.Allocator, profile: p.Profile, family: []const u8, back
                 if (!member.applies(scope)) continue;
                 const raw = environment.get(member.name) orelse continue;
                 if (!member.differs(raw)) continue;
-                try append(&out.writer, member.name, raw, e.class, &found);
+                try append(&out.writer, member.name, raw, e.class, "env", &found);
             }
         } else {
-            const raw = environment.get(e.name()) orelse continue;
+            const own = environment.get(e.name());
+            const raw = e.served(own, if (e.on_with) |w| environment.get(@tagName(w)) else null) orelse continue;
             if (e.id == .TF_DSV41_TOOL_GRAMMAR and environment.get("TENSORFOLD_TOOL_GRAMMAR") != null) continue;
-            if (e.differs(raw)) try append(&out.writer, e.name(), if (e.redact) "<set>" else raw, e.class, &found);
+            if (e.differs(raw)) try append(&out.writer, e.name(), if (e.redact) "<set>" else raw, e.class, if (own == null) @tagName(e.on_with.?) else "env", &found);
         }
     }
     if (!found) try out.writer.writeAll(" none");
     return try out.toOwnedSlice();
 }
 
-fn append(writer: *std.Io.Writer, name: []const u8, raw: []const u8, class: p.Class, found: *bool) !void {
+fn append(writer: *std.Io.Writer, name: []const u8, raw: []const u8, class: p.Class, from: []const u8, found: *bool) !void {
     try writer.print("{s} {s}=", .{ if (found.*) ";" else "", name });
     try shown(writer, raw);
-    try writer.print(" ({s}, env)", .{@tagName(class)});
+    try writer.print(" ({s}, {s})", .{ @tagName(class), from });
     found.* = true;
 }
 
@@ -55,6 +56,7 @@ const TestEnv = struct {
     gemma4: ?[]const u8 = null,
     spark25: ?[]const u8 = null,
     nemotron_metal: ?[]const u8 = null,
+    kv_share: ?[]const u8 = null,
     pub fn get(e: @This(), name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES")) return e.qwen;
         if (std.mem.eql(u8, name, "TF_QWEN_KV_PAGES_ALL")) return e.all;
@@ -62,7 +64,7 @@ const TestEnv = struct {
         if (std.mem.eql(u8, name, "TF_KV_PAGES")) return e.glm_pages;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST")) return e.glm_host;
         if (std.mem.eql(u8, name, "TF_GLM_KV_HOST_SHARED")) return e.glm_shared;
-        if (std.mem.eql(u8, name, "TF_KV_SHARE")) return null;
+        if (std.mem.eql(u8, name, "TF_KV_SHARE")) return e.kv_share;
         if (std.mem.eql(u8, name, "TENSORFOLD_DORY_KV_PAGES")) return e.dory;
         if (std.mem.eql(u8, name, "TENSORFOLD_GEMMA4_KV_PAGES")) return e.gemma4;
         if (std.mem.eql(u8, name, "TENSORFOLD_SPARK25_KV_PAGES")) return e.spark25;
@@ -247,4 +249,30 @@ test "profile line: both DeepSeek model type names report the same CUDA registry
     const metal = try format(a, .stable, "deepseek_v4", "metal", Environment{});
     defer a.free(metal);
     try std.testing.expectEqualStrings("profile: stable; registered overrides: none", metal);
+}
+
+test "profile line: Dory's pages count as on, from TF_KV_SHARE, when TF_KV_SHARE turns them on" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const on = "profile: stable; registered overrides: TF_KV_SHARE=4 (identical, env); TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)";
+    try std.testing.expectEqualStrings(on, try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = "4" }));
+    const both = "profile: stable; registered overrides: TF_KV_SHARE=4 (identical, env); TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, env)";
+    try std.testing.expectEqualStrings(both, try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = "4", .dory = "1" }));
+    for ([_]TestEnv{ .{}, .{ .kv_share = "0" }, .{ .dory = "0" }, .{ .kv_share = "0", .dory = "0" } }) |env|
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "dory", "cuda", env));
+    const gemma = "profile: stable; registered overrides: TF_KV_SHARE=4 (identical, env)";
+    try std.testing.expectEqualStrings(gemma, try format(a, .stable, "gemma4", "cuda", TestEnv{ .kv_share = "4" }));
+}
+
+test "profile line: an empty or whitespace-only TF_KV_SHARE does not turn Dory's pages on" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const empty = "profile: stable; registered overrides: TF_KV_SHARE= (identical, env)";
+    try std.testing.expectEqualStrings(empty, try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = "" }));
+    for ([_][]const u8{ " ", "\t", " \t\r\n" }) |raw| {
+        const line = try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = raw });
+        try std.testing.expect(std.mem.indexOf(u8, line, "TENSORFOLD_DORY_KV_PAGES") == null);
+    }
 }

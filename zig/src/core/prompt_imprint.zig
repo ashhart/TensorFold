@@ -18,6 +18,7 @@ pub const Imprint = struct {
     admission: @import("lanes").learned_disk.Admission = .{},
     others: u64 = 0, // bytes other identities under `root` still hold
     metas: std.ArrayList(Meta) = .empty,
+    keys: std.AutoHashMapUnmanaged(u64, usize) = .empty, // each meta's key to its place in `metas`, kept in step
     clock: u64 = 0, // a meta's `used`: the clock at its last write or read
     index_end: u64 = 0,
 
@@ -43,6 +44,7 @@ pub const Imprint = struct {
     pub fn deinit(m: *Imprint) void {
         for (m.metas.items) |x| free(m.gpa, x);
         m.metas.deinit(m.gpa);
+        m.keys.deinit(m.gpa);
         m.gpa.free(m.dir);
         m.gpa.free(m.root);
     }
@@ -57,8 +59,7 @@ pub const Imprint = struct {
     }
 
     fn find(m: *const Imprint, key: u64) ?usize {
-        for (m.metas.items, 0..) |x, i| if (x.key == key) return i;
-        return null;
+        return m.keys.get(key);
     }
 
     pub fn has(m: *const Imprint, key: u64) bool {
@@ -177,11 +178,13 @@ pub const Imprint = struct {
         const s = try m.gpa.dupe(u32, below);
         errdefer m.gpa.free(s);
         try m.metas.ensureUnusedCapacity(m.gpa, 1);
+        try m.keys.ensureUnusedCapacity(m.gpa, 1);
         errdefer _ = platform.c.ftruncate(fd, end);
         try record(fd, key, at, tokens, below, bytes);
         if (platform.c.fsync(fd) != 0) return error.ImprintWrite;
         m.index_end = @as(u64, @intCast(end)) + HEAD * 4 + 4 * (tokens.len + below.len);
         m.clock += 1;
+        m.keys.putAssumeCapacityNoClobber(key, m.metas.items.len);
         m.metas.appendAssumeCapacity(.{ .key = key, .at = at, .tokens = t, .starts = s, .bytes = bytes, .used = m.clock });
     }
 
@@ -201,8 +204,12 @@ pub const Imprint = struct {
         }
         if (platform.c.rename(tmp, try std.fmt.bufPrintSentinel(&path, "{s}/index", .{m.dir}, 0)) != 0) return error.ImprintWrite;
         free(m.gpa, m.metas.orderedRemove(i));
+        _ = m.keys.remove(key);
         m.index_end = 0;
-        for (m.metas.items) |x| m.index_end += HEAD * 4 + 4 * (x.tokens.len + x.starts.len);
+        for (m.metas.items, 0..) |x, j| {
+            m.index_end += HEAD * 4 + 4 * (x.tokens.len + x.starts.len);
+            if (j >= i) m.keys.getPtr(x.key).?.* = j;
+        }
     }
 
     /// Keep a valid prefix across torn or invalid suffixes; unknown versions and I/O errors refuse learning.
@@ -219,6 +226,7 @@ pub const Imprint = struct {
         defer {
             for (fresh.metas.items) |x| free(m.gpa, x);
             fresh.metas.deinit(m.gpa);
+            fresh.keys.deinit(m.gpa);
         }
         try fresh.readIndex(fd);
         for (fresh.metas.items) |*x| {
@@ -228,6 +236,7 @@ pub const Imprint = struct {
             }
         }
         std.mem.swap(std.ArrayList(Meta), &m.metas, &fresh.metas);
+        std.mem.swap(@TypeOf(m.keys), &m.keys, &fresh.keys);
         m.index_end = fresh.index_end;
     }
 
@@ -238,9 +247,6 @@ pub const Imprint = struct {
 
     fn readIndex(m: *Imprint, fd: c_int) !void {
         const end = try indexSize(fd);
-        var keys: std.AutoHashMapUnmanaged(u64, void) = .empty; // kept so far: a later record of one is dropped
-        defer keys.deinit(m.gpa);
-        for (m.metas.items) |x| try keys.put(m.gpa, x.key, {});
         var off: u64 = 0;
         while (off < end) {
             if (end - off < HEAD * 4) {
@@ -275,15 +281,17 @@ pub const Imprint = struct {
                 free(m.gpa, x);
                 return m.torn(fd, off, end);
             }
-            const seen = keys.getOrPut(m.gpa, x.key) catch |err| {
+            const seen = m.keys.getOrPut(m.gpa, x.key) catch |err| { // kept so far: a later record of one is dropped
                 free(m.gpa, x);
                 return err;
             };
             if (seen.found_existing) free(m.gpa, x) else {
+                seen.value_ptr.* = m.metas.items.len;
                 m.clock += 1;
                 var y = x;
                 y.used = m.clock;
                 m.metas.append(m.gpa, y) catch |err| {
+                    _ = m.keys.remove(x.key);
                     free(m.gpa, x);
                     return err;
                 };
@@ -495,6 +503,7 @@ test {
     _ = @import("prompt_imprint_test.zig");
     _ = @import("prompt_imprint_fault_test.zig");
     _ = @import("prompt_imprint_open_test.zig");
+    _ = @import("prompt_imprint_keys_test.zig");
     _ = @import("learned_disk.zig");
 }
 
