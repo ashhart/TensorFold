@@ -409,10 +409,19 @@ To accept remote clients, choose `--host 0.0.0.0` and configure `--api-key-file`
 Clients send `Authorization: Bearer KEY`.
 The default loopback server accepts local clients without a key.
 
-The server admits at most 128 open connections, including idle keep-alive connections and active replies.
+The server admits at most 128 open connections (`--max-connections N`, 1 to 1024), including idle keep-alive connections and active replies.
 Extra connections receive `503 Service Unavailable` with `Retry-After: 1`, then close.
 The reply is best effort if the peer cannot receive it; no extra connection thread is created.
 This cap is independent of the process file limit.
+
+From three quarters of that limit open (96 of 128), one remote address may hold at most a quarter of it (32 of 128); its next connection gets the same 503.
+Below that, one address may hold any number, so clients behind one address are not throttled on a quiet server.
+`--max-connections-per-address N` sets that share (0 turns it off).
+IPv4 peers are counted by address, IPv6 peers by their /64.
+Loopback clients are never counted, nor the exact addresses given with `--trusted-proxy ADDRESS` (repeat it, up to 64).
+Name a reverse proxy, a load balancer, or Docker's bridge gateway there (often `172.17.0.1` with `-p 8080:8080`), since every client behind it shares its address.
+With every slot taken, a connection waiting for its next request gives its slot up after 5 seconds.
+Below the limit, an idle keep-alive connection is never closed for it, and a request in progress never is.
 
 A new connection has 30 seconds to send its request line and all headers.
 A kept connection may wait idle for 900 seconds; its next request's first bytes start a fresh 30-second head budget.
