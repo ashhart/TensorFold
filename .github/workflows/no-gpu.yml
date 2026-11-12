@@ -133,6 +133,10 @@ jobs:
       # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
       - name: zig build test-golden
         run: zig build -Dfixed-cpu test-golden
+      # The serving pins ran only in the nightly, so a PR that touched a pinned file landed green and turned the
+      # next nightly red (10-12 Nov). Run them on every PR: a changed pinned file needs its re-pin in the same PR.
+      - name: zig build test-gradient-serving test-qwen-serving-host
+        run: zig build -Dfixed-cpu test-gradient-serving test-qwen-serving-host
       # Hostile HTTP framing, API keys and download paths, on the CPU.
       - name: zig build test-server-security test-pull-security
         run: zig build -Dfixed-cpu test-server-security test-pull-security
