@@ -495,3 +495,10 @@ The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files
   [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
   `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
   [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).
+
+## Indian-script tokenizer fixture
+
+`INDIC` in `tools/zig/tokenizer_parity.py` holds one sentence of
+[IN22-Gen](https://huggingface.co/datasets/ai4bharat/IN22-Gen) (AI4Bharat) in its 22 languages, unchanged, under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). It is tokenizer test input only. The composition exclusions
+and ZWJ/ZWNJ conjuncts after it are TensorFold's own.
