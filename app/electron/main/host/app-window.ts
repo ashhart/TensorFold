@@ -10,6 +10,8 @@ interface AppWindowRuntimeDeps {
   baseDir: string
   openExternalSafely(url: string, opts?: { allowHttpLocalhost?: boolean }): Promise<void>
   session: typeof sessionType
+  /** `app.isPackaged`. Left out, the build counts as packaged, which ignores the dev-server URL. */
+  packaged?: boolean
   onWindowClosed?(): void
   onWindowCreated?(win: BrowserWindowType): void
   shouldShowWindow?(): boolean
@@ -28,6 +30,13 @@ interface MediaPermissionDetails {
   mediaType?: string
 }
 
+// The dev-server URL becomes the trusted renderer, so it is honoured only in an unpackaged build:
+// a packaged app always loads the page it shipped with, whatever its environment says.
+export function devRendererUrl(packaged: boolean, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (packaged) return null
+  return env.VITE_DEV_SERVER_URL?.trim() || null
+}
+
 // Pure policy seam for tests: only the exact trusted entry's main frame may request audio.
 // Camera/video, child frames, query-modified/file-neighbour URLs, and every other Electron
 // permission remain denied.
@@ -41,16 +50,17 @@ export function trustedRendererMediaAllowed(permission: string, details: MediaPe
 
 export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
   const { BrowserWindow, baseDir, openExternalSafely, session } = deps
+  const currentDevUrl = () => devRendererUrl(deps.packaged ?? true)
 
   const rendererEntryUrl = () => {
-    const devUrl = process.env.VITE_DEV_SERVER_URL
+    const devUrl = currentDevUrl()
     return devUrl
       ? new URL(devUrl).href
       : pathToFileURL(path.join(baseDir, '../dist/index.html')).href
   }
 
   function installSessionHardening() {
-    const devUrl = process.env.VITE_DEV_SERVER_URL
+    const devUrl = currentDevUrl()
     const connectSources: string[] = []
     if (devUrl) {
       const origin = new URL(devUrl)
@@ -108,7 +118,7 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
       if (store.win === appWindow && (deps.shouldShowWindow?.() ?? true)) appWindow.show()
     })
 
-    const devUrl = process.env.VITE_DEV_SERVER_URL
+    const devUrl = currentDevUrl()
     const appEntryUrl = rendererEntryUrl()
     const appWebContents = appWindow.webContents
     configureTrustedRenderer(appWebContents, appEntryUrl)
