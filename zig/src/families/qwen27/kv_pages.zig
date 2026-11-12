@@ -8,9 +8,8 @@ const kv_pool = @import("core").kv_pool;
 pub const kvp = @import("core").metal_kv_pages;
 
 /// TF_QWEN27_METAL_KV_PAGES=1: every slot's keys and values in pages of the core pool (off by default).
-pub fn on() bool {
-    const v = std.c.getenv("TF_QWEN27_METAL_KV_PAGES") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn on() !bool {
+    return @import("sys").environment.read(bool, "TF_QWEN27_METAL_KV_PAGES", false);
 }
 
 /// A page: each attention layer's keys [kv_heads][256][head_dim] then its values, 256 rows of every layer.

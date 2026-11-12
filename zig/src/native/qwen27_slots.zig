@@ -200,9 +200,8 @@ pub fn endFill(b: *Metal, s: *lanes.Stream) void {
 }
 
 /// Slot 0 resumes a later prompt from where its last stream left it unless TF_QWEN27_SLOT_RESUME=0 (read at start).
-pub fn slotResumeEnv() bool {
-    const v = std.c.getenv("TF_QWEN27_SLOT_RESUME") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+pub fn slotResumeEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_QWEN27_SLOT_RESUME", true);
 }
 
 /// Whether slot 0 resumes in place: on, and without --vision (an image prompt's rows go by its images, not its ids).

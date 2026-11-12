@@ -91,6 +91,12 @@ const valid = [_]Case{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_SLOT_RESUME", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .n = 1 },
+    .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },
     .{ .name = "XPU_A8_BITS", .raw = "8", .n = 8 },
     .{ .name = "LFM3_FUSE", .raw = "7", .n = 7 },
@@ -99,6 +105,12 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "subject", .n = 2 },
     .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .n = 3 },
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
+    .{ .name = "TF_SLIDE_FIT_REDUCE", .raw = "ordered", .n = 0 },
+    .{ .name = "TF_SLIDE_FIT_REDUCE", .raw = "tree", .n = 1 },
+    .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .raw = "0", .n = 0 },
+    .{ .name = "TF_SLIDE_TAKE_OUT_CHECK", .raw = "1", .n = 1 },
+    .{ .name = "TF_SLIDE_TAP_CHECK", .raw = "0", .n = 0 },
+    .{ .name = "TF_SLIDE_TAP_CHECK", .raw = "1", .n = 1 },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .raw = "/tmp/pocket rows", .n = 0 },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
@@ -287,4 +299,34 @@ test "environment: a legacy alias is checked only while its canonical name is un
     try t.expectEqualStrings("TF_DSV41_TOOL_GRAMMAR=\"bad\": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)", why);
     for ([_][]const u8{ "", "0", "1" }) |canonical| try t.expect((try e.refusal(a, Alias{ .canonical = canonical }, .{ .dsv41 = true })) == null);
     try t.expect((try e.refusal(a, Alias{ .canonical = null }, .{})) == null);
+}
+
+test "environment: the Metal Qwen and slide-learning switches take their forms, read blank as unset and name a refusal" {
+    const flags = [_][:0]const u8{ "TF_QWEN27_SLOT_RESUME", "TF_QWEN27_METAL_KV_PAGES", "TF_QWEN35_METAL_KV_PAGES", "TF_SLIDE_TAKE_OUT_CHECK", "TF_SLIDE_TAP_CHECK" };
+    for (flags) |name| {
+        try t.expectEqual(@as(?u64, 0), try e.parse(name, "0"));
+        try t.expectEqual(@as(?u64, 1), try e.parse(name, "1"));
+        for ([_][]const u8{ "", " ", "\t" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(name, raw));
+        for ([_][]const u8{ "00", "false", "2", "yes" }) |raw| {
+            try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+            const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, all)).?;
+            defer a.free(why);
+            try t.expect(std.mem.indexOf(u8, why, name) != null);
+        }
+    }
+    // unset and every valid value keep today's meaning: resume on unless 0, pages off unless 1
+    try t.expect(try e.value(bool, "TF_QWEN27_SLOT_RESUME", null, true));
+    try t.expect(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "", true));
+    try t.expect(!(try e.value(bool, "TF_QWEN27_SLOT_RESUME", "0", true)));
+    try t.expect(!(try e.value(bool, "TF_QWEN27_METAL_KV_PAGES", null, false)));
+    try t.expect(try e.value(bool, "TF_QWEN35_METAL_KV_PAGES", "1", false));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_SLIDE_FIT_REDUCE", "ordered"));
+    try t.expectEqual(@as(?u64, 1), try e.parse("TF_SLIDE_FIT_REDUCE", "tree"));
+    try t.expectEqual(@as(?u64, null), try e.parse("TF_SLIDE_FIT_REDUCE", ""));
+    for ([_][]const u8{ "Tree", "trees", "tre", "ordred" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_SLIDE_FIT_REDUCE", raw));
+        const why = (try e.refusal(a, Env{ .name = "TF_SLIDE_FIT_REDUCE", .raw = raw }, all)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_SLIDE_FIT_REDUCE") != null);
+    }
 }
