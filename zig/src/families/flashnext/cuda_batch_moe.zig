@@ -33,7 +33,7 @@ pub fn sumSlots(self: anytype, r0: usize, rows: usize) !void {
     try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }
 
-/// The EXL3 canonical value over the leaf subtree [start, start + 2^log) into [rows, dims] fp32: the f64 value rounded once.
+/// Canonical subtree rounded once from f64 into [rows, dims] f32.
 pub fn leafTree(self: anytype, out: u64, start: usize, log: usize) !void {
     try leaf(self, self.k.leaf_tree, out, start, log);
 }
