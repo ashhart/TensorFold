@@ -7,6 +7,8 @@
 
 #include <cstdint>
 
+#include "common/dot2.hpp"
+
 namespace tf {
 namespace rocm {
 
@@ -26,6 +28,11 @@ __device__ __forceinline__ float fp8_level(unsigned c) {
     return (c & 0x80u) != 0 ? -v : v;
 }
 
+// Its BF16 bits: exact, since three mantissa bits fit seven.
+__device__ __forceinline__ unsigned short fp8_bf16(unsigned c) {
+    return __bfloat16_as_ushort(__float2bfloat16(fp8_level(c)));
+}
+
 __device__ __forceinline__ float fp8_warp_sum(float v) {
 #pragma unroll
     for (int off = 16; off > 0; off >>= 1) v += __shfl_down_sync(0xffffffffu, v, off);
@@ -42,6 +49,7 @@ __device__ __forceinline__ void fp8_rows(ModelFp8 a) {
     const unsigned char* codes = static_cast<const unsigned char*>(a.codes);
     const bool wide = (a.k & 3) == 0;
     const int words_row = a.k / 4;
+    const int k = a.k;
     const long long stride = static_cast<long long>(gridDim.x) * warps;
     for (long long item = static_cast<long long>(blockIdx.x) * warps + (threadIdx.x >> 5); item < total;
          item += stride) {
@@ -49,8 +57,12 @@ __device__ __forceinline__ void fp8_rows(ModelFp8 a) {
         const int col = static_cast<int>(item % a.n);
         const int row0 = rb * R;
         const int rows = a.m - row0 < R ? a.m - row0 : R;
-        const unsigned char* w = codes + static_cast<long long>(col) * a.k;
-        const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0) * a.k;
+        const unsigned char* w = codes + static_cast<long long>(col) * k;
+        const hip_bfloat16* xr[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            xr[r] = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0 + (r < rows ? r : 0)) * k;
+        }
         float acc[R];
 #pragma unroll
         for (int r = 0; r < R; ++r) acc[r] = 0.f;
@@ -58,30 +70,40 @@ __device__ __forceinline__ void fp8_rows(ModelFp8 a) {
             const uint32_t* w32 = reinterpret_cast<const uint32_t*>(w);
             for (int base = 0; base < words_row; base += 32) {
                 const int wd = base + lane;
-                if (wd < words_row) {
-                    const uint32_t word = w32[wd];
-                    float lvl[4];
+                if (wd >= words_row) continue;
+                const uint32_t word = w32[wd];
+                const int at = wd * 4;
+                uint32_t lv[2];
+                lv[0] = static_cast<uint32_t>(fp8_bf16(word & 0xffu)) | (static_cast<uint32_t>(fp8_bf16((word >> 8) & 0xffu)) << 16);
+                lv[1] = static_cast<uint32_t>(fp8_bf16((word >> 16) & 0xffu)) | (static_cast<uint32_t>(fp8_bf16((word >> 24) & 0xffu)) << 16);
 #pragma unroll
-                    for (int c = 0; c < 4; ++c) lvl[c] = fp8_level(word >> (8 * c));
+                for (int r = 0; r < R; ++r) {
+                    float q = 0.f;
+                    if (r < rows) {
+#if TF_DEVICE_BF16_DOT2
+                        const uint32_t* xw = reinterpret_cast<const uint32_t*>(xr[r] + at);
 #pragma unroll
-                    for (int r = 0; r < R; ++r) {
-                        if (r < rows) {
-                            float q = 0.f;
-#pragma unroll
-                            for (int c = 0; c < 4; ++c) {
-                                q = fmaf(lvl[c], static_cast<float>(x[static_cast<long long>(r) * a.k + wd * 4 + c]), q);
-                            }
-                            acc[r] += q;
+                        for (int c = 0; c < 2; ++c) {
+                            q = DotBF16::dot(__builtin_bit_cast(bf16x2, xw[c]), __builtin_bit_cast(bf16x2, lv[c]), q);
                         }
+#else
+                        const hip_bfloat16* xp = xr[r] + at;
+#pragma unroll
+                        for (int c = 0; c < 2; ++c) {
+                            q = fmaf(__uint_as_float(lv[c] << 16), static_cast<float>(xp[2 * c]), q);
+                            q = fmaf(__uint_as_float(lv[c] & 0xffff0000u), static_cast<float>(xp[2 * c + 1]), q);
+                        }
+#endif
                     }
+                    acc[r] += q;
                 }
             }
         } else {
-            for (int j = lane; j < a.k; j += 32) {
+            for (int j = lane; j < k; j += 32) {
                 const float lvl = fp8_level(w[j]);
 #pragma unroll
                 for (int r = 0; r < R; ++r) {
-                    if (r < rows) acc[r] = fmaf(lvl, static_cast<float>(x[static_cast<long long>(r) * a.k + j]), acc[r]);
+                    if (r < rows) acc[r] = fmaf(lvl, static_cast<float>(xr[r][j]), acc[r]);
                 }
             }
         }

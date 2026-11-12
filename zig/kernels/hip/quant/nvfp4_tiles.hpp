@@ -8,6 +8,7 @@
 
 #include <cstdint>
 
+#include "common/dot2.hpp"
 #include "quant/nvfp4.hpp"
 
 namespace tf {
@@ -32,8 +33,8 @@ __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
-// A warp R rows of one output column: its lanes read the column's consecutive words, so a column's weights load once
-// and serve the R rows; a group's two words are folded by a lane pair, its even lane applies the group's scale.
+// A warp R rows of one output column: its lanes read the column's consecutive words, so a column loads once and serves
+// the R rows; a group's two words are folded by a lane pair whose even lane applies the group's scale.
 template <int R>
 __device__ __forceinline__ void nvfp4_rows(Nvfp4 a) {
     const int lane = threadIdx.x & 31;
@@ -42,6 +43,7 @@ __device__ __forceinline__ void nvfp4_rows(Nvfp4 a) {
     const long long total = static_cast<long long>(row_blocks) * a.n;
     const int words_row = a.k / 8;
     const int groups = a.k / a.group;
+    const int k = a.k;
     const long long stride = static_cast<long long>(gridDim.x) * warps;
     for (long long item = static_cast<long long>(blockIdx.x) * warps + (threadIdx.x >> 5); item < total;
          item += stride) {
@@ -50,30 +52,47 @@ __device__ __forceinline__ void nvfp4_rows(Nvfp4 a) {
         const int row0 = rb * R;
         const int rows = a.m - row0 < R ? a.m - row0 : R;
         const uint32_t* w = a.words + static_cast<long long>(col) * words_row;
-        const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0) * a.k;
+        const hip_bfloat16* xr[R];
+#pragma unroll
+        for (int r = 0; r < R; ++r) {
+            xr[r] = static_cast<const hip_bfloat16*>(a.x) + static_cast<long long>(row0 + (r < rows ? r : 0)) * k;
+        }
         float acc[R];
 #pragma unroll
         for (int r = 0; r < R; ++r) acc[r] = 0.f;
         for (int base = 0; base < words_row; base += 32) {
             const int wd = base + lane;
-            if (wd < words_row) {
-                const uint32_t word = w[wd];
-                float lvl[8];
+            if (wd >= words_row) continue;
+            const uint32_t word = w[wd];
+            const float scale = nvfp4_scale(a.scale, static_cast<long long>(col) * groups + (wd >> 1));
+            const int at = wd * 8;
+            uint32_t lv[4];
 #pragma unroll
-                for (int c = 0; c < 8; ++c) lvl[c] = nvfp4_level(word >> (4 * c));
-                const float scale = nvfp4_scale(a.scale, static_cast<long long>(col) * groups + (wd >> 1));
+            for (int c = 0; c < 4; ++c) {
+                lv[c] = static_cast<uint32_t>(kE2m1Bf16[(word >> (8 * c)) & 0xfu]) |
+                        (static_cast<uint32_t>(kE2m1Bf16[(word >> (8 * c + 4)) & 0xfu]) << 16);
+            }
 #pragma unroll
-                for (int r = 0; r < R; ++r) {
-                    float q = 0.f;
-                    if (r < rows) {
+            for (int r = 0; r < R; ++r) {
+                float q = 0.f;
+                if (r < rows) {
+#if TF_DEVICE_BF16_DOT2
+                    const uint32_t* xw = reinterpret_cast<const uint32_t*>(xr[r] + at);
 #pragma unroll
-                        for (int c = 0; c < 8; ++c) {
-                            q = fmaf(lvl[c], static_cast<float>(x[static_cast<long long>(r) * a.k + wd * 8 + c]), q);
-                        }
+                    for (int c = 0; c < 4; ++c) {
+                        q = DotBF16::dot(__builtin_bit_cast(bf16x2, xw[c]), __builtin_bit_cast(bf16x2, lv[c]), q);
                     }
-                    q += __shfl_xor_sync(0xffffffffu, q, 1);
-                    if ((lane & 1) == 0) acc[r] = fmaf(q, scale, acc[r]);
+#else
+                    const hip_bfloat16* xp = xr[r] + at;
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) {
+                        q = fmaf(__uint_as_float(lv[c] << 16), static_cast<float>(xp[2 * c]), q);
+                        q = fmaf(__uint_as_float(lv[c] & 0xffff0000u), static_cast<float>(xp[2 * c + 1]), q);
+                    }
+#endif
                 }
+                q += __shfl_xor_sync(0xffffffffu, q, 1);
+                if ((lane & 1) == 0) acc[r] = fmaf(q, scale, acc[r]);
             }
         }
 #pragma unroll
