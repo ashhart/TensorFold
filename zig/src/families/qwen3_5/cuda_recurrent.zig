@@ -6,9 +6,11 @@ const Cache = @import("cuda_cache.zig").Cache;
 pub const Pool = common.Workspace(cuda.DeviceBuffer);
 pub const Lease = Pool.Lease;
 
+/// The whole model's shape decides, so a pipeline stage keeps the scratch path one engine takes.
 pub fn enabled(e: *const Engine) bool {
-    return e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0 and
-        e.g.v_heads == 48 and e.g.k_heads == 16 and e.g.deltas() == 48;
+    const g = e.g.model();
+    return @import("cuda_geometry.zig").dense27(g) and
+        g.v_heads == 48 and g.k_heads == 16 and g.deltas() == 48;
 }
 
 pub const Provider = struct {
