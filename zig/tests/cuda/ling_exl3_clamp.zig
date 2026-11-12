@@ -98,8 +98,8 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
         const gp = try r.zeros(pairs * ni * 4);
         const up = try r.zeros(pairs * ni * 4);
         const pin: ex.Rows = .{ .x = try r.dev(std.mem.sliceAsBytes(xp)), .stride = d };
-        try g.run(r.s, .down_f32, pin, asDown(l, false), p, gp, items, -1, false);
-        try g.run(r.s, .down_f32, pin, asDown(l, true), p, up, items, -1, false);
+        try g.run(r.s, .down_f32, pin, asDown(l, false), p, gp, items, pairs, 16, -1);
+        try g.run(r.s, .down_f32, pin, asDown(l, true), p, up, items, pairs, 16, -1);
         const gv = try f32s(&r, gp, pairs * ni);
         const uv = try f32s(&r, up, pairs * ni);
         // L at the 90th percentile of silu(g): the clamp bites on a tenth of the values
@@ -115,7 +115,7 @@ pub fn run(gpu: check.Gpu, rest: []const [:0]const u8) !void {
             lc.after = after;
             lc.exl3.?.limit = lv;
             const out = try r.zeros(pairs * ni * 2);
-            try g.run(r.s, .up, in, lc, p, out, items, -1, rows > 16);
+            try g.run(r.s, .up, in, lc, p, out, items, pairs, 16, -1);
             outs[k] = try r.back(out, pairs * ni * 2);
         }
         var most: f64 = 0;

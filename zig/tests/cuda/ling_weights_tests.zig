@@ -234,10 +234,10 @@ pub fn experts(r: *Rig, kit: *const Kit, ck: *core.Checkpoint, c: *const Config,
     nolimit.limit = 0;
     const x = try r.bfs(rows * d, 1.0);
     const act = try r.zeros(pairs * ni * 2);
-    try kit.grouped().decode(r.s, .up, .{ .x = try r.dev(std.mem.sliceAsBytes(x)), .stride = d, .slots = slots }, nolimit, plan, act, items, -1);
+    try kit.grouped().decode(r.s, .up, .{ .x = try r.dev(std.mem.sliceAsBytes(x)), .stride = d, .slots = slots }, nolimit, plan, act, items, pairs, 16, -1);
     const xd = try r.bfs(pairs * ni, 1.0);
     const y = try r.zeros(pairs * d * 4);
-    try kit.grouped().decode(r.s, .down_f32, .{ .x = try r.dev(std.mem.sliceAsBytes(xd)), .stride = ni }, nolimit, plan, y, items, -1);
+    try kit.grouped().decode(r.s, .down_f32, .{ .x = try r.dev(std.mem.sliceAsBytes(xd)), .stride = ni }, nolimit, plan, y, items, pairs, 16, -1);
     var b: [3][192]u8 = undefined;
     const want = try r.a.alloc(f64, pairs * ni);
     const tol = try r.a.alloc(f64, pairs * ni);
