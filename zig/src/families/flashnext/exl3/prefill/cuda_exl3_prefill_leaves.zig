@@ -1,5 +1,4 @@
-//! The canonical expert reduction at any degree: 64 leaves, fp64 fma chains, a balanced fp64 tree, gathered block partials,
-//! and one round to fp32 at the root.
+//! TP-independent 64-leaf F64 expert tree, with one F32 root rounding.
 
 const std = @import("std");
 
@@ -57,7 +56,7 @@ pub fn treeSum(v: []f64) f64 {
     return v[0];
 }
 
-/// The branch from all ranks' fp64 block partials in leaf order: equal aligned neighbours merge until 64 leaves are left.
+/// Merge aligned F64 neighbours in leaf order until one 64-leaf root remains.
 pub fn finish(starts: []const Block, vals: []f64) f64 {
     var blk: [leaves]Block = undefined;
     var n = starts.len;
@@ -87,7 +86,7 @@ pub fn round(v: f64) f32 {
     return @floatCast(v);
 }
 
-/// Leaf sums of one output element: leaf[j] = fp64 fma chain of y[k] * w[k] over slots in leaf j, in slot order, from +0.
+/// Each leaf chains its slots' exact F32 products with F64 FMAs, starting at +0.
 pub fn leafSums(picks: []const i32, y: []const f32, w: []const f32, out: *[leaves]f64) void {
     @memset(out, 0);
     for (picks, 0..) |p, k| {
@@ -187,7 +186,7 @@ test "exl3: leaves a row's leaf sums chain the picks in slot order from +0 in fp
     try std.testing.expectEqual(@as(f64, 0), out[4]);
 }
 
-/// The leaf values of a row of four slots on leaves `at`: y = (1e9, 8, -1e9, 8), w = 1/8 each, so the leaves hold 1.25e8, 1, -1.25e8, 1.
+/// Four leaves hold 1.25e8, 1, -1.25e8, 1, whose exact sum is 2.
 fn cancelling(at: [4]usize) [leaves]f64 {
     const picks = [_]i32{ @intCast(at[0] * ids_per_leaf), @intCast(at[1] * ids_per_leaf), @intCast(at[2] * ids_per_leaf), @intCast(at[3] * ids_per_leaf) };
     const y = [_]f32{ 1e9, 8, -1e9, 8 };
@@ -209,7 +208,7 @@ fn treeSumF32(leaf: *const [leaves]f64) f32 {
 }
 
 test "exl3: leaves cancelling leaves keep the +1s the fp32 tree rounds away, at every degree" {
-    // 1.25e8 + 1 is not an fp32 (spacing 8): the fp32 tree's two pair sums are +-1.25e8 and the root is 0; the exact answer is 2.
+    // F32 loses both +1s and returns 0; F64 retains the exact answer 2.
     for ([_][4]usize{ .{ 0, 1, 2, 3 }, .{ 0, 21, 42, 63 }, .{ 0, 9, 40, 62 } }) |at| {
         const leaf = cancelling(at);
         try std.testing.expectEqual(@as(f64, 2), single(&leaf));
@@ -222,8 +221,7 @@ test "exl3: leaves cancelling leaves keep the +1s the fp32 tree rounds away, at 
 }
 
 test "exl3: leaves a partial carried through fp32 loses what the fp64 partial keeps" {
-    // Two ranks: rank 0 holds leaves 0 and 21 (1.25e8 and 1), rank 1 leaves 42 and 63 (-1.25e8 and 1). Each rank's block
-    // partial is +-1.25e8 +- 1 exactly in fp64; through fp32 both round to +-1.25e8 and the root is 0 instead of 2.
+    // Each rank holds +/-1.25e8 + 1; narrowing partials to F32 loses both +1s.
     const leaf = cancelling(.{ 0, 21, 42, 63 });
     var half: [2]f64 = undefined;
     for (0..2) |r| {

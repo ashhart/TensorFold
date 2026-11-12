@@ -86,6 +86,8 @@ test "Qwen paged reuse: a bf16 save and restore copy a page each into the copy's
     e.g.q_heads = 32;
     e.g.kv_heads = 4;
     e.g.layers = 8;
+    e.g.first = 0; // one engine, not a pipeline stage
+    e.g.whole = 0;
     @memset(&e.g.linear, false);
     for (0..8) |i| e.g.linear[i] = i % 4 != 3;
     e.stream = .{ .d = &d, .handle = null };
