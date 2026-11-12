@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: decode launches of 6 to 16 rows (draft verify windows, alone or with other streams' rows) run the dense FP8 projections on a simdgroup-matrix tile that splits K over simdgroups in the row kernel's own group tree, so every row's bits equal the row kernel's one row at a time; launches of 1 to 5 rows keep the row kernel. On synthetic layers of the release's shapes on an M5 Max, the layers of a 16-row window take about 26% less GPU time and an 8-row one about 13% less, with fewer rows unchanged; `time-dsv41-metal-synth` times the dispatch classes per row without a checkpoint (#2973, part of #1676).
+
 - DeepSeek-V4.1 on Metal: rounds with three or more decoding streams decode plain, with no draft pass and no drafter ingest, since drafts lose there; when fewer streams decode again the drafter takes the rows it missed from the target, so its drafts are the ones it would have made (#1720, part of #1676).
 
 - GLM-5.3-Flash on CUDA: tensor-parallel shares and layer sums go through one mesh layer (declared shares, one reduction boundary over a `Collective`), with the same gathers, bytes and order and tokens equal to main at TP=2; an aborted `tp_group` call now ends as `Aborted` instead of stopping the process (#2789, part of #2560). Thanks to @laudney.
