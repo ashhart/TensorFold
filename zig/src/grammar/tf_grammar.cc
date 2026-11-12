@@ -220,6 +220,9 @@ int tfg_budget_ready(void* g) {
     }
 }
 
+// The work and the milliseconds exploring a grammar may take, for grammars first looked up after this (tfb::Limits).
+void tfg_budget_limits(void* c, int64_t work, int64_t ms) { static_cast<Compiler*>(c)->budgets.Limit({work, ms}); }
+
 // n == 0 arms a fresh matcher, else clears bits that leave no completion in left - 1 more: 0, 1 not covered, -1 failed.
 int tfg_budget(void* m, int32_t* words, int n, int left) {
     try {
