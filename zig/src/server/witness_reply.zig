@@ -200,7 +200,7 @@ fn unknownInto(a: Allocator, o: *json.Object, reason: []const u8, feature: ?[]co
     return null;
 }
 
-/// A reply that asked but took a path that binds nothing (compaction, Cortheon): unknown, with the witness's reason.
+/// A reply that asked but took a path that binds nothing (compaction, Cortheon): the witness's reason, or unbound.
 pub fn missing(a: Allocator, srv: *Server) Allocator.Error!Value {
     const snap = srv.witness.?.read(srv);
     const o = try json.newObject(a);

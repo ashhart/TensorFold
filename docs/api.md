@@ -1280,7 +1280,7 @@ key may always ask. Only these two routes carry the binding: `/v1/responses` and
 | `binding` | Known only: SHA-256 over `witness`, `prompt_sha256`, `request_sha256`, `token_sha256` and `finish_reason` |
 | `witness`, `path` | Known only: the snapshot's, as `GET /v1/execution/witness` gives them |
 | `instance`, `epoch` | The process and the engine generation at the end |
-| `reason`, `feature`, `admitted_epoch` | Unknown only: the snapshot's reason, or `epoch_changed` or `witness_changed`; the epoch at admission |
+| `reason`, `feature`, `admitted_epoch` | Unknown only: the snapshot's reason, or `epoch_changed`, `witness_changed` or `unbound` (below); the epoch at admission |
 | `prompt_sha256` | The prompt's token ids after the template, hashed as `tensorfold.token_sha256` hashes the reply's |
 | `token_sha256` | The reply's token ids, equal to `tensorfold.token_sha256` |
 | `finish_reason` | The reply's |
@@ -1293,8 +1293,10 @@ text; `f` then the float's IEEE-754 bits as a little-endian u64 (every float in 
 string; `a` then the count as a little-endian u64, then each item; `o` then the count, then each key as a field and its
 value. `binding` hashes the field `tensorfold execution binding v1`, then `witness`, `prompt_sha256`, `request_sha256`,
 `token_sha256` and `finish_reason`, each as its text in the reply. A reply that took a path that binds nothing (with
-`--compact-at` or `--cortheon`, which the witness already excludes) carries an unknown object with the snapshot's
-reason. No response cache reads the binding yet.
+`--compact-at` or `--cortheon`, which the witness already excludes) carries only `schema`, `state: "unknown"`, `reason`
+(and `feature`), `instance` and `epoch`, with the snapshot's reason. `reason` is `unbound` if that snapshot reads known;
+no route does that today, since each path that binds nothing runs only under a flag the witness excludes, so `unbound`
+would mean a reply path that skipped the binding by mistake. No response cache reads the binding yet.
 
 ## Cancel a request
 
