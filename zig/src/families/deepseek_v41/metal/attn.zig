@@ -36,7 +36,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     var buf: [pipelines.max_rows]Ctx = undefined;
     const segs = x.parts(&buf);
     // rows of several slots: each slot-bound stage is one dispatch over the layer's slot table
-    const tab: ?Ref = if (segs_.many(x)) try segs_.table(x, e, l) else null;
+    const tab: ?Ref = if (segs_.many(x)) try segs_.table(x, l) else null;
     // every reader of hq and hn: wq_a, wkv, the compressor's linears, the index weights
     try x.proj(e, s.hq, w.wq_a, s.qa, false);
     try x.proj(e, s.hq, w.wkv, s.kv, false);

@@ -50,8 +50,11 @@ fn launch(f: *ff.Fwd, slots: []pkg.kv.Slot, hist: []const []u32, n: u32, segs: *
     return x;
 }
 
-/// Each layer's dispatches and barriers, and the round's median wall time over `reps` runs.
-fn measure(a: std.mem.Allocator, f: *ff.Fwd, slots: []pkg.kv.Slot, hist: []const []u32, n: u32, per: []Count) !f64 {
+/// Medians of a round's wall time and of its host encode alone (a command buffer encoded, never committed), in ms.
+const Times = struct { round: f64, encode: f64 };
+
+/// Each layer's dispatches and barriers, and the round's median times over `reps` runs.
+fn measure(a: std.mem.Allocator, f: *ff.Fwd, slots: []pkg.kv.Slot, hist: []const []u32, n: u32, per: []Count) !Times {
     const r = f.r;
     var segs: [most]pkg.ctx.Seg = undefined;
     const x = try launch(f, slots, hist, n, &segs);
@@ -73,7 +76,20 @@ fn measure(a: std.mem.Allocator, f: *ff.Fwd, slots: []pkg.kv.Slot, hist: []const
         if (i >= 5) t[i - 5] = mtl.clock.seconds() - t0;
     }
     std.mem.sort(f64, &t, {}, lessThan);
-    return t[reps / 2] * 1e3;
+    var enc: [reps]f64 = undefined;
+    for (&enc) |*v| {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        const cb = r.queue.commandBuffer();
+        const t0 = mtl.clock.seconds();
+        const e = cb.compute(.concurrent);
+        const ok = fwd.encode(&x, e, f.model(), &f.b);
+        e.end();
+        v.* = mtl.clock.seconds() - t0;
+        try ok;
+    }
+    std.mem.sort(f64, &enc, {}, lessThan);
+    return .{ .round = t[reps / 2] * 1e3, .encode = enc[reps / 2] * 1e3 };
 }
 
 test "dsv41 metal slots timing: a round's dispatches, barriers and time at 1, 2 and 4 slots and 1 slot of 4 rows" {
@@ -107,6 +123,6 @@ test "dsv41 metal slots timing: a round's dispatches, barriers and time at 1, 2 
             tot.b += n.b;
             try line.print(a, " L{d} {d}/{d}", .{ i, n.d, n.b });
         }
-        std.debug.print("dsv41 metal slots timing: {d} slot(s) x {d} row(s): {d} dispatches, {d} barriers in the layers; median round {d:.3} ms; per layer d/b:{s}\n", .{ k, kn[1], tot.d, tot.b, ms, line.items });
+        std.debug.print("dsv41 metal slots timing: {d} slot(s) x {d} row(s): {d} dispatches, {d} barriers in the layers; median round {d:.3} ms, encode {d:.3} ms; per layer d/b:{s}\n", .{ k, kn[1], tot.d, tot.b, ms.round, ms.encode, line.items });
     }
 }
