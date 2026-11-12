@@ -11,7 +11,7 @@ const cm = host.calib_measure;
 const Allocator = std.mem.Allocator;
 
 /// Committed rows a timed pass ingests first (a round's keep is a few rows).
-const ingest_rows = 4;
+const ingest_rows = 3;
 
 /// What a measurement runs on: the served target and pass and the plain numbers of the model.
 pub const Subject = struct {
