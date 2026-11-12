@@ -105,13 +105,13 @@ zig/src/cuda/nvfp4.zig	62bd32b4dcc7d4e7f077c2147adf65a1aea7744dda4845b06da72c946
 zig/src/cuda/qlinear.zig	680c653d110b53e52918bb13f7c54c12ffac4097959319281dc7509c085c062f	raw	commits da01294e0, 7f6f940eb, 4cec0eba1, c360607f0, ba1a9a2bb, b631fe069, 0a2a1c681, aca5a88e2, c12503be2, 7b17d0eb7, d7e44b555, 59be20e24, d40bc9e8b, f1f7f9abd, 3915bceaf, e8eabc82c; series patches 14-runtime-foundation.patch, 25-mimo-02.patch; MiMo-only aliases omitted from this candidate; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7f12b30	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name)
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
-zig/src/cuda/root.zig	ab1760e269f72b970ecf5f0a2b808777ff31001918b7d1134c3f083c20d12852	raw	main 42735f94f0 (#2335: cuda.mla exported), #3041 b83c447d08: tp_line.zig's tests imported
+zig/src/cuda/root.zig	ab1760e269f72b970ecf5f0a2b808777ff31001918b7d1134c3f083c20d12852	raw	main 42735f94f0 (#2335: cuda.mla exported), #3041: its tests reach tp_line.zig
 zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
 zig/src/cuda/sample.zig	5d374b5cd2108fd90b383cfec0a63bdce038eef8c380289495e5b9d080c590f2	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged)
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
 zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125db2199fa6	raw	commits e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/tp_group.zig	1a2acbdf2de6b827218deb45df5b5845beecde4eb718a4e4b3966582db51d7a7	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally); #2918 (communicator abort through its owner)
-zig/src/cuda/tp_watch.zig	4de1a9f14d514f1cbb5576b1db33cc11bd504b5a434ad3e7787af6d3a40c91a7	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512), #3041 b83c447d08: rank connections prove a shared key before their first protocol byte
+zig/src/cuda/tp_watch.zig	4de1a9f14d514f1cbb5576b1db33cc11bd504b5a434ad3e7787af6d3a40c91a7	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512), #3041: liveness lines prove the rank key through tp_line.zig
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
@@ -159,10 +159,10 @@ zig/src/families/flashnext/cuda_prompt_main.zig	2543cd166dc80cd97b1ca1ce930a6150
 zig/src/families/flashnext/cuda_prompt_step.zig	e04030fb4a4fdb8780704a1bc0b5ba4b786159ab08a927fe32a636a893129d0c	raw
 zig/src/families/flashnext/cuda_prompt_wt.zig	9f0b8f853cc33e23c3ae3785c7031721615fc043e240161c84fb945e499e809f	raw
 zig/src/families/flashnext/cuda_qmm.zig	6d035feb053691cc9750a369c86a5463d41ed942764ad85b861bb628c106dccf	raw
-zig/src/families/flashnext/cuda_rank_engine.zig	e229100dc45d140a1ce138e22f7014527a38d900bbd8b0a62281a65ae7e956c7	raw	#3041 b83c447d08: rank connections prove a shared key before their first protocol byte
+zig/src/families/flashnext/cuda_rank_engine.zig	e229100dc45d140a1ce138e22f7014527a38d900bbd8b0a62281a65ae7e956c7	raw	#3041: Link.open takes the rank key from TF_RANK_SECRET_FILE
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
-zig/src/families/flashnext/cuda_rank_wire.zig	57f0a5f43d1006fac1bb0b87cc590ae2abe746caa755b96730931d1f1e3dc8ab	raw	#3041 b83c447d08: rank connections prove a shared key before their first protocol byte
+zig/src/families/flashnext/cuda_rank_wire.zig	23116dec51d6f5e77d4acb6ad1b1c38ebdb49d3cd962b27a7969d6b897b1a44e	raw	#3041: the pair proves the rank key first; #3076: keyed pairs seal every byte after it
 zig/src/families/flashnext/cuda_round_graph.zig	7fa3a54e93c81de36cf3962d0a68eb72a7dd81b8869f47b6d9ed8b9a6cc325cd	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
