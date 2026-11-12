@@ -12,6 +12,9 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.dsv41);
 
+/// Prompt rows prefilled in the first slot.
+pub const prefix_rows = 4;
+
 pub const Measured = struct {
     costs: costs_mod.Costs,
     /// rank 0's rows 1..rows as kept (the lower of sweep and recheck), ms
@@ -24,6 +27,12 @@ pub const Measured = struct {
     timed: usize = 0,
     /// the drafter's ingest of a few committed rows within the pass, fastest timed run, ms (0: not timed apart)
     ingest_ms: f64 = 0.0,
+    /// prompt rows run into slots, and the windows (untimed warm-ups included) the measurement ran
+    prefill_rows: u32 = 0,
+    windows: usize = 0,
+    /// seconds in the prompt's prefills and in the timed runs
+    prefill_s: f64 = 0.0,
+    runs_s: f64 = 0.0,
 };
 
 /// `boot`'s result: the measured table and the stored entry's path (null when nothing was stored).
@@ -86,38 +95,25 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var plan = try cm.Plan.initWide(gpa, d.slots, rows_cap, rows, how, pass != null, d.wide);
     defer plan.deinit(gpa);
     if (ids.len < 2) return error.CalibPrompt;
+    // a few prompt rows in slot 0, one in the others: a prefill reads the experts its rows route to, so it stays short
     var lens: [4]usize = undefined;
     for (lens[0..plan.n], 0..) |*l, i| {
-        l.* = cm.cutOf(ids.len, @intCast(i));
+        l.* = if (i == 0) prefix_rows + 1 else 2;
         if (l.* + rows + 2 > d.limit) return error.CalibContext;
     }
     // rank 0's session store detached: a calibration text is neither resumed nor saved
     if (d.detach) |f| f(d.ctx);
     defer if (d.detach) |f| f(d.ctx);
-    try prefillAll(d, ids, lens[0..plan.n], false);
-    // each slot's greedy continuation, 1-row windows kept one by one
-    var conts: [4][cm.max_rows]u32 = undefined;
-    for (lens[0..plan.n], 0..) |l, i| {
-        const slot: u32 = @intCast(i);
-        var pend = ids[l - 1];
-        for (0..rows - 1) |j| {
-            const at: u64 = l - 1 + j;
-            var one: [1]u32 = undefined;
-            var out = [_][]u32{&one};
-            try tgt.window(&.{.{ .slot = slot, .start = at, .tokens = &.{pend}, .parents = null, .draws = &.{at + 1}, .sampling = null }}, &out);
-            try tgt.keep(slot, &.{0});
-            pend = one[0];
-            conts[i][j] = pend;
-        }
-    }
-    try prefillAll(d, ids, lens[0..plan.n], true);
+    const began_prefill = ph.nowNs();
+    try prefillAll(d, ids, lens[0..plan.n]);
+    const prefill_ns = ph.nowNs() - began_prefill;
     // the timed runs, in the plan's order; each between two marks on every rank
     const samples = try gpa.alloc(i64, plan.runs.items.len);
     defer gpa.free(samples);
+    // each window's tokens are the text's own that follow the slot's prompt
     var toks: [4][cm.max_rows]u32 = undefined;
     for (lens[0..plan.n], 0..) |l, i| {
-        toks[i][0] = ids[l - 1];
-        @memcpy(toks[i][1..rows], conts[i][0 .. rows - 1]);
+        for (toks[i][0..rows], 0..) |*t, j| t.* = ids[(l - 1 + j) % ids.len];
     }
     const shape = d.shape;
     if (shape.block > cm.max_rows) return error.CalibBlock;
@@ -126,6 +122,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var chosen: [4][cm.max_rows]u32 = undefined;
     const began = ph.nowNs();
     var timed: usize = 0;
+    var windows: usize = 0;
     var ingest_best: f64 = std.math.inf(f64);
     for (plan.runs.items, samples, 0..) |run, *x, at| {
         if (how.budget_ms > 0 and ph.nowNs() - began > @as(u64, how.budget_ms) * std.time.ns_per_ms and plan.repeat(at)) {
@@ -159,6 +156,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
         try tgt.window(segs[0..run.nsegs], outs[0..run.nsegs]);
         x.* = @intCast((try d.mark(d.ctx)) - t0);
         timed += 1;
+        windows += 1;
         for (run.segments()) |s| try d.drop_window(d.ctx, s.slot);
     }
     for (0..plan.n) |i| {
@@ -189,16 +187,18 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
         try plan.values(ms, v);
         r.* = v;
     }
-    var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len, .timed = timed, .ingest_ms = if (std.math.isFinite(ingest_best)) ingest_best else 0.0 };
+    var prefill_rows: u32 = 0;
+    for (lens[0..plan.n]) |l| prefill_rows += @intCast(l - 1);
+    const spent: f64 = @floatFromInt(ph.nowNs() - began);
+    var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len, .timed = timed, .ingest_ms = if (std.math.isFinite(ingest_best)) ingest_best else 0.0, .prefill_rows = prefill_rows, .windows = windows, .prefill_s = @as(f64, @floatFromInt(prefill_ns)) / 1e9, .runs_s = spent / 1e9 };
     @memcpy(out.kept[0..rows], ranks[0][1 .. rows + 1]);
     return out;
 }
 
-/// Every text slot released and prefilled again (drafter reset, text but its last token, a pending verify tail kept).
-fn prefillAll(d: Device, ids: []const u32, lens: []const usize, again: bool) !void {
+/// Every slot's prompt run into it (drafter reset, text but its last token, a pending verify tail kept).
+fn prefillAll(d: Device, ids: []const u32, lens: []const usize) !void {
     for (lens, 0..) |l, i| {
         const slot: u32 = @intCast(i);
-        if (again) d.target.release(slot);
         if (d.pass) |p| p.reset(slot);
         _ = try d.target.prefill(slot, ids[0 .. l - 1], null, l - 1);
         if (d.has_pending(d.ctx, slot)) try d.target.keep(slot, &.{0});
@@ -209,9 +209,11 @@ fn prefillAll(d: Device, ids: []const u32, lens: []const usize, again: bool) !vo
 pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env.Knobs, want: calib_env.Shape) !Boot {
     const how = try cm.methodFrom(&calib_env.env, d.base);
     const rows_cap = (try calib_env.depthSettings(&calib_env.env)).max_rows;
+    const began_prompt = ph.nowNs();
     const ids = try promptOf(gpa, io, dir, d.vocab);
     defer gpa.free(ids);
     const t0 = ph.nowNs();
+    const prompt_s = @as(f64, @floatFromInt(t0 - began_prompt)) / 1e9;
     var got = try measure(gpa, d, ids, how, rows_cap);
     errdefer got.costs.deinit(gpa);
     const secs = @as(f64, @floatFromInt(ph.nowNs() - t0)) / 1e9;
@@ -237,6 +239,6 @@ pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env
         wr.print("{s}{d:.1}", .{ if (first) "" else ", ", got.costs.windowMs(r) }) catch {};
         first = false;
     };
-    log.info("dsv41 calibration (zig): draft {d:.2} ms (ingest {d:.2}), slot {d:.2} ms, verify {s} ms, measured in {d:.2} s over {d} timed runs{s}{s}{s}", .{ got.costs.draft, got.ingest_ms, got.costs.slot, wr.buffered(), secs, got.timed, if (path != null) " (stored " else " (not stored", path orelse "", ")" });
+    log.info("dsv41 calibration (zig): draft {d:.2} ms (ingest {d:.2}), slot {d:.2} ms, verify {s} ms, measured in {d:.2} s over {d} timed runs (tokenizer and text {d:.2} s, {d} prompt rows in {d:.2} s, {d} windows and passes in {d:.2} s){s}{s}{s}", .{ got.costs.draft, got.ingest_ms, got.costs.slot, wr.buffered(), secs, got.timed, prompt_s, got.prefill_rows, got.prefill_s, got.windows, got.runs_s, if (path != null) " (stored " else " (not stored", path orelse "", ")" });
     return .{ .costs = got.costs, .path = path };
 }

@@ -147,9 +147,9 @@ test "a sparse plan under a spent budget still gives a monotone 32-row table fro
         timed += 1;
         pass_runs += @intFromBool(!r.warm);
     }
-    // 1 untimed window, 1 untimed pass, then 5 rows, the 4 + 4 window, 2 wide windows and the pass once each
-    try t_.expectEqual(@as(usize, 2 + 5 + 1 + 2 + 1), timed);
-    try t_.expectEqual(@as(usize, 9), pass_runs);
+    // 1 untimed window, 1 untimed pass, then 9 rows, the 4 + 4 window, 2 wide windows and the pass once each
+    try t_.expectEqual(@as(usize, 2 + 9 + 1 + 2 + 1), timed);
+    try t_.expectEqual(@as(usize, 13), pass_runs);
     try t_.expect(spent < 2000.0);
     const out = try gpa.alloc(f64, p.entries());
     defer gpa.free(out);
@@ -159,8 +159,8 @@ test "a sparse plan under a spent budget still gives a monotone 32-row table fro
     try t_.expectEqual(@as(usize, 32), built.verify.len);
     for (built.verify[1..], built.verify[0..31]) |b, a| try t_.expect(b >= a);
     // the timed rows are exact and the ones between them are on the line
-    for ([_]u32{ 1, 2, 4, 8, 16 }) |r| try t_.expectApproxEqAbs(synthetic(r, 1), built.verify[r - 1], 0.002);
-    try t_.expectApproxEqAbs((synthetic(4, 1) + synthetic(8, 1)) / 2.0, built.verify[5], 0.01);
+    for ([_]u32{ 1, 2, 3, 4, 5, 6, 8, 12, 16 }) |r| try t_.expectApproxEqAbs(synthetic(r, 1), built.verify[r - 1], 0.002);
+    try t_.expectApproxEqAbs((synthetic(6, 1) + synthetic(8, 1)) / 2.0, built.verify[6], 0.01); // row 7 is on the line
     try t_.expect(built.verify[16] - built.verify[15] > 20.0); // the second launch's step is in the table
     try t_.expectEqual(@as(f64, 12.0), built.draft);
 }
@@ -175,7 +175,7 @@ test "a plan with budget left repeats its passes, and a repeat never replaces an
         try t_.expectEqual(seen, p.repeat(i));
         first += @intFromBool(!r.warm and !seen);
     }
-    try t_.expectEqual(@as(usize, 9), first); // 5 rows, the 4 + 4 window, 2 wide windows, the pass
+    try t_.expectEqual(@as(usize, 13), first); // 9 rows, the 4 + 4 window, 2 wide windows, the pass
 }
 
 test "a stored table is read back only for the device and weights that stored it" {
@@ -209,4 +209,55 @@ test "a stored table is read back only for the device and weights that stored it
     defer unnamed.deinit(gpa);
     try t_.expectEqual(calib_env.Source.cached, unnamed.source);
     try t_.expectEqual(@as(f64, 20.0), unnamed.costs.draft);
+}
+
+/// Tokens a lone stream drafting `k` of chain chance `p` commits a round, on average.
+fn committed(p: f64, k: usize) f64 {
+    var run: f64 = 1.0;
+    var e: f64 = 1.0;
+    for (0..k) |_| {
+        run *= p;
+        e += run;
+    }
+    return e;
+}
+
+/// The drafts the rule gives a lone stream at chain chance `p`, once its rate has settled on its own rounds.
+fn loneDrafts(c: costs_mod.Costs, p: f64) !usize {
+    var d = try depth.Depth.init(gpa, c, 5, .{});
+    defer d.deinit();
+    const conf = [5]f64{ p, p, p, p, p };
+    var k: usize = 0;
+    for (0..40) |_| {
+        const ask = [_]depth.Depth.Ask{.{ .slot = 0, .conf = &conf, .most = 5, .first = 7, .position = 100 }};
+        var ks: [1]usize = undefined;
+        try d.chooseJoint(&ask, 0, 0, true, &ks);
+        k = ks[0];
+        (try d.state(0)).rounds.push(.{ .tokens = committed(p, k), .ms = d.roundMs(k + 1, 1, true) });
+    }
+    return k;
+}
+
+test "a lone stream's choice under the measured table is never worse, under the measured costs, than the default table's" {
+    const xs = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 16 };
+    const ys = [_]f64{ 28.4, 37.5, 44.2, 50.9, 58.75, 66.6, 82.3, 152.0 };
+    var buf: [32]f64 = undefined;
+    for (&buf, 1..) |*v, r| {
+        var i: usize = 0;
+        while (i + 2 < xs.len and xs[i + 1] < r) i += 1;
+        const f = (@as(f64, @floatFromInt(r)) - @as(f64, @floatFromInt(xs[i]))) / @as(f64, @floatFromInt(xs[i + 1] - xs[i]));
+        v.* = ys[i] + (ys[i + 1] - ys[i]) * f + (if (r > 16) @as(f64, 19.5) else 0.0);
+    }
+    const measured: costs_mod.Costs = .{ .verify = &buf, .draft = 6.42, .slot = 7.96 };
+    var lin = try costs_mod.defaults(gpa, 64);
+    defer lin.deinit(gpa);
+    for ([_]f64{ 0.4, 0.5, 0.6, 0.7, 0.8, 0.9 }) |p| {
+        const km = try loneDrafts(measured, p);
+        const kd = try loneDrafts(lin, p);
+        // tokens a ms under the measured costs, the pass paid every round
+        const got = committed(p, km) / (measured.windowMs(@intCast(km + 1)) + measured.draft);
+        const base = committed(p, kd) / (measured.windowMs(@intCast(kd + 1)) + measured.draft);
+        try t_.expect(got >= base - 1e-9);
+        try t_.expect(km <= kd); // dearer rows past the first never draft deeper
+    }
 }
