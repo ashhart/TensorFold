@@ -148,7 +148,7 @@ pub const Pass = struct {
         if (x.prof) |q| {
             q.event(ev[0], q.clock() -| t0);
             const s = cb.gpuSeconds();
-            q.event(ev[1], if (s > 0) @intFromFloat(s * 1e9) else 0);
+            q.event(ev[1], round_prof.secondsNs(s));
         }
         if (cb.failure()) |msg| {
             std.debug.print("dspark command buffer failed: {s}\n", .{msg});

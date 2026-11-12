@@ -271,9 +271,7 @@ fn bookBuffers(r: *round_prof.Round, cbs: []const mtl.CommandBuffer, committed: 
     r.book(.commit_done, done -| committed[0]);
 }
 
-fn secondsNs(s: f64) u64 {
-    return if (s > 0) @intFromFloat(s * 1e9) else 0;
-}
+const secondsNs = round_prof.secondsNs;
 
 /// Layers lo .. hi of the forward, the embedding before layer 0 and the head after the last.
 fn encodeRange(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs, lo: usize, hi: usize) !void {

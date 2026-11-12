@@ -10,11 +10,16 @@ const nevent = std.enums.values(Event).len;
 
 /// Command buffers a round can hold (forward.zig cuts a round into about five).
 pub const max_cbs = 16;
-/// Samples kept per series for the percentiles; later ones still count in the mean.
+/// Samples kept per series within one summary window; later ones still count in the mean.
 const max_samples = 1 << 15;
 /// Rounds between summaries in the log.
 pub const report_every = 4096;
 const row_buckets = [_][]const u8{ "1", "2", "3-4", "5-8", "9-16" };
+
+/// A GPU span in seconds as ns; zero for a negative or non-finite span, and capped so the cast cannot trap.
+pub fn secondsNs(s: f64) u64 {
+    return if (s > 0 and s < 1e9) @intFromFloat(s * 1e9) else 0;
+}
 
 fn realNow() u64 {
     var t: std.c.timespec = undefined;
@@ -32,6 +37,12 @@ const Series = struct {
         s.n += 1;
         s.sum += ns;
         if (s.at.items.len < max_samples) s.at.append(a, @intCast(@min(ns, std.math.maxInt(u32)))) catch {};
+    }
+
+    fn clear(s: *Series) void {
+        s.n = 0;
+        s.sum = 0;
+        s.at.clearRetainingCapacity();
     }
 
     fn deinit(s: *Series, a: std.mem.Allocator) void {
@@ -115,6 +126,10 @@ pub const RoundProf = struct {
     clock: *const fn () u64 = realNow,
     last_end: u64 = 0,
     rounds: u64 = 0,
+    /// rounds before the current summary window
+    since: u64 = 0,
+    /// rounds between summaries; each one starts a new window
+    every: u64 = report_every,
     groups: [17][row_buckets.len][2]?*Group = @splat(@splat(@splat(null))),
     cb_gpu: [max_cbs]Series = @splat(.{}),
     cb_wall: [max_cbs]Series = @splat(.{}),
@@ -155,7 +170,7 @@ pub const RoundProf = struct {
     }
 
     fn add(p: *RoundProf, r: *const Round) void {
-        const g = p.group(r);
+        const g = p.group(r) orelse return;
         g.n += 1;
         p.rounds += 1;
         for (&g.phase, r.ns, 0..) |*s, ns, i| {
@@ -167,22 +182,39 @@ pub const RoundProf = struct {
             p.cb_gpu[i].add(p.a, r.cb_gpu[i]);
             p.cb_wall[i].add(p.a, r.cb_wall[i]);
         }
-        if (p.rounds % report_every == 0) p.log();
+        if (p.rounds - p.since >= p.every) {
+            p.log();
+            p.reset();
+        }
     }
 
-    fn group(p: *RoundProf, r: *const Round) *Group {
+    /// The shape's group, made on first use; null when it cannot be allocated (the round is then not booked).
+    fn group(p: *RoundProf, r: *const Round) ?*Group {
         const slot = &p.groups[@min(r.slots, 16)][rowBucket(r.rows)][@intFromBool(r.drafted)];
         if (slot.* == null) {
-            slot.* = p.a.create(Group) catch @panic("round profile: out of memory");
-            slot.*.?.* = .{};
+            const g = p.a.create(Group) catch return null;
+            g.* = .{};
+            slot.* = g;
         }
-        return slot.*.?;
+        return slot.*;
+    }
+
+    /// A new summary window: every series and count starts again, so a summary's mean and percentiles share rounds.
+    fn reset(p: *RoundProf) void {
+        p.since = p.rounds;
+        for (&p.groups) |*bs| for (bs) |*ds| for (ds) |g| if (g) |gg| {
+            gg.n = 0;
+            for (&gg.phase) |*s| s.clear();
+        };
+        for (&p.cb_gpu) |*s| s.clear();
+        for (&p.cb_wall) |*s| s.clear();
+        for (&p.ev) |*s| s.clear();
     }
 
     /// The summary: one line a launch shape (slots, rows, drafted or plain), the command buffers, the drafter's passes.
     pub fn write(p: *const RoundProf, w: *std.Io.Writer) !void {
-        try w.print("dsv41 round profile: {d} rounds; ms mean/p50/p95 (gpu, gap, commit_done: the round's command buffers)\n", .{p.rounds});
-        for (p.groups, 0..) |bs, slots| for (bs, 0..) |ds, b| for (ds, 0..) |g, drafted| if (g) |gg| {
+        try w.print("dsv41 round profile: rounds {d} to {d} ({d} rounds; mean and percentiles cover these rounds); ms mean/p50/p95\n", .{ p.since + 1, p.rounds, p.rounds - p.since });
+        for (p.groups, 0..) |bs, slots| for (bs, 0..) |ds, b| for (ds, 0..) |g, drafted| if (g) |gg| if (gg.n > 0) {
             try w.print("slots {d} rows {s} {s} n {d}:", .{ slots, row_buckets[b], if (drafted == 1) "drafted" else "plain", gg.n });
             for (&gg.phase, 0..) |*s, i| if (s.n > 0) try p.cell(w, @tagName(@as(Phase, @fromBackingInt(@intCast(i)))), s);
             try w.writeByte('\n');
@@ -281,4 +313,51 @@ test "row buckets" {
     try std.testing.expectEqual(@as(usize, 2), RoundProf.rowBucket(4));
     try std.testing.expectEqual(@as(usize, 3), RoundProf.rowBucket(8));
     try std.testing.expectEqual(@as(usize, 4), RoundProf.rowBucket(16));
+}
+
+test "a failed allocation for a new shape leaves the round unbooked and the profiler usable" {
+    const a = std.testing.allocator;
+    const p = try RoundProf.init(a);
+    defer p.deinit();
+    p.clock = fakeClock;
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    p.a = failing.allocator();
+    fake_now = 10;
+    var r = p.begin(1, 1);
+    fake_now += 5;
+    r.end();
+    try std.testing.expectEqual(@as(u64, 0), p.rounds);
+    try std.testing.expect(p.groups[1][0][0] == null);
+    p.a = a;
+    var r2 = p.begin(1, 1);
+    fake_now += 7;
+    r2.end();
+    try std.testing.expectEqual(@as(u64, 1), p.rounds);
+    try std.testing.expectEqual(@as(u64, 1), p.groups[1][0][0].?.n);
+}
+
+test "each periodic summary covers only the rounds since the last, and says so" {
+    const a = std.testing.allocator;
+    const p = try RoundProf.init(a);
+    defer p.deinit();
+    p.clock = fakeClock;
+    p.every = 2;
+    fake_now = 1;
+    for ([_]u64{ 1_000_000, 1_000_000, 9_000_000 }) |ns| {
+        var r = p.begin(1, 1);
+        fake_now += ns;
+        r.lap(.wait);
+        r.end();
+    }
+    // the first two rounds were summarised and dropped: the third stands alone
+    try std.testing.expectEqual(@as(u64, 3), p.rounds);
+    try std.testing.expectEqual(@as(u64, 2), p.since);
+    const g = p.groups[1][0][0].?;
+    try std.testing.expectEqual(@as(u64, 1), g.n);
+    try std.testing.expectEqual(@as(usize, 1), g.phase[@backingInt(Phase.wait)].at.items.len);
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try p.write(&w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "rounds 3 to 3 (1 rounds; mean and percentiles cover these rounds)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), " wait 9.000/9.000/9.000") != null);
 }

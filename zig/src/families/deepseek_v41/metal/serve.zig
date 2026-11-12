@@ -56,7 +56,8 @@ pub const Metal = struct {
         m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes });
         errdefer m.t.deinit();
         if (opt.round_prof) {
-            m.rp = try round_prof.RoundProf.init(a);
+            // a diagnostic: without memory for it the server runs unprofiled
+            m.rp = round_prof.RoundProf.init(a) catch null;
             m.t.prof = m.rp;
         }
         errdefer if (m.rp) |p| p.deinit();
