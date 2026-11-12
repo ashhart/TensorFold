@@ -319,6 +319,7 @@ pub const glm_draft_accept = @embedFile("glm_draft_accept.metal");
 /// GLM-5.3-Flash's DFlash2 inline follow: copies accepted tap rows into the drafter ring ahead of its block.
 pub const glm_draft_follow = @embedFile("glm_draft_follow.metal");
 pub const sam3_contract = @embedFile("sam3/contract.metal");
-pub const sam3_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal");
+pub const sam3_dense_small = @embedFile("sam3/dense_small.metal");
+pub const sam3_source = @embedFile("sam3/deconv.metal") ++ @embedFile("sam3/sam3.metal") ++ sam3_dense_small;
 pub const sam3_deconv = @embedFile("sam3/deconv.metal");
 pub const sam3_deconv_baseline = @embedFile("sam3/deconv_baseline.metal");

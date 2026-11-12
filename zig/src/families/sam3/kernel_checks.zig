@@ -10,22 +10,25 @@ const flash = Runtime.flash;
 
 pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        std.debug.print("tf-sam3-kernels [--benchmark | --benchmark-projections]\ntf-sam3-kernels --replay-attention[-two-pass] Q.safetensors K.safetensors V.safetensors [ROW]\ntf-sam3-kernels --replay-attention-operator CAPTURE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-projection CAPTURE.safetensors RECEIPT.json [--mps-ndarray]\ntf-sam3-kernels --check-mps-ndarray RECEIPT.json\n", .{});
+        std.debug.print("tf-sam3-kernels [--benchmark | --benchmark-projections]\ntf-sam3-kernels --replay-attention[-two-pass] Q.safetensors K.safetensors V.safetensors [ROW]\ntf-sam3-kernels --replay-attention-operator CAPTURE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-projection CAPTURE.safetensors RECEIPT.json [--mps-ndarray | --compensated]\ntf-sam3-kernels --check-mps-ndarray RECEIPT.json\n", .{});
+        std.debug.print("tf-sam3-kernels --replay-text CHECKPOINT REFERENCE.safetensors RECEIPT.json [--compensated-mlp]\n", .{});
         return;
     }
+    const text_replay = (args.len == 5 or args.len == 6) and std.mem.eql(u8, args[1], "--replay-text");
     const two_pass = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention-two-pass");
     const replay = two_pass or (args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention"));
     const projections = args.len == 2 and std.mem.eql(u8, args[1], "--benchmark-projections");
     const projection_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-projection");
     const operator_replay = args.len >= 2 and std.mem.eql(u8, args[1], "--replay-attention-operator");
     const mps_check = args.len == 3 and std.mem.eql(u8, args[1], "--check-mps-ndarray");
-    if (!replay and !projections and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
+    if (!text_replay and !replay and !projections and !projection_replay and !operator_replay and !mps_check and args.len != 1 and !(args.len == 2 and std.mem.eql(u8, args[1], "--benchmark"))) return error.UnexpectedSamKernelArgument;
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     var g = try gpu.Gpu.init(init.gpa, @import("sam3_kernels").source);
     defer g.deinit();
     g.guards = true;
     g.buffer_cache_limit = 32 << 20;
+    if (text_replay) return @import("text_replay.zig").run(init, &g, args[2..]);
     if (projections) return @import("projection_checks.zig").run(&g);
     if (mps_check) return @import("mps_ndarray_probe.zig").check(init, &g, args[2]);
     if (projection_replay) return @import("projection_replay.zig").run(init, &g, args[2..]);

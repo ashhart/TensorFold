@@ -5,6 +5,14 @@ const st = @import("safetensors");
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
+        std.debug.print(
+            \\tf-sam3-image CHECKPOINT FRAMES OUTPUT_PREFIX --point X Y | --box X0 Y0 X1 Y1 | --text TEXT --tokenizer FILE
+            \\  --negative-point X Y --fp32 --frame N --threshold N
+            \\
+        , .{});
+        return;
+    }
     if (args.len < 5) return error.ExpectedCheckpointFramesOutputAndPrompt;
     var points: std.ArrayList(sam.prompts.Point) = .empty;
     var boxes: std.ArrayList(sam.prompts.Box) = .empty;

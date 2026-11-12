@@ -330,6 +330,7 @@ const macos_fast = [_][]const u8{
     "test-qwen27-startup-host",
     "test-template-limits-host",
     "test-tokenizer-host",
+    "test-sam3",
 };
 
 const macos_lanes = [_][]const u8{
