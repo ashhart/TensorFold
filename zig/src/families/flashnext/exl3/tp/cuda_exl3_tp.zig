@@ -141,7 +141,7 @@ pub const Scratch = struct {
     d: *const cuda.Driver,
     mod: cuda.Module,
     mask_fn: cuda.Function,
-    /// The rank's masked picks [rows, 11] int32, then the finish's piece table and the all-gather buffer of FP64 partials (gatherAt).
+    /// Masked picks, finish metadata, then aligned F64 all-gather partials.
     picks: ?cuda.DeviceBuffer = null,
     rows: usize = 0,
     world: usize = 1,
@@ -214,8 +214,7 @@ fn gatherAt(rows: usize) usize {
     return align256(rows * slots * 4) + meta_bytes;
 }
 
-/// The canonical exchange's partials: each rank's `most` subtrees of `n` rows as FP64 values, rank by rank in the one
-/// all-gather buffer. The finish merges them in FP64 and rounds once to f32 at the root.
+/// Rank-major F64 subtrees; finish merges without narrowing before the root.
 const Partials = struct {
     /// Subtrees a rank computes at most: the all-gather's fixed width in partials.
     most: usize,
@@ -244,7 +243,7 @@ const Partials = struct {
     }
 };
 
-/// The finish's table into `meta`, a piece's start leaf, log and partial index (rank * most + idx) in leaf order; returns the count.
+/// Write (start leaf, log, rank * most + index) in leaf order; return the piece count.
 fn pieceTable(meta: *[3 * meta_pieces]i32, world: usize) !usize {
     var ps: [canon.max_pieces]canon.Piece = undefined;
     const np = canon.pieces(&ps, world);
@@ -325,8 +324,7 @@ pub fn canonical(p: anytype) !void {
     m.kept(p);
 }
 
-/// The canonical branch on `world` ranks: own subtrees as FP64 partials, one fixed-size typed all-gather, every rank
-/// finishes the tree in FP64 and rounds once to f32.
+/// Exchange F64 subtrees with one typed all-gather, then round the finished root once.
 fn exchange(p: anytype, t: *Scratch, c: anytype, r: Rank) !void {
     const m = @import("../../cuda_batch_moe.zig");
     const q = Partials.init(r.world, p.rows);
@@ -516,7 +514,7 @@ test "exl3: each rank's FP64 partials sit where the finish's table reads them, a
         const q = Partials.init(world, rows);
         var meta: [3 * meta_pieces]i32 = undefined;
         const np = try pieceTable(&meta, world);
-        // the buffer is every rank's block of `most` partials, each [rows, dims] doubles; its start keeps NCCL's 16-byte alignment
+        // Rank blocks contain [rows, dims] doubles; NCCL starts at a 16-byte-aligned offset.
         try std.testing.expectEqual(world * q.most * rows * dims * bytes, q.bytes(world));
         try std.testing.expectEqual(@as(usize, 0), gatherAt(rows) % 16);
         // the table's pieces tile the 64 leaves in order
