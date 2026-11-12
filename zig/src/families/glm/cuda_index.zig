@@ -16,8 +16,7 @@ pub const pool_threads = 256;
 pub const rows_from = sparse.score_loop_from;
 pub const cap_max = 4096;
 
-/// TF_GLM_INDEX_CUDA: unset, blank or 1 (both kernels), scores (only the scores, to bisect), 0 (tf_glm_scores and
-/// tf_glm_select_rows). Shapes the kernels do not take (`takes`) keep tf_glm_scores either way.
+/// TF_GLM_INDEX_CUDA: unset, blank or 1 (both kernels), scores (only the scores, to bisect), 0 (neither).
 pub const Mode = enum {
     off,
     both,
