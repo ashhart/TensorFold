@@ -356,7 +356,9 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     // the 27B runner's RoPE tables on core's rope_freq, printed beside the expressions they replaced
     const rope = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/rope_table.zig"), .target = host });
     rope.addImport("core", core);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rope })).step);
+    const rope_tests = b.addRunArtifact(b.addTest(.{ .root_module = rope }));
+    b.step("test-rope-xpu-host", "The XPU 27B runner's RoPE tables on core's rope_freq, without devices or ocloc").dependOn(&rope_tests.step);
+    step.dependOn(&rope_tests.step);
     // the Gemma 4 E4B runner's admission, over the family config (which takes `core` by name)
     const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_config.zig"), .target = host, .optimize = .debug });
     gemma4.addImport("core", core);
