@@ -12,6 +12,10 @@ const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.dsv41);
 
+/// Untimed and timed passes run back to back for the pass's entry.
+const steady_warm = 1;
+const steady_reps = 5;
+
 /// Prompt rows prefilled in the first slot.
 pub const prefix_rows = 4;
 
@@ -27,6 +31,8 @@ pub const Measured = struct {
     timed: usize = 0,
     /// the drafter's ingest of a few committed rows within the pass, fastest timed run, ms (0: not timed apart)
     ingest_ms: f64 = 0.0,
+    /// the same ingest the first time after the windows, ms
+    ingest_first_ms: f64 = 0.0,
     /// prompt rows run into slots, and the windows (untimed warm-ups included) the measurement ran
     prefill_rows: u32 = 0,
     windows: usize = 0,
@@ -124,6 +130,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var timed: usize = 0;
     var windows: usize = 0;
     var ingest_best: f64 = std.math.inf(f64);
+    var ingest_first: f64 = 0.0;
     for (plan.runs.items, samples, 0..) |run, *x, at| {
         if (how.budget_ms > 0 and ph.nowNs() - began > @as(u64, how.budget_ms) * std.time.ns_per_ms and plan.repeat(at)) {
             x.* = cm.skipped;
@@ -133,14 +140,25 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
             const p0: u64 = lens[0] - 1;
             const asks = [_]iface.Ask{.{ .slot = 0, .anchor = ids[lens[0] - 1], .start = p0, .params = dspark.Params.of(null, p0) }};
             var props = [_]iface.Proposal{.{ .drafts = drafts[0..shape.block], .conf = conf[0..shape.block] }};
-            const t0 = try d.mark(d.ctx);
-            if (d.ingest) |f| {
-                try f(d.ctx, 0);
-                const t1 = try d.mark(d.ctx);
-                if (!run.warm) ingest_best = @min(ingest_best, @as(f64, @floatFromInt(t1 - t0)) / 1e6);
+            // a round's pass the way serving runs it: back to back, the first after the windows left untimed
+            const pairs: u32 = if (run.warm) 1 else steady_warm + steady_reps;
+            var best: i64 = std.math.maxInt(i64);
+            for (0..pairs) |k| {
+                const t0 = try d.mark(d.ctx);
+                var t1 = t0;
+                if (d.ingest) |f| {
+                    try f(d.ctx, 0);
+                    t1 = try d.mark(d.ctx);
+                }
+                try pass.?.propose(&asks, &props);
+                const t2 = try d.mark(d.ctx);
+                if (run.warm) break;
+                if (k == 0) ingest_first = @as(f64, @floatFromInt(t1 - t0)) / 1e6;
+                if (k < steady_warm) continue;
+                best = @min(best, @as(i64, @intCast(t2 - t0)));
+                ingest_best = @min(ingest_best, @as(f64, @floatFromInt(t1 - t0)) / 1e6);
             }
-            try pass.?.propose(&asks, &props);
-            x.* = @intCast((try d.mark(d.ctx)) - t0);
+            x.* = if (run.warm) 0 else best;
             timed += 1;
             continue;
         }
@@ -190,7 +208,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var prefill_rows: u32 = 0;
     for (lens[0..plan.n]) |l| prefill_rows += @intCast(l - 1);
     const spent: f64 = @floatFromInt(ph.nowNs() - began);
-    var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len, .timed = timed, .ingest_ms = if (std.math.isFinite(ingest_best)) ingest_best else 0.0, .prefill_rows = prefill_rows, .windows = windows, .prefill_s = @as(f64, @floatFromInt(prefill_ns)) / 1e9, .runs_s = spent / 1e9 };
+    var out: Measured = .{ .costs = try plan.build(gpa, ranks), .rows = rows, .n = plan.n, .runs = plan.runs.items.len, .timed = timed, .ingest_ms = if (std.math.isFinite(ingest_best)) ingest_best else 0.0, .ingest_first_ms = ingest_first, .prefill_rows = prefill_rows, .windows = windows, .prefill_s = @as(f64, @floatFromInt(prefill_ns)) / 1e9, .runs_s = spent / 1e9 };
     @memcpy(out.kept[0..rows], ranks[0][1 .. rows + 1]);
     return out;
 }
@@ -216,6 +234,10 @@ pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env
     const prompt_s = @as(f64, @floatFromInt(t0 - began_prompt)) / 1e9;
     var got = try measure(gpa, d, ids, how, rows_cap);
     errdefer got.costs.deinit(gpa);
+    if (!got.costs.plausible()) {
+        log.warn("calibration: a pass of {d:.2} ms against a 1-row window of {d:.2} ms is not a measurement to price drafts by", .{ got.costs.draft, got.costs.windowMs(1) });
+        return error.CalibImplausible;
+    }
     const secs = @as(f64, @floatFromInt(ph.nowNs() - t0)) / 1e9;
     log.info("dsv41 calib method (zig): table {t}, {t} of {d} after {d} warm-up(s), rows 1-{d} cycled, rows 1-{d} rechecked, rows 9+ {d} runs; {d} slots, {d} timed runs, a {d}-token text; rows 1-4 kept {d:.3} / {d:.3} / {d:.3} / {d:.3} ms (rank 0)", .{ how.shape, how.stat, how.reps, how.warm, how.cycle, how.recheck, how.deep, got.n, got.runs, ids.len, got.kept[0], got.kept[1], got.kept[2], got.kept[3] });
     var path: ?[]u8 = null;
@@ -239,6 +261,6 @@ pub fn boot(gpa: Allocator, io: std.Io, d: Device, dir: []const u8, k: calib_env
         wr.print("{s}{d:.1}", .{ if (first) "" else ", ", got.costs.windowMs(r) }) catch {};
         first = false;
     };
-    log.info("dsv41 calibration (zig): draft {d:.2} ms (ingest {d:.2}), slot {d:.2} ms, verify {s} ms, measured in {d:.2} s over {d} timed runs (tokenizer and text {d:.2} s, {d} prompt rows in {d:.2} s, {d} windows and passes in {d:.2} s){s}{s}{s}", .{ got.costs.draft, got.ingest_ms, got.costs.slot, wr.buffered(), secs, got.timed, prompt_s, got.prefill_rows, got.prefill_s, got.windows, got.runs_s, if (path != null) " (stored " else " (not stored", path orelse "", ")" });
+    log.info("dsv41 calibration (zig): draft {d:.2} ms (ingest {d:.2}, first {d:.2}), slot {d:.2} ms, verify {s} ms, measured in {d:.2} s over {d} timed runs (tokenizer and text {d:.2} s, {d} prompt rows in {d:.2} s, {d} windows and passes in {d:.2} s){s}{s}{s}", .{ got.costs.draft, got.ingest_ms, got.ingest_first_ms, got.costs.slot, wr.buffered(), secs, got.timed, prompt_s, got.prefill_rows, got.prefill_s, got.windows, got.runs_s, if (path != null) " (stored " else " (not stored", path orelse "", ")" });
     return .{ .costs = got.costs, .path = path };
 }

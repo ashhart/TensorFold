@@ -69,6 +69,18 @@ fn slotBytes(s: anytype) u64 {
     return n;
 }
 
+test "dsv41 metal calib: three fresh starts each price a pass that is plausible against their own rows" {
+    for (0..3) |start| {
+        const m = try fs.open(gpa, io, seed, .{});
+        const md = m.model();
+        defer md.close(md.ptr);
+        var got = try md.calibrate(md.ptr, gpa, io, ".", .{ .mode = "measure" }, want);
+        defer got.costs.deinit(gpa);
+        say(got.costs.plausible(), "start {d}: pass {d:.3} ms against a 1-row window of {d:.3} ms", .{ start, got.costs.draft, got.costs.windowMs(1) });
+        try testing.expect(got.costs.plausible());
+    }
+}
+
 test "dsv41 metal calib: the work a measurement does is bounded: a few prompt rows, the planned windows, only the slots it used" {
     const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
     const md = m.model();
