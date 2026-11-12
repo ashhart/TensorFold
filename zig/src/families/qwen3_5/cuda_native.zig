@@ -9,6 +9,7 @@ pub const reservation = @import("cuda_reserve.zig");
 pub const window_costs = @import("cuda_window_costs.zig");
 pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
+const pick = @import("cuda_pick.zig").pick;
 const Draft = @import("cuda_draft.zig").Draft;
 const cuda_rope = @import("cuda_rope.zig");
 const prefill = @import("cuda_prefill.zig");
@@ -17,7 +18,6 @@ pub const Readout = readout.Readout;
 pub const readout_piece_rows = readout.piece_rows;
 const Fill = prefill.Fill;
 const reuse = @import("cuda_reuse.zig");
-const spares = @import("cuda_spares.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const pages_mod = @import("cuda_pages.zig");
 const cache_mod = @import("cuda_cache.zig");
@@ -51,9 +51,9 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
-pub const snap_spare = spares.spare;
-pub const snap_trim = spares.trim;
-pub const snap_reuses = spares.reuses;
+pub const snap_spare = @import("cuda_spares.zig").spare;
+pub const snap_trim = @import("cuda_spares.zig").trim;
+pub const snap_reuses = @import("cuda_spares.zig").reuses;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
@@ -261,13 +261,6 @@ pub const explain = @import("cuda_native_explain.zig").explain;
 fn release(p: *anyopaque) void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     l.deinit();
-}
-
-/// The device draw of a stream's rule at `position`: sample.cu's keyed rule, greedy at temperature 0 or without one.
-fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
-    const s = sampling orelse return .{ .rule = null, .position = position };
-    if (s.temperature <= 0) return .{ .rule = null, .position = position };
-    return .{ .rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(s)), .position = position };
 }
 
 pub const Lanes = struct {
