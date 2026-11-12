@@ -286,11 +286,10 @@ pub const Spark = struct {
         const l = got.value_ptr;
         try x.reach(l, p.len); // the prompt's pages (a kept state's restore writes into them too)
         l.sampled = false;
-        if (s.sampling) |sp| if (sp.temperature > 0) {
-            const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+        if (cuda.sample.ruleFor(s.sampling)) |r| {
             try x.upload(l.rule, std.mem.asBytes(&r));
             l.sampled = true;
-        };
+        }
         s.cached = 0;
         l.fill = if (x.prompts != null) try x.resumeShared(s, l) else x.resumeAt(s, l, p.len);
         s.fill_at.store(@intCast(l.fill.?), .monotonic);

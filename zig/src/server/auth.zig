@@ -221,6 +221,20 @@ pub const Store = struct {
         // the request's own copy: a reload frees the file's
         return .{ .label = a.dupe(u8, key.label) catch return null, .digest = key.digest, .scopes = key.scopes };
     }
+
+    /// The key with this digest in the current store, after its refresh; null once it is gone or the file is refused.
+    pub fn byDigest(s: *Store, a: Allocator, d: [32]u8) ?Matched {
+        const m = log.io();
+        s.mutex.lockUncancelable(m);
+        defer s.mutex.unlock(m);
+        s.refresh(std.Io.Clock.awake.now(m).toNanoseconds());
+        if (!s.valid) return null;
+        for ([_][]Key{ s.static.items, s.file }) |keys| for (keys) |key| {
+            if (std.crypto.timing_safe.eql([32]u8, key.digest, d))
+                return .{ .label = a.dupe(u8, key.label) catch return null, .digest = d, .scopes = key.scopes };
+        };
+        return null;
+    }
 };
 
 const latin1_space = " \t\r\n\x0b\x0c\x1c\x1d\x1e\x1f\x85\xa0";

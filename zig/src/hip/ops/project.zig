@@ -222,9 +222,9 @@ pub fn projectRoutedPlainRelu2(
 }
 
 /// matmul_routed on a stack of experts: every item in one launch; out (pairs, N) fp32.
-pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize) Error!u64 {
+pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
     switch (proj.handle) {
-        .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows),
+        .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows),
         .dense, .bf16 => return error.BadShape,
     }
 }
@@ -362,17 +362,28 @@ pub fn affineRoutedAct(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, m
 }
 
 /// matmul_routed: every item (expert, first, count) in one launch over stacked weights; out (pairs, N) fp32.
-pub fn affineRouted(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize) Error!u64 {
+pub fn affineRouted(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
     try w.check();
     const out = try o.arena.of(f32, pairs * w.n);
     if (o.prefill) {
+        // a routed prompt without its plan's average rows an expert can't choose its tile: refuse it by name
+        if (expert_rows == 0) return error.BadShape;
         const z = o.l;
         const kind = w.tables.table();
-        try z.affine.prefillLaunch(z.r, .{ .x = x.ptr, .words = w.words, .scale = .{ .p = w.scale, .kind = kind }, .bias = .{ .p = w.bias, .kind = kind }, .out = out, .m = int(rows), .n = int(w.n), .k = int(w.k), .bits = int(w.bits), .group = int(w.group), .fp16 = @intFromBool(x.kind == .f16), .route = .{ .items = items, .members = members, .x_div = int(x_div) } }, o.stream, int(count), int(pairs));
+        try z.affine.prefillLaunch(z.r, .{ .x = x.ptr, .words = w.words, .scale = .{ .p = w.scale, .kind = kind }, .bias = .{ .p = w.bias, .kind = kind }, .out = out, .m = int(rows), .n = int(w.n), .k = int(w.k), .bits = int(w.bits), .group = int(w.group), .fp16 = @intFromBool(x.kind == .f16), .route = .{ .items = items, .members = members, .x_div = int(x_div) } }, o.stream, int(count), int(pairs), int(expert_rows));
         return out;
     }
     try o.l.tf_affine_routed(p(x.ptr), p(w.words), p(w.scale), p(w.bias), w.tables.table(), p(out), i(items), int(count), i(members), int(x_div), int(rows), int(w.n), int(w.k), w.bits, w.group, @intFromBool(x.kind == .f16), o.stream);
     return out;
+}
+
+test "a routed prompt without its average rows per expert refuses, instead of guessing the 64-row tile" {
+    const std = @import("std");
+    var arena = @import("../arena.zig").Arena.counting();
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = null, .arena = &arena, .prefill = true };
+    const x = Tensor{ .ptr = 0, .kind = .bf16 };
+    const w = Affine{ .words = 0, .scale = 0, .bias = 0, .tables = .bf16, .n = 1024, .k = 2048, .bits = 4, .group = 64 };
+    try std.testing.expectError(error.BadShape, affineRouted(o, x, w, 1, 8, 1, 8, 1, 128, 0));
 }
 
 /// The MLX affine gather: `n` embedding rows of width `table.k` by device ids, dequantized into `out`.

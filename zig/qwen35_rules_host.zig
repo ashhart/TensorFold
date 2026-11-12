@@ -137,3 +137,34 @@ test "qwen35 rules: every row and value through every entry point admits as main
     try t.expectEqual(@as(usize, 6 * 6 * values.len), cases);
     try t.expect(words > 0); // the refusals whose word the table changed (CUDA's, the 2B's, two of Metal's 27B)
 }
+
+/// `base` with `tie_word_embeddings` set (JSON) at the root and in `text_config`.
+fn ties(a: std.mem.Allocator, base: []const u8, root: []const u8, tower: []const u8) ![]const u8 {
+    var doc = try std.json.parseFromSliceLeaky(std.json.Value, a, base, .{});
+    const key = "tie_word_embeddings";
+    try doc.object.put(a, key, try std.json.parseFromSliceLeaky(std.json.Value, a, root, .{}));
+    try doc.object.getPtr("text_config").?.object.put(a, key, try std.json.parseFromSliceLeaky(std.json.Value, a, tower, .{}));
+    return std.json.Stringify.valueAlloc(a, doc, .{});
+}
+
+test "qwen35 rules: CUDA's parse refuses a root and text_config tie that disagree, and a non-flag root" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = (try layers_host.bases(a))[1];
+    try t.expect(!(try cuda.parse(t.allocator, try ties(a, base, "false", "false"))).tied);
+    try t.expectError(error.BadTiedHead, cuda.parse(t.allocator, try ties(a, base, "true", "false")));
+    try t.expectError(error.BadTiedHead, cuda.parse(t.allocator, try ties(a, base, "false", "true")));
+    try t.expectError(error.BadTiedHead, cuda.parse(t.allocator, try ties(a, base, "\"yes\"", "false")));
+}
+
+test "qwen35 rules: Metal 27B's parse refuses a nested tie disagreement and a tie of 1 as BadTiedHead" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = (try layers_host.bases(a))[1];
+    _ = try metal27.parse(t.allocator, try ties(a, base, "false", "false"), null);
+    try t.expectError(error.BadTiedHead, metal27.parse(t.allocator, try ties(a, base, "true", "false"), null));
+    try t.expectError(error.BadTiedHead, metal27.parse(t.allocator, try ties(a, base, "false", "true"), null));
+    try t.expectError(error.BadTiedHead, metal27.parse(t.allocator, try ties(a, base, "false", "1"), null));
+}

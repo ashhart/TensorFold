@@ -1,6 +1,7 @@
 //! tf-moss-image's case driver for any backend `B`: its family `mi`, safetensors `st`, clock `seconds` and `Device`.
 const std = @import("std");
 const gate = @import("moss_image_teacher.zig");
+const guide = @import("moss_image_guided.zig");
 
 const usage =
     \\tf-moss-image TRANSFORMER_DIR CASE OUT_DIR [--prompt FILE [--negative FILE]]
@@ -228,18 +229,11 @@ pub fn run(comptime B: type, init: std.process.Init) !u8 {
         try print(&out, a, ", \"run\": [", .{});
 
         const x = try a.dupe(f32, start);
-        const cond = try a.alloc(f32, count);
-        const uncond = try a.alloc(f32, count);
-        var total: f64 = 0;
-        for (0..steps) |s| {
-            const c = try model.forward(&branches[0], x, timesteps[s], null, cond);
-            const u = try model.forward(&branches[1], x, timesteps[s], negative_skip, uncond);
-            const by = sigmas[s + 1] - sigmas[s];
-            for (x, cond, uncond) |*o, pc, pu| o.* += (pu + guidance * (pc - pu)) * by;
-            const wall = c.wall + u.wall;
-            total += wall;
-            std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation on the host)\n", .{ s + 1, steps, wall, c.gpu + u.gpu, c.host + u.host });
-            try print(&out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", wall, c.gpu + u.gpu, c.host + u.host });
+        const timings = try a.alloc(guide.Timing, steps);
+        const total = try guide.denoise(B, a, model, &branches, x, timesteps, sigmas, guidance, negative_skip, timings);
+        for (timings, 0..) |t, s| {
+            std.debug.print("step {d}/{d}: {d:.3} s ({d:.3} s on the GPU, {d:.3} s modulation on the host)\n", .{ s + 1, steps, t.wall, t.gpu, t.host });
+            try print(&out, a, "{s}{{\"wall_s\": {d:.4}, \"gpu_s\": {d:.4}, \"host_s\": {d:.4}}}", .{ if (s == 0) "" else ", ", t.wall, t.gpu, t.host });
         }
         try print(&out, a, "], \"denoise_s\": {d:.3}", .{total});
         std.debug.print("denoise: {d:.2} s for {d} steps ({d} forwards)\n", .{ total, steps, 2 * steps });

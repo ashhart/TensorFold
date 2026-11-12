@@ -79,6 +79,11 @@ pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and oneOf(route, &inferring);
 }
 
+/// A key that may open a Responses WebSocket: admin, or inference (each create is checked again over the socket).
+pub fn allowsUpgrade(scopes: Scopes) bool {
+    return scopes.admin or scopes.inference;
+}
+
 /// The routes a PUT reaches as it would by POST: SGLang's rerank route takes both.
 pub fn putRoute(route: []const u8) bool {
     return std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");

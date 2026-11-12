@@ -1,4 +1,4 @@
-//! The std-only `qwen35_layers` and `qwen35_rules` modules for every build consumer; each file has one module owner.
+//! The std-only shared modules (`qwen35_layers`, `qwen35_rules`, `rope_config`) for every build consumer.
 
 const std = @import("std");
 
@@ -17,6 +17,12 @@ const shared = [_]Shared{
         .path = "core/qwen35_rules.zig",
         .step = "test-qwen35-rules",
         .about = "Qwen3.5's computed-part refusals: one table, a column per backend",
+    },
+    .{
+        .name = "rope_config",
+        .path = "core/rope_config.zig",
+        .step = "test-rope-config",
+        .about = "A tower's RoPE keys: rope_parameters, the legacy rope_scaling and the top-level keys, read one way",
     },
 };
 

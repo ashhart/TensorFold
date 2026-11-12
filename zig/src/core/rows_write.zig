@@ -202,6 +202,7 @@ fn publish(r: *Rows, j: *io.Job) !void {
     r.states.appendAssumeCapacity(s);
     r.ref(j.wants, 1);
     r.touch(r.states.items.len - 1);
+    noteWriteLatency(r, nowNs() - j.began);
     r.counts.writes += 1;
     if (j.verify) r.counts.verified += 1;
     if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ j.at, j.files.len - 1, s.own >> 20, j.bytes >> 20, s.rows >> 20, @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6 });
@@ -346,4 +347,14 @@ fn newBytes(r: *const Rows, promised: *const io.Promised, j: *const Job, metadat
         count.* += 1;
     };
     return bytes;
+}
+
+// Times a write took, in milliseconds: the last, the smoothed and the histogram, and the wall time it landed.
+fn noteWriteLatency(r: *Rows, ns: i128) void {
+    if (ns <= 0) return;
+    const ms = @as(f64, @floatFromInt(ns)) / 1e6;
+    r.file_io.write_ms_last = ms;
+    r.file_io.write_ms_ema = if (r.file_io.write_ms_ema == 0) ms else 0.8 * r.file_io.write_ms_ema + 0.2 * ms;
+    r.file_io.write_lat.observe(ms);
+    r.file_io.last_write_ms = @import("rows_io.zig").wallMs();
 }

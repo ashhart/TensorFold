@@ -73,6 +73,9 @@ pub const Run = struct {
     dense: bool = false,
     dense_target: bool = false,
     skip: u32 = 0,
+    sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: the 4/32 expert kernels read scales and biases through scale_index's tables
+    sbix: std.AutoHashMapUnmanaged(@import("scale_index.zig").Key, [2]Buf) = .empty,
+    sb_pairs: usize = 0, // the most distinct pairs any indexed tensor has
     hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)
     hc_up: bool = false, // fz_hc_up for the hyper-connection's up projection at 3-8 rows (the recorded kernels' bits)
     hc_up_pipe: mtl.Pipeline = undefined,
@@ -117,7 +120,7 @@ pub const Run = struct {
     limit: ?Buf = null, // a GPU-gated window's or head step's row count for the 4-bit row kernels (gate.zig)
     head_md1: ?Buf = null, // a gated head step's one-row dims, in place of the head's own
     head_draw: ?@import("sample.zig").HeadDraw = null, // a sampled reply's head step drafts by its keyed rule
-    gx: ?*@import("gx.zig").Gx = null, // FZ_GX=rows: windows from that many rows on the grouped experts (gx.zig)
+    gx: ?*@import("gx.zig").Gx = null, // windows from its min_rows on the grouped experts (TF_FLASHNEXT_GROUPED_ROWS)
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)

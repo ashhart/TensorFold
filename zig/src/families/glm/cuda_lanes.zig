@@ -100,7 +100,7 @@ pub const Lanes = struct {
         const costs = if (block) null else if (self.costs) |*c| c else null;
         const sharing = drafting and !self.alone;
         return .{
-            .allocate_shared_drafts = drafting,
+            .allocate_shared_drafts = drafting and !block, // cut chances would price a block's stream at none
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = 4, // a first copy starts narrow; it grows as its tokens land
             .gpu_tokens = false,
@@ -254,7 +254,7 @@ pub const Lanes = struct {
             l.fill = null;
             return true;
         }
-        l.fill = at + step.rows; // on the 2048 grid (cuda_engine.zig), so uncapped; the share still works by time
+        l.fill = at + step.rows; // a cold pass's cut (cuda_prompt_cuts), so uncapped; the share still works by time
         if (s.settle_step) { // its tail would land in the next decode round's time
             try self.x.e.stream.synchronize();
             lanes.prefill_widths.completed(self.x.e.gpa, s, step.rows);
@@ -300,6 +300,7 @@ pub const Lanes = struct {
         }
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.beginOn(s.sampling, pages, adopt.items.len);
+        if (s.chunks.len > 0) try self.x.cuts(s.chunks); // TF_GLM_REQUEST_STARTS: every rank cuts the pass there too
         s.cached = 0;
         s.prompt_rows.clearRetainingCapacity();
         const l = self.lanes.getPtr(s).?;
@@ -377,13 +378,13 @@ pub const Lanes = struct {
         };
     }
 
-    /// The stream's kept state, where its prompt pass starts (null: none, off the chunk grid, or no longer held).
-    fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
+    /// The stream's kept state where its pass starts (null: none, not at a cold cut over the same chunks, or not held).
+    pub fn resumeFrom(self: *Lanes, s: *lanes.Stream, len: usize) ?engine.Resume {
         const saved = s.reuse.saved orelse return null;
         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
-        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or k.at % fw.prefill_rows != 0 or !self.x.e.holds(k.id)) {
+        if (k.at != s.reuse.at or k.at == 0 or k.at >= len or !engine.prompt_cuts.resumes(len, s.chunks, k.at, k.below) or !self.x.e.holds(k.id)) {
             s.reuse_failed = true;
-            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or k.at % fw.prefill_rows != 0) error.SnapshotOutOfStep else error.SnapshotStale;
+            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or !engine.prompt_cuts.resumes(len, s.chunks, k.at, k.below)) error.SnapshotOutOfStep else error.SnapshotStale;
             return null;
         }
         s.cached = k.at;
@@ -595,5 +596,5 @@ pub const Lanes = struct {
 
 /// Eligibility for the maintained fresh-prompt batching path.
 pub fn canBatch(s: anytype) bool {
-    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows;
+    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows and s.chunks.len == 0; // a batched pass keeps nothing at a request start
 }

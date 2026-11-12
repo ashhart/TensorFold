@@ -122,6 +122,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "embed_rows", .flags = &.{"-O3"} }, // ours: MLX affine and bf16 token rows (cuda/embed_rows.zig)
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
     .{ .name = "lfm2_moe", .flags = glue }, // ours: LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (liquid_conv.cuh)
+    .{ .name = "dots_mocr", .flags = glue }, // ours: dots.mocr's q|k|v bias and Torch-order RoPE (dots_rope.cuh)
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
@@ -129,7 +130,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "gemma4_ple", .flags = &.{"-O3"} }, // ours: Gemma 4 E-series per-layer inputs (gemma4/cuda_ple.zig)
     .{ .name = "gdn_prep", .flags = &.{"-O3"} }, // ours: Gated DeltaNet conv, norms, g and beta (cuda/gdn_prep.zig)
     .{ .name = "qk_rows", .flags = &.{"-O3"} }, // ours: QK norm, RoPE and the cache write (cuda/qk_rows.zig)
-    .{ .name = "qmmf", .flags = &.{"-O3"} }, // nvfp4/qmmf.cu's device code (FP8G, FP4), tensorfold_nvfp4_v3
+    .{ .name = "qmmf", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/qmmf.cu (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
@@ -159,7 +160,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "torch_indexing", .src = "torch_ops/indexing", .flags = torch_ops },
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
-    .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
+    .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, any world on a mesh
     .{ .name = "l2pf", .src = "deepseek_v41/l2pf", .flags = &.{"-O3"} }, // DeepSeek V4.1's L2 prefetch of a weight table, as GLM's too (records: glm_l2pf_pending.zig)
     .{ .name = "l2pace", .src = "deepseek_v41/l2pace", .flags = &.{"-O3"} }, // and its paced form
     .{ .name = "drama3_staged_gemv", .flags = glue },
@@ -198,4 +199,17 @@ test "profile: arch-specific kernels take sm_<n>a from sm_120 on, others plain, 
     try std.testing.expectEqual(Profile{ .number = 86, .arch_specific = false }, profile(ck, Target.parse("86")).?);
     try std.testing.expectEqual(Profile{ .number = 120, .arch_specific = false }, profile(plain, Target.parse("120")).?);
     try std.testing.expectEqual(@as(?Profile, null), profile(plain, Target.parse("75")));
+}
+
+test "native_fp units: exactly fp8_experts, qmmf and prompt16 (without the flag native-fp only skips)" {
+    const want = [_][]const u8{ "fp8_experts", "qmmf", "prompt16" };
+    var seen: usize = 0;
+    for (kernels) |k| {
+        if (!k.native_fp) continue;
+        seen += 1;
+        for (want) |w| {
+            if (std.mem.eql(u8, k.name, w)) break;
+        } else return error.UnexpectedNativeFpUnit;
+    }
+    try std.testing.expectEqual(want.len, seen);
 }

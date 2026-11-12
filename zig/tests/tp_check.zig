@@ -1,0 +1,35 @@
+//! Mixed-TP gate (#1236, rules 1, 2 and 4): each rank dumps its collectives and logits; the checks read the dumps.
+const dump = @import("tp_check_dump.zig");
+const rules = @import("tp_check_rules.zig");
+const agree = @import("tp_check_agree.zig");
+
+pub const magic = dump.magic;
+pub const version = dump.version;
+pub const phase_version = dump.phase_version;
+pub const canonical_version = dump.canonical_version;
+pub const Phase = dump.Phase;
+pub const Kind = dump.Kind;
+pub const Call = dump.Call;
+pub const Error = dump.Error;
+pub const Mode = dump.Mode;
+pub const Header = dump.Header;
+pub const Collective = dump.Collective;
+pub const Logits = dump.Logits;
+pub const writeHeader = dump.writeHeader;
+pub const writeCollective = dump.writeCollective;
+pub const writeCollectiveVersion = dump.writeCollectiveVersion;
+pub const writeLogits = dump.writeLogits;
+pub const TokenHash = dump.TokenHash;
+pub const Dump = dump.Dump;
+pub const parse = dump.parse;
+pub const Mismatch = rules.Mismatch;
+pub const ReferenceReport = rules.ReferenceReport;
+pub const checkReference = rules.checkReference;
+pub const RepeatReport = rules.RepeatReport;
+pub const checkRepeat = rules.checkRepeat;
+pub const repeatPassed = rules.repeatPassed;
+pub const Split = agree.Split;
+pub const AgreeReport = agree.AgreeReport;
+pub const chosenHash = agree.chosenHash;
+pub const checkAgree = agree.checkAgree;
+pub const agreeFailure = agree.agreeFailure;

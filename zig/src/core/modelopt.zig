@@ -2,6 +2,9 @@
 
 const std = @import("std");
 
+/// One projection's tensors read and checked (weight, block scales, weight_scale_2, input_scale).
+pub const part = @import("modelopt_part.zig");
+
 /// The NVFP4 group size ModelOpt writes for this format.
 pub const nvfp4_group = 16;
 /// The group size of csf0_v1, this engine's own: no other reader takes it.
@@ -379,4 +382,8 @@ test "empty MIXED_PRECISION recipes retain their identity beside single-format N
     var nv = try admitRecipes(std.testing.allocator, @embedFile("fixtures/glm53_flash_nvfp4/config.json"), &why);
     defer nv.deinit();
     try std.testing.expect(!nv.mixed);
+}
+
+test {
+    _ = part;
 }

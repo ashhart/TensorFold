@@ -65,6 +65,14 @@ __device__ __forceinline__ uint32_t e4m3x2(uint32_t h) {
     asm("{ .reg .b16 a; cvt.u16.u32 a, %1; cvt.rn.bf16x2.e4m3x2 %0, a; }" : "=r"(r) : "r"(h));
     return r;
 }
+
+// fp4pair(w, 8q), fp4pair(w, 8q + 4) bit for bit: byte q of x holds nibbles (2q, 2q + 4), of y (2q + 1, 2q + 5)
+__device__ __forceinline__ void e2m1_pairs(uint32_t w, int q, uint32_t& b0, uint32_t& b1) {
+    const uint32_t lo = w & 0x0F0F0F0Fu, hi = (w >> 4) & 0x0F0F0F0Fu;
+    const uint32_t x = lo | (lo >> 12), y = hi | (hi >> 12);
+    b0 = e2m1x2(q ? x >> 8 : x);
+    b1 = e2m1x2(q ? y >> 8 : y);
+}
 #endif
 
 }  // namespace tf_common

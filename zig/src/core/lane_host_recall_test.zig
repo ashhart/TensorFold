@@ -208,7 +208,6 @@ test "a turn resumed from the prompt cache adds the ids past its resume point an
     defer store.close();
     var s: Served = undefined;
     try s.init();
-    defer s.deinit();
     const Snaps = struct {
         fn bytes(_: *anyopaque, at: u32) u64 {
             return 64 + 4 * @as(u64, at);
@@ -234,6 +233,8 @@ test "a turn resumed from the prompt cache adds the ids past its resume point an
     const family: pc.Snapshots = .{ .ptr = &s.target, .vtable = &snaps };
     var cache = pc.Store.init(gpa, family, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
     defer cache.deinit();
+    defer s.deinit();
+    _ = &s;
     s.host.cache = &cache;
     _ = s.host.engine().attachRecall(store);
     try s.host.start();

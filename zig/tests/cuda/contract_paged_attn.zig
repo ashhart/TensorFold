@@ -36,6 +36,46 @@ pub const cfgs = [_]Cfg{
     .{ .name = "control: paged decode at head 64 reading its values from the neighbouring lane's dims", .h = 32, .hk = 8, .d = 64, .form = .{ .decode = .{ .chunk = "tf_ctl_paged_attn_chunk_segs_64", .merge = "tf_paged_attn_merge_segs_64" } }, .control = true, .served = &decode_served },
     .{ .name = "cuda paged prompt pattn_kernel<64, 8, 4, 8>, 32/8 heads of 64, 512-key pages", .h = 32, .hk = 8, .d = 64, .form = prompt64, .served = &prompt_served },
     .{ .name = "control: paged prompt rows at head 64 reading their values from the neighbouring 8 dims", .h = 32, .hk = 8, .d = 64, .form = .{ .prompt = .{ .sym = "tf_ctl_pattn_64", .rows = 32, .smem = 8 * 32 * 8 * 16 } }, .control = true, .served = &prompt_served },
+} ++ dense.cfgs;
+
+/// The dense OCR decoders' layouts: two query heads a block at head 128 (groups 6 and 2) and 64 (group 2).
+const dense = struct {
+    const hpc2_128 = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi2ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix";
+    const hpc2_64 = "_ZN20tf_prefill_attention12pattn_kernelILi64ELi8ELi2ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix";
+    const p128: Form = .{ .prompt = .{ .sym = hpc2_128, .rows = 64, .smem = 8 * 32 * 16 * 16 } };
+    const p64: Form = .{ .prompt = .{ .sym = hpc2_64, .rows = 64, .smem = 8 * 32 * 8 * 16 } };
+    const c128: Form = .{ .prompt = .{ .sym = "tf_ctl_pattn_128_hpc2", .rows = 64, .smem = 8 * 32 * 16 * 16 } };
+    const c64: Form = .{ .prompt = .{ .sym = "tf_ctl_pattn_64_hpc2", .rows = 64, .smem = 8 * 32 * 8 * 16 } };
+    const d128: Form = .{ .decode = .{ .chunk = "tf_nemo_attn_chunk_segs", .merge = "tf_nemo_attn_merge_segs" } };
+    const dctl: Form = .{ .decode = .{ .chunk = "tf_ctl_nemo_attn_chunk_segs", .merge = "tf_nemo_attn_merge_segs" } };
+
+    /// The file's prompt and decode shapes at `h` query heads, and one whole 1024-row prompt chunk from key 0.
+    fn prompt(comptime h: usize) [4]c.Shape {
+        return .{ .{ .rows = 256, .n = h, .k = 0 }, .{ .rows = 64, .n = h, .k = 3000 }, .{ .rows = 100, .n = h, .k = 500 }, .{ .rows = 1024, .n = h, .k = 0 } };
+    }
+    fn decode(comptime h: usize) [4]c.Shape {
+        return .{ .{ .rows = 1, .n = h, .k = 3000 }, .{ .rows = 16, .n = h, .k = 1500 }, .{ .rows = 128, .n = h, .k = 700 }, .{ .rows = 8, .n = h, .k = 4000 } };
+    }
+    const prompt12 = prompt(12);
+    const prompt16 = prompt(16);
+    const decode12 = decode(12);
+    const decode16 = decode(16);
+
+    const cfgs = [_]Cfg{
+        // dots.mocr: 12 query heads over 2 KV heads of 128
+        .{ .name = "cuda paged prompt pattn_kernel<128, 8, 2, 8>, 12/2 heads of 128, 512-key pages", .h = 12, .hk = 2, .d = 128, .form = p128, .served = &prompt12 },
+        .{ .name = "control: paged prompt rows at head 128, two heads a block, 12/2, values from the neighbouring 8 dims", .h = 12, .hk = 2, .d = 128, .form = c128, .control = true, .served = &prompt12 },
+        .{ .name = "cuda paged decode tf_nemo_attn_chunk_segs + tf_nemo_attn_merge_segs, 12/2 heads of 128, 512-key pages", .h = 12, .hk = 2, .d = 128, .form = d128, .served = &decode12 },
+        .{ .name = "control: paged decode at head 128, 12/2, values from the neighbouring lane's dims", .h = 12, .hk = 2, .d = 128, .form = dctl, .control = true, .served = &decode12 },
+        // GLM-OCR: 16 query heads over 8 KV heads of 128
+        .{ .name = "cuda paged prompt pattn_kernel<128, 8, 2, 8>, 16/8 heads of 128, 512-key pages", .h = 16, .hk = 8, .d = 128, .form = p128, .served = &prompt16 },
+        .{ .name = "control: paged prompt rows at head 128, two heads a block, 16/8, values from the neighbouring 8 dims", .h = 16, .hk = 8, .d = 128, .form = c128, .control = true, .served = &prompt16 },
+        .{ .name = "cuda paged decode tf_nemo_attn_chunk_segs + tf_nemo_attn_merge_segs, 16/8 heads of 128, 512-key pages", .h = 16, .hk = 8, .d = 128, .form = d128, .served = &decode16 },
+        .{ .name = "control: paged decode at head 128, 16/8, values from the neighbouring lane's dims", .h = 16, .hk = 8, .d = 128, .form = dctl, .control = true, .served = &decode16 },
+        // Nemotron Parse: 16 query heads over 8 KV heads of 64
+        .{ .name = "cuda paged prompt pattn_kernel<64, 8, 2, 8>, 16/8 heads of 64, 512-key pages", .h = 16, .hk = 8, .d = 64, .form = p64, .served = &prompt16 },
+        .{ .name = "control: paged prompt rows at head 64, two heads a block, 16/8, values from the neighbouring 8 dims", .h = 16, .hk = 8, .d = 64, .form = c64, .control = true, .served = &prompt16 },
+    };
 };
 
 /// Gates 1 and 3 run attention_ref's bound: decode weights are fp32 through fast exp, prompt P enters the mma as bf16.
@@ -337,8 +377,21 @@ pub const Set = struct {
     }
 };
 
-test "the paged forms' geometry: 4 query heads a KV head, AttnSegs as nemotron_attention.cu pads it" {
+test "the paged forms' geometry: whole groups a block, groups the decode kernels take, AttnSegs as nemotron_attention.cu pads it" {
     try std.testing.expectEqual(@as(usize, 304), @sizeOf(AttnSegs));
-    for (cfgs) |f| try std.testing.expectEqual(@as(usize, 4), f.h / f.hk);
     try std.testing.expectEqual(@as(usize, 32), prompt64.prompt.rows);
+    for (cfgs) |f| {
+        const group = f.h / f.hk;
+        try std.testing.expectEqual(f.h, group * f.hk);
+        for (f.served) |s| try std.testing.expectEqual(f.h, s.n);
+        switch (f.form) {
+            .prompt => |p| { // a block's query heads, 16 rows a warp over eight warps, divide the group
+                const hpc = 16 * 8 / p.rows;
+                try std.testing.expect(hpc == 1 or hpc == 2 or hpc == 4 or hpc == 8);
+                try std.testing.expectEqual(@as(usize, 0), group % hpc);
+                try std.testing.expectEqual(@as(u32, @intCast(8 * 32 * ((f.d / 8 + 7) / 8 * 8) * 16)), p.smem);
+            },
+            .decode => try std.testing.expect(group <= 16), // paged_attn.cuh's GMAX
+        }
+    }
 }

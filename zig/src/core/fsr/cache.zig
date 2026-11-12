@@ -21,6 +21,8 @@ pub const Cache = struct {
     current: []usize,
     current_count: usize = 0,
     hand: usize = 0,
+    hits: u64 = 0, // demand hits: a resident or protected slab
+    evictions: u64 = 0, // occupied slabs displaced to make room
     owns_map: bool = true,
 
     pub fn init(a: std.mem.Allocator, keys: usize, capacity: usize) !Cache {
@@ -61,6 +63,7 @@ pub const Cache = struct {
     pub fn resident(c: *Cache, key: usize) !?usize {
         const at = try c.peek(key) orelse return null;
         c.slots[at].uses +|= 1;
+        c.hits += 1;
         return at;
     }
 
@@ -90,6 +93,7 @@ pub const Cache = struct {
         for (c.current[0..c.current_count]) |key| if (c.slotFor(key)) |s| {
             s.leased = true;
             s.uses +|= 1;
+            c.hits += 1;
         };
     }
 
@@ -139,6 +143,7 @@ pub const Cache = struct {
                 continue;
             }
             const old = s.key;
+            if (old != null) c.evictions += 1;
             if (old) |k| c.map[k] = absent;
             s.* = .{ .key = key, .generation = s.generation +% 1, .reading = true, .leased = c.demand[key], .displaced = if (forecast) old else null };
             c.inflight[key] = @intCast(i);
@@ -175,6 +180,15 @@ pub const Cache = struct {
         s.ready = true;
         s.displaced = null;
         c.map[old] = @intCast(t.slot);
+    }
+
+    /// Ready slabs held, the resident demand and every slot: occupancy, hits and evictions at a glance.
+    pub fn occupancy(c: *const Cache) struct { held: usize, capacity: usize, hits: u64, evictions: u64 } {
+        var n: usize = 0;
+        for (c.slots) |s| {
+            if (s.ready and s.key != null) n += 1;
+        }
+        return .{ .held = n, .capacity = c.slots.len, .hits = c.hits, .evictions = c.evictions };
     }
 
     pub fn abort(c: *Cache, t: Ticket) !void {

@@ -5,10 +5,11 @@ const errors = @import("errors.zig");
 const http_body = @import("http_body.zig");
 const openai = @import("openai.zig");
 const routes = @import("routes.zig");
-const sse = @import("sse.zig");
 const pyrepr = @import("pyrepr.zig");
 const ids = @import("ids.zig");
 const translate_mod = @import("responses_translate.zig");
+const store_mod = @import("responses_store.zig");
+const Sink = @import("responses_sink.zig").Sink;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -27,115 +28,8 @@ pub fn route(path: []const u8) ?[]const u8 {
     return null;
 }
 
-const Entry = struct {
-    arena: std.heap.ArenaAllocator,
-    id: []const u8,
-    response: Value,
-    parent: ?[]const u8,
-    messages: []Value,
-    size: usize,
-};
-
-/// The newest stored responses, in memory, for GET, DELETE and ``previous_response_id``.
-pub const Store = struct {
-    gpa: Allocator,
-    mutex: std.Io.Mutex = .init,
-    entries: std.ArrayList(*Entry) = .empty, // oldest first
-    bytes: usize = 0,
-    limit: usize = 1024,
-    max_bytes: usize = 256 * 1024 * 1024,
-
-    pub fn deinit(s: *Store) void {
-        for (s.entries.items) |e| free(s.gpa, e);
-        s.entries.deinit(s.gpa);
-    }
-
-    fn free(gpa: Allocator, e: *Entry) void {
-        var arena = e.arena;
-        arena.deinit();
-        gpa.destroy(e);
-    }
-
-    fn find(s: *Store, id: []const u8) ?usize {
-        for (s.entries.items, 0..) |e, i| if (std.mem.eql(u8, e.id, id)) return i;
-        return null;
-    }
-
-    /// Keeps a finished response with the messages it added; the oldest go past 1,024 entries or 256 MiB.
-    pub fn put(s: *Store, io: std.Io, cx: *Cx, response: Value, added: []const Value) !void {
-        const e = try s.gpa.create(Entry);
-        e.arena = .init(s.gpa);
-        const a = e.arena.allocator();
-        e.response = try json.deepCopy(a, response);
-        e.id = e.response.get("id").?.string;
-        const parent = e.response.get("previous_response_id");
-        e.parent = if (parent != null and parent.? == .string) parent.?.string else null;
-        const output = response.get("output").?.array;
-        const from_output = try translate_mod.messages(cx, output);
-        const all = try std.mem.concat(cx.a, Value, &.{ added, from_output });
-        e.messages = (try json.deepCopy(a, .{ .array = all })).array;
-        e.size = (try json.stringify(cx.a, e.response, .{})).len + (try json.stringify(cx.a, .{ .array = e.messages }, .{})).len;
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        if (s.find(e.id)) |i| {
-            const old = s.entries.orderedRemove(i);
-            s.bytes -= old.size;
-            free(s.gpa, old);
-        }
-        try s.entries.append(s.gpa, e);
-        s.bytes += e.size;
-        while (s.entries.items.len > 0 and (s.entries.items.len > s.limit or s.bytes > s.max_bytes)) {
-            const old = s.entries.orderedRemove(0);
-            s.bytes -= old.size;
-            free(s.gpa, old);
-        }
-    }
-
-    pub fn get(s: *Store, io: std.Io, a: Allocator, id: []const u8) !?Value {
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        const i = s.find(id) orelse return null;
-        return try json.deepCopy(a, s.entries.items[i].response);
-    }
-
-    pub fn delete(s: *Store, io: std.Io, id: []const u8) bool {
-        s.mutex.lockUncancelable(io);
-        defer s.mutex.unlock(io);
-        const i = s.find(id) orelse return false;
-        const old = s.entries.orderedRemove(i);
-        s.bytes -= old.size;
-        free(s.gpa, old);
-        return true;
-    }
-};
-
-/// Every message of a stored response's chain, oldest first (the chain stays newest in the store).
-const History = struct {
-    srv: *Server,
-
-    pub fn conversation(h: History, cx: *Cx, rid: Value) errors.Refused![]Value {
-        if (rid != .string) return cx.refuse("previous_response_id must be a string");
-        const s = &h.srv.store;
-        s.mutex.lockUncancelable(h.srv.io);
-        defer s.mutex.unlock(h.srv.io);
-        var chain: std.ArrayList([]Value) = .empty;
-        var at: ?[]const u8 = rid.string;
-        while (at) |id| {
-            const i = s.find(id) orelse return cx.fail(.request, "previous response {s} is not stored here (store: false, deleted, or evicted): send the conversation's items instead", .{try pyrepr.repr(cx.a, .{ .string = id })});
-            const e = s.entries.orderedRemove(i);
-            s.entries.append(s.gpa, e) catch {};
-            try chain.append(cx.a, e.messages);
-            at = e.parent;
-        }
-        var out: std.ArrayList(Value) = .empty;
-        var i = chain.items.len;
-        while (i > 0) {
-            i -= 1;
-            for (chain.items[i]) |m| try out.append(cx.a, try json.deepCopy(cx.a, m));
-        }
-        return out.items;
-    }
-};
+/// The store lives in its own module; the server keeps it by this name.
+pub const Store = store_mod.Store;
 
 fn refuse(conn: *Conn, a: Allocator, message: []const u8, status: u16, param: ?[]const u8) void {
     const body = std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}, \"type\": \"invalid_request_error\", \"param\": {s}, \"code\": null}}}}", .{ json.quote(a, message, .{}) catch return, if (param) |p| json.quote(a, p, .{}) catch return else "null" }) catch return;
@@ -161,41 +55,80 @@ pub fn delete(srv: *Server, conn: *Conn, a: Allocator, rid: ?[]const u8) void {
 /// POST /v1/responses.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     var cx: Cx = .{ .a = a };
-    const request = blk: {
-        const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
-            .ok => |b| b,
-            .refused => |m| return refuse(conn, a, m, 400, null),
-        };
-        const body = switch (json.parse(a, if (raw.len == 0) "{}" else raw) catch return) {
-            .ok => |v| v,
-            .err => return refuse(conn, a, "the request body is not JSON", 400, null),
-        };
-        // a restricted key is stateless here: checked before any stored conversation is read
-        if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
-            return @import("auth_scope_reply.zig").deny(conn, false, why);
-        const r = translate_mod.translate(&cx, body, History{ .srv = srv }) catch return refuse(conn, a, cx.message, 400, null);
-        break :blk .{ r, body };
+    const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
+        .ok => |b| b,
+        .refused => |m| return refuse(conn, a, m, 400, null),
     };
-    const t = request[0];
-    const base = json.newObject(a) catch return;
-    base.put(a, "id", .{ .string = ids.make(a, "resp_", 32) catch return }) catch return;
-    base.put(a, "object", .{ .string = "response" }) catch return;
-    base.put(a, "created_at", json.intValue(a, std.Io.Clock.real.now(srv.io).toSeconds()) catch return) catch return;
-    base.put(a, "status", .{ .string = "in_progress" }) catch return;
-    base.put(a, "error", .null) catch return;
-    base.put(a, "incomplete_details", .null) catch return;
-    base.put(a, "model", .{ .string = openai.replyModel(srv, request[1]) }) catch return;
-    base.put(a, "output", .{ .array = &.{} }) catch return;
-    base.put(a, "usage", .null) catch return;
-    for (t.echo.keys(), t.echo.values()) |k, v| base.put(a, k, v) catch return;
-    var reply: Reply = .{ .srv = srv, .a = a, .conn = conn, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = &cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat } };
+    const body = switch (json.parse(a, if (raw.len == 0) "{}" else raw) catch return) {
+        .ok => |v| v,
+        .err => return refuse(conn, a, "the request body is not JSON", 400, null),
+    };
+    // a restricted key is stateless here: checked before any stored conversation is read
+    if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
+        return @import("auth_scope_reply.zig").deny(conn, false, why);
+    const history: store_mod.History = .{ .store = &srv.store, .io = srv.io };
+    const t = translate_mod.translate(&cx, body, history) catch return refuse(conn, a, cx.message, 400, null);
+    switch (turn(srv, a, conn, &cx, body, t, @import("responses_sink.zig").sse(conn), .{})) {
+        .streamed => {},
+        .refused => |r| routes.sendValue(conn, a, r.status, r.payload),
+        .whole => |final| routes.sendValue(conn, a, 200, final),
+    }
+}
+
+/// How a turn ended, for its transport to answer.
+pub const Outcome = union(enum) {
+    /// The final response object sent as events (null: the client left first, or nothing could be sent).
+    streamed: ?Value,
+    /// The chat route's whole error reply, before any event.
+    refused: struct { status: u16, payload: Value },
+    /// A final response that was not streamed (HTTP only).
+    whole: Value,
+};
+
+/// What a transport adds to a turn beyond its translated request.
+pub const TurnOptions = struct {
+    /// The parent's whole conversation when it came from outside the store; the store then keeps the turn whole.
+    whole_history: ?[]Value = null,
+};
+
+/// One translated Responses request run as its chat completion, its events sent through ``sink``.
+pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, opts: TurnOptions) Outcome {
+    const base = newBase(srv, a, body, t) catch return .{ .streamed = null };
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history };
     var out: Wire = .{ .reply = &reply };
     openai.runNamed(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format, true);
-    if (out.opened or conn.broken) return;
-    const status = out.status orelse return;
-    if (status != 200) return routes.sendValue(conn, a, status, out.payload);
-    const final = reply.completion(out.payload) catch return;
-    routes.sendValue(conn, a, 200, final);
+    if (out.opened or conn.broken) return .{ .streamed = reply.final };
+    const status = out.status orelse return .{ .streamed = null };
+    if (status != 200) return .{ .refused = .{ .status = status, .payload = out.payload } };
+    return .{ .whole = reply.completion(out.payload) catch return .{ .streamed = null } };
+}
+
+/// A ``generate: false`` turn: created, in progress, then completed with no output and ``prompt_tokens`` of input.
+pub fn warmup(srv: *Server, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, prompt_tokens: usize, opts: TurnOptions) ?Value {
+    const base = newBase(srv, a, body, t) catch return null;
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = true, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .warmup = true };
+    const usage = json.newObject(a) catch return null;
+    usage.put(a, "prompt_tokens", json.intValue(a, prompt_tokens) catch return null) catch return null;
+    usage.put(a, "completion_tokens", .{ .int = "0" }) catch return null;
+    sink.vt.open(sink.ctx) catch return null;
+    reply.start() catch return null;
+    return reply.finish("stop", .{ .object = usage }, null) catch null;
+}
+
+/// The response object a turn starts from: in progress, with no output yet and the request's echoed fields.
+fn newBase(srv: *Server, a: Allocator, body: Value, t: translate_mod.Request) !*json.Object {
+    const base = try json.newObject(a);
+    try base.put(a, "id", .{ .string = try ids.make(a, "resp_", 32) });
+    try base.put(a, "object", .{ .string = "response" });
+    try base.put(a, "created_at", try json.intValue(a, std.Io.Clock.real.now(srv.io).toSeconds()));
+    try base.put(a, "status", .{ .string = "in_progress" });
+    try base.put(a, "error", .null);
+    try base.put(a, "incomplete_details", .null);
+    try base.put(a, "model", .{ .string = openai.replyModel(srv, body) });
+    try base.put(a, "output", .{ .array = &.{} });
+    try base.put(a, "usage", .null);
+    for (t.echo.keys(), t.echo.values()) |k, v| try base.put(a, k, v);
+    return base;
 }
 
 /// The chat handler's output, translated as Python's Wire reads it.
@@ -212,7 +145,8 @@ const Wire = struct {
     fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
         const w: *Wire = @ptrCast(@alignCast(ctx));
         w.opened = true;
-        try sse.open(w.reply.conn);
+        const sink = w.reply.sink;
+        try sink.vt.open(sink.ctx);
         try w.reply.start();
     }
 
@@ -223,7 +157,8 @@ const Wire = struct {
 
     fn keepalive(ctx: *anyopaque) error{Closed}!void {
         const w: *Wire = @ptrCast(@alignCast(ctx));
-        try sse.comment(w.reply.conn);
+        const sink = w.reply.sink;
+        try sink.vt.keepalive(sink.ctx);
     }
 
     fn whole(ctx: *anyopaque, status: u16, payload: Value) void {
@@ -237,7 +172,7 @@ const Wire = struct {
 const Reply = struct {
     srv: *Server,
     a: Allocator,
-    conn: *Conn,
+    sink: Sink,
     base: *json.Object,
     streaming: bool,
     keep: bool,
@@ -250,6 +185,10 @@ const Reply = struct {
     calls: std.AutoArrayHashMapUnmanaged(i64, *json.Object) = .empty,
     seq: u64 = 0,
     final: ?Value = null,
+    /// The parent's whole conversation from outside the store (null over HTTP): the store keeps this turn whole.
+    whole_history: ?[]Value = null,
+    /// A warmup turn: no empty message item, so its output stays empty.
+    warmup: bool = false,
 
     const E = error{Closed};
 
@@ -269,7 +208,7 @@ const Reply = struct {
         try r.put(o, "sequence_number", json.intValue(r.a, r.seq) catch return error.Closed);
         r.seq += 1;
         for (fields) |f| try r.put(o, f[0], f[1]);
-        return sse.event(r.conn, r.a, kind, .{ .object = o });
+        return r.sink.vt.event(r.sink.ctx, r.a, kind, o);
     }
 
     fn int(r: *Reply, n: anytype) E!Value {
@@ -430,7 +369,7 @@ const Reply = struct {
         const filtered = reason != null and std.mem.eql(u8, reason.?, @import("loop_stop.zig").finish_reason);
         const incomplete = length or filtered;
         const status = if (incomplete) "incomplete" else "completed";
-        if (!incomplete) {
+        if (!incomplete and !r.warmup) {
             const all_reasoning = for (r.items.items) |item| {
                 if (!std.mem.eql(u8, item.get("type").?.string, "reasoning")) break false;
             } else true;
@@ -449,9 +388,18 @@ const Reply = struct {
         if (!incomplete) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));
         if (stats) |s| if (s != .null) try r.put(final, "tensorfold", s);
         r.final = .{ .object = final };
-        if (r.keep) r.srv.store.put(r.srv.io, r.cx, .{ .object = final }, r.added) catch {};
+        if (r.keep) r.store(.{ .object = final });
         try r.event(if (incomplete) "response.incomplete" else "response.completed", &.{.{ "response", .{ .object = final } }});
         return .{ .object = final };
+    }
+
+    /// Keeps the final response: chained to its stored parent, or whole when the parent came from elsewhere.
+    fn store(r: *Reply, final: Value) void {
+        const s = &r.srv.store;
+        const earlier = r.whole_history orelse return s.put(r.srv.io, r.cx, final, r.added) catch {};
+        const from_output = translate_mod.messages(r.cx, final.get("output").?.array) catch return;
+        const all = std.mem.concat(r.cx.a, Value, &.{ earlier, r.added, from_output }) catch return;
+        s.putWhole(r.srv.io, r.cx, final, all) catch {};
     }
 
     fn fail(r: *Reply, problem: Value) E!void {
@@ -512,7 +460,7 @@ test "a call delta that names no id takes the chat run's id at its index, and on
     const key: ids.Key = .of(ids.test_key_text);
     const chat = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}")).ok;
     var cx: Cx = .{ .a = a };
-    var reply: Reply = .{ .srv = undefined, .a = a, .conn = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = chat } };
+    var reply: Reply = .{ .srv = undefined, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = chat } };
     try reply.delta((try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f\"}},{\"index\":2,\"id\":\"call_sent\",\"function\":{\"name\":\"f\"}}]}")).ok);
     var calls: ids.Calls = .{ .key = &key, .body = chat };
     try std.testing.expectEqualStrings(try calls.id(a, 0, 1), reply.items.items[0].get("call_id").?.string);
@@ -523,11 +471,10 @@ test "Server recovery: Responses grows reasoning, text and interleaved call argu
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var conn: Conn = undefined;
     var cx: Cx = .{ .a = a };
     var srv: Server = undefined;
     const key: ids.Key = .of(ids.test_key_text);
-    var r: Reply = .{ .srv = &srv, .a = a, .conn = &conn, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = .null } };
+    var r: Reply = .{ .srv = &srv, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = .null } };
     const chunk = "abcdefgh";
     for ([_][]const u8{ "reasoning", "message" }) |kind| {
         for (0..3000) |_| try r.write(kind, chunk);

@@ -36,10 +36,15 @@ test "a plain BF16 config parses as bf16 with every used module and the head bf1
     }
 }
 
-test "a plain BF16 config is refused tied or with a learned pocket (a MoE one: cuda_exl3_admission_test)" {
-    const tied = try config("", true, "");
-    defer a.free(tied);
-    try std.testing.expectError(error.UnsupportedQwenQuantization, geometry.parse(a, tied));
+test "a tied plain BF16 config (LightOnOCR-3 0.8B/4B) parses with its head bf16, packed from the embedding" {
+    const c = try config("", true, "");
+    defer a.free(c);
+    const g = try geometry.parse(a, c);
+    try std.testing.expect(g.bf16 and g.tied and g.kinds.modelopt);
+    try std.testing.expectEqual(geometry.Kind.bf16, g.kinds.head);
+}
+
+test "a plain BF16 config is refused with a learned pocket (a MoE one: cuda_exl3_admission_test)" {
     const pocket = try config("", false, ",\"tensorfold_learned_neurons\":64");
     defer a.free(pocket);
     try std.testing.expectError(error.UnsupportedLearningFormat, geometry.parse(a, pocket));

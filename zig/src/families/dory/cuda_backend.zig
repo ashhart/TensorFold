@@ -277,11 +277,10 @@ pub const Dory = struct {
         }
         const l = got.value_ptr;
         l.sampled = false;
-        if (s.sampling) |sp| if (sp.temperature > 0) {
-            const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+        if (cuda.sample.ruleFor(s.sampling)) |r| {
             try x.upload(l.rule, std.mem.asBytes(&r));
             l.sampled = true;
-        };
+        }
         s.cached = 0;
         if (x.prompts != null) {
             s.cached = l.from;

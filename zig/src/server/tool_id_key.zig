@@ -74,6 +74,7 @@ fn refusal(a: Allocator, path: []const u8) ![]const u8 {
 
 test "a key file that is missing, locked, a link, a folder, open to others, short or long is refused by name, unechoed" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // mode bits and links; NTFS keeps access in ACLs
+    try @import("test_permissions.zig").skipIfRoot();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -104,7 +105,7 @@ test "a key file that is missing, locked, a link, a folder, open to others, shor
     const link = try std.fmt.allocPrintSentinel(a, "{s}/link", .{dir}, 0);
     try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink("good", link));
     try has(try refusal(a, link), "cannot be opened");
-    if (platform.c.geteuid() != 0) try has(try refusal(a, try put(a, tmp, "locked", test_secret, 0o000)), "cannot be opened (AccessDenied)");
+    try has(try refusal(a, try put(a, tmp, "locked", test_secret, 0o000)), "cannot be opened (AccessDenied)");
     var problem: []const u8 = "";
     try std.testing.expectError(error.Refused, load(a, test_secret ++ "\x1b", &problem)); // a key pasted into the setting
     try std.testing.expect(std.mem.startsWith(u8, problem, name ++ " ") and std.mem.indexOf(u8, problem, "SECRET") == null);

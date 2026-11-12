@@ -25,15 +25,16 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     return rules;
 }
 
-/// The server's chunk step: a family whose cold passes cut at request starts gets message starts on its grid (0: none).
+/// The server's chunk step: message starts on F's grid when F's own `request_starts_switch` is 1, else 0 (none).
 pub fn requestStep(comptime F: type) u32 {
     if (!@hasDecl(F, "request_starts_switch")) return 0; // each family names its own opt-in, so it turns on alone
     return requestStepFor(F, @import("profile").lookup(F.request_starts_switch));
 }
 
-/// An opted-in family keeps each message start, including turns closer than the shared default.
+/// An opted-in family keeps each message start (1), or starts its `request_min_chunk` apart; 256 when not opted in.
 pub fn requestMinimum(comptime F: type) u32 {
-    return if (requestStep(F) > 0) 1 else 256;
+    if (requestStep(F) == 0) return 256;
+    return if (@hasDecl(F, "request_min_chunk")) F.request_min_chunk else 1;
 }
 
 /// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
@@ -128,15 +129,20 @@ test {
 }
 
 test "only a family whose passes cut at request starts asks the server for them" {
+    const Grid = struct {
+        pub const snap_grid: u32 = 2048;
+    };
     const Glm = struct {
         pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
     };
     const Qwen = struct {
         pub const snap_grid: u32 = 4096;
         pub const request_starts = true;
     };
-    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Glm, "1"));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Grid, "1"));
     try std.testing.expectEqual(@as(u32, 0), requestStepFor(struct {}, "1"));
+    try std.testing.expectEqual(@as(u32, 2048), requestStepFor(Glm, "1"));
     try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
 }
 
@@ -152,7 +158,7 @@ test "request starts: one family's switch leaves every other family without star
         pub const snap_grid: u32 = 2048;
         pub const request_starts = true;
     };
-    const names = [_][:0]const u8{ "TF_QWEN_REQUEST_STARTS", Other.request_starts_switch };
+    const names = [_][:0]const u8{ "TF_QWEN_REQUEST_STARTS", "TF_GLM_REQUEST_STARTS", Other.request_starts_switch };
     var saved: [names.len]?[:0]u8 = @splat(null);
     for (names, &saved) |n, *s| if (sys.getenv(n)) |v| {
         s.* = try std.testing.allocator.dupeSentinel(u8, v, 0);
@@ -164,22 +170,25 @@ test "request starts: one family's switch leaves every other family without star
         _ = sys.env.unsetenv(n);
     };
     const registry = @import("cuda.zig").registry;
-    var qwens: usize = 0;
+    var named = [_]usize{ 0, 0 }; // registry entry points naming Qwen's switch, GLM's
     inline for (registry) |F| if (@hasDecl(F, "request_starts_switch")) {
-        try std.testing.expect(std.mem.startsWith(u8, F.model_type, "qwen3_5"));
+        const glm = std.mem.eql(u8, F.request_starts_switch, names[1]);
+        try std.testing.expect(std.mem.startsWith(u8, F.model_type, if (glm) "glm5_next" else "qwen3_5"));
+        try std.testing.expect(glm or std.mem.eql(u8, F.request_starts_switch, names[0]));
         const id = profile.registered(F.request_starts_switch) orelse return error.UnreviewedSwitch;
         try std.testing.expect(profile.entry(id).applies(F.model_type, "cuda"));
-        qwens += 1;
+        named[@intFromBool(glm)] += 1;
     };
-    try std.testing.expectEqual(@as(usize, 2), qwens); // the dense and MoE entry points
+    try std.testing.expectEqual([_]usize{ 2, 1 }, named); // Qwen's dense and MoE entry points, GLM's one
     for (0..names.len + 1) |on| { // on == names.len: every switch unset
         for (names, 0..) |n, i| try std.testing.expectEqual(@as(c_int, 0), if (i == on) sys.env.setenv(n, "1", 1) else sys.env.unsetenv(n));
         inline for (registry ++ .{ Other, Unnamed }) |F| {
-            const qwen = @hasDecl(F, "request_starts_switch") and F != Other;
+            const opted = @hasDecl(F, "request_starts_switch") and on < names.len and std.mem.eql(u8, F.request_starts_switch, names[on]);
             const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else 0;
-            try std.testing.expect(!qwen or grid > 0);
-            try std.testing.expectEqual(if ((on == 0 and qwen) or (on == 1 and F == Other)) grid else 0, requestStep(F));
-            try std.testing.expectEqual(@as(u32, if ((on == 0 and qwen) or (on == 1 and F == Other)) 1 else 256), requestMinimum(F));
+            try std.testing.expect(!@hasDecl(F, "request_starts_switch") or grid > 0);
+            try std.testing.expectEqual(if (opted) grid else 0, requestStep(F));
+            const glm = opted and on == 1; // GLM keeps 256 apart, as measured; Qwen and the test family keep every start
+            try std.testing.expectEqual(@as(u32, if (opted and !glm) 1 else 256), requestMinimum(F));
         }
     }
 }

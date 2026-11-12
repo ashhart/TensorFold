@@ -22,7 +22,7 @@ pub const Cuda = struct {
 /// The CUDA options for every target: a script that passes them where no CUDA step runs is not refused.
 pub fn cuda(b: *std.Build) Cuda {
     const sm_help = "SASS targets, comma separated (default 121; 80, 86, 89, 120 and 121 build)";
-    const native_help = "prompt16 FP4 and fp8_experts prompt tiles decode natively (PTX ISA 9.2: nvcc 13.2+, sm_120a+)";
+    const native_help = "prompt16/qmmf FP4 and fp8_experts tiles decode natively (PTX ISA 9.2: nvcc 13.2+, sm_120a+)";
     const strip_help = "No debug info in the CUDA executables: no build machine paths leave with them";
     return .{
         .nvcc = b.option([]const u8, "nvcc", "nvcc (or a wrapper) that builds the CUDA kernel fatbins"),

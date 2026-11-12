@@ -24,8 +24,13 @@ pub const formats: []const []const u8 = &.{ "modelopt-nvfp4", "modelopt-mixed", 
 pub const default_context: i64 = 8192;
 pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = fw.prefill_rows;
-/// Prompt kernels change arithmetic with a chunk's rows: states keep and resume only on chunk starts.
+/// Chunk rows change prompt arithmetic: states keep and resume only where a cold pass cuts (cuda_prompt_cuts).
 pub const snap_grid: u32 = prompt_rows;
+/// cuda_prompt_cuts cuts a cold pass at the request's chunk starts too, so the server may send its message starts.
+pub const request_starts = true;
+pub const request_starts_switch = "TF_GLM_REQUEST_STARTS";
+/// Starts closer than 256 tokens merge, as in the measured pair receipts (#2404); a 1-row minimum needs its own run.
+pub const request_min_chunk: u32 = 256;
 /// TF_GLM_PROMPT_TAIL=1: a prompt that names no history keeps its last chunk start, as the KV pages' store does.
 pub const snap_tail = "TF_GLM_PROMPT_TAIL";
 /// `explain` words this family's open refusals too (where to set the rank and the id).
@@ -45,6 +50,7 @@ pub const Options = struct {
     drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
     drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
     mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
+    learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (cuda_env)
 };
 /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
@@ -139,14 +145,15 @@ fn checked(p: Place) !Place {
     return p;
 }
 
-/// Bytes this rank's weights take at most, for the server's admission: the checkpoint times its largest axis share.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
+/// Bytes this rank's weights take at most: the checkpoint (TF_GLM_LAYERS: the tensors read) times its largest share.
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
     const p = place() catch return total;
     const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return total;
     const text = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24)) catch return total;
     const c = config.parse(a, text) catch return total;
     const f = (shard.Share.of(&c, p.rank, p.world) catch return total).part(&c);
-    return @intCast(@as(u128, total) * f[0] / f[1]);
+    const whole = @import("cuda_thin_bytes.zig").count(a, io, dir, total, ranks.environment("TF_GLM_LAYERS"), c.layers, drafts and c.mtp > 0);
+    return @intCast(@as(u128, whole) * f[0] / f[1]);
 }
 
 /// Slots for `context` plus a verify window, a multiple of 64 so the sparse pool keeps the AOT set.
@@ -188,6 +195,7 @@ const paging = startup.paging;
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
     try @import("cuda_env.zig").startup();
+    try @import("cuda_env.zig").requestStartsAlone(o.learn_conversations); // before any rank opens
     const p = try place();
     const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
@@ -316,11 +324,12 @@ fn finishRank(a: OpenArgs) !Loaded {
         if (!o.drafts) return error.DrafterNeedsDrafts;
         own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world, o.drafter_bits);
     }
-    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes); // both ranks bring it up or neither does
+    // the group's own RoCE path (every rank or none), unless TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire
+    if (ranks.ownRoce(set, p.world)) try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes);
     errdefer if (own.group.fast) |f| f.deinit();
     try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
     errdefer if (own.group.multi) |m| m.deinit(m.ctx);
-    own.e.group = &own.group;
+    own.e.installGroup(&own.group);
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
@@ -423,14 +432,14 @@ pub fn snap_reuses(ptr: *anyopaque, at: u32) bool {
     return snap_spare(ptr) >= snap_bytes(ptr, at);
 }
 
-/// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id.
+/// The prompt pass stands at `at` (a mark at a chunk start): copy the state there under a new id, with its cuts below.
 pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     _ = owner;
     const e: *engine.Engine = @ptrCast(@alignCast(ptr));
     if (e.pos() != at) return error.NotAtMark;
     const k = try e.gpa.create(engine.Kept);
     errdefer e.gpa.destroy(k);
-    k.* = .{ .id = try e.keepState(), .at = at };
+    k.* = .{ .id = try e.keepState(), .at = at, .below = @import("cuda_prompt_cuts.zig").below(e.cur.cuts.items, at) };
     return k;
 }
 
@@ -504,6 +513,8 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",
         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",
+        error.GlmRequestStartsWithSharedKv => "TF_GLM_REQUEST_STARTS=1 cannot be used with TF_KV_SHARE above 0: unset request starts or disable shared KV",
+        error.GlmRequestStartsWithLearnConversations => "TF_GLM_REQUEST_STARTS=1 cannot be used with --learn-conversations: unset request starts or serve without it",
         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",

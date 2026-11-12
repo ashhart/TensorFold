@@ -93,6 +93,12 @@ pub const Geometry = struct {
     exl3: bool = false,
     /// A plain BF16 checkpoint (no quantization at all, HF tensor names): every projection bf16, decisions only.
     bf16: bool = false,
+    /// A pipeline stage's layers: `layers` of them from global layer `first`, of a model of `whole` (0: this one).
+    first: usize = 0,
+    whole: usize = 0,
+    /// Whether the stage holds the embedding, and the final norm and the head (a whole model holds both).
+    embeds: bool = true,
+    heads: bool = true,
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Geometry {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -127,10 +133,34 @@ pub const Geometry = struct {
         return g.q_heads * head_dim;
     }
 
+    /// The stage's linear layers (`linear` is indexed by global layer).
     pub fn deltas(g: Geometry) usize {
         var n: usize = 0;
-        for (g.linear[0..g.layers]) |l| n += @intFromBool(l);
+        for (g.linear[g.first..][0..g.layers]) |l| n += @intFromBool(l);
         return n;
+    }
+
+    /// The whole model's geometry, of which this may be a stage.
+    pub fn model(g: Geometry) Geometry {
+        var m = g;
+        m.layers = if (g.whole == 0) g.layers else g.whole;
+        m.first = 0;
+        m.whole = 0;
+        m.embeds = true;
+        m.heads = true;
+        return m;
+    }
+
+    /// Layers [first, end) of this whole model as a stage; it holds the embedding when it starts at layer 0.
+    pub fn stage(g: Geometry, first: usize, end: usize, heads: bool) error{BadStageRange}!Geometry {
+        if (g.whole != 0 or first >= end or end > g.layers) return error.BadStageRange;
+        var s = g;
+        s.first = first;
+        s.layers = end - first;
+        s.whole = g.layers;
+        s.embeds = first == 0;
+        s.heads = heads;
+        return s;
     }
 
     pub fn attentions(g: Geometry) usize {
@@ -298,11 +328,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         .q_heads = try integer(t, "num_attention_heads"),
         .kv_heads = try integer(t, "num_key_value_heads"),
         .eps = @floatCast(try number(t, "rms_norm_eps")),
-        .tied = blk: {
-            const v = t.get("tie_word_embeddings") orelse root.get("tie_word_embeddings") orelse break :blk false;
-            if (v != .bool) return error.BadQwenConfig;
-            break :blk v.bool;
-        },
+        .tied = try rules.tied(root, t, .cuda),
         .context = resolved.ceiling,
         .rope = resolved.rope,
         .linear = @splat(false),

@@ -130,11 +130,10 @@ pub fn opening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
         s.cached = plan.from;
         l.fill = plan.from;
     } else l.fill = x.resumeAt(s, &l, prompt.len);
-    if (s.sampling) |sp| if (sp.temperature > 0) {
-        const rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+    if (cuda.sample.ruleFor(s.sampling)) |rule| {
         try x.upload(l.rule, std.mem.asBytes(&rule));
         l.sampled = true;
-    };
+    }
     if (s.images.len > 0) try x.encodeImages(s, &l);
     try x.lanes.put(x.gpa, s, l);
     x.free[slot] = false;
@@ -169,11 +168,10 @@ pub fn legacyOpening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
     const l = got.value_ptr;
     l.sampled = false;
     l.mark = null;
-    if (s.sampling) |sp| if (sp.temperature > 0) {
-        const r = cuda.sample.Rule.from(lanes.gpu_rule.rule(sp));
+    if (cuda.sample.ruleFor(s.sampling)) |r| {
         try x.upload(l.rule, std.mem.asBytes(&r));
         l.sampled = true;
-    };
+    }
     s.cached = 0;
     if (s.images.len > 0) try x.encodeImages(s, l);
     l.fill = x.resumeAt(s, l, p.len);

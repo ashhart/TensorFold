@@ -159,6 +159,13 @@ pub const Prefetch = struct {
         return f.limits.reads > 0;
     }
 
+    /// Counters, held reads and their bytes, read under the mutex for the status snapshot.
+    pub fn snapshot(f: *Prefetch) struct { counts: Counts, held_reads: usize, held_bytes: u64 } {
+        f.lock();
+        defer f.unlock();
+        return .{ .counts = f.counts, .held_reads = f.held_reads, .held_bytes = f.held_bytes };
+    }
+
     fn lock(f: *Prefetch) void {
         f.mutex.lockUncancelable(f.io);
     }

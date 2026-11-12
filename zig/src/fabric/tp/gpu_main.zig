@@ -1,4 +1,4 @@
-//! `tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel`: one rank.
+//! `tf-tp-test suite | device | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | tcp-host | hca | kernel`
 const std = @import("std");
 const cuda = @import("cuda");
 const tp = @import("tp");
@@ -22,7 +22,9 @@ pub fn main(init: std.process.Init) !u8 {
     }
     const cfg = try tp.Config.fromEnv();
     if (command == .@"roce-host") return @import("roce_host.zig").run(cfg, init.gpa);
+    if (command == .@"tcp-host") return @import("tcp_host.zig").run(cfg, init.gpa);
     if (command == .hca) return hca(cfg, init.io);
+    if (command == .device) return device(cfg);
     if (command == .failfast and (!cfg.failfast or command.failfast.hold != null) and !hostOnlyAllowed(cfg)) {
         std.debug.print("REFUSED: failfast with TF_TP_FAILFAST=0 or a hold is host-only: TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire\n", .{});
         return 2;
@@ -123,6 +125,43 @@ fn suite(s: *tp.Session, d: *const cuda.Driver, gpa: std.mem.Allocator, cfg: tp.
     s.close();
     return if (c.failures == 0) 0 else 1;
 }
+
+/// `device`: every collective on 2, 3 and 4 in-process ranks of one GPU (`TF_TP_DEVICE`), against the reference.
+fn device(cfg: tp.Config) !u8 {
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, @intCast(cfg.device));
+    defer ctx.deinit();
+    var name_buf: [128]u8 = undefined;
+    std.debug.print("INFO in-process ranks on {s} (sm_{d})\n", .{ try ctx.name(&name_buf), try ctx.capability() });
+    var run: DeviceRun = .{ .d = &driver };
+    for ([_]u32{ 2, 3, 4 }) |w| tp.device.run(&ctx, std.heap.smp_allocator, w, .{}, &run, DeviceRun.rank) catch |e| {
+        std.debug.print("FAIL world {d}: {t}\n", .{ w, e });
+        _ = run.failures.fetchAdd(1, .monotonic);
+    };
+    const passes = run.passes.load(.monotonic);
+    const failures = run.failures.load(.monotonic);
+    std.debug.print("SUMMARY in-process ranks: {d} passed, {d} failed\n", .{ passes, failures });
+    return if (failures == 0 and passes > 0) 0 else 1;
+}
+
+const DeviceRun = struct {
+    d: *const cuda.Driver,
+    passes: std.atomic.Value(u32) = .init(0),
+    failures: std.atomic.Value(u32) = .init(0),
+
+    fn rank(comm: tp.Collective, r: u32, run: *DeviceRun) !void {
+        var c = try checks.Ctx.init(run.d, std.heap.smp_allocator, r, comm.world(), max_bytes);
+        defer c.deinit();
+        c.rank_order = true;
+        const sizes = [_]usize{ 6, 1000, 4096, 65536, 256 * 1024, 256 * 1024 + 16, 1 << 20, 4 << 20 };
+        for (sizes, 0..) |n, i| try c.collectives(comm, "device", n, 100 * i);
+        try c.pointToPoint(comm, "device", 64 * 1024, 7);
+        try comm.barrier();
+        _ = run.passes.fetchAdd(c.passes, .monotonic);
+        _ = run.failures.fetchAdd(c.failures, .monotonic);
+    }
+};
 
 /// The failed-transport check's host-only forms (fail-fast off, a hold): TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire.
 fn hostOnlyAllowed(cfg: tp.Config) bool {

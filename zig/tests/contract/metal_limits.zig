@@ -135,12 +135,21 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try @import("metal_weight_only.zig").text(a);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "flashnext grouped ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.flashnext_gx, .pre_m5 = sources.flashnext_gx };
+    }
     if (std.mem.startsWith(u8, d.name, "flashnext FSR ")) {
         if (!assemble) return undefined;
         const fsr = try tf.flashnext_fsr_contract.source(a, fun);
         const pre = if (fsr.fragments) try preM5(a, "", fsr.text) else fsr.text;
         const here = if (fsr.fragments and device.tensorUnits()) try std.mem.replaceOwned(u8, a, fsr.text, "#include \"../nax.h\"", sources.nax) else pre;
         return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
+    }
+    if (std.mem.startsWith(u8, d.name, "flashnext index ")) {
+        if (!assemble) return undefined;
+        const body = try tf.flashnext_scale_index_fixture.text(a, std.mem.eql(u8, fun, tf.flashnext_fsr_contract.gate), true, false);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
     if (std.mem.startsWith(u8, d.name, "flashnext vision ") or std.mem.startsWith(u8, d.name, "flashnext rotary ")) {
         if (!assemble) return undefined;

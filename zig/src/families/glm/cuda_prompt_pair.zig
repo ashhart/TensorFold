@@ -61,6 +61,7 @@ pub fn piecesOf(e: *const Engine, b: *const fw.Buffers) ?*const fw.Pieces {
 /// Rank 0's choice for the step at `start` (the others take the ids it sends); not with a drafter, prompt rows or prof.
 pub fn pairedAt(e: *const Engine, start: usize, len: usize, from: ?engine.Resume, marks: ?engine.Marks) bool {
     if (e.pair == null or !e.settings.pair or e.drafter != null or e.prompt_logprobs != null or e.prompt_profs[3] != null) return false;
+    if (e.cur.cuts.items.len > 0) return false; // a paired step would step over a request start
     if (e.pieces.count == 1 and !e.settings.split) return false; // run takes such a chunk whole
     if (!takesTwo(start, len, e.share.world, if (marks) |m| m.at else &.{})) return false;
     // a resumed step restores its kept state, and the rings' base, after this choice

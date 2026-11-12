@@ -53,6 +53,7 @@ pub fn loaderTests(b: *std.Build, test_step: *std.Build.Step) void {
     }) }));
     loader.has_side_effects = true; // TF_QWEN_DIR is not a cached input
     test_step.dependOn(&loader.step);
+    loader.step.dependOn(@import("mesh.zig").qwenDeclTest(b, coreModule(b, b.graph.host))); // its cuts as declarations
     b.step("test-qwen35", "Qwen3.5 / 3.6 checkpoint loader tests; TF_QWEN_DIR indexes a real checkpoint").dependOn(&loader.step);
 }
 /// hip-host-test (part of `test`), hip-gpu-build and hip-gpu-test, hip-affine-build and hip-affine-test.
@@ -241,6 +242,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         "tf-flashnext-hip-test",
         "Flash Next model checks on the GPU (-Dhip-arch)",
     ).dependOn(&b.addInstallArtifact(fx_test, .{}).step);
+    const fx_gpu = b.addTest(.{ .name = "tf-flashnext-hip-gpu-test", .root_module = gpu.flashnext, .filters = &.{"Flash Next fused prompt prep:"} });
+    b.step("flashnext-hip-gpu-build", "Compile the Flash Next GPU checks without running them").dependOn(&fx_gpu.step);
+    b.step("flashnext-hip-gpu-test", "Flash Next's DeltaNet through linear() on the GPU: the fused prompt prep against the unfused chain").dependOn(&b.addRunArtifact(fx_gpu).step);
     const nem_test = b.addExecutable(.{ .name = "tf-nemotron-hip-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/nemotron_hip/main.zig"),
         .target = target,

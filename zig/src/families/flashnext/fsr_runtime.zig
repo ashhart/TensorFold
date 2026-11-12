@@ -4,9 +4,37 @@ const mtl = @import("metal");
 const fz = @import("replay.zig");
 const storage = @import("fsr_storage.zig");
 const trace_file = @import("fsr_trace.zig");
+const platform = @import("sys");
 const Commands = @import("../../core/fsr/commands.zig").Commands(mtl);
+
+/// The pool's counts as /stats shows them; the host copies these fields into engine_api's `Status.FsrCache`.
+pub const Counts = struct {
+    io_bytes: u64 = 0,
+    io_calls: u64 = 0,
+    io_size_checks: u64 = 0,
+    io_logical_bytes: u64 = 0,
+    demand_misses: u64 = 0,
+    forecast_misses: u64 = 0,
+    demand_keys: u64 = 0,
+    unique_demand_keys: u64 = 0,
+    worker_joins: u64 = 0,
+    cancelled_forecasts: u64 = 0,
+    occupancy: u64 = 0,
+    capacity: u64 = 0,
+    cache_hits: u64 = 0,
+    evictions: u64 = 0,
+};
+
+/// Calls to `after` between clock reads: one MoE layer a call, so a few passes.
+const sync_every: u32 = 256;
+
 pub const Runtime = struct {
     commands: Commands = .{},
+    gate: std.atomic.Value(u32) = .init(0), // guards `published`: the engine thread writes, HTTP threads read
+    published: Counts = .{},
+    published_on: bool = false,
+    published_ms: i64 = 0, // monotonic ms of the last copy (engine thread only)
+    sync_calls: u32 = 0, // `after` calls since the last clock read (engine thread only)
     trace: ?trace_file.Trace = null,
     trace_enabled: bool = false,
     trace_streams: usize = 1,
@@ -58,6 +86,53 @@ pub const Runtime = struct {
         };
         for (&s.route_rows, 0..) |*buffer, i| buffer.* = try fz.i32Buf(r, &.{@intCast(i)});
         return s;
+    }
+
+    /// Once per MoE layer a pass: the clock is read every `sync_every` calls, and the counts copied at 1 Hz at most.
+    fn syncSnapshot(s: *Runtime) void {
+        if (s.pool == null) return;
+        s.sync_calls += 1;
+        if (s.published_on and s.sync_calls < sync_every) return;
+        s.sync_calls = 0;
+        const now = monotonicMs();
+        if (s.published_on and now - s.published_ms < 1000) return;
+        s.published_ms = now;
+        s.publish();
+    }
+
+    /// The engine thread copies the arena's counters (also when a reply ends); readers never touch the arena.
+    pub fn publish(s: *Runtime) void {
+        if (s.pool) |p| {
+            const o = p.arena.clock.occupancy();
+            const v = Counts{
+                .io_bytes = p.arena.io.bytes,
+                .io_calls = p.arena.io.calls,
+                .io_size_checks = p.arena.io.size_checks,
+                .io_logical_bytes = p.arena.io.logical_bytes,
+                .demand_misses = p.arena.demand_misses,
+                .forecast_misses = p.arena.forecast_misses,
+                .demand_keys = p.arena.demand_keys,
+                .unique_demand_keys = p.arena.unique_demand_keys,
+                .worker_joins = p.arena.worker_joins,
+                .cancelled_forecasts = p.arena.cancelled_forecasts,
+                .occupancy = @intCast(o.held),
+                .capacity = @intCast(o.capacity),
+                .cache_hits = o.hits,
+                .evictions = o.evictions,
+            };
+            while (s.gate.cmpxchgWeak(0, 1, .acq_rel, .acquire) != null) std.atomic.spinLoopHint();
+            s.published = v;
+            s.published_on = true;
+            s.gate.store(0, .release);
+        }
+    }
+
+    /// The copied snapshot, or null while the pool has not reported yet (hidden, not zeroed, in the page).
+    pub fn snapshot(s: *Runtime) ?Counts {
+        while (s.gate.cmpxchgWeak(0, 1, .acq_rel, .acquire) != null) std.atomic.spinLoopHint();
+        defer s.gate.store(0, .release);
+        if (!s.published_on) return null;
+        return s.published;
     }
 
     pub fn deinit(s: *Runtime) void {
@@ -148,6 +223,7 @@ pub const Runtime = struct {
 
     /// Slot publication never overlaps a writer or a GPU consumer of the same expert.
     pub fn after(s: *Runtime, r: *fz.Run) !void {
+        s.syncSnapshot();
         if (s.predicted_count == 0) return;
         if (s.pool.?.arena.readingAhead()) {
             s.predicted_count = 0;
@@ -185,6 +261,12 @@ pub const Runtime = struct {
         return null;
     }
 };
+
+fn monotonicMs() i64 {
+    var ts: platform.c.timespec = undefined;
+    if (platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    return @as(i64, @intCast(ts.sec)) * 1000 + @divTrunc(@as(i64, @intCast(ts.nsec)), 1_000_000);
+}
 
 /// Only the all-four-bit recorded gate/up variant reads GROWS; other variants encode the upper bound.
 pub fn guarded(widths: anytype) bool {

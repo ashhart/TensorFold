@@ -1,7 +1,7 @@
 zig/kernels/cuda/affine4_pack.cu	cbc03ae0622574b57ae266091ea9f26888b21b2b1c020a031940eacddcf8ff14	raw
 zig/kernels/cuda/ck_lane.cu	652fa9993c0c6905e6564681bcca07dc61c1d7f448e2e91ada377a59174dd5e1	raw	commits c0a58fd30; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/contract_controls.cu	b331c9cd4ce9cbf2183290e1e6f83261b4eecd16d1681ce98053f3cd837fd45b	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off)
-zig/kernels/cuda/contract_ctl_router.cuh	5d9b88d650776a89a61d9e48e2cc20f09050aa25ec357a13c4368370eaea7e1f	raw
+zig/kernels/cuda/contract_ctl_router.cuh	9320ff62a3bf4e06cb43f6a630a8cb1d5705471d83df6e965f5297ac2cd59d33	raw
 zig/kernels/cuda/embed_rows.cu	7ec99588b7628578864e3020a01cdc330c209160d25ac30498c3a13708a9ed26	raw
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
 zig/kernels/cuda/exlr8_dense.cu	7616e7a3bb35a2bb64b53a1ca84ce8be98442a36394dad945b844219f72ec671	raw
@@ -13,19 +13,19 @@ zig/kernels/cuda/experts_rows.cu	714b76ad72ff45715c5ebf6b57365f0f41789ad301871f0
 zig/kernels/cuda/flashnext_attn.cu	9731e39b67a8adb4a0a42222e9f888877932f2aa7108b1631ea61016083d3b71	raw
 zig/kernels/cuda/flashnext_batch.cu	95260b964fb633d23df28970672d87688f21cdd9073e44f92a1523b54b4ecd99	raw
 zig/kernels/cuda/flashnext_gdn.cu	c7b9712626778d452e18234e2dfc3b26f8112618cdc492957c4b5f5454d64126	raw
-zig/kernels/cuda/flashnext_hc.cu	407e8d9aec5d4103d3b3466322d7456f5909cfe8a33bd6d38c493f777bc2cdb2	raw	main d4541b00e0 (rms_scale shared; same SASS)
+zig/kernels/cuda/flashnext_hc.cu	54fa2cfa22e483341835f6349cf0a8f508459ed1b65804728cb1358ac82b24f1	raw	main 5c7cf5c117, d88c1ed57d (sum_rn and rms_scale shared; same SASS)
 zig/kernels/cuda/flashnext_mtp.cu	0b99c76b7ed0c4a76ea59b7f121eb8c806f76edafdaad807e86214a96ee9edec	raw
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	a9caeec5b270dcab933a5eae0f500d7aabcd31cde156238225ae064ac92ba2e8	raw
 zig/kernels/cuda/glm_glue.cu	8c71cb95fafdcc6a1540cb260edc40f5ef280b2d549e5b39a66ecdc60fbdaa9b	raw
 zig/kernels/cuda/glm_glue_attn.cuh	abecbecf809292c0f82294fa688e47e574fa43c8ff3b1497966f9d3dd52b9881	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs)
-zig/kernels/cuda/glm_glue_bmm.cuh	1accfc9285deabb63a6cf6d70dc11544ebcb1654a8eb6c7159927d8c1d5177dc	raw
+zig/kernels/cuda/glm_glue_bmm.cuh	7fbaaa4517e309b17ebb41f84f94f9a939baa27a2fb5c9a6b7f5b857b5a21391	raw
 zig/kernels/cuda/glm_glue_hc.cuh	c3aa26475c6ce05d2508c300c8e88d429adea4c0c173e3909734bb0ece06da2a	raw
 zig/kernels/cuda/glm_glue_index.cuh	73fbdf6dea2cfc13275169ac2e7ea4d670611145c1e738529a05b23d63f39abf	raw
 zig/kernels/cuda/glm_glue_latent.cuh	4d4c7872b6383d5a4e2194b2ea0e477948ba3ff482c3aeb364838f3df0aa6ab5	raw
 zig/kernels/cuda/glm_glue_moe.cuh	163d542c99f6ef0432956f6341df324c85568127b623e301ad29279bbb49128c	raw
 zig/kernels/cuda/glm_glue_norm.cuh	7efd71df53fbf664d2f6d13b8aa7a9f0483f50f3d26574360d7ad8f4361cd453	raw
-zig/kernels/cuda/glm_glue_router.cuh	33c61252d5f86e7e22d5ba4bf9a1a48e6e13e195c40ecee2b024a1b647610f20	raw	main 42735f94f0 (#2335; glm_glue SASS identical on five SMs)
+zig/kernels/cuda/glm_glue_router.cuh	99911df38e6ad2826491b3fa5efd47aea5e54eebb7cd83eed586ba0dd9305658	raw
 zig/kernels/cuda/glm_glue_rows.cuh	0e70ddc8f3d3d91bd09a3643599bd3dc4cf98b9959ea03f8105ee84755440b2f	raw
 zig/kernels/cuda/glm_kda.cu	73e8ed722c69447232e4a5f0edf2c5245fee82f5b9c0c550ec516a035e550b57	raw	#2142: the KDA chain and saved-row replay moved to common/kda.cuh; SASS identical on sm_80/86/89/120/121 (5,465 functions)
 zig/kernels/cuda/glm_ops.cu	3c96e09f3e650a516d2685125f5603f4fd8877f54f2a16430a44fd717c1a6667	raw
@@ -46,19 +46,20 @@ zig/kernels/cuda/nemotron_route.cu	65da41432442f9fd99f73abefe87f34cf3c46b4971afe
 zig/kernels/cuda/norms.cu	89d3c6cea39fe3e1bf8d5a2fe60465f7ae272548f14711abb59ddac709d2d1db	raw	main d4541b00e0 (rms_scale shared; same SASS)
 zig/kernels/cuda/nvfp4_experts.cu	9ef08b957b02e1a3ef2ee814aaf79ed15d85ada6b99e6cca2c1cadc1cadd6964	raw
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
-zig/kernels/cuda/prefill_attention.cu	a52da014495e328d10258191cbd51dd19dc77c1c019e037274e0e2387b24be01	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged)
+zig/kernels/cuda/prefill_attention.cu	905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged)
 zig/kernels/cuda/prefill_attention_rows.cuh	21975248a7ec9efd199a28324bba837e7b78f066a63b426ab26587cba38fda5e	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
 zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de62f7474255a	raw
 zig/kernels/cuda/prompt16.cu	972fb2f601da2d64549717d27e642363243b0e2df88cfeffa81452216e160ae4	raw
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
 zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb9a8df3f0780129dcb675a	raw
 zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a77b398f572ba974055dfafd3c	raw
+zig/kernels/cuda/common/router_mma.cuh	3aca244a38f2e4b4f28bf74f333f384b1060b764c25b004cef4e6c636e7cc1dd	raw
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
 zig/kernels/cuda/qmm_prefill.cu	45ab2be277c7c17e6cdc6041db45611f2554c6e88f09a295e88751b1c51be1f5	raw
-zig/kernels/cuda/qmmf.cu	af2e073a5b04317aff95bcef888750ccd9648093ed6d9efd802fabf1d47f36dd	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged)
+zig/kernels/cuda/qmmf.cu	13a3cb0b6dec56afeb1f248f0cfe39e2d4d458f2b08272c26adb92fe3efba8fc	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical)
 zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
-zig/kernels/cuda/route_rows.cu	3744cca214bcb265f5dff43fea20c0fb6795bacbebe0a1d528c4a78ef9141bde	raw
+zig/kernels/cuda/route_rows.cu	a2bf267f360cb57257aaef9765d4dca93f68523338b0881d710bbfcb01917dad	raw
 zig/kernels/cuda/sample.cu	77858bb2cbebae601044716c6f1857148b8c10cbd627f8b3e13d9ebcbbed9d99	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/scan_rows.cu	d1a379a98cf7504a7ed3b3f2d24c8ab6a39fe5511bcded6449e598ce5c3c79e7	raw
 zig/kernels/cuda/torch_ops/argmax.cu	c87ab27188397298dce89ae80bb524b55a1d5c4f6aaa54627cba01d926da9ecf	raw
@@ -92,7 +93,7 @@ zig/src/cuda/experts.zig	1a2490128498525cb73bfe6f379a1dabfab4d62ceef9dec7e794abe
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/kernels.zig	9498065716c6418474da1110212aeb36d6958ba4b423653ec5e5e53c60215a61	raw	main 42735f94f0 (#2335: the mla image registered)
+zig/src/cuda/kernels.zig	db8a02c5b1469baa67e29b915b3e63cee0d0ec8b76009b9472b9307dadf12ebd	raw	main 42735f94f0 (#2335: the mla image registered), f35900e60c (#2709: the dots_mocr image registered)
 zig/src/cuda/launch.zig	9ec64848834d82ddcea85a6123e975c95a5ae2bf85c2a71772244794b0bcd705	raw	series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/memory.zig	7d2a91bfca8a08ae59df16ddf30d22226aba773cc814dd106930840ab344fc52	raw	commits 5dcf77d7c, f630f1a90, e9bf05ffd, 881cccaa4, a34cb6ded; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/modelopt.zig	648c9ba58197af0ce905f8792383502fc44a52c45d1413fe9e21d28d04c22253	raw
@@ -106,7 +107,7 @@ zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
 zig/src/cuda/root.zig	5dbca351bbf6a42cd83d7b615d4e4624809444d7d2e714b1d71d8eec53c6e606	raw	main 42735f94f0 (#2335: cuda.mla exported)
 zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
-zig/src/cuda/sample.zig	90539ff301ee1bff78c1d69f47ff60e2309b459c1f6cb438d710a332773b913f	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
+zig/src/cuda/sample.zig	5d374b5cd2108fd90b383cfec0a63bdce038eef8c380289495e5b9d080c590f2	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged)
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
 zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125db2199fa6	raw	commits e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/tp_group.zig	bf1ca9060e4e407e197b64df25d33275c3b608f074ccf816b314da2135c4d11d	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
@@ -114,7 +115,7 @@ zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0b
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
-zig/src/families/flashnext/cuda_batch.zig	e3aa67947b43989f18967a0a1fab065787b3b4c355d48d4761840133d25f56de	raw	main 4f6017ced (prompt cache marks kept inside the pass)
+zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
 zig/src/families/flashnext/cuda_batch_state.zig	c5950c8da26a8adf01844444585da813a0d832976e5e2b65e46205b7c275412a	raw	main 4f6017ced (prompt cache marks kept inside the pass)
 zig/src/families/flashnext/cuda_collective.zig	898e15d936062b5a26d0aacc0df8b40b5ae4983111d6aec35db1128aaf5f3f76	raw
 zig/src/families/flashnext/cuda_compare_main.zig	96dd8c699a898105b559477b1ac852acf126abef2f84c4a5529227f6ca6a327f	raw
@@ -128,11 +129,11 @@ zig/src/families/flashnext/cuda_hc.zig	01f897ac65d6edd2cd6ac76d97cb4d96619c25ffa
 zig/src/families/flashnext/cuda_head.zig	fc6410e8b17d559a12d81fd4bee9ab4e65f6f8b0999796c68baba58efb8fe818	raw
 zig/src/families/flashnext/cuda_images.zig	5bd8a6c06cb69440522f4392794d9ef52b3760195b97d96f2316b1acac271bd4	raw
 zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a124de2a7019041ed1f7483b2a4a2d7c99	raw
-zig/src/families/flashnext/cuda_lanes.zig	2eff184e3080adbf6f22909386cabf6033fb0ff3ad5ecf9cdbcfa8d5174ef652	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391)
+zig/src/families/flashnext/cuda_lanes.zig	be45eae2cee9739aecd6077eaa5cdda8f63e40aa0f27e3eb07603bd6faa3bfe6	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged)
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	4b8052db793ba81f0e73e1b9bd77b1780bbc4fd550d90976d017da47e76faaa2	raw
 zig/src/families/flashnext/cuda_lanes_load.zig	c073a8a8408a06ccc3f5d43ad7b5925a134a4a61676b51a3095ce39b204053b2	raw
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	f9947521a6d9c7d7380ca1b784a93a43b364c6fa5861cad15efd3538d2b8ceff	raw
-zig/src/families/flashnext/cuda_launch.zig	17999c016ddd3791e7ff00ff7e8b37309ad08da074aa8cd37500ef3d3e44060b	raw
+zig/src/families/flashnext/cuda_launch.zig	33eae02f7126a765dbee0310276fb51cacb2bfbebbf96146e4067a73b2becde7	raw	main ab2d08ac3 (#2802: pins that Flash Next declares no chunk_invariant; no served change)
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
 zig/src/families/flashnext/cuda_media_test.zig	4292f8f7c8f8bf4efd0dfaaa5a6c63e11568f85534127a0ce9feb0ab0be05120	raw
 zig/src/families/flashnext/cuda_mix.zig	248a2a86b3f377531f5b713c408ba99f73604510f4afe34ffae52615d5863c2c	raw
@@ -140,11 +141,11 @@ zig/src/families/flashnext/cuda_mixed_experts.zig	d0362f591e98c2d13581ae48fb75fb
 zig/src/families/flashnext/cuda_mlp.zig	8224a28003487487e69eb669be11eaafafdb1ce0bc4c5e57024cef0a6a29e66f	raw
 zig/src/families/flashnext/cuda_modelopt_experts.zig	de779975629770b33ad5c0ebf9aa6e334f7a98f173a452d2b7c33b50a08d968e	raw
 zig/src/families/flashnext/cuda_moe.zig	87ba75343c1d228800ed9fcc6d933f1175df172c008e14a8c7a64ff7011bed44	raw
-zig/src/families/flashnext/cuda_mtp.zig	1dc215370ecacf1280d3ad3a833f2b041a234d13651556d3be6445c5d2839f2c	raw
+zig/src/families/flashnext/cuda_mtp.zig	4ee36f11634cf629bcc9b912cb590c964ef6bc0042798499d4e4ae415d8708ed	raw	main 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged)
 zig/src/families/flashnext/cuda_mtp_check.zig	c80a8021e48559855ffd0c8163efa2d09899ec47d8ec4c605630b7582b5a3437	raw
-zig/src/families/flashnext/cuda_mtp_draft.zig	b974668c86718e05a54a15d20fa915f23456175ad13903bfce0c529808bddd10	raw
+zig/src/families/flashnext/cuda_mtp_draft.zig	49a43e45df95e051205e88bd421d13d54ef67135f4617b28a3d2957ecbb472b2	raw	main 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged)
 zig/src/families/flashnext/cuda_mtp_load.zig	095c8b71f984a7810adb1fb5e6d13da4a9abdc438de08405b4ad82d3f51f56e9	raw
-zig/src/families/flashnext/cuda_mtp_ops.zig	2fa79ae1d114d9b841f57e8fcac6de2004b61e07efa44b004b469ebdae8f7e37	raw	main 4b2679bf9 (grouped draft head carries its page table), 4f6017ced, ec76abd45 (reserveRows)
+zig/src/families/flashnext/cuda_mtp_ops.zig	526c946e7646214591397e37ead4451f62cefa0dc7373950309d6251d791db6a	raw	main 4b2679bf9 (grouped draft head carries its page table), 4f6017ced, ec76abd45 (reserveRows), 80e0fd72c, c6a337753 (#2753: verify rows checked after one completion wait, non-finite rows refused; finite rows unchanged)
 zig/src/families/flashnext/cuda_norms.zig	c6ca7f9c1a9049c0f9d512fe2a38c2672a2e96b5c060d6cec2bca0d39e34bad0	raw
 zig/src/families/flashnext/cuda_ple.zig	6c512f28c1b00465e7520c7fd4da71e80ebb068f19ee19360d9242639e8f61d1	raw
 zig/src/families/flashnext/cuda_ple_check.zig	e8b7cac1e0d3718f106482f6cff7375c0063e1757c46814bd40da435c83ba8ed	raw

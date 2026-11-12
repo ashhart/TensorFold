@@ -33,6 +33,8 @@ pub const Shape = struct {
     items: u32 = 0,
     /// A routed plan's pairs (rows x slots); 0: not given, and no pairs bound refuses it.
     plan_pairs: u32 = 0,
+    /// A routed prompt plan's average rows per expert; 0: not given.
+    expert_rows: u32 = 0,
     /// Parts the groups are split into.
     parts: u32 = 1,
     /// Inside a lane round: the decode tile keeps every row count.

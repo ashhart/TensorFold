@@ -154,6 +154,7 @@ const linux_host = [_][]const u8{
     "test-flashnext-load-context-host",
     "test-flashnext-loader-host",
     "test-flashnext-memory-host",
+    "test-flashnext-nonfinite-host",
     "test-flashnext-precise-host",
     "test-flashnext-prefill-pairs-host",
     "test-flashnext-proposal-host",
@@ -210,6 +211,7 @@ const linux_host = [_][]const u8{
     "test-qwen27-plans-host",
     "test-qwen27-speed-host",
     "test-qwen27-window-host",
+    "test-qwen3-cuda-host",
     "test-qwen35-cache-host",
     "test-qwen35-copies-host",
     "test-qwen35-decode-records-host",
@@ -299,6 +301,7 @@ const macos_fast = [_][]const u8{
     "test-persistence-identity-host",
     "test-qwen27-bank-boundary-host",
     "test-qwen27-prompt-floor-host",
+    "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
 };
 

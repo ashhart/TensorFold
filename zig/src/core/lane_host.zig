@@ -61,10 +61,13 @@ pub const LaneHost = struct {
     lone: ?api.Lone = null, // the backend's driver for a lone greedy stream; null: every stream in the lane core
     lone_job: ?*Job = null, // the job that driver holds now
     cache_status: ?api.Status.PromptCache = null, // published under mutex; HTTP threads never read the store
+    disk_status: ?api.Status.DiskCache = null, // published under mutex beside it
+    cache_at: i64 = 0, // wall-clock ms of the last full cache and disk copy (republished at 1 Hz at most)
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,
+    fsr: ?@import("engine_status.zig").FsrSource = null, // the backend's SSD-expert cache counts; null: Status.fsr stays null
     frame_key: ?*const fn (images: []const api.Image) u32 = null, // a family's image frame (0: text's), in the cache key
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
@@ -305,6 +308,7 @@ pub const LaneHost = struct {
         h.unlock();
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
         job.reported();
+        job.cache_promise = .{};
         h.gpa.free(job.marks);
         h.gpa.free(job.key);
         const s = &job.stream;
@@ -436,6 +440,7 @@ pub const LaneHost = struct {
     }
 
     pub fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
+        job.cache_promise = .{};
         if (job.prefilled != null) return;
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
@@ -582,4 +587,5 @@ test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
     _ = @import("lane_host_fetch.zig");
+    _ = @import("lane_host_cache_queue_test.zig");
 }
