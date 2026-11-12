@@ -127,6 +127,7 @@ pub const Model = struct {
         if (rows > m.rows_most) return error.PromptLength;
         if (branches.len == 0 or branches.len > branches_most) return error.Branches;
         if (labels.len > labels_most) return error.TooManyLabels;
+        if (!inVocabulary(m.cfg.vocab, trunk, branches, labels)) return error.TokenOutsideVocabulary;
         const taps = m.cfg.taps - 1;
         const host = m.host.slice(i32);
         const ids = host[0..rows];
@@ -228,3 +229,23 @@ pub const Model = struct {
         }
     }
 };
+
+/// Every token and label names a row of the embedding table: the kernels read `embed[id]` with no bound of their own.
+fn inVocabulary(vocab: usize, trunk: []const u32, branches: []const []const u32, labels: []const u32) bool {
+    for (trunk) |t| if (t >= vocab) return false;
+    for (branches) |branch| for (branch) |t| if (t >= vocab) return false;
+    for (labels) |t| if (t >= vocab) return false;
+    return true;
+}
+
+test "security: a token or label past the embedding table is refused before upload" {
+    const t = std.testing;
+    const branch = [_]u32{ 3, 4 };
+    try t.expect(inVocabulary(8, &.{ 0, 7 }, &.{&branch}, &.{ 1, 7 }));
+    try t.expect(!inVocabulary(8, &.{ 0, 8 }, &.{&branch}, &.{1}));
+    try t.expect(!inVocabulary(4, &.{0}, &.{&branch}, &.{1}));
+    try t.expect(!inVocabulary(8, &.{0}, &.{&branch}, &.{ 1, 8 }));
+    // an id a narrowing cast would turn negative
+    try t.expect(!inVocabulary(8, &.{0x8000_0000}, &.{&branch}, &.{1}));
+    try t.expect(!inVocabulary(8, &.{0}, &.{&branch}, &.{0xffff_ffff}));
+}

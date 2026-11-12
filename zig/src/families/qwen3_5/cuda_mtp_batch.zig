@@ -44,6 +44,7 @@ fn ringRow(d: *Mtp, ctx: *Ctx, end: u64, seg: usize) RingRow {
 /// The pass's tokens and ring table up from the batch's own staging (the last pass's fetch has waited on it).
 fn upload(d: *Mtp, ids: []const u32, tab: []const RingRow) !void {
     const e = d.e;
+    for (ids) |id| if (id >= e.g.vocab) return error.InvalidQwenToken; // embed reads the table at id unchecked
     const st = d.staged.bytes;
     @memcpy(std.mem.bytesAsSlice(u32, st[Mtp.bids_at..][0 .. ids.len * 4]), ids);
     @memcpy(st[Mtp.btab_at..][0 .. tab.len * @sizeOf(RingRow)], std.mem.sliceAsBytes(tab));
