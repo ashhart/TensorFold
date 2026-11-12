@@ -162,7 +162,7 @@ zig/src/families/flashnext/cuda_qmm.zig	6d035feb053691cc9750a369c86a5463d41ed942
 zig/src/families/flashnext/cuda_rank_engine.zig	575ebbf4656d8a064a9e1945527a3a12a54a2879f56d2dbfe0f2e51d3014d102	raw
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
-zig/src/families/flashnext/cuda_rank_wire.zig	6b2195652b7e2898f68c8d605121d3928365c678cae794f68b3b020b3d9717e2	raw	a control-link wait polls with a 50 us timeout for its first 50 ms, then blocks; how the host waits only, replies unchanged; Link.oneHost: whether both ranks share a host, from the link's two addresses; framing and waits unchanged
+zig/src/families/flashnext/cuda_rank_wire.zig	ccabe0f06babc1c1ba6ced699b203406a0b98127b5c4b3ca4bdd54157e88fcc2	raw	a control-link wait polls with a 50 us timeout for its first 50 ms, then blocks; how the host waits only, replies unchanged; Link.oneHost: whether both ranks share a host, from the link's two addresses; framing and waits unchanged
 zig/src/families/flashnext/cuda_round_graph.zig	7fa3a54e93c81de36cf3962d0a68eb72a7dd81b8869f47b6d9ed8b9a6cc325cd	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw

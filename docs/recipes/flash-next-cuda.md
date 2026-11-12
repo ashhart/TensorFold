@@ -47,7 +47,7 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 - The rank that finishes loading first waits up to 10 minutes for the other before their first collective; a rank
   that exits, fails its load or closes its link ends that wait within seconds.
 - Each rank opens NCCL nonblocking, so its start-up waits on the peer under a 30 s deadline. When both ranks run on
-  one host (the control link's two ends share an address), each then splits from it, under a second 30 s deadline, a
+  one host (both ranks must report it over the link), each then splits from it, under a second 30 s deadline, a
   blocking communicator that shares its connections and carries every collective, so a collective returns once
   enqueued; there the engine sets `NCCL_RUNTIME_CONNECT=0` when it is unset, so NCCL makes every connection inside that
   bounded start-up and none at a collective's first use. Ranks on two hosts run their collectives on the nonblocking
