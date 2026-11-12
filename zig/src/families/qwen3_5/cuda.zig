@@ -90,3 +90,7 @@ test "Qwen pages default: the learner's and the prefix share's refusals stop bef
 test {
     _ = @import("cuda_request_starts_test.zig");
 }
+
+test {
+    _ = @import("cuda_sm110_modes.zig");
+}
