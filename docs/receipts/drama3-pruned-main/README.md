@@ -42,8 +42,11 @@ Verdict: pass. Both held their experts; whole and streamed replies equalled thei
 - **Memory.** The footprint leaves out the packed experts, which Metal reads in place from the mapped files: 13.04 GB
   (7,369) and 10.44 GB (5,900), beside 6.36 GB of BF16 weights. The startup line keeps 28.5 GiB wired between requests
   for the 7,369-expert checkpoint, inside the load limit of 70% of RAM.
-- **Second lane.** The concurrent streamed reply's first audio came at 5.6 s, not 0.5 s: its lane built its own
-  reference prefill while the other lane spoke.
+- **Second lane.** The concurrent streamed reply recorded first audio at 6.07 s (7,369 experts) and 6.22 s (5,900),
+  with total times of 8.47/8.66 s and RTF 1.90 for both: its lane built its own reference prefill while the other spoke.
+- **Timing limitation.** This Mac run predates the checker's `read1()` correction. Its first-audio figures time a
+  buffered 65,536-byte read, so they are upper bounds on first-byte latency. PCM hashes, total times and RTF are
+  unaffected; a new Mac run is needed for first-byte latency.
 
 ## Spark
 

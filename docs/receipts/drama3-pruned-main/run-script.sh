@@ -19,9 +19,9 @@ for path in "$fp8/codec.pth" "$pruned/config.json" "$pruned5900/config.json" "$n
 done
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 mkdir -p "$out/voices"
-zig build -Dgpu=spark -Dnvcc="$nvcc" --prefix "$zig_out"
+nice -n 10 zig build -Dgpu=spark -Dnvcc="$nvcc" --prefix "$zig_out"
 # -Dgpu builds the server alone; the voice tools come from the development build
-zig build drama3-generate drama3-voice -Dsm=121 -Dnvcc="$nvcc" -Doptimize=ReleaseFast --prefix "$zig_out"
+nice -n 10 zig build drama3-generate drama3-voice -Dsm=121 -Dnvcc="$nvcc" -Doptimize=ReleaseFast --prefix "$zig_out"
 for model in "$fp8" "$pruned" "$pruned5900"; do
     sum=$(find "$model" -name '*.safetensors' -o -name codec.pth | sort | xargs cat | sha256sum | cut -d' ' -f1)
     echo "input $model: $sum"
