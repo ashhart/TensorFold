@@ -49,6 +49,7 @@ pub const Rule = struct {
     k: Constants = .{},
     prior: []const f64,
     most_drafts: u32,
+    shared_cap: u32 = 0, // Model.shared_mtp_cap: most a shared round chains a stream; a lone one chains most_drafts (0: off)
     family_costs: *const Table,
     shared_costs: *const Table,
     mtp_step_ms: f64,
@@ -153,7 +154,7 @@ pub const Rule = struct {
         if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
-            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
+            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else if (r.shared_cap != 0) r.most_drafts else 3;
             return @max(1, @min(most, want));
         }
         var best: i64 = 1;
@@ -337,7 +338,7 @@ pub const Rule = struct {
         var made: usize = 0;
         defer for (probs[0..made]) |p| r.gpa.free(p);
         for (whos, most, probs[0..whos.len]) |w, *m, *p| {
-            m.* = @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1));
+            m.* = @min(@as(i64, if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts), @max(1, w.draft_room - 1));
             p.* = try alloc.chainProbabilities(r.gpa, try r.rates(w), @intCast(m.*));
             made += 1;
         }
@@ -516,4 +517,5 @@ test {
 
 test {
     _ = @import("shared_step_test.zig");
+    _ = @import("deep_chain_test.zig");
 }
