@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the cancelled-benchmark test checks that a cancelled run saves one cancelled sample and never publishes, instead of counting requests that race the stop, so it no longer fails on a busy runner (#2865, fixes #2853).
+
 - HIP Flash Next: a decode round's n-gram table gather spreads over the parked host workers and asks for its pages first (`MADV_POPULATE_READ`), so first-time page faults overlap; on one Radeon 8060S (gfx1151) with Qwen3.8-Flash-Next oQ4e at 4 streams, cold decode is about 45% faster sampled and 18% greedy and the cold 8K first token about 10% sooner, with warm decode level and tokens unchanged (#2695). Thanks to @gilby.
 
 - Cortheon (`--cortheon`): DuckDuckGo results are kept, and its ads still skipped, when only the spelling differs (either quote style, a `class` attribute in any letter case, an unquoted `href`, spaces around its `=`, or a line break before it); a duplicate whose scheme or host differs only in letter case is dropped while paths and queries keep their case, and the PyPI, npm and crates.io allow-list takes the host in any case with the path exact (#2750). Thanks to @ppardus.
