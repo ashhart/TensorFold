@@ -91,11 +91,15 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
-/// `project` over weights repacked by `tile`: one dispatch; bf16 or f32 (both x and out) activations.
+/// The tiled images take bf16, or f32 for both x and out; qmm_q4_tile_rows is bf16 only.
 pub fn tiledActivation(out: View, x: View) Error!void {
     if (out.kind != x.kind or (x.kind != .bf16 and x.kind != .f32)) return error.Invalid;
 }
 
+/// Rows of x one thread of qmm_q4_tile_rows computes (it also takes two columns); a chunk this long takes that image.
+pub const tile_rows: u64 = 4;
+
+/// `project` over weights repacked by `tile`: one dispatch, so w must fit one binding and start 16-byte aligned.
 pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
     try tiledActivation(out, x);
     const g = try projectGeometry(out, x, w, scales, biases, k, .tiles);
@@ -103,10 +107,13 @@ pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scale
     const range = o.dev.properties.limits.maxStorageBufferRange;
     if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
     if (qmmVariant(x, w) != .vec4) return error.Misaligned;
-    const pipe = if (out.kind == .f32) &o.qmm_q4_tile_f32 else &o.qmm_q4_tile;
+    const act_f32 = out.kind == .f32;
+    const many = !act_f32 and g.m >= tile_rows;
+    const pipe = if (act_f32) &o.qmm_q4_tile_f32 else if (many) &o.qmm_q4_tile_rows else &o.qmm_q4_tile;
     try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
     const p = try q4Push(g.m, g.n, k);
-    try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
+    const threads = if (many) try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * ((g.n + 31) / 32 * 16)) else p.count;
+    try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(threads, pipe.local[0]), timeout_ns);
 }
 
 /// `project` with the qmm image forced (null picks by alignment); a forced vec4 over unaligned windows is refused.
