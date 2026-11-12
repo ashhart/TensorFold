@@ -245,7 +245,10 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
     const probs = try a.alloc([]const f64, plans.len);
-    for (plans, fixed, probs) |p, *fx, *pr| {
+    const cuts = try a.alloc(?usize, plans.len); // the cut each plan's chances hook marked, committed with its cache
+    for (plans, fixed, probs, cuts) |p, *fx, *pr, *mark| {
+        const prior = p.stream.draft_chances_cut;
+        p.stream.draft_chances_cut = null;
         const n = p.count();
         if (p.kind == .forced or n == 0) {
             fx.* = 1 + @as(u32, @intCast(if (p.kind == .forced) n else 0));
@@ -260,15 +263,19 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
             pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
+        mark.* = p.stream.draft_chances_cut;
+        p.stream.draft_chances_cut = prior;
     }
-    if (e.cfg.allocate_shared_drafts) for (plans, probs) |p, chances| {
+    if (e.cfg.allocate_shared_drafts) for (plans, probs, cuts) |p, chances, mark| {
         if (p.kind == .copy or p.context_copy) {
             p.stream.draft_chances.clearRetainingCapacity();
+            p.stream.draft_chances_cut = null;
             continue;
         }
         if (p.kind != .head or chances.len == 0) continue;
         p.stream.draft_chances.clearRetainingCapacity();
         try p.stream.draft_chances.appendSlice(e.gpa, chances);
+        p.stream.draft_chances_cut = if (mark) |first| @min(first, chances.len) else null;
     };
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
