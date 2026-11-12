@@ -1,4 +1,4 @@
-// Planted faults for fn_exl3_leaf_tree, fn_exl3_leaf_partial and fn_exl3_leaf_finish: each control is the kernel with one change.
+// Planted faults for canonical EXL3 roots, double partials and finishes.
 #pragma once
 #include <cuda_bf16.h>
 #include "flashnext_exl3_leaf_value.cuh"
@@ -77,8 +77,7 @@ __device__ __forceinline__ void leaf_tree(float* y, const float* wts, const int*
     if (F == WRITES_INPUT && r == 0 && col == 0) y[0] = __fadd_rn(y[0], 1.0f);
 }
 
-// fn_exl3_leaf_finish, then the fault: FLAT adds every piece in one chain (gate 3), BF16_ADDS rounds merges (gate 4),
-// F32_PARTIALS reads each partial through float (gate 3).
+// Finish faults: flat order, bf16 merges, or partials narrowed through float.
 template <int F>
 __device__ __forceinline__ void leaf_finish(const double* g, float* out, const int* meta, int pieces, int d, long long stride) {
     const int r = blockIdx.x, col = blockIdx.y * blockDim.x + threadIdx.x;
@@ -125,8 +124,7 @@ TF_CTL_LEAF_FINISH(tf_ctl_leaf_finish_bf16_adds, tf_leaf_ctl::BF16_ADDS)
 TF_CTL_LEAF_FINISH(tf_ctl_leaf_finish_f32, tf_leaf_ctl::F32_PARTIALS)
 #undef TF_CTL_LEAF_FINISH
 
-// fn_exl3_leaf_partial, then the fault: the partial stored through float (the rounding that moves the old f32 partials' error
-// into the finish), gate 3.
+// Partial narrowed through float: the pre-fix partial-rounding fault (gate 3).
 extern "C" __global__ void tf_ctl_leaf_partial_f32(const float* y, const float* wts, const int* pick, double* out, int d, int slots,
                                                    int start, int log) {
     const int r = blockIdx.x, col = blockIdx.y * blockDim.x + threadIdx.x;

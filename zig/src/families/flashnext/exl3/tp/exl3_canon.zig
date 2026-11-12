@@ -1,5 +1,4 @@
-//! The canonical expert reduction at any TP degree: 64 leaves of 8 ids, an fma chain each, a fixed binary tree, all in f64.
-//! Only the root rounds, once, to f32 (`toF32`): partials and their merges never narrow.
+//! Canonical 64-leaf expert tree: slot-order F64 FMAs and merges, then one F32 root rounding.
 const std = @import("std");
 
 pub const leaves: usize = 64;
@@ -74,8 +73,7 @@ pub fn toF32(v: f64) f32 {
     return @floatCast(v);
 }
 
-/// One column of a row: the f64 value of the subtree [start, start + 2^log) (the reference of fn_exl3_leaf_partial; its
-/// `toF32` is that of fn_exl3_leaf_tree). The f32 products are exact in f64, so each leaf is an f64 fma chain.
+/// Unrounded F64 subtree [start, start + 2^log); each F32 product is exact before leaf accumulation.
 pub fn subtree(y: *const [slots]f32, w: *const [slots]f32, picks: *const [slots]u16, start: usize, log: u8) f64 {
     var leaf: [slots]u8 = undefined;
     var val: [slots]f64 = undefined;
@@ -252,8 +250,7 @@ test "exl3: canon mutations of the order, a slot, a leaf or a level change bits"
 
 test "exl3: canon empty siblings preserve signed-zero equality across degrees" {
     const negative_min: f32 = @bitCast(@as(u32, 0x80000001));
-    // -0 products start from the chain's +0 and every empty sibling adds +0: the root is +0 at every degree; a negative
-    // subnormal times 0.1 is a nonzero f64 product that no degree may lose or round differently
+    // Zero products give +0; negative subnormal products stay nonzero in f64 and partition identically.
     for ([_]f32{ -0.0, negative_min }) |v| {
         var row: Row = .{ .y = @splat(v), .w = @splat(0.1), .p = undefined };
         for (0..slots - 1) |k| row.p[k] = @intCast(256 + k);

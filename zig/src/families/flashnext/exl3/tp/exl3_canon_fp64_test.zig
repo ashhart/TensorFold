@@ -1,5 +1,4 @@
-//! The canonical expert reduction against exact integer sums: rounding bounds, sampled error versus other orders,
-//! and TP independence. The f64 tree rounds once to f32; its intermediate additions can still round in f64.
+//! Exact integer products check canonical rounding error, sampled no-worse accuracy and TP independence.
 const std = @import("std");
 const canon = @import("exl3_canon.zig");
 
@@ -65,8 +64,7 @@ fn withinGamma(m: Miss, comptime n: u256) bool {
     return (m.abs << 24) - m.abs * n <= m.mag * n;
 }
 
-/// The root is one f32 rounding of an f64 value within 18 2^-53 of the terms' magnitude of the exact sum:
-/// |root - sum| <= 2^-24 |sum| + 18 2^-53 mag + half the least f32 subnormal (2^-150).
+/// Root bound: 2^-24 |sum| + 18 * 2^-53 sum(|y w|) + half a minimum f32 subnormal.
 fn withinRoot(m: Miss) bool {
     return m.abs << 53 <= (m.sum << 29) + 18 * m.mag + (@as(u256, 1) << (53 - 150 - lsb));
 }
@@ -274,7 +272,7 @@ test "exl3: canon fp64 tree bits are the same at TP 1 to 8 and as the halves of 
 }
 
 test "exl3: canon fp64 root is exact where f32 cancellation loses (tree 0, slot chain 1, independent sum 2) at every degree" {
-    // 1e9/8, 1/1, -1e9/8, 1/1 one a leaf: 1.25e8 + 1 is not an f32 number, so the old f32 tree gave 0 and the slot chain 1
+    // Distinct leaves give 1.25e8 + 1 - 1.25e8 + 1: old f32 tree 0, slot chain 1, exact sum 2.
     var r: canon.Row = .{
         .y = .{ 1e9, 8, -1e9, 8, 0, 0, 0, 0, 0, 0, 0 },
         .w = .{ 0.125, 0.125, 0.125, 0.125, 0, 0, 0, 0, 0, 0, 0 },

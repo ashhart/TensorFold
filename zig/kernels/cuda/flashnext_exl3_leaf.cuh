@@ -1,5 +1,4 @@
-// EXL3 canonical expert reduction. The value of a leaf subtree is computed in double (flashnext_exl3_leaf_value.cuh);
-// float appears once, in the root's output.
+// Canonical EXL3 roots round once to float; rank partials and finish merges stay double.
 #include "flashnext_exl3_leaf_value.cuh"
 
 // The whole-tree root (start 0, log 6) or any subtree: the double value rounded once to float, to nearest even.
@@ -18,8 +17,7 @@ extern "C" __global__ void fn_exl3_leaf_partial(const float* __restrict__ y, con
     out[static_cast<long long>(r) * d + col] = fn_exl3_leaf_value_f64(y, wts, pick, r, col, d, slots, start, log);
 }
 
-// The finish: `pieces` double partial subtrees (meta: start leaf, log, source piece; stride in double elements), in leaf
-// order, merged left to right in double and rounded once to float.
+// Finish ordered double subtrees; meta=(start, log, piece), stride counts double elements.
 extern "C" __global__ void fn_exl3_leaf_finish(const double* __restrict__ g, float* __restrict__ out, const int* __restrict__ meta,
                                                int pieces, int d, long long stride) {
     const int r = blockIdx.x, col = blockIdx.y * blockDim.x + threadIdx.x;
