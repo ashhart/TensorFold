@@ -1,6 +1,9 @@
 test {
     _ = @import("draft/draft.zig");
     _ = @import("sampling_test.zig");
+    _ = @import("logprob_test.zig");
+    _ = @import("logprob_lanes_test.zig");
+    _ = @import("logprob_pieces_test.zig");
     _ = @import("dsv41_serve");
     _ = @import("serve_knobs_test.zig");
 }
