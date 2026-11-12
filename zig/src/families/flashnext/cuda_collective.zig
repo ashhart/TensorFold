@@ -127,6 +127,11 @@ pub const Collective = struct {
         return c.gatherType(stream, local, out, count, .f32);
     }
 
+    /// FP64 rank blocks are concatenated bit for bit: `count` counts doubles (8 bytes each), no conversion or reduction.
+    pub fn gatherF64(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        return c.gatherType(stream, local, out, count, .f64);
+    }
+
     fn gatherType(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize, dtype: nccl.DataType) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;
         if (count == 0) return;
@@ -154,3 +159,7 @@ pub const Collective = struct {
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 };
+
+test {
+    if (@import("builtin").os.tag != .windows) _ = @import("cuda_collective_test.zig"); // over a Unix socket pair
+}
