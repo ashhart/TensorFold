@@ -197,13 +197,11 @@ inline void lfm3_head(const device bfloat* x, const device bfloat* gain, constan
   }
 }
 
-[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_qk(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]],
-                       const device bfloat* v [[buffer(2)]], const device bfloat* qn [[buffer(3)]],
-                       const device bfloat* kn [[buffer(4)]], constant lfm3_qk_args& p [[buffer(5)]],
-                       device bfloat* queries [[buffer(6)]], device bfloat* keys [[buffer(7)]],
-                       device bfloat* values [[buffer(8)]], uint2 tg [[threadgroup_position_in_grid]],
-                       uint lane [[thread_index_in_simdgroup]]) {
-  const uint head = tg.x, row = tg.y, pos = p.len + row;
+// One row's head: a query head normed and rotated into queries, or a key head into keys at len + row, with its values.
+inline void lfm3_qk_row(const device bfloat* q, const device bfloat* k, const device bfloat* v, const device bfloat* qn,
+                        const device bfloat* kn, constant lfm3_qk_args& p, uint len, uint cap, device bfloat* queries,
+                        device bfloat* keys, device bfloat* values, uint head, uint row, uint lane) {
+  const uint pos = len + row;
   bfloat normed[4];
   if (head < L3Q) {
     lfm3_head(q + (size_t(row) * L3Q + head) * L3H, qn, p, pos, lane, normed);
@@ -212,11 +210,41 @@ inline void lfm3_head(const device bfloat* x, const device bfloat* gain, constan
     const uint kh = head - L3Q;
     lfm3_head(k + (size_t(row) * L3K + kh) * L3H, kn, p, pos, lane, normed);
     for (uint j = 0; j < 4; ++j) {
-      const size_t target = (size_t(kh) * p.cap + pos) * L3H + lane + 32 * j;
+      const size_t target = (size_t(kh) * cap + pos) * L3H + lane + 32 * j;
       keys[target] = normed[j];
       values[target] = v[(size_t(row) * L3K + kh) * L3H + lane + 32 * j];
     }
   }
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_qk(const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]],
+                       const device bfloat* v [[buffer(2)]], const device bfloat* qn [[buffer(3)]],
+                       const device bfloat* kn [[buffer(4)]], constant lfm3_qk_args& p [[buffer(5)]],
+                       device bfloat* queries [[buffer(6)]], device bfloat* keys [[buffer(7)]],
+                       device bfloat* values [[buffer(8)]], uint2 tg [[threadgroup_position_in_grid]],
+                       uint lane [[thread_index_in_simdgroup]]) {
+  lfm3_qk_row(q, k, v, qn, kn, p, p.len, p.cap, queries, keys, values, tg.x, tg.y, lane);
+}
+
+// kernels.zig's AttentionSegment (attention.metal's lfm3_attn_segment, declared after this file), field for field.
+struct lfm3_qk_segment { ulong keys, values; uint base, rows, len, cap; float scale; uint window, chunk_base, pad; };
+
+// lfm3_qk over a shared round's every row: row tg.y's stream from row_segments, its cache's len, cap, keys and values.
+[[kernel, max_total_threads_per_threadgroup(32)]] void lfm3_qk_segments(
+    const device bfloat* q [[buffer(0)]], const device bfloat* k [[buffer(1)]], const device bfloat* v [[buffer(2)]],
+    const device bfloat* qn [[buffer(3)]], const device bfloat* kn [[buffer(4)]], constant lfm3_qk_args& p [[buffer(5)]],
+    device bfloat* queries [[buffer(6)]], constant lfm3_qk_segment* segments [[buffer(7)]],
+    const device uint* row_segments [[buffer(8)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+#ifdef L3_QK_BAD_STREAM
+  constant lfm3_qk_segment& seg = segments[0];
+#else
+  constant lfm3_qk_segment& seg = segments[row_segments[tg.y]];
+#endif
+  const size_t b = seg.base;
+  lfm3_qk_row(q + b * L3Q * L3H, k + b * L3K * L3H, v + b * L3K * L3H, qn, kn, p, seg.len, seg.cap,
+              queries + b * L3Q * L3H, reinterpret_cast<device bfloat*>(seg.keys),
+              reinterpret_cast<device bfloat*>(seg.values), tg.x, tg.y - seg.base, lane);
 }
 
 [[kernel, max_total_threads_per_threadgroup(256)]] void lfm3_gate(device bfloat* y [[buffer(0)]], const device bfloat* logits [[buffer(1)]],
