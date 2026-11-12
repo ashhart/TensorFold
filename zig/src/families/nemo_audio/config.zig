@@ -27,7 +27,8 @@ pub const Config = struct {
     threshold: f32, // a slot is active past it (speaker_activity_threshold)
     kernel_scale: f32, // spk_kernel_scale
     boost_latest: f32, // the speaker cache's scores: frames new to it (scores_boost_latest)
-    score_floor: f32, // a slot's frame scores only from this probability (pred_score_threshold)
+    score_clamp: f32, // a slot's probability counts at least this much in its own frame scores (pred_score_threshold)
+    min_pos_rate: f32, // a slot with floor(this x its share of the cache) positive scores keeps only those (min_pos_scores_rate)
     strong_rate: f32,
     weak_rate: f32,
     sil_per_speaker: usize, // silence rows a slot keeps in the speaker cache (spkcache_sil_frames_per_spk)
@@ -50,6 +51,8 @@ pub const Config = struct {
     /// The speaker branch's streaming state between windows (dumps): its cache and queue rows.
     pub const cache_rows = 188;
     pub const fifo_rows = 40;
+    /// A slot's frames under this probability never score in the speaker cache (arXiv 2507.18446, step 3).
+    pub const speech = 0.5;
     /// The audio a request may hold: the model card's one hour.
     pub const max_seconds = 3600;
 
@@ -76,11 +79,13 @@ pub const Config = struct {
             .threshold = @floatCast(try float(pe.get("speaker_activity_threshold"))),
             .kernel_scale = @floatCast(try float(pe.get("spk_kernel_scale"))),
             .boost_latest = @floatCast(try float(mods.get("scores_boost_latest"))),
-            .score_floor = @floatCast(try float(mods.get("pred_score_threshold"))),
+            .score_clamp = @floatCast(try float(mods.get("pred_score_threshold"))),
+            .min_pos_rate = @floatCast(try float(mods.get("min_pos_scores_rate"))),
             .strong_rate = @floatCast(try float(mods.get("strong_boost_rate"))),
             .weak_rate = @floatCast(try float(mods.get("weak_boost_rate"))),
             .sil_per_speaker = try size(mods.get("spkcache_sil_frames_per_spk")),
         };
+        if (!(c.min_pos_rate >= 0)) return error.BadConfig;
         if (c.speakers != 8 or c.head_width == 0 or c.output == 0 or c.speakers * (c.sil_per_speaker + 1) > cache_rows) return error.UnsupportedAudio;
         return c;
     }
