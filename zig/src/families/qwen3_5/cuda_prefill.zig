@@ -2,6 +2,7 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const E = @import("cuda_engine.zig");
+const prompt_tail = @import("cuda_prompt_tail.zig");
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const readout = @import("cuda_readout.zig");
 const cuda_solo = @import("cuda_solo.zig");
@@ -297,7 +298,9 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
         !cuda_solo.othersDecode(self, stream);
     const marks = if (f.kept) |k| k.marks else stream.reuse.marks;
     const end = if (solo) soloEnd(ids.len, stream.chunks, f, rows, marks) else capped(ids.len, stream.chunks, f, max_rows);
-    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+    // a non-final chunk's rows feed only a head nobody reads: its last layer stops at its keys and values
+    const unread = end < ids.len and prompt_tail.unread(self.e, images != null);
+    try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], if (unread) .none else .last);
     lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);
