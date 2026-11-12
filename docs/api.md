@@ -1253,7 +1253,7 @@ A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "inst
 | `components.binary` | The running executable's SHA-256, read from the file the server opened before loading the model (`/proc/self/exe` on Linux, the executable's path elsewhere) |
 | `components.text` | The checkpoint's tokenizer, template, special-token and EOS files (or their absence) and `--chat-template`'s file, whose stamps the server took before loading them |
 | `components.preparation` | The serve defaults a request starts from: sampling, `--instruct-sampling`, max tokens, thinking, loop guard, seed salt, drafts, and the loaded template and EOS ids |
-| `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE` and names ending in `_API_KEY`, `_SECRET`, `_PASSWORD` or `_TOKEN` |
+| `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except names ending in `_API_KEY`, `_SECRET`, `_PASSWORD`, `_TOKEN`, `_SIGNING_KEY`, `_SECRET_FILE` or `_KEY_FILE` (such as `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE`, `TF_RUNTIME_SIGNING_KEY` and `TF_STAGE_SECRET_FILE`); other names, such as `TF_SLIDE_POCKET_KEY`, are hashed |
 
 Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
 `reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path; every engine so far),
