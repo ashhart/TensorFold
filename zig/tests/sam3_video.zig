@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
         std.debug.print(
             \\tf-sam3-video CHECKPOINT FRAMES OUTPUT_PREFIX --point ID X Y | --box ID X0 Y0 X1 Y1 | --seed-reference MASKS
-            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle --baseline-attention --compact-gemm
+            \\  --start N --frames N --reverse --fp32 --exercise-lifecycle --baseline-attention --baseline-gemm
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
             \\  --trace DIR --trace-frames N,N (NHWC tensors; recomputes preprocessing and trunk)
@@ -31,7 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var exercise = false;
     var fp32 = false;
     var attention_two_pass = true;
-    var compact_gemm = false;
+    var compact_gemm = (sam.LoadOptions{}).compact_gemm;
     var reference_path: ?[]const u8 = null;
     var seed_path: ?[]const u8 = null;
     var raw_path: ?[]const u8 = null;
@@ -65,8 +65,8 @@ pub fn main(init: std.process.Init) !void {
             attention_two_pass = false;
             continue;
         }
-        if (std.mem.eql(u8, flag, "--compact-gemm")) {
-            compact_gemm = true;
+        if (std.mem.eql(u8, flag, "--baseline-gemm")) {
+            compact_gemm = false;
             continue;
         }
         if (std.mem.eql(u8, flag, "--box")) {
@@ -164,10 +164,10 @@ pub fn main(init: std.process.Init) !void {
     defer if (trace) |*output| output.deinit();
     const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{
         .precision = if (fp32) .float32 else .checkpoint,
+        .compact_gemm = compact_gemm,
     });
     defer loaded.deinit();
     loaded.gpu.attention_two_pass = attention_two_pass;
-    loaded.gpu.compact_gemm = compact_gemm;
     const started = clock.seconds();
     if (exercise) {
         if (count < 2) return error.LifecycleNeedsTwoFrames;

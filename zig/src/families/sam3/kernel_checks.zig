@@ -10,7 +10,7 @@ const flash = Runtime.flash;
 
 pub fn check(init: std.process.Init, args: []const [:0]const u8) !void {
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        std.debug.print("tf-sam3-kernels [--benchmark | --benchmark-projections]\ntf-sam3-kernels --replay-attention[-two-pass] Q.safetensors K.safetensors V.safetensors [ROW]\ntf-sam3-kernels --replay-attention-operator CAPTURE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-projection CAPTURE.safetensors RECEIPT.json [--mps-ndarray | --compensated | --compensated-baseline]\ntf-sam3-kernels --check-mps-ndarray RECEIPT.json\n", .{});
+        std.debug.print("tf-sam3-kernels [--benchmark | --benchmark-projections]\ntf-sam3-kernels --replay-attention[-two-pass] Q.safetensors K.safetensors V.safetensors [ROW]\ntf-sam3-kernels --replay-attention-operator CAPTURE.safetensors RECEIPT.json\ntf-sam3-kernels --replay-projection CAPTURE.safetensors RECEIPT.json [--baseline-gemm | --mps-ndarray | --compensated | --compensated-baseline]\ntf-sam3-kernels --check-mps-ndarray RECEIPT.json\n", .{});
         std.debug.print("tf-sam3-kernels --replay-text CHECKPOINT REFERENCE.safetensors RECEIPT.json [--compensated-mlp]\n", .{});
         return;
     }

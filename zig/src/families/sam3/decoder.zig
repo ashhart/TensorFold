@@ -25,7 +25,7 @@ pub const Result = struct {
 pub const Options = struct {
     multiplex: bool = false,
     active: u16 = 1,
-    multimask: bool = false,
+    multimask: bool = true,
     dense: ?ops.Tensor = null,
     sparse: ?ops.Tensor = null,
 };
@@ -120,16 +120,16 @@ fn upsample(layer: Layer, image: ops.Tensor, skips: [3]ops.Feature) !ops.Feature
 
 const Choice = struct { candidate: usize = 0, score: f32 = -10, iou: f32 = 0 };
 
-fn choose(table: TokenTable, quality: ops.Tensor, scores: ops.Tensor, multimask: bool) [16]Choice {
+fn choose(table: TokenTable, quality: []const f32, scores: []const f32, multimask: bool) [16]Choice {
     var selected: [16]Choice = @splat(.{});
     for (selected[0..table.slots], 0..) |*choice, slot| {
         choice.candidate = @intFromBool(multimask);
         const count = if (table.slots > 1 or multimask) table.masks else 1;
         for (choice.candidate + 1..count) |candidate| {
-            if (quality.get(slot * table.masks + candidate) > quality.get(slot * table.masks + choice.candidate)) choice.candidate = candidate;
+            if (quality[slot * table.masks + candidate] > quality[slot * table.masks + choice.candidate]) choice.candidate = candidate;
         }
-        choice.iou = quality.get(slot * table.masks + choice.candidate);
-        choice.score = scores.get(slot);
+        choice.iou = quality[slot * table.masks + choice.candidate];
+        choice.score = scores[slot];
     }
     return selected;
 }
@@ -166,7 +166,8 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     const quality = try layer.mlp("iou_prediction_head", ops.view(state.queries, table.slots * table.width, table.slots * table.width), 3);
     const scores = try layer.mlp("pred_obj_score_head", ops.view(state.queries, 0, table.slots * table.width), 3);
     try r.g.endBatch();
-    const selected = choose(table, quality, scores, options.multimask and !options.multiplex);
+    if (quality.count != table.slots * table.masks or scores.count != table.slots) return error.SamDecoderShape;
+    const selected = choose(table, quality.slice(f32, quality.count), scores.slice(f32, scores.count), options.multimask and !options.multiplex);
     const empty_mask = try r.alloc(pixels.height * pixels.width);
     const empty_pointer = try r.alloc(table.width);
     @memset(empty_mask.slice(f32, empty_mask.count), -1024);
@@ -196,4 +197,21 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     try r.g.endBatch();
     r.trim(mark, &.{ output.masks.tensor, output.pointer });
     return output;
+}
+
+test "SAM tracked masks exclude candidate zero while explicit single-mask prompts retain it" {
+    const table = TokenTable{ .slots = 1, .masks = 4, .width = 256 };
+    const quality = [_]f32{ 0.99, 0.4, 0.8, 0.9 };
+    const scores = [_]f32{2};
+    const tracked = choose(table, &quality, &scores, (Options{}).multimask);
+    try std.testing.expectEqual(@as(usize, 3), tracked[0].candidate);
+    try std.testing.expectEqual(quality[3], tracked[0].iou);
+    const single = choose(table, &quality, &scores, false);
+    try std.testing.expectEqual(@as(usize, 0), single[0].candidate);
+    const tied = choose(table, &.{ 0.99, 0.8, 0.8, 0.7 }, &scores, true);
+    try std.testing.expectEqual(@as(usize, 1), tied[0].candidate);
+    const multiplex = choose(.{ .slots = 2, .masks = 3, .width = 256 }, &.{ 0.9, 0.2, 0.3, 0.4, 0.5, 0.8 }, &.{ 2, -3 }, false);
+    try std.testing.expectEqual(@as(usize, 0), multiplex[0].candidate);
+    try std.testing.expectEqual(@as(usize, 2), multiplex[1].candidate);
+    try std.testing.expectEqual(@as(f32, -3), multiplex[1].score);
 }
