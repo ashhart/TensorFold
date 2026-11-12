@@ -76,7 +76,7 @@ pub const Rotate = struct {
             .writes_input => "control: tf_exl3pf_rotate writing its input",
             .wrong => "control: tf_exl3pf_rotate taking the up table's signs from the gate table",
             .bf16_adds => "control: tf_exl3pf_rotate with bf16 butterfly adds",
-            .flat => unreachable,
+            .flat, .f32_partials => unreachable,
         };
         return .{
             .name = name,
