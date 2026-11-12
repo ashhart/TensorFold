@@ -416,6 +416,13 @@ below; these are estimates for planning a port, not results.
     | glm | decode +3.0..+4.1 % at TP=3, +0.8..+1.9 % at TP=2 | [#2162] |
     | flashnext, gemma4 | null: +0.45 % and +0.15 % at one stream, inside the runs' spread, same replies; not proposed | measured on a GB10, no PR |
 
+    Qwen3.8-27B's decode attention on XPU takes its L2 reuse from launch order instead, with no prefetch: [#2595] is a
+    grid-only change. `attn_decode` runs on a (rows, heads, slices) grid, so a key slice's tree rows run back to back;
+    each work group's arithmetic and the bits are unchanged ([#2543] keeps wider slices for later, as an opt-in). On
+    an Arc Pro B70 at one stream, drafted, with a bf16 cache: +6 % at 8K prompt tokens, +23 % at 32K, +33 % at 131K;
+    `"draft": false` is unchanged. With `XPU_KV_INT8=1` it is 2–4 % slower below about 12K tokens and faster past it.
+    Not run: sampled decoding, resumed prompts, `QPARTS != 1` builds and any GPU but BMG-G31.
+
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
 
@@ -546,6 +553,8 @@ below; these are estimates for planning a port, not results.
 [#2127]: https://github.com/ashhart/TensorFold/pull/2127
 [#2146]: https://github.com/ashhart/TensorFold/pull/2146
 [#2162]: https://github.com/ashhart/TensorFold/pull/2162
+[#2543]: https://github.com/ashhart/TensorFold/issues/2543
+[#2595]: https://github.com/ashhart/TensorFold/pull/2595
 [#2165]: https://github.com/ashhart/TensorFold/issues/2165
 [#2432]: https://github.com/ashhart/TensorFold/pull/2432
 [#2167]: https://github.com/ashhart/TensorFold/pull/2167
