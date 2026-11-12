@@ -83,6 +83,7 @@ pub const Metal = struct {
             .health = .{ .ctx = m, .read = healthy },
             .close = close,
             .calib_id = m.opt.identity,
+            .table_prices = host.calib_env.Knobs.fromEnv().mode != null,
             .calib = m.knobs(),
         };
     }

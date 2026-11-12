@@ -51,7 +51,9 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = p.host.import_table.get("core").? }, .{ .name = "engine_api", .module = p.host.import_table.get("engine_api").? }, .{ .name = "lanes", .module = p.host.import_table.get("lanes").? }, .{ .name = "tokenizer", .module = p.host.import_table.get("tokenizer").? } },
     });
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes_test })).step);
+    const lanes_run = b.addRunArtifact(b.addTest(.{ .root_module = lanes_test }));
+    test_step.dependOn(&lanes_run.step);
+    step.dependOn(&lanes_run.step);
     const run = b.addRunArtifact(b.addTest(.{ .root_module = tests }));
     run.has_side_effects = true; // a device run: never cached
     step.dependOn(&run.step);

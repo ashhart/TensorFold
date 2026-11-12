@@ -55,12 +55,16 @@ const TwinModel = struct {
     d: *twin.Drafter,
 
     fn open(slots: u32) !serve_lanes.Model {
+        return openWith(slots, "default", true);
+    }
+
+    fn openWith(slots: u32, mode: []const u8, table_prices: bool) !serve_lanes.Model {
         const b = try gpa.create(TwinModel);
         errdefer gpa.destroy(b);
         b.t = try twin.Twin.init(gpa, .{}, slots);
         errdefer b.t.deinit();
         b.d = try twin.Drafter.init(gpa, b.t, slots);
-        return .{ .ptr = b, .name = "dsv41-twin", .slots = slots, .limit = 4096, .world = 1, .prefill_step = 16, .forward_rows = 16, .shape = b.d.shape, .target = target, .pass = pass, .calibrate = calibrate, .close = close, .calib = .{ .mode = "default" } };
+        return .{ .ptr = b, .name = "dsv41-twin", .slots = slots, .limit = 4096, .world = 1, .prefill_step = 16, .forward_rows = 16, .shape = b.d.shape, .target = target, .pass = pass, .calibrate = calibrate, .close = close, .calib = .{ .mode = mode }, .table_prices = table_prices };
     }
 
     fn target(ctx: *anyopaque) iface.Target {
@@ -74,7 +78,10 @@ const TwinModel = struct {
     }
 
     fn calibrate(_: *anyopaque, _: std.mem.Allocator, _: std.Io, _: []const u8, _: calib_env.Knobs, _: calib_env.Shape) anyerror!calib_lanes.Boot {
-        return error.Unmeasured; // mode "default" never measures
+        // a table a mode that measures would return: a 1-row window of 1 ms
+        const verify = try gpa.alloc(f64, 64);
+        for (verify, 0..) |*v, r| v.* = 1.0 + 0.1 * @as(f64, @floatFromInt(r));
+        return .{ .costs = .{ .verify = verify, .draft = 0.2 }, .path = null };
     }
 
     fn close(ctx: *anyopaque) void {
@@ -141,4 +148,23 @@ test "serve lanes: replies through LaneHost over the twin, concurrent == solo ==
     }
     try t.expect(drafted > 0); // the DSpark pass drafted: the drafted replies were not one token a round
     try t.expectEqual(@as(u64, 0), plain_drafted);
+}
+
+test "serve lanes: a timed table prices the rounds only where the model says so; otherwise the defaults do" {
+    const t = std.testing;
+    var defaults = try @import("draft/costs.zig").defaults(gpa, 64);
+    defer defaults.deinit(gpa);
+    const reported = try serve_lanes.Served.open(gpa, io, try TwinModel.openWith(2, "measure", false), ".", null);
+    defer serve_lanes.Served.close(reported);
+    try t.expectEqualSlices(f64, defaults.verify, reported.costs.verify);
+    try t.expectEqual(defaults.draft, reported.costs.draft);
+    try t.expectEqualSlices(f64, defaults.verify, reported.x.policy.depth.costs.verify);
+    const priced = try serve_lanes.Served.open(gpa, io, try TwinModel.openWith(2, "measure", true), ".", null);
+    defer serve_lanes.Served.close(priced);
+    try t.expectEqual(@as(f64, 0.2), priced.costs.draft);
+    try t.expectEqual(@as(f64, 1.0), priced.costs.verify[0]);
+    // the defaults when nothing is timed, whatever the flag says
+    const plain = try serve_lanes.Served.open(gpa, io, try TwinModel.openWith(2, "default", false), ".", null);
+    defer serve_lanes.Served.close(plain);
+    try t.expectEqualSlices(f64, defaults.verify, plain.costs.verify);
 }
