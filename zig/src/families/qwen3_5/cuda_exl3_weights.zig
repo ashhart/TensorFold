@@ -33,12 +33,15 @@ pub const Kit = struct {
         k.grouped = .{ .d = d, .kernels = &k.experts };
         if (!g.moe()) return k; // a dense checkpoint's MLP is three Dense projections
         // the grouped experts' scratch grows on first use: allocate it before any graph capture, for the widest call
-        const pairs = engine.max_rows * g.slots();
-        const items = cuda.grouped.maxItems(pairs, g.experts + 1, 16);
-        const up = try cuda.exl3_grouped.Grouped.bytes(g.hidden, g.intermediate, items, try ex.plan(g.hidden, g.intermediate, true), 2);
-        const down = try cuda.exl3_grouped.Grouped.bytes(g.intermediate, g.hidden, items, try ex.plan(g.intermediate, g.hidden, false), 1);
-        k.grouped.storage = try cuda.DeviceBuffer.alloc(d, @max(up, down));
+        k.grouped.storage = try cuda.DeviceBuffer.alloc(d, try storageBytes(g));
         return k;
+    }
+
+    pub fn storageBytes(g: geometry.Geometry) !usize {
+        const pairs = engine.max_rows * g.slots();
+        const up = try cuda.exl3_grouped.Grouped.bytes(g.hidden, g.intermediate, pairs, 64, try ex.plan(g.hidden, g.intermediate, true), 2);
+        const down = try cuda.exl3_grouped.Grouped.bytes(g.intermediate, g.hidden, pairs, 64, try ex.plan(g.intermediate, g.hidden, false), 1);
+        return @max(up, down);
     }
 
     pub fn deinit(k: *Kit, gpa: std.mem.Allocator) void {
