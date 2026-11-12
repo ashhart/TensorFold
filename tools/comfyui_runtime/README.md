@@ -6,7 +6,7 @@ This standalone Python CLI installs the latest stable TensorFold native CLI and 
 
 The first MOSS-only PR is scoped to experimental BF16 generation on Linux aarch64 with NVIDIA GB10, SM121. Use Python 3.10 or later, Git, Zig **0.17.0**, and a complete CUDA 13 toolchain with matching `nvcc`, NVVM, CRT and CCCL headers.
 
-SM120 is unvalidated and outside this first PR's generation support scope. The existing worker build and device admission still include SM120/SM121; compilation does not qualify a GPU. Linux x86_64 passed software tests, an actual native build and fresh installation on a CPU-only host. No SM120 workflow, numerical comparison or live kernel-contract check has run. Windows and macOS media installation fail before network access or builds.
+SM120 is refused by name. `install` and `update` read every GPU's compute capability with `nvidia-smi --query-gpu=compute_cap --format=csv,noheader` before any download or build, and `run` reads it again before the worker starts. Any GPU other than 12.1 stops them with `MOSS ComfyUI generation is qualified on GB10 (sm_121) only; this GPU is sm_120` (naming the capability found). A capability that cannot be read, because `nvidia-smi` is missing, the driver lacks the field, it lists no GPU or it times out, is refused rather than assumed. The worker is compiled for sm_121 alone, with no sm_120 image or PTX, so its kernels cannot load on an SM120 GPU even when it is started directly. No SM120 workflow, numerical comparison or live kernel-contract check has run. Before this check, Linux x86_64 passed software tests and an actual native build on a CPU-only host; a host without an sm_121 GPU is now refused at install. Windows and macOS media installation fail before network access or builds.
 
 Generation also requires the NVIDIA driver and CUDA 13 cuBLASLt runtime libraries. The dynamic loader must find `libcuda.so.1` and `libcublasLt.so.13` (or `libcublasLt.so`) on its search path. An nvcc-only installation does not provide these generation prerequisites.
 
@@ -31,11 +31,19 @@ The standalone CLI version and media source are independent. The latest CLI arch
 | Source archive SHA-256 | `013d687c5b72718220ac8e137252492d72be85d27ff9cec37525d714c52dc2ba` |
 | ComfyUI compatibility patch SHA-256 | `e6156ed11263a2d32586245b1702a6bc47ac0049e65bf1724afad69242eb617f` |
 | Zig | `0.17.0`, checked against the source `.zig-version` |
-| Compiled CUDA targets | `120,121`; live generation validated on GB10 SM121 only |
+| Compiled CUDA targets | `121` only (`-Dsm=121`); live generation validated on GB10 SM121 only |
 
 The bundled `tf_installer/moss-comfy.patch` is verified before application. It changes numerical materialization, reduction and cuBLASLt planning to match ComfyUI, adds a MOSS-only attention entrypoint, and adds the narrow build target. It is applied to the extracted build copy, including when that copy is nested inside a ComfyUI Git repository. The supplied checkout is never edited. `runtime.json` records both the source revision and patch digest.
 
 The source archive pin was taken from the exact official URL above. An optional `--source-archive /path/to/source.tar.gz` uses the same checksum verification. An optional `--source-checkout /path/to/TensorFold` requires the exact commit and a clean Git working tree, then builds an archive of tracked Git objects in a separate directory. Existing source checkouts are never built in place.
+
+## Run
+
+```sh
+python installer/tensorfold_runtime.py run --comfy-root /path/to/ComfyUI -- TRANSFORMER_DIR CASE OUT_DIR
+```
+
+`run` refuses any GPU but GB10 (sm_121), verifies the active manifest and the worker's SHA-256, then replaces itself with the installed `tf-moss-image`, passing the arguments after `--` unchanged. The worker never starts, and so never loads weights, on a refused GPU.
 
 ## Updates and status
 
@@ -58,7 +66,7 @@ The checksum files for the latest CLI are fetched from the same official release
 python -m unittest discover -s installer/tests -v
 ```
 
-These tests exercise archive attacks, release metadata, exact source/toolchain pins, subprocess failures, deadlines and descendant cleanup, offline status, tampering and failed-build/activation preservation. They do not establish image correctness, GPU compatibility or performance. The installer makes no claim that its probes qualify real generation.
+These tests exercise archive attacks, release metadata, exact source/toolchain pins, GPU admission at install and run, subprocess failures, deadlines and descendant cleanup, offline status, tampering and failed-build/activation preservation. They do not establish image correctness, GPU compatibility or performance. The installer makes no claim that its probes qualify real generation.
 
 ## Prepare the official MOSS checkpoint
 

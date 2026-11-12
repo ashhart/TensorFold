@@ -1,3 +1,4 @@
+from contextlib import contextmanager, redirect_stderr
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tf_installer import archive, build, install, network, pins
+import tensorfold_runtime
 
 
 def tar_fixture(path, entries):
@@ -48,6 +50,35 @@ def license_fixture(root):
         (root / name).write_text(name)
     (root / "LICENSES").mkdir()
     (root / "LICENSES/Apache.txt").write_text("license")
+
+
+def gb10():
+    return "12.1\n"
+
+
+@contextmanager
+def fake_nvidia_smi(stdout=b"12.1\n", returncode=0, found=True, error=None):
+    """nvidia-smi's answer, faked at the subprocess boundary: no process runs and no GPU is needed."""
+    answer = subprocess.CompletedProcess(["nvidia-smi"], returncode, stdout, b"")
+    with patch("shutil.which", side_effect=lambda name, *args, **kwargs: f"/usr/bin/{name}" if found and name == "nvidia-smi" else None), patch("subprocess.run", side_effect=error, return_value=answer) as query:
+        yield query
+
+
+def candidate_fixture(root, name="candidate", version="1.1.0"):
+    folder = root / name
+    folder.mkdir()
+    paths = {"engine": "engine/bin/tensorfold-native", "moss": "media/bin/tf-moss-image"}
+    items = {}
+    for kind, path in paths.items():
+        target = folder / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(kind)
+        target.chmod(0o755)
+        items[kind] = {"path": path, "sha256": archive.file_hash(target)}
+    items["engine"]["version"] = version
+    license_fixture(folder / "media/licenses")
+    manifest = {"schema": 1, "source_revision": pins.SOURCE_REVISION, "source_patch_sha256": pins.SOURCE_PATCH_SHA256, "platform": "linux-x86_64", "backend": "cuda", "engine": items["engine"], "artifacts": {"moss": items["moss"]}}
+    return folder, manifest
 
 
 class TemporaryCase(unittest.TestCase):
@@ -223,6 +254,7 @@ class SourceTests(TemporaryCase):
                 self.assertNotIn("--global-cache-dir", arguments)
                 self.assertEqual(kwargs["environment"], {"ZIG_GLOBAL_CACHE_DIR": str(work / "zig-global-cache")})
                 self.assertEqual(arguments[2], "moss-image-cuda")
+                self.assertEqual([argument for argument in arguments if argument.startswith("-Dsm=")], ["-Dsm=121"])
                 target = work / "built/bin/tf-moss-image"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(b"built")
@@ -282,20 +314,7 @@ class TransactionTests(TemporaryCase):
         self.runtime.mkdir(parents=True)
 
     def candidate(self, name="candidate", version="1.1.0"):
-        folder = self.root / name
-        folder.mkdir()
-        paths = {"engine": "engine/bin/tensorfold-native", "moss": "media/bin/tf-moss-image"}
-        items = {}
-        for kind, path in paths.items():
-            target = folder / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(kind)
-            target.chmod(0o755)
-            items[kind] = {"path": path, "sha256": archive.file_hash(target)}
-        items["engine"]["version"] = version
-        license_fixture(folder / "media/licenses")
-        manifest = {"schema": 1, "source_revision": pins.SOURCE_REVISION, "source_patch_sha256": pins.SOURCE_PATCH_SHA256, "platform": "linux-x86_64", "backend": "cuda", "engine": items["engine"], "artifacts": {"moss": items["moss"]}}
-        return folder, manifest
+        return candidate_fixture(self.root, name, version)
 
     def test_atomic_activation_and_offline_status(self):
         folder, manifest = self.candidate()
@@ -328,7 +347,7 @@ class TransactionTests(TemporaryCase):
             raise pins.InstallError("build failed")
         messages = []
         with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "check_toolchain", return_value=("zig", "nvcc")), patch.object(install, "get_release", return_value={"version": "1.2.0"}), patch.object(install, "fetch_release", return_value=("1.2.0", package, digest)), patch.object(install, "prepare_source", return_value=self.root), self.assertRaisesRegex(pins.InstallError, "build failed"):
-            install.install(self.comfy, action="install", run=lambda *args, **kwargs: "tensorfold-native 1.2.0", builder=bad_build, log=messages.append)
+            install.install(self.comfy, gpu=gb10, action="install", run=lambda *args, **kwargs: "tensorfold-native 1.2.0", builder=bad_build, log=messages.append)
         self.assertEqual((self.runtime / "runtime.json").read_bytes(), previous)
         self.assertEqual(json.loads(previous)["engine"]["version"], "1.1.0")
         retained = list((self.runtime / "logs").glob("failed-*/moss-build.log"))
@@ -363,20 +382,20 @@ class TransactionTests(TemporaryCase):
             with self.subTest(name=name), self.assertRaisesRegex(pins.InstallError, "not executable"):
                 install.read_status(self.runtime)
             with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "get_release", side_effect=AssertionError("Network forbidden")), self.subTest(update=name), self.assertRaisesRegex(pins.InstallError, "use install"):
-                install.install(self.comfy, action="update")
+                install.install(self.comfy, gpu=gb10, action="update")
             path.chmod(0o755)
 
     def test_no_downgrade(self):
         folder, manifest = self.candidate(version="2.0.0")
         install.activate(self.runtime, folder, manifest)
         with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "check_toolchain", return_value=("zig", "nvcc")), patch.object(install, "get_release", return_value={"version": "1.2.0"}), self.assertRaisesRegex(pins.InstallError, "downgrade"):
-            install.install(self.comfy, action="update")
+            install.install(self.comfy, gpu=gb10, action="update")
 
     def test_no_op_update_needs_no_compiler_or_download(self):
         folder, manifest = self.candidate(version="1.2.0")
         active = install.activate(self.runtime, folder, manifest)
         with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "check_toolchain", side_effect=AssertionError("Compiler forbidden")), patch.object(install, "get_release", return_value={"version": "1.2.0"}), patch.object(install, "fetch_release", side_effect=AssertionError("Artifact download forbidden")):
-            self.assertEqual(install.install(self.comfy, action="update", log=lambda text: None), active)
+            self.assertEqual(install.install(self.comfy, gpu=gb10, action="update", log=lambda text: None), active)
 
     def test_same_cli_does_not_reuse_legacy_moss(self):
         folder, manifest = self.candidate(version="1.2.0")
@@ -384,7 +403,7 @@ class TransactionTests(TemporaryCase):
         previous = install.activate(self.runtime, folder, manifest)
         with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "get_release", return_value={"version": "1.2.0"}), patch.object(install, "fetch_release", side_effect=RuntimeError("rebuild required")) as fetch:
             with self.assertRaisesRegex(RuntimeError, "rebuild required"):
-                install.install(self.comfy, action="update", log=lambda text: None)
+                install.install(self.comfy, gpu=gb10, action="update", log=lambda text: None)
         fetch.assert_called_once()
         self.assertEqual(install.read_status(self.runtime), previous)
 
@@ -394,7 +413,7 @@ class TransactionTests(TemporaryCase):
         package = self.root / "new-engine.tgz"
         engine_fixture(package)
         with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "check_toolchain", side_effect=AssertionError("Compiler forbidden")), patch.object(install, "get_release", return_value={"version": "1.2.0"}), patch.object(install, "fetch_release", return_value=("1.2.0", package, archive.file_hash(package))):
-            result = install.install(self.comfy, action="update", run=lambda *args, **kwargs: "tensorfold-native 1.2.0", builder=lambda *args: self.fail("Build forbidden"), log=lambda text: None)
+            result = install.install(self.comfy, gpu=gb10, action="update", run=lambda *args, **kwargs: "tensorfold-native 1.2.0", builder=lambda *args: self.fail("Build forbidden"), log=lambda text: None)
         self.assertEqual(result["engine"]["version"], "1.2.0")
         self.assertEqual(result["artifacts"]["moss"]["sha256"], previous["artifacts"]["moss"]["sha256"])
         self.assertEqual(install.read_status(self.runtime), result)
@@ -428,7 +447,7 @@ class TransactionTests(TemporaryCase):
                     broken.chmod(0o644)
                 previous = (self.runtime / "runtime.json").read_bytes()
                 with patch.object(install, "host_platform", return_value="linux-x86_64"), patch.object(install, "check_toolchain", return_value=("zig", "nvcc")), patch.object(install, "get_release", return_value={"version": "1.2.0"}), patch.object(install, "fetch_release", return_value=("1.2.0", package, archive.file_hash(package))), patch.object(install, "prepare_source", return_value=source):
-                    result = install.install(self.comfy, action="install", run=lambda *args, **kwargs: "tensorfold-native 1.2.0", builder=builder, log=lambda text: None)
+                    result = install.install(self.comfy, gpu=gb10, action="install", run=lambda *args, **kwargs: "tensorfold-native 1.2.0", builder=builder, log=lambda text: None)
                 self.assertNotEqual((self.runtime / "runtime.json").read_bytes(), previous)
                 self.assertEqual(install.read_status(self.runtime), result)
                 for component in (result["engine"], result["artifacts"]["moss"]):
@@ -443,6 +462,95 @@ class TransactionTests(TemporaryCase):
             (self.runtime / "runtime.json").write_text(json.dumps(bad))
             with self.subTest(field=field), self.assertRaises(pins.InstallError):
                 install.read_status(self.runtime)
+
+
+QUALIFIED = "MOSS ComfyUI generation is qualified on GB10 (sm_121) only"
+UNREADABLE = (
+    ("nvidia-smi missing", {"found": False}),
+    ("driver without compute_cap", {"returncode": 2, "stdout": b'Field "compute_cap" is not a valid field to query.\n'}),
+    ("not available", {"stdout": b"[N/A]\n"}),
+    ("no GPU listed", {"stdout": b""}),
+    ("timeout", {"error": subprocess.TimeoutExpired("nvidia-smi", 15)}),
+)
+
+
+class InstallAdmissionTests(TemporaryCase):
+    def setUp(self):
+        super().setUp()
+        self.comfy = self.root / "ComfyUI"
+        self.comfy.mkdir()
+        (self.comfy / "main.py").touch()
+        (self.comfy / "folder_paths.py").touch()
+
+    def attempt(self, **answer):
+        fetch = Mock(side_effect=pins.InstallError("network reached"))
+        forbidden = Mock(side_effect=AssertionError("Build forbidden"))
+        with fake_nvidia_smi(**answer) as query, patch.object(install, "host_platform", return_value="linux-aarch64"), patch.object(install, "check_toolchain", forbidden), patch.object(install, "prepare_source", forbidden), self.assertRaises(pins.InstallError) as raised:
+            install.install(self.comfy, fetch=fetch, run=forbidden, builder=forbidden, log=lambda text: None)
+        forbidden.assert_not_called()
+        return str(raised.exception), fetch, query
+
+    def test_sm120_refused_by_name_before_any_download(self):
+        for stdout, which in ((b"12.0\n", "this GPU"), (b"12.1\n12.0\n", "GPU 1 of 2")):
+            with self.subTest(stdout=stdout):
+                message, fetch, query = self.attempt(stdout=stdout)
+                self.assertEqual(message, f"{QUALIFIED}; {which} is sm_120. No files were downloaded or built.")
+                fetch.assert_not_called()
+                self.assertFalse((self.comfy / "models").exists())
+                self.assertEqual(query.call_args.args[0], ["/usr/bin/nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"])
+
+    def test_sm121_reads_the_capability_then_proceeds(self):
+        message, fetch, query = self.attempt(stdout=b"12.1\n")
+        query.assert_called_once()
+        self.assertEqual(message, "network reached")
+        self.assertEqual(fetch.call_args.args[0], pins.RELEASE_API)
+
+    def test_unreadable_capability_refused_not_assumed(self):
+        for name, answer in UNREADABLE:
+            with self.subTest(name=name):
+                message, fetch, query = self.attempt(**answer)
+                self.assertTrue(message.startswith(f"{QUALIFIED}; this GPU's compute capability could not be read ("), message)
+                self.assertTrue(message.endswith(" No files were downloaded or built."), message)
+                fetch.assert_not_called()
+                self.assertFalse((self.comfy / "models").exists())
+
+
+class RunAdmissionTests(TemporaryCase):
+    def setUp(self):
+        super().setUp()
+        self.comfy = self.root / "ComfyUI"
+        self.comfy.mkdir()
+        (self.comfy / "main.py").touch()
+        (self.comfy / "folder_paths.py").touch()
+        self.runtime = install.runtime_root(self.comfy)
+        self.runtime.mkdir(parents=True)
+        folder, manifest = candidate_fixture(self.root)
+        active = install.activate(self.runtime, folder, manifest)
+        self.worker = str(self.runtime / active["artifacts"]["moss"]["path"])
+
+    def attempt(self, **answer):
+        with fake_nvidia_smi(**answer) as query, patch("os.execv") as execute, redirect_stderr(io.StringIO()) as errors:
+            code = tensorfold_runtime.main(["run", "--comfy-root", str(self.comfy), "--", "transformer", "case.safetensors", "out", "--prompt", "prompt.txt"])
+        return code, errors.getvalue(), execute, query
+
+    def test_sm120_refused_by_name_before_the_worker_starts(self):
+        code, errors, execute, query = self.attempt(stdout=b"12.0\n")
+        self.assertEqual((code, errors), (1, f"TensorFold: {QUALIFIED}; this GPU is sm_120.\n"))
+        execute.assert_not_called()
+
+    def test_sm121_starts_the_verified_worker(self):
+        code, errors, execute, query = self.attempt(stdout=b"12.1\n")
+        self.assertEqual((code, errors), (0, ""))
+        query.assert_called_once()
+        execute.assert_called_once_with(self.worker, [self.worker, "transformer", "case.safetensors", "out", "--prompt", "prompt.txt"])
+
+    def test_unreadable_capability_refused_not_assumed(self):
+        for name, answer in UNREADABLE:
+            with self.subTest(name=name):
+                code, errors, execute, query = self.attempt(**answer)
+                self.assertEqual(code, 1)
+                self.assertTrue(errors.startswith(f"TensorFold: {QUALIFIED}; this GPU's compute capability could not be read ("), errors)
+                execute.assert_not_called()
 
 
 if __name__ == "__main__":

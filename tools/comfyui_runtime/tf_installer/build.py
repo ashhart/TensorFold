@@ -119,7 +119,7 @@ def apply_media_patch(source, work, run=run_command):
 def build_media(source, work, candidate, zig, nvcc, run=run_command):
     apply_media_patch(source, work, run)
     prefix = work / "built"
-    options = ["-j2", f"-Dnvcc={nvcc}", "-Dsm=120,121", "--prefix", str(prefix), "--cache-dir", str(work / "zig-cache")]
+    options = ["-j2", f"-Dnvcc={nvcc}", "-Dsm=121", "--prefix", str(prefix), "--cache-dir", str(work / "zig-cache")]
     environment = {"ZIG_GLOBAL_CACHE_DIR": str(work / "zig-global-cache")}
     run([zig, "build", "moss-image-cuda", *options], source, work / "moss-build.log", timeout=7200, environment=environment)
     origin = prefix / "bin/tf-moss-image"
