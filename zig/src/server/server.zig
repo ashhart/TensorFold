@@ -25,6 +25,7 @@ const slide_graph = @import("slide_graph.zig");
 const slide_lesson = @import("slide_lesson.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const idle_unload = @import("idle_unload.zig");
+const input_types = @import("input_types.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -146,6 +147,8 @@ pub const Server = struct {
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
     thinking_switch: bool = false,
+    /// libtfvideo loaded in `init` (input_types.decodes): with the model's video offer it decides video input (#3004).
+    video_decoder: bool = false,
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
     think_close_end: ?u32 = null,
@@ -187,6 +190,9 @@ pub const Server = struct {
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
         var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
+        const taken = input_types.Inputs.of(srv.info.vision, srv.video_decoder); // what /v1/models publishes (#3004)
+        result.images = taken.image;
+        result.videos = taken.video;
         result.native_deepseek = srv.text.native_deepseek;
         return result;
     }
@@ -203,6 +209,7 @@ pub const Server = struct {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
+        srv.video_decoder = input_types.decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
         if (config.voices_dir) |dir| {
             if (srv.info.speech == null) return error.VoicesRequireSpeech;
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);

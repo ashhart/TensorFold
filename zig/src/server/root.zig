@@ -82,6 +82,7 @@ test {
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
+    _ = @import("models_input_types_test.zig");
     _ = @import("speech.zig");
     _ = @import("images_generations.zig");
     _ = @import("drama_cfg.zig");
