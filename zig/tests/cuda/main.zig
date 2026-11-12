@@ -297,6 +297,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-prefill")) return exl3_prefill_tests.run(gpu, rest);
     if (std.mem.eql(u8, cmd, "exl3-tpprefill")) return @import("flashnext_exl3/tp/exl3_tpprefill_tests.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "nccl-lat")) return exl3_pack_tests.ncclLatency(gpu, rest);
+    if (std.mem.eql(u8, cmd, "exl3-grouped-tile")) return @import("exl3_grouped_tile_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
