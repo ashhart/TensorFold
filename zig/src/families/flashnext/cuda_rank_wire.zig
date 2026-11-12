@@ -5,6 +5,7 @@ const platform = @import("sys");
 const p = std.posix;
 const net = std.Io.net;
 const auth = platform.rank_auth;
+const Seal = auth.seal.Seal;
 
 pub const max_payload = 1 << 20;
 pub const Kind = enum(u32) { hello = 1, ready, create, forward, round, drop_seq, save, restore, drop_snap, stop, ack, verify, keep, media, verify_many };
@@ -74,10 +75,13 @@ fn wait(fd: p.socket_t, events: i16, until: ?u64) !void {
 
 pub const Link = struct {
     fd: p.socket_t,
+    /// The key proof's seal: every byte crosses in its records. Null with no key, and on a test's unproven socket pair.
+    seal: ?*Seal = null,
 
     pub fn close(l: Link) void {
         _ = std.c.shutdown(l.fd, p.SHUT.RDWR);
         _ = std.c.close(l.fd);
+        if (l.seal) |seal| std.heap.page_allocator.destroy(seal);
     }
 
     /// Exactly two rank processes, each proving `secret` first. Retry only the connect, never an accepted command.
@@ -101,7 +105,7 @@ pub const Link = struct {
                 const peer = std.c.accept4(fd, null, null, p.SOCK.NONBLOCK | p.SOCK.CLOEXEC);
                 switch (p.errno(peer)) {
                     .SUCCESS => {
-                        if (proven(peer, secret, until)) return .{ .fd = peer };
+                        if (proven(peer, secret, until)) |session| return sealed(peer, &session, false, secret.keyed);
                         _ = std.c.close(peer);
                     },
                     .INTR, .AGAIN => continue,
@@ -131,7 +135,36 @@ pub const Link = struct {
         return error.RankTimeout;
     }
 
+    /// `bytes` to the peer, in the seal's records when the link has one.
     pub fn send(l: Link, bytes: []const u8, until: u64) !void {
+        const seal = l.seal orelse return l.sendRaw(bytes, until);
+        var wire: [auth.seal.max_record]u8 = undefined;
+        var at: usize = 0;
+        while (at < bytes.len) {
+            const n = @min(bytes.len - at, auth.seal.max_plain);
+            try l.sendRaw(wire[0..seal.seal(bytes[at..][0..n], &wire)], until);
+            at += n;
+        }
+    }
+
+    /// Fills `bytes` from the peer's records; with no `until` it waits for one to begin, and then not for long.
+    pub fn receive(l: Link, bytes: []u8, until: ?u64) !void {
+        const seal = l.seal orelse return l.receiveRaw(bytes, until);
+        var at = seal.take(bytes);
+        while (at < bytes.len) {
+            var head: [auth.seal.head_len]u8 = undefined;
+            try l.receiveRaw(head[0..1], until);
+            const rest = until orelse deadline(30_000);
+            try l.receiveRaw(head[1..], rest);
+            var body: [auth.seal.max_plain + auth.seal.tag_len]u8 = undefined;
+            const n = Seal.bodyLen(&head) catch return unsealed();
+            try l.receiveRaw(body[0..n], rest);
+            seal.open(&head, body[0..n]) catch return unsealed();
+            at += seal.take(bytes[at..]);
+        }
+    }
+
+    fn sendRaw(l: Link, bytes: []const u8, until: u64) !void {
         if (builtin.os.tag == .windows) return error.RankPlatform; // no MSG.NOSIGNAL or DONTWAIT in Winsock
         var at: usize = 0;
         while (at < bytes.len) {
@@ -149,7 +182,7 @@ pub const Link = struct {
         }
     }
 
-    pub fn receive(l: Link, bytes: []u8, until: ?u64) !void {
+    fn receiveRaw(l: Link, bytes: []u8, until: ?u64) !void {
         if (builtin.os.tag == .windows) return error.RankPlatform;
         var at: usize = 0;
         while (at < bytes.len) {
@@ -198,25 +231,40 @@ fn msLeft(until: u64) u64 {
     return (until -| now()) / std.time.ns_per_ms;
 }
 
-/// Rank 0: whether the connection `peer` proved the key as rank 1 of 2. One that did not is the caller's to close.
-fn proven(peer: p.socket_t, secret: *const auth.Secret, until: u64) bool {
-    noDelay(peer) catch return false;
+/// A record that does not open ends the link: something between the ranks changed it, or sent it.
+fn unsealed() error{RankDisconnected} {
+    std.log.warn("flashnext: a frame between the ranks did not open under the group's key, so the link is closed", .{});
+    return error.RankDisconnected;
+}
+
+/// A proven connection, and its seal when the proof used a key: kept off the stack, as a link is copied by value.
+fn sealed(fd: p.socket_t, session: *const auth.Key, connector: bool, keyed: bool) !Link {
+    if (!keyed) return .{ .fd = fd };
+    errdefer _ = std.c.close(fd);
+    const seal = try std.heap.page_allocator.create(Seal);
+    seal.* = .init(session, connector);
+    return .{ .fd = fd, .seal = seal };
+}
+
+/// Rank 0: the session of a connection that proved the key as rank 1 of 2. One that did not is the caller's to close.
+fn proven(peer: p.socket_t, secret: *const auth.Secret, until: u64) ?auth.Key {
+    noDelay(peer) catch return null;
     const who = auth.accept(peer, secret, &.{.flashnext}, msLeft(until)) catch |e| {
         var at: [64]u8 = undefined;
         std.log.warn("flashnext: a connection from {s} proved no key and is ignored: {s}", .{ auth.peerText(peer, &at), auth.explain(e) orelse @errorName(e) });
-        return false;
+        return null;
     };
-    return who.rank == 1 and who.world == 2;
+    return if (who.rank == 1 and who.world == 2) who.session else null;
 }
 
 /// Rank 1: proves the key to rank 0 over the connected `fd`, which closes when the proof fails.
 fn prove(fd: p.socket_t, secret: *const auth.Secret, until: u64) !Link {
-    _ = auth.connect(fd, secret, .flashnext, 1, 2, msLeft(until)) catch |e| {
+    const session = auth.connect(fd, secret, .flashnext, 1, 2, msLeft(until)) catch |e| {
         std.log.warn("flashnext: rank 1 and rank 0 did not prove the group's key: {s}", .{auth.explain(e) orelse @errorName(e)});
         _ = std.c.close(fd);
         return error.RankUnproven;
     };
-    return .{ .fd = fd };
+    return sealed(fd, &session, true, secret.keyed);
 }
 
 fn socket(family: u32) !p.socket_t {
@@ -329,4 +377,138 @@ test "security: a rank 1 with another key is refused and rank 0 keeps waiting fo
     t0.join();
     try std.testing.expectEqual(@as(?anyerror, null), follow.err);
     try std.testing.expectEqual(@as(?anyerror, null), lead.err);
+}
+
+/// A host on the path between rank 1 and rank 0: it passes every byte, keeps what rank 0 sent, and can change a bit.
+const TestRelay = struct {
+    server: p.socket_t,
+    to: u16,
+    seen: [1 << 14]u8 = undefined,
+    len: usize = 0,
+    tamper: std.atomic.Value(bool) = .init(false),
+
+    fn listen(port: u16) !p.socket_t {
+        const fd = std.c.socket(p.AF.INET, p.SOCK.STREAM | p.SOCK.CLOEXEC, 0);
+        if (p.errno(fd) != .SUCCESS) return error.RankSocket;
+        var addr: p.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+        if (std.c.bind(fd, @ptrCast(&addr), @sizeOf(p.sockaddr.in)) != 0 or std.c.listen(fd, 1) != 0) return error.RankBind;
+        return fd;
+    }
+
+    fn run(r: *TestRelay) void {
+        const down = std.c.accept(r.server, null, null);
+        defer _ = std.c.close(down);
+        const up = std.c.socket(p.AF.INET, p.SOCK.STREAM | p.SOCK.CLOEXEC, 0);
+        defer _ = std.c.close(up);
+        var addr: p.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, r.to), .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+        while (std.c.connect(up, @ptrCast(&addr), @sizeOf(p.sockaddr.in)) != 0) pause();
+        var fds = [_]p.pollfd{ .{ .fd = down, .events = p.POLL.IN, .revents = 0 }, .{ .fd = up, .events = p.POLL.IN, .revents = 0 } };
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            _ = p.poll(&fds, -1) catch return;
+            for (fds, 0..) |f, i| {
+                if (f.revents == 0) continue;
+                const rc = std.c.recv(f.fd, &buf, buf.len, 0);
+                if (rc <= 0) return;
+                const n: usize = @intCast(rc);
+                if (i == 1) {
+                    // the last byte it holds is the end of a record's tag
+                    if (r.tamper.swap(false, .acq_rel)) buf[n - 1] ^= 1;
+                    @memcpy(r.seen[r.len..][0..n], buf[0..n]);
+                    r.len += n;
+                }
+                var at: usize = 0;
+                while (at < n) {
+                    const w = std.c.send(fds[1 - i].fd, buf[at..].ptr, n - at, p.MSG.NOSIGNAL);
+                    if (w <= 0) return;
+                    at += @intCast(w);
+                }
+            }
+        }
+    }
+};
+
+/// Rank 0 of a pair: it joins, waits to be told, and sends one forward frame.
+const TestSender = struct {
+    port: u16,
+    secret: auth.Secret,
+    go: std.atomic.Value(bool) = .init(false),
+    err: ?anyerror = null,
+
+    const text = "prompt ids 17 4021 88213";
+
+    fn run(s: *TestSender) void {
+        const link = Link.open(std.testing.io, "127.0.0.1", s.port, 0, 5000, &s.secret) catch |e| {
+            s.err = e;
+            return;
+        };
+        defer link.close();
+        while (!s.go.load(.acquire)) pause();
+        const until = deadline(5000);
+        link.sendHeader(.{ .kind = .forward, .arg = 7, .bytes = text.len }, until) catch |e| {
+            s.err = e;
+            return;
+        };
+        link.send(text, until) catch |e| {
+            s.err = e;
+            return;
+        };
+        var end: [1]u8 = undefined;
+        link.receive(&end, until) catch {}; // rank 1 leaves first
+    }
+};
+
+fn testForward(link: Link, got: *[TestSender.text.len]u8) !void {
+    const until = deadline(5000);
+    const h = try link.receiveHeader(until);
+    try std.testing.expectEqual(Kind.forward, h.kind);
+    try std.testing.expectEqual(@as(u32, got.len), h.bytes);
+    try link.receive(got, until);
+}
+
+/// Rank 1 joins rank 0 through a relay and reads one frame; `tamper` has the relay change a bit of it.
+fn testThroughRelay(secret: auth.Secret, tamper: bool, relay: *TestRelay, got: *[TestSender.text.len]u8) !void {
+    var sender: TestSender = .{ .port = try testPort(), .secret = secret };
+    const relay_port = try testPort();
+    relay.* = .{ .server = try TestRelay.listen(relay_port), .to = sender.port };
+    defer _ = std.c.close(relay.server);
+    const lead = try std.Thread.spawn(.{}, TestSender.run, .{&sender});
+    const path = try std.Thread.spawn(.{}, TestRelay.run, .{relay});
+    const link = try Link.open(std.testing.io, "127.0.0.1", relay_port, 1, 5000, &secret);
+    if (tamper) relay.tamper.store(true, .release);
+    sender.go.store(true, .release);
+    const result = testForward(link, got);
+    link.close();
+    lead.join();
+    path.join();
+    try std.testing.expectEqual(@as(?anyerror, null), sender.err);
+    return result;
+}
+
+test "security: the pair's frames cross sealed, and a bit changed on the way ends the link" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var got: [TestSender.text.len]u8 = undefined;
+    var relay: TestRelay = undefined;
+    const secret = try auth.Secret.fromBytes("the pair's rank secret for the tests");
+    try testThroughRelay(secret, false, &relay, &got);
+    try std.testing.expectEqualStrings(TestSender.text, &got);
+    // a host on the path saw the key proof and then records: no frame magic, none of the payload
+    const seen = relay.seen[0..relay.len];
+    try std.testing.expect(seen.len > 40 + got.len);
+    for ([_][]const u8{ "TFR1", "prompt", "4021" }) |clear| try std.testing.expect(std.mem.indexOf(u8, seen, clear) == null);
+    try std.testing.expectError(error.RankDisconnected, testThroughRelay(secret, true, &relay, &got));
+}
+
+test "security: a pair with no key, on one host, is not sealed: after the proof its frames cross as they are" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    var got: [TestSender.text.len]u8 = undefined;
+    var relay: TestRelay = undefined;
+    try testThroughRelay(.none, false, &relay, &got);
+    try std.testing.expectEqualStrings(TestSender.text, &got);
+    // the proof's challenge, then the forward frame's header and payload: no record heads, no tags
+    const header = try (Header{ .kind = .forward, .arg = 7, .bytes = TestSender.text.len }).encode();
+    const seen = relay.seen[0..relay.len];
+    try std.testing.expectEqual(auth.challenge_len + header.len + got.len, seen.len);
+    try std.testing.expectEqualSlices(u8, &header, seen[auth.challenge_len..][0..header.len]);
+    try std.testing.expectEqualStrings(TestSender.text, seen[auth.challenge_len + header.len ..]);
 }
