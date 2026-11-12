@@ -73,7 +73,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 25. TP ranks | done H[#655] | done C[#1771] H[#817] | done [#855] | yes | done¹ |
 | 26. Pipeline | open [#2115] | yes | yes | yes | yes |
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
-| 28. Scale index | ? | open M[#2760] | ? | ? | ? |
+| 28. Scale index | ? | done M[#2760], open M[#2805] | ? | ? | ? |
 | 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
@@ -457,8 +457,10 @@ below; these are estimates for planning a port, not results.
 28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
     bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
     table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on
-    Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
-    dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
+    Macs before tensor units ([#2760], plan in [#2751]); its prompt gathers and grouped expert kernels read it too,
+    the routed experts' stored arrays are released and it is the default, `TF_FLASHNEXT_SCALE_INDEX=0` turning it
+    off ([#2805]). The dense rows still read the stored arrays. `?` cells: the same count has not been run on those
+    checkpoints.
 
 29. **DSpine drafter.** Tencent's DSpine-b16 for Qwen3.8-27B, opt-in by `--drafter` with its folder, never the
     default. It reuses DFlash2's taps and tap ring and adds a code bridge and an exact-sender table.
@@ -615,3 +617,4 @@ below; these are estimates for planning a port, not results.
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
+[#2805]: https://github.com/ashhart/TensorFold/pull/2805
