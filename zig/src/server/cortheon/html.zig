@@ -315,7 +315,7 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
         while (v.len > 0 and std.ascii.isWhitespace(v[0])) v = v[1..]; // a newline may sit before the quotes
         const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' ';
         if (q != ' ') v = v[1..];
-        const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
+        const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " \t\r\n>" else &.{q}) orelse v.len;
         const raw = std.mem.trim(u8, v[0..stop], " \t\r\n");
         if (raw.len == 0 or raw[0] == '#' or std.ascii.startsWithIgnoreCase(raw, "javascript:") or std.ascii.startsWithIgnoreCase(raw, "mailto:") or std.ascii.startsWithIgnoreCase(raw, "data:")) continue; // a data URL is not a page
         var text: std.ArrayList(u8) = .empty;
@@ -475,6 +475,17 @@ test "a page link keeps its target when a newline follows href's equals" {
     const got = try hrefs(a, "<a href=\n\"https://b.org/y\">n</a>", 10, null);
     try std.testing.expectEqual(@as(usize, 1), got.len);
     try std.testing.expectEqualStrings("https://b.org/y", got[0]);
+}
+
+test "an unquoted page link ends at a tab" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try hrefs(a, "<a href=https://b.org/z\ttitle=n>z</a>", 10, null);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("https://b.org/z", got[0]);
+    const cr = try hrefs(a, "<a href=https://b.org/w\r\ntitle=n>w</a>", 10, null);
+    try std.testing.expectEqualStrings("https://b.org/w", cr[0]);
 }
 
 test "a link broken onto the next line by a carriage return is kept" {
