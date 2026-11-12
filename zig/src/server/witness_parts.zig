@@ -157,9 +157,8 @@ fn settingName(name: []const u8) bool {
 
 /// Names whose values are credentials or point at them; they never change an execution.
 pub fn secret(name: []const u8) bool {
-    const exact = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_TOOL_ID_KEY_FILE" };
-    for (exact) |x| if (std.mem.eql(u8, name, x)) return true;
-    for ([_][]const u8{ "_API_KEY", "_SECRET", "_PASSWORD", "_TOKEN" }) |tail| if (std.mem.endsWith(u8, name, tail)) return true;
+    const tails = [_][]const u8{ "_API_KEY", "_SECRET", "_PASSWORD", "_TOKEN", "_SIGNING_KEY", "_SECRET_FILE", "_KEY_FILE" };
+    for (tails) |tail| if (std.mem.endsWith(u8, name, tail)) return true;
     return false;
 }
 
