@@ -11,6 +11,11 @@ const trigger = @import("remote_trigger.zig");
 const Filled = api.LaneHost.Remote.Filled;
 const http = @import("deepseek_v41_http.zig");
 const Flags = api.LaneHost.Remote.Flags;
+const Route = api.LaneHost.Remote.Route;
+const Ask = api.LaneHost.Remote.Ask;
+const Verdict = api.LaneHost.Remote.Verdict;
+const Measured = api.LaneHost.Remote.Measured;
+const Outcome = api.LaneHost.Remote.Outcome;
 
 /// The Qwen pull's prefix policy with TF_PREFILL_TAIL: the Mac prefills only the last token by default, no 512 tail.
 pub fn policy() !ps.Policy {
@@ -34,28 +39,51 @@ pub const Pull = struct {
     io: std.Io,
     model: *ds.Model,
     remote: ps.Remote,
-    mutex: std.Io.Mutex = .init,
+    /// the connect daemon's mailbox and its client, mapped again when the daemon restarts (`remote.client` is its own)
+    link: *fabric.relink.Relink,
+    /// a KV_SPLIT pair's other producers' links, mapped again the same way (`remote.peers` are their clients)
+    more: []fabric.relink.Relink = &.{},
+    http: *trigger.Http,
+    route: Route = .{},
     pulls: u64 = 0,
     ns: u64 = 0,
     running: std.atomic.Value(u32) = .init(0),
     closing: std.atomic.Value(bool) = .init(false),
     off: std.atomic.Value(bool) = .init(false),
     linked: bool = true,
+    /// the gate wait of the pull under way, for its phases
+    waited_ns: u64 = 0,
 
     pub fn source(p: *Pull) api.LaneHost.Remote.Source {
-        return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running };
+        return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running, .measured = measured };
     }
 
     /// A prefix of `prompt` beyond `cached` on a whole chunk, filled remotely and landed whole in a blank Snapshot.
-    pub fn pull(p: *Pull, prompt: []const u32, cached: u64) !?Filled {
-        p.mutex.lockUncancelable(p.io);
-        defer p.mutex.unlock(p.io);
+    pub fn pull(p: *Pull, prompt: []const u32, cached: u64, gone: *const std.atomic.Value(bool)) !?Filled {
         if (p.closing.load(.acquire) or p.off.load(.acquire)) return null;
-        p.renewLinks() catch |err| {
+        const upto = p.remote.policy.upto(prompt.len, cached) orelse return null;
+        p.waited_ns = p.route.admit(p.io, p.route.estimate(upto, prompt.len - cached), &p.closing, gone) orelse return null;
+        defer p.route.leave();
+        if (p.closing.load(.acquire) or p.off.load(.acquire) or gone.load(.acquire)) return null;
+        return api.LaneHost.Remote.guarded(p, prompt, cached, upto, gone);
+    }
+
+    /// The trial pull's liveness check: the GB10's server answers.
+    pub fn alive(p: *Pull) bool {
+        if (p.http.alive()) return true;
+        std.log.warn("remote prefill: the GB10's server does not answer /health", .{});
+        return false;
+    }
+
+    /// The pull, the gate held: the link (mapped again if the daemon restarted), the trigger, the stream, the landing.
+    pub fn run(p: *Pull, prompt: []const u32, cached: u64, upto: u64, gone: *const std.atomic.Value(bool), outcome: *Outcome) !?Filled {
+        const event = p.renewLinks() catch |err| {
             if (p.linked) std.log.warn("remote prefill: the link is not usable ({s}); prompts are prefilled here", .{@errorName(err)});
             p.linked = false;
+            outcome.* = .down;
             return null;
         };
+        if (event == .reopened) std.log.info("remote prefill: the connect daemon's mailbox was replaced; the link was re-opened", .{});
         if (!p.linked) std.log.info("remote prefill: the link is back", .{});
         p.linked = true;
         p.remote.reason.len = 0;
@@ -68,6 +96,11 @@ pub const Pull = struct {
         var landing: ho.landing.Landing = undefined;
         try landing.initShards(p.gpa, at, @intCast(1 + p.remote.peers.len), .{ .@"packed" = packedOf(p.model, snap) });
         defer landing.deinit();
+        p.http.limit_s = p.route.deadlineS(upto);
+        p.http.gone = gone;
+        p.remote.abort = gone;
+        defer p.http.gone = null; // the ticket's flag goes with its fill
+        defer p.remote.abort = null;
         src.fill(prompt, offer, landing.state()) catch |err| {
             if (err == error.Refused and p.remote.reason.len > 0) std.log.warn("remote prefill: the GB10 refused ({s})", .{p.remote.reason.text()});
             p.settle(err);
@@ -76,16 +109,23 @@ pub const Pull = struct {
         const pulled_ns = fabric.words.nowNs() - t0;
         _ = landing.complete() catch return error.PartialState;
         try p.model.snapshotSeal(snap, prompt, at);
+        const took = fabric.words.nowNs() - t0;
         p.pulls += 1;
-        p.ns += fabric.words.nowNs() - t0;
+        p.ns += took;
+        p.route.observePull(at, p.http.cached, took);
+        outcome.* = .ok;
         if (p.remote.peers.len > 0) std.log.info("remote prefill: {d} tokens pulled over {d} links in {d:.0} ms", .{ at, 1 + p.remote.peers.len, @as(f64, @floatFromInt(pulled_ns)) / 1e6 });
-        return .{ .saved = snap, .at = at };
+        return .{ .saved = snap, .at = at, .phases = .{ .queue_ns = p.waited_ns, .trigger_ns = p.remote.trigger_ns, .pull_ns = took -| p.remote.trigger_ns, .land_ns = landing.land_ns, .bytes = p.remote.bytes } };
     }
 
-    /// Every link of the pull usable again (a producer's new generation starts afresh).
-    fn renewLinks(p: *Pull) !void {
-        try p.remote.client.renew();
-        for (p.remote.peers) |c| try c.renew();
+    /// Every link of the pull usable again: a restarted daemon's mailbox mapped, a producer's new generation made.
+    fn renewLinks(p: *Pull) !fabric.relink.Event {
+        const now = fabric.words.nowNs();
+        var event = try p.link.renew(now);
+        for (p.more) |*r| if ((try r.renew(now)) == .reopened) {
+            event = .reopened;
+        };
+        return event;
     }
 
     /// A mismatch no retry mends (the checkpoint, the prompt's tokens, the protocol) turns remote prefill off for good.
@@ -95,16 +135,22 @@ pub const Pull = struct {
         std.log.warn("remote prefill off for this server: the GB10's export does not match ({s})", .{@errorName(err)});
     }
 
-    fn wants(ptr: *anyopaque, len: u64, cached: u64) bool {
+    fn wants(ptr: *anyopaque, ask: Ask) Verdict {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        if (p.closing.load(.acquire) or p.off.load(.acquire)) return false;
-        const n = p.remote.policy.upto(len, cached) orelse return false;
-        return n - cached >= p.remote.policy.min_prefix;
+        if (p.closing.load(.acquire) or p.off.load(.acquire)) return .off;
+        const n = p.remote.policy.upto(ask.len, ask.cached) orelse return .small;
+        if (n - ask.cached < p.remote.policy.min_prefix) return .small;
+        return p.route.weigh(Route.nowNs(p.io), ask, n);
     }
 
-    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64) anyerror!?Filled {
+    fn measured(ptr: *anyopaque, m: Measured) void {
         const p: *Pull = @ptrCast(@alignCast(ptr));
-        return p.pull(prompt, cached);
+        p.route.observe(m);
+    }
+
+    fn fill(ptr: *anyopaque, prompt: []const u32, cached: u64, gone: *const std.atomic.Value(bool)) anyerror!?Filled {
+        const p: *Pull = @ptrCast(@alignCast(ptr));
+        return p.pull(prompt, cached, gone);
     }
 
     fn drop(ptr: *anyopaque, saved: *anyopaque) void {
@@ -175,12 +221,12 @@ pub const FileSource = struct {
         return .{ .ptr = f, .wants = fileWants, .fill = fileFill, .drop = fileDrop, .running = &f.running };
     }
 
-    fn fileWants(ptr: *anyopaque, len: u64, cached: u64) bool {
+    fn fileWants(ptr: *anyopaque, ask: api.LaneHost.Remote.Ask) Verdict {
         const f: *FileSource = @ptrCast(@alignCast(ptr));
-        return len > f.blob.tokens.len and cached < f.blob.tokens.len;
+        return if (ask.len > f.blob.tokens.len and ask.cached < f.blob.tokens.len) .remote else .small;
     }
 
-    fn fileFill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?Filled {
+    fn fileFill(ptr: *anyopaque, prompt: []const u32, _: u64, _: *const std.atomic.Value(bool)) anyerror!?Filled {
         const f: *FileSource = @ptrCast(@alignCast(ptr));
         const tokens = f.blob.tokens;
         if (prompt.len <= tokens.len or !std.mem.eql(u32, prompt[0..tokens.len], tokens)) return null;
@@ -212,41 +258,36 @@ pub fn refusal(f: Flags, drafter: bool) ?[]const u8 {
 
 /// A served link: the connect daemon's mailbox, its client, the HTTP trigger and the pull, as long as the server runs.
 pub const Link = struct {
-    box: fabric.mailbox.Mailbox,
-    client: fabric.mailbox.Client,
-    /// a KV_SPLIT pair's other producers' links (`--mcdma-link a,b`): shard k's mailbox and client are `more[k - 1]`'s
-    more: []More = &.{},
+    relink: fabric.relink.Relink,
+    /// a KV_SPLIT pair's other producers' links (`--mcdma-link a,b`): shard k is `more[k - 1]`, client `peers[k - 1]`
+    more: []fabric.relink.Relink = &.{},
     peers: []*fabric.mailbox.Client = &.{},
     http: trigger.Http,
     pull: Pull,
-
-    const More = struct { box: fabric.mailbox.Mailbox, client: fabric.mailbox.Client };
 
     /// `id` names the checkpoint both ends load (the manifest's model must equal it).
     pub fn start(gpa: std.mem.Allocator, io: std.Io, m: *ds.Model, f: Flags, id: []const u8) !*Link {
         const l = try gpa.create(Link);
         errdefer gpa.destroy(l);
         const rules = try policy();
+        const gate = try Route.fromEnv();
         var names = std.mem.splitScalar(u8, f.link.?, ',');
-        l.box = try fabric.mailbox.Mailbox.openConnect(names.first());
-        errdefer l.box.close();
-        l.client = try fabric.mailbox.Client.init(&l.box, fabric.words.native, 30 * std.time.ns_per_s);
+        try l.relink.open(names.first(), fabric.words.native, 30 * std.time.ns_per_s);
+        errdefer l.relink.close();
         l.more = &.{};
         l.peers = &.{};
         var opened: usize = 0;
         errdefer {
-            for (l.more[0..opened]) |*x| x.box.close();
+            for (l.more[0..opened]) |*x| x.close();
             gpa.free(l.more);
             gpa.free(l.peers);
         }
         const extra = std.mem.count(u8, f.link.?, ",");
         if (extra > 0) {
-            l.more = try gpa.alloc(More, extra);
+            l.more = try gpa.alloc(fabric.relink.Relink, extra);
             l.peers = try gpa.alloc(*fabric.mailbox.Client, extra);
             while (names.next()) |name| : (opened += 1) {
-                l.more[opened].box = try fabric.mailbox.Mailbox.openConnect(name);
-                errdefer l.more[opened].box.close();
-                l.more[opened].client = try fabric.mailbox.Client.init(&l.more[opened].box, fabric.words.native, 30 * std.time.ns_per_s);
+                try l.more[opened].open(name, fabric.words.native, 30 * std.time.ns_per_s);
                 l.peers[opened] = &l.more[opened].client;
             }
         }
@@ -254,7 +295,7 @@ pub const Link = struct {
         const key = try q27.apiKey(gpa, io);
         errdefer if (key) |k| gpa.free(k);
         l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "", .closing = &l.pull.closing, .key = key };
-        l.pull = .{ .gpa = gpa, .io = io, .model = m, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.client, .peers = l.peers, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
+        l.pull = .{ .gpa = gpa, .io = io, .model = m, .route = gate, .link = &l.relink, .more = l.more, .http = &l.http, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.relink.client, .peers = l.peers, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
         return l;
     }
 
@@ -268,8 +309,8 @@ pub const Link = struct {
             std.crypto.secureZero(u8, @constCast(k));
             gpa.free(k);
         }
-        l.box.close();
-        for (l.more) |*x| x.box.close();
+        l.relink.close();
+        for (l.more) |*x| x.close();
         gpa.free(l.more);
         gpa.free(l.peers);
         gpa.destroy(l);
@@ -328,15 +369,18 @@ test "remote prefill for DeepSeek V4.1 refuses half its flags and a separate dra
 test "the pull wants a prefix only 4096 tokens or more past what the Mac resumes, and stops for good on a mismatch" {
     if (std.c.getenv("TF_PREFILL_MIN") != null or std.c.getenv("TF_PREFILL_CHUNK") != null or std.c.getenv("TF_PREFILL_TAIL") != null) return error.SkipZigTest;
     var p: Pull = undefined;
+    p.io = std.testing.io;
+    p.route = .{};
     p.closing = .init(false);
     p.off = .init(false);
     p.remote.policy = try policy();
-    try std.testing.expect(Pull.wants(&p, 5600, 1000));
-    try std.testing.expect(!Pull.wants(&p, 5600, 2000));
+    const t = std.testing;
+    try t.expectEqual(Verdict.remote, Pull.wants(&p, .{ .len = 5600, .cached = 1000, .decoding = 1 }));
+    try t.expectEqual(Verdict.small, Pull.wants(&p, .{ .len = 5600, .cached = 2000, .decoding = 1 }));
     p.settle(error.Refused);
-    try std.testing.expect(Pull.wants(&p, 8192, 0));
+    try t.expectEqual(Verdict.remote, Pull.wants(&p, .{ .len = 8192, .cached = 0, .decoding = 1 }));
     p.settle(error.Mismatch);
-    try std.testing.expect(!Pull.wants(&p, 8192, 0));
+    try t.expectEqual(Verdict.off, Pull.wants(&p, .{ .len = 8192, .cached = 0, .decoding = 1 }));
 }
 
 test "the pull leaves the last prompt token to the Mac by default, and the producer is asked for all the others" {

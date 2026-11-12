@@ -47,6 +47,9 @@ pub const Job = struct {
     remote: ?@import("lane_remote.zig").Filled = null, // a prefix another machine filled, until it is restored
     ticket: ?*@import("lane_remote.zig").Ticket = null, // its fill under way while it is queued
     remote_looked: bool = false, // queued, it was weighed for a remote fill once
+    verdict: ?@import("lane_remote.zig").Verdict = null, // the remote source's last verdict on it, for the reply
+    phases: @import("lane_remote.zig").Phases = .{}, // its pull's phases, once its prefix landed in the stream
+    remote_said: @import("lane_remote.zig").Verdict = .small, // the last reason it was kept off the pair that the log gave
     exported: bool = false, // a handoff request's state went to the exporter (or its failure did)
     cut: [1]u32 = .{0}, // a handoff request's one chunk start: its prompt's last token
 

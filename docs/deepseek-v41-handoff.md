@@ -3,6 +3,7 @@
 A GB10 pair prefills a prompt; a Mac decodes it. The hand-off is the state a prefill leaves behind, carried by MKVH
 protocol 2 (recurrent layers of named parts) and converted to the Metal engine's own cache layout
 on arrival. The library is `zig/src/families/deepseek_v41/handoff/`; it is host-only and independent of the transport.
+The operator recipe (hardware, link set-up, launch, troubleshooting, measurements) is [deepseek-v41-disaggregated.md](deepseek-v41-disaggregated.md).
 
 A hand-off prefix is **outside the exactness contract**: it is opt-in (`--prefill-from`), labelled remote, never kept as a
 native state, and the Metal engine re-quantises some of it (below). Decode after an import is not bit-identical to a
@@ -119,9 +120,21 @@ on the Qwen3.8-27B pull) gives the lane host a `lane_remote.Source`: `wants` is 
 host slices, so nothing is staged), seals it (`Model.snapshotSeal`: position, the Engram record of the last three tokens'
 compressed ids, taps with no rows) and returns `{ saved, at }`. `Backend.prefill` restores it with `snapshotRestore` and
 prefills the tail, exactly as for a kept prompt state. `drop` frees the Snapshot; `TF_PREFILL_KEEP` decides whether states
-built on it are kept (marked remote). The drafter's rings are not in a Snapshot (the lane holds them in a state of its own), so
-`ring` parts are read and dropped; the drafter has no conditioning rows until local forwards fill the taps, which can lower
-draft acceptance and nothing else.
+built on it are kept (marked remote). The drafter's rings are in the Snapshot's `live` bytes when the slot's cache plan has the three
+DSpark stages (43 layers), and `ring` parts then land there (all three stages or none; a part that is short, repeated or for another
+stage is refused). A producer sends them only in its full-prefill profile with drafts on (`MissingRing` otherwise, and the replay
+profile ships none); a plan without the stages reads and drops them, which `Landing.dropped` counts. Without rings, or without
+conditioning rows (the taps are filled by local forwards), the drafter can accept fewer drafts and nothing else.
+
+The source decides per prompt (`core/lane_remote_route.zig`, kept by both Mac pulls, see
+[the setup page](deepseek-v41-disaggregated.md#several-requests-and-when-a-prompt-goes-to-the-pair-at-all)): `wants` returns a
+verdict, and `queue` passes it the number of streams decoding. The pair takes one pull at a time, kept by a try-lock gate and
+no longer by a mutex held across the pull: a prompt that finds it busy is prefilled on the Mac, unless the pull under way ends
+soon enough that waiting still pays (a wait already begun ends when it stops paying); a stream decoding on the Mac sends the
+prompt to the pair even when the pair is no faster; otherwise the pull must be predicted no slower than the Mac's prefill, by
+running averages the pull and the lane host feed (`Source.measured`). A `busy`, `slower` or `down` verdict holds for now and
+the prompt is weighed again; `small` and `off` are final. Nothing changes on the wire. `TF_PREFILL_ROUTE=always` pulls every
+prompt past `TF_PREFILL_MIN`, queued behind any pull under way, as it used to.
 
 ### How much of the prompt is handed over
 
