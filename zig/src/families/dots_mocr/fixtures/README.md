@@ -50,3 +50,9 @@ FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
   OUTPUT_DIR --pci PCI_ID --max-new-tokens 64
 python tools/zig/dots_mocr_reference.py compare OUTPUT_DIR NATIVE_PREFIX
 ```
+
+`rope_inv_freq.txt` holds the 64 float32 bit patterns of the checkpoint's
+rotary `inv_freq` as Transformers 4.57.6 computes them on the CPU (theta 1e6,
+head dim 128), dumped by the oracle's `text` mode (`rope-inv_freq.npy`). The
+CUDA recipe uploads them as they are, because Torch's CPU `powf` is not
+correctly rounded: entry 37 is one ulp from the correctly rounded value.

@@ -140,7 +140,7 @@ fn oneCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: cud
     const bound = grouped.maxItems(pairs, l.experts, t);
     try act.fill8(0xff, s.handle); // a call that writes nothing fails rather than pass on old bytes
     const up_in: ex_.Rows = .{ .x = dx.ptr, .stride = l.dims, .slots = slots };
-    if (prompt) try g.prompt(s, .up, up_in, l, plan, act.ptr, bound, -1) else try g.decode(s, .up, up_in, l, plan, act.ptr, bound, -1);
+    if (prompt) try g.prompt(s, .up, up_in, l, plan, act.ptr, bound, pairs, t, -1) else try g.decode(s, .up, up_in, l, plan, act.ptr, bound, pairs, t, -1);
     try s.synchronize();
     const got_act = try check.download(gpu, act);
     defer a.free(got_act);
@@ -153,7 +153,7 @@ fn oneCase(gpu: Gpu, fx: Fixture, router: grouped.Router, g: ex_.Grouped, s: cud
     defer y.free();
     try y.fill8(0xff, s.handle);
     const down_in: ex_.Rows = .{ .x = act.ptr, .stride = l.width };
-    if (prompt) try g.prompt(s, .down_bf16, down_in, l, plan, y.ptr, bound, -1) else try g.decode(s, .down_f32, down_in, l, plan, y.ptr, bound, -1);
+    if (prompt) try g.prompt(s, .down_bf16, down_in, l, plan, y.ptr, bound, pairs, t, -1) else try g.decode(s, .down_f32, down_in, l, plan, y.ptr, bound, pairs, t, -1);
     try s.synchronize();
     const got_y = try check.download(gpu, y);
     defer a.free(got_y);
