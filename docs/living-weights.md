@@ -14,7 +14,7 @@ The same text and supplied questions can take different steps and choose differe
 The lesson writer generates extra question wordings at temperature 0.9, including when you supply questions.
 The writer seeds these requests from their system and user text. After a refused round, the next round draws fresh
 extra wordings from that seed and the round number for the existing pocket neurons' router.
-Their output weights and optimizer state carry into the next round. Other learner methods keep their existing continuation.
+Their output weights and optimizer state carry into the next round. Other learner methods, and corrections, keep their existing continuation.
 The original training answers, held-out answers, unseen checks and safety checks stay fixed. A first round that passes keeps the
 same wordings and rows as before. The fitter shuffles examples from its round and pass counters; lesson history
 also affects those counters.
