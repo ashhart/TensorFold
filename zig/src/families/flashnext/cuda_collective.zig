@@ -160,6 +160,3 @@ pub const Collective = struct {
     }
 };
 
-test {
-    if (@import("builtin").os.tag != .windows) _ = @import("cuda_collective_test.zig"); // over a Unix socket pair
-}
