@@ -4,6 +4,7 @@ import http.server
 import io
 import json
 from pathlib import Path
+import re
 import sys
 import threading
 import unittest
@@ -13,7 +14,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "qwen27"))
 import pair_accept  # noqa: E402
 import record_oracle  # noqa: E402
 
-PAIR_POLICY = "speed-up mode: a two-Mac pair, rank 0 answers greedy requests only"
+ENGINE = Path(__file__).resolve().parents[2] / "zig/src/native/qwen27_pair_flags.zig"
+
+
+def engine_pair_policy():
+    """The policy line a pair's /health shows, read from the engine's own source (qwen27_pair_flags.healthPolicy)."""
+    found = re.search(r'fn healthPolicy\(pair: bool\)[^{]*\{\s*return if \(pair\) "([^"]+)"', ENGINE.read_text("utf-8"))
+    assert found is not None, "qwen27_pair_flags.zig has no healthPolicy line"
+    return found.group(1)
+
+
+PAIR_POLICY = engine_pair_policy()
 ORACLE = {"gpu_family": "apple-m4", "cases": []}
 
 
