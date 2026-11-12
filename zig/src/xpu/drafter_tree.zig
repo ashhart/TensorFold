@@ -125,10 +125,13 @@ pub const Draw = struct {
     temperature: f64,
 };
 
+/// Told, at each step of a round's walk, which verified `row` the target chose `pick` from, as path place `at`.
+pub const Note = struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, at: u32, row: u32, pick: u32) anyerror!void };
+
 pub const Round = struct { tokens: []const u32, terminal: u32, drafted: u32, accepted: u32 };
 
 /// One tree round from `pending`: drafts a tree of ≤ `nodes`, verifies it, keeps the path; returns the accepted drafts.
-pub fn treeRound(dr: *Drafter, pending: u32, depths: u32, nodes: u32, draw: ?Draw, out: *[MAXL]u32) !Round {
+pub fn treeRound(dr: *Drafter, pending: u32, depths: u32, nodes: u32, draw: ?Draw, note: ?Note, out: *[MAXL]u32) !Round {
     const r = dr.r;
     const p0: u64 = r.pos;
     try dr.lattice(pending, depths);
@@ -148,11 +151,13 @@ pub fn treeRound(dr: *Drafter, pending: u32, depths: u32, nodes: u32, draw: ?Dra
     path[0] = 0;
     var len: u32 = 1;
     var terminal = if (draw) |dw| try dw.row(dw.ctx, 0, p0 + 1) else greedy[0];
+    if (note) |nt| try nt.f(nt.ctx, 0, 0, terminal);
     walk: while (true) {
         for (1..n + 1) |c| if (rows[c] == path[len - 1] and ids[c] == terminal) {
             path[len] = @intCast(c);
             len += 1;
             terminal = if (draw) |dw| try dw.row(dw.ctx, @intCast(c), p0 + len) else greedy[c];
+            if (note) |nt| try nt.f(nt.ctx, len - 1, @intCast(c), terminal);
             continue :walk;
         };
         break;
