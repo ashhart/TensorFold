@@ -59,7 +59,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_FLASHNEXT_EXL3_GRAPH", .scope = .cuda, .kind = .word, .words = &.{ "0", "eager", "1" }, .forms = "0, eager or 1 (default 0: 0 plans on the host, eager on the device, 1 also replays CUDA graphs)" },
     .{ .name = "TF_FLASHNEXT_EXL3_GRAPH_ASYNC", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1: 0 instantiates a captured graph on the step's thread)" },
-    .{ .name = "TF_FLASHNEXT_EXL3_UNIFORM_LINES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (either gives every rank exactly TF_FLASHNEXT_EXPERT_LINES lines; unset or blank does not)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_UNIFORM_LINES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 gives every rank exactly TF_FLASHNEXT_EXPERT_LINES lines)" },
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
