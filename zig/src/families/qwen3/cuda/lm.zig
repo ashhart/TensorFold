@@ -7,6 +7,7 @@ const store = @import("store.zig");
 const weights = @import("weights.zig");
 
 const Driver = cuda.Driver;
+const Allocator = std.mem.Allocator;
 
 /// nemotron_attention.cu's chunk: keys a partial covers, and the most chunk blocks a row launches.
 pub const chunk_keys = 512;
@@ -122,11 +123,123 @@ pub const Addrs = struct {
     rows: u64 = 0,
 };
 
+/// The position table and the RoPE table for `cap` positions, uploaded into the block at `a`.
+pub fn tables(gpa: Allocator, d: *const Driver, a: Addrs, spec: config.Spec, cap: usize) !void {
+    try positions(gpa, d, a, cap);
+    try rope(gpa, d, a, spec, cap);
+}
+
+/// Positions 0 to cap - 1: each row's rotation angle, and the first position a row block's chunks read.
+fn positions(gpa: Allocator, d: *const Driver, a: Addrs, cap: usize) !void {
+    const pos = try gpa.alloc(i32, cap);
+    defer gpa.free(pos);
+    for (pos, 0..) |*x, i| x.* = @intCast(i);
+    try store.view(d, a.pos, cap * 4).upload(0, std.mem.sliceAsBytes(pos));
+}
+
+/// The RoPE table [cap, head_dim] of fp32 cosines and sines, each half of a head rotating by the same angle.
+fn rope(gpa: Allocator, d: *const Driver, a: Addrs, spec: config.Spec, cap: usize) !void {
+    const hd = spec.head_dim;
+    const theta: f64 = spec.theta;
+    const cs = try gpa.alloc(f32, cap * hd);
+    defer gpa.free(cs);
+    const sn = try gpa.alloc(f32, cap * hd);
+    defer gpa.free(sn);
+    var i: usize = 0;
+    while (i < hd / 2) : (i += 1) {
+        const inv = 1.0 / std.math.pow(f64, theta, @as(f64, @floatFromInt(2 * i)) / @as(f64, @floatFromInt(hd)));
+        var p: usize = 0;
+        while (p < cap) : (p += 1) {
+            const angle = @as(f64, @floatFromInt(p)) * inv;
+            const c: f32 = @floatCast(@cos(angle));
+            const s: f32 = @floatCast(@sin(angle));
+            for ([_]usize{ i, i + hd / 2 }) |col| {
+                cs[p * hd + col] = c;
+                sn[p * hd + col] = s;
+            }
+        }
+    }
+    try store.view(d, a.cos, cs.len * 4).upload(0, std.mem.sliceAsBytes(cs));
+    try store.view(d, a.sin, sn.len * 4).upload(0, std.mem.sliceAsBytes(sn));
+}
+
 /// `n` bytes at the block's cursor, a section unit in.
 fn cut(cursor: *usize, n: usize) usize {
     cursor.* = store.up(cursor.*);
     defer cursor.* += n;
     return cursor.*;
+}
+
+/// Rows from elsewhere over the embedded ones: `n` rows of hidden at `ptr`, standing at positions [at, at + n).
+pub const Splice = struct {
+    ptr: u64,
+    at: usize,
+    n: usize,
+
+    /// The rows standing in a pass over positions [pos, pos + rows): row `src` on, `len` of them, from pass row `dst`.
+    pub fn within(sp: Splice, pos: usize, rows: usize) ?struct { src: usize, dst: usize, len: usize } {
+        const lo = @max(sp.at, pos);
+        const hi = @min(sp.at + sp.n, pos + rows);
+        return if (lo < hi) .{ .src = lo - sp.at, .dst = lo - pos, .len = hi - lo } else null;
+    }
+};
+
+/// Every layer's k and v caches of `cap` positions, in place of the scratch's one: layer i's at kc + i * stride.
+pub const Cache = struct { kc: u64, vc: u64, stride: usize };
+
+/// The final norm over the pass's last `rows` rows, then the tied head's logits [rows, vocab] into `logits`.
+pub const Head = struct { rows: usize, logits: u64 };
+
+/// A stage's rows (lm_embed, lm0_norm, lm0_attn, lm0_o, lm0_post, lm0_mlp, lm_layer{i}, lm_norm), after its launch.
+pub const Tap = struct {
+    ctx: *anyopaque,
+    put: *const fn (ctx: *anyopaque, stage: []const u8, ptr: u64, rows: usize, cols: usize) anyerror!void,
+};
+
+/// What a resumed or spliced pass adds; each field is read only when set, so `.{}` is the embeddings' call.
+pub const Extra = struct {
+    /// The input's first position: the pass continues a `cache` holding [0, start), one input only.
+    start: usize = 0,
+    cache: ?Cache = null,
+    splice: ?Splice = null,
+    head: ?Head = null,
+    tap: ?Tap = null,
+};
+
+/// Refuses a start or head on several inputs or without caches, a head over 0 or too many rows, positions past cap.
+pub fn admit(x: Extra, ends: []const u32, cap: usize) !void {
+    if (ends.len == 0) return error.InvalidBatch;
+    const total = ends[ends.len - 1];
+    if ((x.start > 0 or x.head != null) and (ends.len != 1 or x.cache == null)) return error.InvalidBatch;
+    if (x.start + total > cap) return error.ContextFull;
+    if (x.head) |h| if (h.rows == 0 or h.rows > total) return error.InvalidBatch;
+}
+
+test "admit: the embeddings' call passes; a start or head needs one input and its caches, and stays in them" {
+    const c: Cache = .{ .kc = 256, .vc = 512, .stride = 256 };
+    try admit(.{}, &.{ 3, 7 }, 512);
+    try admit(.{ .start = 5, .cache = c, .head = .{ .rows = 7, .logits = 0 } }, &.{7}, 512);
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .start = 5 }, &.{7}, 512)); // no caches to resume
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .start = 5, .cache = c }, &.{ 3, 7 }, 512));
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .head = .{ .rows = 1, .logits = 0 } }, &.{7}, 512));
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .cache = c, .head = .{ .rows = 8, .logits = 0 } }, &.{7}, 512));
+    try std.testing.expectError(error.InvalidBatch, admit(.{ .cache = c, .head = .{ .rows = 0, .logits = 0 } }, &.{7}, 512));
+    try std.testing.expectError(error.ContextFull, admit(.{ .start = 506, .cache = c }, &.{7}, 512));
+    try admit(.{ .start = 505, .cache = c }, &.{7}, 512);
+}
+
+test "a splice is cut to the pass: the rows inside its positions, none outside" {
+    const sp: Splice = .{ .ptr = 0, .at = 3, .n = 4 }; // positions 3..6
+    const in = sp.within(0, 10).?;
+    try std.testing.expectEqual(@as(usize, 0), in.src);
+    try std.testing.expectEqual(@as(usize, 3), in.dst);
+    try std.testing.expectEqual(@as(usize, 4), in.len);
+    const tail = sp.within(5, 1).?; // a one-row pass at position 5: the splice's row 2
+    try std.testing.expectEqual(@as(usize, 2), tail.src);
+    try std.testing.expectEqual(@as(usize, 0), tail.dst);
+    try std.testing.expectEqual(@as(usize, 1), tail.len);
+    try std.testing.expect(sp.within(7, 3) == null);
+    try std.testing.expect(sp.within(0, 3) == null);
 }
 
 /// Which of the CUDA kernels' geometry limits a spec breaks: the attention's heads, the row kernels' widths, or none.
@@ -223,9 +336,22 @@ pub const Lm = struct {
 
     /// Every input's final-normed last row into the block's `rows`, inputs independent and ending at `ends`.
     pub fn forward(lm: *Lm, m: *const weights.Model, a: Addrs, cap: usize, ends: []const u32) !void {
+        return lm.forwardFrom(m, a, cap, ends, .{});
+    }
+
+    /// forward with `x`'s start, caches, splice, head and taps; refused before any launch when they do not fit.
+    pub fn forwardFrom(lm: *Lm, m: *const weights.Model, a: Addrs, cap: usize, ends: []const u32, x: Extra) !void {
         const s = m.spec;
-        try lm.emb.bf16(lm.s, a.ids, m.embed, a.x, ends[ends.len - 1], s.hidden);
-        for (m.layers, 0..) |*l, i| try layerRows(lm, m, l, a, cap, ends, ends[ends.len - 1], i == 0);
+        try admit(x, ends, cap); // before any launch: a refused pass queues nothing
+        const total = ends[ends.len - 1];
+        try lm.emb.bf16(lm.s, a.ids, m.embed, a.x, total, s.hidden);
+        if (x.splice) |sp| if (sp.within(x.start, total)) |in| {
+            const row = s.hidden * 2;
+            try store.view(lm.d, a.x + in.dst * row, in.len * row).copyFrom(0, sp.ptr + in.src * row, in.len * row, lm.s.handle);
+        };
+        if (x.tap) |t| try t.put(t.ctx, "lm_embed", a.x, total, s.hidden);
+        for (m.layers, 0..) |*l, i| try layerRows(lm, m, l, a, cap, ends, total, i, x);
+        if (x.head) |h| return lm.head(m, a, total, h, x.tap);
         for (ends, 0..) |e, i| {
             // the last layer's residual add and the final norm, for the one row an input pools
             const row = (e - 1) * s.hidden * 2;
@@ -233,10 +359,24 @@ pub const Lm = struct {
         }
     }
 
+    /// The final norm over the head's rows (every row when tapped), then their logits by the tied embedding table.
+    fn head(lm: *Lm, m: *const weights.Model, a: Addrs, total: usize, h: Head, tap: ?Tap) !void {
+        const s = m.spec;
+        const rows = if (tap == null) h.rows else total;
+        const at = (total - rows) * s.hidden * 2;
+        try lm.nm.addRmsH(lm.s, a.z + at, a.x + at, m.final_norm, .f32, a.x + at, a.normed + at, null, rows, s.hidden, @floatCast(s.eps));
+        if (tap) |t| {
+            var name: [24]u8 = undefined;
+            try t.put(t.ctx, try std.fmt.bufPrint(&name, "lm_layer{d}", .{m.layers.len - 1}), a.x, total, s.hidden);
+            try t.put(t.ctx, "lm_norm", a.normed, total, s.hidden);
+        }
+        try lm.g.run(lm.s, a.normed + (total - h.rows) * s.hidden * 2, m.embed, h.logits, h.rows, s.vocab, s.hidden);
+    }
+
     /// The chunk partials of a row block's `q`, over every chunk below its last key.
-    fn chunks(lm: *Lm, s: config.Spec, q: u64, a: Addrs, pos: u64, rows: usize, nch: usize, scale: f32) !void {
+    fn chunks(lm: *Lm, s: config.Spec, q: u64, kc: u64, vc: u64, a: Addrs, pos: u64, rows: usize, nch: usize, scale: f32) !void {
         var args: cuda.Args = .{};
-        for ([_]u64{ q, a.kc, a.vc, pos, a.po, a.pm, a.pl }) |x| args.add(x);
+        for ([_]u64{ q, kc, vc, pos, a.po, a.pm, a.pl }) |x| args.add(x);
         for ([_]usize{ s.heads * s.head_dim, s.heads, s.kv_heads, s.heads / s.kv_heads, chunk_keys, nch }) |x| args.add(@as(c_int, @intCast(x)));
         args.add(scale);
         args.add(@as(u64, 0));
@@ -254,13 +394,20 @@ pub const Lm = struct {
     }
 };
 
-/// One decoder layer over every row; `first` is layer 0, whose residual is the embedding rows themselves.
-fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, ends: []const u32, total: usize, first: bool) !void {
+/// Decoder layer `li` over every row; layer 0's residual is the embedding rows themselves.
+fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, ends: []const u32, total: usize, li: usize, x: Extra) !void {
     const s = m.spec;
     const qw = s.heads * s.head_dim;
     const kvw = s.kv_heads * s.head_dim;
     const eps: f32 = @floatCast(s.eps);
+    const first = li == 0;
     try lm.nm.addRmsH(lm.s, a.x, if (first) null else a.z, l.input_norm, .f32, a.x, a.normed, null, total, s.hidden, eps);
+    const tap0 = if (first) x.tap else null; // layer 0's steps, as a case taps them
+    if (x.tap) |t| if (!first) {
+        var name: [24]u8 = undefined;
+        try t.put(t.ctx, try std.fmt.bufPrint(&name, "lm_layer{d}", .{li - 1}), a.x, total, s.hidden);
+    };
+    if (tap0) |t| try t.put(t.ctx, "lm0_norm", a.normed, total, s.hidden);
     // the projected q goes to a.q, and the attention's rotated rows to a.attn, which the o_proj then reads
     try lm.g.run(lm.s, a.normed, l.q, a.q, total, qw, s.hidden);
     try lm.g.run(lm.s, a.normed, l.k, a.k, total, kvw, s.hidden);
@@ -268,19 +415,23 @@ fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs
     var begin: usize = 0;
     for (ends) |e| {
         defer begin = e;
-        try attention(lm, m, l, a, cap, begin, e);
+        try attention(lm, m, l, a, cap, begin, e, li, x);
     }
+    if (tap0) |t| try t.put(t.ctx, "lm0_attn", a.attn, total, qw);
     try lm.g.run(lm.s, a.attn, l.o, a.z, total, s.hidden, qw);
+    if (tap0) |t| try t.put(t.ctx, "lm0_o", a.z, total, s.hidden);
     try lm.nm.addRmsH(lm.s, a.z, a.x, l.post_norm, .f32, a.x, a.normed, null, total, s.hidden, eps);
+    if (tap0) |t| try t.put(t.ctx, "lm0_post", a.normed, total, s.hidden);
     try lm.g.run(lm.s, a.normed, l.gate, a.gate, total, s.inter, s.hidden);
     try lm.g.run(lm.s, a.normed, l.up, a.up, total, s.inter, s.hidden);
     // in place into gate: each thread reads its 8 values of gate and up before it writes them
     try lm.act.swiglu(lm.s, a.gate, s.inter, a.up, s.inter, a.gate, null, total, s.inter);
     try lm.g.run(lm.s, a.gate, l.down, a.z, total, s.hidden, s.inter);
+    if (tap0) |t| try t.put(t.ctx, "lm0_mlp", a.z, total, s.hidden);
 }
 
-/// One input's rows [begin, end): QK norm, RoPE and the cache write, then causal attention over that cache alone.
-fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, begin: usize, end: usize) !void {
+/// One input's rows [begin, end) at positions from x.start: QK norm, RoPE, the cache write, then causal attention.
+fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, begin: usize, end: usize, li: usize, x: Extra) !void {
     const s = m.spec;
     const hd = s.head_dim;
     const qw = s.heads * hd;
@@ -290,6 +441,8 @@ fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs
     const heads: cuda.qk_rows.Heads = .{ .h = s.heads, .hk = s.kv_heads, .dim = hd };
     const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = l.k_norm, .cos = a.cos, .sin = a.sin, .rot = hd, .eps = @floatCast(s.eps) };
     const len = end - begin;
+    // layer li's own caches when the pass keeps them, else the scratch's one, rewritten by every layer
+    const kc, const vc = if (x.cache) |c| .{ c.kc + li * c.stride, c.vc + li * c.stride } else .{ a.kc, a.vc };
     var p: usize = 0;
     while (p < len) : (p += attn_rows) {
         const rows = @min(attn_rows, len - p);
@@ -299,11 +452,11 @@ fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs
         const kld: i64 = @intCast(kvw);
         const hd64: i64 = @intCast(hd);
         const src: cuda.qk_rows.Src = .{ .q = a.q + (begin + p) * qw * 2, .q_ld = ld, .q_hs = hd64, .k = a.k + k, .k_ld = kld, .k_hs = hd64, .v = a.v + k, .v_ld = kld, .v_hs = hd64 };
-        const dst: cuda.qk_rows.Out = .{ .q = out, .k = a.kb, .v = a.kb + attn_rows * kvw * 2, .kc = a.kc, .vc = a.vc, .len = cap };
-        // a block's first row stands at position p: the position table is the meta the chunks read, shifted too
-        const pos = a.pos + 4 * p;
+        const dst: cuda.qk_rows.Out = .{ .q = out, .k = a.kb, .v = a.kb + attn_rows * kvw * 2, .kc = kc, .vc = vc, .len = cap };
+        // a block's first row stands at position start + p: the position table is the meta the chunks read, shifted too
+        const pos = a.pos + 4 * (x.start + p);
         try lm.qk.rowsFrom(lm.s, src, heads, shape, pos, null, dst, rows);
-        try lm.chunks(s, dst.q, a, pos, rows, nch, scale);
+        try lm.chunks(s, dst.q, kc, vc, a, pos, rows, nch, scale);
         try lm.merge(s, out, a, pos, rows, nch);
     }
 }

@@ -1,6 +1,9 @@
 //! Missing 13.0 resources still refuse qualification after measured rows are restored.
 const std = @import("std");
 const registry = @import("registry.zig");
+test {
+    _ = @import("qwen3_asr_cuda_records.zig");
+}
 const limits = @import("limits.zig");
 const none = registry.none;
 const cuda_pending = registry.cuda_pending;

@@ -46,7 +46,7 @@ zig/kernels/cuda/nemotron_route.cu	65da41432442f9fd99f73abefe87f34cf3c46b4971afe
 zig/kernels/cuda/norms.cu	89d3c6cea39fe3e1bf8d5a2fe60465f7ae272548f14711abb59ddac709d2d1db	raw	main d4541b00e0 (rms_scale shared; same SASS)
 zig/kernels/cuda/nvfp4_experts.cu	9ef08b957b02e1a3ef2ee814aaf79ed15d85ada6b99e6cca2c1cadc1cadd6964	raw
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
-zig/kernels/cuda/prefill_attention.cu	905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged)
+zig/kernels/cuda/prefill_attention.cu	4227f0a9b7a89ac296388a7dcd9e49cd0dd487ed09ee46cc1d4eda94ab8e3741	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged), #2239 (a vision_kernel<64, 8> instance for Qwen3-ASR's audio tower; existing instances unchanged)
 zig/kernels/cuda/prefill_attention_rows.cuh	21975248a7ec9efd199a28324bba837e7b78f066a63b426ab26587cba38fda5e	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
 zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de62f7474255a	raw
 zig/kernels/cuda/prompt16.cu	972fb2f601da2d64549717d27e642363243b0e2df88cfeffa81452216e160ae4	raw
@@ -79,7 +79,7 @@ zig/kernels/cuda/torch_ops/nucleus.cu	c3328dc3ad1fb28c820c343f22c10dd1b4f9a9d8c8
 zig/kernels/cuda/torch_ops/pointwise.cu	3d3118159265538679968e56a8c4b5d61b01c07487530e95e4f93ba8662f98c8	raw
 zig/kernels/cuda/torch_ops/topk.cu	0b5ddb5b02af2ebd9a3992cb11bb80eefd7547c32d6dfdafdf216ab484dd1627	raw
 zig/kernels/cuda/train_mixers.cuh	cec88446cede27c941da254d94f81afa1c92c6880e63bfd66a0efcdc7f95aa13	raw
-zig/kernels/cuda/vit.cu	516fbc7ec65afafd3a368d593c85d21d5ffa0da858703f257c4779745ebc239e	raw
+zig/kernels/cuda/vit.cu	5bdb9bb4e247c1deb6d5e30bc65aa7976786b1a3f55569e1729a87717d2e37b3	raw	#2239 (tf_vit_conv_cols and tf_vit_conv_flatten for Qwen3-ASR's audio tower; existing kernels unchanged)
 zig/src/cuda/abi.zig	fef21a6302d1863001496b3765899a265470cfdf78678d7f73fa7fd3115d2a93	raw	commits ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/aot.zig	bd4e41f32eebf8e75e6f40e036847aaca2900aee7628167552c661824c79d62b	raw	commits 9349e38bb; series patches 14-runtime-foundation.patch, 45-runtime-one-fallback.patch, 46-preserve-nospec-and-capture.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 3a7e6fac7 (identity export for persisted serving states)
 zig/src/cuda/carveout.zig	5ebe77d420ec42d1494fbe7259ce12e20e56427d8f7d931d672b7ca1240b1759	raw	main 6a1feb26e (malformed TF_CUDA_CARVEOUT settings refused by name)
@@ -113,7 +113,7 @@ zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125d
 zig/src/cuda/tp_group.zig	cc353741ff13422e24f5c5434af189c81663e70eaf831afd6ec1e468c8204d25	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally)
 zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0bd5f468ace3	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512)
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
-zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
+zig/src/cuda/vit.zig	0a9200b161e331cf3f5937ff5dcc5c65bcb15e3de8127c277f6a31595d2e5296	raw	#2239 (convCols, convFlatten and the head-64 full attention for Qwen3-ASR's audio tower; existing paths unchanged)
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
 zig/src/families/flashnext/cuda_batch_state.zig	5da910105c3b0fa3a776c582198677bd54d977c821f7314a6494d7e9f7a1cbea	raw	main 4f6017ced (prompt cache marks kept inside the pass), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
