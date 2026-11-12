@@ -19,8 +19,13 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
-| `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off |
+| `TF_CUDA_CARVEOUT` | Exactly `0` or `1`; default off. `1` puts the KV caches in GB10's display reservation first |
+| `TF_CUDA_CARVEOUT_SOURCE` | `drm` (default) or `daemon`: where the reservation comes from, a DRM dumb buffer or a display-memory daemon that lends it ([CUDA recipe](recipes/cuda.md)) |
+| `TF_CUDA_CARVEOUT_SOCKET` | Socket path to the lending daemon without control characters, or empty for `/run/dispram/dispram.sock`; read only when the source is `daemon` |
+| `TF_CUDA_CARVEOUT_KEY` | The daemon protocol's key, no control characters, or empty for `kindlingai_1`; read only when the source is `daemon` |
+| `TF_CUDA_CARVEOUT_KEY_FILE` | A path without control characters to a file whose first line is the daemon's key, or empty for none; atticd keeps it at `/etc/spark-attic/key`. It is read only when the source is `daemon` and `TF_CUDA_CARVEOUT_KEY` is unset. A file that is missing, not a regular file, empty on its first line or 256 bytes or more on it stops the load; the message names this setting but never shows the path or what the file holds |
 | `TF_CUDA_CARVEOUT_MIB` | Positive whole MiB count whose byte size fits the platform, or empty for 1792 MiB |
+| `TF_DRM_CARD` | A device path without control characters to a DRM card, or empty for `/dev/dri/card0`; read only while the carveout is on and its source is `drm` |
 | `TF_Q27_COPY_ROWS` | Whole u32 count; zero disables copied rows; default 48 |
 | `TF_Q27_DRAFT_SLOTS` | Whole u32 count, clamped to 1 through the lane stream limit; default 8. DFlash2 can draft for at most the smaller of this count and the admitted streams, and none without a drafter. |
 | `TF_MTP_DRAFTS` | Whole u32 count, clamped to 1 through the drafter's window less one; existing depth when unset |

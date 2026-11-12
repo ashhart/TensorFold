@@ -79,6 +79,8 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
   layer reads 512 blocks of 4 keys a row, chosen by the model's block indexer, as the Python engine does.
 - `--parallel N` admits N streams. Each stream's caches are its own: about 110 MiB of DeltaNet state and the n-gram
   tail, plus 28 KiB a token of keys, values and indexer keys, and with drafts its MTP head's cache.
+- `TF_CUDA_CARVEOUT=1` (experimental, GB10, one rank) keeps one stream's first attention planes in the display
+  carveout, and the memory budget counts them out of device memory; see [CUDA](cuda.md).
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_READOUT_ROWS` (default 64, `0` never) is the rows from which the hyper-connection read-out takes the prompt
   tiles. Same bits either way; `128` keeps 16-stream decode rounds on the row kernels, up to 7% quicker on a GB10.

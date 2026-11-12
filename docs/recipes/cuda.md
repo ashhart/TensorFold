@@ -124,21 +124,53 @@ parse. The other CUDA families, the HIP engines and Kimi on Metal refuse the fla
 refuses it for any model that is not Dory.
 
 Experimental: on a DGX Spark (GB10), `tensorfold run --carveout` on a CUDA build, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
-`tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
-MemAvailable never counts. The native engine maps a
+`tensorfold-native`, puts Nemotron's and Flash Next's KV caches in the memory the display controller
+reserves, which MemAvailable never counts. The native engine maps a
 DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
-CUDA. It is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
+CUDA. The carveout is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
 planes go there while the carveout holds both, and the rest stays in device memory. The recurrent
 state stays out, because every round reads and writes all of it. Copies into and out of this memory
 run at about half the speed of ordinary memory and kernels reading it keep about 90%, so expect a small
-decode cost. Placement leaves the arithmetic alone, so the output should not change. It needs
+decode cost. Placement leaves the arithmetic alone, so the output should not change. The DRM route needs
 `nvidia_drm modeset=1`, access to the card's device node (`--device /dev/dri/card0` in a
-container) and no display in use. It is off by default. The carveout is all or nothing: when the
+container) and no display in use. The carveout is off by default. It is all or nothing: when the
 driver can't hand over the whole size, the load stops with the failing step named instead of
 running with less or without it. `tf-cuda-test carveout [MiB] [card]`
 checks a machine: round trips from the host and from a kernel, and copy and read bandwidth. It
 skips on a GPU that is not integrated and when it can't open the card. The idea comes from coolbho3k's
 DeepSeek-v4.1-Flash-2x-DGX-Spark.
+
+`TF_CUDA_CARVEOUT_SOURCE=daemon`, with the carveout on, takes the same reservation from a display-memory
+daemon that holds it and lends it in 2 MiB slices, where the default source, `drm`, maps the dumb buffer.
+The placement is the same for both. The size is `TF_CUDA_CARVEOUT_MIB` for both, but the daemon lends whole 2 MiB slices: the ask is rounded up to one and the slice it grants is the size used. kindling spark-os's dispramd listens on
+`/run/dispram/dispram.sock` with a fixed key, which are the defaults; spark-attic's atticd listens on
+`/run/spark-attic/attic.sock` and keeps a key for each box in `/etc/spark-attic/key`. Both speak one
+protocol, so `TF_CUDA_CARVEOUT_SOCKET` and `TF_CUDA_CARVEOUT_KEY`, or `TF_CUDA_CARVEOUT_KEY_FILE` for a key
+kept in a file, name whichever one a box runs. The key file is read only for this source. The claim is one
+`SOCK_SEQPACKET` datagram each way, a JSON object, and the memory comes back as a descriptor by `SCM_RIGHTS`.
+The engine maps that slice with CUDA's virtual-memory calls, so this source works where the driver refuses a
+dumb buffer (the driver on kindling spark-os refuses `DRM_IOCTL_MODE_CREATE_DUMB`), and it needs neither the
+card's device node nor `modeset=1`. A daemon that does not answer within 10 seconds, a refused claim, a slice
+shorter than asked and a key file that is missing, not a regular file or empty on its first line each stop the
+load with the cause named. The GPU's L2 cache does not hold the lent slice. On a GB10 with dispramd, reading the same 8 MiB 200 times ran at
+209 GB/s from the slice against 810 GB/s from ordinary device memory, while one pass over 1.5 GiB ran the same
+(244 against 238 GB/s) and a `cuMemcpyDtoD` into or out of the slice ran at about half speed (59 against 111 GB/s).
+A kernel that rereads rows, as attention over a KV cache does, runs at memory speed and not cache speed, which is the
+likely cause of what Nemotron measured: a 108,012-token prompt took a 35.6 s prefill against 22.4 s and 11.5 ms a token
+of decode against 8.85, with the output unchanged. A short prompt measured the same as without the carveout. The DRM
+source behaves differently: on DGX OS (driver 580.178.04, 4 KiB pages) a registered dumb buffer reread at 711 GB/s
+against 844 for ordinary memory, streamed at 157 against 259 GB/s, and the same 108,012-token prompt measured the same
+prefill (22.4 s) and decode within 2% of running without the carveout. Measure a daemon's slice on the box before
+relying on it.
+
+Flash Next keeps one contiguous cache there at a time, as many whole planes of a full window as the
+carveout holds: the keys and values of the first attention layers, then their indexer keys, then their
+pooled keys. At 262,144 tokens the default 1,792 MiB holds three layers' keys and values and four layers'
+indexer keys, all of it; a daemon's 2,044 MiB reservation holds three more indexer keys and three pooled
+keys, 2,032 MiB. A shorter cache takes the same planes, so it fits too. The DeltaNet state, the MTP head's
+cache and the pages of `TF_FLASHNEXT_KV_PAGES` stay in device memory. The memory budget counts those planes
+out of the first stream's window, so the other streams' pages, or the streams admitted, grow by them; the
+startup log names the planes and the bytes. It needs one rank.
 
 Preparing a DGX Spark for the carveout:
 

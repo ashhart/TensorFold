@@ -113,6 +113,7 @@ test "a leader whose peer leaves after the image broadcast is enqueued drains be
     var engine: prompt.Engine = undefined;
     engine.driver = &d;
     engine.stream = &stream;
+    engine.carve = null;
     var pair: [2]c_int = undefined;
     var s = try session(&engine, 0, &pair);
     defer close(pair);
@@ -134,6 +135,7 @@ test "a follower whose image broadcast fails after it is enqueued keeps the feat
     var engine: prompt.Engine = undefined;
     engine.driver = &d;
     engine.stream = &stream;
+    engine.carve = null;
     var v: images.Vision = undefined;
     v.a = a;
     v.limits = .{};

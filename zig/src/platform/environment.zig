@@ -42,8 +42,13 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
-    .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 puts the KV caches in GB10's display memory first)" },
+    .{ .name = "TF_CUDA_CARVEOUT_SOURCE", .scope = .cuda, .kind = .word, .words = &.{ "drm", "daemon" }, .forms = "drm or daemon, or empty for drm: where the reservation comes from" },
+    .{ .name = "TF_CUDA_CARVEOUT_SOCKET", .scope = .cuda, .kind = .path, .forms = "a socket path without control characters to the daemon; empty for /run/dispram/dispram.sock" },
+    .{ .name = "TF_CUDA_CARVEOUT_KEY", .scope = .cuda, .kind = .path, .forms = "the daemon protocol key without control characters; empty for kindlingai_1" },
+    .{ .name = "TF_CUDA_CARVEOUT_KEY_FILE", .scope = .cuda, .kind = .path, .forms = "a path without control characters to a file whose first line is the daemon's key; empty for none" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
+    .{ .name = "TF_DRM_CARD", .scope = .cuda, .kind = .path, .forms = "a device path without control characters to a DRM card; empty for /dev/dri/card0" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
@@ -372,13 +377,17 @@ pub const Flags = struct {
 
 /// The environment is injectable so the actual startup validator runs against host fixtures without a GPU.
 pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]const u8 {
+    // The carveout's own rows only matter once it is on; the daemon's belong to the daemon source, the card's to drm.
+    const carve_on = flags.carveout or std.mem.eql(u8, environment.get("TF_CUDA_CARVEOUT") orelse "0", "1");
+    const lend = std.mem.eql(u8, environment.get("TF_CUDA_CARVEOUT_SOURCE") orelse "drm", "daemon");
     for (rules) |r| {
         if (!flags.includes(r.scope) or masked(r, environment)) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_DEVICE") and flags.device != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_SEGMENTS") and flags.segments != null) continue;
         if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT") and flags.carveout) continue;
-        if (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT_MIB") and !flags.carveout and
-            !std.mem.eql(u8, environment.get("TF_CUDA_CARVEOUT") orelse "0", "1")) continue;
+        if (!carve_on and std.mem.startsWith(u8, r.name, "TF_CUDA_CARVEOUT_")) continue;
+        if (!lend and (std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT_SOCKET") or std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT_KEY") or std.mem.eql(u8, r.name, "TF_CUDA_CARVEOUT_KEY_FILE"))) continue;
+        if (std.mem.eql(u8, r.name, "TF_DRM_CARD") and (!carve_on or lend)) continue;
         if (std.mem.eql(u8, r.name, "TF_DRAFT_NODES") and environment.get("TF_NO_TREES") != null) continue;
         const raw = environment.get(r.name) orelse continue;
         _ = parse(r.name, raw) catch return try describe(a, r.name, raw);
