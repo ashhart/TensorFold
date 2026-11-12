@@ -35,7 +35,8 @@ pub fn join(gpa: std.mem.Allocator, io: std.Io, j: collective.Join) collective.J
         .rccl = version,
         .ident = j.ident,
     };
-    g.link, g.id, const words = try link_mod.Link.open(io, host, j.port, mine, hello, j.policy.words(), j.fault);
+    const secret = try @import("sys").rank_auth.Secret.fromEnv(); // TF_RANK_SECRET_FILE: the key every rank proves
+    g.link, g.id, const words = try link_mod.Link.open(io, host, j.port, mine, hello, j.policy.words(), j.fault, &secret);
     g.rank = j.rank;
     g.world = j.world;
     g.comm = null;
