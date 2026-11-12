@@ -148,6 +148,7 @@ test {
     _ = @import("late_system_test.zig");
     _ = @import("compact.zig");
     _ = @import("compact_test.zig");
+    _ = @import("private_files_test.zig");
     _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
