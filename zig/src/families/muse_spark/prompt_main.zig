@@ -7,8 +7,9 @@ const muse = @import("muse_spark");
 const Model = muse.forward.Model;
 const Row = muse.forward.Row;
 
-fn env(name: [*:0]const u8, default: usize) usize {
-    const v = std.c.getenv(name) orelse return default;
+/// A developer knob's whole number (`std.c.getenv("MUSE_...")` at the call, so the name stays a literal).
+fn env(raw: ?[*:0]const u8, default: usize) usize {
+    const v = raw orelse return default;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
 }
 
@@ -35,9 +36,9 @@ fn greedy(model: *Model, s: cuda.Stream, slot: u32, pos0: usize, first: i32, out
 pub fn run(gpa: std.mem.Allocator, ar: std.mem.Allocator, io: std.Io, driver: *const cuda.Driver, args: []const [:0]const u8, rank: usize, world: usize, comm: ?tp.Collective) !void {
     var s = try cuda.Stream.init(driver, false);
     defer s.deinit();
-    const context = env("MUSE_CONTEXT", 8192);
-    const G = env("MUSE_GREEDY", 32);
-    const max_layers: ?usize = if (env("MUSE_LAYERS", 0) > 0) env("MUSE_LAYERS", 0) else null;
+    const context = env(std.c.getenv("MUSE_CONTEXT"), 8192);
+    const G = env(std.c.getenv("MUSE_GREEDY"), 32);
+    const max_layers: ?usize = if (env(std.c.getenv("MUSE_LAYERS"), 0) > 0) env(std.c.getenv("MUSE_LAYERS"), 0) else null;
     var w = try muse.load.load(gpa, io, driver, args[2], rank, world, .{ .max_layers = max_layers, .log = rank == 0 });
     defer w.deinit();
     var k3 = try muse.exl3.Kernels.load(driver);
