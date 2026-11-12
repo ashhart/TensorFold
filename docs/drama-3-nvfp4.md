@@ -60,8 +60,10 @@ reference voice and about 4.5 s replies, timed by the client.
 - **Mac memory.** Metal maps the packed experts from the checkpoint files, so the process footprint leaves them out.
   The 7,369-expert server keeps 28.5 GiB wired between requests; the load is refused above 70% of RAM
   (`DRAMA_LOAD_LIMIT_GB` sets another limit).
-- **Second lane.** On the Mac, a request on a lane that has not yet prefilled its voice's reference waits for that
-  prefill: the concurrent streamed reply's first audio came at 5.6 s.
+- **Second lane.** On the Mac, the concurrent streamed replies recorded first audio at 6.07 s (7,369 experts) and
+  6.22 s (5,900), with total times of 8.47/8.66 s and an RTF of 1.90 for each. A lane without a cached reference
+  waits for its own reference prefill. These historical first-audio timings, including the table's 0.94 s, used
+  buffered 65,536-byte reads and are upper bounds, not first-byte measurements; the current checker uses `read1()`.
 
 ## Checks
 
