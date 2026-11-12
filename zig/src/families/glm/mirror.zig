@@ -76,7 +76,8 @@ pub fn follow(e: *Engine, sl: *Slots) !void {
     const quiet: eng.Out = .{ .ctx = &dummy, .prefilled = eng.Quiet.prefilled, .tokens = eng.Quiet.tokens, .cancelled = eng.Quiet.cancelled };
     while (try ep.ctl.waitCommand()) |cmd| switch (cmd) {
         .request => |r| _ = e.generate(r.prompt, r.max_tokens, r.eos, r.depth, quiet) catch |err| switch (err) {
-            error.ContextFull, error.EmptyPrompt => continue, // refused before its first step, on rank 0 too
+            // refused before its first step, on rank 0 too
+            error.ContextFull, error.EmptyPrompt, error.TokenOutsideVocabulary => continue,
             else => return err,
         },
         .lanes => |l| try apply(sl, l.kind, l.words, &wins, &drafts),

@@ -18,6 +18,7 @@ const Model = fz.Model;
 const finish = Model.finish;
 
 pub fn mtpRun(m: *Model, nexts: []const u32, streams: Buf) !u32 {
+    if (!Model.inVocab(nexts)) return error.TokenOutsideVocabulary;
     const r = m.r;
     const h = &m.mtp;
     const rows = nexts.len;
