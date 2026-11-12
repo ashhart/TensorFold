@@ -139,14 +139,12 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.pool.items.len > 0 and !l.paged_only) return true;
-    const pg = l.pages orelse return true;
-    return pg.fits(prompt, max_tokens);
+    return if (l.pages) |pg| pg.fits(prompt, max_tokens) else true;
 }
 
 /// The pool the lane host's ledger admits this family's promises by (#1943).
 pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    return if (l.pages) |pg| &pg.pool else null;
+    return if (@as(*Lanes, @ptrCast(@alignCast(p))).pages) |pg| &pg.pool else null;
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -258,8 +256,7 @@ pub const openDrafter = drafter_open.openDrafter;
 pub const explain = @import("cuda_native_explain.zig").explain;
 
 fn release(p: *anyopaque) void {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    l.deinit();
+    @as(*Lanes, @ptrCast(@alignCast(p))).deinit();
 }
 
 /// The device draw of a stream's rule at `position`: sample.cu's keyed rule, greedy at temperature 0 or without one.
