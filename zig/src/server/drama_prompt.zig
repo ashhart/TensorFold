@@ -95,6 +95,9 @@ pub fn tagged(a: Allocator, input: []const u8) Allocator.Error![]const u8 {
     return std.mem.concat(a, u8, &.{ "<|speaker:0|> ", input });
 }
 
+/// The index in ``segments`` of the request's own segment, its speaker-tagged text.
+pub const request_segment = 4;
+
 /// The prompt's segments for a checked ``input`` (``problem`` returned null), each tokenized on its own.
 pub fn segments(a: Allocator, input: []const u8) Allocator.Error![segment_count][]const u8 {
     return .{ "<|im_start|>system\n", tts_instruction, message_end, "<|im_start|>user\n", try tagged(a, input), message_end, generation_start };
@@ -102,9 +105,30 @@ pub fn segments(a: Allocator, input: []const u8) Allocator.Error![segment_count]
 
 /// The prompt's ids: each segment encoded with the server's tokenizer as ``tokenizer.encode(segment).ids`` encodes it.
 pub fn encode(a: Allocator, text: model_text.Text, input: []const u8) model_text.Error![]u32 {
+    return (try encodeCounted(a, text, input)).ids;
+}
+
+/// A prompt's ids and how many of them the request segment encoded to, special tokens included.
+pub const Counted = struct { ids: []u32, text_tokens: usize };
+
+/// ``encode``, also counting the request text's share of the ids as the prompt encodes it.
+pub fn encodeCounted(a: Allocator, text: model_text.Text, input: []const u8) model_text.Error!Counted {
     var ids: std.ArrayList(u32) = .empty;
-    for (try segments(a, input)) |segment| try ids.appendSlice(a, try text.encode(a, segment, true));
-    return ids.items;
+    var own: usize = 0;
+    for (try segments(a, input), 0..) |segment, i| {
+        const part = try text.encode(a, segment, true);
+        if (i == request_segment) own = part.len;
+        try ids.appendSlice(a, part);
+    }
+    return .{ .ids = ids.items, .text_tokens = own };
+}
+
+test "the request segment is the speaker-tagged input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "hello", "  hello", "\u{3000}<|speaker:1|> hi" }) |input|
+        try std.testing.expectEqualStrings(try tagged(a, input), (try segments(a, input))[request_segment]);
 }
 
 test "white space is the Unicode property, not Python's str.strip set" {
