@@ -7,7 +7,7 @@ const c = core.c;
 const Model = core.Model;
 const tokens = core.tokens;
 const budget = core.budget;
-const gateRefAsh = core.gateRefAsh;
+const gateRefOracle = core.gateRefOracle;
 const f32Of = core.f32Of;
 const poisonedShell = core.poisonedShell;
 const violated = core.violated;
@@ -236,8 +236,8 @@ pub const Decode = struct {
         var st: [16 * 128 * 128]f64 = @splat(0);
         for (0..16 * 128 * 128) |i| st[i] = f32Of(state_in_bits, i);
         for (0..16) |h| {
-            // HOST Ash chain: the exact bf16 rounds the decode prologue does
-            const gref = gateRefAsh(
+            // HOST oracle chain: the exact bf16 rounds the decode prologue does
+            const gref = gateRefOracle(
                 a_bits[h],
                 b_bits[h],
                 f32Of(a_log_bits, h),
@@ -327,7 +327,7 @@ pub const Decode = struct {
 
 // ---- Gated norm ----
 
-// gatedNorm tokens=4: PER-HEAD 128-wide RMS (Ash gdn_post), [4,16,128]; out=bf16(silu_div(z)*bf16(w*(x*inv))).
+// gatedNorm tokens=4: PER-HEAD 128-wide RMS (oracle gdn_post), [4,16,128]; out=bf16(silu_div(z)*bf16(w*(x*inv))).
 pub const Norm = struct {
     a: std.mem.Allocator,
     y_bits: []u16, // norm input

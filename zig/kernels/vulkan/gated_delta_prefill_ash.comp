@@ -1,4 +1,6 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/gated_delta_prefill.comp at 7d3f69ff2010.
+// Code adapted: 3 lines added or changed, 7 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 
 #extension GL_EXT_shader_16bit_storage : require
@@ -180,9 +182,9 @@ void main() {
 
   for (uint t = t_begin; t < t_end; ++t) {
     uint t_head = t * hv + head;
-    // ASH arm: no mask binding; the host rejects flag bit 1, so every token is valid.
+    // Oracle arm: no mask binding; the host rejects flag bit 1, so every token is valid.
     bool tok = true;
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // Double buffer: even and odd tokens use alternate shared slots.
     uint buf = t & 1u;
     sk[buf][tid] = bf16_load(k_buf.v[params.rhs_offset + t_head * DK + tid]);
     sq[buf][tid] = bf16_load(q_buf.v[params.lhs_offset + t_head * DK + tid]);

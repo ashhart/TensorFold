@@ -1,4 +1,4 @@
-// Single-sequence Qwen3.5-2B Vulkan matches Ash8c Metal (24 layers: 18 GDN, 6 attention); GPU calls via vk.orExit.
+// Single-sequence Qwen3.5-2B Vulkan matches the Metal oracle (24 layers: 18 GDN, 6 attention); GPU calls via vk.orExit.
 const std = @import("std");
 const vk = @import("vulkan");
 const pinned = @import("../../config.zig");
@@ -123,7 +123,7 @@ pub const Core = struct {
         c.scratch.reset(mark) catch {};
     }
 
-    // The dense MLP: Q4 gate and up projections, the ASH single-round SwiGLU, and the Q4 down projection into `r_out`.
+    // The dense MLP: Q4 gate and up projections, the one-round oracle SwiGLU, and the Q4 down projection into `r_out`.
     pub fn mlp(c: *const Core, x: View, rows: usize, m: weights.DenseMlp, r_out: View) !void {
         const mark = c.scratch.mark();
         errdefer c.scratch.reset(mark) catch {};

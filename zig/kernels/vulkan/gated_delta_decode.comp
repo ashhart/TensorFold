@@ -1,4 +1,6 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// From omarchy-mlx overlay/mlx/backend/omarchy/shaders/gated_delta_decode.comp at 16c800c7e89d.
+// Code adapted: 5 lines added or changed, 3 removed.
+// Copyright © 2026 Joshua Warren and mlx-omarchy contributors; MIT License, full text in LICENSES/mlx-omarchy-MIT.txt.
 #version 460
 
 #extension GL_EXT_shader_16bit_storage : require
@@ -55,7 +57,6 @@ uint16_t bf16_store(float value) {
   return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
 }
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
 const uint ROWS = 32u;
 const uint TILE_STRIDE = 129u;  // padded: row r, column i -> bank (r + i) % 32
 
@@ -64,7 +65,7 @@ shared float sq[128];
 shared float skg[128];
 shared float tile[ROWS * TILE_STRIDE];
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// One decayed state row's k-weighted sum; mlx_order selects MLX's rounding order.
 float gdn_kv_walk(uint trow, uint dk, float g, bool mlx_order) {
   float kv_acc = 0.0f;
   for (uint i = 0u; i < dk; ++i) {
@@ -102,7 +103,7 @@ float gdn_softplus_ew(float x) {
   return value;
 }
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// Decay gate g = exp(-exp(a_log) * softplus(x)), each step rounded separately.
 float gdn_g_composed(float x, float a_log) {
   float sp = gdn_softplus_ew(x);
   precise float e = exp(a_log);
@@ -125,7 +126,7 @@ vec2 gdn_gates(uint head) {
     float beta_f = 1.0f / (1.0f + exp(-b_in));
     beta = bf16_load(bf16_store(beta_f));
     float a_in = bf16_load(g_buf.v[params.shape[0] + head]);
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // ph: head index within one batch row (in_strides[2] heads per row).
     uint ph = head % params.in_strides[2];
     float a_log;
     if ((params.flags & 512u) != 0u) {
@@ -145,7 +146,7 @@ vec2 gdn_gates(uint head) {
 #endif /* GDN_COMPOSED_ORDER */
     float x = bf16_load(bf16_store(a_in + dt));
 #ifdef ASH_QWEN35
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // Qwen3.5 gate: bf16 softplus, then g = exp(-(exp(a_log) * sp)).
     float sp = bf16_load(bf16_store(max(x, 0.0f) + log(1.0f + exp(-abs(x)))));
     g = exp(-(exp(a_log) * sp));
 #else /* ASH_QWEN35 */
@@ -194,7 +195,7 @@ void main() {
   float g = gates.x;
   float beta = gates.y;
 #ifdef GDN_COMPOSED_ORDER
-  // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+  // khead: the key head shared by this value head (in_strides[2] value and in_strides[3] key heads per row).
   uint khead = head;
   if (params.in_strides[3] != 0u) {
     uint hv_b = params.in_strides[2];

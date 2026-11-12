@@ -1,4 +1,4 @@
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// Vulkan host dispatch for the Gated DeltaNet kernels.
 
 const std = @import("std");
 const dispatch = @import("dispatch.zig");
@@ -37,7 +37,7 @@ comptime {
 pub const Shaders = struct {
     /// conv_dw1d.comp -DUSE_BF16
     conv_dw1d_bf16: []align(4) const u8,
-    // gdn_conv_decode.comp -DUSE_BF16 (no APPLE_REDUCTION: the Ash arm uses flag bit 0 only)
+    // gdn_conv_decode.comp -DUSE_BF16 (no APPLE_REDUCTION: the oracle arm uses flag bit 0 only)
     gdn_conv_decode_bf16: []align(4) const u8,
     /// gdn_split.comp -DUSE_BF16
     gdn_split_bf16: []align(4) const u8,
@@ -223,7 +223,7 @@ pub const Gdn = struct {
         try m.split_bf16.run(cmds, std.mem.asBytes(&p), .{ plan.tokens, 3 * Model.heads, 1 }, timeout_ns);
     }
 
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // Depthwise conv over the stored conv state and the new tokens, then the SoA split to q/k/v, g and beta.
     pub fn convPrefill(m: *Gdn, cmds: *Commands, out_soa: View, g_out: View, beta_out: View, conv_out: View, conv_input: View, conv_state_in: View, qkv: View, weight: View, a: View, b: View, a_log: View, dt: View, conv_state_out: View, tokens: u64, timeout_ns: u64) Error!void {
         try wantBf16(&.{ conv_out, conv_input, conv_state_in, qkv, weight, a, b, dt, conv_state_out });
         try wantSplitOutputs(out_soa, g_out, beta_out);
@@ -270,7 +270,7 @@ pub const Gdn = struct {
         try m.split(cmds, out_soa, g_out, beta_out, activated, a, b, a_log, dt, 1, timeout_ns);
     }
 
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // Delta-net prefill recurrence: h0 in, hf out, y written; snap is an optional f32 side output.
     pub fn prefillRecur(m: *Gdn, cmds: *Commands, soa: View, g: View, beta: View, h0: View, y: View, hf: View, snap: ?View, tokens: u64, chunk: u64, timeout_ns: u64) Error!void {
         try wantBf16(&.{ soa, beta, y });
         try wantF32(&.{ g, h0, hf });
@@ -342,7 +342,7 @@ pub const Gdn = struct {
         try m.decode_bf16.run(cmds, std.mem.asBytes(&p), .{ Model.heads, Model.head_dim / 32, 1 }, timeout_ns);
     }
 
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // Gated RMSNorm of y with weight, gated by z.
     pub fn gatedNorm(m: *Gdn, cmds: *Commands, out: View, y: View, z: View, weight: View, rows: u64, eps: f32, timeout_ns: u64) Error!void {
         try wantBf16(&.{ out, y, z, weight });
         const plan = try gatedNormPlan(out.elements, y.elements, z.elements, weight.elements, rows, eps);
