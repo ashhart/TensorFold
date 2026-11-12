@@ -43,6 +43,11 @@ fn wideWindows() !bool {
     return @import("sys").environment.read(bool, "TF_QWEN35_CPU_WINDOWS", false);
 }
 
+/// TF_QWEN35_CPU_TRACE=1: each one-token draw's top two logits and their margin on stderr, read once at open.
+fn tracing() !bool {
+    return @import("sys").environment.read(bool, "TF_QWEN35_CPU_TRACE", false);
+}
+
 pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const started = std.Io.Timestamp.now(io, .awake);
     const model = q.Model.load(gpa, io, o.dir, try threads()) catch |err| {
@@ -65,7 +70,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
-    h.cpu = try q.backend.Cpu.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(served, 2) }, try wideWindows());
+    h.cpu = try q.backend.Cpu.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(served, 2), .trace = try tracing() }, try wideWindows());
     errdefer h.cpu.deinit();
     h.config = try lanes.Config.init(gpa, h.cpu.facts(), q.state.window_rows, q.state.window_rows - 1);
     errdefer h.config.deinit(gpa);

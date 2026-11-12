@@ -162,6 +162,7 @@ test "profile line: new rows and every grouped member report real names and scop
         .{ .name = "GEMMA_DRAFT_BF16", .raw = "self_attn.q_proj", .family = "gemma4", .backend = "metal", .class = "debug" },
         .{ .name = "TF_ANE_COLUMNS", .raw = "3072", .family = "qwen3_5", .backend = "metal", .class = "experimental" },
         .{ .name = "TF_PROMPT_ROWS", .raw = "128", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
+        .{ .name = "TF_QWEN35_CPU_WINDOWS", .raw = "1", .family = "qwen3_5", .backend = "cpu", .class = "identical" },
         .{ .name = "TF_SLIDE_POCKET_KEY", .raw = "both", .family = "nemotron_h", .backend = "metal", .class = "experimental" },
         .{ .name = "TF_SLIDE_EDIT", .raw = "0", .family = "nemotron_h", .backend = "metal", .class = "experimental" },
         .{ .name = "TF_SLIDE_PROBE", .raw = "", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },

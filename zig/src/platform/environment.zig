@@ -3,7 +3,7 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
+pub const Scope = enum { common, cuda, metal, xpu, cpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
@@ -71,9 +71,9 @@ const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
-    .{ .name = "TF_QWEN35_CPU_THREADS", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (CPU worker threads beside the engine thread; unset: the logical CPUs less one)" },
-    .{ .name = "TF_QWEN35_CPU_WINDOWS", .scope = .common, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN35_CPU_TRACE", .scope = .common, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_QWEN35_CPU_THREADS", .scope = .cpu, .kind = .positive, .max = 255, .forms = "a whole number from 1 to 255 (CPU worker threads beside the engine thread; unset: the logical CPUs less one)" },
+    .{ .name = "TF_QWEN35_CPU_WINDOWS", .scope = .cpu, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_QWEN35_CPU_TRACE", .scope = .cpu, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },

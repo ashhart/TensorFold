@@ -142,6 +142,7 @@ pub const valid = [_]Case{
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DFLASH_ADAPTIVE_BLOCK", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CPU_THREADS", .raw = "4", .n = 4 },
+    .{ .name = "TF_QWEN35_CPU_THREADS", .raw = "255", .n = 255 },
     .{ .name = "TF_QWEN35_CPU_WINDOWS", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CPU_TRACE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },

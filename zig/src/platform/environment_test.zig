@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .cpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true, .hub = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -60,7 +60,8 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
         .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },          .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
-        .{ "TF_QWEN35_CPU_THREADS", "0" },             .{ "TF_QWEN35_CPU_WINDOWS", "yes" },
+        .{ "TF_QWEN35_CPU_THREADS", "0" },             .{ "TF_QWEN35_CPU_THREADS", "256" },
+        .{ "TF_QWEN35_CPU_WINDOWS", "yes" },           .{ "TF_QWEN35_CPU_TRACE", "2" },
         .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" },        .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
         .{ "TF_CUDA_SEGMENTS", "0" },                  .{ "TF_CUDA_SEGMENTS", "5" },
         .{ "TF_CUDA_CARVEOUT", "true" },               .{ "TF_CUDA_CARVEOUT", "01" },
@@ -342,3 +343,24 @@ test "environment: a malformed calibration setting stops a Metal start naming th
         try t.expect((try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, .{ .cuda = true })) == null);
     }
 }
+<<<<<<< HEAD
+=======
+
+test "environment: Qwen host GiB cap is strict, bounded and blank as unset" {
+    const name = "TF_QWEN_KV_HOST_GIB";
+    for ([_]?[]const u8{ null, "", " \t\r\n" }) |raw| try t.expectEqual(@as(u64, 0), try e.value(u64, name, raw, 0));
+    try t.expectEqual(@as(u64, 8), try e.value(u64, name, "8", 0));
+    try t.expectEqual(@as(u64, std.math.maxInt(u64) >> 30), try e.value(u64, name, "17179869183", 0));
+    for ([_][]const u8{ "0", "-1", "bad", "1.5", "17179869184" }) |raw| try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 0));
+}
+
+test "environment: the CPU engine's settings are refused only by a build that serves the CPU engine" {
+    for ([_][]const u8{ "TF_QWEN35_CPU_THREADS", "TF_QWEN35_CPU_WINDOWS", "TF_QWEN35_CPU_TRACE" }) |name| {
+        const bad = Env{ .name = name, .raw = "typo" };
+        for ([_]e.Flags{ .{ .cuda = true }, .{ .metal = true }, .{ .xpu = true } }) |gpu| try t.expect(try e.refusal(a, bad, gpu) == null);
+        const why = (try e.refusal(a, bad, .{ .cpu = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.startsWith(u8, why, name));
+    }
+}
+>>>>>>> cpu: the TF_QWEN35_CPU_* settings in their own scope, checked only where the CPU engine is built

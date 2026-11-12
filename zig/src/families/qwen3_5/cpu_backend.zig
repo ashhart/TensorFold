@@ -10,7 +10,13 @@ const draws = @import("draw.zig");
 const mask_words = draws.mask_words;
 pub const draw = draws.draw;
 
-pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
+pub const Options = struct {
+    capacity: usize,
+    chunk: usize = 128,
+    streams: u32 = 8,
+    /// Each one-token draw's top two logits and their margin on stderr; the caller reads TF_QWEN35_CPU_TRACE once.
+    trace: bool = false,
+};
 
 pub const Cpu = struct {
     gpa: std.mem.Allocator,
@@ -94,7 +100,7 @@ pub const Cpu = struct {
         const cache = try self.cacheOf(stream);
         if (position != cache.len) return error.InvalidQwenPosition;
         const drawn = try draw(self.gpa, cache.logits, stream.sampling, position, &.{});
-        if (try tracing()) trace(cache.logits, position, drawn);
+        if (self.options.trace) trace(cache.logits, position, drawn);
         return drawn;
     }
 
@@ -115,7 +121,7 @@ pub const Cpu = struct {
         };
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
         const drawn = try draw(self.gpa, cache.logits, stream.sampling, position, &.{});
-        if (try tracing()) trace(cache.logits, position, drawn);
+        if (self.options.trace) trace(cache.logits, position, drawn);
         return drawn;
     }
 
@@ -149,7 +155,7 @@ pub const Cpu = struct {
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
                 t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
-                if (try tracing()) trace(logits[(base + r) * c.vocab ..][0..c.vocab], p, t.*);
+                if (self.options.trace) trace(logits[(base + r) * c.vocab ..][0..c.vocab], p, t.*);
             }
             @memcpy(o.drafts, w.tokens);
             base += w.rows();
@@ -173,11 +179,6 @@ pub const Cpu = struct {
         }
     }
 };
-
-/// TF_QWEN35_CPU_TRACE=1: each one-token draw's top two logits and their margin on stderr.
-fn tracing() !bool {
-    return @import("sys").environment.read(bool, "TF_QWEN35_CPU_TRACE", false);
-}
 
 fn trace(logits: []const u16, position: u64, drawn: u64) void {
     var best: usize = 0;
