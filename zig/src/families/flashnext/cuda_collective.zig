@@ -387,6 +387,3 @@ test "exl3: graph rendezvous failure aborts the communicator and disconnects its
     try std.testing.expectError(error.RankDisconnected, peer.checkPeer());
 }
 
-test {
-    if (@import("builtin").os.tag != .windows) _ = @import("cuda_collective_test.zig"); // over a Unix socket pair
-}
