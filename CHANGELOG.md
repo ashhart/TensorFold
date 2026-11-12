@@ -151,7 +151,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: kernels nothing launches are removed: Qwen3.8-27B's `prompt_glue.metal` and `prompt_state.metal` (six `q27_prompt_*` kernels) and core's `tf_lane_rope` with `Attention.rotate`; saved Qwen3.8-27B prompt states on Metal are recomputed once after upgrading, since their identity covers the kernel sources (#3065, part of #2251). Thanks to @jschmied.
 - Tests: main's nightly is green again. The Flash Next learn, prompt and compare tools build again on Linux (#2585 had put one file in two modules), and the dense serving and serving-identity pins take the changes #2579, #2585, #2285, #2205 and #2789 made, each named beside its pin. Serving is unchanged (#3002).
 - HIP: Qwen3.8-Flash-Next's MTP head takes a prompt chunk on the prompt tiles, not a decode window at a time, so cold prompts finish about 5% sooner at 8K and 32K on a Radeon 8060S (gfx1151). Replies are unchanged; the head's caches and drafts are not bit-identical to before (#1878). Thanks to @gilby.
-- CUDA Qwen3.8 on sm_110: the development build refuses unqualified FP8 KV, INT8 prompt, YaRN override and experimental Qwen serving switches at load, while the default BF16 KV path remains available (part of #2319).
 
 - Cortheon (`--cortheon`): DuckDuckGo results are kept, and its ads still skipped, when only the spelling differs (either quote style, a `class` attribute in any letter case, an unquoted `href`, spaces around its `=`, or a line break before it); a duplicate whose scheme or host differs only in letter case is dropped while paths and queries keep their case, and the PyPI, npm and crates.io allow-list takes the host in any case with the path exact (#2750). Thanks to @ppardus.
 
@@ -187,6 +186,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: the image towers' and Spark2.5's and Llama's prompt GEMMs share one `gemm_nax` kernel macro, with the same preprocessed source; Qwen3.8-27B saved prompt states on Metal are recomputed once after upgrading (#2787, part of #2251). Thanks to @jschmied.
 
 - GLM-5.3-Flash on Metal: the TP2 sparse-attention and KDA-rows kernels are the full kernels' templates at 32 heads, with the same compiled code; saved GLM prompt states on Metal are recomputed once after upgrading (#2786, part of #2251). Thanks to @jschmied.
+
 
 - Metal: Qwen 3.5, LFM2-MoE, MiniMax-M3 (with its DFlash2 and DSpark drafters), Step-5 and Spark-X read MLX affine modules through one core reader, `core/quant/mlx_affine.zig`, and LFM3 takes its modules' stored shapes from it while keeping its own checks; loads are unchanged, and a module the reader refuses now reports `UnexpectedAffineTensor` and is named in the log (#2583, part of #2460). Thanks to @jschmied.
 
