@@ -90,8 +90,10 @@ test "rank start: a peer that closes its link during the wait ends it at once, b
     }
 }
 
-test "rank start: the loader's first collective waits for the peer's load" {
+test "rank start: the loader's first collective waits for the peer's load, and a failed wait frees the engine" {
     const load = @embedFile("cuda_lanes_load.zig");
     try std.testing.expect(std.mem.indexOf(u8, load, "benchmark_group.") == null);
-    try std.testing.expect(std.mem.indexOf(u8, load, "try r.afterLoad(io, ctx, own.stream);") != null);
+    const wait = std.mem.indexOf(u8, load, "try r.afterLoad(io, ctx, own.stream);") orelse return error.TestUnexpectedResult;
+    const free = std.mem.indexOf(u8, load, "errdefer own.engine.deinit();") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(free < wait);
 }
