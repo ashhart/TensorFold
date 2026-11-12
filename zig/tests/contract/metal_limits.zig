@@ -117,7 +117,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "living-native ")) {
         if (!assemble) return undefined;
-        const body = try registry.living_native.source(@import("qwen4").family, a, d.name);
+        const body = try contract.living_native.source(@import("qwen4").family, a, d.name);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
     if (std.mem.startsWith(u8, d.name, "qwen4-native ")) {

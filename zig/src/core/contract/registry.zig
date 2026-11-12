@@ -14,7 +14,6 @@ pub const CudaRecord = struct {
     /// Keep the independent later compiler selection when adding a late 13.0 receipt.
     later_pending: bool = false,
 };
-pub const living_native = @import("living_native_records.zig");
 const target = @import("registry_target.zig");
 pub const TargetDecision = target.TargetDecision;
 pub const targetDecision = target.targetDecision;
@@ -588,7 +587,6 @@ test {
     _ = @import("glm_l2pf_pending.zig");
     _ = @import("exl3_prompt_pending.zig");
     _ = @import("registry_pending_test.zig");
-    _ = @import("living_native_records.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");
 }
