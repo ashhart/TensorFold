@@ -5,6 +5,7 @@ const pkg = @import("dsv41_metal");
 const host = @import("dsv41");
 const fixture = @import("fixture.zig");
 const timing = @import("timing_real.zig");
+const timing_fp8 = @import("timing_fp8.zig");
 
 const Ids = host.config.Ids;
 const limit = 1280;
@@ -43,7 +44,7 @@ fn classOf(name: []const u8) Class {
             return std.mem.indexOf(u8, n, t) != null;
         }
     }.f;
-    if (has(name, "p.fp8") or has(name, "p.mma")) return .fp8;
+    if (has(name, "p.fp8") or has(name, "p.tile") or has(name, "p.mma")) return .fp8;
     if (has(name, "p.experts") or has(name, "p.route") or has(name, "p.xmma")) return .experts;
     if (has(name, "p.attn") or has(name, "p.index") or has(name, "p.cand") or has(name, "p.topk512") or has(name, "p.compress")) return .attention;
     return .glue;
@@ -105,6 +106,8 @@ test "dsv41 metal synthetic release-shape layers timed by dispatch class at 1-16
     defer r.deinit();
     const junk = try r.device.buffer(timing.flush_bytes, mtl.ResourceOptions.private);
     defer junk.deinit();
+    // TF_DSV41_SYNTH_FP8: each FP8 projection alone, the row kernel against the tile at every simdgroup count
+    if (env("TF_DSV41_SYNTH_FP8") != null) return timing_fp8.run(r, junk, n);
     var names: timing.Names = .{};
     try names.walk(a, pkg.pipelines.Pipelines, &r.p, "p");
     var slots: [4]pkg.kv.Slot = undefined;

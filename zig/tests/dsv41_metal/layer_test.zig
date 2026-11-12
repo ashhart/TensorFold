@@ -19,6 +19,7 @@ test {
     _ = @import("dspark_test.zig");
     _ = @import("multi_test.zig");
     _ = @import("units_test.zig");
+    _ = @import("tile_test.zig");
 }
 
 test "dsv41 metal: every stage of every layer kind within its float64 bound" {

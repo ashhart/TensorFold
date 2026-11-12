@@ -3,6 +3,7 @@ pub const fp8_mma = @import("fp8_mma.zig");
 pub const index = @import("index.zig");
 pub const engram = @import("engram.zig");
 pub const fp8_rows = @import("fp8_rows.zig");
+pub const fp8_tile = @import("fp8_tile.zig");
 pub const attn = @import("csa2_attn.zig");
 pub const experts = @import("experts.zig");
 pub const mv = @import("mv.zig");
