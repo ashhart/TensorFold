@@ -59,6 +59,8 @@ Coverage includes:
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
+- Qwen3.5-2B on the CPU engine (`zig build native-cpu`): `TF_QWEN35_CPU_WINDOWS`, where exactly `1` admits verify
+  windows of up to 16 rows once the engine's exactness check against one-row steps passes at load.
 - DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.
 
 `identical` records the existing switch's token-preserving design and linked evidence; it is not a claim that the

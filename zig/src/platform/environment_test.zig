@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .cpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -79,6 +79,7 @@ const valid = [_]Case{
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_COPY_ROWS", .raw = "48", .n = 48 },
     .{ .name = "TF_QWEN35_CPU_THREADS", .raw = "4", .n = 4 },
+    .{ .name = "TF_QWEN35_CPU_THREADS", .raw = "255", .n = 255 },
     .{ .name = "TF_QWEN35_CPU_WINDOWS", .raw = "1", .n = 1 },
     .{ .name = "TF_QWEN35_CPU_TRACE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_DRAFT_SLOTS", .raw = "0", .n = 0 },
@@ -127,7 +128,8 @@ test "environment: valid forms remain raw numbers before existing consumer clamp
 test "environment: range, enum, whitespace and native prompt geometry refusals are explicit" {
     for ([_][2][]const u8{
         .{ "TENSORFOLD_MAX_PDF_PAGES", "0" },   .{ "TENSORFOLD_PRESSURE_CACHE_PERCENT", "101" },
-        .{ "TF_QWEN35_CPU_THREADS", "0" },      .{ "TF_QWEN35_CPU_WINDOWS", "yes" },
+        .{ "TF_QWEN35_CPU_THREADS", "0" },      .{ "TF_QWEN35_CPU_THREADS", "256" },
+        .{ "TF_QWEN35_CPU_WINDOWS", "yes" },    .{ "TF_QWEN35_CPU_TRACE", "2" },
         .{ "TENSORFOLD_PREFIX_WAIT_MS", "+1" }, .{ "TENSORFOLD_RESTORE_PREFETCH", "+1" },
         .{ "TF_CUDA_SEGMENTS", "0" },           .{ "TF_CUDA_SEGMENTS", "5" },
         .{ "TF_CUDA_CARVEOUT", "true" },        .{ "TF_CUDA_CARVEOUT", "01" },
@@ -284,4 +286,14 @@ test "environment: a legacy alias is checked only while its canonical name is un
     try t.expectEqualStrings("TF_DSV41_TOOL_GRAMMAR=\"bad\": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)", why);
     for ([_][]const u8{ "", "0", "1" }) |canonical| try t.expect((try e.refusal(a, Alias{ .canonical = canonical }, .{ .dsv41 = true })) == null);
     try t.expect((try e.refusal(a, Alias{ .canonical = null }, .{})) == null);
+}
+
+test "environment: the CPU engine's settings are refused only by a build that serves the CPU engine" {
+    for ([_][]const u8{ "TF_QWEN35_CPU_THREADS", "TF_QWEN35_CPU_WINDOWS", "TF_QWEN35_CPU_TRACE" }) |name| {
+        const bad = Env{ .name = name, .raw = "typo" };
+        for ([_]e.Flags{ .{ .cuda = true }, .{ .metal = true }, .{ .xpu = true } }) |gpu| try t.expect(try e.refusal(a, bad, gpu) == null);
+        const why = (try e.refusal(a, bad, .{ .cpu = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.startsWith(u8, why, name));
+    }
 }

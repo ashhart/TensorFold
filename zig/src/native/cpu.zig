@@ -31,8 +31,8 @@ pub fn chip(a: Allocator) ?[]const u8 {
             return null;
         },
         .windows => {
-            const value = std.c.getenv("PROCESSOR_IDENTIFIER") orelse return null;
-            return a.dupe(u8, std.mem.span(value)) catch null;
+            const value = @import("sys").getenv("PROCESSOR_IDENTIFIER") orelse return null;
+            return a.dupe(u8, value) catch null;
         },
         else => return null,
     }

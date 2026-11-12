@@ -3,7 +3,7 @@ const std = @import("std");
 const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
-pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext };
+pub const Scope = enum { common, cuda, metal, xpu, cpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
 pub const Rule = struct {
     name: [:0]const u8,
@@ -40,9 +40,9 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
-    .{ .name = "TF_QWEN35_CPU_THREADS", .scope = .common, .kind = .positive, .forms = "a whole number from 1 to 4294967295 (CPU worker threads beside the engine thread; unset: the logical CPUs less one)" },
-    .{ .name = "TF_QWEN35_CPU_WINDOWS", .scope = .common, .kind = .flag, .forms = "0 or 1" },
-    .{ .name = "TF_QWEN35_CPU_TRACE", .scope = .common, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_QWEN35_CPU_THREADS", .scope = .cpu, .kind = .positive, .max = 255, .forms = "a whole number from 1 to 255 (CPU worker threads beside the engine thread; unset: the logical CPUs less one)" },
+    .{ .name = "TF_QWEN35_CPU_WINDOWS", .scope = .cpu, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_QWEN35_CPU_TRACE", .scope = .cpu, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
@@ -345,6 +345,7 @@ pub const Flags = struct {
     cuda: bool = false,
     metal: bool = false,
     xpu: bool = false,
+    cpu: bool = false,
     slide: bool = false,
     hooks: bool = false,
     dsv41: bool = false,
@@ -362,6 +363,7 @@ pub const Flags = struct {
             .cuda => f.cuda,
             .metal => f.metal,
             .xpu => f.xpu,
+            .cpu => f.cpu,
             .slide => f.slide,
             .hooks => f.hooks,
             .dsv41 => f.dsv41,
