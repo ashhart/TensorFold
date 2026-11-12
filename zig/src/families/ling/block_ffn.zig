@@ -58,10 +58,10 @@ fn grouped(o: Ops, b: *const state.Buffers, l: cuda.experts.Layer, rows: usize, 
     const up: cuda.experts.Rows = .{ .x = b.normed, .stride = l.dims, .slots = slots };
     const down: cuda.experts.Rows = .{ .x = b.eact, .stride = l.width };
     if (prompt) {
-        try g.prompt(o.s, .up, up, l, b.plan, b.eact, items, skip);
-        try g.prompt(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip);
+        try g.prompt(o.s, .up, up, l, b.plan, b.eact, items, pairs, tile, skip);
+        try g.prompt(o.s, .down_bf16, down, l, b.plan, b.ey, items, pairs, tile, skip);
     } else {
-        try g.decode(o.s, .up, up, l, b.plan, b.eact, items, skip);
-        try g.decode(o.s, .down_bf16, down, l, b.plan, b.ey, items, skip);
+        try g.decode(o.s, .up, up, l, b.plan, b.eact, items, pairs, tile, skip);
+        try g.decode(o.s, .down_bf16, down, l, b.plan, b.ey, items, pairs, tile, skip);
     }
 }
