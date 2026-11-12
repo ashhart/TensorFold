@@ -22,7 +22,7 @@ pub const Kernels = struct {
         defer a.free(text);
         var weight = try api.Kernels.load(device, text, false);
         errdefer weight.deinit();
-        const glue = try mtl.Library.fromSource(device, qsource.glue, mtl.CompileOptions.mlx());
+        const glue = try mtl.Library.fromSource(device, qsource.glue ++ "\n" ++ qsource.gguf_norm, mtl.CompileOptions.mlx());
         defer glue.deinit();
         const train = try mtl.Library.fromSource(device, sources.train, mtl.CompileOptions.mlx());
         defer train.deinit();

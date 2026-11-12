@@ -5,6 +5,7 @@ const Set = @import("set.zig").Set;
 pub fn add(s: *Set) !void {
     inline for (.{ "glue", "copy", "moe", "prompt_glue", "prompt_state" }) |name|
         try s.raw("qwen27", name, @field(ks, name));
+    try s.raw("qwen27", "gguf-norm", ks.glue ++ "\n" ++ ks.gguf_norm);
     try s.raw("qwen27", "moe-rows", @import("../src/families/qwen27/moe_gpu.zig").rows_source);
     const quant = @import("../src/families/qwen27/quant_gpu.zig");
     for (std.enums.values(quant.Kind)) |kind| {
