@@ -162,6 +162,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
             return 1;
         },
     };
+    const take_out_check = takeOutCheck(args.slide, env(s, "TF_SLIDE_TAKE_OUT_CHECK")) catch return 1;
     const salt = if (env(s, "TENSORFOLD_SEED_SALT")) |t| std.fmt.parseInt(i64, std.mem.trim(u8, t, " "), 10) catch {
         std.debug.print("tensorfold: TENSORFOLD_SEED_SALT={s}: an integer\n", .{t});
         return 1;
@@ -220,6 +221,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
         .slide_drift_gate = args.slide_drift_gate,
+        .slide_take_out_check = take_out_check,
         .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
@@ -426,6 +428,18 @@ test "the raise lifts a low soft limit, and a second raise does nothing" {
     try std.testing.expectEqual(@as(u64, 256), raised[0]);
     try std.testing.expectEqual(raised[1], @as(u64, @intCast((try posix.getrlimit(.NOFILE)).cur)));
     try std.testing.expect(raiseOpenFileLimit() == null);
+}
+
+/// TF_SLIDE_TAKE_OUT_CHECK, read once at start and only with --slide: a malformed value is refused here, by name.
+fn takeOutCheck(slide: bool, raw: ?[]const u8) !bool {
+    return slide and try @import("sys").environment.value(bool, "TF_SLIDE_TAKE_OUT_CHECK", raw, false);
+}
+
+test "Failure boundaries: TF_SLIDE_TAKE_OUT_CHECK is read once at start, only with --slide" {
+    try std.testing.expect(try takeOutCheck(true, "1"));
+    for ([_]?[]const u8{ null, "", "0" }) |raw| try std.testing.expect(!try takeOutCheck(true, raw));
+    try std.testing.expect(!try takeOutCheck(false, "1"));
+    for ([_][]const u8{ "yes", "2", "on" }) |raw| try std.testing.expectError(error.InvalidEnvironment, takeOutCheck(true, raw));
 }
 
 test "Failure boundaries: drain and SSE duration settings refuse non-finite or unrepresentable values" {
