@@ -101,16 +101,7 @@ pub const SchedHost = struct {
                 };
                 return .admit;
             },
-            // the planner's own counters say which hold it met: the KV pool's pages or the memory floor
-            .wait => return .{ .wait = if (h.p.counts.pool_waits > before.pool_waits) .kv_pool else .memory_floor },
-            .skip => return .{ .skip = .prefill_concurrent }, // its one skip: a long prompt past the concurrent bound
-            .refuse => |r| {
-                words.* = switch (r) {
-                    .too_large => "the request needs more KV pool pages than the pool has",
-                    .memory => "the prompt's prefill cannot fit in this server's memory now (TF_DSV41_FLOOR_HARD_GIB)",
-                };
-                return .refuse;
-            },
+            .wait, .skip, .refuse => return @import("sched_verdict.zig").held(v, before, h.p.counts, words),
         }
     }
 

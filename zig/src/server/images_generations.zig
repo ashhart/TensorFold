@@ -194,7 +194,7 @@ fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, result: *api.ImageResul
     if (srv.keepalive) |k| k.begin();
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submitImage(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
-        error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
+        error.Busy => @import("refusals.zig").count(srv, .engine_busy, cx.fail(.capacity, "the engine is busy; retry shortly", .{})),
         error.Closed => cx.fail(.capacity, "the scheduler is closed", .{}),
         error.InvalidRequest => cx.fail(.request, "the engine refused this image request's prompt, size or steps", .{}),
         error.Unsupported => cx.fail(.capacity, "this model does not serve images", .{}),
