@@ -10,8 +10,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA: with `--vision` and no video library, rank 0 says at startup how much each stream sets aside for `--vision-video-tokens` rows that no request can fill (128 MiB a stream at the default 16,384), and that `--vision-video-tokens 64` on every rank cuts it to 512 KiB (#2813). Thanks to @Bizuayeu.
 
-
-
 - CUDA: `Qwen/Qwen3-Embedding-0.6B`, `-4B` and `-8B` load on the native engine from the published BF16 weights and serve `/v1/embeddings` (last-token pooling, unit-normed, `dimensions` crops). On one GB10 the worst cosine distance to float32 is 1.55e-4, 1.34e-4 and 1.08e-4 (transformers' own BF16: 1.88e-4, 1.79e-4 and 1.77e-4), a request's vectors equal each input sent alone, and a reranker folder or a flag the family does not serve is refused by name (#2285). Thanks to @Arminova.
 - Qwen3.8-27B on Metal: the startup line says how many streams draft ("for both streams", "for all 4 streams", "for 8 of 16 streams"), the smaller of the stream count and `TF_Q27_DRAFT_SLOTS`, instead of "for one of them"; log text only (#2806).
 
