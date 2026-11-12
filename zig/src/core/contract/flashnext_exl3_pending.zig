@@ -1,4 +1,5 @@
-//! Flash Next EXL3 fp16 row split and canonical reduction launches; nvcc 13.4 measured, older pending.
+//! Flash Next EXL3 fp16 row split and canonical reduction launches. The split is measured at nvcc 13.4; the canonical
+//! reduction (f64 leaves and tree) is pending until its f64 kernels are measured on all five SMs.
 const std = @import("std");
 const limits = @import("limits.zig");
 const registry = @import("registry.zig");
@@ -7,24 +8,38 @@ const registry = @import("registry.zig");
 pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_exl3 fn_exl3_split_f16", .symbol = "fn_exl3_split_f16", .image = "flashnext_exl3", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_batch fn_exl3_leaf_tree", .symbol = "fn_exl3_leaf_tree", .image = "flashnext_batch", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_batch fn_exl3_leaf_partial", .symbol = "fn_exl3_leaf_partial", .image = "flashnext_batch", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "flashnext_batch fn_exl3_leaf_finish", .symbol = "fn_exl3_leaf_finish", .image = "flashnext_batch", .threads = 256 }, .usage = registry.none },
 };
 
-/// nvcc 13.4's measured registers, static shared bytes and launch bounds for sm_80, sm_86, sm_89, sm_120, sm_121.
+/// nvcc 13.4's measured registers, static shared bytes and launch bounds for sm_80, sm_86, sm_89, sm_120, sm_121. The
+/// canonical reduction's root, partial and finish are absent: the f32 receipts of their old bodies do not describe the f64
+/// kernels, and each is added here, all five SMs, only from a fresh 13.4 compile.
 pub const cuda_134 = [_]registry.Override{
     .{ .name = "flashnext_exl3 fn_exl3_split_f16", .usage = .{ .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 10, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } } },
-    .{ .name = "flashnext_batch fn_exl3_leaf_tree", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 } } },
-    .{ .name = "flashnext_batch fn_exl3_leaf_finish", .usage = .{ .{ .regs = 23, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 22, .static = 0, .bound = 0 }, .{ .regs = 19, .static = 0, .bound = 0 }, .{ .regs = 19, .static = 0, .bound = 0 } } },
 };
 
-test "Flash Next EXL3 launches: pending below nvcc 13.4, measured 13.4 resources fit every SM launch limit" {
+test "Flash Next EXL3 launches: pending below nvcc 13.4, measured 13.4 resources fit every SM launch limit, the rest stay pending" {
     const t = std.testing;
-    try t.expectEqual(records.len, cuda_134.len);
-    for (records, cuda_134) |r, o| {
-        try t.expectEqualStrings(r.launch.name, o.name);
+    for (cuda_134) |o| {
+        const recorded = for (records) |r| {
+            if (std.mem.eql(u8, r.launch.name, o.name)) break true;
+        } else false;
+        try t.expect(recorded);
+    }
+    for (records) |r| {
         try t.expectEqual(limits.sms.len, try registry.checkCuda(t.allocator, &.{r}, true));
+        for (registry.cuda) |known| try t.expect(!std.mem.eql(u8, r.launch.symbol, known.launch.symbol));
         const measured = registry.usageFor(r, .{ .major = 13, .minor = 4 });
-        try t.expect(std.meta.eql(measured, o.usage));
+        const receipt: ?registry.Override = for (cuda_134) |o| {
+            if (std.mem.eql(u8, o.name, r.launch.name)) break o;
+        } else null;
+        // no 13.4 receipt: still pending, and still refused by the resource check
+        if (receipt == null) {
+            try t.expect(std.meta.eql(measured, registry.none));
+            continue;
+        }
+        try t.expect(std.meta.eql(measured, receipt.?.usage));
         var current = r;
         current.usage = measured;
         try t.expectEqual(@as(usize, 0), try registry.checkCuda(t.allocator, &.{current}, true));
@@ -32,6 +47,5 @@ test "Flash Next EXL3 launches: pending below nvcc 13.4, measured 13.4 resources
             try t.expect(u.regs > 0);
             try t.expect(u.bound == 0 or u.bound == r.launch.threads);
         }
-        for (registry.cuda) |known| try t.expect(!std.mem.eql(u8, r.launch.symbol, known.launch.symbol));
     }
 }
