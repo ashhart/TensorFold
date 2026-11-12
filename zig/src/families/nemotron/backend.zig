@@ -17,6 +17,7 @@ const head_tree = @import("head_tree.zig");
 const prefill = @import("prefill.zig");
 const head_block = @import("head_block.zig");
 const snapshot = @import("snapshot.zig");
+const prefill_metal = @import("prefill_metal.zig");
 const Model = @import("model.zig").Model;
 const nemotron_config = @import("config.zig");
 const grammar = @import("grammar.zig");
@@ -60,6 +61,7 @@ pub const Metal = struct {
     wide: ?prefill.Prefill = null, // prompt chunks over fused_rows
     head: ?mtp.Head = null,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
+    steps: @import("prefill_steps.zig").Steps = .{}, // prompt passes a chunk a call (prefill_step), by stream
     tokens: mtl.Buffer, // u32 [ring]: drawn tokens and host-fed ones
     prompt: mtl.Buffer, // u32 [capacity]
     fence: Fence,
@@ -119,6 +121,7 @@ pub const Metal = struct {
             self.gpa.destroy(c.*);
         }
         self.caches.deinit(self.gpa);
+        self.steps.at.deinit(self.gpa);
         kv_pages.detach(self);
         if (self.head) |*h| h.deinit();
         if (self.masks) |*m| m.deinit();
@@ -133,7 +136,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefill_metal.prefill, .prefill_step = prefill_metal.prefillStep, .cancel_prefill = prefill_metal.cancelPrefill, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
     }
 
     /// The round loop's setup facts, including this engine's measured head-step depth cap.
@@ -229,99 +232,6 @@ pub const Metal = struct {
     }
 
     // -- the vtable ---------------------------------------------------------------------------------------------
-
-    fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
-        const self: *Metal = @ptrCast(@alignCast(ptr));
-        const ids = s.prompt();
-        try limits.check(ids.len, s.max_new, self.o.capacity);
-        if (s.isCancelled()) return error.Cancelled;
-        const rows_needed = @min(self.o.capacity, ids.len + s.max_new + max_lanes + 1); // the reply and a widest window past it
-        try self.drain();
-        if (self.caches.get(s)) |old| {
-            old.deinit(&self.pool);
-            self.gpa.destroy(old);
-            _ = self.caches.remove(s);
-        }
-        const c = try @import("residency.zig").openCache(self, s, rows_needed);
-        @memcpy(self.prompt.slice(u32, ids.len), ids);
-        const Chunks = struct {
-            n: usize,
-            c: *st.Cache,
-            at: usize,
-            rows: usize,
-            fn encode(j: @This(), b: *Metal, e: *fwd.Enc) !void {
-                const d = b.m.config.hidden * 2;
-                const rows = j.rows;
-                const fresh = try b.pool.take();
-                var out = b.scratch.x; // the chunk's final-normed rows
-                if (rows <= fused_rows) {
-                    const segs = [_]fwd.Seg{.{ .rows = rows, .cache = j.c, .store = .full, .slot = @intCast(fresh) }};
-                    b.forward().body(e, &segs, b.prompt, j.at * 4);
-                } else {
-                    const w = &b.wide.?;
-                    w.chunk(e, b.forward(), j.c, b.prompt, j.at * 4, rows, fresh);
-                    out = w.s.x;
-                }
-                j.c.advance(&b.pool, rows, fresh);
-                // the head's cache takes each row whose next token the prompt holds, as many rows a call as a window
-                const absorbed = @min(j.at + rows, j.n - 1) - j.at;
-                if (b.head) |*h| {
-                    var r: usize = 0;
-                    while (r < absorbed) : (r += max_window) h.absorb(e, j.c, @min(max_window, absorbed - r), out, r * d, b.prompt, (j.at + 1 + r) * 4);
-                }
-                j.c.start = 0;
-                j.c.rows = rows;
-                if (rows > fused_rows) {
-                    // the last row where the first draw and the head read it
-                    e.pipe(b.m.kernels.get("tf_copy_rows"));
-                    e.buf(out, (rows - 1) * d, 0);
-                    e.buf(b.scratch.x, 0, 1);
-                    e.run(.{ d / 2, 1, 1 }, .{ 256, 1, 1 });
-                    j.c.rows = 1;
-                }
-            }
-        };
-        s.cached = 0;
-        var at: usize = 0;
-        if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
-            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < ids.len) if (snapshot.restore(self, c, snap)) |_| {
-                at = snap.at;
-            } else |_| {};
-            s.cached = @intCast(at);
-            s.reuse_failed = at == 0;
-        }
-        s.fill_at.store(@intCast(at), .monotonic); // a restored prefix is done the moment it is restored
-        // a command buffer a chunk, each committed before the one ahead is waited on, so the GPU keeps a chunk queued
-        var k: usize = 0;
-        while (at < ids.len) {
-            const decision: ?usize = if (c.decide == lesson_route.none) null else @intCast(c.decide);
-            const rows = @import("prompt_flight.zig").rows(s, at, self.o.chunk, decision, &k);
-            if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
-            try kv_pages.grow(c, at + rows);
-            try @import("prompt_flight.zig").submit(self, s, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
-            at += rows;
-            // landed tokens only: the newest chunk is still queued on the GPU
-            s.fill_at.store(@intCast(at - rows), .monotonic);
-            if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
-        }
-        if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
-    }
-
-    /// Dev trace (TF_SLIDE_TRACE): the stream's router scores at its decision row and the lessons acting on its reply.
-    fn traceLessons(self: *Metal, c: *const st.Cache) !void {
-        const ad = layers.firstAdapter(&self.m.weights) orelse return;
-        try self.drain();
-        const n = lesson_route.max_blocks;
-        const at: usize = @intCast(@max(c.rid, 0));
-        const score = ad.score.slice(f32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const flags = ad.latch.slice(u32, lesson_route.max_slots * n)[at * n ..][0..n];
-        const need = ad.need.slice(f32, n);
-        var line: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&line);
-        for (0..ad.rank / 16) |b| w.print(" {d:.2}/{d:.2}{s}", .{ score[b], need[b], if (flags[b] != 0) "*" else "" }) catch break;
-        std.log.info("slide trace: decision row {d}: scores{s} (* acting)", .{ c.decide, w.buffered() });
-    }
 
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self: *Metal = @ptrCast(@alignCast(ptr));
@@ -580,6 +490,7 @@ pub const Metal = struct {
         self.drain() catch {
             @import("prompt_flight.zig").forget(self, s);
         };
+        _ = self.steps.at.remove(s); // a stream that left mid-pass
         if (self.caches.fetchRemove(s)) |kv| {
             kv.value.deinit(&self.pool);
             self.gpa.destroy(kv.value);
