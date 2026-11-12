@@ -34,7 +34,6 @@ const affine4_decode_tests = @import("affine4_decode_tests.zig");
 const w4a8_tests = @import("w4a8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
 const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
-const glm_exl3_layer_tests = @import("glm_exl3_layer_tests.zig");
 const glm_vision_tests = @import("glm_vision_tests.zig");
 const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
 const glm_mm_bench = @import("glm_mm_bench.zig");
@@ -251,8 +250,7 @@ const usage =
     \\  exl3-contract             EXL3's replacements of linear_body through gates 1-4, each control red (kernel-contract's subset)
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
-    \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time;
-    \\                            DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
+    \\  exl3-prompt-k6 [DIR|none] [BASE]  EXL3 prompt kernels at 3 and 4 bits, GLM's shapes: runSlots, FP64, row bytes, time; DIR adds a real layer, BASE (an earlier exl3_experts fatbin) its 4-bit bytes
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
@@ -444,7 +442,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
-    if (std.mem.eql(u8, cmd, "glm-exl3-layer")) return glm_exl3_layer_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "glm-exl3-layer")) return @import("glm_exl3_layer_tests.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
