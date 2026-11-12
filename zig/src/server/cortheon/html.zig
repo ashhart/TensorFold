@@ -307,8 +307,11 @@ pub fn hrefs(a: Allocator, page: []const u8, max: usize, budget: ?*Budget) Alloc
         const end = tagEnd(page, lt);
         from = end; // the next link starts after this tag, so an unclosed one is read once
         const tag = page[lt..end];
-        const at = std.ascii.findIgnoreCase(tag, "href=") orelse continue;
-        var v = tag[at + 5 ..];
+        const at = std.ascii.findIgnoreCase(tag, "href") orelse continue; // HREF is the same attribute
+        var after = at + 4;
+        while (after < tag.len and std.ascii.isWhitespace(tag[after])) after += 1; // href = is the same attribute
+        if (after >= tag.len or tag[after] != '=') continue;
+        var v = tag[after + 1 ..];
         const q: u8 = if (v.len > 0 and (v[0] == '"' or v[0] == '\'')) v[0] else ' ';
         if (q != ' ') v = v[1..];
         const stop = std.mem.indexOfAny(u8, v, if (q == ' ') " >" else &.{q}) orelse v.len;
@@ -453,6 +456,15 @@ test "a data URL is not kept as a page link" {
     const got = try hrefs(a, "<p><a href=\"data:text/html,hi\">d</a> <a href=\"/docs\">x</a></p>", 10, null);
     try std.testing.expectEqual(@as(usize, 1), got.len);
     try std.testing.expectEqualStrings("/docs", got[0]);
+}
+
+test "a page link keeps its target when a space precedes href's equals" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try hrefs(a, "<a href =\"https://b.org/x\">n</a>", 10, null);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("https://b.org/x", got[0]);
 }
 
 test "a link broken onto the next line by a carriage return is kept" {
