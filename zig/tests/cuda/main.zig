@@ -124,7 +124,8 @@ pub fn main(init: std.process.Init) !u8 {
     }
     var driver = try cuda.Driver.open();
     defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
+    if (try @import("contract_jobs.zig").parent(init, &driver, args)) |code| return code;
+    var ctx = try cuda.Context.init(&driver, @import("contract_jobs.zig").device(init.gpa, args));
     defer ctx.deinit();
     const gpu: check.Gpu = .{ .d = &driver, .ctx = &ctx, .gpa = init.gpa, .io = init.io };
     const cmd = args[1];
