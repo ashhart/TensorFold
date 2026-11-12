@@ -175,6 +175,8 @@ pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var wrapped = try Drafted.init(gpa, target_backend, head.drafter());
     wrapped.held_on_target = mode == .wrapped_held;
     defer wrapped.deinit();
+    try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().first_before_draft);
+    try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().penalties);
     var m = base();
     m.root_copies = cases[0].root_copies;
     var cfg = try Config.init(gpa, if (mode != .plain) wrapped.facts(m) else m, 16, 15);
