@@ -236,6 +236,15 @@ test "environment: ranges, word lists and whole-number bounds refuse ignored tai
         try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
 }
 
+test "environment: the pair trace interval refuses 0, which would divide by zero, and names its variable" {
+    for ([_][]const u8{ "0", "4294967296" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_Q27_PAIR_TRACE_EVERY", raw));
+        const why = (try e.refusal(a, Env{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = raw }, all)).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_Q27_PAIR_TRACE_EVERY") != null);
+    }
+}
+
 const Alias = struct {
     canonical: ?[]const u8,
     video: ?[]const u8 = null,

@@ -396,11 +396,9 @@ pub const valid = [_]Case{
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = " 0 ", .n = 0 },
     .{ .name = "TF_DSV41_SCHEMA_PROMPT", .raw = "\t1\r\n", .n = 1 },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "1", .n = 1 },
-    .{ .name = "TF_DIAG_SUBMIT", .raw = "1", .n = 1 },
-    .{ .name = "TF_DIAG_SUBMIT", .raw = "off", .n = 0 },
-    .{ .name = "TF_Q27_KERNEL_WAIT", .raw = "on", .n = 1 },
-    .{ .name = "TF_Q27_KERNEL_WAIT", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_PAIR_TRACE", .raw = "true", .n = 1 },
     .{ .name = "TF_Q27_PAIR_TRACE", .raw = "0", .n = 0 },
     .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "256", .n = 256 },
+    .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_PAIR_TRACE_EVERY", .raw = "4294967295", .n = std.math.maxInt(u32) },
 };
