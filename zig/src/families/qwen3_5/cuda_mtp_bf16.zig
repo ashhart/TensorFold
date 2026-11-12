@@ -146,7 +146,7 @@ fn experts(l: *Loader) !engine.Mlp {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mtp.Weights {
     const g = e.g;
     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     if (!ck.has("mtp.fc.weight")) return error.NoMtpLayer;
     std.log.info("qwen3.6 mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)", .{});
     var w: mtp.Weights = .{ .arena = try DeviceBuffer.alloc(e.d, mtp.total(g)), .fc_e = undefined, .fc_h = undefined, .norm_e = 0, .norm_h = 0, .input_norm = 0, .post_norm = 0, .q_norm = 0, .k_norm = 0, .norm = 0, .q = undefined, .k = undefined, .v = undefined, .o = undefined, .mlp = undefined };

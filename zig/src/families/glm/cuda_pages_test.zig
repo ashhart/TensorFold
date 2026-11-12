@@ -7,7 +7,11 @@ const pages_mod = @import("cuda_pages.zig");
 const Plan = @import("cuda_snapshot_layout.zig").Plan;
 const page_rows = @import("cuda_state.zig").page_rows;
 const sparse = @import("cuda_sparse.zig");
-const prefix_mod = @import("cuda_prefix.zig");
+const share = @import("cuda_share.zig");
+const native = @import("cuda_native.zig");
+const kv = @import("core").kv_pool;
+const kp = @import("core").kv_prompts;
+const radix = @import("engine_api").prompt_radix;
 const Kept = @import("cuda_engine.zig").Kept;
 const Engine = @import("cuda_engine.zig").Engine;
 const Lanes = @import("cuda_lanes.zig").Lanes;
@@ -184,7 +188,7 @@ test "a follower maps rank 0's ids, and refuses ids past its pool or a slot that
     try expect(p.pool.idle()); // a follower's pool lends nothing
 }
 
-test "TF_GLM_KV_SHARE at TP: two followers map rank 0's resumed table, NaN past the cache's pages, more kept refused" {
+test "TF_KV_SHARE at TP: two followers map rank 0's resumed table, NaN past the store's pages, more kept refused" {
     var ids: [4]u32 = undefined;
     {
         var f: Fake = undefined; // rank 0: the prompt cache keeps the first two pages, and a resume holds them again
@@ -364,9 +368,10 @@ test "a kept state's copy leaves the prompt cache's pages out: past them, two po
     try std.testing.expectError(error.SnapshotShape, Plan.init(st, c, at, at, held + 1)); // a page past the mark
 }
 
-/// The prompt cache's states without a device: each a Kept, live until the store drops it.
+/// The shared store's states without a device: each a Kept, live until the store drops it, restored by GLM's decl.
 const States = struct {
     gpa: std.mem.Allocator,
+    e: *Engine,
     next: u64 = 1,
     live: usize = 0,
 
@@ -389,40 +394,88 @@ const States = struct {
         x.gpa.destroy(@as(*Kept, @ptrCast(@alignCast(saved))));
         x.live -= 1;
     }
-    const vtable: prefix_mod.radix.Snapshots.VTable = .{ .bytes = bytes, .save = save, .restore = prefix_mod.Prefix.restore, .drop = drop };
+    fn restore(p: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!void {
+        return native.snap_restore(of(p).e, owner, saved);
+    }
+    const vtable: radix.Snapshots.VTable = .{ .bytes = bytes, .save = save, .restore = restore, .drop = drop };
 };
 
-test "TF_GLM_KV_SHARE: a pass's pages below its mark go to the prompt cache, and a later pass resumes on those pages" {
+/// The shared store over GLM's pool as native/cuda_prompt_pages.zig opens it from GLM's decls, without the server.
+const Store = struct {
+    gpa: std.mem.Allocator,
+    store: radix.Store,
+
+    fn of(ctx: *anyopaque) *Store {
+        return @ptrCast(@alignCast(ctx));
+    }
+    fn open(x: *Store, gpa: std.mem.Allocator, e: *Engine, states: radix.Snapshots, snaps: usize) !void {
+        const pool = native.share_pool(e).?;
+        const rules: radix.Rules = .{ .page = page_rows, .planned = true, .grid = native.snap_grid, .lookahead = 1, .min_prompt = 0, .tail = true };
+        x.* = .{ .gpa = gpa, .store = try radix.Store.init(gpa, states, radix.pagesOf(kv.Pool, pool, pool.page_bytes), rules) };
+        x.store.limit(.{ .pages = pool.total(), .snaps = snaps });
+        try pool.joinReclaim(.{ .ctx = x, .call = reclaim });
+        native.share_attach(e, .{ .ctx = x, .vtable = &vtable });
+    }
+    fn close(x: *Store, e: *Engine) void {
+        native.share_attach(e, null);
+        native.share_pool(e).?.leaveReclaim(x);
+        x.store.deinit();
+    }
+    fn reclaim(ctx: *anyopaque, want: usize) bool {
+        return of(ctx).store.reclaim(want);
+    }
+    fn begin(ctx: *anyopaque, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!kp.Plan {
+        const x = of(ctx);
+        const plan = try x.store.begin(x.gpa, prompt, history_len, shared, owner, adopt);
+        return .{ .from = plan.from, .marks = plan.marks };
+    }
+    fn keep(ctx: *anyopaque, prompt: []const u32, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
+        return of(ctx).store.keep(prompt, at, owner, mine, path).shared;
+    }
+    fn report(_: *anyopaque, _: usize, _: u32, _: u64) void {}
+    fn free(ctx: *anyopaque, marks: []const u32) void {
+        of(ctx).gpa.free(marks);
+    }
+    const vtable: kp.Prompts.VTable = .{ .begin = begin, .keep = keep, .report = report, .free = free };
+};
+
+test "TF_KV_SHARE: a pass's pages below its mark go to the shared store, and a later pass resumes on those pages" {
     const gpa = std.testing.allocator;
     var f: Fake = undefined;
     try f.init(gpa);
     const l = try pages_mod.layout(gpa, &f.e, 0);
     const p = try f.pool(l, 3, 8, true);
     defer f.deinit(p);
-    var states: States = .{ .gpa = gpa };
-    const x = try prefix_mod.Prefix.initWith(gpa, p, 2048, 4, .{ .ptr = &states, .vtable = &States.vtable });
-    defer x.deinit();
-    var owner: prefix_mod.Owner = .{};
+    f.e.pages = p;
+    var states: States = .{ .gpa = gpa, .e = &f.e };
+    var owner: share.Owner = .{};
+    var none: Kept = .{ .id = 0, .at = 0 };
+    try std.testing.expectError(error.RestoredInPromptPass, native.snap_restore(&f.e, &owner, &none)); // no store: refused
+    var x: Store = undefined;
+    try x.open(gpa, &f.e, .{ .ptr = &states, .vtable = &States.vtable }, 4);
+    defer x.close(&f.e);
+    const prompts = share.of(&f.e).?;
     var adopt: std.ArrayList(u32) = .empty;
     defer adopt.deinit(gpa);
     var a: [3000]u32 = undefined;
     for (&a, 1..) |*t, i| t.* = @intCast(i);
     // a cold pass: a mark on the grid below its end, where the tree takes the pages below it and the state
-    const cold = try x.begin(&a, 0, &.{}, &owner, &adopt);
-    defer gpa.free(cold.marks);
+    const cold = try prompts.begin(&a, 0, &.{}, &owner, &adopt);
+    defer prompts.free(cold.marks);
     try std.testing.expectEqualSlices(u32, &.{2048}, cold.marks);
     try expect(cold.from == 0 and owner.pending == null and adopt.items.len == 0);
     var kept: [4]u32 = undefined;
     @memcpy(&kept, (try p.openWith(1, a.len, 100, adopt.items))[0..4]);
-    x.keep(1, &a, 2048);
+    const keeps: share.Keeps = .{ .e = &f.e, .slot = 1, .prompt = &a };
+    keeps.keep(2048);
     try expectEqual(@as(usize, 1), states.live);
     p.close(1); // its pages past the mark free again, those below it the tree's
     for (kept) |id| try expectEqual(@as(u32, 1), p.pool.holders(id));
     // the same 2,049 tokens, another tail: the pass resumes at 2,048 on the tree's pages, its state pending
     var b = a;
     for (b[2049..]) |*t| t.* += 10_000;
-    const warm = try x.begin(&b, 0, &.{}, &owner, &adopt);
-    defer gpa.free(warm.marks);
+    const warm = try prompts.begin(&b, 0, &.{}, &owner, &adopt);
+    defer prompts.free(warm.marks);
     try expectEqual(@as(u32, 2048), warm.from);
     try expectEqual(@as(u32, 2048), owner.pending.?.at);
     try std.testing.expectEqualSlices(u32, &kept, adopt.items);
@@ -434,15 +487,15 @@ test "TF_GLM_KV_SHARE: a pass's pages below its mark go to the prompt cache, and
     var c = a;
     for (c[2048..]) |*t| t.* += 10_000;
     owner = .{};
-    const miss = try x.begin(&c, 0, &.{}, &owner, &adopt);
-    defer gpa.free(miss.marks);
+    const miss = try prompts.begin(&c, 0, &.{}, &owner, &adopt);
+    defer prompts.free(miss.marks);
     try expect(miss.from == 0 and owner.pending == null and adopt.items.len == 0);
     // a stream that needs the tree's pages: its promise evicts the state, and the pages are the stream's
     _ = try p.openWith(0, c.len, 100, &.{}); // 7 pages: the 4 free and 3 of the tree's
     try expectEqual(@as(usize, 0), states.live);
     p.close(0);
-    const gone = try x.begin(&a, 0, &.{}, &owner, &adopt);
-    defer gpa.free(gone.marks);
+    const gone = try prompts.begin(&a, 0, &.{}, &owner, &adopt);
+    defer prompts.free(gone.marks);
     try expect(gone.from == 0 and owner.pending == null and adopt.items.len == 0);
     try expect(p.pool.idle() and p.pool.census().free == 8);
 }

@@ -106,6 +106,7 @@ pub fn run(gpu: Gpu, cmd: []const u8, rest: []const []const u8) !void {
     if (std.mem.eql(u8, cmd, "dory-bench")) return bench(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory-prefill")) return prefill(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory-pages")) return @import("dory_pages_tests.zig").pages(gpu, rest);
+    if (std.mem.eql(u8, cmd, "dory-store")) return @import("dory_store_tests.zig").store(gpu, rest);
     return error.UnknownCommand;
 }
 

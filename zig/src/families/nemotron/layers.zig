@@ -59,7 +59,7 @@ pub const Tables = struct {
         return t;
     }
 
-    /// A place's parent: the previous place in a chain or replay; a tree row's parent (its root after the replayed rows).
+    /// A place's parent: the previous place in a chain or replay; a tree row's parent (its root after replayed rows).
     fn parentOf(g: fwd.Seg, k: i32, loc: i32) i32 {
         if (loc < k) return loc - 1;
         const p = g.parents orelse return loc - 1;
@@ -574,6 +574,7 @@ pub fn kvWriteAt(f: Forward, e: *Enc, kv: st.Kv, args: Buffer, at: usize, row0: 
 /// The stacked q/k/v rows from `row0` (their keys and values) into a cache after its `len` rows.
 pub fn kvWrite(f: Forward, e: *Enc, kv: st.Kv, len: usize, row0: usize, rows: usize) void {
     const c = f.c;
+    kvp.holds(kv, len + rows);
     e.pipe(if (kv.paged != null) f.k.paged.?.glue[0] else f.k.get("tf_kv_write"));
     e.buf(f.s.qkv, row0 * c.qkvDim() * 2, 0);
     kvp.bindKv(e, kv, 1, 2);

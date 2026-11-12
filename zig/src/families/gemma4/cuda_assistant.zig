@@ -79,7 +79,7 @@ pub const Drafter = struct {
         const hid = c.hidden;
         const qw = c.heads * cfg.global_dim;
         const wide: Window = .{ .h = c.heads, .hk = geo.global_kv_heads, .d = cfg.global_dim, .win = 0, .ring = m.context, .scale = 1 };
-        const narrow: Window = .{ .h = c.heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = cfg.window, .ring = fwd.ring, .scale = 1 };
+        const narrow: Window = .{ .h = c.heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = cfg.window, .ring = m.ringRows(), .scale = 1 };
         const part = @max(cuda.window_attention.WindowAttention.scratchBytes(wide, 16), cuda.window_attention.WindowAttention.scratchBytes(narrow, 16));
         x.x = .{
             .ids = try x.alloc(n * 4),
@@ -145,6 +145,17 @@ pub const Drafter = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
+    pub fn relocate(p: *anyopaque) void {
+        cast(p).dropGraphs();
+    }
+
+    pub fn dropGraphs(x: *Drafter) void {
+        for (&x.graphs) |*row| for (row) |*g| if (g.*) |*e| {
+            e.deinit();
+            g.* = null;
+        };
+    }
+
     /// The target's last layer: its output before the final norm, which absorb applies.
     fn tapsFn(ptr: *anyopaque) []const u32 {
         return &cast(ptr).tap;
@@ -153,7 +164,7 @@ pub const Drafter = struct {
     /// Chains of up to 6, one assistant forward a draft: the rule prices each draft and may choose none.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
-        return .{ .depth = depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.m.geo.hidden * 2, .window_costs = &x.costs };
+        return .{ .limit_shared_drafts = true, .depth = depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.m.geo.hidden * 2, .window_costs = &x.costs };
     }
 
     fn newLane(x: *Drafter) !*Lane {
@@ -196,8 +207,10 @@ pub const Drafter = struct {
     /// Each stream's last absorbed row through the target's final norm into its lane, queued on the target's stream.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const x = cast(ptr);
+        if (!try @import("assistant_budget.zig").useful(x, items)) return;
         const width = x.m.geo.hidden * 2;
         for (items) |it| {
+            if (!it.propose) continue;
             const l = x.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or f.rows == 0 or it.follow.len < f.rows) return error.DraftFeaturesUnsupported;
@@ -220,15 +233,31 @@ pub const Drafter = struct {
         }
     }
 
+    pub fn projectMany(x: *Drafter, ls: []const Affine4, in: u64, xs: u64, outs: []const u64, rows: usize) !void {
+        const A = cuda.qlinear.Affine4Kernels;
+        if (ls.len < 2 or ls.len > A.segs_max or ls.len != outs.len) return error.ShapeMismatch;
+        if (x.k.affine.pdl) {
+            var many: [A.segs_max]A.Out = undefined;
+            for (ls, outs, many[0..ls.len]) |l, out, *v| v.* = .{ .q = l, .out = out };
+            return x.k.affine.verifyManyRows(x.s, in, xs, many[0..ls.len], rows);
+        }
+        for (ls, outs) |l, out| try x.project(l, in, xs, out, rows);
+    }
+
     fn copy2d(x: *Drafter, dst: u64, dst_pitch: usize, src: u64, src_pitch: usize, width: usize, rows: usize) !void {
         const p: cuda.abi.Memcpy2D = .{ .src = src, .src_pitch = src_pitch, .dst = dst, .dst_pitch = dst_pitch, .width = width, .height = rows };
         try x.d.check(x.d.api.cuMemcpy2DAsync_v2(&p, x.s.handle), "cuMemcpy2DAsync");
     }
 
     /// Assistant layer i on the rows: input normed in normed (sums in xs), residual h[cur] into h[1 - cur].
+    pub fn sourceWindow(x: *const Drafter, i: usize) Window {
+        const global = !x.c.sliding[i];
+        const t = x.sources[@intFromBool(global)];
+        return .{ .h = x.c.heads, .hk = x.m.geo.kvHeads(t), .d = x.c.headDim(i), .win = if (global) 0 else cfg.window, .ring = x.m.cacheLen(t), .scale = 1, .pg = if (global) x.m.pagesFor(null) else null };
+    }
+
     fn layer(x: *Drafter, i: usize, cur: usize, rows: usize) !void {
         const c = &x.c;
-        const geo = x.m.geo;
         const l = &x.w.layers[i];
         const s = x.x;
         const global = !c.sliding[i];
@@ -240,8 +269,7 @@ pub const Drafter = struct {
         const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = l.q_norm, .norms_bf16 = true, .inv = if (global) x.m.inv_global else x.m.inv_sliding, .rot = dh, .eps = cfg.eps, .round = true };
         try x.k.qk.rowsFrom(x.s, src, .{ .h = c.heads, .hk = 1, .dim = dh }, shape, s.pos, null, .{ .q = s.q, .k = s.kj, .v = 0 }, rows);
         const t = x.sources[@intFromBool(global)];
-        const len = x.m.cacheLen(t);
-        const w: Window = .{ .h = c.heads, .hk = geo.kvHeads(t), .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1 };
+        const w = x.sourceWindow(i);
         var r: usize = 0;
         while (r < rows) : (r += 16) {
             const n = @min(16, rows - r);
@@ -250,8 +278,7 @@ pub const Drafter = struct {
         try x.k.act.groupSums(x.s, s.att, qw, s.xs, rows, qw);
         try x.project(l.o, s.att, s.xs, s.o, rows);
         try x.k.norms.addRmsTail(x.s, s.o, s.h[cur], l.pre_feedforward, s.hn, s.nmlp, s.xs, rows, c.hidden, cfg.eps, .{ .round = true, .branch = l.post_attention });
-        try x.project(l.gate, s.nmlp, s.xs, s.gate, rows);
-        try x.project(l.up, s.nmlp, s.xs, s.up, rows);
+        try x.projectMany(&.{ l.gate, l.up }, s.nmlp, s.xs, &.{ s.gate, s.up }, rows);
         try x.k.act.geglu(x.s, s.gate, c.intermediate, s.up, c.intermediate, s.act, s.xs, rows, c.intermediate);
         try x.project(l.down, s.act, s.xs, s.y, rows);
         const next = if (i + 1 < c.layers) x.w.layers[i + 1].input_norm else x.w.norm;
@@ -340,7 +367,7 @@ pub const Drafter = struct {
         try x.chain(items[0..holds.len], steps);
         var picks: [depth * max_items]Pick = undefined;
         try x.s.synchronize();
-        try x.d.check(x.d.api.cuMemcpyDtoH_v2(&picks, x.x.picks, steps * max_items * @sizeOf(Pick)), "cuMemcpyDtoH");
+        try cuda.memory.download(x.d, x.x.picks, std.mem.asBytes(&picks)[0 .. steps * max_items * @sizeOf(Pick)]);
         for (items[0..holds.len], 0..) |it, r| {
             for (it.lane.held[0..it.depth], 0..) |*tok, step| {
                 const p = picks[step * max_items + r];
@@ -378,3 +405,7 @@ pub const Drafter = struct {
         }
     }
 };
+
+test {
+    _ = @import("assistant_budget.zig").Cases(Drafter, Lane);
+}

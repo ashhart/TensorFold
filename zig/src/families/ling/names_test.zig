@@ -148,6 +148,7 @@ test "the real index (TF_LING_INDEX=<model.safetensors.index.json>) against the 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(t.io, path, a, .unlimited);
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
     const map = doc.object.get("weight_map").?.object;
+    if (map.count() != 214025) return error.SkipZigTest; // tiny's index is tiny_test.zig's TF_LING_INDEX case
     const c = try load();
     const r = try names.check(a, &c, map.keys());
     try t.expectEqual(@as(usize, 0), r.missing.items.len + r.unknown.items.len);

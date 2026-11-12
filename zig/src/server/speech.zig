@@ -17,6 +17,7 @@ const drama_cfg = @import("drama_cfg.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
 const clock = @import("clock.zig");
+const wait = @import("wait_reason.zig");
 const Mailbox = @import("mailbox.zig").Mailbox;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -157,7 +158,10 @@ pub fn releaseLane(srv: *Server, released: *bool) void {
 fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, metadata: *Metadata) void {
     var held = srv.speech_inflight.load(.acquire);
     while (true) {
-        if (held >= @max(1, srv.info.lanes)) return fail(c, cx, id, metadata.*, .capacity, "speech output capacity is full");
+        if (held >= @max(1, srv.info.lanes)) {
+            cx.code = wait.engine_busy;
+            return fail(c, cx, id, metadata.*, .capacity, "speech output capacity is full");
+        }
         if (srv.speech_inflight.cmpxchgWeak(held, held + 1, .acq_rel, .acquire)) |now| held = now else break;
     }
     var lane_released = false;
@@ -208,7 +212,10 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     srv.engine.submitSpeech(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| {
         releaseLane(srv, &lane_released);
         return switch (e) {
-            error.Busy => fail(c, cx, id, metadata.*, .capacity, "the engine is busy; retry shortly"),
+            error.Busy => blk: {
+                cx.code = wait.engine_busy;
+                break :blk fail(c, cx, id, metadata.*, .capacity, "the engine is busy; retry shortly");
+            },
             error.Closed => fail(c, cx, id, metadata.*, .other, "the scheduler is closed"),
             error.InvalidRequest => fail(c, cx, id, metadata.*, .request, "the engine refused this speech request's prompt, frame limit or sampling"),
             error.Unsupported => fail(c, cx, id, metadata.*, .request, "this model does not support speech synthesis"),

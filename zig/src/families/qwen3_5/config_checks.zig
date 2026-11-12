@@ -1,8 +1,11 @@
 //! What a Qwen3.5 config must declare for the HIP engine: activation, gate, state, layers, rope, end ids, sizes.
 
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
 
-pub const Error = error{ UnsupportedActivation, UnsupportedAttentionGate, UnsupportedStateType, BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidLayerTypes, InvalidRotary };
+pub const Error = error{ BadEos, TooManyEos, MissingEos, InvalidConfig, InvalidRotary } || rules.Error || layer_pattern.Error;
 
 /// The most end ids a checkpoint may declare across config.json and generation_config.json.
 pub const max_eos = 8;
@@ -10,19 +13,11 @@ pub const max_eos = 8;
 /// The most decoder layers a config may declare.
 pub const max_layers = 128;
 
-/// Each layer's kind (true: full attention), from `layer_types` in any order, else every `interval`-th layer.
-pub fn layers(out: *[max_layers]bool, tower: std.json.ObjectMap, count: usize, interval: usize) Error!void {
-    if (count == 0 or count > max_layers or interval == 0) return error.InvalidConfig;
+/// Each layer's kind (true: full attention), by the rule every backend shares (core/qwen35_layers.zig).
+pub fn layers(out: *[max_layers]bool, tower: std.json.ObjectMap, count: usize) Error!void {
+    if (count == 0 or count > max_layers) return error.InvalidConfig;
     out.* = @splat(false);
-    const list = tower.get("layer_types") orelse .null;
-    if (list == .null) {
-        for (out[0..count], 0..) |*full, i| full.* = (i + 1) % interval == 0;
-        return;
-    }
-    if (list != .array or list.array.items.len != count) return error.InvalidLayerTypes;
-    for (list.array.items, out[0..count]) |item, *full| {
-        if (isString(item, "full_attention")) full.* = true else if (!isString(item, "linear_attention")) return error.InvalidLayerTypes;
-    }
+    try layer_pattern.read(out[0..count], tower);
 }
 
 /// The multimodal rope's three sections and their interleaving: the text and image positions a vision tower feeds.
@@ -47,8 +42,7 @@ pub fn mrope(rope: std.json.ObjectMap, rotary: usize) Error!Mrope {
 
 /// Unscaled rope only: a tower's `rope_scaling`, or a `rope_type`/`type` not default, would be read as plain rope.
 pub fn defaultRope(tower: std.json.ObjectMap, rope: std.json.ObjectMap) Error!void {
-    if (tower.get("rope_scaling")) |v| if (v != .null) return error.InvalidRotary;
-    for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.get(key)) |v| if (!isString(v, "default")) return error.InvalidRotary;
+    if (rope_config.scaled(tower, rope) != null) return error.InvalidRotary;
 }
 
 /// `max_position_embeddings`: a positive token count, else the family's 262,144.
@@ -60,14 +54,7 @@ pub fn maxPosition(tower: std.json.ObjectMap) Error!usize {
 
 /// Refuses a tower whose activation, attention gate, attention bias or recurrent state type the kernels do not compute.
 pub fn computes(tower: std.json.ObjectMap) Error!void {
-    if (tower.get("hidden_act")) |v| if (!isString(v, "silu")) return error.UnsupportedActivation;
-    // "swish" is the gate the kernels apply, att * sigmoid(gate), as the qwen27 family reads it
-    if (tower.get("output_gate_type")) |v| if (!isString(v, "swish")) return error.UnsupportedAttentionGate;
-    if (tower.get("attn_output_gate")) |v| if (!isFlag(v, true)) return error.UnsupportedAttentionGate;
-    if (tower.get("attention_bias")) |v| if (!isFlag(v, false)) return error.UnsupportedAttentionGate;
-    inline for (.{ "linear_attn_state_dtype", "mamba_ssm_dtype" }) |key| {
-        if (tower.get(key)) |v| if (!isString(v, "float32")) return error.UnsupportedStateType;
-    }
+    return rules.check(tower, .hip);
 }
 
 /// The sizes the kernels index with 32-bit counts and the host multiplies: every product must fit.
@@ -134,10 +121,6 @@ fn add(a: usize, b: usize) Error!usize {
     return std.math.add(usize, a, b) catch error.InvalidConfig;
 }
 
-fn isString(v: std.json.Value, want: []const u8) bool {
-    return v == .string and std.mem.eql(u8, v.string, want);
-}
-
 /// A JSON boolean, or the 0 / 1 some conversions write in its place.
 fn isFlag(v: std.json.Value, want: bool) bool {
     return switch (v) {
@@ -202,13 +185,15 @@ test "layer kinds: any order from layer_types, the interval otherwise; wrong len
     defer arena.deinit();
     const a = arena.allocator();
     var kinds: [max_layers]bool = undefined;
-    try layers(&kinds, try parsed(a, "{}"), 8, 4);
+    try layers(&kinds, try parsed(a, "{}"), 8);
     try std.testing.expectEqualSlices(bool, &.{ false, false, false, true, false, false, false, true }, kinds[0..8]);
-    try layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\",\"linear_attention\",\"full_attention\"]}"), 3, 4);
+    try layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\",\"linear_attention\",\"full_attention\"]}"), 3);
     try std.testing.expectEqualSlices(bool, &.{ true, false, true }, kinds[0..3]);
-    try std.testing.expectError(error.InvalidLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\"]}"), 3, 4));
-    try std.testing.expectError(error.InvalidLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"sliding_attention\"]}"), 1, 4));
-    try std.testing.expectError(error.InvalidConfig, layers(&kinds, try parsed(a, "{}"), max_layers + 1, 4));
+    try layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\",\"linear_attention\"],\"full_attention_interval\":0}"), 2);
+    try std.testing.expectEqualSlices(bool, &.{ true, false }, kinds[0..2]);
+    try std.testing.expectError(error.BadLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"full_attention\"]}"), 3));
+    try std.testing.expectError(error.UnsupportedLayerTypes, layers(&kinds, try parsed(a, "{\"layer_types\":[\"sliding_attention\"]}"), 1));
+    try std.testing.expectError(error.InvalidConfig, layers(&kinds, try parsed(a, "{}"), max_layers + 1));
 }
 
 test "mrope: three sections filling half the rotary width, interleaved; max_position positive" {

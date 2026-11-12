@@ -1,10 +1,10 @@
 //! A Qwen-VL tower's bf16 tensors (vision_tower.*) from a checkpoint's shards into one Metal buffer, 256-aligned.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("../safetensors.zig");
 const Config = @import("config.zig").Config;
+const shards = @import("shards.zig");
 
-pub const prefix = "vision_tower.";
+pub const prefix = shards.prefix;
 
 /// A place in a buffer.
 pub const Ref = struct {
@@ -86,7 +86,7 @@ pub fn bytes(gpa: std.mem.Allocator, c: Config) !usize {
     return (try plan(gpa, c)).device;
 }
 
-const Src = struct { path: [:0]const u8, off: u64, e: st.Entry };
+const Src = shards.Src;
 
 /// The tower's tensors from `dir` into one shared buffer; MLX's patch kernel [O, T, Y, X, C] turned to [O, C, T, Y, X].
 pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, c: Config) !Weights {
@@ -97,7 +97,7 @@ pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []con
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const found = try headers(arena, io, dir);
+    const found = try shards.headers(arena, io, dir);
     var w: Weights = .{ .buf = undefined, .blocks = try gpa.alloc(Block, c.depth) };
     errdefer gpa.free(w.blocks);
     const wants = (try wanted(arena, c, &w)).items;
@@ -133,52 +133,12 @@ pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []con
     return w;
 }
 
-/// Every vision tensor's file, offset and header entry, found through the shard index (or the one file).
-fn headers(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !std.StringArrayHashMapUnmanaged(Src) {
-    var files: std.StringArrayHashMapUnmanaged(void) = .empty;
-    const index = try std.fs.path.join(arena, &.{ dir, "model.safetensors.index.json" });
-    if (std.Io.Dir.cwd().readFileAlloc(io, index, arena, .limited(64 << 20))) |text| {
-        const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, text, .{});
-        const map = (doc.object.get("weight_map") orelse return error.BadIndex).object;
-        var it = map.iterator();
-        while (it.next()) |kv| if (std.mem.startsWith(u8, kv.key_ptr.*, prefix)) try files.put(arena, kv.value_ptr.string, {});
-    } else |_| try files.put(arena, "model.safetensors", {});
-    var out: std.StringArrayHashMapUnmanaged(Src) = .empty;
-    for (files.keys()) |name| {
-        const path = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-        if (fd < 0) return error.OpenFailed;
-        defer _ = std.c.close(fd);
-        var head: [8]u8 = undefined;
-        try readAll(fd, &head, 0);
-        const hlen = std.mem.readInt(u64, &head, .little);
-        const end: u64 = @intCast(std.c.lseek(fd, 0, std.c.SEEK.END));
-        if (hlen > end - 8) return error.BadSafetensors;
-        const header = try arena.alloc(u8, @intCast(hlen));
-        try readAll(fd, header, 8);
-        const parsed = try st.parseHeaderPrefix(arena, header, @intCast(end - 8 - hlen), prefix);
-        var it = parsed.iterator();
-        while (it.next()) |kv| try out.put(arena, kv.key_ptr.*, .{ .path = path, .off = 8 + hlen + kv.value_ptr.begin, .e = kv.value_ptr.* });
-    }
-    if (out.count() == 0) return error.NoVisionTower;
-    return out;
-}
-
 fn readInto(path: [:0]const u8, dst: []u8, off: u64) !void {
     const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd < 0) return error.OpenFailed;
     defer _ = std.c.close(fd);
     _ = std.c.fcntl(fd, 48, @as(c_int, 1)); // F_NOCACHE, as the language model's shards are read
-    try readAll(fd, dst, off);
-}
-
-fn readAll(fd: std.c.fd_t, dst: []u8, at: u64) !void {
-    var done: usize = 0;
-    while (done < dst.len) {
-        const n = std.c.pread(fd, dst.ptr + done, dst.len - done, @intCast(at + done));
-        if (n <= 0) return error.ShortRead;
-        done += @intCast(n);
-    }
+    try shards.readAll(fd, dst, off);
 }
 
 /// [O, T, Y, X, C] (MLX's Conv3d) to [O, C, T, Y, X], each output channel's row in place.

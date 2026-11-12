@@ -98,6 +98,7 @@ pub const Drafted = struct {
         m.mtp = true;
         m.speculate = true;
         m.speculate_early = false;
+        m.allocate_shared_drafts = true;
         m.drafts = @min(d.depth, if (target.exact_width > 1) target.exact_width - 1 else 0);
         m.mtp_step_ms = d.step_ms;
         m.draft_prior = d.prior;
@@ -105,12 +106,23 @@ pub const Drafted = struct {
         m.draft_streams = d.batched;
         m.draft_probabilities = false;
         m.head_trees = d.trees;
+        m.copy_first = d.copy_first;
+        m.hold_costs = d.hold_costs;
+        if (d.chances and x.drafter.vtable.chances != null) {
+            // a chain's drafts priced by the drafter's own chances; the next hold as deep as the grant and its slack
+            m.draft_probabilities = d.confidence_floor == null;
+            m.draft_confidence = d.confidence_floor;
+            m.granted_depth = d.confidence_floor == null;
+            m.draft_slack = d.slack;
+        }
         if (d.tree_nodes > 0) {
             // the drafter grows its own trees, best first, and prices their nodes
             m.drafts = @min(d.tree_nodes, if (target.exact_width > 1) target.exact_width - 1 else 0);
             m.draft_probabilities = x.drafter.vtable.chances != null;
             m.head_trees = false;
         }
+        m.limit_shared_drafts = (target.limit_shared_drafts or d.limit_shared_drafts) and
+            !m.draft_probabilities and m.draft_confidence == null;
         if (d.copy_match > 0) m.copy_match = d.copy_match;
         if (d.window_costs.len > 0) m.window_costs = d.window_costs;
         if (d.lane_costs.len > 0) m.lane_costs = d.lane_costs;
@@ -286,7 +298,7 @@ pub const Drafted = struct {
                 for (rows, 0..) |row, i| prefix = prefix and row == i;
                 const n: u32 = @intCast(if (prefix) rows.len else rows[rows.len - 1] + 1);
                 const f = try x.target.features(r.stream, x.drafter.taps(), r.start, n);
-                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .prompt = false, .offered = lane.offered });
+                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .prompt = false, .propose = r.depth > 0, .offered = lane.offered });
                 lane.offered = 0;
                 pending = r.follow[rows.len - 1];
                 lane.rows = true;
@@ -299,8 +311,9 @@ pub const Drafted = struct {
                 pending = tok.*;
                 const last = r.stream.prompt_len - 1;
                 if (r.stream.cached <= last) { // the pass computed the prompt's last row (not restored whole)
+                    // right after this stream's own prompt pass: a target keeping one pass's taps refuses another's
                     const f = try x.target.features(r.stream, x.drafter.taps(), last, 1);
-                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok) });
+                    try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = last, .follow = @as(*const [1]u32, tok), .propose = r.depth > 0 });
                     lane.rows = true;
                 }
             }
@@ -330,6 +343,15 @@ pub const Drafted = struct {
         const grown = try x.drafter.tree(s, gpa) orelse return null;
         lane.tree_first = if (grown.tokens) |t| (if (t.len > 0) t[0] else null) else null;
         return grown;
+    }
+
+    /// A stream another driver decoded on the drafter's own state (a lone driver): the next draft absorbs and holds.
+    pub fn adopt(x: *Drafted, s: *Stream) !void {
+        if (!x.lanes.contains(s)) {
+            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+            try x.drafter.open(s);
+        }
+        x.lanes.putAssumeCapacity(s, .{ .rows = true });
     }
 
     fn dropStream(x: *Drafted, s: *Stream) void {

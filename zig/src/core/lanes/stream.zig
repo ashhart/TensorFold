@@ -108,6 +108,8 @@ pub const Image = struct {
     gw: u32,
     at: u32,
     tokens: u32,
+    /// Visible pixel height and width before padding, for towers with content-normalized positions.
+    content_size: ?[2]u32 = null,
     hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
 };
 
@@ -115,6 +117,7 @@ pub const Spec = struct {
     id: []const u8,
     prompt: []const u32,
     embedding: ?@import("embedding.zig").Batch = null,
+    readout: ?*const @import("readout.zig").Spec = null,
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
@@ -148,6 +151,7 @@ pub const Spec = struct {
 
 pub const Stream = struct {
     embedding: ?@import("embedding.zig").Batch = null,
+    readout: ?*const @import("readout.zig").Spec = null, // the request's; the backend writes its logits
     id: []const u8,
     prompt_len: usize,
     max_new: u32,
@@ -179,6 +183,8 @@ pub const Stream = struct {
     rows: std.ArrayList(Row) = .empty, // with `logprobs`: one a token of emitted(), in order
     prompt_logprobs: ?u8 = null,
     prompt_rows: std.ArrayList(Row) = .empty, // with `prompt_logprobs`: one a prompt token after the first, in order
+    prefill_widths: std.ArrayList(u32) = .empty, // completed target prompt passes, reported by an instrumented backend
+    prefill_widths_failed: bool = false, // an allocation failure invalidates this observation without failing the reply
     reuse: Reuse = .{},
     decode_spans: []const [2]u32 = &.{},
     decide: ?u32 = null,
@@ -225,6 +231,8 @@ pub const Stream = struct {
     measured: [plan_lanes.sizes.len + 1]plan_lanes.Measured = @splat(.{}), // each pick's round times past its table price
     priced: ?struct { choice: usize, ms: f64 } = null, // the pick that shaped the held window, at its table price
     min_rows: u32 = 0,
+    grammar_time: @import("grammar_time.zig").Sum = .{},
+    grammar_round: @import("grammar_time.zig").Round = .{},
     gpu_seconds: ?f64 = null, // a timed backend's passes this stream ran in (TF_Q27_PROFILE); null: untimed
     paused: bool = false,
     depth: ?State = null,
@@ -234,6 +242,8 @@ pub const Stream = struct {
     served: ?u64 = null,
     proposal_depth: ?u32 = null, // null: legacy; otherwise the last routed request, zero until it succeeds
     granted: ?u32 = null,
+    grant_short: bool = false, // the last grant verified fewer drafts than the stream held
+    grant_gain: ?f64 = null, // the drafts its last grant expected to keep (the chances it was priced by)
     draft_chances: std.ArrayList(f64) = .empty, // last full head prices, retained through zero-row rounds
     copy_width: ?u32 = null,
 
@@ -242,6 +252,7 @@ pub const Stream = struct {
             .id = spec.id,
             .prompt_len = spec.prompt.len,
             .embedding = spec.embedding,
+            .readout = spec.readout,
             .max_new = spec.max_new,
             .eos = spec.eos,
             .sampling = spec.sampling,
@@ -289,6 +300,7 @@ pub const Stream = struct {
         s.context.deinit(gpa);
         s.rows.deinit(gpa);
         s.prompt_rows.deinit(gpa);
+        s.prefill_widths.deinit(gpa);
         s.force.deinit(gpa);
         s.long_loop.deinit(gpa);
         s.dropRoundState(gpa);
@@ -303,6 +315,8 @@ pub const Stream = struct {
         s.inflight = null;
         s.served = null;
         s.granted = null;
+        s.grant_short = false;
+        s.grant_gain = null;
         s.draft_chances.deinit(gpa);
         s.draft_chances = .empty;
         s.copy_width = null;
@@ -321,6 +335,11 @@ pub const Stream = struct {
 
     pub fn prompt(s: *const Stream) []const u32 {
         return s.context.items[0..s.prompt_len];
+    }
+
+    /// A stream whose answer is a function of its prompt rows alone (an embedding or a readout): no token is drawn.
+    pub fn promptOnly(s: *const Stream) bool {
+        return s.embedding != null or s.readout != null;
     }
 
     pub fn emitted(s: *const Stream) []const u32 {

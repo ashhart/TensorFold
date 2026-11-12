@@ -34,6 +34,7 @@ const Odd = struct {
 
 const Head = struct {
     d: q.draft.Draft = undefined,
+    target: q.engine.Engine = undefined,
     storage: [F.stagedLen(2)]u8 align(16) = undefined,
     book: [512]u16 = @splat(0),
     data: std.AutoHashMapUnmanaged(*lanes.Stream, Lane) = .empty,
@@ -41,6 +42,10 @@ const Head = struct {
     calls: usize = 0,
     const Lane = struct { ctx: q.draft.Ctx, history: std.ArrayList(u32) = .empty };
     fn init(h: *Head) !void {
+        h.target.g.hidden = 256; // the drafter's facts read the target's shape: this small one keeps its copy match
+        h.target.g.layers = 1;
+        h.target.g.experts = 0;
+        h.d.e = &h.target;
         h.d.frame_streams = 128;
         h.d.projection_role = .proposal;
         h.d.scratch_one = 0;
@@ -50,6 +55,7 @@ const Head = struct {
         h.d.w.successor = &h.book;
         h.d.staged = .{ .d = undefined, .bytes = &h.storage };
         if (own_trees) h.d.c.block = 16;
+        h.d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
         h.d.gpa = a;
         h.d.streams = .empty;
         h.d.landing = .{};
@@ -132,7 +138,7 @@ const Head = struct {
         // a grown tree takes the drafter's whole node budget; the engine admits its first nodes
         if (own_trees) for (contexts[0..items.len]) |ctx| {
             try std.testing.expect(ctx.grown > 0);
-            try std.testing.expect(ctx.grown <= q.draft.tree.nodes());
+            try std.testing.expect(ctx.grown <= try q.draft.tree.nodes());
         };
     }
     fn held(p: *anyopaque, streams: []const *lanes.Stream, outs: []const []u32) !void {

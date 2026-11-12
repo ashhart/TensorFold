@@ -5,6 +5,7 @@ const c = contract.spec;
 const g = contract.gates;
 const Affine = contract.affine.Affine;
 const cases = @import("glm_rows_cases.zig");
+const reference_threads = contract.reference_threads;
 fn bf(x: f64) f64 {
     return c.fromBf16(c.toBf16(@floatCast(x)));
 }
@@ -110,6 +111,22 @@ pub const Fixture = struct {
         return .{ .row = if (f.v.kind == .glu) @as(usize, @intCast(f.order[pos])) / 2 else pos, .col = expert * n + i % n };
     }
     pub fn reference(f: Fixture, want: []f64, mag: []f64) void {
+        f.referenceParallel(want, mag, reference_threads.maximum, .normal);
+    }
+    fn referenceParallel(f: Fixture, want: []f64, mag: []f64, requested: usize, mode: reference_threads.Mode) void {
+        const jobs_count = reference_threads.count(requested, want.len);
+        if (jobs_count == 0) return;
+        var jobs: [reference_threads.maximum]ReferenceJob = undefined;
+        for (jobs[0..jobs_count], 0..) |*job, worker| job.* = .{
+            .f = f,
+            .first = worker * want.len / jobs_count,
+            .end = (worker + 1) * want.len / jobs_count,
+            .want = want,
+            .mag = mag,
+        };
+        reference_threads.run(ReferenceJob, jobs[0..jobs_count], mode);
+    }
+    pub fn referenceSerial(f: Fixture, want: []f64, mag: []f64) void {
         for (want, mag, 0..) |*w, *m, i| {
             const at = f.coordinates(i);
             const q = if (f.v.mode == .up_oracle) f.up.? else f.f;
@@ -150,6 +167,29 @@ pub const Fixture = struct {
         }
     }
 };
+const ReferenceJob = struct {
+    f: Fixture,
+    first: usize,
+    end: usize,
+    want: []f64,
+    mag: []f64,
+    pub fn run(job: *@This()) void {
+        const f = job.f;
+        for (job.first..job.end) |i| {
+            const at = f.coordinates(i);
+            const q = if (f.v.mode == .up_oracle) f.up.? else f.f;
+            const dot = q.one(at.row, at.col);
+            if (f.v.nonlinear()) {
+                job.want[i] = glu(dot[0], f.up.?.one(at.row, at.col)[0]);
+                job.mag[i] = @abs(job.want[i]);
+            } else {
+                job.want[i] = dot[0];
+                job.mag[i] = dot[1];
+            }
+        }
+    }
+};
+
 fn linear(f: Affine, row: usize, col: usize, acc: c.Accum, order: g.Order, t: []f64, groups: []f64) f64 {
     const k = f.shape.k;
     const kg = k / f.group;
@@ -171,4 +211,56 @@ fn linear(f: Affine, row: usize, col: usize, acc: c.Accum, order: g.Order, t: []
         best = v;
     };
     return best;
+}
+
+fn checkParallel(f: Fixture) !void {
+    const a = std.testing.allocator;
+    const n = f.count();
+    const values = try a.alloc(f64, 4 * n);
+    defer a.free(values);
+    const want = values[0..n];
+    const mag = values[n .. 2 * n];
+    const got = values[2 * n .. 3 * n];
+    const got_mag = values[3 * n ..];
+    f.referenceSerial(want, mag);
+    for ([_]usize{ 1, 3, 8 }) |workers| {
+        for ([_]reference_threads.Mode{ .normal, .partial_failure, .all_failure }) |mode| {
+            @memset(got, -517);
+            @memset(got_mag, -519);
+            f.referenceParallel(got, got_mag, workers, mode);
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got));
+            try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mag), std.mem.sliceAsBytes(got_mag));
+        }
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    var borrowed = f;
+    borrowed.a = failing.allocator();
+    borrowed.f.a = failing.allocator();
+    if (borrowed.up) |*up| up.a = failing.allocator();
+    borrowed.reference(got, got_mag);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(want), std.mem.sliceAsBytes(got));
+    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mag), std.mem.sliceAsBytes(got_mag));
+}
+
+pub fn checkParallelReference() !void {
+    const a = std.testing.allocator;
+    for (cases.entries) |v| for ([_]usize{ 3, 4 }) |count| {
+        for ([_]g.Fill{ .random, .stress, .nonfinite }) |fill| {
+            var f = try Fixture.init(a, v, .{ .rows = count, .n = 8, .k = 128 }, fill, 517 + @as(u64, v.bits));
+            defer f.deinit();
+            try checkParallel(f);
+            f.f.x[0] = c.toBf16(7);
+            f.f.codes[0] ^= 1;
+            f.f.scales[0] = c.toBf16(-0.5);
+            if (f.up) |up| {
+                up.x[0] = c.toBf16(7);
+                up.codes[0] ^= 1;
+            }
+            f.order[0] = f.order[f.order.len - 1];
+            f.offsets[2] = 1;
+            f.offsets[3] = 1;
+            try checkParallel(f);
+        }
+    };
 }

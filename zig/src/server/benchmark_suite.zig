@@ -303,6 +303,9 @@ pub fn receiptCells(a: Allocator, v: json.Value) ![]Cell {
     const sid = protocol(v.get("suite") orelse return error.UnknownProtocol) orelse return error.UnknownProtocol;
     const stg = v.get("settings") orelse return error.UnknownProtocol;
     const out = try cells(a, v.get("samples").?.array, @intFromFloat(number(stg.get("repetitions")).?));
-    for (out) |*c| c.protocol = sid;
+    for (out) |*c| {
+        c.protocol = sid;
+        if (stg.get("thinking_mode") != null) c.protocol_complete = false;
+    }
     return out;
 }

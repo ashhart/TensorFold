@@ -1,9 +1,12 @@
 //! Kimi K3's text model shape from config.json's text_config, and which layers are KDA or MLA.
 const std = @import("std");
+pub const dsa_config = @import("dsa_config.zig");
 
 pub const Kind = enum { kda, mla };
+pub const thinking_efforts = [_][]const u8{ "low", "medium", "high", "max" };
 
 pub const Config = struct {
+    dsa: ?dsa_config.Indexer = null,
     hidden: u32 = 7168,
     layers: u32 = 93,
     vocab: u32 = 163840,
@@ -31,6 +34,10 @@ pub const Config = struct {
     routed_scale: f32 = 1.0,
     /// 0-based layer i is MLA when i + 1 is in config's 1-based full_attn_layers.
     full_attn: std.StaticBitSet(128) = defaultFull(),
+
+    pub fn checkEnd(c: *const Config, pos: u32, rows: u32) !void {
+        if (c.dsa != null) try dsa_config.checkEnd(pos, rows);
+    }
 
     pub fn kind(c: *const Config, i: u32) Kind {
         return if (c.full_attn.isSet(i)) .mla else .kda;
@@ -79,9 +86,13 @@ fn defaultFull() std.StaticBitSet(128) {
 pub fn parse(gpa: std.mem.Allocator, json: []const u8) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
     defer parsed.deinit();
+    if (parsed.value != .object) return error.BadConfig;
     const root = parsed.value.object;
-    const t = (root.get("text_config") orelse parsed.value).object;
+    const text = root.get("text_config") orelse parsed.value;
+    if (text != .object) return error.BadConfig;
+    const t = text.object;
     var c = Config{};
+    c.dsa = try dsa_config.parse(root, t);
     const ints = .{
         .{ "hidden_size", "hidden" },               .{ "num_hidden_layers", "layers" },
         .{ "vocab_size", "vocab" },                 .{ "first_k_dense_replace", "dense_layers" },
@@ -130,4 +141,8 @@ test "K3's defaults: 69 KDA and 24 MLA layers, layer 0 KDA, layers 3 and 92 MLA"
     try std.testing.expectEqual(Kind.mla, c.kind(91));
     try std.testing.expectEqual(@as(u32, 23), c.kindIndex(92));
     try std.testing.expectEqual(@as(u32, 8), c.blocksBefore(85));
+}
+
+test {
+    _ = @import("config_test.zig");
 }

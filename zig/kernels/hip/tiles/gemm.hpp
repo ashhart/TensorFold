@@ -41,6 +41,7 @@ struct GemmShape<DotBF16> {
 };
 
 // One 128 x 128 block of y = x . W^T: Dec reads weights and group terms, Act the rows of x, T multiplies, Epi stores.
+// A decoder without a bias term (Dec::kBias false) leaves out the x sums and the bias folds; the MLX one keeps them.
 template <class Dec, class Act, class T, class Epi, int RT>
 __device__ __forceinline__ void gemm_tile(typename Dec::Args& a) {
     if (!Dec::take_item(a, blockIdx.z)) return;
@@ -122,7 +123,7 @@ __device__ __forceinline__ void gemm_tile(typename Dec::Args& a) {
         }
         if (side == 0 && st % per == per - 1) {
             sc[(st / per) % 3][line] = Dec::scale_value(a, term[J]);
-            bi[(st / per) % 3][line] = Dec::bias_value(a, term[J]);
+            if constexpr (Dec::kBias) bi[(st / per) % 3][line] = Dec::bias_value(a, term[J]);
         }
     };
     // Side 1 sums a row's x of the stage in LDS, lo then hi of each pair in order, on through the group.
@@ -180,7 +181,9 @@ __device__ __forceinline__ void gemm_tile(typename Dec::Args& a) {
     // Two stages a trip so a stage's buffer and parity are known when the code is built.
     auto step = [&]<int P>(std::integral_constant<int, P>, int s) {
         constexpr int cur = P;
-        if (live && s > 0 && (s - 1) % per == per - 1) apply_bias(((s - 1) / per) % 3, ((s - 1) / per) & 1);
+        if constexpr (Dec::kBias) {
+            if (live && s > 0 && (s - 1) % per == per - 1) apply_bias(((s - 1) / per) % 3, ((s - 1) / per) & 1);
+        }
         if constexpr (P == 1) fetch(s + 1);
         if (live) {
             constexpr int kXRegs = RT / 4;  // x words (4 pairs each) a lane loads a chunk
@@ -235,7 +238,9 @@ __device__ __forceinline__ void gemm_tile(typename Dec::Args& a) {
                 }
             }
         }
-        if (side == 1 && sxlive) sumx(s, cur);
+        if constexpr (Dec::kBias) {
+            if (side == 1 && sxlive) sumx(s, cur);
+        }
         stash(std::integral_constant<int, P ^ 1>{}, s + 1, cur ^ 1);
         __syncthreads();
     };
@@ -243,7 +248,9 @@ __device__ __forceinline__ void gemm_tile(typename Dec::Args& a) {
         step(std::integral_constant<int, 0>{}, s);
         if (s + 1 < stages) step(std::integral_constant<int, 1>{}, s + 1);
     }
-    if (live && (stages - 1) % per == per - 1) apply_bias(((stages - 1) / per) % 3, ((stages - 1) / per) & 1);
+    if constexpr (Dec::kBias) {
+        if (live && (stages - 1) % per == per - 1) apply_bias(((stages - 1) / per) % 3, ((stages - 1) / per) & 1);
+    }
 #pragma unroll
     for (int r = 0; r < RT; ++r) {
         const int row = m0 + rg * 16 + hrow + r;

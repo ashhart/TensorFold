@@ -1,6 +1,7 @@
 //! Kolibri-1's dimensions from config.json, and the layouts this engine refuses (FP8 128 x 128, sigmoid routing).
 const std = @import("std");
 const eos_ids = @import("core").tokenizer.eos;
+const rope_config = @import("rope_config");
 
 pub const max_layers = 64;
 pub const max_eos = 4;
@@ -165,11 +166,14 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         why.set("{d} layers; this build holds at most {d}", .{ c.layers, max_layers });
         return error.BadConfig;
     }
-    // rope_parameters.rope_theta wins over the top-level rope_theta, as transformers reads them
+    // rope_parameters.rope_theta wins over the top-level one, as transformers reads them; a non-object is not read
+    const rope = rope_config.params(o) catch null;
     if (o.get("rope_theta")) |v| c.rope_theta = @floatCast(try number(v));
-    if (o.get("rope_parameters")) |v| if (v == .object) if (v.object.get("rope_theta")) |t| {
-        c.rope_theta = @floatCast(try number(t));
-    };
+    if (rope_config.pick(rope, o, "rope_theta", .params)) |t| c.rope_theta = @floatCast(try number(t));
+    if (rope_config.scaled(o, rope)) |key| {
+        why.set("config.json's {s} asks for scaled RoPE (YaRN); Kolibri-1 runs plain RoPE", .{key});
+        return error.UnsupportedRope;
+    }
     const types = o.get("layer_types") orelse {
         why.set("config.json has no layer_types", .{});
         return error.BadConfig;
@@ -280,6 +284,25 @@ test "refusals: not kolibri1, other quantization, normalised routing, other laye
     const short = try replaced("\"num_hidden_layers\": 50", "\"num_hidden_layers\": 49");
     defer std.testing.allocator.free(short);
     try refused(short, error.BadConfig, "49 layers");
+}
+
+test "scaled RoPE is refused in either form; plain, default and null keep theta and head dim" {
+    const theta = "\"rope_theta\": 10000.0,";
+    const yarn = "{\"rope_type\": \"yarn\", \"rope_theta\": 10000.0, \"factor\": 4.0}";
+    const params = try replaced(theta, "\"rope_parameters\": " ++ yarn ++ ",");
+    defer std.testing.allocator.free(params);
+    try refused(params, error.UnsupportedRope, "rope_parameters.rope_type");
+    const legacy = try replaced(theta, theta ++ " \"rope_scaling\": " ++ yarn ++ ",");
+    defer std.testing.allocator.free(legacy);
+    try refused(legacy, error.UnsupportedRope, "rope_scaling");
+    const plain = try replaced(theta, "\"rope_parameters\": {\"rope_type\": \"default\", \"rope_theta\": 10000.0}, \"rope_scaling\": null,");
+    defer std.testing.allocator.free(plain);
+    for ([_][]const u8{ pinned, plain }) |text| {
+        var why: Why = .{};
+        const c = try parse(std.testing.allocator, text, &why);
+        try std.testing.expectEqual(@as(f32, 10000), c.rope_theta);
+        try std.testing.expectEqual(@as(usize, 128), c.head_dim);
+    }
 }
 
 test "rope_parameters' theta wins, and other shapes are refused before any kernel runs" {

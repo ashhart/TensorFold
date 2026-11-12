@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/logo.png" />
+    <!-- installable as an app (Chrome, Edge, Safari's Add to Dock) where the page is served over HTTPS or localhost -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#F4F5F7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0F1114" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <title>TensorFold Web</title>
+    <!-- the look before the first paint: a dark page never flashes white while the app loads (App.tsx then keeps it) -->
+    <script>
+      try {
+        var t = localStorage.getItem('tfs-theme') || 'system'
+        if (t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches))
+          document.documentElement.setAttribute('data-theme', 'dark')
+      } catch (e) { /* no storage: the app sets it once the settings are read */ }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

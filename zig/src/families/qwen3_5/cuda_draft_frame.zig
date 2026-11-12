@@ -8,7 +8,6 @@ const layers = @import("cuda_layers.zig");
 const sig = @import("cuda_signatures.zig");
 pub const max_streams = @import("cuda_engine.zig").max_segs;
 pub const max_rows = max_streams * 16;
-pub const chunks = 9;
 const lp_words = 43;
 /// DFlash2's draft vocabulary as the Metal drafter and qwen27 engine read it: the head's first 98,304 rows, last 288.
 const spans = [2][2]usize{ .{ 0, 98304 }, .{ 248032, 248320 } };
@@ -33,7 +32,7 @@ pub fn stage(c: draft.Config, items: []const dr.Hold, contexts: []const *draft.C
     for (items, contexts, 0..) |it, ctx, index| {
         if (it.position == 0 or it.position > std.math.maxInt(i64) - c.block or ctx.end != it.position - 1 or ctx.begin > ctx.end) return error.DraftContextBehind;
         // a chain drafts a row a depth; a grown tree's depth is its node budget (tree.nodes(), up to the window)
-        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, tree.nodes()) else c.block - 1;
+        const most = if (c.block == 16 and it.lanes == null) @max(c.block - 1, try tree.nodes()) else c.block - 1;
         if (it.pending >= c.vocab or it.depth > most) return error.BadDraftFrame;
         for (contexts[0..index]) |prior| if (ctx == prior or ctx.ring.ptr == prior.ring.ptr) return error.OverlappingDraftContexts;
         if (it.lanes) |shape| {
@@ -59,14 +58,15 @@ fn launch(d: anytype, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, blo
 fn conv(d: anytype, x: u64, base: u64, res: u64, out: u64, rows: usize, branch: c_int) !void {
     try d.e.run(d.fns.dyn_conv_batch, .{ rows, (d.c.hidden + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ x, d.dyn, base, res, out, @as(c_int, @intCast(d.c.hidden)), @as(c_int, @intCast(d.c.group)), branch, @as(c_int, @intCast(d.c.block)) });
 }
-fn rope(d: anytype, x: u64, w: u64, out: u64, rows: usize, heads: usize) !void {
+pub fn rope(d: anytype, x: u64, w: u64, out: u64, rows: usize, heads: usize) !void {
     try d.e.run(d.fns.norm_rope_batch, .{ rows * heads, 1, 1 }, .{ 32, 1, 1 }, .{ x, w, out, @as(c_int, @intCast(heads)), @as(c_int, @intCast(heads * 128)), d.segments, @as(c_int, @intCast(d.c.block)), d.c.eps, d.c.theta });
 }
 pub fn attention(d: anytype, rows: usize, layer: usize) !void {
     const c = d.c;
-    const partial = .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), d.pm, d.pl, d.po };
-    try launch(d, d.fns.attn_partial, sig.draft_partial, .{ rows, c.heads, chunks }, .{ 128, 1, 1 }, partial);
-    const merge = .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), d.att };
+    // causal: DSpine's block rows see the rows up to their own; DFlash2's see the whole block
+    const partial = .{ d.q, d.kb, d.vb, d.segments, @as(c_int, @intCast(c.block)), @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.kv_heads)), @as(c_int, @intCast(c.ringRows())), @as(c_int, @intCast(c.window)), @as(c_int, @intCast(layer)), @as(c_int, @intCast(c.chunks())), @as(c_int, @intFromBool(c.kind == .dspine)), d.pm, d.pl, d.po };
+    try launch(d, d.fns.attn_partial, sig.draft_partial, .{ rows, c.heads, c.chunks() }, .{ 128, 1, 1 }, partial);
+    const merge = .{ d.pm, d.pl, d.po, @as(c_int, @intCast(c.heads)), @as(c_int, @intCast(c.chunks())), d.att };
     try launch(d, d.fns.attn_merge, sig.draft_merge, .{ rows, c.heads, 1 }, .{ 32, 1, 1 }, merge);
 }
 pub fn publish(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx) !void {
@@ -103,8 +103,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try d.norm(d.h2, l.post_norm, d.x, B);
         try d.projAgain(l.mlp_conv, d.x, d.dyn, B);
         try conv(d, d.x, l.mlp_base, 0, d.xin, B, 0);
-        try d.proj(l.gate, d.xin, d.gate, B);
-        try d.projAgain(l.up, d.xin, d.up, B);
+        try d.projManySums(&.{ l.gate, l.up }, d.xin, &.{ d.gate, d.up }, B, true);
         try e.run(e.fns.mlp_act, .{ (B * c.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ d.gate, d.up, d.act, @as(c_longlong, @intCast(B * c.intermediate)), @as(u64, 0), @as(c_int, @intCast(c.intermediate)), d.xs });
         try d.projAgain(l.down, d.act, d.o, B);
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
@@ -116,7 +115,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         masked = d.h2;
     }
     try d.norm(masked, d.w.final_norm, d.x, rows);
-    const spanned = if (narrow(contexts)) try head(d, rows) else try full(d, rows);
+    const spanned = try logitsOf(d, contexts, d.x, d.logits, rows);
     try e.draws.topkRows(e.stream, spanned orelse d.logits, if (spanned != null) span_width else c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);
     try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(st.ptr + words_at, d.words, rows * lp_words * 4, e.stream.handle), "cuMemcpyDtoHAsync");
@@ -124,9 +123,7 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
     try e.stream.synchronize();
     if (spanned != null) for (0..rows) |r| {
         const w = std.mem.bytesAsSlice(u32, st[words_at + r * lp_words * 4 ..][0 .. lp_words * 4]);
-        for (w[2..][0..c.topk]) |*id| if (id.* >= spans[0][1]) {
-            id.* += @intCast(spans[1][0] - spans[0][1]);
-        };
+        for (w[2..][0..c.topk]) |*id| id.* = columnId(id.*);
     };
     try publish(d, items, contexts);
 }
@@ -138,6 +135,26 @@ pub fn scan(ctx: *draft.Ctx, toks: []const u32) void {
         break;
     };
     ctx.scanned = toks.len;
+}
+
+/// The rows' draft logits of x into `logits`: over the spans when every stream keeps to them (the packed rows).
+pub fn logitsOf(d: anytype, contexts: []const *draft.Ctx, x: u64, logits: u64, rows: usize) !?u64 {
+    return if (narrow(contexts)) try head(d, x, logits, rows) else try full(d, x, logits, rows);
+}
+
+/// A top-k column's token id: past the first span, the tail's.
+pub fn columnId(column: u32) u32 {
+    return if (column >= spans[0][1]) column + @as(u32, @intCast(spans[1][0] - spans[0][1])) else column;
+}
+
+/// The column split and id shift a kernel maps spanned columns with (0: the whole head, ids are columns).
+pub fn split(spanned: bool) [2]c_int {
+    return if (spanned) .{ @intCast(spans[0][1]), @intCast(spans[1][0] - spans[0][1]) } else .{ 0, 0 };
+}
+
+/// The spans' packed width, or the whole vocabulary.
+pub fn columns(spanned: bool, vocab: usize) usize {
+    return if (spanned) span_width else vocab;
 }
 
 /// Whether every stream's tokens so far keep to the spans (a warmup's or standalone hold's context reads none).
@@ -155,12 +172,12 @@ pub fn x3Views(q: cuda.exl3.Weight) !struct { first: cuda.exl3.Weight, tail: cud
 }
 
 /// The rows' draft logits over the spans' columns, packed in d.logits after the two projections (null: not this head).
-fn head(d: anytype, rows: usize) !?u64 {
+fn head(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
     const e = d.e;
     // the head's first span and the whole tiles holding its tail span, as views of the stored matrix
     const first: layers.Proj, const tail: layers.Proj, const tail_at: usize = switch (e.head) {
         .a4 => |q| blk: {
-            if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, rows);
+            if (q.n != spans[1][1] or q.k % 64 != 0) return full(d, x, logits, rows);
             break :blk .{
                 .{ .a4 = .{ .w = q.w, .s = q.s, .b = q.b, .n = spans[0][1], .k = q.k, .npad = q.npad } },
                 .{ .a4 = .{ .w = q.w + tail_tile * q.k / 2, .s = q.s + tail_tile * 2, .b = q.b + tail_tile * 2, .n = q.n - tail_tile, .k = q.k, .npad = q.npad } },
@@ -168,18 +185,22 @@ fn head(d: anytype, rows: usize) !?u64 {
             };
         },
         .x3 => |q| blk: {
-            if (q.n != spans[1][1] or q.k % 128 != 0) return full(d, rows);
+            if (q.n != spans[1][1] or q.k % 128 != 0) return full(d, x, logits, rows);
             const v = try x3Views(q);
             break :blk .{ .{ .x3 = v.first }, .{ .x3 = v.tail }, x3_tail_at };
         },
-        .an, .ql, .bf => return full(d, rows),
+        .an, .ql, .bf => return full(d, x, logits, rows),
     };
     const tail_n = spans[1][1] - tail_at;
-    const a = d.logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592
+    const a = logits; // rows x 98,304, then rows x the tail's columns, then the packed rows x 98,592
     const b = a + rows * spans[0][1] * 2;
     const out = b + rows * tail_n * 2;
-    try draft.precision.project(e, first, d.x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
-    try draft.precision.project(e, tail, d.x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    if (e.affine.pdl and first == .a4 and tail == .a4) {
+        try e.projManySums(&.{ first, tail }, x, d.xs, &.{ a, b }, rows, false, 0);
+    } else {
+        try draft.precision.project(e, first, x, d.xs, a, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+        try draft.precision.project(e, tail, x, d.xs, b, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+    }
     const skip = spans[1][0] - tail_at;
     const copies = [2]cuda.abi.Memcpy2D{
         .{ .src = a, .src_pitch = spans[0][1] * 2, .dst = out, .dst_pitch = span_width * 2, .width = spans[0][1] * 2, .height = rows },
@@ -189,8 +210,8 @@ fn head(d: anytype, rows: usize) !?u64 {
     return out;
 }
 
-/// The rows' draft logits over the whole vocabulary, in d.logits.
-fn full(d: anytype, rows: usize) !?u64 {
-    try draft.precision.project(d.e, d.e.head, d.x, d.xs, d.logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
+/// The rows' draft logits over the whole vocabulary, in `logits`.
+fn full(d: anytype, x: u64, logits: u64, rows: usize) !?u64 {
+    try draft.precision.project(d.e, d.e.head, x, d.xs, logits, rows, .proposal, draft.precision.dflash_projection_prompt_cutoff);
     return null;
 }

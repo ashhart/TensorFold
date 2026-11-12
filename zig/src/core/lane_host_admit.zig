@@ -1,11 +1,11 @@
 //! Which queued request a lane host admits next: the head, or one behind a head that waits for pool room.
-const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const lanes = @import("lanes");
 const prefix = @import("lane_host_prefix.zig");
 const fetch = @import("lane_host_fetch.zig");
 const pressure = @import("lane_host_pressure.zig");
+const ledger = @import("lane_host_ledger.zig");
 
 /// The queued job to admit (its index), or null to hold; the caller holds the lock.
 pub fn pick(h: *LaneHost) ?usize {
@@ -36,20 +36,24 @@ fn choose(h: *LaneHost) ?usize {
     const first = for (h.queued.items, 0..) |j, i| {
         if (!passed(h, j)) break i;
     } else return null;
-    const a = h.info_.admit orelse return first;
-    if (h.core.activeCount() == 0) return first; // alone: the whole pool is free (kept prefixes give their blocks back)
+    if (h.info_.admit == null and !ledger.priced(h)) return first;
+    // alone: the whole pool is free (kept prefixes give their blocks back); a ledger counts leases, not live streams
+    if (if (ledger.priced(h)) !ledger.outstanding(h) else h.core.activeCount() == 0) return first;
     const head = h.queued.items[first];
-    if (fits(a, head)) return first;
+    if (fits(h, head)) return first;
     if (head.waits_since == null) head.waits_since = h.admissions;
     // it waits on the streams admitted before it waited: while one runs, later requests that fit go first; then none do
     for (h.admitted.items) |j| if (j.seq < head.waits_since.?) {
-        for (h.queued.items[first + 1 ..], first + 1..) |j2, i| if (!passed(h, j2) and fits(a, j2)) return i;
+        for (h.queued.items[first + 1 ..], first + 1..) |j2, i| if (!passed(h, j2) and fits(h, j2)) return i;
         return null;
     };
     return null;
 }
 
-fn fits(a: api.Admit, job: *const Job) bool {
+/// Whether `job` fits now: the host's ledger when it has one, else the family's own pool.
+fn fits(h: *const LaneHost, job: *const Job) bool {
+    if (ledger.priced(h)) return ledger.fits(h, job);
+    const a = h.info_.admit.?;
     return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
 }
 
@@ -80,7 +84,8 @@ pub fn many(h: *LaneHost) bool {
         };
         took = true;
         const at = h.setup(job) orelse continue;
-        if (h.startsAlone(job) or (h.core.fills() and !h.core.batchable(&job.stream))) { // long, image, resumed: filled
+        // a prompt-only job ends through `launch`: after `addStreams` nothing would complete it
+        if (h.startsAlone(job) or job.stream.promptOnly() or (h.core.fills() and !h.core.batchable(&job.stream))) { // long, image, resumed: filled
             _ = h.launch(job, at);
             continue;
         }

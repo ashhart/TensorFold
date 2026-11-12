@@ -1,4 +1,4 @@
-//! Attention: planned decode over pages and the paged prompt tile against their flat forms (same bits) and float64.
+//! Attention: planned decode and the paged prompt tile against their flat forms, and prompt rows at any chunk start.
 const std = @import("std");
 const rig = @import("rig.zig");
 const Rig = rig.Rig;
@@ -10,13 +10,13 @@ const DeviceBuffer = @import("../memory.zig").DeviceBuffer;
 const page = 64;
 
 /// A cache of `kv_heads` heads and `span` positions in the activation type, flat (kv_heads, span, d) and paged.
-const Cache = struct {
+pub const Cache = struct {
     k: []u16,
     v: []u16,
     /// Position block i lives in page table[i].
     table: []u32,
 
-    fn make(t: *Rig, rng: *rig.Rng, kv_heads: usize, span: usize, d: usize) !Cache {
+    pub fn make(t: *Rig, rng: *rig.Rng, kv_heads: usize, span: usize, d: usize) !Cache {
         const c: Cache = .{ .k = try gpa.alloc(u16, kv_heads * span * d), .v = try gpa.alloc(u16, kv_heads * span * d), .table = try gpa.alloc(u32, span / page) };
         for (c.k) |*x| x.* = t.bits(rng.unit());
         for (c.v) |*x| x.* = t.bits(rng.unit());
@@ -25,14 +25,14 @@ const Cache = struct {
         return c;
     }
 
-    fn free(c: Cache) void {
+    pub fn free(c: Cache) void {
         gpa.free(c.k);
         gpa.free(c.v);
         gpa.free(c.table);
     }
 
     /// The pool layout of decode/pages.hpp: ((h * count + page) * 64 + slot) * d.
-    fn pool(c: Cache, src: []const u16, kv_heads: usize, span: usize, d: usize) ![]u16 {
+    pub fn pool(c: Cache, src: []const u16, kv_heads: usize, span: usize, d: usize) ![]u16 {
         const out = try gpa.alloc(u16, src.len);
         const count = span / page;
         for (0..kv_heads) |h| for (0..span) |pos| {
@@ -43,11 +43,47 @@ const Cache = struct {
     }
 };
 
+/// A score as plan.hip sums it: lane l over l, l + 32, ... in fp32, lanes folded by xor 16 to 1, times scale.
+fn scoreBits(q: []const f32, k: []const f32, visible: usize, key: usize, scale: f32) u32 {
+    if (key >= visible) return @bitCast(-std.math.inf(f32));
+    var lanes: [32]f32 = undefined;
+    for (&lanes, 0..) |*x, lane| {
+        x.* = 0;
+        var idx = lane;
+        while (idx < q.len) : (idx += 32) x.* = x.* + q[idx] * k[idx];
+    }
+    var mask: usize = 16;
+    while (mask > 0) : (mask >>= 1) {
+        var next: [32]f32 = undefined;
+        for (&next, 0..) |*x, lane| x.* = lanes[lane] + lanes[lane ^ mask];
+        lanes = next;
+    }
+    return @bitCast(lanes[0] * scale);
+}
+
+/// Every score of the planned walk's buffer against scoreBits: `qv` the query values the kernel reads.
+fn expectScores(t: *const Rig, c: Cache, qv: []const f32, scores: DeviceBuffer, heads: usize, kv_heads: usize, d: usize, span: usize, pos: []const i32, scale: f32) !void {
+    const got = try rig.download(u32, scores);
+    defer gpa.free(got);
+    const kv = try gpa.alloc(f32, d);
+    defer gpa.free(kv);
+    for (pos, 0..) |p, r| for (0..heads) |h| {
+        const kh = h / (heads / kv_heads);
+        const visible: usize = @intCast(p + 1);
+        for (0..span) |key| {
+            for (kv, 0..) |*x, j| x.* = @floatCast(t.value(c.k[(kh * span + key) * d + j]));
+            const want = scoreBits(qv[(r * heads + h) * d ..][0..d], kv, visible, key, scale);
+            try std.testing.expectEqual(want, got[(r * heads + h) * span + key]);
+        }
+    };
+}
+
 /// softmax(q . k * scale) v in float64 for one query of `head` seeing positions [0, visible).
-fn reference(t: *const Rig, c: Cache, q: []const f32, head: usize, group: usize, span: usize, d: usize, visible: usize, scale: f64, out: []f64) void {
+fn reference(t: *const Rig, c: Cache, q: []const f32, head: usize, group: usize, span: usize, d: usize, visible: usize, scale: f64, out: []f64) !void {
     const kv = head / group;
     var top: f64 = -std.math.inf(f64);
-    var scores: [4096]f64 = undefined;
+    const scores = try gpa.alloc(f64, visible);
+    defer gpa.free(scores);
     for (0..visible) |key| {
         var dot: f64 = 0;
         for (0..d) |j| dot += @as(f64, q[j]) * t.value(c.k[(kv * span + key) * d + j]);
@@ -76,8 +112,7 @@ fn worst(got: []const f32, want: []const f64) f64 {
 }
 
 /// Rows at positions `pos` over one slot's cache: the planned walk (grouped heads, pages) and the flat walk agree.
-fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: []const i32) !void {
-    const span: usize = 1024;
+fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, span: usize, pos: []const i32) !void {
     const rows = pos.len;
     const group = heads / kv_heads;
     const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
@@ -128,6 +163,12 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     defer dev_count.free();
     const tiles = span / 128;
     var scores = try t.alloc(rows * heads * span * 4);
+    // the planned walk's own scores start as NaN, so a key it skips cannot pass for the flat walk's bits
+    const poison = try gpa.alloc(u32, rows * heads * span);
+    defer gpa.free(poison);
+    @memset(poison, 0x7fc00000);
+    var planned_scores = try t.upload(poison);
+    defer planned_scores.free();
     defer scores.free();
     var stats = try t.alloc(rows * heads * 2 * 4);
     defer stats.free();
@@ -138,31 +179,51 @@ fn decode(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, pos: 
     const s = t.stream.handle;
     try t.on.tf_causal(@ptrFromInt(at(q)), @ptrFromInt(at(k)), @ptrFromInt(at(v)), @ptrFromInt(at(outs[0])), @intCast(rows), 1, @intCast(span), @intCast(heads), @intCast(kv_heads), @intCast(d), scale, 0, 0, @intCast(span * d), @intCast(d), 0, @intCast(span * d), @intCast(d), if (t.bf16) 1 else 0, @ptrFromInt(at(scores)), @ptrFromInt(at(stats)), @ptrFromInt(at(partials)), s, @ptrFromInt(at(dev_pos)));
     const p: plan.PlanRef = .{ .rows = rows, .slots = 1, .args = .{ .pos = at(dev_pos), .slot = at(slot), .first = at(dev_first), .count = at(dev_count), .desc = at(descs), .pages = words, .pool = @intCast(c.table.len) } };
-    try t.on.planCausal(at(q), at(outs[1]), at(scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), s);
+    try t.on.planCausal(at(q), at(outs[1]), at(planned_scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), s);
     try t.stream.synchronize();
     const flat = try rig.download(f32, outs[0]);
     defer gpa.free(flat);
     const planned = try rig.download(f32, outs[1]);
     defer gpa.free(planned);
     try std.testing.expectEqualSlices(u32, @ptrCast(flat), @ptrCast(planned));
+    try expectScores(t, c, hq, planned_scores, heads, kv_heads, d, span, pos, scale);
+    // q in the activation type: the score reads its widened values
+    const hq16 = try gpa.alloc(u16, hq.len);
+    defer gpa.free(hq16);
+    const qv = try gpa.alloc(f32, hq.len);
+    defer gpa.free(qv);
+    for (hq16, qv, hq) |*b, *w, x| {
+        b.* = t.bits(x);
+        w.* = @floatCast(t.value(b.*));
+    }
+    var q16 = try t.upload(hq16);
+    defer q16.free();
+    var act_scores = try t.upload(poison);
+    defer act_scores.free();
+    try t.on.planCausalAs(at(q16), at(outs[1]), at(act_scores), at(stats), at(partials), p, 0, heads, kv_heads, d, span, scale, t.kind(), true, s);
+    try t.stream.synchronize();
+    try expectScores(t, c, qv, act_scores, heads, kv_heads, d, span, pos, scale);
     const want = try gpa.alloc(f64, rows * heads * d);
     defer gpa.free(want);
     for (0..rows) |r| for (0..heads) |h| {
         const at_q = (r * heads + h) * d;
-        reference(t, c, hq[at_q..][0..d], h, group, span, d, @intCast(pos[r] + 1), scale, want[at_q..][0..d]);
+        try reference(t, c, hq[at_q..][0..d], h, group, span, d, @intCast(pos[r] + 1), scale, want[at_q..][0..d]);
     };
     try std.testing.expect(worst(planned, want) < 1e-5);
 }
 
-test "the planned decode walk over pages writes the flat walk's bits for grouped heads, within 1e-5 of float64" {
+test "the planned decode walk over pages writes the flat walk's bits for grouped heads, each score in its lane order, within 1e-5 of float64" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     var rng: rig.Rng = .{ .state = 0xA77E57 };
     const pos = [_]i32{ 0, 37, 300, 1023 };
-    try decode(t, &rng, 16, 2, 256, &pos); // 8 query heads a KV head, Qwen3.6-35B-A3B's attention
-    try decode(t, &rng, 24, 4, 256, &pos); // 6, Qwen3.8-27B
-    try decode(t, &rng, 16, 4, 128, &pos); // 4
-    try decode(t, &rng, 4, 4, 128, &pos); // no sharing
+    try decode(t, &rng, 16, 2, 256, 1024, &pos); // 8 query heads a KV head, Qwen3.6-35B-A3B's attention
+    try decode(t, &rng, 24, 4, 256, 1024, &pos); // 6, Qwen3.8-27B
+    try decode(t, &rng, 16, 4, 128, 1024, &pos); // 4
+    try decode(t, &rng, 4, 4, 128, 1024, &pos); // no sharing
+    // spans long enough for the four-key warps, ending mid-warp
+    try decode(t, &rng, 16, 2, 256, 16384, &.{ 9001, 16382 });
+    try decode(t, &rng, 16, 4, 128, 16384, &.{16381});
 }
 
 /// A prompt of `qlen` queries from `q_pos0` over `span` positions: the paged 64-row tile writes the flat tile's bits.
@@ -208,7 +269,7 @@ fn prompt(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, qlen:
     defer gpa.free(want);
     for (0..heads) |h| for (0..qlen) |i| {
         const at_q = (h * qlen + i) * d;
-        reference(t, c, hq[at_q..][0..d], h, group, span, d, q_pos0 + i + 1, scale, want[at_q..][0..d]);
+        try reference(t, c, hq[at_q..][0..d], h, group, span, d, q_pos0 + i + 1, scale, want[at_q..][0..d]);
     };
     const bound: f64 = if (t.bf16) 2e-2 else 4e-3;
     try std.testing.expect(worst(paged, want) < bound);
@@ -222,4 +283,68 @@ test "the paged prompt tile writes the flat tile's bits, within the cache type's
     try prompt(t, &rng, 16, 2, 256, 64, 192);
     try prompt(t, &rng, 24, 4, 256, 192, 64);
     try prompt(t, &rng, 16, 4, 128, 128, 128);
+}
+
+/// Rows a prompt chunk holds in the qwen3 forward (its SPAN): a launch takes at most this many query rows.
+const chunk = 2048;
+
+/// Every query of the cache, rows [0, cut) in chunks from 0, then [cut, len) in chunks from cut; out (heads, len, d).
+fn cuts(t: *Rig, hq: []const f32, k: DeviceBuffer, v: DeviceBuffer, heads: usize, kv_heads: usize, d: usize, len: usize, cut: usize) ![]f32 {
+    const out = try gpa.alloc(f32, heads * len * d);
+    errdefer gpa.free(out);
+    const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
+    const kind: c_int = if (t.bf16) 1 else 0;
+    for ([_][2]usize{ .{ 0, cut }, .{ cut, len } }) |seg| {
+        var p = seg[0];
+        while (p < seg[1]) : (p += chunk) {
+            const rows = @min(chunk, seg[1] - p); // one launch: q_pos0 its first position, span its end
+            const q = try gpa.alloc(f32, heads * rows * d);
+            defer gpa.free(q);
+            for (0..heads) |h| @memcpy(q[h * rows * d ..][0 .. rows * d], hq[(h * len + p) * d ..][0 .. rows * d]);
+            var dq = try t.upload(q);
+            defer dq.free();
+            var dout = try t.alloc(q.len * 4);
+            defer dout.free();
+            try t.on.tf_causal(@ptrFromInt(at(dq)), @ptrFromInt(at(k)), @ptrFromInt(at(v)), @ptrFromInt(at(dout)), 1, @intCast(rows), @intCast(p + rows), @intCast(heads), @intCast(kv_heads), @intCast(d), scale, @intCast(p), 0, @intCast(len * d), @intCast(d), 0, @intCast(len * d), @intCast(d), kind, null, null, null, t.stream.handle, null);
+            try t.stream.synchronize();
+            const got = try rig.download(f32, dout);
+            defer gpa.free(got);
+            for (0..heads) |h| @memcpy(out[(h * len + p) * d ..][0 .. rows * d], got[h * rows * d ..][0 .. rows * d]);
+        }
+    }
+    return out;
+}
+
+/// Each row's output has the same bits cut at 0 (a prompt alone) and at `cut` (a branch after a trunk), finite inputs.
+fn shifted(t: *Rig, rng: *rig.Rng, heads: usize, kv_heads: usize, d: usize, len: usize, cut: usize) !void {
+    const c = try Cache.make(t, rng, kv_heads, len, d);
+    defer c.free();
+    const hq = try gpa.alloc(f32, heads * len * d);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = rng.unit();
+    var k = try t.upload(c.k);
+    defer k.free();
+    var v = try t.upload(c.v);
+    defer v.free();
+    const alone = try cuts(t, hq, k, v, heads, kv_heads, d, len, 0);
+    defer gpa.free(alone);
+    const after = try cuts(t, hq, k, v, heads, kv_heads, d, len, cut);
+    defer gpa.free(after);
+    try std.testing.expectEqualSlices(u32, @ptrCast(alone), @ptrCast(after));
+}
+
+test "a query row's prompt attention keeps its bits wherever its chunk starts, on the wide, 16-row and one-wave kernels" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x7A1C5 };
+    // the 64-row tile (wide on, d 128), then the 16-row tile (attention=f32 turns wide off); odd cuts split a key pair
+    for ([_]bool{ true, false }) |wide| {
+        t.on.wide = wide;
+        defer t.on.wide = true;
+        try shifted(t, &rng, 32, 8, 128, 2400, 1);
+        try shifted(t, &rng, 32, 8, 128, 2400, 87);
+        try shifted(t, &rng, 32, 8, 128, 2400, 2100);
+    }
+    // an odd head width takes the one-wave kernel
+    try shifted(t, &rng, 4, 2, 63, 300, 87);
 }

@@ -1,4 +1,4 @@
-//! The 27B's lane core backend: a stream a runner slot, shared rounds across slots, DFlash2 trees for slot 0.
+//! The 27B's lane core: a stream a runner slot, shared rounds, DFlash2 trees for the first TF_Q27_DRAFT_SLOTS streams.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -23,7 +23,7 @@ pub fn windowRows(units: bool) !u32 {
     return @import("qwen27_window.zig").requested(units, if (platform.c.getenv("TF_QWEN27_WINDOW")) |v| std.mem.span(v) else null);
 }
 /// A shared round's rows at most: the frame's.
-pub const batch_rows = 128;
+pub const batch_rows = @import("qwen27_prompt_floor.zig").minimum;
 /// Streams a runner holds at most (the attention plan's).
 pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
@@ -35,6 +35,9 @@ comptime {
     std.debug.assert(max_rows <= q.attention_plan.max_rows and max_rows <= q.attention_plan.path_width);
     std.debug.assert(max_rows <= q.gpu_frame.logit_rows and batch_rows <= q.gpu_frame.max_rows);
 }
+
+/// A sampled window's logits rows, drawn by the 2B's draw (top-k candidates, then the shared keyed sampler).
+const Rows = @import("qwen27_draws.zig").Rows(tf.qwen35.backend.draw, lanes.Sampling);
 
 pub const Release = @import("qwen27_hooks.zig").Release;
 pub const Grow = @import("qwen27_hooks.zig").Grow;
@@ -90,7 +93,13 @@ pub const Metal = struct {
     slot_resume: bool = true, // TF_QWEN27_SLOT_RESUME: a later prompt resumes where slot 0 stands (0: off)
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
-        if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
+        if (runner.slots == 0 or runner.slots > max_streams) return error.TargetBinding;
+        const floor = @import("qwen27_prompt_floor.zig");
+        floor.check(runner.model.frame.capacity) catch |err| {
+            var buffer: [320]u8 = undefined;
+            std.log.err("{s}", .{try floor.describe(&buffer, runner.model.frame.capacity, .frame)});
+            return err;
+        };
         const device = runner.model.device;
         const tensor_units = device.tensorUnits();
         const window = try windowRows(tensor_units);
@@ -103,7 +112,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {
@@ -150,14 +159,16 @@ pub const Metal = struct {
         return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
-    /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
+    /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
         const drafting = b.draft != null;
         const shared = b.runner.slots > 1;
         // Context copies remain opt-in until their served cost is qualified.
         const lone_copies = b.copies;
         const narrow: usize = @min(b.window, b.timed);
-        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
+        // routed experts make a drafted window read most expert weights: plain rounds compete with drafted depths
+        const routed = b.runner.model.config.moe();
+        return .{ .exact_width = if (drafting or shared) b.window else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .plain_guard = routed, .window_costs = b.costs[0..narrow], .shared_costs = b.costs[narrow..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else b.window, .max_streams = b.runner.slots, .lone_copies = lone_copies, .context_copies = lone_copies, .allocate_shared_drafts = drafting, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -246,12 +257,8 @@ pub const Metal = struct {
             const metric = mtl.pass_metrics.phase(.sampling);
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
-            // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token)
-            for (out[0..rows], positions[0..rows], 0..) |*t, p, row| {
-                const mask = if (masks.len == 0) &.{} else masks[row * width ..][0..width];
-                t.* = try @import("qwen27_masks.zig").draw(tf.qwen35.backend.draw, b.gpa, words[(first + row) * vocab ..][0..vocab], s.sampling, p, mask);
-            }
-            return;
+            // each row's whole-row draw at its own position, the window's rows on threads
+            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks }, rows);
         }
         try b.argmaxRows(first, rows);
         try b.picked(first, rows, out);
@@ -335,10 +342,11 @@ pub const Metal = struct {
         std.debug.assert(r.active == null);
         if (r.active != null) return error.RoundNotReady;
         try r.taps.complete();
-        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, rows[0..n], out.contents()[0..out.length()]);
+        try q.tap_gather.gather(r.taps.buffer.contents()[0..r.taps.buffer.length()], r.taps.capacity, r.taps.rows, r.taps.width, r.taps.count, rows[0..n], out.contents()[0..out.length()]);
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
+            if (g.stride != r.taps.width * r.taps.count * 2) return error.BadTapGather;
             if (b.early[slot] == 0) {
                 try g.absorb(out, at * g.stride, @intCast(path.len));
                 at += path.len;
@@ -547,7 +555,6 @@ pub const Metal = struct {
 };
 
 /// Streams that draft their own trees in shared rounds, while no more are live (TF_Q27_DRAFT_SLOTS; 1: slot 0 alone).
-fn draftSlots() u32 {
-    const v = std.c.getenv("TF_Q27_DRAFT_SLOTS") orelse return 8;
-    return std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8, 1, max_streams);
+pub fn draftSlots() !u32 {
+    return std.math.clamp(try @import("sys").environment.read(u32, "TF_Q27_DRAFT_SLOTS", 8), 1, max_streams);
 }

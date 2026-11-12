@@ -35,7 +35,7 @@ struct Affine {
     int m, n, k, bits, group;
     int fp16;  // 0 is bf16, 1 is fp16
     Routing route = {};
-    __half* out16 = nullptr;  // set: the decode tile rounds each output to fp16 here instead of writing out
+    __half* out16 = nullptr;  // set: the tile rounds each output to the activation type here instead of writing out
 };
 
 // A routed block takes item ``z``: its expert's weights and its rows. False when the item has no rows.

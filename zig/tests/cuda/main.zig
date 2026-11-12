@@ -29,9 +29,11 @@ const nvfp4_experts_tests = @import("nvfp4_experts_tests.zig");
 const quant_ref_tests = @import("quant_ref_tests.zig");
 const glm_ref_tests = @import("glm_ref_tests.zig");
 const affine8_tests = @import("affine8_tests.zig");
+const native_fp_tests = @import("native_fp_tests.zig");
 const affine4_decode_tests = @import("affine4_decode_tests.zig");
 const w4a8_tests = @import("w4a8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
+const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
 const glm_vision_tests = @import("glm_vision_tests.zig");
 const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
 const glm_mm_bench = @import("glm_mm_bench.zig");
@@ -41,6 +43,8 @@ const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
 const exl3_tests = @import("exl3_tests.zig");
 const exl3_tp2_tests = @import("exl3_tp2_tests.zig");
+const exl3_plan_bench = @import("exl3_plan_bench.zig");
+const exl3_contract = @import("contract_exl3.zig");
 const exl3_candidate_tests = @import("exl3_candidate_tests.zig");
 const experts3_tests = @import("experts3_tests.zig");
 const moe_tests = @import("moe_tests.zig");
@@ -55,6 +59,7 @@ const embed_tests = @import("embed_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
 const contract_tests = @import("contract_tests.zig");
+const gb10_many_contract = @import("contract_gb10_many.zig");
 const qmm_prefill_many_contract = @import("contract_qmm_prefill_many.zig");
 const qmm_prefill_tile22_contract = @import("contract_qmm_prefill_tile22.zig");
 const glue_contract = @import("contract_flashnext_glue.zig");
@@ -63,8 +68,12 @@ const lfm2_kernel_tests = @import("lfm2_kernel_tests.zig");
 const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
 const radio_tests = @import("radio_tests.zig");
 const glm_lanes_tests = @import("glm_lanes_tests.zig");
+const glm_pair_tests = @import("glm_pair_tests.zig");
 const glm_split_tests = @import("glm_split_tests.zig");
+const glm_solo_tests = @import("glm_solo_tests.zig");
 const glm_paged_tests = @import("glm_paged_tests.zig");
+const glm_kv_host_slots = @import("glm_kv_host_slots.zig");
+const glm_tap_tests = @import("glm_tap_tests.zig");
 const glm_synth = @import("glm_synth.zig");
 const tree_round_tests = @import("tree_round_tests.zig");
 const tree_tests = @import("tree_tests.zig");
@@ -91,7 +100,9 @@ const flashnext_rank_tests = @import("flashnext_rank_tests.zig");
 const flashnext_draft_affine_tests = @import("flashnext_draft_affine_tests.zig");
 const flashnext_shared_tests = @import("flashnext_shared_tests.zig");
 const flashnext_nvfp4_tp_tests = @import("flashnext_nvfp4_tp_tests.zig");
+const flashnext_fp8_experts_tests = @import("flashnext_fp8_experts_tests.zig");
 const nvfp4_fact_tests = @import("nvfp4_fact_tests.zig");
+const nvfp4_b32_tests = @import("nvfp4_b32_tests.zig");
 const lane_half_tests = @import("lane_half_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
 const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
@@ -132,11 +143,18 @@ const usage =
     \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
     \\  flashnext-shared          separate MXFP8 shared expert and reserved-slot scatter against FP64
     \\  flashnext-nvfp4-tp        rank-local expert cuts and FP32 partials against FP64 (one GPU)
+    \\  flashnext-fp8-experts     the MTP head's block-FP8 experts (512 x 640 x 2560) through moe_native.fp8 against FP64
+    \\  moetile                   whole shared down writes only slot 10 with identical FP32 bytes
+    \\  moetile-contract          shared down replacement gates and the planted control
+    \\  moetile-bench             alternate shared-down plus scatter and direct-slot GPU timings
     \\  nvfp4-fact                NVFP4 experts' prompt tiles with the decode form's sums: its bytes at every row, FP64
+    \\  nvfp4-b32                 block 32 experts with csf0 scales: block 16's bytes on equal scales, each form and width
     \\  lane-half                 lane half tiles (MXFP8, BF16): bytes equal to the 64-column tile, FP64, cold-weight time
     \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
     \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
     \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
+    \\  flashnext-gdn-heads [BASELINE]  DeltaNet full/half bytes, optionally against a frozen flashnext_batch.fatbin
+    \\  flashnext-tp-heads MODEL  each rank's cut in-projections and attention heads equal the whole layer's bytes
     \\  flashnext-pages           the attention glue's caches through a page table: paged == contiguous, float64, controls
     \\  info                      driver, device and library versions
     \\  smoke                     copies, fills, launches, argument packing, module globals
@@ -150,7 +168,7 @@ const usage =
     \\  cublaslt                  bf16 GEMM through cuBLASLt against an fp64 reference
     \\  nccl                      one-rank NCCL all-reduce and all-gather
     \\  rank-scatter <rank> <n> [id]  rank-order reduce-scatter (NCCL_COMM_ID or an id file) against an all-gather
-    \\  roce-gather <rank>        two ranks (NCCL_COMM_ID): the RoCE all-gather against NCCL's, graph replays, time a call
+    \\  roce-gather <rank> [world]  the RoCE all-gather against NCCL's (NCCL_COMM_ID; world 2 by default, any on a switch): every size, graph replays, 3000 mixed calls, time a call
     \\  rank-sum                  the reduce-scatter's sum kernel alone, 2 to 5 ranks as each rank (one GPU, no NCCL)
     \\  nccl-pair <rank> <world> <idfile>  one rank of a multi-host communicator: send/recv with every peer, all-reduce, all-gather
     \\  gdn-replay <dir>          replay_kernel bits against the Python oracle's fixture
@@ -201,12 +219,14 @@ const usage =
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
     \\  affine8                   MLX affine 2 to 8-bit tiles and the 8-bit lane_gemv: widened codes, float64, rows (synthetic)
+    \\  native-fp                 -Dnative-fp-decode: hardware e2m1/e4m3 pair decode equals software on every finite input
     \\  affine4-decode            affine-4 decode at the Qwen3.5 shapes: row counts and segmented launches byte for byte
     \\  w4a8                      int8-activation prompt matmuls on affine-4 tiles: float64 of their formula, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  moe                       softmax routing and SwiGLU experts against host references, then moe-live
     \\  moe-live                  a captured bucket's padding rows: never routed, planned or combined (synthetic)
+    \\  moe-router-bench          tf_moe_router against its register tiles by row count, alternating (35B-A3B shape)
     \\  experts3 [reps]           affine-3 packing and outputs against affine-4 and fp64; reps > 0 times decode
     \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
     \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
@@ -224,42 +244,64 @@ const usage =
     \\  moe-glue                  sigmoid top-k routing and the weighted combine against float64 references (synthetic)
     \\  dense-rows                bf16 rows times weight rows (routers, heads) against float64 references (synthetic)
     \\  exl3 [dir]                EXL3 decode-row linear: float64 checks, row invariance, the Python engine's fixture (dir none skips it)
+    \\  exl3-shapes [rows]        the 27B's EXL3 shapes once each at plan()'s launch (1 and 16 rows), for ncu
+    \\  exl3-midm                 the mid-M kernels, linear_wc and the projection groups against the linear, byte for byte
+    \\  exl3-plans [shape]        the 27B's EXL3 shapes: every (K splits, warps) and layout timed at 1 and 16 rows
+    \\  exl3-contract             EXL3's replacements of linear_body through gates 1-4, each control red (kernel-contract's subset)
     \\  exl3-tp2 <rank> <host:port> [dir]  EXL3 tensor parallel: rank shards vs the Python engine's, all-gathered (dir none skips them)
     \\  exl3-tiles [DIR]          EXL3's tile candidate: codebooks and tiles bit-equal, FP64, rows through qlinear and Dense
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
-    \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
+    \\  kernel-contract [WORD...]  the contract's gates, each planted control red (-Dnvcc); WORDs: kernels named so
     \\  qmm-prefill-many-contract the GB10 bit-exact multi-projection prompt launch against separate launches
     \\  qmm-prefill-tile22-contract the GB10 large-prompt 2x2 tile against the default tile
+    \\  qmmf-prompt              BF16 K32 prompt staging: parent K64 bytes at current Flash Next shapes
+    \\  qmmf-prompt-contract     K64 and K32 replacement gates with both new output controls
+    \\  qmmf-prompt-repro        isolate M=65 N=8240 K=2560 SK=4 BF16 without clusters
+    \\  qmmf-prompt-bench        rank0 normal-main weighted A-B-A timings, plus separate MTP hidden timings
     \\  qmm-prefill-many-bench    same-process A-B-A screening for the GB10 launch fusion
     \\  mtp-rows                  tf_q36m_attn_rows: gates 1-4 (byte-equal to tf_q36m_attn a segment) and float64 alone
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
+    \\  qwen-norm-shift           qwen35.cu's _shift norms (BF16 checkpoints): 1 + w in FP32 within a BF16 ulp of float64, red controls
+    \\  clef tiny DIR | head MODEL CASES OUT [--piece N]  Clef's joint schema head: the tiny fixture, gate 3's logits
+    \\  qwen-pending              qwen35's pending kept rows: the slot scans and tf_q35k_apply_pend == tf_q35k_apply, red controls
     \\  rope-yarn                 YaRN rope in tf_q35_rope, tf_q35_rope8 and tf_q36m_norm_rope against float64, to 1M
-    \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
+    \\  kernel-contract-limits DIR   each registered launch against release SMs or sm_110 in DIR's fatbins
     \\  pocket-contract           Nemotron's pocket kernels (learned neurons) through gates 1-4, controls red
+    \\  flashnext-modelopt-contract  Flash Next NVFP4's BF16 dense and FP8 MTP-expert downs through gates 1-4
     \\  minimax-contract          MiniMax-M3.1-Flash's indexer and block-sparse attention through gates 1-4, controls red
     \\  moss-contract             MOSS-Image's own kernels and its full attention through gates 1-4, controls red
     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
+    \\  glm-kda-pad-split         TF_GLM_KDA_PAD's padding of the bf16 and split KDA stacks at TP=3 (synthetic)
     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
     \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
     \\  glm-index-check           GLM's indexer with glm_index against tf_glm_scores and tf_glm_select_rows, byte for byte (one GPU)
+    \\  glm-kv-host-slots         TF_GLM_KV_HOST's gather past its slots is refused as error.GlmKvHostSlots, then one within (one GPU)
     \\  glm-ref                   GLM projections (matmuls, router, attention, indexer, hc) against float64 (synthetic)
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
+    \\  glm-pair-check <ckpt> <dc.json> <rank> <world> <idfile>  paired prompt steps against twins a chunk a step, logits and states byte for byte
     \\  glm-split-check <ckpt> <dc.json> <rank> <world> <idfile>  prompt chunks with their indexer rows split across ranks against whole twins, byte for byte
+    \\  glm-solo-check <ckpt> <dc.json> <rank> <world> <idfile>  solo prompt passes against twins a chunk a step, logits and states byte for byte
+    \\  glm-tap-split-check <ckpt> <drafter> <rank> <world> <idfile>  DFlash2 prompt taps: split and ring retained taps against gather, byte for byte, every rank
     \\  glm-paged-check <ckpt> <rank> <world> <idfile>  a paged stream (pages out of order, NaN first) against a whole-window twin
     \\  dory MODEL LOOPS N TEXT     Dory (NVFP4): N greedy tokens from TEXT, then verify windows of 2 to 16 rows bit-equal
     \\  dory-serve MODEL LOOPS TEXT N   Dory served: eager == graphs, copy drafts == plain, 2/4/8 streams == solo
     \\  dory-states MODEL LOOPS TEXT N  Dory kept prompt states at 8k and 32k resumed into wiped caches == fresh
     \\  dory-bench MODEL LOOPS TEXT N [STREAMS...]  Dory greedy decode tok/s at 1/2/4/8 streams (graphs on)
     \\  dory-pages MODEL LOOPS TEXT N   Dory with its full caches in pages == contiguous: fp32 logits bytes, then replies
+    \\  dory-store MODEL LOOPS TEXT N   Dory prompts as pool pages (DORY_PAGED=1): resumes and shared streams == fresh
     \\  dory-prefill MODEL LOOPS TEXT N  Dory prompt time alone at 512, 2k, 8k and 16k rows (DORY_PAGED=1: on pages)
     \\  gemma4-states MODEL DRAFTER TEXT N   Gemma 4 + DFlash: stepped passes keep the drafter's context, resumed == fresh
     \\  spark25-pages MODEL TEXT N   Spark2.5: full-layer caches in pool pages == linear ones, replies and logits
+    \\  gemma4-pages MODEL TEXT N [DRAFTER]  Gemma 4: global caches in pool pages == linear ones, replies and logits
+    \\  gemma4-ple                         Gemma 4 E-series: per-layer input rows bit-equal to the host steps
+    \\  gemma4-e4b-force MODEL REF OUT NAME...  Gemma 4 E4B: a reference's tokens forced, logits as .npy
     \\  kolibri-reference MODEL IDS  Kolibri-1's layer 0 and head against float64 from the checkpoint (prompt and decode rows)
     \\  kolibri-layers MODEL IDS    Kolibri-1's window edge (513 keys) and its fifth layer's full reach, on the checkpoint
     \\  kolibri-full MODEL IDS N    Kolibri-1: eager rows, steps, drafted, sampled, shared rounds, cuts and kept states alike
+    \\  kolibri-pages MODEL TEXT N  Kolibri-1: full layers in pool pages == linear caches, replies and logits
     \\  kolibri-greedy MODEL PROMPTS N OUT  Kolibri-1 greedy from each prompt (JSON id lists): ids and top-2 margins
     \\  kolibri-logits MODEL IDS OUT [PROMPTS]  Kolibri-1's teacher-forced fp32 logits of 2,048 prompt rows; each prompt's last
     \\  glm-synth <dir> [fp8pb|local]  a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
@@ -336,12 +378,29 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-draft-affine")) return flashnext_draft_affine_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-shared")) return flashnext_shared_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-nvfp4-tp")) return flashnext_nvfp4_tp_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-fp8-experts")) return flashnext_fp8_experts_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moetile")) return @import("moetile_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "moetile-contract")) return @import("contract_qmmf_shared.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "moetile-bench")) return @import("moetile_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "nvfp4-fact")) return nvfp4_fact_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "nvfp4-b32")) return nvfp4_b32_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "qmmf-prompt")) return @import("qmmf_prompt_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qmmf-prompt-contract")) return @import("contract_qmmf_prompt.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qmmf-prompt-repro")) return @import("qmmf_prompt_tests.zig").repro(gpu);
+    if (std.mem.eql(u8, cmd, "qmmf-prompt-bench")) return @import("qmmf_prompt_tests.zig").bench(gpu);
     if (std.mem.eql(u8, cmd, "lane-half")) return lane_half_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-gdn-heads")) {
+        if (rest.len > 1) return error.GdnHeadsArguments;
+        const heads = @import("flashnext_gdn_heads_tests.zig");
+        return if (rest.len == 1) heads.runBaseline(gpu, rest[0]) else heads.run(gpu);
+    }
+    if (std.mem.eql(u8, cmd, "flashnext-tp-heads")) return @import("flashnext_tp_heads_tests.zig").run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "flashnext-pages")) return @import("contract_fn_pages.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-attn-lanes")) return @import("contract_fn_attn_lanes.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-readout-cut")) return @import("flashnext_readout_cut.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
     if (std.mem.eql(u8, cmd, "shared-context")) return runtime_tests.sharedContext(gpu);
@@ -361,7 +420,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const world = try std.fmt.parseInt(usize, try arg(rest, 1), 10);
         return rank_scatter_tests.run(gpu, rank, world, if (rest.len > 2) rest[2] else null);
     }
-    if (std.mem.eql(u8, cmd, "roce-gather")) return roce_gather_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10));
+    if (std.mem.eql(u8, cmd, "roce-gather")) return roce_gather_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10), if (rest.len > 1) try std.fmt.parseInt(usize, rest[1], 10) else 2);
     if (std.mem.eql(u8, cmd, "rank-sum")) return rank_scatter_tests.sum(gpu);
     if (std.mem.eql(u8, cmd, "nccl-pair")) return libs_tests.ncclPair(gpu, try std.fmt.parseInt(c_int, try arg(rest, 0), 10), try std.fmt.parseInt(c_int, try arg(rest, 1), 10), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "gdn-replay")) return oracle_tests.gdnReplay(gpu, try arg(rest, 0));
@@ -376,16 +435,20 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine8")) return affine8_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+    if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe-live")) return @import("moe_live_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-router-bench")) return @import("moe_router_bench.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "ggml")) return ggml_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ggml-bench")) return ggml_tests.bench(gpu);
@@ -395,6 +458,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);
     if (std.mem.eql(u8, cmd, "exl3")) return exl3_tests.run(gpu, if (rest.len > 0) rest[0] else "none");
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "exl3-shapes")) return exl3_plan_bench.profileShapes(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "exl3-midm")) return exl3_plan_bench.midm(gpu);
+    if (std.mem.eql(u8, cmd, "exl3-plans")) return exl3_plan_bench.run(gpu, if (rest.len > 0) rest[0] else null);
+    if (std.mem.eql(u8, cmd, "exl3-contract")) return exl3_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "topk")) return sample_tests.topk(gpu);
@@ -452,16 +519,22 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
-    if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return gb10_many_contract.runAll(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-contract")) return qmm_prefill_many_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-tile22-contract")) return qmm_prefill_tile22_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-bench")) return qmm_prefill_many_contract.bench(gpu);
     if (std.mem.eql(u8, cmd, "mtp-rows")) return @import("contract_qwen_mtp_rows.zig").alone(gpu);
     if (std.mem.eql(u8, cmd, "qwen-pages")) return @import("contract_qwen_pages.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "clef")) return @import("clef_tests.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "qwen-pending")) return @import("contract_qwen_pending.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "dspine-table")) return @import("dspine_table_tests.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "minimax-contract")) return @import("contract_minimax.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "rope-yarn")) return @import("contract_qwen_rope_yarn.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "pocket-contract")) return @import("contract_pocket.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-modelopt-contract")) return @import("contract_flashnext_modelopt.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "moss-contract")) return @import("contract_moss_image.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
@@ -475,7 +548,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-paged-check")) return glm_paged_tests.pagedCheck(gpu, try arg(rest, 0), try std.fmt.parseInt(c_int, try arg(rest, 1), 10), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-pair-check")) return glm_pair_tests.pairCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-split-check")) return glm_split_tests.splitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-solo-check")) return glm_solo_tests.soloCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-tap-split-check")) return glm_tap_tests.tapSplitCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-synth")) {
         const kind = if (rest.len > 1) std.meta.stringToEnum(glm_synth.Kind, rest[1]) orelse return error.UnknownCommand else .nvfp4;
         return glm_synth.run(gpu, try arg(rest, 0), kind);
@@ -485,10 +561,14 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.startsWith(u8, cmd, "dory-")) return dory_serve.run(gpu, cmd, rest);
     if (std.mem.eql(u8, cmd, "gemma4-states")) return @import("gemma4_states_tests.zig").states(gpu, rest);
     if (std.mem.eql(u8, cmd, "spark25-pages")) return @import("spark25_pages_tests.zig").pages(gpu, rest);
+    if (std.mem.eql(u8, cmd, "gemma4-pages")) return @import("gemma4_pages_tests.zig").pages(gpu, rest);
+    if (std.mem.eql(u8, cmd, "gemma4-ple")) return @import("gemma4_ple_tests.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "gemma4-e4b-force")) return @import("gemma4_e4b_force.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "dory")) return dory_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-reference")) return kolibri_layer_tests.reference(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-layers")) return kolibri_layer_tests.layers(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "kolibri-full")) return kolibri_tests.full(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "kolibri-pages")) return @import("kolibri_pages_tests.zig").pages(gpu, rest);
     if (std.mem.eql(u8, cmd, "kolibri-greedy")) return kolibri_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
     if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));

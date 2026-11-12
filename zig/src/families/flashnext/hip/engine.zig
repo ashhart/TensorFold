@@ -9,6 +9,7 @@ const loader = @import("load.zig");
 const tables = @import("tables.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
+const head_mod = @import("head.zig");
 const mixers = @import("mixers.zig");
 const index = @import("../index.zig");
 
@@ -24,7 +25,16 @@ pub const Options = struct {
     capacity: usize = 4096,
     /// Prompt rows a forward takes at most: a multiple of 64, so a prompt's bits do not depend on where it is cut.
     chunk: usize = 512,
+    /// A smaller chunk to take when `chunk`'s scratch would admit fewer of the `want` streams (null: keep `chunk`).
+    fallback: ?usize = null,
+    /// The streams the server asks for.
+    want: usize = 1,
 };
+
+/// Whether the smaller chunk's scratch admits more of `want` streams of `per` bytes in `room` than the larger's.
+pub fn narrows(room: u64, larger: u64, smaller: u64, per: u64, want: u64) bool {
+    return @min(want, (room -| smaller) / per) > @min(want, (room -| larger) / per);
+}
 
 /// Bytes of the pinned staging a forward's uploads and n-gram rows go through.
 const staging_bytes = 64 << 20;
@@ -76,6 +86,8 @@ pub const Engine = struct {
     votes: ?hip.Votes,
     /// A rank could not take a round: every rank stops before another collective.
     stopped: bool,
+    /// The chunk the options asked for when the engine took their fallback (null: it took what they asked).
+    narrowed: ?usize = null,
 
     /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -121,10 +133,12 @@ pub const Engine = struct {
         e.keep = .init(gpa);
         errdefer e.keep.deinit();
         const rank: ?core.quant.Rank = if (o.world > 1) .{ .rank = o.rank, .world = o.world } else null;
-        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act);
+        // the index drives both the MTP head's root (oMLX keeps it outside language_model) and the shard spelling
+        const map = try weightMapOf(e.keep.allocator(), io, dir);
+        e.weights = try loader.load(gpa, &e.driver, &e.ck, &e.cfg, rank, e.act, index.mtpRoot(map));
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
-        const spelling = try spellingOf(e.keep.allocator(), io, dir);
+        const spelling = index.ngramSpelling(map);
         e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, &e.cfg, e.weights.model.ple.layer, spelling);
         const c = mixers.qkConstants(e.cfg.key_dim);
         var w: [2]hip.DeviceBuffer = undefined;
@@ -145,7 +159,11 @@ pub const Engine = struct {
         };
         errdefer e.host.staging.free();
         e.eos = e.tables.hasher.ref.eos;
-        e.arena = try hip.Arena.init(&e.driver, try e.scratchBytes());
+        e.narrowed = null;
+        // every weight is on the device now: only the n-gram rows a gather reads stay resident
+        const live = try e.tables.spans(e.keep.allocator());
+        e.ck.releaseExcept(live);
+        e.arena = try hip.Arena.init(&e.driver, try e.fittedScratch());
         errdefer e.arena.deinit();
         e.drawer = try serve.draw.Drawer.init(
             gpa,
@@ -215,29 +233,81 @@ pub const Engine = struct {
         return cache.Caches.init(e.gpa, &e.driver, e.weights.model.dims, try e.kinds(&buf), cap, e.act, e.eos);
     }
 
-    /// The scratch the largest forward takes: a prompt chunk at the capacity's end, counted on a dry run.
+    /// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
+    pub fn streamBytes(e: *const Engine, cap: usize) usize {
+        var buf: [config.max_layers]bool = undefined;
+        const ks = e.kinds(&buf) catch return std.math.maxInt(usize);
+        const l = cache.Layout.of(e.weights.model.dims, ks, cap, e.act);
+        var head: usize = 0;
+        if (e.weights.model.mtp) |h| {
+            const hl = cache.Layout.of(h.dims, &.{false}, cap, e.act);
+            head = hl.bytes() + hl.cinBytes() + 4;
+        }
+        return l.bytes() + l.windowBytes() + l.cinBytes() + head +
+            cache.max_window * e.weights.model.dims.wide() * e.act.size();
+    }
+
+    /// The scratch for `o.chunk` rows, or the fallback's when the larger chunk admits fewer of the streams asked for.
+    fn fittedScratch(e: *Engine) !usize {
+        const larger = try e.scratchBytes();
+        const small = e.o.fallback orelse return larger;
+        if (small >= e.o.chunk) return larger;
+        const pool = try hip.admission.budget(e.gpa, e.io, e.ctx);
+        const room = pool.room(hip.usage(false).device);
+        const asked = e.o.chunk;
+        e.o.chunk = small;
+        const smaller = try e.scratchBytes();
+        if (!narrows(room, larger, smaller, e.streamBytes(e.o.capacity), e.o.want)) {
+            e.o.chunk = asked;
+            return larger;
+        }
+        e.narrowed = asked;
+        return smaller;
+    }
+
+    /// The largest forward's scratch: a dry run at the capacity's end, where the indexer's scores are longest.
     fn scratchBytes(e: *Engine) !usize {
+        return e.scratchAt(e.o.capacity -| @max(e.o.chunk, forward.max_segs * cache.max_window));
+    }
+
+    /// A prompt forward at `pos` over a round's most rows (chunk or verify round), the MTP head and the round's logits.
+    fn scratchAt(e: *Engine, pos: usize) !usize {
+        const verify_rows = forward.max_segs * cache.max_window;
+        const rows = @max(e.o.chunk, verify_rows);
         var counting = hip.Arena.counting();
         var o = e.ops(&counting);
         o.stream = hip.counting;
-        var c = try e.caches(@max(e.o.capacity, e.o.chunk) + cache.max_window);
-        defer c.deinit(e.gpa);
-        const tokens = try e.gpa.alloc(u32, e.o.chunk);
+        const tokens = try e.gpa.alloc(u32, rows);
         defer e.gpa.free(tokens);
         @memset(tokens, 0);
         const before = e.host.used;
         defer e.host.used = before;
-        const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = e.o.capacity -| e.o.chunk }};
-        const out = try forward.run(
-            o,
-            &e.weights.model,
-            &e.host,
-            &segs,
-            false,
-            try forward.stage(&e.weights.model, &e.host, &segs, false),
-        );
-        _ = try e.logits(o, out.mixed, e.o.chunk);
-        return counting.used + (16 << 20);
+        const out = out: {
+            // freed before the head's caches, so the dry run never holds both on the device
+            var c = try e.caches(@max(e.o.capacity, rows) + cache.max_window);
+            defer c.deinit(e.gpa);
+            const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = pos }};
+            break :out try forward.run(
+                o,
+                &e.weights.model,
+                &e.host,
+                &segs,
+                false,
+                try forward.stage(&e.weights.model, &e.host, &segs, false),
+            );
+        };
+        if (e.weights.model.mtp) |*h| {
+            var hc = try head_mod.caches(e.gpa, &e.driver, h, @max(e.o.capacity, rows) + cache.max_window, e.act, e.eos);
+            defer hc.deinit(e.gpa);
+            var ones = try hip.DeviceBuffer.alloc(&e.driver, rows * e.cfg.hc_count * e.act.size());
+            defer ones.free();
+            var ho = o;
+            ho.prefill = true;
+            _ = try head_mod.run(ho, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
+        }
+        _ = try e.logits(o, out.mixed, verify_rows);
+        // the peak, not what is left at the end: each layer hands its scratch back when it is done
+        return counting.peak + (16 << 20);
     }
 
     /// The output head over `rows` final rows: whole logits rows (act dtype), joined across ranks in rank order.
@@ -410,11 +480,24 @@ fn nowNs(io: std.Io) i96 {
     return std.Io.Timestamp.now(io, .awake).nanoseconds;
 }
 
-/// The index's spelling of its n-gram shards (`shard_` or oMLX's `shards.`).
-fn spellingOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const u8 {
+/// The checkpoint index's weight_map, read from `dir` (the answer and everything it points at live on `a`).
+fn weightMapOf(a: std.mem.Allocator, io: std.Io, dir: []const u8) !std.json.ObjectMap {
     const path = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26));
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{});
-    const map = try core.safetensors.index.weightMap(doc);
-    return index.ngramSpelling(map);
+    return core.safetensors.index.weightMap(doc);
+}
+
+test "a chunk narrows only when its scratch costs a stream the server asked for" {
+    const gib: u64 = 1 << 30;
+    // one stream asked, room for many either way: the larger chunk stays
+    try std.testing.expect(!narrows(40 * gib, 7 * gib, 2 * gib, 3 * gib, 1));
+    // one stream fits only beside the smaller chunk's scratch
+    try std.testing.expect(narrows(9 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
+    // four asked: the larger chunk leaves three, the smaller four
+    try std.testing.expect(narrows(20 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    // four asked and four fit beside either
+    try std.testing.expect(!narrows(30 * gib, 7 * gib, 2 * gib, 4 * gib, 4));
+    // neither fits one: nothing to gain
+    try std.testing.expect(!narrows(3 * gib, 7 * gib, 2 * gib, 4 * gib, 1));
 }

@@ -8,6 +8,8 @@ pub const PreparedImage = struct {
     gh: u32,
     gw: u32,
     tokens: u32,
+    /// Visible pixel height and width before padding, for towers with content-normalized positions.
+    content_size: ?[2]u32 = null,
     hash: u64,
     /// The image as tower inputs in order, each image tokens between `before` and `after`; empty: `pixels` alone.
     pieces: []const Piece = &.{},

@@ -7,6 +7,7 @@ const frags = @import("../../core/frags.zig");
 pub const Kernels = struct {
     gpa: std.mem.Allocator,
     pipelines: std.StringHashMapUnmanaged(mtl.Pipeline) = .empty,
+    mask: ?@import("prompt_mask.zig").Pipelines = null,
 
     /// The pipeline of an entry point (its full Metal function name).
     pub fn get(self: *const Kernels, name: []const u8) mtl.Pipeline {
@@ -14,6 +15,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(self: *Kernels) void {
+        if (self.mask) |p| p.deinit();
         var it = self.pipelines.iterator();
         while (it.next()) |e| {
             e.value_ptr.deinit();
@@ -111,6 +113,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device) !Kernels {
             }
         }
     }
+    k.mask = try @import("prompt_mask.zig").Pipelines.load(gpa, device, null);
     return k;
 }
 

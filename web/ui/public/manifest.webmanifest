@@ -1,0 +1,22 @@
+{
+  "name": "TensorFold Web",
+  "short_name": "TensorFold",
+  "description": "Run, measure and share local models with TensorFold.",
+  "id": "/",
+  "start_url": "/#models",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#141A3A",
+  "theme_color": "#F4F5F7",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Monitor", "url": "/#monitor", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Chat", "url": "/#chat", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Bench", "url": "/#bench", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Fleet", "url": "/#fleet", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

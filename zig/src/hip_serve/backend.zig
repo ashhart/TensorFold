@@ -207,6 +207,9 @@ pub fn Backend(comptime F: type) type {
             .draft = draftFn,
             .tree = heldFn,
             .release = releaseFn,
+            .readout_finish = if (@hasDecl(F, "readoutFinish")) readoutFinishFn else null,
+            .prepare_features = if (@hasDecl(F, "prepareFeatures")) prepareFeaturesFn else null,
+            .features = if (@hasDecl(F, "features")) featuresFn else null,
         };
 
         /// The backend behind `ptr`, the calling thread bound to its GPU.
@@ -232,6 +235,16 @@ pub fn Backend(comptime F: type) type {
             try h.tp.fill(lane.id, to);
             // The hook reaches the engine, so a cancel arriving inside a long chunk stops between its layers.
             const cancel = h.cancelOf(s);
+            // a readout's every piece, the last too, feeds its readout: no projection, no draw, no `last` row
+            if (comptime @hasDecl(F, "readoutPiece")) if (s.readout != null) {
+                try h.readoutPiece(lane, prompt, f.at, to, cancel);
+                f.at = to;
+                s.fill_at.store(@intCast(to), .monotonic); // a readout has no drafts, and HIP reports no fill: the trace's rows
+                _ = f.cut(to); // a cut passed keeps no state: a readout writes no snapshot
+                if (to < prompt.len) return false;
+                lane.fill = null;
+                return true;
+            };
             if (to == prompt.len) {
                 // a structured reply keeps the prompt's last row: its first token is drawn again under the grammar
                 if (s.grammar != null and lane.first_row == null) lane.first_row = try h.gpa.alloc(
@@ -331,9 +344,26 @@ pub fn Backend(comptime F: type) type {
             return .{ .count = @intCast(lane.held_n) };
         }
 
+        /// A filled readout's logits into the request's slice, before its release.
+        fn readoutFinishFn(ptr: *anyopaque, s: *lanes.Stream, logits: []u16) anyerror!void {
+            const h = of(ptr);
+            try h.readoutFinish(try h.streams.get(s), logits);
+        }
+
         fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
             const h = of(ptr);
             h.release(h.streams.forget(s) orelse return);
+        }
+
+        /// A drafter's tapped layers, before any stream: each forward then fills the streams' tap rings.
+        fn prepareFeaturesFn(ptr: *anyopaque, taps: []const u32) anyerror!void {
+            return of(ptr).prepareFeatures(taps);
+        }
+
+        /// Rows [start, start + count) of a stream's tap ring, while the ring still holds them.
+        fn featuresFn(ptr: *anyopaque, s: *lanes.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+            const h = of(ptr);
+            return h.features(try h.streams.get(s), taps, start, count);
         }
     };
 }

@@ -29,7 +29,7 @@ pub fn Replay(comptime d3: type) type {
             if (!std.mem.eql(u8, a, b)) return error.ReplayMismatch;
         }
 
-        fn audio(t: *d3.tts.Tts, out: []f32, n: usize, chunk: usize) !void {
+        fn audio(t: *d3.tts.Tts, out: []f32, n: usize, chunk: usize, report: bool) !void {
             try reset(t);
             var sink: Audio = .{ .out = out };
             var from: usize = 0;
@@ -47,10 +47,20 @@ pub fn Replay(comptime d3: type) type {
                 at += want;
             }
             if (sink.calls != calls) return error.BadCodecChunk;
+            if (!report) return;
             std.debug.print("codec requested {d}, actual sizes {any}\n", .{ chunk, sink.sizes[0..sink.calls] });
         }
 
-        pub fn verify(gpa: std.mem.Allocator, io: std.Io, e: *d3.Engine, t: *d3.tts.Tts, rows: []const Frame, smp: d3.Sampling) !void {
+        /// Fails on the first mismatch; ``report`` prints each chunk's codec sizes and the pass line (CLI receipt).
+        pub fn verify(
+            gpa: std.mem.Allocator,
+            io: std.Io,
+            e: *d3.Engine,
+            t: *d3.tts.Tts,
+            rows: []const Frame,
+            smp: d3.Sampling,
+            report: bool,
+        ) !void {
             if (t.max_chunk < 16) return error.ReplayCodecCapacity;
             const baseline = try e.generate(io, rows, smp, 17, false, 1);
             defer gpa.free(baseline.frames);
@@ -60,14 +70,14 @@ pub fn Replay(comptime d3: type) type {
             defer gpa.free(pcm);
             const other = try gpa.alloc(f32, pcm.len);
             defer gpa.free(other);
-            try audio(t, pcm, baseline.frames.len, 1);
+            try audio(t, pcm, baseline.frames.len, 1, report);
             try e.poison();
             try t.c.poison();
             const replay = try e.generate(io, rows, smp, 17, true, 1);
             defer gpa.free(replay.frames);
             try equal(std.mem.sliceAsBytes(baseline.frames), std.mem.sliceAsBytes(replay.frames));
             for ([_]usize{ 1, 4, 16 }) |chunk| {
-                try audio(t, other, replay.frames.len, chunk);
+                try audio(t, other, replay.frames.len, chunk, report);
                 try equal(std.mem.sliceAsBytes(pcm), std.mem.sliceAsBytes(other));
             }
             const second = try e.fork();
@@ -84,8 +94,9 @@ pub fn Replay(comptime d3: type) type {
                     try equal(std.mem.asBytes(&expected), std.mem.asBytes(&frame));
                 }
             }
-            try audio(second_tts, other, baseline.frames.len, 1);
+            try audio(second_tts, other, baseline.frames.len, 1, report);
             try equal(std.mem.sliceAsBytes(pcm), std.mem.sliceAsBytes(other));
+            if (!report) return;
             std.debug.print("Drama replay passed: eager/graphs, poison/reset, codec chunks and interleaved state\n", .{});
         }
     };

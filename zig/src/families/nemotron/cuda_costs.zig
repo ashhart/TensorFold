@@ -15,11 +15,7 @@ const regime = cuda.launch.few_rows; // windows past it take the router's and th
 const prefix = 16; // text tokens before the timed windows, at any window width: a window's ms depends on its tokens
 
 // Windows hold this prefix's pending token, then the text's next tokens as drafts, after the head drafts as in a round.
-const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
-    "market up the hill. Children carried baskets of apples past the church while their parents argued about " ++
-    "whether the old bridge would hold. In the workshop behind the bakery, a carpenter measured each plank " ++
-    "twice, wrote the numbers on the wall, and cut slowly.\n\ndef mean(values):\n    total = 0\n    for v in " ++
-    "values:\n        total += v\n    return total / len(values)\n";
+const text = rule.text;
 
 const Timer = struct {
     a: cuda.Event,

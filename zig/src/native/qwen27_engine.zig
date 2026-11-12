@@ -31,6 +31,7 @@ test "a qwen3_5 checkpoint opens the 27B engine unless it has the 2B's geometry 
         .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":true,\"text_config\":{}}", .big = false },
         .{ .config = "{\"model_type\":\"qwen3_5\",\"tie_word_embeddings\":false,\"text_config\":{\"tie_word_embeddings\":false}}", .big = true },
         .{ .config = "{\"model_type\":\"qwen3_5\",\"hidden_size\":5120}", .big = true },
+        .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":false,\"hidden_size\":4096}}", .big = true },
         .{ .config = "{\"model_type\":\"qwen3_5\",\"text_config\":{\"tie_word_embeddings\":false,\"hidden_size\":2048}}", .big = false },
     };
     for (cases) |c| {

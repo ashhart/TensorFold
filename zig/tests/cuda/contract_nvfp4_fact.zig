@@ -8,10 +8,11 @@ const contract = core.contract;
 const c = contract.spec;
 const g = contract.gates;
 const fx = cuda.experts.Nvfp4Experts;
+const Y = cuda.experts32.Nvfp4b32Experts;
 const grouped = cuda.grouped;
 
-/// Fact up/down, a control, experts_waves' entries, the TF_NVFP4_DECODE_WARPS=1 CTAs, two controls cut to one wave.
-pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one };
+/// Fact up/down, a control, experts_waves' entries, 1-warp CTAs, two cut controls, block 32's five and its control.
+pub const Kind = enum { up, down, control, up_waves, down_waves, up_half, up_one, down_one, down_bf16_one, relu2_one, up_waves_one, down_waves_one, up_half_one, cut_waves, cut_waves_one, b32_up, b32_down, b32_down_bf16, b32_prompt_up, b32_prompt_down, b32_control };
 
 /// experts_waves.zig's entry a kind launches, or null for the prompt-tile and classic kinds.
 fn wavesEntry(kind: Kind) ?usize {
@@ -25,7 +26,7 @@ fn wavesEntry(kind: Kind) ?usize {
 
 fn isDown(kind: Kind) bool {
     return switch (kind) {
-        .down, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one => true,
+        .down, .down_waves, .down_one, .down_bf16_one, .down_waves_one, .cut_waves_one, .b32_down, .b32_down_bf16, .b32_prompt_down => true,
         else => false,
     };
 }
@@ -39,22 +40,55 @@ fn isOne(kind: Kind) bool {
 }
 
 fn epiOf(kind: Kind) cuda.experts.Epi {
-    return if (kind == .down_bf16_one) .down_bf16 else if (isDown(kind)) .down_f32 else .up;
+    return switch (kind) {
+        .down_bf16_one, .b32_down_bf16, .b32_prompt_down => .down_bf16,
+        else => if (isDown(kind)) .down_f32 else .up,
+    };
+}
+
+/// nvfp4_experts32.cu's kinds, which replace block 16's kernels on scales written two by two.
+fn isB32(kind: Kind) bool {
+    return switch (kind) {
+        .b32_up, .b32_down, .b32_down_bf16, .b32_prompt_up, .b32_prompt_down, .b32_control => true,
+        else => false,
+    };
+}
+
+/// Block 32's prompt entries, whose block 16 is the prompt tile and not the decode form.
+fn isB32Prompt(kind: Kind) bool {
+    return kind == .b32_prompt_up or kind == .b32_prompt_down;
 }
 
 const experts = 4;
 const slots = 2; // pairs a token row, both routed
-const waves_rows = 1024; // the waves kinds' two-wave shape: cut_waves and cut_waves_one go red only there
+const waves_rows = 1024; // the waves kinds' least two-wave shape: cut_waves and cut_waves_one go red only past one wave
 const rule = "as the decode form it replaces gives them: NaN and infinite global scales, a NaN block scale, NaN and infinite inputs";
+
+/// Rows whose items of 16 pairs route more units than `warps` resident warps hold over `nb` column blocks: two waves.
+fn wavesRows(warps: usize, nb: usize) !usize {
+    return @max(waves_rows, try std.math.mul(usize, try std.math.add(usize, warps / nb, 1), 16 / slots));
+}
 
 /// Each 16-input block's mma (16 products) and its fma into the running sum, blocks in ascending K.
 fn depth(s: c.Shape) usize {
     return s.k / 16 + 16;
 }
 
-/// Flash Next's served shapes (2,560 dims, 640 wide), then Qwen3.6-35B-A3B's ModelOpt experts (2,048 dims, 512 wide).
-const prompt_up_served = [_]c.Shape{ .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 }, .{ .rows = 130, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 512, .k = 2048 } };
+/// Flash Next and Qwen3.6 ModelOpt gate-up shapes, then GLM at TP=1/2/4 and up to 32 verify rows.
+const prompt_up_served = [_]c.Shape{
+    .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 },
+    .{ .rows = 130, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 512, .k = 2048 },
+    .{ .rows = 1, .n = 2048, .k = 4096 },  .{ .rows = 16, .n = 2048, .k = 4096 },
+    .{ .rows = 32, .n = 2048, .k = 4096 }, .{ .rows = 1, .n = 1024, .k = 4096 },
+    .{ .rows = 16, .n = 1024, .k = 4096 }, .{ .rows = 32, .n = 1024, .k = 4096 },
+    .{ .rows = 1, .n = 512, .k = 4096 },   .{ .rows = 16, .n = 512, .k = 4096 },
+    .{ .rows = 32, .n = 512, .k = 4096 },
+};
 const prompt_down_served = [_]c.Shape{ .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 130, .n = 2048, .k = 512 }, .{ .rows = 1, .n = 2048, .k = 512 } };
+
+/// GLM-5.3-Flash's routed experts, 4,096 dims: TP=2's rank is 1,024 wide, TP=3's are 704 and 640.
+const b32_up_served = [_]c.Shape{ .{ .rows = 1, .n = 1024, .k = 4096 }, .{ .rows = 16, .n = 1024, .k = 4096 }, .{ .rows = 16, .n = 704, .k = 4096 }, .{ .rows = 16, .n = 640, .k = 4096 } };
+const b32_down_served = [_]c.Shape{ .{ .rows = 1, .n = 4096, .k = 1024 }, .{ .rows = 16, .n = 4096, .k = 1024 }, .{ .rows = 16, .n = 4096, .k = 704 }, .{ .rows = 16, .n = 4096, .k = 640 } };
 
 /// Flash Next's routed experts: 2,560 dims, 640 wide; the decode-sums entries also serve Qwen3.6's.
 pub fn spec(kind: Kind) c.Spec {
@@ -64,11 +98,16 @@ pub fn spec(kind: Kind) c.Spec {
     // a decode item of 16 pairs (8 token rows) by a warp's 32 columns (half: 16 of them) over all K, 32 inputs a step
     const unit = [3]c.Tile{ .{ .size = 16 / slots }, .{ .size = 32, .step = 32, .min = 32 }, .{ .size = 32, .step = 32, .min = 32 } };
     const why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable";
-    // 1,024 rows: 128+ items of 16 pairs, 2,560+ gate-up and 10,240+ down units: two waves below 2,560 resident warps
+    // 1,024 rows: 128+ items of 16 pairs, 2,560+ gate-up and 10,240+ down units; waves kinds grow it past one wave
     const up_served = &[_]c.Shape{ .{ .rows = 1, .n = 640, .k = 2560 }, .{ .rows = 4, .n = 640, .k = 2560 }, .{ .rows = 16, .n = 640, .k = 2560 }, .{ .rows = waves_rows, .n = 640, .k = 2560 } };
     const down_served = &[_]c.Shape{ .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 4, .n = 2560, .k = 640 }, .{ .rows = 16, .n = 2560, .k = 640 }, .{ .rows = waves_rows, .n = 2560, .k = 640 } };
     const why2 = "the bf16 rounding before the square is allowed in the bound (2 u of the output), so a short sum stands out less than in SwiGLU: fp16 and bf16 sums miss by 64x";
     const cut = "dropped past the first wave: gate 3 at the two-wave shape refuses it";
+    // block 32's sums come in pairs of k32 groups, 64 inputs a step
+    const pair = c.Tile{ .size = 64, .step = 64, .min = 64 };
+    const unit32 = [3]c.Tile{ unit[0], unit[1], pair };
+    const up32_tiles = [3]c.Tile{ up_tiles[0], up_tiles[1], pair };
+    const down32_tiles = [3]c.Tile{ down_tiles[0], down_tiles[1], pair };
     return switch (kind) {
         .up_one => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_kernel<2, 2, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
         .up_waves_one => .{ .name = "cuda nvfp4 experts decode gate-up nvfp4_expert_waves<2, 2, 1> (TF_NVFP4_DECODE_WARPS=1)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit, .served = up_served, .sums = .{ .bf16 = 30, .why = why } },
@@ -85,6 +124,12 @@ pub fn spec(kind: Kind) c.Spec {
         .up => .{ .name = "cuda nvfp4 experts prompt gate-up tf_nvfp4_fact_swiglu (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &prompt_up_served, .sums = .{ .bf16 = 30, .why = "a bf16 sum that collapses moves the output by about itself, and the epilogue's three bf16 roundings already allow 3 u of it: at most 1 / (3 u) = 85x is provable" } },
         .control => .{ .name = "control: scaled-code prompt tile tf_nvfp4_prompt_swiglu posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = up_tiles, .served = &.{.{ .rows = 130, .n = 640, .k = 2560 }} },
         .down => .{ .name = "cuda nvfp4 experts prompt down tf_nvfp4_fact_down_f32 (decode sums)", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = down_tiles, .served = &prompt_down_served },
+        .b32_up => .{ .name = "cuda nvfp4 block 32 decode gate-up tf_nvfp4_decode32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .b32_down => .{ .name = "cuda nvfp4 block 32 decode down tf_nvfp4_decode32_down_f32", .accum = .f32, .depth = depth, .ops = 1, .out = .f32, .replaces = "nvfp4_expert_kernel<1, 0, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served },
+        .b32_down_bf16 => .{ .name = "cuda nvfp4 block 32 decode down bf16 tf_nvfp4_decode32_down_bf16", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "nvfp4_expert_kernel<1, 3, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
+        .b32_prompt_up => .{ .name = "cuda nvfp4 block 32 prompt gate-up tf_nvfp4_prompt32_swiglu", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "tf_nvfp4_prompt_swiglu", .nan = .{ .stated = rule }, .tiles = up32_tiles, .served = &b32_up_served, .sums = .{ .bf16 = 30, .why = why } },
+        .b32_prompt_down => .{ .name = "cuda nvfp4 block 32 prompt down tf_nvfp4_prompt32_down", .accum = .f32, .depth = depth, .ops = 1, .out = .bf16, .replaces = "tf_nvfp4_prompt_down", .nan = .{ .stated = rule }, .tiles = down32_tiles, .served = &b32_down_served, .sums = .{ .bf16 = 30, .why = why } },
+        .b32_control => .{ .name = "control: tf_nvfp4_decode32_swiglu on offsets with each byte's nibbles swapped, posing as the decode gate-up", .accum = .f32, .depth = depth, .ops = 1, .mids = 3, .out = .bf16, .replaces = "nvfp4_expert_kernel<2, 2, 4>", .nan = .{ .stated = rule }, .tiles = unit32, .served = b32_up_served[1..2] },
     };
 }
 
@@ -94,18 +139,23 @@ pub const Experts = struct {
     k: *const fx, // Group's four: the baseline, and the kernels under test unless isOne
     k1: *const fx, // Group's one
     tile: ?*const cuda.experts_tile.Tile = null,
+    k32: ?*const Y = null, // block 32's kernels, under test in its kinds
     router: grouped.Router,
     shape: c.Shape = undefined,
     x: []u16 = &.{}, // bf16 rows: a token's for up, a pair's for down
     codes: []u8 = &.{}, // [experts][parts][n][k/2]
     scales: []u8 = &.{}, // [experts][parts][n][k/16] e4m3
+    bases: []u8 = &.{}, // block 32's: [experts][parts][n] e4m3
+    offsets: []u8 = &.{}, // block 32's: [experts][parts][n][k/64], a group a nibble
     globals: [experts * 2]f32 = undefined, // [experts][parts]
     picks: []i32 = &.{},
     allow_extra: []f64 = &.{}, // up: the SwiGLU roundings' share of each output's bound
     wd: u64 = 0,
+    wd32: u64 = 0, // block 32's words
     sd: u64 = 0,
     xd: u64 = 0,
     plan: grouped.Plan = undefined, // 16 pairs an item: the decode form's
+    served: [4]c.Shape = undefined, // a waves kind's shapes: the last sized past one wave of the entry it launches
     wide: grouped.Plan = undefined, // promptTile pairs an item: the fact tiles'
     out: u64 = 0,
     base: u64 = 0,
@@ -121,16 +171,20 @@ pub const Experts = struct {
         a.free(self.x);
         a.free(self.codes);
         a.free(self.scales);
+        a.free(self.bases);
+        a.free(self.offsets);
         a.free(self.picks);
         a.free(self.allow_extra);
         self.x = &.{};
         self.codes = &.{};
         self.scales = &.{};
+        self.bases = &.{};
+        self.offsets = &.{};
         self.picks = &.{};
         self.allow_extra = &.{};
     }
 
-    pub fn kernel(self: *Experts) g.Kernel {
+    pub fn kernel(self: *Experts) !g.Kernel {
         var entry = spec(self.kind);
         if (self.tile != null) {
             entry.name = switch (self.kind) {
@@ -143,8 +197,15 @@ pub const Experts = struct {
             // the K32 tile is Flash Next's alone: its own shapes
             if (self.kind != .control) entry.served = if (self.kind == .up) prompt_up_served[0..2] else prompt_down_served[0..2];
         }
+        // a waves entry's two-wave shape from its measured residency as loaded (half, entry 6, serves one wave only)
+        if (wavesEntry(self.kind)) |fi| if (fi != 6) {
+            const k = if (isOne(self.kind)) self.k1 else self.k;
+            self.served = entry.served[0..4].*;
+            self.served[3].rows = try wavesRows(try std.math.mul(usize, k.resident[fi], k.warps), self.served[3].n / fx.cols);
+            entry.served = &self.served;
+        };
         return .{ .spec = entry, .ctx = self, .vt = &vt, .control = switch (self.kind) {
-            .control, .cut_waves, .cut_waves_one => .shapes,
+            .control, .cut_waves, .cut_waves_one, .b32_control => .shapes,
             else => null,
         } };
     }
@@ -187,6 +248,7 @@ pub const Experts = struct {
     /// Random codes, scales, globals and inputs; non-finite: planted values; stress: integer sums, mirrored halves.
     pub fn prepare(self: *Experts, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.n == 0 or shape.n % 32 != 0 or shape.k == 0 or shape.k % 32 != 0) return false;
+        if (isB32(self.kind) and shape.k % 64 != 0) return false;
         self.free();
         self.rig.reset();
         self.shape = shape;
@@ -216,6 +278,7 @@ pub const Experts = struct {
             },
             .stress => self.stress(rng),
         }
+        if (isB32(self.kind)) try self.jam();
         self.xd = try self.rig.input(std.mem.sliceAsBytes(self.x));
         // pack on the host as the loader does: [E][n/32][k/32][parts][144] int32
         const per = fx.bytes(1, n, k, self.parts()) / 4;
@@ -226,6 +289,19 @@ pub const Experts = struct {
             if (self.parts() == 2) fx.packGateUp(o, .{ self.codesOf(e, 0), self.scalesOf(e, 0) }, .{ self.codesOf(e, 1), self.scalesOf(e, 1) }, n, k) else fx.packOne(o, self.codesOf(e, 0), self.scalesOf(e, 0), n, k);
         }
         self.wd = try self.rig.input(std.mem.sliceAsBytes(words));
+        if (isB32(self.kind)) {
+            if (self.kind == .b32_control) for (self.offsets) |*o| { // the planted fault: each group read with its pair's offset
+                o.* = o.* << 4 | o.* >> 4;
+            };
+            const per32 = Y.bytes(1, n, k, self.parts()) / 4;
+            const words32 = try a.alloc(u32, experts * per32);
+            defer a.free(words32);
+            for (0..experts) |e| {
+                const o = words32[e * per32 ..][0..per32];
+                if (self.parts() == 2) Y.packGateUp(o, self.matrix(e, 0), self.matrix(e, 1), n, k) else Y.packOne(o, self.matrix(e, 0), n, k);
+            }
+            self.wd32 = try self.rig.input(std.mem.sliceAsBytes(words32));
+        }
         self.sd = try self.rig.input(std.mem.sliceAsBytes(self.globals[0 .. experts * self.parts()]));
         const ids = try self.rig.input(std.mem.sliceAsBytes(self.picks));
         const zeros = try a.alloc(u8, @max(self.pairs() * 4, grouped.maxItems(self.pairs(), experts, 16) * 12, 8));
@@ -237,6 +313,34 @@ pub const Experts = struct {
         self.out = try self.rig.output(self.outBytes());
         self.base = try self.rig.scratch(self.outBytes());
         return true;
+    }
+
+    /// Block 32's scales from any fill: each row inside 16 steps of its largest, two by two, as bases and offsets.
+    fn jam(self: *Experts) !void {
+        const a = self.rig.gpu.gpa;
+        const g16 = self.shape.k / 16;
+        const g64 = self.shape.k / 64;
+        const rows = experts * self.parts() * self.shape.n;
+        self.bases = try a.alloc(u8, rows);
+        self.offsets = try a.alloc(u8, rows * g64);
+        @memset(self.offsets, 0);
+        for (0..rows) |r| {
+            const line = self.scales[r * g16 ..][0..g16];
+            const base = @max(std.mem.max(u8, line), 15) - 15;
+            self.bases[r] = base;
+            for (0..g16 / 2) |i| {
+                const s = @max(line[2 * i], base);
+                @memset(line[2 * i ..][0..2], s);
+                self.offsets[r * g64 + i / 2] |= (s - base) << if (i & 1 == 0) @as(u3, 0) else 4;
+            }
+        }
+    }
+
+    fn matrix(self: *const Experts, e: usize, part: usize) cuda.experts32.Matrix {
+        const n = self.shape.n;
+        const g64 = self.shape.k / 64;
+        const at = (e * self.parts() + part) * n;
+        return .{ .codes = self.codesOf(e, part), .bases = self.bases[at..][0..n], .offsets = self.offsets[at * g64 ..][0 .. n * g64] };
     }
 
     /// Gate 4: bf16-integer inputs, codes 4 and 6 at scale 1, K's halves mirrored: fp32 sums exact in any order.
@@ -294,7 +398,9 @@ pub const Experts = struct {
         const epi = epiOf(self.kind);
         const items = grouped.maxItems(self.pairs(), experts, 16);
         const k = if (isOne(self.kind)) self.k1 else self.k;
-        if (fact and wavesEntry(self.kind) != null) {
+        if (isB32(self.kind)) {
+            try self.launch32(fact, in, epi, out);
+        } else if (fact and wavesEntry(self.kind) != null) {
             const plan = if (self.kind == .cut_waves or self.kind == .cut_waves_one) try self.firstWave(k, items) else self.plan;
             try cuda.experts_waves.entry(k, wavesEntry(self.kind).?, self.rig.s, in, self.layer(), plan, out, items, -1);
         } else if (fact and isOne(self.kind)) {
@@ -307,6 +413,20 @@ pub const Experts = struct {
             try self.k.runFact(self.rig.s, epi, in, self.layer(), self.wide, out, grouped.maxItems(self.pairs(), experts, cuda.experts.promptTile(.nvfp4)), -1);
         } else try self.k.run(self.rig.s, epi, in, self.layer(), self.plan, out, items, -1);
         try self.rig.s.synchronize();
+    }
+
+    /// Block 32's entry, or block 16's on the same scales: the decode form, or the prompt tile for a prompt kind.
+    fn launch32(self: *Experts, under: bool, in: cuda.experts.Rows, epi: cuda.experts.Epi, out: u64) !void {
+        var l = self.layer();
+        const prompt = isB32Prompt(self.kind);
+        const plan = if (prompt) self.wide else self.plan;
+        const items = grouped.maxItems(self.pairs(), experts, if (prompt) cuda.experts.promptTile(.nvfp4) else 16);
+        if (under) {
+            l.format = .nvfp4_csf0;
+            l.up = self.wd32;
+            l.down = self.wd32;
+            if (prompt) try self.k32.?.runPrompt(self.rig.s, epi, in, l, plan, out, items, -1) else try self.k32.?.run(self.rig.s, epi, in, l, plan, out, items, -1);
+        } else if (prompt) try self.k.runPrompt(self.rig.s, epi, in, l, plan, out, items, -1) else try self.k.run(self.rig.s, epi, in, l, plan, out, items, -1);
     }
 
     /// The plan with its item count cut to one wave of the entry's grid (unchanged where one wave covers it).

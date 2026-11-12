@@ -13,29 +13,13 @@ Each path places its ranks its own way:
 | Native ROCm build | `--tp`, `--rank`, `--master` | [Native ROCm placement](../zig/src/native/hip.zig) |
 | The `fabric/tp` transport's harness | `TF_TP_WORLD`, `TF_TP_RANK`, `TF_TP_MASTER` | [The transport's README](../zig/src/fabric/tp/README.md) |
 
-The native CUDA build serves neither `--tp` nor `--rank`: a family's own variables place its ranks. `tf-tp-test` is
-the transport's harness rather than a server. `tensorfold benchmark` accepts no group placement flags and records 1
-for a managed run. Its child inherits the parent's rank environment, so start managed runs from a single-rank
-configuration. Measure a group as an attached server: start the group, then point the client at the rank that serves.
+Placement is family-specific; use the selected family's current native recipe. `tensorfold benchmark` accepts no placement hints of its own. Both managed and attached runs read the loaded server's manifest, so inherited rank variables cannot silently become a one-rank label. Start followers separately and attach to the serving rank when measuring an existing group.
 
 ## What a receipt can carry
 
-A reply's `tensorfold` object carries the engine's name, its decode seconds and rate, `prefill_seconds`,
-`time_to_first_token`, `sampling`, `drafts` and `token_sha` / `token_sha256`. It carries no rank count, no transport
-and no per-rank timing, so a reply cannot show that a group served it. A receipt's `settings` adds `rank_count`, and
-nothing else about ranks.
+New community-v2 receipts carry an optional `group` object with 1-8 loaded ranks, per-node hardware and a `single-node` or `multi-node` category. The server gathers it at startup and HTTP reads its frozen snapshot. `settings.rank_count` must agree. [Loaded group receipts](loaded-group-receipts.md) defines the fields, validation and receiver partitions. Ranks sharing a node are not multiple nodes; identical hardware names on two nodes do not merge them.
 
-The native manifest reads `TF_NEMOTRON_WORLD` first, then `TF_BENCHMARK_RANK_COUNT` only when the former is unset.
-It emits `rank_count` only when that value parses as 1 or 2. It does not derive the count from `TF_GLM_WORLD`, a
-speed-up settings file or ROCm's `--tp`, and does not cross-check that hint against the running engine's world.
-Never label a larger group as rank 1 or 2 to make its receipt fit the schema. Its hardware probe describes the
-serving process's visible hardware, not an inventory gathered from every rank.
-
-`settings.rank_count` accepts 1, 2 or null. A manifest declaring another count fails the client's checks as a whole,
-leaving the attached run's hardware and revision unknown. A valid manifest with no count or a null count keeps its
-other accepted facts while the rank count stays unknown. Both cases are unranked; the client does not infer a count
-from reply speed or the number of GPUs. Runs past two ranks belong in the local prose report below. Community-v2
-publication is currently disabled for every rank count, as [community benchmarks](community-benchmarks.md) explains.
+V1 remains byte-for-byte unchanged, accepting 1, 2 or null as before. Legacy v2 receipts without `group` keep that bound. Missing, unsupported or inconsistent inventories remain unranked. No client or environment rank hint can fill them. ROCm distributed inventory remains unavailable. Community-v2 publication stays disabled until the receiver accepts and separates its new fields.
 
 ## The settings the ranks agreed on
 
@@ -49,7 +33,7 @@ on GLM-5.3-Flash, `TF_GLM_PREFILL_REDUCE` defaults to `split`, which sends every
 world whose ranks reach only their neighbours needs `ring` or `gather` instead, as the collective path supports.
 
 Transport choice changes exchange cost; verify token equality at the same world size rather than assuming it. On
-native GLM on CUDA with two ranks, `TF_ROCE` takes the small all-gathers over RDMA writes and `TF_ROCE=0` on either rank keeps NCCL;
+native GLM on CUDA with two ranks, `TF_ROCE` takes the small all-gathers over RDMA writes and `TF_ROCE=0` on either rank keeps NCCL (three ranks or more ask for it with `TF_ROCE=1` on every rank);
 `TF_ROCE_HCA` names the devices and
 `TF_ROCE_MAX_KB` bounds the largest gather sent that way. Nemotron's serving path opens the NCCL group without
 enabling its optional RoCE gather. On the `fabric/tp` harness, `TF_COMM_BACKEND` picks `nccl`, `mailbox` or `roce`, and
@@ -85,9 +69,9 @@ of the link between them, because the exchange cost is a property of that fabric
 different links are not comparable at the same numbers. When a change reaches the transport, the before column is the
 base commit at the same rank count.
 
-## Reporting a run past two ranks
+## Reporting an unattested group run
 
-Prose, and the receipt stays local with its run: the rank count, each rank's effective settings and completed boot checks, the start order,
+When no complete loaded inventory is available, prose accompanies the local receipt: the rank count, each rank's effective settings and completed boot checks, the start order,
 each rank's hardware class and the link's, the client that measured it, which equalities ran, and what it could not
 attest. It does not enter a comparison beside rank-1 and rank-2 receipts, whatever it measured.
 

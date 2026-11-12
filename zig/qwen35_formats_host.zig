@@ -217,6 +217,7 @@ fn bf16Prompt(rows: usize) !void {
     e.stream = .{ .d = &d, .handle = @ptrFromInt(0x1800) };
     e.g = g;
     e.kit = &kit;
+    e.affine.mlp128 = false;
     e.affine.split = null;
     e.xs = 0;
     e.tables.ptr = 0x100000;
@@ -261,4 +262,22 @@ test "format coexistence: EXL3 BF16 prompt: 4096 rows reach both GDN scalar proj
 
 test "format coexistence: EXL3 BF16 prompt: existing rows and partial final slices keep every argument and row" {
     for ([_]usize{ 0, 1, 16, 17, 127, 128, 129, 2049, 4095 }) |rows| try bf16Prompt(rows);
+}
+
+test {
+    _ = @import("src/families/qwen3_5/cuda_host_embed.zig"); // where an EXL3 checkpoint's embedding rows live
+}
+
+test "format coexistence: disjoint mixer and dense MLP scratch regions share one arena union" {
+    const c = try config(exl3, false, false);
+    defer t.allocator.free(c);
+    var e: Engine = undefined;
+    e.g = try geo.parse(t.allocator, c);
+    e.arena = .{ .d = undefined, .ptr = 0x100000, .len = 1 << 30 };
+    e.arena_at = 0;
+    const measured = try e.scratch(.measure);
+    e.arena_at = 0;
+    try t.expectEqual(measured, try e.scratch(.allocate));
+    try t.expectEqual(e.y, e.gate);
+    try t.expectEqual(e.z, e.qraw);
 }

@@ -231,6 +231,7 @@ pub const Metal = struct {
                     cache.tap = .{ .buf = last, .start = ids.len - 1, .rows = 1 };
                 }
             }
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
             at = end;
             if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(cache.len)) != null) if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(cache.len));
         }
@@ -409,3 +410,19 @@ const shared_widths = [_]usize{ 32, 48, 64, 96, 128 };
 const mask_words = (cfg.vocab + 31) / 32;
 
 const Pick = @import("tree_round_gpu").contract.Pick;
+
+test "zero grant: Gemma Metal assistant and DFlash retain tapped context through a long skip" {
+    var b: Metal = undefined;
+    b.options = .{ .capacity = 512, .streams = 16 };
+    b.timed = 0;
+    b.shared_timed = 0;
+    try lanes.shared_draft_check.check(b.facts(), true);
+}
+
+test "shared head costs: Gemma Metal assistant and DFlash retain costed copy grants" {
+    var b: Metal = undefined;
+    b.options = .{ .capacity = 512, .streams = 16 };
+    b.timed = 0;
+    b.shared_timed = 0;
+    try @import("metal_head_cost_test.zig").check(b.facts());
+}

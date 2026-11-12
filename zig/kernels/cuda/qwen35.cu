@@ -58,10 +58,15 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_splice(__nv_bfloat16* _
     for (int i = threadIdx.x; i < D; i += blockDim.x) H[(size_t)blockIdx.x * D + i] = F[(size_t)s * D + i];
 }
 
-// h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)), XS (may be null) x's group sums; D 256k up to 8192.
-extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
-                                                               const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,
-                                                               const int* __restrict__ P, float* __restrict__ XS) {
+// A norm weight as the kernel scales by it: as stored, or (SHIFT) HF's raw w as 1 + w in FP32, as torch computes it.
+template <bool SHIFT>
+__device__ __forceinline__ float norm_weight(__nv_bfloat16 w) {
+    return SHIFT ? 1.0f + bf(w) : bf(w);
+}
+
+template <bool SHIFT>
+__device__ __forceinline__ void norm_rows(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R, const __nv_bfloat16* __restrict__ W,
+                                          __nv_bfloat16* __restrict__ X, float eps, int D, const int* __restrict__ P, float* __restrict__ XS) {
     constexpr int MAXE = 32;
     __shared__ float red[8];
     __shared__ __align__(16) __nv_bfloat16 xrow[8192];
@@ -117,7 +122,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
             uint4 xw;
             __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(&xw);
 #pragma unroll
-            for (int k = 0; k < 8; k++) xb[k] = __float2bfloat16_rn(bf(wb[k]) * (bf(hb[k]) * scale));
+            for (int k = 0; k < 8; k++) xb[k] = __float2bfloat16_rn(norm_weight<SHIFT>(wb[k]) * (bf(hb[k]) * scale));
             *reinterpret_cast<uint4*>(X + row * D + d) = xw;
             *reinterpret_cast<uint4*>(xrow + d) = xw;
         }
@@ -152,13 +157,27 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
     for (int i = 0; i < MAXE; i++) {
         if (i >= E) break;
         const int d = t * E + i;
-        const __nv_bfloat16 x = __float2bfloat16_rn(bf(W[d]) * (hv[i] * inv));
+        const __nv_bfloat16 x = __float2bfloat16_rn(norm_weight<SHIFT>(W[d]) * (hv[i] * inv));
         X[row * D + d] = x;
         xrow[d] = x;
     }
     if (XS == nullptr) return;
     __syncthreads();
     for (int g = t; g < D / 64; g += blockDim.x) XS[row * (D / 64) + g] = group_sum(xrow + g * 64);
+}
+
+// h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)), XS (may be null) x's group sums; D 256k up to 8192.
+extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
+                                                               const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,
+                                                               const int* __restrict__ P, float* __restrict__ XS) {
+    norm_rows<false>(H, R, W, X, eps, D, P, XS);
+}
+
+// tf_q35_norm over HF's raw weights: x = bf16((1 + w) * (h * inv)) with 1 + w in FP32 (a BF16 checkpoint's norms).
+extern "C" __global__ void __launch_bounds__(256) tf_q35_norm_shift(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
+                                                                     const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps,
+                                                                     int D, const int* __restrict__ P, float* __restrict__ XS) {
+    norm_rows<true>(H, R, W, X, eps, D, P, XS);
 }
 
 // 64-group sums of bf16 rows D wide (the decode projections' input sums). Grid (rows, groups / 64), a thread a group.
@@ -393,9 +412,9 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_post(Geo geo, const 
 }
 
 // Per-head RMSNorm of attention rows, out packed (rows, heads, HD); grid (rows * heads), 64 threads of 4 values.
-extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
-                                                                    __nv_bfloat16* __restrict__ OUT, int heads, int stride, int hstride, float eps,
-                                                                    const int* __restrict__ P) {
+template <bool SHIFT>
+__device__ __forceinline__ void head_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ OUT,
+                                          int heads, int stride, int hstride, float eps, const int* __restrict__ P) {
     __shared__ float sums[2];
     const int head = blockIdx.x % heads;
     if (past_rows(P, blockIdx.x / heads)) return;
@@ -415,8 +434,21 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
 #pragma unroll
     for (int i = 0; i < 4; i++) {
         const int d = 4 * t + i;
-        OUT[(m * heads + head) * HD + d] = __float2bfloat16_rn(bf(W[d]) * (v[i] * inv));
+        OUT[(m * heads + head) * HD + d] = __float2bfloat16_rn(norm_weight<SHIFT>(W[d]) * (v[i] * inv));
     }
+}
+
+extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
+                                                                    __nv_bfloat16* __restrict__ OUT, int heads, int stride, int hstride, float eps,
+                                                                    const int* __restrict__ P) {
+    head_rows<false>(X, W, OUT, heads, stride, hstride, eps, P);
+}
+
+// tf_q35_head_norm over HF's raw q and k norm weights, 1 + w in FP32.
+extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm_shift(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
+                                                                          __nv_bfloat16* __restrict__ OUT, int heads, int stride, int hstride,
+                                                                          float eps, const int* __restrict__ P) {
+    head_rows<true>(X, W, OUT, heads, stride, hstride, eps, P);
 }
 
 // A key and value as bf16 rows in their cache slot (qwen35.cu's layout: a layer's keys then values, kvh blocks of cap).

@@ -15,6 +15,8 @@ pub const Device = struct {
     policy: Policy,
     /// The tensor-parallel group this rank belongs to (null: one rank).
     group: ?Group = null,
+    /// The plain step a family takes when the GPU's larger default admits fewer streams (null: the step was asked for).
+    fallback_step: ?u32 = null,
 
     /// The card of `rank`: with every card visible rank r takes card r, with one card a process that card.
     pub fn ordinal(rank: u32) c_int {

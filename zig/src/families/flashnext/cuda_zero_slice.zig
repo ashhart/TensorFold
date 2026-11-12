@@ -16,7 +16,7 @@ pub fn lane(k: *const parts.Kernels, stream: cuda.Stream, s: *parts.Scratch, zer
     if (spends(w.native != null, sk, m, w.n, s.cap)) s.part_zero = false;
     const native = w.native orelse return null;
     if (!zero or sk == 1) return null;
-    try k.native_lane.matmulF32(stream, x, w.k, m, native, part, s.native_part);
+    try k.nativeMatmul(stream, x, w.k, m, native, part, s.native_part, .f32);
     return 1;
 }
 

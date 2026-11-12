@@ -79,7 +79,7 @@ pub fn weights(t: *Trainer, io: std.Io) !void {
     const e = t.e;
     const g = t.g;
     var ck = try core.Checkpoint.openModelPrefix(t.gpa, io, e.dir, prefix);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     const r: Reader = .{ .t = t, .ck = &ck };
     var nb: [160]u8 = undefined;
     var nb2: [160]u8 = undefined;
@@ -139,7 +139,7 @@ fn widen(t: *Trainer, ptr: u64, n: usize) !u64 {
     defer t.gpa.free(raw);
     try t.e.stream.synchronize();
     const d = t.e.d;
-    try d.check(d.api.cuMemcpyDtoH_v2(raw.ptr, ptr, n * 2), "cuMemcpyDtoH");
+    try cuda.memory.download(d, ptr, std.mem.sliceAsBytes(raw)[0 .. n * 2]);
     const out = try t.gpa.alloc(f32, n);
     defer t.gpa.free(out);
     for (out, raw) |*o, b| o.* = @bitCast(@as(u32, b) << 16);

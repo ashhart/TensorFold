@@ -16,11 +16,19 @@ pub const Request = struct {
     mask: []const u32 = &.{},
     /// The row's logits copied here (the prompt's last row, kept for a masked first draw).
     keep: ?[]u16 = null,
+    /// The checkpoint's multiplicative penalty over prompt and reply tokens, applied once per seen token in FP32.
+    repetition: f32 = 1,
+    /// A checkpoint-forced final EOS, after its ordinary score processors.
+    forced: ?u32 = null,
+    history: []const u32 = &.{},
+    /// OpenAI penalties count reply tokens only; history may also contain prompt tokens.
+    reply: []const u32 = &.{},
+    penalties: lanes.sampling.Penalties = .{},
 };
 
 /// Whether a row is drawn on the host from the whole row.
 fn whole(r: Request) bool {
-    return r.mask.len > 0 or r.keep != null;
+    return r.mask.len > 0 or r.keep != null or r.repetition != 1 or r.penalties.active() or r.forced != null;
 }
 
 fn greedy(s: ?lanes.Sampling) bool {
@@ -154,7 +162,54 @@ pub const Drawer = struct {
 
     /// A host row's token per `r`: its mask applied in place, then greedy or the keyed draw.
     pub fn drawHost(w: *const Drawer, row: []u16, r: Request) !u32 {
+        if (r.forced) |id| {
+            if (id >= row.len) return error.BadForcedToken;
+            if (r.mask.len > 0 and (id / 32 >= r.mask.len or (r.mask[id / 32] >> @intCast(id % 32)) & 1 == 0)) return error.NoAllowedToken;
+            return id;
+        }
         if (r.mask.len > 0) sample.mask(row, w.dtype, r.mask);
-        return sample.draw(w.gpa, row, w.dtype, r.sampling, r.position);
+        if (r.repetition == 1 and !r.penalties.active()) return sample.draw(w.gpa, row, w.dtype, r.sampling, r.position);
+        const values = try w.gpa.alloc(f32, row.len);
+        defer w.gpa.free(values);
+        for (values, 0..) |*v, i| v.* = sample.widen(row, w.dtype, i);
+        try process(w.gpa, values, r);
+        return sample.drawWide(w.gpa, values, r.sampling, r.position);
     }
 };
+
+/// HF repetition processing widens raw scores before FP32 multiply/divide; it must not round back to BF16.
+pub fn process(a: std.mem.Allocator, values: []f32, r: Request) !void {
+    if (!(r.repetition > 0) or !std.math.isFinite(r.repetition)) return error.BadRepetitionPenalty;
+    const counts = try a.alloc(u32, values.len);
+    defer a.free(counts);
+    @memset(counts, 0);
+    if (r.repetition != 1) {
+        for (r.history) |id| {
+            if (id >= values.len) return error.BadHistoryToken;
+            counts[id] = 1;
+        }
+        for (values, counts) |*v, seen| if (seen != 0) {
+            v.* = if (v.* < 0) v.* * r.repetition else v.* / r.repetition;
+        };
+    }
+    if (r.penalties.active()) {
+        @memset(counts, 0);
+        for (r.reply) |id| {
+            if (id >= values.len) return error.BadHistoryToken;
+            counts[id] += 1;
+        }
+        for (values, counts) |*v, count| if (count != 0) {
+            v.* -= r.penalties.of(count);
+        };
+    }
+}
+
+test "repetition keeps FP32 ranking and counts prompt tokens once, OpenAI penalties count only reply tokens" {
+    var values = [_]f32{ 1.5, 1.3671875, -2, 4 };
+    try process(std.testing.allocator, &values, .{ .sampling = null, .position = 0, .repetition = 1.1, .history = &.{ 0, 0, 2 }, .reply = &.{ 3, 3 }, .penalties = .{ .presence = 1, .frequency = 0.5 } });
+    try std.testing.expectEqual(@as(f32, 1.5) / @as(f32, 1.1), values[0]);
+    try std.testing.expectEqual(@as(f32, -2) * @as(f32, 1.1), values[2]);
+    try std.testing.expectEqual(@as(f32, 2), values[3]);
+    try std.testing.expectEqual(@as(u32, 1), try sample.drawWide(std.testing.allocator, values[0..2], null, 0));
+    try std.testing.expectError(error.BadHistoryToken, process(std.testing.allocator, &values, .{ .sampling = null, .position = 0, .repetition = 1.1, .history = &.{4} }));
+}

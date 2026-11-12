@@ -62,7 +62,7 @@ pub const Grouped = struct {
         const w = l.exl3 orelse return error.BadExperts;
         if (w.dims != l.dims or w.width != l.width or w.experts != l.experts or l.relu2 or
             in.stride > std.math.maxInt(i32) or in.slots > std.math.maxInt(i32)) return error.BadExperts;
-        try checkAct(w);
+        try checkAct(w, l.after);
         const up = epi == .up;
         const k = if (up) w.dims else w.width;
         const n = if (up) w.width else w.dims;
@@ -96,29 +96,43 @@ pub const Grouped = struct {
         try launch.launch(g.kernels.grouped[@backingInt(w.codebook)], .{ .grid = .{ .x = @intCast(items), .y = @intCast(n / 128), .z = @intCast(mats * sk * 4) }, .block = .{ .x = 128 } }, s, &args);
         var finish: launch.Args = .{};
         finish.add(a);
-        try launch.launch(g.kernels.plan_finish, .{ .grid = .{ .x = @intCast(items), .y = @intCast(n / 128) }, .block = .{ .x = 32 } }, s, &finish);
+        try launch.launch(if (l.after) g.kernels.plan_finish_after else g.kernels.plan_finish, .{ .grid = .{ .x = @intCast(items), .y = @intCast(n / 128) }, .block = .{ .x = 32 } }, s, &finish);
     }
 };
 
 /// The activations plan_finish runs (0 bf16, 1 fp32, 2 SwiGLU-OAI); SwiGLU-OAI needs its clamp and alpha.
-fn checkAct(w: ex.Layer) !void {
+fn checkAct(w: ex.Layer, after: bool) !void {
     if (w.act_mode < 0 or w.act_mode > 2) return error.BadExperts;
     if (w.act_mode == 2 and !(w.limit > 0 and w.alpha > 0)) return error.BadExperts;
+    if (after and w.act_mode == 0) return error.OptionNotBuilt; // bf16 activations: no contract entry covers it
+    if (after and w.act_mode == 2) return error.OptionNotBuilt; // SwiGLU-OAI's branch clamps the gate before silu
 }
 
 test "Grouped's SwiGLU-OAI takes act_mode 2 only with a positive clamp and alpha" {
     var w: ex.Layer = std.mem.zeroes(ex.Layer);
-    try checkAct(w);
+    try checkAct(w, false);
     w.act_mode = 2;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
     w.limit = 7;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
     w.alpha = 1.702;
-    try checkAct(w);
+    try checkAct(w, false);
     w.limit = -1;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
     w.act_mode = 3;
-    try std.testing.expectError(error.BadExperts, checkAct(w));
+    try std.testing.expectError(error.BadExperts, checkAct(w, false));
+}
+
+test "Grouped takes the clamp-after order at fp32 activations only: not at bf16, nor on SwiGLU-OAI" {
+    var w: ex.Layer = std.mem.zeroes(ex.Layer);
+    w.limit = 7;
+    w.alpha = 1.702;
+    w.act_mode = 1;
+    try checkAct(w, true);
+    w.act_mode = 0;
+    try std.testing.expectError(error.OptionNotBuilt, checkAct(w, true));
+    w.act_mode = 2;
+    try std.testing.expectError(error.OptionNotBuilt, checkAct(w, true));
 }
 
 test "Grouped scratch includes every pair and rejects overflowing geometry" {

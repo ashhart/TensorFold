@@ -1,8 +1,11 @@
-//! TensorFold's tokenizer for Hugging Face tokenizer.json files: encode equals tokenizers' encode(text, add_special_tokens=False).
+//! TensorFold tokenizer for HF tokenizer.json files: encode equals tokenizers' encode(text, add_special_tokens=False).
 const std = @import("std");
+pub const kimi_tiktoken = @import("tiktoken.zig");
 pub const unicode = @import("unicode.zig");
 const steps = @import("steps.zig");
+const regex = @import("regex.zig");
 const models = @import("model.zig");
+const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
 pub const eos = @import("eos.zig");
@@ -151,6 +154,19 @@ pub const Tokenizer = struct {
         t.* = undefined;
     }
 
+    /// New Split regex, empty memo; call before the tokenizer is shared: an encode in flight keeps the old memo.
+    pub fn overrideSplit(t: *Tokenizer, pattern: []const u8) !void {
+        const pre = if (t.pre_tokenizer) |*p| p else return error.NoSplitRegex;
+        const split = firstSplit(pre) orelse return error.NoSplitRegex;
+        split.pattern = .{ .regex = try regex.Regex.compile(t.arena.?.allocator(), pattern) };
+        if (t.memo) |m| {
+            const gpa = m.gpa;
+            const cap = m.cap;
+            m.destroy();
+            t.memo = Memo.create(gpa, cap) catch null; // without a memo every encode tokenizes, which is only slower
+        }
+    }
+
     /// Id of a token written out whole, such as a chat template's special token.
     pub fn specialTokenId(t: *const Tokenizer, text: []const u8) ?u32 {
         return t.vocab.get(text);
@@ -243,7 +259,7 @@ pub const Tokenizer = struct {
         }
     }
 
-    /// encodeText through the memo for a long segment: its kept ids, else encoded and kept.
+    /// encodeText through the memo for a segment of `min_bytes` or more: its kept ids, else encoded and kept.
     fn encodeSegment(t: *const Tokenizer, ctx: *steps.Context, text: []const u8, first: bool, ids: *std.ArrayList(u32)) Error!void {
         const m = t.memo orelse return t.encodeText(ctx, text, first, ids);
         if (text.len < @import("memo.zig").min_bytes) return t.encodeText(ctx, text, first, ids);
@@ -419,11 +435,16 @@ pub const Tokenizer = struct {
     }
 };
 
-/// Loads `path/tokenizer.json`, or `path` itself when it names a .json file.
+/// Loads `path/tokenizer.json`, or `path` itself when it names a .json file; a Qwen2 slow export is converted.
 pub fn loadTokenizer(io: std.Io, a: Allocator, path: []const u8) !Tokenizer {
     const file = if (std.mem.endsWith(u8, path, ".json")) try a.dupe(u8, path) else try std.fmt.allocPrint(a, "{s}/tokenizer.json", .{path});
     defer a.free(file);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, a, .limited(1 << 30));
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, file, a, .limited(1 << 30)) catch |e| {
+        if (e != error.FileNotFound or std.mem.endsWith(u8, path, ".json")) return e;
+        const converted = qwen2_slow.converted(io, a, path) catch |f| return if (f == error.FileNotFound) e else f;
+        defer a.free(converted);
+        return parse(a, converted);
+    };
     defer a.free(bytes);
     return parse(a, bytes);
 }
@@ -488,7 +509,7 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         if (content.len == 0) continue;
         if (steps.flag(item, "special", false)) try t.specials.put(keep, try keep.dupe(u8, content), {});
         if (ids.contains(content)) continue;
-        const id = t.model.id(&t.vocab, content) orelse if (max) |m| (if (m >= t.model.size or t.model.size == 0) m + 1 else t.model.size) else t.model.size;
+        const id = t.model.id(&t.vocab, content) orelse if (max) |m| (if (m >= t.model.size or t.model.size == 0) (if (m < std.math.maxInt(u32) - 1) m + 1 else return error.InvalidTokenizer) else t.model.size) else t.model.size;
         max = @max(max orelse id, id);
         try ids.put(content, id);
     }
@@ -524,8 +545,8 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
         }
         var zero: usize = 0;
         const text = if (token.normalized and t.normalizer != null) try keep.dupe(u8, try t.normalizer.?.apply(&ctx, token.content, &zero)) else token.content;
-        // tokenizers matches and decodes a normalized added token by its normalized content.
-        try t.id_to_token.put(token.id, text);
+        // Normalization changes the matching key; the decoder retains the added token's original spelling.
+        try t.id_to_token.put(token.id, token.content);
         try (if (token.normalized) &t.normalized else &t.raw).insert(keep, text, @intCast(index));
     }
     if (tokens.items.len > 0) {
@@ -537,7 +558,38 @@ fn addTokens(t: *Tokenizer, keep: Allocator, scratch: Allocator, list: std.json.
     }
 }
 
+/// A vocabulary id of 2^32 - 2, set without its 64 GiB dense entry, then added tokens: new ids 2^32 - 1, then 2^32.
+fn addPastLastId(added: []const u8) !void {
+    var t = try parse(std.testing.allocator, "{\"model\":{\"type\":\"WordLevel\",\"unk_token\":\"a\",\"vocab\":{\"a\":0}}}");
+    defer t.deinit();
+    t.vocab.getPtr("a").?.* = std.math.maxInt(u32) - 1;
+    var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer scratch.deinit();
+    const list = try std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), added, .{});
+    try std.testing.expectError(error.InvalidTokenizer, addTokens(&t, t.arena.?.allocator(), scratch.allocator(), list));
+}
+
+// In a child: if addTokens' u32 `m + 1` is unchecked, a safe build panics and only this test fails
+test "an added token whose new id would be 2^32 - 1 or more is refused, not wrapped" {
+    const isolate = @import("sys").isolate;
+    const lists = [_][]const u8{ "[{\"content\":\"a\"},{\"content\":\"b\"},{\"content\":\"c\"}]", "[{\"content\":\"a\"},{\"content\":\"b\",\"special\":true}]" };
+    var outcomes: [lists.len]isolate.Outcome = undefined;
+    for (lists, &outcomes) |added, *outcome| outcome.* = try isolate.run(addPastLastId, .{added});
+    try std.testing.expectEqualSlices(isolate.Outcome, &.{ .passed, .passed }, &outcomes);
+}
+
 test {
     _ = @import("tokenizer_test.zig");
     _ = @import("masked_test.zig");
+    _ = @import("unicode_nfkc_test.zig");
+}
+
+/// The first Split whose pattern is a regex, in a pre-tokenizer or its sequence.
+fn firstSplit(p: *steps.PreTokenizer) ?*@FieldType(steps.PreTokenizer, "split") {
+    switch (p.*) {
+        .split => |*s| return if (s.pattern == .regex) s else null,
+        .sequence => |list| for (@constCast(list)) |*q| if (firstSplit(q)) |s| return s,
+        else => {},
+    }
+    return null;
 }

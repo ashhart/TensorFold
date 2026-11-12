@@ -49,10 +49,16 @@ pub const VTable = struct {
     check: ?*const fn (*anyopaque, Gate) anyerror!?[]const u8 = null,
     /// A replacement's baseline: the replaced kernel's bytes on the prepared inputs.
     replaced: ?*const fn (*anyopaque) anyerror![]const u8 = null,
+    /// Frees the device buffers and host copies the last `prepare` left; called once a kernel's gates are done.
+    release: ?*const fn (*anyopaque) void = null,
 };
 
 /// The VTable of a test type T: its prepare, run, count and reference, its `rig`'s bytes, and the optional hooks.
 pub fn hooks(comptime T: type) VTable {
+    const Rig = switch (@typeInfo(@FieldType(T, "rig"))) {
+        .pointer => |p| p.child,
+        else => @FieldType(T, "rig"),
+    };
     const H = struct {
         fn of(ctx: *anyopaque) *T {
             return @ptrCast(@alignCast(ctx));
@@ -96,6 +102,9 @@ pub fn hooks(comptime T: type) VTable {
         fn replaced(ctx: *anyopaque) anyerror![]const u8 {
             return of(ctx).replaced();
         }
+        fn release(ctx: *anyopaque) void {
+            if (@hasDecl(Rig, "finishGates")) of(ctx).rig.finishGates() else of(ctx).rig.reset();
+        }
     };
     return .{
         .prepare = H.prepare,
@@ -111,6 +120,7 @@ pub fn hooks(comptime T: type) VTable {
         .simulate = if (@hasDecl(T, "simulate")) H.simulate else null,
         .check = if (@hasDecl(T, "check")) H.check else null,
         .replaced = if (@hasDecl(T, "replaced")) H.replaced else null,
+        .release = if (@hasDecl(Rig, "reset")) H.release else null,
     };
 }
 
@@ -310,7 +320,7 @@ pub fn sums(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
     const q = misses(got, want, allow);
     if (!(q <= 1)) return say(.fail, .sums, s.name, "{d:.1}x over its exact-sum bound at k {d}: not fp32 sums (fp16 would miss {d:.0}x, bf16 {d:.0}x)", .{ q, shape.k, margin[0], margin[1] });
     if (need[1] == 0 or need[0] == 0) return say(.pass, .sums, s.name, "within its bound at k {d}; fp16 sums would miss {d:.0}x, bf16 {d:.1}x ({s})", .{ shape.k, margin[0], margin[1], s.sums.why });
-    return say(.pass, .sums, s.name, "exact sums at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ shape.k, margin[0], margin[1] });
+    return say(.pass, .sums, s.name, "{s} at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ if (s.sums.exact) "exact sums" else "FP32 sums within their derived bound", shape.k, margin[0], margin[1] });
 }
 
 /// A kernel's or control's gates 1-4; a control must fail its own gate and passes when it does.
@@ -341,6 +351,7 @@ pub fn one(a: std.mem.Allocator, which: Gate, k: Kernel, seed: u64) !Verdict {
 /// Gates 1-4 on each kernel, and each control at its own gate (which must fail).
 pub fn runAll(a: std.mem.Allocator, kernels: []const Kernel, seed: u64, t: *Tally) !void {
     for (kernels) |k| {
+        defer if (k.vt.release) |free| free(k.ctx);
         const s = std.hash.Wyhash.hash(seed, k.spec.name);
         if (k.control) |g| {
             t.controls += 1;

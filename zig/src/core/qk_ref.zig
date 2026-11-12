@@ -1,6 +1,6 @@
 //! QK norm and RoPE of one head in float64, the reference for every backend's attention inputs (cuda/qk_rows.zig).
 const std = @import("std");
-const bf = @import("bf16_round.zig");
+const bf = @import("bf16_round");
 
 /// One head: RMS-normed by w (none: as is), then rotate-half RoPE on its first `rot` dims (no cos/sin: none).
 pub fn head(x: []const f64, w: ?[]const f64, eps: f64, cos: ?[]const f64, sin: ?[]const f64, rot: usize, y: []f64) void {

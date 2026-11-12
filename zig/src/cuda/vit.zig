@@ -316,16 +316,3 @@ pub const Attention = struct {
         try launch_.launch(a.fns[i], .{ .grid = grid, .block = .{ .x = 32 * f.warps }, .shared = f.smem() }, s, &args);
     }
 };
-
-/// cvt.rn.bf16.f32 of a finite value.
-pub fn bf16(x: f32) u16 {
-    const u: u32 = @bitCast(x);
-    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
-
-test "bf16 rounds to nearest even" {
-    try std.testing.expectEqual(@as(u16, 0x3f80), bf16(1.0));
-    try std.testing.expectEqual(@as(u16, 0x3f80), bf16(@bitCast(@as(u32, 0x3f808000))));
-    try std.testing.expectEqual(@as(u16, 0x3f82), bf16(@bitCast(@as(u32, 0x3f818000))));
-    try std.testing.expectEqual(@as(u16, 0x3f81), bf16(@bitCast(@as(u32, 0x3f808001))));
-}

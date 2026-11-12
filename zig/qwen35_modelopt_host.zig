@@ -1,4 +1,4 @@
-//! Synthetic compressed-tensors index admission and stored BF16/FP8/NVFP4 layouts.
+//! Synthetic compressed-tensors index admission, stored BF16/FP8/NVFP4 layouts and plain BF16 configs.
 const std = @import("std");
 const core = @import("core");
 const modelopt = @import("src/families/qwen3_5/cuda_modelopt.zig");
@@ -248,4 +248,10 @@ test "ModelOpt partials: real reservations cover every 27B projection below the 
             };
         }
     }
+}
+
+test {
+    _ = @import("src/families/qwen3_5/cuda_bf16_admission_test.zig");
+    _ = @import("src/families/qwen3_5/cuda_bf16_bytes.zig");
+    _ = @import("src/families/qwen3_5/cuda_decide.zig");
 }

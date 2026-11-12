@@ -21,7 +21,7 @@ pub const Expanded = struct {
     ids: []const u32,
     history_len: usize,
     images: []const api.Image,
-    cache_key: []const u32,
+    cache_key: []const u32, // one compact word per model row; the core also checks exact Image metadata
 };
 
 const Part = struct { video: bool = false, url: []const u8, low: bool = false };
@@ -266,7 +266,7 @@ pub fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(
 /// Appends one image's rows, its engine entry and its cache words; `named`: the word before them is its marker's.
 fn placeImage(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage, named: bool) !void {
     if (named) key.items[key.items.len - 1] = image_key.open(img.hash);
-    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens, .hash = img.hash });
+    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens, .content_size = img.content_size, .hash = img.hash });
     for (0..img.tokens) |j| {
         try ids.append(a, token);
         try key.append(a, image_key.row(img.hash, j));
@@ -295,7 +295,7 @@ fn fakePrepare(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tok
     _ = ctx;
     _ = max_tokens;
     const tokens: u32 = @intCast(bytes.len - 3); // the test's images: a JPEG's first bytes, then one token a byte
-    return .{ .pixels = try a.alloc(f32, 0), .gh = 2, .gw = 2 * tokens, .tokens = tokens, .hash = bytes[3] };
+    return .{ .pixels = try a.alloc(f32, 0), .gh = 2, .gw = 2 * tokens, .tokens = tokens, .content_size = .{ 16, 16 }, .hash = bytes[3] };
 }
 
 test "placeholders expand to each image's tokens, the history and cache key with them" {
@@ -320,6 +320,8 @@ test "placeholders expand to each image's tokens, the history and cache key with
     try std.testing.expectEqual(@as(usize, 5), x.history_len); // the first image is in the history, the second not
     try std.testing.expectEqual(@as(u32, 1), x.images[0].at);
     try std.testing.expectEqual(@as(u32, 5), x.images[1].at);
+    try std.testing.expectEqualDeep(@as(?[2]u32, .{ 16, 16 }), x.images[0].content_size);
+    try std.testing.expectEqualDeep(@as(?[2]u32, .{ 16, 16 }), x.images[1].content_size);
     try std.testing.expect(x.cache_key[1] >= 0x8000_0000 and x.cache_key[1] != x.cache_key[2]);
     try std.testing.expectEqual(@as(u32, 2), x.cache_key[3]);
     // a placeholder the images do not account for is refused

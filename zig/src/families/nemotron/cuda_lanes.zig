@@ -1,5 +1,4 @@
 //! Nemotron CUDA streams own their sequences and share window rounds.
-
 const std = @import("std");
 const vision = @import("cuda_vision.zig");
 const cuda = @import("cuda");
@@ -17,27 +16,21 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
 const lesson_route = @import("living").lesson_route;
 const Pages = @import("cuda_pages.zig").Pages;
-
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
 const row_words = lanes.logprob.words;
 /// Host-mapped words for every row a shared window holds, then the first token's row.
 const row_slots = engine.max_streams * state.max_rows + 1;
-
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
-
 /// A stream's sequence (`own`: the engine's, the graphs' buffers; `paged`: the pool's) and its first logprob row.
 const Lane = struct { seq: *state.Seq, own: bool = false, paged: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
-
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
-
 /// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
 pub fn finalTap(c: config.Config) u32 {
     return @intCast(c.layers);
 }
-
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -64,7 +57,6 @@ pub const Cuda = struct {
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
     copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
-
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
         errdefer pinned.free();
@@ -74,7 +66,6 @@ pub const Cuda = struct {
         errdefer prompt_out.free();
         return .{ .gpa = gpa, .e = e, .head = head, .pinned = pinned, .rows_out = rows_out, .rows_dev = try rows_out.device(), .prompt_out = prompt_out, .prompt_dev = try prompt_out.device() };
     }
-
     pub fn deinit(self: *Cuda) void {
         var it = self.lanes.valueIterator();
         while (it.next()) |l| if (l.paged) {
@@ -88,7 +79,6 @@ pub const Cuda = struct {
         if (self.tapped) |*b| b.free();
         self.prompt_out.free();
     }
-
     pub fn backend(self: *Cuda) be.Backend {
         return .{ .ptr = self, .vtable = &.{
             .prefill = prefillFn,
@@ -149,7 +139,6 @@ pub const Cuda = struct {
     fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
         return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
     }
-
     /// The checkpoint's verify width, shared target forwards and this GPU's measured costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
@@ -157,8 +146,13 @@ pub const Cuda = struct {
         return .{
             .exact_width = @intCast(width),
             .copy_drafts = self.copy_drafts,
+            .root_copies = self.copy_drafts,
+            .context_copies = self.copy_drafts,
+            .copy_match = if (self.copy_drafts) 4 else 8,
             .gpu_tokens = false,
             .mtp = drafting,
+            .allocate_shared_drafts = drafting,
+            .limit_shared_drafts = drafting and self.mtp_confidence == null,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
@@ -315,10 +309,7 @@ pub const Cuda = struct {
         tap.taps.verified = null;
         if (self.tapped != null) e.taps = .{ .ctx = &tap, .call = TapSink.take };
         defer e.taps = null;
-        const first = e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
-            if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
-            return err;
-        };
+        const first = try servedPrefill(e, self.head, s, from, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = ids.len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
@@ -341,6 +332,16 @@ pub const Cuda = struct {
             for (picks, 0..) |pick, i| try p.s.prompt_rows.append(p.gpa, LogRow.fromWords(words[i * row_words ..][0..row_words], pick, p.s.prompt_logprobs.?));
         }
     };
+
+    pub fn servedPrefill(e: anytype, head: ?*Head, s: *lanes.Stream, from: usize, keep: ?engine.Keep) !u32 {
+        const ids = s.prompt();
+        const first = e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
+            if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
+            return err;
+        };
+        if (e.last_chunk == from) lanes.prefill_widths.completed(e.gpa, s, ids.len - from);
+        return first;
+    }
 
     /// A prompt chunk's rows copied to the stream's host rows, a staging buffer at a time.
     const TapSink = struct {
@@ -582,4 +583,18 @@ test "latent Bolt allows copy drafts and shared rounds without an MTP head" {
     try std.testing.expect(f.hidden_rows);
     try std.testing.expect(f.max_streams > 1);
     try std.testing.expect(!f.mtp);
+}
+
+test "zero grant: Nemotron CUDA preserves later drafts through a long shared skip" {
+    var e: Engine = undefined;
+    e.c.latent = 0;
+    var b: Cuda = undefined;
+    b.e = &e;
+    b.head = @ptrFromInt(16);
+    b.copy_drafts = true;
+    b.cost_count = 0;
+    b.mtp_ms = 0;
+    b.mtp_drafts = null;
+    b.mtp_confidence = null;
+    try lanes.shared_draft_check.check(b.facts(), false);
 }

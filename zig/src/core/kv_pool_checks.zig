@@ -2,4 +2,5 @@
 test {
     _ = @import("kv_pool_store_test.zig");
     _ = @import("kv_pool_host_test.zig");
+    _ = @import("kv_pool_ledger_test.zig");
 }

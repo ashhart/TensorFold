@@ -1,0 +1,71 @@
+name: Feature request
+description: A new capability or workflow improvement. Use the proposal form for a model family, backend or arithmetic change.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first; a proposed design is welcome but optional.
+        Do not paste private paths, hostnames, tokens, keys or confidential prompts. Maintainers may relabel the issue.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Engine or server
+        - Desktop app
+        - Mobile app
+        - Tools, build or CI
+        - Documentation or website
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What you are trying to do and what gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: Current behavior
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and how to verify it
+      description: What a user would see, and the checks that would show it works.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and exclusions
+      description: What this includes and what it leaves out.
+    validations:
+      required: true
+  - type: textarea
+    id: effects
+    attributes:
+      label: Compatibility, API and security effects
+      description: Optional. Changes to flags, endpoints, defaults or stored data.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives tried
+      description: Optional.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Version, hardware and checkpoint
+      description: Optional, unless the feature depends on them. The TensorFold version or commit, GPU, and checkpoint and revision.
+  - type: textarea
+    id: related
+    attributes:
+      label: Related issues and pull requests
+      description: Links to similar requests and how this one differs, or "none found".
+    validations:
+      required: true

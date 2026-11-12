@@ -169,7 +169,7 @@ kernel void tf_copy_u32(const device uint* src [[buffer(0)]],
   dst[i] = src[i];
 }
 
-// lane_qmm's split-K partials summed in slice order, as the coop kernel's threadgroup reduction does, then rounded to bf16: grid (N, M).
+// lane_qmm's split-K partials summed in slice order, as the coop kernel reduces, then rounded to bf16: grid (N, M).
 kernel void tf_coop_combine(const device float* part [[buffer(0)]],
                             const device int* dims [[buffer(1)]],
                             device bfloat* y [[buffer(2)]],

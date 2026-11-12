@@ -10,6 +10,8 @@ pub fn submit(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.Learn
     defer h.unlock();
     if (h.closing) return error.Closed;
     if (h.learner == null) return error.Unsupported;
+    if (request.audit != null and !h.learner.?.read_only_audit) return error.Unsupported;
+    if (request.audit != null and h.stale) return error.Busy;
     h.lessons.append(h.gpa, .{ .request = request, .sink = sink }) catch return error.Busy;
     h.wake.signal(h.io);
 }
@@ -37,9 +39,14 @@ pub fn step(h: *LaneHost) void {
     if (!h.lesson_open) {
         h.mutex.lockUncancelable(h.io);
         const lesson = h.lessons.orderedRemove(0);
+        const blocked = lesson.request.audit != null and h.stale;
         h.unlock();
+        if (blocked) {
+            const failed: api.LearnEvent = .{ .done = .{ .message = "AuditUnresolved" } };
+            return lesson.sink.event(lesson.sink.ctx, &failed);
+        }
         learner.begin(learner.ctx, lesson.request, lesson.sink) catch |e| {
-            const failed: api.LearnEvent = .{ .done = .{ .message = h.words(e) } };
+            const failed: api.LearnEvent = .{ .done = .{ .message = h.words(e), .before_begin = true } };
             return lesson.sink.event(lesson.sink.ctx, &failed);
         };
         h.lesson_open = true;

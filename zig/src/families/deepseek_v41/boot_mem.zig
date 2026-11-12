@@ -109,9 +109,8 @@ pub const Trace = struct {
     /// the kernel keys at the last step (null before the first)
     kernel: ?[kernel_keys.len]?u64 = null,
 
-    pub fn fromEnv() Trace {
-        const v = std.c.getenv("TF_DSV41_BOOT_TRACE") orelse return .{};
-        return .{ .on = std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1") };
+    pub fn fromEnv() !Trace {
+        return .{ .on = try @import("sys").environment.read(bool, "TF_DSV41_BOOT_TRACE", false) };
     }
 
     /// `u`: cuda.usage(false) (device, host, allocs).
@@ -147,6 +146,7 @@ pub const Trace = struct {
 
     /// glibc's free heap returned to the system, logged as RssAnon before and after (a no-op without glibc).
     pub fn trim(t: *const Trace) void {
+        if (@import("builtin").os.tag != .linux) return;
         if (!t.on) return;
         const f = malloc_trim orelse return log.info("boot trace: malloc_trim: not in this libc", .{});
         const before = procField("/proc/self/status", "RssAnon:");

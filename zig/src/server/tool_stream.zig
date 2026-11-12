@@ -4,7 +4,10 @@ const json = @import("json");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_dsml = @import("tool_dsml.zig");
+const tool_dsml_stream = @import("tool_dsml_stream.zig");
 const tool_glm_cut = @import("tool_glm_cut.zig");
+const tool_json_cut = @import("tool_json_cut.zig");
+const tool_glm_stream = @import("tool_glm_stream.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_parse = @import("tool_parse.zig");
@@ -35,7 +38,7 @@ fn closing(rest: []const u8, text: []const u8) ?usize {
     return if (std.mem.startsWith(u8, rest[i..], text)) i + text.len else null;
 }
 
-/// Streams XML argument deltas and validated DSML envelopes, matching the final parser.
+/// Streams XML, GLM and DSML argument deltas, else whole envelopes at their closers, matching the final parser.
 pub const Streamer = struct {
     a: Allocator,
     schemas: tool_params.Schemas,
@@ -45,7 +48,7 @@ pub const Streamer = struct {
     typed: bool = false,
     buffer: std.ArrayList(u8) = .empty,
     pos: usize = 0,
-    state: enum { outside, call, buffered, function, value, closing, abort } = .outside,
+    state: enum { outside, call, buffered, function, value, closing, glm, dsml, abort } = .outside,
     index: i64 = -1,
     args_open: bool = false,
     lead: bool = false,
@@ -59,6 +62,8 @@ pub const Streamer = struct {
     dsml_seen: bool = false,
     buffered_start: usize = 0,
     buffered_close: []const u8 = "",
+    glm: tool_glm_stream.Glm = .{},
+    dsml: tool_dsml_stream.Dsml = .{},
 
     pub fn init(a: Allocator, tools: []const Value) Allocator.Error!Streamer {
         var s: Streamer = .{ .a = a, .schemas = try tool_params.schemas(a, tools), .tools = tools };
@@ -72,7 +77,8 @@ pub const Streamer = struct {
         return s;
     }
 
-    fn args(s: *Streamer, fragment: []const u8) Allocator.Error!Value {
+    /// One arguments delta under the open call.
+    pub fn args(s: *Streamer, fragment: []const u8) Allocator.Error!Value {
         const function = try json.newObject(s.a);
         try function.put(s.a, "arguments", .{ .string = fragment });
         const one = try json.newObject(s.a);
@@ -81,9 +87,27 @@ pub const Streamer = struct {
         return wrap(s.a, .{ .object = one });
     }
 
-    fn esc(s: *Streamer, text: []const u8) Allocator.Error![]const u8 {
+    /// ``text`` as the bytes of a JSON string, its quotes off.
+    pub fn esc(s: *Streamer, text: []const u8) Allocator.Error![]const u8 {
         const q = try json.quote(s.a, text, .{ .ascii = false });
         return q[1 .. q.len - 1];
+    }
+
+    /// The delta that opens call ``name``: an XML, GLM or DSML call's header, before its arguments.
+    pub fn begin(s: *Streamer, name: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
+        s.current = name;
+        s.index += 1;
+        s.streamed = true;
+        const function = try json.newObject(s.a);
+        try function.put(s.a, "name", .{ .string = name });
+        try function.put(s.a, "arguments", .{ .string = "" });
+        const one = try json.newObject(s.a);
+        try one.put(s.a, "index", try json.intValue(s.a, s.index));
+        try one.put(s.a, "id", .{ .string = try ids.make(s.a, "call_", 24) });
+        try one.put(s.a, "type", .{ .string = "function" });
+        try one.put(s.a, "function", .{ .object = function });
+        try out.append(s.a, try wrap(s.a, .{ .object = one }));
+        s.args_open = false;
     }
 
     fn emitCalls(s: *Streamer, calls: []const Value, out: *std.ArrayList(Value)) Allocator.Error!void {
@@ -130,28 +154,24 @@ pub const Streamer = struct {
                     while (std.mem.indexOfScalarPos(u8, text, at, '<')) |start| {
                         if (tool_dsml.openedBy(text[start..])) |sp| {
                             s.dsml_seen = true;
-                            s.dsml_start = start;
-                            s.dsml_close = sp.close;
                             s.pos = start + sp.open.len;
-                            s.dsml_searched = s.pos;
+                            s.dsml = .{ .sp = sp, .start = start, .at = s.pos };
+                            s.state = .dsml;
                             break;
                         }
                         if (std.mem.startsWith(u8, text[start..], "<tool_call>")) {
                             s.buffered_start = start;
                             s.pos = start + "<tool_call>".len;
+                            s.glm = .{ .base = s.pos, .scan = s.pos };
                             s.state = .call;
                             break;
                         }
                         if (std.mem.startsWith(u8, text[start..], "<|tool_call>")) {
-                            if (!s.dsml_seen) {
-                                s.state = .abort;
-                                return;
-                            }
                             s.buffered_start = start;
                             s.buffered_close = "<tool_call|>";
                             s.pos = start + "<|tool_call>".len;
                             s.dsml_searched = s.pos;
-                            s.state = .buffered;
+                            if (!s.giveUp()) return;
                             break;
                         }
                         const end = std.mem.indexOfAnyPos(u8, text, start + 1, "<>") orelse {
@@ -163,15 +183,11 @@ pub const Streamer = struct {
                             continue;
                         }
                         if (callTag(text[start + 1 .. end])) {
-                            if (!s.dsml_seen) {
-                                s.state = .abort;
-                                return;
-                            }
                             s.buffered_start = start;
                             s.buffered_close = try std.mem.concat(s.a, u8, &.{ "</", text[start + 1 .. end], ">" });
                             s.pos = end + 1;
                             s.dsml_searched = s.pos;
-                            s.state = .buffered;
+                            if (!s.giveUp()) return;
                             break;
                         }
                         at = end + 1;
@@ -181,48 +197,42 @@ pub const Streamer = struct {
                     }
                 },
                 .call => {
-                    const m = opening(rest, "<function=") orelse {
-                        const trimmed = reply_text.pyStrip(rest);
-                        if (reply_text.charCount(rest) > 256 or (trimmed.len > 0 and trimmed[0] != '<') or
-                            (s.dsml_seen and std.ascii.findIgnoreCase(rest, "</tool_call>") != null))
-                        {
-                            if (!s.dsml_seen) {
-                                s.state = .abort;
-                                return;
-                            }
+                    if (opening(rest, "<function=")) |m| {
+                        const lower = try std.ascii.allocLowerString(s.a, reply_text.pyStrip(m.name));
+                        const name = s.known.get(lower) orelse {
                             s.buffered_close = "</tool_call>";
                             s.dsml_searched = s.pos;
-                            s.state = .buffered;
+                            if (!s.giveUp()) return;
                             continue;
-                        }
-                        return;
-                    };
-                    const lower = try std.ascii.allocLowerString(s.a, reply_text.pyStrip(m.name));
-                    const name = s.known.get(lower) orelse {
-                        if (!s.dsml_seen) {
-                            s.state = .abort;
-                            return;
-                        }
+                        };
+                        try s.begin(name, out);
+                        s.pos += m.len;
+                        s.state = .function;
+                        continue;
+                    }
+                    const trimmed = reply_text.pyStrip(rest);
+                    // GLM's ``NAME<arg_key>K</arg_key><arg_value>V</arg_value>`` arguments stream as written
+                    if (!s.dsml_seen and !std.mem.startsWith(u8, trimmed, "<function=")) {
+                        if (!try s.glmStep(text, out)) return;
+                        continue;
+                    }
+                    if (reply_text.charCount(rest) > 256 or (trimmed.len > 0 and trimmed[0] != '<') or
+                        (s.dsml_seen and std.ascii.findIgnoreCase(rest, "</tool_call>") != null))
+                    {
                         s.buffered_close = "</tool_call>";
                         s.dsml_searched = s.pos;
-                        s.state = .buffered;
+                        if (!s.giveUp()) return;
                         continue;
-                    };
-                    s.current = name;
-                    s.index += 1;
-                    s.streamed = true;
-                    const function = try json.newObject(s.a);
-                    try function.put(s.a, "name", .{ .string = name });
-                    try function.put(s.a, "arguments", .{ .string = "" });
-                    const one = try json.newObject(s.a);
-                    try one.put(s.a, "index", try json.intValue(s.a, s.index));
-                    try one.put(s.a, "id", .{ .string = try ids.make(s.a, "call_", 24) });
-                    try one.put(s.a, "type", .{ .string = "function" });
-                    try one.put(s.a, "function", .{ .object = function });
-                    try out.append(s.a, try wrap(s.a, .{ .object = one }));
-                    s.args_open = false;
-                    s.pos += m.len;
-                    s.state = .function;
+                    }
+                    return;
+                },
+                .glm => {
+                    if (!try s.glmStep(text, out)) return;
+                    continue;
+                },
+                .dsml => {
+                    if (!try s.dsmlStep(text, out)) return;
+                    continue;
                 },
                 .buffered => {
                     const tail = s.buffered_close;
@@ -284,7 +294,7 @@ pub const Streamer = struct {
                     if (end == null) return;
                     if (s.typed) {
                         const v = try tool_params.decode(s.a, s.buffer.items, s.value_schema, true);
-                        try out.append(s.a, try s.args(try json.stringify(s.a, v, .{ .ascii = false })));
+                        try out.append(s.a, try s.args(try json.stringify(s.a, v, .{ .ascii = false, .compact = true })));
                     } else try out.append(s.a, try s.args("\""));
                     s.pos += tail.len;
                     s.state = .function;
@@ -301,12 +311,56 @@ pub const Streamer = struct {
 
     /// A call that the reply's end left open: its name streamed, its envelope not closed.
     pub fn open(s: *const Streamer) bool {
-        return s.index >= 0 and (s.state == .function or s.state == .value or s.state == .closing);
+        if (s.state == .dsml) return s.dsml.sent > 0; // the block's whole parse would keep it all as text
+        return s.index >= 0 and (s.state == .glm or s.state == .function or s.state == .value or s.state == .closing);
+    }
+
+    /// An envelope this stream cannot stream: with nothing sent yet the finish sends every call, else its closer does.
+    fn giveUp(s: *Streamer) bool {
+        if (!s.dsml_seen and !s.streamed) {
+            s.state = .abort;
+            return false;
+        }
+        s.state = .buffered;
+        return true;
+    }
+
+    /// One GLM state-machine step: whether ``feed`` goes on with the state the step left.
+    fn glmStep(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!bool {
+        switch (try tool_glm_stream.feed(s, text, out)) {
+            .wait => return false,
+            .outside => return true,
+            .unstreamable => {
+                s.buffered_close = "</tool_call>";
+                s.dsml_searched = s.pos;
+                return s.giveUp();
+            },
+            .more => unreachable,
+        }
+    }
+
+    /// One DSML state-machine step: whether ``feed`` goes on; a block it cannot stream parses whole at its closer.
+    fn dsmlStep(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!bool {
+        switch (try tool_dsml_stream.feed(s, text, out)) {
+            .wait => return false,
+            .outside => return true,
+            .rejected => {
+                s.dsml_start = s.dsml.start;
+                s.dsml_close = s.dsml.sp.close;
+                s.pos = s.dsml.start + s.dsml.sp.open.len;
+                s.dsml_searched = s.pos;
+                s.state = .outside;
+                return true;
+            },
+            .more => unreachable,
+        }
     }
 
     /// ``feed`` of the reply's final text; a value it cuts sends the bytes held back for a closer that never came.
     pub fn finishCut(s: *Streamer, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!void {
         try s.feed(text, out);
+        if (s.state == .glm) return tool_glm_stream.cut(s, text, out); // a GLM value's held bytes
+        if (s.state == .dsml) return tool_dsml_stream.cut(s, text, out); // a DSML value's held bytes
         if (s.state != .value) return;
         var cut = try std.mem.concat(s.a, u8, &.{ if (s.typed) s.buffer.items else "", s.held, text[@min(s.pos, text.len)..] });
         if (s.lead and cut.len > 0 and cut[0] == '\n') cut = cut[1..];
@@ -318,8 +372,9 @@ pub const Streamer = struct {
     }
 };
 
-/// A streamed reply's final prose: ``cutProse`` when max_tokens left a call open, else ``finishedProse``.
-pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8) Allocator.Error![]const u8 {
+/// A streamed reply's final prose: ``cutProse`` for a cut call, else ``finishedProse``; one-call mode rstrips it.
+pub fn endProse(a: Allocator, content: []const u8, text: []const u8, tools: []const Value, reason: []const u8, single: bool) Allocator.Error![]const u8 {
+    if (single) return reply_text.pyRstrip(try reply_text.finishedProse(a, content));
     const cut = std.mem.eql(u8, reason, "length") and (try cutCalls(a, text, tools)) != null;
     return if (cut) reply_text.cutProse(a, content) else reply_text.finishedProse(a, content);
 }
@@ -329,7 +384,8 @@ pub fn cutCalls(a: Allocator, text: []const u8, tools: []const Value) Allocator.
     var s: Streamer = try .init(a, tools);
     var deltas: std.ArrayList(Value) = .empty;
     try s.finishCut(text, &deltas);
-    if (!s.open()) return tool_glm_cut.cutCalls(a, text, tools); // a GLM envelope streams no call before it closes
+    // GLM and JSON envelopes stream no call before they close
+    if (!s.open()) return (try tool_glm_cut.cutCalls(a, text, tools)) orelse try tool_json_cut.cutCalls(a, text, tools);
     const Call = struct { id: []const u8 = "", name: []const u8 = "", args: std.ArrayList(u8) = .empty };
     const built = try a.alloc(Call, @intCast(s.index + 1));
     for (built) |*c| c.* = .{};
@@ -378,24 +434,28 @@ fn nameLike(s: []const u8) bool {
 pub const TextFilter = struct {
     pending: std.ArrayList(u8) = .empty,
     hidden: ?[]const u8 = null,
+    deferred: bool = false, // a closed envelope was hidden: later prose waits for the reply's final content
 
     pub fn feed(f: *TextFilter, a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+        if (f.deferred) return "";
         try f.pending.appendSlice(a, text);
         var out: std.ArrayList(u8) = .empty;
         while (f.pending.items.len > 0) {
             const p = f.pending.items;
             if (f.hidden) |name| {
                 const close = try std.mem.concat(a, u8, &.{ "</", name, ">" });
-                const end = std.ascii.findIgnoreCase(p, close) orelse {
+                if (std.ascii.findIgnoreCase(p, close) == null) {
                     const keep = reply_text.charCount(close) - 1;
                     const chars = reply_text.charCount(p);
                     const tail = if (chars > keep) reply_text.afterChars(p, chars - keep) else p;
                     try f.reset(a, tail);
                     break;
-                };
-                try f.reset(a, p[end + close.len ..]);
+                }
+                // The whole reply may keep this envelope as text, so what follows cannot overtake it.
                 f.hidden = null;
-                continue;
+                f.deferred = true;
+                f.pending.clearRetainingCapacity();
+                break;
             }
             const start = std.mem.indexOfScalar(u8, p, '<') orelse {
                 try out.appendSlice(a, p);
@@ -433,7 +493,7 @@ pub const TextFilter = struct {
     }
 
     pub fn finish(f: *TextFilter) []const u8 {
-        const tail = if (f.hidden != null) "" else f.pending.items;
+        const tail = if (f.hidden != null or f.deferred) "" else f.pending.items;
         f.pending = .empty;
         return tail;
     }
@@ -485,11 +545,12 @@ pub const Policy = struct {
     }
 
     /// Held-back malformed or unoffered call envelopes kept as reply text: ``final`` past the prose ``sent``.
-    pub fn kept(_: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
+    pub fn kept(p: *const Policy, final: []const u8, sent: []const u8) ?[]const u8 {
         // Replies without parsed calls retain their leading whitespace; parsed content may be stripped.
         const shown = if (std.mem.startsWith(u8, final, sent)) sent else reply_text.pyLstrip(sent);
         if (!std.mem.startsWith(u8, final, shown)) return null;
         const rest = final[shown.len..];
+        if (p.single) return if (rest.len > 0) rest else null;
         return if (reply_text.pyStrip(rest).len > 0) rest else null;
     }
 };

@@ -17,77 +17,77 @@ fn pairTile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
     };
 }
 
-pub const records = [_]Record{
+pub const records = [8]Record{
     .{
         .launch = pairTile(1, 2),
         .usage = .{
-            .{ .vgprs = 101, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 117, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 117, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 117, .sgprs = 60, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 100, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 113, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 113, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 113, .sgprs = 62, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(1, 4),
         .usage = .{
-            .{ .vgprs = 180, .sgprs = 63, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 172, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 172, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 172, .sgprs = 64, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 179, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 201, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 201, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 201, .sgprs = 65, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(1, 8),
         .usage = .{
-            .{ .vgprs = 181, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 178, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 178, .sgprs = 66, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 178, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 231, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 237, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 237, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 237, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(2, 2),
         .usage = .{
-            .{ .vgprs = 123, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 152, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 152, .sgprs = 68, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 152, .sgprs = 67, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 90, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 95, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 95, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 95, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(2, 4),
         .usage = .{
-            .{ .vgprs = 177, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 236, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 236, .sgprs = 70, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 236, .sgprs = 69, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 161, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 174, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 174, .sgprs = 72, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 174, .sgprs = 71, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(2, 8),
         .usage = .{
-            .{ .vgprs = 157, .sgprs = 73, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 159, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 159, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 159, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 157, .sgprs = 74, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 240, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 240, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 240, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(4, 2),
         .usage = .{
-            .{ .vgprs = 194, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 185, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 185, .sgprs = 76, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 185, .sgprs = 75, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 126, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 125, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 125, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 125, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
         .launch = pairTile(4, 4),
         .usage = .{
-            .{ .vgprs = 148, .sgprs = 77, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 150, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 150, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 150, .sgprs = 80, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 177, .sgprs = 79, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 82, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 82, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 182, .sgprs = 82, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
 };

@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const formats = @import("cuda_formats.zig");
 const X = cuda.experts.Nvfp4Experts;
+const Y = cuda.experts32.Nvfp4b32Experts;
 
 /// Packers when TF_GLM_LOAD_PACK is unset.
 pub const default_packers = 8;
@@ -12,6 +13,13 @@ pub const max_packers = 16;
 
 /// The packed layer, `count` experts in a row: gate and up interleaved, down, and each matrix's global scale.
 pub const Out = struct { up: []u32, down: []u32, up_scale: []f32, down_scale: []f32 };
+
+/// Int32 of an expert's up and down: block 16's, or a csf0_v1 layer's, whose offsets cut by the byte: 64 inputs.
+pub fn wordsOf(csf0: bool, lo: usize, ni: usize, d: usize) ![2]usize {
+    if (!csf0) return .{ X.bytes(1, ni, d, 2) / 4, X.bytes(1, d, ni, 1) / 4 };
+    if (lo % 64 != 0 or ni % 64 != 0 or d % 64 != 0) return error.BadNvfp4;
+    return .{ Y.bytes(1, ni, d, 2) / 4, Y.bytes(1, d, ni, 1) / 4 };
+}
 
 /// Layer `index`'s cut: hidden `d`, the rank's `ni` rows from `lo`, `per` scale bytes a matrix, expert `first` on.
 pub const Cut = struct { index: u32, d: usize, ni: usize, lo: usize, per: usize, first: usize = 0 };
@@ -75,8 +83,9 @@ pub fn pack(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cu
 
 /// A layer's experts packed into `s` a piece at a time, each piece copied into `up` and `down` before the next packs.
 pub fn pieces(gpa: std.mem.Allocator, s: *Staging, d: *const cuda.Driver, stream: cuda.Stream, pending: []const [3]formats.Pending, cut: Cut, up: cuda.DeviceBuffer, down: cuda.DeviceBuffer, up_scale: []f32, down_scale: []f32, threads: usize) !void {
-    const up_len = X.bytes(1, cut.ni, cut.d, 2) / 4;
-    const down_len = X.bytes(1, cut.d, cut.ni, 1) / 4;
+    const words = try wordsOf(pending.len > 0 and pending[0][0] == .csf0, cut.lo, cut.ni, cut.d);
+    const up_len = words[0];
+    const down_len = words[1];
     const m = s.per(up_len, down_len, threads);
     var first: usize = 0;
     while (first < pending.len) : (first += m) {
@@ -100,8 +109,54 @@ fn run(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cut, ou
     };
 }
 
+/// `m`'s rows [lo, lo + ni) of k inputs, as stored.
+fn rowsOf(m: cuda.experts32.Matrix, lo: usize, ni: usize, k: usize) cuda.experts32.Matrix {
+    return .{ .codes = m.codes[lo * k / 2 ..][0 .. ni * k / 2], .bases = m.bases[lo..][0..ni], .offsets = m.offsets[lo * (k / 64) ..][0 .. ni * (k / 64)] };
+}
+
+/// Experts [from, to) of a csf0_v1 layer, their scales as stored, into their own parts of `out`.
+fn share32(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cut, out: Out, experts: [2]usize) !void {
+    const d = cut.d;
+    const ni = cut.ni;
+    const lo = cut.lo;
+    const inter = cut.per * 16 / d;
+    const codes = try gpa.alloc(u8, d * ni / 2);
+    defer gpa.free(codes);
+    const offsets = try gpa.alloc(u8, d * (ni / 64));
+    defer gpa.free(offsets);
+    const up_len = out.up.len / pending.len;
+    const down_len = out.down.len / pending.len;
+    for (experts[0]..experts[1]) |e| {
+        var ls: [3]formats.Csf0 = undefined;
+        for (&ls, pending[e], [_][]const u8{ "gate_proj", "up_proj", "down_proj" }, 0..) |*l, p, proj, m| {
+            const shaped = p == .csf0 and p.csf0.n == (if (m < 2) inter else d) and p.csf0.k == (if (m < 2) d else inter);
+            if (!shaped) {
+                if (!@import("builtin").is_test) std.log.err("layers.{d}.mlp.experts.{d}.{s}: not the layer's csf0_v1 shape", .{ cut.index, cut.first + e, proj });
+                return error.BadNvfp4;
+            }
+            if (p.csf0.matrix.pastFinite(p.csf0.k)) |r| { // every row, so every rank refuses the same checkpoint
+                if (!@import("builtin").is_test) std.log.err("layers.{d}.mlp.experts.{d}.{s}: row {d}'s csf0_v1 base and offset pass 0x7e, e4m3's largest finite", .{ cut.index, cut.first + e, proj, r });
+                return error.BadNvfp4;
+            }
+            l.* = p.csf0;
+        }
+        // gate and up: the rank's rows; down: every row, the rank's columns
+        Y.packGateUp(out.up[e * up_len ..][0..up_len], rowsOf(ls[0].matrix, lo, ni, d), rowsOf(ls[1].matrix, lo, ni, d), ni, d);
+        const l = ls[2].matrix;
+        for (0..d) |r| {
+            @memcpy(codes[r * ni / 2 ..][0 .. ni / 2], l.codes[r * inter / 2 + lo / 2 ..][0 .. ni / 2]);
+            @memcpy(offsets[r * (ni / 64) ..][0 .. ni / 64], l.offsets[r * (inter / 64) + lo / 64 ..][0 .. ni / 64]);
+        }
+        Y.packOne(out.down[e * down_len ..][0..down_len], .{ .codes = codes, .bases = l.bases, .offsets = offsets }, d, ni);
+        out.up_scale[e * 2] = ls[0].global;
+        out.up_scale[e * 2 + 1] = ls[1].global;
+        out.down_scale[e] = ls[2].global;
+    }
+}
+
 /// Experts [from, to) as the loader packed each before (cuda_weights' nvfp4Experts), into their own parts of `out`.
 fn share(gpa: std.mem.Allocator, pending: []const [3]formats.Pending, cut: Cut, out: Out, experts: [2]usize) !void {
+    if (experts[0] < experts[1] and pending[experts[0]][0] == .csf0) return share32(gpa, pending, cut, out, experts);
     const d = cut.d;
     const ni = cut.ni;
     const lo = cut.lo;
@@ -142,6 +197,109 @@ test "TF_GLM_LOAD_PACK: 8 when unset, the loader alone at 1, a count up to the l
     try std.testing.expectEqual(@as(usize, 1), try packers("1"));
     try std.testing.expectEqual(@as(usize, 16), try packers("16"));
     for ([_][]const u8{ "0", "17", "eight", "" }) |bad| try std.testing.expectError(error.BadSetting, packers(bad));
+}
+
+test "a csf0_v1 layer's rank is packed as its stored parts cut, by any number of packers; a mixed layer is refused" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(13);
+    const rng = prng.random();
+    const experts = 3;
+    const inter = 192; // the experts' rows; this rank holds the middle 64
+    const d = 64;
+    const ni = 64;
+    const lo = 64;
+    var pending: [experts][3]formats.Pending = undefined;
+    for (&pending) |*row| for (row, 0..) |*p, m| {
+        const n: usize = if (m < 2) inter else d;
+        const k: usize = if (m < 2) d else inter;
+        const codes = try a.alloc(u8, n * k / 2);
+        rng.bytes(codes);
+        const bases = try a.alloc(u8, n);
+        for (bases) |*b| b.* = rng.uintLessThan(u8, 0x70); // base + 15 stays finite
+        const offsets = try a.alloc(u8, n * (k / 64));
+        rng.bytes(offsets);
+        p.* = .{ .csf0 = .{ .n = n, .k = k, .matrix = .{ .codes = codes, .bases = bases, .offsets = offsets }, .global = 0.25 + @as(f32, @floatFromInt(m)) } };
+    };
+    const cut: Cut = .{ .index = 3, .d = d, .ni = ni, .lo = lo, .per = inter * d / 16 };
+    const w = try wordsOf(true, lo, ni, d);
+    const up_len = w[0];
+    const down_len = w[1];
+    const want = try a.alloc(u32, experts * (up_len + down_len) + experts * 3);
+    const lay = layout(want, experts, up_len, down_len);
+    for (0..experts) |e| { // one expert at a time, each cut by hand: the rows of gate and up, the inputs [64, 128) of down
+        const g = pending[e][0].csf0.matrix;
+        const u = pending[e][1].csf0.matrix;
+        const dn = pending[e][2].csf0.matrix;
+        const row = [2]cuda.experts32.Matrix{
+            .{ .codes = g.codes[lo * d / 2 ..][0 .. ni * d / 2], .bases = g.bases[lo .. lo + ni], .offsets = g.offsets[lo .. lo + ni] },
+            .{ .codes = u.codes[lo * d / 2 ..][0 .. ni * d / 2], .bases = u.bases[lo .. lo + ni], .offsets = u.offsets[lo .. lo + ni] },
+        };
+        Y.packGateUp(lay.up[e * up_len ..][0..up_len], row[0], row[1], ni, d);
+        const codes = try a.alloc(u8, d * ni / 2);
+        const offsets = try a.alloc(u8, d);
+        for (0..d) |r| {
+            @memcpy(codes[r * ni / 2 ..][0 .. ni / 2], dn.codes[r * inter / 2 + lo / 2 ..][0 .. ni / 2]);
+            offsets[r] = dn.offsets[r * (inter / 64) + lo / 64];
+        }
+        Y.packOne(lay.down[e * down_len ..][0..down_len], .{ .codes = codes, .bases = dn.bases, .offsets = offsets }, d, ni);
+        lay.up_scale[e * 2] = pending[e][0].csf0.global;
+        lay.up_scale[e * 2 + 1] = pending[e][1].csf0.global;
+        lay.down_scale[e] = pending[e][2].csf0.global;
+    }
+    for ([_]usize{ 1, 2, 3, 8 }) |threads| {
+        const got = try a.alloc(u32, want.len);
+        @memset(got, 0xdeadbeef);
+        try pack(gpa, &pending, cut, layout(got, experts, up_len, down_len), threads);
+        try std.testing.expectEqualSlices(u32, want, got);
+    }
+    const got = try a.alloc(u32, want.len);
+    var mixed = pending;
+    mixed[1][2] = .{ .plain = .{ .n = d, .k = inter, .codes = &.{}, .scales = &.{}, .global = 1 } };
+    try std.testing.expectError(error.BadNvfp4, pack(gpa, &mixed, cut, layout(got, experts, up_len, down_len), 1));
+    var wrong = pending;
+    wrong[2][0].csf0.n = d;
+    try std.testing.expectError(error.BadNvfp4, pack(gpa, &wrong, cut, layout(got, experts, up_len, down_len), 1));
+    try std.testing.expectError(error.BadNvfp4, wordsOf(true, 0, 96, d));
+    try std.testing.expectError(error.BadNvfp4, wordsOf(true, 32, 64, d));
+    try std.testing.expectEqual(@as(usize, X.bytes(1, 96, d, 2) / 4), (try wordsOf(false, 32, 96, d))[0]);
+}
+
+test "a csf0_v1 row whose base and offset pass 0x7e is refused, outside the rank's rows too; 0x7e itself packs" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const inter = 128; // this rank holds rows [0, 64)
+    const d = 64;
+    var bases: [3][]u8 = undefined;
+    var offsets: [3][]u8 = undefined;
+    var pending: [1][3]formats.Pending = undefined;
+    for (&pending[0], &bases, &offsets, 0..) |*p, *b, *o, m| {
+        const n: usize = if (m < 2) inter else d;
+        const k: usize = if (m < 2) d else inter;
+        b.* = try a.alloc(u8, n);
+        @memset(b.*, 0x40);
+        o.* = try a.alloc(u8, n * (k / 64));
+        @memset(o.*, 0x21);
+        const codes = try a.alloc(u8, n * k / 2);
+        @memset(codes, 0x22);
+        p.* = .{ .csf0 = .{ .n = n, .k = k, .matrix = .{ .codes = codes, .bases = b.*, .offsets = o.* }, .global = 1 } };
+    }
+    const cut: Cut = .{ .index = 5, .d = d, .ni = 64, .lo = 0, .per = inter * d / 16 };
+    const w = try wordsOf(true, cut.lo, cut.ni, d);
+    const got = try a.alloc(u32, w[0] + w[1] + 3);
+    const out = layout(got, 1, w[0], w[1]);
+    bases[2][7] = 0x6f;
+    offsets[2][7 * 2 + 1] = 0xf0;
+    try pack(gpa, &pending, cut, out, 1);
+    bases[2][7] = 0x70;
+    try std.testing.expectError(error.BadNvfp4, pack(gpa, &pending, cut, out, 1));
+    bases[2][7] = 0x40;
+    bases[0][100] = 0x7f; // gate's row 100: another rank's, with offsets of 1 and 2
+    try std.testing.expectError(error.BadNvfp4, pack(gpa, &pending, cut, out, 1));
 }
 
 test "packers pack the same bytes as the loader's one thread, whole or a piece at a time through the mapped staging" {

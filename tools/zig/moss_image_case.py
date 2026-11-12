@@ -26,14 +26,20 @@ USAGE = """\
   encode MODEL_DIR OUT_DIR [--prompt-file F]  the prompt encoder alone: token ids, embedding rows, and every layer's
                                            output and the final rows in bf16 and in float32, and
                                            each step alone in bf16 on the float32 run's input
+  blocks MODEL_DIR CASE_DIR --step N --branch B  one step of a `case` in float32, the stream into every block
+                                           kept, and torch bf16's embedding, each block and the final layer
+                                           alone on that stream in bf16, on --device and on the CPU:
+                                           CASE_DIR/blocks-N-B.safetensors, for tf-moss-image-blocks
   compare A.png B.png [SIDE.png]           PSNR and mean absolute difference of two pictures, optionally side by side
   noise OUT.json                           torch.randn's starting latents for many seeds and sizes, as sha256s (x86)
+  schedule MODEL_DIR OUT.json              MOSSImageScheduler's timesteps and sigmas for many step counts and configs
 MODEL_DIR is the OpenMOSS-Team/MOSS-Image-Base folder. The case runs the card's defaults: 50 Euler steps, CFG 3, an
 empty negative prompt whose branch skips block 22, the bf16 transformer and text encoder, the float32 decoder.
 """
 
 
 # pipeline_moss_image.py at OpenMOSS-Team/MOSS-Image-Base revision 85975793d8b3d432f1b6e27f352abaa4c2a4c0d3
+PUBLISHER_REVISION = "85975793d8b3d432f1b6e27f352abaa4c2a4c0d3"
 PIPELINE_SHA256 = "1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31"
 
 
@@ -102,6 +108,13 @@ def to_png(pipe, latents, path: str) -> None:
     pipe.image_processor.postprocess(image, output_type="pil")[0].save(path)
 
 
+def teacher_steps(requested: int | None, available: int) -> int:
+    """Default to complete coverage of the publisher's actual schedule, which may retain fewer than requested steps."""
+    if requested is not None and requested < 0:
+        raise ValueError("--fp32-steps must be nonnegative")
+    return available if requested is None else min(requested, available)
+
+
 def case(args) -> int:
     import torch
     from safetensors.torch import save_file
@@ -146,12 +159,13 @@ def case(args) -> int:
                "latents": noise[0].permute(1, 2, 0).contiguous(), "inputs": torch.stack([c["input"] for c in cond]),
                "velocity": torch.stack([c["velocity"] for c in cond]),
                "velocity_negative": torch.stack([u["velocity"] for u in uncond])}
-    if args.fp32_steps:
+    coverage = teacher_steps(args.fp32_steps, len(cond))
+    if coverage:
         # the same transformer and inputs in float32 throughout: the bf16 reference's own distance from exact arithmetic
         pipe.transformer.float()
         exact, exact_negative = [], []
         with torch.no_grad():
-            for s in range(min(args.fp32_steps, len(cond))):
+            for s in range(coverage):
                 x = cond[s]["input"].permute(2, 0, 1)[None].to(args.device)
                 t = sched.timesteps[s]
                 exact.append(rows(pipe.transformer(x, t, positive.float()).sample))
@@ -165,7 +179,9 @@ def case(args) -> int:
     meta = {"width": args.width, "height": args.height, "seed": args.seed, "steps": len(cond),
             "prompt_rows": int(positive.shape[1]), "negative_rows": int(negative.shape[1]), "device": args.device,
             "encode_s": round(encode_s, 2), "torch_bf16_forward_s": [round(c["s"], 3) for c in calls],
-            "torch": torch.__version__}
+            "torch": torch.__version__, "publisher_revision": PUBLISHER_REVISION, "pipeline_sha256": PIPELINE_SHA256,
+            "fp32_teacher_steps": coverage, "fp32_teacher_branches": ["prompt", "negative"] if coverage else [],
+            "teacher_coverage": "complete" if coverage == len(cond) else "INCONCLUSIVE"}
     (out / "reference.json").write_text(json.dumps(meta, indent=1) + "\n")
     print(json.dumps({k: v for k, v in meta.items() if k != "torch_bf16_forward_s"}))
     return 0
@@ -255,6 +271,74 @@ def vae(args) -> int:
     out.astype(np.float64).tofile(args.out)
     print(json.dumps({"out": args.out, "torch_out": args.torch_out, "shape": list(out.shape),
                       "decode_s": round(time.perf_counter() - mark, 1)}))
+    return 0
+
+
+def blocks(args) -> int:
+    """One step's branch of a `case` in float32, keeping each block's input; then each step alone in bf16, two ways."""
+    import torch
+    from safetensors.torch import load_file, save_file
+
+    case = load_file(str(Path(args.case_dir) / "case.safetensors"))
+    if "inputs" not in case:
+        sys.exit("blocks needs a case made by `case`, which holds each step's input")
+    latents = case["inputs"][args.step - 1].permute(2, 0, 1)[None]
+    timestep = case["timesteps"][args.step - 1]
+    text = case[args.branch][None]
+    skip = [22] if args.branch == "negative" else []
+    pipe, _ = pipeline(args.model_dir, args.device, text=False)
+    tr = pipe.transformer
+    kept = [layer for i, layer in enumerate(tr.layers) if i not in skip]
+    image = latents.shape[2] * latents.shape[3]
+
+    def forward(device, dtype, pre, post):
+        handles = [m.register_forward_pre_hook(fn, with_kwargs=True) for m, fn in pre]
+        handles += [m.register_forward_hook(fn) for m, fn in post]
+        with torch.no_grad():
+            out = tr(latents.to(device), timestep, text.to(device=device, dtype=dtype), skip_layers=skip).sample
+        for h in handles:
+            h.remove()
+        return rows(out)
+
+    def record(into):
+        def hook(module, a, kw):
+            into.append(a[0][0].float().cpu())
+        return hook
+
+    def output(into):
+        return lambda module, a, out: into.append(out[0].float().cpu())
+
+    # float32 throughout: the stream into each block kept, then the last block's output
+    tr.float()
+    stream = []
+    velocity_fp32 = forward(args.device, torch.float32, [(m, record(stream)) for m in kept], [(kept[-1], output(stream))])
+
+    def alone(device):
+        """bf16, each step alone: the embedding, every block and the final layer, given the float32 stream in bf16."""
+        tr.to(device=device, dtype=torch.bfloat16)
+        embedded, outs = [], []
+
+        def feed(k):
+            def hook(module, a, kw):
+                if k == 0:
+                    embedded.append(a[0][0].float().cpu())
+                x = stream[k].to(device=device, dtype=torch.bfloat16)[None]
+                return (x[:, :image] if k == len(kept) else x,) + tuple(a[1:]), kw
+            return hook
+
+        velocity = forward(device, torch.bfloat16, [(m, feed(k)) for k, m in enumerate(kept + [tr.final_norm_video])],
+                           [(m, output(outs)) for m in kept])
+        return torch.stack(embedded + outs).to(torch.bfloat16).contiguous(), velocity
+
+    steps, velocity_alone = alone(args.device)
+    steps_cpu, velocity_alone_cpu = alone("cpu")
+    out = Path(args.case_dir) / f"blocks-{args.step}-{args.branch}.safetensors"
+    save_file({"step": torch.tensor([args.step], dtype=torch.int64), "skip": torch.tensor(skip or [-1], dtype=torch.int64),
+               "timestep": timestep.reshape(1).float(), "latents": case["inputs"][args.step - 1].contiguous(),
+               "prompt": text[0].contiguous(), "stream": torch.stack(stream).contiguous(), "alone": steps,
+               "alone_cpu": steps_cpu, "velocity_fp32": velocity_fp32, "velocity_alone": velocity_alone,
+               "velocity_alone_cpu": velocity_alone_cpu}, str(out))
+    print(json.dumps({"out": str(out), "blocks": len(kept), "rows": int(stream[0].shape[0])}))
     return 0
 
 
@@ -387,6 +471,32 @@ def encode(args) -> int:
     return 0
 
 
+# The released config, then one setting changed at a time; image size does not enter (no dynamic shifting).
+SCHEDULE_CONFIGS = [{}, {"shift": 3.0}, {"shift": 7.5}, {"training_shift": 2.0}, {"num_train_timesteps": 500}]
+SCHEDULE_STEPS = [1, 2, 3, 4, 8, 10, 20, 25, 28, 30, 40, 50, 64, 100, 128, 250, 500, 999, 1000, 1001, 2000]
+
+
+def schedule(args) -> int:
+    """sha256s of the pinned pipeline's MOSSImageScheduler float32 timesteps and sigmas, on the CPU."""
+    import tempfile
+    mod = module(args.model_dir)
+    released = json.loads((Path(args.model_dir) / "scheduler" / "scheduler_config.json").read_text())
+    cases = []
+    for change in SCHEDULE_CONFIGS:
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "scheduler_config.json").write_text(json.dumps({**released, **change}))
+            sched = mod.MOSSImageScheduler.from_pretrained(folder)
+        for steps in SCHEDULE_STEPS:
+            sched.set_timesteps(steps)
+            t, s = sched.timesteps.float().contiguous(), sched.sigmas.float().contiguous()
+            cases.append({"config": change, "steps": steps, "count": len(t), "first": [t[0].item(), s[1].item()],
+                          "timesteps": hashlib.sha256(t.numpy().tobytes()).hexdigest(),
+                          "sigmas": hashlib.sha256(s.numpy().tobytes()).hexdigest()})
+    Path(args.out).write_text(json.dumps({"config": released, "cases": cases}, indent=1) + "\n")
+    print(f"{len(cases)} schedules in {args.out}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, epilog=USAGE, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -398,7 +508,7 @@ def main() -> int:
     c.add_argument("--height", type=int, default=1024)
     c.add_argument("--seed", type=int, default=42)
     c.add_argument("--steps", type=int, default=50)
-    c.add_argument("--fp32-steps", type=int, default=1, help="steps also run in float32 (0: none)")
+    c.add_argument("--fp32-steps", type=int, help="steps also run in float32 (default: all; 0 or partial: INCONCLUSIVE)")
     c.add_argument("--device", default="mps")
     s = sub.add_parser("start")
     s.add_argument("model_dir")
@@ -437,14 +547,25 @@ def main() -> int:
     v.add_argument("--device", default="mps", help="where the float32 decode runs, as the pipeline would")
     v.add_argument("--width", type=int, default=1024)
     v.add_argument("--height", type=int, default=1024)
+    b = sub.add_parser("blocks")
+    b.add_argument("model_dir")
+    b.add_argument("case_dir")
+    b.add_argument("--step", type=int, required=True, help="the step, from 1")
+    b.add_argument("--branch", choices=("prompt", "negative"), required=True)
+    b.add_argument("--device", default="mps")
     p = sub.add_parser("compare")
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("side", nargs="?")
     n = sub.add_parser("noise")
     n.add_argument("out")
+    q = sub.add_parser("schedule")
+    q.add_argument("model_dir")
+    q.add_argument("out")
     args = parser.parse_args()
-    return {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae, "compare": compare, "noise": noise}[args.mode](args)
+    modes = {"case": case, "start": start, "exact": exact, "decode": decode, "encode": encode, "vae": vae,
+             "blocks": blocks, "compare": compare, "noise": noise, "schedule": schedule}
+    return modes[args.mode](args)
 
 
 if __name__ == "__main__":

@@ -7,9 +7,13 @@ pub fn moduleAt(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     core.addImport("tokenizer", tok);
-    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const canon = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon.zig"), .target = target, .optimize = optimize });
+    return b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/deepseek_v41/{s}", .{file})), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes }, .{ .name = "canon", .module = canon } } });
 }
 pub fn steps(b: *std.Build) void {
+    const env_tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, "env_validate.zig") }));
+    b.step("test-dsv41-env-host", "Named DeepSeek environment refusals and unchanged valid forms").dependOn(&env_tests.step);
     const host = b.addTest(.{ .root_module = module(b, b.graph.host, "shared_test.zig") });
     b.step("test-dsv41-engram-alloc", "Actual Engram startup failure sweeps with varying remap behavior").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.root_module, .filters = &.{ "production batch", "engram alloc:" } })).step);
     const arm = b.addTest(.{ .root_module = module(b, b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), "shared_test.zig"), .filters = &.{ "production batch", "engram alloc:" } });
@@ -33,4 +37,14 @@ pub fn steps(b: *std.Build) void {
     b.step("test-dsv41-token-map", "PCG64 and Unicode normalization without Metal").dependOn(&token_tests.step);
     const tool = b.addExecutable(.{ .name = "tf-dsv41-token-map", .root_module = builder });
     b.step("compile-dsv41-token-map", "Compile actual token-map CLI without running or Metal").dependOn(&tool.step);
+    const pack_host = moduleAt(b, b.graph.host, .ReleaseSafe, "neutral.zig");
+    @import("dsv41_draft.zig").addImportsAt(b, pack_host, b.graph.host, .ReleaseSafe);
+    const pack_tool = b.addExecutable(.{ .name = "tf-dsv41-engram-pack", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tools/dsv41_engram_pack.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{.{ .name = "dsv41", .module = pack_host }},
+    }) });
+    b.step("dsv41-engram-pack", "Build and install tf-dsv41-engram-pack (release Engram tables to packed row shards)").dependOn(&b.addInstallArtifact(pack_tool, .{}).step);
 }

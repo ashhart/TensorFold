@@ -76,7 +76,7 @@ pub fn fillEngramRows(f: *Forward, h: *const eh.Host, L: u32, out: []u16) !void 
 pub fn engramSource(f: *Forward, h: *const eh.Host) !?eh.Source {
     if (!f.engram_opened) {
         f.engram_opened = true;
-        if (std.c.getenv("TF_DSV41_ENGRAM_PREFETCH")) |v| f.engram_prefetch = !std.mem.eql(u8, std.mem.span(v), "0");
+        f.engram_prefetch = try @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_PREFETCH", f.engram_prefetch);
         if (std.c.getenv("TF_DSV41_ENGRAM_DIR")) |dir| {
             const cap: u32 = if (std.c.getenv("TF_DSV41_ENGRAM_CACHE")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 65536;
             f.engram_rows = try er.Rows.open(f.gpa, std.mem.span(dir), f.comm.rank(), f.comm.world(), h.layer_ids, cap);

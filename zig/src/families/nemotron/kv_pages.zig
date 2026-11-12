@@ -1,5 +1,6 @@
 //! TF_NEMOTRON_METAL_KV_PAGES=1: the paged twins' pipelines (kernels/metal/nemotron/paged.zig) and their bindings.
 const std = @import("std");
+const builtin = @import("builtin");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const st = @import("state.zig");
@@ -13,8 +14,8 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// Whether the streams' keys and values live in pages of the core pool (off by default).
 pub fn on() bool {
-    const v = std.c.getenv("TF_NEMOTRON_METAL_KV_PAGES") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    const v = @import("profile").get(.TF_NEMOTRON_METAL_KV_PAGES) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Backend `b` gets `pages` pages over its `o.streams` lanes for streams of at most `most` rows, and the twins.
@@ -40,6 +41,27 @@ pub fn detach(b: anytype) void {
         b.m.kernels.paged = null;
         p.deinit(b.gpa);
     }
+}
+
+/// A paged stream holds the pages of its first `rows` rows (its capacity at most) before a pass writes them.
+pub inline fn grow(c: *st.Cache, rows: usize) !void {
+    if (c.attentions == 0) return;
+    const p = c.kv[0].paged orelse return;
+    try p.lease.pages.cover(p.lease.lane, @min(rows, c.kv[0].capacity));
+}
+
+/// A rolled-back window's pages past the rows a stream keeps go back to its promise; none in flight reads them.
+pub inline fn keep(c: *st.Cache) void {
+    if (c.attentions == 0 or c.compact != null) return; // a tree path's rows still move from past the kept ones
+    const p = c.kv[0].paged orelse return;
+    p.lease.pages.trim(p.lease.lane, @max(c.len, c.mtp_len));
+}
+
+/// Debug builds: a pass writing a paged cache's rows before `end` holds their pages already (grow ran first).
+pub inline fn holds(kv: st.Kv, end: usize) void {
+    if (builtin.mode != .debug) return;
+    const p = kv.paged orelse return;
+    std.debug.assert(end <= p.ids().len * kvp.page_tokens);
 }
 
 /// With no stream open every page must be free: the census says so, or warns.

@@ -16,6 +16,7 @@ pub const explains_open = true;
 pub const Loaded = native.Loaded;
 pub const LoneRun = native.LoneRun;
 pub const open = native.open;
+pub const benchmark = native.benchmark;
 pub const explain = native.explain;
 pub const warm_quiet = native.warm_quiet;
 pub const lone_min_budget = native.lone_min_budget;
@@ -28,12 +29,18 @@ pub const snap_place = native.snap_place;
 pub const window_rows = native.window_rows;
 pub const attach = native.attach;
 pub const fits = native.fits;
+pub const slide = native.slide;
+pub const learnModel = native.learnModel;
+pub const linked = native.linked;
+pub const plainShared = native.plainShared;
+pub const slideRefusal = @import("cuda_omni_slide.zig").refusal;
 
 /// NVFP4 bytes a parameter takes: a 4-bit code and an e4m3 scale a 16.
 const nvfp4_bytes: f64 = 0.5625;
 
 /// Bytes this rank's weights take: rank 0 all but the other ranks' expert shares, rank r > 0 its expert shares alone.
-pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64) u64 {
+pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64, drafts: bool) u64 {
+    _ = drafts; // the MTP head's experts are counted either way
     var c = Config.read(a, io, dir) catch return total;
     latent.place(&c) catch return total;
     if (c.world < 2 or c.latent == 0) return total;
@@ -46,3 +53,21 @@ pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64
 }
 
 pub const tensorWeightBytes = native.tensorWeightBytes;
+
+test "Omni learner: the native wrapper registers the existing learner and serving entry" {
+    try std.testing.expect(@hasDecl(@This(), "slide"));
+    try std.testing.expect(@hasDecl(@This(), "learnModel"));
+    try std.testing.expect(@hasDecl(@This(), "linked"));
+    if (comptime @hasDecl(@This(), "slide")) {
+        try std.testing.expect(@field(@This(), "slide") == native.slide);
+        try std.testing.expect(@field(@This(), "learnModel") == native.learnModel);
+        try std.testing.expect(@field(@This(), "linked") == native.linked);
+        try std.testing.expect(@field(@This(), "plainShared") == native.plainShared);
+        try std.testing.expect(open == native.open);
+    }
+}
+
+test {
+    _ = @import("cuda_omni_slide.zig");
+    _ = @import("cuda_train_source.zig");
+}

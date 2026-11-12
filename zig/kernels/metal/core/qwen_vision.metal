@@ -1,28 +1,20 @@
 // Qwen-VL image towers (the Qwen3.5 tower, any width): bf16 weights, fp32 sums and residual; gemm_nax.metal first.
 
-// ---- the projections and attention products: tfp::gemm_nax (bm64 bn128 bk256 wm2 wn4) by operand layout ----
-#define QWV_GEMM(NAME, T, TB, AM, AN)                                                                               \
-  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
-      const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
-      device T* D [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],                                      \
-      uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
-    tfp::gemm_nax<T, false, TB, AM, AN, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);                      \
-  }
 // x [M, K] w^T: every linear layer (bf16 in and out, fp32 sums)
-QWV_GEMM(qwv_gemm_bf16_nt_00, bfloat16_t, true, false, false)
-QWV_GEMM(qwv_gemm_bf16_nt_01, bfloat16_t, true, false, true)
-QWV_GEMM(qwv_gemm_bf16_nt_10, bfloat16_t, true, true, false)
-QWV_GEMM(qwv_gemm_bf16_nt_11, bfloat16_t, true, true, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
 // q k^T per head in fp32
-QWV_GEMM(qwv_gemm_f32_nt_00, float, true, false, false)
-QWV_GEMM(qwv_gemm_f32_nt_01, float, true, false, true)
-QWV_GEMM(qwv_gemm_f32_nt_10, float, true, true, false)
-QWV_GEMM(qwv_gemm_f32_nt_11, float, true, true, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_00, float, false, true, false, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_01, float, false, true, false, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_10, float, false, true, true, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nt_11, float, false, true, true, true)
 // p v per head in fp32
-QWV_GEMM(qwv_gemm_f32_nn_00, float, false, false, false)
-QWV_GEMM(qwv_gemm_f32_nn_01, float, false, false, true)
-QWV_GEMM(qwv_gemm_f32_nn_10, float, false, true, false)
-QWV_GEMM(qwv_gemm_f32_nn_11, float, false, true, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_00, float, false, false, false, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_01, float, false, false, false, true)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_10, float, false, false, true, false)
+TF_GEMM_NAX_KERNEL(qwv_gemm_f32_nn_11, float, false, false, true, true)
 
 inline float qwv_bf(float x) { return float(bfloat(x)); }
 

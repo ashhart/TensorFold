@@ -152,7 +152,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     const h = geo.hidden;
     // the largest projection as stored: the tied head's table
     var stage = try DeviceBuffer.alloc(d, cfg.vocab * h * c.bits / 8 + 2 * cfg.vocab * (h / 64) * 2);
@@ -167,7 +167,14 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
     w.layers = try gpa.alloc(Layer, n);
     var b1: [128]u8 = undefined;
     var b2: [128]u8 = undefined;
+    const readers = try core.checkpoint_read_ahead.optInReaders();
+    // each layer read past the page cache, the next one while it packs (TF_LOAD_DIRECT=0: main's mapped reads)
+    var direct = core.checkpoint.direct.Layers.init(gpa, &ck, try core.checkpoint.loadReaders());
+    defer direct.deinit();
     for (w.layers, 0..) |*l, i| {
+        try direct.layerAt(m ++ "layers.{d}.", i, if (i + 1 < n) i + 1 else null);
+        var reading = try @import("cuda_load_prefetch.zig").begin(&ck, i, if (direct.on()) 0 else readers);
+        defer reading.deinit();
         const name = struct {
             fn of(b: []u8, layer: usize, suffix: []const u8) ![]const u8 {
                 return std.fmt.bufPrint(b, m ++ "layers.{d}.{s}", .{ layer, suffix });
@@ -181,6 +188,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         l.down = try x.linear(&.{try name(&b1, i, "mlp.down_proj")}, &.{h}, geo.intermediate);
         l.input_norm = try x.widened(try name(&b1, i, "input_layernorm.weight"), h);
         l.post_attention = try x.widened(try name(&b1, i, "post_attention_layernorm.weight"), h);
+        _ = try reading.check();
     }
     return w;
 }

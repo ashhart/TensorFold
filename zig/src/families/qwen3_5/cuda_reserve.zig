@@ -8,7 +8,8 @@ pub fn target(comptime Cache: type, comptime Part: type, l: anytype, streams: u3
     var warm_ns: i96 = 0;
     const paged = comptime @hasField(@TypeOf(l.*), "pages");
     const pooled = if (paged) l.pages != null else false;
-    const windows: u32 = if (pooled) @min(streams, 1) else streams;
+    const all = if (comptime @hasField(@TypeOf(l.*), "engine_paged")) l.engine_paged else false;
+    const windows: u32 = if (pooled) (if (all) 0 else @min(streams, 1)) else streams; // all: every stream a lane
     try l.pool.ensureTotalCapacity(l.gpa, windows);
     while (l.pool.items.len < windows) {
         const cache = try l.gpa.create(Cache);
@@ -44,10 +45,11 @@ pub fn target(comptime Cache: type, comptime Part: type, l: anytype, streams: u3
         if (l.warmed.contains(shape)) continue;
         for (picks[0..rows]) |*pk| pk.* = .{ .rule = null, .position = 1 };
         const warm_start = warm.profile.now(l.io);
-        try l.e.forward(&.{.{ .cache = l.pool.items[0], .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
+        const first = if (windows > 0) l.pool.items[0] else if (opened > 0) warming[0] else return error.MissingReservedQwenCache;
+        try l.e.forward(&.{.{ .cache = first, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
         try l.e.stream.synchronize();
         warm_ns += warm.profile.elapsed(l.io, warm_start);
-        try l.pool.items[0].reset(l.e);
+        try first.reset(l.e);
         l.warmed.mark(shape);
     };
     if (comptime @hasField(@TypeOf(l.e.*), "rec_scratch")) E.recurrent.idle(l.e);

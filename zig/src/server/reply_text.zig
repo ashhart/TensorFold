@@ -1,5 +1,7 @@
 //! Reply text as it streams: think blocks, tool markup held back, Harmony channels, stop strings.
 const std = @import("std");
+const json = @import("json");
+const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
 pub const Markers = struct { open: []const u8, close: []const u8 };
@@ -40,7 +42,7 @@ pub fn openersOf(m: Markers) Openers {
 }
 
 /// Whether the text after an opener is a call's payload, may still become one, or is prose that names the opener.
-fn payloadOf(rest: []const u8, o: Openers, which: usize, finished: bool) enum { call, wait, prose } {
+pub fn payloadOf(rest: []const u8, o: Openers, which: usize, finished: bool) enum { call, wait, prose } {
     if (o.leads[which].len == 0) return .call;
     const body = std.mem.trimStart(u8, rest, " \t\r\n");
     for (o.leads[which]) |lead| if (std.mem.startsWith(u8, body, lead)) return .call;
@@ -162,7 +164,11 @@ pub fn splitThinkingAt(a: Allocator, full: []const u8, finished: bool, m: Marker
     };
     if (end) |at_end| {
         if (at_end + m.close.len <= text.len and std.mem.startsWith(u8, text[at_end..], m.close)) {
-            return .{ .reasoning = text[0..at_end], .answer = trimNewlines(text[at_end + m.close.len ..]) };
+            const reasoning = text[0..at_end];
+            const answer = trimNewlines(text[at_end + m.close.len ..]);
+            if (pyStrip(answer).len == 0) if (@import("reply_tool_tail.zig").start(reasoning, o)) |call_start|
+                return .{ .reasoning = reasoning[0..call_start], .answer = if (finished) reasoning[call_start..] else "" };
+            return .{ .reasoning = reasoning, .answer = answer };
         }
         // the close token's bytes are not where the text says: the whole text is reasoning
     }
@@ -566,4 +572,11 @@ test "reply text: MiniMax-M3's call opener is watched for only under MiniMax-M3'
     const mm = openersOf(mm_markers);
     try std.testing.expectEqualStrings("x = a[i", try hideInto(a, &out, "x = a[i]", false, false, mm));
     try std.testing.expectEqualStrings("Checking. ", try hideInto(a, &out, "Checking. ]<]minimax[>[<tool_call>]<]minimax[>[<invoke", false, false, mm));
+}
+
+/// ``{key: text}``: a streamed delta (role, content or reasoning_content).
+pub fn deltaOf(a: Allocator, key: []const u8, text: []const u8) Allocator.Error!Value {
+    const o = try json.newObject(a);
+    try o.put(a, key, .{ .string = text });
+    return .{ .object = o };
 }

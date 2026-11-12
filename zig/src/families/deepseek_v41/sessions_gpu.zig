@@ -40,9 +40,8 @@ pub const Options = struct {
     several: bool = false,
 };
 
-fn flag(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+fn flag(name: [:0]const u8) !bool {
+    return @import("sys").environment.read(bool, name, false);
 }
 
 /// The store's policy from the family's options: an unset residency stays unlimited, as sessions.Policy reads null.
@@ -61,7 +60,7 @@ test "the default session options keep idle chats unlimited; an explicit 0 keeps
 
 pub fn optionsFromEnv() !Options {
     var o: Options = .{};
-    if (std.c.getenv("TF_DSV41_SESSIONS")) |v| o.enabled = !std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "0");
+    o.enabled = try @import("sys").environment.read(bool, "TF_DSV41_SESSIONS", o.enabled);
     if (std.c.getenv("TF_DSV41_SESSION_DISK")) |v| if (std.mem.trim(u8, std.mem.span(v), " ").len > 0) {
         o.disk = std.mem.trim(u8, std.mem.span(v), " ");
     };
@@ -77,9 +76,9 @@ pub fn optionsFromEnv() !Options {
         o.ram_bytes = (try std.fmt.parseInt(u64, std.mem.span(v), 10)) << 20;
     };
     if (std.c.getenv("TF_DSV41_SESSION_STAGING_MIB")) |v| o.staging_mib = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-    o.skip_covered = flag("TF_DSV41_SESSION_SKIP_COVERED");
-    o.delta = flag("TF_DSV41_SESSION_DELTA");
-    o.several = flag("TF_DSV41_SESSION_SLOTS");
+    o.skip_covered = try flag("TF_DSV41_SESSION_SKIP_COVERED");
+    o.delta = try flag("TF_DSV41_SESSION_DELTA");
+    o.several = try flag("TF_DSV41_SESSION_SLOTS");
     return o;
 }
 

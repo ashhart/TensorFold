@@ -88,14 +88,14 @@ pub fn Kept(comptime F: type) type {
             const head = c.head != null;
             const st = try c.gpa.create(snap.Snap);
             errdefer c.gpa.destroy(st);
-            st.* = .{ .buf = try cuda.DeviceBuffer.alloc(c.engine.driver, snap.bytes(at, head)), .at = at, .history = .{ 0, 0 }, .head = head };
+            st.* = .{ .buf = try cuda.DeviceBuffer.alloc(c.engine.driver, snap.bytes(at, head, .full)), .at = at, .history = .{ 0, 0 }, .head = head };
             return @ptrCast(st);
         }
 
         /// A state from a stream that did not draft lacks the head's rows this server's parts name: it stays off disk.
         fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
             const st: *const snap.Snap = @ptrCast(@alignCast(saved));
-            return st.head == (of(ptr).head != null) and st.rank_id == 0;
+            return st.head == (of(ptr).head != null) and st.rank_id == 0 and st.heads.eql(.full);
         }
 
         /// A fixed prompt's state at a mark inside its last chunk, hashed, and the prompt rate it took.
@@ -139,6 +139,43 @@ pub fn Kept(comptime F: type) type {
         pub fn facts(target: *anyopaque) [1]u64 {
             return .{@intFromBool(of(target).head != null)};
         }
+
+        /// The native key extends with policyOf under this domain (native/cuda_disk.zig keptKey).
+        pub const policy_domain = "flash-cuda-policy-v1";
+        pub fn policy(target: *anyopaque) [13]u64 {
+            return policyOf(of(target));
+        }
+    };
+}
+
+/// What a prompt pass that writes a kept state was resolved with at load: its rows, kernel forms and expert grids.
+pub fn policyOf(c: anytype) [13]u64 {
+    const e = c.engine;
+    const k = &e.batch_k;
+    const f = k.forms;
+    var grids = std.hash.Wyhash.init(0); // resident blocks a grid takes, which pick the experts' decode forms
+    grids.update(std.mem.asBytes(&k.nvfp4.resident));
+    grids.update(std.mem.asBytes(&k.fp8.resident));
+    if (k.expert_tile) |x| grids.update(std.mem.asBytes(&x.resident));
+    grids.update(std.mem.asBytes(&k.native_lane.prompt_sms)); // a BF16 prompt tile runs over half these SMs' worth
+    return .{
+        // TF_FLASHNEXT_CHUNK_SOLO and _CHUNK as resolved: a pass's rows alone, and beside a decoding stream
+        e.chunk,
+        e.busy_chunk,
+        @intFromBool(f.gdn_fused),
+        @intFromBool(f.hc_fuse),
+        @intFromBool(f.in_pass),
+        f.readout_rows,
+        f.fact_rows,
+        // TF_FLASHNEXT_PROMPT_EXPERT_TILE, _PROMPT_BF16 and TF_NVFP4_DECODE_WARPS as the kernels loaded
+        if (k.expert_tile) |x| 1 + @as(u64, @backingInt(x.selection)) else 0,
+        @intFromBool(k.native_lane.prompt != null),
+        // TF_QMMF_HALF_BELOW: a pass of 16 rows or fewer takes the lane's 32-column BF16 and MXFP8 tile below it
+        k.native_lane.half_below,
+        k.nvfp4.warps,
+        grids.final(),
+        // a captured set in use, and the entries TF_FLASHNEXT_OWNED runs on our glue beside it
+        if (c.set != null) 1 + @as(u64, c.glue.mixed) else 0,
     };
 }
 
@@ -149,7 +186,7 @@ test "the image covers a state's device bytes once, its rows split into 256-toke
         defer parts.deinit(a);
         try partsOf(at, head, &parts, a);
         try std.testing.expect(rows.image.valid(parts.items, at, rows.block_tokens));
-        try std.testing.expectEqual(words + snap.bytes(at, head), rows.image.imageBytes(parts.items));
+        try std.testing.expectEqual(words + snap.bytes(at, head, .full), rows.image.imageBytes(parts.items));
     };
 }
 
@@ -160,7 +197,7 @@ test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets
         defer parts.deinit(a);
         try partsOf(at, head, &parts, a);
         try std.testing.expectEqual(@as(u64, words), parts.items[0].bytes);
-        const o = snap.order(at, head);
+        const o = snap.order(at, head, .full);
         var i: usize = 1;
         var off: u64 = words; // the image's offset; move's buffer offset is this less the words
         var moved: u64 = 0;
@@ -185,7 +222,7 @@ test "the image's parts are cuda_snap.move's pieces in its order: sizes, offsets
             }
         }
         try std.testing.expectEqual(parts.items.len, i);
-        try std.testing.expectEqual(@as(u64, snap.bytes(at, head)), moved);
+        try std.testing.expectEqual(@as(u64, snap.bytes(at, head, .full)), moved);
         try std.testing.expectEqual(rows.image.imageBytes(parts.items), off);
     };
 }

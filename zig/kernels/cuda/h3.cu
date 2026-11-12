@@ -8,16 +8,7 @@ __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2b
 __device__ __forceinline__ float f(__nv_bfloat16 x) { return __bfloat162float(x); }
 
 // A value every thread of the block agrees on: the sum of what each holds.
-__device__ __forceinline__ float block_sum(float v, float* scratch) {
-#pragma unroll
-    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-    if ((threadIdx.x & 31) == 0) scratch[threadIdx.x >> 5] = v;
-    __syncthreads();
-    float t = 0.0f;
-    for (int w = 0; w < (blockDim.x >> 5); ++w) t += scratch[w];
-    __syncthreads();
-    return t;
-}
+using tf_common::block_sum_serial;
 
 using tf_common::warp_max;
 using tf_common::warp_sum;
@@ -51,7 +42,7 @@ __global__ void __launch_bounds__(256) h3_norm(__nv_bfloat16* X, const __nv_bflo
     } else {
         for (int c = threadIdx.x; c < C; c += blockDim.x) sq += f(x[c]) * f(x[c]);
     }
-    const float inv = rsqrtf(block_sum(sq, scratch) / float(C) + eps);
+    const float inv = rsqrtf(block_sum_serial(sq, scratch) / float(C) + eps);
     const float* s = TAB + (static_cast<size_t>(line) * 6 + scale) * C;
     const float* h = TAB + (static_cast<size_t>(line) * 6 + shift) * C;
     __nv_bfloat16* o = O + static_cast<size_t>(row) * C;

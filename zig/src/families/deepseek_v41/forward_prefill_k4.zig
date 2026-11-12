@@ -54,6 +54,7 @@ pub fn planWorkspace(f: *Forward, wp: *buffers.Plan, rows: u32, layers: []const 
             const cs = try block_prefill.emitReplay(ka.allocator(), f.cfg, f.widths, o4, enc, K4.rows, start, .encoder);
             try wp.add(try block_prefill.ownCalls(ka.allocator(), cs, K4.tag));
         }
+        try @import("index_scratch.zig").plan(wp, K4.rows, o4, f.cfg, K4.tag);
     }
     if (replay and f.opts.pf_tbo and rows >= 2 * block_prefill.tbo_min) {
         const enc = try encoderLayers(f, layers);
@@ -67,6 +68,15 @@ pub fn planWorkspace(f: *Forward, wp: *buffers.Plan, rows: u32, layers: []const 
             const cs = try block_prefill.emitTbo(ta.allocator(), f.cfg, f.widths, op, enc, seg, seg, start);
             try wp.add(try wsPair(ta.allocator(), cs, k4));
         }
+        // B at full rows can stream even at start zero; the minimum legal pair seeds its materialised branch.
+        {
+            var ta = std.heap.ArenaAllocator.init(f.gpa);
+            defer ta.deinit();
+            const n = block_prefill.tbo_min;
+            const cs = try block_prefill.emitTbo(ta.allocator(), f.cfg, f.widths, op, enc, n, n, 0);
+            try wp.add(try wsPair(ta.allocator(), cs, k4));
+        }
+        try @import("index_scratch.zig").plan(wp, seg, op, f.cfg, K4.tag ++ "b~");
     }
 }
 
@@ -78,7 +88,7 @@ pub fn workspaceBytes(f: *Forward, rows: u32) !u64 {
     var wp: buffers.Plan = .{ .a = la.allocator() };
     const layers = try f.backbone(la.allocator());
     try planWorkspace(f, &wp, rows, layers);
-    if (keepsShared(f)) {
+    if (try keepsShared(f)) {
         // the same trim `plan` makes: the roles the forward's prefill programs hold already
         var fp: buffers.Plan = .{ .a = la.allocator() };
         try planPrograms(f, &fp, rows, layers);
@@ -127,7 +137,7 @@ pub fn wsAgreed(f: *Forward) !bool {
     if (ws.buf != null) return true;
     const pl = ws.plan orelse return false;
     const bytes = planBytes(&pl);
-    const hard = wsFloorGiB();
+    const hard = (try wsFloorGiB());
     const avail = graphs.memAvailableGiB();
     const left = if (avail) |v| v - @as(f64, @floatFromInt(bytes)) / (1 << 30) else hard;
     if (st.agreement == null) st.agreement = try graphs.Agreement.init(f.runner.d, f.comm, f.runner.stream);
@@ -216,15 +226,13 @@ pub fn nowMs() f64 {
 }
 
 /// TF_DSV41_PF_WS_FLOOR_GIB: MemAvailable the workspace must leave on every rank (default TF_DSV41_FLOOR_HARD_GIB).
-pub fn wsFloorGiB() f64 {
-    const v = std.c.getenv("TF_DSV41_PF_WS_FLOOR_GIB") orelse return hardFloorGiB();
-    return std.fmt.parseFloat(f64, std.mem.span(v)) catch hardFloorGiB();
+pub fn wsFloorGiB() !f64 {
+    return @import("kv").budget.workspaceFloorGiB();
 }
 
 /// TF_DSV41_FLOOR_HARD_GIB (4, the boot check's).
-pub fn hardFloorGiB() f64 {
-    const v = std.c.getenv("TF_DSV41_FLOOR_HARD_GIB") orelse return 4.0;
-    return std.fmt.parseFloat(f64, std.mem.span(v)) catch 4.0;
+pub fn hardFloorGiB() !f64 {
+    return @import("kv").budget.hardFloorGiB();
 }
 
 /// The workspace back (a prompt's CED finish: no 4K segment runs until the next prompt's first).

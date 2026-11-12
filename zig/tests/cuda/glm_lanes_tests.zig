@@ -280,10 +280,10 @@ pub fn sharedCheck(gpu: Gpu, checkpoint: []const u8, dc_path: []const u8, rank: 
         var row0: usize = 0;
         for (0..n) |i| { // each stream's rows of the shared forward against its twin's lone round (verify, keep, draft)
             const rows = parts[i].ids.len;
-            try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(mine.ptr, e.bs.?.logits + row0 * V * 2, rows * V * 2), "cuMemcpyDtoH");
+            try cuda.memory.download(gpu.d, e.bs.?.logits + row0 * V * 2, std.mem.sliceAsBytes(mine)[0 .. rows * V * 2]);
             try x.bind(@intCast(S + i));
             try x.verify(parts[i].ids, twin[i][0..rows], 0);
-            try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(lone.ptr, e.bd.logits, rows * V * 2), "cuMemcpyDtoH");
+            try cuda.memory.download(gpu.d, e.bd.logits, std.mem.sliceAsBytes(lone)[0 .. rows * V * 2]);
             if (!std.mem.eql(u16, mine[0 .. rows * V], lone[0 .. rows * V]) or !std.mem.eql(u32, outs[i][0..rows], twin[i][0..rows])) {
                 std.debug.print("FAIL shared: round {d}, stream {d} ({d} rows from row {d} of the shared window): logits or tokens differ from its twin's\n", .{ round, i, rows, row0 });
                 failed = true;

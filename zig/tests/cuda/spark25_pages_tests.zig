@@ -1,5 +1,6 @@
 //! Spark2.5's full-attention caches as pool pages against linear ones: replies and last-row logits byte-equal.
 const std = @import("std");
+const cuda = @import("cuda");
 const core = @import("core");
 const lanes = @import("lanes");
 const spark = @import("spark25");
@@ -43,7 +44,7 @@ fn run(gpu: Gpu, engine: *lanes.Engine, gb: *be.Spark, c: Case, count: u32) !Out
     errdefer gpa.free(logits);
     try gb.s.synchronize();
     const l = gb.lanes.get(&s) orelse return error.UnknownStream;
-    try gb.d.check(gb.d.api.cuMemcpyDtoH_v2(logits.ptr, l.last, logits.len), "cuMemcpyDtoH");
+    try cuda.memory.download(gb.d, l.last, std.mem.sliceAsBytes(logits)[0..logits.len]);
     while (engine.activeCount() > 0) try engine.step();
     try idle(gb);
     return .{ .ids = try gpa.dupe(u32, s.emitted()), .logits = logits, .cached = if (s.reuse_failed) 0 else s.cached };

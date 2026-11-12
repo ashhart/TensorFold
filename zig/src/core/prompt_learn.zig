@@ -8,6 +8,7 @@ const note = pc.note;
 
 /// A shared cut's state written to disk once (--learn): later sessions read it back, after a restart too.
 pub fn learn(s: *Store, e: *const Entry, starts: []const u32) void {
+    if (e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) return;
     const im = s.imprint orelse return;
     if (e.decode_spans.len != 0) return; // learned states are prompt arithmetic only: their key holds no span map
     const write = s.family.vtable.write orelse return;

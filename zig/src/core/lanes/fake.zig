@@ -91,6 +91,7 @@ pub const Fake = struct {
     image_words: bool = false, // an image row feeds a word of its image's identity, as a tower's row would
     image_rows: usize = 0, // image rows fed (`image_words`): the rows a tower had to make
     gpu_charge: ?f64 = null, // each verify and step charges its streams this many GPU seconds, as a timed backend does
+    head_accepts: ?usize = null, // head drafts a round right before one wrong (null: one in five wrong)
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -505,7 +506,8 @@ pub const Fake = struct {
             for (0..r.depth) |j| {
                 const at = r.position + j;
                 var t = x.targetNext(guess.items, r.stream.sampling, at);
-                if ((at *% 2654435761 + j) % 5 == 0) t = (t + 1) % vocab; // a wrong guess now and then
+                const wrong = if (x.head_accepts) |k| j == k else (at *% 2654435761 + j) % 5 == 0;
+                if (wrong) t = (t + 1) % vocab; // a wrong guess now and then, or after exactly `head_accepts`
                 try l.held.append(x.gpa, t);
                 try guess.append(x.gpa, t);
             }
@@ -518,6 +520,17 @@ pub const Fake = struct {
         const l = self(ptr).lane(s);
         if (start + count > l.history.items.len) return error.RowsNotHeld;
         return .{ .buffer = @intFromPtr(l.history.items.ptr), .offset = start * 4, .rows = count, .row_bytes = 4, .space = .host, .dtype = .u32 };
+    }
+
+    /// The stream's cache rows (prompt and fed tokens), as a backend's state digest would cover them; null: no lane.
+    pub fn cache(x: *const Fake, s: *Stream) ?[]const u32 {
+        const l = x.lanes.getPtr(s) orelse return null;
+        return l.history.items;
+    }
+
+    /// A digest of `rows` as cache state, so a stream's digest after any rounds compares with a fresh run's.
+    pub fn digest(rows: []const u32) u64 {
+        return std.hash.Wyhash.hash(0x2138, std.mem.sliceAsBytes(rows));
     }
 
     fn release(ptr: *anyopaque, s: *Stream) void {

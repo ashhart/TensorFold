@@ -67,7 +67,9 @@ fi
 case "$platform" in
     *-host-only) printf '%s\n' 'CPU verification only. This binary has no embedded CUDA kernels and cannot run inference.' > "$stage/HOST-ONLY" ;;
 esac
-sh "$(dirname "$0")/check_paths.sh" "$path_checker" "$build_root" "$stage"
+# The walk (refuse symlinks, check every regular file, require a real directory)
+# runs inside the checker, so it behaves the same on every host.
+"$path_checker" "$build_root" --tree "$stage"
 sha() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }

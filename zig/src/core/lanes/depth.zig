@@ -5,14 +5,10 @@ const Table = @import("table.zig").Table;
 const alloc = @import("allocate.zig");
 pub const pricedBatched = alloc.pricedBatched;
 
-pub const Constants = struct {
-    depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
-    depth_probe_every: u64 = 8, // rounds between probes one depth deeper
-    cost_rate: f64 = 0.2, // weight of the newest round in a depth's measured time
-    plain_margin: f64 = 1.05, // a drafted depth must beat plain rounds' tokens a ms by this much
-    plain_wait_most: u64 = 128, // plain rounds between probes at most
-    draft_slack: i64 = 2, // drafts a stream offers past what its last shared round granted it
-};
+pub const Constants = @import("depth_constants.zig").Constants;
+
+pub const HoldCost = @import("hold_price.zig").HoldCost;
+const holdMs = @import("hold_price.zig").holdMs;
 
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
@@ -35,6 +31,8 @@ pub const Who = struct {
     finished: bool,
     forced: bool,
     granted: ?u32 = null,
+    grant_short: bool = false, // the last grant left some held drafts unverified (the width did not bind)
+    gain: ?f64 = null, // the drafts its last grant expected to keep (null: none priced)
     stream: ?*anyopaque = null,
     sampled: bool = false, // keyed draws: host work a row that a greedy round does not have
 };
@@ -59,16 +57,22 @@ pub const Rule = struct {
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
     node_probabilities: bool,
+    granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
     batch_rows: u32,
     batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
+    row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
     greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
     shared_rounds: u64 = 0,
     greedy_overhead: std.ArrayList(Overhead) = .empty, // overhead from rounds without a sampled stream
 
+    hold_order: []usize = &.{}, // reused hold ordering, at most batch_rows entries
+
     pub fn deinit(r: *Rule) void {
+        r.gpa.free(r.hold_order);
+        r.row_cost.deinit(r.gpa);
         r.round_ms.deinit(r.gpa);
         r.overhead.deinit(r.gpa);
         r.greedy_ms.deinit(r.gpa);
@@ -192,15 +196,104 @@ pub const Rule = struct {
         return true;
     }
 
-    /// Python `_head_depth`: next head drafts (0 forced, 1 with a copy); a floor leaves a sampled stream its rates'.
+    /// Drafts past a grant: none when it stopped short of the held drafts (the width did not bind), else grant_slack.
+    fn slack(r: *const Rule, who: Who) i64 {
+        return if (who.grant_short) r.k.short_slack else r.k.grant_slack;
+    }
+
+    /// The last grant plus its slack (the deepest chain before any); after a grant of none, a probe of draft_slack.
+    fn grantDepth(r: *Rule, who: Who) !i64 {
+        const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
+        const granted = who.granted orelse return most;
+        _ = try r.rates(who);
+        const st = &who.state.*.?;
+        if (granted == 0) return if (!r.plain_guard or r.probePlain(st)) @min(most, r.k.draft_slack) else 0;
+        st.plain = 0;
+        st.wait = r.k.depth_probe_every;
+        return @min(most, @as(i64, granted) + r.slack(who));
+    }
+
+    /// Python `_head_depth`: the next round's head drafts for a stream (0 when forced, 1 or none with a copy ahead).
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
-        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
+        const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.granted_depth)
+            try r.grantDepth(who.*)
+        else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
         else
             try r.depth(who.*);
         if (who.forced) return 0;
-        if (d != 0 and probe.copy(probe.ptr, who)) return 1;
+        if (d != 0 and probe.copy(probe.ptr, who)) return @intFromBool(!r.k.copy_first);
         return d;
+    }
+
+    /// A shared hold pads every block to its deepest: depths cut so the drafting streams' blocks fit `rows` (one pass).
+    pub fn capPass(out: []i64, rows: u32) void {
+        var n: i64 = 0;
+        for (out) |d| n += @intFromBool(d > 0);
+        if (n == 0) return;
+        const most = @max(1, @divFloor(@as(i64, rows), n));
+        for (out) |*d| d.* = @min(d.*, most);
+    }
+
+    /// Granted holds kept, most expected drafts a row first, while they raise the next round's expected tokens a ms.
+    pub fn payHolds(r: *Rule, whos: []const Who, sampled: bool, out: []i64) !void {
+        if (whos.len > r.batch_rows) return error.BadHoldStreamCount;
+        if (r.hold_order.len == 0) r.hold_order = try r.gpa.alloc(usize, r.batch_rows);
+        const order = r.hold_order[0..whos.len];
+        var m: usize = 0;
+        var probes: usize = 0; // a probe after a grant of none keeps its hold: it measures the stream again
+        var deepest: i64 = 0;
+        for (whos, out, 0..) |w, d, i| {
+            if (d <= 0) continue;
+            if (w.granted == @as(?u32, 0)) {
+                probes += 1;
+                deepest = @max(deepest, d);
+            } else {
+                order[m] = i;
+                m += 1;
+            }
+        }
+        if (m == 0) return;
+        const Ctx = struct {
+            r: *Rule,
+            whos: []const Who,
+            fn less(c: @This(), x: usize, y: usize) bool {
+                const gx = c.r.gainOf(c.whos[x]) catch 0;
+                const gy = c.r.gainOf(c.whos[y]) catch 0;
+                return gx * rowsOf(c.whos[y]) > gy * rowsOf(c.whos[x]) or (gx * rowsOf(c.whos[y]) == gy * rowsOf(c.whos[x]) and x < y);
+            }
+        };
+        std.mem.sort(usize, order[0..m], Ctx{ .r = r, .whos = whos }, Ctx.less);
+        const fixed = r.fixedMs(whos.len, sampled);
+        var rows: f64 = @floatFromInt(whos.len);
+        var tokens = rows;
+        const plain = r.shared_costs.get(@intCast(whos.len)) orelse return;
+        const probe_ms = if (probes > 0) holdMs(r.k.hold_costs, probes, deepest) else 0;
+        var best = tokens / (plain + fixed + probe_ms);
+        var keep: usize = 0;
+        for (order[0..m], 1..) |i, k| {
+            rows += rowsOf(whos[i]);
+            tokens += try r.gainOf(whos[i]);
+            deepest = @max(deepest, out[i]);
+            const verify = r.shared_costs.get(@intFromFloat(@ceil(rows))) orelse break;
+            const extra = r.row_cost.extraMs(whos.len, sampled) * (rows - @as(f64, @floatFromInt(whos.len)));
+            const now = tokens / (verify + (if (extra < 0) @max(extra, plain - verify) else extra) + fixed + holdMs(r.k.hold_costs, k + probes, deepest));
+            if (now > best) {
+                best = now;
+                keep = k;
+            }
+        }
+        for (order[keep..m]) |i| out[i] = 0;
+    }
+
+    /// The drafts a granted stream's next round is expected to keep: its last grant's, or its first draft's rate.
+    fn gainOf(r: *Rule, w: Who) !f64 {
+        if (w.gain) |g| if (w.granted != null) return g;
+        return (try r.rates(w))[0];
+    }
+
+    fn rowsOf(w: Who) f64 {
+        return @floatFromInt(@max(1, w.granted orelse 1));
     }
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
@@ -213,8 +306,10 @@ pub const Rule = struct {
             for (whos, out) |*w, *o| {
                 const inner = try r.headDepth(w, null, probe);
                 const granted: i64 = if (w.granted) |g| g else r.most_drafts;
-                o.* = try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
+                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
             }
+            if (r.granted_depth) capPass(out, r.batch_rows);
+            if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHolds(whos, sampled, out);
             return;
         }
         const most = try r.gpa.alloc(i64, whos.len);
@@ -231,11 +326,11 @@ pub const Rule = struct {
         const ones = try r.gpa.alloc(u32, whos.len);
         defer r.gpa.free(ones);
         @memset(ones, 1);
-        const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads };
+        const head: alloc.HeadCost = .{ .step_ms = r.sharedStepMs(), .batched = r.batched_heads, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = r.row_cost.leastRows(whos.len, sampled) };
         const counts = if (r.draft_step_ms != 0)
-            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), @max(whos.len, r.batch_rows), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true })
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = head.least_rows })
         else
-            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), @max(whos.len, r.batch_rows), head);
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), head);
         defer r.gpa.free(counts);
         r.probeShared(whos, most, counts);
         if (r.plain_guard) {
@@ -293,17 +388,28 @@ pub const Rule = struct {
         return best;
     }
 
+    /// Shared pricing can retain a family policy while lone rounds use a measured head step.
+    pub fn sharedStepMs(r: *const Rule) f64 {
+        return r.k.shared_step_ms orelse r.mtp_step_ms;
+    }
+
     /// The modeled time of a shared round's head steps for the depths it drafted.
     pub fn headMs(r: *const Rule, depths: []const i64) f64 {
         var steps: i64 = 0;
         for (depths) |d| steps = if (r.batched_heads) @max(steps, d) else steps + d;
-        return r.mtp_step_ms * @as(f64, @floatFromInt(steps));
+        return r.sharedStepMs() * @as(f64, @floatFromInt(steps));
     }
 
     /// `sampled`: the round drew keyed samples, so it counts for sampled streams' overhead alone; `head_ms` its drafts.
     pub fn observeOverhead(r: *Rule, streams: u32, rows: u64, ms: f64, sampled: bool, head_ms: f64) !void {
         const forward = r.shared_costs.get(@intCast(rows)) orelse return;
-        const extra = if (ms - forward > 0.0) ms - forward else 0.0;
+        if (r.k.learn_rows) try r.row_cost.observe(r.gpa, streams, rows, ms - forward - head_ms, sampled);
+        // rows the table underprices are no fixed cost: called fixed, they would make the next draft look cheaper
+        const row_ms = r.row_cost.extraMs(streams, sampled);
+        // no fit yet: a wide round's excess may be its rows, and adding it to the overhead draws the next round wider
+        if (r.k.learn_rows and streams > 1 and row_ms == 0 and rows > streams) return;
+        const paid = alloc.rowTerm(r.shared_costs, true, .{ .row_ms = row_ms }, rows, streams);
+        const extra = if (ms - forward - paid > 0.0) ms - forward - paid else 0.0;
         const fixed = if (extra - head_ms > 0.0) extra - head_ms else 0.0;
         try r.addOverhead(&r.overhead, streams, fixed, extra - fixed);
         if (!sampled) try r.addOverhead(&r.greedy_overhead, streams, fixed, extra - fixed);
@@ -400,4 +506,93 @@ test "a shared round's drafts come out the same whichever depths its overhead wa
         try rule.budgets(&whos, probe, false, out);
     }
     try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
+}
+
+test "granted depths in a shared round fit one hold pass: every block is as deep as the deepest" {
+    const empty: Table = .{};
+    var rule: Rule = .{ .gpa = std.testing.allocator, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
+    defer rule.deinit();
+    var states: [8]?State = @splat(null);
+    defer for (&states) |*st| if (st.*) |*x| x.deinit(std.testing.allocator);
+    var whos: [8]Who = undefined;
+    for (&whos, &states, 0..) |*w, *st, i| w.* = .{ .state = st, .draft_room = 100, .finished = false, .forced = false, .granted = @intCast(i) };
+    const No = struct {
+        fn copy(_: *anyopaque, _: *const Who) bool {
+            return false;
+        }
+    };
+    var unused: u8 = 0;
+    var out: [8]i64 = undefined;
+    try rule.budgets(&whos, .{ .ptr = &unused, .copy = No.copy }, false, &out);
+    // a grant of none probes two; grants 1..7 that took every held draft, plus one; cut to 32 rows over eight blocks
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2, 3, 4, 4, 4, 4, 4 }, &out);
+    try rule.budgets(whos[0..2], .{ .ptr = &unused, .copy = No.copy }, false, out[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, out[0..2]); // two blocks fit whole
+    for (whos[0..2]) |*w| w.grant_short = true;
+    try rule.budgets(whos[0..2], .{ .ptr = &unused, .copy = No.copy }, false, out[0..2]);
+    try std.testing.expectEqualSlices(i64, &.{ 2, 1 }, out[0..2]); // a grant short of the held drafts: no slack
+}
+
+test "a copy ahead: one head draft beside it, or none when the head's drafts cost a pass of their own" {
+    const empty: Table = .{};
+    const Yes = struct {
+        fn copy(_: *anyopaque, _: *const Who) bool {
+            return true;
+        }
+    };
+    var unused: u8 = 0;
+    const probe: Probe = .{ .ptr = &unused, .copy = Yes.copy };
+    var st: ?State = null;
+    defer if (st) |*x| x.deinit(std.testing.allocator);
+    const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false, .granted = 3 };
+    for ([_]bool{ false, true }) |first| {
+        var rule: Rule = .{ .gpa = std.testing.allocator, .k = .{ .copy_first = first }, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
+        defer rule.deinit();
+        try std.testing.expectEqual(@as(i64, @intFromBool(!first)), try rule.headDepth(&who, null, probe));
+        var out: [1]i64 = undefined;
+        var whos = [_]Who{who};
+        try rule.budgets(&whos, probe, false, &out);
+        try std.testing.expectEqual(@as(i64, @intFromBool(!first)), out[0]);
+    }
+}
+
+test "a granted hold stays only while its stream's expected drafts pay for the verify rows and the hold pass" {
+    const gpa = std.testing.allocator;
+    var shared: Table = .{};
+    defer shared.deinit(gpa);
+    for (1..33) |w| try shared.put(gpa, @intCast(w), 10.0 + @as(f64, @floatFromInt(w)));
+    const empty: Table = .{};
+    const cheap = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1.0 }, .{ .streams = 8, .depth = 1, .ms = 4.5 } };
+    var states: [4]?State = @splat(null);
+    defer for (&states) |*st| if (st.*) |*x| x.deinit(gpa);
+    const granted = [_]?u32{ 2, 2, 0, 1 };
+    const gains = [_]?f64{ 1.8, 0.2, null, 0.9 };
+    var whos: [4]Who = undefined;
+    for (&whos, &states, granted, gains) |*w, *st, g, x| w.* = .{ .state = st, .draft_room = 100, .finished = false, .forced = false, .granted = g, .gain = x };
+    var rule: Rule = .{ .gpa = gpa, .k = .{ .hold_costs = &cheap }, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &shared, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
+    defer rule.deinit();
+    // 8 ms overhead: plain 4 / 22; stream 0 then 3 raise the rate (5.8 / 25, 6.7 / 26.5), stream 1 would lower it
+    var out = [_]i64{ 4, 4, 0, 3 };
+    try rule.payHolds(&whos, false, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 4, 0, 0, 3 }, &out);
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    rule.gpa = failing.allocator();
+    out = .{ 4, 4, 0, 3 };
+    try rule.payHolds(&whos, false, &out);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqualSlices(i64, &.{ 4, 0, 0, 3 }, &out);
+    rule.gpa = gpa;
+    const dear = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 20.0 }};
+    rule.k.hold_costs = &dear;
+    out = .{ 4, 4, 0, 3 };
+    try rule.payHolds(&whos, false, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0, 0, 0 }, &out); // no gain pays a 20 ms pass
+    whos[2].granted = 0;
+    out = .{ 4, 4, 2, 3 };
+    try rule.payHolds(&whos, false, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 0 }, &out); // a probe after a grant of none keeps its hold
+}
+
+test {
+    _ = @import("shared_step_test.zig");
 }

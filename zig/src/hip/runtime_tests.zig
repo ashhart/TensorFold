@@ -273,7 +273,8 @@ test "a cooperative grid of one block a compute unit, and the device's attribute
     var name_buf: [256]u8 = undefined;
     try std.testing.expect((try ctx.name(&name_buf)).len > 0);
     try std.testing.expectEqual(@as(c_int, 32), try ctx.attribute(.warp_size));
-    try std.testing.expect(try ctx.attribute(.cooperative_launch) != 0);
+    // Windows HIP has no cooperative launch support (ROCm/HIP#3640), so the grid runs plain there.
+    const cooperative = (try ctx.attribute(.cooperative_launch)) != 0;
     const cus: u32 = @intCast(try ctx.attribute(.multiprocessor_count));
     var arch_buffer: [256]u8 = undefined;
     var m = try Module.loadForArchitecture(&r, &.{probe_image}, try @import("device_arch.zig").query(&r, 0, &arch_buffer));
@@ -287,7 +288,7 @@ test "a cooperative grid of one block a compute unit, and the device's attribute
     try args.add(y.ptr);
     try args.add(@as(f32, 3));
     try args.add(cus * 256);
-    try launch.launch(fill, .{ .grid = .{ .x = cus }, .block = .{ .x = 256 }, .cooperative = true }, stream, &args);
+    try launch.launch(fill, .{ .grid = .{ .x = cus }, .block = .{ .x = 256 }, .cooperative = cooperative }, stream, &args);
     try stream.synchronize();
     const got = try std.testing.allocator.alloc(f32, cus * 256);
     defer std.testing.allocator.free(got);

@@ -11,6 +11,10 @@ const mib: u64 = 1 << 20;
 /// Nemotron 3.5 Lightning on CUDA: 6 attention layers and the MTP head's, 2 KV heads of 128, Mamba states in a slot.
 const nemotron: kv.Layout = .{ .fixed_bytes = 64 * mib, .token_bytes = 7 << 10, .page_tokens = 512, .snap_bytes = 48 * mib };
 
+test {
+    _ = @import("kv_pool_band_test.zig");
+}
+
 test "a 2,048-token prompt with 4,096 reply tokens and a 16-row window reserves 13 pages of 512 rows, 45.5 MiB" {
     try expectEqual(@as(u64, 3584 * 1024), nemotron.pageBytes());
     try expectEqual(@as(usize, 13), nemotron.need(2048, 4096, 16));
@@ -128,6 +132,43 @@ test "the engine's own sequence on pages: the windows the room would hold come b
     try expectEqual(@as(u32, 8), t.lanes);
     try expectEqual(@as(usize, 2 * 2049), t.pages);
     try expectEqual(room3 - 2 * 2049 * page - 7 * 131 * mib, t.copied);
+}
+
+test "the engine's own sequence on pages: an asked cache comes before every window but the engine's own" {
+    const g: u64 = 1 << 30;
+    // GLM-5.3-Flash on CUDA at TP=3 with a drafter (291 MiB fixed), a 1M window, four streams: the room holds three
+    const tp3: kv.Layout = .{ .fixed_bytes = 291 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 0 };
+    const page = tp3.pageBytes();
+    const long: u64 = 1_048_576 + 8;
+    const room = 40 * g;
+    // unasked, the three windows come first and leave the cache 0.88 GiB of its 16
+    const unasked = try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 16 * g, .window = long, .engine_paged = true });
+    try expectEqual(@as(usize, 3 * 2049), unasked.pages);
+    try expectEqual(room - 3 * 2049 * page - 3 * 291 * mib, unasked.copied);
+    try expectEqual(16 * g - unasked.copied, unasked.taken);
+    // asked, the cache comes after the engine's own window and a fixed part and page each; the pool takes the rest
+    const asked = try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true });
+    try expectEqual(@as(u32, 4), asked.lanes);
+    try expectEqual(4 * g, asked.copied);
+    try expectEqual(@as(u64, 0), asked.taken);
+    try expectEqual(@as(usize, @intCast((room - 3 * 291 * mib - 4 * g) / page)), asked.pages);
+    // TF_KV_SHARE: the cache is the pool's kept pages, so the pages are the same and the kept budget is the asked one
+    const shared = try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .kept_ppm = 1_000_000, .asked = true });
+    try expectEqual(4 * g, shared.kept);
+    try expectEqual((try kv.plan(tp3, .{ .room = room, .engine = 0, .lanes = 4, .cache = 16 * g, .window = long, .engine_paged = true, .kept_ppm = 1_000_000 })).pages, shared.pages);
+    // past the room every stream's fixed part and page take, an asked cache never falls as the room grows
+    var last: u64 = 0;
+    var r: u64 = 14 * g;
+    while (r <= 64 * g) : (r += 64 * mib) {
+        const p = try kv.plan(tp3, .{ .room = r, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true });
+        try expect(p.copied >= last);
+        last = p.copied;
+    }
+    // holds counts the same way: the asked cache whole past the window and a fixed part and page each, not a byte less
+    const edge = 2049 * page + 3 * (291 * mib + page) + 4 * g;
+    try expect(kv.holds(tp3, .{ .room = edge, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true }));
+    try expect(!kv.holds(tp3, .{ .room = edge - 1, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true }));
+    try expectEqual(4 * g, (try kv.plan(tp3, .{ .room = edge, .engine = 0, .lanes = 4, .cache = 4 * g, .window = long, .engine_paged = true, .asked = true })).copied);
 }
 
 test "a cache holds when the room past the engine and every stream's fixed part and page is at least its bytes" {
@@ -286,7 +327,7 @@ test "a promise that does not fit asks the store to reclaim first, and fails onl
     try expectEqual(@as(usize, 1), p.available());
     try expectEqual(@as(usize, 3), p.reclaimable());
     try expect(p.fits(4) and !p.fits(5));
-    p.reclaim = .{ .ctx = &store, .call = Kept.call };
+    try p.joinReclaim(.{ .ctx = &store, .call = Kept.call });
     var b: Lease = .{};
     try std.testing.expectError(error.LaneMemory, p.promise(&b, 5));
     try expectEqual(@as(usize, 0), b.promised);
@@ -453,10 +494,36 @@ test "a hold past the free pages asks the store to reclaim first, as a promise d
     var old: [3]u32 = undefined;
     try expect(p.hold(&old)); // the store's own pages fill the pool
     var shed: Shed = .{ .pool = &p, .kept = &old };
-    p.reclaim = .{ .ctx = &shed, .call = Shed.call };
+    try p.joinReclaim(.{ .ctx = &shed, .call = Shed.call });
     var ids: [2]u32 = undefined;
     try expect(p.hold(&ids));
     try expectEqual(@as(usize, 1), shed.calls);
     for (ids) |id| p.release(id);
     try expect(p.idle());
+}
+
+test "TF_KV_SHARE's slots alone (GLM): the cache keeps the slots it holds, the named count at most, and the rest is pages" {
+    const g: u64 = 1 << 30;
+    const glm: kv.Layout = .{ .fixed_bytes = 180 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
+    const b: kv.Budget = .{ .room = 80 * g, .engine = 0, .lanes = 4, .cache = g, .snaps = 16, .window = 262_144 + 8, .engine_paged = true, .slots_only = true };
+    const p = try kv.plan(glm, b);
+    try expectEqual(@as(usize, 5), p.snaps); // a GiB holds five of the sixteen named
+    try expectEqual(@as(u64, 0), p.copied);
+    try expectEqual(g - 5 * 180 * mib, p.kept);
+    var two = b;
+    two.snaps = 2;
+    const q = try kv.plan(glm, two);
+    try expectEqual(@as(usize, 2), q.snaps);
+    try expectEqual(g - 2 * 180 * mib, q.kept);
+    var copies = two; // the split without the flag: the slots' rest stays copied rows
+    copies.slots_only = false;
+    const r = try kv.plan(glm, copies);
+    try expectEqual(@as(usize, 2), r.snaps);
+    try expectEqual(g - 2 * 180 * mib, r.copied);
+    try expectEqual(@as(u64, 0), r.kept);
+    try expect(q.pages > r.pages and q.pages > p.pages); // what the slots leave is pages, past the windows' bound
+    var many = b;
+    many.snaps = 100;
+    many.cache = 16 * g;
+    try expectEqual(@as(usize, kv.most_snaps), (try kv.plan(glm, many)).snaps);
 }

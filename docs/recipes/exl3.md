@@ -7,10 +7,11 @@ GLM-5.3-Flash.
 ## Where it stands
 
 - The native engine has the format and a reference decoder in core (`zig/src/core/exl3_format.zig`, @akol1, #496),
-  and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). No model serves an
-  EXL3 checkpoint in this release.
-- CUDA projections and routed experts on this format are in review (#740, #741, #806). A model needs them and a loader
-  for its EXL3 tensors before it can serve a checkpoint; the 27B on CUDA is the first planned.
+  and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). On CUDA, `qwen3_5`
+  serves EXL3 packs of the Qwen3.5 models and of the dense Qwen3.8-27B ([using it](#using-it)).
+- CUDA's EXL3 operators, projections and grouped routed experts landed in 1.1.0 (#740, #741, #806, #837). On CUDA,
+  GLM-5.3-Flash runs its routed experts through them and `qwen3_5` serves dense EXL3 packs. Another family needs a
+  loader for its EXL3 tensors before it can serve a checkpoint.
 - The Python engine served EXL3 on CUDA from 0.3.6 to 0.6.6 through the module @vcruz305 wrote (#42): every codebook,
   widths 1 to 8 mixed per tensor, a row-invariant linear for 1 to 128 rows, and grouped routed experts, for the 27B,
   Flash Next and mixed-width packs. It is at the
@@ -196,6 +197,10 @@ row's bits match it:
   layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
   equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
   The split counters are zeroed on the calls' stream when they grow, and each block's last program resets its own.
+  On sm_90 and newer the input rotations and the linear, alone or grouped, go out as programmatic dependent
+  launches: a linear loads its weights while the kernel before it finishes, then waits for its rows.
+  `TF_EXL3_PDL=0` makes them plain stream-ordered launches with the same bits, to time a change without them or to
+  rule them out when chasing a fault; below sm_90 they are plain already.
 - `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
   each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
   a layer; an expert's member count never changes a row's bits.

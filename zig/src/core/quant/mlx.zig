@@ -498,6 +498,9 @@ test "an override declared in any spelling answers every spelling of its module"
 }
 
 test "aliases of one module must agree on its width" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -540,4 +543,5 @@ test {
     _ = keys;
     _ = @import("mlx_geometry_test.zig");
     _ = @import("mlx_checkpoint_test.zig");
+    _ = @import("mlx_affine.zig");
 }

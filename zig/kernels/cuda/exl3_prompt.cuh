@@ -12,9 +12,7 @@ __device__ __forceinline__ void decode_tile_p(const uint32_t* tile, int lane, ui
     decode_lane<8, CB_MCG>(w, lane, b0, b1);
 }
 __device__ __forceinline__ void cp_async16(void* dst, const void* src, bool valid) {
-    const unsigned d = (unsigned)__cvta_generic_to_shared(dst);
-    const int n = valid ? 16 : 0;
-    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(n));
+    tf_common::cp16z(dst, src, valid);
 }
 using tf_common::cp_commit;
 using tf_common::cp_wait;

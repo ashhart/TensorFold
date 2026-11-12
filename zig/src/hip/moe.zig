@@ -8,19 +8,26 @@ const Tensor = ops.Tensor;
 const Kind = ops.Kind;
 const Projection = ops.Projection;
 
-/// A layer's experts, shared expert last: gate and up stacked as one (E + 1, 2 NI, ...) weight, down (E + 1, D, ...).
+/// A shared expert of its own width, run beside the routed stack: gate and up as one (2 NI, K) projection, then down.
+pub const Shared = struct { gate_up: Projection, down: Projection };
+
+/// A layer's experts, shared last in the stack, or beside it in `shared` at its own bits and group (`count` is then E).
 pub const Experts = struct {
     fused: Projection,
     down: Projection,
+    /// E + 1 when the shared expert is the stack's last expert, E when it is `shared`.
     count: usize,
     width: usize,
     dims: usize,
     limit: f32 = 0,
+    shared: ?Shared = null,
 };
 
 /// The router's rows in fp32 (E + 1, D), the shared expert's gate last, and the experts.
 pub const Routed = struct {
     rows32: u64,
+    /// The same rows as the bf16 they are held in (the fp32 rows' values widened), which a round reads instead.
+    rows16: u64 = 0,
     experts: Experts,
     top_k: usize,
     /// The router's rows, E + 1: the model's expert count, whatever share of the experts this rank holds.
@@ -63,6 +70,12 @@ pub fn tileOf(rows: usize, window: bool) usize {
     return if (rows < BLOCK_FROM or window) LANE_ROWS else BLOCK_ROWS;
 }
 
+/// The average rows an expert of `experts` takes of `rows` tokens' `top_k` routed slots, rounded up; 0 without experts.
+pub fn expertRows(rows: usize, top_k: usize, experts: usize) u32 {
+    if (experts == 0) return 0;
+    return @intCast((rows * top_k + experts - 1) / experts);
+}
+
 /// `x` (rows, D) to (rows, D) in its dtype: the top-k experts plus the shared one; a tp rank returns its fp32 share.
 pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool) ops.Error!Tensor {
     _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tile comes from tile_for)
@@ -76,7 +89,7 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, ex.dims, r.rows);
+    try o.moeRouterRows(x, r.rows32, r.rows16, logits, rows, ex.dims, r.rows);
     const count: usize = cap;
     var tile: usize = undefined;
     if (r.remap != 0) {
@@ -87,26 +100,48 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         tile = tileFor(o, rows);
         try o.moeRoute(local, pairs, r.rows, tile, members, items, cap);
         try o.moeForeignItems(items, cap, ex.count);
-        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));
+        const expert_rows = expertRows(rows, r.top_k, r.count());
+        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const act_t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, act_t, pairs, ex.width, ex.limit);
-        const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows));
+        const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
+        // the shared pair's id is another rank's here: its row reads zero, and rank 0 adds its own gate's branch
         try o.moeZeroForeign(y, local, ex.count, pairs, ex.dims);
         const share = try o.arena.of(f32, rows * ex.dims);
+        if (ex.shared) |sh| {
+            const s = try sharedRun(o, sh, x, rows, kind, ex.limit);
+            try o.moeCombineGate(y, wts, s, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
+            return .{ .ptr = share, .kind = .f32 };
+        }
         try o.moeCombine(y, wts, .{ .ptr = share, .kind = .f32 }, rows, slots, ex.dims);
         return .{ .ptr = share, .kind = .f32 };
     }
     const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
     const out = try o.arena.take(rows * ex.dims * kind.size());
+    if (ex.shared) |sh| {
+        const s = try sharedRun(o, sh, x, rows, kind, ex.limit);
+        try o.moeCombineGate(p.y, wts, s, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
+        return .{ .ptr = out, .kind = kind };
+    }
     try o.moeCombine(p.y, wts, .{ .ptr = out, .kind = kind }, rows, slots, ex.dims);
     return .{ .ptr = out, .kind = kind };
 }
 
-/// The routed slots a row (fp32) and their weights before the sum: a single rank only.
+/// down(silu(gate) * up) of `x`'s rows at the shared expert's own widths: (rows, dims) fp32, as the combine reads it.
+fn sharedRun(o: Ops, sh: Shared, x: Tensor, rows: usize, kind: Kind, limit: f32) ops.Error!u64 {
+    const width = sh.gate_up.n / 2;
+    const both = try o.project(x, sh.gate_up, rows, true);
+    const act: Tensor = .{ .ptr = try o.arena.take(rows * width * kind.size()), .kind = kind };
+    try o.moeAct(both.ptr, act, rows, width, limit);
+    return (try o.project(act, sh.down, rows, true)).ptr;
+}
+
+/// The routed slots and weights before the sum: one rank, and only where the shared expert stacks in `y`.
 pub const Parts = struct { y: u64, wts: u64, slots: usize };
 
 pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Parts {
+    std.debug.assert(r.experts.shared == null);
     const slots = r.top_k + 1;
     const size = if (r.exact) rows else bucket(rows);
     const cap = capacity(size * slots, r.rows);
@@ -115,7 +150,7 @@ pub fn parts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize) ops.Error!Pa
     const wts = try o.arena.of(f32, size * slots);
     const items = try o.arena.of(i32, cap * 3);
     const members = try o.arena.of(i32, size * slots);
-    try o.moeRouter(x, r.rows32, logits, rows, r.experts.dims, r.rows);
+    try o.moeRouterRows(x, r.rows32, r.rows16, logits, rows, r.experts.dims, r.rows);
     const p = try expertParts(o, kind, r, x, rows, logits, pick, wts, items, members, cap);
     return .{ .y = p.y, .wts = wts, .slots = slots };
 }
@@ -136,15 +171,18 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
         tile = tileFor(o, rows);
         try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
     }
+    // beside the stack the shared pair's id is the stack's first id past its experts: zero its item, never read its row
+    if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
+    const expert_rows = expertRows(rows, r.top_k, r.count());
     // the gate and up's activation is the launch's epilogue when the tile takes the shape
     const act_t: Tensor = if (try o.projectRoutedAct(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), ex.limit)) |t| t else blk: {
-        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows));
+        const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
         const act = try o.arena.take(pairs * ex.width * kind.size());
         const t: Tensor = .{ .ptr = act, .kind = kind };
         try o.moeAct(both, t, pairs, ex.width, ex.limit);
         break :blk t;
     };
-    const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows));
+    const y = try o.projectRouted(act_t, ex.down, items, count, members, pairs, 1, @min(tile, rows), expert_rows);
     return .{ .y = y };
 }
 

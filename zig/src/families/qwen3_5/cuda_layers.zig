@@ -47,6 +47,7 @@ pub const Fns = struct {
     embed: cuda.Function,
     embed8: cuda.Function,
     norm: cuda.Function,
+    norm_shift: cuda.Function, // a plain BF16 checkpoint's norms: HF's raw w, 1 + w in FP32
     sums: cuda.Function,
     gdn_pre: cuda.Function,
     conv_commit: cuda.Function,
@@ -58,6 +59,7 @@ pub const Fns = struct {
     gdn_slots_16: cuda.Function,
     gdn_post: cuda.Function,
     head_norm: cuda.Function,
+    head_norm_shift: cuda.Function,
     rope: cuda.Function,
     attn_partial: cuda.Function,
     attn_rows: cuda.Function,
@@ -74,7 +76,7 @@ pub const Fns = struct {
 };
 
 /// qwen35_keep.cu's kernels (Cache.keep).
-pub const Keeps = struct { apply: cuda.Function, conv: cuda.Function, compact: cuda.Function };
+pub const Keeps = struct { apply: cuda.Function, apply_pend: cuda.Function, conv: cuda.Function, compact: cuda.Function };
 
 /// qwen35_kv8.cu's kernels: the cache writes, attention reads and keep's moves over e4m3 rows (--kv-cache fp8).
 pub const Kv8 = struct { rope: cuda.Function, attn_partial: cuda.Function, attn_rows: cuda.Function, attn_partial8_whole: cuda.Function, attn_rows8_whole: cuda.Function, compact: cuda.Function };

@@ -6,7 +6,9 @@ const chat = @import("../chat.zig");
 const ids = @import("../ids.zig");
 const Server = @import("../server.zig").Server;
 const Turn = @import("cortheon.zig").Turn;
+const memory = @import("memory.zig");
 const tools = @import("tools.zig");
+const seen_url = @import("seen.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -32,7 +34,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         const call = try toolCall(a, tools.search_name, "query", q);
         const ran = try tools.run(t.state.web, a, call, t.today, budget, t.goal, &t.seen);
         try t.noteSources(a, ran);
-        if (!ran.ok or ran.sources.len == 0) try t.progress(a, sink, "no results: {s}", .{ran.text[0..@min(ran.text.len, 160)]});
+        if (!ran.ok or ran.sources.len == 0) try t.progress(a, sink, "no results: {s}", .{clip(ran.text, 160)});
         found[i] = ran.sources;
         try calls.append(a, call);
         try results.append(a, try toolMessage(a, call, ran.text));
@@ -51,7 +53,7 @@ pub fn run(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, sink: ?ch
         const call = try toolCall(a, tools.fetch_name, "url", url);
         const ran = try tools.run(t.state.web, a, call, t.today, budget, focus, &t.seen);
         try t.noteSources(a, ran);
-        if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
+        if (!ran.ok) try t.progress(a, sink, "{s}", .{clip(ran.text, 200)});
         try calls.append(a, call);
         try results.append(a, try toolMessage(a, call, ran.text));
     }
@@ -77,6 +79,11 @@ fn plan(t: *Turn, srv: *Server, a: Allocator, gone: anytype) chat.Failure![]cons
     return if (list.len > 0) list else fallback(a, t.goal);
 }
 
+/// A slice of at most `max` bytes that ends on a character boundary.
+pub fn clip(text: []const u8, max: usize) []const u8 {
+    return text[0..@import("html.zig").cutAt(text, max)]; // the cap does not split a character
+}
+
 /// Up to three queries from the planner's reply: one a line, list marks and quotes dropped, NONE ignored.
 pub fn parseQueries(a: Allocator, text: []const u8) Allocator.Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
@@ -95,10 +102,10 @@ pub fn parseQueries(a: Allocator, text: []const u8) Allocator.Error![]const []co
 
 /// A line without its list mark ("-", "*", "#", "1." or "1)"); a query that starts with a number keeps it.
 fn unmark(line: []const u8) []const u8 {
-    if (line.len > 1 and (line[0] == '-' or line[0] == '*' or line[0] == '#')) return std.mem.trimStart(u8, line[1..], " *#");
+    if (line.len > 1 and (line[0] == '-' or line[0] == '*' or line[0] == '#')) return std.mem.trimStart(u8, line[1..], " \t*#"); // a tab after a mark is not part of the query
     var i: usize = 0;
     while (i < line.len and std.ascii.isDigit(line[i])) i += 1;
-    if (i > 0 and i + 1 < line.len and (line[i] == '.' or line[i] == ')') and line[i + 1] == ' ') return std.mem.trimStart(u8, line[i + 1 ..], " ");
+    if (i > 0 and i + 1 < line.len and (line[i] == '.' or line[i] == ')') and (line[i + 1] == ' ' or line[i + 1] == '\t')) return std.mem.trimStart(u8, line[i + 1 ..], " \t"); // a tab separates a list number too
     return line;
 }
 
@@ -108,7 +115,7 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
     while (lines.next()) |raw| {
         var line = std.mem.trim(u8, raw, " \t\r`#>-*");
         if (line.len < 3) continue;
-        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ')) {
+        for (line, 0..) |ch, i| if ((ch == '?' or ch == '.' or ch == '!') and (i + 1 == line.len or line[i + 1] == ' ' or line[i + 1] == '\t')) { // a tab ends a sentence the way a space does
             line = line[0..i];
             break;
         };
@@ -116,15 +123,25 @@ pub fn fallback(a: Allocator, goal: []const u8) Allocator.Error![]const []const 
         var it = std.mem.tokenizeAny(u8, line, " \t");
         var n: usize = 0;
         while (it.next()) |w| : (n += 1) {
-            if (n == 12 or words.items.len + w.len > 120) break;
+            const gap: usize = if (words.items.len > 0) 1 else 0; // the space between words counts toward the cap
+            if (n == 12 or words.items.len + gap + w.len > 120) break;
             if (words.items.len > 0) try words.append(a, ' ');
             try words.appendSlice(a, w);
         }
+        if (words.items.len == 0) continue; // a word that does not fit is not a query
         const one = try a.alloc([]const u8, 1);
         one[0] = words.items;
         return one;
     }
     return &.{};
+}
+
+fn samePage(a: Allocator, left: []const u8, right: []const u8) bool {
+    if (std.mem.eql(u8, left, right)) return true;
+    const x = seen_url.normal(a, left) catch return false;
+    const y = seen_url.normal(a, right) catch return false;
+    if (x == null or y == null) return false;
+    return std.mem.eql(u8, x.?, y.?);
 }
 
 fn hostOf(url: []const u8) []const u8 {
@@ -145,7 +162,7 @@ pub fn pick(a: Allocator, found: []const []const []const u8) Allocator.Error![]c
             const host = hostOf(u);
             var skip = false;
             for (unreadable) |h| skip = skip or std.ascii.eqlIgnoreCase(host, h) or std.ascii.endsWithIgnoreCase(host, h[0..]) and host.len > h.len and host[host.len - h.len - 1] == '.';
-            for (out.items) |seen| skip = skip or std.mem.eql(u8, seen, u);
+            for (out.items) |seen| skip = skip or samePage(a, seen, u); // host case, a trailing slash and a fragment are one page
             if (!skip) try out.append(a, u);
         }
     }
@@ -154,13 +171,17 @@ pub fn pick(a: Allocator, found: []const []const []const u8) Allocator.Error![]c
 
 /// The model's share of the room left in the window for one tool result, in characters.
 fn charBudget(srv: *const Server, input: chat.Input) usize {
-    const window: usize = srv.info.context_window;
+    const max_tokens: usize = @intCast(@max(srv.config.default_max_tokens, 0));
+    return pageBudget(srv.info.context_window, max_tokens, input.messages);
+}
+
+fn pageBudget(window: usize, max_tokens: usize, messages: Value) usize {
     if (window == 0) return 6000;
     var chars: usize = 0;
-    if (input.messages == .array) for (input.messages.array) |m| {
-        chars += (m.strField("content") orelse continue).len;
+    if (messages == .array) for (messages.array) |m| {
+        chars += memory.textLen(m); // text parts count, as the turn's words do
     };
-    const used = chars / 3 + 1024 + @as(usize, @intCast(@max(0, srv.config.default_max_tokens)));
+    const used = chars / 3 + 1024 + max_tokens;
     if (used >= window) return 600;
     return std.math.clamp((window - used) * 3 / 8, 600, 6000);
 }
@@ -212,11 +233,82 @@ test "planner replies become clean queries; a goal becomes one when the planner 
     try std.testing.expectEqualStrings("Zig 0.17 std.http.Client docs", qs[0]);
     try std.testing.expectEqualStrings("Zig 0.17 release notes", qs[1]);
     try std.testing.expectEqualStrings("zig std.Io async", qs[2]);
+    try std.testing.expectEqualStrings("Zig 0.17 docs", (try parseQueries(a, "1.\tZig 0.17 docs"))[0]);
+    try std.testing.expectEqualStrings("Zig 0.17 docs", (try parseQueries(a, "#\tZig 0.17 docs"))[0]);
     try std.testing.expectEqual(@as(usize, 0), (try parseQueries(a, "NONE")).len);
     try std.testing.expectEqualStrings("2025 tax brackets for Canada", (try parseQueries(a, "2025 tax brackets for Canada"))[0]);
     const f = try fallback(a, "```\n\nImplement a client for the latest Stripe API, with retries and idempotency keys and good tests please thanks\n");
     try std.testing.expectEqualStrings("Implement a client for the latest Stripe API, with retries and idempotency", f[0]);
     try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release? Name the version."))[0]);
+    try std.testing.expectEqualStrings("What are the main changes in the latest Zig release", (try fallback(a, "What are the main changes in the latest Zig release?\tName the version."))[0]);
+}
+
+fn textPart(a: Allocator, s: []const u8) !Value {
+    const p = try json.newObject(a);
+    try p.put(a, "type", .{ .string = "text" });
+    try p.put(a, "text", .{ .string = s });
+    return .{ .object = p };
+}
+
+test "text beside an image counts in the page budget" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    while (words.items.len < 6000) try words.append(a, 'x');
+    const mid = words.items.len / 2;
+    const parts = try a.alloc(Value, 3);
+    parts[0] = try textPart(a, words.items[0..mid]);
+    const image = try json.newObject(a);
+    try image.put(a, "type", .{ .string = "image_url" });
+    parts[1] = .{ .object = image };
+    parts[2] = try textPart(a, words.items[mid..]);
+    const turn = try json.newObject(a);
+    try turn.put(a, "role", .{ .string = "user" });
+    try turn.put(a, "content", .{ .array = parts });
+    const messages = try a.alloc(Value, 1);
+    messages[0] = .{ .object = turn };
+    try std.testing.expectEqual(@as(usize, 600), pageBudget(5000, 2048, .{ .array = messages }));
+    const only = try a.alloc(Value, 1);
+    only[0] = parts[1];
+    const bare = try json.newObject(a);
+    try bare.put(a, "role", .{ .string = "user" });
+    try bare.put(a, "content", .{ .array = only });
+    const one = try a.alloc(Value, 1);
+    one[0] = .{ .object = bare };
+    try std.testing.expect(pageBudget(5000, 2048, .{ .array = one }) > 600);
+}
+
+test "a fallback query counts the space before the next word" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var line: std.ArrayList(u8) = .empty;
+    while (line.items.len < 118) try line.append(a, 'x');
+    try line.appendSlice(a, " ab");
+    const q = try fallback(a, line.items);
+    try std.testing.expectEqual(@as(usize, 1), q.len);
+    try std.testing.expect(q[0].len <= 120);
+}
+
+test "a fallback query is omitted when its first word does not fit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var words: std.ArrayList(u8) = .empty;
+    while (words.items.len < 121) try words.append(a, 'x');
+    try std.testing.expectEqual(@as(usize, 0), (try fallback(a, words.items)).len);
+}
+
+test "a progress clip keeps a character on the cap whole" {
+    var buf: [202]u8 = undefined;
+    @memset(&buf, 'x');
+    buf[199] = 0xe2;
+    buf[200] = 0x82;
+    buf[201] = 0xac;
+    const s = clip(buf[0..202], 200);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(s));
+    try std.testing.expectEqual(@as(usize, 199), s.len);
 }
 
 test "a planner query cut at the cap keeps the character whole" {
@@ -244,4 +336,16 @@ test "pages are picked by rank across queries, without repeats or video hosts" {
     try std.testing.expectEqualStrings("https://a.org/1", got[0]);
     try std.testing.expectEqualStrings("https://c.org/2", got[1]);
     try std.testing.expectEqualStrings("https://b.org/1", got[2]);
+}
+
+test "a page is read once when only its host case, slash or fragment differs" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const q1 = [_][]const u8{ "https://a.org/1", "https://A.org/1/", "https://a.org/1#notes" };
+    const q2 = [_][]const u8{"https://b.org/2"};
+    const got = try pick(a, &.{ &q1, &q2 });
+    try std.testing.expectEqual(@as(usize, 2), got.len);
+    try std.testing.expectEqualStrings("https://a.org/1", got[0]);
+    try std.testing.expectEqualStrings("https://b.org/2", got[1]);
 }

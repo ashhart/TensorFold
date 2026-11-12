@@ -49,6 +49,11 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
         const rows = @min(SPAN, len - start);
         try o.embedRows(m.embed, ids + start * 4, rows, at(x, start * s.hidden));
     }
+    if (m.frame) |frame| {
+        for (frame.runs) |run| if (run.clip(pos0, len, s.hidden)) |clip| {
+            try o.copyCols(.{ .ptr = clip.features, .kind = .bf16 }, s.hidden, 0, x.ptr + clip.first * s.hidden * 2, clip.rows, s.hidden);
+        };
+    }
     for (m.layers, 0..) |layer, index| {
         start = 0;
         while (start < len) : (start += SPAN) {
@@ -66,10 +71,10 @@ pub fn span(ops: Ops, m: *const view.Model, caches: *state.Caches, ids: u64, len
                 .full => |f| try attention(o, m, f, caches, index, normed, rows, pos0 + start),
                 .linear => |l| try linear(o, m, l, caches, index, normed, rows),
             };
-            try residual(o, m, xs, y, rows * s.hidden);
-            try o.rms(xs, post_norm, normed, rows, s.hidden, @floatCast(s.eps));
+            try reduce.residualNorm(o, m.tp, xs, y, post_norm, normed, rows, s.hidden, @floatCast(s.eps));
             const z = try mlpRows(o, m, mlp, normed, rows, true);
             try residual(o, m, xs, z, rows * s.hidden);
+            if (m.taps.of(index)) |ti| if (caches.tap) |ring| try hip.plan_ops.tapRows(o, xs, ring.base(), rows, s.hidden, ti, m.taps.n, m.taps.rows, pos0 + start);
         }
         if (trace) |t| t.layer(t.ctx, index, x, len) catch |err| return if (err == error.Cancelled) error.Cancelled else error.HipFailed;
     }
@@ -99,12 +104,24 @@ fn attention(o: Ops, m: *const view.Model, f: view.Full, caches: *state.Caches, 
     try o.rms(keys, f.k_norm, kn, rows * s.kv_heads, hd, @floatCast(s.eps));
     const theta: f32 = @floatCast(s.rope_theta);
     const q32 = try o.arena.of(f32, q_rows * hd);
+    // HF BF16 text and image prompts take Torch's M-RoPE; other text keeps the MLX kernels' arithmetic
+    const torch = m.torch_text or (if (m.frame) |fr| fr.runs.len != 0 else false);
+    const positions = (if (m.frame) |fr| fr.positions else m.positions) + pos * 12;
+    const stream: hip.Stream = .{ .r = o.l.r, .handle = o.stream };
     // q rounded to the activation dtype by apply_rope, then widened for the kernel: (heads, rows, d) fp32
-    try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, pos, theta);
+    if (!torch) {
+        try o.ropePrefill(qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, pos, theta);
+    } else if (o.stream != hip.counting) {
+        m.rope.?.textRope(stream, qn, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, s.heads, hd, s.rotary_dim, positions, theta) catch return error.HipFailed;
+    }
     const c = caches.paged(m, index);
     // k rotated and rounded to the activation dtype as (kv_heads, rows, d), then with v into the pages from slot pos
     const kr = try take(o, m.act, rows * s.kv_heads * hd);
-    try o.ropePrefill(kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, pos, theta);
+    if (!torch) {
+        try o.ropePrefill(kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, pos, theta);
+    } else if (o.stream != hip.counting) {
+        m.rope.?.textRope(stream, kn, kr, rows * hd, hd, rows, s.kv_heads, hd, s.rotary_dim, positions, theta) catch return error.HipFailed;
+    }
     try o.pageWrite(kr.ptr, c.k, c.table, rows, s.kv_heads, hd, rows * hd, hd, pos, c.count);
     try o.pageWrite(values.ptr, c.v, c.table, rows, s.kv_heads, hd, hd, s.kv_heads * hd, pos, c.count);
     const att = try o.arena.of(f32, q_rows * hd);
@@ -123,13 +140,17 @@ fn linear(o: Ops, m: *const view.Model, l: view.Linear, caches: *state.Caches, i
     const b = try o.project(x, l.b, rows, false);
     const cache = caches.layers[index].linear;
     const ch = view.convChannels(s);
-    const mixed = try o.arena.of(f32, rows * ch);
+    const kw = s.keyWidth();
+    const qc = try o.arena.of(f32, rows * kw);
+    const kc = try o.arena.of(f32, rows * kw);
+    const v = try o.arena.of(f32, rows * s.valueWidth());
     // the new window lands beside the old one (every row reads the old), then replaces it
     const conv_bytes = (s.conv - 1) * ch * 4;
     const window = try o.arena.take(conv_bytes);
-    try o.convPrefill(qkv, l.conv, cache.conv.base(), mixed, window, rows, ch, s.conv);
+    // the conv writes its q, k and v channels to their own contiguous rows
+    try o.convPrefill(qkv, l.conv, cache.conv.base(), qc, window, rows, ch, s.conv, .{ .k = kc, .v = v, .key_width = kw });
     try hip.raw.copy(cache.conv, 0, window, conv_bytes, o.stream);
-    const q, const k, const v = try splitQkv(o, m, .{ .ptr = mixed, .kind = .f32 }, rows);
+    const q, const k = try normQk(o, m, qc, kc, rows);
     const gate = try o.arena.of(f32, rows * s.value_heads);
     const beta = try o.arena.of(f32, rows * s.value_heads);
     try o.gdnGatePrefill(a, b, l.a_log, l.dt_bias, gate, beta, rows, s.value_heads);
@@ -138,23 +159,16 @@ fn linear(o: Ops, m: *const view.Model, l: view.Linear, caches: *state.Caches, i
     return gatedOut(o, m, l, y, z, rows);
 }
 
-/// The conv output's q and k, normalized (fp32, contiguous), and v (fp32, contiguous).
-pub fn splitQkv(o: Ops, m: *const view.Model, mixed: Tensor, rows: usize) Error!struct { u64, u64, u64 } {
+/// The conv's q and k rows (fp32, contiguous), normalized a head at a time.
+fn normQk(o: Ops, m: *const view.Model, qc: u64, kc: u64, rows: usize) Error!struct { u64, u64 } {
     const s = m.spec;
     const kw = s.keyWidth();
-    const ch = view.convChannels(s);
-    const qc = try o.arena.of(f32, rows * kw);
-    const kc = try o.arena.of(f32, rows * kw);
-    const v = try o.arena.of(f32, rows * s.valueWidth());
-    try o.copyCols(mixed, ch, 0, qc, rows, kw);
-    try o.copyCols(mixed, ch, kw, kc, rows, kw);
-    try o.copyCols(mixed, ch, 2 * kw, v, rows, s.valueWidth());
     const q = try o.arena.of(f32, rows * kw);
     const k = try o.arena.of(f32, rows * kw);
     const heads = rows * s.key_heads;
     try o.rms(.{ .ptr = qc, .kind = .f32 }, m.qk.q_weight, .{ .ptr = q, .kind = .f32 }, heads, s.key_dim, m.qk.eps);
     try o.rms(.{ .ptr = kc, .kind = .f32 }, m.qk.k_weight, .{ .ptr = k, .kind = .f32 }, heads, s.key_dim, m.qk.eps);
-    return .{ q, k, v };
+    return .{ q, k };
 }
 
 /// rms_norm(y, gnorm) * silu(z), rounded to the activation dtype, then the out projection.

@@ -5,9 +5,8 @@ const buffers = @import("buffers.zig");
 
 const log = std.log.scoped(.dsv41);
 
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_DSV41_EX_STACKS") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+pub fn enabled() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_EX_STACKS", false);
 }
 
 /// The shared expert's tensor for a routed suh / svh ("L3.moe.w1.suh" -> "L3.moe.shared.0.w1.suh"), else null.

@@ -52,7 +52,7 @@ pub const Weights = struct {
         var paired: std.AutoHashMapUnmanaged(usize, void) = .empty;
         defer paired.deinit(w.gpa);
         try paired.ensureTotalCapacity(w.gpa, @intCast(b.out.items.len));
-        if (w.pair_stacks orelse stacks.enabled()) {
+        if (w.pair_stacks orelse try stacks.enabled()) {
             const names = try w.gpa.alloc([]const u8, b.out.items.len);
             defer w.gpa.free(names);
             const lengths = try w.gpa.alloc(usize, b.out.items.len);
@@ -142,8 +142,9 @@ pub fn load(w: *Weights, d: *const cuda.Driver, io: std.Io, cfg: *const @import(
     try admitPlan(io, cfg, pack, plan);
     var b: named.Builder = .{ .gpa = w.gpa, .io = io, .pack = pack };
     defer b.deinit();
-    try b.all(plan, cfg.o_groups);
+    try @import("cuda_load_prefetch.zig").all(&b, plan, cfg, try @import("core").checkpoint_read_ahead.optInReaders());
     try w.upload(d, &b);
+    @import("core").checkpoint.cache.files(io, pack.dir, pack.files.items);
 }
 fn admitGroup(pack: *const @import("pack.zig").Pack, io: std.Io, group: @import("plan.zig").GroupPlan) !void {
     try admitWidth(try pack.codebook(io, group.prefix), group.part.group.k2());

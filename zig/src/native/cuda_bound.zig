@@ -12,6 +12,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.embedding.?(x.inner.ptr, s, out);
             }
         }.f else null,
+        .readout_finish = if (v.readout_finish != null) struct {
+            fn f(p: *anyopaque, s: *lanes.Stream, logits: []u16) anyerror!void {
+                const x = H.bind(p);
+                return x.inner.vtable.readout_finish.?(x.inner.ptr, s, logits);
+            }
+        }.f else null,
         .prefill = struct {
             fn f(p: *anyopaque, s: *lanes.Stream) anyerror!void {
                 const x = H.bind(p);
@@ -157,7 +163,11 @@ test "every entry the family's backend gives is forwarded, and none it leaves ou
     interrupted.cancel_prefill = struct {
         fn f(_: *anyopaque, _: *lanes.Stream) anyerror!void {}
     }.f;
-    for ([_]be.Backend{ fake.backend(), fake.stepped(), fake.batchedSteps(), .{ .ptr = &fake, .vtable = &interrupted } }) |b| {
+    var readout = fake.stepped().vtable.*; // a Clef engine's: the readout's completion beside the stepped pass
+    readout.readout_finish = struct {
+        fn f(_: *anyopaque, _: *lanes.Stream, _: []u16) anyerror!void {}
+    }.f;
+    for ([_]be.Backend{ fake.backend(), fake.stepped(), fake.batchedSteps(), .{ .ptr = &fake, .vtable = &interrupted }, .{ .ptr = &fake, .vtable = &readout } }) |b| {
         const w = vtable(H, b.vtable.*);
         const info = @typeInfo(be.Backend.VTable).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
@@ -166,6 +176,7 @@ test "every entry the family's backend gives is forwarded, and none it leaves ou
         }
     }
     try std.testing.expect(vtable(H, fake.stepped().vtable.*).prefill_step != null);
+    try std.testing.expect(vtable(H, readout).readout_finish != null and vtable(H, fake.stepped().vtable.*).readout_finish == null);
 }
 
 test "each forwarded entry calls the family's entry of the same name, once" {

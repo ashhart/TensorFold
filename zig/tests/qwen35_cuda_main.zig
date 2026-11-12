@@ -15,8 +15,17 @@ const usage =
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
     \\state: raw GDN/conv and active KV bytes; TF_Q35_STATE_STEPS=N settles N decode rows first.
-    \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
+    \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _RESUME_TREE, _SHIFT: below.
     \\TF_Q35_WINDOW=N fixes window/tree width (tree: at least 2); 0 keeps growing widths.
+    \\       tf-qwen35-cuda <model dir> rows <ids file> <out> [piece] | rows-last <ids file> | rows-cuts <ids file>
+    \\rows: final-norm rows as a readout keeps them (raw bf16); rows-last checks them against .last; rows-cuts reports.
+    \\       tf-qwen35-cuda <model dir> readout <ids file> [streams]: a test readout's rows alone, together, after a cancel
+    \\       tf-qwen35-cuda <model dir> stage <out> [fp8]: a scenario's logits, one engine or a ring of stages (RFC #2005)
+    \\stage: without TF_STAGE_RANK one engine; with TF_STAGE_RANK, _WORLD, _PEERS, _SECRET_FILE and TF_STAGE_LAYOUT
+    \\(first:end a rank, e.g. 0:32,32:64) each process loads its layers only and rank 0 writes <out>. The scenario: a
+    \\two-chunk prompt, greedy steps, a second stream beside it, drafted windows kept short or rolled back.
+    \\       tf-qwen35-cuda <model dir> pipe <out> [fp8]: greedy streams in TF_PIPE_K groups in flight, tokens to <out>
+    \\pipe: TF_PIPE_STREAMS, _K (0: no pipelining), _PROMPT, _TOKENS, _DRAFT (prompt-lookup drafts); TF_STAGE_* as stage.
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -37,6 +46,32 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
         return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "readout")) {
+        const code = try @import("qwen35_cuda_readout.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
+    }
+    if (args.len >= 4 and std.mem.startsWith(u8, args[2], "rows")) {
+        const code = try @import("qwen35_cuda_rows.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "stage")) {
+        const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
+        if (args.len > 5 or (args.len == 5 and !fp8)) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return @import("qwen35_stage.zig").run(init, a, args[1], args[3], fp8);
+    }
+    if (args.len >= 4 and std.mem.eql(u8, args[2], "pipe")) {
+        const fp8 = args.len == 5 and std.mem.eql(u8, args[4], "fp8");
+        if (args.len > 5 or (args.len == 5 and !fp8)) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return @import("qwen35_pipe.zig").run(init, a, args[1], args[3], fp8);
     }
     if (args.len >= 3 and std.mem.eql(u8, args[2], "kl")) {
         if (args.len != 7 and args.len != 8) {
@@ -59,7 +94,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6, null);
     defer e.deinit();
     if (std.mem.eql(u8, args[2], "mtp")) return mtpCheck(init.gpa, init.io, e, args[1], ids.items);
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
@@ -108,36 +143,29 @@ pub fn main(init: std.process.Init) !u8 {
         // tree windows of growing widths, junk branches beside the kept true one, whose logits must equal step's bits
         var at: usize = 0;
         var w: usize = if (fixed > 0) @max(2, fixed) else 2;
+        var windows: usize = 0;
+        // TF_Q35_RESUME_TREE=J: a kept copy after window J (rows pending), and the windows after J run again from it
+        const resume_tree = try envCount("TF_Q35_RESUME_TREE");
+        var copy: ?*q.reuse.Copy = null;
+        defer if (copy) |c| q.reuse.dropCopy(e, c);
+        var from: struct { at: usize = 0, w: usize = 0, out: usize = 0 } = .{};
         while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
-            var toks: [E.most_window]u32 = undefined;
-            var parents: [E.most_window]i32 = undefined;
-            var path: [E.most_window]u32 = undefined;
-            toks[0] = ids.items[at];
-            parents[0] = -1;
-            path[0] = 0;
-            var n: usize = 1;
-            var kept: usize = 1;
-            var last: i32 = 0;
-            var depth: usize = 1;
-            while (n + 2 <= w and at + depth < ids.items.len) : (depth += 1) {
-                toks[n] = (ids.items[at + depth] + 7) % @as(u32, @intCast(e.g.vocab));
-                parents[n] = last;
-                toks[n + 1] = ids.items[at + depth];
-                parents[n + 1] = last;
-                path[kept] = @intCast(n + 1);
-                last = @intCast(n + 1);
-                n += 2;
-                kept += 1;
+            if (resume_tree > 0 and windows == resume_tree) {
+                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+                from = .{ .at = at, .w = w, .out = out.items.len };
             }
-            if (n < w and n >= 3) {
-                toks[n] = 1;
-                parents[n] = 1;
-                n += 1;
-            }
-            try f.run(.{ .cache = &cache, .rows = n, .parents = parents[0..n] }, toks[0..n]);
-            for (path[0..kept]) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
-            if (n > 1) try cache.keep(e, path[0..kept]);
-            at += kept;
+            at += try treeWindow(&f, &cache, ids.items, at, w, a, &out);
+            windows += 1;
+        }
+        if (copy) |c| {
+            // restored into this cache with rows pending again: the rerun's logits must equal the first run's
+            try q.reuse.restoreCache(e, &cache, c, &.{});
+            var again: std.ArrayList(u8) = .empty;
+            at = from.at;
+            w = from.w;
+            while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) at += try treeWindow(&f, &cache, ids.items, at, w, a, &again);
+            if (!std.mem.eql(u8, again.items, out.items[from.out..])) return error.ResumeMismatch;
+            std.debug.print("tree resume after window {d}: the {d} rows from {d} repeat their logits\n", .{ resume_tree, ids.items.len - from.at, from.at });
         }
     } else if (std.mem.eql(u8, args[2], "probe")) {
         // the first id through layers 0..N (N = the out argument): that layer's routing and rows, for a reference
@@ -218,7 +246,7 @@ pub fn main(init: std.process.Init) !u8 {
                 try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
                 try cache.settle(e);
             }
-            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{});
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
             defer q.reuse.dropCopy(e, copy);
             try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
         } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
@@ -227,9 +255,43 @@ pub fn main(init: std.process.Init) !u8 {
     return 0;
 }
 
+/// One tree window of `w` rows at `at`: its true rows' logits onto `out`, their path kept; the rows it keeps.
+fn treeWindow(f: *Fwd, cache: *E.Cache, ids: []const u32, at: usize, w: usize, a: std.mem.Allocator, out: *std.ArrayList(u8)) !usize {
+    const e = f.e;
+    var toks: [E.most_window]u32 = undefined;
+    var parents: [E.most_window]i32 = undefined;
+    var path: [E.most_window]u32 = undefined;
+    toks[0] = ids[at];
+    parents[0] = -1;
+    path[0] = 0;
+    var n: usize = 1;
+    var kept: usize = 1;
+    var last: i32 = 0;
+    var depth: usize = 1;
+    while (n + 2 <= w and at + depth < ids.len) : (depth += 1) {
+        toks[n] = (ids[at + depth] + 7) % @as(u32, @intCast(e.g.vocab));
+        parents[n] = last;
+        toks[n + 1] = ids[at + depth];
+        parents[n + 1] = last;
+        path[kept] = @intCast(n + 1);
+        last = @intCast(n + 1);
+        n += 2;
+        kept += 1;
+    }
+    if (n < w and n >= 3) {
+        toks[n] = 1;
+        parents[n] = 1;
+        n += 1;
+    }
+    try f.run(.{ .cache = cache, .rows = n, .parents = parents[0..n] }, toks[0..n]);
+    for (path[0..kept]) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
+    if (n > 1) try cache.keep(e, path[0..kept]);
+    return kept;
+}
+
 /// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
 fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
-    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{});
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false);
     defer q.reuse.dropCopy(e, copy);
     var fresh = try E.Cache.init(gpa, e, cache.cap);
     errdefer fresh.deinit(gpa);
@@ -366,10 +428,10 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8);
+    const eb = try E.Engine.init(init.gpa, io, &ctx, model, int8, null);
     defer eb.deinit();
     // int8: one engine (two would not fit), fp8 caches, the second cache's prompt chunks through int8 activations
-    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control);
+    const e8 = if (int8) eb else try E.Engine.init(init.gpa, io, &ctx, model, !control, null);
     defer if (!int8) e8.deinit();
     var cb = try E.Cache.init(init.gpa, eb, skip + rows + 64);
     defer cb.deinit(init.gpa);

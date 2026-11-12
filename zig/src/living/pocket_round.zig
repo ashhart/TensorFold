@@ -6,7 +6,7 @@ pub fn layer(comptime F: @import("family.zig").Family, gpa: std.mem.Allocator, d
         return error.BadPocket;
     if (F.neuron.act == .swiglu and gate.len != up.len) return error.BadPocket;
     for ([_][]f32{ gate, up, down }) |xs| for (xs) |x| if (!std.math.isFinite(x)) return error.NonFinitePocket;
-    try @import("shards.zig").round(F, gpa, d, if (F.neuron.act == .swiglu) &.{ gate, up } else &.{up}, down);
+    try @import("shards.zig").roundFixed(F, gpa, d, if (F.neuron.act == .swiglu) &.{ gate, up } else &.{up}, down);
     for ([_][]f32{ gate, up, down }) |xs| for (xs) |x| if (!std.math.isFinite(x)) return error.NonFinitePocket;
 }
 pub fn asWritten(p: anytype, t: anytype, host: anytype) !void {
@@ -34,9 +34,12 @@ pub fn slot(p: anytype, t: anytype, host: anytype, j: usize) !void {
     @memcpy(cg, gate);
     @memcpy(cu, written_up);
     @memcpy(cv, down);
-    try layer(P.of, p.gpa, p.hidden, P.neurons, cg, cu, cv);
+    try @import("shards.zig").round(P.of, p.gpa, p.hidden, if (P.swiglu) &.{ cg, cu } else &.{cu}, cv);
     if (!std.mem.eql(u8, std.mem.sliceAsBytes(cg), std.mem.sliceAsBytes(gate)) or
         !std.mem.eql(u8, std.mem.sliceAsBytes(cu), std.mem.sliceAsBytes(written_up)) or
         !std.mem.eql(u8, std.mem.sliceAsBytes(cv), std.mem.sliceAsBytes(down))) return error.LayerRoundsAgain;
-    if (P.swiglu) math.fromUp(P.of.neuron, p.scratch.items, up);
+    if (P.swiglu) {
+        math.fromUp(P.of.neuron, p.scratch.items, up);
+        for (up) |x| if (!std.math.isFinite(x)) return error.NonFinitePocket;
+    }
 }

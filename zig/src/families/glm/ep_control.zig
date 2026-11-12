@@ -1,4 +1,4 @@
-//! The expert-parallel pair's control protocol over a link's window: identities, requests and stop decisions, each acked.
+//! The expert-parallel pair's control protocol on a link's window: identities, requests and stop decisions, each acked.
 const std = @import("std");
 const platform = @import("sys");
 const fabric = @import("fabric");
@@ -61,6 +61,7 @@ fn ticks() u64 {
 }
 
 pub const Control = struct {
+    inventory: bool = false, // HELLO=2 announces the optional public inventory exchange after identity agreement
     rank: u32,
     peer: u32,
     rd: Rdma,
@@ -107,7 +108,7 @@ pub const Control = struct {
 
     /// Send this Mac's identity, wait for the peer's, and refuse a peer that runs something else (both Macs refuse).
     pub fn hello(c: *Control, me: Identity) !Identity {
-        try c.rd.write2Signal(c.peer, c.base + IDENT, std.mem.asBytes(&me), &.{}, c.base + HELLO, 1);
+        try c.rd.write2Signal(c.peer, c.base + IDENT, std.mem.asBytes(&me), &.{}, c.base + HELLO, if (c.inventory) 2 else 1);
         _ = try c.reach(HELLO, 1, true) orelse return error.EpClosed;
         const peer: *const Identity = @ptrCast(@alignCast(c.rd.window().ptr + c.base + IDENT));
         if (!me.compatible(peer.*)) {
@@ -117,7 +118,7 @@ pub const Control = struct {
         return peer.*;
     }
 
-    /// A step both Macs take in order: rank 0's stop decision, read and acknowledged by rank 1 before its parity word is reused.
+    /// In-order step on both Macs: rank 0's stop decision, read and acked by rank 1 before its parity word is reused.
     pub fn agree(c: *Control, quit: bool) !bool {
         c.step += 1;
         const at = CTRL + 8 * (c.step % 2);
@@ -252,6 +253,9 @@ test "identities: the halves tile the experts and everything else matches" {
 }
 
 test "hello refuses a peer that runs another layer subset, on both ranks" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const gpa = std.testing.allocator;
     const p = try Pair.init(gpa);
     defer p.deinit(gpa);

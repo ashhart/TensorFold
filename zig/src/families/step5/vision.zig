@@ -247,10 +247,11 @@ pub const Vision = struct {
     }
 };
 
-/// fp32 to bf16, round to nearest even.
+/// fp32 to bf16 as core's bf16_round.bits rounds (NaN stays NaN); a copy, the contract tests build core as a module.
 pub fn bf16(x: f32) u16 {
     const u: u32 = @bitCast(x);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+    if (std.math.isNan(x)) return @truncate((u >> 16) | 0x40);
+    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
 fn f32of(h: u16) f32 {

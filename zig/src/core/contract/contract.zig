@@ -36,11 +36,7 @@ pub fn read(e: Elem, bytes: []const u8, i: usize) f64 {
 }
 
 /// fp32 to bf16, round to nearest even (NaN stays NaN).
-pub fn toBf16(v: f32) u16 {
-    const u: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @truncate((u >> 16) | 0x40);
-    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
-}
+pub const toBf16 = @import("bf16_round").bits;
 
 pub fn fromBf16(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -84,6 +80,8 @@ pub const Spec = struct {
     /// Roundings to the output's own type before its last one (a bf16 product of bf16 values).
     mids: f64 = 0,
     out: Elem,
+    /// The precision a kernel stores at when that is narrower than `out` (bf16 values in fp32 words); null means `out`.
+    store: ?Elem = null,
     in_place: bool = false,
     /// A replacement kernel's outputs must equal this kernel's bits on the same inputs.
     replaces: ?[]const u8 = null,
@@ -121,16 +119,18 @@ pub fn gamma(d: f64, u: f64) f64 {
     return if (d * u < 0.5) d * u / (1 - d * u) else 1;
 }
 
-/// The allowed |got - want|: the sums' gamma(depth) of their terms' magnitude, the ops, then the output's rounding.
+/// The allowed |got - want|: the sums' gamma(depth) of their terms' magnitude, the ops, then the store's rounding.
 pub fn bound(s: Spec, shape: Shape, want: f64, mag: f64) f64 {
-    const work = gamma(@floatFromInt(s.depth(shape)), unit(s.accum)) * mag + (s.ops * 0x1p-24 + s.mids * outUnit(s.out)) * @abs(want);
-    return work + outUnit(s.out) * (@abs(want) + work) + outFloor(s.out);
+    const st = s.store orelse s.out;
+    const work = gamma(@floatFromInt(s.depth(shape)), unit(s.accum)) * mag + (s.ops * 0x1p-24 + s.mids * outUnit(st)) * @abs(want);
+    return work + outUnit(st) * (@abs(want) + work) + outFloor(st);
 }
 
 /// The allowed |got - want| when every sum is exact in fp32 in any order (gate 4's inputs): the ops and the rounding.
 pub fn boundExact(s: Spec, want: f64) f64 {
-    const work = (s.ops * 0x1p-24 + s.mids * outUnit(s.out)) * @abs(want);
-    return work + outUnit(s.out) * (@abs(want) + work) + outFloor(s.out);
+    const st = s.store orelse s.out;
+    const work = (s.ops * 0x1p-24 + s.mids * outUnit(st)) * @abs(want);
+    return work + outUnit(st) * (@abs(want) + work) + outFloor(st);
 }
 
 /// The served shapes, then per tiled dimension of the first: least, tile - step, tile, tile + step, largest served.

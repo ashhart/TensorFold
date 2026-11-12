@@ -4,8 +4,10 @@ const t = @import("types.zig");
 const quant = @import("core").quant;
 const launches = @import("../launches.zig");
 const affine_launch = @import("../launches/affine.zig");
+pub const DenseTile = @import("../launches/dense.zig").Tile;
 const registry = @import("core").registry;
 const Ops = @import("ops.zig").Ops;
+const counting = @import("../launches/util.zig").counting;
 const Error = t.Error;
 const Tensor = t.Tensor;
 const Affine = t.Affine;
@@ -30,13 +32,44 @@ fn affineOf(proj: Projection, h: mlx.Matrix) Affine {
 pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Error!Tensor {
     switch (proj.handle) {
         .mlx => |h| return affine(o, x, affineOf(proj, h), m, f32_out),
-        .dense => |h| {
-            if (f32_out or m == 0 or x.kind == .f32) return error.BadShape;
-            const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
-            try denseRows(o, x, h.weight, out, m, proj.n, proj.k);
+        .dense => |h| switch (h.dtype) {
+            .f32 => {
+                if (f32_out or m == 0 or x.kind == .f32) return error.BadShape;
+                const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
+                try denseRows(o, x, h.weight, out, m, proj.n, proj.k);
+                return out;
+            },
+            .bf16 => {
+                if (m == 0 or x.kind != .bf16) return error.BadShape;
+                const kind: t.Kind = if (f32_out) .f32 else .bf16;
+                const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * kind.size()), .kind = kind };
+                try denseGemm(o, o.l.dense.serve, x, h.weight, out, m, proj.n, proj.k);
+                return out;
+            },
+            else => return error.BadShape,
+        },
+        .bf16 => |h| {
+            if (f32_out or m == 0 or x.kind != .bf16) return error.BadShape;
+            const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 2), .kind = .bf16 };
+            // the counting stream sizes the arena: no product runs on its addresses
+            if (o.stream == counting) return out;
+            const b = o.blas orelse return error.BadShape;
+            if (b.stream.handle != o.stream) return error.BadShape;
+            b.project(x.ptr, h.weight, out.ptr, m, proj.n, proj.k) catch |err| return if (err == error.Invalid) error.BadShape else error.HipFailed;
             return out;
         },
     }
+}
+
+/// silu(gate) x up into `act` (m, n / 2) from an interleaved gate/up BF16 projection (n, k), in the WMMA epilogue.
+pub fn projectSilu(o: Ops, x: Tensor, proj: Projection, m: usize, act: Tensor) Error!void {
+    const h = switch (proj.handle) {
+        .dense => |d| d,
+        .mlx, .bf16 => return error.BadShape,
+    };
+    if (h.dtype != .bf16 or m == 0 or x.kind != .bf16 or act.kind != .bf16) return error.BadShape;
+    if (o.l.dense.siluRefusal(x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k)) != null) return error.BadShape;
+    try o.l.dense.gemmSilu(o.l.r, x.ptr, h.weight, act.ptr, int(m), int(proj.n), int(proj.k), o.stream);
 }
 
 /// Up to four products of the same `m` rows in one launch; false, nothing launched, when no grouped tile takes them.
@@ -45,7 +78,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
     if (ps.len > ws.len) return false;
     for (ps, ws[0..ps.len]) |pr, *w| switch (pr.handle) {
         .mlx => |h| w.* = affineOf(pr, h),
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     return affineGroup(o, x, ws[0..ps.len], m, outs);
 }
@@ -54,7 +87,7 @@ pub fn projectGroup(o: Ops, x: Tensor, ps: []const Projection, m: usize, outs: [
 pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, limit: f32) Error!?Tensor {
     switch (proj.handle) {
         .mlx => |h| return affineRoutedAct(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, limit),
-        .dense => return null,
+        .dense, .bf16 => return null,
     }
 }
 
@@ -62,7 +95,7 @@ pub fn projectRoutedAct(o: Ops, x: Tensor, proj: Projection, items: u64, count: 
 pub fn projectRelu2(o: Ops, x: Tensor, proj: Projection, m: usize, out: Tensor) Error!bool {
     const h = switch (proj.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -103,7 +136,7 @@ pub fn projectRoutedRelu2(
 ) Error!bool {
     const h = switch (proj.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const w = affineOf(proj, h);
     try w.check();
@@ -141,11 +174,11 @@ pub fn projectRoutedPlainRelu2(
 ) Error!bool {
     const ha = switch (routed.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const hb = switch (plain.handle) {
         .mlx => |h| h,
-        .dense => return false,
+        .dense, .bf16 => return false,
     };
     const wa = affineOf(routed, ha);
     const wb = affineOf(plain, hb);
@@ -189,10 +222,10 @@ pub fn projectRoutedPlainRelu2(
 }
 
 /// matmul_routed on a stack of experts: every item in one launch; out (pairs, N) fp32.
-pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize) Error!u64 {
+pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
     switch (proj.handle) {
-        .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows),
-        .dense => return error.BadShape,
+        .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows),
+        .dense, .bf16 => return error.BadShape,
     }
 }
 
@@ -200,7 +233,8 @@ pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usi
 pub fn embedRows(o: Ops, table: Projection, ids: u64, n: usize, out: Tensor) Error!void {
     switch (table.handle) {
         .mlx => |h| return embedAffine(o, affineOf(table, h), ids, n, out),
-        .dense => |h| try o.l.tf_embed_dense(f(h.weight), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
+        .dense => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(try kindOf(h.dtype)), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
+        .bf16 => |h| try o.l.tf_embed_dense(p(h.weight), @backingInt(t.Kind.bf16), @ptrFromInt(ids), int(n), int(table.k), p(out.ptr), @backingInt(out.kind), o.stream),
     }
 }
 
@@ -236,7 +270,7 @@ pub fn affine(o: Ops, x: Tensor, w: Affine, m: usize, f32_out: bool) Error!Tenso
     const z = o.l;
     const shape = shapeOf(o, x, w, m);
     const tile = z.affine.choose(.project, if (o.prefill) .prefill else .decode, shape) orelse return error.BadShape;
-    half = !f32_out and !o.prefill and tile.roundsAct(shape);
+    half = !f32_out and tile.roundsAct(shape);
     const out = try o.arena.take(m * n * @as(usize, if (half) 2 else 4));
     {
         const arg: affine_launch.Arg = .{
@@ -328,17 +362,28 @@ pub fn affineRoutedAct(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, m
 }
 
 /// matmul_routed: every item (expert, first, count) in one launch over stacked weights; out (pairs, N) fp32.
-pub fn affineRouted(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize) Error!u64 {
+pub fn affineRouted(o: Ops, x: Tensor, w: Affine, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
     try w.check();
     const out = try o.arena.of(f32, pairs * w.n);
     if (o.prefill) {
+        // a routed prompt without its plan's average rows an expert can't choose its tile: refuse it by name
+        if (expert_rows == 0) return error.BadShape;
         const z = o.l;
         const kind = w.tables.table();
-        try z.affine.prefillLaunch(z.r, .{ .x = x.ptr, .words = w.words, .scale = .{ .p = w.scale, .kind = kind }, .bias = .{ .p = w.bias, .kind = kind }, .out = out, .m = int(rows), .n = int(w.n), .k = int(w.k), .bits = int(w.bits), .group = int(w.group), .fp16 = @intFromBool(x.kind == .f16), .route = .{ .items = items, .members = members, .x_div = int(x_div) } }, o.stream, int(count), int(pairs));
+        try z.affine.prefillLaunch(z.r, .{ .x = x.ptr, .words = w.words, .scale = .{ .p = w.scale, .kind = kind }, .bias = .{ .p = w.bias, .kind = kind }, .out = out, .m = int(rows), .n = int(w.n), .k = int(w.k), .bits = int(w.bits), .group = int(w.group), .fp16 = @intFromBool(x.kind == .f16), .route = .{ .items = items, .members = members, .x_div = int(x_div) } }, o.stream, int(count), int(pairs), int(expert_rows));
         return out;
     }
     try o.l.tf_affine_routed(p(x.ptr), p(w.words), p(w.scale), p(w.bias), w.tables.table(), p(out), i(items), int(count), i(members), int(x_div), int(rows), int(w.n), int(w.k), w.bits, w.group, @intFromBool(x.kind == .f16), o.stream);
     return out;
+}
+
+test "a routed prompt without its average rows per expert refuses, instead of guessing the 64-row tile" {
+    const std = @import("std");
+    var arena = @import("../arena.zig").Arena.counting();
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = null, .arena = &arena, .prefill = true };
+    const x = Tensor{ .ptr = 0, .kind = .bf16 };
+    const w = Affine{ .words = 0, .scale = 0, .bias = 0, .tables = .bf16, .n = 1024, .k = 2048, .bits = 4, .group = 64 };
+    try std.testing.expectError(error.BadShape, affineRouted(o, x, w, 1, 8, 1, 8, 1, 128, 0));
 }
 
 /// The MLX affine gather: `n` embedding rows of width `table.k` by device ids, dequantized into `out`.
@@ -350,4 +395,22 @@ pub fn embedAffine(o: Ops, table: Affine, ids: u64, n: usize, out: Tensor) Error
 /// x (rows, k) of x's kind times fp32 weights (n, k), out (rows, n) in x's kind: an unquantized draft projection.
 pub fn denseRows(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
     try o.l.tf_dense_rows(p(x.ptr), @backingInt(x.kind), f(w), p(out.ptr), int(rows), int(n), int(k), o.stream);
+}
+
+/// x (rows, k) BF16 times BF16 weights [n, k] on `tile`: `out` fp32, or BF16 rounded once.
+pub fn denseGemm(o: Ops, tile: DenseTile, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
+    if (x.kind != .bf16 or out.kind == .f16) return error.BadShape;
+    const wide = out.kind == .f32;
+    if (o.l.dense.refusal(tile, x.ptr, w, int(rows), int(n), int(k)) != null) return error.BadShape;
+    try o.l.dense.gemm(o.l.r, tile, x.ptr, w, if (wide) out.ptr else 0, if (wide) 0 else out.ptr, int(rows), int(n), int(k), o.stream);
+}
+
+/// The kernels' element kind of a dense weight's dtype.
+fn kindOf(dtype: quant.DType) Error!t.Kind {
+    return switch (dtype) {
+        .f32 => .f32,
+        .bf16 => .bf16,
+        .f16 => .f16,
+        else => error.BadShape,
+    };
 }

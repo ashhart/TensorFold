@@ -3,11 +3,30 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int G = 6, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4; // a row's key chunk is its node word 2
+#ifndef Q27_G
+#define Q27_G 6 // query heads a KV head (the 27B's); the model's host prepends its own
+#define Q27_KVH 4
+#endif
+constant constexpr int G = Q27_G, KVH = Q27_KVH, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4; // a row's key chunk is its node word 2
 struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
 
+// Bits 15 and 31 of two bf16s: set where that half's exponent is all ones (not finite), as adding 1 to it carries out.
+inline uint q27_inf2(uint w) {
+  return ((w & 0x7F807F80u) + 0x00800080u) & 0x80008000u;
+}
+
+// Whether a value at keys lo..hi in the 128 dims from `v` isn't finite: one simdgroup's vote, two keys a pass.
+inline bool q27_nonfinite(const device bfloat* v, int lo, int hi, ushort lane) {
+  uint inf = 0;
+  for (int key = min(lo, hi) + (lane >> 4); key < hi; key += 2) {  // lo is INT_MAX where no row is live
+    const uint4 w = *(const device uint4*)(v + (int64_t)key * D + (lane & 15) * 8);
+    inf |= q27_inf2(w.x) | q27_inf2(w.y) | q27_inf2(w.z) | q27_inf2(w.w);
+  }
+  return simd_any(inf != 0);
+}
+
 // SG tiles a threadgroup, a simdgroup pair each: both run scores and softmax, one owns each half of the head dim.
-template <int SG>
+template <int SG, bool MASKED>  // MASKED false is main's kernel, for one row a stream: it sees every key its tile reads
 kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]],
     constant float* scale [[buffer(2)]], device const int* meta [[buffer(3)]], device const int* tile_stream [[buffer(4)]],
     device float* PO [[buffer(5)]], device float* PM [[buffer(6)]], device float* PL [[buffer(7)]], device const int* nodes [[buffer(8)]],
@@ -59,6 +78,10 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
   const int e0 = ck0 == w ? n0 : 0, e1 = ck1 == w ? n1 : 0;
   const int kbeg = int(c) * w;
   const int kend = min(kbeg + w, L);
+  // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), those steps sum P V here
+  const int seen = MASKED ? simd_min(min(q0 < G * NQ ? e0 : INT_MAX, q1 < G * NQ ? e1 : INT_MAX)) : 0;
+  const device bfloat* vh = MASKED ? Vb + (int64_t)hk * meta[MG + st * MS + 8] + (hi ? 128 : 0) : Vb;
+  const bool masked = MASKED && q27_nonfinite(vh, max(seen, kbeg), kend, lane);
   for (int kt = kbeg; kt < kend; kt += TK) {
     auto bK = tK.slice(0, kt);
     auto S = opS.template get_destination_cooperative_tensor<decltype(aQ), decltype(bK), float>();
@@ -90,8 +113,31 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     for (int i = 0; i < TK / 2; i++) Pc[i] = half(p[i]);
     auto Pin = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Pc);
     for (int i = 0; i < 64; i++) O[i] *= (i & 4) ? f1 : f0;
-    auto bV = tV.slice(hi ? 128 : 0, kt);
-    opO.run(Pin, bV, O);
+    if (!masked || kt + TK <= seen) {
+      auto bV = tV.slice(hi ? 128 : 0, kt);
+      opO.run(Pin, bV, O);
+      continue;
+    }
+    for (int d = 0; d < TK && kt + d < kend; d++) {
+      // rows fm and fm + 8 at key kt + d: element (d / 16) 8 + d % 4 (+ 4) of the lane with fn = d % 16 rounded to 4
+      const int b = d >> 4, u = d & 3;
+      float va = 0.0f, vb = 0.0f;
+      _Pragma("clang loop unroll(full)")
+      for (int i = 0; i < 16; i++)
+        if ((i >> 2) == b && (i & 3) == u) { va = p[(i >> 2) * 8 + (i & 3)]; vb = p[(i >> 2) * 8 + 4 + (i & 3)]; }
+      const short g = (d >> 2) & 3;
+      const ushort from = ((fm & 4) << 2) | ((g & 2) << 2) | ((fm & 3) << 1) | (g & 1);
+      const float pa = simd_shuffle(float(half(va)), from), pb = simd_shuffle(float(half(vb)), from);
+      const int key = kt + d;
+      const device bfloat* vk = vh + (int64_t)key * D + fn;
+      _Pragma("clang loop unroll(full)")
+      for (int t = 0; t < 8; t++)
+        for (int x = 0; x < 4; x++) {
+          const float val = float(vk[t * 16 + x]);
+          if (key < e0) O[t * 8 + x] += pa * val;
+          if (key < e1) O[t * 8 + 4 + x] += pb * val;
+        }
+    }
   }
   if (w == wb) break;
   }
@@ -107,7 +153,8 @@ kernel void q27_attn_prefix(device const bfloat* Qp [[buffer(0)]], device const 
     if (q1 < G * NQ) { PM[base + r1] = m1; PL[base + r1] = l1; }
   }
 }
-#define Q27_PREFIX(SG) template [[host_name("q27_attn_prefix_" #SG)]] kernel void q27_attn_prefix<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, device const int*, uint3, ushort, ushort);
+#define Q27_PREFIX_AS(SG, M, NAME) template [[host_name(NAME #SG)]] kernel void q27_attn_prefix<SG, M>(device const bfloat*, device const Q27AttnReadPtrs*, constant float*, device const int*, device const int*, device float*, device float*, device float*, device const int*, uint3, ushort, ushort);
+#define Q27_PREFIX(SG) Q27_PREFIX_AS(SG, false, "q27_attn_prefix_") Q27_PREFIX_AS(SG, true, "q27_attn_prefix_masked_")
 Q27_PREFIX(1)
 Q27_PREFIX(2)
 Q27_PREFIX(3)
@@ -380,10 +427,10 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
   }
   const int h = hk * G + g;
   for (int i = 0; i < DP; i++) {
-    const int64_t index = ((int64_t)node * (G * 4) + h) * D + lane * DP + i;
+    const int64_t index = ((int64_t)node * (G * KVH) + h) * D + lane * DP + i;
     const bfloat v = static_cast<bfloat>(o[i] / l);
     if (gated) {
-      const float gate = float(QG[((int64_t)node * (G * 4) + h) * 2 * D + D + lane * DP + i]);
+      const float gate = float(QG[((int64_t)node * (G * KVH) + h) * 2 * D + D + lane * DP + i]);
       OUT[index] = static_cast<bfloat>(float(v) * q27_round(1.0f / (1.0f + exp(-gate)), 0));
     } else OUT[index] = v;
   }

@@ -1,5 +1,8 @@
-//! Admission for the Qwen3.5-2B MLX affine checkpoint: pinned geometry and formats, tied or untied head; other geometries require qualification.
+//! Qwen3.5-2B MLX affine admission: pinned geometry and formats, tied or untied head; other geometries need qualifying.
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
 
 pub const hidden = 2048;
 pub const vocab = 248320;
@@ -67,12 +70,6 @@ fn boolean(o: std.json.ObjectMap, key: []const u8, expected: bool) !void {
     if (v != .bool or v.bool != expected) return error.UnsupportedQwenConfig;
 }
 
-fn flag(o: std.json.ObjectMap, key: []const u8) !bool {
-    const v = try field(o, key);
-    if (v != .bool) return error.BadQwenConfig;
-    return v.bool;
-}
-
 fn quantization(v: std.json.Value) !void {
     const o = try object(v);
     if (try integer(o, "bits") != 4 or try integer(o, "group_size") != group) return error.UnsupportedQwenQuantization;
@@ -95,30 +92,19 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     const text = try object(try field(root, "text_config"));
     try string(text, "model_type", "qwen3_5_text");
     // The head's tiedness: the language config decides; a root-level copy must agree.
-    const tied = try flag(text, "tie_word_embeddings");
-    if (root.get("tie_word_embeddings")) |v| {
-        if (v != .bool) return error.BadQwenConfig;
-        if (v.bool != tied) return error.BadQwenConfig;
-    }
-    try boolean(text, "attention_bias", false);
-    try boolean(text, "attn_output_gate", true);
-    try string(text, "hidden_act", "silu");
-    try string(text, "mamba_ssm_dtype", "float32");
+    const tied = try rules.tied(root, text, .metal2b);
+    try rules.check(text, .metal2b);
     const dims = .{
         .{ "hidden_size", hidden },              .{ "vocab_size", vocab },                  .{ "num_hidden_layers", layers },
         .{ "intermediate_size", intermediate },  .{ "linear_num_key_heads", linear_heads }, .{ "linear_num_value_heads", linear_heads },
         .{ "linear_key_head_dim", linear_dim },  .{ "linear_value_head_dim", linear_dim },  .{ "linear_conv_kernel_dim", conv_taps },
         .{ "num_attention_heads", query_heads }, .{ "num_key_value_heads", kv_heads },      .{ "head_dim", head_dim },
-        .{ "full_attention_interval", 4 },
     };
     inline for (dims) |d| if (try integer(text, d[0]) != d[1]) return error.UnsupportedQwenGeometry;
     if (try number(try field(text, "rms_norm_eps")) != 1e-6) return error.UnsupportedQwenConfig;
-    const types = try field(text, "layer_types");
-    if (types != .array or types.array.items.len != layers) return error.UnsupportedQwenGeometry;
-    for (types.array.items, 0..) |kind, i| {
-        if (kind != .string or !std.mem.eql(u8, kind.string, if (linear(i)) "linear_attention" else "full_attention"))
-            return error.UnsupportedQwenGeometry;
-    }
+    var full: [layers]bool = undefined;
+    try layer_pattern.read(&full, text);
+    for (full, 0..) |f, i| if (f == linear(i)) return error.UnsupportedQwenGeometry; // the 2B's schedule only
     const rope = try object(try field(text, "rope_parameters"));
     try string(rope, "rope_type", "default");
     checks.defaultRope(text, rope) catch return error.UnsupportedQwenRotary;
@@ -238,6 +224,7 @@ test "admit the affine 2B geometry and text rotary layout" {
         .{ "\"rope_theta\":10000000", "\"rope_theta\":100000", error.UnsupportedQwenRotary },
         .{ "\"mrope_section\":[11,11,10]", "\"mrope_section\":[16,8,8]", error.UnsupportedQwenRotary },
         .{ "\"max_position_embeddings\":262144", "\"max_position_embeddings\":524288", error.UnsupportedQwenConfig },
+        .{ "\"full_attention_interval\":4", "\"full_attention_interval\":2", error.LayerTypesContradictFullAttentionInterval },
         .{ "\"rope_type\":\"default\"", "\"rope_type\":\"yarn\",\"factor\":4.0,\"original_max_position_embeddings\":262144", error.UnsupportedQwenConfig },
     };
     inline for (changes) |change| {
@@ -258,7 +245,7 @@ test "admit untied heads and refuse a root and language tiedness disagreement" {
     // Only the root flipped: text_config keeps the tie, the root disagrees -> malformed export.
     const mismatch = try std.mem.replaceOwned(u8, gpa, fixture, "\"tie_word_embeddings\": true\n}", "\"tie_word_embeddings\": false\n}");
     defer gpa.free(mismatch);
-    try std.testing.expectError(error.BadQwenConfig, parse(gpa, mismatch));
+    try std.testing.expectError(error.BadTiedHead, parse(gpa, mismatch));
 }
 
 // The geometry any backend reads, with its defaults and checks; Metal's admission above is stricter (one geometry).
@@ -269,7 +256,6 @@ pub const Error = error{
     UnsupportedModel,
     InvalidMoe,
     InvalidRotary,
-    InvalidLayerTypes,
 } || checks.Error || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
 
 pub const checks = @import("config_checks.zig");
@@ -291,7 +277,6 @@ pub const Spec = struct {
     eps: f64,
     rope_theta: f64,
     rotary_dim: usize,
-    full_every: usize,
     bits: u8,
     group: u16,
     experts: usize,
@@ -318,11 +303,12 @@ pub const Spec = struct {
     }
 };
 
-/// The config's root object, when its model_type is a Qwen3.5 text model, dense or sparse.
+/// The config's root object, when its model_type is a Qwen3.5 text model, dense or sparse, and its tied head readable.
 pub fn declared(a: std.mem.Allocator, bytes: []const u8) Error!std.json.ObjectMap {
     const doc = try objectOf(try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}));
     const kind = doc.get("model_type") orelse return error.UnsupportedModel;
     if (kind != .string or !(eql(kind.string, "qwen3_5") or eql(kind.string, "qwen3_5_moe"))) return error.UnsupportedModel;
+    _ = try rules.tied(doc, try textTower(doc), .hip);
     return doc;
 }
 
@@ -337,9 +323,9 @@ pub fn pickObject(doc: std.json.ObjectMap, tower: std.json.ObjectMap, key: []con
     return std.json.ObjectMap.empty;
 }
 
-/// `tie_word_embeddings`: the output head is the embedding (the default).
-pub fn isTied(doc: std.json.ObjectMap, tower: std.json.ObjectMap) bool {
-    return if (doc.get("tie_word_embeddings")) |v| truthyValue(v) else if (tower.get("tie_word_embeddings")) |v| truthyValue(v) else true;
+/// `tie_word_embeddings` by the shared row: text_config's, else the root's, else untied; a bad key is refused.
+pub fn isTied(doc: std.json.ObjectMap, tower: std.json.ObjectMap) Error!bool {
+    return rules.tied(doc, tower, .hip);
 }
 
 /// The Spec of a text tower whose weights are `bits` wide in groups of `group_size`.
@@ -355,11 +341,11 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
     const attn_heads = try requiredInt(tower, "num_attention_heads");
     const per_head = if (truthy(tower.get("head_dim"))) try toInt(tower.get("head_dim").?) else model_width / attn_heads;
     const rope = if (truthy(tower.get("rope_parameters"))) try objectOf(tower.get("rope_parameters").?) else std.json.ObjectMap.empty;
-    const partial = try numberOf(rope.get("partial_rotary_factor") orelse tower.get("partial_rotary_factor") orelse .{ .float = 0.25 });
+    const partial = try numberOf(rope_config.pick(rope, tower, "partial_rotary_factor", .both) orelse .{ .float = 0.25 });
     const product = @as(f64, @floatFromInt(per_head)) * partial;
     if (!(product >= 0 and product <= @as(f64, @floatFromInt(per_head)))) return error.InvalidRotary;
     const rotary: usize = @intFromFloat(product);
-    const base = try numberOf(rope.get("rope_theta") orelse if (truthy(tower.get("rope_theta"))) tower.get("rope_theta").? else .{ .integer = 10_000_000 });
+    const base = try numberOf(rope_config.pick(rope, tower, "rope_theta", .truthy) orelse .{ .integer = 10_000_000 });
     var spec: Spec = .{
         .hidden = model_width,
         .intermediate = try optionalInt(tower, "intermediate_size", 0),
@@ -376,7 +362,6 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .eps = try numberOf(tower.get("rms_norm_eps") orelse .{ .float = 1e-6 }),
         .rope_theta = base,
         .rotary_dim = rotary,
-        .full_every = try optionalInt(tower, "full_attention_interval", 4),
         .bits = bits,
         .group = group_size,
         .experts = experts,
@@ -386,10 +371,10 @@ pub fn geometry(tower: std.json.ObjectMap, bits: u8, group_size: u16) Error!Spec
         .mtp_layers = try optionalInt(tower, "mtp_num_hidden_layers", 0),
     };
     if (rotary % 2 != 0 or rotary == 0 or rotary > per_head) return error.InvalidRotary;
-    if (spec.full_every == 0 or attn_heads == 0) return error.InvalidConfig;
+    if (attn_heads == 0) return error.InvalidConfig;
     try checks.computes(tower);
     try checks.products(.{ .hidden = spec.hidden, .intermediate = spec.intermediate, .vocab = spec.vocab, .heads = spec.heads, .kv_heads = spec.kv_heads, .head_dim = spec.head_dim, .key_heads = spec.key_heads, .value_heads = spec.value_heads, .key_dim = spec.key_dim, .value_dim = spec.value_dim, .conv = spec.conv, .experts = spec.experts, .moe_width = spec.moe_width, .shared_width = spec.shared_width });
-    try checks.layers(&spec.full_layers, tower, spec.n_layers, spec.full_every);
+    try checks.layers(&spec.full_layers, tower, spec.n_layers);
     spec.mrope = try checks.mrope(rope, rotary);
     try checks.defaultRope(tower, rope);
     spec.max_position = try checks.maxPosition(tower);
@@ -480,7 +465,7 @@ test "text_config parses into the Python Spec" {
     try std.testing.expectEqual(@as(u16, 64), s.group);
     try std.testing.expectEqual(@as(usize, 0), s.experts);
     try std.testing.expectEqual(@as(usize, 1), s.mtp_layers);
-    try std.testing.expect(!isTied(doc, tower));
+    try std.testing.expect(!try isTied(doc, tower));
     try std.testing.expect(s.full(3) and s.full(7) and !s.full(0) and !s.full(4));
 }
 
@@ -498,7 +483,7 @@ test "a top-level config, the partial rotary default and the MoE fields" {
     const doc = try declared(arena.allocator(), text);
     const tower = try textTower(doc);
     const s = try geometry(tower, 8, 64);
-    try std.testing.expect(isTied(doc, tower));
+    try std.testing.expect(!try isTied(doc, tower)); // no tie_word_embeddings: untied, as transformers reads it
     try std.testing.expectEqual(@as(usize, 128), s.head_dim);
     try std.testing.expectEqual(@as(usize, 64), s.rotary_dim);
     try std.testing.expectEqual(@as(f64, 5_000_000), s.rope_theta);
@@ -507,7 +492,35 @@ test "a top-level config, the partial rotary default and the MoE fields" {
     try std.testing.expectEqual(@as(usize, 512), s.moe_width);
     try std.testing.expectEqual(@as(usize, 512), s.shared_width);
     try std.testing.expectEqual(@as(usize, 0), s.intermediate);
-    try std.testing.expectEqual(@as(usize, 4), s.full_every);
+    try std.testing.expect(s.full(3) and !s.full(0) and !s.full(2)); // no interval, no list: every fourth layer
+}
+
+test "HIP's tied head: text_config's key, else the root's, untied when absent; a disagreement or a non-flag refused" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { []const u8, []const u8, ?bool }{
+        .{ "", "", false },
+        .{ "", "\"tie_word_embeddings\": true, ", true }, // text_config only
+        .{ "", "\"tie_word_embeddings\": false, ", false },
+        .{ "\"tie_word_embeddings\": true, ", "", true }, // root only
+        .{ "\"tie_word_embeddings\": true, ", "\"tie_word_embeddings\": true, ", true },
+        .{ "\"tie_word_embeddings\": false, ", "\"tie_word_embeddings\": true, ", null },
+        .{ "\"tie_word_embeddings\": true, ", "\"tie_word_embeddings\": false, ", null },
+        .{ "", "\"tie_word_embeddings\": 1, ", true },
+        .{ "", "\"tie_word_embeddings\": \"yes\", ", null },
+        .{ "\"tie_word_embeddings\": null, ", "", null },
+    };
+    const body = sample_text["{\"model_type\": \"qwen3_5\", \"tie_word_embeddings\": false,\n \"text_config\": {".len..];
+    for (cases) |c| {
+        const text = try std.fmt.allocPrint(a, "{{\"model_type\": \"qwen3_5\", {s}\"text_config\": {{{s}{s}", .{ c[0], c[1], body });
+        const doc = declared(a, text) catch |e| {
+            try std.testing.expectEqual(@as(?bool, null), c[2]);
+            try std.testing.expectEqual(error.BadTiedHead, e);
+            continue;
+        };
+        try std.testing.expectEqual(c[2].?, try isTied(doc, try textTower(doc)));
+    }
 }
 
 test "the geometry refuses what the kernels do not compute and sizes past 32 bits" {
@@ -539,15 +552,33 @@ test "the Python loader's refusals" {
     const wrong = try std.mem.replaceOwned(u8, a, sample_text, "\"qwen3_5\"", "\"llama\"");
     defer a.free(wrong);
     try std.testing.expectError(error.UnsupportedModel, declared(arena.allocator(), wrong));
-    // any mix of the two kinds is read as written; another kind is refused
+    // any mix of the two kinds is read as written unless the interval contradicts it; another kind is refused
     const mixed = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"linear_attention\"],");
     defer a.free(mixed);
-    const s = try geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64);
+    try std.testing.expectError(error.LayerTypesContradictFullAttentionInterval, geometry(try textTower(try declared(arena.allocator(), mixed)), 4, 64));
+    const unset = try std.mem.replaceOwned(u8, a, mixed, "\"full_attention_interval\": 4,", "\"full_attention_interval\": null,");
+    defer a.free(unset);
+    const s = try geometry(try textTower(try declared(arena.allocator(), unset)), 4, 64);
     try std.testing.expect(s.full(3) and !s.full(7));
     const types = try std.mem.replaceOwned(u8, a, sample_text, "\"full_attention\"],", "\"sliding_attention\"],");
     defer a.free(types);
-    try std.testing.expectError(error.InvalidLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
+    try std.testing.expectError(error.UnsupportedLayerTypes, geometry(try textTower(try declared(arena.allocator(), types)), 4, 64));
     const moe = try std.mem.replaceOwned(u8, a, sample_text, "\"vocab_size\"", "\"num_experts\": 8, \"num_experts_per_tok\": 9, \"vocab_size\"");
     defer a.free(moe);
     try std.testing.expectError(error.InvalidMoe, geometry(try textTower(try declared(arena.allocator(), moe)), 4, 64));
+}
+
+test "Metal 2B format scope: the geometry takes only affine q4g64 from the family union" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try std.json.parseFromSlice(std.json.Value, a, fixture, .{});
+    const compact = try std.json.Stringify.valueAlloc(a, doc.value, .{});
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64, 128 }) |g| {
+        const widened = try std.mem.replaceOwned(u8, a, compact, "\"bits\":4", try std.fmt.allocPrint(a, "\"bits\":{d}", .{bits}));
+        const changed = try std.mem.replaceOwned(u8, a, widened, "\"group_size\":64", try std.fmt.allocPrint(a, "\"group_size\":{d}", .{g}));
+        if (bits == 4 and g == 64) {
+            _ = try parse(a, changed);
+        } else try std.testing.expectError(error.UnsupportedQwenQuantization, parse(a, changed));
+    };
 }

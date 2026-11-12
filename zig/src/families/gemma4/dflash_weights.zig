@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
+const bf16_round = @import("bf16_round");
 const weights = @import("weights.zig");
 
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
@@ -139,13 +140,8 @@ fn bf16ToF32(v: u16) f32 {
     return @bitCast(@as(u32, v) << 16);
 }
 
-/// Round to nearest even, as MLX casts.
-fn f32ToBf16(f: f32) u16 {
-    const bits: u32 = @bitCast(f);
-    if ((bits & 0x7f80_0000) == 0x7f80_0000) return @truncate(bits >> 16);
-    const round = 0x7fff + ((bits >> 16) & 1);
-    return @truncate((bits + round) >> 16);
-}
+/// Round to nearest even, as MLX casts; NaN stays NaN.
+const f32ToBf16 = bf16_round.bits;
 
 /// A thread's share of a tensor's rows quantized.
 const Job = struct {
@@ -165,8 +161,8 @@ const Job = struct {
 /// The members' bf16 rows stacked along N, quantized to 4-bit groups of 64 on every core, packed for the reg kernel.
 fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8) !Linear {
     _ = try stackShape(c, prefix, members);
-    const bf16_env = std.c.getenv("GEMMA_DRAFT_BF16");
-    if (bf16_env != null and (std.mem.eql(u8, std.mem.span(bf16_env.?), "all") or std.mem.eql(u8, std.mem.span(bf16_env.?), members[0]))) return bf16Stack(gpa, device, c, owned, prefix, members);
+    const bf16_env = @import("profile").lookup("GEMMA_DRAFT_BF16");
+    if (bf16_env != null and (std.mem.eql(u8, bf16_env.?, "all") or std.mem.eql(u8, bf16_env.?, members[0]))) return bf16Stack(gpa, device, c, owned, prefix, members);
     return quantized(gpa, device, c, owned, geo, prefix, members);
 }
 
@@ -319,4 +315,42 @@ test "4-bit quantization keeps the larger edge exact and zero within the scale's
     const q16: u32 = words[2] & 0xf; // x[16] = 0.0 lands on a code, off by the bf16 rounding of the scale times the code
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), scale * @as(f32, @floatFromInt(q16)) + bias, 0.05);
     try std.testing.expect(@abs(scale * @as(f32, @floatFromInt(q16)) + bias) < @abs(scale) / 2);
+}
+
+test "DFlash scale and bias bf16: today's bits on every zero, subnormal, infinity and tie; a NaN scale stays NaN" {
+    const old = struct {
+        /// f32ToBf16 as it was spelled before it was core's bits(): the oracle for every non-NaN input.
+        fn spelled(f: f32) u16 {
+            const bits: u32 = @bitCast(f);
+            if ((bits & 0x7f80_0000) == 0x7f80_0000) return @truncate(bits >> 16);
+            const round = 0x7fff + ((bits >> 16) & 1);
+            return @truncate((bits + round) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = f32ToBf16(v);
+            if (!std.math.isNan(v)) return std.testing.expectEqual(spelled(v), h);
+            try std.testing.expect(std.math.isNan(bf16ToF32(h)));
+            try std.testing.expectEqual(u >> 31, h >> 15);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expectEqual(@as(u16, 0x7f80), old.spelled(@bitCast(@as(u32, 0x7f800001)))); // the old copy's +Inf
+    try std.testing.expectEqual(@as(u16, 0xff80), old.spelled(@bitCast(@as(u32, 0xff80ffff)))); // and its -Inf
+    for ([_]u32{ 0x7f800001, 0xff80ffff, 0x7fc00000, 0xffffffff, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
+    var x: [64]u16 = @splat(0x3f80); // an infinite weight: the bias passes it, the scale is -Inf / NaN
+    x[5] = 0x7f80;
+    var words: [8]u32 = undefined;
+    var s: u16 = undefined;
+    var b: u16 = undefined;
+    quantizeGroup(&x, &words, &s, &b);
+    try std.testing.expectEqual(@as(u16, 0x7f80), b);
+    try std.testing.expect(std.math.isNan(bf16ToF32(s)));
 }

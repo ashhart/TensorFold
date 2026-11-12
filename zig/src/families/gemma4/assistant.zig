@@ -92,7 +92,7 @@ pub const Drafter = struct {
     pub fn init(gpa: std.mem.Allocator, io: std.Io, metal: *backend.Metal, dir: []const u8) !*Drafter {
         const target = metal.model;
         // the assistant's own weights are the lane layout: M5 only. The target's row path does not serve them.
-        if (!target.device.tensorUnits()) return error.GemmaDraftNeedsTensorUnits;
+        if (!kernels.draftAvailable(target.device)) return error.GemmaDraftNeedsTensorUnits;
         const geo = target.config.geo;
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
@@ -192,7 +192,7 @@ pub const Drafter = struct {
     /// Chains of up to 6, one assistant forward a draft: the rule prices each draft and may choose none.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const d = cast(ptr);
-        return .{ .depth = depth, .step_ms = d.step_ms, .batched = true, .stream_bytes = d.target.config.geo.hidden * 2 };
+        return .{ .limit_shared_drafts = true, .depth = depth, .step_ms = d.step_ms, .batched = true, .stream_bytes = d.target.config.geo.hidden * 2 };
     }
 
     fn openFn(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -248,12 +248,14 @@ pub const Drafter = struct {
     /// Each stream's last absorbed row through the target's final norm into its lane; committed, not awaited.
     fn absorbFn(ptr: *anyopaque, items: []const dr.Absorb) anyerror!void {
         const d = cast(ptr);
+        if (!try @import("assistant_budget.zig").useful(d, items)) return;
         const t = d.target;
         const width = t.config.geo.hidden * 2;
         try d.settle();
         const cb = t.queue.commandBuffer();
         const e = cb.compute(.serial);
         for (items) |it| {
+            if (!it.propose) continue;
             const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or f.rows == 0 or it.follow.len < f.rows) return error.DraftFeaturesUnsupported;
@@ -543,4 +545,8 @@ test "a hold's key range and chunk counts follow the kept row's position" {
         try std.testing.expectEqual(k[2], p / sliding_chunk - lo / sliding_chunk + 1);
         try std.testing.expect(p + 1 - lo <= cfg.window);
     }
+}
+
+test {
+    _ = @import("assistant_budget.zig").Cases(Drafter, Lane);
 }

@@ -178,10 +178,16 @@ pub fn vecTensor(d: *Dev, c: *const Checkpoint, name: []const u8, centred: bool)
         const h: f16 = @bitCast(std.mem.readInt(u16, t.bytes[2 * i ..][0..2], .little));
         var v: f32 = h;
         if (centred) v += 1.0;
-        const u: u32 = @bitCast(v);
-        o.* = @intCast((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
+        o.* = toBf16(v);
     }
     return d.upload(std.mem.sliceAsBytes(out));
+}
+
+/// fp32 to bf16 as core's bf16_round.bits rounds (NaN stays NaN); spelled out, the XPU 27B modules have no `core`.
+fn toBf16(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return @truncate((u >> 16) | 0x40);
+    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
 /// Qwen3.8-27B from a symmetric 4-bit GPTQ checkpoint (g128): int4 projections, fp16 embedding, head quantized to 4/64.

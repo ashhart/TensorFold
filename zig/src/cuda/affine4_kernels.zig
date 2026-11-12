@@ -33,12 +33,15 @@ pub const Affine4Kernels = struct {
     pub const Out = struct { q: Affine4, out: u64 };
 
     group_fn: Function,
+    mlp128_fn: Function,
+    mlp128: bool = false,
     gemv_fn: Function,
     verify_fn: Function, // two m16 row tiles share each weight panel on the GB10 verify path
     verify64_fn: Function, // four, for wider shared frames
     verify128_fn: Function, // eight
     split_fn: Function,
     seg_fn: Function, // the split form over up to four projections of one input
+    many_fn: Function, // GB10 keeps each member's K slices in its CTA
     prefill_fn: Function,
     prefill22_fn: Function, // the prompt tile on 2x2 warps and two stages (`half_prompt` picks it)
     prefill_many_fn: Function, // GB10: one prompt grid over projections sharing the bf16 input
@@ -54,6 +57,18 @@ pub const Affine4Kernels = struct {
     pub fn resolve(d: *const Driver, group_mod: Module, prefill_mod: Module, gemv_mod: Module, pack_mod: Module, sms: usize, gb10: bool) !Affine4Kernels {
         var a: Affine4Kernels = undefined;
         a.group_fn = try group_mod.function(symbols.group);
+        a.mlp128_fn = try group_mod.function("_ZN12tf_qmm_group12group_kernelILi64ELi16ELi128ELi1ELi8ELi4ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii");
+        try a.mlp128_fn.allowDynamicShared(26880);
+        a.mlp128 = false;
+        if (sms == 82 or std.c.getenv("TF_CUDA_TEST_MLP128") != null) {
+            var device: @import("abi.zig").Device = 0;
+            try d.check(d.api.cuCtxGetDevice(&device), "cuCtxGetDevice");
+            var major: c_int = 0;
+            var minor: c_int = 0;
+            try d.check(d.api.cuDeviceGetAttribute(&major, .compute_capability_major, device), "cuDeviceGetAttribute");
+            try d.check(d.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, device), "cuDeviceGetAttribute");
+            a.mlp128 = try @import("sm120_test_override.zig").select("TF_CUDA_TEST_MLP128", @intCast(10 * major + minor), sms);
+        }
         a.verify_fn = try group_mod.function(symbols.verify32);
         a.verify64_fn = try group_mod.function(symbols.verify64);
         a.verify128_fn = try group_mod.function(symbols.verify128);
@@ -63,6 +78,7 @@ pub const Affine4Kernels = struct {
         a.half_prompt = false;
         a.gemv_fn = try gemv_mod.function(symbols.gemv);
         a.split_fn = try gemv_mod.function(symbols.gemv_split);
+        a.many_fn = try gemv_mod.function("tf_lane_gemv_many");
         a.seg_fn = try gemv_mod.function(symbols.gemv_seg);
         a.words_fn = try pack_mod.function(symbols.pack_words);
         a.scales_fn = try pack_mod.function(symbols.pack_scales);
@@ -76,6 +92,7 @@ pub const Affine4Kernels = struct {
         try a.prefill_fn.allowDynamicShared(prefill_smem);
         try a.prefill22_fn.allowDynamicShared(linear.prefill22_smem);
         try a.prefill_many_fn.allowDynamicShared(prefill_smem);
+        try a.many_fn.allowDynamicShared(group_smem);
         a.gemv_blocks = @max(1, try a.gemv_fn.occupancy(128, group_smem)) * sms;
         a.pdl = gb10;
         a.wide_verify = false;
@@ -118,11 +135,88 @@ pub const Affine4Kernels = struct {
     /// decode() of each projection of one input; without GB10 one segmented launch, each keeping its split's bits.
     pub fn decodeMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
         if (rows > max_rows) return error.WindowTooWide;
+        if (a.pdl and outs.len > 1) return a.gemvMany(s, x, xs, outs, rows);
         const sp = a.split orelse {
             for (outs) |o| try a.decode(s, x, xs, o.q, o.out, rows);
             return;
         };
         return a.gemvSeg(s, x, xs, outs, rows, sp);
+    }
+
+    /// Every member's verify() bits, without changing the GB10 split-buffer policy.
+    pub fn verifyMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (rows == 0 or rows > a.verifyRows()) return error.WindowTooWide;
+        if (rows <= max_rows) return a.decodeMany(s, x, xs, outs, rows);
+        if (a.pdl and outs.len > 1) return a.wideMany(s, x, xs, outs, rows);
+        for (outs) |o| try a.verify(s, x, xs, o.q, o.out, rows);
+    }
+
+    /// The existing wide tile already accepts member-local splits within one common cluster width.
+    pub fn wideMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (!a.pdl or rows <= max_rows or rows > a.verifyRows()) return error.WindowTooWide;
+        if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;
+        var width: usize = 1;
+        for (outs, 0..) |o, i| {
+            if (o.q.k == 0 or o.q.k % 64 != 0 or o.q.k != outs[0].q.k or o.q.n == 0 or o.q.npad < o.q.n or o.q.npad % 64 != 0) return error.InputMismatch;
+            for (outs[0..i]) |prev| if (prev.out == o.out) return error.InputMismatch;
+            width = @max(width, splitK(o.q.n, o.q.k));
+        }
+        var parts: Parts = std.mem.zeroes(Parts);
+        var clusters: usize = 0;
+        for (outs, 0..) |o, i| {
+            const sk = splitK(o.q.n, o.q.k);
+            const tiles = (o.q.n + 63) / 64;
+            const per = width / sk;
+            parts.p[i] = .{ .w = o.q.w, .scales = o.q.s, .biases = o.q.b, .out = o.out, .n = int(o.q.n), .npad = int(o.q.npad), .sk = int(sk), .tiles = int(tiles), .first = int(clusters) };
+            clusters += (tiles + per - 1) / per;
+        }
+        parts.count = int(outs.len);
+        var args: launch_.Args = .{};
+        args.add(x);
+        args.add(xs);
+        args.add(parts);
+        for ([_]usize{ rows, outs[0].q.k, outs[0].q.k, 1, width }) |v| args.add(int(v));
+        const f = if (rows <= 32) a.verify_fn else if (rows <= 64) a.verify64_fn else a.verify128_fn;
+        const shared = if (rows <= 32) linear.verify_smem else if (rows <= 64) linear.verify64_smem else linear.verify128_smem;
+        try launch_.launch(f, .{ .grid = .{ .x = u(clusters * width) }, .block = .{ .x = 128 }, .shared = shared, .cluster = if (width > 1) .{ .x = u(width) } else null, .pdl = true }, s, &args);
+    }
+
+    /// Native rows in bounded verify tiles, each output retaining its own contiguous row stride.
+    pub fn verifyManyRows(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;
+        if (rows == 0) return error.WindowTooWide;
+        var many: [segs_max]Out = undefined;
+        const k = outs[0].q.k;
+        const tile = a.verifyRows();
+        var at: usize = 0;
+        while (at < rows) : (at += tile) {
+            for (outs, many[0..outs.len]) |o, *m| m.* = .{ .q = o.q, .out = o.out + at * o.q.n * 2 };
+            try a.verifyMany(s, x + at * k * 2, xs + at * (k / 64) * 4, many[0..outs.len], @min(tile, rows - at));
+        }
+    }
+
+    /// One decode-sized PDL grid over independent persistent member grids.
+    pub fn gemvMany(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, outs: []const Out, rows: usize) !void {
+        if (!a.pdl or rows == 0 or rows > max_rows) return error.WindowTooWide;
+        if (outs.len < 2 or outs.len > segs_max) return error.TooManyParts;
+        var parts: linear.GemvManyParts = std.mem.zeroes(linear.GemvManyParts);
+        var blocks: usize = 0;
+        for (outs, 0..) |o, i| {
+            if (o.q.k == 0 or o.q.k % 64 != 0 or o.q.k != outs[0].q.k or o.q.n == 0 or o.q.npad < o.q.n or o.q.npad % 64 != 0) return error.InputMismatch;
+            for (outs[0..i]) |prev| if (prev.out == o.out) return error.InputMismatch;
+            const tiles = (o.q.n + 63) / 64;
+            const local = @min(tiles, a.gemv_blocks);
+            if (local == 0) return error.InputMismatch;
+            parts.p[i] = .{ .p = .{ .w = o.q.w, .scales = o.q.s, .biases = o.q.b, .out = o.out, .n = int(o.q.n), .npad = int(o.q.npad), .sk = int(splitK(o.q.n, o.q.k)), .tiles = int(tiles) }, .first = int(blocks), .blocks = int(local) };
+            blocks += local;
+        }
+        parts.count = int(outs.len);
+        var args: launch_.Args = .{};
+        args.add(x);
+        args.add(xs);
+        args.add(parts);
+        for ([_]usize{ rows, outs[0].q.k, outs[0].q.k }) |v| args.add(int(v));
+        try launch_.launch(a.many_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 128 }, .shared = group_smem, .pdl = true }, s, &args);
     }
 
     /// One CTA a tile's K slice over every projection of `outs`, the split form's partials and tickets in `sp`.
@@ -227,7 +321,9 @@ pub const Affine4Kernels = struct {
 
     /// qmm_group's tile 2: a cluster of `sk` CTAs a column tile, its K slices summed over distributed shared memory.
     pub fn cluster(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize) !void {
-        const tiles = (q.n + 63) / 64;
+        const tuned = a.mlp128 and mlp128Shape(rows, q.n, q.k, sk);
+        const width: usize = if (tuned) 128 else 64;
+        const tiles = (q.n + width - 1) / width;
         var parts: Parts = std.mem.zeroes(Parts);
         parts.count = 1;
         parts.p[0] = .{ .w = q.w, .scales = q.s, .biases = q.b, .out = out, .n = int(q.n), .npad = int(q.npad), .sk = int(sk), .tiles = int(tiles), .first = 0 };
@@ -240,12 +336,12 @@ pub const Affine4Kernels = struct {
         for ([_]usize{ rows, q.k, q.k, rows_t, sk }) |v| g.add(int(v));
         const cfg: launch_.Config = .{
             .grid = .{ .x = u(clusters * sk) },
-            .block = .{ .x = 128 },
-            .shared = group_smem,
+            .block = .{ .x = if (tuned) 256 else 128 },
+            .shared = if (tuned) 26880 else group_smem,
             .cluster = if (sk > 1) .{ .x = u(sk) } else null,
-            .pdl = a.pdl,
+            .pdl = a.pdl or tuned,
         };
-        try launch_.launch(a.group_fn, cfg, s, &g);
+        try launch_.launch(if (tuned) a.mlp128_fn else a.group_fn, cfg, s, &g);
     }
 
     /// qmm.prefill_matmul (tile 0): weights rounded once to bf16, one fp32 chain over K; bf16 out.
@@ -303,3 +399,26 @@ pub const Affine4Kernels = struct {
         try launch_.launch(a.prefill_many_fn, .{ .grid = .{ .x = u(blocks) }, .block = .{ .x = 256 }, .shared = prefill_smem }, s, &g);
     }
 };
+
+test {
+    _ = @import("gemv_many_host_test.zig");
+}
+
+/// The measured device envelope; other SM120 cards keep the existing tile.
+pub fn mlp128Device(sm: u32, sms: usize) bool {
+    return @import("sm120_test_override.zig").enabled(sm, sms, null);
+}
+
+/// A single K slice and a complete dense 27B MLP output panel.
+pub fn mlp128Shape(rows: usize, n: usize, k: usize, sk: usize) bool {
+    return rows > 0 and rows <= 16 and n == 17408 and k == 5120 and sk == 1;
+}
+
+test "MLP128 keeps unqualified devices and shapes on the existing tile" {
+    try std.testing.expect(mlp128Device(120, 82));
+    for ([_][2]u32{ .{ 121, 82 }, .{ 120, 170 }, .{ 89, 82 } }) |d|
+        try std.testing.expect(!mlp128Device(d[0], d[1]));
+    for ([_]usize{ 1, 8, 16 }) |rows| try std.testing.expect(mlp128Shape(rows, 17408, 5120, 1));
+    for ([_][4]usize{ .{ 0, 17408, 5120, 1 }, .{ 17, 17408, 5120, 1 }, .{ 16, 17408, 5120, 2 }, .{ 16, 5120, 17408, 1 }, .{ 16, 17408, 2048, 1 } }) |s|
+        try std.testing.expect(!mlp128Shape(s[0], s[1], s[2], s[3]));
+}

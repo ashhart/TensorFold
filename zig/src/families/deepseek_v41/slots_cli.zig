@@ -68,8 +68,8 @@ pub fn main(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []cons
     while (it.next()) |l| try lines.append(a, try std.json.parseFromSliceLeaky(Line, a, l, .{ .ignore_unknown_fields = true }));
     const n = lines.items.len;
     if (n == 0 or n > 16) return error.BadTrace;
-    const drafts = if (std.c.getenv("TF_DSV41_DRAFTS")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else false;
-    const s = try se.Served.open(gpa, io, pack, assets, drafts, null);
+    const drafts = try @import("sys").environment.read(bool, "TF_DSV41_DRAFTS", false);
+    const s = try se.Served.open(gpa, io, pack, assets, drafts, null, null);
     defer se.Served.close(s);
     const eng = s.engine();
     const eos = s.m.cfg.eos;

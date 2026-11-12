@@ -104,12 +104,21 @@ const Rig = struct {
     host: LaneHost,
 
     fn start(r: *Rig, pages: *Pages, check: bool) !void {
+        return r.startWith(pages, check, false);
+    }
+
+    /// `counted`: the pool's promises pass the host's ledger alone (#1943), as a paged family's on the CUDA host.
+    fn startWith(r: *Rig, pages: *Pages, check: bool, counted: bool) !void {
         const gpa = std.testing.allocator;
         r.cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        errdefer r.cfg.deinit(gpa);
         r.target = .{ .gpa = gpa, .reserve = pages.reserve() };
+        errdefer r.target.deinit();
         r.clock = .{};
         r.core = lanes.Engine.init(gpa, &r.cfg, r.target.backend(), r.clock.clock());
+        errdefer r.core.deinit();
         r.host = LaneHost.init(gpa, std.testing.io, &r.core, .{ .lanes = 3, .admit = if (check) .{ .ctx = pages, .fits = Pages.fits } else null });
+        if (counted) try r.host.countPool(&pages.pool);
         try r.host.start();
     }
 
@@ -122,10 +131,14 @@ const Rig = struct {
 };
 
 fn run(check: bool) !void {
+    return runWith(check, false);
+}
+
+fn runWith(check: bool, counted: bool) !void {
     var pages: Pages = .{ .pool = try kv.Pool.init(std.testing.allocator, 25003 + 3, 4) };
     defer pages.deinit();
     var rig: Rig = undefined;
-    try rig.start(&pages, check);
+    try rig.startWith(&pages, check, counted);
     const e = rig.host.engine();
     var a: Box = .{};
     var b: Box = .{};
@@ -147,6 +160,7 @@ fn run(check: bool) !void {
     try expectEqual(@as(?Reason, .length), b.waitFor(2000)); // then it runs
     try expectEqual(@as(usize, 7), b.state()[0]);
     rig.stop();
+    try expect(pages.pool.ledger == null); // the stopped host's ledger let the pool go
     try expectEqual(@as(usize, if (check) 2 else 1), pages.most);
     try expectEqual(@as(usize, 0), pages.leases.count());
     try expect(pages.pool.idle());
@@ -203,4 +217,43 @@ test "a cancel during the prompt pass gives the stream's pages back" {
     rig.stop();
     try expectEqual(@as(usize, 1), pages.most);
     try expect(pages.pool.idle());
+}
+
+test "a pool counted in the host's ledger admits as it did alone: the same waits, the same streams at once, idle" {
+    try runWith(true, true);
+    try runWith(false, true);
+}
+
+test "a counted pool: a request past it with nothing else running fails in words, and the host still serves" {
+    var pages: Pages = .{ .pool = try kv.Pool.init(std.testing.allocator, 3, 4) };
+    defer pages.deinit();
+    var rig: Rig = undefined;
+    try rig.startWith(&pages, true, true);
+    try expect(rig.host.kv.?.idle() and rig.host.kv.?.total == 3 * 4);
+    const e = rig.host.engine();
+    var a: Box = .{};
+    var b: Box = .{};
+    const big: Request = .{ .prompt = &tokens, .max_tokens = 8 }; // pages(17) = 5
+    const small: Request = .{ .prompt = &tokens, .max_tokens = 3 }; // pages(12) = 3
+    try e.submit(1, &big, .{ .ctx = &a, .event = Box.event });
+    try expectEqual(@as(?Reason, .failed), a.waitFor(2000));
+    try e.submit(2, &small, .{ .ctx = &b, .event = Box.event });
+    try expectEqual(@as(?Reason, .length), b.waitFor(2000));
+    rig.stop();
+    try expect(pages.pool.idle() and pages.pool.ledger == null);
+}
+
+test "one host counts a pool: a second is refused while the first holds it, and counts it once the first stops" {
+    var pages: Pages = .{ .pool = try kv.Pool.init(std.testing.allocator, 3, 4) };
+    defer pages.deinit();
+    var first: Rig = undefined;
+    try first.startWith(&pages, true, true);
+    var second: Rig = undefined;
+    try std.testing.expectError(error.PoolHasHost, second.startWith(&pages, true, true));
+    try expect(pages.pool.host == @as(*const anyopaque, &first.host));
+    first.stop();
+    try expect(pages.pool.host == null and pages.pool.ledger == null);
+    try second.startWith(&pages, true, true);
+    try expect(pages.pool.host == @as(*const anyopaque, &second.host));
+    second.stop();
 }

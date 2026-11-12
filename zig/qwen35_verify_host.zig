@@ -8,6 +8,7 @@ pub const Trace = struct {
     pub var calls: [128]Call = undefined;
     pub var count: usize = 0;
     pub var prompts: usize = 0;
+    pub var grouped: usize = 0;
     fn record(f: cuda.abi.Function, gx: u32, shared: u32, args: ?[*]?*anyopaque) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id == 4) {
@@ -22,6 +23,15 @@ pub const Trace = struct {
         var out: u64 = 0;
         var sk: c_int = 0;
         var tiles: c_int = 1;
+        if (id == 9) {
+            grouped += 1;
+            const parts = @as(*const cuda.qlinear.GemvManyParts, @ptrCast(@alignCast(a[2].?))).*;
+            for (parts.p[0..@intCast(parts.count)]) |part| {
+                calls[count] = .{ .id = id, .x = x, .xs = xs, .out = part.p.out, .rows = rows, .sk = part.p.sk, .row_tiles = @divTrunc(rows + 15, 16), .grid = gx, .shared = shared };
+                count += 1;
+            }
+            return 0;
+        }
         if (id == 8) {
             const segs = @as(*const cuda.qlinear.Segs, @ptrCast(@alignCast(a[2].?))).*;
             for (segs.s[0..@intCast(segs.count)]) |seg| {
@@ -36,6 +46,14 @@ pub const Trace = struct {
             sk = p.sk;
         } else if (id == 3 or id == 5 or id == 6 or id == 7) {
             const p = @as(*const cuda.qlinear.Parts, @ptrCast(@alignCast(a[2].?))).*;
+            if (p.count > 1) {
+                grouped += 1;
+                for (p.p[0..@intCast(p.count)]) |part| {
+                    calls[count] = .{ .id = id, .x = x, .xs = xs, .out = part.out, .rows = rows, .sk = part.sk, .row_tiles = 1, .grid = gx, .shared = shared };
+                    count += 1;
+                }
+                return 0;
+            }
             out = p.p[0].out;
             sk = p.p[0].sk;
             tiles = @as(*const c_int, @ptrCast(@alignCast(a[6].?))).*;
@@ -66,6 +84,8 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);
+    e.affine.many_fn = function(d, 9);
+    e.affine.mlp128 = false;
     e.affine.gemv_fn = function(d, 2);
     e.affine.group_fn = function(d, 3);
     e.affine.prefill_fn = function(d, 4);
@@ -202,4 +222,30 @@ test "verify matmuls: real module resolution sets the new function's shared-memo
     try t.expectEqual([3]c_int{ 32640, 43008, 57600 }, Resolve.shared);
     try t.expectEqual(@as(usize, 96), a.gemv_blocks);
     try t.expectEqual(@as(usize, 128), a.verifyRows());
+}
+
+test "MLP128 leaves the lane GEMV column coverage unchanged" {
+    const Probe = struct {
+        var tiles: c_int = 0;
+        var blocks: u32 = 0;
+        fn launch(_: cuda.abi.Function, gx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+            const p = @as(*const cuda.qlinear.GemvPart, @ptrCast(@alignCast(args.?[2].?))).*;
+            tiles = p.tiles;
+            blocks = gx;
+            return 0;
+        }
+    };
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Probe.launch;
+    var a: cuda.qlinear.Affine4Kernels = undefined;
+    a.mlp128 = true;
+    a.gemv_fn = function(&d, 2);
+    a.gemv_blocks = 1000;
+    a.pdl = false;
+    const projection: cuda.qlinear.Affine4 = .{ .w = 10, .s = 20, .b = 30, .n = 17408, .k = 5120, .npad = 17408 };
+    for ([_]usize{ 1, 8, 16 }) |rows| {
+        try a.gemv(.{ .d = &d, .handle = null }, 100, 200, projection, 300, rows, 1);
+        try t.expectEqual(@as(c_int, 272), Probe.tiles);
+        try t.expectEqual(@as(u32, 272), Probe.blocks);
+    }
 }

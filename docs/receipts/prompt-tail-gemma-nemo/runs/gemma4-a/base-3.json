@@ -1,0 +1,185 @@
+{
+ "label": "base-3",
+ "md5": "671fd7101a3ce9afbdfe5d3f9c77061c",
+ "cold": {
+  "2k": [
+   {
+    "prompt": 2045,
+    "cached": 0,
+    "sha": "2b8b4e752a6a",
+    "ttft": 2.119,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (harbor,"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 2068,
+    "cached": 0,
+    "sha": "99172159e730",
+    "ttft": 2.251,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words combined with numbers ("
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 2041,
+    "cached": 0,
+    "sha": "5a0eb141f58d",
+    "ttft": 2.119,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 3520"
+    },
+    "lp": null,
+    "plp": null
+   }
+  ],
+  "16k": [
+   {
+    "prompt": 15965,
+    "cached": 0,
+    "sha": "5399bfa076a9",
+    "ttft": 19.589,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of the provided text, which is a"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 15974,
+    "cached": 0,
+    "sha": "5399bfa076a9",
+    "ttft": 19.641,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of the provided text, which is a"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 15944,
+    "cached": 0,
+    "sha": "7be6097bb432",
+    "ttft": 19.621,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (mostly nouns like"
+    },
+    "lp": null,
+    "plp": null
+   }
+  ],
+  "32k": [
+   {
+    "prompt": 31902,
+    "cached": 0,
+    "sha": "7be6097bb432",
+    "ttft": 45.604,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (mostly nouns like"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 31905,
+    "cached": 0,
+    "sha": "0445409ab0c7",
+    "ttft": 45.588,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 1020"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 31826,
+    "cached": 0,
+    "sha": "adb20d5f1b6b",
+    "ttft": 45.432,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 1120"
+    },
+    "lp": null,
+    "plp": null
+   }
+  ]
+ },
+ "decode": {
+  "tokens": 128,
+  "s": 10.294,
+  "sha": "5d5caa4d22ef",
+  "msg": {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "*   Input: A long list of words (garden, copper, stone, winter, ledger, candle, river, harbor, signal, meadow, orbit, lamp) each followed by a number.\n    *   Task: Summarize the document.\n\n    *   The document consists of repeated words (categories) paired with numbers.\n    *   Words: garden, copper, stone, winter, ledger, candle, river, harbor, signal, meadow, orbit, lamp.\n    *   Numbers: Vary widely (e.g., 333, 246, 842"
+  },
+  "lp": null,
+  "plp": null
+ },
+ "seeded": {
+  "sha": "5515ac89e29e",
+  "msg": {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "The user wants a summary of \"Document 78\"."
+  },
+  "lp": null,
+  "plp": null
+ },
+ "kept": {
+  "cached": [
+   0,
+   13835,
+   15950
+  ],
+  "shas": [
+   "b844d0a10ad3",
+   "6f9c03bcc509",
+   "6f9c03bcc509"
+  ],
+  "a": {
+   "msg": {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "*   Input: A long list of words (garden, ledger"
+   },
+   "lp": null,
+   "plp": null
+  },
+  "b": {
+   "msg": {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "*   Input: A long list of words (garden, ledger"
+   },
+   "lp": null,
+   "plp": null
+  }
+ },
+ "gate_logits": [
+  [],
+  []
+ ]
+}

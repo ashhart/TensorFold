@@ -103,9 +103,10 @@ test "an attached run saves an unranked receipt that publishes with explicit con
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try runArgs(&r, try f.url(a, ""), out)));
     try std.testing.expect(r.has("unranked") and r.has("Receipt saved") and r.has("code T=0 repeat 1/1: ok"));
-    try std.testing.expectEqual(@as(usize, 5), f.count()); // the manifest it asked for first, then the four replies
+    try std.testing.expectEqual(@as(usize, 6), f.count()); // Manifest, thinking discovery, then four streamed replies.
     try std.testing.expectEqualStrings("/v1/benchmark/manifest", f.request(0).path);
-    for (0..5) |i| try std.testing.expect(std.mem.startsWith(u8, f.request(i).path, "/v1/"));
+    try std.testing.expectEqualStrings("/v1/models", f.request(1).path);
+    for (0..6) |i| try std.testing.expect(std.mem.startsWith(u8, f.request(i).path, "/v1/"));
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     try std.testing.expect(v.get("samples").?.array.len == 2 and !v.get("settings").?.get("managed").?.bool and v.get("settings").?.get("rank_count").? == .null);
@@ -333,7 +334,7 @@ test "a managed run starts its own serve, measures through it, stops it and save
     try std.testing.expectEqualStrings(server.buildBackend(), rt.get("backend").?.string);
     const m = v.get("model").?;
     try std.testing.expect(m.get("local").?.bool and m.get("repo_id").? == .null and std.mem.eql(u8, m.get("quantization").?.string, "mlx-4bit-g64"));
-    try std.testing.expect(v.get("settings").?.get("managed").?.bool and std.mem.eql(u8, v.get("settings").?.get("rank_count").?.int, "1"));
+    try std.testing.expect(v.get("settings").?.get("managed").?.bool and v.get("settings").?.get("rank_count").? == .null);
     try std.testing.expect(std.mem.indexOf(u8, try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, a, .limited(1 << 20)), "private-checkpoint") == null);
     const again = server.lockRun(std.testing.io, try r.path(".tensorfold/benchmarks"), &problem) orelse return error.TestUnexpectedResult;
     again.close(std.testing.io);
@@ -435,7 +436,7 @@ test "an attached rocm run saves a local receipt that inspect accepts and publis
     try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try backendArgs(&r, "rocm", try f.url(a, ""), out)));
-    try std.testing.expect(r.has("| rocm |") and r.has("Receipt saved") and r.has("rocm receipt is saved locally") and f.count() == 5);
+    try std.testing.expect(r.has("| rocm |") and r.has("Receipt saved") and r.has("rocm receipt is saved locally") and f.count() == 6);
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     try std.testing.expectEqualStrings("rocm", v.get("runtime").?.get("backend").?.string);

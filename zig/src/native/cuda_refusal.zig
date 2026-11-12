@@ -26,12 +26,22 @@ pub fn backend(o: api.Open) ?[]const u8 {
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
+    // Fish and Qwen4 open outside family(), so their --tp is refused here
+    if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
+        if (unranked(o)) |why| return why;
     return null;
 }
 
 /// LFM2 reads a checkpoint's pictures through its own tower without --vision: the flag is refused, not ignored.
 pub fn lfm2(o: api.Open) ?[]const u8 {
-    return if (o.vision != null) lfm2_vision else null;
+    return if (o.vision != null) lfm2_vision else unranked(o);
+}
+
+pub const no_ranks = "this CUDA family has no tensor-parallel ranks: serve without --tp";
+
+/// --tp for a family that opens outside `family()` (Fish, Qwen4, LFM2): refused, never ignored.
+pub fn unranked(o: api.Open) ?[]const u8 {
+    return if (o.tp != 1) no_ranks else null;
 }
 
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
@@ -42,11 +52,7 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
-    if (o.tp != 1 and !ranked) return "this CUDA family has no tensor-parallel ranks: serve without --tp";
-    if (@hasDecl(F, "tp_draft_snapshots")) {
-        if (!F.tp_draft_snapshots and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
-            return "Flash Next tensor-rank MTP snapshots are unavailable: use --prompt-cache-gib 0 with --tp and drafting";
-    }
+    if (o.tp != 1 and !ranked) return no_ranks;
     // ahead of the drafter's and --learn-conversations' refusals (--spill-gib sets that flag), on a line of its own
     if (o.spill == .evicted and F != nemotron.native and @import("cuda_disk.zig").keptDisk(F) == null) return "--spill-gib keeps evicted states on disk for Nemotron, the Qwen hybrids and Flash Next only on CUDA: serve this model without it";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
@@ -58,8 +64,11 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";
     if (o.prompt_int8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "prompt_int8"))) return "--prompt-precision int8: this CUDA family's prompt matmuls take bf16 inputs; serve without it";
     if (o.loops != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "loops"))) return "--loops sets a looped model's recurrent passes (Dory's): this CUDA family has none; serve without it";
+    if (o.prompt_cache_gib != null and @import("cuda_kv_pool.zig").keepsNoPrompts(F)) return no_prompts;
     return null;
 }
+
+pub const no_prompts = "--prompt-cache-gib: this CUDA family keeps no prompt states; serve without it";
 
 test "a family must consume rank options before tensor parallelism is admitted" {
     const Single = struct {
@@ -70,6 +79,23 @@ test "a family must consume rank options before tensor parallelism is admitted" 
     };
     try std.testing.expectStringStartsWith(family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
     try std.testing.expect(family(Ranked, .{ .dir = "d", .model_type = "m", .tp = 2 }) == null);
+    try std.testing.expectEqualStrings(no_ranks, family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }).?);
+    // the families past family(): one rank opens, two are refused by the same words
+    try std.testing.expect(unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 1 }) == null);
+    try std.testing.expectEqualStrings(no_ranks, unranked(.{ .dir = "d", .model_type = "qwen4", .tp = 2 }).?);
+    try std.testing.expectEqualStrings(no_ranks, lfm2(.{ .dir = "d", .model_type = "lfm2", .tp = 2 }).?);
+    for ([_][]const u8{ "fish_omni", "qwen4", "qwen4_text" }) |m| {
+        try std.testing.expect(backend(.{ .dir = "d", .model_type = m, .tp = 1 }) == null);
+        try std.testing.expectEqualStrings(no_ranks, backend(.{ .dir = "d", .model_type = m, .tp = 2 }).?);
+    }
+}
+
+test "the CUDA server serves --tp, and Flash Next's two ranks pass family admission" {
+    try std.testing.expect(for (@import("cuda.zig").serves) |x| {
+        if (std.mem.eql(u8, x, "--tp")) break true;
+    } else false);
+    const flashnext = @import("flashnext").native;
+    try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2 }) == null); // kept prompt states and drafts together
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
@@ -220,6 +246,20 @@ test "prompt precision: int8 is refused unless a CUDA family consumes the option
     try std.testing.expect(family(Bf16, .{ .dir = "d", .model_type = "m" }) == null);
 }
 
+test "--prompt-cache-gib is refused by name for a family that keeps no prompts, and opens LFM2-MoE as before" {
+    const Promptless = struct {
+        pub const keeps_no_prompts = true;
+    };
+    const Declined = struct {
+        pub const keeps_no_prompts = false;
+    };
+    const asked: api.Open = .{ .dir = "d", .model_type = "m", .prompt_cache_gib = 0 };
+    try std.testing.expectEqualStrings(no_prompts, family(Promptless, asked).?);
+    try std.testing.expect(family(Promptless, .{ .dir = "d", .model_type = "m" }) == null);
+    try std.testing.expect(family(Declined, asked) == null);
+    try std.testing.expect(family(@import("lfm2_moe_cuda").native, .{ .dir = "d", .model_type = "lfm2_moe", .prompt_cache_gib = 4 }) == null);
+}
+
 test "--spill-gib and --checkpoint-slots open the families with a disk image; the rest refuse them by name" {
     const spilled: api.Open = .{ .dir = "d", .model_type = "m", .learn = "/s", .learn_conversations = true, .spill = .evicted, .keep = 2 };
     try std.testing.expect(backend(spilled) == null);
@@ -231,4 +271,52 @@ test "--spill-gib and --checkpoint-slots open the families with a disk image; th
     try std.testing.expectStringStartsWith(family(Other, spilled) orelse "", "--spill-gib keeps evicted states");
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "m", .keep = 2 }) orelse "", "--checkpoint-slots sets how many");
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "m" }) == null);
+}
+
+test "GLM keeps its prompt states in the process: no disk image, so --spill-gib and --learn-conversations refuse" {
+    // TF_GLM_KV_LIVE_HALF's keeps omit the dead KDA half; they must never reach a store a server without the flag reads
+    const glm = @import("glm_cuda").native;
+    try std.testing.expect(@import("cuda_disk.zig").keptDisk(glm) == null);
+    const spill: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true, .spill = .evicted };
+    try std.testing.expectStringStartsWith(family(glm, spill) orelse "", "--spill-gib keeps evicted states");
+    const learn: api.Open = .{ .dir = "d", .model_type = "glm5_next", .learn = "/s", .learn_conversations = true };
+    try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations keeps");
+}
+
+/// The scopes this open's startup check covers, from its flags and model type.
+fn startupFlags(o: api.Open) @import("sys").environment.Flags {
+    const flashnext = @import("flashnext").native.model_type; // families/flashnext/cuda_lanes.zig declares it
+    return .{ .cuda = true, .slide = o.slide, .device = o.device, .segments = o.segments, .flashnext = std.mem.eql(u8, o.model_type, flashnext) };
+}
+
+const TopkFixture = struct {
+    pub fn get(_: @This(), key: []const u8) ?[]const u8 {
+        return if (std.mem.eql(u8, key, "TF_FLASHNEXT_GPU_TOPK")) "yes" else null;
+    }
+};
+
+test "the CUDA server's startup check covers the Flash Next table only for a Flash Next checkpoint" {
+    const settings = @import("sys").environment;
+    const flash: api.Open = .{ .dir = "d", .model_type = @import("flashnext").native.model_type };
+    const other: api.Open = .{ .dir = "d", .model_type = "nemotron_h" };
+    try std.testing.expect(startupFlags(flash).flashnext);
+    try std.testing.expect(!startupFlags(other).flashnext);
+    const why = try settings.refusal(std.testing.allocator, TopkFixture{}, startupFlags(flash));
+    defer if (why) |w| std.testing.allocator.free(w);
+    try std.testing.expectStringStartsWith(why.?, "TF_FLASHNEXT_GPU_TOPK");
+    try std.testing.expect(try settings.refusal(std.testing.allocator, TopkFixture{}, startupFlags(other)) == null);
+}
+
+/// Validate CUDA settings and residency support before checkpoint or driver work at direct entry points.
+pub fn startup(a: std.mem.Allocator, o: api.Open, problem: *[]const u8) !bool {
+    const settings = @import("sys").environment;
+    if (try settings.refusal(a, settings.Process{}, startupFlags(o))) |why| {
+        problem.* = why;
+        return true;
+    }
+    if (o.fsrRefusal("cuda")) |why| {
+        problem.* = why;
+        return true;
+    }
+    return false;
 }

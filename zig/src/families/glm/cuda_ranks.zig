@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const heat = @import("heat");
+const l2pf = @import("cuda_l2pf.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
@@ -14,16 +15,34 @@ pub const Settings = struct {
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
-    pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
+    kda_pad: bool = false, // TF_GLM_KDA_PAD: 1 (the fused KDA input padded to eight columns at load, for glm_mm) or 0
+    pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
+    solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
+    pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
     index_split: u32 = 2048, // TF_GLM_INDEX_SPLIT: from this position on, rank 0 splits a prompt chunk's indexer rows (0: never)
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
     dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
     head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
     roce_multi: bool = false, // TF_GLM_ROCE_MULTI: 1 (three ranks or more: small all-gathers on fabric/tp's multirank RoCE beside NCCL) or 0
+    roce_wide: bool = false, // TF_ROCE=1: at three ranks or more the RoCE gather and the drafter MLP split (two ranks: always)
+    kv_host: u8 = 0, // TF_GLM_KV_HOST=1: KV pages in host memory (1); with TF_GLM_KV_HOST_SHARED=1, one copy a host (2)
+    kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
+    l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
+    kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
 
-    /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
-    pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+    /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
+    pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
+        return readSet(&struct {
+            fn set(name: [:0]const u8) ?[]const u8 {
+                const v = get(name) orelse return null;
+                return if (std.mem.trim(u8, v, " \t\r\n").len == 0) null else v; // environment.parse's blank
+            }
+        }.set, problem);
+    }
+
+    /// `read` from a lookup with no blank text, so every name below and in l2pf's reader is unset when blank.
+    fn readSet(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
         if (get("TF_GLM_PROMPT_K")) |v| {
             if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
@@ -31,9 +50,22 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        // TF_GLM_PROMPT_TAIL: rank 0's prompt cache reads it (cuda_snaps' cacheRules); a typo is refused on every rank
+        if (get("TF_GLM_PROMPT_TAIL")) |v| {
+            if (!std.mem.eql(u8, v, "0") and !std.mem.eql(u8, v, "1")) {
+                problem.* = "TF_GLM_PROMPT_TAIL: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_MM")) |v| {
             if (std.mem.eql(u8, v, "0")) s.tiled = false else if (!std.mem.eql(u8, v, "1")) {
                 problem.* = "TF_GLM_MM: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KDA_PAD")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.kda_pad = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_KDA_PAD: 0 or 1";
                 return error.BadSetting;
             }
         }
@@ -58,12 +90,28 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        if (get("TF_ROCE")) |v| s.roce_wide = std.mem.eql(u8, v, "1");
+        if (get("TF_GLM_CHUNK_SOLO")) |v| {
+            if (std.mem.eql(u8, v, "4096")) s.solo = true else if (std.mem.eql(u8, v, "2048")) s.solo = false else {
+                problem.* = "TF_GLM_CHUNK_SOLO: 2048 or 4096";
+                return error.BadSetting;
+            }
+        }
+        s.l2pf = try l2pf.Options.read(get, problem);
+        if (get("TF_GLM_PROMPT_PAIR")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.pair = true else if (std.mem.eql(u8, v, "0")) s.pair = false else {
+                problem.* = "TF_GLM_PROMPT_PAIR: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_OVERLAP_PIECES")) |v| {
             s.pieces = std.fmt.parseInt(u32, v, 10) catch 0;
             if (s.pieces < 1 or s.pieces > 8) {
                 problem.* = "TF_GLM_OVERLAP_PIECES: 1 to 8";
                 return error.BadSetting;
             }
+        } else if (s.solo and s.roce_multi and wireOpens(get)) {
+            s.pieces = 8; // TF_GLM_CHUNK_SOLO=4096 with TF_GLM_ROCE_MULTI=1: solo's doubled passes on the wire
         }
         if (get("TF_GLM_INDEX_SPLIT")) |v| {
             s.index_split = std.fmt.parseInt(u32, v, 10) catch {
@@ -100,9 +148,38 @@ pub const Settings = struct {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
         }
+        if (get("TF_GLM_KV_HOST")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.kv_host = 1 else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_KV_HOST: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KV_HOST_SHARED")) |v| {
+            if (std.mem.eql(u8, v, "1") and s.kv_host == 1) s.kv_host = 2 else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = if (std.mem.eql(u8, v, "1")) "TF_GLM_KV_HOST_SHARED=1 requires TF_GLM_KV_HOST=1" else "TF_GLM_KV_HOST_SHARED: 0 or 1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KV_HOST_GIB")) |v| {
+            s.kv_host_gib = std.fmt.parseFloat(f64, v) catch 0;
+            if (!(s.kv_host_gib > 0) or s.kv_host == 0) {
+                problem.* = "TF_GLM_KV_HOST_GIB: the host pages' GiB, more than 0, with TF_GLM_KV_HOST=1";
+                return error.BadSetting;
+            }
+        }
+        if (get("TF_GLM_KV_LIVE_HALF")) |v| {
+            if (std.mem.eql(u8, v, "1")) s.kv_live_half = true else if (!std.mem.eql(u8, v, "0")) {
+                problem.* = "TF_GLM_KV_LIVE_HALF: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         // refused here, before the weights load: the wire's bootstrap meets at rank 0, its kernel comes from the image
         if (s.roce_multi and (get("TF_TP_MASTER") == null or get("TF_TP_KERNEL_IMAGE") == null)) {
             problem.* = "TF_GLM_ROCE_MULTI=1 requires TF_TP_MASTER and TF_TP_KERNEL_IMAGE";
+            return error.BadSetting;
+        }
+        if (s.kda_pad and !s.tiled) {
+            problem.* = "TF_GLM_KDA_PAD=1 requires TF_GLM_MM=1 (glm_mm is what reads the padded rows)";
             return error.BadSetting;
         }
         return s;
@@ -112,14 +189,25 @@ pub const Settings = struct {
 /// The most ranks a world holds: rank 0's greedy pick gathers every rank's top-1 into one host array of this size.
 pub const max_world = 16;
 
-/// The process environment's value of `name` (null when unset).
+/// A setting by name (null when unset): a registered switch through the profile registry, the rest as before.
 pub fn environment(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
+    return @import("profile").lookup(name);
+}
+
+/// Whether the group brings up its own RoCE path: not where TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire (3+ ranks).
+pub fn ownRoce(s: Settings, world: usize) bool {
+    return !(s.roce_multi and world >= 3);
+}
+
+/// Whether TF_GLM_ROCE_MULTI's wire opens at TF_GLM_WORLD: three ranks or more (cuda_roce_multi); TP=2 stays on NCCL.
+fn wireOpens(get: *const fn ([:0]const u8) ?[]const u8) bool {
+    const v = get("TF_GLM_WORLD") orelse return false;
+    return (std.fmt.parseInt(usize, v, 10) catch 0) >= 3;
 }
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 13, // this struct's version
+    layout: u32 = 21, // this struct's version (20, main's kv_live_half, plus roce_wide)
     world: u32,
     rank: u32,
     kv8: u32 = 0,
@@ -128,7 +216,10 @@ pub const Fingerprint = extern struct {
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
     kda_wide: u32,
+    kda_pad: u32 = 0, // TF_GLM_KDA_PAD: every rank's KDA input rows carry one width
+    kv_live_half: u32 = 0, // TF_GLM_KV_LIVE_HALF: every rank keeps the live KDA half alone (1) or the head whole (0)
     pieces: u32,
+    pair: u32, // TF_GLM_PROMPT_PAIR: rank 0's paired steps need the second chunk's buffers on every rank
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
@@ -137,10 +228,15 @@ pub const Fingerprint = extern struct {
     max_videos: u32 = 0,
     max_frames: u32 = 0,
     roce_multi: u32 = 0, // TF_GLM_ROCE_MULTI: every rank opens the borrowed wire or none does (a lone rank would wait on it)
+    roce_wide: u32 = 0, // TF_ROCE=1: three ranks or more split the drafter MLP and gather by RoCE, or none does
+    kv_host: u32 = 0, // TF_GLM_KV_HOST(_SHARED): every rank sizes the pool alike and maps the shared file, or none does
+    solo: u32 = 0, // TF_GLM_CHUNK_SOLO: rank 0's solo passes need the wider prompt buffers on every rank
+    l2pf: [4]u32 = @splat(0), // TF_GLM_L2PF's words: every rank prefetches alike, so none waits on a slower one's windows
     bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
     heat_low: f64,
+    kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: each rank's row marks span the host pages rank 0 counts
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
     checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
@@ -155,7 +251,10 @@ pub const Fingerprint = extern struct {
         tiled,
         split,
         kda_wide,
+        kda_pad,
+        kv_live_half,
         pieces,
+        pair,
         layers,
         mtp,
         vision,
@@ -164,10 +263,15 @@ pub const Fingerprint = extern struct {
         max_videos,
         max_frames,
         roce_multi,
+        roce_wide,
+        kv_host,
+        solo,
+        l2pf,
         bits,
         capacity,
         heat_high,
         heat_low,
+        kv_host_gib,
         config,
         program,
         checkpoint,
@@ -192,10 +296,18 @@ pub const Fingerprint = extern struct {
             .tiled = @intFromBool(s.tiled),
             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
             .kda_wide = @intFromBool(s.kda_wide),
+            .kda_pad = @intFromBool(s.kda_pad),
+            .kv_live_half = @intFromBool(s.kv_live_half),
             .pieces = s.pieces,
+            .pair = @intFromBool(s.pair),
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
             .roce_multi = @intFromBool(s.roce_multi),
+            .roce_wide = @intFromBool(s.roce_wide and world >= 3), // two ranks ask by default, so a lone TF_ROCE=1 there is no difference
+            .kv_host = s.kv_host,
+            .kv_host_gib = s.kv_host_gib,
+            .solo = @intFromBool(s.solo),
+            .l2pf = s.l2pf.words(),
             .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
@@ -223,7 +335,10 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "tiled",
             "split",
             "kda_wide",
+            "kda_pad",
+            "kv_live_half",
             "pieces",
+            "pair",
             "layers",
             "mtp",
             "vision",
@@ -232,10 +347,15 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "max_videos",
             "max_frames",
             "roce_multi",
+            "roce_wide",
+            "kv_host",
+            "solo",
+            "l2pf",
             "bits",
             "capacity",
             "heat_high",
             "heat_low",
+            "kv_host_gib",
             "config",
             "program",
             "checkpoint",
@@ -316,7 +436,14 @@ fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.n
     };
 }
 
+/// The latest pair split refused, which a test build keeps for its test instead of printing the refusal.
+pub var refused_pair: ?[2]usize = null;
+
 fn unreachablePeer(rank: usize, peer: usize) error{SplitUnreachable} {
+    if (@import("builtin").is_test) {
+        refused_pair = .{ rank, peer };
+        return error.SplitUnreachable;
+    }
     std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} cannot exchange with rank {d}; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather\n", .{ rank, peer });
     return error.SplitUnreachable;
 }
@@ -332,7 +459,10 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
+        .kda_pad => "TF_GLM_KDA_PAD",
+        .kv_live_half => "TF_GLM_KV_LIVE_HALF",
         .pieces => "TF_GLM_OVERLAP_PIECES",
+        .pair => "TF_GLM_PROMPT_PAIR",
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
@@ -341,6 +471,11 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .max_videos => "the video count limit",
         .max_frames => "the frame limit",
         .roce_multi => "TF_GLM_ROCE_MULTI",
+        .roce_wide => "TF_ROCE=1 at three ranks or more (the RoCE gather and the drafter split)",
+        .kv_host => "TF_GLM_KV_HOST or TF_GLM_KV_HOST_SHARED",
+        .kv_host_gib => "TF_GLM_KV_HOST_GIB",
+        .solo => "TF_GLM_CHUNK_SOLO",
+        .l2pf => "TF_GLM_L2PF, _MB, _CTAS or _PACE_GBPS",
         .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",

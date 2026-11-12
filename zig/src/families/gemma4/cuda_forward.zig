@@ -1,12 +1,16 @@
 //! Gemma 4 on CUDA: prompt chunks and decode windows through the shared operators in the Metal family's steps.
 const std = @import("std");
 const cuda = @import("cuda");
+const rope_freq = @import("core").rope_freq;
+const prompt_tail = @import("core").prompt_tail;
 const cfg = @import("cuda_config.zig");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
+const solo = @import("cuda_solo.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
 const Window = cuda.window_attention.Window;
+pub const pages = @import("cuda_pages.zig");
 
 /// Rows a prompt chunk takes (Metal's chunk_rows: cut where Metal cuts, so fresh and resumed passes keep their bits).
 pub const prompt_rows = 512;
@@ -14,7 +18,7 @@ pub const prompt_rows = 512;
 pub const round_rows = 128;
 /// Rows a decode attention call takes: its partials' scratch is sized for this many (Metal's attend_rows).
 const attend_rows = 16;
-/// A sliding layer's ring: the window and a prompt chunk, so a chunk's writes never reach keys its first row reads.
+/// A sliding layer's ring: window + chunk, so a chunk never overwrites keys its first row reads (solo: ringRows).
 pub const ring = cfg.window + prompt_rows;
 
 /// A stream's rows in one forward: its cache slot, first position, tokens.
@@ -30,17 +34,10 @@ pub fn embedScale(hidden: usize) f32 {
     return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
 }
 
-/// fp32 inverse RoPE frequencies [dim / 2]: sliding as Metal's host table; global 1 / f32(1e6^(2i/512)), 0 past 64.
+/// fp32 inverse RoPE frequencies [dim / 2]: sliding as Metal's host table; global core's proportional, 0 past 64.
 pub fn inverseFrequencies(is_global: bool, out: []f32) void {
     if (!is_global) return cfg.inverseFrequencies(false, out);
-    for (out, 0..) |*f, i| {
-        if (i >= cfg.global_rotated) {
-            f.* = 0;
-            continue;
-        }
-        const p: f32 = @floatCast(std.math.pow(f64, cfg.global_theta, @as(f64, @as(f32, @floatFromInt(2 * i)) / 512.0)));
-        f.* = @floatCast(1.0 / @as(f64, p));
-    }
+    rope_freq.proportional(cfg.global_theta, cfg.global_dim, cfg.global_rotated, out);
 }
 
 pub const Model = struct {
@@ -53,11 +50,17 @@ pub const Model = struct {
     slots: usize,
     kc: []u64, // per layer: keys [slots, len, kv heads, head dim] bf16 (len: the ring, or the context if global)
     vc: []u64,
+    paged: bool = false,
+    pages: usize = 0,
+    table: u64 = 0,
+    ids: []u32 = &.{},
+    caps: []usize = &.{},
     inv_sliding: u64, // fp32 [128]
     inv_global: u64, // fp32 [256]
     s: Scratch,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
     planned: ?usize = null, // a plan: the bytes counted, nothing allocated
+    prompt_most: usize = prompt_rows, // rows a prompt chunk takes at most: TF_GEMMA4_CHUNK_SOLO's, else prompt_rows
     /// Decode forwards of n rows as CUDA graphs, captured at their first use ([n]; null: not yet, or graphs off).
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
     graphed: bool = true,
@@ -66,9 +69,12 @@ pub const Model = struct {
     tap_count: usize = 0,
     taps_buf: ?DeviceBuffer = null,
 
-    const Scratch = struct { ids: u64, pos: u64, slot: u64, hi: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64 };
+    const Scratch = struct { ids: u64, pos: u64, slot: u64, hi: u64, h: [2]u64, n: u64, xs: u64, q: u64, k: u64, v: u64, qr: u64, kr: u64, vr: u64, att: u64, o: u64, gate: u64, up: u64, act: u64, y: u64, part: u64, logits: u64, li: LayerInputs = .{} };
 
-    fn alloc(m: *Model, bytes: usize) !u64 {
+    /// The E-series' rows: every layer's inputs [rows, layers * width], the projection and table rows, a gate's rows.
+    const LayerInputs = struct { all: u64 = 0, proj: u64 = 0, table: u64 = 0, gate: u64 = 0 };
+
+    pub fn alloc(m: *Model, bytes: usize) !u64 {
         if (m.planned) |*p| {
             p.* += @max(bytes, 256);
             return 0;
@@ -82,7 +88,7 @@ pub const Model = struct {
         return b.ptr;
     }
 
-    fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
+    pub fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
         const p = try m.alloc(bytes);
         if (m.planned == null) try (DeviceBuffer{ .d = m.d, .ptr = p, .len = @max(bytes, 256), .borrowed = true }).fill8(0, s.handle);
         return p;
@@ -90,18 +96,40 @@ pub const Model = struct {
 
     /// A layer's cache positions: the ring, or every position of the context (global layers).
     pub fn cacheLen(m: *const Model, i: usize) usize {
-        return if (cfg.global(i)) m.context else ring;
+        return if (cfg.global(i)) m.context else m.ringRows();
     }
 
-    /// Bytes one stream's caches take.
-    pub fn streamBytes(geo: cfg.Geometry, layers: usize, context: usize) usize {
+    /// A sliding layer's ring rows: the window and the widest prompt chunk.
+    pub fn ringRows(m: *const Model) usize {
+        return cfg.window + m.prompt_most;
+    }
+
+    pub fn pagesFor(m: *const Model, slot: ?usize) ?cuda.window_attention.Pages {
+        return pages.view(m, slot);
+    }
+
+    pub fn dropGraphs(m: *Model) void {
+        for (&m.graphs) |*g| if (g.*) |*e| {
+            e.deinit();
+            g.* = null;
+        };
+    }
+
+    /// Bytes one stream's caches take: the owning layers' (a shared layer reads its owner's), rings `rings` rows each.
+    pub fn streamBytes(geo: cfg.Geometry, layers: usize, context: usize, rings: usize) usize {
         var total: usize = 0;
-        for (0..layers) |i| total += 2 * (if (cfg.global(i)) context else ring) * geo.kvHeads(i) * cfg.headDim(i) * 2;
+        for (0..@min(layers, geo.cacheLayers())) |i| total += 2 * (if (cfg.global(i)) context else rings) * geo.kvHeads(i) * cfg.headDim(i) * 2;
         return total;
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !Model {
-        var m = blank(gpa, d, w, context, slots);
+        return initPaged(gpa, d, s, w, context, slots, false);
+    }
+
+    pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !Model {
+        var m = blank(gpa, d, w, context, if (paged) 1 else slots);
+        m.paged = paged;
+        m.prompt_most = try solo.rows(); // refused before anything allocates
         errdefer m.deinit();
         try m.build(s);
         return m;
@@ -109,7 +137,13 @@ pub const Model = struct {
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
     pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !usize {
-        var m = blank(gpa, d, w, context, slots);
+        return openPagedBytes(gpa, d, s, w, context, slots, false);
+    }
+
+    pub fn openPagedBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !usize {
+        var m = blank(gpa, d, w, context, if (paged) 1 else slots);
+        m.paged = paged;
+        m.prompt_most = try solo.rows();
         defer m.deinit();
         m.planned = 0;
         try m.build(s);
@@ -124,11 +158,7 @@ pub const Model = struct {
         const geo = m.geo;
         m.kc = try m.gpa.alloc(u64, m.layers);
         m.vc = try m.gpa.alloc(u64, m.layers);
-        for (0..m.layers) |i| {
-            const bytes = m.slots * m.cacheLen(i) * geo.kvHeads(i) * cfg.headDim(i) * 2;
-            m.kc[i] = try m.zeros(s, bytes);
-            m.vc[i] = try m.zeros(s, bytes);
-        }
+        try pages.build(m, s);
         var sl: [cfg.sliding_dim / 2]f32 = undefined;
         var gl: [cfg.global_dim / 2]f32 = undefined;
         inverseFrequencies(false, &sl);
@@ -139,18 +169,18 @@ pub const Model = struct {
             try (DeviceBuffer{ .d = m.d, .ptr = m.inv_sliding, .len = sl.len * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(&sl));
             try (DeviceBuffer{ .d = m.d, .ptr = m.inv_global, .len = gl.len * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(&gl));
         }
-        const r = @max(prompt_rows, round_rows);
+        const r = @max(m.prompt_most, round_rows);
         const h = geo.hidden;
         const qw = geo.queryWidth();
         const kw = geo.kvWidth();
         const most = @max(h, geo.intermediate);
         // the widest decode partials: attend_rows rows of a global layer over the context in 256-key chunks
         const wide: Window = .{ .h = geo.query_heads, .hk = geo.global_kv_heads, .d = cfg.global_dim, .win = 0, .ring = m.context, .scale = 1 };
-        const narrow: Window = .{ .h = geo.query_heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = cfg.window, .ring = ring, .scale = 1 };
+        const narrow: Window = .{ .h = geo.query_heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = geo.sliding_window, .ring = m.ringRows(), .scale = 1 };
         const part = @max(cuda.window_attention.WindowAttention.scratchBytes(wide, attend_rows), cuda.window_attention.WindowAttention.scratchBytes(narrow, attend_rows));
         m.s = .{
             .ids = try m.alloc(r * 4),
-            .hi = try m.alloc(prompt_rows * 4),
+            .hi = try m.alloc(m.prompt_most * 4),
             .pos = try m.alloc(r * 4),
             .slot = try m.alloc(r * 4),
             .h = .{ try m.alloc(r * h * 2), try m.alloc(r * h * 2) },
@@ -171,6 +201,10 @@ pub const Model = struct {
             .part = try m.alloc(part),
             .logits = try m.alloc(round_rows * cfg.vocab * 2),
         };
+        if (geo.layer_input != 0) {
+            const stacked = geo.layers * geo.layer_input;
+            m.s.li = .{ .all = try m.alloc(r * stacked * 2), .proj = try m.alloc(r * stacked * 2), .table = try m.alloc(r * stacked * 2), .gate = try m.alloc(r * geo.layer_input * 2) };
+        }
         if (m.planned == null) try s.synchronize();
     }
 
@@ -181,9 +215,11 @@ pub const Model = struct {
         m.buffers.deinit(m.gpa);
         m.gpa.free(m.kc);
         m.gpa.free(m.vc);
+        m.gpa.free(m.ids);
+        m.gpa.free(m.caps);
     }
 
-    fn upload(m: *const Model, s: cuda.Stream, dst: u64, bytes: []const u8) !void {
+    pub fn upload(m: *const Model, s: cuda.Stream, dst: u64, bytes: []const u8) !void {
         try m.d.check(m.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, s.handle), "cuMemcpyHtoDAsync");
     }
 
@@ -226,14 +262,30 @@ pub const Model = struct {
         }
     }
 
+    /// Same-input affine-4 native projections share the GB10 grid; prompt and mixed widths keep their launches.
+    pub fn projectMany(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, ls: []const wts.Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool) !void {
+        if (ls.len == 0 or ls.len != outs.len) return error.ShapeMismatch;
+        const A = cuda.qlinear.Affine4Kernels;
+        if (k.affine.pdl and !prompt and ls.len >= 2 and ls.len <= A.segs_max) grouped: {
+            var many: [A.segs_max]A.Out = undefined;
+            for (ls, outs, many[0..ls.len]) |l, out, *v| {
+                if (l != .a4 or l.k() != ls[0].k()) break :grouped;
+                v.* = .{ .q = l.a4, .out = out };
+            }
+            return k.affine.verifyManyRows(s, x, xs, many[0..ls.len], rows);
+        }
+        for (ls, outs) |l, out| try m.project(k, s, l, x, xs, out, rows, prompt);
+    }
+
     /// Every chain's rows (a prompt chunk, or decode windows); rows [head0, head0 + heads)'s capped logits at s.logits.
     pub fn forward(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
         var rows: usize = 0;
         for (chains) |c| {
             if (c.tokens.len == 0 or c.slot >= m.slots or c.p0 + c.tokens.len > m.context) return error.BadChain;
+            if (m.paged and c.p0 + c.tokens.len > m.caps[c.slot]) return error.PastPages;
             rows += c.tokens.len;
         }
-        if (rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
+        if (rows > @as(usize, if (prompt) m.prompt_most else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
         if (heads > round_rows or head0 + heads > rows) return error.BadWindow;
         const ids = try m.gpa.alloc(i32, 3 * rows);
         defer m.gpa.free(ids);
@@ -288,16 +340,47 @@ pub const Model = struct {
         if (prompt) for (chains[0].images) |im| {
             try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(x.h[0] + im.row * h * 2, im.src, im.rows * h * 2, s.handle), "cuMemcpyDtoDAsync");
         };
+        if (m.w.ple) |p| try m.layerInputs(k, s, p, rows, prompt);
         // layer 0's input norm alone; every later one is the previous layer's dense tail
         try k.norms.addRmsTail(s, x.h[0], null, m.w.layers[0].input_norm, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true });
-        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt);
+        const tapped = std.mem.indexOfScalar(u32, m.taps[0..m.tap_count], @intCast(m.layers - 1)) != null;
+        const unread = prompt and prompt_tail.unread(.{ .logits = heads != 0, .readers = tapped });
+        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt, unread and i + 1 == m.layers);
         if (heads == 0) return;
         try m.project(k, s, m.w.head, x.n + head0 * h * 2, x.xs + head0 * (h / 64) * 4, x.logits, heads, false);
         try k.act.softcap(s, x.logits, x.logits, heads, cfg.vocab, cfg.softcap);
     }
 
+    /// Every layer's per-layer inputs from the scaled embedding rows in s.h[0] (layer_input.inputs' steps).
+    fn layerInputs(m: *Model, k: *const kern.Kernels, s: cuda.Stream, p: wts.PleModel, rows: usize, prompt: bool) !void {
+        const g = m.geo;
+        const x = m.s;
+        const stacked = g.layers * g.layer_input;
+        try k.act.groupSums(s, x.h[0], g.hidden, x.xs, rows, g.hidden);
+        try m.project(k, s, p.project, x.h[0], x.xs, x.li.proj, rows, prompt);
+        try k.embed.affine(s, x.ids, p.table_w, p.table_s, p.table_b, x.li.table, rows, stacked, .{ .bits = p.table_bits, .group = cfg.group });
+        const li = @import("cuda_layer_input.zig");
+        const c: @import("cuda_ple.zig").Scalars = .{ .scale = li.scalar(1.0 / @sqrt(@as(f64, @floatFromInt(g.hidden)))), .token = li.scalar(@sqrt(@as(f64, @floatFromInt(g.layer_input)))), .mix = li.scalar(std.math.sqrt1_2), .eps = cfg.eps };
+        try k.ple.run(s, x.li.proj, x.li.table, p.norm, x.li.all, rows, g.layers, c);
+    }
+
+    /// Layer i's per-layer block on the residual in s.h[0]: gate, GeGLU with its inputs, projection, the scaled tail.
+    fn layerBlock(m: *Model, k: *const kern.Kernels, s: cuda.Stream, p: wts.Ple, i: usize, rows: usize, prompt: bool, next: u64) !void {
+        const g = m.geo;
+        const x = m.s;
+        const h = g.hidden;
+        try k.act.groupSums(s, x.h[0], h, x.xs, rows, h);
+        try m.project(k, s, p.gate, x.h[0], x.xs, x.li.gate, rows, prompt);
+        const up = x.li.all + i * g.layer_input * 2;
+        try k.act.geglu(s, x.li.gate, g.layer_input, up, g.layers * g.layer_input, x.act, x.xs, rows, g.layer_input);
+        try m.project(k, s, p.project, x.act, x.xs, x.y, rows, prompt);
+        const scalar = m.w.layers[i].scalar;
+        try k.norms.addRmsTail(s, x.y, x.h[0], next, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = p.post_norm, .scalar = scalar });
+        try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(x.h[0], x.h[1], rows * h * 2, s.handle), "cuMemcpyDtoDAsync");
+    }
+
     /// Layer i on the rows: residual in s.h[0], its normed input (and sums) in s.n (s.xs); the same on return.
-    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool) !void {
+    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool, unread: bool) !void {
         const geo = m.geo;
         const l = m.w.layers[i];
         const x = m.s;
@@ -307,20 +390,32 @@ pub const Model = struct {
         const kvh = geo.kvHeads(i);
         const qw = geo.query_heads * dh;
         const kw = kvh * dh;
-        try m.project(k, s, l.q, x.n, x.xs, x.q, rows, prompt);
-        try m.project(k, s, l.k, x.n, x.xs, x.k, rows, prompt);
-        if (l.v) |v| try m.project(k, s, v, x.n, x.xs, x.v, rows, prompt);
-        const vsrc = if (global) x.k else x.v; // global layers: v is k_proj's output, unit-normed and not rotated
-        const src: cuda.qk_rows.Src = .{ .q = x.q, .q_ld = @intCast(qw), .q_hs = @intCast(dh), .k = x.k, .k_ld = @intCast(kw), .k_hs = @intCast(dh), .v = vsrc, .v_ld = @intCast(kw), .v_hs = @intCast(dh) };
-        const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = l.k_norm, .norms_bf16 = true, .inv = if (global) m.inv_global else m.inv_sliding, .rot = dh, .eps = cfg.eps, .round = true, .v_norm = true };
+        const own = l.k != null; // a shared layer: q only, attending over its owner's cache (kc[i] is the owner's)
+        if (unread and !own) return; // a shared layer writes no state
+        if (unread) { // no q: its rows only reach the attention this layer skips
+            try m.project(k, s, l.k.?, x.n, x.xs, x.k, rows, prompt);
+            if (l.v) |v| try m.project(k, s, v, x.n, x.xs, x.v, rows, prompt);
+        } else if (l.k) |kp| {
+            if (l.v) |v| {
+                try m.projectMany(k, s, &.{ l.q, kp, v }, x.n, x.xs, &.{ x.q, x.k, x.v }, rows, prompt);
+            } else try m.projectMany(k, s, &.{ l.q, kp }, x.n, x.xs, &.{ x.q, x.k }, rows, prompt);
+        } else try m.project(k, s, l.q, x.n, x.xs, x.q, rows, prompt);
+        const vsrc = if (l.v != null) x.v else x.k; // no v_proj (12B, 31B global): v is k_proj's output, not rotated
+        const src: cuda.qk_rows.Src = .{ .q = x.q, .q_ld = @intCast(qw), .q_hs = @intCast(dh), .k = x.k, .k_ld = @intCast(kw), .k_hs = @intCast(dh), .v = if (own) vsrc else 0, .v_ld = @intCast(kw), .v_hs = @intCast(dh) };
+        const shape: cuda.qk_rows.Shape = .{ .norms = l.q_norm, .norm_k = if (own) l.k_norm else l.q_norm, .norms_bf16 = true, .inv = if (global) m.inv_global else m.inv_sliding, .rot = dh, .eps = cfg.eps, .round = true, .v_norm = true };
         const len = m.cacheLen(i);
-        try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = kvh, .dim = dh }, shape, x.pos, x.slot, .{ .q = x.qr, .k = x.kr, .v = x.vr, .kc = m.kc[i], .vc = m.vc[i], .len = len }, rows);
-        const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else cfg.window, .ring = len, .scale = 1, .p32 = true };
+        const pg = if (global) m.pagesFor(null) else null;
+        const direct = own and pg == null;
+        const out: cuda.qk_rows.Out = .{ .q = x.qr, .k = x.kr, .v = x.vr, .kc = if (direct) m.kc[i] else null, .vc = if (direct) m.vc[i] else null, .len = len };
+        try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = if (own) kvh else 0, .dim = dh }, shape, x.pos, x.slot, out, rows);
+        const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else geo.sliding_window, .ring = len, .scale = 1, .p32 = true, .pg = pg };
+        if (own and pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
+        if (unread) return;
         if (prompt) {
             const c = chains[0];
-            const off = c.slot * len * kw * 2;
+            const off = if (pg != null) 0 else c.slot * len * kw * 2;
             const hi: ?u64 = if (!global and c.images.len > 0) x.hi else null;
-            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, if (global) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = 1, .p32 = true } else w, hi);
+            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, if (global) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = 1, .p32 = true, .pg = m.pagesFor(c.slot) } else w, hi);
         } else {
             var r: usize = 0;
             while (r < rows) : (r += attend_rows) {
@@ -331,18 +426,31 @@ pub const Model = struct {
         try k.act.groupSums(s, x.att, qw, x.xs, rows, qw);
         try m.project(k, s, l.o, x.att, x.xs, x.o, rows, prompt);
         try k.norms.addRmsTail(s, x.o, x.h[0], l.pre_feedforward, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = l.post_attention });
-        try m.project(k, s, l.gate, x.n, x.xs, x.gate, rows, prompt);
-        try m.project(k, s, l.up, x.n, x.xs, x.up, rows, prompt);
+        try m.projectMany(k, s, &.{ l.gate, l.up }, x.n, x.xs, &.{ x.gate, x.up }, rows, prompt);
         try k.act.geglu(s, x.gate, geo.intermediate, x.up, geo.intermediate, x.act, x.xs, rows, geo.intermediate);
         try m.project(k, s, l.down, x.act, x.xs, x.y, rows, prompt);
         const next = if (i + 1 < m.layers) m.w.layers[i + 1].input_norm else m.w.final_norm;
-        try k.norms.addRmsTail(s, x.y, x.h[1], next, x.h[0], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = l.post_feedforward, .scalar = l.scalar });
+        if (l.ple) |p| { // the E-series: the layer scalar after the per-layer block, not the MLP
+            try k.norms.addRmsTail(s, x.y, x.h[1], next, x.h[0], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = l.post_feedforward });
+            try m.layerBlock(k, s, p, i, rows, prompt, next);
+        } else try k.norms.addRmsTail(s, x.y, x.h[1], next, x.h[0], x.n, x.xs, rows, h, cfg.eps, .{ .round = true, .branch = l.post_feedforward, .scalar = l.scalar });
         if (std.mem.indexOfScalar(u32, m.taps[0..m.tap_count], @intCast(i))) |j| {
             const p: cuda.abi.Memcpy2D = .{ .src = x.h[0], .src_pitch = h * 2, .dst = m.taps_buf.?.ptr + j * h * 2, .dst_pitch = m.tap_count * h * 2, .width = h * 2, .height = rows };
             try m.d.check(m.d.api.cuMemcpy2DAsync_v2(&p, s.handle), "cuMemcpy2DAsync");
         }
     }
 };
+
+test "a stream's caches count the owning layers only: the E4B's 24 of 42" {
+    const g = cfg.e4b;
+    var own: usize = 0;
+    for (0..g.cacheLayers()) |i| own += 2 * (if (cfg.global(i)) @as(usize, 4096) else ring) * g.kvHeads(i) * cfg.headDim(i) * 2;
+    try std.testing.expectEqual(own, Model.streamBytes(g, g.layers, 4096, ring));
+    try std.testing.expectEqual(Model.streamBytes(g, 24, 4096, ring), Model.streamBytes(g, 42, 4096, ring));
+    try std.testing.expect(Model.streamBytes(g, 23, 4096, ring) < Model.streamBytes(g, 24, 4096, ring));
+    try std.testing.expectEqual(@as(?usize, 22), cfg.cacheOwner(40, g.cacheLayers()));
+    try std.testing.expectEqual(@as(?usize, 23), cfg.cacheOwner(41, g.cacheLayers()));
+}
 
 test "the embedding scale is bf16(sqrt(hidden)): 62 for the 12B, 73.5 for the 31B" {
     try std.testing.expectEqual(@as(f32, 62.0), embedScale(3840));
@@ -360,4 +468,17 @@ test "RoPE tables: sliding as Metal's host table, global zero past 64 pairs and 
     try std.testing.expectEqual(@as(f32, 1), gl[0]);
     for (1..64) |i| try std.testing.expect(gl[i] < gl[i - 1] and gl[i] > 0);
     for (gl[64..]) |v| try std.testing.expectEqual(@as(f32, 0), v);
+}
+
+test "the global table is core's proportional one, word for word the expression it replaced" {
+    var gl: [256]f32 = undefined;
+    inverseFrequencies(true, &gl);
+    for (gl, 0..) |v, i| {
+        var old: f32 = 0; // the replaced form: 1 / f32(1e6^f32(2i / 512)), the reciprocal in f64
+        if (i < cfg.global_rotated) {
+            const p: f32 = @floatCast(std.math.pow(f64, cfg.global_theta, @as(f64, @as(f32, @floatFromInt(2 * i)) / 512.0)));
+            old = @floatCast(1.0 / @as(f64, p));
+        }
+        try std.testing.expectEqual(@as(u32, @bitCast(old)), @as(u32, @bitCast(v)));
+    }
 }

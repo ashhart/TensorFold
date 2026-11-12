@@ -129,7 +129,7 @@ pub const Gate = struct {
         errdefer a.destroy(g);
         const cols = host.headShard(rank, world)[1] * dim;
         g.* = .{ .a = a, .host = host, .src = src, .layers = try a.dupe(u32, layers), .rank = rank, .world = world, .dim = dim, .cols = cols, .rows = s.rows, .timeout_ns = s.timeout_ns, .wait_ns = s.wait_ns, .mem = mem };
-        g.stats.prof = if (std.c.getenv("TF_DSV41_WIN_PROF")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+        g.stats.prof = try @import("sys").environment.read(bool, "TF_DSV41_WIN_PROF", false);
         if (mem.ctl.len < ctl_n or mem.staging.len < 2 * layers.len * s.rows * cols) return error.BadEngramGate;
         @memset(mem.ctl, 0);
         g.thread = try std.Thread.spawn(.{ .stack_size = 1 << 20 }, loop, .{g});

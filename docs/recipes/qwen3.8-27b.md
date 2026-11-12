@@ -1,11 +1,19 @@
 # Qwen3.8-27B
 
+For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
+
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
 `zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
 the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
+
+The Metal dense loader reads aligned hidden, intermediate, layer and head counts from `config.json`.
+It retains the existing attention/DeltaNet head layouts and layer schedule. The untied 9B geometry
+(4096 hidden, 12288 intermediate, 32 layers) uses the same runtime-shaped projections; full checkpoint
+reference, draft, resume, concurrency and performance qualification remains pending. The pinned 2B
+continues to open its separate engine. Host header checks do not qualify another checkpoint.
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit
@@ -60,8 +68,9 @@ default. The larger frame must fit the configured context and all streams beside
 margin, otherwise M5 keeps 512 rows. Startup reserves the actual prompt scratch sizes as well as stream caches.
 Wide prompt frames keep separate 512-row activation scratch for small rounds, so decoding binds the small buffers.
 Admission counts both banks.
-`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 16 to 2,048. Each chunk takes at most 512 rows beside
-a decoding request, including with an override, and still respects the frame, attention and request boundaries.
+`TF_QWEN27_WORKING_SET_BYTES` can lower the device working-set budget for admission checks. `TF_PROMPT_ROWS` selects another multiple of 16 from 128 to 2,048 for native serving.
+Any other explicit value is refused at startup with its name, supplied text and accepted range; unset keeps the device default.
+The internal model test interface can still use 16-row frames, which native shared serving does not admit.
 
 Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
 from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
@@ -86,28 +95,40 @@ window into its history as it reads it, so the commit and publication kernels go
 four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
 the state, history and logits bytes against the general path).
 
-The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
-[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
-engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).
+## GGUF host adapter
 
-Experimental [packed affine formats](../quantization.md) include 8-bit and mixed layer precision.
+`families/qwen27/gguf.zig` prepares the dense family's GGUF metadata and tensor identities on the host (#1920).
+It accepts the observed qwen35 architecture, refuses the unproven qwen3 alias, uses core's typed views
+and checks the fixed DeltaNet/attention geometry and layer schedule. Unknown computation keys, conflicting
+patterns, missing tensors, wrong shapes and unsupported quantization are refused by key or tensor identity.
 
-The `qwen3_5` family combines Gated DeltaNet and full attention. The standard recipe below uses its
-4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
+The observed ggml-org revision a316ea527fde32c12487be7574e2db5ac2ad2a7e has 40 metadata keys and 851 tensors.
+Core's reader checks both Q4_K_M and Q8_0 header/index lists against the plan, with no missing names or shapes.
+The testdata directory pins the extracted keys, tensor names/shapes and corresponding native Config input.
+Host tests use those data files and need no checkpoint. Large tokenizer arrays record type/count only.
 
-```bash
-tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
-tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
+`Adapter.open` borrows the GGUF byte image and owns its index, destination names and compact affine arrays until
+`deinit`. FP32 coefficient tables and group-16/32 layouts remain intact. Dense F32/F16/BF16 tensors borrow their
+original bytes. GGUF matrices reverse dimension labels only; the convolution is reshaped without a transpose.
+The host fixture checks every repacked value against independent source decoding for all ten core formats.
+Core's documented signed-zero cancellation exception still applies; this does not extend its exactness claim.
+
+Destination names are identities for future native loading, not ready-to-serve tensors. The `ssm_a` entry has an
+explicit negative-exponential-decay role: its bytes are not relabelled as a usable logarithmic `A_log`. GDN head
+ordering still needs checkpoint qualification. No coefficient is narrowed or group merged.
+
+The final, input, post-attention, gated-linear, Q and K norm tensors carry the explicit `rms_gain` role.
+Sixteen values per class from both GGUF variants match the supplied MLX BF16 gains after rounding to BF16.
+Both checkpoints therefore store effective multiplicative gains here: the adapter neither adds nor subtracts one.
+It preserves the GGUF F32 values, including the bits beyond the MLX BF16 representation. The paired sample fixture
+checks all 96 values and the borrowed byte identities; this comparison does not qualify the remaining weights.
+Existing Metal paths still need FP32 metadata and group-16 qualification, tokenizer/chat-template integration,
+prepared-cache integration and real-model token/performance gates. GGUF model arguments receive a coming-later
+refusal; the adapter does not enable end-to-end GGUF inference.
+
+```sh
+zig build test-qwen27-gguf-host test-gguf-host -j1 --summary all
 ```
-
-DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
-`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
-The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
-loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
-checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
-head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
-both off and decodes plain.
-The target verifies every proposed token against its own serial sample.
 
 ## MLX
 
@@ -132,9 +153,27 @@ The lane switch accepts only 0 or 1; the copy switch accepts only 0 or 1. Invali
 ## Weights other than 4-bit
 
 The M5 lane kernels accept MLX affine 2-, 3-, 4-, 5-, 6- and 8-bit projections in groups of 64.
-They widen packed values for the tensor operations without changing those values. Mixed-width stacks
-keep separate calls where a fused projection needs one width. Examples include
+The 4- and 8-bit paths read stored code tiles directly; the other widths expand their codes without changing values.
+The 8-bit group-64 path also reuses the input producer's ordered FP32 group sums.
+Mixed-width stacks keep separate calls where a fused projection needs one width. Examples include
 `TensorFold/Qwen3.8-27B-oQ2` and `TensorFold/Qwen3.8-27B-oQ4`.
+
+On an M5 Ultra with 256 GiB, macOS 27.0.1 and Metal 32023.922, one plain stream measured:
+
+| MLX affine, group 64 | Cold 2K prompt tok/s | Cold 8K prompt tok/s | 512-token decode tok/s |
+| --- | ---: | ---: | ---: |
+| 4-bit | 1904.9 | 1856.9 | 47.7 |
+| 8-bit | 768.5 | 760.0 | 29.3 |
+
+These are two-process means from balanced main/candidate runs, with warm weights and pipelines,
+raw token prompts, a 2,048-row prompt capacity and `--prompt-cache-gib 0`.
+Revisions were `70ae7fac63274ff2eac54152031433374cb80f2f` for 4-bit and
+`9ef68bd06f524d972d0e9b16ac0a49963528ed81` for 8-bit.
+Main `985692e50` measured 648.5/643.1 prompt tok/s at 2K/8K for 8-bit; the byte reader and sum reuse improve
+those rates by 18.5%/18.2%, retaining exact tokens and committed prompt-state bytes.
+The remaining 8-bit prompt rate is 40–41% of 4-bit's, against a stored-weight byte ratio of 54.4%.
+Dense projections still dominate its split-buffer profile, so weight size alone does not explain the prompt gap.
+Decode here is a regression check; the two changes were measured together.
 
 The packed row readers on Apple Silicon and the CUDA readers cover MLX affine 2/3/4/5/6/8-bit projections
 with groups of 32/64/128, including mixed layers. CUDA also reads [EXL3 packs](#exl3-checkpoints-experimental).
@@ -142,8 +181,35 @@ A fused projection keeps its members separate where their bit width or group siz
 and tied embedding heads are refused from `config.json` before weight downloads and again at load; loaded
 projections must also be covered by the selected decoder. `--lane-kernels on` requires M5 tensor units and
 formats they read; `auto` falls back to the packed row decoder for the rest.
-Lower weight precision does not guarantee faster decode or a fitting context. Release memory and
-quality comparisons are TBD [release-0.3.5].
+Lower weight precision does not guarantee faster decode or a fitting context.
+
+`TensorFold/Qwen3.8-27B-MLX-8bit` serves natively with the same flags as the 4-bit checkpoint. On the same M5 Ultra
+its weights take 27.5 GiB on disk against 15.0 GiB, and 38.3 GiB stays wired between requests against 25.5 GiB.
+Its speeds are in the table above. For the fastest replies on a Mac, use the 4-bit checkpoint; take 8-bit when you
+want the higher-precision weights.
+
+The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
+engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).
+
+Experimental [packed affine formats](../quantization.md) include 8-bit and mixed layer precision.
+
+The `qwen3_5` family combines Gated DeltaNet and full attention. The standard recipe below uses its
+4-bit/group-64 checkpoint; the quantization guide lists the other affine formats it reads.
+
+```bash
+tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit z-lab/Qwen3.8-27B-DFlash2
+tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
+```
+
+DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
+`--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
+The HIP engine runs no DFlash2 drafter yet: `serve --drafter` is refused before the engine opens the GPU or
+loads any weights. Refusing DFlash2 does not turn off the engine's own drafts: the model's MTP head where the
+checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
+head, so on HIP it drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts` turns
+both off and decodes plain.
+The target verifies every proposed token against its own serial sample.
 
 ## CUDA
 
@@ -260,7 +326,8 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --parallel 16 --context 8192 --
 
 `--parallel N` decodes up to N requests in shared rounds: each stream verifies its own DFlash2 tree in one
 forward, and every reply equals the same request served alone. A new prompt prefills 1,024 tokens a round
-while the other streams decode. States kept at message starts let prompts that share a system prompt resume
+while the other streams decode. On Metal, a reply that would end well before a long prompt goes first: the prompt
+lends it at most a quarter of its own time, and `--decode-share` or `TENSORFOLD_PREFILL_ORDER` overrides this. States kept at message starts let prompts that share a system prompt resume
 there, and each stream's caches are sized once, at admission.
 
 On one DGX Spark, with the workload from issue #38 (48 chat requests of 3,000 to 5,100 tokens sharing a
@@ -336,6 +403,24 @@ their solo runs and every solo run equal to `"draft": false` (60 of 60 for oQ2 a
 serial, resumed against fresh, by `token_sha`) matched on 8 of 8 short-prompt cells and 4 of 4 cells at 8,192
 tokens with a real resume, and replays after a restart matched too. A conversation grown by 6,144 tokens a turn
 to the 140,288 window kept swap at 653 to 656 MB, with a 43.57 GiB peak footprint.
+
+### A 48 GB M5 Pro Mac mini on 1.2.1
+
+Halfpenny Mac measured these on a rack-mounted Mac mini with the release binary; the 1.1.0 runs of the same cells
+are [public receipts](https://tensorfold.dev/benchmarks?contributor=7cc22071-45c2-4df0-8466-2cc25904b4fe) on the
+board.
+
+| | |
+| --- | --- |
+| Machine | Mac mini Mac17,16, Apple M5 Pro, 15-core CPU, 16-core GPU, 48 GB, macOS 27.0.1 (26A434), headless |
+| Runtime | TensorFold 1.2.1, the native Metal binary from Homebrew (`ashhart/tensorfold/tensorfold`), no Python |
+| Checkpoints | `TensorFold/Qwen3.8-27B-MLX-4bit@22d8d538`, `z-lab/Qwen3.8-27B-DFlash2@50307d4c` |
+| Launch | `tensorfold benchmark TensorFold/Qwen3.8-27B-MLX-4bit`, managed server, defaults; `--serial` for the plain rows |
+
+Decode medians from the [public benchmark command](README.md#measurements), 256-token replies, five repeats a cell,
+in tok/s for code sampled, chat sampled, code greedy and chat greedy: 89.1, 47.2, 79.3 and 56.4 with DFlash2;
+17.3, 17.3, 17.3 and 17.3 with `--serial`. First text arrived in 71 to 73 ms on every cell. The 1.1.0 binary served
+86.5, 46.1, 80.2 and 53.3 on the same cells. The machine was otherwise idle and no wired-limit sysctl was set.
 
 ## Calibration and checks
 

@@ -1,4 +1,4 @@
-//! A handoff's manifest (kv-handoff.md): what each exported layer's page rows hold, written as MCDMA's producer writes it.
+//! A handoff's manifest (kv-handoff.md): what each exported layer's page rows hold, as MCDMA's producer writes it.
 const std = @import("std");
 const wire = @import("wire.zig");
 const Allocator = std.mem.Allocator;

@@ -160,11 +160,17 @@ fn admits(c: Class, b: f32, tokens: usize) bool {
     return pairs <= @as(f64, b) * @as(f64, @floatFromInt(selectorCount(c, tokens)));
 }
 
+/// A class's routed slots a token holds: its `slots` minus the shared expert's when it is one.
+fn routedSlots(c: Class) usize {
+    return c.slots - @intFromBool(c.shared);
+}
+
 /// The shape serving asks the registry about for `tokens` tokens of a routed class, from one of its timed shapes.
 pub fn routedShape(c: Class, template: registry.Shape, tokens: usize) registry.Shape {
     var s = template;
     s.items = @intCast(selectorCount(c, tokens));
     s.plan_pairs = @intCast(tokens * c.slots);
+    s.expert_rows = moe.expertRows(tokens, routedSlots(c), c.experts);
     s.m = @intCast(@min(moe.tileOf(tokens, false), tokens));
     return s;
 }

@@ -1,6 +1,9 @@
 //! Prefer foreground and least remaining prefill work, with bounded waiting for every admitted fill.
 const std = @import("std");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const load = @import("lane_host_load.zig");
+const ends = @import("lane_host_end.zig");
+const lane_trace = @import("lane_trace.zig");
 
 pub const preference_rounds = 8;
 
@@ -41,6 +44,9 @@ fn pick(h: *const LaneHost, among: enum { all, short, long }) ?usize {
 fn remaining(h: *const LaneHost, j: *const LaneHost.Job) u64 {
     const completed = if (j.fill_began and h.core.backend.vtable.reports_fill)
         @max(j.stream.cached, j.stream.fill_at.load(.monotonic))
+    else if (!j.fill_began and !j.stream.reuse_failed)
+        // an unstarted job's cache hit is known at admission; a rejected restore leaves the whole prompt
+        @max(j.stream.cached, j.stream.reuse.at)
     else
         j.stream.cached;
     return j.stream.prompt_len -| completed;
@@ -59,8 +65,16 @@ pub const Share = struct {
     p: f64 = 1,
     debt_ns: i64 = 0, // decode time owed before the next step of a long prompt
     rows: u64 = 0, // prompt rows a visit fills beside decoders before their round (TENSORFOLD_PREFILL_BUDGET; 0: none)
+    // long prompts' order and chunk rows (TENSORFOLD_PREFILL_POLICY, policyRun); .stock: the default order and cuts
+    policy: Policy = .stock,
+    tokens: u32 = default_tokens, // TENSORFOLD_PREFILL_TOKENS: a policy's rows a visit, clamped to [min_tokens, max_tokens]
+    call_rows: u32 = 0, // the row hint policyRun set for the call in flight (capRows); 0 outside its calls
 
     pub const short_rows = 512;
+    pub const Policy = enum { stock, fcfs };
+    pub const default_tokens: u32 = 2048; // fcfs at 2048 stalls decoders ~1.7 s a chunk (8192: ~5.9 s) for ~+13% last TTFT at N=8 x 14336
+    pub const min_tokens: u32 = 64;
+    pub const max_tokens: u32 = 16384; // 2 x flashnext Metal's prompt step (PMAX 8192), the most one staggered call takes (a solo 14336-row prompt is one 2 x 7168 call)
     pub const min_share = 0.01; // below it a step's debt is minutes of decoding, and is no share
 
     /// --decode-share's share x: the prompt's p is its complement, floored at min_share; 0 keeps whole prompts.
@@ -79,7 +93,23 @@ pub const Share = struct {
     pub fn fromEnv() Share {
         var s: Share = if (std.c.getenv("TENSORFOLD_PREFILL_SHARE")) |text| fromText(std.mem.span(text)) else .{};
         if (std.c.getenv("TENSORFOLD_PREFILL_BUDGET")) |text| s.rows = budget(std.mem.span(text));
+        if (std.c.getenv("TENSORFOLD_PREFILL_POLICY")) |text| s.policy = policyOf(std.mem.span(text));
+        if (std.c.getenv("TENSORFOLD_PREFILL_TOKENS")) |text| s.tokens = tokensOf(std.mem.span(text));
         return s;
+    }
+
+    /// `fcfs`; anything else is the default order.
+    pub fn policyOf(text: []const u8) Policy {
+        const t = std.mem.trim(u8, text, " \t");
+        if (std.mem.eql(u8, t, "fcfs")) return .fcfs;
+        return .stock;
+    }
+
+    /// Whole rows clamped to [min_tokens, max_tokens]; no number is the default.
+    pub fn tokensOf(text: []const u8) u32 {
+        const n = budget(text);
+        if (n == 0) return default_tokens;
+        return @intCast(std.math.clamp(n, min_tokens, max_tokens));
     }
 
     /// A share from its text: anything but a number in [min_share, 1] is the default, 1.
@@ -97,8 +127,13 @@ pub const Share = struct {
 
     /// A step that took `ns` while `decoding` streams were live: the decode time it owes them.
     pub fn stepped(s: *Share, ns: i64, decoding: bool) void {
-        if (s.p >= 1 or !decoding) return;
-        const owed = @as(f64, @floatFromInt(ns)) * (1 - s.p) / s.p;
+        s.steppedAt(ns, decoding, s.p);
+    }
+
+    /// `stepped` with this step's own share `p` (TENSORFOLD_PREFILL_ORDER=srpt varies it a step at a time).
+    pub fn steppedAt(s: *Share, ns: i64, decoding: bool, p: f64) void {
+        if (p >= 1 or !decoding) return;
+        const owed = @as(f64, @floatFromInt(ns)) * (1 - p) / p;
         s.debt_ns +|= @intFromFloat(@min(owed, @as(f64, @floatFromInt(std.math.maxInt(i64) / 2))));
     }
 
@@ -115,6 +150,7 @@ pub const decode_cap_rows: u32 = 512;
 pub fn run(h: *LaneHost) void {
     if (h.filling.items.len == 0 or runnable(h) == 0) h.share.debt_ns = 0; // owed to streams that ended or paused: no one's
     if (h.filling.items.len == 0) return;
+    if (h.share.policy != .stock) return policyRun(h); // opt-in only; the default path below
     const budget = h.share.rows;
     var used: u64 = 0; // rows filled while a stream could decode: the budget counts no others
     // an aged long prompt's step first, when due: under a budget, short arrivals could spend every visit's rows
@@ -143,6 +179,31 @@ pub fn run(h: *LaneHost) void {
     _ = longStep(h, at);
 }
 
+/// TENSORFOLD_PREFILL_POLICY=fcfs: short prompts as by default (no budget), then one chunk of the oldest long prompt.
+fn policyRun(h: *LaneHost) void {
+    var burst: usize = 0;
+    while (pick(h, .short)) |at| {
+        if (!h.filling.items[at].fill_began) {
+            if (burst == h.info_.lanes and (runnable(h) > 0 or pick(h, .long) != null)) break;
+            burst += 1;
+        }
+        _ = step(h, at);
+        between(h);
+    }
+    if (!due(h)) return; // TENSORFOLD_PREFILL_SHARE's debt, per visit
+    const at = oldestLong(h) orelse return;
+    // `tokens` rows while a stream decodes; alone, the engine's own cut, as without the policy
+    h.share.call_rows = if (runnable(h) > 0) h.share.tokens else 0;
+    defer h.share.call_rows = 0;
+    _ = longStep(h, at);
+}
+
+/// The first long prompt in `filling`, which is in admission order: admitOne appends, removal keeps the order.
+fn oldestLong(h: *const LaneHost) ?usize {
+    for (h.filling.items, 0..) |j, i| if (!short(j)) return i;
+    return null;
+}
+
 /// The long prompt `pick` takes, once it has waited `preference_rounds` choices; null otherwise.
 fn agedLong(h: *const LaneHost) ?usize {
     const at = pick(h, .long) orelse return null;
@@ -155,11 +216,44 @@ fn between(h: *LaneHost) void {
     while (h.admitOne()) {}
 }
 
+/// Filling job `at`'s next prompt chunk: the other streams' rounds run between chunks, not after the prompt.
+fn fillAt(h: *LaneHost, at: usize) void {
+    const job = h.filling.items[at];
+    const first = !job.fill_began;
+    // the trace's line, from what the job holds before the call can end it; written last, after any completion
+    var line: lane_trace.Event = if (h.trace) |t| .fill(t, job.id, job.seq, if (first) job.stream.cached else job.stream.fill_at.load(.monotonic)) else undefined;
+    defer if (h.trace) |t| t.end(&line);
+    job.fill_began = true;
+    load.calling(h, job);
+    const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = LaneHost.firstCommitted }, capRows(h)) catch |e| {
+        if (h.trace != null) line.failed(job.stream.fill_at.load(.monotonic));
+        _ = switch (e) {
+            error.Cancelled => h.cancel(job),
+            error.LaneMemory => blk: {
+                unfill(h, job);
+                break :blk ends.requeue(h, job);
+            },
+            else => ends.dropFailed(h, job, e),
+        };
+        return;
+    };
+    load.progress(h, job);
+    if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
+    if (!done) return;
+    _ = h.filling.orderedRemove(at);
+    h.prefilled(job, job.began);
+    if (job.request.promptOnly()) {
+        _ = @import("lane_prompt_only.zig").complete(h, job, if (h.trace != null) &line.ok else null);
+        return;
+    }
+    _ = h.deliver(job);
+}
+
 /// Fill `at`'s next call: the rows it advanced (all it had, if it left the list); no progress shown spends any budget.
 fn step(h: *LaneHost, at: usize) u64 {
     const job = h.filling.items[at];
     const before = remaining(h, job);
-    h.fillAt(took(h, at));
+    fillAt(h, took(h, at));
     // the call can finish, cancel or requeue the job: it is read again only while it is still filling
     const after = for (h.filling.items) |j| {
         if (j == job) break remaining(h, j);
@@ -171,12 +265,31 @@ fn step(h: *LaneHost, at: usize) u64 {
 /// A long prompt's step, timed while its share owes decoders a part of it; its rows as `step` counts them.
 fn longStep(h: *LaneHost, at: usize) u64 {
     const decoding = runnable(h) > 0;
+    if (h.srpt.on) return srptStep(h, at, decoding);
     // timed on the host, so a step owed to decoders ends on the GPU; at p = 1 none is owed, and no earlier mark stays
     h.filling.items[at].stream.settle_step = decoding and h.share.p < 1;
     if (h.share.p >= 1) return step(h, at);
     const t0 = std.Io.Clock.awake.now(h.io);
     const rows = step(h, at);
     h.share.stepped(@intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds()), decoding);
+    return rows;
+}
+
+/// TENSORFOLD_PREFILL_ORDER=srpt: a step timed always, its share the floor when a reply has less work left.
+fn srptStep(h: *LaneHost, at: usize, decoding: bool) u64 {
+    const job = h.filling.items[at];
+    var buf: [64]i64 = undefined;
+    const left = @import("lane_host_srpt.zig").replyTokens(h.core.live.items, &buf);
+    const first = h.srpt.decodeFirst(remaining(h, job), left) and h.srpt.lends(job.stream.prompt_len -| job.stream.cached, job.fill_lent_ns);
+    const p = h.srpt.share(first, h.share.p, h.decode_cap and h.share.p >= 1);
+    h.filling.items[at].stream.settle_step = decoding and p < 1;
+    const t0 = std.Io.Clock.awake.now(h.io);
+    const rows = step(h, at);
+    const ns: i64 = @intCast(t0.durationTo(std.Io.Clock.awake.now(h.io)).toNanoseconds());
+    // no progress shown is no sample; a backend that never reports shows a whole prompt at its last step
+    h.srpt.filled(if (rows == std.math.maxInt(u64) or !h.core.backend.vtable.reports_fill) 0 else rows, ns);
+    if (first and decoding and p < 1) job.fill_lent_ns += @as(f64, @floatFromInt(ns)) * (1 - p) / p;
+    h.share.steppedAt(ns, decoding, p);
     return rows;
 }
 
@@ -187,6 +300,7 @@ fn short(j: *const LaneHost.Job) bool {
 
 /// Fill chunks' cap: only the flag, a chunk-invariant family and live decoders together; else 0 (the engine's own cut).
 pub fn capRows(h: *const LaneHost) u32 {
+    if (h.share.policy != .stock and h.share.call_rows > 0) return h.share.call_rows; // policyRun's hint for the call in flight
     if (!h.decode_cap or h.share.p >= 1 or !h.core.backend.chunk_invariant) return 0;
     return if (runnable(h) > 0) decode_cap_rows else 0;
 }
@@ -330,4 +444,157 @@ test "prefill service: aged long priority keeps the existing stable winner over 
     try std.testing.expectEqual(@as(u64, 0), b.stream.fill_at.load(.monotonic));
     run(&host);
     try std.testing.expectEqual(@as(u64, 512), b.stream.fill_at.load(.monotonic));
+}
+
+// TENSORFOLD_PREFILL_POLICY tests (the env is parsed in Share.fromEnv; these set host.share).
+const PolicyCalls = struct {
+    host: *LaneHost,
+    streams: [16]*const @import("lanes").Stream = undefined,
+    caps: [16]u32 = undefined,
+    n: usize = 0,
+    fn hook(ctx: *anyopaque, s: *@import("lanes").Stream, _: usize) void {
+        const c: *PolicyCalls = @ptrCast(@alignCast(ctx));
+        c.streams[c.n] = s;
+        c.caps[c.n] = capRows(c.host); // the hint fillAt passed for this call
+        c.n += 1;
+    }
+};
+
+fn policyEvent(_: *anyopaque, _: @import("engine_api.zig").Id, _: *const @import("engine_api.zig").Event) void {}
+
+/// A host with one live decoder (when `decoder`) and long prompts of `lens` rows admitted in order, then `share`.
+fn policyHost(comptime body: fn (*LaneHost, *PolicyCalls) anyerror!void, decoder: bool, lens: []const usize, share: Share) !void {
+    const lanes = @import("lanes");
+    const api = @import("engine_api.zig");
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 1 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 4 });
+    defer {
+        @import("lane_host_end.zig").closeAll(&host);
+        host.stop();
+    }
+    if (decoder) {
+        const d: api.Request = .{ .prompt = &.{ 3, 1, 4, 1 }, .max_tokens = 64, .drafts = false };
+        try host.engine().submit(1, &d, .{ .ctx = &host, .event = policyEvent });
+        try std.testing.expect(host.admitOne());
+        while (host.filling.items.len > 0) _ = step(&host, 0);
+        try std.testing.expectEqual(@as(usize, 1), runnable(&host));
+    }
+    const prompt: [4096]u32 = @splat(3);
+    var requests: [3]api.Request = undefined;
+    for (lens, 0..) |len, i| {
+        requests[i] = .{ .prompt = prompt[0..len], .max_tokens = 8, .drafts = false };
+        try host.engine().submit(@intCast(10 + i), &requests[i], .{ .ctx = &host, .event = policyEvent });
+        try std.testing.expect(host.admitOne());
+    }
+    host.share = share;
+    var calls: PolicyCalls = .{ .host = &host };
+    target.prefill_hook = PolicyCalls.hook;
+    target.prefill_hook_ctx = &calls;
+    try body(&host, &calls);
+}
+
+test "prefill service: policy text and rows; unset or unknown is the default order, TOKENS clamped" {
+    for ([_][]const u8{ "", "stock", "FCFS", "lifo", "batched", "x" }) |text| try std.testing.expectEqual(Share.Policy.stock, Share.policyOf(text));
+    try std.testing.expectEqual(Share.Policy.fcfs, Share.policyOf("fcfs"));
+    try std.testing.expectEqual(Share.Policy.fcfs, Share.policyOf(" fcfs\t"));
+    try std.testing.expectEqual(Share.Policy.stock, (Share{}).policy);
+    try std.testing.expectEqual(@as(u32, 2048), (Share{}).tokens);
+    for ([_][]const u8{ "", "0", "x", "-1", "4294967296" }) |text| try std.testing.expectEqual(@as(u32, 2048), Share.tokensOf(text));
+    for ([_]u32{ 2048, 4096, 8192, 16384 }) |n| { // the default and the measured options pass through unchanged
+        var buf: [8]u8 = undefined;
+        try std.testing.expectEqual(n, Share.tokensOf(try std.fmt.bufPrint(&buf, "{d}", .{n})));
+    }
+    try std.testing.expectEqual(@as(u32, 64), Share.tokensOf("1"));
+    try std.testing.expectEqual(@as(u32, 64), Share.tokensOf("63"));
+    try std.testing.expectEqual(@as(u32, 1000), Share.tokensOf("1000"));
+    try std.testing.expectEqual(@as(u32, 8193), Share.tokensOf("8193"));
+    try std.testing.expectEqual(@as(u32, 16384), Share.tokensOf("16384"));
+    try std.testing.expectEqual(@as(u32, 16384), Share.tokensOf("16385"));
+    try std.testing.expectEqual(@as(u32, 16384), Share.tokensOf("65536"));
+}
+
+test "prefill service: stock policy keeps the default hint and its one long step, call_rows or not" {
+    try policyHost(struct {
+        fn body(host: *LaneHost, calls: *PolicyCalls) !void {
+            host.share.call_rows = 777; // read only under a policy
+            try std.testing.expectEqual(@as(u32, 0), capRows(host));
+            run(host);
+            try std.testing.expectEqual(@as(usize, 1), calls.n); // one long step a visit
+            try std.testing.expectEqual(@as(u32, 0), calls.caps[0]);
+        }
+    }.body, true, &.{ 2048, 2048, 2048 }, .{});
+}
+
+test "prefill service: fcfs fills only the oldest long prompt a visit, at TOKENS rows, beside a decoder" {
+    try policyHost(struct {
+        fn body(host: *LaneHost, calls: *PolicyCalls) !void {
+            const first = &host.filling.items[0].stream;
+            const second = &host.filling.items[1].stream;
+            const third = &host.filling.items[2].stream;
+            run(host);
+            try std.testing.expectEqual(@as(usize, 1), calls.n);
+            try std.testing.expectEqual(first, calls.streams[0]);
+            try std.testing.expectEqual(@as(u32, 1024), calls.caps[0]);
+            try std.testing.expectEqual(@as(u64, 1024), first.fill_at.load(.monotonic));
+            try std.testing.expectEqual(@as(u64, 0), second.fill_at.load(.monotonic));
+            try std.testing.expectEqual(@as(u64, 0), third.fill_at.load(.monotonic));
+            try std.testing.expectEqual(@as(u32, 0), host.share.call_rows); // no hint outlives its call
+            run(host); // the oldest again, to its end: it leaves the list and decodes
+            try std.testing.expectEqual(first, calls.streams[1]);
+            try std.testing.expectEqual(@as(usize, 2), host.filling.items.len);
+            run(host);
+            try std.testing.expectEqual(second, calls.streams[2]);
+            try std.testing.expectEqual(@as(u32, 1024), calls.caps[2]);
+        }
+    }.body, true, &.{ 2048, 2048, 2048 }, .{ .policy = .fcfs, .tokens = 1024 });
+}
+
+test "srpt: a prompt's steps teach its row time only where the backend reports them" {
+    const lanes = @import("lanes");
+    const api = @import("engine_api.zig");
+    const gpa = std.testing.allocator;
+    for ([_]bool{ true, false }) |reports| {
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 2 };
+        defer target.deinit();
+        var vt = target.stepped().vtable.*;
+        vt.reports_fill = reports;
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, .{ .ptr = &target, .vtable = &vt }, clock.clock());
+        defer core.deinit();
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+        defer {
+            @import("lane_host_end.zig").closeAll(&host);
+            host.stop();
+        }
+        host.srpt.on = true;
+        const prompt: [2048]u32 = @splat(3);
+        const request: api.Request = .{ .prompt = &prompt, .max_tokens = 1, .drafts = false };
+        try host.engine().submit(1, &request, .{ .ctx = &host, .event = policyEvent });
+        try std.testing.expect(host.admitOne());
+        _ = longStep(&host, 0); // half of it: a reporting backend shows those rows
+        try std.testing.expectEqual(reports, host.srpt.fill_ns_row > 0);
+        _ = longStep(&host, 0); // its last: a silent backend's whole prompt in one step is no row's time
+        try std.testing.expectEqual(@as(usize, 0), host.filling.items.len);
+        try std.testing.expectEqual(reports, host.srpt.fill_ns_row > 0);
+    }
+}
+
+test "prefill service: fcfs alone with nothing decoding takes the engine's own cut" {
+    try policyHost(struct {
+        fn body(host: *LaneHost, calls: *PolicyCalls) !void {
+            run(host);
+            try std.testing.expectEqual(@as(usize, 1), calls.n);
+            try std.testing.expectEqual(@as(u32, 0), calls.caps[0]);
+            try std.testing.expectEqual(@as(usize, 1), host.filling.items.len); // the whole prompt went in
+        }
+    }.body, false, &.{ 2048, 2048 }, .{ .policy = .fcfs, .tokens = 1024 });
 }

@@ -139,7 +139,7 @@ pub fn plan(f: *Forward, p: *buffers.Plan, rows: u32) !void {
         if (ws.plan == null) {
             ws.plan = .{ .a = f.gpa };
             try planWorkspace(f, &ws.plan.?, rows, layers);
-            if (keepsShared(f)) {
+            if (try keepsShared(f)) {
                 const before = planBytes(&ws.plan.?);
                 try k4Trim(f.gpa, &ws.plan.?, p, &ws.keep);
                 log.info("prefill 4K: rank {d}: {d} roles shared with the forward (TF_DSV41_PF_WS_SHARE): workspace {d} -> {d} MiB", .{ f.comm.rank(), ws.keep.count(), before >> 20, planBytes(&ws.plan.?) >> 20 });
@@ -168,16 +168,16 @@ pub fn planPrograms(f: *Forward, p: *buffers.Plan, rows: u32, layers: []const u3
     const replay = state(f).mode == .replay;
     const runs = try block_prefill.planRuns(ra.allocator(), f.cfg, f.widths, image_opts.planOptions(f), if (replay) try encoderLayers(f, layers) else layers, if (replay) try decoderLayers(f, layers) else null, rows, if (replay) .encoder else .whole);
     for (runs.items) |cs| try p.add(cs);
+    try @import("index_scratch.zig").plan(p, rows, image_opts.planOptions(f), f.cfg, "");
 }
 
 /// TF_DSV41_PF_WS_SHARE=1 with TF_DSV41_PF_4K alone: a 4K segment reuses forward roles that are already large enough.
-pub fn keepsShared(f: *const Forward) bool {
-    return state(f).k4 and !f.opts.pf_tbo and envOn("TF_DSV41_PF_WS_SHARE");
+pub fn keepsShared(f: *const Forward) !bool {
+    return state(f).k4 and !f.opts.pf_tbo and try envOn("TF_DSV41_PF_WS_SHARE");
 }
 
-fn envOn(name: [:0]const u8) bool {
-    const v = std.mem.span(std.c.getenv(name) orelse return false);
-    return std.mem.eql(u8, v, "1");
+fn envOn(name: [:0]const u8) !bool {
+    return @import("sys").environment.read(bool, name, false);
 }
 
 pub const k4Trim = pf_k4.k4Trim;

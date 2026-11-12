@@ -164,14 +164,8 @@ The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine st
   flag's name.
 - PNG and JPEG are decoded to the pixels 0.6.6 decoded with Pillow 12.3 (`zig/src/core/picture/`, which d1-3B's
   pictures on CUDA use too): PNG from the PNG specification, JPEG by libjpeg-turbo 3.1.4.1's TurboJPEG library
-  (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library; the
-  server checks it at startup with `--vision`, or when running `capabilities --json`, from the file
-  `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
-  folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
-  libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
-  release; PNG images still serve. Homebrew is a search location, not a guarantee of the pinned version: a newer
-  `jpeg-turbo` package is refused too. Use a separately built libjpeg-turbo 3.1.4.1 library with the override or
-  beside the server; updating the package does not satisfy this exact pin.
+  (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library;
+  [JPEG input](#jpeg-input) says where the server looks for it and what its warnings mean.
 - WebP is decoded by libwebp 1.6.0's decoder library (`libwebpdecoder`, the release Pillow 13.0.0 bundles), to the
   RGB bytes Pillow 13.0.0 gives the same file (lossy and lossless, with and without alpha, EXIF-oriented:
   `zig/tests/fixtures/picture/webp.json`, from `tools/zig/picture_webp_fixtures.py`). TensorFold does not ship it
@@ -195,6 +189,51 @@ The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine st
   part, become image tokens.
 - The prompt cache keys each image's placeholder rows by the image's content, so a kept state resumes the same image
   and never another one under the same placeholders. Image conversations reuse their history like text ones.
+
+### JPEG input
+
+JPEG images are decoded by libjpeg-turbo 3.1.4.1 and no other release. Decoders can give different pixels for the
+same file from one release to the next, and different pixels give the image tower different rows, so the image's
+tokens, and the reply, could change with the library installed. 3.1.4.1 is the release Pillow 12.3 decoded with for
+0.6.6, so the server gets 0.6.6's pixels. The release archives do not include it.
+
+The server tries these in order and uses the first that has TurboJPEG 3's `tj3` functions and whose version string,
+which libjpeg-turbo writes into the file, is exactly `3.1.4.1`:
+
+1. The file `TENSORFOLD_LIBTURBOJPEG` names. While the variable is set, even to an empty value, nothing else is tried.
+2. `lib/` in the folder above the executable's (`../lib/` from `bin/`).
+3. The executable's own folder.
+4. On macOS only, `/opt/homebrew/opt/jpeg-turbo/lib/`, then `/usr/local/opt/jpeg-turbo/lib/`.
+5. The file name alone, through the system loader's search: `LD_LIBRARY_PATH` and the system directories on Linux,
+   `DYLD_LIBRARY_PATH` and dyld's defaults on macOS, the DLL search order with `PATH` on Windows.
+
+| Platform | File name |
+| --- | --- |
+| macOS | `libturbojpeg.0.dylib` |
+| Linux | `libturbojpeg.so.0` |
+| Windows | `turbojpeg.dll` |
+
+From step 2 on, a file of another release is skipped and the search goes on, as is one without the `tj3` functions.
+Homebrew's `jpeg-turbo` is a search location, not the pin: a newer package is skipped like any other release, and
+updating it does not satisfy the pin. Put a separately built 3.1.4.1 in `lib/` or beside the server, or name it with
+the variable. The Homebrew formula (`ashhart/tensorfold/tensorfold`) builds 3.1.4.1 into the install's `lib/`, so a
+tap install serves JPEG with no setup; an older install picks it up with `brew reinstall tensorfold`.
+
+With `--vision`, the server checks the library before it loads the model, and `capabilities --json` runs the same
+check. Neither decodes an image. A failed check is a warning, not a refusal: the server starts and PNG, WebP and text
+requests still serve, but each JPEG image is refused with the warning's words.
+
+- `FILE is not libjpeg-turbo 3.1.4.1; JPEG images are refused until it is`: that candidate was another release and
+  was skipped. If no warning below follows, a later candidate was 3.1.4.1 and JPEG images serve.
+- `JPEG images need libjpeg-turbo 3.1.4.1 (libturbojpeg); the library has another release, whose pixels can
+  differ; ...`: a library was found, but every one found was another release.
+- `libturbojpeg.0.dylib is required for JPEG inputs (--vision); install libjpeg-turbo 3.1.4.1 and set
+  TENSORFOLD_LIBTURBOJPEG to its file, or put it on the documented loader path`: nothing usable was found, or the
+  named file did not load or lacks the `tj3` functions. The file name is the platform's, and the documented loader
+  path is the list above.
+
+In `capabilities --json`, `found: true` with `usable: false` means a candidate opened but was refused; `problem`
+holds the warning's words.
 
 ### Qwen3.8-27B
 
@@ -255,6 +294,8 @@ as transformers 5.19's `Glm5NextProcessor` prepares them:
   `<|begin_of_image|>…<|end_of_image|>T.T seconds` block a pair.
 - **Budget:** a request's videos share `--vision-video-tokens` visual tokens (default 16,384; the processor's
   `max_image_tokens`). The frames are sized under it and resized with torch's antialiased uint8 bicubic.
+  `--max-frames N` caps the frames a video is sampled to, from 1 through 8,190; without it the engine samples at
+  most 256.
 
 Video needs `libtfvideo`, an optional library over FFmpeg 9.0.2 (the release PyAV 19.0.1 ships). The server loads it
 when the first video arrives and refuses videos by name without it:
@@ -273,6 +314,36 @@ zig build video -Dffmpeg=$HOME/ffmpeg-9.0.2     # zig-out/native/lib/libtfvideo.
   can't read these at all.
 - **Checks:** `tools/zig/glm_video_fixtures.py` checks the patches bit for bit against the processor on frames PyAV
   decodes, over 13 clips. `tools/zig/video_served.py` checks a served model's prompt ids against the processor's.
+
+### PDF inputs
+
+With `--vision --vision-pdf`, user messages and tool results also accept inline PDF documents: `file` parts in
+`/v1/chat/completions`, `input_file` parts in `/v1/responses`, `document` blocks in `/v1/messages`, or
+`data:application/pdf;base64,...` URLs. Without `--vision-pdf`, PDF parts are refused with the flag's name. Remote URLs
+(`file_url` or `document.source.type: "url"`) are refused.
+
+- **Libraries:** rendering requires PDFium (`chromium/7725`, `libpdfium.so` on Linux, `libpdfium.dylib` on macOS,
+  `pdfium.dll` on Windows) installed in `lib/` beside the server or named by `TENSORFOLD_LIBPDFIUM` (the ambient loader
+  search path is not used), plus libjpeg-turbo 3.1.4.1 (`libturbojpeg`, `TENSORFOLD_LIBTURBOJPEG`). At startup with
+  `--vision-pdf`, the server logs the loaded PDFium file path and its SHA-256 digest; missing libraries are reported in
+  `capabilities --json`, logged at startup, and return HTTP `501` at request time.
+- **Request-wide limits before rendering:** across the entire request, PDF pages and regular images share one running
+  count and byte/pixel budget: at most `min(16, --vision-max-images)` PDF pages (`TENSORFOLD_MAX_PDF_PAGES` can lower
+  or raise the 16-page cap up to `--vision-max-images`), `--vision-max-images` total images, 20 MiB encoded image
+  bytes, and 32 megapixels. A request that would cross any of those limits is refused before rendering the page that
+  would exceed them, and a page that fails to load or render is refused explicitly rather than skipped.
+- **Images only, no text layer:** each page is rendered at 144 DPI (bounded to 2,048 pixels a side and 3.6 megapixels)
+  and passed to the vision tower as a JPEG image (bounded by the 10 MiB per-image and 20 MiB per-request encoded byte
+  limits). No PDF text layer is extracted.
+- **Resource and crash isolation:** on POSIX (`Linux` and `macOS`), each PDF renders in a fresh worker process, the
+  server's own executable started again (`posix_spawn` on macOS) to run only the renderer, so no framework state is
+  inherited from the multithreaded server. The worker reads the PDF on its standard input and replies on its standard
+  output, closes every other inherited descriptor, sets `setrlimit` CPU, core, file-size, and (on Linux) 1 GiB
+  address-space growth limits before it opens PDFium, checks progressive-rendering pauses (`IFSDK_PAUSE`), and is held
+  to a 10-second wall-clock deadline (`SIGKILL` on timeout) under a serializing lock so one PDF renders at a time and
+  the OS reclaims PDFium's heap after each document. A worker stopped at a limit is reported as `PDF rendering exceeded
+  resource limits or failed`; one killed by any other signal is reported by name, for example `the PDF render worker
+  crashed (SIGSEGV)`.
 
 ### Nemotron 3.5 Super VL on CUDA
 

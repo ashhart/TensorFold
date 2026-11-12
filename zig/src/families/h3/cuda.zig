@@ -1,5 +1,6 @@
 //! MiniMax H3 / FastH3's transformer blocks over the CUDA runtime in the checkpoint's bf16; the host owns the rest.
 const std = @import("std");
+const report = @import("report.zig");
 const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
 pub const geometry = @import("cuda_geometry.zig");
@@ -120,7 +121,7 @@ pub const Model = struct {
     /// A failed drain retains the complete live handle; the caller can retry close after recovery.
     pub fn deinit(self: *Model) void {
         self.tryDeinit() catch |e| {
-            std.debug.print("H3 model retained at close: {t}\n", .{e});
+            report.say("H3 model retained at close: {t}", .{e});
         };
     }
     pub fn tryDeinit(self: *Model) !void {

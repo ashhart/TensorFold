@@ -29,6 +29,9 @@ pub const worker = @import("backend/hip/engine/worker.zig");
 pub const slicing = @import("weights/slicing.zig");
 pub const reduce = @import("hip").reduce;
 pub const native_engine = @import("backend/hip/engine/native.zig");
+/// The DFlash2 drafter's config.json and weights for the HIP engine.
+pub const draft_config = @import("backend/hip/draft/config.zig");
+pub const draft_weights = @import("backend/hip/draft/weights.zig");
 /// The registry entries of the native server: the dense and the sparse checkpoints.
 pub const native = native_engine.Native("qwen3_5");
 pub const native_moe = native_engine.Native("qwen3_5_moe");
@@ -39,6 +42,7 @@ test {
     _ = @import("weights/shard.zig");
     _ = @import("weights/projection.zig");
     _ = @import("weights/checkpoint_test.zig");
+    _ = @import("weights/checkpoint_hf_test.zig");
     _ = @import("weights/real_test.zig");
     _ = view;
     _ = moe;
@@ -50,6 +54,8 @@ test {
     _ = pages;
     _ = plan;
     _ = slicing;
+    _ = @import("backend/hip/draft/config_test.zig");
+    _ = @import("backend/hip/draft/weights_test.zig");
     // the engine and its workers compile on a host with no GPU
     @import("std").testing.refAllDecls(hip_lanes.Hip);
     @import("std").testing.refAllDecls(worker.Worker);

@@ -40,7 +40,6 @@ test "GLM 64-sums stress separates BF16 at every registered width independently 
             const mag = try a.alloc(f64, n);
             try ref.sums(a, in, .{}, want, mag);
             for (want) |v| try std.testing.expectEqual(@as(f64, 511), v);
-            var least: f64 = std.math.inf(f64);
             for ([_]g.Order{ .sequential, .pairwise, .strided }) |order| {
                 for ([_]c.Accum{ .f32, .f16, .bf16 }) |acc| {
                     try ref.sums(a, in, .{ .acc = acc, .order = order }, got, mag);
@@ -48,14 +47,10 @@ test "GLM 64-sums stress separates BF16 at every registered width independently 
                         const ratio = @abs(v - target) / c.boundExact(spec, target);
                         if (acc == .bf16) {
                             try std.testing.expect(ratio >= spec.sums.bf16);
-                            least = @min(least, ratio);
                         } else try std.testing.expectEqual(target, v);
                     }
                 }
             }
-            if (seed == 0) std.debug.print("GLM 64-sums width={d} hc={} BF16 minimum={d}x\n", .{
-                entry.width, entry.which == .hc_sums, least,
-            });
         }
     }
 }

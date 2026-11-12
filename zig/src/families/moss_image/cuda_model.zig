@@ -220,19 +220,10 @@ pub const Model = struct {
         if (latents.len != R * cfg.channels or velocity.len != latents.len) return error.LatentRows;
         if (skip) |s| if (s >= cfg.layers) return error.BadSkipLayer;
         const started = seconds();
-        var spent: f64 = 0;
-        if (t.timestep != timestep) {
-            var vectors: [host.vectors][H]u16 = undefined;
-            t.timestep = null;
-            try host.modulation(&vectors, t.gpa, t.w.modulation, timestep);
-            try t.upload(t.mods, std.mem.sliceAsBytes(&vectors));
-            t.timestep = timestep;
-            spent = seconds() - started;
-        }
+        const spent = try t.modulate(timestep);
         const halves = try t.gpa.alloc(u16, latents.len);
         defer t.gpa.free(halves);
-        for (halves, latents) |*o, v| o.* = host.bf16(v);
-        try t.upload(t.lat, std.mem.sliceAsBytes(halves));
+        try t.embed(latents, halves);
         const N = R + p.rows;
         try t.marks[0].record(t.stream);
         try t.d.check(t.d.api.cuMemcpyDtoDAsync_v2(t.x + R * H * 2, p.text.ptr, p.rows * H * 2, t.stream.handle), "cuMemcpyDtoDAsync");
@@ -245,6 +236,58 @@ pub const Model = struct {
         try t.stream.synchronize();
         for (velocity, halves) |*o, v| o.* = host.widen(v);
         return .{ .wall = seconds() - started, .gpu = @as(f64, try cuda.Event.elapsedMs(t.marks[0], t.marks[1])) / 1000, .host = spent };
+    }
+
+    /// For checks: the embedding, each kept block alone on its block of `inputs`, then the final layer on the last.
+    pub fn steps(t: *Model, p: *const Prompt, latents: []const f32, timestep: f32, skip: ?usize, inputs: []const u16, rows: []u16, velocity: []f32) !void {
+        const R = t.image;
+        const N = R + p.rows;
+        const kept: usize = cfg.layers - @as(usize, @intFromBool(skip != null));
+        if (latents.len != R * cfg.channels or velocity.len != latents.len) return error.LatentRows;
+        if (skip) |s| if (s >= cfg.layers) return error.BadSkipLayer;
+        if (inputs.len != (kept + 1) * N * H or rows.len != inputs.len) return error.StreamRows;
+        _ = try t.modulate(timestep);
+        const halves = try t.gpa.alloc(u16, latents.len);
+        defer t.gpa.free(halves);
+        try t.embed(latents, halves);
+        try t.d.check(t.d.api.cuMemcpyDtoDAsync_v2(t.x + R * H * 2, p.text.ptr, p.rows * H * 2, t.stream.handle), "cuMemcpyDtoDAsync");
+        try t.linearBias(t.lat, t.w.video_in, t.w.video_in_b, t.x, R, H, cfg.channels);
+        try t.download(rows[0 .. N * H], t.x);
+        var k: usize = 0;
+        for (t.w.blocks, 0..) |b, i| if (skip != i) {
+            try t.upload(t.x, std.mem.sliceAsBytes(inputs[k * N * H ..][0 .. N * H]));
+            try t.block(b, N, p.cos(), p.sin(R));
+            k += 1;
+            try t.download(rows[k * N * H ..][0 .. N * H], t.x);
+        };
+        try t.upload(t.x, std.mem.sliceAsBytes(inputs[kept * N * H ..][0 .. N * H]));
+        try t.norm(R, t.w.final_norm, .{ .scale = .scale_out, .shift = .shift_out });
+        try t.linear(t.xn, t.w.final_out, t.vel, R, cfg.channels, H);
+        try t.download(halves, t.vel);
+        for (velocity, halves) |*o, v| o.* = host.widen(v);
+    }
+
+    /// The shared modulation for `timestep` on the device, made on the host unless it holds it; the seconds it took.
+    fn modulate(t: *Model, timestep: f32) !f64 {
+        if (t.timestep == timestep) return 0;
+        const started = seconds();
+        var vectors: [host.vectors][H]u16 = undefined;
+        t.timestep = null;
+        try host.modulation(&vectors, t.gpa, t.w.modulation, timestep);
+        try t.upload(t.mods, std.mem.sliceAsBytes(&vectors));
+        t.timestep = timestep;
+        return seconds() - started;
+    }
+
+    /// The latents in bf16 (through `halves`) on the device, ready for the input projection.
+    fn embed(t: *const Model, latents: []const f32, halves: []u16) !void {
+        for (halves, latents) |*o, v| o.* = host.bf16(v);
+        try t.upload(t.lat, std.mem.sliceAsBytes(halves));
+    }
+
+    fn download(t: *const Model, into: []u16, at: u64) !void {
+        try t.d.check(t.d.api.cuMemcpyDtoHAsync_v2(into.ptr, at, into.len * 2, t.stream.handle), "cuMemcpyDtoHAsync");
+        try t.stream.synchronize();
     }
 
     const Modulated = struct { scale: host.Vector, shift: host.Vector };

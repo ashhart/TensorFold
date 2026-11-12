@@ -11,18 +11,21 @@ const wt = @import("cuda_prompt_wt.zig");
 /// Rows past a request's prompt and reply its pages hold: one drafted window's.
 pub const window_rows: u32 = mtp.max_rows;
 
-/// TF_FLASHNEXT_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset or 0: none).
+/// TF_FLASHNEXT_KV_PAGES=n: streams beside the first take n-position pages from one pool (unset, blank or 0: none).
 pub fn paging() !usize {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_PAGES") orelse return 0;
-    const n = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.BadFlashNextKvPages;
+    return pagingOf(@import("core").profile.given(.TF_FLASHNEXT_KV_PAGES));
+}
+
+pub fn pagingOf(v: ?[]const u8) !usize {
+    const n = std.fmt.parseInt(usize, v orelse return 0, 10) catch return error.BadFlashNextKvPages;
     if (n != 0 and !pages.valid(n)) return error.BadFlashNextKvPages;
     return n;
 }
 
 /// TF_FLASHNEXT_KV_PAGES_ALL=1: every stream on pages, none on its own contiguous caches (checks).
 pub fn pagedOnly() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_KV_PAGES_ALL") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    const v = @import("core").profile.get(.TF_FLASHNEXT_KV_PAGES_ALL) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Pages a stream maps at most: a full window and one more drafted window.
@@ -50,7 +53,7 @@ pub const Head = struct { draft_n: usize, rows: usize };
 pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layout {
     const layers = wt.attn_n + @intFromBool(head != null);
     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
-    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null), .run_bytes = run };
+    return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run };
 }
 
 /// Where a stream's caches came from: no pool, the one stream on its own caches beside a pool, or a pool lane.
@@ -200,6 +203,8 @@ pub const Pool = struct {
         x.run = run;
         try p.mapStates(&x.seq);
         try p.e.clearSeq(&x.seq, cap);
+        // a new generation each open: every lane's caches share the arena's address, so the graph keys need it
+        x.seq.gen = @import("cuda_window_graph.zig").nextGen();
         x.used = true;
         return x.seq;
     }
@@ -267,6 +272,37 @@ pub const Pool = struct {
         }
     };
 };
+
+test "TF_FLASHNEXT_KV_PAGES: unset, empty or whitespace-only text reads as no pages; every valid size unchanged" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const t = std.testing;
+    const env = @import("sys").env;
+    const name = "TF_FLASHNEXT_KV_PAGES";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = env.unsetenv(name);
+    }
+    _ = env.unsetenv(name);
+    try t.expectEqual(@as(usize, 0), try paging());
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(@as(usize, 0), try paging());
+    }
+    for ([_][:0]const u8{ "0", "4", "256" }, [_]usize{ 0, 4, 256 }) |v, n| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectEqual(n, try paging());
+    }
+    for ([_][:0]const u8{ "abc", " 256", "256 ", "\t256", "6", "18446744073709551616" }) |v| {
+        try t.expectEqual(@as(c_int, 0), env.setenv(name, v, 1));
+        try t.expectError(error.BadFlashNextKvPages, paging());
+    }
+    try t.expectEqual(@as(usize, 0), try pagingOf(null));
+    try t.expectError(error.BadFlashNextKvPages, pagingOf(""));
+    try t.expectError(error.BadFlashNextKvPages, pagingOf(" "));
+}
 
 test "a stream's pages: its rows and a drafted window, no more than a full window's" {
     const l = layout(40960, 256, null, 0);

@@ -1,4 +1,4 @@
-// Prompt int4 GEMM with fp16 activations (w4g_dpb, w4g_s4dpb, w4g_dpb_swiglu): C[M, N] = A[M, K] · Wᵀ on fp16 DPAS.
+// Prompt int4 GEMM with fp16 activations (w4g_dpb, w4g_s4dpb, w4g_dpb_swiglu, w4g_dpb_geglu): C[M, N] = A[M, K] · Wᵀ on fp16 DPAS.
 #pragma once
 #include <functional>
 #include <vector>
@@ -35,7 +35,8 @@ class W4Prompt : public ELFCodeGenerator<hw> {
 
 public:
     // 32x32 subgroup tiles, 64x256 work-groups; the group fold, bias and options as NAVIGATION.md section 8 says.
-    W4Prompt(Product product, int gsz, bool s4, bool asplit, bool b3, bool swiglu) : ELFCodeGenerator<hw>(product) {
+    W4Prompt(Product product, int gsz, bool s4, bool asplit, bool b3, bool swiglu, bool geglu = false)
+        : ELFCodeGenerator<hw>(product) {
         const int subs = gsz / 64, tn = 2;
         newArgument("A", ExternalArgumentType::GlobalPtr);
         newArgument("W", ExternalArgumentType::GlobalPtr);
@@ -50,7 +51,8 @@ public:
         newArgument("Mp", DataType::d);
         newArgument("G", DataType::d);
         if (s4) newArgument("P", ExternalArgumentType::GlobalPtr);
-        externalName(swiglu ? "w4g_dpb_swiglu" : s4 ? "w4g_s4dpb" : "w4g_dpb");
+        if (geglu) newArgument("TBL", ExternalArgumentType::GlobalPtr);
+        externalName(geglu ? "w4g_dpb_geglu" : swiglu ? "w4g_dpb_swiglu" : s4 ? "w4g_s4dpb" : "w4g_dpb");
         requireSIMD(16);
         requireGRF(256);
         requireLocalID(1);
@@ -77,7 +79,7 @@ public:
 
         // Tile: mt = z·GM + x, nt = y; subgroup = local id of channel 0 / 16.
         const Subregister m0 = s.d(0), n0 = s.d(1), g = s.d(2), groups = s.d(3), mt = s.d(4), sg = s.d(5);
-        const Subregister kx = s.d(6), tmp = s.d(7);
+        const Subregister kx = s.d(6), tmp = s.d(7), n1 = mt;   // n1 (geglu): the up column of the tile, once mt is spent
         mul(1, mt, r0.ud(7), GM);
         add(1, mt, mt, r0.ud(1));
         shl(1, tmp, mt, 6);
@@ -91,6 +93,11 @@ public:
         shl(1, t.d(1), t.d(1), 5);
         shl(1, n0, r0.ud(6), 8);
         add(1, n0, n0, t.d(1));                           // n0 = nt·256 + (sg / 2)·32
+        if (geglu) {                                       // gate | up not interleaved: gate columns n0 / 2, up N / 2 further
+            shr(1, n0, n0, 1);
+            shr(1, n1, N, 1);
+            add(1, n1, n1, n0);
+        }
 
         // 2D headers (widths and heights − 1).
         shl(1, t.d(2), K, 1);
@@ -109,7 +116,7 @@ public:
         mov(1, hW.ud(6), 0);                               // row of words of the current block
         header(hPW, W, t.d(4), t.d(5), 16, 8, 1);
         mov(1, hPW.ud(5), n0);
-        if (swiglu)
+        if (swiglu || geglu)
             add(1, t.d(6), N, -1);                         // (N/2)·2 − 1
         else {
             shl(1, t.d(6), N, 1);
@@ -123,14 +130,19 @@ public:
 
         // Scale of group gi: 16 fp16 per tile at (gi·N + n0)·2, converted to fp32 (scale × 2²⁴) in r42 + 2j.
         auto scales = [&](const Subregister &gi) {
-            mul32(t.d(0), gi, N, t.d(5));
-            add(1, t.d(0), t.d(0), n0);
-            shl(1, t.d(0), t.d(0), 1);
-            mov(1, addr.uq(0), t.ud(0));
-            add(1, addr.uq(0), addr.uq(0), S);
-            load.ugm(1, sh, block(DataSizeLSC::D32, 8 * tn), A64, addr);
+            for (int p = 0; p < (geglu ? tn : 1); p++) {      // geglu: the gate and up scales are 16 columns each, N / 2 apart
+                mul32(t.d(0), gi, N, t.d(5));
+                add(1, t.d(0), t.d(0), p ? n1 : n0);
+                shl(1, t.d(0), t.d(0), 1);
+                mov(1, addr.uq(0), t.ud(0));
+                add(1, addr.uq(0), addr.uq(0), S);
+                if (geglu)
+                    load.ugm(1, GRF(sh.getBase() + p), block(DataSizeLSC::D32, 8), A64, addr);
+                else
+                    load.ugm(1, sh, block(DataSizeLSC::D32, 8 * tn), A64, addr);
+            }
             for (int j = 0; j < tn; j++) {
-                mov(16, GRF(42 + 2 * j).f(), sh.hf(16 * j)(1));
+                mov(16, GRF(42 + 2 * j).f(), geglu ? GRF(sh.getBase() + j).hf(0)(1) : sh.hf(16 * j)(1));
                 mul(16, GRF(42 + 2 * j).f(), GRF(42 + 2 * j).f(), 16777216.0f);
             }
         };
@@ -236,10 +248,16 @@ public:
             add(1, hPA.ud(5), kx, 96);
             load(1, null, block_2d(DataSizeLSC::D16, 16, 32, 2), A64, hPA);
             for (int j = 0; j < tn; j++) {
-                if (j) add(1, hW.ud(5), hW.ud(5), 16);
+                if (geglu && j)
+                    mov(1, hW.ud(5), n1);
+                else if (j)
+                    add(1, hW.ud(5), hW.ud(5), 16);
                 load(1, GRF(W0 + 8 * j), block_2d(DataSizeLSC::D32, 16, 8), A64, hW);
             }
-            add(1, hW.ud(5), hW.ud(5), -16 * (tn - 1));
+            if (geglu)
+                mov(1, hW.ud(5), n0);
+            else
+                add(1, hW.ud(5), hW.ud(5), -16 * (tn - 1));
             if (u == 0) {
                 // The current group's scale becomes the previous one (duplicated for SIMD32).
                 for (int j = 0; j < tn; j++) {
@@ -338,7 +356,10 @@ public:
             load(1, GRF(A0), block_2d(DataSizeLSC::D16, 16, 32), A64, hAH);
             load(1, GRF(A0 + 16), block_2d(DataSizeLSC::D16, 16, 32), A64, hAL);
             for (int j = 0; j < tn; j++) {
-                add(1, hBB.ud(5), n0, 16 * j);
+                if (geglu)
+                    mov(1, hBB.ud(5), j ? n1 : n0);
+                else
+                    add(1, hBB.ud(5), n0, 16 * j);
                 load(1, GRF(j ? B1 : B0), block_2d(DataSizeLSC::D16, 16, 16) | vnni, A64, hBB);
             }
             for (int j = 0; j < tn; j++)
@@ -352,7 +373,40 @@ public:
             jmpi(1 | f1[0], lBias);
         }
 
-        if (swiglu) {
+        if (geglu) {
+            // GeGLU of 8 rows x 16 columns per row tile i in the glue's bf16 steps: g and u to fp16 then bf16, gelu(g) from a
+            // table of the glue's own bf16 values, the product to bf16 then fp16; activation columns n0 ... + 15.
+            const GRF X = GRF(PART), E = GRF(PART + 1), Q = GRF(PART + 2), U = GRF(PART + 3), O = GRF(PART + 4);
+            const GRF AD = GRF(PART + 5), TT = GRF(PART + 7);   // AD: 16 addresses over two registers
+            const auto TBL = getArgument("TBL");
+            for (int i = 0; i < 4; i++) {
+                for (int r = 0; r < 8; r++) {
+                    const GRF g = GRF(ACC + 8 * (2 * i) + r), u = GRF(ACC + 8 * (2 * i + 1) + r);
+                    mov(16, Q.hf(0)(1), g.f());              // g rounded to fp16
+                    mov(16, X.f(), Q.hf(0)(1));
+                    mov(16, Q.bf(0)(1), X.f());              // then to bf16: the index of the table
+                    mov(16, E.ud(), Q.uw(0)(1));
+                    shl(16, E.ud(), E.ud(), 1);
+                    mov(16, AD.ud(0)(2), E.ud());
+                    mov(16, AD.ud(1)(2), 0);
+                    add(16, AD.uq(), AD.uq(), TBL.uq(0)(0, 1, 0));
+                    load.ugm(16, TT, D16U32, A64, AD);
+                    shl(16, X.ud(), TT.ud(), 16);            // bf16(gelu) as fp32
+                    mov(16, Q.hf(16)(1), u.f());             // u rounded to fp16, then bf16
+                    mov(16, U.f(), Q.hf(16)(1));
+                    mov(16, Q.bf(16)(1), U.f());
+                    mov(16, E.ud(), Q.uw(16)(1));
+                    shl(16, U.ud(), E.ud(), 16);
+                    mul(16, O.f(), X.f(), U.f());
+                    mov(16, Q.bf(0)(1), O.f());              // the product to bf16, then fp16
+                    mov(16, E.ud(), Q.uw(0)(1));
+                    shl(16, O.ud(), E.ud(), 16);
+                    mov(16, GRF(H + r / 2).hf((r % 2) * 16)(1), O.f());
+                }
+                add(1, hC.ud(6), m0, 8 * i);
+                store(1, block_2d(DataSizeLSC::D16, 16, 8), A64, hC, GRF(H));
+            }
+        } else if (swiglu) {
             // Activation of 8 rows × 16 columns per row tile i: activation columns n0/2 … + 15.
             const GRF X = GRF(PART), E = GRF(PART + 1), Q = GRF(PART + 2), U = GRF(PART + 3), O = GRF(PART + 4);
             shr(1, hC.ud(5), n0, 1);

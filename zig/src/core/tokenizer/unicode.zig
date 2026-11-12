@@ -145,21 +145,36 @@ fn composition(first: u21, second: u21) ?u21 {
 
 const Mark = struct { cp: u21, ccc: u8 };
 
-fn decompose(cp: u21, out: *std.ArrayList(Mark), a: std.mem.Allocator) !void {
+fn compatibility(cp: u21) ?[]const u21 {
+    var lo: usize = 0;
+    var hi: usize = data.compatibility.len;
+    while (lo < hi) {
+        const mid = (lo + hi) / 2;
+        const entry = data.compatibility[mid];
+        if (cp < entry[0]) hi = mid else if (cp > entry[0]) lo = mid + 1 else return data.compatibility_sequences[entry[1]..][0..entry[2]];
+    }
+    return null;
+}
+
+fn decompose(cp: u21, compat: bool, out: *std.ArrayList(Mark), a: std.mem.Allocator) !void {
+    if (compat) if (compatibility(cp)) |parts| {
+        for (parts) |part| try decompose(part, true, out, a);
+        return;
+    };
     if (cp >= s_base and cp < s_base + s_count) {
         const index = cp - s_base;
         try out.append(a, .{ .cp = l_base + index / n_count, .ccc = 0 });
         try out.append(a, .{ .cp = v_base + index % n_count / t_count, .ccc = 0 });
         if (index % t_count != 0) try out.append(a, .{ .cp = t_base + index % t_count, .ccc = 0 });
     } else if (decomposition(cp)) |parts| {
-        try decompose(parts[0], out, a);
-        if (parts[1] != 0) try decompose(parts[1], out, a);
+        try decompose(parts[0], compat, out, a);
+        if (parts[1] != 0) try decompose(parts[1], compat, out, a);
     } else try out.append(a, .{ .cp = cp, .ccc = combiningClass(cp) });
 }
 
-pub const Form = enum { nfc, nfd };
+pub const Form = enum { nfc, nfd, nfkc, nfkd };
 
-/// Canonical normalization of valid UTF-8 (UAX #15); the result is owned by `a`.
+/// Canonical or compatibility normalization of valid UTF-8 (UAX #15); the result is owned by `a`.
 pub fn normalize(a: std.mem.Allocator, text: []const u8, form: Form) ![]u8 {
     // Below U+0300 every character is NFC-stable and never the second half of a composition.
     const limit: u8 = if (form == .nfc) 0xCC else 0x80;
@@ -171,7 +186,7 @@ pub fn normalize(a: std.mem.Allocator, text: []const u8, form: Form) ![]u8 {
     var i: usize = 0;
     while (i < text.len) {
         const at = decodeAt(text, i);
-        try decompose(at.cp, &marks, a);
+        try decompose(at.cp, form == .nfkc or form == .nfkd, &marks, a);
         i += at.len;
     }
     const items = marks.items;
@@ -188,7 +203,7 @@ pub fn normalize(a: std.mem.Allocator, text: []const u8, form: Form) ![]u8 {
         start = end;
     }
     var len = items.len;
-    if (form == .nfc and len > 0) {
+    if ((form == .nfc or form == .nfkc) and len > 0) {
         var starter: usize = 0;
         var last: u16 = if (items[0].ccc == 0) 0 else 256;
         len = 1;
@@ -221,7 +236,7 @@ pub inline fn decodeAt(s: []const u8, i: usize) Decoded {
     return .{ .cp = @as(u21, b & 0x07) << 18 | @as(u21, s[i + 1] & 0x3F) << 12 | @as(u21, s[i + 2] & 0x3F) << 6 | (s[i + 3] & 0x3F), .len = 4 };
 }
 
-/// Length of the well-formed sequence at `i`, or of its maximal invalid subpart (Unicode 3.9, Table 3-7) when `cp` is null.
+/// Length of the well-formed sequence at `i`, or its maximal invalid subpart (Unicode 3.9 Table 3-7) when `cp` is null.
 pub fn scan(s: []const u8, i: usize) struct { len: usize, cp: ?u21 } {
     const b = s[i];
     if (b < 0x80) return .{ .len = 1, .cp = b };

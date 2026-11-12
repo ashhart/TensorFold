@@ -213,6 +213,16 @@ pub fn Io(comptime core: type) type {
 
 /// One layer's pocket ([neurons, D] each) rounded in place as `write` hands it back: input rows, then output columns.
 pub fn round(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []const []f32, down: []f32) !void {
+    return roundWith(F, gpa, d, inputs, down, false);
+}
+
+/// A freshly fitted layer on a grid whose endpoints survive the next ordinary write, before it is judged.
+pub fn roundFixed(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []const []f32, down: []f32) !void {
+    return roundWith(F, gpa, d, inputs, down, true);
+}
+
+fn roundWith(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []const []f32, down: []f32, comptime fixed: bool) !void {
+    const quantize = if (fixed) affine.quantizeFixed else affine.quantize;
     const q = F.quant;
     const g = q.group;
     const neurons = down.len / d;
@@ -228,14 +238,14 @@ pub fn round(comptime F: Family, gpa: std.mem.Allocator, d: usize, inputs: []con
     // each input row on its own groups, as `expert` writes a learned row
     for (inputs) |rows| for (0..neurons) |k| {
         const x = rows[k * d ..][0..d];
-        affine.quantize(q, x, w[0..affine.wordsOf(q, d)], s[0 .. d / g], b[0 .. d / g]);
+        quantize(q, x, w[0..affine.wordsOf(q, d)], s[0 .. d / g], b[0 .. d / g]);
         affine.dequantize(q, w[0..affine.wordsOf(q, d)], s[0 .. d / g], b[0 .. d / g], x);
     };
     // each output's learned columns on their own groups, as `expert` writes the output projection's
     const col = try arena.alloc(f32, neurons);
     for (0..d) |o| {
         for (col, 0..) |*x, k| x.* = down[k * d + o];
-        affine.quantize(q, col, w[0..affine.wordsOf(q, neurons)], s[0 .. neurons / g], b[0 .. neurons / g]);
+        quantize(q, col, w[0..affine.wordsOf(q, neurons)], s[0 .. neurons / g], b[0 .. neurons / g]);
         affine.dequantize(q, w[0..affine.wordsOf(q, neurons)], s[0 .. neurons / g], b[0 .. neurons / g], col);
         for (col, 0..) |x, k| down[k * d + o] = x;
     }

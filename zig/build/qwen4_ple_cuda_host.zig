@@ -1,4 +1,4 @@
-//! Actual CUDA lexical source uses owned CPU collectives and the maintained IEEE scalar helper body.
+//! Actual CUDA lexical source uses owned CPU collectives and the maintained IEEE scalar helper bodies.
 const std = @import("std");
 const gen = @import("../src/families/flashnext/hybrid_ple_source.zig");
 const ctl = @import("../src/families/qwen4/ple_control_source.zig");
@@ -10,15 +10,20 @@ pub fn wire(b: *std.Build, module: *std.Build.Module) void {
 }
 pub fn generate(a: std.mem.Allocator) ![]const u8 {
     const production = try gen.cuda(a);
-    const reduce = try edit.function(production, "float block_sum(");
-    if (!std.mem.eql(u8, std.mem.trim(u8, reduce, "\n "), std.mem.trim(u8, @embedFile("../tests/qwen4/ple_block_sum.cuh"), "\n "))) return error.PleBlockReduction;
+    const reduce = "using tf_common::block_sum_serial;";
+    if (std.mem.count(u8, production, reduce) != 1) return error.PleBlockReduction;
+    const shared = try edit.function(@embedFile("../kernels/cuda/common/reduce.cuh"), "float block_sum_serial(");
+    const renamed = try edit.once(a, shared, "block_sum_serial(", "block_sum(");
+    if (!std.mem.eql(u8, std.mem.trim(u8, renamed, "\n "), std.mem.trim(u8, @embedFile("../tests/qwen4/ple_block_sum.cuh"), "\n "))) return error.PleBlockReduction;
     var text = try ctl.cuda(a, production);
     text = try edit.once(a, text, reduce, "");
-    for ([_][]const u8{ "kss", "qss", "dot", "gss" }) |v| text = try std.mem.replaceOwned(u8, a, text, try std.fmt.allocPrint(a, "block_sum({s}, scratch)", .{v}), try std.fmt.allocPrint(a, "(co_await cpu_block_sum({s}))", .{v}));
+    for ([_][]const u8{ "kss", "qss", "dot", "gss" }) |v| text = try std.mem.replaceOwned(u8, a, text, try std.fmt.allocPrint(a, "block_sum_serial({s}, scratch)", .{v}), try std.fmt.allocPrint(a, "(co_await cpu_block_sum({s}))", .{v}));
     var math = @embedFile("../kernels/cuda/common/glue_math.cuh").*;
     var helpers: []const u8 = &math;
     helpers = try edit.once(a, helpers, "#include \"common/reduce.cuh\"", "");
     helpers = try edit.once(a, helpers, "using tf_common::warp_sum;", "");
+    const scale = try edit.function(@embedFile("../kernels/cuda/common/reduce.cuh"), "float rms_scale(");
+    helpers = try std.mem.concat(a, u8, &.{ helpers, "\nnamespace tf_common {\n", scale, "\n}\n" });
     const replacements = [_][2][]const u8{
         .{ "#pragma once", "" },                       .{ "#include <cuda_bf16.h>", "" },                                                                .{ "#include <cuda_fp16.h>", "" },                                                                .{ "#include \"common/glue_math.cuh\"", "" },
         .{ "__device__ __forceinline__ ", "inline " }, .{ "extern \"C\" __global__ void __launch_bounds__(512) qwen4_ple_gate", "Task qwen4_ple_gate" }, .{ "extern \"C\" __global__ void __launch_bounds__(512) qwen4_ple_conv", "void qwen4_ple_conv" }, .{ "__shared__ float", "static float" },

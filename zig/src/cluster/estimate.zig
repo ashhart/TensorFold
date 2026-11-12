@@ -1,4 +1,4 @@
-//! A checkpoint's tensor table from its config and the Hub's file list, so a cluster can be planned before the weights land.
+//! A checkpoint's tensor table from its config and the Hub's file list, to plan a cluster before the weights land.
 const std = @import("std");
 const platform = @import("sys");
 const checkpoint = @import("checkpoint.zig");

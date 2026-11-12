@@ -102,7 +102,7 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         for (nexts[i][0..w], 0..) |*t, r| t.* = @intCast((37 + 101 * i + 17 * r) % 50_000);
         inline for (.{ &alone, &together }) |side| {
             side.seqs[i] = try e.newSeq(cap);
-            side.drafts[i] = mtp.Draft.init(gpa, e.driver, stream.*, cap, ops.h.ids.len, e.chunk) catch |err| {
+            side.drafts[i] = mtp.Draft.init(gpa, e.driver, stream.*, cap, ops.h.ids.len, e.chunk, e.heads) catch |err| {
                 side.seqs[i].deinit(gpa);
                 return err;
             };
@@ -134,7 +134,8 @@ fn shape(gpu: check.Gpu, e: *prompt.Engine, ops: mtp.Ops(flash.Tri), stream: *cu
         sms[i] = rule(mode, i);
         outs[i] = &chains[i];
     }
-    try ops.draftMany(ds[0..n], nexts_s[0..n], rows_s[0..n], counts[0..n], positions[0..n], sms[0..n], confidence, outs[0..n]);
+    const stops: [6]f64 = @splat(confidence);
+    try ops.draftMany(ds[0..n], nexts_s[0..n], rows_s[0..n], counts[0..n], positions[0..n], sms[0..n], stops[0..n], outs[0..n]);
     try stream.synchronize();
     for (widths, 0..) |_, i| {
         try check.expect(try sameLogits(gpu, &alone.drafts[i], &together.drafts[i]), "a shared head's logits equal its lone pass's", .{});

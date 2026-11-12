@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cuda_bf16.h>
+#include "common/act.cuh"
 
 namespace dsv41_pointwise {
 
@@ -13,7 +14,7 @@ namespace dsv41_pointwise {
 __device__ __forceinline__ float clamp_max(float v, float hi) { return isnan(v) ? v : fminf(v, hi); }
 __device__ __forceinline__ float clamp(float v, float lo, float hi) { return isnan(v) ? v : fminf(fmaxf(v, lo), hi); }
 // torch's silu (ActivationSiluKernel.cu): x / (1 + exp(-x)) in fp32
-__device__ __forceinline__ float silu(float x) { return x / (1.0f + expf(-x)); }
+using tf_common::silu;
 
 // g [R, ldg], u [R, ldu], act [R, lda]; n columns a row
 __global__ void __launch_bounds__(256) swiglu_kernel(const float* __restrict__ g, long long ldg,

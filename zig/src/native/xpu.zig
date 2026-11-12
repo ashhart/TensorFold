@@ -1,17 +1,23 @@
 //! XPU engines (Intel Xe2 over Level Zero): Qwen3.8-27B behind the lane host; a lone stream uses the backend's driver.
 const std = @import("std");
 const api = @import("engine_api");
-const xq = @import("xpu_qwen27");
+/// The Qwen3.8-27B runner needs DPAS and nGEN: a build without DPAS (-Dxpu-dpas=false, Gen12LP) leaves it out.
+const has_qwen27 = @import("xpu_engine_options").qwen27;
+const xq = if (has_qwen27) @import("xpu_qwen27") else struct {};
 const Drafter = xq.drafter.Drafter;
 const lanes = @import("lanes");
 const sampling = lanes.sampling;
 const XpuLanes = @import("xpu_lanes.zig").Lanes;
+const dflash2 = @import("xpu_dflash2.zig");
+const DFlash2 = dflash2.Adapter(xq.drafter, XpuLanes);
 const nem = @import("xpu_nem.zig");
 const admit = @import("xpu_admit.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
-pub const families: []const api.Family = &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} } };
+const qwen27_family: []const api.Family = if (has_qwen27) &.{.{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }} else &.{};
+const gemma4_family: []const api.Family = if (nem.has_gemma4) &.{.{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} }} else &.{};
+pub const families: []const api.Family = qwen27_family ++ &[_]api.Family{ .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "lfm3", .formats = &.{"mlx-q4g64"} } } ++ gemma4_family;
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return "Intel Xe2 (Level Zero)";
@@ -62,6 +68,8 @@ fn pickAll(gpa: Allocator, row: []const f32, position: u64, s: api.Sampling) !u3
 const LaneServed = struct {
     gpa: Allocator,
     back: XpuLanes,
+    dflash: DFlash2, // the drafter behind the core Drafter VTable (with a drafter attached)
+    wrap: ?lanes.drafted.Drafted, // Drafted in front of `back`: lane rounds draft through it
     cfg: lanes.Config,
     wall: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -73,6 +81,7 @@ const LaneServed = struct {
         h.host.stop();
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
+        if (h.wrap) |*w| w.deinit();
         h.cfg.deinit(h.gpa);
         for (h.back.first_logits) |l| if (l) |x| h.gpa.free(x);
         if (h.back.mask_bits) |x| h.gpa.free(x);
@@ -137,10 +146,17 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
         try h.back.measure();
         std.log.info("qwen27-xpu: window ms by rows: 1 {d:.1}, 8 {d:.1}, 16 {d:.1}", .{ h.back.costs[0].ms, h.back.costs[7].ms, h.back.costs[15].ms });
     }
-    h.cfg = try lanes.Config.init(gpa, h.back.facts(), 16, 15);
+    h.wrap = null;
+    if (drafter) |d| {
+        h.dflash = .{ .d = d, .host = &h.back };
+        h.wrap = try lanes.drafted.Drafted.init(gpa, h.back.backend(), h.dflash.drafter());
+        h.back.wrap = &h.wrap.?;
+    }
+    errdefer if (h.wrap) |*w| w.deinit();
+    h.cfg = try lanes.Config.init(gpa, if (h.wrap) |*w| dflash2.facts(w, h.back.facts()) else h.back.facts(), 16, 15);
     errdefer h.cfg.deinit(gpa);
     h.wall = .{ .io = io };
-    h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
+    h.core = lanes.Engine.init(gpa, &h.cfg, if (h.wrap) |*w| w.backend() else h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
     // the engine cuts its prompts on its own grid from position 0 (prefill_step 0): the same ids give the same bits
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27-xpu", .draft_sources = .{ .drafter = if (drafter != null) .{ .kind = "DFlash2", .name = o.drafter_name orelse o.drafter orelse "" } else null }, .lanes = slots, .context_window = context, .prefill_step = 0, .structures = true });
@@ -162,6 +178,10 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (try o.slideRefusal(a, "XPU")) |why| {
+        problem.* = why;
+        return null;
+    }
     if (o.fsrRefusal("xpu")) |why| {
         problem.* = why;
         return null;
@@ -171,10 +191,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return null;
     }
     if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
-    if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
-        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});
-        return null;
-    }
+    if (comptime has_qwen27) {
+        if (std.mem.eql(u8, o.model_type, "qwen3_5")) return openQwen27(a, gpa, io, o, problem);
+        const gemma = if (nem.has_gemma4) ", Gemma 4 E4B (gemma4, MLX 4/64)" else "";
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128), Nemotron-H (nemotron_h, MLX 4/64){s} and LFM3 (lfm3, MLX 4/64), not {s}", .{ gemma, o.model_type });
+    } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64) and LFM3 (lfm3, MLX 4/64), not {s}: Qwen3.8-27B and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
+    return null;
+}
+
+fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context = xq.limits.context(o.context orelse 32768) catch {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine holds 1 to {d} tokens a stream, not {d}", .{ xq.limits.MAX_CONTEXT, o.context.? });
         return null;
@@ -205,4 +230,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
     };
+}
+
+test "slide admission: xpu refuses before checkpoint or device access" {
+    try @import("slide_open_test.zig").check(open, "XPU", &.{ "qwen3_5", "nemotron_h", "gemma4" });
 }

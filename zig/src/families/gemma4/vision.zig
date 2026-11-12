@@ -96,9 +96,7 @@ pub const Vision = struct {
         v.gpa = gpa;
         v.mm = mm;
         v.out_hidden = out_hidden;
-        const body = try frags.source(device, gpa, ks.gemma4_vision);
-        defer gpa.free(body);
-        const src = try std.fmt.allocPrint(gpa, "#define G4V_OUT {d}\n{s}", .{ out_hidden, body });
+        const src = try @import("vision_source.zig").source(device, gpa, out_hidden);
         defer gpa.free(src);
         v.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer v.lib.deinit();
@@ -300,10 +298,11 @@ pub const Vision = struct {
     }
 };
 
-/// fp32 to bf16, round to nearest even.
+/// fp32 to bf16 as core's bf16_round.bits rounds (NaN stays NaN); a copy, the contract tests build core as a module.
 pub fn bf16(x: f32) u16 {
     const u: u32 = @bitCast(x);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+    if (std.math.isNan(x)) return @truncate((u >> 16) | 0x40);
+    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }
 
 /// Gemma4VisionRotaryEmbedding, gw wide: dims 0-35 by x and 36-71 by y, 18 frequencies twice each, bf16 cos and sin.

@@ -2,12 +2,10 @@
 
 const std = @import("std");
 const hip = @import("hip");
-const lanes = @import("lanes");
 const view = @import("../model/view.zig");
 const weights = @import("../model/weights.zig");
 const bridge = @import("../model/bridge.zig");
 const fwd = @import("../forward/forward.zig");
-const draw = @import("hip_serve").draw;
 const plan = @import("../forward/plan.zig");
 const graph_cache = hip.graph_cache;
 
@@ -18,22 +16,21 @@ const Tensor = hip.ops.Tensor;
 /// Most drafts a chain (the Python engine's depth).
 pub const max_depth = 3;
 
-/// One stream's chain: its last kept final row, the token after it and its slot, the drafts asked for and their draw.
+/// One stream's chain: its last kept final row, the token after it and its slot, the drafts asked for.
 pub const Job = struct {
     hidden: u64,
     token: u32,
     position: usize,
     depth: usize,
-    sampling: ?lanes.Sampling,
     stop_under: f64,
     out: []u32,
     kept: usize = 0,
 };
 
-/// What a greedy batch's launches depend on: its chain bucket, drafts per chain, whether the confidence cut runs.
+/// What a batch's launches depend on: its chain bucket, drafts per chain, whether the confidence cut runs.
 const ChainKey = struct { rows: u32, most: u32, cut: bool };
 
-/// A greedy chain reads the head over the first ids of the vocabulary alone (the common tokens): a draft only guesses.
+/// A chain reads the head over the first ids of the vocabulary alone (the common tokens): a draft only guesses.
 const draft_vocab = 65536;
 
 /// Most chains one batch runs; a head serving `rows` rows a round holds caches for this many at most.
@@ -46,8 +43,7 @@ pub const Head = struct {
     heads: usize,
     kv_heads: usize,
     mlp: ?view.Mlp,
-    logits_head: view.Projection,
-    /// The same weights over the first `draft_vocab` ids.
+    /// The head's logits projection (its own, else the model's) over the first `draft_vocab` ids.
     draft_head: view.Projection,
     /// Most chains a batch runs together; each has its own cache of `max_depth + 1` slots.
     cap: usize,
@@ -62,7 +58,7 @@ pub const Head = struct {
     scalars: hip.HostBuffer, // `Layout`'s words, pinned
     scalars_dev: hip.DeviceBuffer,
     last: u64 = 0, // the last step's final rows, the next step's hidden input
-    /// Greedy batches captured by shape: the head's launches over the scalars alone, replayed.
+    /// Batches captured by shape: the head's launches over the scalars alone, replayed.
     graphs: graph_cache.Cache(ChainKey, void),
 
     /// The head of `m` with no device memory yet, or null when the checkpoint has none: what `deviceBytes` counts.
@@ -83,7 +79,6 @@ pub const Head = struct {
             .heads = qa.n / s.head_dim / @as(usize, if (w.gated) 2 else 1),
             .kv_heads = kv_heads,
             .mlp = if (w.mlp) |x| try bridge.mlpView(x, false) else null,
-            .logits_head = full,
             .draft_head = narrow,
             .cap = cap,
             .cache_bytes = kv_heads * (max_depth + 1) * s.head_dim * model.act.size(),
@@ -131,16 +126,12 @@ pub const Head = struct {
         return h;
     }
 
-    /// The arena a batch of `cap` chains takes at full depth, greedy or sampled, counted on the counting stream.
+    /// The arena a batch of `cap` chains takes at full depth, counted on the counting stream.
     fn scratch(h: *Head, lib: *const hip.Launcher, m: *const view.Model) !usize {
-        var most: usize = 0;
-        for ([_]view.Projection{ h.draft_head, h.logits_head }) |head| {
-            var arena = hip.Arena.counting();
-            const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = hip.counting, .arena = &arena };
-            try h.steps(o, m, head, h.cap, max_depth, true);
-            most = @max(most, arena.peak);
-        }
-        return most;
+        var arena = hip.Arena.counting();
+        const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = hip.counting, .arena = &arena };
+        try h.steps(o, m, h.draft_head, h.cap, max_depth, true);
+        return arena.peak;
     }
 
     pub fn deinit(h: *Head) void {
@@ -173,29 +164,26 @@ pub const Head = struct {
     }
 
     /// Every job's chain, `cap` at a time, up to `depth` drafts each, cut after a draft under `stop_under` (0: never).
-    pub fn chains(h: *Head, lib: *const hip.Launcher, stream: hip.Stream, drawer: *draw.Drawer, m: *const view.Model, jobs: []Job, graphs: bool) !void {
+    pub fn chains(h: *Head, lib: *const hip.Launcher, stream: hip.Stream, m: *const view.Model, jobs: []Job, graphs: bool) !void {
         var at: usize = 0;
-        while (at < jobs.len) : (at += h.cap) try h.batch(lib, stream, drawer, m, jobs[at..][0..@min(h.cap, jobs.len - at)], graphs);
+        while (at < jobs.len) : (at += h.cap) try h.batch(lib, stream, m, jobs[at..][0..@min(h.cap, jobs.len - at)], graphs);
     }
 
-    fn batch(h: *Head, lib: *const hip.Launcher, stream: hip.Stream, drawer: *draw.Drawer, m: *const view.Model, jobs: []Job, graphs: bool) !void {
+    fn batch(h: *Head, lib: *const hip.Launcher, stream: hip.Stream, m: *const view.Model, jobs: []Job, graphs: bool) !void {
         const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = stream.handle, .arena = &h.arena };
         h.arena.reset();
         const rows = jobs.len;
         const at = h.layout();
-        const width = m.spec.hidden * m.act.size();
         var most: usize = 0;
-        var greedy = true;
         var cut = false;
         for (jobs) |j| {
             most = @max(most, @min(j.depth, max_depth, j.out.len));
-            if (j.sampling) |s| greedy = greedy and s.temperature <= 0.0;
             cut = cut or j.stop_under > 0.0;
         }
         const sc = h.scalars.slice(i32);
         const srcs = h.scalars.slice(u64);
-        // greedy chains run in a bucket of rows, the padding ones over zeros, so one graph serves any streams
-        const run = if (greedy) plan.bucketOf(rows, h.cap) else rows;
+        // chains run in a bucket of rows, the padding ones over zeros, so one graph serves any streams
+        const run = plan.bucketOf(rows, h.cap);
         for (0..max_depth) |n| sc[h.cap + n] = @intCast(n);
         for (0..run) |r| {
             const real = r < jobs.len;
@@ -204,40 +192,15 @@ pub const Head = struct {
             srcs[at.ptrs / 8 + r] = if (real) jobs[r].hidden else h.zero.base();
         }
         try hip.raw.upload(h.scalars_dev, 0, h.scalars.bytes[0..at.drafts], o.stream);
-        const dev = h.scalars_dev.base();
-        if (greedy) {
-            try h.chain(stream, o, m, .{ .rows = @intCast(run), .most = @intCast(most), .cut = cut }, graphs);
-        } else {
-            try pops.gather(o, dev + at.ptrs, h.rows.base(), width / 4, rows);
-            var cur: Tensor = .{ .ptr = h.rows.base(), .kind = m.act };
-            var reqs: [64]draw.Request = undefined;
-            var drawn: [64]u32 = undefined;
-            for (0..most) |n| {
-                const logits = try h.step(o, m, h.logits_head, cur, dev, rows, dev + at.slots + 4 * n, dev + at.pos + 4 * h.cap * n, n);
-                for (jobs, 0..) |j, r| reqs[r] = .{ .sampling = j.sampling, .position = j.position + n + 1 };
-                try drawer.draw(o, stream, logits, reqs[0..rows], drawn[0..rows], false);
-                for (jobs, 0..) |j, r| if (n < j.out.len) {
-                    j.out[n] = drawn[r];
-                };
-                if (n + 1 < most) {
-                    for (0..rows) |r| sc[r] = @intCast(drawn[r]);
-                    try hip.raw.upload(h.scalars_dev, 0, h.scalars.bytes[0 .. 4 * rows], o.stream);
-                    if (cut) try o.tokenProb(logits, rows, h.logits_head.n, dev, dev + at.probs + 4 * h.cap * n);
-                }
-                cur = .{ .ptr = h.last, .kind = m.act };
-            }
-        }
-        if (greedy or cut) {
-            try hip.raw.download(h.scalars_dev, at.drafts, h.scalars.bytes[at.drafts..at.total], o.stream);
-            try stream.synchronize();
-        }
+        // a sampled stream drafts the argmax too: a draft is kept only where it equals the target's own draw
+        try h.chain(stream, o, m, .{ .rows = @intCast(run), .most = @intCast(most), .cut = cut }, graphs);
+        try hip.raw.download(h.scalars_dev, at.drafts, h.scalars.bytes[at.drafts..at.total], o.stream);
+        try stream.synchronize();
         const words = h.scalars.slice(u32);
         const chance = h.scalars.slice(f32);
         for (jobs, 0..) |*j, r| {
             const count = @min(j.depth, max_depth, j.out.len);
-            if (greedy) for (0..count) |n| {
-                j.out[n] = words[at.drafts / 4 + n * h.cap + r];
-            };
+            for (0..count) |n| j.out[n] = words[at.drafts / 4 + n * h.cap + r];
             j.kept = count;
             if (j.stop_under > 0.0) for (0..count -| 1) |n| if (chance[at.probs / 4 + n * h.cap + r] < j.stop_under) {
                 j.kept = n + 1;
@@ -252,7 +215,7 @@ pub const Head = struct {
         try c.h.launches(c.o, c.m, c.key);
     }
 
-    /// A greedy batch's launches: replayed from the shape's graph, captured the first time it is met, or eager.
+    /// A batch's launches: replayed from the shape's graph, captured the first time it is met, or eager.
     fn chain(h: *Head, stream: hip.Stream, o: Ops, m: *const view.Model, key: ChainKey, graphs: bool) !void {
         h.graphs.rounds += 1;
         const entry = if (graphs) try h.graphs.find(key) else null;
@@ -283,7 +246,7 @@ pub const Head = struct {
         try h.steps(o, m, h.draft_head, key.rows, key.most, key.cut);
     }
 
-    /// The greedy chains' steps on the device alone: each step's drafts feed the next, with probabilities for the cut.
+    /// The chains' steps on the device alone: each step's drafts feed the next, with probabilities for the cut.
     fn steps(h: *Head, o: Ops, m: *const view.Model, head: view.Projection, rows: usize, most: usize, cut: bool) !void {
         const at = h.layout();
         const dev = h.scalars_dev.base();

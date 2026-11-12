@@ -89,6 +89,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     const at = f.at;
     var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s), ids.len, s.chunks, s.decode_spans);
     if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
+    end = resume_rules.rewindEnd(at, end, f.rewind);
     var decoded = false;
     for (s.decode_spans) |span| decoded = decoded or (at >= span[0] and at < span[1]);
     var mark_bank: ?q.gdn_pool_gpu.PromptMarks = null;
@@ -120,7 +121,6 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
     if (mark_bank == null) for (s.reuse.marks) |mark| if (mark > at and mark < end) {
         end = mark;
     };
-    if (mark_bank == null and f.rewind > at and f.rewind < end) end = f.rewind;
     const part = ids[at..end];
     const last = end == ids.len;
     const before = b.runner.gpu_seconds;
@@ -132,6 +132,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         if (b.ringOf(slot)) |g| try ringChunk(b, g, part.len);
     }
     charge(b, s, before);
+    lanes.prefill_widths.completed(b.gpa, s, part.len);
     f.at = end;
     s.fill_at.store(@intCast(end), .monotonic); // a prompt chunk waits: `at` is landed progress
     if (end == f.rewind) saveRewind(b, f.rewind);
@@ -273,11 +274,11 @@ fn saveRewind(b: *Metal, at: u32) void {
     b.standing.rewind_at = at;
 }
 
-/// The rewind buffer, where the prompt cache cannot keep a full-context state (`cache` bytes) and `room` holds it.
+/// The history rewind where two full-context states do not fit in `cache`, provided `room` holds its bytes.
 pub fn rewindInit(b: *Metal, room: u64, cache: u64) ?mtl.Buffer {
     if (!slotResume(b) or b.runner.ready == 0) return null;
     const need = q.snapshot.rewindBytes(b.runner, b.ringOf(0));
-    if (cache >= q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)) return null; // the cache keeps them
+    if (!resume_rules.needsRewind(cache, q.snapshot.Spares.size(q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)))) return null;
     if (need > room) {
         std.log.info("qwen27: no rewind point for slot 0 ({d} MiB, {d} MiB left under the load limit): a next turn that drops the last reply's reasoning reads its prompt again", .{ need >> 20, room >> 20 });
         return null;
@@ -446,9 +447,8 @@ const Copies = struct {
 };
 
 /// Copied rows a lone round may add past its drafted tree, at most (TF_Q27_COPY_ROWS overrides; 0: none).
-fn copyRows() u32 {
-    const v = std.c.getenv("TF_Q27_COPY_ROWS") orelse return 48;
-    return std.fmt.parseInt(u32, std.mem.span(v), 10) catch 48;
+fn copyRows() !u32 {
+    return @import("sys").environment.read(u32, "TF_Q27_COPY_ROWS", 48);
 }
 
 /// A lone greedy stream on the DFlash2 serial loop in slot 0 until it ends (false) or the lane core adopts it (true).
@@ -466,7 +466,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     try prefill(b, s, 0);
     if (s.isCancelled()) return error.Cancelled;
     const g = &d.generation;
-    const cap = copyRows();
+    const cap = try copyRows();
     var extra: u32 = @min(cap, 16); // grows while copies land whole, shrinks when most miss
     var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = 5 }) };
     defer copies.lookup.deinit();

@@ -33,11 +33,13 @@ fn payload(arena: std.mem.Allocator, url: []const u8) !?[]u8 {
     return out;
 }
 
-/// JPEG cases need the pinned library: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
+/// JPEG cases need the pinned library: required if TENSORFOLD_LIBTURBOJPEG names one, else the test reports a skip.
 fn jpegReady(a: std.mem.Allocator) !bool {
+    const level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = level;
     if (picture.jpeg.available(std.testing.io, a)) return true;
     if (@import("sys").getenv(picture.jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
-    std.debug.print("libjpeg-turbo {s} not found: JPEG pixel cases skipped\n", .{picture.jpeg.pinned});
     return false;
 }
 
@@ -73,6 +75,7 @@ test "every picture 0.6.6 decoded decodes to the same RGB bytes, and its refusal
         checked[0] += 1;
     }
     try std.testing.expect(checked[0] >= @as(usize, if (jpeg) 29 else 19) and checked[1] >= 4);
+    if (!jpeg) return error.SkipZigTest;
 }
 
 const Edge = struct { name: []const u8, b64: []const u8, width: usize = 0, height: usize = 0, rgb: ?[]const u8 = null, problem: ?[]const u8 = null };
@@ -114,13 +117,99 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
         checked += 1;
     }
     try std.testing.expect(checked >= @as(usize, if (jpeg) 76 else 50));
+    if (!jpeg) return error.SkipZigTest;
 }
 
-/// WebP cases need the pinned libwebp: required when TENSORFOLD_LIBWEBP names one, skipped when none loads.
+/// Small JPEGs built by hand: 8-bit, one quantization table of ones, one-code Huffman tables (DC 0, then end of block).
+const crafted = struct {
+    const soi = "\xff\xd8";
+    const eoi = "\xff\xd9";
+    const junk = "\x00"; // a stray byte before a marker: libjpeg's "extraneous bytes" warning
+    const dqt = "\xff\xdb\x00\x43\x00" ++ @as([64]u8, @splat(1));
+    const dht = "\xff\xc4\x00\x14\x00\x01" ++ @as([15]u8, @splat(0)) ++ "\x00" ++ "\xff\xc4\x00\x14\x10\x01" ++ @as([15]u8, @splat(0)) ++ "\x00";
+    const gray8 = "\xff\xc0\x00\x0b\x08\x00\x08\x00\x08\x01\x01\x11\x00";
+    const gray16 = "\xff\xc0\x00\x0b\x08\x00\x10\x00\x10\x01\x01\x11\x00";
+    const progressive16 = "\xff\xc2\x00\x0b\x08\x00\x10\x00\x10\x01\x01\x11\x00";
+    const rgb8 = "\xff\xc0\x00\x11\x08\x00\x08\x00\x08\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00";
+    const scan_gray = "\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00";
+    const scan_dc = "\xff\xda\x00\x08\x01\x01\x00\x00\x00\x00"; // a progressive first scan: DC only
+    const scan_rgb = "\xff\xda\x00\x0c\x03\x01\x00\x02\x00\x03\x00\x00\x3f\x00";
+
+    /// libjpeg stops on a fatal error after a warning, and TurboJPEG reports it as a warning: no pixel is written.
+    const unfinished = [_][]const u8{
+        soi ++ gray8 ++ junk ++ scan_gray ++ eoi, // no quantization table, refused only as the pixels start
+        soi ++ rgb8 ++ junk ++ scan_rgb ++ eoi,
+        soi ++ dqt ++ progressive16 ++ dht ++ scan_dc ++ gray16 ++ eoi, // the scan ends at once at a second frame
+        soi ++ dqt ++ junk ++ progressive16 ++ dht ++ scan_dc ++ "\x0f" ++ gray16 ++ eoi,
+    };
+
+    /// Warned, but libjpeg finishes every row: these still decode, all mid-gray (each block's DC is 0).
+    const finished = [_][]const u8{
+        soi ++ dqt ++ junk ++ gray16 ++ dht ++ scan_gray ++ "\x00" ++ eoi,
+        soi ++ dqt ++ gray16 ++ dht ++ scan_gray ++ eoi, // the scan is empty: its blocks read as zeros
+        soi ++ dqt ++ gray16 ++ dht ++ scan_gray ++ gray16 ++ eoi, // a second frame only after the last row
+        soi ++ dqt ++ gray16 ++ dht ++ "\xff\xdd\x00\x04\x00\x01" ++ scan_gray ++ "\x00\xff\xd3\x00" ++ eoi, // a wrong restart
+    };
+};
+
+test "a JPEG libjpeg gives up on after a warning is refused, never returned with pixels it did not write" {
+    const a = std.testing.allocator;
+    if (!try jpegReady(a)) return error.SkipZigTest;
+    var decoded: usize = 0;
+    for (crafted.unfinished, 0..) |bytes, i| {
+        var rgb = picture.decode(std.testing.io, a, bytes) catch |err| {
+            try std.testing.expectEqual(error.Invalid, err);
+            continue;
+        };
+        defer rgb.deinit(a);
+        // a safe build paints new memory 0xaa: the bytes the decoder left as it found them
+        const painted = std.mem.count(u8, rgb.pixels, "\xaa");
+        std.debug.print("case {d}: {d}x{d} decoded, {d} of {d} bytes unwritten\n", .{ i, rgb.width, rgb.height, painted, rgb.pixels.len });
+        decoded += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), decoded);
+}
+
+test "warned JPEGs libjpeg finishes still decode, every pixel written" {
+    const a = std.testing.allocator;
+    if (!try jpegReady(a)) return error.SkipZigTest;
+    for (crafted.finished, 0..) |bytes, i| {
+        errdefer std.debug.print("case {d}\n", .{i});
+        var rgb = try picture.decode(std.testing.io, a, bytes);
+        defer rgb.deinit(a);
+        try std.testing.expectEqual(@as(usize, 16), rgb.width);
+        try std.testing.expectEqual(@as(usize, 16), rgb.height);
+        for (rgb.pixels) |v| try std.testing.expectEqual(@as(u8, 128), v);
+    }
+}
+
+test "PNG tRNS keys compare their low bytes, except mode 1 keeps the whole key" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/tests/fixtures/picture/trns.json", a, .limited(1 << 16));
+    const cases = (try std.json.parseFromSliceLeaky(struct { cases: []const Edge }, a, text, .{ .ignore_unknown_fields = true })).cases;
+    try std.testing.expectEqual(@as(usize, 5), cases.len);
+    for (cases) |c| {
+        errdefer std.debug.print("case {s}\n", .{c.name});
+        const b64 = std.base64.standard.Decoder;
+        const bytes = try a.alloc(u8, try b64.calcSizeForSlice(c.b64));
+        try b64.decode(bytes, c.b64);
+        var rgb = try picture.decode(std.testing.io, std.testing.allocator, bytes);
+        defer rgb.deinit(std.testing.allocator);
+        try std.testing.expectEqual(c.width, rgb.width);
+        try std.testing.expectEqual(c.height, rgb.height);
+        try std.testing.expectEqualStrings(c.rgb.?, &sha256(rgb.pixels));
+    }
+}
+
+/// WebP cases need the pinned libwebp: required if TENSORFOLD_LIBWEBP names one, else the test reports a skip.
 fn webpReady(a: std.mem.Allocator) !bool {
+    const level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = level;
     if (picture.webp.available(std.testing.io, a)) return true;
     if (@import("sys").getenv(picture.webp.env) != null) return error.PinnedLibraryDidNotLoad;
-    std.debug.print("libwebp {s} not found: WebP pixel cases skipped\n", .{picture.webp.pinned});
     return false;
 }
 
@@ -152,6 +241,7 @@ test "WebP pictures (zig/tests/fixtures/picture/webp.json) decode to Pillow's RG
         checked += 1;
     }
     try std.testing.expect(checked >= @as(usize, if (ready) 8 else 2)); // without the library: the files refused before it loads
+    if (!ready) return error.SkipZigTest;
 }
 
 test "damaged and cut pictures are refused or decoded, never trapped" {
@@ -187,6 +277,7 @@ test "damaged and cut pictures are refused or decoded, never trapped" {
         }
     }
     try std.testing.expect(outcomes[0] > 0 and outcomes[1] > 0);
+    if (!jpeg) return error.SkipZigTest;
 }
 
 /// Each whole chunk's CRC rewritten, so a damaged body reaches the decoder past its checksum.
@@ -207,6 +298,36 @@ test "sizes are judged as 0.6.6 judged them" {
     try std.testing.expectError(error.Oversized, picture.fits(4097, 4096));
     try std.testing.expectError(error.Invalid, picture.fits(9000, 10000)); // Pillow's bomb bound first
     try std.testing.expectError(error.Invalid, picture.fits(0, 100_000_000));
+}
+
+test "explicit decode limits admit a large source while retaining defaults and the absolute bomb bound" {
+    const larger: picture.Limits = .{ .pixels = 32 << 20 };
+    try std.testing.expectError(error.Oversized, picture.fits(5184, 3456));
+    try larger.fits(5184, 3456);
+    try std.testing.expectError(error.Oversized, larger.fits(8193, 1));
+    try std.testing.expectError(error.Oversized, larger.fits(8192, 4097));
+    try std.testing.expectError(error.Invalid, larger.fits(std.math.maxInt(u64), 2));
+    try std.testing.expectError(error.Invalid, (picture.Limits{ .side = 100000, .pixels = 100000000 }).fits(9000, 10000));
+    try std.testing.expectError(error.Invalid, (picture.Limits{ .pixels = 0 }).fits(1, 1));
+}
+
+test "caller decode limits reach every admitted image header before pixel allocation" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const golden = try goldens(arena);
+    var checked: usize = 0;
+    for (golden.cases) |case| {
+        if (case.problem != null or case.width * case.height <= 1) continue;
+        const bytes = (try payload(arena, case.url)) orelse continue;
+        const format = picture.sniff(bytes);
+        if (format == .jpeg and !picture.jpeg.available(std.testing.io, arena)) continue;
+        if (format == .webp and !picture.webp.available(std.testing.io, arena)) continue;
+        if (format == .unknown) continue;
+        try std.testing.expectError(error.Oversized, picture.decodeWithLimits(std.testing.io, std.testing.allocator, bytes, .{ .pixels = 1 }));
+        checked += 1;
+    }
+    try std.testing.expect(checked > 0);
 }
 
 test "alpha over white keeps opaque values and whitens clear ones" {

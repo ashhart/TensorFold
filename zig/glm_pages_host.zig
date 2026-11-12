@@ -112,6 +112,20 @@ const Fixture = struct {
     }
 };
 
+test "GLM pages: TF_KV_SHARE's slot, counted before the pool is made, is the state's bytes at the last mark after it" {
+    var f: Fixture = undefined;
+    try f.prepare();
+    f.e.c = f.e.w.config;
+    f.e.mtp = false;
+    f.e.share_pages = true;
+    const slot = glm.pages.shareSlot(&f.e);
+    f.p = try f.make(1);
+    f.e.pages = f.p;
+    defer f.deinit();
+    try t.expect(slot > 0);
+    try t.expectEqual(slot, f.e.stateBytes(f.e.capacity - f.e.capacity % glm.native.snap_grid));
+}
+
 test "GLM pages: a failed page-owner wait must fall back to the context before freeing" {
     var f: Fixture = undefined;
     try f.init(0);
@@ -121,7 +135,6 @@ test "GLM pages: a failed page-owner wait must fall back to the context before f
     f.p.deinit();
     F.pending = false;
     F.fail_wait = false;
-    std.debug.print("page deinit: context_waits={d}, unsafe_frees={d}\n", .{ F.context_waits, F.unsafe_frees });
     try t.expect(F.context_waits > 0);
     try t.expectEqual(@as(usize, 0), F.unsafe_frees);
 }
@@ -147,11 +160,9 @@ fn overflow(capped: bool) !void {
     }
     const b = back.backend();
     const result = b.vtable.prefill_step.?(b.ptr, &ss[2], 0);
-    if (result) |_| return error.ExpectedFailure else |err| {
-        std.debug.print("all-on-pages third opening: capped={}, error={s}, allocations={d}->{d}, slots={d}\n", .{ capped, @errorName(err), before, F.allocs, f.e.seqs.items.len });
-        try t.expectEqual(error.LaneMemory, err);
-    }
+    if (result) |_| return error.ExpectedFailure else |err| try t.expectEqual(error.LaneMemory, err);
     try t.expectEqual(before, F.allocs);
+    try t.expectEqual(@as(usize, 2), f.e.seqs.items.len);
     try t.expect(!back.lanes.contains(&ss[2]));
     try t.expectEqual(@as(usize, 2), back.lanes.count());
 }

@@ -10,7 +10,7 @@ pub const Ref = projection.Ref;
 /// Group sums the input's producer wrote: XS[group * stride + row], in the lane projection's order.
 pub const Sums = struct { ref: Ref, stride: u32 };
 
-const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
+pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
 pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
@@ -60,6 +60,11 @@ pub const Kernels = struct {
     long_prompt: bool = false,
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
+    /// Per [n, k]: whether simd_qmm's half operands give its tiles' bits (checked once on this chip).
+    half_twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
+    /// The last norm's output and its tf_sq_fits words, while no later norm has written over it.
+    fits: ?Fits = null,
+    fits_words: ?mtl.Buffer = null,
 
     pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
         var it = k.lanes.valueIterator();
@@ -82,6 +87,8 @@ pub const Kernels = struct {
         k.twins.deinit(k.allocator);
         k.bit_twins.deinit(k.allocator);
         k.pair_twins.deinit(k.allocator);
+        k.half_twins.deinit(k.allocator);
+        if (k.fits_words) |b| b.deinit();
         var lane_it = k.lanes.valueIterator();
         while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
@@ -92,24 +99,7 @@ pub const Kernels = struct {
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
         if (k.cache.get(key)) |p| return p;
-        const template = switch (key.kind) {
-            .projection => unreachable,
-            .xsum => sources.xsum,
-            .norm => sources.norm_xs,
-            .input_norm => sources.norm_input,
-            .mlp => sources.mlp_xs,
-            .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
-        };
-        const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
-        const definitions = switch (key.kind) {
-            .projection => unreachable,
-            .xsum => try std.fmt.allocPrint(k.allocator, "constexpr int K={d}, GS=64;", .{key.k}),
-            .norm, .input_norm => try std.fmt.allocPrint(k.allocator, "constexpr int K={d};", .{key.k}),
-            .mlp => try std.fmt.allocPrint(k.allocator, "constexpr int N={d};", .{key.n}),
-            .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(k.allocator, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
-        };
-        defer k.allocator.free(definitions);
-        const source = try std.mem.concat(k.allocator, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+        const source = try specializedSource(k.allocator, key);
         defer k.allocator.free(source);
         const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
         defer library.deinit();
@@ -148,12 +138,75 @@ pub const Kernels = struct {
         return k.quantOne(input_encoder, p, x, xs, dims, y, rows, skip, cut);
     }
 
+    /// The lane projection a launch of `p` takes, compiled from source and cached the first time its key is seen.
+    fn laneEntry(
+        k: *Kernels,
+        p: projection.Linear,
+        sk: u32,
+        skip: u32,
+        cut: [2]u32,
+        long: bool,
+    ) !std.AutoHashMapUnmanaged(Key, lane.Projection).GetOrPutResult {
+        const reg = p.bits == 4 and p.group == 64;
+        const key = Key{
+            .kind = .projection,
+            .n = p.n,
+            .k = p.k,
+            .slices = if (reg) sk else p.slices,
+            .skip = skip,
+            .cut = cut,
+            .bits = p.bits,
+            .group = p.group,
+            .long = long,
+        };
+        const half = p.n / 64;
+        const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
+        const entry = try k.lanes.getOrPut(k.allocator, key);
+        if (!entry.found_existing) {
+            errdefer _ = k.lanes.remove(key);
+            entry.value_ptr.* = try lane.Projection.init(k.allocator, k.device, .{
+                .n = p.n,
+                .k = p.k,
+                .format = .{ .bits = p.bits, .group = p.group },
+                .sk = key.slices,
+                .ranges = if (skip > 0) &ranges else &.{},
+                .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null,
+                .output = if (cut[1] > 0) .f32 else .bf16,
+                .precompute_sums = reg or (p.bits == 8 and p.group == 64),
+                .reg = reg,
+                .rows = if (long) lane.max_reg_rows else lane.reg_rows,
+            });
+            k.joined(entry.value_ptr);
+        }
+        return entry;
+    }
+
+    /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
+    pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
+        if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;
+        // decoded rows never take the long key (longKey needs prompt rows)
+        _ = try k.laneEntry(p, p.slices, 0, .{ 0, 0 }, false);
+    }
+
     fn quantOne(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
         if ((skip > 0 or cut[1] > 0) and p.raw != null) return error.BadCoreProjectionRows;
         if (skip > 0 and (p.raw != null or skip >= p.n / 64)) return error.BadCoreProjectionRows;
         if (p.raw) |raw| if (raw.bits != 4 and k.tiled(raw)) {
-            if (rows == 0 or rows > 128 or p.tile != 32) return error.BadCoreProjectionRows;
-            return k.strided(input_encoder, raw, x, y, rows, @intCast(raw.n), p.gn);
+            if (rows == 0 or p.tile != 32) return error.BadCoreProjectionRows;
+            // A raw matrix takes at most 128 rows a dispatch; a prompt pass can hand it up to the frame's 2,048.
+            const stride: u32 = @intCast(raw.n);
+            var done: u32 = 0;
+            while (done < rows) : (done += 128) {
+                const take = @min(rows - done, 128);
+                try k.strided(input_encoder, raw, .{
+                    .buffer = x.buffer,
+                    .offset = x.offset + @as(usize, done) * raw.k * 2,
+                }, .{
+                    .buffer = y.buffer,
+                    .offset = y.offset + @as(usize, done) * @as(usize, stride) * 2,
+                }, take, stride, p.gn);
+            }
+            return;
         };
         var span = profile.begin(k.profiler, input_encoder, .dense);
         // Prompt rows take the checkpoint matrix's split, as decoded rows already do through `p.slices`.
@@ -170,8 +223,9 @@ pub const Kernels = struct {
                 const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
                 const scalar = try k.twin(m); // loads the tiles before they're read
                 const paired = try k.pairTwin(m);
-                const call = try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn);
-                row.simd.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
+                if (try k.halfCall(m, x, rows, gn)) |half| {
+                    row.simd.encodeHalf(e, half, m, x.buffer, x.offset, y.buffer, y.offset, k.fits_words.?, 0);
+                } else row.simd.encode(e, try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn), m, x.buffer, x.offset, y.buffer, y.offset);
                 e.barrier();
                 try span.end();
                 return;
@@ -193,16 +247,8 @@ pub const Kernels = struct {
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
         const long = reg and longKey(k.long_prompt, k.prompt, rows);
-        const key = Key{ .kind = .projection, .n = p.n, .k = p.k, .slices = if (reg) sk else p.slices, .skip = skip, .cut = cut, .bits = p.bits, .group = p.group, .long = long };
-        const sums: ?Sums = if (reg) xs else null; // the non-reg kernel sums its own groups
-        const half = p.n / 64;
-        const ranges = [_][2]usize{ .{ skip, half - skip }, .{ half + skip, half - skip } };
-        const entry = try k.lanes.getOrPut(k.allocator, key);
-        if (!entry.found_existing) {
-            errdefer _ = k.lanes.remove(key);
-            entry.value_ptr.* = try lane.Projection.init(k.allocator, k.device, .{ .n = p.n, .k = p.k, .format = .{ .bits = p.bits, .group = p.group }, .sk = key.slices, .ranges = if (skip > 0) &ranges else &.{}, .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null, .output = if (cut[1] > 0) .f32 else .bf16, .precompute_sums = reg, .reg = reg, .rows = if (long) lane.max_reg_rows else lane.reg_rows });
-            k.joined(entry.value_ptr);
-        }
+        const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
+        const entry = try k.laneEntry(p, sk, skip, cut, long);
         const step = entry.value_ptr.max_rows;
         var first: u32 = 0;
         while (first < rows) : (first += step) {
@@ -217,10 +263,21 @@ pub const Kernels = struct {
 
     /// A mixed stack: each member its own product into its columns; row kernels write the fused rows at a stride.
     fn quantRuns(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32, skip: u32, cut: [2]u32) !void {
-        if (skip > 0 or cut[1] > 0 or rows == 0 or rows > 128) return error.BadCoreProjectionRows;
+        if (skip > 0 or cut[1] > 0 or rows == 0) return error.BadCoreProjectionRows;
         for (p.runs) |run| {
             if (run.linear.raw) |raw| {
-                try k.strided(input_encoder, raw, x, .{ .buffer = y.buffer, .offset = y.offset + @as(usize, run.first) * 2 }, rows, p.n, run.linear.gn);
+                // The raw member takes 128 rows a dispatch, as quantOne does; lane siblings below run one row a launch.
+                var done: u32 = 0;
+                while (done < rows) : (done += 128) {
+                    const take = @min(rows - done, 128);
+                    try k.strided(input_encoder, raw, .{
+                        .buffer = x.buffer,
+                        .offset = x.offset + @as(usize, done) * raw.k * 2,
+                    }, .{
+                        .buffer = y.buffer,
+                        .offset = y.offset + (@as(usize, done) * p.n + run.first) * 2,
+                    }, take, p.n, run.linear.gn);
+                }
                 continue;
             }
             for (0..rows) |r| { // lane kernels take one row a launch until they write at a stride
@@ -316,7 +373,36 @@ pub const Kernels = struct {
         e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width }));
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
         e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
+        k.fits = null;
+        // tf_sq_fits's words for this output: prompt rows' projections of it may take half operands
+        if (k.raw_tiles and rows >= half_rows) {
+            if (k.simd == null) k.simd = try row.simd.Pipelines.load(k.device);
+            const bytes = row.simd.fitsBytes(width, rows);
+            if (k.fits_words == null or k.fits_words.?.length() < bytes) {
+                if (k.fits_words) |b| b.deinit();
+                k.fits_words = null;
+                k.fits_words = try k.device.buffer(row.simd.fitsBytes(width, @import("gpu_frame.zig").max_rows), mtl.ResourceOptions.private);
+            }
+            e.barrier();
+            row.simd.encodeFits(e, &k.simd.?, width, rows, out.buffer, out.offset, k.fits_words.?, 0);
+            e.barrier();
+            k.fits = .{ .x = out, .rows = rows, .k = width };
+        }
         try span.end();
+    }
+
+    /// `m`'s half-operand tiles over x's rows: only on the last norm's output at its rows, where they keep its bits.
+    fn halfCall(k: *Kernels, m: row.simd.Matrix, x: Ref, rows: u32, gn: usize) !?row.simd.Call {
+        const f = k.fits orelse return null;
+        if (!std.meta.eql(f.x.buffer, x.buffer) or f.x.offset != x.offset or f.rows != rows or f.k != m.k) return null;
+        const c = (try row.simd.callHalf(&k.simd.?, m.n, m.k, rows, gn)) orelse return null;
+        const ok = k.half_twins.get(.{ m.n, m.k }) orelse blk: {
+            const exact = try row.simd.halfExact(&k.simd.?, k.device, m);
+            if (!exact) std.log.info("qwen27: {d}x{d} rows keep simd_qmm's fp32 tiles (half operands' bits differ on this chip)", .{ m.n, m.k });
+            try k.half_twins.put(k.allocator, .{ m.n, m.k }, exact);
+            break :blk exact;
+        };
+        return if (ok) c else null;
     }
 
     /// Prompt rows [base, base + 128) into the Neural Engine's fp16 input planes [hidden][128].
@@ -367,10 +453,39 @@ pub const Kernels = struct {
     }
 };
 
+/// A norm's output of this many rows or more gets tf_sq_fits's words: prompt chunks, not decode or verify rows.
+pub const half_rows = 64;
+
+/// A norm's output, its rows and width: the words in `Kernels.fits_words` are its.
+const Fits = struct { x: Ref, rows: u32, k: u32 };
+
 pub fn padded(rows: u32) u32 {
     return 16 * ((rows + 15) / 16);
 }
 
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+}
+
+/// The quantized helper specialization compiled by get.
+pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
+    const template = switch (key.kind) {
+        .projection => unreachable,
+        .xsum => sources.xsum,
+        .norm => sources.norm_xs,
+        .input_norm => sources.norm_input,
+        .mlp => sources.mlp_xs,
+        .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
+    };
+    const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
+    const definitions = switch (key.kind) {
+        .projection => unreachable,
+        .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
+        .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};", .{key.k}),
+        .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
+        .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
+    };
+    defer a.free(definitions);
+    const source = try std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
+    return source;
 }

@@ -44,6 +44,7 @@ pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]
 }
 
 pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, window: fz.WindowSettings) !*Engine {
+    try @import("env_validate.zig").startup();
     try window.validate(speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null);
     try load_admission.check(gpa, io, model_dir);
     const memory = @import("flashnext_memory");
@@ -205,6 +206,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
+    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null and !r.device.tensorUnits();
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -233,6 +235,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&L.ex);
+        if (r.sb_index) try @import("scale_index.zig").addAll(r, &L.ex);
         m.layers[i] = L;
     }
     m.mix = try hcOf(r, "mix", .{});
@@ -330,6 +333,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
             }
         }
         if (r.xpack) try r.repack(&ex);
+        if (r.sb_index) try @import("scale_index.zig").addAll(r, &ex);
         m.mtp = .{
             .ahc = try hcOf(r, "mtp.ahc", .{}),
             .mhc = try hcOf(r, "mtp.mhc", .{}),
@@ -393,18 +397,22 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in...
     const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
     if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
-    if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
+    if (tp_path) |path| r.tp = try fz.Tp2.init(arena, io, r.device, path);
     if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
     if (r.tp == null) try fz.rows_load.attach(
         e.pr,
         m,
         @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
     );
-    if (r.fsr != null and platform.c.getenv("FZ_GX") != null) return error.FsrGroupedOverrideUnsupported;
-    if (r.tp == null) if (platform.c.getenv("FZ_GX")) |v| { // dev: windows from this many rows on the grouped experts
-        r.gx = try @import("gx.zig").init(r, try std.fmt.parseInt(usize, std.mem.span(v), 10));
+    // windows from this many rows run their experts grouped by expert (gx.zig): the row kernels' bits, 4/32 only
+    const grouped_rows = try platform.environment.read(usize, "TF_FLASHNEXT_GROUPED_ROWS", 5);
+    var grouped = false;
+    for (&m.layers) |*L| grouped = grouped or (L.xw != null and @import("gx.zig").applies(L.xw.?));
+    if (grouped and grouped_rows != 0 and r.tp == null and r.fsr == null and !r.device.tensorUnits()) {
+        r.gx = try @import("gx.zig").init(r, grouped_rows);
         std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
-    };
+    }
+    if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
     // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
     const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
@@ -426,6 +434,9 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         e.tree = try @import("tree.zig").init(r, a, if (sib > 0) a * sib else b, feed, sib);
         if (sib > 0) std.log.info("flash next: tree rounds, a head chain of {d} and {d} head siblings a depth", .{ a, sib }) else std.log.info("flash next: tree rounds, a head chain of {d} and a branch of {d}", .{ a, b });
     };
+    if (r.fsr) |s| {
+        @import("checkpoint_cache.zig").finish(r.files.items, s.source.files);
+    } else @import("checkpoint_cache.zig").finish(r.files.items, &.{});
     return e;
 }
 

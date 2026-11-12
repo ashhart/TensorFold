@@ -93,6 +93,8 @@ pub const Store = struct {
         defer _ = platform.c.close(fd);
         const st = meta(fd, null) orelse return error.Unsafe;
         if ((st.mode & platform.c.S.IFMT) != platform.c.S.IFREG or st.mode & 0o066 != 0) {
+            // the path and mode read, for a chmod 600 that did not take; once, as refresh retries a refused file
+            if (s.valid) log.line("API key file {s}: mode 0{o}, {s}", .{ path, st.mode & 0o7777, if ((st.mode & platform.c.S.IFMT) != platform.c.S.IFREG) "not a regular file" else "readable or writable by other users" });
             problem.* = "API key file must be a regular file unreadable and unwritable by other users; use chmod 600";
             return error.Invalid;
         }
@@ -219,6 +221,20 @@ pub const Store = struct {
         // the request's own copy: a reload frees the file's
         return .{ .label = a.dupe(u8, key.label) catch return null, .digest = key.digest, .scopes = key.scopes };
     }
+
+    /// The key with this digest in the current store, after its refresh; null once it is gone or the file is refused.
+    pub fn byDigest(s: *Store, a: Allocator, d: [32]u8) ?Matched {
+        const m = log.io();
+        s.mutex.lockUncancelable(m);
+        defer s.mutex.unlock(m);
+        s.refresh(std.Io.Clock.awake.now(m).toNanoseconds());
+        if (!s.valid) return null;
+        for ([_][]Key{ s.static.items, s.file }) |keys| for (keys) |key| {
+            if (std.crypto.timing_safe.eql([32]u8, key.digest, d))
+                return .{ .label = a.dupe(u8, key.label) catch return null, .digest = d, .scopes = key.scopes };
+        };
+        return null;
+    }
 };
 
 const latin1_space = " \t\r\n\x0b\x0c\x1c\x1d\x1e\x1f\x85\xa0";
@@ -332,14 +348,14 @@ test "auth cleanup on every initialization allocation failure" {
     try std.testing.checkAllAllocationFailures(gpa, Case.run, .{@as(?[]const u8, path)});
 }
 
-/// The key file opened for reading, never through a link.
-fn openKeys(pathz: [*:0]const u8) !platform.c.fd_t {
+/// The key file opened for reading, never through a link (tool_id_key.zig opens its key file the same way).
+pub fn openKeys(pathz: [*:0]const u8) !platform.c.fd_t {
     if (builtin.os.tag != .windows) return posix.openatZ(posix.AT.FDCWD, pathz, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true }, 0);
     const fd = platform.c.open(pathz, .{ .ACCMODE = .RDONLY });
     return if (fd < 0) error.OpenFailed else fd;
 }
 
-fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
+pub fn readKeys(fd: platform.c.fd_t, buf: []u8) !usize {
     if (builtin.os.tag != .windows) return posix.read(fd, buf);
     const n = platform.c.read(fd, buf.ptr, buf.len);
     return if (n < 0) error.ReadFailed else @intCast(n);
@@ -376,6 +392,49 @@ test "the key file: refused while others can read it, read at 0600, reread after
     try std.testing.expect(!std.mem.eql(i128, &s.stamp, &s.statStamp().?));
     s.checked_ns = null;
     try std.testing.expectEqualStrings("ci", s.match(a, null, "sk-two").?);
+}
+
+test "the key file refusal logs the path and the mode the file system reported, once at startup and once a reload" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest; // refusal by mode bits; NTFS keeps access in ACLs
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-one\n" });
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/keys", .{tmp.sub_path}, 0);
+    const Capture = struct {
+        bytes: [1024]u8 = undefined,
+        len: usize = 0,
+        fn line(ctx: *anyopaque, text: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            @memcpy(self.bytes[self.len..][0..text.len], text);
+            self.len += text.len;
+        }
+    };
+    var capture: Capture = .{};
+    log.Test.sink = .{ .ctx = &capture, .call = Capture.line };
+    defer log.Test.sink = null;
+    const mode_line = try std.fmt.allocPrint(a, "[tensorfold] API key file {s}: mode 0640, readable or writable by other users\n", .{path});
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, 0o640, 0));
+    var problem: []const u8 = "";
+    try std.testing.expectError(error.KeyFile, Store.init(a, &.{}, "", path, false, &problem));
+    try std.testing.expect(std.mem.indexOf(u8, problem, "chmod 600") != null);
+    try std.testing.expectEqualStrings(mode_line, capture.bytes[0..capture.len]);
+    // a file read at 0600 and then refused: the line once, with the reload's own, not again on each retry
+    capture.len = 0;
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, 0o600, 0));
+    var s = try Store.init(std.testing.allocator, &.{}, "", path, false, &problem);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 0), capture.len);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, 0o640, 0));
+    const once = try std.mem.concat(a, u8, &.{ mode_line, "[tensorfold] API key file reload refused; authenticated routes remain closed\n" });
+    for (0..2) |_| {
+        s.checked_ns = null;
+        try std.testing.expect(s.match(a, "Bearer sk-one", null) == null);
+        try std.testing.expectEqualStrings(once, capture.bytes[0..capture.len]);
+    }
 }
 
 test "a request's key label outlives a reload of the key file" {

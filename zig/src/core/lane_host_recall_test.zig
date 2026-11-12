@@ -37,12 +37,14 @@ const Box = struct {
         }
     }
 
-    fn wait(b: *Box) Reason {
+    fn wait(b: *Box) !Reason {
+        const deadline = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + 30 * std.time.ns_per_s;
         while (true) {
             b.mutex.lockUncancelable(std.testing.io);
             const d = b.done;
             b.mutex.unlock(std.testing.io);
             if (d) |r| return r;
+            if (std.Io.Clock.awake.now(std.testing.io).toNanoseconds() >= deadline) return error.RecallWaiterStranded;
             std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
         }
     }
@@ -206,7 +208,6 @@ test "a turn resumed from the prompt cache adds the ids past its resume point an
     defer store.close();
     var s: Served = undefined;
     try s.init();
-    defer s.deinit();
     const Snaps = struct {
         fn bytes(_: *anyopaque, at: u32) u64 {
             return 64 + 4 * @as(u64, at);
@@ -232,6 +233,8 @@ test "a turn resumed from the prompt cache adds the ids past its resume point an
     const family: pc.Snapshots = .{ .ptr = &s.target, .vtable = &snaps };
     var cache = pc.Store.init(gpa, family, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
     defer cache.deinit();
+    defer s.deinit();
+    _ = &s;
     s.host.cache = &cache;
     _ = s.host.engine().attachRecall(store);
     try s.host.start();
@@ -284,4 +287,94 @@ test "a prompt with an image gets the same reply drafted and plain, each prefill
     try std.testing.expectEqualSlices(u32, drafted.tokens.items, plain.tokens.items);
     try std.testing.expectEqual(@as(usize, 2), seen.n);
     try std.testing.expect(drafted.rounds < plain.rounds);
+}
+
+test "restore scale: Recall allocation faults fall back and release the job reader" {
+    const recalls = @import("lane_host_recall.zig");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
+    defer gpa.free(path);
+    const store = try openStore(path, false);
+    defer store.close();
+    var s: Served = undefined;
+    try s.init();
+    defer s.deinit();
+    recalls.attach(&s.host, store);
+    const p = prompt(200, 17);
+    const request: Request = .{ .prompt = &p, .max_tokens = 4 };
+    var job: LaneHost.Job = .{ .host = &s.host, .id = 1, .request = &request, .sink = undefined };
+    job.stream = try lanes.Stream.init(gpa, .{ .id = "recall-fault", .prompt = &p, .max_new = 4 });
+    defer job.stream.deinit(gpa);
+    defer recalls.release(&job);
+    recalls.prompted(&s.host, &job);
+    var fa = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    const reader = recalls.reader(&s.host, &job).?;
+    reader.gpa = fa.allocator();
+    try std.testing.expectEqual(@as(usize, 0), reader.propose(p[0..64], 4, 0).len);
+    try std.testing.expect(fa.has_induced_failure);
+    recalls.release(&job);
+    recalls.release(&job);
+    try std.testing.expect(!job.recall.reading);
+    try std.testing.expectEqual(fa.allocated_bytes, fa.freed_bytes);
+    const healthy = recalls.reader(&s.host, &job).?;
+    try std.testing.expect(healthy.propose(p[0..64], 4, 0).len > 0);
+    _ = try job.stream.commit(gpa, &.{ 7, 8, 9, 10 }, &.{});
+    var write_fault = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
+    store.gpa = write_fault.allocator();
+    defer store.gpa = gpa;
+    _ = recalls.finished(&s.host, &job, .failed, .{});
+    try std.testing.expect(!write_fault.has_induced_failure);
+    const told = recalls.finished(&s.host, &job, .length, .{});
+    try std.testing.expect(write_fault.has_induced_failure);
+    try std.testing.expect(told.telemetry_json.len > 0);
+    store.gpa = gpa;
+    recalls.release(&job);
+    try std.testing.expect(!job.recall.reading);
+}
+
+test "restore scale: Recall survives a failed round and a queued cancellation without stranding the next job" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/recall", .{tmp.sub_path});
+    defer gpa.free(path);
+    const store = try openStore(path, false);
+    defer store.close();
+    var s: Served = undefined;
+    try s.init();
+    defer s.deinit();
+    _ = s.host.engine().attachRecall(store);
+    const p = prompt(200, 19);
+    const request: Request = .{ .prompt = &p, .max_tokens = 32 };
+    var cancelled: Box = .{};
+    defer cancelled.deinit();
+    try s.host.engine().submit(1, &request, .{ .ctx = &cancelled, .event = Box.event });
+    s.host.engine().cancel(1);
+    s.target.fail_round = 1;
+    try s.host.start();
+    try std.testing.expectEqual(Reason.cancelled, try cancelled.wait());
+    var failed: Box = .{};
+    defer failed.deinit();
+    const reason = blk: {
+        // This round's injected failure is expected; keep the failure comparison without its warning receipt.
+        const level = std.testing.log_level;
+        std.testing.log_level = .err;
+        defer std.testing.log_level = level;
+        break :blk try s.run(&request, 2, &failed);
+    };
+    try std.testing.expectEqual(Reason.failed, reason);
+    s.target.fail_round = null;
+    var after: Box = .{};
+    defer after.deinit();
+    try std.testing.expectEqual(Reason.length, try s.run(&request, 3, &after));
+    const plain_request: Request = .{ .prompt = &p, .max_tokens = 32, .drafts = false };
+    var plain: Box = .{};
+    defer plain.deinit();
+    try std.testing.expectEqual(Reason.length, try s.run(&plain_request, 4, &plain));
+    try std.testing.expectEqualSlices(u32, after.tokens.items, plain.tokens.items);
+    s.host.lock();
+    const queued = s.host.queued.items.len;
+    const admitted = s.host.admitted.items.len;
+    s.host.unlock();
+    try std.testing.expectEqual(@as(usize, 0), queued + admitted);
 }

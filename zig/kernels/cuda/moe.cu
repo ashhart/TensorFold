@@ -4,6 +4,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "common/router_tiles.cuh"
+
 namespace {
 
 __device__ __forceinline__ float bf(__nv_bfloat16 v) { return __bfloat162float(v); }
@@ -116,4 +118,14 @@ extern "C" __global__ void __launch_bounds__(256) tf_moe_combine(const void* __r
         }
         OUT[r * D + d] = __float2bfloat16_rn(acc);
     }
+}
+
+// tf_moe_router's chains on prompt rows, grid (R / 128, E / 128); x_stride == D, D % 32 == 0; skips rows >= P[2].
+extern "C" __global__ void __launch_bounds__(256) tf_moe_router_tiles(const __nv_bfloat16* __restrict__ X, int x_stride,
+                                                                        const __nv_bfloat16* __restrict__ W,
+                                                                        float* __restrict__ OUT, int R, int D, int E,
+                                                                        const int* __restrict__ P) {
+    if (P != nullptr) R = min(R, P[2]);
+    if (static_cast<int>(blockIdx.x) * tf_router_tiles::TT >= R) return;
+    tf_router_tiles::tiles(X, W, OUT, R, D, E, 1);
 }

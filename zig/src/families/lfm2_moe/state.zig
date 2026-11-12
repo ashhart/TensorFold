@@ -128,6 +128,7 @@ pub const Scratch = struct {
     k: mtl.Buffer,
     v: mtl.Buffer,
     queries: mtl.Buffer,
+    prompt_pick: mtl.Buffer,
     pm: mtl.Buffer,
     pl: mtl.Buffer,
     po: mtl.Buffer,
@@ -176,6 +177,8 @@ pub const Scratch = struct {
         out.k = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         out.v = try mem.alloc(rows * c.kv_heads * c.head_dim * 2);
         const partials = partialCount(rows);
+        out.prompt_pick = try mem.alloc(64);
+        @memset(out.prompt_pick.contents()[0..64], 0);
         out.pm = try mem.alloc(partials * 4);
         out.pl = try mem.alloc(partials * 4);
         out.po = try mem.alloc(partials * c.head_dim * 4);

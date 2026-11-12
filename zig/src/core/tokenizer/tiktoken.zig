@@ -179,11 +179,13 @@ pub const TikToken = struct {
             try std.base64.standard.Decoder.decode(t.bytes[at .. at + n], line[0..sp]);
             const rank = try std.fmt.parseInt(u32, std.mem.trim(u8, line[sp + 1 ..], " \r"), 10);
             if (rank != t.tokens.items.len) return error.BadModel;
+            if (t.ranks.contains(t.bytes[at .. at + n])) return error.BadModel;
             try t.tokens.append(a, t.bytes[at .. at + n]);
             try t.ranks.put(a, t.bytes[at .. at + n], rank);
             at += n;
         }
         t.first_special = @intCast(t.tokens.items.len);
+        for (0..256) |b| if (!t.ranks.contains(&.{@as(u8, @intCast(b))})) return error.BadModel;
         const cfg_path = try std.fs.path.join(a, &.{ dir, "tokenizer_config.json" });
         defer a.free(cfg_path);
         const cfg = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 26));
@@ -273,6 +275,17 @@ pub const TikToken = struct {
 
     /// Kimi's encode: 400k-character chunks, runs of over 25k spaces or non-spaces split, specials allowed.
     pub fn encode(t: *const TikToken, s: []const u8) ![]u32 {
+        return t.encodeMode(s, true);
+    }
+
+    /// Request-local allocation, with the same chunking for ordinary text and structural special tokens.
+    pub fn encodeAlloc(t: *const TikToken, a: Allocator, s: []const u8, allow_special: bool) ![]u32 {
+        var view = t.*;
+        view.a = a;
+        return view.encodeMode(s, allow_special);
+    }
+
+    fn encodeMode(t: *const TikToken, s: []const u8, allow_special: bool) ![]u32 {
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(t.a);
         const txt = Text{ .s = s };
@@ -294,14 +307,14 @@ pub const TikToken = struct {
                 } else {
                     run += 1;
                     if (run > 25_000) {
-                        try t.withSpecials(s[start..i], &out);
+                        if (allow_special) try t.withSpecials(s[start..i], &out) else try t.ordinary(s[start..i], &out);
                         start = i;
                         run = 1;
                     }
                 }
                 i += c.len;
             }
-            try t.withSpecials(s[start..end], &out);
+            if (allow_special) try t.withSpecials(s[start..end], &out) else try t.ordinary(s[start..end], &out);
             chunk = end;
         }
         return out.toOwnedSlice(t.a);
@@ -316,6 +329,33 @@ pub const TikToken = struct {
             } else return error.UnknownToken;
         }
         return out.toOwnedSlice(t.a);
+    }
+
+    /// The server's decoded text replaces incomplete UTF-8; tokenBytes keeps logprob pieces lossless.
+    pub fn decodeAlloc(t: *const TikToken, a: Allocator, ids: []const u32) ![]u8 {
+        var view = t.*;
+        view.a = a;
+        const raw = try view.decode(ids);
+        defer a.free(raw);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(a);
+        try unicode.appendLossy(&out, a, raw);
+        return out.toOwnedSlice(a);
+    }
+
+    pub fn tokenBytes(t: *const TikToken, id: u32) ?[]const u8 {
+        if (id < t.first_special) return t.tokens.items[id];
+        return if (id - t.first_special < t.specials.items.len) t.specials.items[id - t.first_special] else null;
+    }
+
+    /// HF's vocabulary strings use the byte alphabet, while added control tokens keep their literal names.
+    pub fn tokenString(t: *const TikToken, a: Allocator, id: u32) ![]u8 {
+        const bytes = t.tokenBytes(id) orelse return a.dupe(u8, "");
+        if (id >= t.first_special) return a.dupe(u8, bytes);
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(a);
+        for (bytes) |b| try unicode.appendCodepoint(&out, a, @import("steps.zig").byte_chars[b]);
+        return out.toOwnedSlice(a);
     }
 };
 

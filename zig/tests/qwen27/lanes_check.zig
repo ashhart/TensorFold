@@ -114,6 +114,8 @@ pub fn main(init: std.process.Init) !void {
     defer draft.deinit();
     const drafted = try lb.Metal.init(a, &runner, draft);
     defer drafted.deinit();
+    try drafted.measure(io);
+    std.debug.print("lane check: {d}/{d} window costs initialized\n", .{ drafted.timed, drafted.window });
     var oracle = Oracle{ .a = a, .runner = &runner, .tokens = &expected, .prompt = prompt.len };
     draft.generation.proposer = .{ .ptr = &oracle, .call = Oracle.propose };
     const device_width = drafted.window;
@@ -124,6 +126,7 @@ pub fn main(init: std.process.Init) !void {
         const shaped = try runWidth(a, io, drafted, &prompt, 65, true, null, true);
         if (shaped.widest != width) return error.LaneWidthNotExercised;
         try same(shaped, &runner, prompt.len, &expected, &states, 65);
+        std.debug.print("lane oracle width={d}: 65 tokens and committed state exact\n", .{width});
     }
     draft.generation.proposer = null;
     drafted.window = device_width;
@@ -137,6 +140,7 @@ pub fn main(init: std.process.Init) !void {
         try same(try run(a, io, drafted, &prompt, count, false, null), &runner, prompt.len, &expected, &states, count);
         try same(try run(a, io, drafted, &prompt, count, true, .{ .seed = 7, .temperature = 0 }), &runner, prompt.len, &expected, &states, count);
         try same(try run(a, io, plain, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
+        std.debug.print("lane count={d}: drafted/plain/sampled-at-0/no-drafter exact\n", .{count});
     }
     std.debug.print("lane core: drafted, plain, sampled-at-0 and no-drafter streams at 1/2/7/16/17/33 equal plain greedy tokens and state\n", .{});
     for ([_]bool{ false, true }) |in_drafter| try failOnce(a, io, drafted, drafter, &prompt, in_drafter);
@@ -149,6 +153,7 @@ pub fn main(init: std.process.Init) !void {
         defer draft4.deinit();
         const back4 = try lb.Metal.init(a, &runner, draft4);
         defer back4.deinit();
+        try back4.measure(io);
         for (counts) |count| try same(try run(a, io, back4, &prompt, count, true, null), &runner, prompt.len, &expected, &states, count);
     }
     std.debug.print("a q4 drafter opened from its file (each linear read once, into its q4 copy) drafts streams equal to plain greedy\n", .{});

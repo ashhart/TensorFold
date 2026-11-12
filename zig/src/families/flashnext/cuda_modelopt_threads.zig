@@ -24,8 +24,40 @@ pub fn configured() !usize {
     return parseThreads(if (std.c.getenv("TF_FLASHNEXT_LOAD_THREADS")) |v| std.mem.span(v) else null);
 }
 
-/// A projection's borrowed planes: FP4 codes, plain E4M3 scales or the CSF fixed and exception planes, the global.
-pub const View = struct { codes: []const u8, scales: []const u8 = &.{}, fixed: []const u8 = &.{}, exceptions: []const u8 = &.{}, global: f32 };
+/// A projection's borrowed planes: FP4 codes, plain E4M3 scales or the CSF planes, the global and its bytes.
+pub const View = struct { codes: []const u8, scales: []const u8 = &.{}, fixed: []const u8 = &.{}, exceptions: []const u8 = &.{}, global: f32, global_bytes: []const u8 = &.{} };
+
+/// Readers a direct load gathers each chunk's planes with (the NVMe's O_DIRECT rate holds from 4 streams).
+const direct_readers = 4;
+
+/// A store's hook at chunk k's gather start (`gather`) or pack end (a test's; the weight store has none).
+fn mark(store: anytype, gather: bool, k: usize) void {
+    if (comptime @hasDecl(std.meta.Child(@TypeOf(store)), "chunkMark")) store.chunkMark(gather, k);
+}
+
+/// The chunk's plane views as the gather repoints them: codes, scales, fixed and exceptions of each.
+fn planes(part: []View, ptrs: []*[]const u8) []*[]const u8 {
+    for (part, 0..) |*v, j| {
+        ptrs[4 * j] = &v.codes;
+        ptrs[4 * j + 1] = &v.scales;
+        ptrs[4 * j + 2] = &v.fixed;
+        ptrs[4 * j + 3] = &v.exceptions;
+    }
+    return ptrs[0 .. 4 * part.len];
+}
+
+/// A store's chunkMark as the gather thread's hook (chunk k's gather start).
+fn Marker(comptime S: type) type {
+    return struct {
+        store: S,
+        k: usize = 0,
+
+        fn run(ctx: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            mark(self.store, true, self.k);
+        }
+    };
+}
 
 /// The store as slice.stored reads it, every tensor's pages read ahead (this loader copies all of each).
 fn Ahead(comptime S: type) type {
@@ -42,19 +74,44 @@ fn Ahead(comptime S: type) type {
     };
 }
 
-/// A projection read and refused as loadShape's loop reads it: weight shape, slice.stored, slice.dimensions, global.
-fn viewOf(store: anytype, name: []const u8, n: usize, k: usize) !View {
+/// The store as slice.stored reads it, no pages read ahead (a direct load reads the planes past the page cache).
+fn Direct(comptime S: type) type {
+    return struct {
+        store: S,
+
+        pub fn get(self: @This(), name: []const u8) !core.safetensors.Tensor {
+            return self.store.hold(name);
+        }
+
+        pub fn has(self: @This(), name: []const u8) bool {
+            return self.store.has(name);
+        }
+    };
+}
+
+/// A projection read and refused as loadShape's loop reads it; `direct` reads no plane bytes (gathered, then checked).
+fn viewOf(store: anytype, name: []const u8, n: usize, k: usize, comptime direct: bool) !View {
     var buf: [512]u8 = undefined;
     const w = try store.hold(try std.fmt.bufPrint(&buf, "{s}.weight", .{name}));
     if (!w.is(.u8, &.{ n, k / 2 })) return error.UnexpectedTensor;
-    const source = try slice.stored(Ahead(@TypeOf(store)){ .store = store }, name);
-    _ = try slice.dimensions(source);
-    const global: f32 = @bitCast(std.mem.readInt(u32, source.global.bytes[0..4], .little));
-    if (!std.math.isFinite(global) or global <= 0) return error.UnsupportedQuantization;
-    return switch (source.scales) {
-        .plain => |s| .{ .codes = source.weight.bytes, .scales = s.bytes, .global = global },
-        .csf => |s| .{ .codes = source.weight.bytes, .fixed = s.fixed.bytes, .exceptions = s.exceptions.bytes, .global = global },
+    const source = try slice.stored(if (direct) Direct(@TypeOf(store)){ .store = store } else Ahead(@TypeOf(store)){ .store = store }, name);
+    // direct: the CSF planes are checked on their gathered bytes, as scalesOf decodes them before packing
+    _ = try if (direct) slice.shapes(source) else slice.dimensions(source);
+    if (source.global.bytes.len < 4) return error.UnexpectedTensor;
+    var v: View = switch (source.scales) {
+        .plain => |s| .{ .codes = source.weight.bytes, .scales = s.bytes, .global = 0 },
+        .csf => |s| .{ .codes = source.weight.bytes, .fixed = s.fixed.bytes, .exceptions = s.exceptions.bytes, .global = 0 },
     };
+    v.global_bytes = source.global.bytes[0..4];
+    if (!direct) try globalOf(&v);
+    return v;
+}
+
+/// The view's global from its bytes, refused unless finite and positive.
+fn globalOf(v: *View) !void {
+    const global: f32 = @bitCast(std.mem.readInt(u32, v.global_bytes[0..4], .little));
+    if (!std.math.isFinite(global) or global <= 0) return error.UnsupportedQuantization;
+    v.global = global;
 }
 
 /// A view's row-major E4M3 scales [n, k/16]: the plain plane, or its CSF planes decoded whole as slice.slice does.
@@ -127,6 +184,15 @@ pub fn load(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix:
 }
 
 pub fn loadChunked(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix: []const u8, dims: usize, width: usize, count: usize, n: usize, stage_cap: usize) !experts.Owned {
+    // a store that names its mapped shards reads them past the page cache (core.direct_gather; TF_LOAD_DIRECT=0: off)
+    if (comptime @hasDecl(std.meta.Child(@TypeOf(store)), "sources")) {
+        if (core.direct_gather.enabled()) return loadMode(a, d, store, prefix, dims, width, count, n, stage_cap, true);
+    }
+    return loadMode(a, d, store, prefix, dims, width, count, n, stage_cap, false);
+}
+
+/// loadChunked with its planes read through the mapping (`direct` false) or gathered past the page cache.
+pub fn loadMode(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, prefix: []const u8, dims: usize, width: usize, count: usize, n: usize, stage_cap: usize, comptime direct: bool) !experts.Owned {
     const up_bytes = try experts.packedBytes(width, dims, 2);
     const down_bytes = try experts.packedBytes(dims, width, 1);
     const up_total = std.math.mul(usize, count, up_bytes) catch return error.UnexpectedTensor;
@@ -138,9 +204,25 @@ pub fn loadChunked(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, 
     defer store.release();
     var buf: [512]u8 = undefined;
     for (0..count) |i| {
-        views[3 * i] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.gate_proj", .{ prefix, i }), width, dims);
-        views[3 * i + 1] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.up_proj", .{ prefix, i }), width, dims);
-        views[3 * i + 2] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.down_proj", .{ prefix, i }), dims, width);
+        views[3 * i] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.gate_proj", .{ prefix, i }), width, dims, direct);
+        views[3 * i + 1] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.up_proj", .{ prefix, i }), width, dims, direct);
+        views[3 * i + 2] = try viewOf(store, try std.fmt.bufPrint(&buf, "{s}.experts.{d}.down_proj", .{ prefix, i }), dims, width, direct);
+    }
+    // two arenas: chunk k packs from one while chunk k + 1 is gathered into the other
+    var pair = core.direct_gather.Pair.init(a, direct_readers);
+    defer pair.deinit();
+    var held: [core.direct_gather.max_sources]core.direct_gather.Source = undefined;
+    // a layer whose shards don't fit one gather reads through the mapping, as a file system without O_DIRECT does
+    const sources: ?[]core.direct_gather.Source = if (direct) store.sources(&held) catch |err| switch (err) {
+        error.TooManySources => null,
+    } else null;
+    const ptrs = try a.alloc(*[]const u8, if (direct) 4 * view_count else 0);
+    defer a.free(ptrs);
+    if (direct) {
+        // every global first (a 4-byte read each, joined where they sit together), checked as viewOf checks them
+        for (views, 0..) |*v, j| ptrs[j] = &v.global_bytes;
+        if (sources) |src| try pair.read(src, ptrs[0..view_count]);
+        for (views) |*v| try globalOf(v);
     }
     var up = try cuda.DeviceBuffer.alloc(d, up_total);
     errdefer up.free();
@@ -149,15 +231,36 @@ pub fn loadChunked(a: std.mem.Allocator, d: *const cuda.Driver, store: anytype, 
     // the store's pinned staging, kept across a load's layers and freed by its dropStaging or deinit on any path
     const chunk = @max(1, @min(count, stage_cap / (up_bytes + down_bytes)));
     const stage = try store.pinned(d, chunk * (up_bytes + down_bytes));
+    if (sources) |src| {
+        mark(store, true, 0);
+        try pair.read(src, planes(views[0 .. 3 * @min(chunk, count)], ptrs));
+    }
+    var marker: Marker(@TypeOf(store)) = .{ .store = store };
     var lo: usize = 0;
-    while (lo < count) : (lo += chunk) {
+    var k: usize = 0;
+    while (lo < count) : ({
+        lo += chunk;
+        k += 1;
+    }) {
         const m = @min(chunk, count - lo);
+        // the next chunk's gather runs while this one packs; the main thread allocates nothing from `a` meanwhile
+        defer pair.wait() catch {};
+        if (sources != null and lo + chunk < count) {
+            marker.k = k + 1;
+            const hook: core.direct_gather.Hook = .{ .ctx = &marker, .run = @TypeOf(marker).run };
+            const ahead = planes(views[3 * (lo + chunk) ..][0 .. 3 * @min(chunk, count - lo - chunk)], ptrs);
+            try pair.start(sources.?, ahead, hook);
+        }
         const up_words = std.mem.bytesAsSlice(u32, stage[0 .. m * up_bytes]);
         const down_words: []u32 = @alignCast(std.mem.bytesAsSlice(u32, stage[m * up_bytes ..][0 .. m * down_bytes]));
         try pack(views[3 * lo ..][0 .. 3 * m], up_words, down_words, width, dims, n);
+        mark(store, false, k);
         // synchronous from pinned memory, as cuda_pocket.zig's staged: done before return, so the next chunk may refill
         try d.check(d.api.cuMemcpyHtoD_v2(try up.at(lo * up_bytes), stage.ptr, m * up_bytes), "cuMemcpyHtoD pinned experts");
         try d.check(d.api.cuMemcpyHtoD_v2(try down.at(lo * down_bytes), stage.ptr + m * up_bytes, m * down_bytes), "cuMemcpyHtoD pinned experts");
+        try pair.wait();
+        // the next chunk's gather reuses these views' memory: only their globals are read after this
+        for (views[3 * lo ..][0 .. 3 * m]) |*v| v.* = .{ .codes = &.{}, .global = v.global };
     }
     const up_globals = try a.alloc(f32, 2 * count);
     defer a.free(up_globals);

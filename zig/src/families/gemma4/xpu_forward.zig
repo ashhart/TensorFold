@@ -12,8 +12,9 @@ const alloc = dev.alloc;
 const off = dev.off;
 
 pub const ROWS = 16; // rows of a decode or verification window
-pub const MAXT = 256; // rows of a prompt forward at most
+pub const MAXT = 1024; // rows of a prompt forward at most
 pub const KEYS = 128;
+const MERGE_TILES = 16; // tiles from which a window's merge splits a row over 64-column groups
 pub const MAXK = 64; // candidates the device keeps of a row of logits (top_k above it: the host draws from all)
 const EPS: f32 = cfg.eps;
 const nul: ?*anyopaque = null;
@@ -26,9 +27,12 @@ pub const Kernels = struct {
     ple_combine: ze.H,
     resid: ze.H,
     geglu: ze.H,
+    geglu_sums: ze.H,
+    geglu_tab: ze.H,
     ple_mid: ze.H,
     attn_prep: [2]ze.H, // [sliding, global]
     attn_merge: [2]ze.H,
+    attn_merge_w: [2]ze.H, // the 128-column fold, for windows over few tiles
     argmax_part: ze.H,
     argmax: ze.H,
     dec_wide: ze.H,
@@ -47,6 +51,7 @@ pub const Kernels = struct {
     dp_sums: [2]ze.H,
     ngen_wide: ze.H,
     ngen_narrow: ze.H,
+    ngen_geglu: ze.H, // gate_up with the GeGLU epilogue
     topk_part: ze.H,
     topk_merge: ze.H,
 };
@@ -89,6 +94,8 @@ pub const Want = enum { none, last, rows };
 pub const Runner = struct {
     d: *Dev,
     k: Kernels,
+    kp: Kernels, // prompt rows (more than ROWS): the glue kernels that gain from 128 registers a thread
+    tab: *anyopaque, // bf16 [65536]: bf16(gelu_tanh(x)) of every bf16 x, for the GEMM's GeGLU epilogue
     m: load_mod.Model,
     a: Acts,
     kc: [24]*anyopaque,
@@ -137,8 +144,11 @@ pub const Runner = struct {
         r.dump_dir = if (std.c.getenv("XPU_DUMP")) |v| std.mem.span(v) else null;
         const mg = try d.g.module(&kb.glue);
         const mgg = try d.g.module(&kb.glue_g);
+        const mr = try d.g.module(&kb.rows);
+        const mrg = try d.g.module(&kb.rows_g);
         const mw = try d.g.module(&kb.ngen_wide);
         const mn = try d.g.module(&kb.ngen_narrow);
+        const mgl = try d.g.module(&kb.ngen_geglu);
         const mm = try d.g.module(&kb.gemm);
         r.k = .{
             .repack = try d.kernel(mg, "repack", 16),
@@ -148,9 +158,12 @@ pub const Runner = struct {
             .ple_combine = try d.kernel(mg, "g4_ple_combine", 16),
             .resid = try d.kernel(mg, "g4_resid", 512),
             .geglu = try d.kernel(mg, "g4_geglu", 256),
+            .geglu_sums = try d.kernel(mg, "g4_geglu_sums", 256),
+            .geglu_tab = try d.kernel(mg, "g4_geglu_tab", 256),
             .ple_mid = try d.kernel(mg, "g4_ple_mid", 64),
             .attn_prep = .{ try d.kernel(mg, "g4_attn_prep", 256), try d.kernel(mgg, "g4_attn_prep", 256) },
-            .attn_merge = .{ try d.kernel(mg, "g4_attn_merge", 128), try d.kernel(mgg, "g4_attn_merge", 128) },
+            .attn_merge = .{ try d.kernel(mg, "g4_attn_merge", 64), try d.kernel(mgg, "g4_attn_merge", 64) },
+            .attn_merge_w = .{ try d.kernel(mg, "g4_attn_merge_w", 128), try d.kernel(mgg, "g4_attn_merge_w", 128) },
             .argmax_part = try d.kernel(mg, "argmax_part", 256),
             .argmax = try d.kernel(mg, "argmax", 256),
             .dec_wide = try d.kernel(mm, "w4k1_decode", 64),
@@ -165,18 +178,33 @@ pub const Runner = struct {
             .dec_narrow16s = try d.kernel(mm, "w4k_s16x16s", 64),
             .dec_wide16s = try d.kernel(mm, "w4k1_d16s", 64),
             .dp_part = .{ try d.kernel(mg, "g4_attn_dp_part", 256), try d.kernel(mgg, "g4_attn_dp_part", 256) },
-            .dp_rows = .{ try d.kernel(mg, "g4_attn_dp_rows", 256), try d.kernel(mgg, "g4_attn_dp_rows", 256) },
+            .dp_rows = .{ try d.kernel(mr, "g4_attn_dp_rows", 256), try d.kernel(mrg, "g4_attn_dp_rows", 256) },
             .dp_sums = .{ try d.kernel(mg, "g4_attn_sums", 128), try d.kernel(mgg, "g4_attn_sums", 128) },
             .ngen_wide = try d.kernel(mw, "w4g_dpb", 256),
             .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
+            .ngen_geglu = try d.kernel(mgl, "w4g_dpb_geglu", 256),
             .topk_part = try d.kernel(mg, "g4_topk_part", 256),
             .topk_merge = try d.kernel(mg, "g4_topk_merge", 256),
         };
+        // the same source at 128 registers a thread: twice the resident threads for the memory-bound glue of prompts
+        r.kp = r.k;
+        r.kp.embed = try d.kernel(mr, "g4_embed", 256);
+        r.kp.x2h = try d.kernel(mr, "g4_x2h", 256);
+        r.kp.ple_tok = try d.kernel(mr, "g4_ple_tok", 256);
+        r.kp.resid = try d.kernel(mr, "g4_resid", 512);
+        r.kp.geglu = try d.kernel(mr, "g4_geglu", 256);
+        r.kp.geglu_sums = try d.kernel(mr, "g4_geglu_sums", 256);
+        r.kp.ple_mid = try d.kernel(mr, "g4_ple_mid", 64);
+        r.kp.attn_prep = .{ try d.kernel(mr, "g4_attn_prep", 256), try d.kernel(mrg, "g4_attn_prep", 256) };
+        r.kp.dp_sums = .{ try d.kernel(mr, "g4_attn_sums", 128), try d.kernel(mrg, "g4_attn_sums", 128) };
+        r.kp.dense_b = try d.kernel(mr, "g4_dense_b", 256);
         if (std.c.getenv("XPU_PROFILE") != null) try d.profOn();
         const prof = d.prof_on;
         d.prof_on = false;
         r.m = try load_mod.load(d, r.k.repack, &r.ckpt);
         d.prof_on = prof;
+        r.tab = try d.alloc_(65536 * 2);
+        try d.launch(r.k.geglu_tab, .{ .x = 256 }, .{r.tab});
         try r.buffers();
         return r;
     }
@@ -283,9 +311,16 @@ pub const Runner = struct {
             if (r.pos + (end - at) > r.context) return error.ContextFull;
             var win: [MAXT]i32 = undefined;
             for (ids[at..end], 0..) |t, j| win[j] = @intCast(t);
-            const w: Want = if (want and end == ids.len) .last else .none;
-            if (try r.forward(win[0 .. end - at], r.pos, w)) |t| r.last = @intCast(t);
-            r.pos += @intCast(end - at);
+            // the prompt's last row runs alone: the rows before it only fill the cache (16 rows or fewer stay whole)
+            const split = want and end == ids.len and end - at > ROWS;
+            const body = end - at - @intFromBool(split);
+            const w: Want = if (want and end == ids.len and !split) .last else .none;
+            if (try r.forward(win[0..body], r.pos, w)) |t| r.last = @intCast(t);
+            r.pos += @intCast(body);
+            if (split) {
+                if (try r.forward(win[body .. body + 1], r.pos, .last)) |t| r.last = @intCast(t);
+                r.pos += 1;
+            }
             at = end;
         }
     }
@@ -343,6 +378,20 @@ pub const Runner = struct {
         return r.host_logits;
     }
 
+    /// gate | up of prompt rows with the GeGLU in the GEMM epilogue: activation in `a.p` [m, ff], its sums in ahi, alo.
+    pub fn gateUp(r: *Runner, w: Proj, m: u32) !bool {
+        if (m <= ROWS or w.bits8 or w.dense or !w.wide or w.n != 2 * cfg.ff) return false;
+        const a = &r.a;
+        if (r.d.prof_on) r.d.tag = r.tag;
+        defer r.d.tag = "";
+        const mp: i32 = @intCast((m + 7) / 8 * 8);
+        const groups: ze.GroupCount = .{ .x = 8, .y = w.n / 256, .z = ((m + 63) / 64 + 7) / 8 };
+        try r.d.launch(r.kp.ngen_geglu, groups, .{ a.h, w.w, w.s, w.bg, a.p, @as(i32, @intCast(m)), @as(i32, @intCast(w.n)), @as(i32, @intCast(w.k)), a.ahi, a.alo, mp, @as(i32, @intCast(w.k / 64)), r.tab });
+        r.d.tag = "";
+        try r.d.launch(r.kp.geglu_sums, .{ .x = m, .y = cfg.ff / 1024 }, .{ a.p, a.ahi, a.alo });
+        return true;
+    }
+
     pub fn gemm(r: *Runner, h: *anyopaque, ahi: *anyopaque, alo: *anyopaque, w: Proj, out: *anyopaque, m: u32) !void {
         if (r.d.prof_on) r.d.tag = r.tag;
         defer r.d.tag = "";
@@ -351,7 +400,7 @@ pub const Runner = struct {
         const K: i32 = @intCast(w.k);
         const G: i32 = @intCast(w.k / 64);
         const mp: i32 = @intCast((m + 7) / 8 * 8);
-        const k = r.k;
+        const k = if (m > ROWS) r.kp else r.k;
         if (w.dense) { // a bf16 weight (the per-layer linears)
             try r.d.launch(k.dense_b, .{ .x = (m + 15) / 16, .y = w.n / 16 }, .{ h, w.w, out, M, N, K });
             return;
@@ -443,8 +492,8 @@ pub const Runner = struct {
         const d = r.d;
         const a = &r.a;
         const m = &r.m;
-        const k = r.k;
         const T: u32 = @intCast(ids.len);
+        const k = if (T > ROWS) r.kp else r.k;
         if (T == 0 or T > MAXT or (T > ROWS and want == .rows)) return error.BadWindow;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
         errdefer d.settle(); // the queued copy reads the caller's ids
@@ -462,7 +511,9 @@ pub const Runner = struct {
         if (r.cap) |c| try c.grab(r, .inputs, 0);
         try d.launch(k.resid, .{ .x = T }, .{ a.x, nul, nul, nul, m.layers[0].in_norm, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
         if (r.dump_dir != null and p0 == 0) try r.dumpBuf("pli", a.pli, T * cfg.ple_all * 2);
-        for (&m.layers, 0..) |*l, i| {
+        // a forward nothing reads stops after the layers that own a K/V cache: the deeper ones write none
+        const depth: usize = if (want == .none and r.cap == null) cfg.shared_from else cfg.layers;
+        for (m.layers[0..depth], 0..) |*l, i| {
             const glob = cfg.isGlobal(i);
             const hd: u32 = if (glob) cfg.dim_g else cfg.dim_s;
             const src = cfg.kvSource(i);
@@ -487,7 +538,9 @@ pub const Runner = struct {
                 } else { // a window: the tiles in parallel, then the ordered fold
                     const nt: u32 = if (glob) (pt.p0 + pt.t - 1) / KEYS + 1 else 6; // a block's rows may span one tile more than a row's window
                     try d.launch(k.dp_part[g], .{ .x = nt, .y = 2, .z = blocks }, .{ off(a.q, q_off), ca.kc[src], ca.vc[src], a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), @as(i32, @intCast(pt.t)), window, ring, krows, @as(i32, @intCast(nt)) });
-                    try d.launch(k.attn_merge[g], .{ .x = 8, .y = pt.t }, .{ a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), window, @as(i32, @intCast(nt)), off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) });
+                    const margs = .{ a.pm, a.pl, a.po, @as(i32, @intCast(pt.p0)), window, @as(i32, @intCast(nt)), off(a.h, h_off), off(a.ahi, ps_off), off(a.alo, ps_off) };
+                    const few = nt < MERGE_TILES;
+                    try d.launch(if (few) k.attn_merge_w[g] else k.attn_merge[g], .{ .x = 8, .y = pt.t, .z = if (few) 1 else @as(u32, @intCast(hd / 64)) }, margs);
                 }
             }
             if (r.dump_dir != null and p0 == 0 and i == 0) {
@@ -501,10 +554,13 @@ pub const Runner = struct {
             try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_attn_norm, nul, l.pre_ffn_norm, a.h, a.ahi, a.alo, EPS, @as(i32, 0) });
             if (r.dump_dir != null and p0 == 0 and i == 0) try r.dump("0_attn", p0, T);
             r.tag = "gate_up";
-            try r.gemm(a.h, a.ahi, a.alo, l.gu, a.p, T);
-            try d.launch(k.geglu, .{ .x = T, .y = cfg.ff / 1024 }, .{ a.p, a.h, a.ahi, a.alo });
+            const fused = try r.gateUp(l.gu, T);
+            if (!fused) {
+                try r.gemm(a.h, a.ahi, a.alo, l.gu, a.p, T);
+                try d.launch(k.geglu, .{ .x = T, .y = cfg.ff / 1024 }, .{ a.p, a.h, a.ahi, a.alo });
+            }
             r.tag = "down";
-            try r.gemm(a.h, a.ahi, a.alo, l.down, a.r, T);
+            try r.gemm(if (fused) a.p else a.h, a.ahi, a.alo, l.down, a.r, T);
             try d.launch(k.resid, .{ .x = T }, .{ a.x, a.r, l.post_ffn_norm, nul, nul, a.h, a.ahi, a.alo, EPS, @as(i32, 1) });
             if (r.dump_dir != null and p0 == 0 and i == 0) try r.dump("0_ffn", p0, T);
             if (r.cap) |c| try c.grab(r, .before, i);

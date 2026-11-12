@@ -242,7 +242,7 @@ fn show(ctx: *const Context, v: json.Value) !void {
     try say(ctx, "Stream delivery includes transport buffering; it is not an engine token clock.", .{});
     const managed = settings.get("managed").? == .bool and settings.get("managed").?.bool;
     if (managed) if (try unranked(ctx.a, v)) |lacks|
-        try say(ctx, "The board ranks a run that names its GPU, checkpoint revision and configuration digest; this receipt names no {s}.", .{lacks});
+        try say(ctx, "The board ranks a run that names its GPU, loaded rank count, checkpoint revision and configuration digest; this receipt names no {s}.", .{lacks});
     if (!managed) {
         const source = json.strOr(v.get("hardware").?.get("source"));
         const version = json.strOr(v.get("runtime").?.get("tensorfold_version"));
@@ -261,6 +261,7 @@ pub fn unranked(a: Allocator, v: json.Value) !?[]const u8 {
     const m = v.get("model").?;
     if (m.get("local").? != .bool or m.get("local").?.bool) return null; // a local label is refused before publishing
     var lacks: std.ArrayList([]const u8) = .empty;
+    if (v.get("settings").?.get("rank_count").? == .null) try lacks.append(a, "loaded rank count");
     const gpus = v.get("hardware").?.get("gpus").?;
     if (gpus != .array or gpus.array.len == 0) try lacks.append(a, "GPU");
     if (m.get("revision").? == .null) try lacks.append(a, "checkpoint revision");
@@ -331,7 +332,8 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const bench_dir = try std.fs.path.join(a, &.{ ctx.home, ".tensorfold", "benchmarks" });
     const settings: receipt.Settings = .{ .tokens = @intCast(args.tokens), .repetitions = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .context_tokens = args.context, .managed = args.server == null, .kv_cache = if (args.server == null) (args.kv_cache orelse "bf16") else null };
     var facts: struct { model: receipt.Model, hardware: receipt.Hardware, runtime: receipt.Runtime } = undefined;
-    var rank_count: ?u8 = if (args.server == null) 1 else null;
+    var rank_count: ?u8 = null;
+    var group: ?json.Value = null;
     var target: stream.Target = undefined;
     var chat_only = args.chat_only;
     var plan: ?server.Plan = null;
@@ -412,17 +414,6 @@ fn run(ctx: *const Context, args: Args) !u8 {
     try say(ctx, "This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.", .{});
     if (note) |n| try say(ctx, "{s}", .{n});
     if (wait) |w| try say(ctx, "{s}", .{w});
-    // the attached server's own facts, read once nothing more can refuse the run
-    if (args.server != null) if (try manifest.fetch(a, ctx.io, target.base, backend)) |got| {
-        facts.hardware = got.hardware;
-        facts.runtime = got.runtime;
-        facts.model.revision = got.revision;
-        facts.model.config_sha256 = got.config_sha256;
-        facts.model.tokenizer_sha256 = got.tokenizer_sha256;
-        facts.model.family = got.family;
-        facts.model.quantization = got.quantization;
-        rank_count = got.rank_count;
-    };
     var managed: ?server.Managed = null;
     if (plan) |p| {
         var tail: []const []const u8 = &.{};
@@ -437,6 +428,24 @@ fn run(ctx: *const Context, args: Args) !u8 {
         };
         target = .{ .base = managed.?.base(), .served = server.served_name };
     }
+    // Both attached and managed runs read the loaded server, never client rank or environment hints.
+    if (try manifest.fetch(a, ctx.io, target.base, backend)) |got| {
+        facts.hardware = got.hardware;
+        facts.runtime = got.runtime;
+        if (args.server != null) {
+            facts.model.revision = got.revision;
+            facts.model.config_sha256 = got.config_sha256;
+            facts.model.tokenizer_sha256 = got.tokenizer_sha256;
+            facts.model.family = got.family;
+            facts.model.quantization = got.quantization;
+        }
+        rank_count = got.rank_count;
+        group = got.group;
+    }
+    const thinking = try stream.discoverThinking(a, ctx.io, target);
+    target.thinking_switch = thinking.switchable;
+    target.thinking_applicable = thinking.applicable;
+    try say(ctx, "Chat thinking: {s}", .{if (target.thinking_applicable == false) "not applicable" else if (target.thinking_switch == false) "server default (off unsupported; local only)" else if (target.thinking_switch == true) "off" else "off requested (unverified)"});
     var printer: Printer = .{ .ctx = ctx, .reps = args.reps };
     const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout, .chat_only = chat_only }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
         if (managed) |*m| _ = m.stop();
@@ -448,6 +457,8 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const created = receipt.createdAt(std.Io.Clock.real.now(ctx.io).toNanoseconds(), &stamp);
     var recorded = settings;
     recorded.rank_count = rank_count;
+    if (target.thinking_switch == false and target.thinking_applicable != false) recorded.thinking_mode = "server_default";
+    recorded.group = group;
     const v = try receipt.value(a, &run_id, created, facts.model, facts.runtime, facts.hardware, recorded, samples);
     try show(ctx, v);
     if (!try receipt.save(a, ctx.io, v, dest, nowMs(ctx), &problem)) return fail(ctx, problem);

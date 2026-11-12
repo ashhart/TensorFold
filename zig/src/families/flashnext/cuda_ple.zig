@@ -7,6 +7,7 @@ const embed = @import("cuda_embed.zig");
 const hc = @import("cuda_hc.zig");
 const ple_pool = @import("cuda_ple_pool.zig");
 const ple_reader = @import("cuda_ple_reader.zig");
+const ple_fp8 = @import("cuda_ple_fp8.zig");
 
 const golden: u64 = 0x9E3779B97F4A7C15;
 const mix1: u64 = 0xBF58476D1CE4E5B9;
@@ -151,11 +152,7 @@ pub fn lastIds(h: Hash, history: []const i64, token: i64, out: []i64) !void {
     }
 }
 
-pub fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+pub const toBf16 = core.bf16_round.bits;
 
 pub fn sumGroups(row: []const u16, out: []f32) void {
     const groups = row.len / 32;
@@ -208,7 +205,7 @@ pub fn partName(buf: []u8, shard: usize, nested: bool, part: []const u8) ![]cons
     return partNameFor(buf, shard, nested, part, false);
 }
 
-fn partNameFor(buf: []u8, shard: usize, nested: bool, part: []const u8, modelopt: bool) ![]const u8 {
+pub fn partNameFor(buf: []u8, shard: usize, nested: bool, part: []const u8, modelopt: bool) ![]const u8 {
     const prefix = if (modelopt) "model.language_model" else "language_model.model";
     return if (nested)
         std.fmt.bufPrint(buf, "{s}.layers.{d}.ple.ple_embedding.ngram_embedding.shards.{d}.{s}", .{ prefix, layer, shard, part })
@@ -334,6 +331,9 @@ pub fn eosOf(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !i64 {
     return cfg.eos;
 }
 
+/// A table's row format: MLX affine words, NVFP4 codes with E4M3 group scales, or FP8 rows with one table scale.
+pub const Format = enum { mlx, nvfp4, fp8 };
+
 /// The n-gram table held open for an engine's life: the hash, the scale, and each shard's slices of its mapped file.
 pub const Ngram = struct {
     gpa: std.mem.Allocator,
@@ -343,12 +343,14 @@ pub const Ngram = struct {
     w: [max_shards][]const u8 = undefined,
     s: [max_shards][]const u8 = undefined,
     b: [max_shards][]const u8 = undefined,
-    format: enum { mlx, nvfp4 } = .mlx,
+    format: Format = .mlx,
     tables: [max_shards]core.nvfp4_rows.Table = undefined,
+    tables8: [max_shards]ple_fp8.Table = undefined,
     readers: [max_shards]ple_reader.Reader = undefined,
     read_mode: ple_reader.Mode = .mmap,
     warm_ahead: bool = false,
     pool: ?*ple_pool.Pool = null, // the gather's parked workers (null: every row on the caller's thread)
+    warmer: ?std.Thread = null, // warm's read-ahead thread until joined (waitWarm, deinit)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
         const cfg = try readSpec(gpa, io, model_dir);
@@ -374,13 +376,14 @@ pub const Ngram = struct {
         const wm = try core.safetensors.index.weightMap(parsed.value);
         const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
         const modelopt = wm.contains(first);
-        g.format = if (modelopt) .nvfp4 else .mlx;
+        g.format = if (modelopt) try ple_fp8.format(gpa, io, model_dir, wm, first) else .mlx;
         if (modelopt) g.read_mode = try ple_reader.mode(if (std.c.getenv("TF_FLASHNEXT_PLE_IO")) |v| std.mem.span(v) else null);
-        g.warm_ahead = @import("cuda_ple_ahead.zig").enabled(if (std.c.getenv("TF_FLASHNEXT_WARM_AHEAD")) |v| std.mem.span(v) else null);
-        g.scale = if (modelopt)
-            try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true)
-        else
-            try tableScale(gpa, io, model_dir, wm);
+        g.warm_ahead = try @import("sys").environment.read(bool, "TF_FLASHNEXT_WARM_AHEAD", false);
+        g.scale = switch (g.format) {
+            .mlx => try tableScale(gpa, io, model_dir, wm),
+            .nvfp4 => try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true),
+            .fp8 => try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale", true),
+        };
         const dh = g.hash.dh;
         var key: [180]u8 = undefined;
         for (0..g.hash.shards) |shard| {
@@ -400,15 +403,16 @@ pub const Ngram = struct {
                 try g.files.append(gpa, o);
                 break :file &g.files.items[g.files.items.len - 1];
             };
-            const w = try file.tensor(try partNameFor(&key, shard, nested, "weight", modelopt), if (modelopt) .u8 else .u32);
+            const dtype: core.safetensors.DType = switch (g.format) {
+                .mlx => .u32,
+                .nvfp4 => .u8,
+                .fp8 => .f8_e4m3,
+            };
+            const w = try file.tensor(try partNameFor(&key, shard, nested, "weight", modelopt), dtype);
             const expected_rows: usize = @intCast(g.hash.starts[shard + 1] - g.hash.starts[shard]);
             if (w.rank != 2 or w.dim(0) != expected_rows) return error.UnexpectedTensor;
             if (modelopt) {
-                const sc = try file.tensor(try partNameFor(&key, shard, nested, "weight_scale", true), .f8_e4m3);
-                const table = try core.nvfp4_rows.Table.init(w, sc, g.scale);
-                if (table.width != dh) return error.UnexpectedTensor;
-                g.tables[shard] = table;
-                g.readers[shard] = ple_reader.Reader.init(&file.file, io, table);
+                try ple_fp8.openShard(&g, file, shard, nested, w);
             } else {
                 const sc = try file.tensor(try partNameFor(&key, shard, nested, "scales", false), .bf16);
                 const bias = try file.tensor(try partNameFor(&key, shard, nested, "biases", false), .bf16);
@@ -424,6 +428,7 @@ pub const Ngram = struct {
     }
 
     pub fn deinit(g: *Ngram) void {
+        g.waitWarm();
         if (g.pool) |p| p.destroy();
         for (g.files.items) |*o| o.close(g.gpa);
         g.files.deinit(g.gpa);
@@ -434,6 +439,42 @@ pub const Ngram = struct {
         return g.hash.heads * g.hash.dh;
     }
 
+    /// With TF_FLASHNEXT_TABLE_WARM=1, the table read ahead into the page cache after load, so a cold prompt reads RAM.
+    pub fn warm(g: *Ngram) void {
+        // the startup check refused every malformed value already, so a plain default stands here
+        const on = @import("sys").environment.read(bool, "TF_FLASHNEXT_TABLE_WARM", false) catch false;
+        if (@import("builtin").os.tag != .linux or !on) return;
+        g.warmer = std.Thread.spawn(.{}, warmMain, .{g.*}) catch null;
+    }
+
+    /// Returns once warm's read-ahead is queued.
+    pub fn waitWarm(g: *Ngram) void {
+        if (g.warmer) |t| t.join();
+        g.warmer = null;
+    }
+
+    fn warmMain(g: Ngram) void {
+        var bytes: usize = 0;
+        for (0..g.hash.shards) |shard| switch (g.format) {
+            .nvfp4 => bytes += advise(g.tables[shard].codes) + advise(g.tables[shard].scales),
+            .mlx => bytes += advise(g.w[shard]) + advise(g.s[shard]) + advise(g.b[shard]),
+            .fp8 => bytes += advise(g.tables8[shard].codes),
+        };
+        std.debug.print("n-gram table: {d:.1} GiB read ahead into the page cache\n", .{@as(f64, @floatFromInt(bytes)) / (1 << 30)});
+    }
+
+    /// MADV_WILLNEED over the pages of `bytes`, a 128 KiB readahead window a call (the most the kernel reads a call).
+    fn advise(bytes: []const u8) usize {
+        if (bytes.len == 0) return 0;
+        const page = std.heap.pageSize();
+        const step = 128 << 10;
+        const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+        const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+        var at = lo;
+        while (at < hi) : (at += step) _ = std.os.linux.madvise(@ptrFromInt(at), @min(step, hi - at), std.os.linux.MADV.WILLNEED);
+        return bytes.len;
+    }
+
     /// Rows [lo, hi) of a chunk's token-major row ids `ids`, each dequantized into its head's slice of `out`.
     pub fn fill(g: *const Ngram, ids: []const i64, out: []u16, lo: usize, hi: usize) !void {
         const dh = g.hash.dh;
@@ -442,8 +483,10 @@ pub const Ngram = struct {
             const row = out[i * dh ..][0..dh];
             switch (g.format) {
                 .mlx => try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row),
-                .nvfp4 => if (g.read_mode == .pread)
-                    try g.readers[loc.shard].read(g.gpa, g.tables[loc.shard], loc.local, row)
+                .nvfp4, .fp8 => if (g.read_mode == .pread)
+                    try g.readers[loc.shard].read(g.gpa, loc.local, row)
+                else if (g.format == .fp8)
+                    try g.tables8[loc.shard].gather(&.{loc.local}, row)
                 else
                     try g.tables[loc.shard].gather(&.{loc.local}, row),
             }
@@ -482,7 +525,7 @@ pub const Ngram = struct {
             hist[history.len - 1] = token;
         }
         const n_threads = @min(ple_pool.max_parts, items / 4);
-        if (g.format == .nvfp4 and items > 1) {
+        if (g.format != .mlx and items > 1) {
             try @import("cuda_ple_gather.zig").run(g, ids, out);
         } else if (n_threads <= 1 or g.pool == null) {
             try g.fill(ids, out, 0, items);
@@ -540,5 +583,6 @@ test {
 
 test {
     _ = ple_reader;
+    _ = ple_fp8;
     _ = @import("cuda_ple_ahead.zig");
 }

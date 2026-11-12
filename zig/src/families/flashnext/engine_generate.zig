@@ -461,7 +461,7 @@ fn logRounds(kept_by: *const [2][MAXR + 1][MAXR + 1]u32) void {
 }
 
 pub fn handOver(e: *Engine, h: *Handoff, round: usize, cache: usize) !void {
-    if (e.r.gdn_kept != null) return error.HandoffUnsupported; // kept states replay their rows in the next window
+    // kept states are in place: the last window replayed the rows `cache` counts, and its own rows stayed outside them
     if ((round - 1) % 2 == 1) {
         const n = PLE_TAIL * WIDE * 2;
         @memcpy(e.cins[0].b.contents()[e.cins[0].off..][0..n], e.cins[1].b.contents()[e.cins[1].off..][0..n]);

@@ -61,7 +61,7 @@ pub const Entry = struct {
 
 pub const Header = std.StringArrayHashMapUnmanaged(Entry);
 
-/// The header's entries (names live in `arena`); an entry that breaks the format, runs past `data_len` bytes or has the wrong size is refused.
+/// Header entries (names live in `arena`); an entry breaking the format, past `data_len` bytes or mis-sized is refused.
 pub fn parseHeader(arena: std.mem.Allocator, json: []const u8, data_len: usize) !Header {
     return parseHeaderPrefix(arena, json, data_len, null);
 }
@@ -239,19 +239,50 @@ pub const File = struct {
     }
 
     pub fn close(self: *File, io: Io) void {
+        self.finish(io, false);
+    }
+
+    /// Only after the last borrowed tensor was copied; unmap first, then best-effort copied-file cache release.
+    pub fn closeCopied(self: *File, io: Io) void {
+        self.finish(io, true);
+    }
+
+    fn finish(self: *File, io: Io, copied: bool) void {
         self.map.destroy(io);
+        if (copied) @import("checkpoint_file_cache.zig").release(self.file.handle);
         self.file.close(io);
         self.arena.deinit();
         self.* = undefined;
     }
 
     /// The file's pages out of the mapping and the page cache (unified memory needs the room); Linux only, refaults.
-    pub fn release(self: *const File) void {
+    pub fn release(self: *const File, scratch: std.mem.Allocator) void {
+        self.releaseExcept(&.{}, scratch);
+    }
+
+    /// `release`, with `keep`'s bytes (parts of this mapping read later) left in the pages they live in.
+    pub fn releaseExcept(self: *const File, keep: []const []const u8, scratch: std.mem.Allocator) void {
         if (@import("builtin").os.tag != .linux) return;
-        const linux = std.os.linux;
         // a map that fell back to a heap copy (no mmap) holds the only bytes: DONTNEED would zero them
-        if (self.map.section != null) _ = linux.madvise(self.map.memory.ptr, self.map.memory.len, linux.MADV.DONTNEED);
-        _ = linux.fadvise(self.file.handle, 0, 0, linux.POSIX_FADV.DONTNEED);
+        const mem = self.map.memory;
+        // page-cache advice goes through checkpoint_drop, which holds it until every TP rank has loaded
+        if (self.map.section == null or keep.len == 0) {
+            if (self.map.section != null) _ = std.os.linux.madvise(mem.ptr, mem.len, std.os.linux.MADV.DONTNEED);
+            @import("checkpoint_drop.zig").drop(self.file);
+            return;
+        }
+        dropExcept(mem.ptr, mem.len, self.file, keep, scratch);
+    }
+
+    /// `bytes` (part of this file's mapping) marked read in no order, e.g. a table's rows; Linux only.
+    pub fn adviseRandom(self: *const File, bytes: []const u8) void {
+        if (@import("builtin").os.tag != .linux or bytes.len == 0) return;
+        // a map that fell back to a heap copy has no file pages to advise
+        if (self.map.section == null) return;
+        const page = std.heap.pageSize();
+        const lo = std.mem.alignBackward(usize, @intFromPtr(bytes.ptr), page);
+        const hi = std.mem.alignForward(usize, @intFromPtr(bytes.ptr) + bytes.len, page);
+        _ = std.os.linux.madvise(@ptrFromInt(lo), hi - lo, std.os.linux.MADV.RANDOM);
     }
 
     pub fn get(self: *const File, name: []const u8) ?Tensor {
@@ -259,6 +290,54 @@ pub const File = struct {
         return .{ .dtype = e.dtype, .rank = e.rank, .shape = e.shape, .bytes = self.map.memory[self.data + e.begin .. self.data + e.end] };
     }
 };
+
+/// A mapped file's pages out of memory and its page cache, except the pages holding `keep`'s bytes.
+fn dropExcept(
+    map: [*]u8,
+    map_len: usize,
+    file: std.Io.File,
+    keep: []const []const u8,
+    scratch: std.mem.Allocator,
+) void {
+    const linux = std.os.linux;
+    const base = @intFromPtr(map);
+    const page = std.heap.pageSize();
+    var spans: [8][2]usize = undefined;
+    const kept = if (keep.len <= spans.len) spans[0..keep.len] else scratch.alloc([2]usize, keep.len) catch {
+        _ = linux.madvise(map, map_len, linux.MADV.DONTNEED);
+        @import("checkpoint_drop.zig").drop(file);
+        return;
+    };
+    defer if (kept.len > spans.len) scratch.free(kept);
+    var n: usize = 0;
+    for (keep) |k| {
+        if (k.len == 0) continue;
+        const lo = @intFromPtr(k.ptr);
+        if (lo < base or lo + k.len > base + map_len) continue;
+        kept[n] = .{
+            std.mem.alignBackward(usize, lo - base, page),
+            @min(map_len, std.mem.alignForward(usize, lo - base + k.len, page)),
+        };
+        n += 1;
+    }
+    std.mem.sort([2]usize, kept[0..n], {}, struct {
+        fn less(_: void, x: [2]usize, y: [2]usize) bool {
+            return x[0] < y[0];
+        }
+    }.less);
+    var at: usize = 0;
+    for (kept[0..n]) |sp| {
+        if (sp[0] > at) gap(map, file, at, sp[0] - at);
+        at = @max(at, sp[1]);
+    }
+    if (at < map_len) gap(map, file, at, map_len - at);
+}
+
+/// One run of a mapped shard's bytes out of memory and the page cache: a later read faults them back in.
+fn gap(map: [*]u8, file: std.Io.File, at: usize, len: usize) void {
+    _ = std.os.linux.madvise(map + at, len, std.os.linux.MADV.DONTNEED);
+    @import("checkpoint_drop.zig").range(file, at, len);
+}
 
 test "header entries" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -373,4 +452,5 @@ test "text namespace filtering skips rank-six vision metadata without hiding inv
 
 test {
     _ = @import("safetensors_security_test.zig");
+    _ = @import("safetensors_copied_test.zig");
 }

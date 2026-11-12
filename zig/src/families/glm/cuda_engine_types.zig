@@ -1,13 +1,17 @@
 //! Shared GLM rank state descriptions, kept separate from engine operations.
+const std = @import("std");
 const cuda = @import("cuda");
 const fw = @import("cuda_forward.zig");
 const sampler = @import("cuda_sampler.zig");
 
+/// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
+pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) bool };
+
 /// One stream's window of a shared verify: its slot, its ids, and its drawn tokens.
 pub const Part = struct { slot: u32, ids: []const u32, out: []u32, bits: u64 = 0 };
 
-/// A kept prompt state as the prompt cache holds it: the id every rank keeps its own copy under, and its position.
-pub const Kept = struct { id: u64, at: u32 };
+/// A kept prompt state as the prompt cache holds it: the id every rank keeps it under, its position, its chunks below.
+pub const Kept = struct { id: u64, at: u32, below: u64 = 0 }; // below: cuda_prompt_cuts.below of the pass that kept it
 
 /// A stream's own sequence: state, sampling rule, MTP drafts; buffers are shared, one stream's round at a time.
 pub const Seq = struct {
@@ -15,12 +19,13 @@ pub const Seq = struct {
     sampling: ?sampler.Sampling = null, // null: greedy
     in_head: usize = 0, // drafted rows the MTP caches hold past the kept ones (st.mtp_drafted)
     rows_at: u64 = 0, // its last verify's final-norm rows (bf16 [rows][hidden]), which the next draft reads
+    cuts: std.ArrayList(u32) = .empty, // the request's chunk starts after 0 (TF_GLM_REQUEST_STARTS), every rank's copy
 };
 
 /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
 pub const Snap = struct { lease: @import("cuda_snapshot_pages.zig").Lease, len: usize, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize, shared: usize = 0 };
 
-/// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a multiple of the chunk rows.
+/// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a cold pass's cut (cuda_prompt_cuts).
 pub const Resume = struct { id: u64, at: usize };
 
 /// Rank 0's marks in a prompt pass: `call` may keep the state at a chunk start; other ranks copy at that chunk's gate.

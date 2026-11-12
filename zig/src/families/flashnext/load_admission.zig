@@ -20,7 +20,6 @@ pub fn problemFor(err: anyerror) ?[]const u8 {
         error.FsrNeedsSingleMetalDevice => "FSR SSD residency requires one Metal device; --speed-up and TF_FLASHNEXT_TP are unsupported",
         error.ExpertPoolTooSmall, error.ActiveUnionExceedsPool => "--ssd-experts must hold a complete layer union; raise its GiB budget",
         error.CacheBypassFailed => "FSR requires F_NOCACHE; the checkpoint could not enable page-cache-bypassing reads",
-        error.FsrGroupedOverrideUnsupported => "FSR does not accept the FZ_GX profiling override; unset it",
         else => null,
     };
 }

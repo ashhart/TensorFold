@@ -1,17 +1,24 @@
-//! The cluster on the fabric's own in-process endpoints: membership on its pipes, exact sums on its channel, rounds on its words.
+//! The cluster on the fabric's in-process endpoints: membership, exact sums and rounds on its pipes, channel and words.
 const std = @import("std");
 const fabric = @import("fabric");
 const node = @import("node.zig");
 const membership = @import("membership.zig");
 const exchange = @import("exchange.zig");
 const barrier = @import("barrier.zig");
-const canon = @import("canon.zig");
+const canon = @import("canon");
 const fabric_link = @import("fabric_link.zig");
 
 const gpa = std.testing.allocator;
 
 fn cluster(n: u32, layout: fabric_link.Layout) !*fabric.fake.Cluster {
     return fabric.fake.Cluster.init(gpa, n, layout.total, .immediate, null);
+}
+
+test "a cluster's window layout is the same on every host: words, pipes and total at fixed offsets" {
+    const l = fabric_link.Layout.init(2, 4096, 64 << 10);
+    try std.testing.expectEqual(@as(usize, 32768), l.words);
+    try std.testing.expectEqual(@as(usize, 49152), l.pipes);
+    try std.testing.expectEqual(@as(usize, 638976), l.total);
 }
 
 test "four ranks join over the fabric's pipes, elect the lowest id and agree on one view" {

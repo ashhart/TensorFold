@@ -9,6 +9,13 @@ const Model = @import("model.zig").Model;
 const kvp = @import("../../core/metal_kv_pages.zig");
 const kv = @import("../../core/kv_pool.zig");
 const be = lanes.backend;
+
+test "zero grant: an attached Qwen drafter resumes after a long shared skip" {
+    var b: Metal = undefined;
+    b.width = 16;
+    b.options = .{ .capacity = 512, .streams = 16 };
+    try lanes.shared_draft_check.check(b.facts(), true);
+}
 const snapshot = @import("snapshot.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
