@@ -195,7 +195,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - HIP on gfx12 under `--policy matrix=on`: Qwen3 dense checkpoints load each layer's gate and up weights interleaved as one weight, and one WMMA product writes silu(gate) x up in its epilogue instead of two products and `tf_silu_mul`, with the same output bytes: Qwen3-Reranker-8B ranks 16 documents in 0.657 to 0.661 s instead of 0.687 to 0.697 s and Qwen3-Embedding-8B embeds 100 short inputs in 0.901 to 0.911 s instead of 0.940 to 0.948 s on a Radeon AI PRO R9700. The kernel contract checks both fused blocks byte for byte against the unfused launches (part of #2245). Thanks to @laudney.
 - Nemotron on Macs: the masked prompt shader calls the shared `tf_paged_row` page helper again, so its prompt sources compile; #2322 had used the name #2283 retired the same day (#2548).
-- Docs: `docs/environment.md` says that `TF_GLM_PROF=1` runs GLM's prompt steps one chunk at a time, with no pair or solo steps, so its prompt timings are of that shape (#N). Thanks to @Bizuayeu.
+- Docs: `docs/environment.md` says that `TF_GLM_PROF=1` runs GLM's prompt steps one chunk at a time, with no pair or solo steps, so its prompt timings are of that shape (#2990). Thanks to @Bizuayeu.
 ## 1.2.7
 
 - GLM-5.3-Flash on CUDA: with `TF_GLM_LAYERS=N`, serve's start-up memory check counts the weights by tensor from the shard headers, only those the load reads (the first N layers, the MTP layer when drafts are on, the embedding, norm and head), where it counted every checkpoint file. A 20-layer thin load of the 163.6 GiB checkpoint now counts 66.6 GiB without drafts. Unset, the count is the files' as before (#2788, fixes #2745). Thanks to @wojo.
