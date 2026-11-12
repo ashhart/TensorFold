@@ -500,7 +500,10 @@ pub const Engine = struct {
             if (q.paged != null) break true;
         } else false;
         // a captured round fixes the lanes' tables: paged streams run the plain pass
-        if (try @import("exl3/graph/cuda_exl3_graph.zig").round(e, &p, seqs, ids, scores, out)) {} else if (e.collective != null and round_graph.enabled() and !has_media and !has_paged and e.layers[0].dense_cut == null) {
+        if (try @import("exl3/graph/cuda_exl3_graph.zig").round(e, &p, seqs, ids, scores, out)) {} else if (e.collective != null and round_graph.enabled() and !has_media and !has_paged and
+            e.layers[0].dense_cut == null and
+            !@import("exl3/model/cuda_exl3_pass.zig").waitsHost(p.m.layers, p.m.dplan))
+        {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
