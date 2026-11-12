@@ -12,7 +12,6 @@ const ranks = @import("cuda_rank_engine.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 const living = @import("living");
 const slide_mod = @import("cuda_slide.zig");
-const train = @import("cuda_train.zig");
 const bytes = @import("cuda_lanes_bytes.zig");
 const kvl = @import("cuda_kv_lanes.zig");
 const be = lanes.backend;
@@ -93,6 +92,7 @@ pub fn Namespace(comptime Tri: type) type {
             follow: ?*const fn (*anyopaque) anyerror!void = null,
             /// TF_FLASHNEXT_KV_PAGES: the streams beside the first take pages of one pool (null: their own caches).
             layout: ?@import("core").kv_pool.Layout = null,
+            carved_bytes: u64 = 0, // TF_CUDA_CARVEOUT: the first window's bytes the carveout's planes hold
         };
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.

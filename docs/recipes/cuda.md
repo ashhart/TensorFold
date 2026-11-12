@@ -124,8 +124,8 @@ parse. The other CUDA families, the HIP engines and Kimi on Metal refuse the fla
 refuses it for any model that is not Dory.
 
 Experimental: on a DGX Spark (GB10), `tensorfold run --carveout` on a CUDA build, or `TF_CUDA_CARVEOUT=1` for `tensorfold run` and
-`tensorfold-native`, puts Nemotron's KV caches in the memory the display controller reserves, which
-MemAvailable never counts. The native engine maps a
+`tensorfold-native`, puts Nemotron's and Flash Next's KV caches in the memory the display controller
+reserves, which MemAvailable never counts. The native engine maps a
 DRM dumb buffer from `/dev/dri/card0` (`TF_DRM_CARD` picks another card) and registers it with
 CUDA. The carveout is 1,792 MiB unless `TF_CUDA_CARVEOUT_MIB` says otherwise. Each sequence's key and value
 planes go there while the carveout holds both, and the rest stays in device memory. The recurrent
@@ -162,6 +162,15 @@ source behaves differently: on DGX OS (driver 580.178.04, 4 KiB pages) a registe
 against 844 for ordinary memory, streamed at 157 against 259 GB/s, and the same 108,012-token prompt measured the same
 prefill (22.4 s) and decode within 2% of running without the carveout. Measure a daemon's slice on the box before
 relying on it.
+
+Flash Next keeps one contiguous cache there at a time, as many whole planes of a full window as the
+carveout holds: the keys and values of the first attention layers, then their indexer keys, then their
+pooled keys. At 262,144 tokens the default 1,792 MiB holds three layers' keys and values and four layers'
+indexer keys, all of it; a daemon's 2,044 MiB reservation holds three more indexer keys and three pooled
+keys, 2,032 MiB. A shorter cache takes the same planes, so it fits too. The DeltaNet state, the MTP head's
+cache and the pages of `TF_FLASHNEXT_KV_PAGES` stay in device memory. The memory budget counts those planes
+out of the first stream's window, so the other streams' pages, or the streams admitted, grow by them; the
+startup log names the planes and the bytes. It needs one rank.
 
 Preparing a DGX Spark for the carveout:
 

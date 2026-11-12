@@ -463,6 +463,7 @@ test {
     _ = @import("cuda_disk.zig");
     _ = @import("cuda_pages.zig");
     _ = @import("cuda_kv_lanes.zig");
+    _ = @import("cuda_carve.zig");
     _ = @import("cuda_config.zig");
     _ = @import("cuda_lanes_explain.zig");
     _ = @import("cuda_projection_load.zig");

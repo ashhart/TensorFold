@@ -99,6 +99,7 @@ test "Flash Next completion: allocation refusals drain fills before every constr
         e.eos = 1;
         e.round_graph = .{};
         e.heads = .full;
+        e.carve = null;
         try t.expectError(error.OutOfDeviceMemory, e.newSeq(4));
         _ = try cuda.memory.setAllocationLimit(null);
         try t.expectEqual(deny, Fake.allocations);
@@ -121,6 +122,7 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
         e.eos = 1;
         e.round_graph = .{};
         e.heads = .full;
+        e.carve = null;
         try t.expectError(error.NotReady, e.newSeq(4));
         try t.expectEqual(Fake.allocations, Fake.frees);
         if (Fake.early != 0) std.log.warn("completion control: allocs={d}, fills={d}, frees={d}, syncs={d}", .{ Fake.allocations, Fake.fills, Fake.frees, Fake.syncs });
@@ -135,6 +137,7 @@ test "Flash Next completion: failed asynchronous fill and an interrupted prefill
     e.eos = 1;
     e.round_graph = .{};
     e.heads = .full;
+    e.carve = null;
     var seq = try e.newSeq(4);
     // Model a queued prefill kernel writing every owned sequence buffer before request refusal.
     for (Fake.pending[1 .. Fake.allocations + 1]) |*pending| pending.* = true;
