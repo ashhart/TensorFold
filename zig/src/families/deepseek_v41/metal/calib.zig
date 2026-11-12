@@ -8,6 +8,7 @@ const pipelines = @import("pipelines.zig");
 const calib_lanes = host.calib_lanes;
 const calib_env = host.calib_env;
 const cm = host.calib_measure;
+const environment = @import("sys").environment;
 const Allocator = std.mem.Allocator;
 
 /// Committed rows a timed pass ingests first (a round's keep is a few rows).
@@ -70,15 +71,35 @@ const Rig = struct {
     }
 };
 
-/// The table measured on `s`, with the lanes' boot lines; a model it cannot time gets the defaults and a warning.
-pub fn run(gpa: Allocator, io: std.Io, dir: []const u8, k: calib_env.Knobs, want: calib_env.Shape, s: Subject) !calib_lanes.Boot {
-    var rig: Rig = .{ .s = s };
-    const stats = s.t.stats;
-    defer {
-        s.t.stats = stats;
-        s.t.wipe();
-        if (s.ad) |p| for (0..s.slots) |i| p.pass().reset(@intCast(i));
+/// The settings the measurement reads: a malformed one stops the start by name, as CUDA's `measure` mode does.
+const settings = [_][:0]const u8{
+    "TF_DSV41_CALIB",         "TF_DSV41_CALIB_SHAPE", "TF_DSV41_CALIB_STAT",      "TF_DSV41_CALIB_REPS",      "TF_DSV41_CALIB_WARM",
+    "TF_DSV41_CALIB_RECHECK", "TF_DSV41_CALIB_CYCLE", "TF_DSV41_CALIB_DEEP_REPS", "TF_DSV41_CALIB_BUDGET_MS",
+};
+
+/// What a measurement borrows from the served model: taken at `enter`, given back at `leave`.
+const Held = struct {
+    s: Subject,
+    stats: target_.Stats,
+
+    fn enter(s: Subject) Held {
+        return .{ .s = s, .stats = s.t.stats };
     }
+
+    fn leave(h: Held) void {
+        h.s.t.stats = h.stats;
+        h.s.t.wipe();
+        if (h.s.ad) |p| for (0..h.s.slots) |i| p.pass().reset(@intCast(i));
+    }
+};
+
+/// The table measured on `s`; a malformed setting is refused, a model it cannot time gets the defaults and a warning.
+pub fn run(gpa: Allocator, io: std.Io, dir: []const u8, k: calib_env.Knobs, want: calib_env.Shape, s: Subject) !calib_lanes.Boot {
+    for (settings) |name| try environment.check(name, calib_env.env(name));
+    _ = try cm.methodFrom(&calib_env.env, cm.launch_bound);
+    var rig: Rig = .{ .s = s };
+    const held = Held.enter(s);
+    defer held.leave();
     const mode = std.mem.trim(u8, k.mode orelse "", " \t\r\n");
     const dev: calib_lanes.Device = .{
         .ctx = &rig,
