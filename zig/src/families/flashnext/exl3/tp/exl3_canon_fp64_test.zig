@@ -1,5 +1,5 @@
-//! The canonical expert reduction against exact integer sums: the n u / (1 - n u) bound, other orders, TP independence,
-//! and the root as the exact sum rounded once to f32 (f64 leaves and tree: no other f32 order may beat it).
+//! The canonical expert reduction against exact integer sums: rounding bounds, sampled error versus other orders,
+//! and TP independence. The f64 tree rounds once to f32; its intermediate additions can still round in f64.
 const std = @import("std");
 const canon = @import("exl3_canon.zig");
 
@@ -21,6 +21,7 @@ fn parts(x: f32) Parts {
 }
 
 fn place(m: u64, e: i32, neg: bool) i256 {
+    if (m == 0) return 0;
     std.debug.assert(e >= lsb and e - lsb < 200);
     const v: i256 = @as(i256, m) << @intCast(e - lsb);
     return if (neg) -v else v;
@@ -68,12 +69,6 @@ fn withinGamma(m: Miss, comptime n: u256) bool {
 /// |root - sum| <= 2^-24 |sum| + 18 2^-53 mag + half the least f32 subnormal (2^-150).
 fn withinRoot(m: Miss) bool {
     return m.abs << 53 <= (m.sum << 29) + 18 * m.mag + (@as(u256, 1) << (53 - 150 - lsb));
-}
-
-/// `a` misses the exact sum by no more than `b` does, but for twice the f64 noise of the root's own value (2 x 18 2^-53 mag):
-/// the correctly rounded f32 is the nearest there is, so only a sum within that noise of a midpoint can lose to an f32 order.
-fn noWorse(a: Miss, b: Miss) bool {
-    return a.abs << 53 <= (b.abs << 53) + 36 * a.mag;
 }
 
 /// The leading 64 bits of v as a float (the rest is under 2^-63 of it; the error figures need no more).
@@ -229,7 +224,7 @@ test "exl3: canon fp64 oracle sees what fp32 loses and nothing where fp32 is exa
     }
 }
 
-test "exl3: canon fp64 root is the exact sum rounded once, no worse than the slot chain or rank splits on any row" {
+test "exl3: canon fp64 root obeys its rounding bound and loses no sampled row to the slot chain or rank splits" {
     var prng = std.Random.DefaultPrng.init(0xf64c);
     const rng = prng.random();
     for (kinds) |kind| {
@@ -242,7 +237,7 @@ test "exl3: canon fp64 root is the exact sum rounded once, no worse than the slo
             const root = miss(r, tree(r));
             try t.add(root);
             try std.testing.expect(withinRoot(root));
-            for ([_]f32{ chain(r), rankSplit(r, 2), rankSplit(r, 8) }) |other| try std.testing.expect(noWorse(root, miss(r, other)));
+            for ([_]f32{ chain(r), rankSplit(r, 2), rankSplit(r, 8) }) |other| try std.testing.expect(root.abs <= miss(r, other).abs);
             try c.add(miss(r, chain(r)));
             try s2.add(miss(r, rankSplit(r, 2)));
             try s8.add(miss(r, rankSplit(r, 8)));
@@ -288,7 +283,7 @@ test "exl3: canon fp64 root is exact where f32 cancellation loses (tree 0, slot 
     try std.testing.expectEqual(@as(f32, 1), chain(r));
     try std.testing.expectEqual(@as(f32, 2), tree(r));
     try std.testing.expectEqual(@as(u256, 0), miss(r, tree(r)).abs);
-    try std.testing.expect(noWorse(miss(r, tree(r)), miss(r, chain(r))));
+    try std.testing.expect(miss(r, tree(r)).abs <= miss(r, chain(r)).abs);
     for (1..9) |world| try std.testing.expectEqual(@as(f64, 2), canon.emulate(world, r));
     // the cancelled pair apart on the two TP halves is the same sum
     r.p[2] = 256;
