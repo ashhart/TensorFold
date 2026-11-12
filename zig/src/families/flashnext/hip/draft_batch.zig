@@ -10,7 +10,7 @@ const be = @import("lanes").backend;
 const Fx = lanes_mod.Fx;
 const Lane = lanes_mod.Lane;
 
-/// A stream drafting in a batched call: its lane, head caches, chain depth and its rows in the packed absorb.
+/// A stream drafting in a batched call: its lane, head caches, chain depth, packed rows and its current residual row.
 const Slot = struct {
     lane: *Lane,
     hc: *cache.Caches,
@@ -20,6 +20,7 @@ const Slot = struct {
     row_at: usize = 0,
     row_n: usize = 0,
     chained: usize = 0,
+    chain: u64 = 0,
 };
 
 /// The head absorbs each stream's kept rows (residual streams and the token after each), then chains its drafts.
@@ -146,7 +147,7 @@ fn batched(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
         active_n += 1;
     };
     if (active_n == 0) return;
-    // each stream chains from its last absorbed row: its mixed row gathered, its residual row kept in its lane
+    // each stream chains from its last absorbed row: its mixed row gathered, its residual row's address kept
     const mixed_rows = try e.arena.take(n * hidden_bytes);
     for (slots[0..n], 0..) |*s, i| {
         try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
@@ -155,13 +156,7 @@ fn batched(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
             hidden_bytes,
             e.stream.handle,
         ));
-        if (s.depth > 0) try hip.raw.copy(
-            s.lane.streams,
-            0,
-            out.streams.ptr + (s.row_at + s.row_n - 1) * row_bytes,
-            row_bytes,
-            e.stream.handle,
-        );
+        s.chain = out.streams.ptr + (s.row_at + s.row_n - 1) * row_bytes;
     }
     var toks: [forward.max_segs]u32 = undefined;
     var probs: [forward.max_segs]f32 = undefined;
@@ -198,7 +193,7 @@ fn batched(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
             step_segs[a] = .{ .c = s.hc, .tokens = &s.tok, .pos = s.lane.caches.len + step - 1 };
             try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
                 @ptrFromInt(step_rows + a * row_bytes),
-                @ptrFromInt(s.lane.streams.base()),
+                @ptrFromInt(s.chain),
                 row_bytes,
                 e.stream.handle,
             ));
@@ -224,13 +219,7 @@ fn batched(f: *Fx, requests: []const be.DraftRequest) anyerror!void {
             probs[0..active_n],
             true,
         );
-        for (active[0..active_n], 0..) |si, a| try hip.raw.copy(
-            slots[si].lane.streams,
-            0,
-            step_out.streams.ptr + a * row_bytes,
-            row_bytes,
-            e.stream.handle,
-        );
+        for (active[0..active_n], 0..) |si, a| slots[si].chain = step_out.streams.ptr + a * row_bytes;
         next = 0;
         for (active[0..active_n], 0..) |si, a| {
             const s = &slots[si];

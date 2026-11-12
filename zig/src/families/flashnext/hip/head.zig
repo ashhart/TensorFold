@@ -92,7 +92,7 @@ pub fn run(
     return .{ .mixed = try forward.hcPre(o, m, w.mix, x, rows, null), .streams = h };
 }
 
-/// Each of `rows` mixed rows' greedy draft token and its probability; `window` on a shared round's rows, else a prompt's.
+/// Each mixed row's greedy draft token and probability; `window` for a shared round's rows, else a prompt's.
 pub fn draws(
     ops: Ops,
     m: *const model.Model,

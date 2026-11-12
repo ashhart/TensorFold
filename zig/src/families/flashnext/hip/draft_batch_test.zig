@@ -44,7 +44,7 @@ fn prompts(a: std.mem.Allocator, source: []const u8) ![2][]const u32 {
     return out;
 }
 
-/// The engine of TF_RV2696_DIR and its lane backend.
+/// The engine of TF_FLASHNEXT_DIR and its lane backend.
 const Fixture = struct {
     e: *fx.engine.Engine,
     f: *fx.lanes.Fx,
@@ -131,8 +131,8 @@ test "two streams draft in one head pass a step as they do one stream at a time"
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const dir = try env(a, "TF_RV2696_DIR", 4096) orelse return error.SkipZigTest;
-    const ps = try prompts(a, (try env(a, "TF_RV2696_PROMPTS", 1 << 16)) orelse text);
+    const dir = try env(a, "TF_FLASHNEXT_DIR", 4096) orelse return error.SkipZigTest;
+    const ps = try prompts(a, (try env(a, "TF_FLASHNEXT_PROMPTS", 1 << 16)) orelse text);
     var x = try Fixture.init(a, dir);
     defer x.deinit();
     // four streams: two draft in one call, and the same two prompts again, each drafted alone
