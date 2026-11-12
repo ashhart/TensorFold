@@ -99,12 +99,18 @@ At `--context 131072` admission gives four streams of 8.78 GiB and a 7.1 GiB pro
 A 114,528-token prompt with a random four-word passphrase a third of the way in: the reply names it, first token
 after 300.5 s (381 tok/s).
 
+At `--context 262144`, the cap `config.zig` sets, admission gives two streams of 16.75 GiB and a 5.3 GiB prompt
+cache. A 258,331-token prompt with a random four-word passphrase a third of the way in: the reply names it, first
+token after 919.1 s (281 tok/s). The prompt cache keeps no state of that prompt: one is 16.0 GiB, over the 5.3 GiB
+budget.
+
 ## Not done
 
 Structured output (`response_format`) and forced tool calls (`tool_choice` `"required"` or a named function) are not
 supported on CUDA yet: the server refuses them, because the CUDA family has no masked sampling. Tool calls with
-`tool_choice` `"auto"` work. No quality suite was run. Contexts past 131,072 tokens were not served on CUDA. Only
-GB10 was run. The publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) is not served on CUDA yet.
+`tool_choice` `"auto"` work. No quality suite was run. Past 131,072 tokens, only the one near-cap prompt above was
+run. Only GB10 was run. The publisher's DFlash2 drafter (`ricursiveAI/Ripple-65B-Preview-DFlash2`) is not served
+on CUDA yet.
 
 ## Licence
 
