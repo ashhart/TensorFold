@@ -248,18 +248,6 @@ inline void tf_f_kv_row(const device bfloat* X, const device float* Wt, device b
   tf_f_kv_row(X, Wt, KVN, KVR, KVQ, WIN, P, CS, D, a, r, t, lane, sg, part);
 }
 
-// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
-struct TfDsv41Seg {
-  device uchar* window;
-  device uchar* pool;
-  device uchar* keys;
-  device float* carry;
-  device float* inputs;
-  device uchar* comp;
-  device uchar* ikeys;
-  uint base, rows, nkeys, start;
-};
-
 // tf_dsv41_f_kv over several slots: row r into its slot's window ring (RS: row -> slot; control 6: the first slot's).
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_f_kv_segs(
     TF_F_KV_ARGS, const device TfDsv41Seg* SG [[buffer(10)]], const device int* RS [[buffer(11)]]) {

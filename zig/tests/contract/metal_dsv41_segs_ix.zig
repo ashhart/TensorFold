@@ -38,8 +38,7 @@ pub fn spec(w: Which, name: []const u8) c.Spec {
     return .{ .name = name, .accum = .none, .depth = none, .out = .raw, .served = &served, .replaces = replaces[@backingInt(w)], .nan = .{ .stated = "every byte, NaN and infinity alike, is the slot's own launch's on the same inputs" }, .sums = .{ .f16 = 0, .bf16 = 0, .why = "the per-slot kernel's body and its sums, unchanged" } };
 }
 
-/// The kernels' TfDsv41Seg.
-const Seg = extern struct { window: u64 = 0, pool: u64 = 0, keys: u64 = 0, carry: u64 = 0, inputs: u64 = 0, comp: u64 = 0, ikeys: u64 = 0, base: u32, rows: u32, nkeys: u32 = 0, start: u32 = 0 };
+const Seg = tf.dsv41_metal.segs.Seg;
 
 fn at(r: rig_.Ref, bytes: usize) ix.Ref {
     return .{ .buf = r.buf, .off = r.off + bytes };
@@ -225,6 +224,10 @@ pub const Probe = struct {
 
     /// The clean per-slot kernels a slot at a time through their launchers, each at its own keys and row stride.
     pub fn replaced(p: *Probe) ![]const u8 {
+        return p.perSlot(&p.ix_clean, p.cand_clean);
+    }
+
+    fn perSlot(p: *Probe, ixp: *const ix.Pipelines, cp: mtl.Pipeline) ![]const u8 {
         const a = p.arena.allocator();
         var twin: [2]rig_.Ref = undefined;
         for (0..2) |i| if (p.olen[i] > 0) {
@@ -242,10 +245,10 @@ pub const Probe = struct {
             dense[j] = try p.rig.scratch(n * k * 4);
             if (p.which == .scores) {
                 const cm = if (p.masked) at(p.ins[3], r0 * p.blocks) else at(dense[j], 0);
-                try ix.encodeDecode(&p.ix_clean, e, at(p.ins[0], r0 * qrow), at(p.ins[1], r0 * qsrow), at(p.ins[2], r0 * 64), at(p.kslot[j], 0), at(dense[j], 0), cm, p.call(@intCast(n), k, firsts[j] + 1));
+                try ix.encodeDecode(ixp, e, at(p.ins[0], r0 * qrow), at(p.ins[1], r0 * qsrow), at(p.ins[2], r0 * 64), at(p.kslot[j], 0), at(dense[j], 0), cm, p.call(@intCast(n), k, firsts[j] + 1));
             } else {
                 for (0..n) |i| @memcpy(p.rig.bytes(dense[j], n * k * 4)[i * k * 4 ..][0 .. k * 4], p.rig.bytes(p.ins[6], p.rows * p.stride * 4)[(r0 + i) * p.stride * 4 ..][0 .. k * 4]);
-                cand.encode(p.cand_clean, e, ca(dense[j], 0), ca(p.ins[4], r0 * 4), ca(twin[0], r0 * p.blocks * 4), ca(twin[1], r0 * p.blocks), @intCast(n), k, p.blocks, keep);
+                cand.encode(cp, e, ca(dense[j], 0), ca(p.ins[4], r0 * 4), ca(twin[0], r0 * p.blocks * 4), ca(twin[1], r0 * p.blocks), @intCast(n), k, p.blocks, keep);
             }
         }
         try p.rig.finish(pass);
@@ -282,6 +285,7 @@ pub const Probe = struct {
 
 pub const Suite = struct {
     a: std.mem.Allocator,
+    device: mtl.Device,
     probes: std.ArrayList(*Probe) = .empty,
 
     const E = struct { w: Which, ctl: u8, name: []const u8 };
@@ -294,7 +298,7 @@ pub const Suite = struct {
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
         const s = try a.create(Suite);
-        s.* = .{ .a = a };
+        s.* = .{ .a = a, .device = device };
         errdefer s.destroy();
         for (list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
@@ -307,6 +311,37 @@ pub const Suite = struct {
             try kernels.append(a, p.kernel());
         }
         return s;
+    }
+
+    /// At one stream the scorer and candidate kernels equal the base's kept bodies byte for byte.
+    pub fn base(s: *Suite, seed: u64) !usize {
+        var any = false;
+        for (s.probes.items) |p| any = any or p.ctl == 0;
+        if (!any) return 0;
+        var old = try ix.Pipelines.load(s.device);
+        defer old.deinit();
+        const lay = @import("metal_dsv41_segs_lay.zig");
+        try lay.swap(s.a, s.device, &old.dec, sources.dsv41.index, @embedFile("dsv41_base/index.metal"), "tf_base_dsv41_ix_scores_dec");
+        var oc = try cand.load(s.device);
+        defer oc.deinit();
+        try lay.swap(s.a, s.device, &oc, sources.dsv41.cand, @embedFile("dsv41_base/cand.metal"), "tf_base_cand");
+        var cases: usize = 0;
+        var differ: usize = 0;
+        for (s.probes.items) |p| {
+            if (p.ctl != 0) continue;
+            for (served, 0..) |shape, i| for ([_]g.Fill{ .random, .nonfinite }) |fill| {
+                if (!try p.prepare(shape, fill, seed + i)) continue;
+                const now = try s.a.dupe(u8, try p.perSlot(&p.ix_clean, p.cand_clean));
+                defer s.a.free(now);
+                cases += 1;
+                if (std.mem.indexOfDiff(u8, now, try p.perSlot(&old, oc))) |at_byte| {
+                    differ += 1;
+                    std.debug.print("FAIL base equality {s} {d}x{d}x{d}: first difference at byte {d}\n", .{ p.name, shape.rows, shape.n, shape.k, at_byte });
+                }
+            };
+        }
+        std.debug.print("{s} base equality dsv41 indexer per-slot forms: {d} cases of the decode scores and candidate blocks byte-equal to the base's kept bodies, {d} differ\n", .{ if (differ == 0) "PASS" else "FAIL", cases, differ });
+        return differ;
     }
 
     pub fn destroy(s: *Suite) void {

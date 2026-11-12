@@ -14,3 +14,4 @@ pub const fused = @import("fused.zig");
 pub const fold = @import("fold.zig");
 pub const glue_tmp = @import("glue.zig");
 pub const cand = @import("cand.zig");
+pub const segs = @import("segs.zig");

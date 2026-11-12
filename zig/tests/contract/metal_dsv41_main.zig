@@ -214,5 +214,8 @@ pub const Suites = struct {
         t.failed += try s.fused4.invariance(seed);
         t.failed += try s.fused5.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.ix.timing(io);
+        t.failed += try s.segs.layout();
+        t.failed += try s.segs.base(seed);
+        t.failed += try s.segs_ix.base(seed);
     }
 };

@@ -222,18 +222,6 @@ inline void tf_ix_dec_row(const device uchar* Q, const device uchar* QS, const d
   tf_ix_dec_row(Q, QS, W, IK, S, CM, a, tg, t, lane, sg, sgs, sh);
 }
 
-// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
-struct TfDsv41Seg {
-  device uchar* window;
-  device uchar* pool;
-  device uchar* keys;
-  device float* carry;
-  device float* inputs;
-  device uchar* comp;
-  device uchar* ikeys;
-  uint base, rows, nkeys, start;
-};
-
 // Decode rows of several slots: row tg.y scores its slot's keys from its slot's first row on; control 6: slot 0's keys.
 [[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec_segs(
     TF_IX_DEC_ARGS, const device TfDsv41Seg* SG [[buffer(7)]], const device int* RS [[buffer(8)]]) {

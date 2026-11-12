@@ -152,18 +152,6 @@ inline void tf_c_fp4pack_block(const device bfloat* X, device uchar* C, device u
   tf_c_fp4pack_block(X, C, S, D, a, g);
 }
 
-// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
-struct TfDsv41Seg {
-  device uchar* window;
-  device uchar* pool;
-  device uchar* keys;
-  device float* carry;
-  device float* inputs;
-  device uchar* comp;
-  device uchar* ikeys;
-  uint base, rows, nkeys, start;
-};
-
 // Control 6 of the slot kernels: every row takes the first slot's state.
 inline uint tf_c_slot(const device int* RS, uint r) { return TF_CTL == 6 ? 0u : uint(RS[r]); }
 

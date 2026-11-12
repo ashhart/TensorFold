@@ -417,6 +417,10 @@ first slot's state for every row. The indexer's decode scores (`tf_dsv41_ix_scor
 (`tf_cand_segs`) do the same over each slot's keys, position and key count, bit-equal to the per-slot launches at
 ratios 1 and 2, with and without a candidate mask, and a slot with no keys left alone; the top-512 runs unchanged over
 score rows of one stride. Their controls score the first slot's keys and count the first slot's keys for every row.
+The slot table entry `TfDsv41Seg` lives in one header (`segs.h`) the five sources start with; a kernel reads back its
+size and field offsets against segs.zig's `Seg`. After the gates, every per-slot kernel these slot kernels share a body
+with is checked byte-equal to the base's body, kept only in the tests (`dsv41_base`), on the same random and non-finite
+inputs at one stream.
 
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,

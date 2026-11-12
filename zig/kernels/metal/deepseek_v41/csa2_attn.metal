@@ -342,18 +342,6 @@ template <typename T, bool PF>
   tf_attn_dec_row<T, PF>(Q, W, C, I, M, SK, CS, O, a, tg, sg, lane, sh);
 }
 
-// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
-struct TfDsv41Seg {
-  device uchar* window;
-  device uchar* pool;
-  device uchar* keys;
-  device float* carry;
-  device float* inputs;
-  device uchar* comp;
-  device uchar* ikeys;
-  uint base, rows, nkeys, start;
-};
-
 // Decode rows of several slots in one launch, each over its slot's window and compressed rows; control 6: slot 0's.
 template <typename T, bool PF>
 [[kernel, max_total_threads_per_threadgroup(32 * TF_ATTN_NCH)]] void tf_dsv41_attn_dec_segs(
