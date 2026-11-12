@@ -13,6 +13,7 @@ except ImportError:
 
 from .archive import extract_archive, file_hash, relative_name, verify_engine, verify_hash
 from .build import build_media, check_toolchain, host_platform, prepare_source, run_command
+from .device import nvidia_smi, require_gb10
 from .logs import build_workspace
 from .network import download, fetch_release, get_release, version_tuple
 from .pins import InstallError, SOURCE_REVISION, SOURCE_PATCH_SHA256
@@ -141,8 +142,12 @@ def reuse_media(root, previous, candidate):
     return {"moss": target}
 
 
-def install(comfy_root, backend="cuda", zig=None, nvcc=None, source_checkout=None, source_archive=None, action="install", fetch=download, run=run_command, builder=build_media, log=print):
+def install(comfy_root, backend="cuda", zig=None, nvcc=None, source_checkout=None, source_archive=None, action="install", fetch=download, run=run_command, builder=build_media, log=print, gpu=nvidia_smi):
     platform = host_platform(backend)
+    try:
+        require_gb10(gpu)
+    except InstallError as error:
+        raise InstallError(f"{error} No files were downloaded or built.") from error
     root = runtime_root(comfy_root)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     with install_lock(root), build_workspace(root, log) as work:

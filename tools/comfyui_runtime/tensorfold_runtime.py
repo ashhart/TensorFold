@@ -4,6 +4,7 @@ import sys
 
 from tf_installer.install import install, read_status, runtime_root
 from tf_installer.pins import InstallError
+from tf_installer.worker import start_worker
 
 
 def parser():
@@ -19,6 +20,9 @@ def parser():
             sources = command.add_mutually_exclusive_group()
             sources.add_argument("--source-checkout", help="Exact clean pinned TensorFold Git checkout.")
             sources.add_argument("--source-archive", help="Local official source archive matching the pinned SHA-256.")
+    run = commands.add_parser("run", help="Start the installed MOSS worker on GB10 (sm_121) only; arguments after -- go to the worker.")
+    run.add_argument("--comfy-root", required=True)
+    run.add_argument("worker", nargs=argparse.REMAINDER)
     return result
 
 
@@ -28,6 +32,9 @@ def main(argv=None):
     try:
         if command == "status":
             print(json.dumps(read_status(runtime_root(arguments["comfy_root"])), indent=2, sort_keys=True))
+        elif command == "run":
+            worker = arguments["worker"]
+            start_worker(arguments["comfy_root"], worker[1:] if worker[:1] == ["--"] else worker)
         else:
             install(action=command, **arguments)
     except (InstallError, OSError, UnicodeError, ValueError) as error:
