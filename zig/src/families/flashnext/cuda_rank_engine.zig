@@ -76,7 +76,11 @@ pub const Session = struct {
         const s = try a.create(Session);
         errdefer a.destroy(s);
         if (wait_ms > 60_000) std.log.info("flashnext: rank {d} waits up to {d} min for rank {d} and its checkpoint digest", .{ rank, wait_ms / 60_000, 1 - rank });
-        const link = try wire.Link.open(io, host, port, rank, wait_ms);
+        const secret = @import("sys").rank_auth.Secret.fromEnv() catch |e| {
+            std.log.err("flashnext: {s}", .{@import("sys").rank_auth.explain(e) orelse @errorName(e)});
+            return error.RankSecret;
+        };
+        const link = try wire.Link.open(io, host, port, rank, wait_ms, &secret);
         errdefer link.close();
         const until = wire.deadline(wait_ms);
         var peer: Identity = undefined;
