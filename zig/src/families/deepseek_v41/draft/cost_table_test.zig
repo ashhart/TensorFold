@@ -136,7 +136,7 @@ test "a sparse plan under a spent budget still gives a monotone 32-row table fro
     var spent: f64 = 0.0;
     var pass_runs: usize = 0;
     for (p.runs.items, ms, 0..) |r, *y, i| {
-        if (i > 0 and !r.warm and p.repeat(i)) {
+        if (i > 0 and !r.warm and !r.must and p.repeat(i)) {
             y.* = -1.0;
             continue;
         }
@@ -147,9 +147,21 @@ test "a sparse plan under a spent budget still gives a monotone 32-row table fro
         timed += 1;
         pass_runs += @intFromBool(!r.warm);
     }
-    // 1 untimed window, 1 untimed pass, then 9 rows, the 4 + 4 window, 2 wide windows and the pass once each
-    try t_.expectEqual(@as(usize, 2 + 9 + 1 + 2 + 1), timed);
-    try t_.expectEqual(@as(usize, 13), pass_runs);
+    // 2 untimed, 9 rows, the 4 + 4 window, 2 wide windows and the pass once each, the slot term's pair twice more
+    try t_.expectEqual(@as(usize, 2 + 9 + 1 + 2 + 1 + 4), timed);
+    try t_.expectEqual(@as(usize, 13 + 4), pass_runs);
+    var eights: usize = 0;
+    var pairs: usize = 0;
+    var passes: usize = 0;
+    for (p.runs.items, ms) |r, y| {
+        if (r.warm or y < 0) continue;
+        eights += @intFromBool(r.what == .sweep and r.what.sweep == 8);
+        pairs += @intFromBool(r.what == .shared and r.what.shared == 0);
+        passes += @intFromBool(r.what == .draft);
+    }
+    try t_.expectEqual(@as(usize, 3), eights);
+    try t_.expectEqual(@as(usize, 3), pairs);
+    try t_.expectEqual(@as(usize, 1), passes); // the pass keeps its warm-up and runs inside, back to back
     try t_.expect(spent < 2000.0);
     const out = try gpa.alloc(f64, p.entries());
     defer gpa.free(out);

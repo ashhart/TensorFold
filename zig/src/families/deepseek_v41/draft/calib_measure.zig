@@ -31,6 +31,9 @@ pub const Method = struct {
     sparse: bool = false,
 };
 
+/// Extra timed pairs of the entries the slot term is made of, run past any budget.
+pub const essential_reps = 2;
+
 /// The rows a sparse plan times: every window a lone stream's drafts (at most five) can make, then a spread to 16.
 pub const sparse_rows = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 12, 16 };
 
@@ -182,6 +185,8 @@ pub const Run = struct {
     nsegs: u8 = 0,
     warm: bool,
     what: What,
+    /// kept whatever the budget: the entries the slot term is made of
+    must: bool = false,
 
     pub fn segments(r: *const Run) []const Seg {
         return r.segs[0..r.nsegs];
@@ -268,6 +273,15 @@ pub const Plan = struct {
             }
             if (p.draft) try p.runs.append(gpa, .{ .warm = false, .what = .draft, .nsegs = 0 });
         }
+        // the slot term is the 4 + 4 window less the 8-row one: both again, side by side, whatever the budget
+        if (p.per_slot) for (0..essential_reps) |_| {
+            var eight = one(8, false, false);
+            eight.must = true;
+            try p.runs.append(gpa, eight);
+            var pair: Run = .{ .warm = false, .what = .{ .shared = 0 }, .nsegs = 2, .must = true };
+            pair.segs[0..2].* = .{ .{ .slot = 0, .rows = 4 }, .{ .slot = 1, .rows = 4 } };
+            try p.runs.append(gpa, pair);
+        };
     }
 
     pub fn deinit(p: *Plan, gpa: Allocator) void {

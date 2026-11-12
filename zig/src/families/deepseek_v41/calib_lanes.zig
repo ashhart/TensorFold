@@ -132,7 +132,7 @@ pub fn measure(gpa: Allocator, d: Device, ids: []const u32, how: cm.Method, rows
     var ingest_best: f64 = std.math.inf(f64);
     var ingest_first: f64 = 0.0;
     for (plan.runs.items, samples, 0..) |run, *x, at| {
-        if (how.budget_ms > 0 and ph.nowNs() - began > @as(u64, how.budget_ms) * std.time.ns_per_ms and plan.repeat(at)) {
+        if (how.budget_ms > 0 and ph.nowNs() - began > @as(u64, how.budget_ms) * std.time.ns_per_ms and !run.must and plan.repeat(at)) {
             x.* = cm.skipped;
             continue;
         }
