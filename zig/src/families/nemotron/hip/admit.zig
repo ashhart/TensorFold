@@ -3,11 +3,12 @@ const std = @import("std");
 const config = @import("../config.zig");
 const tensors = @import("tensors.zig");
 const plan = @import("plan.zig");
+const widths = @import("widths.zig");
 
 const Config = config.Config;
 
-/// The MLX affine checkpoints the HIP engine reads: 4-bit codes in groups of 64.
-pub const formats: []const []const u8 = &.{"mlx-q4g64"};
+/// The MLX affine checkpoints the HIP engine reads: 4-, 5-, 6- or 8-bit codes in groups of 64, a width a matrix.
+pub const formats = widths.formats;
 /// Device bytes a rank keeps for the forward's scratch until the engine counts its own.
 pub const scratch_bytes: u64 = 2 << 30;
 /// Rows of the vocabulary head the MTP head drafts among (draft_ids.txt).
@@ -106,8 +107,8 @@ fn missingWhy(
         if (have.contains(words)) return refuse(
             a,
             problem,
-            "{s} is stored unquantized (a projection Living Weights taught): Nemotron on HIP reads MLX " ++
-                "4-bit projections alone for now",
+            "{s} is stored unquantized (a projection Living Weights taught): Nemotron on HIP reads " ++
+                widths.served_text ++ " alone for now",
             .{stem},
         );
     }
@@ -129,6 +130,13 @@ fn names(
     if (check.missing) |m| return missingWhy(a, have, m, where, problem);
     if (check.found != have.count()) {
         const name = (extra(a, have, c, mtp) catch return error.Refused) orelse "?";
+        if (!mtp and std.mem.startsWith(u8, name, "mtp.")) return refuse(
+            a,
+            problem,
+            "{s} holds the MTP head ({s}) inside the model's shards: Nemotron on HIP reads the head from {s} " ++
+                "beside them",
+            .{ where, name, tensors.mtp_file },
+        );
         return refuse(a, problem, "{s} holds {s}, which Nemotron-H on HIP does not read", .{ where, name });
     }
 }
@@ -155,14 +163,15 @@ pub fn checkpoint(a: std.mem.Allocator, f: Facts, problem: *[]const u8) Refused!
         a,
         problem,
         "this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Nemotron on HIP reads " ++
-            "MLX affine 4-bit checkpoints",
+            "MLX affine checkpoints",
         .{},
     );
-    if (c.bits != 4 or c.group_size != 64) return refuse(
+    var name: [96]u8 = undefined;
+    if (widths.unserved(&c, &name)) |m| return refuse(
         a,
         problem,
-        "Nemotron on HIP reads MLX affine 4-bit groups of 64; this checkpoint is {d}-bit in groups of {d}",
-        .{ c.bits, c.group_size },
+        "{s} is {d}-bit in groups of {d}: Nemotron on HIP reads " ++ widths.served_text,
+        .{ m.name, m.width.bits, m.width.group },
     );
     if (c.pocket > 0) return refuse(
         a,
@@ -196,7 +205,9 @@ pub fn checkpoint(a: std.mem.Allocator, f: Facts, problem: *[]const u8) Refused!
 pub fn admit(a: std.mem.Allocator, f: Facts, ask: Ask, problem: *[]const u8) Refused!Verdict {
     const c = try checkpoint(a, f, problem);
     const mtp = f.mtp != null;
-    const w = plan.weights(&c, ask.world, .device, .{ .mtp = mtp, .drafts = if (mtp) draft_rows else 0 }) catch
+    const head: config.Width = .{ .bits = @intCast(c.bits), .group = @intCast(c.group_size) };
+    const want: plan.Head = .{ .mtp = mtp, .drafts = if (mtp) draft_rows else 0, .width = head };
+    const w = plan.weights(&c, ask.world, .device, want) catch
         return refuse(
             a,
             problem,
@@ -234,7 +245,7 @@ pub fn tooBig(a: std.mem.Allocator, v: Verdict, ask: Ask, problem: *[]const u8) 
     return refuse(
         a,
         problem,
-        "Nemotron 4-bit on {d} rank(s) holds {d:.2} GiB of weights a rank and {d:.1} GiB of scratch, of the " ++
+        "Nemotron on {d} rank(s) holds {d:.2} GiB of weights a rank and {d:.1} GiB of scratch, of the " ++
             "{d:.2} GiB this card grants: a {d}-token window does not fit (at most {d}); lower --context or " ++
             "add ranks (--tp)",
         .{ ask.world, gibs(v.weights), gibs(scratch_bytes), gibs(ask.room), ask.window, v.most },
@@ -258,6 +269,16 @@ fn stockMtp(a: std.mem.Allocator) ![]const []const u8 {
 fn edit(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8) ![]const u8 {
     try testing.expect(std.mem.indexOf(u8, text, from) != null);
     return std.mem.replaceOwned(u8, a, text, from, to);
+}
+
+/// The stock config with module `name` at `bits` in groups of `group`.
+fn module(a: std.mem.Allocator, name: []const u8, bits: u8, group: u16) ![]const u8 {
+    const entry = try std.fmt.allocPrint(a, "\"group_size\": 64, \"{s}\": {{\"bits\": {d}, \"group_size\": {d}}},", .{
+        name,
+        bits,
+        group,
+    });
+    return edit(a, stock_config, "\"group_size\": 64,", entry);
 }
 
 /// admit() must refuse with a reason naming each of `words`.
@@ -294,6 +315,29 @@ test "the stock checkpoint and its MTP head are admitted; on one V620 a stream t
     try testing.expect(std.mem.indexOf(u8, problem, "16.00 GiB this card grants") != null);
 }
 
+test "uniform 8-bit and mixed 4/5/6/8-bit checkpoints in groups of 64 are admitted, their bytes at their widths" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    const ask: Ask = .{ .window = 4096, .room = 60 * gib };
+    const four = try admit(a, .{ .config = stock_config, .index = stock_index }, ask, &problem);
+    const eight_text = try edit(a, stock_config, "\"bits\": 4", "\"bits\": 8");
+    const eight = try admit(a, .{ .config = eight_text, .index = stock_index }, ask, &problem);
+    try testing.expect(eight.fits and eight.weights > four.weights + four.weights / 2);
+    var text: []const u8 = stock_config;
+    for ([_][]const u8{ "backbone.embeddings", "lm_head", "backbone.layers.1.mixer.shared_experts.up_proj" }) |n| {
+        const entry = try std.fmt.allocPrint(a, "\"group_size\": 64, \"{s}\": {{\"bits\": 8}},", .{n});
+        text = try edit(a, text, "\"group_size\": 64,", entry);
+    }
+    text = try edit(a, text, "\"group_size\": 64,", "\"group_size\": 64, " ++
+        "\"backbone.layers.0.mixer.in_proj\": {\"bits\": 5}, " ++
+        "\"backbone.layers.0.mixer.out_proj\": {\"bits\": 6},");
+    const mixed = try admit(a, .{ .config = text, .index = stock_index }, ask, &problem);
+    try testing.expect(mixed.fits and mixed.weights > four.weights and mixed.weights < eight.weights);
+    try testing.expectEqual(@as(u8, 5), mixed.config.widths[0][0].bits);
+}
+
 test "altered checkpoints are refused with a reason" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -328,15 +372,42 @@ test "altered checkpoints are refused with a reason" {
     );
     try expectRefused(
         a,
-        .{ .config = try edit(a, stock_config, "\"bits\": 4", "\"bits\": 8"), .index = stock_index },
+        .{ .config = try edit(a, stock_config, "\"group_size\": 64", "\"group_size\": 32"), .index = stock_index },
         ask,
-        &.{"8-bit in groups of 64"},
+        &.{ "backbone.embeddings is 4-bit in groups of 32", "groups of 64" },
+    );
+    const three = try module(a, "backbone.layers.4.mixer.in_proj", 3, 64);
+    try expectRefused(a, .{ .config = three, .index = stock_index }, ask, &.{
+        "backbone.layers.4.mixer.in_proj is 3-bit in groups of 64",
+    });
+    try expectRefused(a, .{ .config = try module(a, "lm_head", 8, 128), .index = stock_index }, ask, &.{
+        "lm_head is 8-bit in groups of 128",
+    });
+    try expectRefused(
+        a,
+        .{ .config = try module(a, "backbone.layers.1.mixer.switch_mlp.fc1", 2, 64), .index = stock_index },
+        ask,
+        &.{"backbone.layers.1.mixer.switch_mlp.fc1 is 2-bit"},
     );
     try expectRefused(
         a,
-        .{ .config = try edit(a, stock_config, "\"group_size\": 64", "\"group_size\": 32"), .index = stock_index },
+        .{
+            .config = try edit(a, stock_config, "\"group_size\": 64,", "\"group_size\": 64, " ++
+                "\"backbone.layers.5.mixer.q_proj\": false,"),
+            .index = stock_index,
+        },
         ask,
-        &.{"groups of 32"},
+        &.{ "backbone.layers.5.mixer.q_proj", "unquantized" },
+    );
+    try expectRefused(
+        a,
+        .{
+            .config = stock_config,
+            .index = try edit(a, stock_index, "\"lm_head.weight\"", "\"lm_head.weight\": \"a\", " ++
+                "\"mtp.layers.0.eh_proj.weight\""),
+        },
+        ask,
+        &.{ "mtp.layers.0.eh_proj.weight", "inside the model's shards", tensors.mtp_file },
     );
     try expectRefused(
         a,

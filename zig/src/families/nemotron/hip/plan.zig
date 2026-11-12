@@ -3,12 +3,13 @@ const std = @import("std");
 const config = @import("../config.zig");
 
 const Config = config.Config;
+const Width = config.Width;
 
 /// Stored: the checkpoint's bytes. Device: as the loader places them, its bf16 vectors widened to fp32.
 pub const Mode = enum { stored, device };
 
-/// The MTP head a rank 0 holds: none, the head alone, or the head and `drafts` rows of the vocabulary head.
-pub const Head = struct { mtp: bool = false, drafts: usize = 0 };
+/// The MTP head rank 0 holds: none, the head alone at its file's `width`, or with `drafts` rows of the vocabulary head.
+pub const Head = struct { mtp: bool = false, drafts: usize = 0, width: Width = .{} };
 
 /// Where a checkpoint's weights live on a rank of `world`.
 pub const Weights = struct {
@@ -30,9 +31,9 @@ pub const Weights = struct {
     }
 };
 
-/// Bytes of an MLX affine 4-bit group-64 matrix: packed codes, then a bf16 scale and bias a group.
-pub fn affine(c: *const Config, n: u64, k: u64) u64 {
-    return n * k * c.bits / 8 + 4 * n * (k / c.group_size);
+/// Bytes of an MLX affine matrix at width `w`: packed codes, then a bf16 scale and bias a group.
+pub fn affine(w: Width, n: u64, k: u64) u64 {
+    return n * k * w.bits / 8 + 4 * n * (k / w.group);
 }
 
 fn even(n: u64, world: u32) !u64 {
@@ -54,34 +55,31 @@ fn float(mode: Mode, n: u64) u64 {
     return n * @as(u64, if (mode == .device) 4 else 2);
 }
 
-/// A mixer's bytes into `w`; `whole` keeps it uncut (the MTP head's, on rank 0).
-fn mixer(c: *const Config, kind: config.Kind, world: u32, mode: Mode, whole: bool, w: *Weights) !void {
+/// A mixer's bytes into `w`, its matrices at `ws` (members(kind) order); `whole` keeps it uncut (the MTP head's).
+fn mixer(c: *const Config, kind: config.Kind, ws: [4]Width, world: u32, mode: Mode, whole: bool, w: *Weights) !void {
     const d: u64 = c.hidden;
-    const ws: u32 = if (whole) 1 else world;
+    const cuts: u32 = if (whole) 1 else world;
     var cut: u64 = 0;
     var mine: u64 = 0;
     switch (kind) {
         .mamba => {
-            const heads = try even(c.mamba_heads, ws);
+            const heads = try even(c.mamba_heads, cuts);
             const inner = heads * c.mamba_head_dim;
-            const groups = try even(c.groups, ws);
+            const groups = try even(c.groups, cuts);
             const conv = inner + 2 * groups * c.state;
-            cut += affine(c, inner + conv + heads, d) + affine(c, d, inner);
+            cut += affine(ws[0], inner + conv + heads, d) + affine(ws[1], d, inner);
             cut += float(mode, conv * c.conv_kernel + conv + 3 * heads + inner);
         },
         .attention => {
-            const heads = try even(c.heads, ws);
+            const heads = try even(c.heads, cuts);
             const kv = if (whole) c.kv_heads else try kvHeads(c, world);
-            cut += affine(
-                c,
-                heads * c.head_dim,
-                d,
-            ) + 2 * affine(c, kv * c.head_dim, d) + affine(c, d, heads * c.head_dim);
+            cut += affine(ws[0], heads * c.head_dim, d) + affine(ws[1], kv * c.head_dim, d) +
+                affine(ws[2], kv * c.head_dim, d) + affine(ws[3], d, heads * c.head_dim);
         },
         .moe => {
             mine += float(mode, c.experts * d) + c.experts * 4;
-            cut += try even(c.experts, ws) * (affine(c, c.expert_width, d) + affine(c, d, c.expert_width));
-            const shared = affine(c, c.shared_width, d) + affine(c, d, c.shared_width);
+            cut += try even(c.experts, cuts) * (affine(ws[0], c.expert_width, d) + affine(ws[1], d, c.expert_width));
+            const shared = affine(ws[2], c.shared_width, d) + affine(ws[3], d, c.shared_width);
             if (whole) cut += shared else w.shared += shared;
         },
     }
@@ -95,17 +93,19 @@ fn mixer(c: *const Config, kind: config.Kind, world: u32, mode: Mode, whole: boo
 pub fn weights(c: *const Config, world: u32, mode: Mode, head: Head) !Weights {
     var w: Weights = .{};
     const d: u64 = c.hidden;
-    w.replicated += affine(c, c.vocab, d) + float(mode, d);
-    w.split += affine(c, try even(c.vocab, world), d);
-    for (c.kinds[0..c.layers]) |kind| {
+    w.replicated += affine(c.embed_width, c.vocab, d) + float(mode, d);
+    w.split += affine(c.head_width, try even(c.vocab, world), d);
+    for (c.kinds[0..c.layers], c.widths[0..c.layers]) |kind, ws| {
         w.replicated += float(mode, d);
-        try mixer(c, kind, world, mode, false, &w);
+        try mixer(c, kind, ws, world, mode, false, &w);
     }
     if (head.mtp) {
-        w.head += affine(c, d, 2 * d) + float(mode, 5 * d);
-        try mixer(c, .attention, world, mode, true, &w);
-        try mixer(c, .moe, world, mode, true, &w);
-        if (mode == .device and head.drafts > 0) w.head += affine(c, head.drafts, d) + head.drafts * 4;
+        const hw: [4]Width = @splat(head.width);
+        w.head += affine(head.width, d, 2 * d) + float(mode, 5 * d);
+        try mixer(c, .attention, hw, world, mode, true, &w);
+        try mixer(c, .moe, hw, world, mode, true, &w);
+        // the draft rows are the vocabulary head's own, at its width
+        if (mode == .device and head.drafts > 0) w.head += affine(c.head_width, head.drafts, d) + head.drafts * 4;
     }
     return w;
 }
@@ -163,13 +163,46 @@ test "the plan counts every byte of the stock checkpoint and its MTP head, and s
         // every cut part sums back; only the replicated parts and the kv heads past two ranks add
         try std.testing.expectEqual(
             one.split,
-            w.split * world - if (world > 2) (world - 2) * 6 * 2 * affine(&c, 128, 2688) else 0,
+            w.split * world - if (world > 2) (world - 2) * 6 * 2 * affine(.{}, 128, 2688) else 0,
         );
         try std.testing.expectEqual(one.shared, w.shared);
         try std.testing.expectEqual(one.replicated, w.replicated);
     }
     try std.testing.expectError(error.UnevenSplit, weights(&c, 3, .stored, .{}));
     try std.testing.expectError(error.UnevenSplit, weights(&c, 16, .stored, .{}));
+}
+
+/// The stock config at `bits`, with `eights` (modules) and every MoE layer's shared expert at 8-bit, oQ's layout.
+fn oq(a: std.mem.Allocator, bits: u8, eights: []const []const u8) !Config {
+    const stock = @embedFile("../fixtures/config.json");
+    var entries: std.ArrayList(u8) = .empty;
+    try entries.print(a, "\"bits\": {d}", .{bits});
+    const c = try lightning();
+    for (eights) |m| try entries.print(a, ", \"{s}\": {{\"bits\": 8}}", .{m});
+    for (c.kinds[0..c.layers], 0..) |kind, i| if (kind == .moe) for ([_][]const u8{ "up", "down" }) |p| {
+        try entries.print(a, ", \"backbone.layers.{d}.mixer.shared_experts.{s}_proj\": {{\"bits\": 8}}", .{ i, p });
+    };
+    const text = try std.mem.replaceOwned(u8, a, stock, "\"bits\": 4", entries.items);
+    var why: config.Why = .{};
+    return config.parse(a, text, &why);
+}
+
+test "the plan counts every byte of oQ6 and oQ8 checkpoints at each matrix's own width" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // the tensors of TensorFold's oQ6 (embedding, head, layer 42's attention and shared experts at 8-bit) and oQ8
+    const six = try oq(a, 6, &.{
+        "backbone.embeddings",             "lm_head",
+        "backbone.layers.42.mixer.q_proj", "backbone.layers.42.mixer.k_proj",
+        "backbone.layers.42.mixer.v_proj", "backbone.layers.42.mixer.o_proj",
+    });
+    try std.testing.expectEqual(@as(u64, 25964363648), (try weights(&six, 1, .stored, .{})).total(1));
+    const eight = try oq(a, 8, &.{});
+    try std.testing.expectEqual(@as(u64, 33559877504), (try weights(&eight, 1, .stored, .{})).total(1));
+    // the head file at its own width beside an 8-bit model: the stock head's bytes, the draft rows at the head's width
+    const head = try weights(&eight, 1, .stored, .{ .mtp = true });
+    try std.testing.expectEqual(@as(u64, 33559877504 + 751635200), head.total(1));
 }
 
 test "device bytes: the bf16 vectors widened, the draft rows of the head on rank 0" {

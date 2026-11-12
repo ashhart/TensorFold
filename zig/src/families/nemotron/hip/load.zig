@@ -5,6 +5,7 @@ const core = @import("core");
 const config = @import("../config.zig");
 const draft_ids = @import("../draft_ids.zig");
 const tensors = @import("tensors.zig");
+const widths = @import("widths.zig");
 const model = @import("model.zig");
 
 const quant = core.quant;
@@ -14,9 +15,11 @@ const Host = quant.Host;
 const Span = quant.Span;
 const Allocator = std.mem.Allocator;
 
-/// The table core/quant reads projections through: one width for every matrix, as admission checked.
+/// The table core/quant reads projections through: each matrix at config.json's width for it, as admission checked.
 const Tables = struct {
     ck: *Checkpoint,
+    /// The model's config, naming each matrix's width; null reads every matrix at `w` (the MTP head's file).
+    c: ?*const config.Config = null,
     w: quant.mlx.Width,
 
     pub fn has(t: *const Tables, key: []const u8) bool {
@@ -27,8 +30,10 @@ const Tables = struct {
         return t.ck.get(key);
     }
 
-    pub fn width(t: *const Tables, _: []const u8) !quant.mlx.Width {
-        return t.w;
+    pub fn width(t: *const Tables, key: []const u8) !quant.mlx.Width {
+        const c = t.c orelse return t.w;
+        const w = widths.of(c, key) orelse return error.UnsupportedQuantization;
+        return .{ .bits = w.bits, .group = w.group };
     }
 };
 
@@ -178,8 +183,9 @@ const Loader = struct {
         };
     }
 
-    /// A routed stack (experts, n, k) as stored, this rank's run of experts when cut.
+    /// A routed stack (experts, n, k) as stored at its own width, this rank's run of experts when cut.
     fn stack(l: *const Loader, k: []const u8, cut: ?Span) !model.Projection {
+        const w = try l.t.width(k);
         var parts: [3]Tensor = undefined;
         for (&parts, tensors.parts) |*p, s| {
             p.* = try l.t.get(try l.key("{s}.{s}", .{ k, s }));
@@ -188,13 +194,17 @@ const Loader = struct {
         }
         if (parts[0].dtype != .u32) return error.UnsupportedQuantization;
         parts[0].dtype = .i32;
+        _ = quant.mlx.geometry.shape(parts[0], parts[1], parts[2], w.bits, w.group, true) catch {
+            std.log.err("{s}: the stack is not {d}-bit in groups of {d}, as config.json says", .{ k, w.bits, w.group });
+            return error.UnexpectedTensor;
+        };
         const pair = try quant.mlx.tables(l.a, parts[1], parts[2]);
         const h: Host = .{ .mlx = .{
             .words = parts[0],
             .scales = pair[0],
             .biases = pair[1],
-            .bits = l.t.w.bits,
-            .group = l.t.w.group,
+            .bits = w.bits,
+            .group = w.group,
         } };
         return quant.view(try quant.upload(l.up.uploader(), h), true);
     }
@@ -290,7 +300,7 @@ pub fn load(
     errdefer w.deinit();
     var ck = try Checkpoint.openModel(gpa, io, dir);
     defer ck.close();
-    const tables: Tables = .{ .ck = &ck, .w = .{ .bits = @intCast(c.bits), .group = @intCast(c.group_size) } };
+    const tables: Tables = .{ .ck = &ck, .c = c, .w = .{ .bits = @intCast(c.bits), .group = @intCast(c.group_size) } };
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const dims = try model.Dims.of(c, o.world, o.rank);
@@ -335,4 +345,26 @@ test "draft ids become runs of the head's rows in their order" {
     try std.testing.expectEqual(@as(usize, 3), spans.len);
     try std.testing.expectEqual(Span{ .from = 4, .to = 7 }, spans[0]);
     try std.testing.expectEqual(Span{ .from = 2, .to = 4 }, spans[2]);
+}
+
+test "the loader's table reads each matrix at config.json's width for it, the head's file at one width" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const stock = @embedFile("../fixtures/config.json");
+    const text = try std.mem.replaceOwned(u8, a, stock, "\"group_size\": 64,", "\"group_size\": 64, " ++
+        "\"lm_head\": {\"bits\": 8}, \"backbone.layers.0.mixer.in_proj\": {\"bits\": 5}, " ++
+        "\"backbone.layers.1.mixer.switch_mlp.fc2\": {\"bits\": 6},");
+    var why: config.Why = .{};
+    const c = try config.parse(a, text, &why);
+    const W = quant.mlx.Width;
+    const four: W = .{ .bits = 4, .group = 64 };
+    const t: Tables = .{ .ck = undefined, .c = &c, .w = four };
+    try std.testing.expectEqual(W{ .bits = 8, .group = 64 }, try t.width("lm_head"));
+    try std.testing.expectEqual(W{ .bits = 5, .group = 64 }, try t.width("backbone.layers.0.mixer.in_proj"));
+    try std.testing.expectEqual(W{ .bits = 6, .group = 64 }, try t.width("backbone.layers.1.mixer.switch_mlp.fc2"));
+    try std.testing.expectEqual(four, try t.width("backbone.layers.1.mixer.switch_mlp.fc1"));
+    try std.testing.expectError(error.UnsupportedQuantization, t.width("backbone.layers.1.mixer.gate"));
+    const head: Tables = .{ .ck = undefined, .w = four };
+    try std.testing.expectEqual(four, try head.width("layers.1.mixer.switch_mlp.fc1"));
 }
