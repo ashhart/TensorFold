@@ -119,7 +119,7 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     }
 }
 
-pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
+pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, build_options: *std.Build.Module) void {
     const ownership = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_engine.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "tensorfold", .module = engine }} });
     b.step("test-qwen-dense-route-host", "Existing 2B route and untied 9B and 27B route without weights").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ownership, .filters = &.{"a qwen3_5 checkpoint opens"} })).step);
     var dense_names: std.ArrayList([]const u8) = .empty;
@@ -130,10 +130,14 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     // memory_controller.zig imports living: the engine's own, as residency_host.zig gives its host module
     const living = engine.import_table.get("living") orelse b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host, .link_libc = true });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "living", .module = living } } });
+    // the pair's identity exchange reads the engine version (`qwen27_pair.pairFingerprint`), as the served build does
+    host.addImport("build_options", build_options);
+    // the pair tests join two ranks' `ready` through the engine's own fake fabric (fabric/fake.zig)
+    host.addImport("fabric", engine.import_table.get("fabric").?);
     b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "a reply's end keeps its prompt's born" } })).step);
     // pair refusals are decided before a model loads: the host's own tests run on CPU alone
-    const served = b.step("test-qwen27-served-host", "Rank 1's named refusal and the pair's --vision refusal, no shaders or GPU");
-    const served_run = b.addRunArtifact(b.addTest(.{ .root_module = host }));
+    const served = b.step("test-qwen27-served-host", "The pair's refusals, seam window and ready check, no shaders or GPU");
+    const served_run = b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"qwen27 pair:"} }));
     served_run.has_side_effects = true; // a rerun must re-execute the tests, not replay a cached pass
     served.dependOn(&served_run.step);
     const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });

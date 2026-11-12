@@ -145,7 +145,7 @@ pub fn slotResume(init: bool, pair: ?*const Pair) bool {
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = 128;
 
-test "the served pair's chunk times the widest seam fits the window" {
+test "qwen27 pair: the served chunk times the widest seam fits the window" {
     // a served pass asks for 512 rows here, 2048 on generation 17 (`model.promptRows`); the pair caps it at the window
     const config = q.config.Config{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 124160, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 };
     const requested = q.model.promptRows(config, 0);
@@ -159,15 +159,7 @@ test "the served pair's chunk times the widest seam fits the window" {
 
 /// This rank's four identity words for `Pair.ready`: the engine build, chip class, checkpoint digest and widths tag.
 pub fn pairFingerprint(a: std.mem.Allocator, io: std.Io, model: *q.model.Model, dir: []const u8) tf.pair_rows.Fingerprint {
-    const generation = blk: {
-        const name = std.mem.span(model.device.name());
-        var words_it = std.mem.tokenizeScalar(u8, name, ' ');
-        _ = words_it.next() orelse break :blk 0; // "Apple"
-        const m = words_it.next() orelse break :blk 0; // "M4"
-        if (m.len < 2 or std.ascii.toLower(m[0]) != 'm') break :blk 0;
-        break :blk std.fmt.parseInt(u32, m[1..], 10) catch 0;
-    };
-    const chip: u64 = if (generation >= 1) generation else 0;
+    const chip = chipGeneration(std.mem.span(model.device.name()));
     const checkpoint: u64 = blk: {
         const digest = q.checkpoint_identity.identity(a, io, dir) catch break :blk 0;
         break :blk std.mem.readInt(u64, digest[0..8], .little);
@@ -178,6 +170,15 @@ pub fn pairFingerprint(a: std.mem.Allocator, io: std.Io, model: *q.model.Model, 
         .checkpoint = checkpoint,
         .format = model.widths_tag,
     };
+}
+
+/// The Apple GPU generation a Metal device name carries ("Apple M4 Max" is 4), or 0 when it names none.
+pub fn chipGeneration(name: []const u8) u64 {
+    var words_it = std.mem.tokenizeScalar(u8, name, ' ');
+    _ = words_it.next() orelse return 0; // "Apple"
+    const m = words_it.next() orelse return 0; // "M4"
+    if (m.len < 2 or std.ascii.toLower(m[0]) != 'm') return 0;
+    return std.fmt.parseInt(u32, m[1..], 10) catch 0;
 }
 
 /// The engine build version's hash: 0 when this binary carries no version string, refused against any named one.
