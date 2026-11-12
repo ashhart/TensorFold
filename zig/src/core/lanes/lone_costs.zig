@@ -65,7 +65,8 @@ pub fn probe(e: anytype, p: anytype) ?u32 {
     const most: u32 = @intCast(@min(p.count() + 1, e.cfg.batch_rows));
     var retry: ?u32 = null;
     var earliest: u64 = std.math.maxInt(u64);
-    var rows: u32 = @min(@as(u32, if (e.cfg.plain_guard) 1 else 2), most); // without plain_guard no round is drafted with nothing
+    // without plain_guard no round is drafted with nothing
+    var rows: u32 = @min(@as(u32, if (e.cfg.plain_guard) 1 else 2), most);
     while (true) {
         if (rows < s.cost_probes.len) {
             const cd = s.cost_probes[rows];
