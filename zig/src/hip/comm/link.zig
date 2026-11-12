@@ -153,7 +153,8 @@ pub const Link = struct {
             const fd = (try accept(server, wait)) orelse break;
             // a connection that proves no key takes no place and hears no answer: it is closed and the wait goes on
             const who = auth.accept(fd, secret, &.{.rocm}, auth.budget_ms) catch |e| {
-                std.log.warn("hip: a connection to the ranks' link proved no key and is ignored: {s}", .{auth.explain(e) orelse @errorName(e)});
+                var at: [64]u8 = undefined;
+                std.log.warn("hip: a connection from {s} to the ranks' link proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
                 _ = posix.system.close(fd);
                 continue;
             };
