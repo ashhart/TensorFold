@@ -63,7 +63,8 @@ pub const Kernels = struct {
         var args: hl.Args = .{};
         try args.add(a);
         const total = a.m * a.n;
-        try go(r, k.gemm, .{ .x = cdiv(total, threads), .y = 1, .z = 1 }, .{ .x = @intCast(threads) }, s, &args);
+        // a warp an output element: eight a 256-thread block
+        try go(r, k.gemm, .{ .x = cdiv(total, threads / 32) }, .{ .x = @intCast(threads) }, s, &args);
     }
 
     /// Launches on `s`; the counting stream runs nothing.

@@ -34,14 +34,12 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
     if (proj.nvfp4) |h| return nvfp4Project(o, x, proj, h, m, f32_out);
     if (proj.fp8) |h| return fp8Project(o, x, proj, h, m, f32_out);
     switch (proj.handle orelse {
-        std.log.err("PROBE project: no handle (nvfp4={} fp8={} n={d} k={d} m={d})", .{ proj.nvfp4 != null, proj.fp8 != null, proj.n, proj.k, m });
         return error.BadShape;
     }) {
         .mlx => |h| return affine(o, x, affineOf(proj, h), m, f32_out),
         .dense => |h| switch (h.dtype) {
             .f32 => {
                 if (f32_out or m == 0 or x.kind == .f32) {
-                    std.log.err("PROBE dense f32: m={d} n={d} k={d} x={t} f32_out={}", .{ m, proj.n, proj.k, x.kind, f32_out });
                     return error.BadShape;
                 }
                 const out: Tensor = .{ .ptr = try o.arena.take(m * proj.n * x.kind.size()), .kind = x.kind };
@@ -50,7 +48,6 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
             },
             .bf16 => {
                 if (m == 0 or x.kind != .bf16) {
-                    std.log.err("PROBE dense bf16: m={d} n={d} k={d} x={t} f32_out={}", .{ m, proj.n, proj.k, x.kind, f32_out });
                     return error.BadShape;
                 }
                 const kind: t.Kind = if (f32_out) .f32 else .bf16;
@@ -59,7 +56,6 @@ pub fn project(o: Ops, x: Tensor, proj: Projection, m: usize, f32_out: bool) Err
                 return out;
             },
             else => {
-                std.log.err("PROBE dense dtype {t}: m={d} n={d} k={d}", .{ h.dtype, m, proj.n, proj.k });
                 return error.BadShape;
             },
         },
@@ -416,12 +412,10 @@ pub fn denseRows(o: Ops, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, 
 /// x (rows, k) BF16 times BF16 weights [n, k] on `tile`: `out` fp32, or BF16 rounded once.
 pub fn denseGemm(o: Ops, tile: DenseTile, x: Tensor, w: u64, out: Tensor, rows: usize, n: usize, k: usize) Error!void {
     if (x.kind != .bf16 or out.kind == .f16) {
-        std.log.err("PROBE denseGemm kind: x={t} out={t} n={d} k={d}", .{ x.kind, out.kind, n, k });
         return error.BadShape;
     }
     const wide = out.kind == .f32;
     if (o.l.dense.refusal(tile, x.ptr, w, int(rows), int(n), int(k)) != null) {
-        std.log.err("PROBE denseGemm refusal: rows={d} n={d} k={d}", .{ rows, n, k });
         return error.BadShape;
     }
     try o.l.dense.gemm(o.l.r, tile, x.ptr, w, if (wide) out.ptr else 0, if (wide) 0 else out.ptr, int(rows), int(n), int(k), o.stream);
@@ -440,7 +434,6 @@ fn kindOf(dtype: quant.DType) Error!t.Kind {
 /// An FP8 product: the checkpoint's E4M3 codes as stored, decoded in flight and scaled once in f32.
 fn fp8Project(o: Ops, x: Tensor, proj: Projection, h: quant.fp8.Matrix, m: usize, f32_out: bool) Error!Tensor {
     if (m == 0 or x.kind != .bf16 or !o.bf16) {
-        std.log.err("PROBE fp8: m={d} n={d} k={d} x={t} bf16={} f32_out={}", .{ m, proj.n, proj.k, x.kind, o.bf16, f32_out });
         return error.BadShape;
     }
     const wide: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 4), .kind = .f32 };
@@ -466,11 +459,9 @@ fn fp8Project(o: Ops, x: Tensor, proj: Projection, h: quant.fp8.Matrix, m: usize
 /// An NVFP4 product: the checkpoint's codes and group scales as stored, e2m1 decoded in flight by one kernel.
 fn nvfp4Project(o: Ops, x: Tensor, proj: Projection, h: quant.nvfp4.Matrix, m: usize, f32_out: bool) Error!Tensor {
     if (m == 0 or x.kind != .bf16 or !o.bf16) {
-        std.log.err("PROBE nvfp4: m={d} n={d} k={d} x={t} bf16={} f32_out={}", .{ m, proj.n, proj.k, x.kind, o.bf16, f32_out });
         return error.BadShape;
     }
     if (proj.k % 32 != 0) {
-        std.log.err("PROBE nvfp4 k: n={d} k={d}", .{ proj.n, proj.k });
         return error.BadShape;
     }
     const wide: Tensor = .{ .ptr = try o.arena.take(m * proj.n * 4), .kind = .f32 };

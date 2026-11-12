@@ -338,11 +338,9 @@ pub const Engine = struct {
         const lane = state.Caches.deviceBytes(m, capacity) + m.spec.hidden * m.act.size() + m.taps.ringBytes(m.spec.hidden) + if (e.vision) |v| v.laneBytes(capacity) else @as(usize, 0);
         // under tensor parallelism only rank 0 holds the head
         const head = if (e.o.rank > 0) 0 else mtp.Head.deviceBytes(e.gpa, &e.driver, &e.lib, &e.weights, m, @min(rows, mtp.max_chains)) catch |err| {
-            std.log.err("PROBE planBytes: the MTP head fails ({s})", .{@errorName(err)});
             return err;
         };
         const sized = e.sizeBytes(rows, capacity, pool_pages) catch |err| {
-            std.log.err("PROBE planBytes: sizeBytes fails ({s})", .{@errorName(err)});
             return err;
         };
         return sized + streams * lane + snapshots * memory.linearBytes(m.spec) + head;

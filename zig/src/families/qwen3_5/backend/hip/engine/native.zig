@@ -223,7 +223,6 @@ fn prepare(
     var streams = o.streams;
     while (streams > 0) : (streams -= 1) {
         if ((served(e, streams, capacity, readouts) catch |err| {
-            if (@errorReturnTrace()) |t| std.debug.dumpStackTrace(t.*);
             return steps.refuseAll(
                 a,
                 problem,
