@@ -160,6 +160,8 @@ their settings file.
 [Speed-up mode](../speed-up-mode.md) builds the server, sets up MCDMA and writes the two settings files; this
 subsection covers what the 27B pair serves and what it leaves out.
 Send requests to rank 0 only; rank 1 holds the other half of the split weights and replays rank 0's rounds.
+Rank 1's `/health` answers as rank 0's does, and a request sent to it is refused with
+`speed-up mode: this Mac runs rank 0's requests; send requests to rank 0`.
 
 ```bash
 # rank 1, on the second Mac: start it first
@@ -182,7 +184,8 @@ it has not been measured against one Mac that drafts too.
 
 Before either rank serves, the two Macs exchange what their bits come from: the engine build, the GPU family, the
 checkpoint, the weight format and the command protocol. When any of these differ, both ranks refuse to start and say
-which one, since such a pair would serve tokens that match neither Mac alone.
+which one, since such a pair would serve tokens that match neither Mac alone. A rank that cannot read its GPU
+generation or its checkpoint's identity refuses to start as well, rather than pass that check on a fact it never read.
 
 The link is trusted: rank 1 replays whatever commands rank 0 sends, and neither rank checks who is at the other end.
 Run a pair only over a dedicated cable between two Macs you control. Rank 0's API is the ordinary server's, on

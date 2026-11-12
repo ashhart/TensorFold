@@ -169,7 +169,7 @@ pub fn bind(b: *Metal, s: *lanes.Stream) !u32 {
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
 pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
-    try @import("qwen27_pair.zig").refuseFollower(b.link); // the chunked prefill bypasses prefillFn's refusals
+    try @import("qwen27_pair.zig").refuseRequest(b.link, s); // the chunked prefill bypasses prefillFn: the same guards
     b.settle() catch {};
     b.dropRound();
     promoteDue(b);

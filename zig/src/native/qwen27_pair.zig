@@ -134,10 +134,7 @@ pub const Link = struct {
 
 /// Rank 1 replays rank 0's rounds: refuse at the head of `prefill`, its first backend call (GLM's `beginPrompt`).
 pub fn refuseFollower(link: ?*Link) !void {
-    if (link) |l| if (l.pair.rank != 0) {
-        std.log.info("q27 rank1 follower refusal: queued words={d} failed_seam={d}", .{ l.words.items.len, l.pair.failedSeam() });
-        return error.FollowsPeer;
-    };
+    if (link) |l| if (l.pair.rank != 0) return error.FollowsPeer;
 }
 
 /// A pair's token is the head seam's pick, so a sampled or grammar-constrained stream has no pair answer.
@@ -145,6 +142,12 @@ pub fn refuseSampling(link: ?*Link, s: *const lanes.Stream) !void {
     // refuse it at `prefill`'s head too, before either rank settles, drops or binds a round (no second argmax).
     if (link == null) return;
     if (s.sampling != null or s.grammar != null) return error.PairGreedyOnly;
+}
+
+/// `prefill`'s and `prefill_step`'s pair guards, before any round state moves: rank 1 names rank 0, then sampling.
+pub fn refuseRequest(link: ?*Link, s: *const lanes.Stream) !void {
+    try refuseFollower(link);
+    try refuseSampling(link, s);
 }
 
 /// The pair's seam ends in the engine's shape: the transport's `Ref` is the frame's, so the casts are field copies.
@@ -223,20 +226,23 @@ test "qwen27 pair: the served chunk times the widest seam fits the window" {
     try std.testing.expect(seamBytes(512) > pairBytes());
 }
 
-/// This rank's four identity words for `Pair.ready`: the engine build, chip class, checkpoint digest and widths tag.
-pub fn pairFingerprint(a: std.mem.Allocator, io: std.Io, model: *q.model.Model, dir: []const u8) tf.pair_rows.Fingerprint {
-    const chip = chipGeneration(std.mem.span(model.device.name()));
-    const checkpoint: u64 = blk: {
-        const digest = q.checkpoint_identity.identity(a, io, dir) catch break :blk 0;
-        break :blk std.mem.readInt(u64, digest[0..8], .little);
+/// This rank's words for `Pair.ready`: build, GPU generation, checkpoint, widths tag and command protocol.
+pub fn pairFingerprint(gpa: std.mem.Allocator, io: std.Io, model: *q.model.Model, dir: []const u8, a: std.mem.Allocator, why: *[]const u8) !tf.pair_rows.Fingerprint {
+    return identityFacts(std.mem.span(model.device.name()), q.checkpoint_identity.identity(gpa, io, dir), model.widths_tag, a, why);
+}
+
+/// What this rank read, or a refusal naming the fact it could not: a 0 would match the peer's own unreadable 0.
+pub fn identityFacts(device: []const u8, digest: anyerror![32]u8, format: u64, a: std.mem.Allocator, why: *[]const u8) !tf.pair_rows.Fingerprint {
+    const chip = chipGeneration(device);
+    if (chip == 0) {
+        why.* = try std.fmt.allocPrint(a, "speed-up mode: this Mac's GPU ({s}) names no Apple generation, so the pair cannot check that both ranks run the same kernels", .{device});
+        return error.PairIdentityUnreadable;
+    }
+    const d = digest catch |err| {
+        why.* = try std.fmt.allocPrint(a, "speed-up mode: this rank cannot read its checkpoint's identity ({s}), so the pair cannot check that both ranks load the same weights", .{@errorName(err)});
+        return error.PairIdentityUnreadable;
     };
-    return .{
-        .version = engineVersion(),
-        .chip = chip,
-        .checkpoint = checkpoint,
-        .format = model.widths_tag,
-        .protocol = protocol,
-    };
+    return .{ .version = engineVersion(), .chip = chip, .checkpoint = std.mem.readInt(u64, d[0..8], .little), .format = format, .protocol = protocol };
 }
 
 /// The Apple GPU generation a Metal device name carries ("Apple M4 Max" is 4), or 0 when it names none.

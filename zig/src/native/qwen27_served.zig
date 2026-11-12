@@ -59,7 +59,6 @@ pub const Host = struct {
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
     pair: ?*lb.Pair = null, // --speed-up: the seam this rank owns; rank 1 follows through it
-    follower: bool = false, // this rank replays rank 0's rounds: its HTTP refuses generations at admission
     link: ?*lb.Link = null, // rank 0's round sender and rank 1's follower target; `Metal.link` points here
     hw: ?mtl.Device = null, // the pair's device, opened before the model's so the seam exists for the load
     picks: ?mtl.Buffer = null, // a round's head-seam picks (one u32 a row), read by the lane backend
@@ -294,7 +293,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
     // the tower before the slots: their room and the cache's budget count it as taken
     if (o.vision) |v| with.images = try images.open(gpa, io, model, dir, v, a, why);
     errdefer if (with.images) |v| v.deinit();
-    const h = try attach(gpa, io, model, null, with, a, why, pair, if (pair != null) pair_mod.pairFingerprint(gpa, io, model, dir) else null);
+    const fp = if (pair != null) try pair_mod.pairFingerprint(gpa, io, model, dir, a, why) else null;
+    const h = try attach(gpa, io, model, null, with, a, why, pair, fp);
     h.owns_model = true;
     h.pair = pair;
     h.hw = hw;
@@ -378,7 +378,6 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.disk_stage = null;
     // create() leaves unnamed Host fields undefined: a debug-filled optional is non-null, so name h.link first.
     h.link = null;
-    h.follower = false;
     h.hw = null;
     h.picks = null;
     h.workers = .{};
@@ -395,10 +394,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer h.runner.deinit();
     h.pair = pair;
     if (pair) |p| {
-        if (slots != 1) {
-            why.* = try std.fmt.allocPrint(a, "--speed-up serves one greedy stream: pass --parallel 1", .{});
-            return error.PairOneStream;
-        }
+        try pair_flags.refuseStreams(true, slots, why);
         // The picks live where the head seam writes them, so the lane backend reads them rather than a local argmax.
         const picks = try model.device.buffer(lb.batch_rows * @sizeOf(u32), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         h.picks = picks;
@@ -474,12 +470,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
-    // both Macs are loaded and allocated before either serves: rank 1 may now replay rank 0's rounds
-    if (pair) |p| {
-        h.follower = p.rank != 0;
-        // The follower must listen before either rank signals ready: rank 0's measure seams follow the handshake.
-        try h.workers.startFollower(p, h.back, a, why);
-    }
+    // both Macs are loaded: rank 1's follower listens before either rank signals ready (rank 0's seams follow it)
+    if (pair) |p| try h.workers.startFollower(p, h.back, a, why);
     errdefer if (pair) |p| h.workers.stop(p); // a failed ready or start joins the threads before `open` frees the pair
     // a mismatch's words name the fact that differs (`Pair.ready`); the other failures are worded here
     if (pair) |p| p.ready(fp.?, a, why) catch |err| {
@@ -490,8 +482,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     };
     // a dead link is not a serving state: exit so a supervisor restarts both ranks, not serve seam errors
     if (pair) |p| try h.workers.startWatch(p, a, why);
-    // Rank 1 serves no generations: its engine only replays rank 0's rounds, so admission refuses at the door.
-    if (h.follower) h.host.health = .{ .ctx = h, .read = unhealthyFollower };
+    // no health gate on rank 1: pair_supervise.sh and pair_accept.py read its /health; prefill refuses its requests
     try h.host.start();
     errdefer h.host.stop(); // a start-up failure after the host is up stops it before `open` frees what it serves
     // Both ranks of a pair time their lane costs: the rounds are local and symmetric, leaving both drafters alike.
@@ -550,11 +541,6 @@ fn enableCache(h: *Host, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) 
 
 /// Weights, the ready slots' state and the drafter join one residency set the idle keepalive uses.
 const holdResident = q.residency.hold;
-
-/// Rank 1's admission gate: always false, so every generation request refuses before it reaches the lanes.
-fn unhealthyFollower(_: *anyopaque) bool {
-    return false;
-}
 
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);

@@ -403,9 +403,7 @@ pub const Metal = struct {
 
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const b = self(ptr);
-        try pair_mod.refuseSampling(b.link, s); // a sampled or grammar-constrained row has no pair answer: refuse before any backend call
-        if (b.link != null and b.link.?.pair.rank != 0) std.log.info("q27 rank1 prefill: slot={d} prompt_len={d} streams={d}", .{ b.slotOf(s) orelse 99, s.prompt_len, b.runner.slots });
-        try pair_mod.refuseFollower(b.link); // before settle, dropRound, promoteDue and bind: rank 1 touched nothing yet
+        try pair_mod.refuseRequest(b.link, s); // before settle, dropRound, promoteDue and bind: nothing moved yet
         b.settle() catch {};
         b.dropRound();
         slots.promoteDue(b);

@@ -14,13 +14,13 @@ const pair_start = @import("pair_rows_start.zig");
 pub const Settings = settings.Settings;
 pub const Ref = @import("exlr8_projection.zig").Ref;
 
-/// The four facts that change a pair's bits, exchanged at `ready`; a 0 means the fact names nothing here.
+/// The five facts that change a pair's bits or its commands, exchanged at `ready`; the wire never carries a 0.
 pub const Fingerprint = struct {
-    /// build_options.version, as `capabilities --json` prints it.
+    /// A hash of build_options.version, as `capabilities --json` prints it; 0 for a build with no version string.
     version: u64 = 0,
-    /// The chip class the kernel contract names: one family's token_sha cannot accept the other's.
+    /// The Apple GPU generation the Metal device names ("Apple M4 Max" is 4): the kernels' bits differ across them.
     chip: u64 = 0,
-    /// The checkpoint directory's config.json content hash: two different quantizations or shapes refuse here.
+    /// The checkpoint identity's first eight bytes (config.json, the index, each shard's name, size and header).
     checkpoint: u64 = 0,
     /// The weight format tag the affine readers resolved (the widths tag), so a 4-bit stack refuses a 6-bit stack.
     format: u64 = 0,

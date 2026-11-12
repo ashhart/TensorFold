@@ -10,7 +10,6 @@ const pair_mod = @import("qwen27_pair.zig");
 /// Rank 1's follower: replay rank 0's rounds in order; a rank that cannot replay stops to be restarted.
 pub fn follow(b: *lb.Metal) void {
     const l = b.link orelse return;
-    std.log.info("q27 follower: listening", .{});
     while (true) {
         const seen = l.pair.next(l.gpa, &l.words) catch |err| {
             if (err != error.PairStopped) failFollow("a round", @errorName(err));
@@ -19,7 +18,6 @@ pub fn follow(b: *lb.Metal) void {
         const k = seen orelse return;
         // a frame is checked whole before any word is read as a field or a slot indexes the runner
         const command = pair_mod.decode(k, l.words.items, b.runner.slots) catch |err| failFollow("a command", .{ k, @errorName(err) });
-        std.log.info("q27 follower: got {s} words={d}", .{ @tagName(command), l.words.items.len });
         replay(b, command);
     }
 }
