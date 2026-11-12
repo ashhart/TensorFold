@@ -258,7 +258,8 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, initial: teach.Plan, g
         srv.slide.phase(id, .checking);
         o.stage(id, "checking");
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
-        redraw = verdict.took == null and !std.mem.allEqual(bool, verdict.recalled, true) and
+        // a correction keeps main's plain continuation: its wordings stay as its old-belief references were read
+        redraw = verdict.took == null and !std.mem.allEqual(bool, verdict.recalled, true) and plan.corrections.len == 0 and
             @import("core").profile.lookup("TF_SLIDE_ROUTED") == null and
             @import("core").profile.lookup("TF_SLIDE_EDIT") == null and
             @import("core").profile.lookup("TF_SLIDE_PROBE") == null;

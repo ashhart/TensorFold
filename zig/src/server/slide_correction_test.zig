@@ -40,6 +40,7 @@ const Model = struct {
     pocket_belief: bool = false,
     base_reads: usize = 0,
     pocket_present: bool = false,
+    refreshed: bool = false, // a round asked to refresh its router wordings
     fn engine(m: *@This()) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
@@ -79,6 +80,7 @@ const Model = struct {
     }
     fn learn(ctx: *anyopaque, req: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
         const m: *Model = @ptrCast(@alignCast(ctx));
+        if (req.refresh_wordings) m.refreshed = true;
         if (m.mode == .before_begin and req.train.len > 0) {
             sink.event(sink.ctx, &.{ .done = .{ .message = "refused before beginning", .before_begin = true } });
             return;
@@ -187,6 +189,12 @@ test "Learning persistence: correction rejects old sampled answers using the con
     try t.expectEqualSlices(bool, &.{false}, f.rounds().recalled);
     try t.expect(!f.model.learned and f.model.sampled > 0 and f.model.correct_sampler and f.model.correct_against);
     try t.expect(f.srv.slide.find(f.neighbour_id).?.recalled.?);
+}
+test "Learning persistence: a refused correction continues its rounds without a wording refresh" {
+    const f = try Fixture.init(.sampled);
+    defer f.deinit();
+    try t.expectEqualSlices(bool, &.{false}, f.rounds().recalled);
+    try t.expect(f.model.rounds > 1 and !f.model.refreshed);
 }
 test "Learning persistence: correction checks training questions as well as held-out questions" {
     const f = try Fixture.init(.training);
