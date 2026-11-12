@@ -160,6 +160,12 @@ The three host-tier settings use the platform environment rules: empty or whites
 the host budget is a nonnegative whole MiB count fitting a native byte size, and frame/slot counts must be
 positive whole numbers. Malformed values refuse with `BadFlashNextKvHost`, never select tier-off silently.
 
+A pass that holds an offloaded experts layer reads each block's picks back to the host before it copies the missing
+expert lines, and a CUDA graph capture cannot hold that wait: on such a pack the drafted-window, shared-window, MTP-head
+(where the pack drafts with one) and `TF_FLASHNEXT_DECODE_GRAPH` graphs are not captured and those passes run eagerly,
+`TF_FLASHNEXT_WINDOW_GRAPH` notwithstanding. With `TF_FLASHNEXT_EXL3_ROUTED=device` no layer waits, and those graphs
+apply.
+
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
 
