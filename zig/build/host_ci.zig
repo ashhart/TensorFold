@@ -79,6 +79,7 @@ const linux_fast = [_][]const u8{
     "compile-glm-prompt-gate-host",
     "compile-pocket-fit-host",
     "test-checkpoint-config",
+    "test-cluster-membership-host",
     "test-cuda-startup-costs-host",
     "test-glm-prompt-arena-host",
     "test-grammar-error-host",
@@ -295,6 +296,7 @@ const macos_deepseek = [_][]const u8{
 
 const macos_fast = [_][]const u8{
     "check-qwen27-speed-host",
+    "test-cluster-membership-host",
     "test-glm-disk-charge-host",
     "test-living-metal-host",
     "test-metal-formats-host",
