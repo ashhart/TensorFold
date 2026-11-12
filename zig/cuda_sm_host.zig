@@ -19,7 +19,14 @@ const Fake = struct {
         return 0;
     }
     fn name(out: [*]u8, _: c_int, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
-        const text = if (capability == 90) "NVIDIA H100" else "NVIDIA GB10";
+        const text = switch (capability) {
+            90 => "NVIDIA H100",
+            89 => "NVIDIA GeForce RTX 4090",
+            87 => "NVIDIA Jetson AGX Orin",
+            75 => "NVIDIA T4",
+            100 => "NVIDIA B200",
+            else => "NVIDIA GB10",
+        };
         @memcpy(out[0..text.len], text);
         out[text.len] = 0;
         return 0;
@@ -86,9 +93,41 @@ test "CUDA release SM: unsupported GPU is named before context retain or module 
     try t.expectEqual(@as(usize, 0), Fake.retains);
 }
 
+test "CUDA release SM: sm_80 and sm_86 images serve later 8.x minors; another major or a later 12.x minor is refused" {
+    const prior = cuda.copy_source.current();
+    defer cuda.copy_source.setCurrent(prior);
+    var d = Fake.driver();
+    for ([_]u32{ 80, 86, 87, 89, 120 }) |sm| {
+        Fake.capability = sm;
+        Fake.retains = 0;
+        Fake.loads = 0;
+        logs.used = 0;
+        var ctx = try cuda.Context.init(&d, 0);
+        try t.expectEqual(@as(usize, 1), Fake.retains);
+        try t.expectEqual(@as(usize, 0), logs.used);
+        ctx.deinit();
+        try t.expectEqual(@as(usize, 0), Fake.retains);
+    }
+    for ([_]u32{ 75, 90, 100, 122 }) |sm| {
+        Fake.capability = sm;
+        Fake.retains = 0;
+        logs.used = 0;
+        try t.expectError(error.WrongGpu, cuda.Context.init(&d, 0));
+        try t.expectEqual(@as(usize, 0), Fake.retains);
+        try t.expect(logs.used > 0);
+        logs.used = 0; // the runner fails a test that leaves a diagnostic unread
+    }
+    try t.expect(cuda.kernels.covers(&.{ 80, 86 }, 89));
+    try t.expect(!cuda.kernels.covers(&.{89}, 86));
+    try t.expect(!cuda.kernels.covers(&.{ 80, 86 }, 90));
+    // arch-specific images (sm_120a from sm_120 on) run on that SM alone
+    try t.expect(!cuda.kernels.covers(&.{120}, 121));
+    try t.expect(!cuda.kernels.covers(&.{121}, 122));
+}
+
 test "CUDA release SM: capabilities JSON reports build coverage for both detected capabilities" {
     var d = Fake.driver();
-    for ([_]u32{ 90, 121 }, [_]bool{ false, true }) |sm, expected| {
+    for ([_]u32{ 90, 121, 89 }, [_]bool{ false, true, true }) |sm, expected| {
         Fake.capability = sm;
         const support = device.kernelSupportOn(&d, 0);
         var out: std.Io.Writer.Allocating = .init(t.allocator);
