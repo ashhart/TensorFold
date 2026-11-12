@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Pull: a repository file under the engine's reserved names (`.tensorfold*` paths and `*.tensorfold-rollback`) is refused, so a model repository can't overwrite the engine's own state (#3032).
+
 - Server media: a media URL whose host resolves to more addresses than the lookup's queue holds no longer hangs the fetch; every address is still checked against private ranges (#3035).
 
 - Server: compaction notes and the fact graph are written owner-only through a unique temporary file renamed into place, so a planted link can't redirect the write (#3031).
