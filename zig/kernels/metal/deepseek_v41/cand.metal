@@ -139,18 +139,6 @@ inline void tf_cand_row(TfCandArgs args, device const uint* s, int vis, device u
               mask + ulong(row) * args.blocks, tid, lane, simd, sh);
 }
 
-// A slot's state at one layer of a launch over several slots (segs.zig's Seg), then its rows from `base`.
-struct TfDsv41Seg {
-  device uchar* window;
-  device uchar* pool;
-  device uchar* keys;
-  device float* carry;
-  device float* inputs;
-  device uchar* comp;
-  device uchar* ikeys;
-  uint base, rows, nkeys, start;
-};
-
 // tf_cand over several slots' rows, scores a fixed `stride` a row: row r over its slot's keys (none: left as it was).
 [[max_total_threads_per_threadgroup(TF_TG)]] kernel void tf_cand_segs(
     constant TfCandArgs& args [[buffer(0)]],
