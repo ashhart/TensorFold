@@ -127,7 +127,7 @@ pub const Collective = struct {
         return c.gatherType(stream, local, out, count, .f32);
     }
 
-    /// FP64 rank blocks are concatenated bit for bit: `count` counts doubles (8 bytes each), no conversion or reduction.
+    /// Concatenate rank blocks without reduction; count is in eight-byte doubles.
     pub fn gatherF64(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
         return c.gatherType(stream, local, out, count, .f64);
     }
@@ -159,4 +159,3 @@ pub const Collective = struct {
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 };
-
