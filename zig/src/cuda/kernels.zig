@@ -19,7 +19,17 @@ pub const target_sms: []const u32 = options.sms;
 pub fn supports(capability: u32) ?bool {
     if (!available) return false;
     if (target_sms.len == 0) return null;
-    return std.mem.indexOfScalar(u32, target_sms, capability) != null;
+    return covers(target_sms, capability);
+}
+
+/// Whether SASS for one of `sms` runs on a GPU of `capability`: the same SM or, below sm_90 where no image is
+/// arch-specific, one of the same major and an equal or lower minor (the driver runs sm_86 SASS on an sm_89 GPU).
+pub fn covers(sms: []const u32, capability: u32) bool {
+    for (sms) |sm| {
+        if (sm == capability) return true;
+        if (sm < 90 and sm / 10 == capability / 10 and sm % 10 <= capability % 10) return true;
+    }
+    return false;
 }
 
 pub const qwen4_hc: []const u8 = if (available) &Blob("fatbin_qwen4_hc").bytes else &.{};
