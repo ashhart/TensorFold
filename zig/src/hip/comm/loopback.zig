@@ -53,7 +53,7 @@ pub fn run(world: usize, ctx: anytype, comptime body: fn (@TypeOf(ctx), usize, c
             const policy: [Policy.word_count]u32 = @splat(0);
             const me = hello(@intCast(rank), @intCast(size));
             const id: @import("rccl.zig").UniqueId = .{ .internal = @splat(7) };
-            const out = link.Link.open(std.testing.io, "127.0.0.1", port, id, me, policy, &fault) catch |err| {
+            const out = link.Link.open(std.testing.io, "127.0.0.1", port, id, me, policy, &fault, &.none) catch |err| {
                 failed.* = err;
                 return;
             };

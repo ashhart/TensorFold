@@ -370,7 +370,7 @@ test "the GPU engine's flags: refused and unlisted unless the backend serves the
     const a = arena.allocator();
     var u: Usage = .{};
     // each flag, a value, and the `serves` entry that turns it on
-    const gated = [_][3][]const u8{ .{ "--tp", "2", "--tp" }, .{ "--rank", "0", "--tp" }, .{ "--master", "node0", "--tp" }, .{ "--master-port", "29600", "--tp" }, .{ "--policy", "matrix=off", "--policy" }, .{ "--mtp-drafts", "2", "--mtp-drafts" }, .{ "--mtp-confidence", "0.5", "--mtp-confidence" }, .{ "--checkpoint-slots", "3", "--checkpoint-slots" }, .{ "--spill-gib", "2", "--spill-gib" } };
+    const gated = [_][3][]const u8{ .{ "--tp", "2", "--tp" }, .{ "--rank", "0", "--tp" }, .{ "--master", "node0", "--tp" }, .{ "--master-port", "29600", "--tp" }, .{ "--rank-secret", "/k", "--tp" }, .{ "--policy", "matrix=off", "--policy" }, .{ "--mtp-drafts", "2", "--mtp-drafts" }, .{ "--mtp-confidence", "0.5", "--mtp-confidence" }, .{ "--checkpoint-slots", "3", "--checkpoint-slots" }, .{ "--spill-gib", "2", "--spill-gib" } };
     var out: std.Io.Writer.Allocating = .init(a);
     try capabilities(&out.writer, .{ .version = "0" });
     for (gated) |g| {

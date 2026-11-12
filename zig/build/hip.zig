@@ -186,6 +186,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     test_step.dependOn(&vision_contract_host.step);
     b.step("test-draft-hip-host", "HIP draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native, .filters = &.{"draft sources:"} })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
+    b.step("test-rank-link-hip-host", "The HIP ranks' link on the host: joins, refusals and the key proof").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip, .filters = &.{ "security:", "ranks that match join", "a rank started with another world", "a rank with other weights", "hellos differ", "startup steps:", "a rank that leaves", "a family's startup", "a change every rank makes" } })).step);
     b.step("test-qwen-hip-formats-host", "Qwen HIP format offers: the BF16 refusal, and discovery against actual config and matrix admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family, .filters = &.{ "a bf16 checkpoint without a joint head", "capability audit: HIP Qwen format" } })).step);
     const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
     test_step.dependOn(&family_host.step);
@@ -566,8 +567,7 @@ fn compileSource(b: *std.Build, cc: Hipcc, arch: []const u8, source: LazyPath, o
     run.addArg(b.fmt("-DTF_MATRIX={d}", .{@intFromBool(c.matrix != .none)}));
     run.addArg(b.fmt("-DTF_DOT2_SIGNED_ZERO={d}", .{@intFromBool(c.dot2_signed_zero)}));
     run.addArg(b.fmt("--rocm-path={s}", .{root}));
-    const lib = cc.device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root});
-    run.addArg(b.fmt("--rocm-device-lib-path={s}", .{lib}));
+    run.addArg(b.fmt("--rocm-device-lib-path={s}", .{cc.device_lib orelse b.fmt("{s}/lib/llvm/amdgcn/bitcode", .{root})}));
     run.addArg(b.fmt("--offload-arch={s}", .{arch}));
     // clang 21 leaves a branch of affine_dot2_stream_relu2_pair<Dot, 6, 1, 8> past simm16 on gfx1100 (#1521)
     if (cc.relax_branches and std.mem.eql(u8, arch, "gfx1100")) run.addArgs(&.{ "-mllvm", "-amdgpu-s-branch-bits=15" });

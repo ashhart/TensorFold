@@ -16,6 +16,8 @@ pub const atomic_file = @import("atomic_file.zig");
 pub const folder_lock = @import("folder_lock.zig");
 /// Original-span matching through arbitrarily nested percent encoding.
 pub const credential = @import("credential.zig");
+/// The rank group's key and the proof every rank connection makes before its first protocol byte.
+pub const rank_auth = @import("rank_auth.zig");
 
 /// std.posix, or its sockets, signals and limits over Winsock and console events.
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;

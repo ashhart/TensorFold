@@ -72,6 +72,7 @@ const stock_rules = [_]Rule{
     .{ .name = "TENSORFOLD_PULL_CONNECT_SECONDS", .scope = .common, .kind = .positive, .trim = " \t", .forms = "whole seconds from 1 to 4294967295 (pull's connect timeout; default 30)" },
     .{ .name = "TENSORFOLD_PULL_STALL_SECONDS", .scope = .common, .kind = .positive, .trim = " \t", .forms = "whole seconds from 1 to 4294967295 (pull's no-progress timeout; default 60)" },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
+    .{ .name = "TF_RANK_SECRET_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding 16 bytes to 4 KiB of key" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_NCCL_LIB", .scope = .cuda, .kind = .path, .forms = "an NCCL library path without control characters, or blank for libnccl.so.2" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
