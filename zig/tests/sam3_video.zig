@@ -172,6 +172,7 @@ pub fn main(init: std.process.Init) !void {
             else => {},
         };
         const frame_start = if (benchmark_path != null) clock.seconds() else 0;
+        if (trace) |*output| session.r.observer = output.observer(index);
         const is_seed = step == 0 or (exercise and step % 5 == 4);
         var prediction = if (is_seed)
             try session.seed(init.gpa, image, index, seeds.items)

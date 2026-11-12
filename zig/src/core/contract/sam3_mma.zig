@@ -5,7 +5,7 @@ const rows = @import("rows.zig");
 pub const m = 16;
 pub const n = 32;
 pub const k = 16;
-pub const Range = enum { normal, subnormal, extreme, half_left, half_right, half_both };
+pub const Range = enum { normal, subnormal, extreme, half_left, half_right, half_both, mixed_tiny };
 
 pub const Panel = struct {
     count: usize,
@@ -39,6 +39,7 @@ pub const Panel = struct {
                     for (0..n) |j| self.y[self.yi(0, j)] = 0x1p-70;
                 }
             } else {
+                if (range == .mixed_tiny) self.x[self.xi(7, 4)] = 0x1p-120;
                 if (range == .half_left or range == .half_both) for (&self.x) |*v| {
                     v.* = @as(f16, @floatCast(v.*));
                 };

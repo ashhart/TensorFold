@@ -76,19 +76,6 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const text_here = try tf.qwen27.simd_attention.grouped(a, units, true, form.group, form.kv_heads, paged);
         return .{ .decl = d, .function = fun, .here = text_here, .pre_m5 = if (units) "" else text_here };
     }
-    if (std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ")) {
-        if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device), .pre_m5 = "" };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
-        if (!assemble) return undefined;
-        const source = try a.dupe(u8, sources.sam3_deconv ++ sources.sam3_deconv_baseline);
-        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
-    }
-    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ")) {
-        if (!assemble) return undefined;
-        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_mma.zig").text(a, device), .pre_m5 = "" };
-    }
     if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
         for (@import("contract").lane_q8.sources) |v| {
             if (!std.mem.eql(u8, v.name, d.name)) continue;
@@ -109,6 +96,19 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         const control_text = @import("masked_value_probe.zig").control_source;
         return .{ .decl = d, .function = fun, .here = control_text, .pre_m5 = control_text };
+    }
+    if (std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_gemm.zig").text(a, device), .pre_m5 = "" };
+    }
+    if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {
+        if (!assemble) return undefined;
+        const source = try a.dupe(u8, sources.sam3_deconv ++ sources.sam3_deconv_baseline);
+        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
+    }
+    if (std.mem.startsWith(u8, d.name, "sam3 fp32 mma ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_mma.zig").text(a, device), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "nemotron masked prompt ")) {
         if (!assemble) return undefined;

@@ -67,6 +67,13 @@ pub const Runtime = struct {
     pub fn mark(self: *Runtime) usize {
         return self.tensors.items.len;
     }
+    pub fn observe(self: *Runtime, name_: []const u8, tensor: Tensor, shape: []const usize) !void {
+        const observer = self.observer orelse return;
+        const batched = self.g.batch != null;
+        if (batched) try self.g.endBatch();
+        try observer.write(observer.context, name_, tensor, shape);
+        if (batched) try self.g.beginBatch();
+    }
     pub fn release(self: *Runtime, tensor: Tensor) void {
         for (self.tensors.items, 0..) |t, i| if (t.buffer.contents() == tensor.buffer.contents() and t.offset == tensor.offset) {
             t.deinit();

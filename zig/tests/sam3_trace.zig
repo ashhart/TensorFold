@@ -8,6 +8,8 @@ pub const Trace = struct {
     dir: std.Io.Dir,
     frames: []const usize,
     layers: bool,
+    current_frame: usize = 0,
+    stage: usize = 0,
 
     pub fn init(a: std.mem.Allocator, io: std.Io, path: []const u8, frames: []const usize, layers: bool) !Trace {
         try std.Io.Dir.cwd().createDir(io, path, .default_dir);
@@ -16,6 +18,13 @@ pub const Trace = struct {
 
     pub fn deinit(self: *Trace) void {
         self.dir.close(self.io);
+    }
+
+    pub fn observer(self: *Trace, index: usize) ?sam.observe.Observer {
+        self.current_frame = index;
+        self.stage = 0;
+        if (std.mem.indexOfScalar(usize, self.frames, index) == null) return null;
+        return .{ .context = self, .write = check };
     }
 
     pub fn frame(self: *Trace, session: *sam.Session, image: sam.Image, index: usize) !void {
@@ -56,6 +65,26 @@ pub const Trace = struct {
         try file.writeStreamingAll(self.io, bytes);
     }
 };
+
+fn check(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape: []const usize) !void {
+    const self: *Trace = @ptrCast(@alignCast(context));
+    if (std.mem.startsWith(u8, name, "tracker.")) {
+        var arena = std.heap.ArenaAllocator.init(self.a);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const bytes = try fixture.image(a, &.{.{ .name = name, .dtype = switch (value.dtype) {
+            .f32 => "F32",
+            .f16 => "F16",
+            .bf16 => "BF16",
+        }, .shape = shape, .bytes = value.slice(u8, value.count * value.dtype.size()) }});
+        const path = try std.fmt.allocPrint(a, "frame-{d:0>6}-stage-{d:0>3}-{s}.safetensors", .{ self.current_frame, self.stage, name });
+        self.stage += 1;
+        const file = try self.dir.createFile(self.io, path, .{ .exclusive = true });
+        defer file.close(self.io);
+        try file.writeStreamingAll(self.io, bytes);
+    }
+    try value.checkFinite(name);
+}
 
 const Context = struct { a: std.mem.Allocator, entries: *std.ArrayList(fixture.Entry) };
 
