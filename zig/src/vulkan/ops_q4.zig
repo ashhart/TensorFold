@@ -91,9 +91,9 @@ pub fn project(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: Vi
     return projectAs(o, null, cmds, out, x, w, scales, biases, k, scratch, timeout_ns);
 }
 
-/// `project` over weights repacked by `tile`: one dispatch. The tiled image reads and stores packed bf16.
+/// `project` over weights repacked by `tile`: one dispatch. The tiled image reads and stores packed bf16, or f32 for both x and out (the wide layers).
 pub fn tiledActivation(out: View, x: View) Error!void {
-    if (out.kind != .bf16 or x.kind != .bf16) return error.Invalid;
+    if (out.kind != x.kind or (x.kind != .bf16 and x.kind != .f32)) return error.Invalid;
 }
 
 pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scales: View, biases: View, k: u64, timeout_ns: u64) Error!void {
@@ -103,7 +103,7 @@ pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scale
     const range = o.dev.properties.limits.maxStorageBufferRange;
     if (x.byteLen() > range or out.byteLen() > range or w.byteLen() > range) return error.TooLarge;
     if (qmmVariant(x, w) != .vec4) return error.Misaligned;
-    const pipe = &o.qmm_q4_tile;
+    const pipe = if (out.kind == .f32) &o.qmm_q4_tile_f32 else &o.qmm_q4_tile;
     try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
     const p = try q4Push(g.m, g.n, k);
     try pipe.run(cmds, std.mem.asBytes(&p), ops_mod.dispatchGroups(p.count, pipe.local[0]), timeout_ns);
@@ -252,7 +252,7 @@ test "tiled storage holds n rounded up to whole tiles of columns" {
     try testing.expectError(error.Invalid, projectGeometry(out, x, w, scales, biases, 128, .rows));
 }
 
-test "the tiled image refuses a float32 activation" {
+test "the tiled image takes matching bf16 or f32 activations and refuses a mix" {
     const dev: @import("device.zig").Device = undefined;
     const buf = @import("memory.zig").Buffer{ .dev = &dev, .handle = null, .memory = null, .len = 1 << 20, .kind = .device, .mapped = null, .coherent = false };
     const out = try View.init(&buf, .bf16, 0, 3 * 100);
@@ -260,7 +260,9 @@ test "the tiled image refuses a float32 activation" {
     try tiledActivation(out, x);
     const f32x = try View.init(&buf, .f32, 8192, 3 * 128);
     const f32out = try View.init(&buf, .f32, 16384, 3 * 100);
-    try testing.expectError(error.Invalid, tiledActivation(f32out, f32x));
+    try tiledActivation(f32out, f32x);
+    try testing.expectError(error.Invalid, tiledActivation(f32out, x));
+    try testing.expectError(error.Invalid, tiledActivation(out, f32x));
 }
 
 test "the vec4 qmm image is chosen only when every vector load is 16-byte aligned" {
