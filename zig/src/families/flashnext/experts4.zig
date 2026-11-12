@@ -63,7 +63,7 @@ const half_codes =
 ;
 
 /// Every expert width in `consts` (WB, WG, SWB, SWG) is 4 bits in groups of 32.
-fn q4(consts: []const Const) bool {
+pub fn q4(consts: []const Const) bool {
     if (consts.len != 4) return false;
     for (consts) |c| {
         const want: usize = if (std.mem.endsWith(u8, c.name, "WB")) 4 else if (std.mem.endsWith(u8, c.name, "WG")) 32 else return false;
@@ -97,6 +97,24 @@ pub fn gateApplies(text: []const u8, consts: []const Const) bool {
 pub fn gated(a: std.mem.Allocator, text: []const u8) ![]const u8 {
     const p = try std.mem.replaceOwned(u8, a, text, gate_param, gate_param ++ "  const constant int32_t* GROWS [[buffer(17)]],\n");
     return std.mem.replaceOwned(u8, a, p, gate_row, gate_row ++ "  if (r >= GROWS[0]) return;\n");
+}
+
+/// Each scale and bias read of the 4/32 expert kernels, and the same pair through a 16-bit index (scale_index.zig).
+const index_reads = [_][2][]const u8{
+    .{ "ag[row] += fma(float(GSp[at]), dg, float(GBp[at]) * sum);", "const uint gi = uint(((const device ushort*)GSp)[at]) * 2u; ag[row] += fma(float(GBp[gi]), dg, float(GBp[gi + 1]) * sum);" },
+    .{ "au[row] += fma(float(USp[at]), du, float(UBp[at]) * sum);", "const uint ui = uint(((const device ushort*)USp)[at]) * 2u; au[row] += fma(float(UBp[ui]), du, float(UBp[ui + 1]) * sum);" },
+    .{ "acc += fma(float(S[at]), d, float(B[at]) * sums[c]);", "{ const uint si = uint(((const device ushort*)S)[at]) * 2u; acc += fma(float(B[si]), d, float(B[si + 1]) * sums[c]); }" },
+    .{ "p1[t] = fma(float(S[at]), d, float(B[at]) * sum1);", "{ const uint si = uint(((const device ushort*)S)[at]) * 2u; p1[t] = fma(float(B[si]), d, float(B[si + 1]) * sum1); }" },
+    .{ "acc += fma(float(S[at]), d, float(B[at]) * sum0);", "{ const uint si = uint(((const device ushort*)S)[at]) * 2u; acc += fma(float(B[si]), d, float(B[si + 1]) * sum0); }" },
+};
+
+/// `text` at 4/32 reading each scale and bias through the index (the scales' slot) and the table (the biases').
+pub fn indexed(a: std.mem.Allocator, text: []const u8, consts: []const Const) ![]const u8 {
+    if (!q4(consts)) return error.KernelPatch;
+    var out = text;
+    for (index_reads) |r| out = try std.mem.replaceOwned(u8, a, out, r[0], r[1]);
+    for ([_][]const u8{ "Sp[at])", "float(S[at])" }) |direct| if (std.mem.indexOf(u8, out, direct) != null) return error.KernelPatch;
+    return out;
 }
 
 const calls = [2][2][]const u8{
@@ -158,6 +176,25 @@ test "both recorded expert kernels take half nibbles at 4/32 only, once" {
         const out = try half(arena.allocator(), src.text);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, out, half_mark));
         try std.testing.expect(!halfApplies(out, &at4)); // never twice
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "both recorded expert kernels read every scale and bias through the index once patched" {
+    const ks = @import("kernel_sources");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const at4 = [_]Const{ .{ .name = "WB", .value = 4 }, .{ .name = "WG", .value = 32 }, .{ .name = "SWB", .value = 4 }, .{ .name = "SWG", .value = 32 } };
+    var seen: usize = 0;
+    for (ks.flashnext_gen.sources) |src| {
+        if (std.mem.indexOf(u8, src.name, "qa_expert_") == null) continue;
+        seen += 1;
+        const full = if (applies(src.text, &at4)) try balanced(a, src.text) else src.text;
+        const out = try indexed(a, full, &at4);
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, out, "float(S[at])"));
+        try std.testing.expect(std.mem.count(u8, out, "(const device ushort*)") >= 3);
+        try std.testing.expectError(error.KernelPatch, indexed(a, full, at4[0..2]));
     }
     try std.testing.expectEqual(@as(usize, 2), seen);
 }

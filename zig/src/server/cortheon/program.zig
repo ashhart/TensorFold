@@ -111,8 +111,8 @@ fn paths(text: []const u8) Paths {
         if (dot == 0 or dot + 1 >= token.len) continue;
         const ext = token[dot + 1 ..];
         var named = true;
-        for (token[0..dot]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '/' or ch == '-')) {
-            named = false;
+        for (token[0..dot]) |ch| if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '/' or ch == '\\' or ch == '-')) {
+            named = false; // a backslash separates a windows path the way a slash does
         };
         if (!named) continue;
         var tech = false;
@@ -120,7 +120,7 @@ fn paths(text: []const u8) Paths {
         if (tech) continue;
         for (code_ext) |e| if (std.ascii.eqlIgnoreCase(ext, e)) {
             out.code = true;
-            if (std.mem.indexOfScalar(u8, token, '/') != null) out.local_code = true;
+            if (std.mem.indexOfAny(u8, token, "/\\") != null) out.local_code = true;
         };
         for (doc_ext) |e| if (std.ascii.eqlIgnoreCase(ext, e)) {
             out.document = true;
@@ -141,7 +141,7 @@ fn requestsChange(a: Allocator, goal: []const u8) bool {
     }
     var tokens = std.mem.tokenizeAny(u8, masked, " \t\r\n");
     while (tokens.next()) |t| {
-        if (std.mem.indexOfScalar(u8, t, '.') != null and std.mem.indexOfScalar(u8, t, '/') != null) {
+        if (std.mem.indexOfScalar(u8, t, '.') != null and std.mem.indexOfAny(u8, t, "/\\") != null) { // a windows path is set aside the way a slash path is
             const at = @intFromPtr(t.ptr) - @intFromPtr(masked.ptr);
             @memset(masked[at .. at + t.len], ' ');
         }
@@ -187,22 +187,25 @@ fn inList(w: []const u8, list: []const []const u8) bool {
 
 /// The user's own words: `text` without the `<tag>...</tag>` blocks harnesses wrap their context in.
 pub fn ownWords(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    var closers = try closersOf(a, text);
+    defer {
+        var it = closers.valueIterator();
+        while (it.next()) |c| c.at.deinit(a);
+        closers.deinit(a);
+    }
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < text.len) {
         if (text[i] == '<' and i + 1 < text.len and std.ascii.isAlphabetic(text[i + 1])) {
             var j = i + 1;
-            while (j < text.len and (std.ascii.isAlphanumeric(text[j]) or text[j] == '-' or text[j] == '_')) j += 1;
-            const name = text[i + 1 .. j];
-            if (j < text.len and (text[j] == '>' or text[j] == ' ')) {
-                var close_buf: [64]u8 = undefined;
-                if (std.fmt.bufPrint(&close_buf, "</{s}>", .{name})) |closer| {
-                    if (std.mem.indexOfPos(u8, text, j, closer)) |end| {
-                        i = end + closer.len;
-                        continue;
-                    }
-                } else |_| {}
-            }
+            while (j < text.len and isNameByte(text[j])) j += 1;
+            if (j < text.len and (text[j] == '>' or text[j] == ' ')) if (closers.getPtr(text[i + 1 .. j])) |c| {
+                while (c.next < c.at.items.len and c.at.items[c.next] < j) c.next += 1; // openers only move forward
+                if (c.next < c.at.items.len) {
+                    i = c.at.items[c.next] + (j - i) + 2; // past `</name>`
+                    continue;
+                }
+            };
         }
         try out.append(a, text[i]);
         i += 1;
@@ -210,9 +213,41 @@ pub fn ownWords(a: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return std.mem.trim(u8, out.items, " \t\r\n");
 }
 
+/// The longest tag name whose closer still counts: `</name>` in 64 bytes.
+const max_name = 64 - "</>".len;
+
+fn isNameByte(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_';
+}
+
+/// Where a name's closers start, in order, and the first one an opener has not yet passed.
+const Closers = struct { at: std.ArrayList(usize) = .empty, next: usize = 0 };
+
+/// Every `</name>` in `text`, found in one pass so that no opener rescans the rest of it.
+fn closersOf(a: Allocator, text: []const u8) Allocator.Error!std.StringHashMapUnmanaged(Closers) {
+    var map: std.StringHashMapUnmanaged(Closers) = .empty;
+    errdefer {
+        var it = map.valueIterator();
+        while (it.next()) |c| c.at.deinit(a);
+        map.deinit(a);
+    }
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, "</")) |lt| {
+        var j = lt + 2;
+        while (j < text.len and isNameByte(text[j])) j += 1;
+        from = j; // a name holds no '<', so the next closer starts at or after j
+        const name = text[lt + 2 .. j];
+        if (name.len == 0 or name.len > max_name or j == text.len or text[j] != '>') continue;
+        const slot = try map.getOrPut(a, name);
+        if (!slot.found_existing) slot.value_ptr.* = .{};
+        try slot.value_ptr.at.append(a, lt);
+    }
+    return map;
+}
+
 /// Whether a tool-less request only asks to transform given text (a harness's title, summary or hint).
 pub fn isUtility(text: []const u8) bool {
-    const head = text[0..@min(text.len, 160)];
+    const head = text[0..@import("html.zig").cutAt(text, 160)]; // the cap does not split a character
     var it = std.mem.tokenizeAny(u8, head, " \t\r\n.,;:!?()[]{}\"'`");
     var n: usize = 0;
     while (it.next()) |w| : (n += 1) {
@@ -321,6 +356,12 @@ test "code changes, research and plain answers classify as Cortheon does" {
     try std.testing.expect(!hello.frontier and hello.quick);
     try std.testing.expectEqual(Kind.general, classify(a, "Use node.js to serve pages").kind);
     try std.testing.expectEqual(Kind.documents, classify(a, "Summarize notes.md").kind);
+    const windows = classify(a, "Explain src\\app.py");
+    try std.testing.expectEqual(Kind.code, windows.kind);
+    try std.testing.expectEqual(Deliverable.code_understanding, windows.deliverable);
+    const named = classify(a, "Explain src\\fix.py");
+    try std.testing.expectEqual(Kind.code, named.kind);
+    try std.testing.expectEqual(Deliverable.code_understanding, named.deliverable);
 }
 
 test "harness context and transform asks do not read as research" {
@@ -336,6 +377,58 @@ test "harness context and transform asks do not read as research" {
     try std.testing.expect(isUtility("Compress into one routing hint of at most 12 words: WHEN to use"));
     try std.testing.expect(isUtility("Generate a short title for this conversation"));
     try std.testing.expect(!isUtility("Fix the failing test in src/app.py and explain why it failed"));
+    var glued: std.ArrayList(u8) = .empty;
+    try glued.appendSlice(arena.allocator(), "w w w w w w ");
+    while (glued.items.len < 150) try glued.append(arena.allocator(), ' ');
+    try glued.appendSlice(arena.allocator(), "summarize\u{20ac}");
+    try std.testing.expect(isUtility(glued.items));
+}
+
+test "own words drop each block through its first closer, and keep what does not close" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const name: []const u8 = comptime blk: { // the longest name whose closer fits
+        var s: [61]u8 = undefined;
+        @memset(&s, 'n');
+        const done = s;
+        break :blk &done;
+    };
+    for ([_][2][]const u8{
+        .{ "<a>x<a>y</a>z</a>w", "z</a>w" },
+        .{ "<a>1<b>2</a>3</b>4", "3</b>4" },
+        .{ "<ctx id=1>x</ctx>y", "y" },
+        .{ "</b> <b>x", "</b> <b>x" },
+        .{ "<B>y</b>z <b>x <B>y</b>", "<B>y</b>z" },
+        .{ "<ctx/>x</ctx>", "<ctx/>x</ctx>" },
+        .{ "<ab>y</a>z", "<ab>y</a>z" },
+        .{ "<a>z</ab>w", "<a>z</ab>w" },
+        .{ "<" ++ name ++ ">x</" ++ name ++ ">y", "y" },
+        .{ "<" ++ name ++ "n>x</" ++ name ++ "n>y", "<" ++ name ++ "n>x</" ++ name ++ "n>y" },
+    }) |case| try std.testing.expectEqualStrings(case[1], try ownWords(a, case[0]));
+}
+
+const Unclosed = struct {
+    texts: [2][]u8,
+    fn run(u: *const Unclosed, i: usize) anyerror!void {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try ownWords(arena.allocator(), u.texts[i]);
+    }
+};
+
+test "a message of unclosed tags reads its own words in linear time" {
+    for ([_][]const u8{ "<a ", "<a>x</b>", "<a1 <a2 <a3 <a4 " }) |unit| {
+        var u: Unclosed = .{ .texts = undefined };
+        for (&u.texts, [_]usize{ 256 << 10, 2 << 20 }) |*text, size| {
+            text.* = try std.testing.allocator.alloc(u8, size);
+            for (text.*, 0..) |*c, i| c.* = unit[i % unit.len];
+        }
+        defer for (u.texts) |text| std.testing.allocator.free(text);
+        const f = try @import("../linear_time.zig").fastest(3, &u, Unclosed.run);
+        try std.testing.expect(f.ns[1] < 5 * std.time.ns_per_s); // 2 MiB; a request may carry 32
+        try std.testing.expect(f.work[1] < 24 * @max(f.work[0], 1)); // 8x the bytes: near 8x the work, not a quadratic's 64x
+    }
 }
 
 test "the note lists the stages in order and adds research for frontier tasks" {

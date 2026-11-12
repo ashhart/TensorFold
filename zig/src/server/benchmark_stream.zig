@@ -10,7 +10,7 @@ pub const user_agent = "TensorFold-benchmark/1";
 /// A 512 KiB line plus its line break fits, so the line limits are checked here, not by the reader.
 const read_buffer = 576 << 10;
 
-pub const Target = struct { base: []const u8, served: []const u8 };
+pub const Target = struct { base: []const u8, served: []const u8, thinking_switch: ?bool = null, thinking_applicable: ?bool = null };
 pub const Opts = struct { tokens: u32, reps: u32, temperatures: []const f64, serial: bool, timeout_s: f64, chat_only: bool = false };
 /// ``call`` after each attempt; ``said`` after one the server refused, with its reason for the terminal only.
 pub const Progress = struct { ctx: *anyopaque, call: *const fn (*anyopaque, *const suite.Sample) void, said: ?*const fn (*anyopaque, *const suite.Sample, []const u8) void = null };
@@ -46,6 +46,10 @@ pub fn endpoint(a: Allocator, base: []const u8, chat: bool, problem: *[]const u8
 
 /// The request body in its fixed key order, written with ``json.dumps`` defaults.
 pub fn body(a: Allocator, served: []const u8, f: suite.Fixture, tokens: u32, t: f64, seed: u32, serial: bool) ![]u8 {
+    return bodyMode(a, served, f, tokens, t, seed, serial, null, null);
+}
+
+fn bodyMode(a: Allocator, served: []const u8, f: suite.Fixture, tokens: u32, t: f64, seed: u32, serial: bool, thinking_switch: ?bool, thinking_applicable: ?bool) ![]u8 {
     const o = try json.newObject(a);
     try o.put(a, "model", .{ .string = served });
     try o.put(a, "max_tokens", try json.intValue(a, tokens));
@@ -55,6 +59,9 @@ pub fn body(a: Allocator, served: []const u8, f: suite.Fixture, tokens: u32, t: 
     const so = try json.newObject(a);
     try so.put(a, "include_usage", .{ .bool = true });
     try o.put(a, "stream_options", .{ .object = so });
+    // the protocol names every draw setting: a served default (the instruct set's presence_penalty 1.5) shapes none
+    try o.put(a, "presence_penalty", .{ .float = 0 });
+    try o.put(a, "frequency_penalty", .{ .float = 0 });
     if (t > 0) {
         try o.put(a, "top_k", try json.intValue(a, 20));
         try o.put(a, "top_p", .{ .float = 0.95 });
@@ -67,9 +74,11 @@ pub fn body(a: Allocator, served: []const u8, f: suite.Fixture, tokens: u32, t: 
         const messages = try a.alloc(json.Value, 1);
         messages[0] = .{ .object = m };
         try o.put(a, "messages", .{ .array = messages });
-        const kw = try json.newObject(a);
-        try kw.put(a, "enable_thinking", .{ .bool = false });
-        try o.put(a, "chat_template_kwargs", .{ .object = kw });
+        if (thinking_switch != false and thinking_applicable != false) {
+            const kw = try json.newObject(a);
+            try kw.put(a, "enable_thinking", .{ .bool = false });
+            try o.put(a, "chat_template_kwargs", .{ .object = kw });
+        }
     } else try o.put(a, "prompt", .{ .string = f.prompt });
     return json.stringify(a, .{ .object = o }, .{});
 }
@@ -250,7 +259,7 @@ pub fn attempt(a: Allocator, io: std.Io, client: *std.http.Client, t: Target, o:
         var problem: []const u8 = "";
         const url = (endpoint(ta, t.base, request.chat, &problem) catch break :blk false) orelse break :blk false;
         x.uri = std.Uri.parse(url) catch break :blk false;
-        x.body = body(ta, t.served, request, o.tokens, temperature, seed, o.serial) catch break :blk false;
+        x.body = bodyMode(ta, t.served, request, o.tokens, temperature, seed, o.serial, t.thinking_switch, t.thinking_applicable) catch break :blk false;
         x.stream = sse.Stream.init(ta) catch break :blk false;
         break :blk true;
     };
@@ -372,4 +381,39 @@ pub fn fetch(a: Allocator, io: std.Io, client: *std.http.Client, f: Fetch) Fetch
         .deadline => .{ .failed = .deadline },
         .unavailable => .{ .failed = .network },
     };
+}
+
+/// Only the selected model's consistent explicit boolean is a known thinking switch.
+pub fn thinkingSwitch(document: json.Value, model: []const u8) ?bool {
+    return capability(document, model, "thinking_switch");
+}
+
+fn capability(document: json.Value, model: []const u8, field: []const u8) ?bool {
+    const data = document.get("data") orelse return null;
+    if (data != .array) return null;
+    var found: ?bool = null;
+    for (data.array) |entry| {
+        if (!std.mem.eql(u8, entry.strField("id") orelse "", model)) continue;
+        const caps = entry.get("capabilities") orelse return null;
+        const bit = caps.get(field) orelse return null;
+        if (bit != .bool) return null;
+        if (found) |previous| if (previous != bit.bool) return null;
+        found = bit.bool;
+    }
+    return found;
+}
+
+pub const Thinking = struct { switchable: ?bool = null, applicable: ?bool = null };
+
+/// One bounded discovery before a benchmark; an unavailable or old server remains unknown.
+pub fn discoverThinking(a: Allocator, io: std.Io, target: Target) !Thinking {
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
+    defer client.deinit();
+    const base = std.mem.trimEnd(u8, target.base, "/");
+    const url = try std.fmt.allocPrint(a, "{s}{s}/models", .{ base, if (std.mem.endsWith(u8, base, "/v1")) "" else "/v1" });
+    const response = fetch(a, io, &client, .{ .url = url, .limit = 1 << 20, .timeout_s = 5 });
+    if (response.failed != .none or response.status != 200) return .{};
+    const parsed = try json.parse(a, response.body);
+    if (parsed != .ok) return .{};
+    return .{ .switchable = thinkingSwitch(parsed.ok, target.served), .applicable = capability(parsed.ok, target.served, "thinking_applicable") };
 }

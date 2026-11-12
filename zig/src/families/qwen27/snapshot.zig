@@ -139,14 +139,10 @@ fn parts(r: *const Runner, slot: u32, ring: ?Ring, at: u32, list: *std.ArrayList
         };
         try list.append(a, .{ .buffer = span.buffer, .offset = span.offset, .len = span.bytes });
     };
-    const row_bytes = r.model.config.head_dim * @sizeOf(u16);
-    for (0..r.caches.len / r.slots) |layer| {
-        const cache = r.caches[layer * r.slots + slot];
-        for ([_]@import("projection.zig").Ref{ cache.keys, cache.values }, [_]u32{ cache.key_stride, cache.value_stride }) |ref, stride| {
-            const head_stride = @as(usize, if (stride == 0) cache.capacity * r.model.config.head_dim else stride) * 2;
-            for (0..r.model.config.kv_heads) |head| try list.append(a, .{ .buffer = ref.buffer, .offset = ref.offset + head * head_stride, .len = @as(usize, at) * row_bytes });
-        }
-    }
+    var spans: std.ArrayList(@import("decode_round.zig").KvSpan) = .empty;
+    defer spans.deinit(a);
+    try r.kvSpans(a, slot, at, &spans);
+    for (spans.items) |x| try list.append(a, .{ .buffer = x.buffer, .offset = x.offset, .len = x.len });
     if (ring) |g| try list.append(a, .{ .buffer = g.buf, .offset = 0, .len = g.bytes(at) });
 }
 
@@ -243,6 +239,7 @@ pub fn restoreSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, st:
     if (st.bytes != slotBytes(r, ring, st.at) or st.at > r.capacity) return error.SnapshotLayout;
     try st.landed();
     try r.reset(slot);
+    try r.cover(slot, st.at); // a paged slot's pages for the state's rows before the copy writes them
     try copy(a, r, slot, ring, st, false);
     r.offsets[slot] = st.at;
     if (ring) |g| g.end.* = st.draft_end;
@@ -255,6 +252,7 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
     if (from == to or r.failed or r.active != null or from >= r.slots or to >= r.slots or (from_ring == null) != (to_ring == null)) return error.BadSlotMove;
     if (from_ring) |g| if (g.end.* != at) return error.NotAtMark;
     try r.reset(to);
+    try r.cover(to, at);
     var src: std.ArrayList(Part) = .empty;
     defer src.deinit(a);
     var dst: std.ArrayList(Part) = .empty;

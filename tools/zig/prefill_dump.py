@@ -1,4 +1,4 @@
-"""One prompt chunk through prefill_forward.py, its rows saved for tf-nemotron-prefill-check: [layers + 2, L, D] bf16 bits."""
+"""One prompt chunk through prefill_forward.py, rows saved for tf-nemotron-prefill-check: [layers+2, L, D] bf16 bits."""
 
 from __future__ import annotations
 

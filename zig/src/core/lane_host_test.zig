@@ -328,10 +328,26 @@ test "a learn request steps while the engine idles, its events in order; a host 
     defer refused.tags.deinit(gpa);
     var bare = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
     try std.testing.expectError(error.Unsupported, bare.engine().learn(&learn, refused.sink()));
+    const audit: api.LearnRequest = .{ .audit = &.{ .probe_only = true, .neurons = &.{}, .probes = &.{}, .peaks = &.{} } };
+    try std.testing.expectError(error.Unsupported, bare.engine().learn(&audit, refused.sink()));
 
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     var fake: FakeLearner = .{};
     host.learner = .{ .ctx = &fake, .begin = FakeLearner.begin, .step = FakeLearner.step, .abort = FakeLearner.abort };
+    try std.testing.expectError(error.Unsupported, host.engine().learn(&audit, refused.sink()));
+    host.learner.?.read_only_audit = true;
+    host.stale = true;
+    try std.testing.expectError(error.Busy, host.engine().learn(&audit, refused.sink()));
+    host.stale = false;
+    var stale_audit: LearnBox = .{};
+    defer stale_audit.tags.deinit(gpa);
+    try host.engine().learn(&audit, stale_audit.sink());
+    host.stale = true;
+    @import("lane_host_learn.zig").step(&host);
+    stale_audit.wait();
+    try std.testing.expectEqualSlices(std.meta.Tag(api.LearnEvent), &.{.done}, stale_audit.tags.items);
+    try std.testing.expect(host.stale and fake.examples == 0);
+    host.stale = false;
     try host.start();
     defer host.stop();
     var box: LearnBox = .{};
@@ -506,6 +522,11 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
             p.asked.store(prompt + max_tokens, .monotonic);
             return p.room.load(.monotonic);
         }
+        /// What the host asked about, once it has asked: a loaded machine asks late, so wait up to 5 s for it.
+        fn waitAsked(p: *@This()) u32 {
+            for (0..5000) |_| if (p.asked.load(.monotonic) != 0) break else std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            return p.asked.load(.monotonic);
+        }
     };
     var pool: Pool = .{};
     const admit: api.Admit = .{ .ctx = &pool, .fits = Pool.fits };
@@ -550,7 +571,7 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
     std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
     try std.testing.expectEqual(@as(usize, 0), b.state()[0]); // a lane is free, the pool is not: it waits
     try std.testing.expectEqual(@as(?Reason, null), b.state()[1]);
-    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.asked.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, prompt.len + 4), pool.waitAsked());
     e.cancel(1);
     try std.testing.expectEqual(Reason.cancelled, a.wait());
     try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted
@@ -561,6 +582,8 @@ test {
     _ = @import("lane_host_fail_test.zig");
     _ = @import("lane_host_lone_test.zig");
     _ = @import("lane_host_admit_test.zig");
+    _ = @import("lane_host_ledger_test.zig");
+    _ = @import("kv_ledger.zig");
     _ = @import("lane_host_recall_test.zig");
     _ = @import("lane_host_fill_test.zig");
     _ = @import("lane_host_status_test.zig");

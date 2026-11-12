@@ -2,6 +2,8 @@
 pub const config = @import("config.zig");
 pub const host = @import("host.zig");
 pub const noise = @import("noise.zig");
+pub const schedule = @import("schedule.zig");
+pub const generate = @import("generate.zig");
 pub const weights = @import("weights.zig");
 pub const kernels = @import("kernels.zig");
 pub const model = @import("model.zig");
@@ -21,6 +23,8 @@ test {
     _ = config;
     _ = host;
     _ = noise;
+    _ = schedule;
+    _ = generate;
     _ = weights;
     _ = kernels;
     _ = model;

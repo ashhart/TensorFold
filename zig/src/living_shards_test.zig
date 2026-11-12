@@ -4,6 +4,8 @@ const living = @import("living");
 const host4 = @import("core/affine4_host.zig");
 
 test {
+    _ = @import("living_restart_test.zig");
+    _ = @import("living_fixed_shards_test.zig");
     _ = @import("families/nemotron/pocket_shards_test.zig");
     _ = @import("families/flashnext/pocket_shards_test.zig");
     _ = @import("families/qwen3_5/pocket_shards_test.zig");

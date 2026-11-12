@@ -19,19 +19,35 @@ test "the code objects load on this device and every kernel the launchers use re
 
 test {
     _ = @import("kernel_tests/gdn.zig");
+    _ = @import("kernel_tests/gdn_bits.zig");
     _ = @import("kernel_tests/mamba.zig");
     _ = @import("kernel_tests/decode.zig");
+    _ = @import("kernel_tests/tail_pin.zig");
     _ = @import("kernel_tests/chain.zig");
     _ = @import("kernel_tests/attention.zig");
+    _ = @import("kernel_tests/attention_pin.zig");
+    _ = @import("kernel_tests/attention_edge.zig");
+    _ = @import("kernel_tests/stats.zig");
+    _ = @import("kernel_tests/tap.zig");
+    _ = @import("kernel_tests/draft.zig");
     _ = @import("kernel_tests/ops.zig");
+    _ = @import("kernel_tests/conv_split.zig");
+    _ = @import("kernel_tests/dense.zig");
+    _ = @import("kernel_tests/silu_fuse.zig");
     _ = @import("kernel_tests/argmax.zig");
+    _ = @import("kernel_tests/embed.zig");
     _ = @import("kernel_tests/tp.zig");
     _ = @import("kernel_tests/affine/affine.zig");
     _ = @import("kernel_tests/affine/rows.zig");
     _ = @import("kernel_tests/affine/order.zig");
+    _ = @import("kernel_tests/affine/round.zig");
+    _ = @import("kernel_tests/affine/layout.zig");
+    _ = @import("kernel_tests/affine/golden.zig");
     _ = @import("kernel_tests/graph_split.zig");
     _ = @import("kernel_tests/flashnext.zig");
     _ = @import("kernel_tests/flashnext_attn.zig");
+    _ = @import("kernel_tests/moe_gate.zig");
+    _ = @import("kernel_tests/flashnext_sparse.zig");
     _ = @import("kernel_tests/nemotron/moe.zig");
     _ = @import("kernel_tests/nemotron/pick.zig");
     _ = @import("kernel_tests/nemotron/attention.zig");

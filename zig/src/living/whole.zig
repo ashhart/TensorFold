@@ -12,8 +12,8 @@ pub const Method = enum { pocket, edit, probe };
 
 /// The method the environment picks for whole lessons.
 pub fn method() Method {
-    if (platform.c.getenv("TF_SLIDE_PROBE") != null) return .probe;
-    if (platform.c.getenv("TF_SLIDE_EDIT") != null) return .edit;
+    if (@import("profile").lookup("TF_SLIDE_PROBE") != null) return .probe;
+    if (@import("profile").lookup("TF_SLIDE_EDIT") != null) return .edit;
     return .pocket;
 }
 
@@ -141,6 +141,7 @@ fn liveReplay(l: anytype) ![]const Example {
 fn startPocket(l: anytype) !void {
     l.stay = .{ l.owned.keep, l.owned.near, try liveReplay(l), l.owned.unasked, l.extra.items };
     l.pockets.lesson = l.last_lesson;
+    l.pockets.against = l.owned.against;
     l.pockets.replay_lessons = l.live_of.items;
     try l.pockets.begin(l.trainer.?, hooks(l), l.answers, l.owned.asked, l.owned.held, &l.stay);
     l.pocketed = true;
@@ -307,4 +308,14 @@ pub fn foldOpen(l: anytype) !void {
     l.can_undo = false;
     const back = try l.recalls(l.owned.held, false);
     std.log.info("slide: the edit is in the model's own codes, live and in its shards, in {d:.1} s; its held questions {s} with no block", .{ H.seconds(l.io) - t0, if (back) "come back" else "do not come back" });
+}
+
+/// The server owns the verdict; unsupported hosts and comparison placement never stage a removal.
+pub fn shrink(l: anytype) !@import("learner.zig").Step {
+    var staged = false;
+    if (l.pocketed and l.trainer != null) {
+        staged = try @import("pocket_shrink.zig").act(&l.pockets, l.trainer.?, hooks(l), @fromBackingInt(@intCast(@backingInt(l.lesson.shrink))));
+    }
+    const changed = l.pocketed and l.pockets.locate.enabled and (staged or l.lesson.shrink == .restore);
+    return .{ .done = true, .changed = changed, .report = .{ .learned = .{ .recalled = l.edited, .steps = 0, .loss = 0, .candidate = staged } } };
 }

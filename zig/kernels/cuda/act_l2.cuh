@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include "common/vec.cuh"
+#include "common/act.cuh"
 
 namespace tf_act_l2 {
 
@@ -26,8 +27,8 @@ using tf_common::unpack8;
 using tf_common::pack8;
 
 // torch's fp32 sigmoid and silu: 1 / (1 + exp(-x)), x / (1 + exp(-x)), IEEE division.
-__device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
-__device__ __forceinline__ float silu(float x) { return __fdiv_rn(x, __fadd_rn(1.f, expf(-x))); }
+__device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn(x); }
+__device__ __forceinline__ float silu(float x) { return tf_common::silu_rn(x); }
 
 // 1 / sqrt(sum + eps) of the row's squares: a thread's fma chain, the warp's xor tree, the 8 warps' tree (IEEE).
 __device__ __forceinline__ float inv_l2(const float (&v)[MOST][8], float eps) {

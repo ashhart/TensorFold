@@ -5,6 +5,8 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
+#include "norms_tail.cuh"
 
 namespace tf_norms {
 
@@ -46,7 +48,7 @@ __device__ __forceinline__ float inv_rms(float part, int width, float eps) {
     if (threadIdx.x < 32) {
         float s = warps[threadIdx.x];
         for (int m = 16; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-        if (threadIdx.x == 0) inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
+        if (threadIdx.x == 0) inv = tf_common::rms_scale(s, width, eps);
     }
     __syncthreads();
     const float r = inv;
@@ -216,23 +218,9 @@ namespace tf_norms {
 constexpr int VNT = 256;
 constexpr int VEC_MOST = 4; // 8,192 wide
 
-__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float2 t = __bfloat1622float2(h[i]);
-        f[2 * i] = t.x;
-        f[2 * i + 1] = t.y;
-    }
-}
+using tf_common::unpack8;
 
-__device__ __forceinline__ uint4 pack8(const float* f) {
-    uint4 u;
-    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
-    return u;
-}
+using tf_common::pack8;
 
 __device__ __forceinline__ void load8f(const float* p, float* f) {
     const float4 a = reinterpret_cast<const float4*>(p)[0];
@@ -248,17 +236,7 @@ __device__ __forceinline__ void store8f(float* p, const float* f) {
 // 1 / sqrt(sum / width + eps), IEEE division and square root, over a VNT-thread block: warp trees, then the 8 warps'.
 template <bool ONCE = false>
 __device__ __forceinline__ float inv_rms_v(float part, int width, float eps) {
-    __shared__ float warps[VNT / 32];
-    for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    if ((threadIdx.x & 31) == 0) warps[threadIdx.x >> 5] = part;
-    __syncthreads();
-    // every warp folds the warps' sums in the same tree, so each holds the same total: no broadcast
-    float s = (threadIdx.x & 31) < VNT / 32 ? warps[threadIdx.x & 31] : 0.f;
-    for (int m = 4; m > 0; m >>= 1) s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, m));
-    s = __shfl_sync(0xFFFFFFFFu, s, 0);
-    const float r = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(width)), eps)));
-    if constexpr (!ONCE) __syncthreads(); // `warps` is reused by a second norm in the same block
-    return r;
+    return tf_rms_tail::inv_rms<ONCE>(part, width, eps);
 }
 
 }  // namespace tf_norms
@@ -358,17 +336,7 @@ __device__ __forceinline__ void load8w(const float* p, float* f) { load8f(p, f);
 __device__ __forceinline__ void load8w(const __nv_bfloat16* p, float* f) { unpack8(*reinterpret_cast<const uint4*>(p), f); }
 
 // A thread's 8 stored outputs summed in order, then the group's 8 lanes in a fixed tree (every lane of the warp calls).
-__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
-    float f[8];
-    unpack8(packed, f);
-    float s = 0.f;
-    if (live)
-#pragma unroll
-        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
-    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
-    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
-}
+using tf_common::group_sum8;
 
 // h = bf16(x + r) (r null: h = x), y = bf16(rms(h) * w), xs y's 64-value sums; width % 64, 16-byte loads.
 template <typename WT>
@@ -467,7 +435,7 @@ __device__ __forceinline__ void gated_rms(const __nv_bfloat16* __restrict__ y, l
     for (int i = 0; i < 8; ++i) part = __fmaf_rn(yv[i], yv[i], part);
 #pragma unroll
     for (int m = L / 2; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-    const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DV)), eps)));
+    const float inv = tf_common::rms_scale(part, DV, eps);
     float o[8];
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
@@ -505,7 +473,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_256(const __
 }
 
 // The bf16 residual's tails (norms_tail.cuh): a norm on the branch before the add, a bf16 scalar on the sum.
-#include "norms_tail.cuh"
 
 // h = bf16(r + bf16(rms(x) wb)) [* sc], y = bf16(rms(h) w), xs y's 64-value sums: each norm rounded once.
 extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf16h_tail(

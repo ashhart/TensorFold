@@ -45,7 +45,7 @@ pub const Weights = struct {
         gpa.free(w.layers);
     }
 
-    fn alloc(w: *Weights, bytes: usize) !u64 {
+    pub fn alloc(w: *Weights, bytes: usize) !u64 {
         const at = aligned(w.arena_at);
         if (at + bytes > w.arena.len) return error.ArenaExhausted;
         w.arena_at = at + bytes;
@@ -53,16 +53,16 @@ pub const Weights = struct {
     }
 };
 
-/// The drafter's widths the loader needs (cuda_draft.zig's Config).
-pub const Shape = struct { hidden: usize, intermediate: usize, layers: usize, vocab: usize, q_width: usize, kv_width: usize, head_dim: usize, dynamic: usize, rank: usize, taps: usize };
+/// The drafter's widths the loader needs; `dflash2`: its conv kernels and selector too (DSpine's bridge loads apart).
+pub const Shape = struct { hidden: usize, intermediate: usize, layers: usize, vocab: usize, q_width: usize, kv_width: usize, head_dim: usize, dynamic: usize, rank: usize, taps: usize, dflash2: bool = true };
 
-fn packedBytes(n: usize, k: usize) usize {
+pub fn packedBytes(n: usize, k: usize) usize {
     const l = Affine4.layout(n, k);
     return aligned(l.words) + 2 * aligned(l.scales);
 }
 
 /// One projection's quantized words, scales and biases as `linear` stages them, back to back.
-fn rawBytes(n: usize, k: usize) usize {
+pub fn rawBytes(n: usize, k: usize) usize {
     return n * k / 2 + 2 * (n * k / 64 * 2);
 }
 
@@ -76,9 +76,10 @@ pub fn stageBytes(s: Shape) usize {
 
 /// Device bytes of everything `load` packs.
 pub fn total(s: Shape) usize {
-    var t = packedBytes(s.hidden, s.taps * s.hidden) + packedBytes(s.rank, s.hidden) + 2 * aligned(s.hidden * 2);
+    var t = packedBytes(s.hidden, s.taps * s.hidden) + 2 * aligned(s.hidden * 2);
     t += s.layers * (2 * aligned(s.hidden * 2) + packedBytes(s.q_width, s.hidden) + 2 * packedBytes(s.kv_width, s.hidden) + packedBytes(s.hidden, s.q_width) +
-        2 * aligned(s.head_dim * 2) + 2 * packedBytes(s.intermediate, s.hidden) + packedBytes(s.hidden, s.intermediate) + 2 * packedBytes(s.dynamic, s.hidden) + 2 * aligned(4 * s.hidden * 2));
+        2 * aligned(s.head_dim * 2) + 2 * packedBytes(s.intermediate, s.hidden) + packedBytes(s.hidden, s.intermediate));
+    if (s.dflash2) t += packedBytes(s.rank, s.hidden) + s.layers * (2 * packedBytes(s.dynamic, s.hidden) + 2 * aligned(4 * s.hidden * 2));
     return t;
 }
 
@@ -86,12 +87,8 @@ fn bf16(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
 }
 
-fn toBf16(x: f32) u16 {
-    // round to nearest even, as the device does
-    const u: u32 = @bitCast(x);
-    const rounding: u32 = 0x7fff + ((u >> 16) & 1);
-    return @intCast((u +% rounding) >> 16);
-}
+// round to nearest even, as the device does
+const toBf16 = core.bf16_round.bits;
 
 /// MLX affine-4, group 64: scale bf16((max - min) / 15), bias bf16(min), nibbles round((w - bias) / scale), low first.
 fn quantize(gpa: std.mem.Allocator, w: []align(1) const u16, n: usize, k: usize) !struct { words: []u32, scales: []u16, biases: []u16 } {
@@ -135,7 +132,13 @@ fn quantize(gpa: std.mem.Allocator, w: []align(1) const u16, n: usize, k: usize)
 /// A bf16 (n, k) tensor quantized and packed through `stage` into the drafter's arena.
 fn linear(gpa: std.mem.Allocator, e: *Engine, stage: *DeviceBuffer, w: *Weights, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !Affine4 {
     const t = try ck.expect(name, .bf16, &.{ n, k });
-    const q = try quantize(gpa, std.mem.bytesAsSlice(u16, t.bytes), n, k);
+    return linearRows(gpa, e, stage, w, std.mem.bytesAsSlice(u16, t.bytes), n, k);
+}
+
+/// bf16 (n, k) rows quantized to affine-4 and packed through `stage` into `w`'s arena (any arena owner with alloc).
+pub fn linearRows(gpa: std.mem.Allocator, e: *Engine, stage: *DeviceBuffer, w: anytype, rows: []align(1) const u16, n: usize, k: usize) !Affine4 {
+    if (rows.len != n * k) return error.UnexpectedTensor;
+    const q = try quantize(gpa, rows, n, k);
     defer {
         gpa.free(q.words);
         gpa.free(q.scales);
@@ -171,10 +174,12 @@ fn hostBf16(gpa: std.mem.Allocator, ck: *core.Checkpoint, name: []const u8, shap
     return out;
 }
 
+const none: Affine4 = .{ .w = 0, .s = 0, .b = 0, .n = 0, .k = 0, .npad = 0 };
+
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, s: Shape) !Weights {
     var ck = try core.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
-    var w: Weights = .{ .fc = undefined, .hidden_norm = 0, .final_norm = 0, .selector = undefined, .predecessor = &.{}, .successor = &.{}, .layers = &.{}, .arena = try DeviceBuffer.alloc(e.d, total(s)) };
+    defer core.checkpoint.cache.close(&ck);
+    var w: Weights = .{ .fc = undefined, .hidden_norm = 0, .final_norm = 0, .selector = none, .predecessor = &.{}, .successor = &.{}, .layers = &.{}, .arena = try DeviceBuffer.alloc(e.d, total(s)) };
     errdefer w.arena.free();
     try w.arena.fill8(0, null);
     var stage = try DeviceBuffer.alloc(e.d, stageBytes(s));
@@ -184,10 +189,12 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, s: 
     w.fc = try linear(gpa, e, &stage, &w, &ck, "fc.weight", s.hidden, s.taps * s.hidden);
     w.hidden_norm = try vector(&w, &ck, "hidden_norm.weight", &.{s.hidden});
     w.final_norm = try vector(&w, &ck, "norm.weight", &.{s.hidden});
-    w.selector = try linear(gpa, e, &stage, &w, &ck, "candidate_selector.hidden_projection.weight", s.rank, s.hidden);
-    w.predecessor = try hostBf16(gpa, &ck, "candidate_selector.predecessor_codebook", &.{ s.vocab, s.rank });
+    if (s.dflash2) {
+        w.selector = try linear(gpa, e, &stage, &w, &ck, "candidate_selector.hidden_projection.weight", s.rank, s.hidden);
+        w.predecessor = try hostBf16(gpa, &ck, "candidate_selector.predecessor_codebook", &.{ s.vocab, s.rank });
+        w.successor = try hostBf16(gpa, &ck, "candidate_selector.successor_codebook", &.{ s.vocab, s.rank });
+    }
     errdefer gpa.free(w.predecessor);
-    w.successor = try hostBf16(gpa, &ck, "candidate_selector.successor_codebook", &.{ s.vocab, s.rank });
     errdefer gpa.free(w.successor);
     for (w.layers, 0..) |*l, i| {
         var buf: [96]u8 = undefined;
@@ -211,11 +218,16 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, s: 
             .gate = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp.gate_proj.weight"), s.intermediate, s.hidden),
             .up = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp.up_proj.weight"), s.intermediate, s.hidden),
             .down = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp.down_proj.weight"), s.hidden, s.intermediate),
-            .attn_conv = try linear(gpa, e, &stage, &w, &ck, try nm.of("attention_conv.kernel_projection.weight"), s.dynamic, s.hidden),
-            .attn_base = try vector(&w, &ck, try nm.of("attention_conv.base_kernel"), &.{ 2, 2, s.hidden }),
-            .mlp_conv = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp_conv.kernel_projection.weight"), s.dynamic, s.hidden),
-            .mlp_base = try vector(&w, &ck, try nm.of("mlp_conv.base_kernel"), &.{ 2, 2, s.hidden }),
+            .attn_conv = none,
+            .attn_base = 0,
+            .mlp_conv = none,
+            .mlp_base = 0,
         };
+        if (!s.dflash2) continue;
+        l.attn_conv = try linear(gpa, e, &stage, &w, &ck, try nm.of("attention_conv.kernel_projection.weight"), s.dynamic, s.hidden);
+        l.attn_base = try vector(&w, &ck, try nm.of("attention_conv.base_kernel"), &.{ 2, 2, s.hidden });
+        l.mlp_conv = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp_conv.kernel_projection.weight"), s.dynamic, s.hidden);
+        l.mlp_base = try vector(&w, &ck, try nm.of("mlp_conv.base_kernel"), &.{ 2, 2, s.hidden });
     }
     return w;
 }
@@ -233,4 +245,33 @@ test "bf16 rounding of a quantized group's scale and bias" {
     try std.testing.expectEqual(@as(u16, 0), q.scales[0]);
     try std.testing.expectEqual(@as(u16, 0x3f80), q.biases[0]);
     try std.testing.expectEqual(@as(u32, 0), q.words[0]);
+}
+
+test "Qwen DFlash2 scale and bias bf16: today's bits on every zero, subnormal, infinity and tie; a NaN stays NaN" {
+    const old = struct {
+        /// toBf16 as it was spelled before it was core's bits(): the oracle for every non-NaN input.
+        fn wrapped(x: f32) u16 {
+            const u: u32 = @bitCast(x);
+            const rounding: u32 = 0x7fff + ((u >> 16) & 1);
+            return @intCast((u +% rounding) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = toBf16(v);
+            if (!std.math.isNan(v)) return std.testing.expectEqual(wrapped(v), h);
+            try std.testing.expect(std.math.isNan(bf16(h)));
+            try std.testing.expectEqual(u >> 31, h >> 15);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expectEqual(@as(u16, 0x8000), old.wrapped(@bitCast(@as(u32, 0x7fff8001)))); // the old copy's -0
+    try std.testing.expectEqual(@as(u16, 0x0000), old.wrapped(@bitCast(@as(u32, 0xffff8001)))); // and its +0
+    for ([_]u32{ 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7f800001, 0xff800001, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
 }

@@ -31,8 +31,55 @@ pub const Sampling = lanes.sampling.Sampling;
 pub const max_chain: usize = 15;
 /// Preserve the existing recipe unless an explicit depth is selected.
 pub const default_depth: usize = 6;
-/// The live recipe's --mtp-confidence (Python's CONFIDENCE default is 0.7).
-pub const default_confidence: f64 = 0.6;
+/// A greedy stream's chain at most (TF_FLASHNEXT_DRAFTS_GREEDY): greedy drafts land more often, so a deeper chain pays.
+pub const default_depth_greedy: usize = 8;
+
+/// A drafted stream's first token is sent before its first drafts are asked (core/lanes/open_first.zig).
+pub fn firstEarly() bool {
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_FIRST_EARLY", true) catch true;
+}
+
+/// The chain a stream drafts at most: `greedy` for greedy streams (no sampling or temperature 0), else `depth`.
+pub fn depthFor(sm: ?Sampling, depth: usize, greedy: usize) usize {
+    return if (isSampled(sm)) depth else greedy;
+}
+/// The chain's stop rule (Stop): the running product of the drafts' probabilities at 0.4; 0.6 per draft before it.
+pub const default_confidence: f64 = -0.4;
+
+/// TF_FLASHNEXT_CONFIDENCE c > 0: a later draft only at or above c; c < 0: while p1 * ... * pj >= -c; 0: every draft.
+pub const Stop = struct {
+    c: f64,
+    product: f64 = 1.0,
+
+    /// Whether draft j (0-based) with probability `p` is proposed, and whether the chain may go on.
+    pub fn take(s: *Stop, j: usize, p: f64) struct { propose: bool, more: bool } {
+        if (s.c > 0) {
+            const low = p < s.c;
+            if (low and j > 0) return .{ .propose = false, .more = false };
+            return .{ .propose = true, .more = !low };
+        }
+        if (s.c < 0) {
+            s.product *= p;
+            // below the line it ends the chain: no later product can reach it again
+            if (s.product < -s.c) return .{ .propose = j == 0, .more = false };
+        }
+        return .{ .propose = true, .more = true };
+    }
+};
+
+test "the stop rule: per draft above zero, the running product below it, every draft at zero" {
+    var per: Stop = .{ .c = 0.6 };
+    try std.testing.expect(per.take(0, 0.5).propose and !per.take(0, 0.5).more);
+    try std.testing.expect(!per.take(1, 0.5).propose);
+    var prod: Stop = .{ .c = -0.4 };
+    try std.testing.expect(prod.take(0, 0.8).more); // 0.8
+    try std.testing.expect(prod.take(1, 0.6).more); // 0.48
+    const t = prod.take(2, 0.8); // 0.384: below 0.4
+    try std.testing.expect(!t.propose and !t.more);
+    var all: Stop = .{ .c = 0 };
+    try std.testing.expect(all.take(5, 0.01).propose and all.take(6, 0.01).more);
+}
 /// A verify window's rows at most: the pending token and a chain, or a copied continuation.
 pub const max_rows: usize = 32;
 /// A drafting round's rows at most: a shared verify's (TF_FLASHNEXT_WINDOW_ROWS lowers it; 0: each alone).
@@ -165,6 +212,7 @@ pub const Head = struct {
     service: lanes.proposal_head.Service,
     module: cuda.Module,
     best_fn: cuda.Function,
+    topk_fn: cuda.Function, // fn_row_topk: a row's top_k candidates as drawRow ranks them (cuda_mtp_draw.zig)
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, dir: []const u8) !*Head {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -212,6 +260,7 @@ pub const Head = struct {
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
         h.best_fn = try h.module.function("fn_row_best");
+        h.topk_fn = try h.module.function("fn_row_topk");
         return h;
     }
 
@@ -247,6 +296,18 @@ pub const Head = struct {
         _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
     }
 
+    /// Each of `rows` rows' `k` best of its first `v` values (fn_row_topk): bf16 bits to out_v, columns to out_c.
+    pub fn topk(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, k: usize, out_v: u64, out_c: u64) !void {
+        var a: cuda.Args = .{};
+        a.add(scores);
+        a.add(cint(v));
+        a.add(@as(c_longlong, @intCast(ld)));
+        a.add(cint(k));
+        a.add(out_v);
+        a.add(out_c);
+        try cuda.launch.launch(h.topk_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &a);
+    }
+
     /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).
     pub fn best(h: *const Head, stream: cuda.Stream, scores: u64, v: usize, ld: usize, rows: usize, out: u64) !void {
         var a: cuda.Args = .{};
@@ -258,9 +319,12 @@ pub const Head = struct {
     }
 };
 
-/// Device bytes the head's weights take beyond the main model's (for the server's admission estimate).
-pub fn headBytes() usize {
-    const experts = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4;
+/// Device bytes the head's weights take beyond the main model's; `fp8`: block-FP8 routed experts (headFp8).
+pub fn headBytes(fp8: bool) usize {
+    const weights = 3 * wt.moe_w * dims;
+    const nvfp4 = weights / 2 * 5 / 4;
+    const routed = if (fp8) weights + 3 * (wt.moe_w / 128) * (dims / 128) * 4 else nvfp4;
+    const experts = wt.experts_n * routed + nvfp4;
     const attn = (wt.proj_n + dims) * dims / 2 * 5 / 4;
     const draft = 79_591 * dims / 2 * 5 / 4;
     return experts + attn + draft + 2 * dims * dims / 2 * 5 / 4;
@@ -271,6 +335,13 @@ pub const Chain = @import("cuda_mtp_draft.zig").Chain;
 pub const Draft = @import("cuda_mtp_draft.zig").Draft;
 pub const Ops = @import("cuda_mtp_ops.zig").Ops;
 pub const check = @import("cuda_mtp_check.zig").check;
+
+test "the head's bytes: NVFP4 experts as before, FP8 routed experts a byte a weight and their f32 block scales" {
+    const before = (wt.experts_n + 1) * 3 * wt.moe_w * dims / 2 * 5 / 4 + (wt.proj_n + dims) * dims / 2 * 5 / 4 + 79_591 * dims / 2 * 5 / 4 + 2 * dims * dims / 2 * 5 / 4;
+    try std.testing.expectEqual(before, headBytes(false));
+    // an expert's three projections: 640 x 2560 bytes and 5 x 20 scales each, against 5/8 of a byte a weight
+    try std.testing.expectEqual(wt.experts_n * (3 * (640 * 2560 + 5 * 20 * 4) - 3 * 640 * 2560 * 5 / 8), headBytes(true) - headBytes(false));
+}
 
 test "the draft vocabulary is 79,591 sorted ids under the vocabulary" {
     const ids = try draftIds(std.testing.allocator);
@@ -353,4 +424,8 @@ test "draft chains fit one verify window while the default stays six" {
     try std.testing.expect(max_chain < max_rows and max_rows <= round_rows);
     try std.testing.expectEqual(@as(usize, 6), default_depth);
     try std.testing.expect(default_depth <= max_chain);
+}
+
+test {
+    _ = @import("cuda_mtp_nonfinite_test.zig");
 }

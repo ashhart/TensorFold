@@ -10,8 +10,16 @@ pub fn steps(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void 
     const checkpoint_run = b.addRunArtifact(b.addTest(.{ .root_module = checkpoint }));
     b.step("test-cluster-checkpoint-host", "Cluster metadata and range controls without shaders").dependOn(&checkpoint_run.step);
     all.dependOn(&checkpoint_run.step);
-    const loader = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/loader_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const canon = @import("cuda_engines.zig").canonModule(b, b.graph.host, .debug);
+    const loader = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/loader_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "canon", .module = canon } } });
     b.step("test-cluster-loader-host", "Cluster local-file and fake-peer loading without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = loader })).step);
+    // the tower's reader opens and preads through libc's POSIX calls: not Windows
+    if (b.graph.host.result.os.tag != .windows) {
+        const vl = b.createModule(.{ .root_source_file = b.path("zig/qwen_vl_shards_host.zig"), .target = b.graph.host, .link_libc = true });
+        const vl_run = b.addRunArtifact(b.addTest(.{ .root_module = vl, .filters = &.{"Qwen-VL shards:"} }));
+        b.step("test-qwen-vl-shards-host", "Qwen-VL tower shard headers through core's checks without Metal").dependOn(&vl_run.step);
+        all.dependOn(&vl_run.step);
+    }
     const metal_core = b.createModule(.{ .root_source_file = b.path("zig/src/tensorfold.zig"), .target = b.graph.host, .link_libc = true });
     const metal_checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/checkpoint.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "core", .module = metal_core }} });
     const compile_root = b.createModule(.{ .root_source_file = b.path("zig/cluster_header_host_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = metal_core }, .{ .name = "cluster_checkpoint", .module = metal_checkpoint } } });

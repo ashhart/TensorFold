@@ -376,6 +376,8 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
             j.r.chain(e, j.r.wins[0], 0, j.levels, j.rate, j.chunks, false, false);
         }
     };
+    try kvp.grow(c, @max(len_known, mtp_known) + rows + o.depth + 1); // the rounds' rows, taken before they are queued
+    kvp.holds(c.mtp.?, mtp_known + o.depth); // the first drafts' head rows
     try b.submit(.draft, b.next, Pre{ .r = &r, .levels = levels, .rate = rate, .chunks = (mtp_known + o.depth + 511) / 512 + 1 });
     const Job = struct {
         r: *Round,
@@ -440,6 +442,8 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
             if (log) std.debug.print("round {d}: window {d} rows {d} kept {d} copy {d} tail {d} match {d} second {d}/{d} at token {d}; drafts {any}\n", .{ read, windows[read % ring], x[1], kept, x[2], x[60], x[3], x[61], x[62], s.emitted().len, x[64 .. 63 + x[1]] });
             len_known += kept;
             mtp_known += kept;
+            kvp.holds(c.kv[0], len_known); // the rows a landed round wrote
+            kvp.holds(c.mtp.?, mtp_known);
             _ = try s.commit(gpa, x[4 .. 4 + kept], &.{});
             hooks.note();
             last_kept = kept;
@@ -474,6 +478,9 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
         if (log) std.debug.print("queue {d}: verify rows {d}, head levels {d}, copy rows {d}\n", .{ queued, verify_rows, levels, copy });
         windows[queued % ring] = verify_rows;
         inflight += verify_rows;
+        try kvp.grow(c, @max(len_known, mtp_known) + inflight + rows + o.depth + 1);
+        kvp.holds(c.kv[0], len_known + inflight); // the queued verifies' rows, and their heads' absorbs and drafts
+        kvp.holds(c.mtp.?, mtp_known + inflight + o.depth);
         try b.submit(.verify, b.next, Job{ .r = &r, .n = queued, .rows = verify_rows, .levels = levels, .copy = copy, .tail = tail, .rate = rate, .chunks = (len_known + ahead + rows + 511) / 512, .head_chunks = head_chunks });
         if (o.split) try b.submit(.draft, b.next, Head{ .r = &r, .n = queued, .rows = verify_rows, .levels = levels, .copy = copy, .tail = tail, .rate = rate, .head_chunks = head_chunks });
         queued += 1;
@@ -505,7 +512,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     if (o.level_bench) {
         // every level live (zero bars), each chain alone in its command buffer
         r.o.stop = false;
-        if (platform.c.getenv("TF_HEAD_GEOMETRY")) |g| b.head.?.geometry = std.fmt.parseInt(usize, std.mem.span(g), 10) catch 0;
+        b.head.?.geometry = try platform.environment.read(usize, "TF_HEAD_GEOMETRY", b.head.?.geometry);
         var med: [2]f64 = undefined;
         for ([_]usize{ 1, @min(8, o.depth) }, 0..) |n, k| {
             var ms: [9]f64 = undefined;

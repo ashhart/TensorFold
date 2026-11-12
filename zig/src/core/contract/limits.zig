@@ -51,6 +51,9 @@ pub const sms = [_]Sm{
     .{ .sm = 121, .threads_sm = 1536, .smem_optin = 99 * 1024, .clusters = true },
 };
 
+/// sm_110 has no pinned usage records; the limits runner reads its compiled cubins.
+pub const thor: Sm = .{ .sm = 110, .threads_sm = 1536, .smem_optin = 227 * 1024, .clusters = true };
+
 /// A CUDA kernel as launched: most threads a block, dynamic shared bytes, cluster width, raised limit, least SM.
 pub const CudaLaunch = struct {
     name: []const u8,
@@ -200,6 +203,8 @@ pub const HipLaunch = struct {
 /// What hipcc made of one kernel for one chip, from the code object's metadata (vgprs 0: none recorded).
 pub const HipUsage = struct {
     vgprs: u32,
+    /// False: the kernel is not launched on this chip (its image keeps a trap body there); no usage is checked.
+    served: bool = true,
     sgprs: u32 = 0,
     lds: u32 = 0,
     private: u32 = 0,
@@ -269,9 +274,10 @@ test "a launch inside every family passes; each planted excess is named" {
     try std.testing.expectEqual(@as(usize, 1), try metal(wide_unmeasured, apple[0], &out, a));
 }
 
-/// The table's row for `sm` (a target the records cover).
+/// The limit row for `sm`, including targets without pinned usage records.
 pub fn target(sm: u32) ?Sm {
     for (sms) |t| if (t.sm == sm) return t;
+    if (sm == thor.sm) return thor;
     return null;
 }
 
@@ -302,6 +308,14 @@ test "CUDA: registers by warp, launch bounds, shared bytes and clusters per SM" 
     cl.min_sm = 90;
     try std.testing.expectEqual(@as(usize, 0), try cuda(cl, .{ .regs = 32, .static = 0 }, sm80, &out, a));
     try std.testing.expectEqual(@as(?Sm, null), target(75));
+    try std.testing.expectEqual(@as(u32, 227 * 1024), target(110).?.smem_optin);
+    var thor_shared = l;
+    thor_shared.dynamic = 48 * 1024;
+    try std.testing.expectEqual(@as(usize, 1), try cuda(thor_shared, .{ .regs = 64, .static = 1024, .bound = 256 }, target(110).?, &out, a));
+    thor_shared.opt_in = true;
+    try std.testing.expectEqual(@as(usize, 0), try cuda(thor_shared, .{ .regs = 64, .static = 1024, .bound = 256 }, target(110).?, &out, a));
+    try std.testing.expectEqual(@as(usize, 5), sms.len);
+    for (sms, [_]u32{ 80, 86, 89, 120, 121 }) |recorded, sm| try std.testing.expectEqual(sm, recorded.sm);
 }
 
 test "HIP: bounds, wave size, VGPRs a SIMD and LDS per chip" {

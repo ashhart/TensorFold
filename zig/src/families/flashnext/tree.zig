@@ -51,7 +51,7 @@ pub fn siblingTable(a: usize, k: usize) [MAXR * STRIDE]i32 {
     return t;
 }
 
-const source =
+pub const source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\// fz_accept for a tree window (cfg: rows, next rows, cache capacity, the next window's chain length): a row lands
@@ -200,13 +200,13 @@ const source =
 ;
 
 /// A recorded attention part: window keys (>= the window's first slot) read at their row's ancestor slot.
-const attn_edits = [_][2][]const u8{
+pub const attn_edits = [_][2][]const u8{
     .{ "  device float* PM [[buffer(10)]],\n", "  device float* PM [[buffer(10)]],\n  const device int* TREE [[buffer(11)]],\n  const device int* TBASE [[buffer(12)]],\n" },
     .{ "    const size_t key = size_t(sparse ? ids[j] : j) * D;\n", "    int kj = sparse ? ids[j] : j;\n    if (kj >= TBASE[0]) kj = TBASE[0] + TREE[r * 18 + 2 + (kj - TBASE[0])];\n    const size_t key = size_t(kj) * D;\n" },
 };
 
 /// The recorded PLE conv: tap j of a row at depth d reads the tail (d - 9 + 3 j < 0) or that ancestor's normed row.
-const conv_edits = [_][2][]const u8{
+pub const conv_edits = [_][2][]const u8{
     .{ "[[kernel]]", "inline int fz_tree_cin(const device int* T, int r, int j) {\n  const int pos = T[r * 18 + 1] - 9 + 3 * j;\n  return pos < 0 ? 9 + pos : 9 + T[r * 18 + 2 + pos];\n}\n[[kernel]]" },
     .{ "  device bfloat16_t* HOUT [[buffer(4)]],\n", "  device bfloat16_t* HOUT [[buffer(4)]],\n  const device int* TREE [[buffer(5)]],\n" },
     .{ "float(CIN[size_t(r + DIL * j) * W + c])", "float(CIN[size_t(fz_tree_cin(TREE, r, j)) * W + c])" },

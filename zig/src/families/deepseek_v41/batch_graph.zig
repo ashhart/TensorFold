@@ -147,9 +147,8 @@ pub const Table = struct {
 };
 
 /// TF_DSV41_GRAPH_LOG=1: every row-graph capture logged with its key and host ms (else the powers of two).
-pub fn graphLog() bool {
-    const v = std.c.getenv("TF_DSV41_GRAPH_LOG") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn graphLog() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_GRAPH_LOG", false);
 }
 
 pub fn outcomeLog(out: graphs.gc.Outcome, g: *const Graphs) bool {

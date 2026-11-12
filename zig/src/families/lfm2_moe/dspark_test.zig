@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const c = @import("config.zig");
 const kernels = @import("kernels.zig");
+const bf16_round = @import("bf16_round");
 
 const shared = mtl.ResourceOptions.shared;
 
@@ -46,10 +47,7 @@ const Rig = struct {
 };
 
 /// Round to nearest even, as MLX casts.
-fn toBf16(f: f32) u16 {
-    const b: u32 = @bitCast(f);
-    return @truncate((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+const toBf16 = bf16_round.bits;
 
 fn noise(seed: u64, out: []u16, scale: f32) void {
     var prng = std.Random.DefaultPrng.init(seed);
@@ -73,5 +71,18 @@ test "lfm2 dspark: the tap kernel copies each row's hidden values into its tap's
         try std.testing.expectEqualSlices(u16, want[row * c.hidden ..][0..c.hidden], got[(row * taps + 1) * c.hidden ..][0..c.hidden]);
         for (got[row * taps * c.hidden ..][0..c.hidden]) |v| try std.testing.expectEqual(@as(u16, 0), v);
         for (got[(row * taps + 2) * c.hidden ..][0..c.hidden]) |v| try std.testing.expectEqual(@as(u16, 0), v);
+    }
+}
+
+test "lfm2 dspark: toBf16 is core's bits(), 0xffffffff gives a NaN, other words the plain + copy's bits" {
+    try std.testing.expect(std.math.isNan(@as(f32, @bitCast(@as(u32, toBf16(@bitCast(@as(u32, 0xffff_ffff)))) << 16))));
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 19) |i| { // every bf16 value's tie and carry edges, then random words
+        const lo = [_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff };
+        const w: u32 = if (i < 1 << 18) @as(u32, @intCast(i >> 2)) << 16 | lo[i & 3] else prng.random().int(u32);
+        const v: f32 = @bitCast(w);
+        if (std.math.isNan(v)) {
+            try std.testing.expect(std.math.isNan(@as(f32, @bitCast(@as(u32, toBf16(v)) << 16))));
+        } else try std.testing.expectEqual(@as(u16, @intCast((w + 0x7fff + ((w >> 16) & 1)) >> 16)), toBf16(v));
     }
 }

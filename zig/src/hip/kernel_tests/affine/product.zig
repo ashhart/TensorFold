@@ -258,6 +258,13 @@ pub const Product = struct {
         return if (p.c.routed()) p.c.rows * p.c.slots else 0;
     }
 
+    /// The plan's average rows an expert, as serving passes it to the choice; 0 for a plain product.
+    pub fn expertRows(p: Product) u32 {
+        if (!p.c.routed()) return 0;
+        const routed = p.c.slots - @intFromBool(p.c.shared);
+        return moe.expertRows(p.c.rows, routed, p.c.experts);
+    }
+
     pub fn outBytes(p: Product, rounded: bool) usize {
         return p.out_rows * p.c.n * @as(usize, if (rounded) 2 else 4);
     }
@@ -289,35 +296,37 @@ fn drawServed(expert_of: []u32, c: cases.Case, rng: *data.Rng) void {
 }
 
 /// The shape a registry entry is asked about: a split entry is asked for two parts.
-pub fn shapeFor(a: affine.Arg, items: usize, pairs: usize, e: *const Entry) registry.Shape {
+pub fn shapeFor(a: affine.Arg, items: usize, pairs: usize, expert_rows: u32, e: *const Entry) registry.Shape {
     var s = Kernels.shapeOf(a, @intCast(items));
     s.plan_pairs = @intCast(pairs);
+    s.expert_rows = expert_rows;
     if (e.family == .split) s.parts = 2;
     return s;
 }
 
 pub fn shapeOf(p: *const Product, e: *const Entry) registry.Shape {
-    return shapeFor(p.arg(0, 0), p.items, p.pairCount(), e);
+    return shapeFor(p.arg(0, 0), p.items, p.pairCount(), p.expertRows(), e);
 }
 
 /// Whether `e` is an entry of the launch's (op, path) that the GPU has and whose shape takes it.
-pub fn takesArg(k: *const Kernels, e: *const Entry, a: affine.Arg, items: usize, pairs: usize, path: registry.Path) bool {
+pub fn takesArg(k: *const Kernels, e: *const Entry, a: affine.Arg, items: usize, pairs: usize, expert_rows: u32, path: registry.Path) bool {
     const op: registry.Op = if (a.route.items != 0) .routed else .project;
     if (e.format != .mlx or e.op != op or e.path != path) return false;
     var env = k.env();
     env.matrix_on = env.matrix;
-    return e.caps(env) and e.fits(shapeFor(a, items, pairs, e));
+    return e.caps(env) and e.fits(shapeFor(a, items, pairs, expert_rows, e));
 }
 
 /// Entries of the product's (op, path) that the GPU has and whose shapes take it.
 pub fn takes(p: *const Product, e: *const Entry) bool {
-    return takesArg(p.rig.kernels, e, p.arg(0, 0), p.items, p.pairCount(), p.c.path);
+    return takesArg(p.rig.kernels, e, p.arg(0, 0), p.items, p.pairCount(), p.expertRows(), p.c.path);
 }
 
 /// The entries the registry picks between at some row count under `env`, or at some pair count for a routed prompt.
-pub fn pickable(k: *const Kernels, a: affine.Arg, items: usize, pairs: usize, path: registry.Path, env: registry.Env, out: *std.ArrayList(*const Entry), alloc: std.mem.Allocator) !void {
+pub fn pickable(k: *const Kernels, a: affine.Arg, items: usize, pairs: usize, expert_rows: u32, path: registry.Path, env: registry.Env, out: *std.ArrayList(*const Entry), alloc: std.mem.Allocator) !void {
     const op: registry.Op = if (a.route.items != 0) .routed else .project;
     var shape = Kernels.shapeOf(a, @intCast(items));
+    shape.expert_rows = expert_rows;
     if (op == .routed and path == .prefill) {
         // ascending, so the tiles that take fewer pairs come first; past 8 * items a plan is above every pairs bound
         const top = 8 * items + 1;

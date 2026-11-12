@@ -8,15 +8,13 @@ const rig_ = @import("rig.zig");
 const c = contract.spec;
 const g = contract.gates;
 const ref = tf.attention_ref;
-
-const D = 128;
-const kvh = 2;
-const heads = 32;
-const G = heads / kvh;
+pub const D = 128;
+pub const kvh = 2;
+pub const heads = 32;
+pub const G = heads / kvh;
 const maxd = 64; // tf_tree_tail's MAXD
 const chunk = 512; // the partials' and the tail's keys a chunk
-const scale: f32 = 1.0 / @sqrt(@as(f32, D));
-
+pub const scale: f32 = 1.0 / @sqrt(@as(f32, D));
 /// decode: attn_partial_N then attn_merge; tree: a partial, tf_tree_tail and tf_tree_merge; prompt: tf_attention_nax.
 pub const Which = enum { decode, tree, prompt, write, put, compact };
 
@@ -104,11 +102,12 @@ fn stressValue(j: usize, n: usize) f32 {
 }
 
 /// A library's text as the engine builds it on this GPU, then the control's edit when asked.
-fn built(a: std.mem.Allocator, device: mtl.Device, w: Which, text: []const u8, control: bool) ![]u8 {
+fn built(a: std.mem.Allocator, device: mtl.Device, w: Which, text: []const u8, control: bool, full: ?bool) ![]u8 {
     const src = switch (w) {
         .decode => if (device.tensorUnits() or std.mem.indexOf(u8, text, "partial_direct") == null) try a.dupe(u8, text) else try tf.nemotron.simd_attention.forGeneration(a, device.generation(), text),
         .tree, .compact => if (device.tensorUnits()) try a.dupe(u8, text) else try std.mem.concat(a, u8, &.{ "#define TF_SIMD_LAYOUT 1\n", text }),
-        .prompt, .put => try tf.frags.source(device, a, text),
+        .prompt => if (full) |on| try tf.frags.sourceMode(device, a, text, on) else try tf.frags.source(device, a, text),
+        .put => try tf.frags.source(device, a, text),
         .write => try a.dupe(u8, text),
     };
     if (!control) return src;
@@ -128,8 +127,8 @@ fn prefillText(file: []const u8) ![]const u8 {
     return error.UnknownSource;
 }
 
-fn compile(a: std.mem.Allocator, device: mtl.Device, w: Which, text: []const u8, control: bool, fun: []const u8) !mtl.Pipeline {
-    const t = try built(a, device, w, text, control);
+fn compile(a: std.mem.Allocator, device: mtl.Device, w: Which, text: []const u8, control: bool, fun: []const u8, full: ?bool) !mtl.Pipeline {
+    const t = try built(a, device, w, text, control, full);
     defer a.free(t);
     return rig_.pipeline(device, t, fun);
 }
@@ -140,6 +139,8 @@ pub const Probe = struct {
     which: Which,
     tiles: usize,
     control: bool,
+    prompt_full: ?bool = null, // an explicit contract mode; null uses the serving process mode
+    prompt_run: @import("metal_nemotron_prompt_launch.zig").State = .{},
     pipes: [3]?mtl.Pipeline = .{ null, null, null }, // decode: partial, merge; tree: tail, merge; glue: the kernel
     partials: [16]?mtl.Pipeline = @splat(null), // the tree's prefix partial at 1 to 16 tiles
     prompts: [4]?mtl.Pipeline = @splat(null), // tf_attention_nax by (whole query blocks, whole key blocks)
@@ -168,18 +169,18 @@ pub const Probe = struct {
             .decode => {
                 var buf: [32]u8 = undefined;
                 const k = try nemotronKernel(try std.fmt.bufPrint(&buf, "attn_partial_{d}", .{tiles}));
-                p.pipes[0] = try compile(a, device, .decode, k.source, control, k.function);
+                p.pipes[0] = try compile(a, device, .decode, k.source, control, k.function, null);
                 const m = try nemotronKernel("attn_merge");
-                p.pipes[1] = try compile(a, device, .decode, m.source, false, m.function);
+                p.pipes[1] = try compile(a, device, .decode, m.source, false, m.function, null);
             },
             .tree => {
-                p.pipes[0] = try compile(a, device, .tree, sources.nemotron_tree, control, "tf_tree_tail");
-                p.pipes[1] = try compile(a, device, .tree, sources.nemotron_tree, false, "tf_tree_merge");
+                p.pipes[0] = try compile(a, device, .tree, sources.nemotron_tree, control, "tf_tree_tail", null);
+                p.pipes[1] = try compile(a, device, .tree, sources.nemotron_tree, false, "tf_tree_merge", null);
             },
             .prompt => {},
-            .write => p.pipes[0] = try compile(a, device, .write, sources.nemotron_glue, control, "tf_kv_write"),
-            .compact => p.pipes[0] = try compile(a, device, .compact, sources.nemotron_tree, control, "tf_kv_compact"),
-            .put => p.pipes[0] = try compile(a, device, .put, try prefillText("glue"), control, "custom_kernel_tf_kv_put_bfloat16_t_bfloat16_t_int32_t_bfloat16_t"),
+            .write => p.pipes[0] = try compile(a, device, .write, sources.nemotron_glue, control, "tf_kv_write", null),
+            .compact => p.pipes[0] = try compile(a, device, .compact, sources.nemotron_tree, control, "tf_kv_compact", null),
+            .put => p.pipes[0] = try compile(a, device, .put, try prefillText("glue"), control, "custom_kernel_tf_kv_put_bfloat16_t_bfloat16_t_int32_t_bfloat16_t", null),
         }
         return p;
     }
@@ -198,6 +199,7 @@ pub const Probe = struct {
     }
 
     pub fn deinit(p: *Probe) void {
+        p.prompt_run.deinit();
         p.drop();
         p.rig.deinit();
         for (&p.pipes) |x| if (x) |q| q.deinit();
@@ -207,10 +209,22 @@ pub const Probe = struct {
 
     const vt = g.hooks(Probe);
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .vt = &vt, .spec = spec(p.which, p.tiles, p.control), .control = if (p.control) .shapes else null };
+        var s = spec(p.which, p.tiles, p.control);
+        if (p.which == .prompt and !p.control and p.rig.device.tensorUnits()) {
+            s.name = "metal nemotron attention prompt selector finite bytes";
+            s.replaces = "main's unchanged direct prompt pipeline";
+        }
+        return .{ .ctx = p, .vt = &vt, .spec = s, .control = if (p.control) .shapes else null };
     }
 
-    fn at(p: *const Probe, values: bool, h: usize, pos: usize) usize {
+    pub fn replaced(p: *Probe) ![]const u8 {
+        p.prompt_run.baseline = true;
+        defer p.prompt_run.baseline = false;
+        try p.run();
+        return p.rig.bytes(p.out, p.out_bytes);
+    }
+
+    pub fn at(p: *const Probe, values: bool, h: usize, pos: usize) usize {
         return ((@as(usize, @intFromBool(values)) * kvh + h) * p.cap + pos) * D;
     }
 
@@ -346,16 +360,17 @@ pub const Probe = struct {
                 if (p.pt() > 0 and p.partials[tiles - 1] == null) {
                     var buf: [32]u8 = undefined;
                     const k = try nemotronKernel(try std.fmt.bufPrint(&buf, "attn_partial_{d}", .{tiles}));
-                    p.partials[tiles - 1] = try compile(p.a, p.rig.device, .decode, k.source, false, k.function);
+                    p.partials[tiles - 1] = try compile(p.a, p.rig.device, .decode, k.source, false, k.function, null);
                 }
             },
             .prompt => {
+                try @import("metal_nemotron_prompt_launch.zig").prepare(p);
                 const v = p.variant();
                 if (p.prompts[v] == null) {
                     var buf: [160]u8 = undefined;
                     const tag = [2]u8{ if (v >= 2) 't' else 'n', if (v % 2 == 1) 't' else 'n' };
                     const s = try std.fmt.bufPrint(&buf, "custom_kernel_tf_attention_nax_bf16_{c}_{c}_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_float_bfloat16_t", .{ tag[0], tag[1] });
-                    p.prompts[v] = try compile(p.a, p.rig.device, .prompt, try prefillText("attention_nax"), p.control, s);
+                    p.prompts[v] = try compile(p.a, p.rig.device, .prompt, try prefillText("attention_nax"), p.control, s, p.prompt_full);
                 }
             },
             else => unreachable,
@@ -424,25 +439,7 @@ pub const Probe = struct {
                 e.setBuffer(p.out.buf, p.out.off, 7);
                 e.dispatchThreads(mtl.Size.of(kvh * 32, G * t, 1), mtl.Size.of(32, 1, 1));
             },
-            .prompt => {
-                const kl = p.len + t;
-                const row = heads * D;
-                const kvs = kvh * p.cap * D;
-                var pr: [32]i32 = @splat(0);
-                const head = [_]usize{ 1, heads, t, kl, G, (t + 63) / 64, (kl + 31) / 32, t / 64, kl / 32, t % 64, kl % 32, kl - t };
-                const st = [12]usize{ t * row, D, row, kvs, p.cap * D, D, kvs, p.cap * D, D, t * row, D, row };
-                for (head ++ st, 0..) |x, i| pr[i] = @intCast(x);
-                var fl: [16]f32 = @splat(0);
-                fl[0] = scale;
-                e.setPipeline(p.prompts[p.variant()].?);
-                e.setBuffer(p.qref.buf, p.qref.off, 0);
-                e.setBuffer(p.kv[0].buf, p.kv[0].off, 1);
-                e.setBuffer(p.kv[1].buf, p.kv[1].off, 2);
-                e.setBytes(std.mem.sliceAsBytes(&pr), 3);
-                e.setBytes(std.mem.sliceAsBytes(&fl), 4);
-                e.setBuffer(p.out.buf, p.out.off, 5);
-                e.dispatchThreads(mtl.Size.of((t + 63) / 64 * 32, heads * 4, 1), mtl.Size.of(32, 4, 1));
-            },
+            .prompt => try @import("metal_nemotron_prompt_launch.zig").run(p, e),
             .write => {
                 e.setPipeline(p.pipes[0].?);
                 e.setBuffer(p.srcs[0].buf, p.srcs[0].off, 0);
@@ -481,12 +478,12 @@ pub const Probe = struct {
     }
 
     /// Output index of query `qi`, head `h`: [heads, rows, D] after a merge, [rows, heads, D] from the prompt kernel.
-    fn outAt(p: *const Probe, qi: usize, h: usize) usize {
+    pub fn outAt(p: *const Probe, qi: usize, h: usize) usize {
         return if (p.which == .prompt) (qi * heads + h) * D else (h * p.rows + qi) * D;
     }
 
     /// Query `qi` of head `h` as float64: Qp's row qi * G + g of its kv head, or the prompt's row.
-    fn query(p: *const Probe, qi: usize, h: usize, out: []f64) void {
+    pub fn query(p: *const Probe, qi: usize, h: usize, out: []f64) void {
         const at_ = if (p.which == .prompt) (qi * heads + h) * D else ((h / G) * 16 * p.rows + qi * G + h % G) * D;
         for (out, 0..) |*x, d| x.* = c.fromBf16(p.q[at_ + d]);
     }

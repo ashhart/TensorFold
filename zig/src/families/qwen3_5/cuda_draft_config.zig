@@ -21,6 +21,12 @@ pub const Config = struct {
     theta: f32,
     taps: [8]u32,
     n_taps: usize,
+    kind: Kind = .dflash2,
+    // DSpine's code bridge: code width (rank is its message width) and its norm epsilon
+    code: usize = 0,
+    bridge_eps: f32 = 0,
+
+    pub const Kind = enum { dflash2, dspine };
 
     pub fn qWidth(c: Config) usize {
         return c.heads * c.head_dim;
@@ -38,6 +44,10 @@ pub const Config = struct {
     pub fn ringBytes(c: Config) usize {
         return c.layers * 2 * c.ringRows() * c.kvWidth() * 2;
     }
+    /// Attention's 256-key chunks a row spans: its window and the block.
+    pub fn chunks(c: Config) usize {
+        return (c.ringRows() + 255) / 256;
+    }
 
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, target: engine.Geometry) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
@@ -54,6 +64,7 @@ pub const Config = struct {
         const o = doc.value.object;
         const d = (o.get("dflash_config") orelse return error.BadDraftConfig);
         if (d != .object) return error.BadDraftConfig;
+        if (@import("core").dspine.declared(doc.value)) return @import("cuda_dspine_config.zig").parse(doc.value, target);
         var c: Config = .{
             .hidden = try int(o, "hidden_size"),
             .intermediate = try int(o, "intermediate_size"),
@@ -73,11 +84,14 @@ pub const Config = struct {
             .taps = @splat(0),
             .n_taps = 0,
         };
+        try slidingLayers(o, c.layers);
         const taps = d.object.get("target_layer_ids") orelse return error.BadDraftConfig;
         if (taps != .array or taps.array.items.len == 0 or taps.array.items.len > c.taps.len) return error.BadDraftConfig;
         for (taps.array.items, 0..) |t, i| {
             if (t != .integer or t.integer < 0 or t.integer >= target.layers) return error.BadDraftConfig;
             c.taps[i] = @intCast(t.integer);
+            // one layer twice would tap one residual into two ring slots
+            if (std.mem.indexOfScalar(u32, c.taps[0..i], c.taps[i]) != null) return error.BadDraftConfig;
         }
         c.n_taps = taps.array.items.len;
         // what the kernels fix: the head width, two-tap convolutions, a block of 8, the selector's top-k within a row
@@ -91,8 +105,21 @@ pub const Config = struct {
     }
 };
 
+/// CUDA's drafter runs every layer over a sliding ring; no declaration may silently select full attention.
+pub fn slidingLayers(o: std.json.ObjectMap, layers: usize) !void {
+    const enabled = o.get("use_sliding_window") orelse return error.BadDraftConfig;
+    if (enabled != .bool) return error.BadDraftConfig;
+    if (!enabled.bool) return error.UnsupportedDraftConfig;
+    const types = o.get("layer_types") orelse return error.BadDraftConfig;
+    if (types != .array or types.array.items.len != layers) return error.BadDraftConfig;
+    for (types.array.items) |kind| {
+        if (kind != .string) return error.BadDraftConfig;
+        if (!std.mem.eql(u8, kind.string, "sliding_attention")) return error.UnsupportedDraftConfig;
+    }
+}
+
 /// The draft's rope_parameters, refused unless unscaled: its kernels rope with theta alone.
-fn plainRope(o: std.json.ObjectMap) !std.json.ObjectMap {
+pub fn plainRope(o: std.json.ObjectMap) !std.json.ObjectMap {
     const rope = o.get("rope_parameters") orelse return error.BadDraftConfig;
     if (rope != .object) return error.BadDraftConfig;
     for ([_][]const u8{ "rope_type", "type" }) |key| if (rope.object.get(key)) |v| {
@@ -114,20 +141,20 @@ pub fn declared(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
 }
 
 /// A size, count or divisor: positive, so a zero can't reach a remainder or an empty allocation.
-fn int(o: std.json.ObjectMap, key: []const u8) !usize {
+pub fn int(o: std.json.ObjectMap, key: []const u8) !usize {
     const v = try whole(o, key);
     if (v == 0) return error.BadDraftConfig;
     return v;
 }
 
 /// A token id: any whole number.
-fn whole(o: std.json.ObjectMap, key: []const u8) !usize {
+pub fn whole(o: std.json.ObjectMap, key: []const u8) !usize {
     const v = o.get(key) orelse return error.BadDraftConfig;
     if (v != .integer or v.integer < 0) return error.BadDraftConfig;
     return @intCast(v.integer);
 }
 
-fn num(o: std.json.ObjectMap, key: []const u8) !f64 {
+pub fn num(o: std.json.ObjectMap, key: []const u8) !f64 {
     return switch (o.get(key) orelse return error.BadDraftConfig) {
         .integer => |i| @floatFromInt(i),
         .float => |f| f,
@@ -149,4 +176,9 @@ test "a drafter directory is DFlash2's by its config's dflash_config; a checkpoi
     try std.testing.expect(declared(a, io, root));
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "[1]" });
     try std.testing.expect(!declared(a, io, root));
+}
+
+test {
+    _ = @import("cuda_draft_config_test.zig");
+    _ = @import("cuda_dspine_config.zig");
 }

@@ -3,6 +3,7 @@
 const std = @import("std");
 const plan = @import("plan.zig");
 const names = @import("names.zig");
+const partition = @import("partition.zig");
 const stage = @import("stage.zig");
 const Pack = @import("pack.zig").Pack;
 const DType = @import("pack.zig").DType;
@@ -56,12 +57,12 @@ const rules = std.StaticStringMap(Rule).initComptime(.{
 });
 
 /// The capture's name of a block group (AttnW / MoEW / EngramW fields).
-fn groupField(g: plan.GroupPlan, gl: u32, buf: []u8) ![]const u8 {
+fn groupField(g: plan.GroupPlan, first_group: u32, buf: []u8) ![]const u8 {
     return switch (g.proj) {
         .wq_a => "attn.wq_a",
         .wkv => "attn.wkv",
         .wq_b => "attn.wq_b",
-        .wo_a => std.fmt.bufPrint(buf, "attn.wo_a.{d}", .{g.slice % gl}),
+        .wo_a => std.fmt.bufPrint(buf, "attn.wo_a.{d}", .{g.slice - first_group}),
         .wo_b => "attn.wo_b",
         .comp_wkv => "attn.comp_wkv",
         .comp_wgate => "attn.comp_wgate",
@@ -75,11 +76,7 @@ fn groupField(g: plan.GroupPlan, gl: u32, buf: []u8) ![]const u8 {
 }
 
 /// fp32 -> bf16, round to nearest even (torch's .to(bfloat16)); NaN stays a quiet NaN.
-pub fn bf16Round(x: f32) u16 {
-    const b: u32 = @bitCast(x);
-    if (std.math.isNan(x)) return @intCast((b >> 16) | 0x40);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+pub const bf16Round = @import("core").bf16_round.bits;
 
 pub fn bf16Widen(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -151,11 +148,10 @@ pub const Builder = struct {
     }
 
     /// The rank's slice of a native tensor, as stored.
-    fn raw(b: *Builder, v: plan.NativePlan, rank: u32, world: u32) ![]u8 {
-        const whole = v.slice == .whole;
-        const s = if (v.slice == .vocab_rows) try @import("partition.zig").share(@intCast(v.info.shape[0]), rank, world) else null;
-        const len = if (s) |part| v.info.nbytes / v.info.shape[0] * part.len else if (whole) v.info.nbytes else v.info.nbytes / world;
-        const offset = if (s) |part| v.info.nbytes / v.info.shape[0] * part.lo else if (whole) 0 else rank * len;
+    fn raw(b: *Builder, v: plan.NativePlan, rank: u32, world: u32, heads: ?partition.Share) ![]u8 {
+        const s = if (v.slice == .vocab_rows) try partition.share(@intCast(v.info.shape[0]), rank, world) else heads;
+        const len = if (s) |part| v.info.nbytes / v.info.shape[0] * part.len else v.info.nbytes;
+        const offset = if (s) |part| v.info.nbytes / v.info.shape[0] * part.lo else 0;
         const bytes = try b.gpa.alloc(u8, @intCast(len));
         errdefer b.gpa.free(bytes);
         try b.pack.read(b.io, v.info, .{ .offset = offset, .len = len }, bytes);
@@ -163,17 +159,18 @@ pub const Builder = struct {
     }
 
     /// A native tensor in its forward form; Engram's q waits for its k (`pending`).
-    fn native(b: *Builder, name: []const u8, rule: Rule, v: plan.NativePlan, rank: u32, world: u32, pending: *?[]f32) !void {
+    fn native(b: *Builder, name: []const u8, rule: Rule, v: plan.NativePlan, rank: u32, world: u32, heads: ?partition.Share, pending: *?[]f32) !void {
+        if ((v.slice == .heads) != (heads != null)) return error.UnexpectedTensor;
         var shape: [4]usize = @splat(1);
         const dims = v.info.dims();
         @memcpy(shape[0..dims.len], dims);
-        if (v.slice == .vocab_rows) shape[0] = (try @import("partition.zig").share(@intCast(shape[0]), rank, world)).len else if (v.slice != .whole) shape[0] /= world;
+        if (v.slice == .vocab_rows) shape[0] = (try partition.share(@intCast(shape[0]), rank, world)).len else if (heads) |s| shape[0] = s.len;
         if (v.info.dtype != .f32 and v.info.dtype != .bf16 and v.info.dtype != .f16) return error.UnexpectedTensor;
         if (b.metadata_only) {
             if (rule.out == .qk and std.mem.endsWith(u8, v.name, "q_weight")) return;
             return b.put(name, if (rule.out == .bf16) .bf16 else .f32, shape[0..dims.len], try b.copy(&.{}));
         }
-        const bytes = try b.raw(v, rank, world);
+        const bytes = try b.raw(v, rank, world, heads);
         defer b.gpa.free(bytes);
         const count = bytes.len / v.info.dtype.size();
         switch (rule.out) {
@@ -210,14 +207,15 @@ pub const Builder = struct {
     pub fn layer(b: *Builder, l: *const plan.LayerPlan, o_groups: u32, rank: u32, world: u32) !void {
         var nb: [160]u8 = undefined;
         var fb: [32]u8 = undefined;
-        const gl = o_groups / world;
-        for (l.groups) |g| try b.group(try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ l.index, try groupField(g, gl, &fb) }), g);
+        const first_group = (try partition.outputGroups(o_groups, rank, world)).lo;
+        for (l.groups) |g| try b.group(try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ l.index, try groupField(g, first_group, &fb) }), g);
         var pending: ?[]f32 = null;
         defer if (pending) |q| b.gpa.free(q);
         for (l.natives) |v| {
             const suffix = v.name[l.prefix.len + 1 ..];
             const rule = rules.get(suffix) orelse return error.UnnamedNative;
-            try b.native(try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ l.index, rule.name }), rule, v, rank, world, &pending);
+            const heads = if (v.slice == .heads) try partition.outputShare(@intCast(v.info.shape[0]), o_groups, rank, world) else null;
+            try b.native(try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ l.index, rule.name }), rule, v, rank, world, heads, &pending);
         }
         if (pending != null) return error.EngramHalf;
         for (&l.experts, [_][]const u8{ "w1", "w2", "w3" }) |*x, w| try b.experts(try std.fmt.bufPrint(&nb, "L{d}.moe.{s}", .{ l.index, w }), x);
@@ -229,7 +227,7 @@ pub const Builder = struct {
         for (p.top) |v| {
             const is_embed = std.mem.eql(u8, v.name, "embed.weight");
             const rule: Rule = if (is_embed) .{ .name = "embed", .out = .bf16 } else .{ .name = "norm", .out = .f32 };
-            try b.native(rule.name, rule, v, p.rank, p.world, &none);
+            try b.native(rule.name, rule, v, p.rank, p.world, null, &none);
         }
         if (p.head) |h| try b.group("head", h);
     }
@@ -241,8 +239,8 @@ pub const Builder = struct {
         try b.group("dspark.main_proj", d.main_proj);
         const out_names = [_][]const u8{ "dspark.main_norm", "dspark.norm", "dspark.markov.w1", "dspark.markov.w2" };
         const outs = [_]Out{ .f32, .f32, .bf16, .bf16 };
-        for (d.natives, out_names, outs) |v, nm, o| try b.native(nm, .{ .name = nm, .out = o }, v, p.rank, p.world, &none);
-        if (d.confidence) |c| try b.native("dspark.conf", .{ .name = "dspark.conf", .out = .f32 }, c, p.rank, p.world, &none);
+        for (d.natives, out_names, outs) |v, nm, o| try b.native(nm, .{ .name = nm, .out = o }, v, p.rank, p.world, null, &none);
+        if (d.confidence) |c| try b.native("dspark.conf", .{ .name = "dspark.conf", .out = .f32 }, c, p.rank, p.world, null, &none);
     }
 
     /// Every planned block, then the model-level tensors (a whole-model plan only).
@@ -300,8 +298,8 @@ test "Engram native qk partial allocation has one pending owner" {
             var pending: ?[]f32 = null;
             defer if (pending) |owned| gpa.free(owned);
             const tensor: plan.NativePlan = .{ .name = "q", .info = p.get("q").?, .slice = .whole, .bytes = 16 };
-            try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, &pending);
-            try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, &pending);
+            try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, null, &pending);
+            try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, null, &pending);
         }
     };
     try testing.checkAllAllocationFailures(a, control.run, .{&pack});
@@ -328,8 +326,8 @@ test "Engram qk decodes stored F32 BF16 F16 before an independently widened prod
         var pending: ?[]f32 = null;
         defer if (pending) |q| a.free(q);
         const tensor: plan.NativePlan = .{ .name = "q", .info = p.get("q").?, .slice = .whole, .bytes = size };
-        try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, &pending);
-        try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, &pending);
+        try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, null, &pending);
+        try b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, null, &pending);
         const got: f32 = @bitCast(std.mem.readInt(u32, b.out.items[0].bytes[0..4], .little));
         // Independent scalar FP64 gate reference: RMS-normalized h=2, k=3, D=1, value=5, residual=2.
         const norm: f64 = 1.0 / @sqrt(4.0 + 1e-6) / @sqrt(9.0 + 1e-6);
@@ -344,7 +342,7 @@ test "Engram qk decodes stored F32 BF16 F16 before an independently widened prod
         try testing.expectEqual(@as(f32, @floatCast(expected * expected)), got);
         if (size == 4) try testing.expect(got != bf16Widen(bf16Round(value)) * bf16Widen(bf16Round(value)));
         pending = try a.alloc(f32, 2);
-        try testing.expectError(error.UnexpectedTensor, b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, &pending));
+        try testing.expectError(error.UnexpectedTensor, b.native("qk", .{ .name = "qk", .out = .qk }, tensor, 0, 1, null, &pending));
         try testing.expect(pending == null);
     }
 }
@@ -366,8 +364,8 @@ test "an F16 router bias and confidence head reach the forward as exactly widene
     defer b.deinit();
     var none: ?[]f32 = null;
     const tensor: plan.NativePlan = .{ .name = "b", .info = p.get("b").?, .slice = .whole, .bytes = 2 * values.len };
-    try b.native("L0.moe.bias", rules.get("ffn.gate.bias").?, tensor, 0, 1, &none);
-    try b.native("dspark.conf", .{ .name = "dspark.conf", .out = .f32 }, tensor, 0, 1, &none);
+    try b.native("L0.moe.bias", rules.get("ffn.gate.bias").?, tensor, 0, 1, null, &none);
+    try b.native("dspark.conf", .{ .name = "dspark.conf", .out = .f32 }, tensor, 0, 1, null, &none);
     for (b.out.items) |n| {
         try testing.expectEqual(Kind.f32, n.kind);
         for (values, 0..) |v, i| try testing.expectEqual(@as(u32, @bitCast(@as(f32, v))), std.mem.readInt(u32, n.bytes[4 * i ..][0..4], .little));

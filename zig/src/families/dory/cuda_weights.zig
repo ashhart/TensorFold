@@ -113,7 +113,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     if (c.quant != .nvfp4) return error.UnsupportedDoryCudaQuantization;
     if (loops) |l| c = try c.withLoops(l);
     var ck = try core.checkpoint.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var m = try names.map(gpa, &ck, c);
     defer m.deinit();
     var w: Weights = .{ .gpa = gpa, .config = c };
@@ -121,7 +121,11 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     const f = c.factors();
     w.subs = try gpa.alloc(Sub, c.sublayers);
     w.embed = try w.upload(d, m.embed.bytes);
-    for (w.subs, m.subs) |*out, s| out.* = switch (s) {
+    // each layer read past the page cache, the next one while it packs (TF_LOAD_DIRECT=0: main's mapped reads)
+    var direct = core.checkpoint.direct.Layers.init(gpa, &ck, try core.checkpoint.loadReaders());
+    defer direct.deinit();
+    const count = c.sublayers;
+    for (w.subs, m.subs, 0..) |*out, *s, i| out.* = switch (try direct.moved(s, "backbone.layers.{d}.", i, count)) {
         .attn => |a| .{ .attn = .{
             .alpha = try w.upload(d, a.alpha.bytes),
             .q = try w.proj(d, a.q),

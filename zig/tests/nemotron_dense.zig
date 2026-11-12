@@ -1,4 +1,4 @@
-//! Nemotron's tensor-unit dense projections at real shapes: schedule variants bit-checked against the engine's kernels, then timed.
+//! Nemotron's tensor-unit dense projections at real shapes: schedule variants bit-checked vs engine kernels, timed.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -8,7 +8,7 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 const MP = 16; // every window of up to 16 rows pads to one 16-row tile
 const GS = 64;
 
-/// A projection: its kernel, shape, how many a forward runs, and weight copies streamed per timing (so no copy stays cached).
+/// A projection: kernel, shape, how many a forward runs, and weight copies streamed per timing (so none stays cached).
 const Shape = struct { key: []const u8, kernel: []const u8, n: usize, k: usize, per_step: usize, per_level: usize, copies: usize, split: bool, relu2: bool = false };
 const shapes = [_]Shape{
     .{ .key = "in", .kernel = "coop_in_1_0_sk", .n = 10304, .k = 2688, .per_step = 23, .per_level = 0, .copies = 23, .split = true },
@@ -97,7 +97,7 @@ fn splitSource(a: std.mem.Allocator, src: []const u8) ![]u8 {
 const ta_line = "  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tA((device bfloat*)X + (int64_t)rb * K, dextents<int32_t, 2>(K, M - rb));\n";
 const ids_line = "  for (int i = 0; i < CAP; i++) { auto ids = P.get_multidimensional_index(i); ecol[i] = ids[0]; erow[i] = ids[1]; }\n";
 
-/// The 16-row tile as 16/r tiles of r rows (C[j*r + i] is tile j's element i), tiles past the window's rows skipped (uniform).
+/// 16-row tile as 16/r tiles of r rows (C[j*r + i] is tile j's element i), tiles past window rows skipped (uniform).
 fn tiles(a: std.mem.Allocator, src: []const u8, r: usize) ![]u8 {
     const n = 16 / r;
     var t = try swap(a, src, "matmul2d_descriptor(16 * TMR, 64, GS,", try std.fmt.allocPrint(a, "matmul2d_descriptor({d}, 64, GS,", .{r}));
@@ -289,7 +289,7 @@ fn time(q: mtl.Queue, p: Pipes, s: Shape, split: bool, sk: usize, b: *const Bufs
     return t[reps / 2];
 }
 
-/// Row r of the 8-row outputs against row r computed alone (rows 0..7), and rows 0..m-1 at m = 1, 2, 3 against the same.
+/// Row r of the 8-row outputs against row r alone (rows 0..7), and rows 0..m-1 at m = 1, 2, 3 against the same.
 fn rowExact(q: mtl.Queue, p: Pipes, s: Shape, split: bool, sk: usize, b: *const Bufs, full: []const u32, scratch: []u32) bool {
     for (0..8) |r| {
         _ = run(q, p, s, split, sk, b, b.x1[r], b.xs1[r], 1, scratch);

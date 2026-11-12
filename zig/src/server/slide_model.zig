@@ -1,6 +1,7 @@
 //! The served model as the Living Weights view draws it: layers, pockets and shards, named as its family names them.
 const std = @import("std");
 const json = @import("json");
+const st = @import("core").safetensors;
 const families = @import("living").families;
 const Family = @import("living").Family;
 const Allocator = std.mem.Allocator;
@@ -68,21 +69,16 @@ fn readShard(a: Allocator, io: Io, path: []const u8, f: Family, shard: *Shard, p
     defer file.close(io);
     var len: [8]u8 = undefined;
     if (try file.readPositionalAll(io, &len, 0) != 8) return error.BadSafetensors;
-    const n = std.mem.readInt(u64, &len, .little);
-    if (shard.bytes < 8 or n > shard.bytes - 8 or n > 1 << 27) return error.BadSafetensors;
-    const text = try a.alloc(u8, @intCast(n));
+    const n = try st.headerSize(std.mem.readInt(u64, &len, .little), shard.bytes);
+    const text = try a.alloc(u8, n);
     if (try file.readPositionalAll(io, text, 8) != text.len) return error.BadSafetensors;
-    const header = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
-    if (header != .object) return error.BadSafetensors;
+    const names = try st.parseHeaderOptions(a, text, shard.bytes - 8 - n, .{ .unsupported = .omit });
     var layers: std.ArrayList(u16) = .empty;
-    var it = header.object.iterator();
-    while (it.next()) |kv| {
-        const name = kv.key_ptr.*;
+    for (names.keys(), names.values()) |name, e| {
         const expert = f.names.expert;
         const at = std.mem.indexOf(u8, name, expert) orelse continue; // an MTP head's expert's bytes count too
-        const range = offsets(kv.value_ptr.*) orelse continue;
-        shard.expert_bytes += range[1] - range[0];
-        const layer: u16 = @intCast(f.expertLayer(name) orelse continue);
+        shard.expert_bytes = std.math.add(u64, shard.expert_bytes, e.end - e.begin) catch return error.BadSafetensors;
+        const layer = std.math.cast(u16, f.expertLayer(name) orelse continue) orelse return error.BadSafetensors;
         if (std.mem.indexOfScalar(u16, layers.items, layer) == null) try layers.append(a, layer);
         if (pocket == 0) continue;
         // a row a neuron: the up projection's scales or biases, zero once a neuron is free (a SwiGLU gate row may stay)
@@ -92,38 +88,25 @@ fn readShard(a: Allocator, io: Io, path: []const u8, f: Family, shard: *Shard, p
         const part = leaf[proj.len + 1 ..];
         if (!std.mem.eql(u8, part, "scales") and !std.mem.eql(u8, part, "biases")) continue;
         const slot = std.mem.indexOfScalar(u16, moe, layer) orelse continue;
-        used[slot] = @max(used[slot], try inUse(a, io, file, 8 + n + range[0], kv.value_ptr.*, pocket));
+        used[slot] = @max(used[slot], try inUse(a, io, file, 8 + n, e, pocket));
     }
     std.mem.sort(u16, layers.items, {}, std.sort.asc(u16));
     shard.layers = layers.items;
 }
 
-fn offsets(entry: std.json.Value) ?[2]u64 {
-    if (entry != .object) return null;
-    const o = entry.object.get("data_offsets") orelse return null;
-    if (o != .array or o.array.items.len != 2) return null;
-    const b = o.array.items[0];
-    const e = o.array.items[1];
-    if (b != .integer or e != .integer or b.integer < 0 or e.integer < b.integer) return null;
-    return .{ @intCast(b.integer), @intCast(e.integer) };
-}
-
 /// Neurons in use among a per-row tensor's last `pocket` rows (bf16 scales or biases): up to the last not all zero.
-fn inUse(a: Allocator, io: Io, file: Io.File, at: u64, entry: std.json.Value, pocket: usize) !u16 {
-    const shape = entry.object.get("shape") orelse return 0;
-    if (shape != .array or shape.array.items.len != 2) return 0;
-    const rows = shape.array.items[0];
-    const cols = shape.array.items[1];
-    if (rows != .integer or cols != .integer or cols.integer < 1 or rows.integer < @as(i64, @intCast(pocket))) return 0;
-    const row: usize = @as(usize, @intCast(cols.integer)) * 2;
-    const own: u64 = @intCast(rows.integer - @as(i64, @intCast(pocket)));
+fn inUse(a: Allocator, io: Io, file: Io.File, data: u64, e: st.Entry, pocket: usize) !u16 {
+    if (e.rank != 2 or e.shape[1] < 1 or e.shape[0] < pocket) return 0;
+    const row = std.math.mul(usize, e.shape[1], 2) catch return 0;
+    const need = std.math.mul(usize, e.shape[0], row) catch return 0;
+    if (need > e.end - e.begin) return 0; // the rows read stay inside the tensor core checked against the file
     const bytes = try a.alloc(u8, pocket * row);
-    if (try file.readPositionalAll(io, bytes, at + own * row) != bytes.len) return 0;
+    if (try file.readPositionalAll(io, bytes, data + e.begin + (e.shape[0] - pocket) * row) != bytes.len) return 0;
     var last: usize = 0;
     for (0..pocket) |r| if (!std.mem.allEqual(u8, bytes[r * row ..][0..row], 0)) {
         last = r + 1;
     };
-    return @intCast(last);
+    return std.math.cast(u16, last) orelse return error.BadSafetensors;
 }
 
 fn readJson(a: Allocator, io: Io, path: []const u8) !std.json.Value {
@@ -268,4 +251,42 @@ test "a SwiGLU pocket counts its neurons by their up rows: one retired with its 
     try readShard(a, io, path, f, &shard, 32, &.{0}, &used);
     try std.testing.expectEqual(@as(u16, 2), used[0]);
     try std.testing.expectEqualStrings("up_proj", f.upInput());
+}
+
+test "a shard whose header would overflow a sum, a layer or a row read is refused with an error" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const f: Family = .{
+        .model_type = "swiglu_scan_test",
+        .names = .{ .layers = "language_model.model.layers.", .expert = "mlp.shared_expert.", .inputs = &.{ "gate_proj", "up_proj" } },
+        .neuron = .{ .act = .swiglu, .margin = 0.5, .sharp = 16 },
+        .quant = .{ .bits = 4, .group = 32 },
+        .keys = .{ .width = "shared_expert_intermediate_size" },
+        .experts = .every,
+    };
+    const p = "language_model.model.layers.";
+    const big = "\"dtype\":\"U8\",\"shape\":[9223372036854775807],\"data_offsets\":[0,9223372036854775807]";
+    const headers = [_][]const u8{
+        "{\"" ++ p ++ "0.mlp.shared_expert.a.weight\":{" ++ big ++ "},\"" ++ p ++ "1.mlp.shared_expert.a.weight\":{" ++ big ++ "}," ++
+            "\"" ++ p ++ "2.mlp.shared_expert.a.weight\":{" ++ big ++ "}}",
+        "{\"" ++ p ++ "65536.mlp.shared_expert.down_proj.weight\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}",
+        "{\"" ++ p ++ "0.mlp.shared_expert.up_proj.scales\":{\"dtype\":\"BF16\",\"shape\":[4611686018427387904,2],\"data_offsets\":[0,4]}}",
+        "{\"" ++ p ++ "0.mlp.shared_expert.up_proj.scales\":{\"dtype\":\"BF16\",\"shape\":[2,34359738368],\"data_offsets\":[0,4]}}",
+    };
+    for (headers) |h| {
+        var bytes: std.ArrayList(u8) = .empty;
+        try bytes.appendNTimes(a, 0, 8);
+        std.mem.writeInt(u64, bytes.items[0..8], h.len, .little);
+        try bytes.appendSlice(a, h);
+        try bytes.appendNTimes(a, 0, 4);
+        try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = bytes.items });
+        const path = try std.fs.path.join(a, &.{ ".zig-cache", "tmp", &tmp.sub_path, "model.safetensors" });
+        var shard: Shard = .{ .name = "model.safetensors", .bytes = bytes.items.len, .mtime = 0, .inode = 0, .layers = &.{}, .expert_bytes = 0 };
+        var used = [_]u16{0};
+        try std.testing.expectError(error.BadSafetensors, readShard(a, io, path, f, &shard, 1, &.{0}, &used));
+    }
 }

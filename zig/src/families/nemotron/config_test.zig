@@ -159,6 +159,9 @@ test "the latent router's bounds: 33 picks, 1,025 experts, zero picks and expert
 }
 
 test "CUDA and the Intel GPU engine refuse any width but 4/64 by name; other configs go on to their own checks" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const a = std.testing.allocator;
     const oq = try withQuantization("\"quantization\": {\"group_size\": 64, \"bits\": 4, \"lm_head\": {\"bits\": 8}}");
     defer a.free(oq);

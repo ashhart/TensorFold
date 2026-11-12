@@ -1,6 +1,7 @@
 //! DFlash2's checkpoint onto the device: the config checked, linears tiled for glm_mm, scratch carved from one buffer.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const mm = @import("cuda_mm.zig");
 const q4 = @import("cuda_q4.zig");
 const quant = @import("cuda_quant.zig");
@@ -47,7 +48,7 @@ const Loader = struct {
             return error.DrafterTensorShape;
         }
         try l.buf.resize(l.gpa, e.n);
-        _ = try l.file.readPositionalAll(l.io, l.buf.items, e.off);
+        if (try l.file.readPositionalAll(l.io, l.buf.items, e.off) != e.n) return error.BadDrafterHeader;
         return l.buf.items;
     }
 
@@ -108,6 +109,15 @@ const Loader = struct {
     }
 };
 
+/// The drafter's tensors from `json`, a header of `data_len` data bytes: core's checks, then every tensor BF16.
+fn addEntries(arena: std.mem.Allocator, json: []const u8, data_len: u64, ents: *std.StringHashMap(Ent)) !void {
+    const names = try core.safetensors.parseHeader(arena, json, std.math.cast(usize, data_len) orelse return error.BadDrafterHeader);
+    for (names.keys(), names.values()) |name, e| {
+        if (e.dtype != .bf16) return error.DrafterNotBf16;
+        try ents.put(name, .{ .off = 8 + json.len + e.begin, .n = e.end - e.begin });
+    }
+}
+
 fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
     return std.fmt.bufPrint(b, "layers.{d}.{s}", .{ li, s });
 }
@@ -116,32 +126,28 @@ fn layerName(b: *[96]u8, li: usize, s: []const u8) ![]const u8 {
 pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, rank: usize, world: usize, bits: u8) !*Drafter {
     if (bits != 0 and bits != 4) return error.BadDrafterBits;
     try checkConfig(gpa, io, dir);
+    const checkpoint_digest = try core.checkpoint_identity.fullIdentity(gpa, io, dir);
     const d = e.d;
     const head = (e.w.mtp orelse return error.DrafterNeedsDraftHead).draft;
     const path = try std.fs.path.join(gpa, &.{ dir, "model.safetensors" });
     defer gpa.free(path);
     const file = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
+    const size = try file.length(io);
     var lenb: [8]u8 = undefined;
-    _ = try file.readPositionalAll(io, &lenb, 0);
-    const hlen = std.mem.readInt(u64, &lenb, .little);
+    if (size < 8 or try file.readPositionalAll(io, &lenb, 0) != 8) return error.BadDrafterHeader;
+    const hlen = core.safetensors.headerSize(std.mem.readInt(u64, &lenb, .little), size) catch return error.BadDrafterHeader;
     if (hlen > 1 << 20) return error.BadDrafterHeader;
-    const text = try gpa.alloc(u8, hlen);
-    defer gpa.free(text);
-    _ = try file.readPositionalAll(io, text, 8);
-    const hdr = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
-    defer hdr.deinit();
+    var names: std.heap.ArenaAllocator = .init(gpa);
+    defer names.deinit();
+    const text = try names.allocator().alloc(u8, hlen);
+    if (try file.readPositionalAll(io, text, 8) != hlen) return error.BadDrafterHeader;
     var ents = std.StringHashMap(Ent).init(gpa);
     defer ents.deinit();
-    var it = hdr.value.object.iterator();
-    while (it.next()) |x| {
-        if (std.mem.eql(u8, x.key_ptr.*, "__metadata__")) continue;
-        if (!std.mem.eql(u8, x.value_ptr.object.get("dtype").?.string, "BF16")) return error.DrafterNotBf16;
-        const offs = x.value_ptr.object.get("data_offsets").?.array.items;
-        try ents.put(x.key_ptr.*, .{ .off = 8 + hlen + @as(u64, @intCast(offs[0].integer)), .n = @intCast(offs[1].integer - offs[0].integer) });
-    }
-    const split = world == 2;
-    const ff: usize = if (split) FF / 2 else FF;
+    try addEntries(names.allocator(), text, size - 8 - hlen, &ents);
+    const mlp = df.mlpSplit(world, e.settings.roce_wide); // the MLP split across the ranks, or whole
+    const split = mlp.split;
+    const ff = mlp.ff;
     const small: u64 = 6 * 4096 * 2 + 2 * 128 * 2 + 2 * 2 * 2 * D * 2 + 16 * 256;
     const per: u64 = if (bits == 4) 1 else 4; // quarter-bytes a weight: 4 bits (plus scales and biases below) or bf16
     const lin_elems: u64 = df.QKV * D + 2 * KVW * D + D * D + 2 * ff * D + 2 * KVW * D + 5 * D * D / df.LAYERS;
@@ -150,7 +156,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     errdefer wbuf.free();
     var tmp = try cuda.DeviceBuffer.alloc(d, 2 * FF * D * 2); // the largest linear as stored
     defer tmp.free();
-    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world));
+    var raw = try cuda.DeviceBuffer.alloc(d, df.rawBytes(bits, world, e.settings.roce_wide));
     defer raw.free();
     var module = try cuda.Module.load(d, cuda.kernels.glm_dflash);
     errdefer module.unload();
@@ -161,7 +167,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     }
     const dr = try gpa.create(Drafter);
     errdefer gpa.destroy(dr);
-    dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world };
+    dr.* = .{ .checkpoint_digest = checkpoint_digest, .bits = bits, .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world, .tap_rows = df.tapRows(e.bp.rows) };
     defer @import("cuda_load_owner.zig").drain(e.stream, d);
     var nb: [4][96]u8 = undefined;
     for (&dr.layers, 0..) |*lw, i| {
@@ -180,7 +186,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
         const gate = try layerName(&nb[1], i, "mlp.gate_proj.weight");
         const up = try layerName(&nb[2], i, "mlp.up_proj.weight");
         const down = try layerName(&nb[3], i, "mlp.down_proj.weight");
-        if (split) { // this rank's half of the MLP width: gate and up rows, down columns
+        if (split) { // this rank's share of the MLP width: gate and up rows, down columns, at rank * ff
             lw.gu = try l.linear(&.{ gate, up }, &.{ FF, FF }, D, .{ rank * ff, ff, 0, D });
             lw.down = try l.linearB(&.{down}, &.{D}, FF, .{ 0, 0, rank * ff, ff });
         } else {
@@ -198,7 +204,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     var tail: Tail = .{ .loader = &l, .head_n = head.n };
     const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
     try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
-    if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
+    dr.log = try @import("sys").environment.read(u64, "TF_GLM_DFLASH2_LOG", dr.log);
     if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
     std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
     return dr;
@@ -237,15 +243,15 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
     if (dr.fc == .bf16) part = @max(part, mm.partBytes(64, dr.fc.bf16));
     part = @max(part, mm.partBytes(64, dr.hproj));
     const fields = .{
-        .{ "x", M * D * 2 },                                                                     .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                .{ "dyn", M * KVW * 2 },
-        .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },              .{ "vb", M * KVW * 2 },
-        .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },           .{ "act", M * FF * 2 },
-        .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },           .{ "logits", M * head_n * 2 },
-        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
-        .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
-        .{ "taps_prefill", C * df.TAP_ROW },                                                     .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
-        .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },
-        .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 }, .{ "pm", M * df.QH * df.CH * 4 },
+        .{ "x", M * D * 2 },                                                                     .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                                     .{ "dyn", M * KVW * 2 },
+        .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },                                   .{ "vb", M * KVW * 2 },
+        .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },                                .{ "act", M * FF * 2 },
+        .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },                                .{ "logits", M * head_n * 2 },
+        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", (if (dr.split) dr.world else 1) * M * D * 4 }, .{ "cin", C * df.TAP_ROW },
+        .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },                              .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
+        .{ "taps_prefill", dr.tap_rows * df.TAP_ROW },                                           .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                                       .{ "rings", df.MAX_S * 8 },
+        .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                                       .{ "crings", C * 8 },
+        .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 },                      .{ "pm", M * df.QH * df.CH * 4 },
         .{ "pl", M * df.QH * df.CH * 4 },                                                        .{ "pacc", M * df.QH * df.CH * df.HD * 4 },
     };
     var at: u64 = 0;
@@ -279,4 +285,31 @@ pub fn checkConfig(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     const taps = dc.get("target_layer_ids").?.array.items;
     if (taps.len != taps_mod.layers.len) return error.DrafterConfigUnexpected;
     for (taps, taps_mod.layers) |t, w| if (t.integer != w) return error.DrafterConfigUnexpected;
+}
+
+test "a malformed drafter header is refused with an error, and a range past the data is refused" {
+    const bad = [_][]const u8{
+        "[]",
+        "{\"a\":1}",
+        "{\"a\":{\"shape\":[1],\"data_offsets\":[0,2]}}",
+        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0]}}",
+        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[4,2]}}",
+        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0.0,2]}}",
+        "{\"a\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,999999]}}",
+    };
+    for (bad) |json| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ents = std.StringHashMap(Ent).init(std.testing.allocator);
+        defer ents.deinit();
+        try std.testing.expectError(error.BadSafetensors, addEntries(arena.allocator(), json, 4, &ents));
+    }
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ents = std.StringHashMap(Ent).init(std.testing.allocator);
+    defer ents.deinit();
+    const json = "{\"a\":{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[0,4]}}";
+    try addEntries(arena.allocator(), json, 4, &ents);
+    try std.testing.expectEqual(Ent{ .off = 8 + json.len, .n = 4 }, ents.get("a").?);
+    try std.testing.expectError(error.DrafterNotBf16, addEntries(arena.allocator(), "{\"f\":{\"dtype\":\"F16\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4, &ents));
 }

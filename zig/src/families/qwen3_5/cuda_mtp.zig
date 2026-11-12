@@ -46,8 +46,8 @@ pub const Ctx = struct {
 /// How a layer pass attends: absorbed or chained rows over the ring and the block's earlier rows, into the ring too.
 const Pass = union(enum) { ring, tree: u64 };
 
-/// Where a stream's ring and state are when its target lane's run holds them (Mtp.ring_of).
-pub const RingOf = struct { ctx: *anyopaque, area: *const fn (*anyopaque, *Stream) ?u64 };
+/// Where a stream's ring and state are when its lane's run holds them (Mtp.ring_of); all: every stream's.
+pub const RingOf = struct { ctx: *anyopaque, area: *const fn (*anyopaque, *Stream) ?u64, all: bool = false };
 
 pub const Mtp = struct {
     gpa: std.mem.Allocator,
@@ -119,7 +119,7 @@ pub const Mtp = struct {
         const d = try gpa.create(Mtp);
         errdefer gpa.destroy(d);
         d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
-        if (platform.c.getenv("TF_MTP_DRAFTS")) |v| d.depth = std.fmt.parseInt(u32, std.mem.span(v), 10) catch default_depth;
+        d.depth = try platform.environment.read(u32, "TF_MTP_DRAFTS", default_depth);
         d.depth = @min(@max(d.depth, 1), most_window - 1);
         if (platform.c.getenv("TF_MTP_BATCH")) |v| d.batch = !std.mem.eql(u8, std.mem.span(v), "0");
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen36_mtp);
@@ -261,7 +261,8 @@ pub const Mtp = struct {
 
     /// `n` contexts ready in the pool, for the streams the server admits.
     pub fn reserve(d: *Mtp, n: usize) !void {
-        const own = if (d.ring_of != null) @min(n, 1) else n; // with a pool the other streams' buffers are lane runs
+        // with a pool the other streams' buffers are lane runs (all: every stream's)
+        const own = if (d.ring_of) |r| (if (r.all) 0 else @min(n, 1)) else n;
         try d.pool.ensureTotalCapacity(d.gpa, own);
         while (d.pool.items.len < own) d.pool.appendAssumeCapacity(try d.create());
     }

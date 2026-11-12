@@ -10,8 +10,8 @@ const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
 const pops = hip.plan_ops;
 
-/// A round's launches: the device plan, its token ids, the keys the attention walk covers, each layer's kept inputs.
-pub const Round = struct { plan: pops.Plan, tokens: u64, span: usize, inputs: []const [2]u64 };
+/// A round's launches and kept inputs; `positions3` holds M-RoPE (t, h, w) rows, `rotary` a 1-D position (0: cache's).
+pub const Round = struct { plan: pops.Plan, tokens: u64, span: usize, inputs: []const [2]u64, positions3: u64 = 0, rotary: u64 = 0 };
 
 /// Whether this build and model run lane rounds: the merged decode launches, and shapes the plan kernels take.
 pub fn supported(o: Ops, m: *const view.Model) bool {
@@ -54,8 +54,12 @@ pub fn forward(ops: Ops, m: *const view.Model, r: Round, trace: ?fwd.Trace) fwd.
             .full => |f| try attentionRows(o, m, f, r, index, normed),
             .linear => |l| try linearRows(o, m, l, r, index, normed),
         };
-        // the launches of a layer's two tails merge when the rows stay on this rank
-        const merge = o.fused() and y.kind == m.act;
+        // the launches of a layer's two tails merge when the rows stay on this rank and every slot is in `y`
+        const stacked = switch (mlp) {
+            .moe => |rt| rt.experts.shared == null,
+            .dense => true,
+        };
+        const merge = o.fused() and y.kind == m.act and stacked;
         const last = index + 1 == m.layers.len;
         const next_norm = if (last) m.final_norm else inputNorm(m.layers[index + 1]);
         const dest = if (last) out else normed;
@@ -84,6 +88,7 @@ pub fn forward(ops: Ops, m: *const view.Model, r: Round, trace: ?fwd.Trace) fwd.
                 }
             },
         }
+        if (m.taps.of(index)) |ti| try pops.tap(o, x, r.plan, s.hidden, ti, m.taps.n, m.taps.rows);
         if (trace) |t| t.layer(t.ctx, index, x, total) catch return error.HipFailed;
     }
     return out;
@@ -124,9 +129,26 @@ fn attentionRows(o: Ops, m: *const view.Model, f: view.Full, r: Round, index: us
     const theta: f32 = @floatCast(s.rope_theta);
     // q and k normed, rotated and rounded in one launch; k then goes with v into the slots' caches
     const q32 = try o.arena.of(f32, q_rows * hd);
-    try o.qkRope(qg, s.heads * 2 * hd, 2 * hd, f.q_norm, eps, total, s.heads, hd, s.rotary_dim, theta, r.plan.args.pos, q32, null, 0);
     const k32 = try o.arena.of(f32, total * s.kv_heads * hd);
-    try o.qkRope(keys, s.kv_heads * hd, hd, f.k_norm, eps, total, s.kv_heads, hd, s.rotary_dim, theta, r.plan.args.pos, k32, null, 0);
+    if (m.torch_text) {
+        const rope = m.rope.?;
+        const qc = try fwd.take(o, m.act, q_rows * hd);
+        try o.copyCols(qg, 2 * hd, 0, qc.ptr, q_rows, hd);
+        const qn = try fwd.take(o, m.act, q_rows * hd);
+        const kn = try fwd.take(o, m.act, total * s.kv_heads * hd);
+        try o.rms(qc, f.q_norm, qn, q_rows, hd, eps);
+        try o.rms(keys, f.k_norm, kn, total * s.kv_heads, hd, eps);
+        if (o.stream != hip.counting) {
+            const stream: hip.Stream = .{ .r = o.l.r, .handle = o.stream };
+            rope.textRope(stream, qn, .{ .ptr = q32, .kind = .f32 }, hd, s.heads * hd, total, s.heads, hd, s.rotary_dim, r.positions3, theta) catch return error.HipFailed;
+            rope.textRope(stream, kn, .{ .ptr = k32, .kind = .f32 }, hd, s.kv_heads * hd, total, s.kv_heads, hd, s.rotary_dim, r.positions3, theta) catch return error.HipFailed;
+        }
+    } else {
+        // an image lane's later rows sit at its M-RoPE shift; with all three axes equal that is 1-D RoPE
+        const pos = if (r.rotary != 0) r.rotary else r.plan.args.pos;
+        try o.qkRope(qg, s.heads * 2 * hd, 2 * hd, f.q_norm, eps, total, s.heads, hd, s.rotary_dim, theta, pos, q32, null, 0);
+        try o.qkRope(keys, s.kv_heads * hd, hd, f.k_norm, eps, total, s.kv_heads, hd, s.rotary_dim, theta, pos, k32, null, 0);
+    }
     try pops.kvWrite(o, k32, values, r.plan, index, s.kv_heads, hd);
     const att = try o.arena.of(f32, q_rows * hd);
     try pops.causal(o, q32, m.act, att, r.plan, index, s.heads, s.kv_heads, hd, r.span, fwd.scaleOf(hd));

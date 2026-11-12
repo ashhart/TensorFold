@@ -51,7 +51,7 @@ fn rounds(t: *Turn, srv: *Server, cx: *errors.Cx, input: *chat.Input, first: cha
         t.rounds += 1;
         completion += reply.completion_tokens;
         reasoning += reply.reasoning_tokens;
-        const parsed = try tool_parse.parse(a, reply.content, input.tools, null);
+        const parsed = if (reply.native_tool_format) tool_parse.Parsed{ .content = reply.content, .calls = reply.native_calls } else try tool_parse.parse(a, reply.content, input.tools, null);
         var server: std.ArrayList(Value) = .empty;
         var client = false;
         if (parsed.calls) |calls| for (calls) |c| {
@@ -111,7 +111,7 @@ fn runCalls(t: *Turn, a: Allocator, input: *chat.Input, calls: []const Value, si
         if (is_search) t.focus = subject;
         const ran = try tools.run(t.state.web, a, c, t.today, 6000, try std.mem.concat(a, u8, &.{ t.focus, " ", t.goal }), &t.seen);
         try t.noteSources(a, ran);
-        if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
+        if (!ran.ok) try t.progress(a, sink, "{s}", .{research.clip(ran.text, 200)});
         try t.hide(a, input, try research.toolMessage(a, c, ran.text));
     }
     t.calls_left -= @intCast(allowed.len);

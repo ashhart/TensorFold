@@ -58,9 +58,8 @@ fn key(b: Buf) Key {
 
 /// qmmw_nax at `bits`/`group` with nax.h inlined for this GPU.
 pub fn compile(r: *Run, bits: u8, group: u16) !Pipes {
-    const head = try std.fmt.allocPrint(r.arena, "#define WB {d}\n#define WG {d}\n", .{ bits, group });
     const body = if (r.window.ssd_experts != null) try @import("fsr_prompt_source.zig").patch(r.arena, ks.flashnext_qmmw, true) else ks.flashnext_qmmw;
-    const text = try frags.source(r.device, r.arena, try std.mem.concat(r.arena, u8, &.{ head, body }));
+    const text = try frags.source(r.device, r.arena, try @import("../../core/qmmw_source.zig").source(r.arena, body, bits, group));
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const p = struct {
         fn of(rr: *Run, l: mtl.Library, name: [:0]const u8) !mtl.Pipeline {

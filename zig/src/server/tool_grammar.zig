@@ -45,8 +45,11 @@ pub fn structure(srv: *Server, cx: *Cx, tools: []const Value, parallel: bool, th
     const rendered = try probed(srv, cx);
     const s = style(rendered) orelse .json; // unrecognized markup uses the canonical call form the parser accepts
     const text = if (lfm2.isStyle(rendered, probe, key)) try lfm2.build(cx.a, tools, parallel) else try build(cx.a, s, tools, parallel);
-    const field = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
-    return srv.compiledStructure(cx, .structural_tag, text, field, thinking);
+    const reason = try std.fmt.allocPrint(cx.a, "tool_choice \"required\" or a named function on backend '{s}'", .{srv.backendName()});
+    var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
+    // The structure names the request's field; the sentence above words the 400.
+    st.field = "tool_choice";
+    return st;
 }
 
 /// An auto reply's grammar: free text or calls, strict tools' arguments in their schema; null for LFM2's markup.
@@ -54,8 +57,11 @@ pub fn optionalStructure(srv: *Server, cx: *Cx, tools: []const Value, all: bool,
     const rendered = try probed(srv, cx);
     if (lfm2.isStyle(rendered, probe, key)) return null; // its call list is one grammar rule, not a tag a trigger opens
     const text = try optional(cx.a, style(rendered) orelse .json, tools, all, parallel);
-    const field = try std.fmt.allocPrint(cx.a, "strict tools under tool_choice \"auto\" on backend '{s}'", .{srv.backendName()});
-    return try srv.compiledStructure(cx, .structural_tag, text, field, thinking);
+    const reason = try std.fmt.allocPrint(cx.a, "strict tools under tool_choice \"auto\" on backend '{s}'", .{srv.backendName()});
+    var st = try srv.compiledStructure(cx, .structural_tag, text, reason, thinking);
+    // The structure names the request's field; the sentence above words the 400.
+    st.field = "tool_choice";
+    return st;
 }
 
 /// The template's rendering of an assistant turn that calls `probe`; empty when it renders no such turn.
@@ -69,9 +75,9 @@ fn probed(srv: *Server, cx: *Cx) errors.Refused![]const u8 {
 }
 
 /// TENSORFOLD_TOOL_GRAMMAR=1 (legacy TF_DSV41_TOOL_GRAMMAR): every auto tools request is held as strict tools are.
-pub fn autoAllEnv() bool {
-    const v = std.c.getenv("TENSORFOLD_TOOL_GRAMMAR") orelse std.c.getenv("TF_DSV41_TOOL_GRAMMAR") orelse return false;
-    return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+pub fn autoAllEnv() !bool {
+    if (std.c.getenv("TENSORFOLD_TOOL_GRAMMAR")) |v| return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+    return @import("sys").environment.read(bool, "TF_DSV41_TOOL_GRAMMAR", false);
 }
 
 /// Whether an auto reply offering `tools` gets a grammar: a tool marked "strict": true, or `all` are held.

@@ -63,11 +63,7 @@ pub const Weights = struct {
     }
 };
 /// Host bf16 from fp32: round to nearest even (torch's float -> bfloat16), NaN kept quiet.
-fn toBf16(v: f32) u16 {
-    const b: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((b >> 16) | 0x40);
-    return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
-}
+const toBf16 = core.bf16_round.bits;
 
 /// A float32 narrowed to bf16 by the loader, or null when bf16 does not hold it exactly (NaN stays NaN).
 fn narrow(v: f32) ?u16 {
@@ -120,10 +116,14 @@ const Loader = struct {
         const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
         const scale_name = try std.fmt.bufPrint(&buf, "{s}.weight_scale", .{module});
         const s: ?Tensor = if (ck.has(scale_name)) try ck.get(scale_name) else null;
+        const bases_name = try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf0_bases", .{module});
+        const bases: ?Tensor = if (ck.has(bases_name)) try ck.get(bases_name) else null;
+        const offsets: ?Tensor = if (bases != null) try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf0_codes", .{module})) else null;
         const stored: formats.Stored = .{
             .weight = .{ .dtype = w.dtype, .shape = w.shape[0..w.rank] },
             .scale = if (s) |*t| .{ .dtype = t.dtype, .shape = t.shape[0..t.rank] } else null,
             .csf = ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module})),
+            .csf0 = if (bases) |*b| .{ .bases = formats.metaOf(b), .offsets = formats.metaOf(&offsets.?) } else null,
         };
         const declared = L.declaredAs(module);
         const got = formats.of(declared, stored);
@@ -470,8 +470,11 @@ const Loader = struct {
         const cut = L.w.share.moe;
         const ni = cut.len();
         const count: usize = c.experts;
-        const up_len = X.bytes(1, ni, d, 2) / 4;
-        const down_len = X.bytes(1, d, ni, 1) / 4;
+        const packing = @import("cuda_load_pack.zig");
+        const csf0 = L.ck.has(try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.mlp.experts.0.gate_proj.weight_scale.csf0_bases", .{i}));
+        const lens = try packing.wordsOf(csf0, cut.lo, ni, d);
+        const up_len = lens[0];
+        const down_len = lens[1];
         const keep = @import("cuda_upload_owner.zig").keep;
         const up = try cuda.DeviceBuffer.alloc(L.d, count * up_len * 4);
         const up_at = try keep(L, up, "layers.{d}.moe.experts.up", .{i});
@@ -490,7 +493,6 @@ const Loader = struct {
             try up.upload(0, std.mem.sliceAsBytes(words[0 .. count * up_len]));
             try down.upload(0, std.mem.sliceAsBytes(words[count * up_len ..]));
         } else {
-            const packing = @import("cuda_load_pack.zig");
             const threads = packing.packers(@import("cuda_ranks.zig").environment("TF_GLM_LOAD_PACK")) catch |err| {
                 std.log.err("TF_GLM_LOAD_PACK: 1 to {d} packer threads", .{packing.max_packers});
                 return err;
@@ -505,7 +507,7 @@ const Loader = struct {
         }
         const us = try keep(L, try cuda.DeviceBuffer.fromHost(L.d, std.mem.sliceAsBytes(up_scale)), "layers.{d}.moe.experts.up_scale", .{i});
         const ds = try keep(L, try cuda.DeviceBuffer.fromHost(L.d, std.mem.sliceAsBytes(down_scale)), "layers.{d}.moe.experts.down_scale", .{i});
-        return .{ .format = .nvfp4, .up = up_at, .down = down_at, .up_scale = us, .down_scale = ds, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
+        return .{ .format = if (csf0) .nvfp4_csf0 else .nvfp4, .up = up_at, .down = down_at, .up_scale = us, .down_scale = ds, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
     }
 
     pub fn layer(L: *Loader, i: u32) !Layer {
@@ -536,9 +538,9 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     var w: Weights = .{ .gpa = gpa, .config = c, .share = share };
     errdefer w.deinit();
     var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, prefix);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var head_ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "lm_head.");
-    defer head_ck.close();
+    defer core.checkpoint.cache.close(&head_ck);
     var L: Loader = .{ .gpa = gpa, .d = d, .stream = stream, .pack_dense = tools.pack_dense, .tools = tools, .w = &w, .ck = &ck };
     defer L.host.deinit(gpa);
     defer L.staging.deinit();

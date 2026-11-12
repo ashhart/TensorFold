@@ -1,0 +1,61 @@
+base-0 2k 0 2099 0.288
+base-0 2k 1 2114 0.290
+base-0 2k 2 2087 0.286
+base-0 16k 0 16333 2.228
+base-0 16k 1 16310 2.229
+base-0 16k 2 16294 2.224
+base-0 32k 0 32545 4.921
+base-0 32k 1 32606 4.926
+base-0 32k 2 32522 4.909
+ARM-DONE base-0
+STEP base-0 rc=0
+new-1 2k 0 2099 0.289
+new-1 2k 1 2114 0.291
+new-1 2k 2 2087 0.285
+new-1 16k 0 16333 2.191
+new-1 16k 1 16310 2.184
+new-1 16k 2 16294 2.184
+new-1 32k 0 32545 4.816
+new-1 32k 1 32606 4.824
+new-1 32k 2 32522 4.818
+ARM-DONE new-1
+STEP new-1 rc=0
+new-2 2k 0 2099 0.289
+new-2 2k 1 2114 0.290
+new-2 2k 2 2087 0.286
+new-2 16k 0 16333 2.191
+new-2 16k 1 16310 2.192
+new-2 16k 2 16294 2.188
+new-2 32k 0 32545 4.822
+new-2 32k 1 32606 4.829
+new-2 32k 2 32522 4.825
+ARM-DONE new-2
+STEP new-2 rc=0
+base-3 2k 0 2099 0.290
+base-3 2k 1 2114 0.291
+base-3 2k 2 2087 0.286
+base-3 16k 0 16333 2.238
+base-3 16k 1 16310 2.241
+base-3 16k 2 16294 2.235
+base-3 32k 0 32545 4.945
+base-3 32k 1 32606 4.944
+base-3 32k 2 32522 4.928
+ARM-DONE base-3
+STEP base-3 rc=0
+MISS 2k/0 no top_logprobs: empty guard
+MISS 2k/1 no top_logprobs: empty guard
+MISS 2k/2 no top_logprobs: empty guard
+2k 2099t base 0.289 new 0.289 +0.00 % range [-0.7, 0.7] in arms [0.288, 0.289, 0.289, 0.29]
+MISS 16k/0 no top_logprobs: empty guard
+MISS 16k/1 no top_logprobs: empty guard
+MISS 16k/2 no top_logprobs: empty guard
+16k 16333t base 2.232 new 2.189 -1.90 % range [-2.2, -0.8] in arms [2.228, 2.184, 2.191, 2.238]
+MISS 32k/0 no top_logprobs: empty guard
+MISS 32k/1 no top_logprobs: empty guard
+MISS 32k/2 no top_logprobs: empty guard
+32k 32545t base 4.927 new 4.823 -2.11 % range [-2.3, -0.8] in arms [4.921, 4.818, 4.825, 4.944]
+prompt_lp present: True
+decode t/s [107.9, 108.1, 108.1, 107.9] +0.17 % tokens [128, 128, 128, 128]
+kept cached [[0, 12295, 16292], [0, 12295, 16292], [0, 12295, 16292], [0, 12295, 16292]]
+GATE OUT
+STEP gate rc=3

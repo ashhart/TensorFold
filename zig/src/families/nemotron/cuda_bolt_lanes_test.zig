@@ -65,7 +65,7 @@ test "four latent streams share rounds with real copy proposals and plain replie
     try std.testing.expect(drafted.proposed > 0);
     try std.testing.expect(drafted.verified > 0);
     try std.testing.expect(drafted.accepted <= drafted.verified);
-    std.debug.print("fake target: proposed={d} verified={d} accepted={d}\n", .{ drafted.proposed, drafted.verified, drafted.accepted });
+    try std.testing.expectEqual([3]u64{ 68, 68, 68 }, [3]u64{ drafted.proposed, drafted.verified, drafted.accepted });
     try std.testing.expectEqual(@as(u64, 0), plain.proposed);
     try std.testing.expectEqual(@as(u64, 0), disabled.proposed);
     try std.testing.expect(drafted.stream_rounds > drafted.rounds);

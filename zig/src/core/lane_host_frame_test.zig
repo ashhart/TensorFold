@@ -10,6 +10,18 @@ const Request = api.Request;
 const Reason = api.Reason;
 
 test "Frame cache: identical image content under another frame cannot resume its cached state" {
+    try frameCache(false, false);
+}
+
+test "Frame cache: image repeats use the effective key and preserve output tokens" {
+    try frameCache(true, true);
+}
+
+test "Frame cache: image repeats stay out of the repeat log unless the family keys them" {
+    try frameCache(true, false);
+}
+
+fn frameCache(repeats: bool, keyed: bool) !void {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -34,7 +46,7 @@ test "Frame cache: identical image content under another frame cannot resume its
             f.drop(saved);
         }
     };
-    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0, .lookahead = if (repeats) 1 else 0, .repeat_min = if (repeats) 1 else 0, .repeat_keyed = keyed }, 1 << 20);
     defer store.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     host.cache = &store;
@@ -83,22 +95,36 @@ test "Frame cache: identical image content under another frame cannot resume its
     const image_b = [_]api.Image{.{ .pixels = &.{}, .gh = 1, .gw = 2, .at = 2, .tokens = 4, .hash = 42 }};
     var b1: Box = .{};
     defer b1.tokens.deinit(gpa);
-    const r1: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = 8, .cache_key = &key_a, .images = &image_a };
+    const r1: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = if (repeats) 0 else 8, .cache_key = &key_a, .images = &image_a };
     try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b1.wait());
-    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len); // image A's state at 8, past its image
+    try std.testing.expectEqual(@as(usize, if (repeats) 0 else 1), store.entries.items.len); // image A's state at 8, past its image
     // The same content key under another frame must miss the first frame's state.
     var b2: Box = .{};
     defer b2.tokens.deinit(gpa);
-    const r2: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = 8, .cache_key = &key_a, .images = &image_b };
+    const r2: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = if (repeats) 0 else 8, .cache_key = &key_a, .images = &image_b };
     try e.submit(2, &r2, .{ .ctx = &b2, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b2.wait());
     try std.testing.expectEqual(@as(?u32, 0), b2.cached);
-    // Returning to the first frame resumes its own state.
+    if (repeats) try std.testing.expectEqual(@as(usize, 0), store.entries.items.len);
+    // Returning to the first frame resumes its own state, or records its first repeated prompt.
     var b3: Box = .{};
     defer b3.tokens.deinit(gpa);
-    const r3: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = 8, .cache_key = &key_a, .images = &image_a };
+    const r3: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = if (repeats) 0 else 8, .cache_key = &key_a, .images = &image_a };
     try e.submit(3, &r3, .{ .ctx = &b3, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b3.wait());
-    try std.testing.expectEqual(@as(?u32, 8), b3.cached);
+    try std.testing.expectEqual(@as(?u32, if (repeats) 0 else 8), b3.cached);
+    if (repeats and !keyed) {
+        try std.testing.expectEqual(@as(usize, 0), store.entries.items.len);
+        try std.testing.expectEqual(@as(usize, 0), store.repeat_log.keys.items.len); // raw prompts only, as before
+    }
+    if (repeats and keyed) {
+        try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
+        var b4: Box = .{};
+        defer b4.tokens.deinit(gpa);
+        try e.submit(4, &r3, .{ .ctx = &b4, .event = Box.event });
+        try std.testing.expectEqual(Reason.length, b4.wait());
+        try std.testing.expectEqual(@as(?u32, 9), b4.cached);
+        try std.testing.expectEqualSlices(u32, b1.tokens.items, b4.tokens.items);
+    }
 }

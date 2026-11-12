@@ -9,6 +9,8 @@ pub const mlx = @import("mlx.zig");
 /// One canonical key per module, whatever prefix a checkpoint or loader writes.
 pub const keys = @import("keys.zig");
 pub const dense = @import("dense.zig");
+/// BF16 as stored, an unquantized checkpoint's: the family opts in (`bf16.detect`), so `read_order` never offers it.
+pub const bf16 = @import("bf16.zig");
 pub const experts = @import("experts.zig");
 /// FP8 and NVFP4 values and fp64 references; host only (no Format: their kernels' layouts are each backend's).
 pub const fp8 = @import("fp8.zig");
@@ -34,6 +36,7 @@ pub fn Module(comptime f: Format) type {
     return switch (f) {
         .mlx => mlx,
         .dense => dense,
+        .bf16 => bf16,
     };
 }
 
@@ -60,12 +63,13 @@ pub fn conforms(comptime M: type) void {
 pub const Config = union(Format) {
     mlx: mlx.Config,
     dense: dense.Config,
+    bf16: bf16.Config,
 
     /// The tensor's MLX width (the table's own, else the global one).
     pub fn width(c: Config, key: []const u8) error{UnsupportedQuantization}!mlx.Width {
         return switch (c) {
             .mlx => |q| q.width(key),
-            .dense => error.UnsupportedQuantization,
+            .dense, .bf16 => error.UnsupportedQuantization,
         };
     }
 };
@@ -82,6 +86,7 @@ pub fn detect(a: Allocator, src: Sources) (Allocator.Error || error{UnsupportedQ
 pub const Host = union(Format) {
     mlx: mlx.Host,
     dense: dense.Host,
+    bf16: bf16.Host,
 
     /// Output rows N.
     pub fn rows(h: Host) usize {
@@ -106,6 +111,14 @@ fn wrap(comptime f: Format, v: Module(f).Host) Host {
 pub fn read(a: Allocator, t: anytype, key: []const u8) !Host {
     inline for (read_order) |f| {
         if (Module(f).matches(t, key)) return wrap(f, try Module(f).read(a, t, key));
+    }
+    return types.refuse(key, "no weight format reads this tensor");
+}
+
+/// `read`, keeping a dense tensor stored in BF16 or FP16 in that dtype (every other format reads as `read` does).
+pub fn readStored(a: Allocator, t: anytype, key: []const u8) !Host {
+    inline for (read_order) |f| {
+        if (Module(f).matches(t, key)) return wrap(f, try if (f == .dense) dense.readStored(a, t, key) else Module(f).read(a, t, key));
     }
     return types.refuse(key, "no weight format reads this tensor");
 }
@@ -145,6 +158,7 @@ pub fn sliceStack(a: Allocator, h: Host, r: Rank, part: usize) slice.Error!Host 
 pub const Device = union(Format) {
     mlx: mlx.Device,
     dense: dense.Device,
+    bf16: bf16.Device,
 };
 
 pub fn upload(u: Uploader, h: Host) !Device {
@@ -157,6 +171,7 @@ pub fn upload(u: Uploader, h: Host) !Device {
 pub const Handle = union(Format) {
     mlx: mlx.Matrix,
     dense: dense.Matrix,
+    bf16: bf16.Matrix,
 };
 
 /// One product (N, K): the format's handle and its shape. A stack is one expert's shape at the stack's addresses.
@@ -191,6 +206,16 @@ pub fn view(d: Device, stacked: bool) error{UnsupportedTables}!Projection {
 test "every format module provides the interface" {
     comptime conforms(mlx);
     comptime conforms(dense);
+    comptime conforms(bf16);
+}
+
+test "the shared detection still refuses a config that declares no quantization" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"model_type\": \"x\"}", .{});
+    try std.testing.expectError(error.UnsupportedQuantization, detect(a, .{ .root = doc.object, .quantization = .empty }));
+    try std.testing.expect(try bf16.detect(a, .{ .root = doc.object, .quantization = .empty }) != null);
 }
 
 test "a projection knows its format and decoder" {
@@ -204,6 +229,7 @@ test {
     _ = convert;
     _ = mlx;
     _ = dense;
+    _ = bf16;
     _ = experts;
     _ = fp8;
     _ = nvfp4;

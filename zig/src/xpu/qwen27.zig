@@ -7,6 +7,7 @@ const fwd = @import("forward.zig");
 const loader = @import("load.zig");
 const multi = @import("runner_multi.zig");
 const slot_states = @import("slot_states.zig");
+const shape = @import("qwen27_config.zig");
 pub const limits = @import("limits.zig");
 const Prof = dev.Prof;
 const a8 = fwd.a8;
@@ -37,11 +38,11 @@ pub const Mode = fwd.Mode;
 
 pub const alloc = std.heap.c_allocator;
 
-// Qwen3.8-27B shape (checked against config.json at load).
-pub const D = 5120;
-pub const FF = 17408;
-pub const LAYERS = 64;
-pub const VOCAB = 248320;
+// Qwen3.8-27B shape and layer pattern, checked at load against config.json when there is one (qwen27_config.zig).
+pub const D = shape.hidden;
+pub const FF = shape.intermediate;
+pub const LAYERS = shape.layers;
+pub const VOCAB = shape.vocab;
 pub const MASK_WORDS = (VOCAB + 31) / 32; // a grammar row's bits (structured output), one a token
 /// The layers' quantization group (64: MLX affine, 128: GPTQ), set at load; the head and the drafter keep 64.
 pub var GS: u32 = 64;
@@ -71,9 +72,7 @@ pub const STASH = ST_P + 16 * GDN_IN * 2;
 /// Target layers whose hidden states feed the DFlash2 drafter (its config's target_layer_ids).
 pub const TAP_LAYERS = [5]usize{ 5, 19, 33, 47, 61 };
 
-pub fn isAttention(i: usize) bool {
-    return (i + 1) % 4 == 0;
-}
+pub const isAttention = shape.isAttention;
 
 /// XPU_DUMP=DIR: the first forward writes x (fp32 [T, D]) after each of the first four layers, for comparison.
 pub var dump_dir: ?[]const u8 = null;
@@ -189,12 +188,14 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_KV8")) |v| kv8 = try std.fmt.parseInt(i32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_A8_ROT") != null) a8_rot = 1;
         if (std.c.getenv("XPU_A8_SITES4")) |v| a8_sites4 = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("XPU_A8_BITS")) |v| a8_levels = if (std.mem.eql(u8, std.mem.span(v), "4")) 7 else 127;
+        const bits = try @import("sys").environment.read(u32, "XPU_A8_BITS", if (a8_levels == 7) 4 else 8);
+        a8_levels = if (bits == 4) 7 else 127;
         if (std.c.getenv("XPU_A8_SITES")) |v| a8_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_A8")) |v| a8_group = if (std.mem.eql(u8, std.mem.span(v), "token")) std.math.maxInt(u32) else try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_DUMP_H")) |v| dump_h = open(v, 0o2101, @as(c_uint, 0o644)); // append
         if (std.c.getenv("XPU_CHUNK")) |v| CHUNK = try limits.chunk(std.mem.span(v));
         MAX_CTX = try limits.context(context);
+        try shape.admit(alloc, dir);
         {
             const marker = try std.fmt.allocPrintSentinel(alloc, "{s}/hadamard128", .{dir}, 0);
             defer alloc.free(marker);

@@ -10,8 +10,7 @@ pub const GiB: u64 = 1 << 30;
 /// The same reserve the native residency and preflight bounds keep.
 pub const runtime_margin = @import("sys").memory_policy.margin;
 
-/// Prints what a Zig family would serve from `model` (a directory or a cached repo id).
-/// Returns the process exit code.
+/// Prints what a Zig family would serve from `model` (a directory or a cached repo id); returns the process exit code.
 pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.process.Environ.Map, override: ?[]const u8, model: []const u8) !u8 {
     const dir: []const u8 = blk: {
         if (hub.isDir(io, model)) break :blk model;

@@ -102,7 +102,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, tools: weights.Tools, dir: []con
     const sub = try std.fs.path.join(gpa, &.{ dir, "dspark" });
     defer gpa.free(sub);
     var ck = try core.Checkpoint.openModel(gpa, io, sub);
-    defer ck.close();
+    defer core.checkpoint.cache.close(&ck);
     var L: weights.Loader = .{ .gpa = gpa, .t = tools, .w = target, .ck = &ck };
     const tc = &target.config;
     const s = target.share;

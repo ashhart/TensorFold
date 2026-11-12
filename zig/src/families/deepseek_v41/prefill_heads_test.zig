@@ -6,7 +6,7 @@ const calls = @import("block_calls.zig");
 const buffers = @import("buffers.zig");
 const Config = @import("config.zig").Config;
 
-fn widths(a: std.mem.Allocator) !block.Widths {
+pub fn widths(a: std.mem.Allocator) !block.Widths {
     var w: block.Widths = .{};
     try @import("widths_listing.zig").parseDense(a, &w, @embedFile("fixtures/dense-k2.txt"));
     try @import("widths_listing.zig").parseExperts(a, &w, @embedFile("fixtures/expert-k2.txt"));

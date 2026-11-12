@@ -1,0 +1,62 @@
+//! Gate 5's records of the 64-row prompt attention tiles (prefill.hip's tf_fa_wide_* and tf_fa_paged_*).
+const limits = @import("limits.zig");
+const Record = @import("hip_records.zig").Record;
+
+const U = limits.HipUsage;
+
+/// The 64-row prompt attention tile (prefill.hip), flat or over pages, at 256 threads and no dynamic LDS.
+fn promptTile(comptime symbol: []const u8, usage: [limits.rdna.len]U) Record {
+    const name = "prompt attention " ++ symbol;
+    return .{ .launch = .{ .name = name, .symbol = symbol, .image = "prefill", .threads = 256 }, .usage = usage };
+}
+
+pub const records = [8]Record{
+    promptTile("tf_fa_wide_f16", .{
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 236, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 49, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_wide_bf16", .{
+        .{ .vgprs = 246, .sgprs = 46, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 236, .sgprs = 47, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 230, .sgprs = 49, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_paged_f16", .{
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 239, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_paged_bf16", .{
+        .{ .vgprs = 249, .sgprs = 52, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 239, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 231, .sgprs = 53, .lds = 40960, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_wide_edge_f16", .{
+        .{ .vgprs = 249, .sgprs = 50, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 233, .sgprs = 50, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 0, .served = false },
+        .{ .vgprs = 233, .sgprs = 51, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_wide_edge_bf16", .{
+        .{ .vgprs = 254, .sgprs = 50, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 233, .sgprs = 50, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 0, .served = false },
+        .{ .vgprs = 233, .sgprs = 51, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_paged_edge_f16", .{
+        .{ .vgprs = 252, .sgprs = 53, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 236, .sgprs = 53, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 0, .served = false },
+        .{ .vgprs = 236, .sgprs = 53, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+    }),
+    promptTile("tf_fa_paged_edge_bf16", .{
+        .{ .vgprs = 249, .sgprs = 52, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 236, .sgprs = 53, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+        .{ .vgprs = 0, .served = false },
+        .{ .vgprs = 236, .sgprs = 53, .lds = 41216, .private = 0, .bound = 256, .wave = 32 },
+    }),
+};

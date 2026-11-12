@@ -3,7 +3,7 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int PG = 6, PD = 256, PH = 128, PCK = 512, PTK = 32;
+constant constexpr int PG = Q27_G, PKVH = Q27_KVH, PD = 256, PH = 128, PCK = 512, PTK = 32; // after attention_mpp.metal's G
 // kv_heads is the rank's, not the model's: a split attention writes local node rows.
 struct Q27PromptArgs { int start, rows, chunks, rp, key_stride, value_stride; float scale2; int kv_heads; };
 typedef vec<float, 8> q27f8;
@@ -17,6 +17,16 @@ inline q27b8 q27_frag(const device bfloat* p, int stride, short fm, short fn, in
   if (!EDGE) return q27b8(*(const device vec<bfloat, 4>*)r0, *(const device vec<bfloat, 4>*)(r0 + 8 * stride));
   const vec<bfloat, 4> z = vec<bfloat, 4>(0);
   return q27b8(row + fm < limit ? *(const device vec<bfloat, 4>*)r0 : z, row + fm + 8 < limit ? *(const device vec<bfloat, 4>*)(r0 + 8 * stride) : z);
+}
+
+// A value fragment; under `mask` (0x8000, else 0) a value that isn't finite reads as a zero of its sign.
+template <bool EDGE, bool MASKED>
+inline q27b8 q27_vfrag(const device bfloat* p, short fm, short fn, int row, int limit, ushort mask) {
+  if (!MASKED) return q27_frag<EDGE>(p, PD, fm, fn, row, limit);
+  vec<ushort, 8> x = as_type<vec<ushort, 8>>(q27_frag<EDGE>(p, PD, fm, fn, row, limit));
+  const vec<ushort, 8> inf = ((x & ushort(0x7F80)) + ushort(0x0080)) & mask;  // bit 15 where the exponent is all ones
+  x &= ~((inf >> 15) * ushort(0x7FFF));
+  return as_type<q27b8>(x);
 }
 
 // S[16][32] += Q[16][16] K[32][16]^T, fp32 sums.
@@ -50,10 +60,36 @@ inline void q27_mma_o(thread q27f8& c0, thread q27f8& c1, q27h8 a, q27b8 b0, q27
 // Running state of one tile half: O over its 128 columns, and each row's max and sum (log2 domain).
 struct Q27PromptRun { q27f8 O[8]; float m0, m1, l0, l1; };
 
-// One 32-key step at `kt`: S halves summed low first, masked by each row's key count, then softmax and O += PV.
+// Adds the step's non-finite values (zeros in its P V) times P where a row sees the key; P passes through xs.
 template <bool EDGE>
+inline void q27_prompt_unmask(thread Q27PromptRun& r, q27h8 p0, q27h8 p1, int kt, int kend, const device bfloat* v,
+    threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, int n0, int n1) {
+  _Pragma("clang loop unroll(full)")
+  for (int i = 0; i < 8; i++) { xs[sg][lane][i] = float(p0[i]); xs[sg][lane][8 + i] = float(p1[i]); }
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+  const int keys = EDGE ? min(PTK, kend - kt) : PTK;
+  for (int d = 0; d < keys; d++) {
+    const int b = d >> 4, g = (d >> 2) & 3, i = d & 3;
+    const ushort from = ((fm & 4) << 2) | ((g & 2) << 2) | ((fm & 3) << 1) | (g & 1);
+    const float pa = xs[sg][from][8 * b + i], pb = xs[sg][from][8 * b + 4 + i];
+    const int key = kt + d;
+    const device bfloat* row = v + (int64_t)key * PD + fn;
+    _Pragma("clang loop unroll(full)")
+    for (int j = 0; j < 8; j++)
+      for (int x = 0; x < 4; x++) {
+        const float val = float(row[16 * j + x]);
+        if (isfinite(val)) continue;
+        if (key < n0) r.O[j][x] += pa * val;
+        if (key < n1) r.O[j][4 + x] += pb * val;
+      }
+  }
+  simdgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// One 32-key step at `kt`: S halves summed low first, masked by each row's key count, then softmax and O += PV.
+template <bool EDGE, bool MASKED>
 inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const device bfloat* q, const device bfloat* k, const device bfloat* v,
-    threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, short h, int n0, int n1, float scale2) {
+    threadgroup float (*xs)[32][16], ushort sg, ushort lane, short fm, short fn, short h, int n0, int n1, float scale2, ushort mask) {
   q27f8 s0 = 0.0f, s1 = 0.0f;
   _Pragma("clang loop unroll_count(4)") // whole unrolling hoists every K load ahead of the products and runs slower
   for (int d = 0; d < 8; d++) q27_mma_s(s0, s1, q27_frag<false>(q + d * 16, PD, fm, fn, 0, 16), q27_frag<EDGE>(k + kt * PD + d * 16, PD, fm, fn, kt, kend), q27_frag<EDGE>(k + (kt + 16) * PD + d * 16, PD, fm, fn, kt + 16, kend));
@@ -101,13 +137,14 @@ inline void q27_prompt_step(thread Q27PromptRun& r, int kt, int kend, const devi
   for (int j = 0; j < 8; j++) for (int i = 0; i < 4; i++) { r.O[j][i] *= f0; r.O[j][4 + i] *= f1; }
   _Pragma("clang loop unroll(full)")
   for (int j = 0; j < 8; j += 2) {
-    q27_mma_o(r.O[j], r.O[j + 1], p0, q27_frag<EDGE>(v + kt * PD + j * 16, PD, fm, fn, kt, kend), q27_frag<EDGE>(v + kt * PD + (j + 1) * 16, PD, fm, fn, kt, kend));
-    q27_mma_o(r.O[j], r.O[j + 1], p1, q27_frag<EDGE>(v + (kt + 16) * PD + j * 16, PD, fm, fn, kt + 16, kend), q27_frag<EDGE>(v + (kt + 16) * PD + (j + 1) * 16, PD, fm, fn, kt + 16, kend));
+    q27_mma_o(r.O[j], r.O[j + 1], p0, q27_vfrag<EDGE, MASKED>(v + kt * PD + j * 16, fm, fn, kt, kend, mask), q27_vfrag<EDGE, MASKED>(v + kt * PD + (j + 1) * 16, fm, fn, kt, kend, mask));
+    q27_mma_o(r.O[j], r.O[j + 1], p1, q27_vfrag<EDGE, MASKED>(v + (kt + 16) * PD + j * 16, fm, fn, kt + 16, kend, mask), q27_vfrag<EDGE, MASKED>(v + (kt + 16) * PD + (j + 1) * 16, fm, fn, kt + 16, kend, mask));
   }
+  if (MASKED && mask != 0) q27_prompt_unmask<EDGE>(r, p0, p1, kt, kend, v, xs, sg, lane, fm, fn, n0, n1);
 }
 
 // One chunk's partial per packed row: a simdgroup pair halves the head dim; only the last step reads bounded.
-template <int SG>
+template <int SG, bool MASKED>
 kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const Q27AttnReadPtrs* caches [[buffer(1)]], constant Q27PromptArgs& args [[buffer(2)]],
     device float* PO [[buffer(3)]], device float* PM [[buffer(4)]], device float* PL [[buffer(5)]],
     uint3 tg [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]]) {
@@ -129,8 +166,17 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
   for (int j = 0; j < 8; j++) r.O[j] = 0.0f;
   r.m0 = -INFINITY; r.m1 = -INFINITY; r.l0 = 0.0f; r.l1 = 0.0f;
   int kt = kbeg;
-  for (; kt + PTK <= kend; kt += PTK) q27_prompt_step<false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2);
-  if (kt < kend) q27_prompt_step<true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2);
+  if (!MASKED) {  // main's loop; q27_attn_prompt_pick sends MASKED when a value some row must not see isn't finite
+    for (; kt + PTK <= kend; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+    if (kt < kend) q27_prompt_step<true, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+  } else {
+    // 0 times a non-finite value is NaN: if one sits past `seen` (fewest keys a live row sees), mask, then unmask
+    const int seen = simd_min(min(n0 ? n0 : INT_MAX, n1 ? n1 : INT_MAX));
+    const ushort mask = q27_nonfinite(v, max(seen, kbeg), kend, lane) ? 0x8000 : 0;
+    const int seen_by_all = kbeg + max(min(seen, kend) - kbeg, 0) / PTK * PTK;  // steps below it: every live row sees all 32 keys
+    for (; kt < seen_by_all; kt += PTK) q27_prompt_step<false, false>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, 0);
+    for (; kt < kend; kt += PTK) q27_prompt_step<true, true>(r, kt, kend, q, k, v, xs, sg, lane, fm, fn, h, n0, n1, args.scale2, mask);
+  }
   if (!live) return;
   const int64_t base = ((int64_t)hk * args.chunks + c) * args.rp + tile * 16;
   _Pragma("clang loop unroll(full)")
@@ -144,8 +190,29 @@ kernel void q27_attn_prompt(device const bfloat* QA [[buffer(0)]], device const 
     PM[base + fm + 8] = r.m1; PL[base + fm + 8] = r.l1;
   }
 }
-#define Q27_PROMPT(SG) template [[host_name("q27_attn_prompt_" #SG)]] kernel void q27_attn_prompt<SG>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
-Q27_PROMPT(8)
+#define Q27_PROMPT(SG, M, NAME) template [[host_name(NAME #SG)]] kernel void q27_attn_prompt<SG, M>(device const bfloat*, device const Q27AttnReadPtrs*, constant Q27PromptArgs&, device float*, device float*, device float*, uint3, ushort, ushort);
+Q27_PROMPT(8, false, "q27_attn_prompt_")
+Q27_PROMPT(8, true, "q27_attn_prompt_masked_")
+
+// flag[0] = 1 if a value some row must not see isn't finite: keys start + 1 to start + rows, a simdgroup a key.
+kernel void q27_attn_prompt_scan(device const Q27AttnReadPtrs* caches [[buffer(0)]], constant Q27PromptArgs& args [[buffer(1)]],
+    device atomic_uint* flag [[buffer(2)]], uint3 tg [[threadgroup_position_in_grid]], uint3 groups [[threadgroups_per_grid]],
+    ushort lane [[thread_index_in_simdgroup]], ushort sg [[simdgroup_index_in_threadgroup]], ushort sgs [[simdgroups_per_threadgroup]]) {
+  const device bfloat* v = caches[0].values + (int64_t)tg.x * args.value_stride;
+  uint inf = 0;
+  for (int key = args.start + 1 + int(tg.y) * sgs + sg; key < args.start + args.rows; key += int(groups.y) * sgs) {
+    const uint4 w = *(const device uint4*)(v + (int64_t)key * PD + lane * 8);
+    inf |= q27_inf2(w.x) | q27_inf2(w.y) | q27_inf2(w.z) | q27_inf2(w.w);
+  }
+  if (simd_any(inf != 0) && lane == 0) atomic_fetch_or_explicit(flag, 1u, memory_order_relaxed);
+}
+
+// The indirect grids: q27_attn_prompt's if the scan found nothing, else the masked kernel's; clears the flag.
+kernel void q27_attn_prompt_pick(device atomic_uint* flag [[buffer(0)]], constant uint* grid [[buffer(1)]], device uint* grids [[buffer(2)]]) {
+  const bool masked = atomic_load_explicit(flag, memory_order_relaxed) != 0;
+  atomic_store_explicit(flag, 0u, memory_order_relaxed);
+  for (int i = 0; i < 3; i++) { grids[i] = masked ? 0u : grid[i]; grids[3 + i] = masked ? grid[i] : 0u; }
+}
 
 // A packed row's chunks merged in key order, normalized and written as the row's head output.
 kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],
@@ -171,7 +238,7 @@ kernel void q27_attn_prompt_merge(device const float* PO [[buffer(0)]], device c
   for (int i = 0; i < DP; i++) OUT[at + i] = static_cast<bfloat>(o[i] / l);
 }
 
-// A single Mac's 24 query heads are known at compile time: main's kernel, so one Mac runs unpaired code.
+// A single Mac's query heads (Q27_G * Q27_KVH) are known at compile time: main's kernel, so one Mac runs unpaired code.
 kernel void q27_attn_prompt_merge_single(device const float* PO [[buffer(0)]], device const float* PM [[buffer(1)]], device const float* PL [[buffer(2)]],
     constant Q27PromptArgs& args [[buffer(3)]], device bfloat* OUT [[buffer(4)]],
     uint3 tg [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
@@ -191,5 +258,5 @@ kernel void q27_attn_prompt_merge_single(device const float* PO [[buffer(0)]], d
     m = nm;
   }
   const int node = r / PG, head = hk * PG + r % PG;
-  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (PG * 4) + head) * PD + lane * DP + i] = static_cast<bfloat>(o[i] / l);
+  for (int i = 0; i < DP; i++) OUT[((int64_t)node * (PG * PKVH) + head) * PD + lane * DP + i] = static_cast<bfloat>(o[i] / l);
 }

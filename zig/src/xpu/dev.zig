@@ -20,7 +20,7 @@ pub const Tensor = safetensors.Tensor;
 pub const Checkpoint = struct {
     tensors: std.ArrayList(Tensor) = .empty,
     maps: std.ArrayList([]const u8) = .empty, // the shards, mapped as long as the tensors' bytes are read
-    headers: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty, // the tensors' names live in them
+    headers: std.ArrayList(std.heap.ArenaAllocator) = .empty, // the tensors' names live in them
 
     pub fn addShard(c: *Checkpoint, path: [:0]const u8) !void {
         const fd = open(path.ptr, 0);

@@ -48,14 +48,16 @@ pub const Config = struct {
         const a = arena.allocator();
         const doc = try shared.declared(a, bytes);
         const tower = try shared.textTower(doc);
-        const table = try quant.detect(a, .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") });
-        const width = try table.width("");
+        const sources: quant.Sources = .{ .root = doc, .quantization = try shared.pickObject(doc, tower, "quantization") };
+        // the family's own order: an unquantized BF16 checkpoint first, then the shared formats
+        const table: quant.Config = if (try quant.bf16.detect(a, sources)) |b| .{ .bf16 = b } else try quant.detect(a, sources);
+        const width: Width = if (table == .bf16) .{ .bits = 16, .group = 0 } else try table.width("");
         const spec = try shared.geometry(tower, width.bits, width.group);
         const gen = if (generation) |g| (try std.json.parseFromSliceLeaky(std.json.Value, a, g, .{})) else null;
         if (gen) |g| if (g != .object) return error.InvalidConfig;
         const ids = try a.create([shared.checks.max_eos]u32);
         const eos = try shared.checks.eos(ids, doc, tower, if (gen) |g| g.object else null, spec.vocab);
-        return .{ .arena = arena, .spec = spec, .quant = table, .tied = shared.isTied(doc, tower), .eos = eos };
+        return .{ .arena = arena, .spec = spec, .quant = table, .tied = try shared.isTied(doc, tower), .eos = eos };
     }
 };
 
@@ -99,4 +101,19 @@ test "the Python loader's refusals of a quantization" {
     const gptq = try std.mem.replaceOwned(u8, a, sample, "\"mode\": \"affine\"", "\"mode\": \"gptq\"");
     defer a.free(gptq);
     try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, gptq, null));
+}
+
+test "a config with no quantization is the bf16 format: 16 bits, no groups, no width table" {
+    const a = std.testing.allocator;
+    const plain = try std.mem.replaceOwned(u8, a, sample, "\"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\",", "\"q\": {");
+    defer a.free(plain);
+    var c = try Config.parse(a, plain, null);
+    defer c.deinit();
+    try std.testing.expectEqual(quant.Format.bf16, std.meta.activeTag(c.quant));
+    try std.testing.expectEqual(@as(u8, 16), c.spec.bits);
+    try std.testing.expectEqual(@as(u16, 0), c.spec.group);
+    try std.testing.expectError(error.UnsupportedQuantization, c.quant.width(""));
+    const named = try std.mem.replaceOwned(u8, a, plain, "\"q\": {", "\"quantization_config\": {\"quant_method\": \"fp8\"}, \"q\": {");
+    defer a.free(named);
+    try std.testing.expectError(error.UnsupportedQuantization, Config.parse(a, named, null));
 }

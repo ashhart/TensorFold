@@ -38,6 +38,8 @@ struct Seg {
     unsigned long long pt;    // the stream's KV page table (int a page; 0: kv holds cap contiguous rows)
     unsigned long long ps;    // elements a KV page holds (bf16, or bytes for fp8): every attention layer's ptok rows
     int ptok;                 // positions a KV page holds
+    int pn;                   // pending kept rows the slot scan replays first (negative: replayed, not written back)
+    unsigned long long plog;  // their heads: cuda_cache.zig's pending buffer (pend_row)
 };
 
 // Seg.kv's element of layer a's key (s 0) or value (s 1) at pos, head h: cap rows a head, or pos's page's row.
@@ -63,6 +65,18 @@ __device__ __forceinline__ LogRow log_row(const Geo& geo, const Seg& sg, int lay
     l.delta = l.g + geo.nv;
     l.k = reinterpret_cast<__nv_bfloat16*>(l.delta + (size_t)geo.nv * DK);
     l.conv = l.k + (size_t)geo.nk * DK;
+    return l;
+}
+
+// A pending kept row's decay, write and key (cuda_cache.zig's pending buffer): rows of nl layers' heads, packed.
+__device__ __forceinline__ LogRow pend_row(const Geo& geo, unsigned long long plog, int layer, int row) {
+    const size_t hb = (size_t)(geo.nv + (size_t)geo.nv * DK) * sizeof(float) + (size_t)geo.nk * DK * sizeof(__nv_bfloat16);
+    char* base = reinterpret_cast<char*>(plog) + ((size_t)row * geo.nl + layer) * hb;
+    LogRow l;
+    l.g = reinterpret_cast<float*>(base);
+    l.delta = l.g + geo.nv;
+    l.k = reinterpret_cast<__nv_bfloat16*>(l.delta + (size_t)geo.nv * DK);
+    l.conv = nullptr;
     return l;
 }
 

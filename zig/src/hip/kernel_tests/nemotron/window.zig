@@ -1,6 +1,7 @@
 //! Nemotron's Mamba window launches against the mixer a row at a time, each state copied out but the last.
 
 const std = @import("std");
+const platform = @import("sys");
 const rig = @import("../rig.zig");
 const raw = @import("../../raw.zig");
 const DeviceBuffer = @import("../../memory.zig").DeviceBuffer;
@@ -169,8 +170,8 @@ test "the Mamba window's two launches write the bytes of the mixer a row at a ti
 }
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

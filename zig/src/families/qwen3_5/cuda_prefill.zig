@@ -35,6 +35,15 @@ test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or 
     try std.testing.expectEqual(@as(usize, start), nextCut(len, &.{start}, m, 0));
 }
 
+/// The rows a capped step's cuts keep: the prompt tile's rows, a multiple of the delta rule's 64-row chunks.
+pub const cap_grid = 128;
+
+/// The end of `f`'s next step under `max_rows` (0: the cold cut), its cold cut renewed once the last one landed.
+fn capped(len: usize, chunks: []const u32, f: *Fill, max_rows: u32) usize {
+    if (f.cold <= f.at) f.cold = nextCut(len, chunks, f.at, 0);
+    return lanes.step_cap.end(f.at, f.cold, max_rows, cap_grid);
+}
+
 pub fn run(self: anytype, stream: *lanes.Stream) !void {
     var f = try opening(self, stream);
     defer f.deinit();
@@ -42,7 +51,7 @@ pub fn run(self: anytype, stream: *lanes.Stream) !void {
 }
 
 /// One cut of the prompt pass a call (prefillFn's forwards, in order): the lane host runs rounds between them.
-pub fn step(self: anytype, stream: *lanes.Stream, _: u32) !bool {
+pub fn step(self: anytype, stream: *lanes.Stream, max_rows: u32) !bool {
     const got = try self.fills.getOrPut(self.gpa, stream);
     if (!got.found_existing) {
         got.value_ptr.* = opening(self, stream) catch |err| {
@@ -51,7 +60,7 @@ pub fn step(self: anytype, stream: *lanes.Stream, _: u32) !bool {
         };
     }
     const f = self.fills.getPtr(stream).?;
-    const done = chunk(self, stream, f, 0) catch |err| {
+    const done = chunk(self, stream, f, max_rows) catch |err| {
         endFill(self, stream);
         return err;
     };
@@ -74,6 +83,7 @@ pub fn endFill(self: anytype, stream: *lanes.Stream) void {
 /// A prompt pass under way: where its next cut starts, an image prompt's encoded images, TF_QWEN_KV_SHARE's marks.
 pub const Fill = struct {
     at: usize,
+    cold: usize = 0, // the cold pass's cut that ends the chunk in flight; a capped step cuts inside it (lanes.step_cap)
     media: ?vision_prompt.Media,
     kept: ?struct { gpa: std.mem.Allocator, marks: []const u32 } = null,
 
@@ -119,7 +129,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
         cache.written = at;
     } else if (stream.reuse.saved) |saved| {
         if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
-            if (reuse.restoreCache(self.e, cache, saved, seen)) {
+            if (self.restoreKept(cache, saved, seen)) {
                 at = stream.reuse.at;
                 stream.cached = stream.reuse.at;
             } else |_| {
@@ -133,8 +143,8 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     return .{ .at = at, .media = media, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
 }
 
-/// The pass's next cut; true once the prompt is in. The hint keeps the cold grid, where a cap would cut differently.
-fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
+/// The pass's next cut; true once the prompt is in. A cap cuts inside the cold chunk (on cap_grid): cold cuts all land.
+pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !bool {
     const ids = stream.prompt();
     // cancel between cuts and retain the last complete prefix before releasing the cache (#1228)
     if (stream.isCancelled()) {
@@ -143,18 +153,20 @@ fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, _: u32) !bool {
     }
     const cache = try self.cacheOf(stream);
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
-    const end = nextCut(ids.len, stream.chunks, f.at, 0);
+    const end = capped(ids.len, stream.chunks, f, max_rows);
     try self.e.forward(&.{.{ .cache = cache, .rows = end - f.at, .images = if (images) |*im| im else null }}, ids[f.at..end], .last);
+    lanes.prefill_widths.completed(self.gpa, stream, end - f.at);
     f.at = end;
     stream.fill_at.store(@intCast(end), .monotonic);
-    // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
+    // a mark the store asked for, where the cold pass cuts (a resume's only place): the lane host copies the state here
+    const cold = end == f.cold; // a capped step's end inside a cold chunk keeps nothing: no pass resumes there
     if (f.kept) |k| {
-        if (end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
+        if (cold and end < ids.len and std.mem.indexOfScalar(u32, k.marks, @intCast(end)) != null)
             self.prefix.?.keep(cache, ids, end) catch |err| {
                 if (err == error.QwenLaneTable) return err; // its table maps pages it may not hold
                 std.log.warn("qwen3_5: prompt pages not kept: {s}", .{@errorName(err)});
             };
-    } else if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
+    } else if (cold and end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
         if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
     }
     if (end < ids.len) return false;

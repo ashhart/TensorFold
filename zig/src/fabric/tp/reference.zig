@@ -1,8 +1,13 @@
 //! Host references for the collectives: reductions in rank order, bf16 / f16 added in fp32 and rounded once.
 const std = @import("std");
 const collective = @import("collective.zig");
+const bf16_round = @import("bf16_round");
 const DType = collective.DType;
 const Op = collective.Op;
+
+test {
+    _ = @import("reference_sum_test.zig");
+}
 
 /// bf16 bits to fp32 (exact).
 pub fn bf16ToF32(h: u16) f32 {
@@ -10,12 +15,7 @@ pub fn bf16ToF32(h: u16) f32 {
 }
 
 /// fp32 to bf16 bits, round to nearest even; NaN stays a quiet NaN.
-pub fn f32ToBf16(f: f32) u16 {
-    const u: u32 = @bitCast(f);
-    if (std.math.isNan(f)) return @intCast((u >> 16) | 0x40);
-    const round = 0x7FFF + ((u >> 16) & 1);
-    return @intCast((u +% round) >> 16);
-}
+pub const f32ToBf16 = bf16_round.bits;
 
 fn combine(comptime T: type, a: T, b: T, op: Op) T {
     return switch (op) {
@@ -35,7 +35,7 @@ fn reduceTyped(comptime T: type, acc: []u8, src: []const u8, op: Op) void {
     }
 }
 
-fn reduceHalf(acc: []u8, src: []const u8, op: Op, bf: bool) void {
+fn accumulateHalf(acc: []u8, src: []const u8, op: Op, bf: bool) void {
     const n = acc.len / 2;
     for (0..n) |i| {
         const a = std.mem.readInt(u16, acc[2 * i ..][0..2], .little);
@@ -48,7 +48,7 @@ fn reduceHalf(acc: []u8, src: []const u8, op: Op, bf: bool) void {
     }
 }
 
-/// acc <- acc (op) src, element-wise; `acc` holds the lower ranks' result, `src` the next rank's input.
+/// One binary operation into storage: half types round after this call. `reduce` keeps half sums wide instead.
 pub fn accumulate(acc: []u8, src: []const u8, t: DType, op: Op) void {
     std.debug.assert(acc.len == src.len and acc.len % t.size() == 0);
     switch (t) {
@@ -57,13 +57,31 @@ pub fn accumulate(acc: []u8, src: []const u8, t: DType, op: Op) void {
         .i64 => reduceTyped(i64, acc, src, op),
         .f32 => reduceTyped(f32, acc, src, op),
         .f64 => reduceTyped(f64, acc, src, op),
-        .bf16 => reduceHalf(acc, src, op, true),
-        .f16 => reduceHalf(acc, src, op, false),
+        .bf16 => accumulateHalf(acc, src, op, true),
+        .f16 => accumulateHalf(acc, src, op, false),
     }
 }
 
-/// out <- inputs[0] (op) inputs[1] (op) ..., in rank order.
+fn sumHalf(out: []u8, inputs: []const []const u8, bf: bool) void {
+    @setFloatMode(.strict);
+    for (0..out.len / 2) |i| {
+        const first = std.mem.readInt(u16, inputs[0][2 * i ..][0..2], .little);
+        var sum: f32 = if (bf) bf16ToF32(first) else @floatCast(@as(f16, @bitCast(first)));
+        for (1..inputs.len) |rank| {
+            const bits = std.mem.readInt(u16, inputs[rank][2 * i ..][0..2], .little);
+            const value: f32 = if (bf) bf16ToF32(bits) else @floatCast(@as(f16, @bitCast(bits)));
+            sum += value;
+        }
+        const bits: u16 = if (bf) f32ToBf16(sum) else @bitCast(@as(f16, @floatCast(sum)));
+        std.mem.writeInt(u16, out[2 * i ..][0..2], bits, .little);
+    }
+}
+
+/// Rank-order fold; half sums use fp32 and round once. A single rank is copied without arithmetic.
 pub fn reduce(out: []u8, inputs: []const []const u8, t: DType, op: Op) void {
+    std.debug.assert(inputs.len > 0 and out.len % t.size() == 0);
+    for (inputs) |input| std.debug.assert(input.len == out.len);
+    if (inputs.len > 1 and op == .sum and (t == .bf16 or t == .f16)) return sumHalf(out, inputs, t == .bf16);
     @memcpy(out, inputs[0]);
     for (inputs[1..]) |in| accumulate(out, in, t, op);
 }
@@ -118,4 +136,30 @@ test "integer sums wrap" {
     var out: [4]u8 = undefined;
     reduce(&out, &.{ &a, &b }, .i32, .sum);
     try std.testing.expectEqual(@as(i32, std.math.minInt(i32)), std.mem.readInt(i32, &out, .little));
+}
+
+test "tp reference f32ToBf16: the old spelling's bits on every zero, subnormal, infinity, NaN and tie" {
+    const old = struct {
+        /// f32ToBf16 as it was spelled before it was core's bits(): the oracle for every input, NaN included.
+        fn spelled(x: f32) u16 {
+            const u: u32 = @bitCast(x);
+            if (std.math.isNan(x)) return @intCast((u >> 16) | 0x40);
+            const round = 0x7FFF + ((u >> 16) & 1);
+            return @intCast((u +% round) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = f32ToBf16(v);
+            try std.testing.expectEqual(spelled(v), h);
+            if (std.math.isNan(v)) try std.testing.expect(std.math.isNan(bf16ToF32(h)));
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
 }

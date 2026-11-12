@@ -54,6 +54,25 @@ const Ignored = struct {
     }
 };
 
+/// Whether layer `i` of `g` has `slot`: a dense MLP, linear or full attention.
+fn slotUsed(g: Geometry, i: usize, slot: Slot) bool {
+    return switch (slot) {
+        .gate, .up, .down => !g.moe(),
+        .qkv, .z, .a, .b, .out => g.linear[i],
+        .q, .k, .v, .o => !g.linear[i],
+    };
+}
+
+/// A plain BF16 checkpoint's kinds: every module and the head bf16 (a tied head packs embed_tokens), on HF names.
+pub fn plain(g: Geometry) !Kinds {
+    if (g.moe()) return error.UnsupportedQwenQuantization;
+    var out: Kinds = .{ .modelopt = true, .head = .bf16 };
+    for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
+        if (slotUsed(g, i, slot)) out.proj[i][@backingInt(slot)] = .bf16;
+    };
+    return out;
+}
+
 /// Every module's kind: a MIXED_PRECISION config's quantized_layers, or a single-format NVFP4 one's `ignore` list.
 pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
     if (try compressedTensors(gpa, config)) return .{ .modelopt = true, .ct = true }; // filled from the index
@@ -69,12 +88,7 @@ pub fn kinds(gpa: std.mem.Allocator, config: []const u8, g: Geometry) !Kinds {
     var out: Kinds = .{ .modelopt = true, .head = try kindOf(r.of("lm_head")), .experts = if (g.moe()) try moeKinds(&r, g) else .affine };
     var buf: [128]u8 = undefined;
     for (0..g.layers) |i| for (std.enums.values(Slot)) |slot| {
-        const used = switch (slot) {
-            .gate, .up, .down => !g.moe(),
-            .qkv, .z, .a, .b, .out => g.linear[i],
-            .q, .k, .v, .o => !g.linear[i],
-        };
-        if (used) out.proj[i][@backingInt(slot)] = try kindOf(r.of(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.{s}", .{ i, geometry.slot_modules.get(slot) })));
+        if (slotUsed(g, i, slot)) out.proj[i][@backingInt(slot)] = try kindOf(r.of(try std.fmt.bufPrint(&buf, prefix ++ "layers.{d}.{s}", .{ i, geometry.slot_modules.get(slot) })));
     };
     return out;
 }

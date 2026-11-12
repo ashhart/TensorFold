@@ -191,7 +191,7 @@ const Rig = struct {
     fn same(r: *Rig, what: []const u8, rows: usize, comptime T: type, ptr: u64, want: []const T) !void {
         try r.s.synchronize();
         const got = try r.a.alloc(T, want.len);
-        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(got.ptr, ptr, want.len * @sizeOf(T)), "cuMemcpyDtoH");
+        try cuda.memory.download(r.gpu.d, ptr, std.mem.sliceAsBytes(got)[0 .. want.len * @sizeOf(T)]);
         r.cases += 1;
         var worst: f64 = 0;
         var differ: usize = 0;

@@ -89,6 +89,9 @@ test "rotary cache: MTP appends reuse the target table and optional admission ne
 }
 
 test "rotary cache: optional table allocation failure selects the original path before shader selection" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const Owner = struct {
         rotary_enabled: bool,
         rotary_buffer: ?usize = null,

@@ -430,7 +430,7 @@ test "GLM snapshots: 0.3 GiB fits the first default TP2 prefix at 256K but not a
     e.capacity = seq.st.capacity;
     const minimum = glm.native.snap_min_bytes(&e);
     const budget: u64 = 322122547;
-    try t.expectEqual(@as(u64, 203423744), minimum);
+    try t.expectEqual(@as(u64, 257949696), minimum);
     try t.expect(minimum <= budget);
     try t.expect(glm.native.snap_bytes(&e, 34816) > budget);
 }
@@ -591,4 +591,9 @@ test "GLM snapshots: with the engine's own sequence on pages too, a prefix's siz
         f.e.cur = cur;
         for (ats, sizes) |at, s| try t.expectEqual(s, f.e.stateBytes(at));
     }
+}
+
+test "GLM snapshots: TF_KV_SHARE's adapter reads GLM's decls as the store it replaced: the 2,048 grid, a lookahead of 1" {
+    const r = adapter.cacheRules(glm.native);
+    try std.testing.expect(r.planned and r.grid == 2048 and r.lookahead == 1 and r.min_prompt == 0 and r.warm == .off and !r.fork);
 }

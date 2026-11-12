@@ -48,6 +48,8 @@ pub const Metrics = struct {
     decode: Histogram = .{},
     prefill: Histogram = .{},
     tpot: TpotHistogram = .{},
+    queue: Histogram = .{}, // seconds from submission to admission, noted only under `phases`
+    phases: bool = false, // TENSORFOLD_PHASE_METRICS=1: the queue histogram renders
     requests: std.ArrayList(struct { key: []const u8, status: u16, count: u64 }) = .empty,
 
     pub fn deinit(m: *Metrics) void {
@@ -69,6 +71,14 @@ pub const Metrics = struct {
         if (decode) |d| m.decode.observe(d);
         if (prefill) |p| m.prefill.observe(p);
         if (tpot) |t| m.tpot.observe(t);
+    }
+
+    /// One finished request's wait for admission; nothing is kept unless the phase families are on.
+    pub fn noteQueue(m: *Metrics, io: std.Io, queued: f64) void {
+        if (!m.phases) return;
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        m.queue.observe(queued);
     }
 
     pub fn tpotValue(_: *const Metrics, first: ?i96, last: ?i96, generated: usize) ?f64 {
@@ -126,6 +136,7 @@ pub const Metrics = struct {
         try histogram(w, "request_time_per_output_token_seconds", "Seconds from the first generated token to the last, divided by the tokens less one.", snap.tpot);
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
+        if (snap.phases) try histogram(w, "request_queue_seconds", "Seconds a finished request waited before admission.", snap.queue);
         try processGauges(w, process.read());
         try residentGauges(w, resident.read(io));
         if (!view.parked) {
@@ -135,6 +146,7 @@ pub const Metrics = struct {
         try histogram(w, "e2e_request_latency_seconds", "Seconds from arrival to the reply leaving, under vLLM's name.", snap.latency);
         try histogram(w, "request_decode_time_seconds", "Seconds a finished request spent decoding, under vLLM's name.", snap.decode);
         try histogram(w, "request_prefill_time_seconds", "Seconds a finished request's prompt pass took, under vLLM's name.", snap.prefill);
+        if (snap.phases) try histogram(w, "request_queue_time_seconds", "Seconds a finished request waited before admission, under vLLM's name.", snap.queue);
         try gauge(w, "client_disconnections_total", "counter", "Requests a client left before the reply left the server.", snap.disconnects);
     }
 
@@ -185,6 +197,7 @@ pub const Metrics = struct {
         try histogram(w, "request_time_per_output_token_seconds", "Seconds from the first generated token to the last, divided by the tokens less one.", snap.tpot);
         try gauge(w, "decode_rounds_total", "counter", "Decode rounds used by finished requests.", snap.rounds);
         try histogram(w, "request_prefill_seconds", "Seconds a finished request's prompt pass took.", snap.prefill);
+        if (snap.phases) try histogram(w, "request_queue_seconds", "Seconds a finished request waited before admission.", snap.queue);
         try processGauges(w, process.read());
         try residentGauges(w, resident.read(io));
         if (memory) |mem| {
@@ -205,6 +218,7 @@ pub const Metrics = struct {
         try histogram(w, "e2e_request_latency_seconds", "Seconds from arrival to the reply leaving, under vLLM's name.", snap.latency);
         try histogram(w, "request_decode_time_seconds", "Seconds a finished request spent decoding, under vLLM's name.", snap.decode);
         try histogram(w, "request_prefill_time_seconds", "Seconds a finished request's prompt pass took, under vLLM's name.", snap.prefill);
+        if (snap.phases) try histogram(w, "request_queue_time_seconds", "Seconds a finished request waited before admission, under vLLM's name.", snap.queue);
         try gauge(w, "client_disconnections_total", "counter", "Requests a client left before the reply left the server.", snap.disconnects);
         if (status.preemptions) |p| try gauge(w, "preemptions_total", "counter", "Requests that had to give a lane up to a later one.", p);
     }
@@ -416,8 +430,8 @@ test "metrics snapshot allocation failure releases the mutex" {
     try std.testing.expectError(error.OutOfMemory, m.render(io, &out.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096));
     const available = m.mutex.tryLock();
     // No other thread uses m: either tryLock acquired it, or render retained it.
-    // Release before asserting so the unfixed regression terminates without blocking.
     m.mutex.unlock(io);
+    // Release before asserting so the unfixed regression terminates without blocking.
     try std.testing.expect(available);
     try std.testing.expect(failing.has_induced_failure);
     failing.fail_index = std.math.maxInt(usize);
@@ -506,4 +520,44 @@ test "admission metrics name each fixed reason and the reservations held" {
         "tensorfold:admission_rejected_total{reason=\"key_limit\"} 5\n",  "tensorfold:admission_rejected_total{reason=\"principal_capacity\"} 0\n",
         "tensorfold:admission_rejected_total{reason=\"rate_limit\"} 7\n", "tensorfold:admission_rate_buckets 3\n",
     }) |line| try std.testing.expect(std.mem.indexOf(u8, out.written(), line) != null);
+}
+
+test "the queue phase renders only when phase metrics are on, and adds nothing else" {
+    const gpa = std.testing.allocator;
+    var off: Metrics = .{ .gpa = gpa };
+    var on: Metrics = .{ .gpa = gpa, .phases = true };
+    for ([_]*Metrics{ &off, &on }) |m| {
+        m.note(std.testing.io, 10, 0, 3, 0, 0, 2, 1.0, null, null, 0.25, null);
+        m.noteQueue(std.testing.io, 0.3);
+    }
+    try std.testing.expectEqual(@as(u64, 0), off.queue.n);
+    try std.testing.expectEqual(@as(u64, 1), on.queue.counts[4]); // 0.3 s falls under the 0.5 edge
+    const stub: RenderStub = .{};
+    var a: std.Io.Writer.Allocating = .init(gpa);
+    defer a.deinit();
+    var b: std.Io.Writer.Allocating = .init(gpa);
+    defer b.deinit();
+    try off.render(std.testing.io, &a.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
+    try on.render(std.testing.io, &b.writer, stub.status_value, &.{}, stub.info_value, stub.memory_value, 4096);
+    try std.testing.expect(std.mem.indexOf(u8, a.written(), "request_queue") == null);
+    try std.testing.expect(std.mem.indexOf(u8, b.written(), "tensorfold:request_queue_seconds_sum 0.3\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b.written(), "tensorfold:request_queue_time_seconds_bucket{le=\"0.5\"} 1\n") != null);
+    for ([_]*Metrics{ &off, &on }) |m| {
+        var parked: std.Io.Writer.Allocating = .init(gpa);
+        defer parked.deinit();
+        try m.renderParked(std.testing.io, &parked.writer, .{ .parked = true });
+        try std.testing.expectEqual(m.phases, std.mem.indexOf(u8, parked.written(), "request_queue_seconds_count 1\n") != null);
+        try std.testing.expectEqual(m.phases, std.mem.indexOf(u8, parked.written(), "request_queue_time_seconds_count 1\n") != null);
+    }
+    // without the queue families and the live process gauges, the on body is the off body, byte for byte
+    var kept: [2]std.ArrayList(u8) = .{ .empty, .empty };
+    defer for (&kept) |*k| k.deinit(gpa);
+    for ([_][]const u8{ a.written(), b.written() }, &kept) |body, *k| {
+        var lines = std.mem.splitScalar(u8, body, '\n');
+        while (lines.next()) |line| if (std.mem.indexOf(u8, line, "request_queue") == null and std.mem.indexOf(u8, line, "process_") == null) {
+            try k.appendSlice(gpa, line);
+            try k.append(gpa, '\n');
+        };
+    }
+    try std.testing.expectEqualStrings(kept[0].items, kept[1].items);
 }

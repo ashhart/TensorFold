@@ -2,6 +2,7 @@
 #pragma once
 
 #include "glm_glue_router.cuh"
+#include "common/router_mma.cuh"
 
 namespace glm_bmm {
 
@@ -97,25 +98,16 @@ __device__ void bmm(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, f
 }
 
 __device__ __forceinline__ void cp16(void* dst, const void* src, bool ok) {
-  const unsigned d = static_cast<unsigned>(__cvta_generic_to_shared(dst));
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
+  tf_common::cp16z(dst, src, ok);
 }
 __device__ __forceinline__ void cp16s(unsigned d, const void* src, bool ok) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(ok ? 16 : 0));
+  tf_common::cp16z(d, src, ok);
 }
-__device__ __forceinline__ void commit() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ __forceinline__ void commit() { tf_common::cp_commit(); }
 template <int N>
-__device__ __forceinline__ void wait() {
-  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
-}
-__device__ __forceinline__ void ldm4s(uint32_t* r, unsigned a) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
-               : "r"(a));
-}
-__device__ __forceinline__ void ldm2s(uint32_t* r, unsigned a) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n" : "=r"(r[0]), "=r"(r[1]) : "r"(a));
-}
+__device__ __forceinline__ void wait() { tf_common::cp_wait<N>(); }
+__device__ __forceinline__ void ldm4s(uint32_t* r, unsigned a) { qmm_frag::ldmatrix4(r, a); }
+__device__ __forceinline__ void ldm2s(uint32_t* r, unsigned a) { qmm_frag::ldmatrix2(r, a); }
 __device__ __forceinline__ void ldm4(uint32_t* r, const void* p) {
   ldm4s(r, static_cast<unsigned>(__cvta_generic_to_shared(p)));
 }
@@ -304,73 +296,12 @@ extern "C" __global__ void __launch_bounds__(256, 2)
   glm_bmm::bmm_tiles<128, 128, 32, 3, 2, 4, false>(x, w, out, m, x_stride, n, k, sk, f32);
 }
 
-// glue._router_part on aligned rows: part[s][m][e] = x[m] . w[e] over K slice s, tf_glm_router_part's chain, tiled.
+// glue._router_part: part[s][m][e] = x[m] . w[e] over K slice s on the shared mma tiles (64 x 32), 16-byte rows.
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_router_tile(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
                        int64_t d, int64_t ne, int ks) {
-  constexpr int BM = 64, BE = 32, KS = 64, LD = KS + 8, A = BM * LD, B = BE * LD, STAGE = (A + B) * 2, RPI = 16;
-  __shared__ __align__(16) __nv_bfloat16 sm[2][A + B];
-  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, q = lane & 3;
-  const int64_t m0 = (int64_t)blockIdx.x * BM, e0 = (int64_t)blockIdx.y * BE, s = blockIdx.z, span = d / ks;
-  const int steps = static_cast<int>(span / KS), lr = tid / 8, lc = (tid % 8) * 8;
-  const __nv_bfloat16* ga[BM / RPI];
-  const __nv_bfloat16* gb[BE / RPI];
-  unsigned oka = 0, okb = 0;
-#pragma unroll
-  for (int i = 0; i < BM / RPI; ++i) {
-    const int64_t row = m0 + lr + i * RPI;
-    oka |= (row < rows ? 1u : 0u) << i;
-    ga[i] = x + (row < rows ? row : 0) * x_stride + s * span + lc;
-  }
-#pragma unroll
-  for (int i = 0; i < BE / RPI; ++i) {
-    const int64_t e = e0 + lr + i * RPI;
-    okb |= (e < ne ? 1u : 0u) << i;
-    gb[i] = w + (e < ne ? e : 0) * d + s * span + lc;
-  }
-  const unsigned sbase = static_cast<unsigned>(__cvta_generic_to_shared(sm)), soff = (lr * LD + lc) * 2;
-  auto load = [&](int st, int kt) {
-    const unsigned a = sbase + st * STAGE + soff;
-#pragma unroll
-    for (int i = 0; i < BM / RPI; ++i) glm_bmm::cp16s(a + i * RPI * LD * 2, ga[i] + kt * KS, (oka >> i) & 1);
-#pragma unroll
-    for (int i = 0; i < BE / RPI; ++i) glm_bmm::cp16s(a + A * 2 + i * RPI * LD * 2, gb[i] + kt * KS, (okb >> i) & 1);
-  };
-  const unsigned fa = sbase + ((warp * 16 + (lane & 15)) * LD + (lane >> 4) * 8) * 2;
-  const unsigned fb = sbase + A * 2 + (((lane >> 4) * 8 + (lane & 7)) * LD + ((lane >> 3) & 1) * 8) * 2;
-  float c[BE / 8][4] = {};
-  load(0, 0);
-  glm_bmm::commit();
-  for (int kt = 0; kt < steps; ++kt) {
-    if (kt + 1 < steps) load((kt + 1) & 1, kt + 1);
-    glm_bmm::commit();
-    glm_bmm::wait<1>();
-    __syncthreads();
-    const unsigned st = (kt & 1) * STAGE;
-#pragma unroll
-    for (int k16 = 0; k16 < KS; k16 += 16) {
-      uint32_t a[4], b[BE / 8][2];
-      glm_bmm::ldm4s(a, fa + st + k16 * 2);
-#pragma unroll
-      for (int j = 0; j < BE / 8; j += 2) {
-        uint32_t r[4];
-        glm_bmm::ldm4s(r, fb + st + (j * 8 * LD + k16) * 2);
-        b[j][0] = r[0], b[j][1] = r[1], b[j + 1][0] = r[2], b[j + 1][1] = r[3];
-      }
-#pragma unroll
-      for (int j = 0; j < BE / 8; ++j) glm_router::mma16816(c[j], a, b[j]);
-    }
-    __syncthreads();
-  }
-#pragma unroll
-  for (int j = 0; j < BE / 8; ++j)
-#pragma unroll
-    for (int h = 0; h < 2; ++h)
-#pragma unroll
-      for (int jj = 0; jj < 2; ++jj) {
-        const int64_t r = m0 + warp * 16 + g + h * 8, col = e0 + j * 8 + q * 2 + jj;
-        if (r < rows && col < ne) part[(s * rows + r) * ne + col] = c[j][h * 2 + jj];
-      }
+  tf_router_mma::logits<4, 2, 64, 4, false, true>(x, static_cast<int>(x_stride), w, part, static_cast<int>(rows),
+                                                   static_cast<int>(d), static_cast<int>(ne), ks);
 }
 
 // Decode windows (under 128 rows): 16 x 64 a block of 4 warps, K 64 at a time, one K slice a block along z.

@@ -4,10 +4,13 @@ pub const draft_sources: api.DraftSources = .{ .mtp = true, .copies = true };
 const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
+const snap = api.prompt_cache.status;
+const FsrRun = @FieldType(@typeInfo(@FieldType(fx.Engine, "r")).pointer.child, "fsr");
 const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
+const cache_setup = @import("flashnext_cache_setup.zig");
 const disk = @import("flashnext_disk.zig");
 const Snaps = @import("flashnext_snaps.zig").Snaps;
 const Resident = @import("resident.zig").Resident;
@@ -35,6 +38,7 @@ pub const Host = struct {
     gpa: Allocator,
     io: std.Io,
     eng: *fx.Engine,
+    shared_gdn_pipe: @FieldType(tf.flashnext_replay.Run, "gdn_pipe") = null,
     warm: mtl.keepalive.Target = undefined, // the engine's queue, for the server's idle ticker
     resident: ?Resident = null, // the engine's buffers, kept wired between requests
     info_: api.Info,
@@ -54,6 +58,9 @@ pub const Host = struct {
     live_generated: u64 = 0,
     prefilling: bool = false, // the engine thread's prompt pass is running (status reads it under this lock)
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
+    cache_status: ?api.Status.PromptCache = null, // published under the lock; status never reads the store
+    disk_status: ?api.Status.DiskCache = null, // published beside it, after the store stops mutating
+    fsr: FsrRun = null, // the engine's FSR counters, set at open: status never reads the engine itself
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
@@ -104,19 +111,15 @@ pub const Host = struct {
     fn self(ctx: *anyopaque) *Host {
         return @ptrCast(@alignCast(ctx));
     }
-
     pub fn lock(h: *Host) void {
         h.mutex.lockUncancelable(h.io);
     }
-
     pub fn unlock(h: *Host) void {
         h.mutex.unlock(h.io);
     }
-
     pub fn now(h: *Host) i96 {
         return std.Io.Clock.awake.now(h.io).toNanoseconds();
     }
-
     fn infoFn(ctx: *anyopaque) api.Info {
         return self(ctx).info_;
     }
@@ -178,6 +181,9 @@ pub const Host = struct {
             .prefill_tokens_per_second = if (t - h.prefill_at <= window_ns) h.prefill_rate else 0,
             .streams = n,
             .generation_tokens = generation_tokens,
+            .prompt_cache = h.cache_status,
+            .disk = h.disk_status,
+            .fsr = if (h.fsr) |rt| if (rt.snapshot()) |c| .from(c) else null else null,
             .fill_unknown = h.prefilling, // this backend reports no fill counters: the page says so, not idle
         };
     }
@@ -185,12 +191,11 @@ pub const Host = struct {
     fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
         return cache_fit.hostMemory(self(ctx).load_limit, reset_peak);
     }
-
-    fn emit(job: *Job, event: api.Event) void {
+    pub fn emit(job: *Job, event: api.Event) void {
         job.sink.event(job.sink.ctx, job.id, &event);
     }
 
-    fn finish(h: *Host, job: *Job, reason: api.Reason, stats: api.Stats, message: []const u8) void {
+    pub fn finish(h: *Host, job: *Job, reason: api.Reason, stats: api.Stats, message: []const u8) void {
         h.lock();
         if (h.running == job) h.running = null; // before finished is out: status must not see a job about to be freed
         h.unlock();
@@ -198,8 +203,7 @@ pub const Host = struct {
         job.emitted.deinit(h.gpa);
         h.gpa.destroy(job);
     }
-
-    fn noteDecoded(h: *Host, n: usize) void {
+    pub fn noteDecoded(h: *Host, n: usize) void {
         const t = h.now();
         h.lock();
         defer h.unlock();
@@ -224,11 +228,11 @@ pub const Host = struct {
                 continue;
             }
             if (h.closing) {
-                const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};
-                h.queued.clearRetainingCapacity();
+                var left = h.queued; // taken whole, as the lane host's close does: no copy to fail and drop them
+                h.queued = .empty;
                 h.unlock();
-                for (left) |job| h.finish(job, .cancelled, .{}, "");
-                h.gpa.free(left);
+                for (left.items) |job| h.finish(job, .cancelled, .{}, "");
+                left.deinit(h.gpa);
                 // --learn's half-made cut settled, then what waits for disk written under the stop's deadline
                 if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im);
                 if (h.cache) |*store| if (store.disk) |r| {
@@ -249,7 +253,10 @@ pub const Host = struct {
             h.cancels.clearRetainingCapacity(); // a cancel for an id no longer queued or running
             h.unlock();
             h.serve(job);
+            if (h.fsr) |rt| rt.publish(); // the reply's last counts, not those of its last 1 Hz copy
             h.lock();
+            h.cache_status = if (h.cache) |*s| snap.PromptCache(s) else null;
+            h.disk_status = if (h.cache) |*s| snap.Disk(s) else null;
             h.running = null;
             h.prefilling = false;
             h.live_generated = 0;
@@ -262,7 +269,6 @@ pub const Host = struct {
             }
         }
     }
-
     fn waiting(ctx: *anyopaque) bool {
         const h = self(ctx);
         h.lock();
@@ -271,7 +277,7 @@ pub const Host = struct {
     }
 
     /// The reply's callbacks from the engine's rounds.
-    const Ctx = struct {
+    pub const Ctx = struct {
         h: *Host,
         job: *Job,
 
@@ -318,7 +324,7 @@ pub const Host = struct {
             return matched;
         }
 
-        fn cancelled(ctx: *anyopaque) bool {
+        pub fn cancelled(ctx: *anyopaque) bool {
             const c: *Ctx = @ptrCast(@alignCast(ctx));
             const h = c.h;
             h.lock();
@@ -334,6 +340,7 @@ pub const Host = struct {
     const Fin = struct { reason: api.Reason = .failed, stats: api.Stats = .{}, message: []const u8 = "" };
 
     fn serve(h: *Host, job: *Job) void {
+        if (job.request.structure != null) return @import("flashnext_constraint.zig").serve(h, job);
         var fin: Fin = .{};
         defer h.finish(job, fin.reason, fin.stats, fin.message); // after every defer below: they read the job and its request
         const r = job.request;
@@ -417,29 +424,10 @@ fn ms(ns: i96) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
-/// The prompt cache's plan (cache_fit.zig); without an OS reading, `gib` or the Metal working set's spare.
-fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
-    const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
-    const dev = eng.r.device;
-    if (limit) |cap| {
-        const ready = cache_fit.footprint() orelse return error.NoMemoryReading;
-        if (ready +| cache_fit.MARGIN > cap) return error.OverMemoryLimit;
-        return cache_fit.budgetUnder(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), a, why, rank);
-    }
-    return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
-}
-
 /// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
 pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false, spill: api.prompt_cache.rows.Spill = .off, slots: ?usize = null };
 
 const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
-
-/// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-fn learnedStates(gpa: Allocator, io: std.Io, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, eng)).id, cap);
-    std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
-    return m;
-}
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8) !*Host {
@@ -454,19 +442,22 @@ pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]cons
         why.* = "--learn is not kept across a Flash Next pair yet: leave it out, or serve on one Mac";
         return error.LearnOnPair;
     }
-    try eng.keepStates(); // a lone reply is never handed to shared rounds, and its cached states come from prompt passes
+    const shared_gdn_pipe = eng.r.gdn_pipe;
+    try eng.keepStates(); // the unconstrained driver keeps its existing state layout
     eng.warm() catch |err| {
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;
     };
     const vis: ?*images.Vision = if (vision) |o| try images.open(gpa, io, eng, dir, o, a, why) else null;
     errdefer if (vis) |v| v.deinit();
-    return openWarmed(gpa, io, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
+    const h = try openWarmed(gpa, io, dir, eng, window, cache_gib, over_cap, learn, eng.r.load_limit, vis, a, why);
+    h.shared_gdn_pipe = shared_gdn_pipe;
+    return h;
 }
 
 /// Takes a warmed engine and its image tower, if any, without loading or warming; the caller keeps both on error.
-pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
-    const cache_plan = try cacheBudget(eng, cache_gib, over_cap, limit, a, why);
+pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, vis: ?*images.Vision, a: Allocator, why: *[]const u8) !*Host {
+    const cache_plan = try cache_setup.cacheBudget(eng, cache_gib, over_cap, limit, a, why);
     const budget = cache_plan.budget_bytes;
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
     eng.snap_pool.max = budget;
@@ -478,8 +469,11 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .benchmark_ranks = if (eng.r.tp != null) 2 else 1, .benchmark_group = if (eng.r.tp) |t| t.benchmark_group else null, .name = "flashnext-zig", .draft_sources = draft_sources, .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
+    h.shared_gdn_pipe = eng.r.gdn_pipe;
+    h.fsr = eng.r.fsr;
     h.warm = .{ .queue = eng.r.queue };
+    h.info_.structures = eng.r.tp == null;
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
@@ -490,9 +484,9 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
     h.info_.warm_turns = h.cache != null;
     if (learn) |l| if (l.conversations) {
-        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l);
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, dir, eng), l);
     } else {
-        h.learned = try learnedStates(gpa, io, eng, l.root, l.cap);
+        h.learned = try cache_setup.learnedStates(gpa, io, dir, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
     };
     errdefer if (h.learned) |*m| m.deinit();
@@ -596,4 +590,8 @@ test "a drained Flash Next host is unhealthy before another submit" {
     try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &ctx, .event = Sink.event }));
     try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
     try std.testing.expect(!status.healthy);
+}
+
+test {
+    _ = @import("flashnext_host_close_test.zig");
 }

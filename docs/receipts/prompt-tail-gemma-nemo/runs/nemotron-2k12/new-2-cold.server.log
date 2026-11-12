@@ -1,0 +1,51 @@
+info: the CUDA memory budget counts the 0.38 GiB free on the per-CPU page lists beyond their resting level (MemAvailable does not)
+[tensorfold] chat template: the checkpoint's
+[tensorfold] open-file limit raised: soft 1024 -> 524288
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 17.77 GiB; 1 stream at once, the engine's own at a 40960-token window (0.30 GiB, in the model's), 0 more taking 0 pages of 512 rows (0.00 GiB) as they need them, 64 MiB fixed each, of 88.3 GiB left after a 12.2 GiB reserve; prompts in passes of up to 4096 rows, no prompt cache; own glue kernels
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving m at http://127.0.0.1:18408/v1 (sampling: temperature 1.0, top_p 0.95; drafts: off; context: 40960; loaded in 8.5s)
+[tensorfold] thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {"enable_thinking": false}
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-66a8ad80ede313fe96dcfd2ec7bda0df prompt=183 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.079 decode=0.029 elapsed=0.108 queued=0.000 tok/s=103.1
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-165509fbd5d59d016eccce717a8ff7f5 prompt=2080 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.289 decode=0.029 elapsed=0.317 queued=0.000 tok/s=104.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-e83b6916edf363dce22bf019c8d8a632 prompt=2102 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.287 decode=0.028 elapsed=0.315 queued=0.000 tok/s=108.4
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-395bb88da91cee288566ceb576f5ec6f prompt=2091 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.288 decode=0.028 elapsed=0.316 queued=0.000 tok/s=105.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-cf20ba200030aebf21bb54f35fd4e956 prompt=2094 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.286 decode=0.029 elapsed=0.315 queued=0.000 tok/s=105.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-db9f695a8d080d1b14496348073c42c2 prompt=2081 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.287 decode=0.028 elapsed=0.315 queued=0.000 tok/s=105.7
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-c649af07a003ac509f5644ef07438f76 prompt=2094 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.286 decode=0.029 elapsed=0.315 queued=0.000 tok/s=103.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-a801820cf67b72d5ecc1befde4bd8029 prompt=2099 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.287 decode=0.028 elapsed=0.314 queued=0.000 tok/s=108.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-d21d9283fefa47f4785b5bbb91a1807c prompt=2069 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.283 decode=0.028 elapsed=0.311 queued=0.000 tok/s=108.9
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-54b374da0539d708533c9a157f484f0d prompt=2089 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.286 decode=0.028 elapsed=0.315 queued=0.000 tok/s=106.0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-b01ddf5dc844e52f9a9749b158e7b7f5 prompt=2087 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.286 decode=0.029 elapsed=0.314 queued=0.000 tok/s=105.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-5863fc61c31f8afbc93b803f54d58a78 prompt=2080 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.284 decode=0.029 elapsed=0.314 queued=0.000 tok/s=102.2
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {"enable_thinking": false} (server: --no-thinking)
+[tensorfold] done chatcmpl-63660d52c3f2635e97301cbc4b543f17 prompt=2102 cached=0 thinking=True effort=none tokens=4 sha=d15b39e85f98 finish=length rounds=3 accepted=0/0 ttft=0.287 decode=0.028 elapsed=0.315 queued=0.000 tok/s=106.8
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] shutting down (SIGTERM): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

@@ -23,3 +23,4 @@ pub const hc_pointwise_metal_adapter = @import("src/core/hc_pointwise_metal_impl
 pub const hc_pointwise_contract = @import("src/core/contract/hc_pointwise.zig");
 
 pub const attention_ref = @import("src/core/attention_ref.zig");
+pub const rope_freq = @import("src/core/rope_freq.zig");

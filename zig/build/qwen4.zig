@@ -12,10 +12,11 @@ pub fn metalNative(b: *std.Build, target: std.Build.ResolvedTarget, native: *std
     native.addImport("qwen4", module(b, target, native.optimize orelse .Debug, core));
 }
 pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
-    const core = b.createModule(.{ .root_source_file = b.path("zig/qwen4_core_host.zig"), .target = b.graph.host, .optimize = .Debug });
+    // ReleaseSafe keeps every runtime check and runs this host gate in minutes less than Debug (#2242).
+    const core = b.createModule(.{ .root_source_file = b.path("zig/qwen4_core_host.zig"), .target = b.graph.host, .optimize = .ReleaseSafe });
     core.addImport("lanes", b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host }));
     core.addImport("engine_api", b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = core.import_table.get("lanes").? }} }));
-    const family = module(b, b.graph.host, .Debug, core);
+    const family = module(b, b.graph.host, .ReleaseSafe, core);
     const m = family;
     m.addCSourceFile(.{ .file = b.path("zig/tests/qwen4/weight_only_host.cpp"), .flags = flags });
     @import("qwen4_hc_host.zig").wire(b, m);
@@ -31,12 +32,17 @@ pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
     @import("qwen4_cuda_attention_host.zig").wire(b, m);
     const step = b.step("test-qwen4-host", "Qwen4 explicit config admission and synthetic graph contracts");
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    const widths_root = b.createModule(.{ .root_source_file = b.path("zig/qwen4_prefill_widths_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "qwen4", .module = m }} });
+    const widths = b.step("test-qwen4-prefill-widths-host", "Existing adapter fixture counts Metal prompt passes and excludes CUDA and verify");
+    for ([_]*std.Build.Module{ m, widths_root }) |root| widths.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Qwen4 lanes:"} })).step);
     const mixer_step = b.step("test-qwen4-native-mixers-host", "Actual native mixer bodies under CPU collective instruments");
     mixer_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "Qwen4 GDN native contract", "Qwen4 HC native contract", "Qwen4 rounding bounds", "Qwen4 PLE native contract" } })).step);
     const ple_step = b.step("test-qwen4-ple-host", "Generated native lexical bodies against binary64 nodes");
     ple_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 PLE native contract"} })).step);
     const qsa_step = b.step("test-qwen4-qsa-host", "Generated native QSA bodies against independent scalar references");
     qsa_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{ "Qwen4 QSA native contract", "Qwen4 QSA scores", "Qwen4 QSA selection" } })).step);
+    const backward = b.step("test-qwen4-qsa-backward-host", "Fixed-selection QSA adjoints against independent binary64 finite differences");
+    backward.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 QSA backward:"} })).step);
     const device_host = b.step("test-qwen4-device-host", "The full native device gate under numeric host instruments and refusal controls");
     device_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Qwen4 device gate:"} })).step);
     const reference_step = b.step("test-qwen4-reference-host", "Qwen4 reference precision, rotary inputs and queued capture fault controls");

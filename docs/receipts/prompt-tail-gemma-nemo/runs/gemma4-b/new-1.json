@@ -1,0 +1,103 @@
+{
+ "label": "new-1",
+ "md5": "eaa871ae49b35bc6ce01f2d5b7ae55cb",
+ "cold": {
+  "32k": [
+   {
+    "prompt": 31902,
+    "cached": 0,
+    "sha": "7be6097bb432",
+    "ttft": 43.756,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (mostly nouns like"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 31905,
+    "cached": 0,
+    "sha": "0445409ab0c7",
+    "ttft": 43.773,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 1020"
+    },
+    "lp": null,
+    "plp": null
+   },
+   {
+    "prompt": 31826,
+    "cached": 0,
+    "sha": "adb20d5f1b6b",
+    "ttft": 43.596,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 1120"
+    },
+    "lp": null,
+    "plp": null
+   }
+  ]
+ },
+ "decode": {
+  "tokens": 128,
+  "s": 10.344,
+  "sha": "5d5caa4d22ef",
+  "msg": {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "*   Input: A long list of words (garden, copper, stone, winter, ledger, candle, river, harbor, signal, meadow, orbit, lamp) each followed by a number.\n    *   Task: Summarize the document.\n\n    *   The document consists of repeated words (categories) paired with numbers.\n    *   Words: garden, copper, stone, winter, ledger, candle, river, harbor, signal, meadow, orbit, lamp.\n    *   Numbers: Vary widely (e.g., 333, 246, 842"
+  },
+  "lp": null,
+  "plp": null
+ },
+ "seeded": {
+  "sha": "5515ac89e29e",
+  "msg": {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "The user wants a summary of \"Document 78\"."
+  },
+  "lp": null,
+  "plp": null
+ },
+ "kept": {
+  "cached": [
+   0,
+   13835,
+   15950
+  ],
+  "shas": [
+   "b844d0a10ad3",
+   "6f9c03bcc509",
+   "6f9c03bcc509"
+  ],
+  "a": {
+   "msg": {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "*   Input: A long list of words (garden, ledger"
+   },
+   "lp": null,
+   "plp": null
+  },
+  "b": {
+   "msg": {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "*   Input: A long list of words (garden, ledger"
+   },
+   "lp": null,
+   "plp": null
+  }
+ },
+ "gate_logits": [
+  [],
+  []
+ ]
+}

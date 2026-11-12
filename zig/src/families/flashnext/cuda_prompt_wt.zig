@@ -79,6 +79,8 @@ const Shard = struct {
     }
 
     fn close(self: *Shard) void {
+        // A shard may mix loaded tensors with the n-gram table still read at runtime.
+        if (!runtimePages(self.f.names.keys())) self.f.release(std.heap.page_allocator); // no keep list: scratch unused
         self.f.close(self.io);
     }
 
@@ -87,19 +89,28 @@ const Shard = struct {
     }
 };
 
+fn runtimePages(names: []const []const u8) bool {
+    for (names) |name| if (std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null) return true;
+    return false;
+}
+
+/// The final load-only sweep excludes the n-gram table's live mappings.
+pub fn dropPageCache(io: std.Io, dir: []const u8, keep: anytype) void {
+    core.checkpoint.cache.directory(io, dir, keep);
+}
+
 pub const Store = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     dir: []const u8,
     parsed: std.json.Parsed(std.json.Value),
-    path: []u8 = &.{},
     rel: []u8 = &.{},
     file: ?Shard = null,
     held: std.ArrayList(Held) = .empty, // as many shards as one layer's borrowed planes span (no fixed cap)
     /// Pinned upload staging for this store's loaders, grown on demand; freed by dropStaging or deinit.
     staging: ?cuda.HostBuffer = null,
-    released: [2]Held = undefined,
-    nreleased: usize = 0,
+    /// Shards a load already opened, kept open until it ends (loaded or deinit): reopening one parses its header again.
+    released: std.ArrayList(Held) = .empty,
     norm_offset: f32 = 0,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
@@ -147,6 +158,7 @@ pub const Store = struct {
         self.release();
         self.held.deinit(self.gpa);
         self.closeReleased();
+        self.released.deinit(self.gpa);
         self.closeFile();
         self.parsed.deinit();
     }
@@ -165,34 +177,41 @@ pub const Store = struct {
         self.staging = null;
     }
 
-    /// A finished load: the pinned staging freed, borrowed planes released, the open shard closed.
+    /// A finished load: the pinned staging freed, borrowed planes released, every open shard closed.
     pub fn loaded(self: *Store) void {
         self.dropStaging();
         self.release();
+        self.closeReleased();
         self.closeFile();
     }
 
-    /// Borrowers expire here; two indexed shards cover separate weight and calibration planes.
+    /// Borrowers expire here; their shards stay open, pages dropped, until the load ends (or close if not kept).
     pub fn release(self: *Store) void {
         for (self.held.items) |h| {
-            if (self.nreleased == self.released.len) {
-                self.released[0].file.close();
-                self.gpa.free(self.released[0].rel);
-                self.released[0] = self.released[1];
-                self.nreleased -= 1;
-            }
-            self.released[self.nreleased] = h;
-            self.nreleased += 1;
+            // the borrowers' pages leave this process (their bytes are copied), except the n-gram table's (Shard.close)
+            if (!runtimePages(h.file.f.names.keys())) h.file.f.release(self.gpa);
+            self.released.append(self.gpa, h) catch {
+                var kept = h.file;
+                kept.close();
+                self.gpa.free(h.rel);
+            };
         }
         self.held.clearRetainingCapacity();
     }
 
     fn closeReleased(self: *Store) void {
-        for (self.released[0..self.nreleased]) |*h| {
+        for (self.released.items) |*h| {
             h.file.close();
             self.gpa.free(h.rel);
         }
-        self.nreleased = 0;
+        self.released.clearRetainingCapacity();
+    }
+
+    /// The held shards as core.direct_gather reads them: each one's path and mapping.
+    pub fn sources(self: *const Store, out: []core.direct_gather.Source) ![]core.direct_gather.Source {
+        if (self.held.items.len > out.len) return error.TooManySources;
+        for (self.held.items, out[0..self.held.items.len]) |h, *o| o.* = .{ .path = h.file.f.path, .memory = h.file.f.map.memory };
+        return out[0..self.held.items.len];
     }
 
     /// hold, the tensor's pages read ahead: only for a reader that copies all of it (the one-GPU threaded loader).
@@ -210,19 +229,14 @@ pub const Store = struct {
             if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
         }
         try self.held.ensureUnusedCapacity(self.gpa, 1);
-        for (self.released[0..self.nreleased], 0..) |cached, i| {
+        for (self.released.items, 0..) |cached, i| {
             if (std.mem.eql(u8, cached.rel, file)) {
                 self.held.appendAssumeCapacity(cached);
-                self.nreleased -= 1;
-                if (i < self.nreleased) self.released[i] = self.released[self.nreleased];
+                _ = self.released.swapRemove(i);
                 return self.held.items[self.held.items.len - 1].file.get(key) orelse return error.MissingTensor;
             }
         }
-        const rel = try self.gpa.dupe(u8, file);
-        errdefer self.gpa.free(rel);
-        const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
-        defer self.gpa.free(path);
-        self.held.appendAssumeCapacity(.{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) });
+        self.held.appendAssumeCapacity(try self.openShard(file));
         return self.held.items[self.held.items.len - 1].file.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
             return error.MissingTensor;
@@ -232,8 +246,6 @@ pub const Store = struct {
     pub fn closeFile(self: *Store) void {
         if (self.file) |*f| f.close();
         self.file = null;
-        if (self.path.len != 0) self.gpa.free(self.path);
-        self.path = &.{};
         if (self.rel.len != 0) self.gpa.free(self.rel);
         self.rel = &.{};
     }
@@ -264,13 +276,30 @@ pub const Store = struct {
         return v.string;
     }
 
+    /// `file` (relative to the checkpoint) opened, its header parsed, with its own copy of the name.
+    fn openShard(self: *Store, file: []const u8) !Held {
+        const rel = try self.gpa.dupe(u8, file);
+        errdefer self.gpa.free(rel);
+        const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
+        defer self.gpa.free(path);
+        return .{ .rel = rel, .file = try Shard.load(self.gpa, self.io, path) };
+    }
+
+    /// Switches shards through `released`: the next one taken from there or opened, the current one parked there.
     fn use(self: *Store, key: []const u8) !void {
         const file = try self.shard(key);
         if (self.file != null and std.mem.eql(u8, file, self.rel)) return;
-        self.closeFile();
-        self.rel = try self.gpa.dupe(u8, file);
-        self.path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
-        self.file = try Shard.load(self.gpa, self.io, self.path);
+        try self.released.ensureUnusedCapacity(self.gpa, 1);
+        const next: Held = for (self.released.items, 0..) |cached, i| {
+            if (std.mem.eql(u8, cached.rel, file)) break self.released.swapRemove(i);
+        } else try self.openShard(file);
+        if (self.file) |*f| {
+            // its pages dropped as close drops them: the n-gram table's stay
+            if (!runtimePages(f.f.names.keys())) f.f.release(self.gpa);
+            self.released.appendAssumeCapacity(.{ .rel = self.rel, .file = f.* });
+        }
+        self.rel = next.rel;
+        self.file = next.file;
     }
 
     pub fn tensor(self: *Store, requested: []const u8) !Tensor {
@@ -340,11 +369,7 @@ pub fn attnIndex(layer: usize) usize {
     return layer / 4;
 }
 
-pub fn toBf16(v: f32) u16 {
-    const bits: u32 = @bitCast(v);
-    if (std.math.isNan(v)) return @intCast((bits >> 16) | 0x40);
-    return @intCast((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16);
-}
+pub const toBf16 = core.bf16_round.bits;
 
 pub fn promote(bits: u16) f32 {
     return @bitCast(@as(u32, bits) << 16);
@@ -551,4 +576,9 @@ pub fn stitch(gpa: std.mem.Allocator, store: *Store, prefix: []const u8, names: 
 
 test {
     _ = @import("cuda_prompt_wt_test.zig");
+}
+
+test "Flash Next load cache: a mixed PLE shard keeps its runtime pages" {
+    try std.testing.expect(runtimePages(&.{ "language_model.model.norm.weight", "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.shards.0.weight" }));
+    try std.testing.expect(!runtimePages(&.{ "language_model.model.norm.weight", "language_model.mtp.norm.weight" }));
 }

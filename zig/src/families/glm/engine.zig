@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash on Metal: one greedy reply at a time, the prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
+//! Metal GLM-5.3-Flash: a greedy reply at a time; prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -39,7 +39,7 @@ pub const Result = struct {
     gap_seconds: f64 = 0, // the GPU idle between consecutive rounds
     copy_rounds: u64 = 0, // rounds whose drafts were copied from earlier in the history, and their drafts kept
     copy_accepted: u64 = 0,
-    // GLM_RANKS=1: rounds by drafts kept m: [m][0] all kept, else the target's place among the head's choices at the miss
+    // GLM_RANKS=1: rounds by drafts kept m: [m][0] all kept, else the target's rank among the head's choices at a miss
     draft_ranks: [st.max_rows][4]u32 = @splat(@splat(0)),
 };
 
@@ -102,7 +102,7 @@ pub const Engine = struct {
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
-    /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
+    /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, cap: u32) !*Engine {
         return loadWith(gpa, io, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null, false);
     }
@@ -231,11 +231,11 @@ pub const Engine = struct {
             me.rest[0] = @intFromBool(rows);
             me.rest[1] = @intCast(e.c.tp);
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
-            e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
+            e.ep = try ep_mod.Ep.init(gpa, io, e.device, s, me);
         }
         if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
         errdefer if (e.vision) |v| v.deinit();
-        // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
+        // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step
         if (e.pr != null and cap >= 128 and platform.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
             for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i);
@@ -452,7 +452,7 @@ pub const Engine = struct {
         var emitted: usize = 1;
         var hist: ?CopyIndex = null; // the prompt and the reply so far: copy drafts' source
         defer if (hist) |*h| h.deinit();
-        // a copy round's window: the most expected tokens a ms against the pair's measured round costs, when that beats an MTP round
+        // copy round window: most expected tokens a ms from the pair's measured round costs, if it beats an MTP round
         var ck: f64 = 0;
         var cr: f64 = 0;
         var mk: f64 = @floatFromInt(d);

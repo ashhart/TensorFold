@@ -20,6 +20,14 @@ pub var fail_record = false;
 pub var live: [1024]bool = @splat(false);
 pub var memory: [1024][1024]u8 = @splat(@splat(0));
 pub var pinned: ?[]align(16) u8 = null;
+fn contextDevice(out: *abi.Device) callconv(.c) abi.Result {
+    out.* = 0;
+    return 0;
+}
+fn deviceAttribute(out: *c_int, _: abi.DeviceAttribute, _: abi.Device) callconv(.c) abi.Result {
+    out.* = 0;
+    return 0;
+}
 pub fn init() cuda.Driver {
     shared_calls = 0;
     shared_bytes = 0;
@@ -37,6 +45,8 @@ pub fn init() cuda.Driver {
     fail_record = false;
     @memset(&live, false);
     var d: cuda.Driver = undefined;
+    d.api.cuCtxGetDevice = contextDevice;
+    d.api.cuDeviceGetAttribute = deviceAttribute;
     d.api.cuModuleLoadData = moduleLoad;
     d.api.cuModuleUnload = moduleUnload;
     d.api.cuModuleGetFunction = moduleFunction;

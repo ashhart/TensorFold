@@ -4,7 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const fw = @import("cuda_forward.zig");
 const weights = @import("cuda_weights.zig");
-const kda = @import("cuda_kda.zig");
+const kda = cuda.kda;
 const latent = @import("cuda_latent.zig");
 const kda_block = @import("cuda_kda_block.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
@@ -43,10 +43,11 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di: 
     switch (l.mixer) {
         .kda => |k| {
             const n = k.heads * kda.dk;
-            const w = k.width();
+            const w = k.matWidth(); // TF_GLM_KDA_PAD: the projection rows carry the padded width
             var s = b.kda;
             s.p = b.kproj;
             try kda_block.project(f.set(), f.stream, k, s, b.normed, c.hidden, rows);
+            if (f.prefetch()) |p| try p.fork(f.stream, l.index, .o); // TF_GLM_L2PF: o read into L2 while the chains run
             for (r.segs) |g| {
                 const st = g.st;
                 const cur = st.cur[li];

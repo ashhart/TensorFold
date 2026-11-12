@@ -90,10 +90,9 @@ pub const Pack = struct {
             defer file.close(io);
             var head: [8]u8 = undefined;
             if (try file.readPositionalAll(io, &head, 0) != 8) return error.BadSafetensors;
-            const n = std.mem.readInt(u64, &head, .little);
             const len = try file.length(io);
-            if (n > len - 8 or n > 1 << 30) return error.BadSafetensors;
-            const json = try a.alloc(u8, @intCast(n));
+            const n = try st.headerSize(std.mem.readInt(u64, &head, .little), len);
+            const json = try a.alloc(u8, n);
             if (try file.readPositionalAll(io, json, 8) != json.len) return error.BadSafetensors;
             try p.addHeader(name, json, len - 8 - n);
         }
@@ -203,6 +202,12 @@ pub const Pack = struct {
         return found;
     }
 
+    /// The release's block-scale tensor of a prefix, when it has one; its shape says how the weights are scaled.
+    pub fn scale(p: *const Pack, prefix: []const u8, buf: []u8) !?Info {
+        const name = try std.fmt.bufPrint(buf, "{s}.scale", .{prefix});
+        return p.get(name);
+    }
+
     /// `span` of tensor `info`'s bytes into `out` (span.bytes() long), run by run.
     pub fn read(p: *const Pack, io: Io, info: Info, span: exl3.Span, out: []u8) !void {
         const bytes = std.math.mul(u64, span.len, span.count) catch return error.BadSpan;
@@ -237,9 +242,7 @@ pub const Pack = struct {
 
     /// Drops the page cache of bytes just read (POSIX_FADV_DONTNEED): on unified memory it competes with the device.
     fn dropCache(file: Io.File, offset: u64, len: usize) void {
-        if (@import("builtin").os.tag != .linux) return;
-        const linux = std.os.linux;
-        _ = linux.fadvise(file.handle, @intCast(offset), @intCast(len), linux.POSIX_FADV.DONTNEED);
+        @import("core").checkpoint.cache.range(file, offset, len);
     }
 
     /// The codebook of the group at `prefix`: its marker's value, else the 3-instruction default.
@@ -267,6 +270,28 @@ const testing = std.testing;
 
 /// One tensor of an in-memory image.
 pub const Spec = struct { name: []const u8, dtype: []const u8, shape: []const usize, fill: u8 = 0 };
+
+/// A safetensors header alone: the tensors' names, dtypes, shapes and byte ranges, without their bytes.
+pub fn headerOnly(a: std.mem.Allocator, specs: []const Spec) ![]u8 {
+    var json: std.Io.Writer.Allocating = .init(a);
+    defer json.deinit();
+    try json.writer.writeAll("{\"__metadata__\":{\"format\":\"pt\"}");
+    var at: usize = 0;
+    for (specs) |s| {
+        var n = (DType.parse(s.dtype) orelse return error.UnsupportedDType).size();
+        for (s.shape) |d| n *= d;
+        try json.writer.print(",\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ s.name, s.dtype });
+        for (s.shape, 0..) |d, i| try json.writer.print("{s}{d}", .{ if (i == 0) "" else ",", d });
+        try json.writer.print("],\"data_offsets\":[{d},{d}]}}", .{ at, at + n });
+        at += n;
+    }
+    try json.writer.writeAll("}");
+    const head = json.written();
+    const out = try a.alloc(u8, 8 + head.len);
+    std.mem.writeInt(u64, out[0..8], head.len, .little);
+    @memcpy(out[8..][0..head.len], head);
+    return out;
+}
 
 /// A safetensors image in memory: tensors in order, each filled with `fill`.
 pub fn image(a: std.mem.Allocator, specs: []const Spec) ![]u8 {
@@ -335,4 +360,32 @@ test "a folder by its headers: index order, groups checked, strided reads, codeb
     try testing.expectEqual(exl3.Codebook.inst3, try p.codebook(io, "y"));
     try testing.expectError(error.MissingTensor, p.group("y", &buf));
     try testing.expectError(error.BadSpan, p.read(io, p.get("y.weight").?, .{ .offset = 8, .len = 8 }, out[0..8]));
+}
+
+test "a shard's header length is read as core reads it: past the file, past 100 MB or the u64 maximum is refused" {
+    const io = testing.io;
+    const a = testing.allocator;
+    const good = try image(a, &.{.{ .name = "y.weight", .dtype = "BF16", .shape = &.{ 3, 2 }, .fill = 7 }});
+    defer a.free(good);
+    const lengths = [_]?u64{ null, good.len - 7, st.max_header_bytes + 1, std.math.maxInt(u64), std.math.maxInt(u64) - 7 };
+    for (lengths) |length| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const bytes = try a.dupe(u8, good);
+        defer a.free(bytes);
+        if (length) |n| std.mem.writeInt(u64, bytes[0..8], n, .little);
+        try tmp.dir.writeFile(io, .{ .sub_path = "a.safetensors", .data = bytes });
+        if (length == st.max_header_bytes + 1) { // a sparse file long enough to hold that header
+            const f = try tmp.dir.openFile(io, "a.safetensors", .{ .mode = .read_write });
+            defer f.close(io);
+            try f.setLength(io, st.max_header_bytes + 16);
+        }
+        const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+        defer a.free(dir);
+        if (length == null) {
+            var p = try Pack.open(a, io, dir);
+            defer p.deinit();
+            try testing.expectEqual(@as(u64, 12), p.get("y.weight").?.nbytes);
+        } else try testing.expectError(error.BadSafetensors, Pack.open(a, io, dir));
+    }
 }

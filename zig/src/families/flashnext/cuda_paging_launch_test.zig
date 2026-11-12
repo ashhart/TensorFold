@@ -51,12 +51,12 @@ test "paged launches: prep, pool, tiled QSA, ahead, one-buffer and fused select 
         Capture.count = 0;
         Capture.symbols = @splat(0);
         Capture.pages = @splat(.{});
-        try g.attnPrep(stream, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 1, pg);
+        try g.attnPrep(stream, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1e-6, 1, .full, pg);
         try g.qsaPool(stream, 1, 2, 3, 4, 5, 1e-6, 1, pg);
         try g.qsaScores(stream, 1, 2, 3, 4, 1024, 1, 600, pg);
-        try g.attnChunks(stream, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, 2, 5, true, pg);
-        try g.attnChunks(stream, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, 2, 5, true, pg);
-        try g.attnFused(stream, 1, 2, 3, 4, 5, 6, 7, 8, 300, 2, pg);
+        try g.attnChunks(stream, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 16, .full, 5, true, pg);
+        try g.attnChunks(stream, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 17, .full, 5, true, pg);
+        try g.attnFused(stream, 1, 2, 3, 4, 5, 6, 7, 8, 300, .full, pg);
         try std.testing.expectEqual(@as(usize, 6), Capture.count);
         for (Capture.symbols, Capture.pages, 0..) |id, actual, i| {
             try std.testing.expectEqual(2 * i + 1 + @intFromBool(pg.pt != 0), id);

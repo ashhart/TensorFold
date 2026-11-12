@@ -59,11 +59,11 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
         command_test.dependOn(&check.step);
     }
 }
+/// Run the checker tree mode over a release directory; the walk runs inside the tool, shared with package.sh.
 pub fn directory(b: *std.Build, tool: *std.Build.Step.Compile, dir: std.Build.LazyPath) *std.Build.Step {
-    const run = b.addSystemCommand(&.{"sh"});
-    run.addFileArg(b.path("tools/release/check_paths.sh"));
-    run.addArtifactArg(tool);
+    const run = b.addRunArtifact(tool);
     run.addArg(absoluteRoot(b));
+    run.addArg("--tree");
     run.addDirectoryArg(dir);
     return &run.step;
 }

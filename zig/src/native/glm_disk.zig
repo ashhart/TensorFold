@@ -9,7 +9,7 @@ const Backend = glm.backend.Backend;
 const Allocator = std.mem.Allocator;
 
 /// The store's view of a kept state: its KDA states, then each MLA layer's rows as a whole state lays them out.
-pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .scatter = scatter, .whole = whole };
+pub const image: rows.Image = .{ .parts = parts, .gather = gather, .blank = blank, .blank_bytes = Backend.snapReadBytes, .scatter = scatter, .whole = whole };
 
 fn back(ptr: *anyopaque) *Backend {
     return @ptrCast(@alignCast(ptr));
@@ -89,7 +89,7 @@ fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
 }
 
 /// What learned and disk states read under: checkpoint, split, chip, OS build, kernel sources, a probe; its rate.
-pub fn identity(io: std.Io, eng: *const glm.engine.Engine, sl: *glm.slots.Slots) !struct { id: u64, rate: f64 } {
+pub fn identity(a: Allocator, io: std.Io, dir: []const u8, eng: *const glm.engine.Engine, sl: *glm.slots.Slots) !struct { id: u64, rate: f64 } {
     var h = std.hash.Wyhash.init(0x62);
     const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
     const probe = try sl.probe(); // both Macs of a pair run it in step: its prompt pass exchanges with the peer
@@ -98,5 +98,34 @@ pub fn identity(io: std.Io, eng: *const glm.engine.Engine, sl: *glm.slots.Slots)
     var os: [64]u8 = undefined;
     h.update(api.prompt_imprint.osBuild(&os));
     h.update(std.mem.span(eng.device.name()));
-    return .{ .id = h.final(), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+    @import("disk_identity.zig").profile(&h, .{ .family = "glm5_next", .backend = "metal" });
+    return .{ .id = try @import("disk_identity.zig").scoped(a, io, dir, withPolicy(h.final(), eng)), .rate = 4143.0 / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
+}
+
+/// Whether a prompt pass's MTP eh_proj runs on the tile kernel: a bf16 head and the pipeline the load built.
+pub fn ehTile(eng: anytype) bool {
+    const head = eng.w.mtp orelse return false;
+    return eng.pr != null and head.eh_bf16 != null and eng.k.wide != null and eng.k.wide.?.bf16_nax != null;
+}
+
+/// Extend a probe identity with the resolved execution policy; another chunk height (pr.rows) starts cold.
+pub fn withPolicy(legacy: u64, eng: anytype) u64 {
+    const c = eng.c;
+    return @import("persistence_policy.zig").extend(legacy, "glm-metal-policy-v1", &.{
+        c.run,
+        c.tp,
+        c.tp_rank,
+        c.own[0],
+        c.own[1],
+        c.inter[0],
+        c.inter[1],
+        c.dense_inter,
+        c.kda_heads,
+        c.mla_heads,
+        @intFromBool(eng.fused_route),
+        @intFromBool(eng.pr != null),
+        if (eng.pr) |p| p.rows else 0, // prompt windows and chunks sum in different orders
+        if (eng.pr) |p| @intFromBool(p.sparse_nax) else 0,
+        @intFromBool(ehTile(eng)),
+    });
 }

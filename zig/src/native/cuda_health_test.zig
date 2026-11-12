@@ -1,12 +1,20 @@
 //! The native family's readiness source reaches the real lane host without a device.
 const std = @import("std");
 const api = @import("engine_api");
+const Phase = @import("cuda").startup_watch.Phase;
 const lanes = @import("lanes");
 
 pub fn check(comptime Host: type, comptime readiness: anytype, comptime serve: anytype) !void {
     const gpa = std.testing.allocator;
     const Family = struct {
         available: std.atomic.Value(bool) = .init(true),
+        phases: [2]Phase = undefined,
+        notes: usize = 0,
+        pub fn startup_phase(ctx: *anyopaque, phase: Phase) void {
+            const f: *@This() = @ptrCast(@alignCast(ctx));
+            f.phases[f.notes] = phase;
+            f.notes += 1;
+        }
         pub fn healthy(ctx: *anyopaque) bool {
             const f: *@This() = @ptrCast(@alignCast(ctx));
             return f.available.load(.acquire);
@@ -24,8 +32,12 @@ pub fn check(comptime Host: type, comptime readiness: anytype, comptime serve: a
     h.* = .{ .gpa = gpa, .gpu = null, .family = &family, .release = Family.release, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
     readiness(h, struct {}); // existing families need no readiness callback
     try std.testing.expect(h.health == null);
+    try std.testing.expect(h.startup_phase == null);
     readiness(h, Family);
     try serve(h, std.testing.io, .{ .exact_width = 8 }, 8, .{ .lanes = 2 }, null);
+    try std.testing.expectEqual(@as(usize, 2), family.notes);
+    try std.testing.expectEqual(Phase.calibration, family.phases[0]);
+    try std.testing.expectEqual(Phase.ready, family.phases[1]);
     defer {
         h.host.stop();
         h.core.deinit();
@@ -47,6 +59,7 @@ pub fn check(comptime Host: type, comptime readiness: anytype, comptime serve: a
     engine.status(&status, &.{});
     try std.testing.expect(!status.healthy);
     try eager(Host, serve);
+    try failedStartup(Host, readiness, serve);
 }
 
 fn eager(comptime Host: type, comptime serve: anytype) !void {
@@ -151,4 +164,32 @@ pub fn context(comptime H: type, comptime serve: anytype) !void {
 test "CUDA context health: sticky driver failure reaches native status and refuses admission" {
     const Host = @import("cuda.zig").Host;
     try context(Host, Host.serve);
+}
+
+fn failedStartup(comptime Host: type, comptime readiness: anytype, comptime serve: anytype) !void {
+    const Family = struct {
+        phases: [2]Phase = undefined,
+        count: usize = 0,
+        pub fn startup_phase(ctx: *anyopaque, p: Phase) void {
+            const f: *@This() = @ptrCast(@alignCast(ctx));
+            f.phases[f.count] = p;
+            f.count += 1;
+        }
+        fn prepare(_: *anyopaque) !lanes.drafter.Facts {
+            return error.InjectedCalibration;
+        }
+        fn release(_: *anyopaque) void {}
+    };
+    const a = std.testing.allocator;
+    var family: Family = .{};
+    var backend: lanes.fake.Fake = .{ .gpa = a };
+    defer backend.deinit();
+    const h = try a.create(Host);
+    defer a.destroy(h);
+    const facts: lanes.Model = .{ .exact_width = 8 };
+    h.* = .{ .gpa = a, .gpu = null, .family = &family, .release = Family.release, .inner = backend.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .served = .{ .backend = backend.backend(), .facts = facts, .stream_bytes = 0, .prepare = .{ .ctx = &family, .run = Family.prepare } } };
+    readiness(h, Family);
+    try std.testing.expectError(error.InjectedCalibration, serve(h, std.testing.io, facts, 8, .{ .lanes = 2 }, null));
+    try std.testing.expectEqual(@as(usize, 2), family.count);
+    try std.testing.expectEqualSlices(Phase, &.{ .calibration, .failed }, &family.phases);
 }

@@ -9,7 +9,8 @@ const spv_basic = @import("xpu").kernels.basic;
 const spv_mamba = @import("xpu").kernels.mamba;
 const spv_moe = @import("xpu").kernels.moe;
 const spv_attn = @import("xpu").kernels.attn;
-const spv_attn_dec = @import("xpu").kernels.nem_attn_dec;
+const kernels_mod = @import("xpu").kernels;
+const spv_attn_dec = kernels_mod.nem_attn_dec;
 const spv_glue = @import("xpu").kernels.glue;
 
 const Buf = rt.Buffer;
@@ -144,6 +145,7 @@ pub const Model = struct {
         var em = try r.module(spv_moe);
         var am = try r.module(spv_attn);
         var gm = try r.module(spv_glue);
+        const dec_shape = cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2; // nem_attn_dec
         const k: Kernels = .{
             .embed = try bm.kernel("embed4", .{ 64, 1, 1 }),
             .embed_tok = try bm.kernel("embed4_tok", .{ 64, 1, 1 }),
@@ -167,11 +169,12 @@ pub const Model = struct {
             .a_qkv = try am.kernel("qkv4_bf", .{ 64, 1, 1 }),
             .a_part = try am.kernel("attn_partial", .{ 256, 1, 1 }),
             .a_merge = try am.kernel("attn_merge", .{ 16, 1, 1 }),
-            .a_dec = if (cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2) blk: {
+            // without DPAS attn_partial beats nem_attn_dec's fallback (12.0 against 57.3 ms at 131k keys, Iris Xe)
+            .a_dec = if (dec_shape and kernels_mod.dpas) blk: {
                 var dm = try r.moduleWith(spv_attn_dec, "-cl-intel-256-GRF-per-thread");
                 break :blk try dm.kernel("nem_attn_dec_partial", .{ 128, 1, 1 });
             } else null,
-            .a_dmerge = if (cfg.head_dim == 128 and cfg.num_attention_heads == 32 and cfg.num_key_value_heads == 2) blk: {
+            .a_dmerge = if (dec_shape and kernels_mod.dpas) blk: {
                 var dm = try r.moduleWith(spv_attn_dec, "-cl-intel-256-GRF-per-thread");
                 break :blk try dm.kernel("nem_attn_dec_merge", .{ 256, 1, 1 });
             } else null,

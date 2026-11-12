@@ -82,7 +82,7 @@ pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
 }
 
 fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !void {
-    if (s.embedding != null) {
+    if (s.promptOnly()) {
         if (s.isCancelled()) {
             e.backend.release(s);
             return error.Cancelled;
@@ -131,12 +131,14 @@ fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !v
     if (s.logprobs != null) first_row[0] = (try e.backend.firstRow(s)).forToken(value);
     _ = try s.commit(e.gpa, &.{value}, if (s.logprobs != null) &first_row else &.{});
     s.pending = value;
-    try trail.resolve(e);
     if (s.finished) {
+        // The host will not discard a finished stream if tracing fails.
+        defer e.release(s);
+        try trail.resolve(e);
         try trail.finish(e, s);
-        e.release(s);
         return;
     }
+    try trail.resolve(e);
     try e.live.append(e.gpa, s);
 }
 

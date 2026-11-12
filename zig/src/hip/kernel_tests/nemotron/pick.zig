@@ -1,6 +1,7 @@
 //! Nemotron-H's 512-thread pick by rank against the wave a pick at a time: the same bytes, and their times.
 
 const std = @import("std");
+const platform = @import("sys");
 const rig = @import("../rig.zig");
 const launch = @import("../../launches/nemotron_moe.zig");
 const DeviceBuffer = @import("../../memory.zig").DeviceBuffer;
@@ -90,8 +91,8 @@ const Case = struct {
 };
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

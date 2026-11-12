@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
+const pdf = @import("pdf.zig");
 const api = @import("engine_api");
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -27,14 +28,21 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
     return normalizeWith(cx, messages, late_system, needs_user_after_tool, .{});
 }
 
-/// The media parts an engine reads: image_url parts (``Info.vision``), and video_url parts (its ``video``).
+/// The media parts an engine reads: image_url (``Info.vision``), video_url (``video``), and PDFs (``--vision-pdf``).
 pub const Media = struct {
+    native_deepseek: bool = false,
     images: bool = false,
     videos: bool = false,
+    pdfs: bool = false,
     image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
+    max_images: u32 = 50,
 
     pub fn of(v: ?api.Vision) Media {
-        return .{ .images = v != null, .videos = v != null and v.?.video != null, .image_type = if (v) |x| x.part_type else "image_url" };
+        return ofVision(v, false);
+    }
+
+    pub fn ofVision(v: ?api.Vision, pdfs: bool) Media {
+        return .{ .images = v != null, .videos = v != null and v.?.video != null, .pdfs = v != null and pdfs, .image_type = if (v) |x| x.part_type else "image_url", .max_images = if (v) |x| x.max_images else 50 };
     }
 };
 
@@ -84,10 +92,12 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
     if (list != .array or list.array.len == 0) return cx.refuse("messages must be a non-empty list");
     var out: std.ArrayList(Value) = .empty;
     var instructions: std.ArrayList(*json.Object) = .empty;
+    var pdf_budget: pdf.Budget = .{};
     for (list.array) |message| {
         if (message != .object) return cx.refuse("each message must be an object");
+        if (media.native_deepseek) try @import("deepseek_request.zig").message(cx, message);
         const role = message.get("role");
-        if (!isRole(role)) return cx.refuse("message role must be system, developer, user, assistant or tool");
+        if (!isRole(role) and !(media.native_deepseek and role != null and role.? == .string and std.mem.eql(u8, role.?.string, "latest_reminder"))) return cx.refuse("message role must be system, developer, user, assistant or tool");
         if (fields.hasMedia(message)) return cx.refuse("this server accepts text only; image, audio and video inputs are unsupported");
         const content = message.get("content");
         var item: *json.Object = message.object;
@@ -95,13 +105,27 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             var text: std.ArrayList(u8) = .empty;
             var parts: std.ArrayList(Value) = .empty; // with images: text and image parts in order
             var has_image = false;
-            for (content.?.array) |part| {
+            for (content.?.array, 0..) |part, part_index| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 // an image part, or one this normalization already wrote with the template's type (it runs twice)
                 if (images and (std.mem.eql(u8, kind, "image_url") or std.mem.eql(u8, kind, media.image_type))) {
                     // tool results carry screenshots too; the template renders them in its response
                     if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
-                    try parts.append(cx.a, try imagePart(cx, part, media.image_type));
+                    if (pdf.isPdfImagePart(part)) {
+                        if (!media.pdfs) return cx.refuse(pdf.off_message);
+                        try pdf.expandPart(cx, part, media.image_type, media.max_images, &pdf_budget, &parts);
+                    } else {
+                        const img_part = try imagePart(cx, part, media.image_type);
+                        try pdf.noteImagePart(cx, img_part, media.max_images, &pdf_budget);
+                        try parts.append(cx.a, img_part);
+                    }
+                    has_image = true;
+                    continue;
+                }
+                if (images and (std.mem.eql(u8, kind, "file") or std.mem.eql(u8, kind, "input_file"))) {
+                    if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("file parts are accepted in user and tool messages only");
+                    if (!media.pdfs) return cx.refuse(pdf.off_message);
+                    try pdf.expandPart(cx, part, media.image_type, media.max_images, &pdf_budget, &parts);
                     has_image = true;
                     continue;
                 }
@@ -114,6 +138,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                 if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
+                if (media.native_deepseek and part_index > 0) try text.appendSlice(cx.a, "\n\n");
                 try text.appendSlice(cx.a, t.string);
                 if (images) {
                     const tp = try json.newObject(cx.a);
@@ -129,7 +154,7 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             return cx.refuse("message content must be text or an array of text parts");
         }
         const r = role.?.string;
-        if (std.mem.eql(u8, r, "system") or std.mem.eql(u8, r, "developer")) {
+        if (!media.native_deepseek and (std.mem.eql(u8, r, "system") or std.mem.eql(u8, r, "developer"))) {
             if (out.items.len == 0) {
                 try instructions.append(cx.a, item);
                 continue;
@@ -325,4 +350,33 @@ test "a call's arguments become objects: blank text is no arguments, bad text is
     try std.testing.expect(calls[5].get("function").?.get("arguments") == null); // none sent, none added
     try std.testing.expectEqual(@as(usize, 3), out.array.len); // the tool results stay as they were, in order
     try std.testing.expectEqualStrings("two", out.array[2].get("content").?.string);
+}
+
+test "a user message with a PDF file content part normalizes into image_url parts or refuses with library name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+    const enc = std.base64.standard.Encoder;
+    const b64 = try cx.a.alloc(u8, enc.calcSize(pdf.minimal_two_page_pdf.len));
+    _ = enc.encode(b64, pdf.minimal_two_page_pdf);
+    const req = try std.fmt.allocPrint(cx.a,
+        \\[{{"role": "user", "content": [{{"type": "text", "text": "Analyze this PDF"}}, {{"type": "file", "file": {{"filename": "document.pdf", "file_data": "data:application/pdf;base64,{s}"}}}}]}}]
+    , .{b64});
+    const messages = (try json.parse(cx.a, req)).ok;
+    var off_cx: Cx = .{ .a = cx.a };
+    try std.testing.expectError(error.Refused, normalizeWith(&off_cx, messages, "system", false, .{ .images = true }));
+    try std.testing.expect(std.mem.indexOf(u8, off_cx.message, "--vision-pdf") != null);
+    const out1 = normalizeWith(&cx, messages, "system", false, .{ .images = true, .pdfs = true }) catch |err| {
+        if (err == error.Refused) {
+            try std.testing.expect(std.mem.indexOf(u8, cx.message, "libpdfium") != null or std.mem.indexOf(u8, cx.message, "pdfium") != null or std.mem.indexOf(u8, cx.message, "turbojpeg") != null);
+            return;
+        }
+        return err;
+    };
+    const out2 = try normalizeWith(&cx, out1, "system", false, .{ .images = true, .pdfs = true });
+    const content = out2.array[0].get("content").?.array;
+    try std.testing.expectEqual(@as(usize, 3), content.len);
+    try std.testing.expectEqualStrings("text", content[0].get("type").?.string);
+    try std.testing.expectEqualStrings("image_url", content[1].get("type").?.string);
+    try std.testing.expectEqualStrings("image_url", content[2].get("type").?.string);
 }

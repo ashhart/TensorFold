@@ -7,6 +7,7 @@ const config = @import("config.zig");
 const knob_types = @import("knob_types.zig");
 const moe = @import("block_moe.zig");
 const block_prefetch = @import("block_prefetch.zig");
+const partition = @import("partition.zig");
 const block_attn = @import("block_attn.zig");
 const block_index = @import("block_index.zig");
 const Config = config.Config;
@@ -414,6 +415,16 @@ pub const Emitter = struct {
         return .{ .ws = ws, .ks = ks, .ns = ns };
     }
 
+    /// This rank's attention heads, in whole output groups.
+    pub fn rankHeads(e: *const Emitter) !u32 {
+        return (try partition.outputShare(e.cfg.heads, e.cfg.o_groups, e.o.rank, e.o.world)).len;
+    }
+
+    /// This rank's output groups.
+    pub fn rankGroups(e: *const Emitter) !u32 {
+        return (try partition.outputGroups(e.cfg.o_groups, e.o.rank, e.o.world)).len;
+    }
+
     /// The q group: wq_b, and an indexer's ix_wq_b.
     pub fn qGroup(e: *Emitter, L: u32) !Group {
         const ix = switch (e.cfg.mode(L)) {
@@ -423,7 +434,7 @@ pub const Emitter = struct {
         const ws = try e.a.alloc([]const u8, if (ix) 2 else 1);
         const ns = try e.a.alloc(i64, ws.len);
         ws[0] = try e.fmt("L{d}.attn.wq_b", .{L});
-        ns[0] = @as(i64, e.cfg.heads / e.o.world) * e.cfg.head_dim;
+        ns[0] = @as(i64, try e.rankHeads()) * e.cfg.head_dim;
         if (ix) {
             ws[1] = try e.fmt("L{d}.attn.ix_wq_b", .{L});
             ns[1] = @as(i64, e.cfg.index_heads) * e.cfg.index_dim;
@@ -510,9 +521,10 @@ pub const Emitter = struct {
 /// The window's calls (arena-owned by `a`).
 pub fn emit(a: std.mem.Allocator, cfg: *const Config, w: *const Widths, o: Options, layers: []const u32, n: i64, start: i64, head: bool) ![]calls.Call {
     try cfg.validate();
-    if (o.world == 0 or o.world > 8 or cfg.heads % o.world != 0 or cfg.o_groups % o.world != 0 or
+    if (o.world == 0 or o.world > 8 or (o.world != 3 and (cfg.heads % o.world != 0 or cfg.o_groups % o.world != 0)) or
         n < 1 or n > 64 or start < 0 or o.limit < n or start > o.limit - n or
         o.rope_rows < n or start > o.rope_rows - n) return error.InvalidBlock;
+    _ = partition.outputGroups(cfg.o_groups, o.rank, o.world) catch return error.InvalidBlock;
     try @import("block_admission.zig").options(cfg, o, layers, n);
     var e: Emitter = .{ .a = a, .cfg = cfg, .w = w, .o = o, .n = n, .start = start };
     try e.window(layers, head);

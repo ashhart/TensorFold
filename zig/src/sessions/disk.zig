@@ -313,7 +313,8 @@ pub const Disk = struct {
         }
         var op = try Op.init(d.gpa, d.io, &d.staging);
         defer op.deinit();
-        errdefer op.wait() catch {};
+        // a failed restore still owns finished reads' staging: give each back, or the next pump waits for it forever
+        errdefer while (op.next()) |j| d.staging.put(j.staging);
         // (segment, chunk) jobs; the pump keeps at most staging - 1 in flight (one buffer for the header path)
         var jobs: std.ArrayList(struct { seg: u32, chunk: u32 }) = .empty;
         defer jobs.deinit(d.gpa);
@@ -493,7 +494,7 @@ pub const Disk = struct {
         var st: linux.Statx = undefined;
         if (linux.errno(linux.statx(f.fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true, .MTIME = true }, &st)) != .SUCCESS or st.size < h.total) return error.Truncated;
         const seg = lay.find(.ids, "ids") orelse return error.BadHeader;
-        if (seg.nbytes % 4 != 0 or seg.nbytes / 4 != h.pos - @as(u64, h.first_page) * h.page) return error.BadHeader;
+        if (seg.nbytes % 4 != 0 or h.pos < @as(u64, h.first_page) * h.page or seg.nbytes / 4 != h.pos - @as(u64, h.first_page) * h.page) return error.BadHeader;
         const ids = try d.gpa.alloc(i32, seg.nbytes / 4);
         errdefer d.gpa.free(ids);
         const sb = try d.staging.get();

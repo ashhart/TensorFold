@@ -14,6 +14,10 @@ whether the launch fits every chip we serve.
 The test of a kernel fills a `contract.spec.Spec` and hands the harness a few hooks (`contract.gates.VTable`, or
 `gates.hooks(T)` for a test type with `prepare`, `run`, `count` and `reference`).
 
+`runAll` calls each kernel's optional `VTable.release` before moving to the next kernel, including after a failed
+gate or planted control. `gates.hooks(T)` supplies `rig.reset()` for value or pointer rigs with a `reset` method.
+Direct `one` callers remain responsible for cleanup.
+
 - Its float64 reference: the kernel's own formula in float64. The input families in `zig/src/core/contract/` cover the
   common cases: `affine` (MLX's affine-quantized projections), `dense` (dots against dequantized weights, in K
   slices) and `rows` (RMS norm, softmax, sums, dots, maxima). Each builds inputs for every gate, computes the reference
@@ -21,15 +25,17 @@ The test of a kernel fills a `contract.spec.Spec` and hands the harness a few ho
 - Its served envelope: the shapes the engine calls it at, and for each dimension its tile, the step a valid size
   moves by and the least valid size.
 - Its accumulator (`f32` where a kernel sums) and the depth of its longest chain of roundings at a shape, plus any
-  fp32 operations after the sums (`ops`) and intermediate roundings to the output type (`mids`).
+  fp32 operations after the sums (`ops`), intermediate roundings to the output type (`mids`), and the precision it
+  stores at when that is narrower than the output's element (`store`: bf16 values in fp32 words).
 - Whether it may write in place. If it replaces another kernel, the kernel whose bits it must equal.
 - Its NaN rule: `propagate` (as float64 arithmetic on its formula does), or a stated rule the test checks itself
   (top-k, argmax, sampling and routing kernels state theirs).
 - For gate 5, its launch in `zig/src/core/contract/registry.zig`: threads a group and threadgroup bytes (the source's,
   and any its encoder sets) on Metal, or symbol, image, threads a block, dynamic shared bytes and cluster width on CUDA,
   with the limits its compiles recorded. HIP launches are in `zig/src/core/contract/hip_records.zig`: symbol, code
-  object, threads a workgroup and dynamic LDS bytes. The seam's records are in `metal_pair_records.zig`, which
-  `registry.zig` concatenates.
+  object, threads a workgroup and dynamic LDS bytes. XPU launches are in `zig/src/core/contract/xpu_records.zig`:
+  symbol, image, work-group size, static SLM bytes, sub-group size and GRF mode, with the values ocloc's `.ze_info`
+  recorded for the card class. The seam's records are in `metal_pair_records.zig`, which `registry.zig` concatenates.
 
 ## The gates
 
@@ -84,26 +90,58 @@ On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), an
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
 `registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
+For a development sm_110 build, use `-Dsm=110` in the fatbin build and run the same limits command on that set.
+The `DIR` must contain `norms.fatbin` and every registered image; the runner reads `norms.fatbin` first to select
+the release or sm_110 audit mode. It reads sm_110 registers, static shared bytes and bounds from each cubin and
+checks its device limits; the five release SMs retain their pinned `RECORD` entries. This does not enable
+`-Dgpu=sm_110`. On sm_110, some 48 KiB dynamic shared-memory kernels carry another 1 KiB of static shared memory.
+Only their sm_110 audit uses the opt-in limit already raised by their loaders (`allowDynamicShared`).
+For a mixed release and sm_110 set, each planted control must go red on each target separately.
+
 On an AMD machine, run `zig build hip-kernel-contract -Dhip-arch=ARCH -Dhipcc=...` on a GPU of that chip (the
 controls are built with the kernels). For the limits of every served chip, `zig build hip-kernel-contract-limits
 -Dhipcc=...` compiles every kernel group and the controls for gfx1030, gfx1100, gfx1151 and gfx1201 and checks each
 record against them, no GPU needed; `hip-kernel-contract-objects` installs those code objects into `zig-out/hsaco/`.
-Its `RECORD` lines are the values `hip_records.zig` holds for that hipcc.
+Its `RECORD` lines are the values `hip_records.zig` holds for that hipcc. The records hold ROCm 10.1's hipcc (HIP 7.16),
+which ROCm 10.1 installs under `core/bin` of its root.
+
+On an Intel GPU host, `zig build -Dxpu-contract=true xpu-kernel-contract-objects -Docloc=... -Dxpu-device=bmg` compiles
+every registered XPU kernel and the controls to zebins, and `xpu-kernel-contract-limits` checks each record against the
+BMG card's row, no GPU needed. Level Zero does not report a kernel's GRF mode, so the record states it, and the audit
+fails a record whose mode is not the zebin's `grf_count`. `tf-xpu-kernel-contract limits DIR` runs that audit on a
+directory another host built. The `RECORD` lines are the values `xpu_records.zig` holds for that ocloc.
+
+On an Arc Pro B70, `zig build -Dxpu-contract=true tf-xpu-contract-run` builds `tf-xpu-contract-run` with the zebins
+linked in, and `./tf-xpu-contract-run [--device N]` runs gates 1 to 4 over nine registrations of the Qwen3.8-27B glue's
+`add_rmsnorm`, `add_rmsnorm_dec`, `gated_norm`, `swiglu`, `argmax` and `embed`, the five planted controls, and gate 5
+live: the card's own properties against the BMG-G31 row and every loaded kernel's against its record. It loads the same
+native zebins the audit reads, so the GRF mode the record states is the loaded image's. Its `SUMMARY` line names the PCI
+id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
+another host made with the commands the receipt records.
+
+On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
+norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has
+nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
+test` the kernels' own test that the bytes are the same at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond (each alignment of the four-tile pass), on x86_64 and arm64.
+
+`--only` filters generic Metal launch labels too; both global launch-limit controls still run.
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
 
 ## Adding a kernel
 
-1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA) or
-   `zig/tests/hip/contract_*.zig` (HIP): `prepare` builds
+1. Write its test type in `zig/tests/contract/` (Metal), `zig/tests/cuda/contract_*.zig` (CUDA),
+   `zig/tests/hip/contract_*.zig` (HIP) or `zig/tests/cpu/contract_*.zig` (CPU): `prepare` builds
    the inputs for a shape and a gate's fill (usually through an input family), `run` launches once and waits, `count`
    and `reference` give the outputs and their float64 values, `simulate` replays the sums for gate 4.
 2. Add it to the runner's list, with its served shapes and tiles.
 3. Add its launches to `registry.zig`, or to a records file it concatenates as the seam's are, and fill them from
    `--offline` (Metal) or `kernel-contract-limits`
    (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently); a HIP
-   kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`.
+   kernel's go to `hip_records.zig`, filled from `hip-kernel-contract-limits`, and an XPU kernel's to
+   `xpu_records.zig`, filled from `xpu-kernel-contract-limits`. Its test type goes in `zig/tests/xpu/contract_*.zig`
+   and, where it needs a planted control, `zig/kernels/xpu/contract_gate_controls.cl`.
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
@@ -117,6 +155,19 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 `tf_glm_scores` scores a NaN dot as 0 where float64 keeps the NaN: its relu is `fmaxf(x, 0)`, as `tl.maximum` is in the
 Python family's Triton glue it was ported from. Nemotron's Metal `tf_xup_w3` gives 0 for a NaN dot where float64 keeps
 the NaN: its relu2 is `metal::max(bfloat(acc), 0.0f)`; the other up pipelines give its bytes on the same inputs.
+HIP's prompt attention tile (`tf_fa_paged_*`, `tf_fa_wide_*`) writes 0 for a row whose every score is NaN where
+float64 gives NaN, as its running max is `fmaxf` and a row at max -inf takes p = 0; and an infinite value at a key
+the row sees under fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters its P x V.
+Qwen3.8 Flash Next's `tf_sattn_nax` and `tf_attn256_nax` score masked keys -FLT_MAX, the value each row's running
+max starts from, so a row whose every score is -Inf weighs its masked keys 1 and gives a finite average where float64
+gives NaN. `tf_sattn_nax`'s padding lanes also read key 0 at p = 0, so a non-finite value in key 0's row reaches every
+row whose key count is not a multiple of 32 (0 x Inf is NaN where float64 gives the infinity).
+MiniMax-M3.1-Flash's `mm_prompt_attention`, Spark-X2.6-4B's `sp_prompt_attention`, Gemma 4's `gemma_prompt_attention`
+(31B and 12B, sliding and global), Nemotron's `tf_attention_nax` and Qwen3.8 Flash Next's `tf_attn256_nax` give NaN
+for a row whose tile or block reads a non-finite value at a key masked for that row, and Gemma 4's
+`gemma_decode_attention` for a decode row whose 32-key step reads one: P = 0 times Inf inside the P x V mma, where
+float64 leaves the masked key out. These were seen on the M5, where their cases run. Each kernel has an entry of its own
+that plants such a value and carries the finding, so its other entries keep a clean gate 1.
 
 HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite result with an actual non-finite
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
@@ -127,6 +178,28 @@ independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
 float64 output class, without an inherited exception.
 
+## Isolated masked-value panels
+
+`metal masked-V` entries isolate one hidden +Inf or NaN in otherwise finite Q/K/V. Every output class and every
+finite output is checked against binary64 over the actual visible set, including a visible exceptional-value control.
+The fixtures cover causal tiles, sliding rings, indexed/padded lists, page mappings and shared-context masks.
+Latent MLA treats its shared K/V storage as both key and value; a visible poisoned latent can also make its score NaN.
+The tensor kernels' dropped visible NaN scores and zero residual probability parts times visible Inf are separate
+known findings from hidden-value leakage. No production kernel is repaired by these registrations.
+
+The source-only focused runner builds without an offline Metal compiler:
+
+```sh
+zig build --build-file build.masked-values.zig tf-masked-values test-masked-values-host -Dcpu=apple_m1
+./zig-out/bin/tf-masked-values
+```
+
+It runs the same entries registered in the main Metal runner. Its equal-score/unit-value panels do not discriminate
+accumulator precision, so gate 4 states that limitation instead of claiming a stress proof. The two device controls
+plant a hidden NaN leak and erase a visible infinity; each must fail gate 1. A known finding must still reproduce.
+LFM3 entries register only on a tree that actually contains its source. DeepSeek CSA2 and H3 are operator checks,
+not new native serving paths. Flash Next is excluded. This focused run does not replace the complete backend gates.
+
 ## Coverage
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm (4
@@ -134,6 +207,43 @@ bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
 prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
+On the M5's tensor units, Metal also checks what nax.h's `mma_16x32` keeps of an fp32 operand
+(`metal_mma_operand.zig`): the left, the right and both (attention's fp32 P, `gemm_nax`'s f32 kernels), each output a
+single product bit-equal to float64 on operands with their low 13 mantissa bits cleared. That is 10 bits kept, rounded
+toward zero, fp32's exponents and subnormals kept, NaN and the infinities passed. Four controls state the operand as
+fp32 or as rounded to nearest at 10 bits, on each side, and must go red at `shapes`. The cut was measured on the tensor
+units only, so the cases run only there; what M1-M4 keep of an fp32 operand is not measured.
+`core/attention_range.zig` names that cut (`operand_cut`, 2^-10) as a form's `p_cut`: one-sided, since each p only
+shrinks, so it moves an output down by up to 2^-10 of its positive values' share and up by its negative values'. On the
+M5, Nemotron's `tf_attention_nax` states its fp32 P with it, and MiniMax-M3.1-Flash's `mm_prompt_attention` does on
+every chip (before the M5 that only widens its range); each bf16 output must lie between its range's ends rounded to
+bf16. Nemotron's adds a case with P spread over about
+[2^-6, 1] and values in [0, 1), where the cut's bias adds up; its control, the same range without the cut, goes red at
+`shapes`. Before the M5, `tf_attention_nax` keeps attention_ref's bound.
+Qwen3.8 Flash Next's prompt attention on the M5 does too: `tf_sattn_nax` (the indexer's dense and selected rows) and
+`tf_attn256_nax` (the causal chunk without the indexer), head dim 256, 24 heads over 2. Each bf16 output,
+bf16(bf16(o) * bsig(gate)), must lie between its range's ends rounded to bf16 and through the gate's rounded sigmoid.
+Each adds a P-spread case whose cutless range is a planted control, and a source edit gate 3 must catch: `tf_sattn_nax`
+counting its padding lane (key 0 again), `tf_attn256_nax` seeing one key past the row. Before the M5 neither is
+registered.
+On the M5, Nemotron's SSD steps (`prefill_mixers.zig`'s Mamba mixer) run `gemm_nax`'s five f32 kernels with both
+operands fp32, so each product enters cut, smaller by up to 1 - (1 - 2^-10)^2. Their entries
+(`metal_nemotron_ssd_gemm.zig`, y = sur x dtx and the state dd^T x bh^T a head, at the step's served row counts) state
+it as a one-sided range: float64's value less that share of the positive terms and plus that of the negative, beside
+the fp32 sums' `mma_step` roundings for every k16 step. Gate 4 runs 11-bit integers times 5-bit ones, which the cut
+keeps. Two cases take operands in (0, 1], where the bias adds up; their controls state the operands as fp32 and go red
+at `shapes`, as does a source edit dropping the ragged K tail's last column. Before the M5 they are not registered;
+their launches are in `nemotron_ssd_records.zig`.
+Spark-X2.6-4B's `sp_prompt_attention` registers both pipelines the engine builds (sliding layers over a 512-key window
+in a 2,560-slot ring, and full layers), its fp32 P stated with the cut, each with a P spread case
+and its cutless control, and one source edit each (a key past the window, a key past the row); before the M5 they are
+not registered.
+On the M5, Gemma 4's `gemma_prompt_attention` (the 31B's and 12B's sliding and global layers) and
+`gemma_decode_attention` with `gemma_attention_merge` (their global layers; the 12B's assistant launches the 12B's)
+state their fp32 P with the cut too, each form's counts taken from the kernel's own steps, at the sliding ring, image
+rows and decode chunks the engine serves. A P-spread case on the 31B's global prompt and decode has a cutless control
+each, red at `shapes`, and a score edit (2 log2e) in each kernel is a control. Their launches are in
+`gemma_attention_records.zig`.
 LFM2.5-24B-A2B's shared rounds: the greedy pick (`lfm2_argmax`) and the conv and attention kernels that run every
 stream's rows in one dispatch, each bit-equal to the per-stream kernels it replaces. Four controls edit the source: a tie
 to the highest id, a nonfinite logit not flagged, and every stream reading or writing the first stream's state or cache.
@@ -143,6 +253,12 @@ Metal also checks Nemotron's routed experts on the engine's route tables, one ro
 against float64 at tf_load16's bf16 x sums (up's relu2 as an interval over its two bf16 roundings), and the rows2, rows4
 and six geometry pipelines of each projection bit-equal to them (two controls: member rows read from one row, and
 w3's x sums without their bf16 steps).
+Metal also checks DeepSeek V4.1's routed experts at hidden 5120, width 2304, rows 1 to 16: the gate/up (`tf_dsv41_xp_up`:
+fp8 act_quant of the input, bf16 projections, clamped SwiGLU, route weight, bf16, act_quant of the result) against an
+oracle in the kernel's fp32 order whose silu may move by exp's error, and the down (`tf_dsv41_xp_down_one`/`_multi`, a
+DeepSeek-only copy of Kimi K3's chains with the full E8M0 scale range) against its bytes (also over the release's real
+FP4 expert bytes), each with four controls. The copied plan and combine (`tf_dsv41_route_plan`, `tf_dsv41_xp_combine`)
+are checked end to end through the GPU's own plan, and every launch is recorded for gate 5.
 The row-split seam's four kernels (`pair_rows.metal`, launched by `pair_rows.zig`) move bf16 frames, never sums:
 `pair_stage` copies this rank's half of a frame row into the slot the relay sends, and `pair_gather` writes both halves
 of every row, its own natively and the peer's from the relayed frame. `pair_argmax` flags a row whose logits are not
@@ -150,6 +266,16 @@ finite (its id word carries bit 31, its value word a NaN) and takes the lower id
 rank's word into the id sentinel, so both Macs refuse a non-finite round where one Mac does. Six controls edit the
 source: a stage reading the peer's half, a gather writing its own half twice, and an argmax or pick tie to the higher
 id must go red at `shapes`, and an argmax or pick that does not flag at `nonfinite`.
+The Llama family's own kernels (`metal_llama*.zig`): its glue (embedding, the norms at HF's rounding points, the
+residual add, RoPE with bf16 cos and sin, the SiLU gate, the decode attention's partials and their merge, the argmax
+draw by its stated rule), its row projections (1 to 32 rows) and, on the M5's tensor units, its four GEMM forms and the
+prompt attention at both served geometries; gate 5 reads their pipelines on this GPU. Twelve controls edit the
+source, one a kernel group: an embedding reading its own row, a norm's mean over the threads, a subtracting add, an
+add-norm dropping its residual, a SiLU with gate and up swapped, a rope at the window's first position, a decode that
+never rescales, a merge dropping each block's scale, a row projection dropping its tail, a GEMM reading its weights
+untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
+`nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
+zero point, and a word's nibbles read in reverse, both red at `shapes`.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
@@ -174,6 +300,9 @@ output within float64's range over the spread its fp32 steps and tensor-core sum
 seven controls, each one planted fault).
 CUDA also checks Dory's nGPT rows: the L2 norm rows with and without their bf16 add, and the normalized lerp residual
 (`norms_l2.cuh`), each output within float64's range at its bf16 points (three controls, each dropping one point).
+CUDA also checks the Qwen3.5 family's pending kept rows (`contract_qwen_pending.zig`): each `tf_q35_gdn_slots_*` scan
+replaying them, written back or not, and `tf_q35k_apply_pend`, bit-equal to `tf_q35k_apply` and then the scan at the
+27B's widths (two controls: the last pending row dropped, the last two swapped).
 CUDA also checks Dory's paged caches (`window_pages.cu`): `tf_wrows_put` places rows in a shuffled arena bit for bit, and the
 head dim 256 decode and prompt kernels read them through a page table, each output within float64's range (two controls:
 swapped stream tables, a stale page id).
@@ -183,7 +312,60 @@ CUDA also checks Dory's activation rows (`act_l2.cuh`): the scaled sigmoid outpu
 each row then L2-normed, against float64's ranges at their bf16 points and expf's ulps (four controls, one point each).
 CUDA also checks `dense_rows`' scaled epilogue (Dory's logits, fp32(bf16(x . w)) times a per-column scale), bit-equal to its
 unscaled tile's outputs rounded and scaled on the host.
+CUDA also checks EXL3's replacements of `linear_body` (`exl3_linear.cu`), each byte-equal to it at every row count it
+takes: the mid-M kernels (3, 4, 5 and 6 bits) and `linear_wc` (4 and 6 bits) at 1-128 rows (`Linear.min_rows` 1 runs
+them below 17 rows), the projection groups against each member's own launch, and `tf_exl3_rot_group` against
+`tf_exl3_rot_in` (1-16 rows). Their served shapes reach every form `plan()` gives them (row passes, warps, split or
+unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `exl3.pick` and `groupable` and fails on a
+form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
+stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
+swapped scales, a swapped suh.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
+HIP also checks the decode tail (`tf_tail`): the residual add, of a row of the activation kind or of nine slots' fp32
+rows times their weights summed in slot order, and the RMS norm after it, against float64 at Qwen3.6-35B-A3B's and
+Qwen3.8-27B's widths, decode rows and windows, and the widest row the launch takes.
+HIP also checks the 64-row prompt attention tile (`prefill.hip`): `tf_fa_paged_bf16` and `tf_fa_paged_f16` over a
+permuted page table at the 27B's, the 35B-A3B's and Nemotron's head counts, each output within attention_ref's float64
+bound, and `tf_fa_wide_bf16` and `tf_fa_wide_f16`, which no model calls, bit-equal to them on flat keys. A build runs
+its chip's cache type (fp16 on gfx1030, bf16 on the rest); gate 5 holds all four.
+HIP's unquantized embedding gather (`tf_embed_dense`) reads a BF16 table byte for byte and an fp32 table bit-equal to
+the gather before its table kind; two controls gather the next row and read a BF16 table as fp16.
+HIP also checks Clef's joint schema head (`joint_schema.hip`, `contract_js_*.zig`): the affine layer norm, the row
+softmax over FP32 scores to 16,384 keys, GELU, BF16 widening and rounding, the span sums over piece rows and over table
+rows by id (FP32 in prompt row order) and their means, step 5's option summary, and step 7's logits (prior, cosine and
+the scorer's input rows) and their gate, each within float64's bound at the head's BF16 points. Two controls: a layer
+norm summed in bf16 and a softmax that skips non-finite scores.
+CUDA checks the same head (`joint_schema.cu`, `zig/tests/cuda/contract_js_*.zig`) with the same cases, plus the
+lexical sums read from the engine's packed BF16 lm_head (`tf_js_lex_sums`) and the head's residual add and broadcast.
+Every kernel has a planted control (`contract_js_controls.cuh`), each naming the gate that catches it.
+
+HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
+form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
+and the exact sums of gate 4.
+
+HIP also checks the DeltaNet prompt recurrence at half a value head a block (`tf_gdn_prompt_128`, its y and state),
+bit-equal to the plain window scan `gated_delta_tile` on the same tokens.
+Its prompt prework in one launch (`tf_gdn_prompt_prep`: conv, q and k head norms, v, gate, beta and the new conv state)
+is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rms`, `tf_gdn_gate_prefill`).
+Four controls: the recurrence one row short of the prompt and with one key head, and the prework norming q with k's
+weights and writing gate and beta to each other's outputs.
+
+On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
+small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
+it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
+controls' code object, with its own gate-5 record) on the same inputs, and the kernel tests hold both geometries to
+float64. Three controls go red: the small block summing each 16-deep step in BF16 (`tf_ctl_wmma12_bf16_sum`) at gate 4,
+and at gate 3 against the frozen block, the big block loading its operands without the stores' swizzle
+(`tf_ctl_wmma12_unswizzled`) and the big block without its K loop's barriers (`tf_ctl_wmma12_unordered`). The last is a
+race, so gate 3 launches it up to eight times a shape and counts it red if any launch differs.
+
+On gfx12, HIP also checks the WMMA product with silu x up in its epilogue (`dense_wmma12_gemm_silu`, a 2-wave 16 x 64
+block and the 128 x 128 block, BF16 out), over a gate/up weight interleaved in 16-row groups. Each block replaces the
+plain WMMA product on that weight, its split into gate and up columns (`tf_copy_cols`) and `tf_silu_mul`, byte for
+byte, at Qwen3-8B's served rows and each block's edges; gate 1 holds the unfused bytes and every float64 class, and
+gate 4 negates the stress rows' x so that every gate and up sum is positive and silu keeps its error. One control goes
+red at gate 3: the pair epilogue applying silu to the fp32 gate sum instead of its BF16 rounding
+(`tf_ctl_silu_unrounded`), once the served kernel shows the unfused bytes on the same inputs.
 
 RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit_bias` then
 `tf_vit_pointwise`, byte for byte.
@@ -194,11 +376,27 @@ sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit
 `tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) to
 `tf_glm_select_rows`; both stated rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one
 positive NaN.
+CUDA also checks `TF_GLM_KV_HOST`'s gather (`tf_glm_kvh_*` in `glm_ops.cu`, launched by `cuda_kv_host.zig`): the
+marks (a slot for each distinct pick; past its slots, the call flagged and no row left marked), the picked rows into
+their slots from host pages or the layer's row cache, the token lists' slots, the marks cleared, the dense rows through
+pages out of order, and the layer's cache kept, each exact against the host's replay (nine controls, one a kernel: a
+stale mark, a dropped row or swapped slots).
 
+Ornith-1.5-122B's routed block on Metal registers the experts' decode rows with the shared expert as an extra matrix
+(`q27_rows_extra`, 4 and 8 bits), the router's softmax and top-k with renormalized bf16 weights (`q27_route`: picks
+equal to the host's, each weight within float64's range at its bf16 points), the tensor units' expert sort and gather
+(bit for bit), the experts' SwiGLU, and the weighted combine with the gated shared expert (in place and from its slot).
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.
 Controls dispatch real source mutations that couple rows or select the wrong expert; host tests validate their witnesses.
+CUDA also checks LFM2.5-24B-A2B's kernels: the router's fp32 logits (`tf_lfm2m_route`) and its top-4 rule, Liquid's
+3-tap short conv with its per-row state snapshots and the state commit (`liquid_conv.cuh`), each against the host's
+replay of its fp32 and bf16 steps (three controls: ties to the higher expert, bx unrounded, every stream committing into
+the first stream's slot). Their paged attention at head dim 64 runs over shuffled 512-key pages with several streams
+a launch: the decode rows' chunks and merge (`tf_paged_attn_chunk_segs_64`, `tf_paged_attn_merge_segs_64`) and the
+prompt rows (`pattn_kernel<64, 8, 4, 8>`), head by head within `attention_ref`'s float64 bound (two controls: the
+decode reading its values from the neighbouring lane's dims, the prompt from the neighbouring 8 dims).
 CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
@@ -208,9 +406,18 @@ shared expert): relu^2 up into act rows and down added into the shared expert's 
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
 relu by `fmaxf`, and the down launched one neuron short).
 
+Metal also checks DeepSeek V4.1's CSA2 attention (`csa2_attn.metal`): decode rows (ring or linear windows) and prompt rows
+(16-key tiles at absolute positions), fp32 and bf16 out, against float64's softmax over the window, the selected rows and
+the sink with the inverse RoPE, and a row's bytes equal across chunk splits and between the two launches (four controls,
+each one planted fault, and one on the row bytes).
+
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,
 MiniMax-M3.1-Flash's) against float64 at its rounding points (two controls: the up without its + 1, alpha 1).
+Its twin `tf_exl3_plan_finish_after` clamps silu's output instead, `min(silu(g), L) * clip(u, -L, L)` (Ling-3.1-flash's
+order): its fp32 SwiGLU at limits 10 and 2 and without one, and its fp32 down, against float64 at Ling's widths. A
+control runs `tf_exl3_plan_finish` against the after order at limit 2, where silu's term differs by up to L - silu(L)
+(0.24; 4.5e-4 at limit 10).
 
 CUDA also checks the grouped EXL3 experts (`tf_exl3_grouped_0`, `_1` and `_2`, one a codebook), which on sm_120 and
 sm_121 load a warp's next k tile while the current one decodes: each bit-equal to main's loop (kept in
@@ -221,6 +428,23 @@ Older SMs build main's loop, and their records are main's.
 CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+
+CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
+to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
+a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,
+so gate 2's five runs are five thread counts (the 16-output a and b projections have two tiles, so all five of theirs
+run on two). Eight controls: a projection zeroing a non-finite activation, writing its
+activations, skipping the rows past its last block of eight, and summing each group in half; a norm taking a
+non-finite input as zero, writing its output over its input, scaling by the next element's weight, and summing its
+squares in bf16.
+
+CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
+GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the
+128-wide absorb_q and expand_v, and the chunk tiles (`tf_mla_chunks_r16`, 576-wide q and keys over a linear cache,
+through `tf_glm_merge`; the split form with `tf_mla_merge_part`), each against float64 (eight controls, real launches
+each given one planted fault: the gate reading the next head's column, the plain rope one position late, the YaRN
+rope without its factor, absorb_q and expand_v reading the next head's weights, the chunks the next head's queries,
+the split chunks reading a rank's page z as chunk z, and the per-rank merge one chunk short).
 
 ## CUDA records per nvcc release
 
@@ -239,6 +463,13 @@ its own is checked against the one below it, so its differences show as stale re
 `kernel-contract-limits` and add a set for that release rather than loosening the audit. Launch dimensions, dynamic
 shared memory, the device's limits and the planted controls are checked the same way under every release.
 
+`-Dnative-fp-decode` (off by default; nvcc 13.2 or later) builds prompt16, qmmf and fp8_experts for `sm_<n>a` from
+sm_120 on and decodes their FP4/FP8 weight pairs with PTX ISA 9.2's `cvt.rn.bf16x2.e2m1x2`/`.e4m3x2` (qmmf: FP4 only).
+Known finding: the hardware decode equals `fp4pair` on all 256 e2m1 bytes and `fp8pair` on every e4m3 pair without a
+NaN code; the 1,020 pairs holding `0x7F` or `0xFF` decode to NaN, where the software gives ±480 (`tf-cuda-test
+native-fp`). Those codes are NaN in e4m3, so only a broken checkpoint can tell the two apart. Default images keep the
+software decode.
+
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
@@ -249,3 +480,33 @@ The sum fixtures use integers with exact FP32 partials below 2^24, including poo
 FP16 and BF16 simulations must fail in each of the three accumulator orders. Pooling declares its nine-term
 reduction separately from the physical grid width, so the small stress grid remains a valid launch.
 NaN and both infinity signs have explicit class controls. These registrations still require the device gates.
+
+## Shared M5 attention products
+
+The shared `attention_nax` defaults to the relaxed tensor P x V: float P is truncated to ten fraction bits.
+`TF_ATTENTION_PV_FP32=1` opts into full float P with FP32 FMA accumulation on M5; unset preserves the old arithmetic.
+The cut registration's independent formula includes the operand cut, while the full registration uses the full P.
+A third registration executes the real cut kernel against the full FP32 bound and must fail the shapes gate.
+The product fixture writes float output so BF16 rounding cannot conceal that control.
+Both modes still require exceptional-class, repeat, guard, shape, accumulator and separate launch checks.
+See [the mode's scope and device checks](recipes/m5-attention-precision.md); other families' rounding is unchanged.
+
+Flash Next's BF16 shared-down entries `tf_qmmf_shared16_half`, `tf_qmmf_shared16`, `tf_qmmf_shared32` and
+`tf_qmmf_shared64` preserve the contiguous projection's FP32 result and store it directly in expert slot 10.
+The baseline shared expert has all 640 intermediate channels and runs only on rank 0 at two ranks.
+The contract checks all four geometries, nonfinite inputs, output bytes and untouched routed slots.
+`moetile_records.zig` holds launch geometry and measured nvcc 13.0 resources on all five served SMs.
+Later compiler receipts remain pending. Check each build with `tf-cuda-test kernel-contract-limits zig-out/fatbin`.
+`tf-cuda-test moetile` compares the direct slot and the BF16 prompt tile plus scatter with the lane's contiguous
+product and scatter at 1, 16, 17, 32, 64, 65, 1536 and 4218 rows, five repeats with guards.
+`moetile-contract` runs the replacement gates and planted control.
+`moetile-bench` rotates GPU event timings of the three at 64 to 4218 rows; no timing is a gate.
+
+BF16 prompt K32 staging registers two unfused 128x128 entries, one for BF16 output and one for FP32 output.
+They read the parent's K64 weight packs in two K32 halves and keep the K16 MMA order and output rounding.
+Only unsplit prompt calls select K32; fused slices retain the parent K64 tile.
+`qmmf-prompt` compares each new output directly with the parent's 128x128 K64 output, including forced small rows.
+`qmmf-prompt-contract` keeps the four parent entries and adds both K32 replacements and their scaled controls.
+Each new control launches K32 for its output type at small and production row counts.
+`qmmf-prompt-bench` times the 64-row lane, prompt16, the parent K64 tile and K32 on each Flash Next BF16 shape.
+Measured nvcc 13.0 resources cover both K32 entries on sm_120 and sm_121; later compiler receipts remain pending.

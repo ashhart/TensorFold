@@ -184,6 +184,57 @@ test "a warm pass its cache keeps nothing of runs no chunk: no planned mark, and
     try std.testing.expectEqual(@as(usize, 0), chunks.n.load(.monotonic)); // the GPU never ran a chunk of it
 }
 
+test "a warm_usable store keeps a warm pass's grid mark but not its end off the grid; without it, the end too" {
+    const gpa = std.testing.allocator;
+    const pc = api.prompt_cache;
+    const Snaps = struct {
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return 64 + 4 * @as(u64, at);
+        }
+        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            return f.save(@ptrCast(@alignCast(owner.?)), at);
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+            return error.BackendRestores;
+        }
+        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            f.drop(saved);
+        }
+    };
+    for ([_]bool{ true, false }) |usable| {
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer core.deinit();
+        // dots.mocr's rules, scaled down: a grid of 4 and no request starts, so only multiples of 4 resume
+        var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .planned = true, .grid = 4, .warm = .on, .warm_usable = usable }, 400);
+        defer store.deinit();
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+        host.cache = &store;
+        try host.start();
+        defer host.stop();
+        const prompt = [_]u32{ 2, 7, 1, 8, 2, 8 };
+        var warm: Box = .{};
+        const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true, .history_len = prompt.len, .born = 4 };
+        try host.engine().submit(1, &warm_request, .{ .ctx = &warm, .event = Box.event });
+        try std.testing.expectEqual(Reason.length, warm.wait());
+        host.engine().drain();
+        var at4 = false;
+        var at6 = false;
+        for (store.entries.items) |e| {
+            at4 = at4 or e.at == 4;
+            at6 = at6 or e.at == 6;
+        }
+        try std.testing.expect(at4);
+        try std.testing.expectEqual(!usable, at6);
+    }
+}
+
 /// Status polls taken at each prompt chunk, the warm pass's apart from the request's.
 const FillPolls = struct {
     engine: Engine = undefined,
@@ -315,10 +366,10 @@ fn pausedTurn(lookahead: u32) !struct { cached: ?u32, same: bool } {
     return .{ .cached = runs[5].cached, .same = runs[5].n == 2 and std.mem.eql(u32, runs[5].tokens[0..2], runs[2].tokens[0..2]) };
 }
 
-test "a finished warm pass keeps its states with its request's length: the history it extends outlives its keep and later ones" {
+test "a kept warm end supersedes its history at either lookahead and regeneration stays token exact" {
     for ([_]u32{ 0, 1 }) |lookahead| { // the 27B keeps the pass's end; Nemotron on CUDA a mark one token before it
         const got = try pausedTurn(lookahead);
-        try std.testing.expectEqual(@as(?u32, 8), got.cached);
+        try std.testing.expectEqual(@as(?u32, 0), got.cached);
         try std.testing.expect(got.same);
     }
 }

@@ -16,7 +16,7 @@ pub const Shared = struct {
 };
 
 /// The 27B's Metal sources, embedded by name (zig/kernels/metal/qwen27).
-const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "attention_mpp", "attention_io", "attention_prompt", "attention_prompt_sg", "prompt_glue", "prompt_state" };
+const parts = [_][]const u8{ "xsum", "norm_xs", "norm_input", "mlp_xs", "mlp_ane", "glue", "copy", "moe", "moe_rows", "attention_mpp", "attention_io", "attention_prompt", "attention_prompt_sg", "prompt_glue", "prompt_state" };
 
 /// The shared modules, imported into `engine` (whose `core` is itself) for the server and the release binary.
 pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module) Shared {
@@ -102,17 +102,20 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const qwen_core = b.createModule(.{ .root_source_file = b.path("zig/qwen27_core.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tokenizer", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true }) } } });
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/qwen27.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } } });
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core", qwen_core }, .{ "core_lane", core_lane }, .{ "core_row", core_row }, .{ "bf16_topk", s.bf16_topk }, .{ "bf16_topk_gpu", s.bf16_topk_gpu }, .{ "tree_round", s.tree_round }, .{ "tree_round_gpu", s.tree_round_gpu }, .{ "tree_commit_gpu", s.tree_commit }, .{ "draft_ops", s.draft_ops }, .{ "kernel_sources", sources } }) |m| qwen_core.addImport(m[0], m[1]);
-    for ([_]struct { []const u8, *std.Build.Module }{ .{ "core_lane", core_lane }, .{ "qwen_runtime_sources", s.runtime_sources }, .{ "core_delta", s.delta }, .{ "qwen_gdn_source", s.gdn_source } }) |m| qwen27.addImport(m[0], m[1]);
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "core_lane", core_lane }, .{ "qwen_runtime_sources", s.runtime_sources }, .{ "core_delta", s.delta }, .{ "qwen_gdn_source", s.gdn_source }, .{ "kernel_sources", sources } }) |m| qwen27.addImport(m[0], m[1]);
     for ([_]*std.Build.Module{ s.bf16_topk, s.tree_round, s.draft_ops }) |m| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
 
     const family: []const std.Build.Module.Import = &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } };
     _ = program(b, "tf-qwen27-run", "Build the native greedy, chunk and prompt-speed check on real weights", "zig/tests/qwen27/run.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal }, .{ .name = "core_lane", .module = core_lane }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources }, .{ .name = "qwen_gdn_source", .module = s.gdn_source } });
     _ = program(b, "tf-qwen27-attention-fused", "Build the fused-chain versus tail-kernel attention byte check on this Mac's tensor units, no models", "zig/tests/qwen27/attention_fused.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources } });
+    _ = program(b, "tf-qwen27-attention-pages", "Build the KV-page attention kernels against main's, bit for bit through shuffled pages, no models", "zig/tests/qwen27/attention_pages.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-attention-precision", "Build decode attention's error against a float64 reference on this Mac, no models", "zig/tests/qwen27/attention_precision.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources } });
     _ = program(b, "tf-qwen27-projection-cases", "Build real-input production projection precision replay", "zig/tests/qwen27/projection_cases.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
+    _ = program(b, "tf-qwen27-pages-resume", "Build kept states saved, restored and moved through KV pages against main's, no models", "zig/tests/qwen27/pages_resume.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-empty-keep", "Build shared empty/full keep state checks", "zig/tests/qwen27/empty_keep.zig", target, false, engine_only);
+    _ = program(b, "tf-qwen27-keep-error", "Build the check that a failing keep returns its error, never aborting", "zig/tests/qwen27/keep_error.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks, embedding", "zig/tests/qwen27/widths.zig", target, false, engine_only);

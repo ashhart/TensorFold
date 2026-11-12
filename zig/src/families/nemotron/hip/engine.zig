@@ -1,5 +1,6 @@
 //! Nemotron-H on one HIP device: the kernels, a stream, the rank's weights, the KV pool and the scratch.
 const std = @import("std");
+const platform = @import("sys");
 const hip = @import("hip");
 const config = @import("../config.zig");
 const tensors = @import("tensors.zig");
@@ -383,8 +384,8 @@ const Body = struct {
 };
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

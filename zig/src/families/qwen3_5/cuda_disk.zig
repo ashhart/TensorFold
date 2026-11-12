@@ -41,6 +41,7 @@ fn wordsOf(c: *const Copy) Words {
 
 fn gather(_: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.image.Range, out: []u8) anyerror!void {
     const c: *const Copy = @ptrCast(@alignCast(saved));
+    if (c.dev != null) return error.KeptOnDevice; // the disk tier's states are saved on the host (Target.ctx)
     const w = wordsOf(c);
     var o: usize = 0;
     for (ranges) |g| {
@@ -147,9 +148,17 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     return .{ .hash = h.final(), .rate = @as(f64, @floatFromInt(toks.len)) / (@as(f64, @floatFromInt(@max(ns, 1))) / 1e9) };
 }
 
-/// What else the states depend on: the cache format, whether a drafter set the target's taps, int8 prompt projections.
-pub fn facts(t: *const Target) [3]u64 {
-    return .{ @backingInt(reuse.formatOf(t.e)), @intFromBool(t.e.n_taps > 0), @intFromBool(t.e.int8.on) };
+/// What else the states depend on: the cache format, target taps, int8 projections and rotary inputs.
+pub fn facts(t: *const Target) [4]u64 {
+    var rope = std.hash.Wyhash.init(0x726f7065);
+    switch (t.e.g.rope) {
+        .plain => rope.update("plain"),
+        .yarn => |y| {
+            rope.update("yarn");
+            rope.update(std.mem.asBytes(&y.table)); // the actual kernel inputs, independent of a finite probe
+        },
+    }
+    return .{ @backingInt(reuse.formatOf(t.e)), @intFromBool(t.e.n_taps > 0), @intFromBool(t.e.int8.on), rope.final() };
 }
 
 test {

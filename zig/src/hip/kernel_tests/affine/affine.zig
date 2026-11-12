@@ -89,7 +89,7 @@ pub fn product(rig: *Rig, c: Case, tot: *Totals) !void {
     const env = rig.kernels.env();
     var pickable_set: std.ArrayList(*const Entry) = .empty;
     defer pickable_set.deinit(gpa);
-    try prod.pickable(rig.kernels, p.arg(0, 0), p.items, p.pairCount(), c.path, env, &pickable_set, gpa);
+    try prod.pickable(rig.kernels, p.arg(0, 0), p.items, p.pairCount(), p.expertRows(), c.path, env, &pickable_set, gpa);
 
     var out = try Buffer.alloc(rig.base, p.outBytes(false));
     defer out.free();

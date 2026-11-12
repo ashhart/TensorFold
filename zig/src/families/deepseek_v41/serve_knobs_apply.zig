@@ -27,8 +27,8 @@ const x3ldEpi = pk.x3ldEpi;
 
 /// The knobs onto a forward before its buffer plan, on every rank; R1 is read where the forward is made (`r1`).
 pub fn apply(f: *Forward, a: std.mem.Allocator, io: std.Io, rank: u32) !void {
-    f.opts.kv_norm_store = kvNormStore(&env);
-    f.opts.router_group_rot = routerGroupRot(&env);
+    f.opts.kv_norm_store = try kvNormStore(&env);
+    f.opts.router_group_rot = try routerGroupRot(&env);
     f.opts.x3ld_epi = try x3ldEpi(&env);
     f.opts.pfd = try pfDense(a, io, &env);
     // TF_DSV41_PF_4K: the forward's own options keep 2,048-row segments; 4,096-row ones use the prefill workspace
@@ -37,7 +37,7 @@ pub fn apply(f: *Forward, a: std.mem.Allocator, io: std.Io, rank: u32) !void {
         f.opts.prefill_rows = r;
     };
     if (try indexBudget(&env)) |b| f.opts.index_budget = b;
-    pf.state(f).ahead = prefetchAhead(&env);
+    pf.state(f).ahead = try prefetchAhead(&env);
     f.opts.gm_v2 = try @import("gm2pf.zig").mode(&env);
     f.opts.mhc_pf_rows = try mhcPfRows(&env);
     pf.state(f).mode = try prefillMode(&env);

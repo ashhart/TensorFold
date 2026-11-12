@@ -213,3 +213,61 @@ test "Ownership rollback: restore copy failure returns its temporary page" {
 test "Ownership rollback: restore push failure returns its temporary page" {
     try restoreFailure(false);
 }
+
+/// Bounded state whose park writes no blobs.
+const Plain = struct {
+    released: usize = 0,
+    fn nbytes(_: *anyopaque) u64 {
+        return 8;
+    }
+    fn blobs(_: *anyopaque, g: std.mem.Allocator) anyerror![]dm.Blob {
+        return g.alloc(dm.Blob, 0);
+    }
+    fn release(ptr: *anyopaque) void {
+        const b: *@This() = @ptrCast(@alignCast(ptr));
+        b.released += 1;
+    }
+    fn bounded(b: *@This()) sm.Bounded {
+        return .{ .ptr = b, .vtable = &.{ .nbytes = nbytes, .blobs = blobs, .release = release } };
+    }
+};
+
+test "Ownership rollback: a restore or park the tier thread cannot queue leaves no job for settle or deinit to wait on" {
+    var pool = try pm.Pool.init(a, .{ .families = &fams, .page = 4 }, 64, 1, 0);
+    defer pool.deinit();
+    var bytes: Bytes = .{};
+    // an index without files: neither job runs, so the tier's staging, lanes and directory are never touched
+    var d: dm.Disk = .{ .gpa = a, .io = std.testing.io, .opts = .{ .root = "", .compat = @splat(0) }, .dir = undefined, .staging = undefined, .lanes = undefined };
+    defer {
+        d.recs.deinit(a);
+        d.by_key.deinit(a);
+    }
+    var s = try sm.Store.init(a, std.testing.io, &pool, bytes.store(), &d, .{ .async_io = true });
+    defer s.deinit();
+    const ids = [_]i32{ 1, 2, 3, 4, 5 };
+    var dg: [1]prefix.Digest = undefined;
+    prefix.chain(7, &ids, 4, &dg);
+    const filed = (try s.index.insert(7, &ids, &dg, false, .{ .file = true })).id;
+    const key = s.entry(filed).key;
+    try d.recs.append(a, .{ .key = key, .tag = 7, .kind = 0, .pos = ids.len, .first_page = 0, .npages = 2, .size = 0, .charge = 0 });
+    try d.by_key.put(a, key, 0);
+    const slot = try pool.newSlot(8);
+    defer _ = slot.releaseAll() catch {};
+    var full = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    s.runner.?.gpa = full.allocator(); // the tier queue's append fails while its thread runs
+    try std.testing.expectError(error.OutOfMemory, s.beginRestore(filed, slot));
+    const restores = s.pending.items.len;
+    s.pending.clearRetainingCapacity(); // if the rollback regresses this holds the freed job: dropped unread, so deinit cannot wait on it
+    var held: Plain = .{};
+    const parked = (try s.save(slot, held.bounded(), &ids, 9, 0)).?;
+    _ = try slot.releaseAll();
+    try std.testing.expectError(error.OutOfMemory, s.beginPark(parked));
+    const parks = s.pending.items.len;
+    const marked = s.entry(parked).extra.job != null;
+    s.pending.clearRetainingCapacity();
+    s.entry(parked).extra.job = null;
+    full.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(usize, 0), restores);
+    try std.testing.expectEqual(@as(usize, 0), parks);
+    try std.testing.expect(!marked);
+}

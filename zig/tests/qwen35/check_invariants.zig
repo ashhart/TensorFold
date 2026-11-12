@@ -6,6 +6,7 @@ const ids_file = @import("ids_file.zig");
 const lanes_session = @import("lanes_session.zig");
 const rows_run = @import("rows_run.zig");
 const check_radix = @import("check_radix.zig");
+const taps_run = @import("taps_run.zig");
 
 const Ctx = check_ctx.Ctx;
 const Session = lanes_session.Session;
@@ -28,11 +29,13 @@ const cases = blk: {
 
 pub fn run(c: *Ctx) void {
     rows(c);
+    taps(c);
     lanesSet(c, "short", c.short);
     lanesSet(c, "long", c.long);
     resumed(c);
     check_radix.run(c);
     replayShare(c);
+    headReplay(c);
     check_radix.leaked(c);
 }
 
@@ -50,6 +53,28 @@ fn rows(c: *Ctx) void {
             c.report.fail(name, "layer {d} ({s}), stream {d} row {d}: first difference at column {d}", .{ d.layer, d.kind, d.stream, d.row, d.column });
         } else c.report.pass(name, "every layer's residuals and the final rows equal each stream one row at a time", .{});
     }
+}
+
+/// A drafter's tap rings after a prompt and a round of 1, 4 and 16 rows: the traced residuals; then a replayed round.
+fn taps(c: *Ctx) void {
+    if (c.tp()) return c.report.skip("taps", "a drafter's taps run on one rank");
+    if (c.e.model().act.size() != 2) return c.report.skip("taps", "taps keep 16-bit residuals");
+    const ids = c.ids[0..@min(c.ids.len, 256)];
+    for ([_]usize{ 1, 4, 16 }) |n| {
+        const name = std.fmt.allocPrint(c.arena, "taps after a prompt and a {d}-row round", .{n}) catch return;
+        const diff = taps_run.runCase(c.gpa, c.e, ids, n) catch |err| {
+            c.report.broke(name, err);
+            continue;
+        };
+        if (diff) |d| {
+            c.report.fail(name, "tap {d} at position {d}: first difference at column {d}", .{ d.tap, d.position, d.column });
+        } else c.report.pass(name, "every tapped layer's residual rows are in the stream's ring at their positions", .{});
+    }
+    const name = "taps after a replayed 4-row round: graph == eager";
+    if (!c.e.o.graphs) return c.report.skip(name, "graphs are off");
+    const diff = taps_run.graphsCase(c.gpa, c.e, ids, 4) catch |err| return c.report.broke(name, err);
+    if (diff) |d| return c.report.fail(name, "tap {d} at position {d}: first difference at column {d}", .{ d.tap, d.position, d.column });
+    c.report.pass(name, "a second stream's round, replayed from the first one's graph, leaves its ring byte for byte as eager rounds do", .{});
 }
 
 /// Where two runs' replies first differ, as a line to print; null when they are equal.
@@ -111,7 +136,9 @@ fn resumed(c: *Ctx) void {
     const first = c.session.run(c.arena, .{ .prompts = c.long, .max_new = c.tokens }) catch |err| return c.report.broke(name, err);
     const extended = lanes_session.extend(c.arena, c.long, first.replies) catch |err| return c.report.broke(name, err);
     const again = c.session.run(c.arena, .{ .prompts = extended, .max_new = c.tokens, .solo = true }) catch |err| return c.report.broke(name, err);
+    c.session.h.keepPrompts(0, 0); // evicts every kept prompt, so the fresh run resumes from nothing
     const fresh = c.session.run(c.arena, .{ .prompts = extended, .max_new = c.tokens, .solo = true, .drafts = false }) catch |err| return c.report.broke(name, err);
+    for (fresh.replies) |r| if (r.cached != 0) return c.report.fail(name, "the fresh run of {s} resumed {d} tokens", .{ r.name, r.cached });
     var cached: usize = 0;
     var every = true;
     for (again.replies) |r| {
@@ -134,4 +161,20 @@ fn replayShare(c: *Ctx) void {
     const share = 100.0 * @as(f64, @floatFromInt(done.replayed)) / @as(f64, @floatFromInt(@max(done.rounds, 1)));
     if (share < 99.0) return c.report.fail(name, "{d:.1}% of {d} rounds replayed", .{ share, done.rounds });
     c.report.pass(name, "{d:.1}% of {d} rounds replayed, {d:.0} us a round submitting", .{ share, done.rounds, @as(f64, @floatFromInt(done.submit_ns)) / @as(f64, @floatFromInt(@max(done.rounds, 1))) / 1e3 });
+}
+
+/// Each sampled draw's drafted run of every stream at once, the third time: its drafts come from the graphed head.
+fn headReplay(c: *Ctx) void {
+    for (check_ctx.draws) |d| {
+        if (d.sampling == null) continue;
+        const name = named(c, "lanes short {s}: head batches replayed", .{d.name});
+        if (!c.e.o.graphs) return c.report.skip(name, "graphs are off");
+        if (c.session.h.head == null) return c.report.skip(name, "the model has no draft head");
+        const job: Session.Job = .{ .prompts = c.short, .max_new = c.tokens, .sampling = d.sampling };
+        var done: Session.Done = undefined;
+        for (0..3) |_| done = c.session.run(c.arena, job) catch |err| return c.report.broke(name, err);
+        const share = 100.0 * @as(f64, @floatFromInt(done.head_replayed)) / @as(f64, @floatFromInt(@max(done.head_batches, 1)));
+        if (done.head_batches == 0 or share < 99.0) return c.report.fail(name, "{d} of {d} head batches replayed", .{ done.head_replayed, done.head_batches });
+        c.report.pass(name, "{d:.1}% of {d} head batches replayed", .{ share, done.head_batches });
+    }
 }

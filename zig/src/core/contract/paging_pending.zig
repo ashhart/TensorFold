@@ -8,13 +8,20 @@ pub const extra = [_]R{
     .{ .launch = .{ .name = "paging tf_nemo_attn_chunk", .image = "nemotron_attention", .symbol = "tf_nemo_attn_chunk", .threads = 256 }, .usage = .{ .{ .regs = 76, .static = 45568, .bound = 256 }, .{ .regs = 91, .static = 45568, .bound = 256 }, .{ .regs = 91, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 } } },
     .{ .launch = .{ .name = "paging tf_nemo_attn_chunk_pf", .image = "nemotron_attention", .symbol = "tf_nemo_attn_chunk_pf", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 45568, .bound = 256 }, .{ .regs = 128, .static = 45568, .bound = 256 }, .{ .regs = 128, .static = 45568, .bound = 256 }, .{ .regs = 128, .static = 45568, .bound = 256 }, .{ .regs = 128, .static = 45568, .bound = 256 } } },
     .{ .launch = .{ .name = "paging tf_nemo_attn_chunk_segs", .image = "nemotron_attention", .symbol = "tf_nemo_attn_chunk_segs", .threads = 256 }, .usage = .{ .{ .regs = 78, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 120, .static = 45568, .bound = 256 }, .{ .regs = 120, .static = 45568, .bound = 256 } } },
+    .{ .launch = .{ .name = "paging tf_nemo_attn_merge_segs", .image = "nemotron_attention", .symbol = "tf_nemo_attn_merge_segs", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 8192, .bound = 256 }, .{ .regs = 39, .static = 8192, .bound = 256 }, .{ .regs = 39, .static = 8192, .bound = 256 }, .{ .regs = 35, .static = 8192, .bound = 256 }, .{ .regs = 37, .static = 8192, .bound = 256 } } },
     .{ .launch = .{ .name = "paging pattn128", .image = "prefill_attention", .symbol = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix", .threads = 256, .dynamic = 65536, .opt_in = true }, .usage = .{ .{ .regs = 206, .static = 0, .bound = 256 }, .{ .regs = 206, .static = 0, .bound = 256 }, .{ .regs = 206, .static = 0, .bound = 256 }, .{ .regs = 231, .static = 0, .bound = 256 }, .{ .regs = 231, .static = 0, .bound = 256 } } },
 };
 test "paging records: every paging launch fits every SM by its measured record" {
     for (extra) |r| try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{r}, true));
 }
 
-/// The paging launch nvcc 13.2 compiles differently, from every SM's image.
+/// The paging launches nvcc 13.2 compiles differently, from every SM's image.
 pub const cuda_132 = [_]@import("registry.zig").Override{
     .{ .name = "paging tf_nemo_attn_chunk_segs", .usage = .{ .{ .regs = 78, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 } } },
+    .{ .name = "paging tf_nemo_attn_merge_segs", .usage = .{ .{ .regs = 32, .static = 8192, .bound = 256 }, .{ .regs = 39, .static = 8192, .bound = 256 }, .{ .regs = 39, .static = 8192, .bound = 256 }, .{ .regs = 35, .static = 8192, .bound = 256 }, .{ .regs = 35, .static = 8192, .bound = 256 } } },
+};
+
+/// The paging launch nvcc 13.3 compiles differently from 13.2, from every SM's image.
+pub const cuda_133 = [_]@import("registry.zig").Override{
+    .{ .name = "paging tf_nemo_attn_merge_segs", .usage = .{ .{ .regs = 32, .static = 8192, .bound = 256 }, .{ .regs = 39, .static = 8192, .bound = 256 }, .{ .regs = 39, .static = 8192, .bound = 256 }, .{ .regs = 34, .static = 8192, .bound = 256 }, .{ .regs = 34, .static = 8192, .bound = 256 } } },
 };

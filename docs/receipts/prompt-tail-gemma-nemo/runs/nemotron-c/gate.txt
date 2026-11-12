@@ -1,0 +1,27 @@
+base-0 32k 0 32545 4.924
+base-0 32k 1 32606 4.935
+base-0 32k 2 32522 4.917
+ARM-DONE base-0
+STEP base-0 rc=0
+new-1 32k 0 32545 4.813
+new-1 32k 1 32606 4.818
+new-1 32k 2 32522 4.812
+ARM-DONE new-1
+STEP new-1 rc=0
+new-2 32k 0 32545 4.816
+new-2 32k 1 32606 4.823
+new-2 32k 2 32522 4.822
+ARM-DONE new-2
+STEP new-2 rc=0
+base-3 32k 0 32545 4.932
+base-3 32k 1 32606 4.937
+base-3 32k 2 32522 4.930
+ARM-DONE base-3
+STEP base-3 rc=0
+32k 32545t base 4.931 new 4.817 -2.31 % range [-2.3, -0.8] OUT arms [4.924, 4.813, 4.822, 4.932]
+MISS 32k range
+prompt_lp present: True
+decode t/s [108.1, 107.6, 107.3, 107.7] -0.46 % tokens [128, 128, 128, 128]
+kept cached [[0, 12295, 16292], [0, 12295, 16292], [0, 12295, 16292], [0, 12295, 16292]]
+GATE OUT
+STEP gate rc=3

@@ -30,7 +30,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     var ids: []const u32 = undefined;
     if (body.has("messages")) {
         const generation = try flag(cx, body, "add_generation_prompt", true);
-        const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
+        const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
         const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
             error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
             else => |x| return x,
@@ -38,6 +38,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
         const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
         const on = thinking.enable orelse srv.config.enable_thinking;
         cx.clear_thinking = thinking.clear;
+        cx.template_fields = body;
         ids = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), generation) catch |e| switch (e) {
             error.Refused => return cx.other(cx.message),
             else => |x| return x,
@@ -98,7 +99,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, detok: bool) void {
     o.put(a, "type", .{ .string = "invalid_request_error" }) catch return;
     const wrapped = json.newObject(a) catch return;
     wrapped.put(a, "error", .{ .object = o }) catch return;
-    routes.sendValue(conn, a, if (cx.kind == .capacity) 503 else 400, .{ .object = wrapped });
+    routes.sendValue(conn, a, cx.status(), .{ .object = wrapped });
 }
 
 /// The reply's token ids hashed: drafted and ``"draft": false`` replies must match.

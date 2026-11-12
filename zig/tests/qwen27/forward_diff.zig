@@ -60,7 +60,7 @@ pub fn run(a: std.mem.Allocator, perturb: bool) !void {
     defer reference.deinit();
     candidate.capture_taps = true;
     reference.capture_taps = true;
-    candidate.taps.ids = .{ 0, 1, 2, 3, 4 };
+    candidate.taps.ids = .{ 0, 1, 2, 3, 4, 0, 0, 0 };
     reference.taps.ids = candidate.taps.ids;
     var ids: [128]u32 = undefined;
     for (&ids, 0..) |*token, i| token.* = @intCast((i * 17 + 7) % 96);

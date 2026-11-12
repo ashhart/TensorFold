@@ -104,6 +104,9 @@ const Hooks = struct {
 };
 
 test "Ownership rollback: admitted callback error ends an ordinary unopened job without backend release" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(a);
     var fake: lanes.fake.Fake = .{ .gpa = a };
@@ -219,5 +222,8 @@ test "Ownership rollback: seventeen finals are all prepared before finish" {
     try seventeenFinals(false);
 }
 test "Ownership rollback: second finals batch error ends every admitted owner" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try seventeenFinals(true);
 }

@@ -52,9 +52,44 @@ pub const Config = struct {
             self.num_key_value_heads == 2 and self.head_dim == 128 and self.n_routed_experts == 128 and
             self.num_experts_per_tok == 6 and self.layers_block_type.len == self.num_hidden_layers;
         if (!ok) return error.UnsupportedConfig;
+        for (self.layers_block_type) |s| if (!known(s)) return error.UnsupportedConfig;
     }
 };
 
+/// The block names `kind` reads; any other name is refused, as the CUDA and Metal parser's kindOf does.
+fn known(s: []const u8) bool {
+    return std.mem.eql(u8, s, "mamba") or std.mem.eql(u8, s, "moe") or std.mem.eql(u8, s, "attention");
+}
+
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(Config) {
     return std.json.parseFromSlice(Config, gpa, bytes, .{ .ignore_unknown_fields = true });
+}
+
+test "validate refuses a block name kind would read as attention" {
+    var names = [_][]const u8{ "mamba", "moe", "attention" };
+    const c: Config = .{
+        .hidden_size = 2688,
+        .vocab_size = 1,
+        .num_hidden_layers = 3,
+        .layers_block_type = &names,
+        .mamba_num_heads = 64,
+        .mamba_head_dim = 64,
+        .ssm_state_size = 128,
+        .n_groups = 8,
+        .conv_kernel = 4,
+        .num_attention_heads = 32,
+        .num_key_value_heads = 2,
+        .head_dim = 128,
+        .n_routed_experts = 128,
+        .num_experts_per_tok = 6,
+        .moe_intermediate_size = 1,
+        .moe_shared_expert_intermediate_size = 1,
+        .routed_scaling_factor = 1,
+        .norm_eps = 1e-5,
+        .layer_norm_epsilon = 1e-5,
+        .eos_token_id = &.{},
+    };
+    try c.validate();
+    names[2] = "mlp";
+    try std.testing.expectError(error.UnsupportedConfig, c.validate());
 }

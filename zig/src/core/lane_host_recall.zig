@@ -29,9 +29,9 @@ pub fn reader(h: *LaneHost, job: *Job) ?*lanes.recall.Reader {
     return &job.recall.reader;
 }
 
-/// Its prompt and reply go in unless it is a background pass (a reply prefilled again) or a lesson's untaught request.
+/// Its prompt and reply go in unless it is a background pass, a lesson's untaught request or prompt-only (no reply).
 fn writes(job: *const Job) bool {
-    return !job.request.background and !job.request.untaught;
+    return !job.request.background and !job.request.untaught and !job.request.promptOnly();
 }
 
 /// The prompt pass ended: what came before its resume point an earlier request read already.

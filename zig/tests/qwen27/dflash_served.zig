@@ -1,12 +1,12 @@
 //! Generated native draft and plain requests retain CLI tokens and final state through the served host.
 const std = @import("std");
-const platform = @import("sys");
 const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const api = @import("engine_api");
 const host = @import("qwen27_served");
 const target_graph = @import("synthetic_graph.zig");
 const draft_graph = @import("dflash_graph.zig");
+const diagnostics = @import("served_diagnostics.zig");
 const Oracle = struct {
     a: std.mem.Allocator,
     runner: *q.decode_round.Runner,
@@ -72,10 +72,9 @@ const Box = struct {
         return error.NoCompletion;
     }
 };
-/// Drafted requests on the lane core (its own round counts), by the host's rule: TF_QWEN27_LANES, else no tensor units.
+/// Ask the attached host which loop it selected; round counts are specific to that loop.
 fn lanesMode(h: *host.Host) bool {
-    if (platform.c.getenv("TF_QWEN27_LANES")) |v| return std.mem.eql(u8, std.mem.span(v), "1");
-    return !h.model.device.tensorUnits();
+    return h.host.lone == null;
 }
 fn stop(_: *anyopaque, ids: []const u32) bool {
     return ids.len == 3;
@@ -90,19 +89,27 @@ fn run(a: std.mem.Allocator, io: std.Io, h: *host.Host, id: u64, request: *const
     }
     return box;
 }
-fn check(a: std.mem.Allocator, io: std.Io, h: *host.Host, id: u64, request: *const api.Request, expected: []const u32, state: [32]u8, reason: api.Reason) !api.Stats {
+fn check(a: std.mem.Allocator, io: std.Io, h: *host.Host, id: u64, request: *const api.Request, expected: []const u32, reason: api.Reason, reference: diagnostics.Reference) !api.Stats {
+    var log = @import("tensorfold").lanes.events.Log.init(a);
+    defer log.deinit();
+    h.core.log = &log;
+    defer h.core.log = null;
     var box = try run(a, io, h, id, request, reason, null);
     defer box.tokens.deinit(a);
-    if (!std.mem.eql(u32, expected, box.tokens.items) or !std.mem.eql(u8, &state, &try (q.session.Session{ .runner = &h.runner }).fingerprint())) return error.ServedDraftDiffers;
+    if (!std.mem.eql(u32, expected, box.tokens.items) or !try reference.sameState(h, request.prompt.len, expected.len)) {
+        std.debug.print("SERVED_ROUNDS request={d} rounds={d} engine_steps={d}\n", .{ id, box.stats.rounds, h.core.steps });
+        try reference.report(h, id, request.prompt.len, expected, box.tokens.items, &log);
+        return error.ServedDraftDiffers;
+    }
     return box.stats;
 }
 /// A cancel sent after `after` tokens lands at a round's end: a prefix of the reply, and the state at its length.
-fn checkCancel(a: std.mem.Allocator, io: std.Io, h: *host.Host, id: u64, request: *const api.Request, expected: []const u32, states: []const [32]u8, after: usize) !void {
+fn checkCancel(a: std.mem.Allocator, io: std.Io, h: *host.Host, id: u64, request: *const api.Request, expected: []const u32, after: usize, reference: diagnostics.Reference) !void {
     var box = try run(a, io, h, id, request, .cancelled, after);
     defer box.tokens.deinit(a);
     const got = box.tokens.items;
     if (got.len < after or got.len >= expected.len or !std.mem.eql(u32, expected[0..got.len], got)) return error.CancelledTokensDiffer;
-    if (!std.mem.eql(u8, &states[got.len], &try (q.session.Session{ .runner = &h.runner }).fingerprint())) return error.CancelledStateDiffers;
+    if (!try reference.sameState(h, request.prompt.len, got.len)) return error.CancelledStateDiffers;
 }
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -119,13 +126,19 @@ pub fn main(init: std.process.Init) !void {
     for (&prompt, 0..) |*id, i| id.* = @intCast((i * 17 + 7) % 96);
     try direct.prefill(&prompt, 16);
     var expected: [33]u32 = undefined;
-    var states: [34][32]u8 = undefined;
+    var states: [35][32]u8 = undefined;
+    const logits = try a.alloc(u16, (expected.len + 1) * model.config.vocab);
     states[0] = try direct.fingerprint();
     for (&expected, 0..) |*id, i| {
         id.* = try direct.greedy();
         states[i + 1] = try direct.fingerprint();
+        @memcpy(logits[i * model.config.vocab ..][0..model.config.vocab], model.frame.get(.logits).buffer.slice(u16, model.config.vocab));
         if (i + 1 < expected.len) try direct.step(id.*);
     }
+    try direct.step(expected[expected.len - 1]);
+    states[expected.len + 1] = try direct.fingerprint();
+    @memcpy(logits[expected.len * model.config.vocab ..][0..model.config.vocab], model.frame.get(.logits).buffer.slice(u16, model.config.vocab));
+    const reference = diagnostics.Reference{ .states = &states, .logits = logits, .vocab = model.config.vocab };
     var why: []const u8 = "";
     // a context the window timing outgrows: a new build's first start refills the timing's slot
     const served = host.attach(a, init.io, model, draft, .{ .context = 256, .streams = 1, .cache_gib = 0 }, a, &why) catch |err| {
@@ -136,24 +149,26 @@ pub fn main(init: std.process.Init) !void {
     var cases: usize = 0;
     for ([_]usize{ 1, 2, 7, 16, 17, 33 }) |count| { // a prompt-only request is the cache's warm pass (tf-qwen27-reuse)
         const request = api.Request{ .prompt = &prompt, .max_tokens = @intCast(count), .chunks = &.{ 16, 32, 48, 64, 80, 96, 112, 128 } };
-        const stats = try check(a, init.io, served, @intCast(cases + 1), &request, expected[0..count], states[count], .length);
+        const stats = try check(a, init.io, served, @intCast(cases + 1), &request, expected[0..count], .length, reference);
         if (count >= 2 and (stats.drafted == 0 or stats.min_rows == 0 or stats.min_rows > 16)) return error.DraftStatsMissing;
         cases += 1;
     }
     const stop_at = (std.mem.indexOfScalar(u32, &expected, expected[2]) orelse return error.NoEos) + 1;
     const eos_request = api.Request{ .prompt = &prompt, .max_tokens = 33, .eos = &.{expected[2]} };
-    _ = try check(a, init.io, served, 20, &eos_request, expected[0..stop_at], states[stop_at], .stop);
+    _ = try check(a, init.io, served, 20, &eos_request, expected[0..stop_at], .stop, reference);
     for (0..3) |mode| {
         const count: usize = if (mode == 2) 3 else 17;
         const request = api.Request{ .prompt = &prompt, .max_tokens = 17, .drafts = mode != 0, .sampling = if (mode == 1) .{ .seed = 7, .temperature = 0 } else null, .stop = if (mode == 2) .{ .ctx = served, .check = stop } else null };
-        const stats = try check(a, init.io, served, @intCast(30 + mode), &request, expected[0..count], states[count], if (mode == 2) .stop else .length);
+        const stats = try check(a, init.io, served, @intCast(30 + mode), &request, expected[0..count], if (mode == 2) .stop else .length, reference);
         // sampled and custom-stop requests draft on the served host; only "draft": false reports none
         if (mode == 0 and (stats.drafted != 0 or stats.accepted != 0)) return error.PlainReportedDrafts;
+        // a sampled round's keep runs behind the drafter; a run returns with it settled
+        if (served.draft.?.generation.keep != null) return error.HeldKeepAfterRun;
     }
     try draft.backend.prepare();
     draft.preparation = .{ .mode = .prepared_q4_reference, .quantization_verified = true, .source_sha256 = @import("tensorfold").affine4.signature() };
     const quantized = api.Request{ .prompt = &prompt, .max_tokens = 33 };
-    _ = try check(a, init.io, served, 40, &quantized, &expected, states[33], .length);
+    _ = try check(a, init.io, served, 40, &quantized, &expected, .length, reference);
     var oracle = Oracle{ .a = a, .runner = &served.runner, .tokens = &expected, .prompt = prompt.len };
     served.draft.?.generation.proposer = .{ .ptr = &oracle, .call = Oracle.propose };
     for ([_]bool{ false, true }) |branch| {
@@ -164,16 +179,18 @@ pub fn main(init: std.process.Init) !void {
         defer a.free(cli.tokens);
         if (cli.rounds != 7 or !std.mem.eql(u32, &expected, cli.tokens)) return error.OracleCli;
         const request = api.Request{ .prompt = &prompt, .max_tokens = expected.len };
-        const stats = try check(a, init.io, served, if (branch) 51 else 50, &request, &expected, states[33], .length);
+        const stats = try check(a, init.io, served, if (branch) 51 else 50, &request, &expected, .length, reference);
         std.debug.print("round delivery branch={}: CLI{d} served{d} matched{d}/{d}\n", .{ branch, cli.rounds, stats.rounds, cli.matched, stats.accepted });
         if (!lanesMode(served) and (stats.rounds != cli.rounds or stats.accepted != cli.matched)) return error.DeliveryClipsRound;
     }
-    for ([_]usize{ 1, 6 }) |cancel_at| {
-        const request = api.Request{ .prompt = &prompt, .max_tokens = expected.len };
-        try checkCancel(a, init.io, served, @intCast(60 + cancel_at), &request, &expected, &states, cancel_at);
-    }
+    for ([_]bool{ false, true }) |sampled| for ([_]usize{ 1, 6 }) |cancel_at| {
+        // a sampled cancel ends with its keep held behind the drafter; the slot's state must still be the reply's
+        const request = api.Request{ .prompt = &prompt, .max_tokens = expected.len, .sampling = if (sampled) .{ .seed = 7, .temperature = 0 } else null };
+        try checkCancel(a, init.io, served, @intCast(@as(usize, if (sampled) 70 else 60) + cancel_at), &request, &expected, cancel_at, reference);
+        if (served.draft.?.generation.keep != null) return error.HeldKeepAfterCancel;
+    };
     const reset_request = api.Request{ .prompt = &prompt, .max_tokens = expected.len };
-    const reset_stats = try check(a, init.io, served, 80, &reset_request, &expected, states[33], .length);
+    const reset_stats = try check(a, init.io, served, 80, &reset_request, &expected, .length, reference);
     if (!lanesMode(served) and reset_stats.rounds != 7) return error.CancelResetRetainsDraft;
-    std.debug.print("drafted served: length/EOS/reset/plain/sampling/custom-stop/BF16/prepared-q4 and cancellation at a round's end; tokens and final state equal CLI\n", .{});
+    std.debug.print("drafted served: length/EOS/reset/plain/sampling/custom-stop/BF16/prepared-q4 and greedy and sampled cancellation at a round's end; tokens and final state equal CLI\n", .{});
 }

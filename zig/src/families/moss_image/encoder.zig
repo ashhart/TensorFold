@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const cfg = @import("encoder_config.zig");
 const wts = @import("encoder_weights.zig");
 const ks = @import("kernels.zig");
+const bf16_round = @import("bf16_round");
 const Ref = ks.Ref;
 
 const H = cfg.hidden;
@@ -39,10 +40,7 @@ pub fn rotary(cos: []f32, sin: []f32, rows: usize) void {
     }
 }
 
-fn bf(v: f32) f32 {
-    const u: u32 = @bitCast(v);
-    return @bitCast(((u +% 0x7fff +% ((u >> 16) & 1)) >> 16) << 16);
-}
+const bf = bf16_round.round32;
 
 pub const Encoder = struct {
     gpa: std.mem.Allocator,
@@ -53,7 +51,7 @@ pub const Encoder = struct {
 
     /// The checkpoint folder `dir`: its text_encoder/.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8) !*Encoder {
-        if (!device.tensorUnits()) {
+        if (!ks.available(device)) {
             std.log.err("moss image encoder: {s} has no tensor units; this family runs on the M5's alone, the only chip it was checked on", .{device.name()});
             return error.TensorUnitsRequired;
         }
@@ -245,4 +243,32 @@ test "the pipeline's chat format" {
     const text = try format(a, "A red fox");
     defer a.free(text);
     try std.testing.expectEqualStrings("<|im_start|>user\nA red fox<|im_end|>\n<|im_start|>assistant\n<think>\n", text);
+}
+
+test "rotary bf16: today's bits on every zero, subnormal, infinity and tie; a NaN stays NaN" {
+    const old = struct {
+        /// bf as it was spelled before it was core's round32(): the oracle for every non-NaN input.
+        fn spelled(v: f32) f32 {
+            const u: u32 = @bitCast(v);
+            return @bitCast(((u +% 0x7fff +% ((u >> 16) & 1)) >> 16) << 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h: u32 = @bitCast(bf(v));
+            if (!std.math.isNan(v)) return std.testing.expectEqual(@as(u32, @bitCast(spelled(v))), h);
+            try std.testing.expect(std.math.isNan(@as(f32, @bitCast(h))));
+            try std.testing.expectEqual(u >> 31, h >> 31);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expect(std.math.isInf(old.spelled(@bitCast(@as(u32, 0x7f800001))))); // the old copy's +Inf
+    try std.testing.expectEqual(@as(u32, 0x80000000), @as(u32, @bitCast(old.spelled(@bitCast(@as(u32, 0x7fff8001)))))); // its -0
+    for ([_]u32{ 0x7f800001, 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
 }

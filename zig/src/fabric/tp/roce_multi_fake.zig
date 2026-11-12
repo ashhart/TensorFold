@@ -4,7 +4,8 @@ const abi = @import("verbs").abi;
 const rv = @import("roce_multi_verbs.zig");
 const guard = @import("roce_multi_guard.zig");
 const cap = 256;
-const Entry = struct { id: u64, bytes: u32, order: u64 };
+const Write = struct { from: u64, to: u64, len: u32, inline_value: ?u32 = null };
+const Entry = struct { id: u64, bytes: u32, order: u64, writes: [3]?Write = @splat(null) };
 pub const Fabric = struct {
     world: u32,
     nh: u32,
@@ -16,6 +17,12 @@ pub const Fabric = struct {
     qp: [8][2][8]abi.Qp = undefined,
     mr: [8][2]abi.Mr = undefined,
     queue: [8][2][cap]?Entry = @splat(@splat(@splat(null))),
+    /// Deferred DMA reads the registered source at completion, exposing premature reuse to the byte checker.
+    deferred: bool = false,
+    omit_payload: bool = false,
+    stalled: ?u32 = null,
+    drop_at: ?u64 = null,
+    skew_at: ?u64 = null,
     flight: u64 = 0,
     peak: u64 = 0,
     order: u64 = 0,
@@ -107,6 +114,8 @@ pub const Fabric = struct {
         }
         var it: ?*abi.SendWr = first;
         var bytes: u32 = 0;
+        var writes: [3]?Write = @splat(null);
+        var nw: usize = 0;
         while (it) |wr| : (it = wr.next) {
             const sg = wr.sg_list[0];
             const lo = @intFromPtr(f.regions[dst].ptr);
@@ -118,27 +127,32 @@ pub const Fabric = struct {
                 return 1;
             }
             if (flag) {
-                if (sg.length != 4 or wr.next != null or wr.send_flags != abi.send_inline | abi.send_signaled) {
+                if (sg.length != 4 or (wr.next != null and !f.wires[src].relay) or
+                    wr.send_flags != (abi.send_inline | (if (wr.next == null) abi.send_signaled else @as(u32, 0))))
+                {
                     f.bad += 1;
                     return 1;
                 }
-                const target: *std.atomic.Value(u32) = @ptrFromInt(remote);
                 const value: *const u32 = @ptrFromInt(sg.addr);
-                target.store(value.*, .release);
+                if (nw >= writes.len) return 1;
+                writes[nw] = .{ .from = 0, .to = remote, .len = 4, .inline_value = value.* +% @as(u32, @intFromBool(f.skew_at == remote)) };
+                nw += 1;
             } else {
                 const from = @intFromPtr(f.regions[src].ptr);
-                if (sg.addr < from + f.layout.send or sg.addr + sg.length > from + f.layout.recv or sg.lkey != 100 + 2 * src + h) {
+                if (sg.addr < from + f.layout.send or sg.addr + sg.length > from + (if (f.wires[src].relay) f.layout.len else f.layout.recv) or sg.lkey != 100 + 2 * src + h) {
                     f.bad += 1;
                     return 1;
                 }
-                const target: [*]u8 = @ptrFromInt(remote);
-                const source: [*]const u8 = @ptrFromInt(sg.addr);
-                @memcpy(target[0..sg.length], source[0..sg.length]);
+                if (nw >= writes.len) return 1;
+                writes[nw] = .{ .from = sg.addr, .to = remote, .len = sg.length };
+                nw += 1;
                 bytes += sg.length;
             }
             if (wr.send_flags & abi.send_signaled != 0) {
                 for (&f.queue[src][h]) |*q| if (q.* == null) {
-                    q.* = .{ .id = wr.wr_id, .bytes = bytes, .order = f.order };
+                    const entry: Entry = .{ .id = wr.wr_id, .bytes = bytes, .order = f.order, .writes = writes };
+                    if (!f.deferred) f.apply(entry);
+                    q.* = entry;
                     f.order += 1;
                     f.flight += bytes;
                     f.peak = @max(f.peak, f.flight);
@@ -149,10 +163,24 @@ pub const Fabric = struct {
         }
         return 1;
     }
+    fn apply(f: *Fabric, e: Entry) void {
+        for (e.writes) |maybe| if (maybe) |w| {
+            if (w.inline_value) |v| {
+                if (f.drop_at == w.to) continue;
+                const target: *std.atomic.Value(u32) = @ptrFromInt(w.to);
+                target.store(v, .release);
+            } else {
+                const target: [*]u8 = @ptrFromInt(w.to);
+                const source: [*]const u8 = @ptrFromInt(w.from);
+                if (!f.omit_payload) @memcpy(target[0..w.len], source[0..w.len]);
+            }
+        };
+    }
     fn poll(cq: *abi.Cq, _: c_int, wc: [*]abi.Wc) callconv(.c) c_int {
         const f = active;
         const src = cq.handle / 2;
         const h = cq.handle % 2;
+        if (f.stalled == src) return 0;
         var at: ?usize = null;
         for (f.queue[src][h], 0..) |q, i| if (q) |e| {
             if (at == null or e.id >> 32 > f.queue[src][h][at.?].?.id >> 32 or
@@ -160,6 +188,7 @@ pub const Fabric = struct {
         };
         const i = at orelse return 0;
         const e = f.queue[src][h][i].?;
+        if (f.deferred) f.apply(e);
         f.flight -= e.bytes;
         f.last_bytes = e.bytes;
         f.queue[src][h][i] = null;

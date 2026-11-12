@@ -25,6 +25,7 @@ pub const Suite = struct {
     grouped: std.ArrayList(*Grouped) = .empty,
     index: ?*attn.Index = null,
     prompt: ?*attn.Prompt = null,
+    masked: ?*attn.Prompt = null,
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
         for (grouped_forms) |f| {
@@ -44,6 +45,13 @@ pub const Suite = struct {
             s.prompt.?.* = try attn.Prompt.init(s.a, s.device, s.queue);
             try s.kernels.append(s.a, s.prompt.?.kernel());
         }
+        // the cut was measured on the tensor units only, so the masked case registers there
+        if (s.device.tensorUnits() and wanted(only, attn.Prompt.maskedSpec().name)) {
+            s.masked = try s.a.create(attn.Prompt);
+            s.masked.?.* = try attn.Prompt.init(s.a, s.device, s.queue);
+            s.masked.?.masked = true;
+            try s.kernels.append(s.a, s.masked.?.kernel());
+        }
     }
     pub fn deinit(s: *Suite) void {
         for (s.grouped.items) |x| {
@@ -55,10 +63,10 @@ pub const Suite = struct {
             x.deinit();
             s.a.destroy(x);
         }
-        if (s.prompt) |x| {
+        for ([_]?*attn.Prompt{ s.prompt, s.masked }) |p| if (p) |x| {
             x.deinit();
             s.a.destroy(x);
-        }
+        };
     }
 };
 

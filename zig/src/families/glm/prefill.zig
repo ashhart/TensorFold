@@ -23,6 +23,7 @@ pub fn step(b: anytype, s: *Stream, _: u32) !bool {
         const n = b.promptRows(p.at, end);
         if (n == 0 or n > end - p.at) return error.ChunkOutOfStep;
         try b.chunkPrompt(s, p.slot, p.at, n);
+        @import("lanes").prefill_widths.completed(b.gpa, s, n);
         p.at += n;
         s.fill_at.store(p.at, .monotonic);
         if (std.mem.indexOfScalar(u32, s.reuse.marks, p.at) != null) if (s.reuse.hook) |h| h.at(h.ptr, s, p.at);

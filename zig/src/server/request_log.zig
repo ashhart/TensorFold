@@ -23,6 +23,14 @@ fn redact(a: Allocator, v: Value) Allocator.Error!Value {
                 try copy.put(a, "image_url", .{ .object = url });
                 return .{ .object = copy };
             }
+            if (v.typeIs("file")) {
+                const copy = try json.copyObject(a, o);
+                const file_obj = try json.newObject(a);
+                if (v.get("file")) |f| if (f == .object) if (f.get("filename")) |fn_val| try file_obj.put(a, "filename", fn_val);
+                try file_obj.put(a, "file_data", .{ .string = "<redacted>" });
+                try copy.put(a, "file", .{ .object = file_obj });
+                return .{ .object = copy };
+            }
             const out = try json.newObject(a);
             for (o.keys(), o.values()) |k, item| try out.put(a, k, try redact(a, item));
             return .{ .object = out };
@@ -71,7 +79,8 @@ test "the request log is created owner-only and keeps image URLs out" {
     try part.put(a, "type", .{ .string = "image_url" });
     try part.put(a, "image_url", .{ .object = url });
     const body = try json.newObject(a);
-    try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{.{ .object = part }}) });
+    const file = (try json.parse(a, "{\"type\": \"file\", \"file\": {\"filename\": \"a.pdf\", \"file_data\": \"JVBERi1zZWNyZXQ=\"}}")).ok;
+    try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{ .{ .object = part }, file }) });
     append(a, path, .{ .object = body });
     if (comptime @import("builtin").os.tag != .windows) { // Windows files have no mode bits
         const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{}); // Linux's libc has no stat for std.c
@@ -80,6 +89,7 @@ test "the request log is created owner-only and keeps image URLs out" {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "JVBERi1zZWNyZXQ=") == null and std.mem.indexOf(u8, text, "a.pdf") != null);
 }
 
 test "appends from several threads keep every line whole" {
@@ -125,6 +135,9 @@ test "appends from several threads keep every line whole" {
 }
 
 test "a log others can read, or a symbolic link, gets no requests; the owner's own file still does" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     if (builtin.os.tag == .windows) return error.SkipZigTest; // refusal by mode bits and links; NTFS keeps access in ACLs
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -136,7 +149,8 @@ test "a log others can read, or a symbolic link, gets no requests; the owner's o
     const body = try json.newObject(a);
     try body.put(a, "model", .{ .string = "m" });
     // a name another user created first, readable by others: nothing is appended to it
-    try tmp.dir.writeFile(io, .{ .sub_path = "taken.jsonl", .data = "", .flags = .{ .permissions = .fromMode(0o644) } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "taken.jsonl", .data = "" });
+    try tmp.dir.setFilePermissions(io, "taken.jsonl", .fromMode(0o644), .{}); // set after creating: a umask clears bits
     append(a, try std.fmt.allocPrint(a, "{s}/taken.jsonl", .{dir}), .{ .object = body });
     try std.testing.expectEqual(@as(usize, 0), (try tmp.dir.readFileAlloc(io, "taken.jsonl", a, .limited(1 << 10))).len);
     // a symbolic link to another file: the target is never written

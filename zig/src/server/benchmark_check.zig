@@ -9,6 +9,7 @@ pub const Mode = enum { save, publish };
 
 pub const local_label = "Local or private model labels cannot be published; benchmark a public checkpoint ID";
 pub const over_budget = "A sample's output count exceeds the requested budget; this receipt cannot be published";
+pub const thinking_local = "Server-default thinking samples stay local; the community protocol requires thinking off";
 pub const rocm_local = "The board accepts mlx and cuda receipts; ROCm receipts stay local until it accepts rocm";
 
 const Bad = error{Bad};
@@ -17,6 +18,13 @@ const Bad = error{Bad};
 pub fn receipt(v: Value, mode: Mode, now_ms: i64, why: *[]const u8) bool {
     var c: Check = .{ .why = why, .mode = mode, .now_ms = now_ms };
     c.all(v) catch return false;
+    return true;
+}
+
+/// A manifest and its receipt use one topology validator; the caller supplies the loaded rank count.
+pub fn group(v: Value, ranks: ?u8, why: *[]const u8) bool {
+    var c: Check = .{ .why = why, .mode = .save, .now_ms = 0 };
+    c.group(v, if (ranks) |n| .{ .float = @floatFromInt(n) } else .null) catch return false;
     return true;
 }
 
@@ -35,6 +43,7 @@ const Check = struct {
     mode: Mode,
     now_ms: i64,
     v2: bool = false,
+    grouped: bool = false,
 
     fn fail(c: *Check, comptime message: []const u8) Bad {
         c.why.* = message;
@@ -46,11 +55,14 @@ const Check = struct {
     }
 
     fn all(c: *Check, v: Value) Bad!void {
-        try c.need(exact(v, &top_keys), "receipt must hold exactly the community receipt fields");
+        const id = if (v.get("suite")) |s| s.get("id") else null;
+        c.grouped = v.get("group") != null and if (id) |i| eqlStr(i, suite.id) else false;
+        try c.need(exact(v, if (c.grouped) &(top_keys ++ .{"group"}) else &top_keys), "receipt must hold exactly the community receipt fields");
         try c.need(isNumber(v.get("schema_version").?, 1), "schema_version must be 1");
         const s = v.get("suite").?;
         try c.need(exact(s, &.{ "id", "sha256" }) and suite.protocol(s) != null, "suite must name a recognized community protocol with its exact manifest digest");
         c.v2 = eqlStr(s.get("id").?, suite.id);
+        try c.need(!c.grouped or c.v2, "only community-v2 receipts may hold a loaded group");
         try c.need(text(v.get("run_id").?, uuid, false), "run_id must be a lowercase UUID v4");
         try c.need(createdAt(v.get("created_at").?, c.now_ms), "created_at must be a real UTC time like 2026-01-01T00:00:00Z, at most 15 minutes ahead");
         try c.runtime(v.get("runtime").?);
@@ -58,6 +70,7 @@ const Check = struct {
         try c.hardware(v.get("hardware").?);
         const st = v.get("settings").?;
         try c.settings(st);
+        if (c.grouped) try c.group(v.get("group").?, st.get("rank_count").?);
         const samples = v.get("samples").?;
         try c.need(samples == .array and samples.array.len >= 1 and samples.array.len <= 200, "samples must hold 1 to 200 attempts");
         for (samples.array, 0..) |x, i| try c.sample(x, st, samples.array[0..i]);
@@ -117,12 +130,53 @@ const Check = struct {
         try c.need(count == .null or toF64(count).? == @as(f64, @floatFromInt(gpus.array.len)), "hardware.gpu_count must equal the number of GPUs");
     }
 
+    fn group(c: *Check, g: Value, expected: Value) Bad!void {
+        try c.need(exact(g, &.{ "schema_version", "source", "rank_count", "category", "nodes" }), "group must hold exactly the loaded group fields");
+        try c.need(isNumber(g.get("schema_version").?, 1) and eqlStr(g.get("source").?, "loaded-group"), "group must be schema 1 from the loaded group");
+        const n = g.get("rank_count").?;
+        try c.need(num(n, .{ .integer = true, .min = 1, .max = 8 }) and toF64(n) == toF64(expected), "group.rank_count must equal settings.rank_count, from 1 to 8");
+        const nodes = g.get("nodes").?;
+        const count: usize = @intFromFloat(toF64(n).?);
+        try c.need(nodes == .array and nodes.array.len > 0 and nodes.array.len <= count, "group.nodes must cover the loaded ranks");
+        try c.need(eqlStr(g.get("category").?, if (nodes.array.len == 1) "single-node" else "multi-node"), "group.category must agree with its node count");
+        var seen: [8]bool = @splat(false);
+        var first_before: ?usize = null;
+        for (nodes.array, 0..) |node, i| {
+            try c.need(exact(node, &.{ "id", "ranks", "hardware" }), "group nodes must hold exactly id, ranks and hardware");
+            try c.need(isNumber(node.get("id").?, @floatFromInt(i)), "group node ids must be ordered ordinals");
+            const ranks = node.get("ranks").?;
+            try c.need(ranks == .array and ranks.array.len > 0 and ranks.array.len <= count, "group node ranks must be nonempty lists");
+            var before: ?usize = null;
+            for (ranks.array, 0..) |rank, j| {
+                try c.need(num(rank, .{ .integer = true, .max = @floatFromInt(count - 1) }), "group ranks must be loaded rank ordinals");
+                const r: usize = @intFromFloat(toF64(rank).?);
+                try c.need(!seen[r] and (before == null or r > before.?), "group ranks must be distinct and ordered");
+                if (j == 0) {
+                    try c.need(first_before == null or r > first_before.?, "group nodes must follow their first rank");
+                    first_before = r;
+                }
+                before = r;
+                seen[r] = true;
+            }
+            const hw = node.get("hardware").?;
+            try c.hardware(hw);
+            try c.need(!eqlStr(hw.get("source").?, "unavailable") and hw.get("gpus").?.array.len > 0, "group nodes need public device hardware");
+        }
+        for (seen[0..count]) |hit| try c.need(hit, "group nodes must cover every rank exactly once");
+    }
+
     fn settings(c: *Check, s: Value) Bad!void {
-        try c.need(exact(s, if (c.v2) &settings_keys_v2 else &settings_keys), "settings must hold exactly its fields");
+        if (s.get("thinking_mode")) |mode| {
+            if (c.mode == .publish) return c.fail(thinking_local);
+            try c.need(eqlStr(mode, "server_default"), "settings.thinking_mode must be server_default");
+            try c.need(exact(s, if (c.v2) &(settings_keys_v2 ++ .{"thinking_mode"}) else &(settings_keys ++ .{"thinking_mode"})), "settings must hold exactly its fields");
+        } else try c.need(exact(s, if (c.v2) &settings_keys_v2 else &settings_keys), "settings must hold exactly its fields");
         try c.need(num(s.get("tokens").?, .{ .integer = true, .min = 2, .max = 8192 }), "settings.tokens must be 2 to 8192");
         try c.need(num(s.get("repetitions").?, .{ .integer = true, .min = 1, .max = 20 }), "settings.repetitions must be 1 to 20");
         try c.need(num(s.get("context_tokens").?, .{ .nullable = true, .integer = true, .min = 1, .max = 10000000 }), "settings.context_tokens must be 1 to 10000000 or null");
-        try c.need(num(s.get("rank_count").?, .{ .nullable = true, .integer = true, .min = 1, .max = 2 }), "settings.rank_count must be 1, 2 or null");
+        if (c.grouped) {
+            try c.need(num(s.get("rank_count").?, .{ .integer = true, .min = 1, .max = 8 }), "loaded settings.rank_count must be 1 to 8");
+        } else try c.need(num(s.get("rank_count").?, .{ .nullable = true, .integer = true, .min = 1, .max = 2 }), "settings.rank_count must be 1, 2 or null");
         try c.need(s.get("serial").? == .bool and s.get("managed").? == .bool, "settings.serial and managed must be true or false");
         if (c.v2) {
             const managed = s.get("managed").?.bool;

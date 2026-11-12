@@ -11,6 +11,7 @@
 #include "tiles/gemm.hpp"
 #include "tiles/gemm_kp.hpp"
 #include "tiles/matrix_gemm.hpp"
+#include "tiles/matrix_item.hpp"
 #include "tiles/stream.hpp"
 
 namespace tf {
@@ -20,21 +21,35 @@ namespace rocm {
 
 template <typename T, int BITS, int RT>
 __global__ void __launch_bounds__(256) affine_gemm_block(Affine a) {
-    gemm_tile<MlxDecoder<BITS>, IdentityAct<T>, T, F32Out, RT>(a);
+    gemm_tile<MlxDecoder<BITS>, IdentityAct<T>, T, GemmOut<T>, RT>(a);
 }
 
 // ---- the K-parallel tiles of a short prompt ----
 
 template <typename T, int BITS, int CB, int R, int WAVES, int RB, bool LOOP>
 __global__ void __launch_bounds__(32 * WAVES) affine_gemm_kp(Affine a) {
-    gemm_kp_tile<MlxDecoder<BITS>, IdentityAct<T>, T, F32Out, CB, R, WAVES, RB, LOOP>(a);
+    gemm_kp_tile<MlxDecoder<BITS>, IdentityAct<T>, T, GemmOut<T>, CB, R, WAVES, RB, LOOP>(a);
 }
 
 // ---- the prefill GEMM tile on the matrix cores of gfx11 ----
 
 template <int BITS>
 __global__ void __launch_bounds__(256) affine_wmma_gemm(Affine a) {
-    wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, F32Out>(a);
+    wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>>(a);
+}
+
+// ---- the same with unpadded, skewed staging rows: less LDS, three blocks a WGP on RDNA3.5 ----
+
+template <int BITS>
+__global__ void __launch_bounds__(256) affine_wmma_skew(Affine a) {
+    wmma_gemm_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, true>(a);
+}
+
+// ---- the same on RM x 16 rows a block, for a routed item of few rows ----
+
+template <int BITS, int RM>
+__global__ void __launch_bounds__(256) affine_wmma_item(Affine a) {
+    wmma_item_tile<MlxDecoder<BITS>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, RM>(a);
 }
 
 // ---- the decode stream tile ----

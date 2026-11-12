@@ -1,8 +1,9 @@
-//! x W^T for affine-quantized W on the tensor units, dense or by expert: exact codes, fp32 group sums and fp32 row sums.
+//! Affine-quantized x W^T on tensor units: dense or expert, exact codes and fp32 group and row sums.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
+const bf16_round = @import("bf16_round");
 
 /// The gather GLU's SwiGLU: GLM's clipped bf16 form, or mlx-lm's compiled silu(g) * u on bf16 rows (LFM2).
 pub const Glu = enum { clipped, plain };
@@ -22,7 +23,7 @@ pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, body });
 }
 
-/// Entry points: row sums, the dense matmul, gathers by tile height, scattering gathers, the experts' gate and up through a pair order into SwiGLU.
+/// Entry points: row sums, dense matmul, tiled and scattering gathers, ordered expert gate/up into SwiGLU.
 pub const names = [8][:0]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64", "tf_affine_gather_glu_32", "tf_affine_gather_glu_64" };
 
 /// A format's pipelines, in `names` order.
@@ -30,7 +31,7 @@ pub const Pipes = [8]mtl.Pipeline;
 
 pub const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
 
-/// A dense matmul's pitches and batch offsets, in elements (the sums' in rows); the default is one plain [rows, k] x [k, n] product.
+/// Dense pitches and batch offsets in elements (sums in rows); default: one [rows, k] x [k, n] product.
 pub const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, sums_row: i32 = 1, x_batch: i32 = 0, y_batch: i32 = 0, sums_batch: i32 = 0, w_batch: i32 = 0, pad: i32 = 0 };
 
 fn bind(e: mtl.ComputeEncoder, i: usize, r: anytype) void {
@@ -51,13 +52,13 @@ pub fn rowSumsAt(e: mtl.ComputeEncoder, p: Pipes, group: u32, x: anytype, sums: 
     e.dispatchThreads(mtl.Size.of(k / group, rows, 1), mtl.Size.of(@min(k / group, 64), 1, 1));
 }
 
-/// y [rows, n] = x [rows, q.k] W^T with x's group sums `sums`; n is q.n rounded up to 64 (the padded weight rows, y's pitch).
+/// y = x W^T using group `sums`; x is [rows, q.k], y is [rows, n], n = q.n rounded up to 64 (padded weights).
 pub fn dense(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     denseBatch(e, p, x, sums, q, y, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(n) });
 }
 
-/// `batch` dense products at once, each over its own rows of the weights (`s`; q.n a multiple of 64), e.g. a per-head projection.
+/// `batch` dense products over per-batch weight rows with strides `s`; q.n is a multiple of 64 (e.g. heads).
 pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, y: anytype, rows: u32, batch: u32, s: Strides) void {
     const n = std.mem.alignForward(u32, q.n, 64);
     e.setPipeline(p[1]);
@@ -72,7 +73,7 @@ pub fn denseBatch(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q:
     e.dispatchGroups(mtl.Size.of(n / 64, (rows + 63) / 64, batch), mtl.Size.of(32, 2, 2));
 }
 
-/// y [rows, q.n] = x times each row's expert's W^T, rows sorted by expert with `offsets` (each expert's first row); q is [experts, n, k].
+/// y [rows, q.n]: x times its row expert's W^T, rows expert-sorted (`offsets`: experts' first rows); q [experts, n, k].
 pub fn gather(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: anytype, offsets: anytype, y: anytype, rows: u32, experts: u32) void {
     gatherTo(e, p, x, sums, q, offsets, y, null, rows, experts);
 }
@@ -96,7 +97,7 @@ pub fn gatherTo(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, q: a
     e.dispatchGroups(mtl.Size.of(q.n / 64, tiles, 1), mtl.Size.of(32, 2, 2));
 }
 
-/// act = SwiGLU(x W_gate^T, x W_up^T) clipped at `limit` for expert-sorted pairs (`offsets`), pair i on x's row order[i] / topk.
+/// act: SwiGLU(x W_gate^T, x W_up^T) clipped at `limit`, expert-sorted pairs (`offsets`); pair i: x row order[i]/topk.
 pub fn gatherGlu(e: mtl.ComputeEncoder, p: Pipes, x: anytype, sums: anytype, gate: anytype, up: anytype, offsets: anytype, order: anytype, act: anytype, rows: u32, experts: u32, topk: u32, limit: f32) void {
     std.debug.assert(gate.n % 32 == 0 and gate.k % 64 == 0 and gate.n == up.n and gate.k == up.k);
     const bm: u32 = if (rows / experts < 200) 32 else 64; // 32-row tiles waste less of each expert's last tile until ~200 rows
@@ -127,10 +128,7 @@ fn code(bytes: []const u8, at: usize, bits: usize) u32 {
     return (v >> @intCast(at % 8)) & ((@as(u32, 1) << @intCast(bits)) - 1);
 }
 
-fn bf16(v: f32) u16 { // round to nearest even
-    const u: u32 = @bitCast(v);
-    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
-}
+const bf16 = bf16_round.bits; // round to nearest even; NaN stays NaN
 
 fn f32of(h: u16) f32 {
     return @bitCast(@as(u32, h) << 16);
@@ -334,4 +332,32 @@ test "a batch of dense products with pitches: each batch's rows of x, the weight
         const got: f64 = f32of(y[(r * B + b) * N + n]);
         try std.testing.expect(@abs(got - sum) <= @abs(sum) / 128.0 + 4e-6 * mag); // one bf16 rounding of the fp32 sum
     };
+}
+
+test "host bf16: today's bits on every zero, subnormal, infinity and tie; a NaN stays NaN" {
+    const old = struct {
+        /// bf16 as it was spelled before it was core's bits(): the oracle for every non-NaN input.
+        fn spelled(v: f32) u16 {
+            const u: u32 = @bitCast(v);
+            return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+        }
+
+        fn kept(u: u32) !void {
+            const v: f32 = @bitCast(u);
+            const h = bf16(v);
+            if (!std.math.isNan(v)) return std.testing.expectEqual(spelled(v), h);
+            try std.testing.expect(std.math.isNan(f32of(h)));
+            try std.testing.expectEqual(u >> 31, h >> 15);
+        }
+    };
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try old.kept(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0, 1, 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try old.kept(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(1863);
+    for (0..1 << 22) |_| try old.kept(prng.random().int(u32));
+    try std.testing.expectEqual(@as(u16, 0x7f80), old.spelled(@bitCast(@as(u32, 0x7f800001)))); // the old copy's +Inf
+    try std.testing.expectEqual(@as(u16, 0x8000), old.spelled(@bitCast(@as(u32, 0x7fff8001)))); // and its -0
+    for ([_]u32{ 0x7f800001, 0x7fff8001, 0xffff8001, 0x7fc00000, 0xffffffff, 0x7fbfffff, 0xffa00000 }) |u| try old.kept(u);
 }

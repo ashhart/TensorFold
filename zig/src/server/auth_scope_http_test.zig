@@ -71,6 +71,7 @@ const Harness = struct {
     listener: listener.Listener = undefined,
     accept: std.Thread = undefined,
     stop: std.atomic.Value(bool) = .init(false),
+    unix_path: ?[:0]const u8 = null,
 
     fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
@@ -82,7 +83,7 @@ const Harness = struct {
             .dashboard = true,
         }, keys);
         errdefer h.srv.deinit();
-        h.listener = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+        h.listener = if (h.unix_path) |path| try listener.Listener.openUnix(path) else try listener.Listener.open(.{ .ip4 = .loopback(0) });
         errdefer h.listener.close();
         h.accept = try std.Thread.spawn(.{}, server.Server.serve, .{ h.srv, h.listener, &h.stop });
     }
@@ -97,15 +98,34 @@ const Harness = struct {
         h.listener.close();
         h.srv.deinit();
     }
-    fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
+    fn connect(h: *Harness) !posix.socket_t {
+        if (h.unix_path) |path| {
+            if (comptime @import("builtin").os.tag == .windows) return error.Unsupported;
+            const c = std.c;
+            var addr: c.sockaddr.un = .{ .path = undefined };
+            @memset(&addr.path, 0);
+            @memcpy(addr.path[0..path.len], path);
+            const fd = c.socket(c.AF.UNIX, c.SOCK.STREAM, 0);
+            if (fd < 0) return error.Socket;
+            if (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) != 0) {
+                _ = c.close(fd);
+                return error.Connect;
+            }
+            return fd;
+        }
         const address: std.Io.net.IpAddress = .{ .ip4 = .loopback(h.listener.port()) };
         var storage: std.Io.Threaded.PosixAddress = undefined;
         const len = std.Io.Threaded.addressToPosix(&address, &storage);
         const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
         if (posix.errno(rc) != .SUCCESS) return error.Socket;
         const fd: posix.socket_t = @intCast(rc);
-        defer _ = posix.system.close(fd);
+        errdefer _ = posix.system.close(fd);
         if (posix.errno(posix.system.connect(fd, &storage.any, len)) != .SUCCESS) return error.Connect;
+        return fd;
+    }
+    fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
+        const fd = try h.connect();
+        defer _ = posix.system.close(fd);
         var sent: usize = 0;
         while (sent < raw.len) {
             const n = posix.system.write(fd, raw[sent..].ptr, raw.len - sent);
@@ -321,4 +341,27 @@ test "auth scopes HTTP: a keep-alive request does not inherit the previous reque
     const unkeyed = try h.exchange(arena.allocator(), "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer admin-secret\r\n\r\n" ++
         "DELETE /v1/responses/unknown HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
     try t.expect(std.mem.indexOf(u8, unkeyed, "HTTP/1.1 401 ") != null);
+}
+
+test "auth over a Unix socket: keys and the Host check apply as on TCP" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var path_buf: [64]u8 = undefined;
+    var h: Harness = .{ .unix_path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/tf-auth-{d}.sock", .{std.c.getpid()}, 0) };
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try expectStatus(try h.ask(a, "GET", "/v1/models", "", ""), 401);
+    try expectStatus(try h.ask(a, "GET", "/v1/models", "unknown-secret", ""), 401);
+    try expectStatus(try h.ask(a, "GET", "/v1/models", "read-secret", ""), 200);
+    try expectStatus(try h.ask(a, "GET", "/metrics", "", ""), 401);
+    const foreign = try h.exchange(a, "GET /v1/models HTTP/1.1\r\nHost: example.com\r\nAuthorization: Bearer read-secret\r\nConnection: close\r\n\r\n");
+    try expectStatus(foreign, 403);
+    try t.expect(std.mem.indexOf(u8, foreign, "Host header is not allowed") != null);
 }

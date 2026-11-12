@@ -6,7 +6,14 @@ const f = @import("device_fixture.zig");
 fn read(_: *n.B, buffer: n.B.Buffer, out: []u8) !void {
     @memcpy(out, buffer[0..out.len]);
 }
+/// Sets what the gate prints (device_fixture.say) and returns what it was.
+fn swap(to: @TypeOf(f.say)) @TypeOf(f.say) {
+    defer f.say = to;
+    return f.say;
+}
 test "Qwen4 device gate: same capture, oracle, state seams and lane checks on the host instrument" {
+    const was = swap(.failures);
+    defer f.say = was;
     var b: n.B = .{};
     var d: D = .{};
     try @import("device_gate.zig").Gate(n.G, D, @import("core").lanes, read).runAll(std.testing.allocator, std.testing.io, &b, n.Loader{}, &d);
@@ -25,6 +32,8 @@ test "Qwen4 device gate: one wrong logit or GPU token cannot pass" {
     };
     const picks = try a.dupe(u32, doc.value.picks);
     try f.oracle(doc.value, logits, picks);
+    const was = swap(.nothing);
+    defer f.say = was;
     logits[logits.len - 1] ^= 1;
     try std.testing.expectError(error.Qwen4OracleMismatch, f.oracle(doc.value, logits, picks));
     logits[logits.len - 1] ^= 1;
@@ -36,6 +45,8 @@ fn corrupt(_: *n.B, buffer: n.B.Buffer, out: []u8) !void {
     out[out.len - 1] ^= 1;
 }
 test "Qwen4 device gate: a damaged queued capture refuses the complete gate and releases its owners" {
+    const was = swap(.nothing);
+    defer f.say = was;
     var b: n.B = .{};
     var d: D = .{};
     try std.testing.expectError(error.Qwen4OracleMismatch, @import("device_gate.zig").Gate(n.G, D, @import("core").lanes, corrupt).runAll(std.testing.allocator, std.testing.io, &b, n.Loader{}, &d));
@@ -43,6 +54,8 @@ test "Qwen4 device gate: a damaged queued capture refuses the complete gate and 
 }
 
 test "Qwen4 device gate: Metal probability nodes retain exact binary64 logit comparison" {
+    const was = swap(.failures);
+    defer f.say = was;
     var b: n.B = .{};
     var d: D = .{};
     try @import("device_gate.zig").Gate(n.G, D, @import("core").lanes, read).runAll(std.testing.allocator, std.testing.io, &b, n.MetalLoader{}, &d);
@@ -51,9 +64,18 @@ test "Qwen4 device gate: Metal probability nodes retain exact binary64 logit com
 
 test "Qwen4 device gate: two-row node ledger covers every binary64 storage node" {
     var b: n.B = .{};
-    const summary = try @import("node_gate.zig").run(n.G, read, std.testing.allocator, std.testing.io, &b, n.MetalLoader{}, false);
+    const gate = @import("node_gate.zig");
+    const summary = try gate.run(n.G, read, std.testing.allocator, std.testing.io, &b, n.MetalLoader{}, .first);
     try std.testing.expectEqual(@as(usize, 0), summary.different);
     try std.testing.expect(summary.first[0] == null and summary.first[1] == null);
+    try std.testing.expectEqual(@as(usize, 0), b.held);
+    const io = std.testing.io;
+    const ids = [_]u32{ 3, 5 };
+    const legacy_ref = gate.legacy_reference;
+    const a = std.testing.allocator;
+    const legacy = try gate.runRows(n.G, read, a, io, &b, n.MetalLoader{}, &ids, legacy_ref, .nothing);
+    try std.testing.expect(legacy.first[0] == null);
+    try std.testing.expectEqual([2]usize{ 53, 24 }, [2]usize{ legacy.first[1] orelse 0, legacy.values[1] });
     try std.testing.expectEqual(@as(usize, 0), b.held);
 }
 
@@ -61,7 +83,11 @@ test "Qwen4 device gate: full Metal storage-node diagnostic" {
     var b: n.B = .{};
     const doc = try std.json.parseFromSlice(f.Oracle, std.testing.allocator, f.metal_reference, .{});
     defer doc.deinit();
-    const summary = try @import("node_gate.zig").runRows(n.G, read, std.testing.allocator, std.testing.io, &b, n.MetalLoader{}, doc.value.tokens, @embedFile("fixtures/native-metal-storage-nodes.json"), false);
+    const nodes = @embedFile("fixtures/native-metal-storage-nodes.json");
+    const gate = @import("node_gate.zig");
+    const io = std.testing.io;
+    const ids = doc.value.tokens;
+    const summary = try gate.runRows(n.G, read, std.testing.allocator, io, &b, n.MetalLoader{}, ids, nodes, .first);
     try std.testing.expectEqual(@as(usize, 0), summary.different);
     try std.testing.expectEqual(@as(usize, 0), b.held);
 }

@@ -77,7 +77,7 @@ class CompleteTiming(unittest.TestCase):
             def __exit__(self, *args):
                 pass
         with patch.object(concurrent.urllib.request, "urlopen", return_value=Response()), \
-                patch.object(concurrent.time, "perf_counter", side_effect=[10, 11, 14, 18]):
+                patch.object(concurrent.time, "perf_counter", side_effect=[10, 10.5, 11, 14, 18]):
             run = concurrent.stream("http://unused", "fixture", concurrent.PROMPTS[0], 80, 0, 1)
         self.assertTrue(run["complete"])
         self.assertEqual(run.get("elapsed_s"), 8)
@@ -87,9 +87,10 @@ class CompleteTiming(unittest.TestCase):
         self.assertIsNone(run["decode_tps"])
 
     def test_cache_report_carries_concurrent_timing_and_observed_chunk_fields(self):
-        good = {**row(), "cache_state": "reused", "elapsed_s": 10, "chunk_offsets_s": [2], "chunk_gaps_ms": None}
+        good = {**row(), "cache_state": "reused", "elapsed_s": 10, "chunk_offsets_s": [2], "chunk_gaps_ms": None,
+                "output_sha256": "a" * 64}
         with patch.object(cache.bench, "stream", return_value=good), \
-                patch.object(cache.bench, "together", return_value=[good, row(4, 22, 120)]), \
+                patch.object(cache.bench, "together", return_value=[good, row(4, 22, 120, output_sha256="a" * 64)]), \
                 contextlib.redirect_stdout(io.StringIO()) as stdout:
             self.assertEqual(cache.main(["unused", "fixture", "--repeats", "1", "--streams", "2"]), 0)
         report = json.loads(stdout.getvalue())

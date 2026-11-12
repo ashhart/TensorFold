@@ -156,6 +156,9 @@ test "per-module entries under any spelling reach their module only" {
 }
 
 test "widths no kernel reads are refused by name, never guessed" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const cases = .{
         .{ "{\"bits\": 7, \"group_size\": 64}", error.UnsupportedGemmaQuantization },
         .{ "{\"bits\": 4, \"group_size\": 32}", error.GemmaWidthNotRead },
@@ -204,6 +207,9 @@ test "the per-layer input linears are BF16 when the table says false, or take th
 }
 
 test "only the per-layer input modules of an E-series may be BF16, and one spelling cannot name both" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const cases = .{
         .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.per_layer_input_gate\": false}", error.GemmaModuleUnquantized, false },
         .{ "{\"bits\": 4, \"group_size\": 64, \"layers.3.self_attn.q_proj\": false}", error.GemmaModuleUnquantized, true },

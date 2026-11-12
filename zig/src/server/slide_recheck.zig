@@ -49,6 +49,7 @@ pub fn check(srv: *Server, cx: *Cx, id: u32, which: Which, before: []const Earli
                 probed += @intFromBool(back);
             } else held = held and back;
         }
+        if (held and !try @import("slide_correction.zig").absent(srv, cx, f.asked, gone)) held = false;
         r.* = .{ .fact = f, .recalled = held and 2 * probed >= probes, .was = cameBack(before, f) };
         srv.slide.checked(f.id, r.recalled);
     }
@@ -63,6 +64,7 @@ fn cameBack(before: []const Earlier, f: Earlier) bool {
 
 /// Whether `reply` to wording `w` brings back `fact`, judged as its own lesson judged it (short answer, else words).
 fn bringsBack(fact: []const u8, w: slide_graph.Answer, reply: []const u8) bool {
+    if (w.reject_old and @import("slide_correction.zig").oldReturned(w.question, w.old, w.old_short, reply)) return false;
     if (w.short.len > 0) return wording.recallsShort(fact, w.question, w.short, reply);
     if (w.answer.len > 0) return wording.recalls(fact, w.question, w.answer, reply);
     return wording.tells(fact, w.question, "", reply);
@@ -161,9 +163,14 @@ pub fn recalled(asks: []const Ask, got: []const bool, f: usize) bool {
 
 /// The first thing wrong after the cut: fact 0 answering where the model as shipped does not, or a kept answer lost.
 pub fn judge(asks: []const Ask, before: []const bool, after: []const bool, shipped: []const bool, facts: usize) ?Miss {
-    for (asks, after, shipped, 0..) |x, g, s, i| if (x.fact == 0 and g and !s) return .{ .fact = 0, .ask = i, .why = "it still gives the deleted fact" };
-    for (asks, before, after, 0..) |x, b, g, i| if (x.fact > 0 and !x.probe and b and !g) return .{ .fact = x.fact, .ask = i, .why = "it no longer brings its fact back" };
-    for (1..facts) |f| {
+    return judgeMany(asks, before, after, shipped, facts, 1);
+}
+
+/// The first `removed` facts were explicitly selected; every other fact keeps the same retention checks.
+pub fn judgeMany(asks: []const Ask, before: []const bool, after: []const bool, shipped: []const bool, facts: usize, removed: usize) ?Miss {
+    for (asks, after, shipped, 0..) |x, g, s, i| if (x.fact < removed and g and !s) return .{ .fact = x.fact, .ask = i, .why = "it still gives the deleted fact" };
+    for (asks, before, after, 0..) |x, b, g, i| if (x.fact >= removed and !x.probe and b and !g) return .{ .fact = x.fact, .ask = i, .why = "it no longer brings its fact back" };
+    for (removed..facts) |f| {
         var n: usize = 0;
         var was: usize = 0;
         var now: usize = 0;

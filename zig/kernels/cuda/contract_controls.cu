@@ -4,6 +4,8 @@
 #include <cuda_fp16.h>
 #include <math.h>
 #include <stdint.h>
+#include "common/reduce.cuh"
+#include "gemma4_ple.cuh"
 
 __device__ __forceinline__ float tf_ctl_x(const __nv_bfloat16* x, int64_t i) { return __bfloat162float(x[i]); }
 
@@ -29,10 +31,7 @@ __device__ __forceinline__ float tf_ctl_rowsum(const __nv_bfloat16* X, int K, in
     return s;
 }
 
-__device__ __forceinline__ float tf_ctl_warp(float s) {
-    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
-    return s;
-}
+__device__ __forceinline__ float tf_ctl_warp(float s) { return tf_common::warp_sum(s); }
 
 // Gate 2 too: a row sum that writes the sum back into its own input, which its spec says it never does.
 extern "C" __global__ void tf_ctl_scribble_sum(__nv_bfloat16* X, int K, float* Y) {
@@ -92,7 +91,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_embed_affine(const int*
                                                                        float scale, int keep) {
     tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, keep);
 }
-
 
 // Gate 3: act_rows.cu's MLX activations keeping only the rounding points in `keep`; the exact check must go red.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bfloat16* gate, long long g_ld,
@@ -370,10 +368,7 @@ namespace tf_ctl_moss {
 typedef __nv_bfloat16 bf16;
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ float ld(const bf16* p) { return __bfloat162float(*p); }
-__device__ __forceinline__ float warp_sum(float v) {
-  for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
+using tf_common::warp_sum;
 // tf_moss_norm; DROP 0: bf16(x inv), 1: bf16(y s).
 template <int DROP>
 __device__ void norm(const bf16* X, const bf16* W, const bf16* S, const bf16* B, bf16* Y, int width, float eps,
@@ -538,3 +533,68 @@ TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_old_2, 2, tf_exl3::PLAIN)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_skip, 2, tf_exl3::SKIP)
 TF_CTL_EXL3_GROUPED(tf_ctl_exl3_grouped_stale, 2, tf_exl3::STALE)
 #undef TF_CTL_EXL3_GROUPED
+
+// Gate 3: gemma4_ple.cu's tf_gemma4_ple_rows with one step dropped (tf_ple::DROP_*); the shapes gate must go red.
+extern "C" __global__ void __launch_bounds__(64) tf_ctl_ple_rows(const __nv_bfloat16* p, const __nv_bfloat16* t,
+                                                                 const __nv_bfloat16* w, __nv_bfloat16* out, int parts,
+                                                                 float scale, float token, float mix, float eps,
+                                                                 int drop) {
+    tf_ple::rows(p, t, w, out, parts, scale, token, mix, eps, drop);
+}
+
+// Liquid's 3-tap short conv and commit, one planted fault each: conv bx unrounded, commits to stream 0's slot.
+#include "liquid_conv.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_conv_3(const __nv_bfloat16* P, const __nv_bfloat16* Wc, const __nv_bfloat16* STATE,
+                                                                        const int* SLOT, const int* OFF, __nv_bfloat16* Y, __nv_bfloat16* SNAP,
+                                                                        int SNAP0, int D, long long SS) {
+    tf_liquid::liquid_conv<3, 1>(P, Wc, STATE, SLOT, OFF, Y, SNAP, SNAP0, D, SS);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_commit_3(__nv_bfloat16* STATE, const __nv_bfloat16* SNAP, const int* SLOT,
+                                                                          const int* ROW, int D, long long state_stride, long long snap_stride,
+                                                                          long long SS) {
+    tf_liquid::liquid_commit<3, 1>(STATE, SNAP, SLOT, ROW, D, state_stride, snap_stride, SS);
+}
+
+// LFM2.5-24B-A2B's router, one planted fault: ties go to the higher expert id.
+#include "lfm2_moe.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_lfm2m_route(const __nv_bfloat16* X, const float* W, const float* BIAS, int* PICK,
+                                                                      float* WTS, float* LOGITS, int rows, int D, float scale) {
+    tf_lfm2m::lfm2m_route<1>(X, W, BIAS, PICK, WTS, LOGITS, rows, D, scale);
+}
+
+// Paged attention at head 64, one planted fault each: values from the next lane's dims (decode) or next 8 (prompt).
+namespace tf_ctl_paged {
+using tf_glue::bf;
+using tf_glue::tf_exp;
+#include "paged_attn.cuh"
+#define SEG_HD 64
+#define SEG_KW (64 / 2 + 2)
+#define SEG_WIDE 0
+#define SEG_VLANE 1
+#define SEG_CHUNK tf_ctl_paged_attn_chunk_segs_64
+#define SEG_MERGE tf_ctl_paged_attn_merge_segs_64
+#include "paged_attn_segs.cuh"
+}  // namespace tf_ctl_paged
+
+#define PATTN_VLANE 1
+#include "prefill_attention.cuh"
+
+namespace tf_prefill_attention {
+extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                                                                     const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
+                                                                     int W, int H, int HK, int G, float scale, const int* __restrict__ PT, long long PS) {
+    constexpr int D = 64, WARPS = 8, HPC = 4, NS = 8;
+    constexpr bool causal = true;
+    constexpr int skip = 0;
+    constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false, IDS = false;
+    constexpr int CAP = 0, PTOK = 1, PN = 0;
+    const float *ks = nullptr, *vs = nullptr;
+    const int HO = H;
+    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
+#include "prefill_attention_rows.cuh"
+}
+}  // namespace tf_prefill_attention
+#include "contract_ctl_router.cuh"

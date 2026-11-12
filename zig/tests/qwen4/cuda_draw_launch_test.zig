@@ -71,9 +71,19 @@ const Trace = struct {
     fn synchronize(_: C.abi.Stream) callconv(.c) c_int {
         return 0;
     }
+    fn contextDevice(out: *C.abi.Device) callconv(.c) c_int {
+        out.* = 0;
+        return 0;
+    }
+    fn deviceAttribute(out: *c_int, _: C.abi.DeviceAttribute, _: C.abi.Device) callconv(.c) c_int {
+        out.* = 0;
+        return 0;
+    }
 };
 fn driver() C.Driver {
     var d: C.Driver = .{ .api = undefined, .lib = undefined };
+    d.api.cuCtxGetDevice = Trace.contextDevice;
+    d.api.cuDeviceGetAttribute = Trace.deviceAttribute;
     d.api.cuModuleLoadData = Trace.load;
     d.api.cuModuleUnload = Trace.unload;
     d.api.cuModuleGetFunction = Trace.function;

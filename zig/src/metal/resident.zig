@@ -93,9 +93,19 @@ pub fn Owner(comptime Metal: type) type {
             r.held.flush();
         }
 
+        fn lockFn(ctx: *anyopaque) void {
+            const r: *Self = @ptrCast(@alignCast(ctx));
+            r.mutex.lockUncancelable(r.io);
+        }
+
+        fn unlockFn(ctx: *anyopaque) void {
+            const r: *Self = @ptrCast(@alignCast(ctx));
+            r.mutex.unlock(r.io);
+        }
+
         /// Flush waiting joins and commit a small blit through the set; the Resident must stay put.
         pub fn target(r: *Self) mtl.keepalive.Target {
-            return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.held.set), .scratch = r.scratch, .flush = .{ .ctx = r, .run = flushFn } };
+            return .{ .queue = r.work, .sets = @as(*const [1]mtl.ResidencySet, &r.held.set), .scratch = r.scratch, .flush = .{ .ctx = r, .run = flushFn }, .hold = .{ .ctx = r, .lock = lockFn, .unlock = unlockFn } };
         }
 
         pub fn deinit(r: *Self) void {
@@ -277,6 +287,9 @@ const FakeSet = struct {
 };
 
 test "a set is built only inside the 70% limit, and never when RAM could not be read" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const GiB = cache_fit.GiB;
     const ids: [4]u8 = .{ 0, 1, 2, 3 };
     const big = [_]Fake.Buffer{ .{ .id = &ids[0], .len = 100 * GiB }, .{ .id = &ids[1], .len = 72 * GiB } };
@@ -366,6 +379,9 @@ test "a join whose bookkeeping cannot grow refuses whole: nothing counted, stage
 }
 
 test "an operator load ceiling holds the shared host and stays in force for later buffers" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     const GiB = cache_fit.GiB;
     const ids: [4]u8 = @splat(0);
     const buffers = [_]Fake.Buffer{.{ .id = &ids[0], .len = 194 * GiB }};

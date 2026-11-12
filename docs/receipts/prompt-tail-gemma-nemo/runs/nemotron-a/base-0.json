@@ -1,0 +1,211 @@
+{
+ "label": "base-0",
+ "md5": "671fd7101a3ce9afbdfe5d3f9c77061c",
+ "cold": {
+  "2k": [
+   {
+    "prompt": 2099,
+    "cached": 0,
+    "sha": "1491da1cf57c",
+    "ttft": 0.288,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   },
+   {
+    "prompt": 2114,
+    "cached": 0,
+    "sha": "1491da1cf57c",
+    "ttft": 0.29,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   },
+   {
+    "prompt": 2087,
+    "cached": 0,
+    "sha": "1491da1cf57c",
+    "ttft": 0.286,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   }
+  ],
+  "16k": [
+   {
+    "prompt": 16333,
+    "cached": 0,
+    "sha": "1491da1cf57c",
+    "ttft": 2.228,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   },
+   {
+    "prompt": 16310,
+    "cached": 0,
+    "sha": "1491da1cf57c",
+    "ttft": 2.229,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   },
+   {
+    "prompt": 16294,
+    "cached": 0,
+    "sha": "1491da1cf57c",
+    "ttft": 2.224,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   }
+  ],
+  "32k": [
+   {
+    "prompt": 32545,
+    "cached": 0,
+    "sha": "1eecfd7e7b2c",
+    "ttft": 4.921,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user is asking me to summarize the provided text. Let me first understand what"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   },
+   {
+    "prompt": 32606,
+    "cached": 0,
+    "sha": "45ed2305ccea",
+    "ttft": 4.926,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user is asking me to summarize the provided text. The text appears to be"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   },
+   {
+    "prompt": 32522,
+    "cached": 0,
+    "sha": "1eecfd7e7b2c",
+    "ttft": 4.909,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user is asking me to summarize the provided text. Let me first understand what"
+    },
+    "lp": {
+     "content": []
+    },
+    "plp": null
+   }
+  ]
+ },
+ "decode": {
+  "tokens": 128,
+  "s": 1.186,
+  "sha": "5b4df047f3ae",
+  "msg": {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**\n   - User provides a long list of numbers/words (appears to be a jumbled mix of tags, IDs, or random terms).\n   - User asks: \"Summarize: Document 77.\"\n   - The text provided doesn't look like a typical document with a coherent narrative, but rather a sequence of terms that seem to repeat patterns (gardens, copper, ledgers, winter, harbor, signal, stone, meadow, orbit, lamp, river, candle).\n   - The instruction is to \"Summarize: Document 7"
+  },
+  "lp": null,
+  "plp": null
+ },
+ "seeded": {
+  "sha": "1491da1cf57c",
+  "msg": {
+   "role": "assistant",
+   "content": "",
+   "reasoning_content": "Here's a thinking process:\n\n1.  **Analyze User Input:**"
+  },
+  "lp": null,
+  "plp": null
+ },
+ "prompt_lp": {
+  "msg": " The count is ",
+  "lp": null,
+  "plp": {
+   "sha256_of_sorted_json": "7402142c64d0150ee52a5891928b7e38ac0bdc527d566db6028875a357f8189b",
+   "rows": 8794
+  }
+ },
+ "kept": {
+  "cached": [
+   0,
+   12295,
+   16292
+  ],
+  "shas": [
+   "60a365c703a9",
+   "899c81910724",
+   "899c81910724"
+  ],
+  "a": {
+   "msg": {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "The user is looking for a one-sentence summary of the provided text."
+   },
+   "lp": {
+    "content": []
+   },
+   "plp": null
+  },
+  "b": {
+   "msg": {
+    "role": "assistant",
+    "content": "",
+    "reasoning_content": "The user is looking for a one-sentence summary of the provided text."
+   },
+   "lp": {
+    "content": []
+   },
+   "plp": null
+  }
+ }
+}

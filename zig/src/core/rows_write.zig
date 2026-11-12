@@ -27,7 +27,7 @@ pub const Failures = struct {
 };
 
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
-    if (r.stopped) return;
+    if (r.stopped or e.image_frame != 0 or e.images.len != 0 or !@import("cache_images.zig").diskSafe(e.tokens)) return;
     sync.queued(r, e, starts);
 }
 
@@ -202,6 +202,7 @@ fn publish(r: *Rows, j: *io.Job) !void {
     r.states.appendAssumeCapacity(s);
     r.ref(j.wants, 1);
     r.touch(r.states.items.len - 1);
+    noteWriteLatency(r, nowNs() - j.began);
     r.counts.writes += 1;
     if (j.verify) r.counts.verified += 1;
     if (!@import("builtin").is_test) std.log.info("imprint: {d} tokens on disk: {d} new blocks and its own {d} MiB ({d} MiB this state, {d} MiB of rows it shares) in {d:.0} ms", .{ j.at, j.files.len - 1, s.own >> 20, j.bytes >> 20, s.rows >> 20, @as(f64, @floatFromInt(nowNs() - j.began)) / 1e6 });
@@ -269,7 +270,7 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     var bytes = newBytes(r, &promised, prepared, metadata, &count);
     var charge: u64 = 0;
     while (true) {
-        charge = bytes + @sizeOf(io.Job) + count * @sizeOf(io.File) + prepared.wants.len * @sizeOf(Want) + 4 * @sizeOf([]const u8);
+        charge = charged(bytes, count, prepared.wants.len);
         if (!w.fits(charge)) return if (may_wait and w.busy(charge)) error.StagingBusy else error.StagingFull;
         const reserved = w.reserved();
         if (!r.budget(bytes + reserved)) return error.DailyBudgetSpent;
@@ -312,6 +313,26 @@ fn stageJob(r: *Rows, prepared: *const Job, may_wait: bool) !void {
     w.submit(j);
 }
 
+/// A staged job's charge: its files' bytes and the bookkeeping the worker holds beside them.
+fn charged(bytes: u64, files: usize, wants: usize) u64 {
+    return bytes + @sizeOf(io.Job) + files * @sizeOf(io.File) + wants * @sizeOf(Want) + 4 * @sizeOf([]const u8);
+}
+
+/// The most staging a state of `at` tokens charges: none of its blocks on disk, spans and starts at most one a token.
+pub fn coldCharge(r: *const Rows, at: u32) !u64 {
+    if (at == 0) return 0;
+    const ps = try r.parts(r.gpa, at);
+    defer r.gpa.free(ps);
+    var groups: [8]u32 = undefined;
+    var blocks: usize = 0;
+    for (try image.groups(ps, &groups)) |g| {
+        const w = image.wholeBlocks(at, r.keying.block, g);
+        blocks += w.end - w.first;
+    }
+    const metadata = 4 * (4 + 4 * @as(u64, at));
+    return charged(image.imageBytes(ps) + metadata + (blocks + 1) * @sizeOf(file.Trailer), blocks + 1, blocks);
+}
+
 /// Whether the state's block is for this job to write: the disk lacks it and no job in flight is writing it.
 fn lacks(r: *const Rows, promised: *const io.Promised, want: Want) bool {
     const n = chain.stem(want.name);
@@ -326,4 +347,14 @@ fn newBytes(r: *const Rows, promised: *const io.Promised, j: *const Job, metadat
         count.* += 1;
     };
     return bytes;
+}
+
+// Times a write took, in milliseconds: the last, the smoothed and the histogram, and the wall time it landed.
+fn noteWriteLatency(r: *Rows, ns: i128) void {
+    if (ns <= 0) return;
+    const ms = @as(f64, @floatFromInt(ns)) / 1e6;
+    r.file_io.write_ms_last = ms;
+    r.file_io.write_ms_ema = if (r.file_io.write_ms_ema == 0) ms else 0.8 * r.file_io.write_ms_ema + 0.2 * ms;
+    r.file_io.write_lat.observe(ms);
+    r.file_io.last_write_ms = @import("rows_io.zig").wallMs();
 }

@@ -1,4 +1,4 @@
-//! The cluster on lead/zig-fabric's links: two-sided Thunderbolt (`TwoSided`), or one-sided windows where writes exist (`Link`).
+//! The cluster on the fabric's links: two-sided Thunderbolt (`TwoSided`) or one-sided windows if writes exist (`Link`).
 const std = @import("std");
 const fabric = @import("fabric");
 const exchange = @import("exchange.zig");
@@ -22,7 +22,7 @@ pub const Layout = struct {
     pub fn init(ranks: u32, step_bytes: usize, message_bytes: usize) Layout {
         var l: Layout = .{ .ranks = ranks, .step_bytes = step_bytes, .message_bytes = message_bytes };
         l.words = Channel.bytes(ranks, step_bytes);
-        l.pipes = l.words + std.mem.alignForward(usize, ranks * 8, fabric.rdma.page);
+        l.pipes = l.words + std.mem.alignForward(usize, ranks * 8, fabric.rdma.layout_align);
         l.total = l.pipes + ranks * ranks * Pipe.bytes(message_bytes);
         return l;
     }

@@ -38,9 +38,10 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     const t_params = e.tables.ptr + params_at;
     const geo = e.geo;
     const group = g.q_heads / g.kv_heads;
+    if (shape.part == .head) return finish(e, total, heads, shape.hidden, shape.rows); // a stage's head over the ring's rows
 
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkStart(e);
-    try e.embed(t_ids, e.h, total, t_params);
+    if (g.embeds) try e.embed(t_ids, e.h, total, t_params); // a later stage's h and r came over the ring
     // the producers of the out, o and down inputs write their group sums; a prompt GEMM past 16 rows needs none
     const sums: u64 = if (prompt and total > 16) 0 else e.xs;
     // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
@@ -48,8 +49,14 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
     if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });
     var di: usize = 0;
     var ai: c_int = 0;
+    // a prompt chunk keeps its last row: past the last layer's keys and values, the kept row's tile runs alone
+    const ends = g.whole == 0 or g.first + g.layers == g.whole; // an earlier stage sends every row on: no tail
+    const tail_at: ?usize = if (prompt and ends) @import("cuda_prompt_tail.zig").first(e, total, nseg, shape.hidden or shape.rows) else null;
     for (e.layers, 0..) |l, i| {
-        try e.norm(i != 0, l.input_norm, total);
+        const tail = tail_at != null and i + 1 == e.layers.len;
+        const t0: usize = if (tail) tail_at.? else 0;
+        const rows: usize = total - t0;
+        try e.norm(g.first + i != 0, l.input_norm, total);
         if (e.learning) |k| try k.input(i, e.h, total);
         switch (l.mixer) {
             .delta => |m| {
@@ -66,57 +73,76 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             },
             .attention => |m| {
                 const aw = g.attnWidth();
-                try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
+                if (tail) {
+                    try e.projManyPrompt(&.{ m.k, m.v }, e.x, &.{ e.kraw, e.vraw }, total, prompt);
+                    try e.projAgain(m.q, e.x + t0 * g.hidden * 2, e.qraw + t0 * 2 * aw * 2, rows, prompt);
+                } else try e.projManyPrompt(&.{ m.q, m.k, m.v }, e.x, &.{ e.qraw, e.kraw, e.vraw }, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
-                try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
-                try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
+                const head_norm = if (g.bf16) e.fns.head_norm_shift else e.fns.head_norm;
+                try e.run(head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
+                try e.run(head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
                 try launch(e, if (e.kv8) e.fp8.rope else e.fns.rope, sig.rope, .{ total, g.q_heads + g.kv_heads, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, mpos, e.rope_table });
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
-                    try @import("cuda_prompt.zig").run(e, @intCast(ai), total);
+                    try @import("cuda_prompt.zig").runFrom(e, @intCast(ai), t0, total);
                 } else {
                     const args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po };
-                    const groups = (total + 64 / group - 1) / (64 / group);
+                    const tile_rows: usize = if (shape.mt2) 32 / group else 64 / group;
+                    const groups = (total + tile_rows - 1) / tile_rows;
                     const rows_args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), @as(c_int, @intCast(total)), e.pm, e.pl, e.po };
                     if (e.kv8) {
                         try launch(e, if (shape.paged) e.fp8.attn_partial else e.fp8.attn_partial8_whole, sig.attn_partial8, .{ total, max_chunks, g.kv_heads }, .{ 128, 1, 1 }, args);
-                        try launch(e, if (shape.paged) e.fp8.attn_rows else e.fp8.attn_rows8_whole, sig.attn_rows8, .{ groups, max_chunks, g.kv_heads }, .{ 256, 1, 1 }, rows_args);
+                        const rows_fn = if (shape.mt2) (if (shape.paged) e.mt2.paged else e.mt2.whole) else (if (shape.paged) e.fp8.attn_rows else e.fp8.attn_rows8_whole);
+                        try launch(e, rows_fn, sig.attn_rows8, .{ groups, max_chunks, g.kv_heads }, .{ if (shape.mt2) @as(usize, 128) else 256, 1, 1 }, rows_args);
                     } else {
                         try shared(e, if (shape.paged) e.fns.attn_partial else e.fns.attn_partial_whole, sig.attn_partial, .{ total, max_chunks, g.kv_heads }, 128, args);
                         try shared(e, if (shape.paged) e.fns.attn_rows else e.fns.attn_rows_whole, sig.attn_rows, .{ groups, max_chunks, g.kv_heads }, 256, rows_args);
                     }
                     try launch(e, e.fns.attn_merge, sig.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
                 }
-                try launch(e, e.fns.attn_gate, sig.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params, sums });
+                // the tail's rows from their own pointers, so no device row count (0: the launch's rows are real)
+                const gp: u64 = if (tail) 0 else t_params;
+                const y0 = e.y + t0 * aw * 2;
+                const mix0 = e.mix + t0 * aw * 2;
+                const gate_args = .{ geo, y0, e.qraw + t0 * 2 * aw * 2, mix0, @as(c_int, @intCast(rows)), gp, sums };
+                const gate_grid = .{ (rows * aw + 255) / 256, 1, 1 };
+                try launch(e, e.fns.attn_gate, sig.attn_gate, gate_grid, .{ 256, 1, 1 }, gate_args);
                 if (e.learning) |k| try k.gated(i, e.mix, total);
-                try e.projAgain(m.o, e.mix, e.r, total, prompt);
+                try e.projAgain(m.o, mix0, e.r + t0 * g.hidden * 2, rows, prompt);
                 ai += 1;
             },
         }
         try e.norm(true, l.post_norm, total);
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
+        // the tail: its rows' MLP at buffer row 0, their outputs into r at their own rows
+        const x0 = e.x + t0 * g.hidden * 2;
+        const r0 = e.r + t0 * g.hidden * 2;
+        const rp: u64 = if (tail) 0 else t_params;
         switch (l.mlp) {
             .dense => |m| {
-                if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
+                if (m.gate == .x3) {
+                    try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
+                } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
                 } else {
-                    try e.projAgain(m.gate, e.x, e.gate, total, prompt);
-                    try e.projAgain(m.up, e.x, e.up, total, prompt);
+                    try e.projAgain(m.gate, x0, e.gate, rows, prompt);
+                    try e.projAgain(m.up, x0, e.up, rows, prompt);
                 }
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
-                const n: c_longlong = @intCast(total * g.intermediate);
-                try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)), sums });
-                try e.projAgain(m.down, e.act, e.r, total, prompt);
+                const n: c_longlong = @intCast(rows * g.intermediate);
+                const act_args = .{ e.gate, e.up, e.act, n, rp, @as(c_int, @intCast(g.intermediate)), sums };
+                try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
+                try e.projAgain(m.down, e.act, r0, rows, prompt);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },
-            .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, promptMoe(prompt, total), t_params),
+            .moe => |m| try e.routedRows(m.router, m.experts, x0, r0, rows, promptMoe(prompt, rows), rp),
         }
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             try e.run(e.fns.tap, .{ total, (g.hidden + 2047) / 2048, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };
     }
     if (prompt and e.int8.on) @import("cuda_prompt_int8.zig").chunkEnd(e, total);
-    try finish(e, total, heads, shape.hidden);
+    if (shape.part == .whole) try finish(e, total, heads, shape.hidden, shape.rows);
 }
 
 /// A launch whose arguments are checked against the kernel's .cu signature: a wrong count or kind does not build.
@@ -134,11 +160,12 @@ fn shared(e: *E.Engine, f: cuda.Function, comptime s: sig.Sig, grid: [3]usize, t
     try cuda.launch.launch(f, cfg, e.stream, &a);
 }
 
-/// Layer inputs are already kept; hidden reads need neither the final norm nor the vocabulary head.
-pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool) !void {
+/// Layer inputs are already kept: hidden reads need no final norm or head, and a readout piece's rows no head.
+pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool, rows: bool) !void {
     if (hidden) return;
     const g = e.g;
     try e.norm(true, e.final_norm, total);
+    if (rows) return;
     if (e.learning) |k| try k.final(e.h, total);
     // the head over the kept rows
     try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);

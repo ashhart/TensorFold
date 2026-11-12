@@ -2,7 +2,7 @@
 const std = @import("std");
 const tp = @import("tp");
 
-pub const identity = [2]i64{ 0x4453563431534553, 2 };
+pub const identity = [2]i64{ 0x4453563431534553, 3 };
 const timeout_ns = 5 * std.time.ns_per_s;
 
 pub fn preflight(plan: *tp.planlink.PlanLink) !void {

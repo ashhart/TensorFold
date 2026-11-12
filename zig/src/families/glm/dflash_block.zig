@@ -56,7 +56,7 @@ pub fn download(dr: *const Drafter, e: anytype, dst: []u8, src: u64) !void {
     _ = dr;
     try e.stream.synchronize();
     if (e.group) |g| try g.check();
-    try e.d.check(e.d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(e.d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
 
 /// Every rank's `bytes` at buf + rank * bytes into every rank's buf, rank order (the engine's gathers' route).
@@ -142,9 +142,9 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
             a.add(dr.gu);
             a.add(dr.act);
             a.add(@as(i32, @intCast(dr.ff)));
-            try go(dr.k.swiglu, .{ .x = @intCast(M), .y = @intCast(dr.ff / 1024) }, 256, e, &a);
+            try go(dr.k.swiglu, .{ .x = @intCast(M), .y = @intCast((dr.ff + 1023) / 1024) }, 256, e, &a);
         }
-        if (dr.split) { // each rank's half of down's K as fp32 partials, gathered and summed
+        if (dr.split) { // each rank's share of down's K as fp32 partials, gathered and summed in rank order
             const bytes = M * D * 4;
             try linB(dr, e, dr.act, l.down, dr.sums + e.share.rank * bytes, M, true);
             try gather(e, dr.sums, bytes);
@@ -152,7 +152,8 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
             a.add(dr.sums);
             a.add(dr.a);
             a.add(@as(i32, @intCast(M)));
-            try go(dr.k.sum2, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
+            a.add(@as(i32, @intCast(dr.world)));
+            try go(dr.k.sumn, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
         } else try linB(dr, e, dr.act, l.down, dr.a, M, false);
         try conv(dr, e, dr.a, 1, l.m_base + 2 * D * 2, dr.x, true, M);
     }

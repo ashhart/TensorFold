@@ -1,0 +1,54 @@
+{
+  "checkpoint_revision": "e539fbb52280393adc081b289ec597430a0f9031",
+  "versions": {
+    "transformers": "4.51.0",
+    "pillow": "11.2.1",
+    "numpy": "2.2.5"
+  },
+  "cases": [
+    {
+      "height": 56,
+      "width": 84,
+      "seed": 0,
+      "grid": [
+        1,
+        4,
+        6
+      ],
+      "sha256": "26417b839277f2c43e418df49434620531776bb564349dc4ee20322e90d3b46e"
+    },
+    {
+      "height": 217,
+      "width": 300,
+      "seed": 1,
+      "grid": [
+        1,
+        16,
+        22
+      ],
+      "sha256": "bf43f0a1fcf91f794292f7f56238975d2d96a7b5dcb719ef394d36f21e3d6081"
+    },
+    {
+      "height": 513,
+      "width": 511,
+      "seed": 2,
+      "grid": [
+        1,
+        36,
+        36
+      ],
+      "sha256": "5c78a79680cf95f9d725285f4b314b9134511a8e0d6945bcc71c3c1d7da3b22f"
+    },
+    {
+      "height": 56,
+      "width": 1120,
+      "seed": 3,
+      "grid": [
+        1,
+        4,
+        80
+      ],
+      "sha256": "5e4efe404207106e2052e0f1c187fb047347b62e773b7e2acf5e8751072ef737"
+    }
+  ]
+}

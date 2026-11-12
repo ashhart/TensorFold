@@ -11,7 +11,6 @@ pub const manifest_name = "eaq_manifest.json";
 pub const marker_name = "EAQ_COMPLETE.json";
 pub const layout = "eaq-container/v0-provisional";
 pub const pack_versions = [_][]const u8{ "eaq.pack/0", "eaq.pack/1" };
-const max_header = 1 << 28;
 
 pub const Format = enum {
     trellis,
@@ -308,9 +307,8 @@ fn readShard(a: std.mem.Allocator, io: Io, file: Io.File, s: Shard, index: usize
     }
     var prefix: [8]u8 = undefined;
     if (len < 8 or try file.readPositionalAll(io, &prefix, 0) != 8) return badShard(why, s.file);
-    const n = std.mem.readInt(u64, &prefix, .little);
-    if (n > max_header or n > len - 8) return badShard(why, s.file);
-    const json = try a.alloc(u8, @intCast(n));
+    const n = safetensors.headerSize(std.mem.readInt(u64, &prefix, .little), len) catch return badShard(why, s.file);
+    const json = try a.alloc(u8, n);
     if (try file.readPositionalAll(io, json, 8) != json.len) return badShard(why, s.file);
     const header = safetensors.parseHeader(a, json, @intCast(len - 8 - n)) catch return badShard(why, s.file);
     for (header.keys(), header.values()) |name, e| {

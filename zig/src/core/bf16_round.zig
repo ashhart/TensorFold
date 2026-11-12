@@ -77,3 +77,51 @@ test "raw bits at the edges: signed zeros from underflow, subnormal ties, the no
     try std.testing.expect(std.math.isNan(value(bitsOf(bf16(-std.math.nan(f64))))));
     try std.testing.expectEqual(@as(u16, 0x8000), bits(-0x1p-135)); // fp32's path agrees
 }
+
+/// The Flash Next, GLM and DeepSeek host copies bits() replaced, as they were spelled.
+fn replaced(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    if (std.math.isNan(v)) return @intCast((u >> 16) | 0x40);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+fn expectReplaced(w: u32) !void {
+    const v: f32 = @bitCast(w);
+    try std.testing.expectEqual(bits(v), replaced(v));
+}
+
+test "the replaced copies equal bits() on every zero, subnormal, infinity, NaN and tie, and 1M random words" {
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try expectReplaced(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0x7fff, 0x8000, 0x8001 }) |lo| try expectReplaced(@as(u32, @intCast(hi)) << 16 | lo);
+    var prng = std.Random.DefaultPrng.init(32);
+    for (0..1 << 20) |_| try expectReplaced(prng.random().int(u32));
+}
+
+/// The load and vision copies as they were spelled: a plain `+`, no NaN branch, so negative NaNs overflow.
+fn plain(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    return @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+fn expectPlain(w: u32) !void {
+    const v: f32 = @bitCast(w);
+    if (std.math.isNan(v)) {
+        try std.testing.expectEqual(@as(u16, @intCast((w >> 16) | 0x40)), bits(v));
+        try std.testing.expect(std.math.isNan(value(bits(v))));
+    } else try std.testing.expectEqual(plain(v), bits(v));
+}
+
+test "the plain-+ copies equal bits() off NaN; every NaN, the negative ones that overflowed them too, stays NaN" {
+    for (0..1 << 25) |i| { // sign, exponent 0 or 255, every mantissa
+        const top: u32 = if (i & 1 << 23 != 0) 0x7f80_0000 else 0;
+        try expectPlain(@as(u32, @intCast(i >> 24)) << 31 | top | @as(u32, @intCast(i & 0x7f_ffff)));
+    }
+    for (0..1 << 16) |hi| for ([_]u32{ 0x7fff, 0x8000, 0x8001, 0xffff }) |lo| try expectPlain(@as(u32, @intCast(hi)) << 16 | lo);
+    try std.testing.expectEqual(@as(u16, 0xffff), bits(@bitCast(@as(u32, 0xffff_ffff))));
+    try std.testing.expectEqual(@as(u16, 0xff80), bits(@bitCast(@as(u32, 0xff7f_ffff)))); // fp32's most negative: -Inf
+    var prng = std.Random.DefaultPrng.init(33);
+    for (0..1 << 20) |_| try expectPlain(prng.random().int(u32));
+}

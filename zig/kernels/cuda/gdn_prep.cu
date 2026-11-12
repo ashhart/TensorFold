@@ -5,6 +5,8 @@
 #include <cuda_bf16.h>
 #include <math.h>
 #include <stdint.h>
+#include "common/act.cuh"
+#include "common/reduce.cuh"
 
 namespace tf_gdn_prep {
 
@@ -31,7 +33,7 @@ struct Io {
 };
 
 // Exactly rounded division on purpose: the same bits on every GPU, where div.full and ex2.approx are not.
-__device__ __forceinline__ float sigmoid(float x) { return __fdiv_rn(1.f, __fadd_rn(1.f, expf(-x))); }
+__device__ __forceinline__ float sigmoid(float x) { return tf_common::sigmoid_rn(x); }
 
 template <int J>
 __device__ __forceinline__ void prep(const Io& io, int c, int kh, int vh, int keep, float eps) {
@@ -70,7 +72,7 @@ __device__ __forceinline__ void prep(const Io& io, int c, int kh, int vh, int ke
 #pragma unroll
         for (int i = 0; i < J; ++i) part = __fmaf_rn(cv[i], cv[i], part);
         for (int m = 16; m > 0; m >>= 1) part = __fadd_rn(part, __shfl_xor_sync(0xFFFFFFFFu, part, m));
-        const float inv = __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(part, static_cast<float>(DK)), eps)));
+        const float inv = tf_common::rms_scale(part, DK, eps);
         const bool is_q = hd < kh;
         const float scale = is_q ? 1.f / DK : __fdiv_rn(1.f, __fsqrt_rn(static_cast<float>(DK)));
         __nv_bfloat16* out = (is_q ? io.q : io.k) + (r * kh + (is_q ? hd : hd - kh)) * DK + J * lane;

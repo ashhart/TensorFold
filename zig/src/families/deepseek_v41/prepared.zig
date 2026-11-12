@@ -54,7 +54,9 @@ pub const Cache = struct {
         h.update(std.mem.asBytes(&version));
         for (sources) |s| h.update(s);
         h.update(&pack_digest);
-        h.update(std.mem.asBytes(&[_]u32{ key.rank, key.world, key.o_groups, @intFromBool(key.dspark), @intCast(key.blocks.len) }));
+        // canon's split is outside `sources`, so the key holds its result
+        const own = try @import("partition.zig").outputGroups(key.o_groups, key.rank, key.world);
+        h.update(std.mem.asBytes(&[_]u32{ key.rank, key.world, key.o_groups, @intFromBool(key.dspark), @intCast(key.blocks.len), own.lo, own.len }));
         h.update(std.mem.sliceAsBytes(key.blocks));
         var d: [32]u8 = undefined;
         h.final(&d);
@@ -95,6 +97,7 @@ pub const Cache = struct {
             return false;
         };
         defer file.close(c.io);
+        defer @import("core").checkpoint.cache.drop(file);
         const got = readInto(b.gpa, c.io, file, b, c.verify, expected) catch |e| {
             if (!quiet) std.log.warn("dsv41 prepared: {s} unusable ({t}); building it from the pack", .{ pbuf[0 .. c.root.len + tag.len + 5], e });
             c.stats.misses += 1;
@@ -134,6 +137,7 @@ pub fn packDigest(io: Io, p: *const pack_mod.Pack) ![32]u8 {
     for (p.files.items) |name| {
         const file = try Io.Dir.cwd().openFile(io, try std.fmt.bufPrint(&path, "{s}/{s}", .{ p.dir, name }), .{});
         defer file.close(io);
+        defer @import("core").checkpoint.cache.drop(file);
         const stat = try file.stat(io);
         h.update(std.mem.asBytes(&@as(u64, name.len)));
         h.update(name);

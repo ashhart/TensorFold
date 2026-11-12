@@ -59,6 +59,7 @@ pub const Trainer = struct {
     fresh: u32,
     sketched: usize = 0, // rows sketched since the sketches were cleared, each row's place in them
     proj: Buffer, // f32 [layers, max_rows, candidates]: each row along each layer's candidate directions
+    locate: @import("living").pocket_locate.Probe = .{},
     nudge: Nudge = .{}, // where a one-sequence target step adds `delta`
     delta: Buffer, // f32 [max_seqs, 3, layers, D]: each sequence's nudges after each layer it names, a row each
     push: Buffer, // f32 [max_seqs, 3, layers, D]: the loss's gradient at each nudged row after each of them
@@ -89,6 +90,7 @@ pub const Trainer = struct {
         t.sketched = 0;
         t.count = .{};
         t.nudge = .{};
+        t.locate = .{};
         t.from = @splat(std.math.maxInt(u32));
         t.seqs = 0;
         t.pack = @min(pack_rows, b.wide.?.rows, b.o.capacity);
@@ -176,6 +178,11 @@ pub const Trainer = struct {
         if (n == 0) t.prefixes.drop(t.gpa) else try t.prefixes.ensure(t.gpa, n);
     }
 
+    /// A forward-only raw-logit read, optionally replacing one subject row's layer contribution with zero.
+    pub fn causalLogit(t: *Trainer, ex: @import("living").lesson_examples.Example, layer: ?usize, row: usize) !f32 {
+        return @import("living").pocket_locate.logit(t, ex, layer, row);
+    }
+
     /// `seqs` side by side in one pass (several: keys, prefixes, losses or targets), each's mean loss into `out`.
     pub fn pass(t: *Trainer, seqs: []const Seq, mode: Mode, turn: lesson_route.Turn, out: []Result) !void {
         const b = t.b;
@@ -222,6 +229,13 @@ pub const Trainer = struct {
         } else {
             try b.submit(.prefill, b.next, j);
             try b.drain();
+        }
+        if (t.locate.active) {
+            const logits = t.logits.slice(u16, t.answered * b.m.config.vocab);
+            var mean: f32 = 0;
+            for (targets, 0..) |target, r| mean += @as(f32, @bitCast(@as(u32, logits[r * b.m.config.vocab + target]) << 16));
+            out[0] = .{ .loss = -mean / @as(f32, @floatFromInt(t.answered)), .recalled = false };
+            return;
         }
         if (mode == .avoid or mode == .seek) t.sketched += rows;
         const stats = t.stats.slice([2]f32, t.answered);

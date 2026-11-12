@@ -2,8 +2,7 @@ const std = @import("std");
 const shared = @import("dsv41_shared.zig");
 const units = @import("dsv41_units.zig");
 pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, images: bool) *std.Build.Module {
-    const options = b.addOptions();
-    options.addOption(bool, "with_kernels", images);
+    const options = @import("cuda_runtime.zig").kernelOptions(b, images, null);
     const cuda = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
     cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     cuda.addOptions("kernel_options", options);
@@ -39,11 +38,12 @@ pub fn assemble(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return m;
 }
 pub fn steps(b: *std.Build) void {
-    _ = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
+    const real = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
     _ = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, runtime(b, b.graph.host, false), null);
     const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const heads_check = b.addExecutable(.{ .name = "tf-dsv41-prefill-heads", .root_module = module(b, check_target, "prefill_heads_check.zig", false) });
     b.step("dsv41-prefill-heads", "Build the AOT-only padded attention comparison for Linux, never run").dependOn(&b.addInstallArtifact(heads_check, .{}).step);
+    b.step("test-dsv41-serve-line-host", "The DeepSeek start-up line names the resolved serving settings").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/serve_line.zig"), .target = b.graph.host }) })).step);
     const planner = module(b, b.graph.host, "cuda_test.zig", false);
     b.step("test-dsv41-bounds-host", "DeepSeek resource bounds and real wrapper controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = planner, .filters = &.{"DeepSeek bounds:"} })).step);
     const binding_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("dsv41_kernels").? }));
@@ -87,13 +87,24 @@ pub fn steps(b: *std.Build) void {
     const output = record.captureStdOut(.{});
     b.step("emit-dsv41-catalog", "Record symbol resolution without CUDA device work").dependOn(&b.addInstallFile(output, "dsv41-launches.txt").step);
     const runner_base = module(b, target, "cuda_test.zig", true);
-    const runner = b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = b.createModule(.{
+    const runner = b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = runnerModule(b, target, runner_base.import_table.get("cuda").?, runner_base.import_table.get("dsv41_kernels").?) });
+    _ = runner.getEmittedBin();
+    b.step("compile-dsv41-runner", "Emit the supplied device fixture runner with nonexecuted synthetic images").dependOn(&runner.step);
+    const gpu = b.step("dsv41-test", "Install tf-dsv41-test for this host over the family images (-Ddsv41-nvcc or -Ddsv41-fatbins)");
+    const im = real orelse return gpu.dependOn(&b.addFail("dsv41-test needs -Ddsv41-nvcc=PATH or -Ddsv41-fatbins=DIR").step);
+    // the family's images only: the runner's commands launch no runtime kernels
+    const cuda = runtime(b, b.graph.host, false);
+    const dk = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, cuda, im);
+    gpu.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = runnerModule(b, b.graph.host, cuda, dk) }), .{}).step);
+}
+
+/// tests/cuda/dsv41_main.zig over `cuda` and `dk`, plus `tp` and the family's `partition.zig` for the exchanges.
+fn runnerModule(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module, dk: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/dsv41_main.zig"),
         .target = target,
         .optimize = .Debug,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = runner_base.import_table.get("cuda").? }, .{ .name = "dsv41_kernels", .module = runner_base.import_table.get("dsv41_kernels").? } },
-    }) });
-    _ = runner.getEmittedBin();
-    b.step("compile-dsv41-runner", "Emit the supplied device fixture runner with nonexecuted synthetic images").dependOn(&runner.step);
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "dsv41_kernels", .module = dk }, .{ .name = "tp", .module = @import("tp.zig").module(b, target, .Debug, cuda) }, .{ .name = "dsv41_partition", .module = shared.module(b, target, "partition.zig") } },
+    });
 }

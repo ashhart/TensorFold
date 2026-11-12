@@ -1,6 +1,7 @@
 //! Living Weights, family-neutral: the learner, its pocket of new neurons, their fits and the shard writer.
 pub const family = @import("family.zig");
 pub const families = @import("families.zig");
+pub const widths = @import("widths.zig");
 pub const Family = family.Family;
 pub const Layout = family.Layout;
 pub const Layers = family.Layers;
@@ -19,9 +20,12 @@ pub const lesson_route = @import("lesson_route.zig");
 pub const neuron = @import("neuron.zig");
 pub const affine = @import("affine.zig");
 pub const shards = @import("shards.zig");
+pub const pocket_locate = @import("pocket_locate.zig");
 pub const pocket = @import("pocket.zig");
 pub const pocket_clock = @import("pocket_clock.zig");
 pub const pocket_dump = @import("pocket_dump.zig");
+pub const pocket_audit = @import("pocket_audit.zig");
+pub const audit_test = if (@import("builtin").is_test) @import("pocket_audit_test.zig") else struct {};
 pub const pocket_fit = @import("pocket_fit.zig");
 pub const pocket_forget = @import("pocket_forget.zig");
 pub const pocket_joint = @import("pocket_joint.zig");
@@ -34,8 +38,10 @@ pub const pocket_read = @import("pocket_read.zig");
 pub const pocket_values = @import("pocket_values.zig");
 
 test {
+    _ = audit_test;
     _ = family;
     _ = families;
+    _ = widths;
     _ = neuron;
     _ = affine;
     _ = shards;
@@ -62,8 +68,20 @@ pub const host_test = @import("host_test.zig");
 pub const pocket_round = @import("pocket_round.zig");
 test {
     _ = @import("commit_test.zig");
+    _ = @import("pocket_round_test.zig");
 }
 
 test {
     _ = @import("pocket_quiet_legacy_test.zig");
+}
+
+pub const restart_fixture = @import("restart_fixture.zig");
+
+test {
+    _ = @import("pocket_locate_test.zig");
+    _ = @import("pocket_shrink_test.zig");
+}
+
+test {
+    _ = @import("correction_test.zig");
 }

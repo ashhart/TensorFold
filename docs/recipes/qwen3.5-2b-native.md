@@ -24,7 +24,9 @@ The Python packed Qwen decoder's tied-head limitation is separate from this nati
 Normal generation stops on both the model's end IDs and the tokenizer's chat-ending token; `ignore_eos: true` disables those stops for fixed-length throughput checks.
 
 The loader requires the 2B geometry and MLX affine 4-bit weights in groups of 64 with bf16 scales and
-biases. The head is the packed input embedding when the checkpoint ties it, or the checkpoint's own
+biases. In `capabilities --json`, `families.qwen3_5` is a union across the 2B and 27B engines,
+not a promise that every listed format loads at every geometry. For this 2B geometry, only `mlx-q4g64`
+is admitted; the other listed widths belong to the family's other engines. The head is the packed input embedding when the checkpoint ties it, or the checkpoint's own
 `language_model.lm_head` projection when it ships one; `config.json`'s `tie_word_embeddings` must
 agree with the tensors either way, and the head matmul reuses the embedding-shape pipeline either way.
 The vision tower is not loaded. Images, video, other model sizes and other quantization formats are outside
@@ -65,23 +67,21 @@ An M5 result does not establish correctness on those GPUs.
 
 ## Verification
 
-Install the repository's test dependencies in an isolated environment. The capture and trusted-forward
-checks also require the checkpoint's tokenizer and `mlx-lm`.
+Install the checks' Python dependency in an isolated environment. The trusted-forward check also requires
+the checkpoint's tokenizer and `mlx-lm`.
 
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[test,tui]'
-zig build test test-native check-generated -Dcpu=apple_m1
+python -m pip install mlx-lm
+zig build test test-native -Dcpu=apple_m1
 zig build tf-qwen35-check tf-qwen35-forward tf-qwen35-exact -Dcpu=apple_m1
-python tools/zig/capture_qwen35.py "$HOME/models/qwen35-2b" /tmp/qwen35-ops
-zig-out/bin/tf-qwen35-check "$HOME/models/qwen35-2b" /tmp/qwen35-ops
+zig-out/bin/tf-qwen35-check "$HOME/models/qwen35-2b"
 zig-out/bin/tf-qwen35-exact "$HOME/models/qwen35-2b"
 python tools/zig/qwen35_fidelity.py "$HOME/models/qwen35-2b" /tmp/qwen35-fidelity
-TENSORFOLD_QWEN35_MODEL="$HOME/models/qwen35-2b" python -m pytest -q tests
 ```
 
-Operation captures check binding and weight hashes with exact equality. The forward/cache sweep covers
+The forward/cache sweep covers
 attention chunk boundaries, partial acceptance followed by continuation, and unequal stream lengths.
 Model fidelity is separate: the tool reports teacher-forced NLL and top-token agreement on the public
 benchmark prompts, this repository's contribution guide and Python's standard library. Stock `mlx-lm`

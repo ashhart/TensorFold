@@ -2,10 +2,12 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
+const kp = @import("core").kv_prompts;
 const fw = @import("cuda_forward.zig");
 const state = @import("cuda_state.zig");
 const types = @import("cuda_engine_types.zig");
 const Engine = @import("cuda_engine.zig").Engine;
+const kv_host = @import("cuda_kv_host.zig");
 
 /// Table entries a sequence of `capacity` rows takes.
 pub fn tableLen(capacity: usize) usize {
@@ -15,8 +17,14 @@ pub fn tableLen(capacity: usize) usize {
 /// What a stream of engine `e` holds: its fixed part and table (and `extra`, its other buffers), 13,056 bytes a token.
 pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
     const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity));
-    const page = state.pageBytes(&e.w);
+    // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
+    const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
     return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
+}
+
+/// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
+pub fn shareSlot(e: *const Engine) u64 {
+    return e.stateBytes(e.capacity - e.capacity % @import("cuda_native.zig").snap_grid);
 }
 
 /// A request's need: its prompt, its reply and one last verify window.
@@ -45,12 +53,18 @@ pub const Pages = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
     layout: kv.Layout,
+    page: u64, // a page's bytes in its arena (TF_GLM_KV_HOST: the whole page, though the layout counts its keys)
     pool: kv.Pool, // rank 0 takes and gives back pages; the other ranks map the ids it sends
     arena: ?cuda.DeviceBuffer,
+    host: ?cuda.HostBuffer = null, // TF_GLM_KV_HOST: the pages in pinned host memory instead of `arena`
+    shared: ?kv_host.SharedPages = null, // TF_GLM_KV_HOST_SHARED: the same, one copy for the ranks on this host
+    host_ptr: u64 = 0,
+    pk_arena: ?cuda.DeviceBuffer = null, // TF_GLM_KV_HOST: the pooled keys' device pages
     leases: []kv.Lease, // slot i's: rank 0's lease, or the ids another rank mapped
     used: []bool,
     leader: bool,
     poison: bool, // TF_KV_POISON=1: a stream's pages start as NaN, so a row read before its write shows in the reply
+    prompts: ?kp.Prompts = null, // TF_KV_SHARE: the shared prompt store over this pool (rank 0's), from the server
 
     /// `streams` sequences from slot 0 on `pages` pages: the engine's own (`ownSequence`) placed, the others made now.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
@@ -58,11 +72,27 @@ pub const Pages = struct {
         if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
-        const page = l.pageBytes();
-        p.* = .{ .gpa = gpa, .e = e, .layout = l, .pool = try kv.Pool.init(gpa, pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
+        const page = if (kv_host.onHost()) state.pageBytes(&e.w) else l.pageBytes();
+        p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.init(gpa, pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
         errdefer p.pool.deinit();
-        if (pages > 0) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
+        const host = kv_host.onHost() and pages > 0;
+        if (pages > 0 and !host) p.arena = try cuda.DeviceBuffer.alloc(e.d, pages * page);
         errdefer if (p.arena) |*a| a.free();
+        if (host) {
+            if (kv_host.shared()) {
+                p.shared = try kv_host.SharedPages.open(e.d, pages * page, leader, e.share.world);
+                p.host_ptr = p.shared.?.dev;
+            } else {
+                p.host = try cuda.HostBuffer.allocMapped(e.d, pages * page);
+                p.host_ptr = try p.host.?.device();
+            }
+            p.pk_arena = try cuda.DeviceBuffer.alloc(e.d, pages * state.pkPageBytes(&e.w));
+            try kv_host.prepare(e.d, page, e.capacity, e.w.config.kv_lora * 2); // made before the room was read
+            std.log.info("kv host: {d} pages ({d} MiB) in pinned host memory, pooled keys {d} MiB on the device", .{ pages, pages * page >> 20, pages * state.pkPageBytes(&e.w) >> 20 });
+        }
+        errdefer if (p.host) |*h| h.free();
+        errdefer if (p.shared) |*h| h.close();
+        errdefer if (p.pk_arena) |*a| a.free();
         p.leases = try gpa.alloc(kv.Lease, streams);
         errdefer gpa.free(p.leases);
         @memset(p.leases, .{});
@@ -78,7 +108,11 @@ pub const Pages = struct {
             q.* = null;
         };
         errdefer cuda.completion.drain(e.d, e.stream, "GLM page construction did not drain");
-        const at = on(e, if (p.arena) |a| a.ptr else 0, page);
+        var at = on(e, p.base(), page);
+        if (p.pk_arena) |a| {
+            at.pk = a.ptr;
+            at.pk_page = state.pkPageBytes(&e.w);
+        }
         for (seqs) |*q| {
             if (q.* != null) return error.SlotTaken; // attach comes before any stream
             const s = try e.gpa.create(types.Seq);
@@ -102,6 +136,11 @@ pub const Pages = struct {
         return init(gpa, e, l, streams, pages, false);
     }
 
+    /// The pages' first byte as kernels address it (device arena or mapped host pages).
+    fn base(p: *const Pages) u64 {
+        return if (p.arena) |a| a.ptr else p.host_ptr;
+    }
+
     fn poisoned() bool {
         const v = std.c.getenv("TF_KV_POISON") orelse return false;
         return std.mem.eql(u8, std.mem.span(v), "1");
@@ -116,6 +155,9 @@ pub const Pages = struct {
         p.gpa.free(p.leases);
         p.gpa.free(p.used);
         if (p.arena) |*a| a.free();
+        if (p.host) |*h| h.free();
+        if (p.shared) |*h| h.close();
+        if (p.pk_arena) |*a| a.free();
         p.pool.deinit();
         p.gpa.destroy(p);
     }
@@ -179,11 +221,12 @@ pub const Pages = struct {
     /// The slot's sequence reaches its pages' rows (past the `kept` first, NaN first under TF_KV_POISON).
     fn mapped(p: *Pages, slot: u32, ids: []const u32, kept: usize) !void {
         const st = &p.e.seqs.items[slot].?.st;
-        const page = p.layout.pageBytes();
-        if (p.poison) for (ids[kept..]) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.arena.?.ptr + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
+        const page = p.page;
+        if (p.poison) for (ids[kept..]) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(p.base() + id * page, 0xFFFF_FFFF, page / 4, p.e.stream.handle), "cuMemsetD32Async");
         st.pages = ids;
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;
+        if (kv_host.active) |*g| try g.invalidate(p.e.stream); // the row cache may hold these pages' old rows
     }
 
     /// The stream on paged slot `slot` ended: its sequence reaches no rows, and rank 0's lease gives its pages back.
@@ -193,17 +236,18 @@ pub const Pages = struct {
         st.pages = &.{};
         st.capacity = 0;
         p.used[slot] = false;
+        if (kv_host.active) |*g| g.invalidate(p.e.stream) catch {};
         if (!p.leader) return p.leases[slot].ids.clearRetainingCapacity();
         p.pool.finish(&p.leases[slot]);
         for (p.used) |u| if (u) return;
         p.report();
     }
 
-    /// The idle server's line: nothing promised, every page free (the copy store holds none).
+    /// The idle server's line: nothing promised, every page free or, under TF_KV_SHARE, the store's.
     fn report(p: *const Pages) void {
         if (@import("builtin").is_test) return;
         const c = p.pool.census();
-        const ok = p.pool.idle() and c.free == c.total;
+        const ok = p.pool.idle() and (p.e.share_pages or c.free == c.total);
         std.log.info("kv pool idle{s}: promised {d}, free {d} + store {d} == total {d}", .{ if (ok) "" else " (UNEVEN)", c.promised, c.free, c.kept, c.total });
     }
 

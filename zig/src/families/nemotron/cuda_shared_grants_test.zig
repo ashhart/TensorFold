@@ -21,6 +21,7 @@ fn replay(model: lanes.Model, policy: bool, stale: bool) !Result {
     var costs: [16]lanes.config.Cost = undefined;
     for (&costs, 1..) |*c, row| c.* = .{ .width = @intCast(row), .ms = 5 + 0.2 * @as(f64, @floatFromInt(row)) };
     var m = model;
+    m.root_copies = false; // exercise head/copy allocation; root precedence bypasses this copy probe
     m.allocate_shared_drafts = policy;
     m.window_costs = &costs;
     var cfg = try lanes.Config.init(a, m, m.exact_width, m.drafts);

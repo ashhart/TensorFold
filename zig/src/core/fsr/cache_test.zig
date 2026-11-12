@@ -25,6 +25,33 @@ test "FSR CLOCK protects the whole incoming union before evicting early misses" 
     for (c.demand) |x| try std.testing.expect(!x);
 }
 
+test "FSR an expert used once leaves before one used again, and counts wear off" {
+    var c = try Cache.init(a, 8, 2);
+    defer c.deinit();
+    try fill(&c, &.{0}); // read, used once
+    c.release();
+    try fill(&c, &.{1});
+    c.release();
+    try fill(&c, &.{1}); // used again
+    c.release();
+    try fill(&c, &.{2}); // needs a slot: 0 leaves, 1 stays
+    c.release();
+    try std.testing.expect(try c.peek(0) == null);
+    try std.testing.expect(try c.peek(1) != null);
+    for (0..4) |_| {
+        // every miss wears 1 down: a burst of new experts displaces it however often it was used before
+        try fill(&c, &.{2});
+        c.release();
+    }
+    try fill(&c, &.{3});
+    c.release();
+    try fill(&c, &.{4});
+    c.release();
+    try fill(&c, &.{5});
+    c.release();
+    try std.testing.expect(try c.peek(1) == null);
+}
+
 test "FSR reads publish all components atomically and cannot replace leased consumers" {
     var c = try Cache.init(a, 4, 1);
     defer c.deinit();
@@ -81,24 +108,76 @@ test "FSR publishes into the borrowed GPU map and never frees its owner" {
     try std.testing.expectEqual(@as(i32, 17), map[0]);
 }
 
-test "FSR forecast cannot spend demand second chances or promote unused predictions" {
+test "FSR forecast cannot spend demand's counts or promote unused predictions" {
     var c = try Cache.init(a, 8, 3);
     defer c.deinit();
     try fill(&c, &.{ 0, 1, 2 });
+    c.release();
+    try fill(&c, &.{ 0, 1, 2 }); // used again: each holds a count
     c.release();
     const result = c.reserve(3, true);
     if (result) |ticket| {
         if (ticket) |t| try c.abort(t);
         return error.ForecastEvictedRecentDemand;
     } else |err| try std.testing.expectEqual(error.NoEvictableSlot, err);
-    for (c.slots) |s| try std.testing.expect(s.referenced);
-    try fill(&c, &.{3});
+    for (c.slots) |s| try std.testing.expectEqual(@as(u2, 1), s.uses);
+    try fill(&c, &.{3}); // demand's hand takes them off
     c.release();
     const predicted = (try c.reserve(4, true)).?;
     try c.publish(predicted);
-    try std.testing.expect(!c.slots[predicted.slot].referenced);
+    try std.testing.expectEqual(@as(u2, 0), c.slots[predicted.slot].uses);
     try std.testing.expect(try c.peek(4) != null);
-    try std.testing.expect(!c.slots[predicted.slot].referenced);
+    try std.testing.expectEqual(@as(u2, 0), c.slots[predicted.slot].uses);
     _ = try c.resident(4);
-    try std.testing.expect(c.slots[predicted.slot].referenced);
+    try std.testing.expectEqual(@as(u2, 1), c.slots[predicted.slot].uses);
+}
+
+test "FSR a forecast gives back the expert it displaced, unless that expert moved" {
+    var c = try Cache.init(a, 8, 2);
+    defer c.deinit();
+    try c.protect(&.{ 0, 1 });
+    for ([_]usize{ 0, 1 }) |k| try c.publish((try c.reserve(k, false)).?);
+    c.release();
+    for (c.slots) |*s| s.uses = 0;
+    const slot = c.map[0];
+    const unread = (try c.reserve(2, true)).?;
+    try std.testing.expectEqual(absent, c.map[0]);
+    try c.giveBack(unread);
+    try std.testing.expectEqual(slot, c.map[0]);
+    try std.testing.expectEqual(absent, c.map[2]);
+    try std.testing.expect(c.pending(2) == null and try c.peek(0) != null);
+    c.hand = 0;
+    const first = (try c.reserve(2, true)).?; // displaces 0
+    const moved = (try c.reserve(0, true)).?; // 0 is being read into the other slot
+    try c.giveBack(first);
+    try std.testing.expectEqual(absent, c.map[0]);
+    try std.testing.expectEqual(absent, c.map[2]);
+    try c.publish(moved);
+    try std.testing.expect(c.map[0] >= 0);
+    const empty = (try c.reserve(3, true)).?; // the empty slot: nothing to give back
+    try c.giveBack(empty);
+    try std.testing.expectEqual(absent, c.map[3]);
+}
+
+test "FSR occupancy, hits and evictions at a glance" {
+    var c = try Cache.init(a, 8, 2);
+    defer c.deinit();
+    try fill(&c, &.{0});
+    c.release();
+    try fill(&c, &.{1});
+    c.release();
+    var o = c.occupancy();
+    try std.testing.expectEqual(@as(usize, 2), o.held);
+    try std.testing.expectEqual(@as(usize, 2), o.capacity);
+    try std.testing.expectEqual(@as(u64, 0), o.evictions);
+    try std.testing.expectEqual(@as(u64, 0), o.hits);
+    // a resident hit, and one eviction when the third expert takes the last used-once slot
+    _ = try c.resident(0);
+    try fill(&c, &.{2});
+    c.release();
+    o = c.occupancy();
+    try std.testing.expectEqual(@as(usize, 2), o.held);
+    try std.testing.expectEqual(@as(u64, 1), o.evictions);
+    try std.testing.expectEqual(@as(u64, 1), o.hits);
+    try std.testing.expect(try c.peek(2) != null);
 }

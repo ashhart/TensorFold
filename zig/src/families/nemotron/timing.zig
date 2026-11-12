@@ -306,7 +306,12 @@ pub const RoundClock = struct {
     seen: usize = 0,
 
     pub fn clock(self: *RoundClock) lanes.backend.Clock {
-        return .{ .ptr = self, .vtable = &.{ .start = start, .elapsed_ms = elapsed } };
+        return .{ .ptr = self, .vtable = &.{ .start = start, .elapsed_ms = elapsed, .host_ns = hostNs } };
+    }
+
+    fn hostNs(ptr: *anyopaque) i128 {
+        const self: *RoundClock = @ptrCast(@alignCast(ptr));
+        return lanes.backend.WallClock.hostNs(&self.wall);
     }
 
     fn start(ptr: *anyopaque) void {

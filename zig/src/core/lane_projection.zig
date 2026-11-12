@@ -3,6 +3,8 @@ const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
+/// The tensor units' affine products by expert, beside the lane layouts (one module for their shared fragments).
+pub const affine_mm = @import("affine_mm.zig");
 
 pub const weight_layout = "u32[ceil(N/32)][K/group][32][group*bits/32], low-bit-first codes, columns past N zero";
 pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock order";
@@ -222,6 +224,7 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 
 pub const Projection = struct {
     pipe: mtl.Pipeline,
+    external_sums: bool = false,
     n: usize,
     k: usize,
     group_count: usize,
@@ -257,7 +260,7 @@ pub const Projection = struct {
             errdefer sums_pipe.?.deinit();
             sums_buffer = try device.buffer(@as(usize, if (l.reg) l.rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .max_rows = @intCast(if (l.reg) l.rows else 16) };
+        return .{ .pipe = p, .external_sums = l.precompute_sums and l.format.bits == 8 and l.format.group == 64 and !l.cooperative, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg, .max_rows = @intCast(if (l.reg) l.rows else 16) };
     }
 
     pub fn deinit(p: Projection) void {
@@ -271,9 +274,9 @@ pub const Projection = struct {
         return p.encodeImpl(e, x, w, sb, null, y, rows);
     }
 
-    /// The reg kernel on group sums its input's producer wrote (tf_lane_sums' order): no sums dispatch, no barrier.
+    /// Prepared group sums from the input producer: reg or 8-bit g64 lanes, with no sums dispatch or barrier.
     pub fn encodeSums(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, sums: Sums, y: Ref, rows: u32) !void {
-        if (!p.reg) return error.SumsNeedReg;
+        if (!p.reg and !p.external_sums) return error.PreparedSumsRequired;
         if (rows == 0 or rows > p.max_rows or sums.stride < rows) return error.InvalidRows;
         try checkRef(sums.ref, ((p.group_count - 1) * @as(usize, sums.stride) + rows) * 4, 4);
         return p.encodeImpl(e, x, w, sb, sums, y, rows);

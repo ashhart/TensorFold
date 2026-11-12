@@ -129,7 +129,10 @@ pub const Model = struct {
     /// What the host's pool plans: a stream's sliding rings and table row fixed, a token its full layers' rows.
     pub fn layout(m: *const Model) kv.Layout {
         const fixed: u64 = m.perSlot() * 4 + (m.layers - m.fullLayers()) * 2 * ring * m.geo.kvWidth() * 2;
-        return .{ .fixed_bytes = fixed, .token_bytes = m.pageBytes() / page_tokens, .page_tokens = page_tokens, .snap_bytes = 0 };
+        const row: u64 = 2 * m.geo.kvWidth() * 2; // K and V a layer, full and sliding alike
+        var l = kv.Layout.ofRows(.{ .kind = .full, .row = row, .layers = @intCast(m.fullLayers()) }, page_tokens, fixed, 0);
+        if (m.layers > m.fullLayers()) l.window = .{ .kind = .window, .row = row, .layers = @intCast(m.layers - m.fullLayers()) };
+        return l;
     }
 
     /// Slots a backend holds: the model's, or (paged) as many as a round takes.
@@ -448,4 +451,12 @@ test "a stream's caches: three rings of 1,024 a full layer's context" {
     try std.testing.expectEqual(@as(usize, 1024), ring);
     const one = Model.streamBytes(cfg.spark4b, 4, 4096);
     try std.testing.expectEqual(@as(usize, 2 * (3 * 1024 + 4096) * 1024 * 2), one);
+}
+
+test "a page's bytes: the pool's layout and the kernels' stride agree" {
+    var m: Model = undefined;
+    m.geo = cfg.spark4b;
+    m.layers = cfg.spark4b.layers;
+    m.context = 4096;
+    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
 }

@@ -158,6 +158,9 @@ test "Qwen share faults: a resume without a lane or a promise leaves the pages s
 }
 
 test "Qwen share faults: a keep whose swapped table fails to upload leaves the lane holding its own pages" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     var w: World = undefined;
     try w.init(t.allocator);
     // a second pass of the same prompt on its own pages: its keep at 4096 swaps in the store's

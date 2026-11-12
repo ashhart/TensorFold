@@ -5,7 +5,7 @@ const replay = @import("replay.zig");
 
 const Buf = replay.Buf;
 
-const source =
+pub const source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\kernel void tf_ple_scale(device bfloat* x [[buffer(0)]], constant float& s [[buffer(1)]],
@@ -87,8 +87,9 @@ test "the scale rounds each row value once to bf16 after the product, as bf16 ro
     try std.testing.expectEqualSlices(u16, want, x);
 }
 
-/// f32 to bf16, round to nearest even.
+/// f32 to bf16 as core's bf16_round.bits rounds (NaN stays NaN); a copy, the batch tests build core as a module.
 fn bf16(f: f32) u16 {
     const u: u32 = @bitCast(f);
-    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+    if (std.math.isNan(f)) return @truncate((u >> 16) | 0x40);
+    return @truncate((u +% 0x7fff +% ((u >> 16) & 1)) >> 16);
 }

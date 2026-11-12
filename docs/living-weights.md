@@ -8,6 +8,18 @@ It is not a prompt cache, a retrieval index or an adapter: each fact it keeps be
 model, written into the checkpoint's own safetensors files. Nothing the model already had is changed. It shipped in 1.0.3
 as Sliding Weights (experimental), and its flag and API use the name `slide`.
 
+## Repeating a lesson
+
+The same text and supplied questions can take different steps and choose different neurons on separate runs.
+The lesson writer generates extra question wordings at temperature 0.9, including when you supply questions.
+Sampled requests use a fresh random seed by default. The fitter also shuffles examples, with deterministic seeds
+from its round and pass counters; the lesson history affects those counters.
+
+For a repeatability check, start each run from fresh copies of the same checkpoint and graph. Use
+`--prompt-seed` to key sampled generations by their rendered prompt. Keep the build, backend, seed salt and settings fixed.
+This controls the writer's random seeds; it does not promise identical lessons across devices or builds.
+The acceptance checks still decide what is kept on every run.
+
 ## What you need
 
 - An Apple-silicon Mac (tested on an M5 Ultra and an M3 Ultra), or an NVIDIA GB10 (DGX Spark) with the CUDA build,
@@ -189,6 +201,31 @@ data. The page asks for the server's key once and keeps it for that browser tab.
 - The same with `-X DELETE` clears the graph. The weights keep what they learned. To take one fact out of the weights,
   see [Delete one fact](#delete-one-fact).
 
+## Audit a pocket
+
+`tensorfold slide audit --server http://127.0.0.1:8080 --key-stdin < ~/models/slide-key` explicitly measures what each
+learned fact's neurons fire on. Add `--json` for the complete machine-readable audit, or `--threshold 0.02` (a rate
+from 0 through 1) to flag an off-subject firing rate above 2% instead of the default 1%. The same request is
+`GET /v1/slide/graph?audit=1&threshold=0.02`; its response adds `audit` and keeps the existing graph fields.
+Ordinary graph requests do not run an audit, and audits require a pocket learner served with `--slide`.
+
+The four groups are the fact's questions, its subject in eight other contexts, the other learned facts' questions,
+and a fixed general bank of 256 prompts over 32 topics. Subject extraction is a heuristic from the fact and its
+questions; an empty subject means that group is unavailable. Questions are asked cold, without their saved
+conversation. Every group's prompt count and rate are reported, so missing coverage is visible.
+
+A prompt fires a neuron when its largest absolute activation over all rendered prompt rows exceeds `0.0001`.
+The audit reconstructs activations with the pocket's host math from a private snapshot of the live weights and the
+forward pass's BF16 layer inputs. It lists each neuron's group and overall firing rates, its off-subject rate,
+flag, and five strongest off-subject prompts with their activation and row. These are diagnostic flags, not a
+verdict that a fact is wrong. The probe bank and thresholds are versioned in the JSON.
+
+The engine reads one prompt per idle step; serving requests can run between prompts. A large audit can take time.
+Lessons and deletes wait until it finishes. No weights, lessons or checks change, no graph or shard is written,
+and the audit never saves, undoes or refits anything. Unsupported, overlong or incomplete measurements refuse
+instead of presenting a partial result as complete. Real-checkpoint activation and serving-parity gates are still
+required for a newly supported backend.
+
 ## Delete one fact
 
 ```sh
@@ -247,6 +284,34 @@ the shards are written.
 A kept fact passes when each answer that came back before the delete still does, and at least half of its other
 wordings do if they did before. The deleted fact passes when none of its questions gives its answer, or when the model
 as shipped gives that answer too (a likely guess, such as a common colour, is no trace of the fact).
+
+To delete a statement learned as several facts, select their IDs explicitly in one request:
+
+```sh
+curl -N -X DELETE http://127.0.0.1:8080/v1/slide/facts \
+  -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"ids": [1, 2], "reason": "duplicate statement"}'
+```
+
+`ids` must contain 1 to 256 distinct positive integer IDs. Every selected fact must exist and hold neurons; an invalid
+selection refuses the entire request before any cut. A fact left `deleting` can also be selected for retry. Graph
+links never select another fact: they are not proven dependencies. The selected neurons are silenced in one cut,
+then every selected fact must stop answering under the same shipped-model exception, and every retained fact must
+pass the same checks as for a single delete. Any regression restores the whole selection, with no shard save.
+The graph marks the selection `deleting` in one write, the shards save once, and the graph marks the selection
+`deleted` in one write. On a write failure, the same recovery rules above apply to all selected facts; retry with
+the same IDs. Each selected ID gets a final `forgot` event. Successful batch events include `selected` and
+`total_neurons`, the count for the whole selection. This operation silences the selected facts and does not rebuild
+an older value or scrub their unused output columns.
+For disjoint additive neurons whose retained weights never moved, silencing gives the same forward values as never
+teaching the selected rows. Refitted neighbours, replacements and shared quantization groups can retain history, so
+a delete does not promise byte equality to a separately trained folder. The retained-answer checks detect regressions
+on their questions; they do not prove equality for every possible prompt.
+
+Host qualification covers duplicate orientations refused one at a time but deleted together, a retained-answer
+regression restoring the whole cut, invalid selections, graph allocation/write failures, shard-write restoration,
+retry of the pending selection, and both HTTP routes with JSON bodies. Checkpoint qualification must repeat the
+duplicate and retained-fact cases on each backend after save and restart.
 
 - A fact a newer one replaced has its neurons at zero already: deleting it answers "nothing to delete" and changes
   nothing. Deleting the newer fact does not bring back the one it replaced.
@@ -403,3 +468,41 @@ If the fact does not come back, or another answer changes, the whole lesson is t
 It also asks a few questions about the user that nothing told it, such as a cat's name or the user's own name; a lesson
 that makes it answer one with something made up ("Your cat's name is Whiskers.") is taken out too. Keep the original
 model for anything that matters.
+
+
+### Fixed drift and supplied recall
+
+With `--slide --slide-drift-gate`, each candidate that reaches the commit checks is measured against `server/slide_panel.zig`:
+115 original unrelated prompts, 15 untold personal controls and 20 fictional neighbour questions.
+This is a new fixed panel, not the reporter's unavailable 155-question panel.
+The graph records the untaught replies and token SHA-256 hashes once. Every later candidate checks
+that the untaught replies still match that baseline. It never substitutes the previous taught reply.
+Greedy replies use 64 tokens with thinking off; where supported, a separate bounded thinking pass is recorded.
+Changed unrelated replies are classified as byte-equal, alike, judged the same, or changed in meaning.
+
+Supply fixed external recall wordings separately from the writer's `questions`:
+
+```json
+{"text":"I like blue.","recall":[{"fact":"I like blue.","question":"Which shade do I favour?","answer":"blue"}]}
+```
+
+`fact` must match an extracted fact exactly and `answer` must occur in it. These wordings never go to
+the writer. A wording that the generated training plan also reads makes the measurement incomplete.
+The graph's `facts[].recall` and `facts[].evaluation` retain the external set and per-lesson receipt;
+`drift_baseline` retains the original replies. Early refusals are explicitly `not_measured`.
+Measured refusals keep their candidate receipt even after the fitted lesson is taken out.
+
+`--slide --slide-drift-gate` adds an opt-in commit gate, after every existing acceptance check.
+Missing external recall, a changed baseline/profile, an incomplete panel or a failed receipt write refuses.
+The hard limits are zero invented personal answers, zero leaks, at most two meaning changes before ten
+kept facts and at most five from ten onward, plus 90% supplied recall and, from ten facts, 90% earlier-fact retention.
+Drift uses the worst of three greedy passes and recall the median. Thinking recall is reported separately.
+Byte-equality targets (103/115 after three facts, 92/115 after ten) remain report-only.
+Without the flag, `recall` is ignored and no fixed-panel requests, receipt writes or new graph fields are added.
+An earlier fact without supplied recall and a complete receipt makes the next measurement incomplete.
+To enable the gate over an existing graph, delete facts missing those records, then re-teach them with the gate
+and external wordings enabled.
+
+These three passes observe one fitted candidate. They do not replace the release experiment's three
+fresh-checkpoint lesson sequences. Full-model results, keep rates and measurement cost on every backend
+remain unchecked; no family is qualified by the host fixtures.

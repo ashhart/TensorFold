@@ -1,5 +1,8 @@
-//! Dense Qwen text shapes, layer schedule, rotary metadata and ordered checkpoint EOS ids.
+//! Qwen3.5-class text shapes (dense or routed), layer schedule, rotary metadata and ordered checkpoint EOS ids.
 const std = @import("std");
+const layer_pattern = @import("qwen35_layers");
+const rules = @import("qwen35_rules");
+const rope_config = @import("rope_config");
 
 pub const Kind = enum { linear, attention };
 pub const max_layers = 128;
@@ -30,6 +33,17 @@ pub const Config = struct {
     rank: u32 = 0,
     ranks: u32 = 1,
     split_attention: bool = false,
+    /// Routed experts (qwen3_5_moe): their count and the picks a row makes; 0: a dense MLP of `intermediate`.
+    experts: usize = 0,
+    top_k: usize = 0,
+    /// A routed expert's width; `intermediate` is then the shared expert's (the same, as the CUDA family requires).
+    moe_intermediate: usize = 0,
+    /// Whether a row's top-k softmax weights are renormalized to sum to one (`norm_topk_prob`).
+    renorm: bool = false,
+
+    pub fn moe(c: Config) bool {
+        return c.experts != 0;
+    }
 
     pub fn kind(c: Config, layer: usize) Kind {
         return c.kinds[layer];
@@ -176,6 +190,8 @@ pub const Mode = enum { full, mlp };
 /// Split the even dimensions: heads, GQA groups, GDN heads, MLP width and vocabulary; embeddings and norms stay whole.
 pub fn split(c: *Config, rank: u32, ranks: u32, mode: Mode) !Shard {
     if (ranks < 2 or ranks > 8 or rank >= ranks) return error.BadShard;
+    // routed experts are one Mac's only: no rank split of the experts or the router is qualified
+    if (c.moe()) return error.BadShard;
     if (c.intermediate % ranks != 0 or c.vocab % ranks != 0) return error.BadShard;
     if (mode == .full and (c.heads % ranks != 0 or c.kv_heads % ranks != 0 or c.k_heads % ranks != 0 or c.v_heads % ranks != 0 or c.hidden % ranks != 0)) return error.BadShard;
     const global = c.*;
@@ -229,11 +245,6 @@ fn optional(o: std.json.ObjectMap, key: []const u8, fallback: f64) !f64 {
     return if (v == .null) fallback else number(v);
 }
 
-fn flag(o: std.json.ObjectMap, key: []const u8) !bool {
-    const v = o.get(key) orelse return false;
-    return if (v == .bool) v.bool else error.BadConfig;
-}
-
 fn eos(c: *Config, v: std.json.Value) !void {
     if (v == .null) return;
     if (v == .array) {
@@ -267,30 +278,29 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
     const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
-    if (model != .string or (!std.mem.eql(u8, model.string, "qwen3_5") and !std.mem.eql(u8, model.string, "qwen3_5_text"))) return error.NotQwenDense;
-    if (t.get("num_experts")) |v| if (try integer(v, true) != 0) return error.NotQwenDense;
-    if (try flag(root, "tie_word_embeddings") or try flag(t, "tie_word_embeddings")) return error.TiedEmbeddingHead;
-    if (t.get("attn_output_gate")) |v| if (v != .bool or !v.bool) return error.UnsupportedAttentionGate;
-    inline for (.{ .{ "hidden_act", "silu" }, .{ "output_gate_type", "swish" }, .{ "linear_attn_state_dtype", "float32" } }) |entry| {
-        if (t.get(entry[0])) |v| if (v != .string or !std.mem.eql(u8, v.string, entry[1])) return error.UnsupportedActivation;
-    }
+    const kinds_of = [_][]const u8{ "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text" };
+    if (model != .string) return error.NotQwenDense;
+    const routed = for (kinds_of, 0..) |k, i| {
+        if (std.mem.eql(u8, model.string, k)) break i >= 2;
+    } else return error.NotQwenDense;
+    const experts = if (t.get("num_experts")) |v| try integer(v, true) else 0;
+    if (routed != (experts != 0)) return error.NotQwenDense;
+    if (try rules.tied(root, t, .metal27)) return error.TiedEmbeddingHead;
+    try rules.check(t, .metal27);
     const heads = try required(t, "num_attention_heads");
     const hidden = try required(t, "hidden_size");
     const head_dim = if (t.get("head_dim")) |v| blk: {
         if (v == .null or (v == .integer and v.integer == 0)) break :blk hidden / heads;
         break :blk try integer(v, false);
     } else hidden / heads;
-    const rope = if (t.get("rope_parameters")) |v| (if (v == .null) null else try object(v)) else null;
-    // the kernels rope with theta alone: a scaled rope would run as plain rope, so it is refused by name
-    if (t.get("rope_scaling") orelse root.get("rope_scaling")) |v| if (v != .null) return error.UnsupportedRopeScaling;
-    if (rope) |r| for ([_][]const u8{ "rope_type", "type" }) |key| if (r.get(key)) |v| {
-        if (v != .string or !std.mem.eql(u8, v.string, "default")) return error.UnsupportedRopeScaling;
-    };
+    const rope = rope_config.params(t) catch return error.BadConfig;
+    // theta alone: a scaled rope (rope_scaling from the tower when it has the key, else the root) runs as plain rope
+    if (rope_config.typed(rope) != null or rope_config.legacy(if (t.contains("rope_scaling")) t else root)) return error.UnsupportedRopeScaling;
     const factor = if (rope) |r| try optional(r, "partial_rotary_factor", try optional(t, "partial_rotary_factor", 0.25)) else try optional(t, "partial_rotary_factor", 0.25);
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
         .hidden = hidden,
-        .intermediate = try required(t, "intermediate_size"),
+        .intermediate = if (routed) try required(t, "shared_expert_intermediate_size") else try required(t, "intermediate_size"),
         .layers = try required(t, "num_hidden_layers"),
         .vocab = try required(t, "vocab_size"),
         .heads = heads,
@@ -305,6 +315,14 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
         .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
     };
+    if (routed) {
+        c.experts = experts;
+        c.top_k = try required(t, "num_experts_per_tok");
+        c.moe_intermediate = try required(t, "moe_intermediate_size");
+        // absent means true, as Qwen3.5-MoE's reference config and the CUDA family read it
+        c.renorm = if (t.get("norm_topk_prob")) |v| (if (v == .bool) v.bool else return error.BadConfig) else true;
+        if (c.experts > 256 or c.top_k >= c.experts or c.top_k > 15 or c.moe_intermediate != c.intermediate) return error.UnsupportedRouting;
+    }
     if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
@@ -316,16 +334,9 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         if (v != .array or v.array.items.len != 3) return error.BadConfig;
         for (v.array.items, 0..) |x, i| c.mrope_section[i] = try integer(x, true);
     };
-    if (t.get("layer_types")) |v| {
-        if (v != .array or v.array.items.len != c.layers) return error.BadConfig;
-        for (v.array.items, 0..) |x, i| {
-            if (x != .string) return error.BadConfig;
-            c.kinds[i] = if (std.mem.eql(u8, x.string, "linear_attention")) .linear else if (std.mem.eql(u8, x.string, "full_attention")) .attention else return error.UnsupportedLayer;
-        }
-    } else {
-        const interval = if (t.get("full_attention_interval")) |v| try integer(v, false) else 4;
-        for (c.kinds[0..c.layers], 0..) |*k, i| k.* = if ((i + 1) % interval == 0) .attention else .linear;
-    }
+    var full: [max_layers]bool = undefined;
+    try layer_pattern.read(full[0..c.layers], t);
+    for (c.kinds[0..c.layers], full[0..c.layers]) |*k, f| k.* = if (f) .attention else .linear;
     if (root.get("eos_token_id") orelse t.get("eos_token_id")) |v| try eos(&c, v);
     if (generation) |text| {
         const gen = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});

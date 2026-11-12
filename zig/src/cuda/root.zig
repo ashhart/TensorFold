@@ -1,7 +1,9 @@
 //! TensorFold's CUDA runtime: the driver, cuBLASLt and NCCL through dlopen, our kernels and Triton's, no Python.
 
+pub const sm120_test_override = @import("sm120_test_override.zig");
 pub const abi = @import("abi.zig");
 pub const Driver = @import("driver.zig").Driver;
+pub const priority_copies = @import("priority_copies.zig");
 pub const copy_source = @import("copy_source.zig");
 pub const completion = @import("completion.zig");
 pub const paging_test_device = if (@import("builtin").is_test) @import("paging_test_device.zig") else struct {};
@@ -10,6 +12,7 @@ pub const Context = @import("context.zig").Context;
 pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 pub const HostBuffer = @import("memory.zig").HostBuffer;
 pub const memory = @import("memory.zig");
+pub const download_stage = @import("download_stage.zig");
 pub const memory_receipt = @import("memory_receipt.zig");
 pub const setAllocationLimit = @import("memory.zig").setAllocationLimit;
 pub const usage = @import("memory.zig").usage;
@@ -31,6 +34,7 @@ pub const roce = @import("roce.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
+pub const qmmf_shared = @import("qmmf_shared.zig");
 pub const qmmf = @import("qmmf.zig");
 pub const fp8 = @import("fp8.zig");
 pub const mxfp8 = @import("mxfp8.zig");
@@ -47,15 +51,19 @@ pub const route_rows = @import("route_rows.zig");
 pub const vit = @import("vit.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const act_rows = @import("act_rows.zig");
+pub const kda = @import("kda.zig");
 pub const gdn_prep = @import("gdn_prep.zig");
 pub const qk_rows = @import("qk_rows.zig");
 pub const experts = @import("experts.zig");
+pub const experts32 = @import("experts32.zig");
 pub const experts_waves = @import("experts_waves.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
 pub const relay_plan = @import("relay_plan.zig");
 pub const tp_group = @import("tp_group.zig");
 pub const tp_watch = @import("tp_watch.zig");
+pub const startup_log = @import("startup_log.zig");
+pub const startup_watch = @import("startup_watch.zig");
 pub const p2p_report = @import("p2p_report.zig");
 pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
@@ -63,6 +71,7 @@ pub const tree_attention = @import("tree_attention.zig");
 pub const block_attention = @import("block_attention.zig");
 pub const window_attention = @import("window_attention.zig");
 pub const moe_glue = @import("moe_glue.zig");
+pub const mla = @import("mla.zig");
 pub const dense_rows = @import("dense_rows.zig");
 pub const exl3 = @import("exl3.zig");
 pub const exl3_experts = @import("exl3_experts.zig");
@@ -75,16 +84,21 @@ pub const pack = @import("pack.zig");
 pub const graph_cache = @import("graph_cache.zig");
 
 test {
+    _ = priority_copies;
     _ = nccl;
     _ = @import("p2p_nvml.zig");
     _ = @import("p2p_probe.zig");
     _ = @import("p2p_nccl_log_test.zig");
+    _ = startup_log;
+    _ = startup_watch;
     _ = @import("p2p_report_test.zig");
     _ = exl3_grouped;
+    _ = kda;
     _ = gdn_train;
     _ = train_q4;
     _ = train_attn;
     _ = @import("memory.zig");
+    _ = @import("download_stage_test.zig");
     _ = memory_receipt;
     _ = @import("grouped.zig");
     _ = @import("qlinear.zig");
@@ -99,6 +113,7 @@ test {
     _ = @import("qk_rows.zig");
     _ = @import("exl3_candidate.zig");
     _ = @import("experts.zig");
+    _ = @import("experts32.zig");
     _ = @import("experts_waves.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");
@@ -110,6 +125,7 @@ test {
     _ = aot;
     _ = segments;
     _ = @import("qmmf.zig");
+    _ = @import("qmmf_shared.zig");
     _ = @import("fp8.zig");
     _ = @import("mxfp8.zig");
     _ = carveout;
@@ -126,6 +142,7 @@ test {
     _ = @import("block_attention.zig");
     _ = @import("window_attention.zig");
     _ = @import("moe_glue.zig");
+    _ = @import("mla.zig");
     _ = @import("dense_rows.zig");
 }
 
@@ -153,6 +170,7 @@ test {
     _ = @import("graph_registry.zig");
     _ = @import("graph_cache_regression_test.zig");
     _ = @import("graph_cache_ranks_test.zig");
+    _ = @import("graph_cache_shapes_test.zig");
     _ = exl3.block.dense;
     _ = exl3.block.experts;
     _ = exl3.block.lin2;

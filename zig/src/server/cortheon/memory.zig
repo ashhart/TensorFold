@@ -91,6 +91,23 @@ pub fn text(a: Allocator, m: Value) Allocator.Error![]const u8 {
     return if (buf.items.len > 0) buf.items else one orelse "";
 }
 
+/// How many bytes `text` would return: the content string, or the text parts joined.
+pub fn textLen(m: Value) usize {
+    const c = m.get("content") orelse return 0;
+    if (c == .string) return c.string.len;
+    if (c != .array) return 0;
+    var n: usize = 0;
+    for (c.array) |part| {
+        if (part != .object) continue;
+        const kind = part.get("type") orelse continue;
+        if (kind != .string or !std.mem.eql(u8, kind.string, "text")) continue;
+        const t = part.get("text") orelse continue;
+        if (t != .string) continue;
+        n += t.string.len;
+    }
+    return n;
+}
+
 /// Folds `s` into `h` with runs of whitespace as one space and the ends trimmed, as clients reshape whitespace.
 fn foldText(h: *std.hash.Wyhash, s: []const u8) void {
     var space = false;

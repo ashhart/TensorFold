@@ -21,6 +21,8 @@ pub const Table = struct { gfx: []const u8, rows: []const Row };
 /// The table a .zon document of `gfx` and `entries` describes.
 pub fn build(comptime zon: anytype) Table {
     const rows = comptime blk: {
+        // each row compares every field's name: the default quota stops near 30 rows
+        @setEvalBranchQuota(1000 + 100 * zon.entries.len * @typeInfo(Row).@"struct".field_names.len);
         var out: [zon.entries.len]Row = undefined;
         for (zon.entries, 0..) |e, i| {
             var row: Row = .{ .id = e.id, .cost = e.cost };

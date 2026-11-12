@@ -129,6 +129,10 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
     for (list) |d| {
         const l = try launchOf(a, device, d);
         const control = std.mem.startsWith(u8, d.name, "control");
+        if (l.pre_m5.len == 0) {
+            std.debug.print("UNSUPPORTED offline {s}: the loader has no M1/M2 library; coverage unchecked\n", .{d.name});
+            continue;
+        }
         if (d.unbuildable) {
             std.debug.print("SKIP offline {s}: air-tt refuses this pipeline for M1/M2; {d} threads a group unmeasured there\n", .{ d.name, d.threads });
             continue;

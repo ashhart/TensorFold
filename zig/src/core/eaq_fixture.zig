@@ -36,6 +36,8 @@ pub const Tamper = enum {
     dictionaries_empty, // no dictionary declared; the trellis entry still names one
     entry_duplicate, // two entries share a name
     empty, // no shards and no entries: a consistent, empty pack
+    header_past_file, // the first shard's header length runs one byte past its file
+    header_max, // the first shard's header length is 2^64 - 1
 };
 
 const Spec = struct { name: []const u8, dtype: []const u8, shape: []const u8, bytes: usize };
@@ -123,6 +125,8 @@ pub fn write(gpa_in: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, t: Tamper, 
     const entries = try std.fmt.allocPrint(gpa, "[{s},{s}]", .{ head_entry, norm_entry });
     const inline_entries = t != .entries_in_header and t != .entries_absent;
     const img1 = try image(gpa, specs1, if (t == .entries_in_header) try std.fmt.allocPrint(gpa, "[{s}]", .{head_entry}) else null);
+    if (t == .header_past_file) std.mem.writeInt(u64, img1[0..8], img1.len - 7, .little);
+    if (t == .header_max) std.mem.writeInt(u64, img1[0..8], std.math.maxInt(u64), .little);
     const img2 = try image(gpa, &s2, if (t == .entries_in_header) try std.fmt.allocPrint(gpa, "[{s}]", .{norm_entry}) else null);
     const dict_name = if (t == .dictionary_id) "exl3.made.up" else shape.dictionary;
     const dicts = if (t == .dictionaries_empty) "{}" else try std.fmt.allocPrint(gpa, "{{\"{s}\":{{\"table_sha256\":\"{s}\"}}}}", .{ dict_name, dict_hash });

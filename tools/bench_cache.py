@@ -12,7 +12,8 @@ from bench_auth import read_api_key, redact
 
 FIELDS = ("prompt_tokens", "cached_tokens", "tokens", "cache_state", "complete", "token_sha", "token_sha256",
           "output_sha256", "ttft_s", "decode_tps", "error", "unmeasured", "elapsed_s",
-          "chunk_offsets_s", "chunk_gaps_ms")
+          "chunk_offsets_s", "chunk_gaps_ms", "completion", "headers_s", "first_payload_s", "first_output_s",
+          "last_output_s", "tool_calls", "tool_sha256")
 
 
 def receipt(run, phase, reference=None):
@@ -26,8 +27,8 @@ def receipt(run, phase, reference=None):
 
 
 def qualify(rows, expected=None, require_cold=False, require_reuse=False):
-    """An assertion needs affirmative usage evidence; unknown cache state cannot satisfy it."""
-    if not rows or any(r.get("error") or not r.get("complete") or not r.get("tokens") for r in rows):
+    """Qualification needs observed output and affirmative evidence for each requested assertion."""
+    if not rows or any(r.get("error") or not r.get("complete") or not r.get("tokens") or not r.get("output_sha256") for r in rows):
         return False
     if any(r.get("equal_first_tokens") is False or r.get("equal_first_output") is False for r in rows):
         return False

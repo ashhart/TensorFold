@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's weights in the Python family's layout (stacked projections and experts, repacked mixes), read by parallel preads.
+//! Weights in the Python family's layout (stacked projections and experts, repacked mixes), read by parallel preads.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -536,12 +536,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
         quant.say("glm: this checkpoint has widths other than 4/64; the pair's split kernels read only 4/64 (load it on one Mac)", .{});
         return error.UnsupportedWidth;
     }
-    if (dry) {
-        var buf: [256]u8 = undefined;
-        const widths = tally(w, c).summary(&buf);
-        std.debug.print("glm plan: {d} of {d} layers{s}, {d:.2} GB in buffers, every tensor's name, dtype and shape checked; {s}\n", .{ c.run, c.layers, if (has_mtp) " and the MTP layer" else "", @as(f64, @floatFromInt(w.bytes)) / 1e9, widths });
-        return w;
-    }
+    if (dry) return w;
     try load_fix.runCopies(gpa, l.shards.items, l.copies.items, l.transforms.items, threads);
     return w;
 }

@@ -88,6 +88,8 @@ pub const Backend = struct {
     pub const VTable = struct {
         /// After prompt work, synchronously write full-width vectors into the caller's host output before release.
         embedding: ?*const fn (*anyopaque, *Stream, []f32) anyerror!void = null,
+        /// After a readout's prompt work, write its BF16 logits into the request's slice; its state goes at release.
+        readout_finish: ?*const fn (*anyopaque, *Stream, []u16) anyerror!void = null,
         /// Prefill the stream's prompt into its caches (and its draft head's).
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One prompt-pass chunk of at most `max_rows` rows when capped (0: uncapped); null: the pass runs whole.
@@ -131,6 +133,8 @@ pub const Backend = struct {
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// One logit per label at the row after `prompt` and, when `mass`, the vocabulary's logsumexp (decisions).
         score: ?*const fn (ptr: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, mass: bool) anyerror!f64 = null,
+        /// Each branch's label logits at trunk ++ branch's last row (Engine.decide); Refused names its `problem`.
+        decide: ?*const fn (ptr: *anyopaque, trunk: []const u32, branches: []const []const u32, counts: []const usize, labels: []const u32, logits: []f64, problem: *[]const u8) anyerror!void = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
         first_masked: ?*const fn (ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 = null,
         /// The stream's held drafts as host tokens in window order, waiting for the draft (a grammar walks them).
@@ -228,6 +232,9 @@ pub const Clock = struct {
     pub const VTable = struct {
         start: *const fn (ptr: *anyopaque) void,
         elapsed_ms: *const fn (ptr: *anyopaque, mark: Mark) f64,
+        host_ns: ?*const fn (ptr: *anyopaque) i128 = null,
+        /// The optional host reader can be called by independent grammar workers.
+        parallel_host_ns: bool = false,
     };
 
     pub fn start(c: Clock) void {
@@ -244,7 +251,12 @@ pub const WallClock = struct {
     started: std.Io.Timestamp = .zero,
 
     pub fn clock(w: *WallClock) Clock {
-        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn } };
+        return .{ .ptr = w, .vtable = &.{ .start = startFn, .elapsed_ms = elapsedFn, .host_ns = hostNs, .parallel_host_ns = true } };
+    }
+
+    pub fn hostNs(ptr: *anyopaque) i128 {
+        const w: *WallClock = @ptrCast(@alignCast(ptr));
+        return std.Io.Clock.awake.now(w.io).toNanoseconds();
     }
 
     fn startFn(ptr: *anyopaque) void {

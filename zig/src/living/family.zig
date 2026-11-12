@@ -53,6 +53,18 @@ pub const Keys = struct {
 /// Which layers have a shared expert: those a layer pattern marks MoE, or every layer.
 pub const Experts = enum { pattern, every };
 
+/// Quantized matrices read by a native family, in its loader's admission order.
+pub const Widths = struct {
+    embedding: []const u8,
+    head: []const u8,
+    mixer: []const u8,
+    aliases: []const []const u8 = &.{},
+    residuals: []const []const u8 = &.{},
+    mamba: []const []const u8 = &.{},
+    attention: []const []const u8 = &.{},
+    expert: []const []const u8 = &.{},
+};
+
 pub const Family = struct {
     model_type: []const u8,
     names: Names,
@@ -60,6 +72,7 @@ pub const Family = struct {
     quant: Quant,
     keys: Keys,
     experts: Experts,
+    widths: ?Widths = null,
     /// Pocket neurons at each layer: a whole number of quantization groups.
     neurons: usize = 64,
 

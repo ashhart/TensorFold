@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
+#include "common/qmm_frag.cuh"
 
 #define TF_FULL 0xFFFFFFFFu
 
@@ -92,9 +93,7 @@ __device__ __forceinline__ void tf_exl3_store(uint8_t* y, uint64_t at, float v, 
 
 // Prompt rows on the tensor units: fp16 A and B fragments, fp32 sums.
 __device__ __forceinline__ void tf_exl3_mma(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
-  asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
-      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
-      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+  qmm_frag::mma_f16(d, a, b0, b1);
 }
 
 __device__ __forceinline__ uint32_t tf_exl3_pair(__half lo, __half hi) {

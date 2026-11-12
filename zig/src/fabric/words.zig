@@ -139,7 +139,7 @@ pub const Library = struct {
         return .{ .ptr = l, .store_fn = libStore, .wait_fn = libWait };
     }
 
-    /// A Metal buffer (id<MTLBuffer>) aliasing page-aligned `memory`, so the GPU reads what the NIC wrote; null without one.
+    /// A Metal id<MTLBuffer> aliasing page-aligned `memory`, so the GPU reads what the NIC wrote; null without one.
     pub fn metalWrap(l: *const Library, memory: []align(std.heap.page_size_min) u8) ?*anyopaque {
         const wrap = l.metal_wrap orelse return null;
         const contents = l.metal_contents orelse return null;
@@ -181,5 +181,8 @@ test "native waits follow the library's sequence rule" {
 }
 
 test "a missing library is reported, not guessed" {
+    const log_level = std.testing.log_level;
+    std.testing.log_level = .err;
+    defer std.testing.log_level = log_level;
     try std.testing.expectError(error.McdmaRpcUnavailable, Library.openPath("/nonexistent/libmcdma-rpc.dylib"));
 }

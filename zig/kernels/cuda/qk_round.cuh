@@ -26,7 +26,7 @@ __device__ __forceinline__ float inv_rms(float x, int dim, float eps) {
     __syncthreads();
     float s = 0.f;
     for (int w = 0; w < dim / 32; ++w) s = __fadd_rn(s, warps[w]);
-    return __fdiv_rn(1.f, __fsqrt_rn(__fadd_rn(__fdiv_rn(s, static_cast<float>(dim)), eps)));
+    return tf_common::rms_scale(s, dim, eps);
 }
 
 // A normed value: w * bf16(x * inv) with ROW, else (x * inv) * w; rounded to bf16 with OUT.

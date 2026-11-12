@@ -68,33 +68,67 @@ test "FSR failed component cannot publish an expert or overwrite an owned consum
     try std.testing.expectError(error.ActiveUnionExceedsPool, s.demand(&.{ 0, 1, 2 }));
 }
 
-test "FSR demand waits for its forecast reads and cancels unrelated reads between experts" {
-    const Gate = struct {
-        data: [6 * 36]u8 = @splat(7),
-        enabled: bool = false,
-        entered: std.atomic.Value(bool) = .init(false),
-        release: std.atomic.Value(bool) = .init(false),
-        bytes: usize = 0,
-        pub fn fileSize(s: *@This(), _: usize) !u64 {
-            return s.data.len;
+const Gate = struct {
+    data: [6 * 36]u8 = @splat(7),
+    enabled: bool = false,
+    entered: std.atomic.Value(bool) = .init(false),
+    release: std.atomic.Value(bool) = .init(false),
+    bytes: std.atomic.Value(usize) = .init(0),
+    pub fn fileSize(s: *@This(), _: usize) !u64 {
+        return s.data.len;
+    }
+    pub fn readAt(s: *@This(), _: usize, dst: []u8, at: u64) !usize {
+        if (s.enabled and !s.entered.swap(true, .acq_rel)) {
+            while (!s.release.load(.acquire)) std.Thread.yield() catch {};
         }
-        pub fn readAt(s: *@This(), _: usize, dst: []u8, at: u64) !usize {
-            if (s.enabled and !s.entered.swap(true, .acq_rel)) {
-                while (!s.release.load(.acquire)) std.Thread.yield() catch {};
-            }
-            @memcpy(dst, s.data[@intCast(at)..][0..dst.len]);
-            s.bytes += dst.len;
-            return dst.len;
-        }
-    };
-    const Owned = arena.Arena(*Gate);
+        @memcpy(dst, s.data[@intCast(at)..][0..dst.len]);
+        _ = s.bytes.fetchAdd(dst.len, .monotonic);
+        return dst.len;
+    }
+};
+const Owned = arena.Arena(*Gate);
+
+test "FSR demand doesn't wait for a forecast read it doesn't need, and reads the rest itself" {
+    var source: Gate = .{};
+    const ex = experts();
+    var memory: [9][6 * 4]u8 = undefined;
+    var slabs: [9][]u8 = undefined;
+    for (&slabs, &memory) |*dst, *src| dst.* = src;
+    var s = try Owned.init(std.testing.allocator, &source, &ex, @splat(4), slabs);
+    defer s.deinit();
+    try s.demand(&.{0});
+    source.enabled = true;
+    source.bytes.store(0, .monotonic);
+    try s.forecast(&.{ 1, 2, 3, 4, 5 });
+    defer source.release.store(true, .release);
+    while (!source.entered.load(.acquire)) std.Thread.yield() catch {};
+    // the worker is held inside expert 1's read, and this returns all the same
+    try s.demand(&.{3});
+    try std.testing.expect(s.clock.map[3] >= 0);
+    try std.testing.expect(s.readingAhead());
+    try std.testing.expectEqual(@as(i32, -1), s.clock.map[1]);
+    // no second forecast starts on top of the read still under way
+    try s.forecast(&.{4});
+    try std.testing.expect(s.clock.pending(4) == null and s.clock.map[4] < 0);
+    source.release.store(true, .release);
+    try s.join();
+    try std.testing.expect(!s.readingAhead());
+    try std.testing.expect(s.clock.map[1] >= 0 and s.clock.map[3] >= 0);
+    try std.testing.expectEqual(@as(usize, 72), source.bytes.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 4), s.cancelled_forecasts);
+    for ([_]usize{ 2, 4, 5 }) |key| try std.testing.expect(s.clock.map[key] < 0 and s.clock.pending(key) == null);
+}
+
+test "FSR demand waits for the forecast read it needs" {
     const Request = struct {
         pool: *Owned,
         failure: ?anyerror = null,
-        fn run(s: *@This()) void {
-            s.pool.demand(&.{3}) catch |err| {
-                s.failure = err;
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(r: *@This()) void {
+            r.pool.demand(&.{1}) catch |err| {
+                r.failure = err;
             };
+            r.done.store(true, .release);
         }
     };
     var source: Gate = .{};
@@ -106,18 +140,45 @@ test "FSR demand waits for its forecast reads and cancels unrelated reads betwee
     defer s.deinit();
     try s.demand(&.{0});
     source.enabled = true;
-    source.bytes = 0;
-    try s.forecast(&.{ 1, 2, 3, 4, 5 });
-    errdefer source.release.store(true, .release);
+    source.bytes.store(0, .monotonic);
+    try s.forecast(&.{ 1, 2 });
+    defer source.release.store(true, .release);
     while (!source.entered.load(.acquire)) std.Thread.yield() catch {};
     var request: Request = .{ .pool = &s };
     const caller = try std.Thread.spawn(.{}, Request.run, .{&request});
-    while (!s.urgent.load(.acquire)) std.Thread.yield() catch {};
+    while (!s.stopped) std.Thread.yield() catch {};
+    try std.testing.expect(!request.done.load(.acquire));
     source.release.store(true, .release);
     caller.join();
     try std.testing.expect(request.failure == null);
-    try std.testing.expectEqual(@as(usize, 72), source.bytes);
-    try std.testing.expectEqual(@as(u64, 3), s.cancelled_forecasts);
-    try std.testing.expect(s.clock.map[1] >= 0 and s.clock.map[3] >= 0);
-    for ([_]usize{ 2, 4, 5 }) |key| try std.testing.expect(s.clock.map[key] < 0 and s.clock.pending(key) == null);
+    try std.testing.expect(s.clock.map[1] >= 0);
+    try std.testing.expectEqual(@as(usize, 36), source.bytes.load(.monotonic));
+}
+
+test "FSR demand finds an expert a forecast displaced, when that forecast's read never started" {
+    var source: Gate = .{};
+    const ex = experts();
+    var memory: [9][3 * 4]u8 = undefined;
+    var slabs: [9][]u8 = undefined;
+    for (&slabs, &memory) |*dst, *src| dst.* = src;
+    var s = try Owned.init(std.testing.allocator, &source, &ex, @splat(4), slabs);
+    defer s.deinit();
+    try s.demand(&.{ 0, 1, 2 });
+    s.clock.release();
+    for (s.clock.slots) |*slot| slot.uses = 0;
+    const slot = s.clock.map[1];
+    source.enabled = true;
+    source.bytes.store(0, .monotonic);
+    try s.forecast(&.{ 3, 4 }); // 3's read is held; 4's never starts, and 4 displaced expert 1
+    defer source.release.store(true, .release);
+    while (!source.entered.load(.acquire)) std.Thread.yield() catch {};
+    try std.testing.expectEqual(@as(i32, -1), s.clock.map[1]);
+    try s.demand(&.{1});
+    try std.testing.expectEqual(slot, s.clock.map[1]);
+    source.release.store(true, .release);
+    try s.join();
+    try std.testing.expect(s.clock.map[3] >= 0);
+    try std.testing.expect(s.clock.map[4] < 0 and s.clock.pending(4) == null);
+    try std.testing.expectEqual(@as(usize, 36), source.bytes.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), s.cancelled_forecasts);
 }

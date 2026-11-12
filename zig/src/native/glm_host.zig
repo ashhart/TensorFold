@@ -77,8 +77,8 @@ fn readMemory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 /// Learned states under `root` by checkpoint, split, chip, OS build, kernel sources and a probe's prompt-pass bits.
-fn learnedStates(gpa: Allocator, io: std.Io, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try glm_disk.identity(io, eng, sl)).id, cap);
+fn learnedStates(gpa: Allocator, io: std.Io, dir: []const u8, eng: *const ge.Engine, sl: *glm.slots.Slots, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try glm_disk.identity(gpa, io, dir, eng, sl)).id, cap);
     std.log.info("glm: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
@@ -124,13 +124,13 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         }
     }
     // sampled draws on one Mac (the pair refuses them per request)
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .benchmark_ranks = if (eng.ep != null) 2 else 1, .benchmark_group = if (eng.ep) |p| p.benchmark_group else null, .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .decode_share = decode_share, .greedy_only = eng.ep != null, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);
     if (!eng.followsPeer() and budget > 0) {
         const B = glm.backend.Backend;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish, .rows = &glm_disk.image } }, cache_rules, budget);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = B.snapBytes, .save = B.snapSave, .restore = B.snapRestore, .drop = B.snapDrop, .charged = B.snapCharged, .write = B.snapWrite, .read = B.snapRead, .forget = B.snapForget, .forget_checked = B.snapForgetChecked, .reclaim = B.snapReclaim, .peer_other_used = B.peerOtherUsed, .peer_other_next = B.peerOtherNext, .peer_other_bytes = B.peerOtherBytes, .peer_other_remove = B.peerOtherRemove, .peer_need = B.peerNeed, .peer_reclaim = B.peerReclaim, .peer_reserve = B.peerReserve, .peer_finish = B.peerFinish, .rows = &glm_disk.image } }, cache_rules, budget);
         h.host.cache = &h.cache.?;
         h.host.info_.prompt_cache = true;
         h.slots.grow = .{ .ctx = h, .f = growSnap }; // a resident state made whole before its slot writes below it
@@ -141,12 +141,12 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     if (learn) |l| if (l.conversations) {
         if (eng.ep != null) return error.LearnConversationsOnPair;
         if (h.cache) |*store| {
-            const id = try glm_disk.identity(io, eng, &h.slots);
+            const id = try glm_disk.identity(gpa, io, dir, eng, &h.slots);
             const r = try api.prompt_cache.rows.attach(gpa, store, .{ .root = l.root, .identity = id.id, .cap = l.cap, .floor = l.floor, .daily = l.daily, .lookahead = cache_rules.lookahead, .planned = cache_rules.planned, .spill = l.spill, .slots = l.slots });
             r.prefill_rate = id.rate;
         }
     } else {
-        h.learned = try learnedStates(gpa, io, eng, &h.slots, l.root, l.cap);
+        h.learned = try learnedStates(gpa, io, dir, eng, &h.slots, l.root, l.cap);
         h.learned.?.admission.floor = l.floor;
         h.slots.disk.admission.floor = l.floor;
         h.slots.disk.cap = l.cap;

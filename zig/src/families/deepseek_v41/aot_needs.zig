@@ -154,9 +154,8 @@ fn envInt(name: [:0]const u8, default: i64) !i64 {
     return std.fmt.parseInt(i64, std.mem.span(v), 10);
 }
 
-fn envOn(name: [:0]const u8, default: bool) bool {
-    const v = std.c.getenv(name) orelse return default;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+fn envOn(name: [:0]const u8, default: bool) !bool {
+    return @import("sys").environment.read(bool, name, default);
 }
 
 pub const Served = struct {
@@ -178,10 +177,11 @@ pub const Served = struct {
 
     /// The engine's knobs as it reads them (PF_DENSE is CUDA, so the `_gemm` variants it replaces are listed too).
     pub fn fromEnv() !Served {
+        try @import("env_validate.zig").startup();
         const knobs = @import("serve_knobs.zig");
-        var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .rank = @intCast(try envInt("TF_TP_RANK", 0)), .r1 = knobs.r1(&knobs.env) };
-        if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| o.expert_topp = try std.fmt.parseFloat(f64, std.mem.span(v));
-        o.limit = try envInt("TF_DSV41_CONTEXT", o.limit);
+        var o: block.Options = .{ .world = @intCast(try envInt("TF_TP_WORLD", 2)), .rank = @intCast(try envInt("TF_TP_RANK", 0)), .r1 = (try knobs.r1(&knobs.env)) };
+        if (try @import("sys").environment.read(?f64, "TF_DSV41_EXPERT_TOPP", null)) |v| o.expert_topp = v;
+        o.limit = try @import("sys").environment.read(i64, "TF_DSV41_CONTEXT", o.limit);
         o.rope_rows = o.limit + 2048;
         if (try knobs.prefillRows(&knobs.env)) |r| o.prefill_rows = r;
         // TF_DSV41_PF_4K: 4,096-row segments (their Triton variants at those rows), x3gm v2 as apply has it
@@ -197,50 +197,49 @@ pub const Served = struct {
         if (try knobs.indexBudget(&knobs.env)) |b| o.index_budget = b;
         // TF_DSV41_MHC_PFDEC: its norm is `_finish_k` without COEF at the windows it covers
         o.mhc_pf_rows = try knobs.mhcPfRows(&knobs.env);
-        const drafts = envOn("TF_DSV41_DRAFTS", true);
+        const drafts = try envOn("TF_DSV41_DRAFTS", true);
         o.taps = drafts;
         o.pool = try poolFromEnv(o.limit, o.world);
-        const slots: u32 = @intCast(try envInt("TF_DSV41_SLOTS", 1));
+        const slots = try @import("sys").environment.read(u32, "TF_DSV41_SLOTS", 1);
         if (slots > 1 and o.pool == null) return error.SlotsNeedPool;
         const rows_mod = @import("dspark_rows.zig");
         return .{
             .o = o,
             .slots = slots,
-            .cap = @intCast(try envInt("TF_DSV41_ROWS_CAP", 16)),
+            .cap = try @import("sys").environment.read(u32, "TF_DSV41_ROWS_CAP", 16),
             .drafts = drafts,
-            .slot_drafts = drafts and slots > 1 and rows_mod.enabled(),
+            .slot_drafts = drafts and slots > 1 and (try rows_mod.enabled()),
             .group = try rows_mod.groupFromEnv((Config{}).dspark_block),
             .graphs = try graphs.Settings.fromEnvOr(true),
             .replay = try knobs.prefillMode(&knobs.env) == .replay,
-            .runs = slots > 1 and envOn("TF_DSV41_PIECE_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
-            .replay_runs = slots > 1 and envOn("TF_DSV41_REPLAY_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
-            .images = if (std.c.getenv("TF_DSV41_IMAGES")) |v| std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "native") else false,
-            .image_bias = if (std.c.getenv("TF_DSV41_BIAS_VL")) |v| std.mem.trim(u8, std.mem.span(v), " ").len > 0 else false,
+            .runs = slots > 1 and try envOn("TF_DSV41_PIECE_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
+            .replay_runs = slots > 1 and try envOn("TF_DSV41_REPLAY_RUNS", false) and try knobs.prefillMode(&knobs.env) == .replay,
+            .images = try @import("sys").environment.read(u64, "TF_DSV41_IMAGES", 0) == 1,
+            .image_bias = try @import("env_validate.zig").imageBiasEnv(),
         };
     }
 };
 
 /// The served pool as model.zig opens it (kv_state.optionsFromEnv; null: no pool); TF_DSV41_NEEDS_POOL=1 / 0 forces it.
 pub fn poolFromEnv(limit: i64, world: u32) !?block.Pool {
-    const force: ?bool = if (std.c.getenv("TF_DSV41_NEEDS_POOL")) |v| std.mem.eql(u8, std.mem.span(v), "1") else null;
+    const force = try @import("sys").environment.read(?bool, "TF_DSV41_NEEDS_POOL", null);
     const ko = try kvs.optionsFromEnv(@intCast(limit), world);
     if (!(force orelse (ko != null))) return null;
     const pages = @divExact(limit, block.Pool.page);
-    const split = if (ko) |k| k.split else envOn("TF_DSV41_KV_SPLIT", false);
+    const split = if (ko) |k| k.split else try envOn("TF_DSV41_KV_SPLIT", false);
     return .{
         .comp_pages = if (split) @divExact(pages, 2) + 2 else pages + 1,
         .ik_pages = pages + 1,
         .pts = pages,
         .split = split,
-        .early = split and earlyOn(),
+        .early = split and (try earlyOn()),
         .union_cap = if (ko) |k| @intCast(k.union_cap) else 128 << 20,
     };
 }
 
 /// kv/split.zig's earlyOn (that file is the kv module's): TF_DSV41_KV_SPLIT_EARLY=1, blanks trimmed.
-fn earlyOn() bool {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_KV_SPLIT_EARLY") orelse return false);
-    return std.mem.eql(u8, std.mem.trim(u8, v, " \t"), "1");
+fn earlyOn() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_KV_SPLIT_EARLY", false);
 }
 
 const period: i64 = 256;
@@ -398,87 +397,7 @@ pub fn enumerate(gpa: std.mem.Allocator, n: *Needs, cfg: *const Config, w: *cons
         try log.print("aot-needs: row mode, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
         try log.flush();
     }
-    // prefill: the full segment's regimes, then every row count at each regime's first start
-    const P = sv.o.prefill_rows;
-    {
-        const full: Ctx = .{ .cfg = cfg, .w = w, .o = sv.o, .layers = layers, .rows = P };
-        // a start whose full segment launches a new variant set opens a regime (each set swept once)
-        var starts: std.ArrayList(i64) = .empty;
-        var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
-        var s: i64 = 0;
-        while (s + P <= limit) : (s += P) {
-            var pa = std.heap.ArenaAllocator.init(gpa);
-            defer pa.deinit();
-            const f = try n.program(try prefillAt(&full, pa.allocator(), s + P));
-            if (!(try seen.getOrPut(a, f)).found_existing) try starts.append(a, s);
-        }
-        for (starts.items) |s0| {
-            var rows: i64 = 1;
-            while (rows <= P and s0 + rows <= limit) : (rows += 1) {
-                var pa = std.heap.ArenaAllocator.init(gpa);
-                defer pa.deinit();
-                _ = try n.program(try block_prefill.emitPrefill(pa.allocator(), cfg, w, sv.o, layers, rows, s0, true));
-            }
-            try log.print("aot-needs: prefill from {d}, {d} programs, {d} variants\n", .{ s0, n.programs, n.keys.count() });
-            try log.flush();
-        }
-        if (sv.runs) {
-            const enc = layers[0 .. try ced.decoderStart(cfg) + 1];
-            for (starts.items) |s0| {
-                var k: i64 = 17;
-                while (k <= 64) : (k += 1) {
-                    try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = 17 }, .{ .slot = 1, .start = s0, .n = k } });
-                    try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = k }, .{ .slot = 1, .start = s0, .n = 17 } });
-                }
-                k = 17;
-                while (k <= 48) : (k += 1) {
-                    try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = k }, .{ .slot = 1, .start = s0, .n = 100 } });
-                    try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = 100 }, .{ .slot = 1, .start = s0, .n = k } });
-                }
-                // a staged segment (past 129 rows: the staging ring) beside short ones, at every residue mod 4
-                k = 17;
-                while (k <= 20) : (k += 1) {
-                    try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = k }, .{ .slot = 1, .start = s0, .n = 1500 + k } });
-                    try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = 1500 + k }, .{ .slot = 1, .start = s0, .n = k } });
-                }
-            }
-            try log.print("aot-needs: piece runs, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
-            try log.flush();
-        }
-        if (sv.images) try images(gpa, n, cfg, w, sv, layers, starts.items, log);
-    }
-    // CED replay's decoder pass: n > 128 replays 127 rows ending at n - 1 (the scan), shorter ones n - 1 rows from 0
-    if (sv.replay) {
-        const dec = layers[try ced.decoderStart(cfg)..];
-        const c: Ctx = .{ .cfg = cfg, .w = w, .o = sv.o, .layers = dec, .rows = ced.keep };
-        try scan(n, .{ .ctx = &c, .emit = decoderAt }, ced.keep, limit - 1);
-        var m: i64 = 1;
-        while (m < ced.keep) : (m += 1) {
-            var pa = std.heap.ArenaAllocator.init(gpa);
-            defer pa.deinit();
-            _ = try n.program(try block_prefill.emitReplay(pa.allocator(), cfg, w, sv.o, dec, m, 0, .decoder));
-        }
-        try log.print("aot-needs: CED decoder, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
-        try log.flush();
-        if (sv.replay_runs) {
-            var k: i64 = 33;
-            while (k <= ced.keep) : (k += 1) {
-                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = 33 }, .{ .slot = 1, .start = 0, .n = k } });
-                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = k }, .{ .slot = 1, .start = 0, .n = 33 } });
-            }
-            k = 33;
-            while (k <= 48) : (k += 1) {
-                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = k }, .{ .slot = 1, .start = 0, .n = ced.keep } });
-                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = ced.keep }, .{ .slot = 1, .start = 0, .n = k } });
-            }
-            for ([_]bool{ false, true }) |first| {
-                const mc: MultiCtx = .{ .c = c, .first = first };
-                try scan(n, .{ .ctx = &mc, .emit = tailsAt }, ced.keep, limit - 1);
-            }
-            try log.print("aot-needs: replay runs, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
-            try log.flush();
-        }
-    }
+    for (promptPasses(sv)) |pass| if (pass) |p| try prompts(gpa, a, n, cfg, w, p, layers, log);
     // DSpark
     if (sv.drafts) {
         var pa = std.heap.ArenaAllocator.init(gpa);
@@ -507,6 +426,95 @@ pub fn enumerate(gpa: std.mem.Allocator, n: *Needs, cfg: *const Config, w: *cons
         }
         try log.print("aot-needs: DSpark, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
         try log.flush();
+    }
+}
+
+/// The served prefill rows; under TF_DSV41_PF_4K also the forward's 2,048-row segments (piece fallback, first start).
+pub fn promptPasses(sv: Served) [2]?Served {
+    var two = sv;
+    two.o.pf4k = false;
+    two.o.prefill_rows = (block.Options{}).prefill_rows;
+    return .{ sv, if (sv.o.pf4k) two else null };
+}
+
+fn prompts(gpa: std.mem.Allocator, a: std.mem.Allocator, n: *Needs, cfg: *const Config, w: *const block.Widths, sv: Served, layers: []const u32, log: *std.Io.Writer) !void {
+    const P = sv.o.prefill_rows; // the full segment's regimes, then every row count at each regime's first start
+    const full: Ctx = .{ .cfg = cfg, .w = w, .o = sv.o, .layers = layers, .rows = P };
+    // a start whose full segment launches a new variant set opens a regime (each set swept once)
+    var starts: std.ArrayList(i64) = .empty;
+    var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
+    var s: i64 = 0;
+    while (s + P <= sv.o.limit) : (s += P) {
+        var pa = std.heap.ArenaAllocator.init(gpa);
+        defer pa.deinit();
+        const f = try n.program(try prefillAt(&full, pa.allocator(), s + P));
+        if (!(try seen.getOrPut(a, f)).found_existing) try starts.append(a, s);
+    }
+    for (starts.items) |s0| {
+        var rows: i64 = 1;
+        while (rows <= P and s0 + rows <= sv.o.limit) : (rows += 1) {
+            var pa = std.heap.ArenaAllocator.init(gpa);
+            defer pa.deinit();
+            _ = try n.program(try block_prefill.emitPrefill(pa.allocator(), cfg, w, sv.o, layers, rows, s0, true));
+        }
+        try log.print("aot-needs: prefill from {d}, {d} programs, {d} variants\n", .{ s0, n.programs, n.keys.count() });
+        try log.flush();
+    }
+    if (sv.runs) {
+        const enc = layers[0 .. try ced.decoderStart(cfg) + 1];
+        for (starts.items) |s0| {
+            var k: i64 = 17;
+            while (k <= 64) : (k += 1) {
+                try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = 17 }, .{ .slot = 1, .start = s0, .n = k } });
+                try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = k }, .{ .slot = 1, .start = s0, .n = 17 } });
+            }
+            k = 17;
+            while (k <= 48) : (k += 1) {
+                try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = k }, .{ .slot = 1, .start = s0, .n = 100 } });
+                try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = 100 }, .{ .slot = 1, .start = s0, .n = k } });
+            }
+            // a staged segment (past 129 rows: the staging ring) beside short ones, at every residue mod 4
+            k = 17;
+            while (k <= 20) : (k += 1) {
+                try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = k }, .{ .slot = 1, .start = s0, .n = 1500 + k } });
+                try run(n, cfg, w, sv.o, enc, .encoder, &.{ .{ .slot = 0, .start = s0, .n = 1500 + k }, .{ .slot = 1, .start = s0, .n = k } });
+            }
+        }
+        try log.print("aot-needs: piece runs, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
+        try log.flush();
+    }
+    if (sv.images) try images(gpa, n, cfg, w, sv, layers, starts.items, log);
+    // CED replay's decoder pass: n > 128 replays 127 rows ending at n - 1 (the scan), shorter ones n - 1 rows from 0
+    if (sv.replay) {
+        const dec = layers[try ced.decoderStart(cfg)..];
+        const c: Ctx = .{ .cfg = cfg, .w = w, .o = sv.o, .layers = dec, .rows = ced.keep };
+        try scan(n, .{ .ctx = &c, .emit = decoderAt }, ced.keep, sv.o.limit - 1);
+        var m: i64 = 1;
+        while (m < ced.keep) : (m += 1) {
+            var pa = std.heap.ArenaAllocator.init(gpa);
+            defer pa.deinit();
+            _ = try n.program(try block_prefill.emitReplay(pa.allocator(), cfg, w, sv.o, dec, m, 0, .decoder));
+        }
+        try log.print("aot-needs: CED decoder, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
+        try log.flush();
+        if (sv.replay_runs) {
+            var k: i64 = 33;
+            while (k <= ced.keep) : (k += 1) {
+                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = 33 }, .{ .slot = 1, .start = 0, .n = k } });
+                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = k }, .{ .slot = 1, .start = 0, .n = 33 } });
+            }
+            k = 33;
+            while (k <= 48) : (k += 1) {
+                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = k }, .{ .slot = 1, .start = 0, .n = ced.keep } });
+                try run(n, cfg, w, sv.o, dec, .decoder, &.{ .{ .slot = 0, .start = 0, .n = ced.keep }, .{ .slot = 1, .start = 0, .n = k } });
+            }
+            for ([_]bool{ false, true }) |first| {
+                const mc: MultiCtx = .{ .c = c, .first = first };
+                try scan(n, .{ .ctx = &mc, .emit = tailsAt }, ced.keep, sv.o.limit - 1);
+            }
+            try log.print("aot-needs: replay runs, {d} programs, {d} variants\n", .{ n.programs, n.keys.count() });
+            try log.flush();
+        }
     }
 }
 

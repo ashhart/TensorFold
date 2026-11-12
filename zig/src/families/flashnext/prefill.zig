@@ -4,6 +4,22 @@ const Stream = @import("lanes").Stream;
 const segments = @import("../../core/stagger.zig");
 
 pub const decode_rows: u32 = 32;
+/// A step's rows beside decoders once its prompt has taken `waited_steps` of them: small passes cost far more a row.
+pub const waited_rows: u32 = 512;
+pub const waited_steps: u32 = 8;
+/// A reply's share beside a long prompt when nothing asks, where steps grow: replies finish first, prompts keep pace.
+pub const decode_share: f64 = 0.8;
+
+/// The shared host's share: the flag's; null when the env sets its own; else `decode_share`.
+pub fn shareOf(flag: ?f64, env_set: bool) ?f64 {
+    return flag orelse if (env_set) null else decode_share;
+}
+
+/// Rows a prompt's `beside`th step beside decoders may take.
+pub fn besideRows(beside: u32, grows: bool) u32 {
+    return if (grows and beside > waited_steps) waited_rows else decode_rows;
+}
+
 pub const State = struct {
     stream: *Stream,
     slot: usize,
@@ -11,6 +27,7 @@ pub const State = struct {
     next: usize = 0,
     reuse_next: usize = 0,
     owner: ?*anyopaque = null,
+    beside: u32 = 0, // steps this prompt took beside decoders
 };
 
 // Reserve first: a successful begin transfers ownership without a later map allocation that could fail.
@@ -23,8 +40,8 @@ pub fn start(b: anytype, s: *Stream, slot: ?usize) !void {
     b.filling.putAssumeCapacity(s, begun);
 }
 
-/// A family the cap cannot stand in for consumes the hint as `_: u32`: GLM CUDA's chunks fix `at + prompt_rows`.
-pub fn step(b: anytype, s: *Stream, _: u32) !bool {
+/// A nonzero `max_rows` caps the call in place of `besideRows`; only a prefill policy sends this family one.
+pub fn step(b: anytype, s: *Stream, max_rows: u32) !bool {
     errdefer b.abortPrompt(s);
     if (s.isCancelled()) return error.Cancelled;
     if (!b.filling.contains(s)) try start(b, s, null);
@@ -37,7 +54,12 @@ pub fn step(b: anytype, s: *Stream, _: u32) !bool {
         var end: u32 = @intCast(prompt.len);
         if (p.next < s.chunks.len) end = @min(end, s.chunks[p.next]);
         if (p.reuse_next < s.reuse.marks.len) end = @min(end, s.reuse.marks[p.reuse_next]);
-        if (b.decoding()) end = @min(end, p.at + @min(decode_rows, end - p.at));
+        if (max_rows > 0) {
+            end = @min(end, p.at + @min(max_rows, end - p.at)); // promptRows still bounds it by the prompt step
+        } else if (b.decoding()) {
+            p.beside +|= 1;
+            end = @min(end, p.at + @min(besideRows(p.beside, b.fill_grows), end - p.at));
+        }
         const n = b.promptRows(p.at, end);
         if (n == 0 or n > end - p.at) return error.ChunkOutOfStep;
         try b.settlePrompt(s);
@@ -74,11 +96,11 @@ pub fn Callbacks(comptime B: type) type {
             defer pool.pop();
             while (!try step(b, s, 0)) {}
         }
-        pub fn one(ptr: *anyopaque, s: *Stream, _: u32) anyerror!bool {
+        pub fn one(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
             const b = B.self(ptr);
             const pool = b.promptPool();
             defer pool.pop();
-            return step(b, s, 0);
+            return step(b, s, max_rows);
         }
     };
 }

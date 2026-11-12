@@ -1,5 +1,6 @@
 //! Causal conv launches: decode, window rows, prefill and the split with its norms and gates.
 
+const std = @import("std");
 const Launcher = @import("../launches.zig").Launcher;
 const util = @import("util.zig");
 const S = util.S;
@@ -80,7 +81,7 @@ pub fn tf_conv_split(l: *const Launcher, c: ConvArgs, s: S) Error!void {
     try l.go(l.dec.conv_split, dim(cdiv(c.channels, 128) + gate_blocks, c.slots, 1), dim(128, 1, 1), 0, s, &a);
 }
 
-pub fn tf_conv_prefill(l: *const Launcher, x: C, kind: c_int, weight: CF, state: CF, out: F, new_state: F, len: c_int, channels: c_int, kernel: c_int, s: S) Error!void {
+pub fn tf_conv_prefill(l: *const Launcher, x: C, kind: c_int, weight: CF, state: CF, out: F, new_state: F, len: c_int, channels: c_int, kernel: c_int, k_out: F, v_out: F, key_width: c_int, s: S) Error!void {
     var a: Args = .{};
     try a.add(ad(x));
     try a.add(kind);
@@ -91,7 +92,40 @@ pub fn tf_conv_prefill(l: *const Launcher, x: C, kind: c_int, weight: CF, state:
     try a.add(len);
     try a.add(channels);
     try a.add(kernel);
+    try a.add(ad(k_out));
+    try a.add(ad(v_out));
+    try a.add(key_width);
     // a thread a channel over 16 rows (conv_prefill_kernel's kConvRows), at most 8 taps
     if (kernel > 8) return invalid("conv_prefill");
     try l.go(l.op.conv_prefill, dim(cdiv(channels, 256), @max(1, cdiv(len, 16)), 1), dim(256, 1, 1), 0, s, &a);
+}
+
+/// tf_gdn_prompt_prep's shapes: a conv of 1 to 8 taps, key widths in whole 128-wide heads, and at least one row.
+pub fn promptPrepFits(kernel: c_int, kwidth: c_int, len: c_int) bool {
+    return kernel >= 1 and kernel <= 8 and @rem(kwidth, 128) == 0 and len >= 1;
+}
+
+/// A DeltaNet layer's prompt prework in one launch: conv, q/k RMS norm, v, new conv state, gate and beta (linear.hpp).
+pub fn tf_gdn_prompt_prep(l: *const Launcher, x: C, kind: c_int, weight: CF, state: CF, new_state: F, q: F, k: F, v: F, qw: CF, kw_w: CF, eps: f32, len: c_int, kwidth: c_int, vwidth: c_int, kernel: c_int, a: C, b: C, a_log: CF, dt_bias: CF, gate: F, beta: F, heads: c_int, s: S) Error!void {
+    if (!promptPrepFits(kernel, kwidth, len)) return invalid("gdn prompt prep");
+    var args: Args = .{};
+    inline for (.{ ad(x), kind, ad(weight), ad(state), ad(new_state), ad(q), ad(k), ad(v), ad(qw), ad(kw_w), eps, len, kwidth, vwidth, kernel, ad(a), ad(b), ad(a_log), ad(dt_bias), ad(gate), ad(beta), heads }) |val| try args.add(val);
+    const n: usize = @intCast(len);
+    const kwu: usize = @intCast(kwidth);
+    const vwu: usize = @intCast(vwidth);
+    const segs = (n + 15) / 16;
+    const qk_heads = 2 * kwu / 128;
+    const per_v = (vwu + 255) / 256;
+    const states = @as(usize, @intCast(kernel - 1)) * (2 * kwu + vwu);
+    const total = (qk_heads * segs + 7) / 8 + per_v * segs + (n * @as(usize, @intCast(heads)) + 255) / 256 + (states + 255) / 256;
+    const blocks: c_int = @intCast(total);
+    try l.go(l.op.gdn_prompt_prep, dim(blocks, 1, 1), dim(256, 1, 1), 0, s, &args);
+}
+
+test "the prompt prep refuses a conv width outside 1-8, a key width off 128 and zero rows" {
+    for ([_]c_int{ 1, 4, 8 }) |taps| try std.testing.expect(promptPrepFits(taps, 2048, 2048));
+    try std.testing.expect(promptPrepFits(4, 128, 1));
+    for ([_]c_int{ 0, 9 }) |taps| try std.testing.expect(!promptPrepFits(taps, 2048, 16));
+    for ([_]c_int{ 64, 2000, 2048 + 64 }) |kw| try std.testing.expect(!promptPrepFits(4, kw, 16));
+    try std.testing.expect(!promptPrepFits(4, 2048, 0));
 }

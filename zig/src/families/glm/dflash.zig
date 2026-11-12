@@ -34,15 +34,26 @@ pub const TAP_ROW: usize = taps_mod.layers.len * D * 2; // bytes of one row's ta
 /// Device bytes a stream's context ring takes (K and V of every layer).
 pub const ring_bytes: u64 = LAYERS * 2 * @as(u64, @intCast(WIN)) * KVW * 2;
 
+/// taps_prefill's rows: a prompt pass's taps whole (TF_GLM_CHUNK_SOLO: two chunks); an ingest keeps its window's.
+pub fn tapRows(prompt_rows: usize) usize {
+    return @max(MAX_CTX, prompt_rows);
+}
+
 /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
-pub fn confidence() f64 {
-    const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
-    return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
+pub fn confidence() !f64 {
+    return @import("sys").environment.read(f64, "TF_GLM_DRAFT_CONFIDENCE", 0.7);
+}
+
+/// The drafter MLP split: two ranks as before; three or more only with `wide` (TF_ROCE=1) and 256-aligned shares of FF.
+pub const MlpSplit = struct { split: bool, ff: usize };
+pub fn mlpSplit(world: usize, wide: bool) MlpSplit {
+    if (world < 2 or (world > 2 and !wide) or FF % world != 0 or (FF / world) % 256 != 0) return .{ .split = false, .ff = FF };
+    return .{ .split = true, .ff = FF / world };
 }
 
 /// Device bytes of the loader's raw scratch: a 4-bit linear's words, scales and biases, for the largest at `world`.
-pub fn rawBytes(bits: u8, world: usize) usize {
-    const ff: usize = if (world == 2) FF / 2 else FF; // the MLP width a rank holds, as dflash_load splits it
+pub fn rawBytes(bits: u8, world: usize, wide: bool) usize {
+    const ff = mlpSplit(world, wide).ff; // the MLP width a rank holds, as dflash_load splits it
     const nk: usize = @max(5 * D * D, 2 * ff * D); // fc, or gate and up stacked
     return if (bits == 4) nk / 2 + 2 * nk / 32 + 1024 else 256;
 }
@@ -56,7 +67,7 @@ pub const Kernels = struct {
     swiglu: cuda.Function,
     attn_part: cuda.Function,
     attn_merge: cuda.Function,
-    sum2: cuda.Function,
+    sumn: cuda.Function, // the split down's fp32 partials of every rank summed in rank order
     top16_part: cuda.Function,
     top16_merge: cuda.Function,
     gsum: cuda.Function,
@@ -92,6 +103,8 @@ pub const Run = struct { ring: u64, taps: u64, n: usize, pos0: i64 };
 
 /// Every rank runs the ingest and the block pass on its half of the MLP and head; rank 0 selects the drafts.
 pub const Drafter = struct {
+    checkpoint_digest: [32]u8 = @splat(0), // the loaded artifact, for the window-price cache key
+    bits: u8 = 0, // the loader's actual linear precision
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
     module: cuda.Module,
@@ -104,11 +117,12 @@ pub const Drafter = struct {
     norm: u64 = 0,
     pred: []u16 = &.{}, // the selector's codebooks, bf16 [VOCAB][RANK] (host: it reads 16 rows a draft)
     succ: []u16 = &.{},
-    split: bool, // the MLP split across two ranks (gate and up by rows, down by K)
+    split: bool, // the MLP split across the ranks (gate and up by rows, down by K): mlpSplit
     ff: usize, // the MLP width this rank holds
     rank: usize,
     world: usize,
     temp: f64 = 1.0, // the selector's softmax temperature for the drafts' chances
+    tap_rows: usize = MAX_CTX, // taps_prefill's rows (tapRows of the engine's prompt buffers)
     scratch: cuda.DeviceBuffer = undefined,
     slots: std.ArrayList(Slot) = .empty,
     verifies: u64 = 0, // verifies so far: a slot's rows are still in taps_step while its v_step is the latest
@@ -136,7 +150,7 @@ pub const Drafter = struct {
     logits: u64 = 0,
     part: u64 = 0, // the linears' K-slice partials
     gs: u64 = 0, // a 4-bit linear's input group sums [MAX_CTX][5 * D / 64]
-    sums: u64 = 0, // the split down's gathered fp32 partials [2][MAX_M][D]
+    sums: u64 = 0, // the split down's gathered fp32 partials [world][MAX_M][D]
     cin: u64 = 0,
     c1: u64 = 0,
     ctx: u64 = 0,
@@ -307,10 +321,10 @@ pub const Drafter = struct {
     }
 };
 
-/// Prompt context retained in the window; row0 is only a tap-buffer offset, never a sequence position.
-pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize) !?Run {
+/// Prompt context retained in the window; row0 is a tap-buffer offset, not a position; cap is that buffer's rows.
+pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize, cap: usize) !?Run {
     if (start > len or rows > len - start) return error.BadPromptContext;
-    if (rows > MAX_CTX or row0 > MAX_CTX - rows) return error.DrafterContextTooWide;
+    if (rows > cap or row0 > cap - rows) return error.DrafterContextTooWide;
     const keep_from = len -| @as(usize, @intCast(WIN));
     if (start + rows <= keep_from) return null;
     const lo = keep_from -| start;
@@ -319,6 +333,6 @@ pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, ro
 
 pub fn ingestPrompt(dr: anytype, e: anytype, i: u32, start: usize, rows: usize, len: usize, row0: usize) !void {
     const s = try dr.slot(i);
-    const run = (try promptRun(s.ring.?.ptr, dr.taps_prefill, start, rows, len, row0)) orelse return;
+    const run = (try promptRun(s.ring.?.ptr, dr.taps_prefill, start, rows, len, row0, dr.tap_rows)) orelse return;
     try dr.ingest(e, &.{run});
 }

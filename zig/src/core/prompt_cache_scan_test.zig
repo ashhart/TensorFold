@@ -10,7 +10,7 @@ fn victimScan(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u
     var best: ?usize = null;
     for (s.entries.items, 0..) |e, i| {
         if (e.borrowers > 0 or e.shared or e.branched or e == skip or rewound(s, e, prompt)) continue;
-        const now = born > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
+        const now = (born > e.born or (born == e.born and !e.rewind)) and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens);
         if ((now or policy.extendedScan(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
     }
     if (best) |i| return i;

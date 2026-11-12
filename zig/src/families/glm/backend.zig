@@ -53,6 +53,7 @@ pub const Backend = struct {
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
     pub fn facts(b: *const Backend) lanes.Model {
         return .{
+            .learn_row_costs = b.sl.e.ep == null and !b.sl.e.device.tensorUnits(), // the table is an M5 Ultra's: others pay more
             .allocate_shared_drafts = b.sl.e.hasMtp(),
             .limit_shared_drafts = b.sl.e.hasMtp(),
             .exact_width = st.max_rows,
@@ -141,7 +142,7 @@ pub const Backend = struct {
             }
         }
         // the images the restored state does not hold through the tower: the chunks inject their rows
-        if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i);
+        if (s.images.len > 0) try @import("prompt_images.zig").prepare(b, s, i, s.cached);
         s.fill_at.store(at, .monotonic);
         return .{ .stream = s, .slot = i, .at = at };
     }
@@ -153,7 +154,7 @@ pub const Backend = struct {
     }
     pub fn chunkPrompt(b: *Backend, s: *Stream, i: u32, at: u32, n: u32) !void {
         const e = b.sl.e;
-        try @import("prompt_images.zig").prepare(b, s, i);
+        try @import("prompt_images.zig").prepare(b, s, i, at); // the chunk's rows read no image ending by `at`
         try b.copyOut(i, at);
         try mirror.send(e, .chunk, &.{ i, at, n });
         const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(s.prompt_len), e.c.vocab);
@@ -182,7 +183,7 @@ pub const Backend = struct {
         try b.sl.restore(i, snap.id);
     }
 
-    /// Slot `i`'s resident states past `at` made whole where the budget has room before it writes; a pair's rank 1 copies the same ids.
+    /// Before slot `i` writes: resident states past `at` made whole as budget allows; pair rank 1 copies the same ids.
     fn copyOut(b: *Backend, i: u32, at: u32) !void {
         b.words.clearRetainingCapacity();
         try b.words.append(b.gpa, i);
@@ -195,6 +196,16 @@ pub const Backend = struct {
     pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
         const b = self(ptr);
         return snapshot.bytes(&b.sl.e.c, at, b.sl.resident());
+    }
+
+    /// A disk read allocates a whole image, even when ordinary saves share the live MLA pool.
+    pub fn snapReadBytes(ptr: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(&self(ptr).sl.e.c, at, false);
+    }
+
+    pub fn snapCharged(_: *anyopaque, saved: *anyopaque) u64 {
+        const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
+        return snap.bytes;
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
@@ -330,7 +341,7 @@ pub const Backend = struct {
         return b.sl.ringPut(Engine.u32s(b.sl.e.sc.picks, 1)[0]);
     }
 
-    /// The next one-token round queued ahead: its token the handle's (read on the GPU) or the host's, its pick a handle.
+    /// The next one-token round queued ahead: its token the handle's (read on GPU) or the host's, its pick a handle.
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
         const b = self(ptr);
         const i = try b.slotOf(s);
@@ -430,6 +441,10 @@ test "zero grant: GLM Metal MTP resumes after a long priced skip" {
     var e: Engine = undefined;
     e.w = &w;
     e.ep = null;
+    const objc = @import("metal").objc;
+    const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{}); // facts() asks it for tensor units, no GPU
+    defer objc.release(no_arch);
+    e.device = .{ .id = no_arch };
     var slots: [16]slots_mod.Slot = undefined;
     var sl: slots_mod.Slots = undefined;
     sl.e = &e;
@@ -446,6 +461,10 @@ test "shared head costs: GLM Metal MTP retains costed copy grants" {
     var e: Engine = undefined;
     e.w = &w;
     e.ep = null;
+    const objc = @import("metal").objc;
+    const no_arch = objc.msg(objc.Id, objc.class("NSObject"), "new", .{}); // facts() asks it for tensor units, no GPU
+    defer objc.release(no_arch);
+    e.device = .{ .id = no_arch };
     var slots: [16]slots_mod.Slot = undefined;
     var sl: slots_mod.Slots = undefined;
     sl.e = &e;
@@ -454,4 +473,23 @@ test "shared head costs: GLM Metal MTP retains costed copy grants" {
     b.sl = &sl;
     b.costs = null;
     try lanes.shared_head_cost_check.check(b.facts());
+}
+
+test "GLM disk charge: a whole read is larger than a resident save and charged at its actual size" {
+    var e: Engine = undefined;
+    e.c = .{};
+    var sl: slots_mod.Slots = undefined;
+    sl.e = &e;
+    sl.learned = null;
+    var b: Backend = undefined;
+    b.sl = &sl;
+    const resident = Backend.snapBytes(&b, 130000);
+    const whole = Backend.snapReadBytes(&b, 130000);
+    try std.testing.expectEqual(@as(u64, snapshot.bytes(&e.c, 130000, false)), whole);
+    try std.testing.expect(whole > resident + (2 << 30));
+    var snap: snapshot.Snap = .{ .id = 1, .at = 130000, .buf = undefined, .bytes = whole };
+    try std.testing.expectEqual(whole, Backend.snapCharged(&b, &snap));
+    snap.bytes = @intCast(resident);
+    try std.testing.expectEqual(resident, Backend.snapCharged(&b, &snap));
+    try std.testing.expectEqual([2]u64{ 147619840, 2643622912 }, [2]u64{ resident, whole });
 }

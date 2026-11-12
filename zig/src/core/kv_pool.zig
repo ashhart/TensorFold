@@ -1,6 +1,11 @@
 //! One pool of KV pages for every stream: a family's layout, page ids and their holders, and the streams' leases.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+pub const groups = @import("kv_groups.zig");
+
+test {
+    _ = @import("kv_groups_test.zig");
+}
 
 /// A family's stream memory: a fixed part at any length, paged caches a token, and a kept snapshot's slot.
 pub const Layout = struct {
@@ -14,6 +19,26 @@ pub const Layout = struct {
     snap_bytes: u64,
     /// Bytes a running stream takes from the pages beside its keys and values, as one run of whole pages (0: none).
     run_bytes: u64 = 0,
+    /// Layers `token_bytes` spans, so a row is token_bytes / full_layers in each (0: not named, one row a token).
+    full_layers: u32 = 0,
+    /// A sliding window's rows outside the pool, by bytes a row a layer (null: none, or not named).
+    window: ?groups.Group = null,
+
+    /// A layout whose full group is `full`, sized by its bytes a row over its layers.
+    pub fn ofRows(full: groups.Group, page_tokens: u32, fixed_bytes: u64, snap_bytes: u64) Layout {
+        return .{ .fixed_bytes = fixed_bytes, .token_bytes = full.bytes(), .page_tokens = page_tokens, .snap_bytes = snap_bytes, .full_layers = full.layers };
+    }
+
+    /// The pool's one group: every row of every paged layer.
+    pub fn group(l: Layout) groups.Group {
+        const n = @max(l.full_layers, 1);
+        return .{ .kind = .full, .row = l.token_bytes / n, .layers = n };
+    }
+
+    /// The groups the load report shows: the pool's, the window outside it, the state run and a snapshot slot.
+    pub fn shape(l: Layout) groups.Shape {
+        return .{ .full = l.group(), .named = l.full_layers > 0, .page_rows = l.page_tokens, .window = l.window, .run = l.run_bytes, .snap = l.snap_bytes };
+    }
 
     pub fn pageBytes(l: Layout) u64 {
         return l.token_bytes * l.page_tokens;
@@ -31,12 +56,27 @@ pub const Layout = struct {
 
     /// Consecutive pages a running stream's `run_bytes` take.
     pub fn runPages(l: Layout) usize {
-        return @intCast((l.run_bytes + l.pageBytes() - 1) / l.pageBytes());
+        return @intCast(groups.state(l.run_bytes, l.pageBytes()).pages);
     }
+};
+
+/// A family whose unpaged streams allocate a request's rows at open, never a whole window (the KV admission ledger).
+pub const PerRequest = struct {
+    /// fixed_bytes holds every per-request byte open allocates past token_bytes x rows; page_tokens 0 until it pages.
+    layout: Layout,
+    /// Rows past the reply: the widest drafted or verify pass the family runs (MTP and DFlash rows), not just decode.
+    lookahead: u32 = 0,
+    /// Buffers that grow with the stream cap but belong to no request, charged once at load.
+    scratch: u64 = 0,
 };
 
 /// Slots a plan sets aside for snapshots when the caller names no count.
 pub const most_snaps = 64;
+
+/// The --prompt-cache-gib whose bytes hold `states` slots of `slot` bytes, rounded up to a whole GiB.
+pub fn holdingGib(states: usize, slot: u64) u64 {
+    return (states * slot + (1 << 30) - 1) >> 30;
+}
 
 /// What the room at load pays for, in order: the engine's own sequence, the other streams, the prompt cache.
 pub const Budget = struct {
@@ -54,14 +94,25 @@ pub const Budget = struct {
     snaps: ?usize = null,
     /// Rows one stream holds at most (0: no bound): pages past what the paged streams hold at once stay unmade.
     window: u64 = 0,
-    /// The engine's own rows are pages too: a window of them first, then the cache after the windows the room holds.
+    /// The engine's own rows are pages too: a window of them first, then the cache after the windows the rest holds.
     engine_paged: bool = false,
     /// Parts per million of the cache that kept states hold as pool pages (TF_KV_SHARE): made pages past the windows.
     kept_ppm: u32 = 0,
+    /// TF_KV_SHARE with a slot a state (GLM): the cache is its slots, `snaps` at most, and the rest is made pages.
+    slots_only: bool = false,
+    /// --prompt-cache-gib named the cache: it comes before every window but the engine's own, which take the rest.
+    asked: bool = false,
 };
 
 /// The streams served, the cache's slots and copied-KV bytes, and the pages left for the streams.
-pub const Plan = struct { lanes: u32, snaps: usize, copied: u64, pages: usize, kept: u64 = 0 }; // kept: the cache bytes made pages
+pub const Plan = struct {
+    lanes: u32,
+    snaps: usize,
+    copied: u64,
+    pages: usize,
+    kept: u64 = 0, // the cache bytes made pages
+    taken: u64 = 0, // the cache bytes the windows past the engine's own took before it (0 when it was asked)
+};
 
 /// The prompt cache's split: slots for its snapshots, the rest for their copied KV rows (no slot: no cache).
 pub fn split(cache: u64, snap_bytes: u64, named: ?usize) struct { snaps: usize, copied: u64 } {
@@ -80,12 +131,13 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const cache = @min(b.cache, left -| held(l, b, fit));
-    const kept = cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
+    const cache = @min(b.cache, left -| held(l, b, fit, windows(l, b, left) - 1));
+    const taken = @min(b.cache, left -| held(l, b, fit, 0)) - cache; // what the windows past the engine's own took
+    const kept = if (b.slots_only) cache - split(cache, l.snap_bytes, b.snaps).snaps * l.snap_bytes else cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
     const most: u64 = if (b.window > 0) (fit + @intFromBool(b.engine_paged)) * l.pages(b.window) + fit * l.runPages() + kept / l.pageBytes() else std.math.maxInt(u64);
-    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept };
+    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept, .taken = taken };
 }
 
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
@@ -95,19 +147,34 @@ pub fn holds(l: Layout, b: Budget) bool {
     const left = b.room - b.engine - own;
     const each = l.fixed_bytes + (1 + l.runPages()) * l.pageBytes();
     const fit = @min(@as(u64, b.lanes - 1), left / each);
-    return left -| (fit * l.fixed_bytes + held(l, b, fit)) >= b.cache;
+    const rest = left - fit * l.fixed_bytes; // what the cache and the pages share, as in plan
+    return rest -| held(l, b, fit, windows(l, b, rest) - 1) >= b.cache;
 }
 
-/// The pages the cache leaves the other streams: a page and a run each, or the windows the room would hold if more.
-fn held(l: Layout, b: Budget, fit: u64) u64 {
-    return @max(fit * (1 + l.runPages()), (windows(l, b) - 1) * l.pages(b.window)) * l.pageBytes();
+/// The --prompt-cache-gib for `n` slots where `b` plans, when asking it keeps all n (else null), and the most it holds.
+pub fn holding(l: Layout, b: Budget, n: usize) struct { gib: ?u64, most: usize } {
+    const gib = holdingGib(n, l.snap_bytes);
+    var asked = b; // an asked cache comes before every window but the engine's own: the most a cache can be here
+    asked.asked = true;
+    asked.snaps = n;
+    asked.cache = gib << 30;
+    const keeps = if (plan(l, asked)) |p| p.snaps else |_| 0; // clipped to the rest: all n short of the whole GiB
+    if (keeps >= n) return .{ .gib = gib, .most = n };
+    asked.cache = std.math.maxInt(u64);
+    return .{ .gib = null, .most = if (plan(l, asked)) |p| p.snaps else |_| 0 };
 }
 
-/// Streams a window each would serve in this room, the engine's own among them (1 unless its rows are pages).
-fn windows(l: Layout, b: Budget) u64 {
-    if (!b.engine_paged or b.window == 0) return 1;
+/// The pages the cache leaves the other streams: a page and a run each, or `more` windows if those are more.
+fn held(l: Layout, b: Budget, fit: u64, more: u64) u64 {
+    return @max(fit * (1 + l.runPages()), more * l.pages(b.window)) * l.pageBytes();
+}
+
+/// Windows set aside before the cache, the engine's own among them: as many as the room holds and `rest` holds whole.
+fn windows(l: Layout, b: Budget, rest: u64) u64 {
+    if (!b.engine_paged or b.window == 0 or b.asked) return 1; // an asked cache comes before all but the engine's own
     const own = ownPages(l, b);
-    return @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes));
+    const room = @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes)); // a window and a fixed part each
+    return if (own == 0) room else @min(room, 1 + rest / own); // `rest`: past the engine's own window and every fixed part
 }
 
 /// The bytes of the engine's own window as pages, set aside first when its rows are pages (0 when it has a window).
@@ -127,10 +194,14 @@ pub const Table = struct {
     write: *const fn (ctx: *anyopaque, ids: []const u32, from: usize) anyerror!void,
 };
 
-/// The store's eviction a promise asks for before it fails: free pages until `want` are available.
-pub const Reclaim = struct {
-    ctx: *anyopaque,
-    call: *const fn (ctx: *anyopaque, want: usize) bool,
+/// A store's eviction a promise asks for before it fails, and the chain of them on one pool (kv_reclaim.zig).
+pub const Reclaim = @import("kv_reclaim.zig").Reclaim;
+pub const Reclaims = @import("kv_reclaim.zig").Chain;
+
+/// The lane host's ledger (core/kv_ledger.zig) that admits this pool's promises: the available pages `n` more need.
+pub const Gate = struct {
+    ctx: *const anyopaque,
+    want: *const fn (ctx: *const anyopaque, n: usize) usize,
 };
 
 /// Called after each outermost change to the pool's counts, on the thread that made it.
@@ -157,8 +228,10 @@ pub const Pool = struct {
     nkept: usize = 0, // pages with a holder beyond their leases; may also be leased
     nleased: usize = 0, // pages mapped by at least one lease, counted once
     page_bytes: u64,
-    reclaim: ?Reclaim = null,
+    reclaims: Reclaims = .{}, // the stores a promise or a hold asks, in the order they joined
+    host: ?*const anyopaque = null, // the lane host whose ledger counts the pool: one a load (lane_host_ledger.count)
     notify: ?Notify = null,
+    ledger: ?Gate = null, // the lane host's ledger, the only test a promise passes; null: the pool's own pages
     depth: u8 = 0, // public changes in progress: the outermost one notifies, after nested calls and rollbacks
 
     pub fn init(gpa: Allocator, count: usize, page_bytes: u64) !Pool {
@@ -196,7 +269,18 @@ pub const Pool = struct {
 
     /// Whether `need` pages could be promised now, the store's idle pages counted.
     pub fn fits(p: *const Pool, need: usize) bool {
-        return p.available() + p.reclaimable() >= need;
+        return p.available() + p.reclaimable() >= p.want(need);
+    }
+
+    /// The available pages at which `n` more fit: the ledger's answer, or `n` on the pool's own pages.
+    fn want(p: *const Pool, n: usize) usize {
+        const g = p.ledger orelse return n;
+        return g.want(g.ctx, n);
+    }
+
+    /// A page's bytes as a ledger counts them: one at least, so a pool of empty pages still counts its pages.
+    pub fn unit(p: *const Pool) u64 {
+        return @max(p.page_bytes, 1);
     }
 
     /// The counts an idle server logs: promised 0, free + kept == total, no page leased.
@@ -264,11 +348,9 @@ pub const Pool = struct {
     pub fn promise(p: *Pool, l: *Lease, n: usize) error{LaneMemory}!void {
         p.enter();
         defer p.leave();
-        if (p.available() < n) if (p.reclaim) |r| {
-            _ = r.call(r.ctx, n);
-        };
-        if (p.available() < n) return error.LaneMemory;
-        p.promised += n;
+        p.reclaimFor(n);
+        if (p.available() < p.want(n)) return error.LaneMemory;
+        p.promised += n; // a sub-count of the ledger's: it passed the ledger's test above, never a second one
         l.promised += n;
     }
 
@@ -276,16 +358,33 @@ pub const Pool = struct {
     pub fn hold(p: *Pool, out: []u32) bool {
         p.enter();
         defer p.leave();
-        if (p.available() < out.len) if (p.reclaim) |r| {
-            _ = r.call(r.ctx, out.len);
-        };
-        if (p.available() < out.len) return false;
+        p.reclaimFor(out.len);
+        if (p.available() < p.want(out.len)) return false;
         for (out) |*id| {
             p.nfree -= 1;
             id.* = p.free[p.nfree];
             p.ownership(id.*, 1, 0);
         }
         return true;
+    }
+
+    /// `r` joins the stores a promise or a hold asks, after those already there.
+    pub fn joinReclaim(p: *Pool, r: Reclaim) error{ Joined, ChainFull }!void {
+        return p.reclaims.join(r);
+    }
+
+    /// The store at `ctx` leaves the chain (it is closing).
+    pub fn leaveReclaim(p: *Pool, ctx: *anyopaque) void {
+        p.reclaims.leave(ctx);
+    }
+
+    /// Each store in join order is asked for the pages `n` more need, until they are available.
+    fn reclaimFor(p: *Pool, n: usize) void {
+        const chain = p.reclaims; // a store that leaves while asked does not shift the walk
+        for (chain.hooks()) |r| {
+            if (p.available() >= p.want(n)) return;
+            _ = r.call(r.ctx, p.want(n));
+        }
     }
 
     /// The part of `l`'s promise it has not taken goes back.
@@ -355,6 +454,13 @@ pub const Pool = struct {
         for (0..n) |i| l.ids.appendAssumeCapacity(@intCast(start + i)); // held as `take` holds a page: `finish` frees them
         errdefer p.shrink(l, 0);
         if (table) |t| try t.write(t.ctx, l.ids.items, 0);
+    }
+
+    /// `l`'s table back to `n` pages, the rest to its promise (rows a rolled-back window held; no reader in flight).
+    pub fn trim(p: *Pool, l: *Lease, n: usize) void {
+        p.enter();
+        defer p.leave();
+        p.shrink(l, n);
     }
 
     /// Pages past `n` in `l`'s table go back to its promise, as they were before it took them.
@@ -454,4 +560,5 @@ test {
     _ = @import("kv_pool_counts_test.zig");
     _ = @import("kv_pool_walk_test.zig");
     _ = @import("kv_pool_notify_test.zig");
+    _ = @import("kv_reclaim_test.zig");
 }

@@ -51,32 +51,26 @@ pub const Options = struct {
     own_prefill: bool = true,
     /// the backbone layers to load and run (null: all; a gate runs a reference's prefix, e.g. 0-24)
     layers: ?[]const u32 = null,
+    /// the server's --prompt-cache-gib on rank 0: every rank's resident limit (session_budget.zig)
+    prompt_cache_gib: ?f64 = null,
 };
 
 /// TF_DSV41_LAYERS=<lo>-<hi>: load and run only that backbone prefix (a reference prefix's model; null: every layer)
 pub fn layersEnv(gpa: std.mem.Allocator) !?[]const u32 {
-    const v = std.mem.span(std.c.getenv("TF_DSV41_LAYERS") orelse return null);
-    var it = std.mem.tokenizeScalar(u8, v, '-');
-    const lo = try std.fmt.parseInt(u32, it.next() orelse return error.BadLayers, 10);
-    const hi = try std.fmt.parseInt(u32, it.next() orelse return error.BadLayers, 10);
-    if (hi < lo) return error.BadLayers;
-    const ls = try gpa.alloc(u32, hi - lo + 1);
+    const lo, const hi = (try @import("sys").environment.range("TF_DSV41_LAYERS", @import("sys").getenv("TF_DSV41_LAYERS"))) orelse return null;
+    const ls = try gpa.alloc(u32, @as(usize, hi) - lo + 1);
     for (ls, 0..) |*l, i| l.* = lo + @as(u32, @intCast(i));
     return ls;
 }
 
 /// TF_DSV41_CONTEXT: the slot's positions; null: block.Options' 4,096
 pub fn contextEnv() !?i64 {
-    const v = std.c.getenv("TF_DSV41_CONTEXT") orelse return null;
-    const c = try std.fmt.parseInt(i64, std.mem.span(v), 10);
-    if (c < 1) return error.BadContext;
-    return c;
+    return @import("sys").environment.read(?i64, "TF_DSV41_CONTEXT", null);
 }
 
 /// TF_DSV41_OWN_PREFILL=0: prompts as 16-row decode windows (every rank must agree: the plans differ)
-pub fn ownPrefillEnv() bool {
-    const v = std.c.getenv("TF_DSV41_OWN_PREFILL") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+pub fn ownPrefillEnv() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_OWN_PREFILL", true);
 }
 
 pub const Model = struct {
@@ -93,6 +87,7 @@ pub const Model = struct {
     stream: cuda.Stream,
     kernels: dk.Kernels,
     session: tp.Session,
+    benchmark_group: ?[]const u8,
     cfg: Config,
     pack: Pack,
     pl: plan.Plan,
@@ -136,6 +131,7 @@ pub const Model = struct {
 
     /// Loads this rank (TF_TP_RANK / WORLD / DEVICE / MASTER / PORT) of `pack_dir` with `assets` (the module doc).
     pub fn open(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, assets: []const u8, o: Options) !*Model {
+        try @import("env_validate.zig").startup();
         if (@import("sys").experimental.refusal("deepseek_v41", @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
             if (!quiet) std.log.err("{s}", .{text});
             return error.ExperimentalDeepSeekRequired;
@@ -147,6 +143,7 @@ pub const Model = struct {
         m.retained_next = null;
         m.retained = false;
         m.boot_complete = false;
+        m.benchmark_group = null;
         m.io = io;
         m.progress = .{ .io = io };
         const stall_ns = try @import("round_progress.zig").timeoutNs(if (std.c.getenv("TF_DSV41_STALL_EXIT_S")) |v| std.mem.span(v) else null);
@@ -179,6 +176,8 @@ pub const Model = struct {
         else
             &.{};
         try m.session.open(&m.driver, m.tcfg, image);
+        var inventory_group: cuda.tp_group.Group = .{ .lib = m.session.lib, .comm = m.session.nccl.comm, .rank = m.session.nccl.me, .world = m.session.nccl.size };
+        m.benchmark_group = try @import("core").benchmark_group.cuda(a, io, &m.ctx, &inventory_group, m.stream);
         m.supervisor = .{ .io = io, .ctx = m, .healthy = @import("model_health.zig").context, .fail = @import("model_health.zig").failed, .progress = if (stall_ns > 0) &m.progress else null, .stall_ns = stall_ns };
         m.supervisor.?.start() catch |err| {
             m.session.bootFailed(err);
@@ -211,12 +210,23 @@ pub const Model = struct {
     fn boot(m: *Model, gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, assets: []const u8, o: Options) !void {
         const a = m.arena.allocator();
         const cwd = std.Io.Dir.cwd();
-        var tr = boot_mem.Trace.fromEnv();
+        var tr = try boot_mem.Trace.fromEnv();
         tr.step("start", cuda.usage(false));
         const comm = m.session.comm();
         const world: u32 = @intCast(comm.world());
+        var load_cache = @import("core").checkpoint.cache.Load.begin(io, world > 1);
+        defer load_cache.deinit();
         try @import("session_protocol.zig").preflight(&m.session.plan);
+        var so = try sg.optionsFromEnv();
+        // rank 0's --prompt-cache-gib (or variable) on every rank: one resident limit, the same evictions
+        so.resident_bytes = try @import("session_budget.zig").agree(&m.session.plan, so.resident_bytes, o.prompt_cache_gib);
         m.cfg = try Config.read(gpa, io, pack_dir);
+        // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
+        if (@import("cuda_format.zig").problem(&m.cfg)) |text| {
+            if (!quiet) std.log.err("{s}", .{text});
+            return error.UnsupportedCheckpoint;
+        }
+        try @import("block_admission.zig").serving(&m.cfg, world);
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
         const backbone = if (o.layers) |ls| try a.dupe(u32, ls) else blk: {
@@ -235,7 +245,10 @@ pub const Model = struct {
         var t_build: i96 = 0;
         var t_upload: i96 = 0;
         const t_load = std.Io.Clock.awake.now(io).toNanoseconds();
+        const readers = try @import("core").checkpoint_read_ahead.optInReaders();
         for (m.pl.layers, 0..) |*l, i| {
+            var reading: @import("core").checkpoint_read_ahead.Scope = .{};
+            defer reading.deinit();
             var b: named.Builder = .{ .gpa = gpa, .io = io, .pack = &m.pack };
             defer b.deinit();
             var tag_buf: [16]u8 = undefined;
@@ -245,7 +258,9 @@ pub const Model = struct {
             defer schema.deinit();
             if (cache != null) try schema.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
             if (cache == null or !try cache.?.get(&b, tag, schema.out.items)) {
+                reading = try @import("cuda_load_prefetch.zig").begin(gpa, io, &m.pack, &m.cfg, l.index, readers);
                 try b.layer(l, m.cfg.o_groups, m.tcfg.rank, world);
+                _ = try reading.check();
                 if (cache) |*c| c.put(&b, tag) catch |e| if (!quiet) std.log.warn("dsv41 prepared: {s} not written ({t})", .{ tag, e });
             }
             const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -278,6 +293,7 @@ pub const Model = struct {
             t_build += t1 - t0;
             t_upload += std.Io.Clock.awake.now(io).toNanoseconds() - t1;
         }
+        @import("core").checkpoint.cache.files(io, m.pack.dir, m.pack.files.items);
         const ms = struct {
             fn of(ns: i96) f64 {
                 return @as(f64, @floatFromInt(ns)) / 1e6;
@@ -291,9 +307,9 @@ pub const Model = struct {
         m.runner = .{ .gpa = gpa, .d = &m.driver, .stream = m.stream, .kernels = &m.kernels, .triton = &m.aot, .weights = &m.weights };
         // TF_DSV41_PROFILE=<file>: the served engine's eager windows and prefill segments timed, JSON written at close
         m.runner.prof = if (try @import("profile.zig").Profile.fromEnv(gpa, &m.driver)) |p| p.timer() else null;
-        const topp: ?f64 = if (std.c.getenv("TF_DSV41_EXPERT_TOPP")) |v| try std.fmt.parseFloat(f64, std.mem.span(v)) else null;
+        const topp = try @import("sys").environment.read(?f64, "TF_DSV41_EXPERT_TOPP", null);
         // TF_DSV41_R1=1, or the eight separate R1 knobs (the knob reader's r1)
-        const r1 = @import("serve_knobs.zig").r1(&@import("serve_knobs.zig").env);
+        const r1 = try @import("serve_knobs.zig").r1(&@import("serve_knobs.zig").env);
         m.f = fwd.Forward.init(gpa, &m.cfg, &m.widths, .{ .world = world, .rank = m.tcfg.rank, .expert_topp = topp, .r1 = r1, .taps = o.drafts }, &m.runner, comm);
         try @import("engine_hooks.zig").open(&m.f); // the forward's later-layer hooks and prefill state
         m.f.layers = backbone;
@@ -308,13 +324,13 @@ pub const Model = struct {
             var ko = ko_;
             ko.slots = m.slots;
             // the long-prompt stream scratch the buffer plan will hold (not in the measured terms)
-            ko.resident = if (longpf.lazyEnv()) 0 else @import("serve_knobs.zig").streamScratch(&m.cfg, m.f.opts.limit, m.f.opts.prefill_rows);
+            ko.resident = if ((try longpf.lazyEnv())) 0 else @import("serve_knobs.zig").streamScratch(&m.cfg, m.f.opts.limit, m.f.opts.prefill_rows);
             // TF_DSV41_PF_4K / _PF_TBO: the prefill workspace a long prompt allocates, priced on top of the worst point
             if (o.own_prefill) ko.workspace = try @import("forward_prefill.zig").workspaceBytes(&m.f, @intCast(m.f.opts.prefill_rows));
             tr.step("forward", cuda.usage(false));
             m.boot_check = try kvs.bootCheck(&m.ctx, &m.cfg, ko, m.tcfg.rank, world);
             m.f.kv = try kvs.Kv.init(gpa, &m.driver, &m.ctx, &m.cfg, ko, &m.runner, comm);
-            m.f.opts.pool = m.f.kv.?.options();
+            m.f.opts.pool = try m.f.kv.?.options();
             tr.step("kv pool", cuda.usage(false));
         }
         // the buffer plan: every window up to the prefill rows (a verify window is at most a block + 1), DSpark's too
@@ -329,18 +345,18 @@ pub const Model = struct {
         const rows_cap = try batch.capFromEnv();
         if (m.slots > 1) try batch.Batch.plan(&m.f, &bp, m.slots, rows_cap);
         // TF_DSV41_SLOT_DRAFTS=1: DSpark over every live slot (off: drafts are refused with several slots)
-        const slot_drafts = o.drafts and m.slots > 1 and dspark_rows.enabled();
+        const slot_drafts = o.drafts and m.slots > 1 and (try dspark_rows.enabled());
         const group = if (slot_drafts) try dspark_rows.groupFromEnv(m.cfg.dspark_block) else 1;
         if (slot_drafts) try dspark_slots.SlotPass.plan(m.f.arena.allocator(), &m.f, &bp, m.slots, group);
         if (m.f.kv) |k| try k.bind(&m.runner, &bp);
         // TF_DSV41_STREAM_LAZY: the stream top-k's scratch out of the plan, allocated by the prompts that stream
-        if (longpf.lazyEnv()) if (bp.sizes.fetchOrderedRemove(longpf.lazy_role)) |kv| {
+        if ((try longpf.lazyEnv())) if (bp.sizes.fetchOrderedRemove(longpf.lazy_role)) |kv| {
             pf.state(&m.f).long.lazy = .{ .bytes = kv.value };
         };
         // TF_DSV41_EX_STACKS=1: the experts' suh / svh stacks read where the weights hold them (no second copy)
-        if (ex_stacks.enabled()) _ = try ex_stacks.bind(&m.runner, &m.weights, &bp);
+        if ((try ex_stacks.enabled())) _ = try ex_stacks.bind(&m.runner, &m.weights, &bp);
         // TF_DSV41_FORMS_INPLACE=1: the dense forms over their trellis (not a second copy), unless a program reads it
-        if (forms_inplace.enabled()) {
+        if ((try forms_inplace.enabled())) {
             const ws = &pf.state(&m.f).k4ws.plan;
             _ = try forms_inplace.bind(gpa, &m.runner, &m.weights, if (ws.*) |*w| &.{ &bp, w } else &.{&bp});
         }
@@ -378,7 +394,6 @@ pub const Model = struct {
         m.f.engram = &m.host;
         if (world > 1) m.f.link = &m.session.plan;
         m.f.on_stop = .{ .ctx = &m.session, .run = announceStop };
-        const so = try sg.optionsFromEnv();
         const several_ok = m.slots == 1 or so.several;
         if (so.enabled and m.f.kv != null and !several_ok)
             if (!quiet) std.log.scoped(.dsv41).warn("sessions: off with {d} live slots (TF_DSV41_SESSION_SLOTS=1 opens them over every slot; the session-slots check has not run on hardware)", .{m.slots});
@@ -402,7 +417,7 @@ pub const Model = struct {
         if (o.drafts) m.pass = try dspark_gpu.GpuPass.init(gpa, &m.f, ingest_rows);
         if (m.slots > 1) try m.openRows(rows_cap, &bp);
         // TF_DSV41_PREFILL_PIECES: two slots' CED prompts interleave, so the stash ring is a slot's own (swapped)
-        if (piecesEnv() and m.slot_set != null and pf.state(&m.f).mode == .replay) try m.slot_set.?.swap(&bp, &@import("ced.zig").roles);
+        if ((try piecesEnv()) and m.slot_set != null and pf.state(&m.f).mode == .replay) try m.slot_set.?.swap(&bp, &@import("ced.zig").roles);
         // sessions over several slots: the operations on the activated slot, the row windows' kept ids committed
         if (m.sessions) |x| if (m.rows) |b| {
             x.slot_set = m.slot_set;
@@ -416,7 +431,7 @@ pub const Model = struct {
         m.gt.ingest_window = m.cfg.window;
         tr.step("drafts and rows", cuda.usage(false));
         // TF_DSV41_SAMPLING=1: keyed sampling (T > 0) on every rank; off: such requests are refused (error.Sampling)
-        m.sampler = if (samp.enabled()) try samp.GpuSampler.init(gpa, &m.f) else null;
+        m.sampler = if ((try samp.enabled())) try samp.GpuSampler.init(gpa, &m.f) else null;
         m.gt.sampler = m.sampler;
         try m.driver.synchronize();
         tr.step("end", cuda.usage(false));
@@ -424,7 +439,12 @@ pub const Model = struct {
         if (m.dev_arena) |x| x.endBoot(m.tcfg.rank); // TF_DSV41_ARENA=pack: boot's buffers in, the rest as before
         // the boot check on the boot's own figures: what it took, the dip below idle, the hard floor
         if (m.boot_check) |b| try kvs.afterBoot(b);
-        try comm.barrier();
+        const Ready = struct {
+            fn wait(c: @TypeOf(comm)) !void {
+                try c.barrier();
+            }
+        };
+        try load_cache.finishAfter(.{comm}, Ready.wait);
     }
 
     /// Several live slots: the stacked roles' bases, the row runner, the followers' row ops; one-slot graphs off.
@@ -457,9 +477,8 @@ pub const Model = struct {
     }
 
     /// TF_DSV41_PREFILL_PIECES=1: prompts prefilled in pieces between decode rounds (default off; ranks must agree).
-    pub fn piecesEnv() bool {
-        const v = std.c.getenv("TF_DSV41_PREFILL_PIECES") orelse return false;
-        return std.mem.eql(u8, std.mem.trim(u8, std.mem.span(v), " "), "1");
+    pub fn piecesEnv() !bool {
+        return @import("sys").environment.read(bool, "TF_DSV41_PREFILL_PIECES", false);
     }
 
     fn announceStop(ctx: *anyopaque) void {

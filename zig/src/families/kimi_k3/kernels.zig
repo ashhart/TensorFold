@@ -280,7 +280,7 @@ pub const Kernels = struct {
         e.dispatchGroups(mtl.Size.of(2, a.heads, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// Up to 32 heads a threadgroup (a simdgroup a head) share each staged key tile: a TP-4 node reads a row's keys once.
+    /// Up to 32 heads a threadgroup (a simdgroup each) share each staged key tile: a TP-4 node reads a row's keys once.
     pub fn mlaAttend(k: *const Kernels, e: mtl.ComputeEncoder, q: Ref, qlat: Ref, rows_ref: Ref, partial: Ref, a: MlaArgs) void {
         e.setPipeline(k.mla_attend);
         bind(e, .{ q, qlat, rows_ref, partial });

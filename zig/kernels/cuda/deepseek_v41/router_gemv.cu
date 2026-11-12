@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include "common/cp_async.cuh"
 
 namespace dsv41_rg {
 
@@ -19,13 +20,7 @@ constexpr int EPL = 16;             // experts a lane in the selection: E <= 512
 constexpr int KMAX = 8;             // top-k at most
 static_assert(NV % JC == 0, "whole chunks");
 
-__device__ __forceinline__ uint4 ldg_stream(const uint16_t* p) {
-    uint4 v;
-    asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
-                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w)
-                 : "l"(p));
-    return v;
-}
+__device__ __forceinline__ uint4 ldg_stream(const uint16_t* p) { return tf_common::ld_nc(reinterpret_cast<const uint4*>(p)); }
 
 // 8 bf16 (k ascending: the low half of each word first) -> fp32, exactly
 __device__ __forceinline__ void widen8(const uint4 v, float (&f)[8]) {
