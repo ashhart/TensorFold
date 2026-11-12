@@ -31,6 +31,9 @@ pub const Drafted = struct {
     firsts: std.ArrayList(u32) = .empty,
     /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
     held_on_target: bool = false,
+    /// The target's logprob rows pass through (opt-in): `first_row` is offered; `verify` already fills `Verified.rows`.
+    rows: bool = false,
+    table: be.Backend.VTable = undefined, // what `backend()` offers when `rows` adds `first_row` to a static vtable
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -71,7 +74,13 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        var vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null);
+        if (x.rows and x.target.vtable.first_row != null) {
+            x.table = vtable.*;
+            x.table.first_row = firstRow;
+            vtable = &x.table;
+        }
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtable };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -210,6 +219,10 @@ pub const Drafted = struct {
         const t = self(ptr).target;
         const masked = t.vtable.first_masked orelse return error.StructuresUnsupported;
         return masked(t.ptr, s, position, mask);
+    }
+
+    fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!@import("logprob.zig").Row {
+        return self(ptr).target.firstRow(s);
     }
 
     fn queue(ptr: *anyopaque, s: *Stream, feed: be.Feed, position: u64) anyerror!u64 {
