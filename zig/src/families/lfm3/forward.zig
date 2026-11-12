@@ -346,7 +346,8 @@ fn conv(enc: *Encoder, s: *st.Scratch, cv: wts.Conv, layer: usize, segments: []c
 
 const AttentionSegment = @import("kernels.zig").AttentionSegment;
 
-fn sharedAttention(enc: *Encoder, s: *st.Scratch, segments: []const Segment, layer: usize, sliding: bool, total: usize) !void {
+/// The shared round's table at `layer` and each row's stream, for qk and attention; the most chunks a row reads.
+fn segmentTable(s: *st.Scratch, segments: []const Segment, layer: usize, sliding: bool) usize {
     const table = s.attention_segments.slice(AttentionSegment, c.layers * st.batch_rows)[layer * st.batch_rows ..][0..st.batch_rows];
     const row_segments = s.attention_rows.slice(u32, st.batch_rows);
     var base: usize = 0;
@@ -360,6 +361,32 @@ fn sharedAttention(enc: *Encoder, s: *st.Scratch, segments: []const Segment, lay
         @memset(row_segments[base..][0..seg.rows], @intCast(i));
         base += seg.rows;
     }
+    return used;
+}
+
+/// lfm3_qk over every row of a shared round in one dispatch: each row's stream, len and cache come from the table.
+fn sharedQk(enc: *Encoder, s: *st.Scratch, a: wts.Attention, segments: []const Segment, layer: usize, qk: QkArgs, total: usize) !void {
+    try enc.begin(.attention_prepare);
+    enc.pipe("lfm3_qk_segments");
+    for (segments) |seg| {
+        const cache = seg.cache.blocks[layer].attention;
+        enc.e.useResource(cache.keys, mtl.ResourceUsage.write);
+        enc.e.useResource(cache.values, mtl.ResourceUsage.write);
+    }
+    enc.e.setBuffer(s.q, 0, 0);
+    enc.e.setBuffer(s.k, 0, 1);
+    enc.e.setBuffer(s.v, 0, 2);
+    enc.tensor(a.q_norm, 3);
+    enc.tensor(a.k_norm, 4);
+    enc.e.setBytes(std.mem.asBytes(&qk), 5);
+    enc.e.setBuffer(s.queries, 0, 6);
+    enc.e.setBuffer(s.attention_segments, layer * st.batch_rows * @sizeOf(AttentionSegment), 7);
+    enc.e.setBuffer(s.attention_rows, 0, 8);
+    enc.groups(.{ c.query_heads + c.kv_heads, total, 1 }, .{ 32, 1, 1 });
+    try enc.end();
+}
+
+fn sharedAttention(enc: *Encoder, s: *st.Scratch, segments: []const Segment, layer: usize, used: usize, total: usize) !void {
     try enc.begin(.attention);
     enc.pipe("lfm3_attn_segments");
     for (segments) |seg| {
@@ -405,17 +432,26 @@ fn attention(enc: *Encoder, s: *st.Scratch, a: wts.Attention, segments: []const 
     const sliding = enc.m.config.layer_types[layer] == .sliding_attention;
     const rotary = if (sliding) enc.m.config.sliding_rotary else enc.m.config.full_rotary;
     const shared = segments.len > 1 and total <= st.batch_rows;
+    const rope = QkArgs{
+        .len = 0,
+        .cap = 0,
+        .eps = c.eps,
+        .log2_theta = std.math.log2(rotary.theta),
+        .rotary_pairs = @intFromFloat(c.head_dim * rotary.partial / 2),
+    };
+    if (shared) {
+        const used = segmentTable(s, segments, layer, sliding);
+        try sharedQk(enc, s, a, segments, layer, rope, total);
+        try sharedAttention(enc, s, segments, layer, used, total);
+    }
+    // Otherwise each stream's qk, then its attention in slices.
     var base: usize = 0;
-    for (segments) |seg| {
+    for (if (shared) segments[0..0] else segments) |seg| {
         const cache = seg.cache.blocks[layer].attention;
         const cap: u32 = @intCast(seg.cache.capacity);
-        const qk = QkArgs{
-            .len = @intCast(seg.cache.len),
-            .cap = cap,
-            .eps = c.eps,
-            .log2_theta = std.math.log2(rotary.theta),
-            .rotary_pairs = @intFromFloat(c.head_dim * rotary.partial / 2),
-        };
+        var qk = rope;
+        qk.len = @intCast(seg.cache.len);
+        qk.cap = cap;
         try enc.begin(.attention_prepare);
         enc.pipe("lfm3_qk");
         enc.e.setBuffer(s.q, base * c.hidden * 2, 0);
@@ -429,10 +465,6 @@ fn attention(enc: *Encoder, s: *st.Scratch, a: wts.Attention, segments: []const 
         enc.e.setBuffer(cache.values, 0, 8);
         enc.groups(.{ c.query_heads + c.kv_heads, seg.rows, 1 }, .{ 32, 1, 1 });
         try enc.end();
-        if (shared) {
-            base += seg.rows;
-            continue;
-        }
         var at: usize = 0;
         while (at < seg.rows) : (at += st.attn_slice) {
             const rows = @min(seg.rows - at, st.attn_slice);
@@ -468,7 +500,6 @@ fn attention(enc: *Encoder, s: *st.Scratch, a: wts.Attention, segments: []const 
         }
         base += seg.rows;
     }
-    if (shared) try sharedAttention(enc, s, segments, layer, sliding, total);
     try enc.begin(.activation);
     enc.pipe("lfm3_gate");
     enc.e.setBuffer(s.y, 0, 0);
