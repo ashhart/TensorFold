@@ -87,6 +87,7 @@ pub const train_mixers = @embedFile("train_mixers.metal");
 /// The NAX helpers the prefill files include (`#include "../nax.h"`, inlined before compiling).
 pub const nax = @embedFile("nax.h");
 pub const tensor_ops = @embedFile("tensor_ops.metal");
+pub const tensor_exact_gemm = "#define TF_NAX_STRICT_FP32\n#define TF_NAX_EXACT_B\n" ++ @embedFile("prefill/gemm_nax.metal") ++ @embedFile("tensor_exact_gemm.metal");
 pub const tensor_attention = @embedFile("tensor_attention.metal");
 pub const tensor_attention_pv = @embedFile("tensor_attention_pv.metal");
 
