@@ -40,14 +40,34 @@ fn addr(b: ?mtl.Buffer) u64 {
     return if (b) |x| x.gpuAddress() else 0;
 }
 
-/// Layer `l`'s table of the launch's slots written (each slot once), every buffer it reaches declared on `e`.
-pub fn table(x: *const Ctx, e: mtl.ComputeEncoder, l: u32) !Ref {
+/// Every buffer of the launch's slots declared on `e` in one call: run once an encoder before its first `table`.
+pub fn declare(x: *const Ctx, e: mtl.ComputeEncoder) void {
+    if (!many(x)) return;
+    var ids: [512]mtl.objc.Id = undefined;
+    var n: usize = 0;
+    const use = mtl.ResourceUsage.read | mtl.ResourceUsage.write;
+    for (x.segs) |sg| for (sg.slot.regions) |*region| {
+        if (n + 5 > ids.len) {
+            e.useResources(ids[0..n], use);
+            n = 0;
+        }
+        ids[n] = region.window.id;
+        n += 1;
+        inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(region, f)) |b| {
+            ids[n] = b.id;
+            n += 1;
+        };
+    };
+    e.useResources(ids[0..n], use);
+}
+
+/// Layer `l`'s table of the launch's slots written (each slot once); `declare` made its buffers resident.
+pub fn table(x: *const Ctx, l: u32) !Ref {
     const c = x.c;
     if (x.segs.len > R) return error.BadRows;
     const ratio = c.compressRatio(l);
     const at: Ref = ctx_.plus(x.s.segs, @as(usize, l) * R * scratch.seg_bytes);
     const out: []Seg = @alignCast(std.mem.bytesAsSlice(Seg, x.s.bytes(at, x.segs.len * scratch.seg_bytes)));
-    const use = mtl.ResourceUsage.read | mtl.ResourceUsage.write;
     for (x.segs, 0..) |sg, j| {
         for (x.segs[0..j]) |prev| if (prev.slot == sg.slot) return error.SlotTwice;
         const region = &sg.slot.regions[l];
@@ -64,12 +84,6 @@ pub fn table(x: *const Ctx, e: mtl.ComputeEncoder, l: u32) !Ref {
             .rows = sg.n,
             .nkeys = if (ratio > 0) (sg.p0 + sg.n) / ratio else 0,
             .start = sg.p0 + 1,
-        };
-        e.useResource(region.window, use);
-        inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(region, f)) |b| e.useResource(b, use);
-        if (src) |r| if (r != region) {
-            e.useResource(r.pool.?, use);
-            if (r.keys) |b| e.useResource(b, use);
         };
     }
     return at;
