@@ -62,6 +62,7 @@ fn run(a: std.mem.Allocator, vendor: ?u32, timeout_ns: u64) !u8 {
         .qmm_f32 = &shaders.qmm_f32,
         .copy_f32_bf16 = &shaders.copy_f32_bf16,
         .qmm_q4_tile = &shaders.qmm_q4_tile,
+        .qmm_q4_tile_f32 = &shaders.qmm_q4_tile_f32,
         .dequant_bf16 = &shaders.dequant_bf16,
         .gather_u32 = &shaders.gather_u32,
         .gather_u16 = &shaders.gather_u16,
