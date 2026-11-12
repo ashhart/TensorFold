@@ -3,7 +3,7 @@ import { currentSecurityRoleFromEnv } from './security'
 import { remoteDeviceStatus } from './device-status'
 import { loadStaticFile } from './remote-static'
 import { DEFAULT_REMOTE_STREAM_BUFFER_BYTES, KeepTailRemoteEventBuffer } from './remote-stream-buffer'
-import { PairingAttemptLimiter, authToken, tokenMatches, securityRoleAllows, requiredRoleForRemoteMutation } from './remote-control-auth'
+import { PairingAttemptLimiter, authToken, tokenMatches, securityRoleAllows, requiredRoleForRemoteMutation, remoteMutationNeedsOwnerToken } from './remote-control-auth'
 import { readJson, writeJson, writeRemoteStatic } from './remote-control-http'
 import { remoteControlCommandCatalog } from './remote-control-catalog'
 import { handleRemoteMutation } from './remote-control-mutations'
@@ -320,7 +320,8 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
         writeJson(res, 403, { error: 'insufficient_role', requiredRole })
         return
       }
-      if (requiredRole === 'owner' && !ownerAuthed) {
+      if ((requiredRole === 'owner' || remoteMutationNeedsOwnerToken(url.pathname)) && !ownerAuthed) {
+        deps.audit('remote_control.reject', { path: url.pathname, reason: 'owner_token_required' })
         writeJson(res, 403, { error: 'owner_token_required' })
         return
       }
