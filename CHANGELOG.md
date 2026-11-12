@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA (GB10): `TF_CUDA_CARVEOUT_SOURCE=daemon` takes the display carveout from a display-memory daemon that lends it in 2 MiB slices (kindling spark-os's dispramd, spark-attic's atticd), for a box whose driver refuses a DRM dumb buffer; `drm` stays the default and with the carveout off nothing changes. A daemon that does not answer, a refused claim, and a key file that is missing, not a regular file or empty on its first line each stop the load with the cause named (#2762).
+
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.
