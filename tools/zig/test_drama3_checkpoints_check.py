@@ -1,5 +1,8 @@
-"""The checkpoints check's verdict and peak-memory source, without a server or GPU."""
+"""The checkpoints check's verdict, peak-memory source and reply timing, without a model or GPU."""
 import copy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
+import time
 import unittest
 
 import drama3_checkpoints_check as check
@@ -49,6 +52,36 @@ class PeakTests(unittest.TestCase):
     def test_without_a_device_peak_the_process_peak_is_used(self):
         memory = {"process": {"lifetime_peak_physical_footprint_bytes": 9}}
         self.assertEqual(check.peak_bytes(memory), (9, "process.lifetime_peak_physical_footprint_bytes"))
+
+
+class SlowStream(BaseHTTPRequestHandler):
+    """A streamed reply whose first 4 bytes come at once and the rest a second later."""
+    protocol_version = "HTTP/1.1"
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.send_response(200)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        for delay, data in ((0, b"\0" * 4), (1.0, b"\1" * 8)):
+            time.sleep(delay)
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+        self.wfile.write(b"0\r\n\r\n")
+
+    def log_message(self, *_):
+        pass
+
+
+class SpeakTests(unittest.TestCase):
+    def test_first_audio_is_the_first_bytes_not_a_full_read(self):
+        with ThreadingHTTPServer(("127.0.0.1", 0), SlowStream) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            reply = check.speak(server.server_address[1], "text", True, 10)
+            server.shutdown()
+        self.assertEqual(reply["bytes"], 12)
+        self.assertLess(reply["first_audio_s"], 0.5)
+        self.assertGreaterEqual(reply["total_s"], 1.0)
 
 
 if __name__ == "__main__":

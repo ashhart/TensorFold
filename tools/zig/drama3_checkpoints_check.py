@@ -25,14 +25,15 @@ SOLO = [("whole", TEXTS[0], False), ("stream", TEXTS[1], True)]
 
 
 def speak(port, text, stream, timeout):
-    """One fixed-seed reply as PCM: sha256, bytes, seconds to its first chunk and to its end."""
+    """One fixed-seed reply as PCM: sha256, bytes, seconds to its first bytes and to its end."""
     body = json.dumps({"model": MODEL, "input": text, "response_format": "pcm", "stream": stream, "seed": SEED}).encode()
     request = urllib.request.Request(f"http://127.0.0.1:{port}/v1/audio/speech", body,
                                      {"Content-Type": "application/json"})
     digest, size, first = hashlib.sha256(), 0, None
     started = time.monotonic()
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        while chunk := response.read(65536):
+        # read1 returns what has arrived; read(n) would wait for n bytes and time first audio late
+        while chunk := response.read1(65536):
             first = first if first is not None else time.monotonic() - started
             digest.update(chunk)
             size += len(chunk)
