@@ -116,6 +116,18 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (own.ranks) |r| try load_cache.finishAfter(.{ r, std.math.maxInt(u64) }, ranks.Session.room) else load_cache.finish();
     // the weights are in: the n-gram table into the page cache behind them, so the first prompt finds its rows in RAM
     own.engine.ngram.warm();
+    // TF_CUDA_CARVEOUT=1: a contiguous cache's first attention planes in the carveout, as many as this window's fit
+    const carve = @import("cuda_carve.zig");
+    const carveout = try carve.open(gpa, ctx, o.tp); // null when off; the engine closes it at deinit
+    // the budget counts them out of the first window unless another cache may hold them (a slide learner, page tests)
+    var carved_bytes: u64 = 0;
+    if (carveout) |c| {
+        const plan = carve.Plan.of(c, window, own.engine.heads);
+        own.engine.carve = plan;
+        const others = o.slide or try @import("cuda_pages.zig").pageTest() > 0 or (page_tokens > 0 and @import("cuda_kv_lanes.zig").pagedOnly());
+        if (!others) carved_bytes = carve.kept(plan.n, window, own.engine.heads);
+        plan.log(window, carved_bytes);
+    }
     return .{
         .layout = own.kv.layout,
         .vision = own.vision,
@@ -124,6 +136,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .rows = if (own.head != null) mtp.max_rows else 2,
         .prompt_rows = @intCast(own.engine.chunk),
         .stream_bytes = stream_bytes,
+        .carved_bytes = carved_bytes,
         .ctx = own,
         .deinit = F.release,
         .learns = if (o.slide) own else null,

@@ -63,6 +63,7 @@ pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytyp
     engine.chunk = 16;
     engine.round_graph = .{};
     engine.heads = .full;
+    engine.carve = null;
     var pair: [2]std.posix.socket_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
     defer _ = std.c.close(pair[0]);
@@ -151,6 +152,7 @@ fn follower(comptime Cuda: type, frames: []const wire.Header, setup: *const fn (
     engine.chunk = 16;
     engine.heads = .full;
     engine.round_graph = .{};
+    engine.carve = null;
     var pair: [2]std.posix.socket_t = undefined;
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
     defer _ = std.c.close(pair[0]);

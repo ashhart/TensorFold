@@ -18,6 +18,7 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, coun
     engine.chunk = 16;
     engine.round_graph = .{};
     engine.heads = .full;
+    engine.carve = null;
     var ids = [_]u32{1};
     var head: mtp.Head = undefined;
     head.ids = &ids;
