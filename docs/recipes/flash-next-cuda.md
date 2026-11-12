@@ -162,6 +162,11 @@ The three host-tier settings use the platform environment rules: empty or whites
 the host budget is a nonnegative whole MiB count fitting a native byte size, and frame/slot counts must be
 positive whole numbers. Malformed values refuse with `BadFlashNextKvHost`, never select tier-off silently.
 
+Whole-pass graphs cannot enclose an expert pool's host planning and synchronization. Unplanned pooled passes run
+eagerly even with `TF_FLASHNEXT_WINDOW_GRAPH` enabled. Resident experts still capture. A pooled MTP head may also
+capture when its active device plan covers every pool in that pass; an inactive or unrelated plan does not suffice.
+EXL3's segmented target graphs keep their own admission and do not wrap a host-planning cut.
+
 EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
 snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
 

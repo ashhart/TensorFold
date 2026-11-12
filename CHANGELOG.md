@@ -50,7 +50,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
 
 - Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership. Grouped MTP heads retain their stream's tier selection, so their progress releases completed frames across rounds and tier restores (#1522). Thanks to @BlivionIaG.
-
 - EXL3 attention and MTP caches can use the existing core K/V page pool through opt-in `TF_FLASHNEXT_KV_PAGES`; paging remains off by default (#1444).
 
 - EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; kept prompt states now resume at any row without a chunk-grid restriction (#1443). Thanks to @BlivionIaG.
@@ -72,6 +71,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
 
 - Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks (#1441).
+
+- Flash Next CUDA avoids invalid whole-pass graph capture when EXL3 expert pools need host planning; resident experts and rollback retain their graphs (#1441). Thanks to @BlivionIaG.
 
 - CUDA startup refuses a malformed Flash Next EXL3 setting (the `TF_FLASHNEXT_*` pool, profile, telemetry, placement and snapshot switches), `TF_FLASHNEXT_CHUNK`, `TF_FLASHNEXT_CHUNK_SOLO` or `TENSORFOLD_MEMORY_RESERVE_GIB`, naming the variable and its accepted forms, from the central environment table; a blank value is unset, and every documented value keeps its meaning (#1441).
 
