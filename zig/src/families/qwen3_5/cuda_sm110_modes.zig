@@ -5,6 +5,9 @@ const profile = @import("core").profile;
 const environment = @import("sys").environment;
 
 pub const Modes = struct {
+    slide: bool = false,
+    dspine: bool = false,
+    dspine_window: ?[]const u8 = null,
     kv8: bool = false,
     prompt_int8: bool = false,
     rope_yarn: bool = false,
@@ -20,6 +23,7 @@ pub const Modes = struct {
 
 pub fn current(kv8: bool, prompt_int8: bool, rope_yarn: bool) Modes {
     return .{
+        .dspine_window = profile.lookup("TF_DSPINE_WINDOW"),
         .kv8 = kv8,
         .prompt_int8 = prompt_int8,
         .rope_yarn = rope_yarn,
@@ -34,14 +38,16 @@ pub fn current(kv8: bool, prompt_int8: bool, rope_yarn: bool) Modes {
     };
 }
 
-pub fn checkDevice(ctx: *const cuda.Context, kv8: bool, prompt_int8: bool, rope_yarn: bool) !void {
-    const now = current(kv8, prompt_int8, rope_yarn);
+pub fn checkDevice(ctx: *const cuda.Context, now: Modes) !void {
     if (!needsDevice(now)) return;
     try check(try ctx.capability(), now);
 }
 
 pub fn check(sm: u32, modes: Modes) !void {
     if (sm != 110) return;
+    if (modes.slide) return error.QwenSm110SlideUnqualified;
+    if (modes.dspine) return error.QwenSm110DspineUnqualified;
+    if (count(modes.dspine_window)) return error.QwenSm110DspineWindowUnqualified;
     if (modes.kv8) return error.QwenSm110Fp8KvUnqualified;
     if (modes.prompt_int8) return error.QwenSm110Int8PromptUnqualified;
     if (modes.rope_yarn) return error.QwenSm110RopeYarnUnqualified;
@@ -65,13 +71,16 @@ fn one(raw: ?[]const u8) bool {
 }
 
 fn needsDevice(modes: Modes) bool {
-    return modes.kv8 or modes.prompt_int8 or modes.rope_yarn or count(modes.kv_pages) or
+    return modes.slide or modes.dspine or count(modes.dspine_window) or modes.kv8 or modes.prompt_int8 or modes.rope_yarn or count(modes.kv_pages) or
         one(modes.kv_pages_all) or count(modes.kv_share) or one(modes.request_starts) or
         modes.kv_page_test != null or one(modes.keep_late) or modes.no_trees != null or modes.draft_nodes != null;
 }
 
 pub fn explain(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.QwenSm110SlideUnqualified => "--slide is not qualified for Qwen on sm_110; omit it",
+        error.QwenSm110DspineUnqualified => "DSpine --drafter is not qualified for Qwen on sm_110; use DFlash2",
+        error.QwenSm110DspineWindowUnqualified => "TF_DSPINE_WINDOW is not qualified for Qwen on sm_110; unset it",
         error.QwenSm110Fp8KvUnqualified => "--kv-cache fp8 is not qualified for Qwen on sm_110; use bf16",
         error.QwenSm110Int8PromptUnqualified => "--prompt-precision int8 is not qualified for Qwen on sm_110; use bf16",
         error.QwenSm110RopeYarnUnqualified => "--rope-yarn is not qualified for Qwen on sm_110; omit it",
@@ -97,6 +106,9 @@ test "SM110 accepts defaults, including explicit off values; other SMs retain ev
 
 test "SM110 refuses every unqualified Qwen serving mode with an explanation" {
     const cases = [_]struct { modes: Modes, err: anyerror }{
+        .{ .modes = .{ .slide = true }, .err = error.QwenSm110SlideUnqualified },
+        .{ .modes = .{ .dspine = true }, .err = error.QwenSm110DspineUnqualified },
+        .{ .modes = .{ .dspine_window = "256" }, .err = error.QwenSm110DspineWindowUnqualified },
         .{ .modes = .{ .kv8 = true }, .err = error.QwenSm110Fp8KvUnqualified },
         .{ .modes = .{ .prompt_int8 = true }, .err = error.QwenSm110Int8PromptUnqualified },
         .{ .modes = .{ .rope_yarn = true }, .err = error.QwenSm110RopeYarnUnqualified },
@@ -114,4 +126,8 @@ test "SM110 refuses every unqualified Qwen serving mode with an explanation" {
         try std.testing.expect(std.mem.indexOf(u8, explain(case.err).?, "sm_110") != null);
     }
     try std.testing.expectError(error.QwenSm110NoTreesUnqualified, check(110, .{ .no_trees = "0" }));
+}
+
+test {
+    _ = @import("cuda_sm110_open_test.zig");
 }
