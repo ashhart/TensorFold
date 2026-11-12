@@ -107,6 +107,7 @@ test "dsv41 metal steps: pieces of 1, 7, 64, 100 and 300 rows == the whole promp
         try testing.expectEqual(@as(u64, 0), b.at);
         var at: u64 = 0;
         const before = m.t.stats.pieces;
+        const hits0 = m.t.pr.stage_hits;
         while (p.len - at > rows) : (at += rows) {
             try tg.piece(1, p, at, at + rows, false);
             if (made.items.len < n_decode) {
@@ -126,8 +127,12 @@ test "dsv41 metal steps: pieces of 1, 7, 64, 100 and 300 rows == the whole promp
         const sd = diff(st, want.state);
         const td = @intFromBool(!std.mem.eql(u32, &toks, &want.toks));
         const dd = @intFromBool(!std.mem.eql(u32, made.items, &solo.toks));
-        say(sd + td + dd == 0, "(a) {d}-row pieces ({d} of them) vs whole: {d} state bytes, tokens {s}; the decode between them {s} alone", .{ rows, m.t.stats.pieces - before, sd, if (td == 0) "equal" else "differ", if (dd == 0) "equals its run" else "differs from its run" });
-        bad += sd + td + dd;
+        // every call after the first (each later piece and the finish) starts on the chunk the one before prepared
+        const pieces = m.t.stats.pieces - before;
+        const hits = m.t.pr.stage_hits - hits0;
+        const hd = @intFromBool(hits != pieces);
+        say(sd + td + dd + hd == 0, "(a) {d}-row pieces ({d} of them, {d} started on a prepared chunk) vs whole: {d} state bytes, tokens {s}; the decode between them {s} alone", .{ rows, pieces, hits, sd, if (td == 0) "equal" else "differ", if (dd == 0) "equals its run" else "differs from its run" });
+        bad += sd + td + dd + hd;
         tg.release(0);
         tg.release(1);
     }
