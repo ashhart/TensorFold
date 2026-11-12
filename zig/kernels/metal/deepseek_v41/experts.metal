@@ -200,74 +200,88 @@ kernel void tf_dsv41_xp_quant(device const bfloat* X [[buffer(0)]], device half*
   ds_up_out<1>(acc, vals, act, wts, pairs, a, first, 0, 1, nl, n, c);
 }
 
-// Slots of LO..HI rows: RP rows a pass share a weight decode (extra rows repeat the last, unwritten); floats staged.
-template <uint RP, uint LO, uint HI>
-[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_xp_upc_multi(
+// NW matrices' chains over RP rows of a slot, each group decoded once for all rows; a row's chain is the one-row one's.
+template <uint RP, uint NW, typename T, bool DOWN>
+inline void ds_rows_chains(thread float (&acc)[NW][RP], device const T* X, device const float* XS,
+                           const thread uint (&src)[RP], uint K, device const uchar* const thread (&wp)[NW],
+                           device const uchar* const thread (&ws)[NW], uint c) {
+  const uint G = K / 32;
+  for (uint v = 0; v < NW; ++v)
+    for (uint r = 0; r < RP; ++r) acc[v][r] = 0.0f;
+  for (uint g = c; g < (DOWN && TF_CTL == 2 ? G - 1 : G); g += 8) {
+    float p[NW][RP];
+    for (uint v = 0; v < NW; ++v)
+      for (uint r = 0; r < RP; ++r) p[v][r] = 0.0f;
+    for (int h = 0; h < 2; ++h) {
+      float w[NW][16];
+      for (uint v = 0; v < NW; ++v) {
+        const uint2 q = *(device const uint2*)(wp[v] + 16 * g + 8 * h);
+        for (int b = 0; b < 8; ++b) {
+          const float2 f = k3_fp4_pair(((b < 4 ? q.x : q.y) >> (8 * (b & 3))) & 0xFFu);
+          w[v][2 * b] = f.x, w[v][2 * b + 1] = f.y;
+        }
+      }
+      for (uint r = 0; r < RP; ++r) {
+        const uint sr = TF_CTL == 6 ? src[0] : src[r];
+        device const vec<T, 4>* x = (device const vec<T, 4>*)(X + sr * K + 32 * g + 16 * h);
+        for (int i = 0; i < 4; ++i) {
+          float4 x4 = float4(x[i]);
+          if (DOWN && TF_CTL == 1) x4 = select(x4, float4(0.0f), !isfinite(x4));
+          for (int j = 0; j < 4; ++j)
+            for (uint v = 0; v < NW; ++v) {
+              const float s = fma(x4[j], w[v][4 * i + j], p[v][r]);
+              p[v][r] = TF_CTL == 3 ? float(half(s)) : s;
+            }
+        }
+      }
+    }
+    for (uint v = 0; v < NW; ++v)
+      for (uint r = 0; r < RP; ++r)
+        acc[v][r] = k3_scaled_fma(DOWN ? p[v][r] : p[v][r] * XS[src[r] * G + g], ws[v][g], acc[v][r]);
+  }
+}
+
+// Rows a pass takes for m rows left: 2, 4, 6 or 8 (gate/up) or 2, 4 (down); extra rows repeat the last, unwritten.
+inline uint ds_tier(uint m, bool down) { return m <= 2 ? 2u : m <= 4 || down ? 4u : m <= 6 ? 6u : 8u; }
+
+// Gate/up of rows r0..r0+rn of a slot over tf_dsv41_xp_quant's values, one weight decode for all, then the epilogue.
+template <uint RP>
+inline void ds_upc_pass(threadgroup float* vals, device const half* XH, device const float* XS,
+                        device const uint* pairs, device bfloat* act, constant DsArgs& a, device const float* wts,
+                        device const uchar* const thread (&wp)[2], device const uchar* const thread (&ws)[2],
+                        uint first, uint r0, uint rn, uint nl, uint n, uint c) {
+  uint src[RP];
+  for (uint r = 0; r < RP; ++r) src[r] = pairs[first + r0 + min(r, rn - 1)] / a.topk;
+  float acc[2][RP];
+  ds_rows_chains<RP, 2, half, false>(acc, XH, XS, src, a.K, wp, ws, c);
+  ds_up_out<RP>(acc, *(threadgroup float(*)[RP][32])vals, act, wts, pairs, a, first, r0, rn, nl, n, c);
+}
+
+// tf_dsv41_xp_upc_one for the slots of 2 to 16 rows: each row's bits as alone, whatever rows share its pass.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_xp_upc_rows(
     device const half* XH [[buffer(0)]], device const ExpertPtrs* table [[buffer(1)]],
     device const uint* slots [[buffer(2)]], device const uint* nslots [[buffer(3)]],
     device const uint* pairs [[buffer(4)]], device bfloat* act [[buffer(5)]], constant DsArgs& a [[buffer(6)]],
     device const float* wts [[buffer(7)]], device const float* XS [[buffer(8)]],
-    uint2 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
-  constexpr uint CH = 4096 / RP;
-  threadgroup float4 xf[1024];
-  threadgroup float xs[RP * (DS_KMAX / 32)], vals[RP][32];
-  if (tg.y >= nslots[0] || slots[3 * tg.y + 2] < LO || slots[3 * tg.y + 2] > HI) return;
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float vals[8 * 32];
+  if (tg.y >= nslots[0] || slots[3 * tg.y + 2] < 2) return;
   const uint e = slots[3 * tg.y], first = slots[3 * tg.y + 1], count = slots[3 * tg.y + 2];
   const ExpertPtrs w = table[e];
   const uint nl = sg * 4 + (lane >> 3), n = tg.x * 32 + nl, c = lane & 7, rowb = a.K / 2, groups = a.K / 32;
   device const uchar* const wp[2] = {w.w1p + n * rowb, w.w3p + n * rowb};
   device const uchar* const ws[2] = {w.w1s + n * groups, w.w3s + n * groups};
-  for (uint r0 = 0; r0 < count; r0 += RP) {
-    uint row[RP];
-    for (uint r = 0; r < RP; ++r) row[r] = pairs[first + min(r0 + r, count - 1)] / a.topk;
+  for (uint r0 = 0, rp; r0 < count; r0 += rp) {
+    rp = ds_tier(count - r0, false);
+    const uint rn = min(rp, count - r0);
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint i = t; i < RP * groups; i += 256) xs[i] = XS[row[i / groups] * groups + i % groups];
-    float acc[2][RP];
-    for (int v = 0; v < 2; ++v)
-      for (uint r = 0; r < RP; ++r) acc[v][r] = 0.0f;
-    for (uint k0 = 0; k0 < a.K; k0 += CH) {
-      const uint q4 = min(CH, a.K - k0) / 4;
-      threadgroup_barrier(mem_flags::mem_threadgroup);
-      for (uint i = t; i < RP * q4; i += 256)
-        xf[i / q4 * (CH / 4) + i % q4] = float4(((device const half4*)(XH + row[i / q4] * a.K + k0))[i % q4]);
-      threadgroup_barrier(mem_flags::mem_threadgroup);
-      // ds_chains over this chunk's groups for RP rows: each chain in the same order
-      for (uint g = k0 / 32 + c; g < (k0 + 4 * q4) / 32; g += 8) {
-        float p[2][RP];
-        for (int v = 0; v < 2; ++v)
-          for (uint r = 0; r < RP; ++r) p[v][r] = 0.0f;
-        for (int h = 0; h < 2; ++h) {
-          float wv[2][16];
-          for (int v = 0; v < 2; ++v) {
-            const uint2 q = *(device const uint2*)(wp[v] + 16 * g + 8 * h);
-            for (int b = 0; b < 8; ++b) {
-              const float2 f = k3_fp4_pair(((b < 4 ? q.x : q.y) >> (8 * (b & 3))) & 0xFFu);
-              wv[v][2 * b] = f.x, wv[v][2 * b + 1] = f.y;
-            }
-          }
-          for (uint r = 0; r < RP; ++r) {
-            threadgroup const float4* x = xf + r * (CH / 4) + (32 * g - k0 + 16 * h) / 4;
-            for (int i = 0; i < 4; ++i) {
-              const float4 x4 = x[i];
-              for (int j = 0; j < 4; ++j)
-                for (int v = 0; v < 2; ++v) {
-                  const float s = fma(x4[j], wv[v][4 * i + j], p[v][r]);
-                  p[v][r] = TF_CTL == 3 ? float(half(s)) : s;
-                }
-            }
-          }
-        }
-        for (int v = 0; v < 2; ++v)
-          for (uint r = 0; r < RP; ++r) acc[v][r] = k3_scaled_fma(p[v][r] * xs[r * groups + g], ws[v][g], acc[v][r]);
-      }
-    }
-    ds_up_out<RP>(acc, vals, act, wts, pairs, a, first, r0, min(RP, count - r0), nl, n, c);
+    if (rp == 2) ds_upc_pass<2>(vals, XH, XS, pairs, act, a, wts, wp, ws, first, r0, rn, nl, n, c);
+    else if (rp == 4) ds_upc_pass<4>(vals, XH, XS, pairs, act, a, wts, wp, ws, first, r0, rn, nl, n, c);
+    else if (rp == 6) ds_upc_pass<6>(vals, XH, XS, pairs, act, a, wts, wp, ws, first, r0, rn, nl, n, c);
+    else ds_upc_pass<8>(vals, XH, XS, pairs, act, a, wts, wp, ws, first, r0, rn, nl, n, c);
   }
 }
-
-template [[host_name("tf_dsv41_xp_upc_multi")]] [[kernel]] decltype(tf_dsv41_xp_upc_multi<4, 2, 16>)
-    tf_dsv41_xp_upc_multi<4, 2, 16>;
 
 // DeepSeek's copy of Kimi K3's down (k3_stage, k3_xp_chains) for one row (ONE) or more, RP rows a pass.
 template <int RP, bool ONE>
@@ -299,7 +313,43 @@ template <int RP, bool ONE>
 }
 
 template [[host_name("tf_dsv41_xp_down_one")]] [[kernel]] decltype(tf_dsv41_xp_down<1, true>) tf_dsv41_xp_down<1, true>;
-template [[host_name("tf_dsv41_xp_down_multi")]] [[kernel]] decltype(tf_dsv41_xp_down<4, false>) tf_dsv41_xp_down<4, false>;
+
+// Kimi's down of rows r0..r0+rn of a slot (act by pair position), one weight decode for all rows.
+template <uint RP>
+inline void ds_down_pass(device const bfloat* act, device bfloat* out, constant XpArgs& a,
+                         device const uchar* const thread (&wp)[1], device const uchar* const thread (&ws)[1],
+                         uint first, uint r0, uint rn, uint n, uint c) {
+  uint src[RP];
+  for (uint r = 0; r < RP; ++r) src[r] = first + r0 + min(r, rn - 1);
+  float acc[1][RP];
+  ds_rows_chains<RP, 1, bfloat, true>(acc, act, nullptr, src, a.K, wp, ws, c);
+  for (uint r = 0; r < RP; ++r) {
+    const float v = k3_xtree8(acc[0][r]);
+    if (c == 0 && r < rn) out[(first + r0 + r) * a.N + n] = bfloat(v);
+    if (TF_CTL == 4 && c == 0 && n == 0 && first + r0 + r == 0) out[a.rows_max * a.topk * a.N] = bfloat(1.0f);
+  }
+}
+
+// tf_dsv41_xp_down_one for the slots of 2 to 16 rows: each row's bits as alone, whatever rows share its pass.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_xp_down_rows(
+    device const bfloat* act [[buffer(0)]], device const ExpertPtrs* table [[buffer(1)]],
+    device const uint* slots [[buffer(2)]], device const uint* nslots [[buffer(3)]],
+    device const uint* pairs [[buffer(4)]], device bfloat* out [[buffer(5)]], constant XpArgs& a [[buffer(6)]],
+    uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  if (tg.y >= nslots[0] || slots[3 * tg.y + 2] < 2) return;
+  const uint e = slots[3 * tg.y], first = slots[3 * tg.y + 1], count = slots[3 * tg.y + 2];
+  const ExpertPtrs w = table[e];
+  const uint n = tg.x * 32 + sg * 4 + (lane >> 3), c = lane & 7, rowb = a.K / 2, groups = a.K / 32;
+  device const uchar* const wp[1] = {w.w2p + n * rowb};
+  device const uchar* const ws[1] = {w.w2s + n * groups};
+  for (uint r0 = 0, rp; r0 < count; r0 += rp) {
+    rp = ds_tier(count - r0, true);
+    const uint rn = min(rp, count - r0);
+    if (rp == 2) ds_down_pass<2>(act, out, a, wp, ws, first, r0, rn, n, c);
+    else ds_down_pass<4>(act, out, a, wp, ws, first, r0, rn, n, c);
+  }
+}
 
 #define DS_UP(RP) \
   template [[host_name("tf_dsv41_xp_up_r" #RP)]] [[kernel]] decltype(tf_dsv41_xp_up<RP>) tf_dsv41_xp_up<RP>;
