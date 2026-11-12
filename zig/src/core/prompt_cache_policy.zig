@@ -9,6 +9,7 @@ pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born
 /// `victimBut`'s order over every state, or with `own_only` over the prompt's own conversation's states alone.
 pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32, own_only: bool) ?usize {
     var best: ?usize = null;
+    var rung: ?usize = null; // a superseded ladder checkpoint: after every other redundant copy, before any newest state
     var oldest: ?usize = null;
     var oldest_rewind = false;
     for (s.entries.items, 0..) |e, i| { // one prefix compare an entry: the superseded scan and the oldest scan share it
@@ -21,11 +22,13 @@ pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born:
             oldest = i;
             oldest_rewind = rewind;
         }
-        if (e.borrowers > 0 or e.shared or e.branched or e.intermediate or e == skip or rewind) continue;
+        if (e.borrowers > 0 or e.shared or e.branched or e == skip or rewind) continue;
         const now = (born > e.born or (born == e.born and !e.rewind)) and prompt.len > e.tokens.len and on;
-        if ((now or extended(s, e)) and (best == null or e.used < s.entries.items[best.?].used)) best = i;
+        if (!now and !extended(s, e)) continue;
+        const pick = if (e.intermediate) &rung else &best;
+        if (pick.* == null or e.used < s.entries.items[pick.*.?].used) pick.* = i;
     }
-    return best orelse oldest;
+    return best orelse rung orelse oldest;
 }
 
 /// A reservation may free redundant copies, but not a newest state just to plan more copies.
