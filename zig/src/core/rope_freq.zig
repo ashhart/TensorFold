@@ -17,7 +17,7 @@ pub fn proportional(theta: f64, dim: usize, rotated: usize, out: []f32) void {
     @memset(out[n..], 0);
 }
 
-/// What an old-against-new table print found.
+/// How a moved table differs from the one it replaced.
 pub const Diff = struct {
     /// Entries whose bits differ.
     differ: usize,
@@ -32,10 +32,10 @@ pub const Diff = struct {
     max_ulp: u32,
 };
 
-/// Every entry of a moved table side by side, with its absolute and relative difference and the largest of each.
-pub fn printDifferences(label: []const u8, old: []const f32, new: []const f32) Diff {
+/// Compares a moved table with the one it replaced entry by entry; when `loud`, prints both side by side.
+pub fn differences(label: []const u8, old: []const f32, new: []const f32, loud: bool) Diff {
     var d: Diff = .{ .differ = 0, .rotated = 0, .max_abs = 0, .at = 0, .max_rel = 0, .max_ulp = 0 };
-    std.debug.print("\n{s} (index | old bits | new bits | old | new | absolute | relative)\n", .{label});
+    if (loud) std.debug.print("\n{s} (index | old bits | new bits | old | new | absolute | relative)\n", .{label});
     for (old, new, 0..) |o, n, i| {
         const abs: f64 = @abs(@as(f64, o) - @as(f64, n));
         const rel: f64 = if (o != 0) abs / @abs(@as(f64, o)) else 0;
@@ -51,10 +51,26 @@ pub fn printDifferences(label: []const u8, old: []const f32, new: []const f32) D
             d.at = i;
         }
         d.max_rel = @max(d.max_rel, rel);
-        std.debug.print("{d:3} {x:0>8} {x:0>8} {e:.9} {e:.9} {e:.3} {e:.3}\n", .{ i, bo, bn, o, n, abs, rel });
+        if (loud) std.debug.print("{d:3} {x:0>8} {x:0>8} {e:.9} {e:.9} {e:.3} {e:.3}\n", .{ i, bo, bn, o, n, abs, rel });
     }
-    std.debug.print("{s}: {d} of {d} differ ({d} of the {d} rotated); largest absolute {e:.3} at {d}; largest relative {e:.3}, largest {d} ulp\n", .{ label, d.differ, old.len, d.differ, d.rotated, d.max_abs, d.at, d.max_rel, d.max_ulp });
+    const summary = "{s}: {d} of {d} differ, {d} rotated; largest absolute {e:.3} at {d}; largest relative {e:.3}, largest {d} ulp\n";
+    if (loud) std.debug.print(summary, .{ label, d.differ, old.len, d.rotated, d.max_abs, d.at, d.max_rel, d.max_ulp });
     return d;
+}
+
+/// What a moved table's test pins: the words that differ, the rotated (nonzero) entries and the largest ulp distance.
+pub const Pinned = struct { differ: usize, rotated: usize, max_ulp: u32 };
+
+/// Silent when the moved table differs as pinned; otherwise names both counts, prints every entry and fails.
+pub fn expectDifferences(label: []const u8, old: []const f32, new: []const f32, want: Pinned) !void {
+    const d = differences(label, old, new, false);
+    const got: Pinned = .{ .differ = d.differ, .rotated = d.rotated, .max_ulp = d.max_ulp };
+    std.testing.expectEqual(want, got) catch |e| {
+        const line = "\n{s}: expected {d} words to differ ({d} rotated, at most {d} ulp), got {d} ({d} rotated, at most {d} ulp)\n";
+        std.debug.print(line, .{ label, want.differ, want.rotated, want.max_ulp, got.differ, got.rotated, got.max_ulp });
+        _ = differences(label, old, new, true);
+        return e;
+    };
 }
 
 fn expectWords(want: []const u32, got: []const f32) !void {
@@ -149,15 +165,12 @@ test "theta 100 over 36 (Gemma 4's vision tower) equals transformers' words" {
     try expectWords(&torch, &got);
 }
 
-test "Gemma 4's tower table: old f32 pow against new, every entry's difference printed" {
+test "Gemma 4's tower table: old f32 pow against new, 5 of 18 words differ by up to 2 ulp" {
     var old: [18]f32 = undefined;
     for (&old, 0..) |*f, i| f.* = 1.0 / std.math.pow(f32, 100, @as(f32, @floatFromInt(2 * i)) / 36.0);
     var new: [18]f32 = undefined;
     inverseFrequencies(100, 36, &new);
-    const d = printDifferences("Gemma 4 vision tower theta 100 over 36", &old, &new);
-    try std.testing.expectEqual(@as(usize, 18), d.rotated);
-    try std.testing.expectEqual(@as(usize, 5), d.differ);
-    try std.testing.expectEqual(@as(u32, 2), d.max_ulp);
+    try expectDifferences("Gemma 4 vision tower theta 100 over 36", &old, &new, .{ .differ = 5, .rotated = 18, .max_ulp = 2 });
 }
 
 test "planted: the fp32-pow form misses transformers' words for theta 1e7 over 64 (15 of 32, up to 5 ulp)" {

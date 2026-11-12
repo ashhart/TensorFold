@@ -536,21 +536,15 @@ fn oldFrequencies(is_global: bool, out: []f32) void {
     }
 }
 
-test "old against new RoPE tables: every entry's absolute and relative difference printed" {
+test "old against new RoPE tables: 43 of 128 sliding and 21 of 64 global words differ, by 1 ulp" {
     var old_s: [sliding_dim / 2]f32 = undefined;
     var new_s: [sliding_dim / 2]f32 = undefined;
     oldFrequencies(false, &old_s);
     inverseFrequencies(false, &new_s);
-    const s = rope_freq.printDifferences("sliding theta 1e4 over 256", &old_s, &new_s);
-    try std.testing.expectEqual(@as(usize, 43), s.differ);
-    try std.testing.expectEqual(@as(usize, 128), s.rotated);
-    try std.testing.expectEqual(@as(u32, 1), s.max_ulp);
+    try rope_freq.expectDifferences("sliding theta 1e4 over 256", &old_s, &new_s, .{ .differ = 43, .rotated = 128, .max_ulp = 1 });
     var old_g: [global_dim / 2]f32 = undefined;
     var new_g: [global_dim / 2]f32 = undefined;
     oldFrequencies(true, &old_g);
     inverseFrequencies(true, &new_g);
-    const g = rope_freq.printDifferences("global theta 1e6 over 512, 64 rotated", &old_g, &new_g);
-    try std.testing.expectEqual(@as(usize, 21), g.differ);
-    try std.testing.expectEqual(@as(usize, 64), g.rotated);
-    try std.testing.expectEqual(@as(u32, 1), g.max_ulp);
+    try rope_freq.expectDifferences("global theta 1e6 over 512, 64 rotated", &old_g, &new_g, .{ .differ = 21, .rotated = 64, .max_ulp = 1 });
 }
