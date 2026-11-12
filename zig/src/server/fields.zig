@@ -243,6 +243,12 @@ fn order(name: []const u8) ?usize {
     return null;
 }
 
+/// The effort a request or --reasoning-effort names, on the template's levels; null when none is named (or `none`).
+pub fn namedEffort(request: ?[]const u8, server: ?[]const u8, levels: []const []const u8) ?[]const u8 {
+    const e = request orelse server orelse return null;
+    return if (std.mem.eql(u8, e, "none")) null else coerceEffort(e, levels);
+}
+
 /// The nearest level the template names, ties going higher; xhigh and none stay.
 pub fn coerceEffort(effort: []const u8, levels: []const []const u8) []const u8 {
     if (levels.len == 0) {
