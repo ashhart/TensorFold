@@ -302,7 +302,7 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });
 }
 
-/// Qwen3.8-27B and Qwen3.5-MoE on the lane host: `--parallel` streams share rounds, DFlash2 drafts for one.
+/// Qwen3.8-27B and Qwen3.5-MoE on the lane host: shared rounds, DFlash2 drafts for up to TF_Q27_DRAFT_SLOTS streams.
 fn openQwen27(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const context = o.context orelse 32768;
     if (context <= 0 or context > 262144) {
