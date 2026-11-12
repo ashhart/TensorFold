@@ -36,6 +36,8 @@ pub const Options = struct {
     prompt: prompt.Opts = .{},
     /// prompts a chunk at a time between the other streams' rounds (serve_lanes.stepsFromEnv); false: whole prompts
     steps: bool = false,
+    /// --decode-share (serve_lanes.Model.decode_share)
+    decode_share: ?f64 = null,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -103,6 +105,7 @@ pub const Metal = struct {
             // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
             .calib = if (host.calib_env.Knobs.fromEnv().file) |f| .{ .file = f } else .{ .mode = "default" },
             .steps = m.opt.steps,
+            .decode_share = m.opt.decode_share,
         };
     }
 
