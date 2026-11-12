@@ -10,7 +10,8 @@ const flags: []const []const u8 = &.{ "-std=c++17", "-fno-fast-math", "-ffp-cont
 pub fn metalNative(b: *std.Build, target: std.Build.ResolvedTarget, native: *std.Build.Module) void {
     const core = b.createModule(.{ .root_source_file = b.path("zig/qwen4_core_metal.zig"), .target = target, .optimize = native.optimize, .imports = &.{.{ .name = "owner", .module = native.import_table.get("tensorfold").? }} });
     if (native.import_table.get("contract")) |contract| core.addImport("contract", contract);
-    core.addImport("living", native.import_table.get("living") orelse native.import_table.get("tensorfold").?.import_table.get("living").?);
+    // a root without a shared `living` (the masked-values fixture) gets module()'s own
+    if (native.import_table.get("living") orelse native.import_table.get("tensorfold").?.import_table.get("living")) |living| core.addImport("living", living);
     native.addImport("qwen4", module(b, target, native.optimize orelse .Debug, core));
 }
 pub fn steps(b: *std.Build, parent: *std.Build.Step) void {
