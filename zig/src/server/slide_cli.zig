@@ -36,6 +36,8 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     try w.print(done, .{ dir, r.files, gb, r.cloned, api.originals.folder_name, r.seconds });
     for (r.removed) |name| try w.print("tensorfold: removed {s}, which a lesson added\n", .{name});
     for (r.graphs) |path| try w.print("tensorfold: removed the fact graph {s}\n", .{path});
+    const left = "tensorfold: left the fact graph {s}: no {s} file beside it says this folder learned from it\n";
+    for (r.left) |path| try w.print(left, .{ path, api.originals.taught_suffix });
     try w.flush();
     return 0;
 }
