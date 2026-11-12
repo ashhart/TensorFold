@@ -1,7 +1,4 @@
-// EXL3 canonical expert reduction, the one definition every kernel includes: the value of the leaf subtree
-// [start, start + 2^log) of row `row`, column `col`, in double. A leaf is the fma chain of its slots in slot order from +0;
-// the tree above it is binary adds, an empty sibling contributing +0 (signed-zero exact). Nothing rounds to float here:
-// the caller rounds once, at the root.
+// Canonical F64 subtree with slot-order FMAs and empty +0 siblings; only the caller narrows the root.
 #pragma once
 
 __device__ __forceinline__ double fn_exl3_leaf_value_f64(const float* __restrict__ y, const float* __restrict__ wts,
