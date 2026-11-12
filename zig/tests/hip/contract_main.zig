@@ -233,9 +233,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&streams) |*x| x.deinit();
     for (&streams) |*x| try kernels.append(a, x.kernel());
-    var relu2 = relu2_k.Relu2.init(a, &r, s, &l);
-    defer relu2.deinit();
-    try kernels.append(a, relu2.kernel());
+    // each width's relu^2 stream tile, then each wider width's planted control (its codes read as 4-bit)
+    var relu2s: [2 * relu2_k.widths.len - 1]relu2_k.Relu2 = undefined;
+    for (&relu2s, 0..) |*x, i| {
+        const plant = i >= relu2_k.widths.len;
+        x.* = .init(a, &r, s, &l, relu2_k.widths[if (plant) i + 1 - relu2_k.widths.len else i], plant);
+    }
+    defer for (&relu2s) |*x| x.deinit();
+    for (&relu2s) |*x| try kernels.append(a, x.kernel());
     var kv_write = kv_k.KvWrite.init(a, &r, s, &l);
     defer kv_write.deinit();
     try kernels.append(a, kv_write.kernel());
