@@ -71,7 +71,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "sam3 small compensated projection ")) {
         if (!assemble) return undefined;
-        const source = try a.dupe(u8, sources.sam3_dense_small);
+        const source = try a.dupe(u8, if (std.mem.indexOf(u8, d.name, " baseline ") != null) sources.sam3_dense_small_baseline else sources.sam3_dense_small);
         return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 deconvolution ")) {

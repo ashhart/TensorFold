@@ -54,6 +54,7 @@ inline void sam_dense_small(const device float *x, const device float *weight, c
     const device float *a = x + row * depth, *b = weight + column * depth;
     int largest = -2048, smallest = 2048;
     uint exceptional = 0, subnormal = 0;
+    float2 sum = float2(0);
     for (uint k = lane; k < depth; k += 32) {
         const uint left = as_type<uint>(a[k]), right = as_type<uint>(b[k]);
         const uint flag = sam_exception(left, right);
@@ -63,6 +64,12 @@ inline void sam_dense_small(const device float *x, const device float *weight, c
         largest = max(largest, exponent);
         smallest = min(smallest, exponent);
         subnormal |= uint((left & 0x7f800000u) == 0 || (right & 0x7f800000u) == 0);
+        if (!DROP_TAIL || k + 1 < depth) {
+            const float av = as_type<float>(left), bv = as_type<float>(right);
+            const float product = av * bv;
+            sam_pair_add(sum, product);
+            sam_pair_add(sum, fma(av, bv, -product));
+        }
     }
     const uint addend = as_type<uint>(bias[column]);
     if (lane == 0) {
@@ -88,17 +95,18 @@ inline void sam_dense_small(const device float *x, const device float *weight, c
     }
     const bool scaled = subnormal || largest > 64 || smallest < -64;
     const int scale = scaled ? largest - 32 : 0;
-    float2 sum = float2(0);
-    for (uint k = lane; k < depth - uint(DROP_TAIL); k += 32) {
-        const uint left = as_type<uint>(a[k]), right = as_type<uint>(b[k]);
-        if ((left & 0x7fffffffu) == 0 || (right & 0x7fffffffu) == 0) continue;
-        const float av = scaled ? sam_binary_mantissa(left) : a[k];
-        const float bv = scaled ? sam_binary_mantissa(right) : b[k];
-        const int shift = scaled ? sam_binary_exponent(left) + sam_binary_exponent(right) - scale : 0;
-        const float product = av * bv;
-        const float residual = fma(av, bv, -product);
-        sam_pair_add(sum, scaled ? ldexp(product, shift) : product);
-        sam_pair_add(sum, scaled ? ldexp(residual, shift) : residual);
+    if (scaled) {
+        sum = float2(0);
+        for (uint k = lane; k < depth - uint(DROP_TAIL); k += 32) {
+            const uint left = as_type<uint>(a[k]), right = as_type<uint>(b[k]);
+            if ((left & 0x7fffffffu) == 0 || (right & 0x7fffffffu) == 0) continue;
+            const float av = sam_binary_mantissa(left), bv = sam_binary_mantissa(right);
+            const int shift = sam_binary_exponent(left) + sam_binary_exponent(right) - scale;
+            const float product = av * bv;
+            const float residual = fma(av, bv, -product);
+            sam_pair_add(sum, ldexp(product, shift));
+            sam_pair_add(sum, ldexp(residual, shift));
+        }
     }
     for (ushort offset = 16; offset != 0; offset >>= 1) {
         const float high = simd_shuffle_down(sum.x, offset), low = simd_shuffle_down(sum.y, offset);

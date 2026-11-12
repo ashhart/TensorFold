@@ -154,7 +154,11 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     }
     const positional_key = if (options.multiplex) try owner.named("image_pe_layer.positional_encoding_gaussian_matrix") else try r.name("{s}.pe_layer.positional_encoding_gaussian_matrix", .{r.config.promptPrefix()});
     const dense = options.dense orelse if (options.multiplex) null else try r.weight(try r.name("{s}.no_mask_embed.weight", .{r.config.promptPrefix()}));
+    const image_shape = [_]usize{ 1, features[2].height, features[2].width, r.config.hidden };
+    try r.observe("decoder.image", image, &image_shape);
+    if (options.dense == null and !options.multiplex) if (dense) |value| try r.observe("prompt.no_mask", value, &.{ 1, r.config.hidden });
     var state = Refinement{ .image = if (dense) |value| try r.add(image, value) else image, .queries = initial, .query_position = initial, .image_position = try position.grid(r, positional_key) };
+    try r.observe("decoder.position", state.image_position, &image_shape);
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     try state.run(try layer.child("transformer"));

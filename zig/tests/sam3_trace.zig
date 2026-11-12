@@ -68,7 +68,7 @@ pub const Trace = struct {
 
 fn check(context: *anyopaque, name: []const u8, value: sam.observe.Tensor, shape: []const usize) !void {
     const self: *Trace = @ptrCast(@alignCast(context));
-    if (std.mem.startsWith(u8, name, "tracker.")) {
+    if (std.mem.startsWith(u8, name, "tracker.") or std.mem.startsWith(u8, name, "prompt.") or std.mem.startsWith(u8, name, "decoder.")) {
         var arena = std.heap.ArenaAllocator.init(self.a);
         defer arena.deinit();
         const a = arena.allocator();

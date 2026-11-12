@@ -2,6 +2,14 @@ const std = @import("std");
 const gpu = @import("tensor_metal");
 const st = @import("safetensors");
 const Mps = @import("mps_ndarray_probe.zig").Backend;
+const timed_batch = 64;
+const batch_output_target = 32 << 20;
+
+fn batchCount(rows: usize, cols: usize) !usize {
+    const bytes = try std.math.mul(usize, try std.math.mul(usize, rows, cols), 4);
+    if (bytes == 0) return error.ProjectionReplayShape;
+    return @max(1, @min(timed_batch, batch_output_target / bytes));
+}
 
 fn upload(g: *gpu.Gpu, value: st.Tensor) !gpu.Tensor {
     if (value.dtype != .f32) return error.ExpectedFloat32Projection;
@@ -21,10 +29,27 @@ fn linear(g: *gpu.Gpu, mps: ?*Mps, small: bool, x: gpu.Tensor, w: gpu.Tensor, bi
     return output;
 }
 
+fn timedBatch(g: *gpu.Gpu, mps: ?*Mps, small: bool, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize, expected: ?[]const u8) !void {
+    var outputs: [timed_batch]gpu.Tensor = undefined;
+    var made: usize = 0;
+    defer for (outputs[0..made]) |output| output.deinit();
+    try g.beginBatch();
+    errdefer if (g.batch != null) g.endBatch() catch {};
+    for (outputs[0..try batchCount(rows, cols)]) |*output| {
+        output.* = if (small) try @import("dense_small.zig").run(g, x, w, bias, rows, cols, depth) else if (mps) |backend| try backend.run(g, x, w, bias, rows, cols, depth) else try g.linear(x, w, bias, rows, cols, depth);
+        made += 1;
+    }
+    try g.endBatch();
+    if (expected) |bytes| for (outputs[0..made]) |output| {
+        if (!std.mem.eql(u8, bytes, output.slice(u8, bytes.len))) return error.ProjectionBatchChanged;
+    };
+}
+
 pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !void {
     if (args.len != 2 and args.len != 3) return error.ExpectedProjectionCaptureAndReceipt;
     const use_mps = args.len == 3 and std.mem.eql(u8, args[2], "--mps-ndarray");
-    const use_small = args.len == 3 and std.mem.eql(u8, args[2], "--compensated");
+    const small_baseline = args.len == 3 and std.mem.eql(u8, args[2], "--compensated-baseline");
+    const use_small = small_baseline or (args.len == 3 and std.mem.eql(u8, args[2], "--compensated"));
     if (args.len == 3 and !use_mps and !use_small) return error.UnexpectedProjectionBackend;
     var mps = if (use_mps) try Mps.init(g.device) else null;
     defer if (mps) |*backend| backend.deinit();
@@ -44,6 +69,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     const depth = weight.dim(1);
     if (cols == 0 or depth == 0 or input.numel() % depth != 0) return error.ProjectionReplayShape;
     const rows = input.numel() / depth;
+    const batch_count = try batchCount(rows, cols);
     const samples = indices.dim(0);
     if (!bias_source.is(.f32, &.{cols}) or truth.dtype != .f32 or truth.numel() != rows * cols or
         !oracle.is(.f64, &.{ samples, cols }) or samples == 0) return error.ProjectionReplayShape;
@@ -68,20 +94,19 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
         defer repeated.deinit();
         if (!std.mem.eql(u8, bytes, repeated.slice(u8, bytes.len))) return error.ProjectionNotRepeatable;
     }
+    try timedBatch(g, backend, use_small, x, w, bias, rows, cols, depth, bytes);
     const warm_start = gpu.mtl.clock.seconds();
     while (gpu.mtl.clock.seconds() - warm_start < 1) {
-        const warm = try linear(g, backend, use_small, x, w, bias, rows, cols, depth);
-        warm.deinit();
+        try timedBatch(g, backend, use_small, x, w, bias, rows, cols, depth, null);
     }
     var gpu_times: [10]f64 = undefined;
     var wall_times: [10]f64 = undefined;
     for (&gpu_times, &wall_times) |*gpu_time, *wall_time| {
         const before = g.gpu_seconds;
         const wall = gpu.mtl.clock.seconds();
-        const timed = try linear(g, backend, use_small, x, w, bias, rows, cols, depth);
-        wall_time.* = gpu.mtl.clock.seconds() - wall;
-        gpu_time.* = g.gpu_seconds - before;
-        timed.deinit();
+        try timedBatch(g, backend, use_small, x, w, bias, rows, cols, depth, null);
+        wall_time.* = (gpu.mtl.clock.seconds() - wall) / @as(f64, @floatFromInt(batch_count));
+        gpu_time.* = (g.gpu_seconds - before) / @as(f64, @floatFromInt(batch_count));
     }
     const native_columns = try a.alloc(f64, cols);
     const torch_columns = try a.alloc(f64, cols);
@@ -104,15 +129,21 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(file.map.memory, &digest, .{});
     const source_hash = std.fmt.bytesToHex(digest, .lower);
+    std.crypto.hash.sha2.Sha256.hash(if (small_baseline) @import("sam3_kernels").baseline_source else @import("sam3_kernels").source, &digest, .{});
+    const shader_hash = std.fmt.bytesToHex(digest, .lower);
     const json = try std.json.Stringify.valueAlloc(a, .{
         .shape = .{ rows, cols, depth },
         .capture_sha256 = source_hash[0..],
-        .backend = if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else "tensor_16_rows",
+        .sam3_metal_source_sha256 = shader_hash[0..],
+        .backend = if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else "tensor_16_rows",
         .replacement_equal = replacement_equal,
         .pytorch_equal = reference_equal,
         .buffer_cache_limit = g.buffer_cache_limit,
         .repeat_runs = 5,
+        .verified_batch_outputs = batch_count,
         .warmup_min_seconds = 1,
+        .timing_batch = batch_count,
+        .batch_output_target_bytes = batch_output_target,
         .gpu_seconds = gpu_times,
         .wall_seconds = wall_times,
         .reference_rows = samples,

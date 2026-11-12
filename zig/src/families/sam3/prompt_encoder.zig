@@ -77,6 +77,8 @@ pub fn encode(r: *ops.Runtime, prompt: prompts.Prompt, size: prompts.Size) !Enco
     const mark = r.mark();
     errdefer r.trim(mark, &.{});
     const output = Encoded{ .sparse = try sparse(r, prompt, size), .dense = if (prompt.mask) |mask| try dense(r, mask) else null };
+    if (output.sparse) |tensor| try r.observe("prompt.sparse", tensor, &.{ 1, tensor.count / r.config.hidden, r.config.hidden });
+    if (output.dense) |tensor| try r.observe("prompt.dense", tensor, &.{ 1, r.config.featureSide(), r.config.featureSide(), r.config.hidden });
     var retained: [2]ops.Tensor = undefined;
     var count: usize = 0;
     for ([_]?ops.Tensor{ output.sparse, output.dense }) |maybe| if (maybe) |tensor| {
