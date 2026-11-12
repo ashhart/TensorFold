@@ -25,14 +25,21 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "this build serves deepseek_v41 checkpoints only, not {s}", .{o.model_type});
         return null;
     }
+    // --decode-share above 0 asks for replies beside prompts (prompts in steps); a malformed setting is refused by name
+    const steps = serve_lanes.stepsFor(o.decode_share) catch |e| {
+        problem.* = switch (e) {
+            error.BadDecodeShare => try std.fmt.allocPrint(a, "--decode-share {d}: expected a share from 0 to under 1", .{o.decode_share.?}),
+            else => try env.describe(a, "TF_DSV41_PREFILL_PIECES", env.Process.get(.{}, "TF_DSV41_PREFILL_PIECES") orelse ""),
+        };
+        return null;
+    };
     const opts: pkg.boot.Options = .{
         .slots = @max(1, @min(o.lanes, 16)),
         .context = if (o.context) |c| @intCast(@max(c, 1)) else null,
         .drafts = o.drafts,
         .cache_bytes = if (o.prompt_cache_gib) |g| @intFromFloat(@max(g, 0) * (1 << 30)) else 4 << 30,
         .small = try env.read(bool, "TF_DSV41_SMALL", false),
-        // --decode-share asks for replies beside prompts: prompts in steps
-        .steps = try serve_lanes.stepsFromEnv() or (o.decode_share orelse 0) > 0,
+        .steps = steps,
         .decode_share = o.decode_share,
     };
     const m = pkg.boot.Boot.open(gpa, io, o.dir, opts) catch |e| {
