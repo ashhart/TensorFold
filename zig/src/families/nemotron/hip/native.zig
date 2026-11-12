@@ -12,6 +12,7 @@ const pages = @import("pages.zig");
 const hip_lanes = @import("lanes.zig");
 const worker = @import("worker.zig");
 const costs = @import("costs.zig");
+const widths = @import("widths.zig");
 
 pub const model_type = "nemotron_h";
 pub const formats = admit.formats;
@@ -236,14 +237,16 @@ fn prepare(
     cache = .{ .pages = @intCast(fit[0]), .snaps = @intCast(fit[1]) };
     e.sizePool(capacity, streams, cache.pages) catch |err|
         return steps.refuseAll(a, problem, "the native HIP engine cannot allocate its pages ({t})", .{err});
+    var label: [64]u8 = undefined;
     const startup = try std.fmt.allocPrint(gpa, "HIP {s} device {d}, rank {d} of {d}: Nemotron-H model " ++
-        "{d:.2} GiB, MTP head {s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.2} " ++
+        "{s} {d:.2} GiB, MTP head {s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.2} " ++
         "GiB left after the model and {d:.1} GiB of scratch; prompt cache {d:.2} GiB ({d} pages, {d} " ++
         "snapshots); prompts in {d}-row chunks; windows of {d} rows", .{
         hip.kernels.arch,
         dev.index,
         o.rank,
         o.world,
+        widths.label(c, &label),
         admit.gibs(v.weights),
         if (e.model_().mtp != null) "loaded" else "off",
         streams,
@@ -347,4 +350,5 @@ pub fn follow(
 test "the registry entry names the family and its format" {
     try std.testing.expectEqualStrings("nemotron_h", model_type);
     try std.testing.expectEqualStrings("mlx-q4g64", formats[0]);
+    try std.testing.expectEqualStrings("mlx-q8g64", formats[formats.len - 1]);
 }
