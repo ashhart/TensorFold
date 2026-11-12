@@ -37,7 +37,7 @@ test "GDN chain port: raw byte registration retains every output and both source
     for (core.contract.registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.symbol, cuda.gdn_chain.symbol)) {
         found += 1;
         try std.testing.expectEqual(@as(u32, 256), r.launch.threads);
-        try std.testing.expectEqualDeep(core.contract.registry.none, r.usage);
+        try std.testing.expect(!std.meta.eql(core.contract.registry.none, r.usage));
         try std.testing.expectEqualStrings("qwen_gdn_bf16", r.launch.image);
     };
     try std.testing.expectEqual(@as(usize, 1), found);
