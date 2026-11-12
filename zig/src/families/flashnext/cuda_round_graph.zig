@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const dims = 2560;
+const vocab = @import("cuda_prompt_wt.zig").vocab;
 
 pub fn enabled() bool {
     // the startup check refused every malformed value already, so a plain default stands here
@@ -45,6 +46,7 @@ pub const Cache = struct {
         const s = pass.s;
         // a captured round is one row a lane; windows run the plain pass
         if (ids.len != pass.lanes.len) return error.UnexpectedTensor;
+        for (ids) |v| if (v >= vocab) return error.InvalidToken; // a replay skips Pass.stage; embed reads the table at id unchecked
         try s.ready();
         for (s.hostIds(ids.len), ids) |*out, token| out.* = @intCast(token);
         const positions = s.hostPos(ids.len * 4);
