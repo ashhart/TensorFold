@@ -151,7 +151,7 @@ pub fn main(init: std.process.Init) !u8 {
         var from: struct { at: usize = 0, w: usize = 0, out: usize = 0 } = .{};
         while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
             if (resume_tree > 0 and windows == resume_tree) {
-                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+                copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false, null);
                 from = .{ .at = at, .w = w, .out = out.items.len };
             }
             at += try treeWindow(&f, &cache, ids.items, at, w, a, &out);
@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !u8 {
                 try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &token, .logits);
                 try cache.settle(e);
             }
-            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false);
+            const copy = try q.reuse.saveCache(e, &cache, cache.len, &.{}, false, null);
             defer q.reuse.dropCopy(e, copy);
             try out.appendSlice(a, copy.host.bytes[0..@intCast(copy.len)]);
         } else try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
@@ -291,7 +291,7 @@ fn treeWindow(f: *Fwd, cache: *E.Cache, ids: []const u32, at: usize, w: usize, a
 
 /// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
 fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
-    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false);
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{}, false, null);
     defer q.reuse.dropCopy(e, copy);
     var fresh = try E.Cache.init(gpa, e, cache.cap);
     errdefer fresh.deinit(gpa);
