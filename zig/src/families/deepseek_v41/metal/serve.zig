@@ -10,6 +10,7 @@ const pass_ = @import("pass.zig");
 const early_ = @import("early.zig");
 const pipelines = @import("pipelines.zig");
 const vision_prepare = @import("vision_prepare.zig");
+const pool = @import("pool.zig");
 
 const serve_lanes = host.serve_lanes;
 const iface = host.iface;
@@ -51,6 +52,8 @@ pub const Options = struct {
     gpu_chain: bool = false,
     /// the drafts of a pass after a window that verified fewer (0: every pass makes the config's block)
     narrow: u32 = 0,
+    /// TF_DSV41_POOL_TOKENS: the slots share one pool of positions (null: `limit` positions a slot)
+    pool: ?pool.Setting = null,
 };
 
 /// A position's draft candidates the pass keeps (the shape the lanes size their buffers by).
@@ -74,7 +77,7 @@ pub const Metal = struct {
         const m = try a.create(Metal);
         errdefer a.destroy(m);
         m.* = .{ .a = a, .parts = parts, .opt = opt, .t = undefined };
-        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident });
+        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident, .pool = opt.pool });
         errdefer m.t.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {

@@ -164,3 +164,22 @@ test "pool: init refuses an empty pool and frees what it made" {
     var fail = std.testing.FailingAllocator.init(t.allocator, .{ .fail_index = 3 });
     try t.expectError(error.OutOfMemory, pool.Pool.init(fail.allocator(), 2, 4)); // the leak check sees the errdefers
 }
+
+test "pool: unset, the startup words are the old line's; set, they name the pool, the window and the bytes" {
+    var buf: [256]u8 = undefined;
+    var old: [256]u8 = undefined;
+    const before = try std.fmt.bufPrint(&old, "{d} slots of {d} positions", .{ 4, 1_048_576 });
+    try t.expectEqualStrings(before, pool.seatWords(&buf, 4, 1_048_576, null, 2730 * B));
+    var why: []const u8 = "";
+    var wb: [256]u8 = undefined;
+    const s = (try pool.setting(1_048_576, 4, 1_048_576, &why, &wb)).?;
+    const words = pool.seatWords(&buf, 4, 1_048_576, s, 2730 * B);
+    try t.expectEqualStrings("4 slots sharing a pool of 1048830 positions (TF_DSV41_POOL_TOKENS=1048576; a request up to 1048576; 2730 bytes a position, 2730 MiB)", words);
+}
+
+test "pool: a pool past the working set is refused by name, one that fits is not" {
+    var buf: [320]u8 = undefined;
+    try t.expectEqual(@as(?[]const u8, null), pool.tooLarge(&buf, 1_048_576, 3 << 30, 100 << 30, 400 << 30));
+    const why = pool.tooLarge(&buf, 1_048_576, 3 << 30, 399 << 30, 400 << 30).?;
+    try t.expect(std.mem.startsWith(u8, why, "TF_DSV41_POOL_TOKENS=1048576 needs 3.00 GiB"));
+}
