@@ -355,7 +355,8 @@ CUDA context and workspace memory the estimate does not count. `TENSORFOLD_MEMOR
 the MLX one. A floor close to the smallest can end requests with CUDA errors mid-reply
 (`PYTORCH_CUDA_ALLOC_CONF` `=` `expandable_segments:True` reduces fragmentation near the cap).
 Unified-memory GPUs share physical RAM with host buffers and file-backed model data. Admission uses the
-host's available memory, reclaimable page cache included, less a floor of a tenth of RAM (at least 4 GiB) that
+host's available memory, at most the free memory CUDA reports (which leaves out the page cache, so the
+checkpoint's own shards leave the page cache before the load), less a floor of a tenth of RAM (at least 4 GiB) that
 `TENSORFOLD_MEMORY_RESERVE_GIB` can move, and considers mapped-table residency when sizing an automatic
 window. It accounts for stream count and retained caches where concurrency is enabled.
 The native engine's memory plan and its settings are in the [API reference](../api.md#context-and-errors).
