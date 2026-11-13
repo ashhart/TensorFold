@@ -8,7 +8,7 @@
 #include "quant/mlx_tiles.hpp"
 #include "quant/dense_tiles.hpp"
 #include "quant/nvfp4_tiles.hpp"
-#include "quant/fp8_tiles.hpp"  // ModelOpt FP8's product beside the NVFP4 one
+#include "quant/fp8_tiles.hpp"  // ModelOpt FP8's product, and NVFP4's, with a 16-row path for decode
 
 namespace tf {
 namespace rocm {

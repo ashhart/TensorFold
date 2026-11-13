@@ -12,7 +12,8 @@ namespace rocm {
 
 constexpr int kFpTileM = 64;
 constexpr int kFpTileN = 64;
-constexpr int kFpChunk = 64;  // codes a chunk
+constexpr int kFpChunk = 64;   // codes a chunk
+constexpr int kFpSmallM = 16;  // rows a decode block serves
 
 struct ModelFp8 {
     const void* x;        // (m, k) row major, bf16
@@ -29,6 +30,9 @@ __device__ __forceinline__ float fp8_level(unsigned c) {
                            : (1.0f + static_cast<float>(m) * 0.125f) * __uint_as_float((e + 120u) << 23);
     return (c & 0x80u) != 0 ? -v : v;
 }
+
+// The row a block reads, clamped so a block past the end reads the last row.
+__device__ __forceinline__ int fp8_row(int m, int row) { return row < m ? row : m - 1; }
 
 // A 64 x 64 block: a chunk of every column's codes and the block's rows of x staged in LDS once, each thread's 4 x 4
 // outputs accumulated over them; the projection's one scale multiplies each output once.
@@ -57,7 +61,7 @@ __device__ __forceinline__ void fp8_block(ModelFp8 a) {
         }
         for (int i = tid; i < kFpTileM * kFpChunk; i += blockDim.x) {
             const int row = i / kFpChunk, j = i % kFpChunk;
-            const int r = m0 + row < a.m ? m0 + row : a.m - 1;
+            const int r = fp8_row(a.m, m0 + row);
             xs[row][j] = kc + j < a.k ? x[static_cast<long long>(r) * a.k + kc + j] : hip_bfloat16(0.f);
         }
         __syncthreads();
@@ -94,10 +98,54 @@ __device__ __forceinline__ void fp8_block(ModelFp8 a) {
     }
 }
 
+// A 16-row block, as NVFP4's: one row four columns a thread, the same sums the 64-row tile makes.
+__device__ __forceinline__ void fp8_small(ModelFp8 a) {
+    __shared__ unsigned char codes[kFpTileN][kFpChunk];
+    __shared__ hip_bfloat16 xs[kFpSmallM][kFpChunk];
+    const int tid = threadIdx.x;
+    const int row = tid >> 4;
+    const int c0 = (tid & 15) * 4;
+    const int n0 = blockIdx.x * kFpTileN;
+    const unsigned char* w = static_cast<const unsigned char*>(a.codes);
+    const hip_bfloat16* x = static_cast<const hip_bfloat16*>(a.x);
+    float acc[4];
+#pragma unroll
+    for (int c = 0; c < 4; ++c) acc[c] = 0.f;
+    for (int kc = 0; kc < a.k; kc += kFpChunk) {
+        for (int i = tid; i < kFpTileN * kFpChunk; i += blockDim.x) {
+            const int col = i / kFpChunk, j = i % kFpChunk;
+            const int c = n0 + col < a.n ? n0 + col : a.n - 1;
+            const int at = kc + j < a.k ? kc + j : a.k - 1;
+            codes[col][j] = w[static_cast<long long>(c) * a.k + at];
+        }
+        for (int i = tid; i < kFpSmallM * kFpChunk; i += blockDim.x) {
+            const int rr = i / kFpChunk, j = i % kFpChunk;
+            const int rw = fp8_row(a.m, rr);
+            xs[rr][j] = kc + j < a.k ? x[static_cast<long long>(rw) * a.k + kc + j] : hip_bfloat16(0.f);
+        }
+        __syncthreads();
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+            const int col = c0 + c;
+            for (int j = 0; j < kFpChunk; ++j) {
+                acc[c] = fmaf(fp8_level(codes[col][j]), static_cast<float>(xs[row][j]), acc[c]);
+            }
+        }
+        __syncthreads();
+    }
+    const float scale = a.scale[0];
+#pragma unroll
+    for (int c = 0; c < 4; ++c) {
+        const int col = n0 + c0 + c;
+        if (row < a.m and col < a.n) a.out[static_cast<long long>(row) * a.n + col] = acc[c] * scale;
+    }
+}
+
 }  // namespace rocm
 }  // namespace tf
 
 // This path serves bf16 activations only, as the NVFP4 product does.
 extern "C" __global__ void __launch_bounds__(256) tf_fp8_gemm(tf::rocm::ModelFp8 a) {
-    tf::rocm::fp8_block(a);
+    if (a.m >= tf::rocm::kFpSmallM) tf::rocm::fp8_block(a);
+    else tf::rocm::fp8_small(a);
 }
