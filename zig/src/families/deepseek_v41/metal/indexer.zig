@@ -6,6 +6,7 @@ const weights = @import("weights.zig");
 const scratch = @import("scratch.zig");
 const pipelines = @import("pipelines.zig");
 const segs_ = @import("segs.zig");
+const kv = @import("kv.zig");
 
 const Ctx = ctx_.Ctx;
 const Ref = ctx_.Ref;
@@ -34,7 +35,7 @@ pub fn select(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer, rat
         if (keys > 0) {
             const src = px.slot.source(c, l).?;
             const masked = c.usesCandidates(l);
-            try ix.encodeDecode(&x.p.index, e, cv(ix.Ref, px.row(s.ixqc, qdim / 2)), cv(ix.Ref, px.row(s.ixqs, qdim / 32)), cv(ix.Ref, px.row(s.ixw, c.index_heads * 2)), .{ .buf = src.keys.? }, cv(ix.Ref, scores), cv(ix.Ref, if (masked) mask else scores), .{
+            try ix.encodeDecode(&x.p.index, e, cv(ix.Ref, px.row(s.ixqc, qdim / 2)), cv(ix.Ref, px.row(s.ixqs, qdim / 32)), cv(ix.Ref, px.row(s.ixw, c.index_heads * 2)), cv(ix.Ref, kv.keysRef(src)), cv(ix.Ref, scores), cv(ix.Ref, if (masked) mask else scores), .{
                 .rows = px.rows,
                 .keys = keys,
                 .start = px.p0 + 1,
