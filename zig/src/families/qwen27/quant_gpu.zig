@@ -11,7 +11,7 @@ pub const Ref = projection.Ref;
 pub const Sums = struct { ref: Ref, stride: u32 };
 
 pub const Key = struct { kind: Kind, n: u32 = 0, k: u32, slices: u32 = 0, tile: u32 = 0, tmr: u32 = 0, edge: bool = false, skip: u32 = 0, cut: [2]u32 = .{ 0, 0 }, bits: u8 = 4, group: u32 = 64, long: bool = false };
-pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_ane, add_ane };
+pub const Kind = enum { projection, xsum, norm, input_norm, norm_steer, mlp, ane_input, mlp_ane, add_ane };
 
 /// Whether prompt chunks take one reg dispatch a projection (`Kernels.long_prompt`): Ultras with tensor units only.
 pub fn longPrompt(name: []const u8, tensor_units: bool) bool {
@@ -108,6 +108,7 @@ pub const Kernels = struct {
             .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
             .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
             .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
+            .norm_steer => "custom_kernel_q27_norm_steer_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float_float_float",
             .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
             .ane_input => "q27_ane_input",
             .mlp_ane => "q27_mlp_ane",
@@ -405,6 +406,22 @@ pub const Kernels = struct {
         return if (ok) c else null;
     }
 
+    /// The norm with a direction inside it: alpha times the direction is added before the normalisation reads the row.
+    pub fn normSteer(k: *Kernels, input_encoder: mtl.ComputeEncoder, h: Ref, residual: Ref, weight: Ref, eps: Ref, dims: Ref, combined: Ref, out: Ref, xs: Ref, dir: mtl.Buffer, alpha: f32, width: u32, rows: u32) !void {
+        var span = profile.begin(k.profiler, input_encoder, .norm);
+        errdefer span.cancel();
+        const e = span.encoder;
+
+        e.setPipeline(try k.get(.{ .kind = .norm_steer, .k = width }));
+        bind(e, .{ h, residual, weight, eps, dims, combined, out, xs });
+        e.setBuffer(dir, 0, 8);
+        e.setValue(alpha, 9);
+        e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
+        // The steered output has no tf_sq_fits words: the last plain norm's must not outlive it.
+        k.fits = null;
+        try span.end();
+    }
+
     /// Prompt rows [base, base + 128) into the Neural Engine's fp16 input planes [hidden][128].
     pub fn aneInput(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, planes: Ref, hidden: u32, width: u32, columns: u32, base: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .copy);
@@ -474,6 +491,7 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
         .xsum => sources.xsum,
         .norm => sources.norm_xs,
         .input_norm => sources.norm_input,
+        .norm_steer => sources.norm_steer,
         .mlp => sources.mlp_xs,
         .ane_input, .mlp_ane, .add_ane => sources.mlp_ane,
     };
@@ -481,7 +499,7 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
     const definitions = switch (key.kind) {
         .projection => unreachable,
         .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
-        .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};", .{key.k}),
+        .norm, .input_norm, .norm_steer => try std.fmt.allocPrint(a, "constexpr int K={d};", .{key.k}),
         .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
         .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
     };

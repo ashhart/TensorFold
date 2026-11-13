@@ -5,6 +5,7 @@ const Allocator = std.mem.Allocator;
 pub const profile = @import("profile");
 pub const tfvideo = @import("tfvideo.zig");
 pub const DraftSources = @import("draft_sources.zig").Sources;
+pub const glp = @import("glp.zig");
 /// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -146,10 +147,7 @@ pub const Event = union(enum) {
 };
 
 /// Where a request's events go. Called on the engine's thread: it must return at once and not re-enter the engine.
-pub const Sink = struct {
-    ctx: *anyopaque,
-    event: *const fn (ctx: *anyopaque, id: Id, event: *const Event) void,
-};
+pub const Sink = struct { ctx: *anyopaque, event: *const fn (ctx: *anyopaque, id: Id, event: *const Event) void };
 
 pub const Benchmark = @import("benchmark_info.zig").Snapshot;
 /// A reranker's label tokens: a prompt's relevance score is sigmoid(yes - no) of their last-row logits.
@@ -298,6 +296,8 @@ pub const Open = struct {
     rope_yarn: ?f64 = null, // --rope-yarn: YaRN over the checkpoint's trained window; families without it refuse
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
+    /// --glp: the control vector the engine applies to the residual stream (null: none).
+    glp: ?glp.Glp = null,
     speed_up: ?[]const u8 = null,
     prompt_cache_gib: ?f64 = null,
     prompt_cache_over_cap: bool = false,
