@@ -18,9 +18,12 @@ pub fn roomRows(bytes: usize, lw: usize) usize {
     return bytes / (lw * 2);
 }
 
-/// Whether a chunk fetches: a prompt chunk on owner-only rows whose rows to its end fit the room (`cap` rows).
-pub fn fetches(prefill: bool, owner: ?u32, host_pos: usize, rows: usize, cap: usize) bool {
-    return prefill and owner != null and host_pos + rows <= cap;
+/// The heads on the ranks that are not the owner (the exchange moves them there and back), and those ranks' count.
+pub const Away = struct { heads: usize, to: usize };
+
+/// Whether a prompt chunk on owner-only rows fetches: it fits the room, its broadcast no more bytes than its exchange.
+pub fn fetches(prefill: bool, owner: ?u32, host_pos: usize, rows: usize, cap: usize, away: Away) bool {
+    return prefill and owner != null and host_pos + rows <= cap and host_pos * away.to <= 2 * rows * away.heads;
 }
 
 /// One DSA layer's chunk on rank `rank`: the owner packs rows [0, host_pos) and broadcasts them, each rank its heads.

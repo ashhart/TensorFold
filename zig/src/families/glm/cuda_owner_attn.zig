@@ -105,6 +105,13 @@ pub const Room = struct {
         for (segs) |g| if (g.owner != null and g.row0 + g.rows > r.rows) return error.KvSplitRoom;
     }
 
+    /// The heads on every rank but `owner`, and how many ranks those are (cuda_owner_fetch.fetches).
+    pub fn away(r: *const Room, owner: u32) @import("cuda_owner_fetch.zig").Away {
+        var heads: usize = 0;
+        for (r.heads[0..r.world], 0..) |h, p| heads += if (p == owner) 0 else h;
+        return .{ .heads = heads, .to = r.world - 1 };
+    }
+
     /// Rank p's slot (every rank but this one has one, in rank order).
     fn slot(r: *const Room, p: usize) usize {
         return if (p < r.rank) p else p - 1;
@@ -196,7 +203,7 @@ pub fn body(f: *const fw.Forward, r: fw.Rank, k: dsa_block.Kernels, a: dsa_block
     if (one.owner == null) return dsa_block.body(k, f.stream, a, one.c, b.dsa, x, r.w.config.hidden, rows, one.pos, one.host_pos, nch, b.part_rows);
     const room = try roomOf(f);
     const fetch = @import("cuda_owner_fetch.zig"); // a prompt chunk: the history to every rank, each its heads
-    if (fetch.fetches(b.prefill, one.owner, one.host_pos, rows, fetch.roomRows(room.buf.len, a.lw))) return fetch.body(f, r, room, k, a, x, one, rows, nch);
+    if (fetch.fetches(b.prefill, one.owner, one.host_pos, rows, fetch.roomRows(room.buf.len, a.lw), room.away(one.owner.?))) return fetch.body(f, r, room, k, a, x, one, rows, nch);
     try dsa_block.prepareProfile(k.set, f.stream, a, b.dsa, x, r.w.config.hidden, rows, dsa_block.sparseRows(a, one.host_pos, rows), k.prof);
     const d: Gpu = .{ .f = f, .room = room, .k = k, .a = a, .b = b, .caches = &.{one.c}, .pos = &.{one.pos}, .host = &.{one.host_pos}, .nch = nch };
     const segs = [_]Seg{.{ .row0 = 0, .rows = rows, .owner = one.owner }};
