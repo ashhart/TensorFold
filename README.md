@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://buymeacoffee.com/ashhart">Help Support TensorFold</a> ·
+  <a href="https://ko-fi.com/ashxhart">Help Support TensorFold</a> ·
   <a href="https://x.com/tensorfold_dev">@tensorfold_dev on X</a>
 </p>
 
