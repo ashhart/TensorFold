@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
+const round_costs = @import("round_costs.zig");
 const row = @import("../step5/backend.zig").row;
 const be = lanes.backend;
 
@@ -41,6 +42,8 @@ pub const Metal = struct {
     sink: ?be.FeatureSink = null, // a drafting prompt pass's: each chunk's tapped rows as they are made
     costs: [max_window]lanes.config.Cost = undefined, // window forward ms by rows, timed by measure() for the depth rule
     timed: usize = 0,
+    shared: [round_costs.shared_widths.len]lanes.config.Cost = undefined, // shared rounds' ms by total rows, by measure()
+    shared_timed: usize = 0,
     values: []f32, // a logits row as f32, for the host twin of the GPU draw
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
@@ -96,14 +99,16 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        // rows are independent in every decode kernel, so any width, alone or beside other streams, gives one-row bits
-        return .{ .exact_width = st.window_rows, .gpu_tokens = !self.options.drafts, .hidden_rows = true, .batch_rows = st.batch_rows, .mtp = false, .speculate = false, .speculate_early = false, .drafts = 1, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed] };
+        return round_costs.facts(st.window_rows, st.batch_rows, self.options.streams, self.options.drafts, self.costs[0..self.timed], self.shared[0..self.shared_timed]);
     }
 
     /// A window of each width 1..max_window at position 0 on a throwaway cache, the second of two runs timed.
     pub fn measure(self: *Metal) !void {
         const c = &self.model.config;
-        var cache = try st.Cache.init(self.model.device, c, 256);
+        // the scratch refuses caches past --context; one too short for a window leaves the rounds untimed
+        const capacity = @min(256, self.options.capacity);
+        if (capacity < max_window) return;
+        var cache = try st.Cache.init(self.model.device, c, capacity);
         defer cache.deinit();
         var ids: [max_window]u32 = undefined;
         for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
@@ -121,6 +126,36 @@ pub const Metal = struct {
             self.costs[rows - 1] = .{ .width = @intCast(rows), .ms = ms };
         }
         self.timed = max_window;
+        try self.measureShared(capacity);
+    }
+
+    /// Shared rounds of 12-32 rows, timed as measure() times a window: streams' windows of up to max_window rows each.
+    fn measureShared(self: *Metal, capacity: usize) !void {
+        const c = &self.model.config;
+        var caches: [st.batch_rows / max_window]st.Cache = undefined;
+        var made: usize = 0;
+        defer for (caches[0..made]) |*x| x.deinit();
+        while (made < caches.len) : (made += 1) caches[made] = try st.Cache.init(self.model.device, c, capacity);
+        var ids: [st.batch_rows]u32 = undefined;
+        for (&ids, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
+        for (round_costs.shared_widths, 0..) |total, j| {
+            var rows: [caches.len]usize = undefined;
+            const parts = round_costs.windows(total, max_window, &rows);
+            var segments: [caches.len]fwd.Segment = undefined;
+            for (parts, 0..) |n, i| segments[i] = .{ .cache = &caches[i], .rows = n };
+            var ms: f64 = 0;
+            for (0..2) |run| {
+                for (caches[0..parts.len]) |*x| x.len = 0;
+                var ts0: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(.MONOTONIC, &ts0);
+                try fwd.runShared(self.model, &self.scratch, segments[0..parts.len], ids[0..total], .{ .all = true });
+                var ts1: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(.MONOTONIC, &ts1);
+                if (run == 1) ms = @as(f64, @floatFromInt(ts1.sec - ts0.sec)) * 1e3 + @as(f64, @floatFromInt(ts1.nsec - ts0.nsec)) / 1e6;
+            }
+            self.shared[j] = .{ .width = total, .ms = ms };
+        }
+        self.shared_timed = round_costs.shared_widths.len;
     }
 
     /// A tapped row's bytes: every tap's hidden row, bf16.
