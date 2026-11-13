@@ -49,10 +49,10 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
-`/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
-is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
-`insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
-or a parked model reloads. The public routes stay public.
+`/v1/imprint`, `/v1/prompt_cache/flush`, another method, or a suffix alias such as `/alt/completions` that the server
+answers for a full key. The route is matched exactly after the query and trailing slashes are cut. A refused route
+answers 403 with the code `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the
+connection before the body is read or a parked model reloads. The public routes stay public.
 
 The stored Responses belong to the server, not to a key, so a scoped key's `POST /v1/responses` must send `"store": false`
 and no `previous_response_id`, with the whole conversation in `input`; anything else answers 403 naming the field. Over
@@ -1160,7 +1160,8 @@ an engine that keeps no prompt states answers 501.
 - `DELETE /v1/imprint` forgets every conversation state this server's model and build keep on disk: it deletes the
   store's state and row files and answers `freed_bytes`. What stays holds no conversation data: the store's folder with
   its `used` stamp, and the `written` and `clock` files at the top of the `--learn-dir` folder (the bytes written today,
-  and the order the stores were last opened in). States in RAM stay until they are evicted.
+  and the order the stores were last opened in). States in RAM stay until they are evicted, or until a
+  [flush](#flush-the-prompt-cache).
 
 What stays on disk: under the `--learn-dir` folder (`~/.cache/tensorfold/learned` by default), directories readable by
 their owner only (0700) hold files readable by their owner only (0600). They contain token ids and the model's own
@@ -1224,6 +1225,31 @@ a forwarded address is never read. Behind a reverse proxy every caller's socket 
 also refuses a request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `Via`,
 `CF-Connecting-IP` or `True-Client-IP`. A proxy that adds none of them cannot be told apart from a local caller: give
 a proxied server keys.
+
+## Flush the prompt cache
+
+`POST /v1/prompt_cache/flush` drops every prompt state the server keeps for resuming conversations: those in RAM, and
+those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). It waits
+for the requests already running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the
+queue and start after it. Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ...,
+"disk_bytes": ..., "disk": ..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the
+cache's budget, the bytes deleted from the server's own state folder, whether this server keeps states on disk, and how
+long the flush waited. The next turn of any conversation prefills its whole prompt and gives the tokens it would have
+given resumed. Two flushes asked together run one after the other, and the second finds nothing left. States `--learn`
+keeps for shared prompt prefixes stay on disk, as they do after `DELETE /v1/imprint`, so with `--learn` a later prompt
+may still resume from one. The body, if any, is ignored.
+
+An engine without the shared prompt cache (its cache turned off, or a backend that keeps its states its own way)
+answers 501 `not_supported` at once and holds nothing back. If the running requests have not ended within 10 minutes,
+the flush is withdrawn: nothing is dropped, new requests start again, and the answer is 503 `timeout`. While a flush
+waits, `--idle-unload` does not unload the model; a model it has already unloaded is not loaded for a flush, which
+answers 503 `model_unloaded` (no state is in RAM then, and the states it saved to disk stay until a flush after the next
+request loads it).
+
+Who may flush is decided as for [cancelling a request](#cancel-a-request). With API keys it is an admin route: a full
+or `[admin]` key may flush from any address, a scoped key gets 403 `insufficient_scope` and a missing key 401. Without
+keys only a caller whose socket is on the loopback address (127.0.0.0/8 or ::1) may flush, and only when the request
+carries none of the proxy headers listed there; anyone else gets 403 `loopback_only`.
 
 ## The Responses API
 

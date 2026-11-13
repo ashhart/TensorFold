@@ -432,7 +432,7 @@ pub const Engine = struct {
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
         /// Recall's record for every later request's drafts and writes, before any request (null: no record read).
         recall: ?*const fn (ctx: *anyopaque, store: *lanes.recall_store.Store) void = null,
-        /// Queue a question about kept states for the engine thread (it stays valid until `done`); false: refused.
+        /// A kept-state question for the engine thread (valid until `done`, for good once withdrawn); false: refused.
         imprint: ?*const fn (ctx: *anyopaque, ask: *ImprintAsk) bool = null,
         /// A planned stop's first half: no more work, disk writes finished under a deadline, the engine thread joined.
         drain: ?*const fn (ctx: *anyopaque) void = null,
@@ -572,6 +572,7 @@ pub const prompt_learn = @import("prompt_learn.zig");
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;
 pub const ImprintOp = @import("rows_ask.zig").Op;
+pub const ImprintClaim = @import("rows_ask.zig").Claim;
 pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).
