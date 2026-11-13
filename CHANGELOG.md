@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA at four ranks or more: when the default split prefill's start-up exchange with every rank fails, as on a switchless ring of four, the failing rank now prints a refusal naming `TF_GLM_PREFILL_REDUCE=gather`, and rank 0 names it too when another rank fails first. Before, every rank stopped on a bare `ncclGroupEnd` error. Start-ups that succeed are unchanged (#2868). Thanks to @Bizuayeu.
+
 - HIP on gfx1151: the routed prompt tile runs an expert of at most 8 rows in K-parallel passes inside the same launch, with the matrix path's bytes; with Qwen3.6-35B-A3B on a Radeon 8060S, served cold prompts of 64 to 256 tokens are 11% to 22% faster (1.5% at 1,024), and logits and served tokens equal main's. Other cards' tables leave it off (#2878, fixes #2795). Thanks to @AbrahamCete.
 
 - Internal: one block-FP8 reader in `core/quant/fp8.zig` loads Flash Next's, Kolibri-1's and Drama 3's FP8 weights and their scales, widening bf16 scales by the same bit shift and copying f32 ones as before; every packed buffer is byte-identical, and only Flash Next refuses non-finite scales, as before (#2892, #2460 item 7). Thanks to @jschmied.
@@ -99,7 +101,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.
 
-
 - The prompt cache can keep a bounded ladder of intermediate checkpoints under a long prompt's history mark, so a later, compacted prompt resumes inside its retained prefix instead of the shared cut. On one GB10 with `nvidia/Qwen3.8-Flash-Next-NVFP4`, a 104K-token request that kept its first 100K resumed 65,536 tokens instead of 2, cutting TTFT from 50.7 s to 19.9 s with the same tokens; a cold 165K prompt paid 0.9 s more, and the 8 GiB cache held two more states. A follow-up after that turn resumed 65,536 tokens too, because the compacted turn evicted the larger states. `TF_PROMPT_INTERMEDIATE=1` enables it for Flash Next on CUDA; it stays off by default (#1909). Its checkpoints go after a conversation's other redundant copies but before any conversation's newest state, and take only the room left after the endpoint, the rewind state and other requests' promised keeps. Thanks to @javierbits.
 
 - Metal: kernels nothing launches are removed: Qwen3.8-27B's `prompt_glue.metal` and `prompt_state.metal` (six `q27_prompt_*` kernels) and core's `tf_lane_rope` with `Attention.rotate`; saved Qwen3.8-27B prompt states on Metal are recomputed once after upgrading, since their identity covers the kernel sources (#3065, part of #2251). Thanks to @jschmied.
@@ -189,8 +190,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Tests: `zig build test-qwen35-copies-host` compiles again, passing the drafter kind `copyMatch` now takes (#2836).
 
 - Internal: core gains one walk for copying kept prompt states, and GLM's copies on CUDA and Metal go through it, with the same copies in the same order; other families keep their own loops. Nothing a user sees changes (#2215, part of #1293). Thanks to @jschmied.
-
-- GLM-5.3-Flash on CUDA at four ranks or more with the default split prefill: when the start-up warm-up's exchange with every rank fails, as on a switchless ring of four, the failing ranks print split's refusal naming `TF_GLM_PREFILL_REDUCE=gather` and the ranks that stop with them name it too; before, the ranks stopped without naming the setting (#2868). Thanks to @Bizuayeu.
 
 - CUDA, opt-in build (`-Dnative-fp-decode`): qmmf's FP4 decode rows use the shared native e2m1 pair decode, `tf_common::e2m1_pairs`, which equals the existing decode on all 2^33 inputs; the default build's 113 fatbins are byte-identical and GB10 decode is level (#2721). Thanks to @jschmied.
 
