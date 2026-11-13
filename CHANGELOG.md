@@ -203,6 +203,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Kernel contract: Hy4-flash's Metal kernels (its indexer, MLA projections and attention, hyper-connections, routing, experts, row windows and Engram) and its lane projection variants (8-bit reg, inline group sums) register under gates 1 to 5, with a planted control for each group; twelve gate-1 findings on non-finite inputs are recorded as known.
 
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds each 512-key chunk's two pages once instead of reading the page table at every 32-key step, with every token and cache row unchanged (#3180, part of #1293). Thanks to @CodingEmil.
+
 ## 1.3.0
 
 - CLI: `tensorfold models` lists the chat checkpoints from the supported-models guide that fit this machine, largest first, with the memory each needs, a quality score from TensorFold Web's quality suite (receipts in `docs/receipts/quality-suite`) and a rough one-stream speed (measured on this chip, or estimated from another chip by memory bandwidth); `--all` adds the rest, `--json` adds `machine` and `catalog` to schema 1, and the cached checkpoints follow as before (#3483).
