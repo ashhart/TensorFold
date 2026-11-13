@@ -10,9 +10,17 @@ pub fn steps(b: *std.Build) void {
     const replay = b.addRunArtifact(tool);
     replay.addPassthruArgs();
     replay.has_side_effects = true;
-    b.step("cache-replay", "Replay synthetic agent traces on main, saved-time-per-byte and recency eviction").dependOn(&replay.step);
+    b.step("cache-replay", "Replay synthetic agent traces on native main and experimental eviction selectors").dependOn(&replay.step);
     const tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_replay_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"cache replay:"} });
     b.step("test-cache-replay-host", "Replay equivalence, ownership, accounting and selector witnesses without devices").dependOn(&b.addRunArtifact(tests).step);
     const existing = b.addTest(.{ .root_module = cache });
     b.step("test-prompt-cache-host", "The snapshot store's existing host suite without a device backend").dependOn(&b.addRunArtifact(existing).step);
+    const store_tests = b.addTest(.{ .root_module = cache, .filters = &.{ "prompt_cache", "prompt_radix" } });
+    b.step("test-cache-store-host", "Snapshot store lookup, lifetime, reservation and eviction tests without devices").dependOn(&b.addRunArtifact(store_tests).step);
+    const agent = b.addExecutable(.{ .name = "tf-cache-agent-replay", .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_agent_replay.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }) });
+    const agent_run = b.addRunArtifact(agent);
+    agent_run.has_side_effects = true;
+    b.step("cache-agent-replay", "Fixed long shared-system agents, phased chats and one-off prompt traces").dependOn(&agent_run.step);
+    const agent_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_agent_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"agent cache replay:"} });
+    b.step("test-cache-agent-host", "Native shared-prefix replay, adapter equivalence and exact rows without devices").dependOn(&b.addRunArtifact(agent_tests).step);
 }
