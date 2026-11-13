@@ -329,6 +329,7 @@ test {
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/run_pdf_test.zig");
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
