@@ -66,7 +66,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(h: *Backend) be.Backend {
-        return .{ .ptr = h, .vtable = &vtable, .penalties = true, .chunk_invariant = true };
+        return .{ .ptr = h, .vtable = &vtable, .penalties = true, .logit_bias = true, .chunk_invariant = true };
     }
 
     const vtable: be.Backend.VTable = .{ .reports_fill = true, .prefill = fillAll, .prefill_step = fillStep, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .tree = tree, .held = held, .release = release };
@@ -117,7 +117,7 @@ pub const Backend = struct {
         const history = try a.alloc(u32, base.len + extra.len);
         @memcpy(history[0..base.len], base);
         @memcpy(history[base.len..], extra);
-        return .{ .sampling = s.sampling, .position = position, .repetition = 1.1, .forced = if (s.max_new > 0 and position == s.prompt_len + s.max_new - 1) 2 else null, .history = history, .reply = history[s.prompt_len - image_rows ..], .penalties = s.penalties };
+        return .{ .sampling = s.sampling, .position = position, .repetition = 1.1, .forced = if (s.max_new > 0 and position == s.prompt_len + s.max_new - 1) 2 else null, .history = history, .reply = history[s.prompt_len - image_rows ..], .penalties = s.penalties, .logit_bias = s.logit_bias };
     }
 
     fn settle(l: *Lane, rows: ?usize) !void {

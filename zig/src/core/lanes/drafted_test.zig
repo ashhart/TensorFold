@@ -283,10 +283,12 @@ pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var target_backend = strict.backend();
     target_backend.first_before_draft = mode == .wrapped_early;
     target_backend.penalties = mode == .wrapped_early;
+    target_backend.logit_bias = mode == .wrapped_early;
     var wrapped = try Drafted.init(gpa, target_backend, head.drafter());
     defer wrapped.deinit();
     try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().first_before_draft);
     try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().penalties);
+    try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().logit_bias);
     var m = base();
     m.root_copies = cases[0].root_copies;
     var cfg = try Config.init(gpa, if (mode != .plain) wrapped.facts(m) else m, 16, 15);

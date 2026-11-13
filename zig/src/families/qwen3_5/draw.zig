@@ -18,6 +18,18 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
     };
 }
 
+/// A raw row's draw under a request's biases (none: `draw` itself); the row's words stay as they are.
+pub fn biased(gpa: std.mem.Allocator, words: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32, entries: []const lanes.logit_bias.Entry) !u32 {
+    if (entries.len == 0) return draw(gpa, words, settings, position, mask);
+    return lanes.logit_bias.draw(gpa, words, settings, position, mask, entries);
+}
+
+/// A row the device already penalized and biased: a biased stream's bans are -inf there, skipped rather than refused.
+pub fn processed(gpa: std.mem.Allocator, words: []const u16, settings: ?lanes.Sampling, position: u64, mask: []const u32, has_bias: bool) !u32 {
+    if (!has_bias) return draw(gpa, words, settings, position, mask);
+    return lanes.logit_bias.draw(gpa, words, settings, position, mask, &.{});
+}
+
 test "candidate selection preserves full-vocabulary keyed draws and tie order" {
     const gpa = std.testing.allocator;
     const words = try gpa.alloc(u16, c.vocab);

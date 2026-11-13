@@ -11,21 +11,18 @@ pub const Id = u64;
 pub const Sampling = lanes.Sampling;
 /// presence_penalty and frequency_penalty, applied where ``Info.penalties``.
 pub const Penalties = lanes.Penalties;
+pub const LogitBias = lanes.logit_bias.Entry;
 pub const EmbeddingInfo = lanes.embedding.Info;
 pub const EmbeddingBatch = lanes.embedding.Batch;
 pub const embedding_vector = @import("embedding_vector.zig");
 pub const load_ledger = @import("load_ledger.zig");
 pub const kv_ledger = @import("kv_ledger.zig");
-
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
-
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
-
 /// A committed token's log probability under the target's raw distribution, with the best tokens at its position.
 pub const LogprobRow = lanes.LogprobRow;
-
 /// The request's stop strings, checked on the engine's thread after each committed token (the server decodes the tail).
 pub const Stop = struct { ctx: *anyopaque, check: *const fn (ctx: *anyopaque, emitted: []const u32) bool };
 
@@ -42,6 +39,7 @@ pub const Request = struct {
     max_tokens: u32,
     sampling: ?Sampling = null,
     penalties: Penalties = .{},
+    logit_bias: []const LogitBias = &.{},
     /// Tokens that end the reply as ``stop`` (the token is delivered); empty when the request ignores EOS.
     eos: []const u32 = &.{},
     stop: ?Stop = null,
@@ -193,6 +191,7 @@ pub const Info = struct {
     logprobs: bool = false,
     /// Requests' presence_penalty and frequency_penalty change the draws (false: nonzero is refused).
     penalties: bool = false,
+    logit_bias: bool = false, // sparse request token biases, including hard bans at -100
     /// Requests may ask for ``prompt_logprobs`` (a prompt pass from 0 that reads every row).
     prompt_logprobs: bool = false,
     /// Prompt rows a prefill chunk at most, for the server's chunk starts (0: the engine cuts prompts itself).
@@ -448,6 +447,7 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         const info_ = e.info();
+        if (request.logit_bias.len > 0 and !info_.logit_bias) return error.InvalidRequest;
         if (request.embedding != null and request.readout != null) return error.InvalidRequest;
         if (request.readout != null) {
             lanes.readout.admit(info_, request) catch return error.InvalidRequest;

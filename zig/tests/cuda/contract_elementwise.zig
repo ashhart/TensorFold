@@ -19,6 +19,8 @@ pub const Set = struct {
     sample: ?cuda.Module = null,
     draws: cuda.sample.Draws = undefined,
     penalize: ?penalize_k.Penalize = null,
+    bias: [2]penalize_k.Penalize = undefined,
+    n_bias: usize = 0,
     lfm2m: lfm2m_k.Set = .{}, // LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (rows with sums, beside these)
     paged: paged_k.Set = .{}, // the Liquid families' paged attention at head 64, decode and prompt rows
     dots: dots_k.Set = .{}, // dots.mocr's q|k|v bias and Torch-order RoPE
@@ -37,6 +39,11 @@ pub const Set = struct {
         self.draws = try cuda.sample.Draws.resolve(self.sample.?);
         self.penalize = .{ .rig = .{ .gpu = gpu, .s = s }, .draws = &self.draws };
         try kernels.append(a, self.penalize.?.kernel());
+        for (&self.bias, 0..) |*p, i| {
+            p.* = .{ .rig = .{ .gpu = gpu, .s = s }, .draws = &self.draws, .bias = true, .bad = i == 1 };
+            self.n_bias += 1;
+            try kernels.append(a, p.kernel());
+        }
         try self.lfm2m.add(gpu, s, ctl_mod, kernels);
         try self.paged.add(gpu, s, ctl_mod, kernels);
         try self.dots.add(gpu, s, ctl_mod, kernels);
@@ -48,6 +55,7 @@ pub const Set = struct {
         self.dots.deinit();
         self.paged.deinit();
         self.lfm2m.deinit();
+        for (self.bias[0..self.n_bias]) |*p| p.deinit();
         if (self.penalize) |*p| p.deinit();
         if (self.sample) |*m| m.unload();
         for (self.embeds[0..self.n_embeds]) |*x| x.deinit();

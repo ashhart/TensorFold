@@ -147,7 +147,7 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .chunk_invariant = h.inner.chunk_invariant };
+        return .{ .ptr = h, .round_observer = h.inner.round_observer, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft, .penalties = h.inner.penalties, .logit_bias = h.inner.logit_bias, .chunk_invariant = h.inner.chunk_invariant };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -465,6 +465,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,
+        .logit_bias = served.backend.logit_bias,
         .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
         .admit = admit,

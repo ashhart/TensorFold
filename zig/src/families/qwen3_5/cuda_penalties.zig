@@ -13,6 +13,7 @@ pub const Rows = struct {
     subs: std.ArrayList(f32) = .empty,
     /// The current window's counts: the reply's tokens before it, then its pending token.
     counts: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty,
+    biased: bool = false,
     host: ?cuda.HostBuffer = null,
     dev: ?cuda.DeviceBuffer = null,
 
@@ -41,17 +42,29 @@ pub const Rows = struct {
 
     /// Row `row`'s entries under `p`: the window's counts with `path` (the drafts from the window's first row to it).
     pub fn row(self: *Rows, gpa: std.mem.Allocator, at: u32, p: lanes.Penalties, path: []const u32) !void {
+        return self.rowBias(gpa, at, p, path, &.{});
+    }
+
+    pub fn rowBias(self: *Rows, gpa: std.mem.Allocator, at: u32, p: lanes.Penalties, path: []const u32, bias: []const lanes.logit_bias.Entry) !void {
         for (path) |t| try bump(gpa, &self.counts, t, 1);
         defer for (path) |t| bump(gpa, &self.counts, t, -1) catch unreachable;
-        const n = self.counts.count();
+        const n = self.counts.count() + bias.len;
+        self.biased = self.biased or bias.len > 0;
         try self.rows.ensureUnusedCapacity(gpa, n);
         try self.toks.ensureUnusedCapacity(gpa, n);
         try self.subs.ensureUnusedCapacity(gpa, n);
-        for (self.counts.keys(), self.counts.values()) |t, c| if (c > 0) {
+        for (self.counts.keys(), self.counts.values()) |t, c| if (c > 0 and p.active()) {
             self.rows.appendAssumeCapacity(at);
             self.toks.appendAssumeCapacity(t);
-            self.subs.appendAssumeCapacity(p.of(c));
+            self.subs.appendAssumeCapacity(lanes.logit_bias.subtract(p.of(c), lanes.logit_bias.find(bias, t)));
         };
+        for (bias) |b| {
+            const count = self.counts.get(b.token) orelse 0;
+            if (p.active() and count > 0) continue;
+            self.rows.appendAssumeCapacity(at);
+            self.toks.appendAssumeCapacity(b.token);
+            self.subs.appendAssumeCapacity(lanes.logit_bias.subtract(0, b));
+        }
     }
 
     /// The staged entries taken from `logits` (rows of `vocab` bf16 words) on `stream`; none staged: nothing runs.
@@ -59,6 +72,8 @@ pub const Rows = struct {
         const n = self.len();
         if (n == 0) return;
         defer self.clear();
+        // the server checks IDs against the tokenizer's vocabulary; the launch writes rows of the head's, unchecked
+        if (self.biased) for (self.toks.items) |t| if (t >= vocab) return error.BadLogitBiasToken;
         const bytes = n * 12;
         if (self.host == null or self.host.?.bytes.len < bytes) {
             if (self.host) |*h| h.free();
@@ -76,7 +91,7 @@ pub const Rows = struct {
         @memcpy(h[n * 8 .. n * 12], std.mem.sliceAsBytes(self.subs.items));
         // the forward waits on its stream before the next one stages, so the pinned bytes are not reused early
         try self.dev.?.uploadAsync(0, h[0..bytes], stream.handle);
-        try draws.penalize(stream, logits, vocab, self.dev.?.ptr, n);
+        if (self.biased) try draws.biasRows(stream, logits, vocab, self.dev.?.ptr, n) else try draws.penalize(stream, logits, vocab, self.dev.?.ptr, n);
     }
 
     /// A window's rows from row `first`: the reply before `cache_len`, the pending token, and each row's own path.
@@ -84,13 +99,14 @@ pub const Rows = struct {
         try self.window(gpa, w.stream, cache_len, w.pending);
         var buf: [most_path]u32 = undefined;
         if (w.rows() > most_path + 1) return error.UnsupportedQwenWindow;
-        for (0..w.rows()) |r| try self.row(gpa, @intCast(first + r), w.stream.penalties, pathOf(&buf, w.tokens, w.parents, r));
+        for (0..w.rows()) |r| try self.rowBias(gpa, @intCast(first + r), w.stream.penalties, pathOf(&buf, w.tokens, w.parents, r), w.stream.logit_bias);
     }
 
     pub fn clear(self: *Rows) void {
         self.rows.clearRetainingCapacity();
         self.toks.clearRetainingCapacity();
         self.subs.clearRetainingCapacity();
+        self.biased = false;
     }
 };
 
@@ -166,4 +182,29 @@ test "a tree row's path follows its parents from the first row" {
     try std.testing.expectEqualSlices(u32, &.{11}, pathOf(&buf, &tokens, &parents, 2));
     try std.testing.expectEqualSlices(u32, &.{ 10, 12, 13 }, pathOf(&buf, &tokens, &parents, 4));
     try std.testing.expectEqualSlices(u32, &.{ 10, 11 }, pathOf(&buf, &tokens, null, 2));
+}
+
+test "bias rows merge each cell once, preserve path penalties and leave another stream unchanged" {
+    const a = std.testing.allocator;
+    var rows: Rows = .{};
+    defer rows.deinit(a);
+    const s = fakeStream(&.{ 9, 9, 5, 7, 5, 7 }, 2);
+    try rows.window(a, &s, 5, 7);
+    const p: lanes.Penalties = .{ .presence = 1, .frequency = 0.5 };
+    const bias = [_]lanes.logit_bias.Entry{ .{ .token = 3, .value = -100, .ban = true }, .{ .token = 5, .value = 3 } }; // sorted, as parsed
+    try rows.rowBias(a, 4, p, &.{5}, &bias);
+    try rows.rowBias(a, 5, p, &.{3}, &bias);
+    try rows.row(a, 6, p, &.{});
+    try std.testing.expectEqualSlices(u32, &.{ 4, 4, 4, 5, 5, 5, 6, 6 }, rows.rows.items);
+    try std.testing.expectEqualSlices(u32, &.{ 5, 7, 3, 5, 7, 3, 5, 7 }, rows.toks.items);
+    try std.testing.expectEqualSlices(f32, &.{ -0.5, 2, std.math.inf(f32), -1, 2, std.math.inf(f32), 2, 2 }, rows.subs.items);
+    for (rows.rows.items, rows.toks.items, 0..) |at, token, i| {
+        for (rows.rows.items[0..i], rows.toks.items[0..i]) |other_row, other_token|
+            try std.testing.expect(at != other_row or token != other_token);
+    }
+    rows.clear();
+    try std.testing.expect(!rows.biased);
+    try rows.rowBias(a, 0, .{}, &.{5}, &bias);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 5 }, rows.toks.items);
+    try std.testing.expectEqualSlices(f32, &.{ std.math.inf(f32), -3 }, rows.subs.items);
 }

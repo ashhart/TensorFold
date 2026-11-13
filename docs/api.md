@@ -140,8 +140,8 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
-warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, logit_bias, prompt_logprobs,
+prompt_cache, warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
 embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
 thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
 [Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean,
@@ -371,6 +371,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
 | `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA; other engines refuse nonzero values with 400; zero, null and omitted values keep working | Native |
+| `logit_bias` | OpenAI's: an object of decimal token IDs (within the tokenizer's vocabulary) to numbers from -100 to 100, at most 300 entries. Before each draw, greedy or sampled, a listed token's logit gains its number; exactly -100 bans the token, so it is never drawn. Drafted replies equal undrafted ones with it. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA (a kernel set built with `tf_bias_rows`), Qwen3.5-2B on Metal and Nemotron Parse on HIP; other engines refuse a non-empty object, even one of zeros, with 400; `{}`, null and omitted keep working | Native |
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |

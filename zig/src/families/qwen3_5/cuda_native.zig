@@ -198,7 +198,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const trace = try round_timing.Trace.create(gpa, timing_on and e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0);
     errdefer if (trace) |x| gpa.destroy(x);
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .bias = e.draws.bias_fn != null, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0 };
     return .{
         .learns = if (o.slide) e else null,
@@ -261,9 +261,7 @@ fn release(p: *anyopaque) void {
 
 /// The device draw of a stream's rule at `position`: sample.cu's keyed rule, greedy at temperature 0 or without one.
 fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
-    const s = sampling orelse return .{ .rule = null, .position = position };
-    if (s.temperature <= 0) return .{ .rule = null, .position = position };
-    return .{ .rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(s)), .position = position };
+    return .{ .rule = cuda.sample.ruleFor(sampling), .position = position };
 }
 
 pub const Lanes = struct {
@@ -272,6 +270,7 @@ pub const Lanes = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     e: *E.Engine,
+    bias: bool = false, // the kernel set has tf_bias_rows, read at open: backend() never reads the engine
     capacity: usize,
     /// TF_QWEN_KV_PAGES's positions a page (0: no pool) and the pool `attach` made.
     page_tokens: usize = 0,
@@ -374,7 +373,7 @@ pub const Lanes = struct {
     };
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
+        return .{ .ptr = self, .round_observer = if (self.trace) |x| x.observer() else null, .first_before_draft = true, .penalties = true, .logit_bias = self.bias, .chunk_invariant = true, .vtable = if (self.readout.readout != null) &read_vtable else &text_vtable };
     }
 
     /// Readout streams from now on fill through `r` (one rank; before the first stream): the backend to hand on.
@@ -442,7 +441,7 @@ pub const Lanes = struct {
         const self = cast(ptr);
         const cache = try self.cacheOf(stream);
         if (position != cache.len) return error.InvalidQwenPosition;
-        return try draws.draw(self.gpa, cache.logits, stream.sampling, position, mask);
+        return try draws.biased(self.gpa, cache.logits, stream.sampling, position, mask, stream.logit_bias);
     }
 
     fn queueFn(ptr: *anyopaque, stream: *lanes.Stream, feed: be.Feed, position: u64) !u64 {
@@ -453,9 +452,9 @@ pub const Lanes = struct {
             .value => |v| v,
             .handle => |h| @intCast(h),
         };
-        if (stream.penalties.active()) {
+        if (stream.penalties.active() or stream.logit_bias.len > 0) {
             try self.e.penalties.window(self.gpa, stream, cache.len, token);
-            try self.e.penalties.row(self.gpa, 0, stream.penalties, &.{});
+            try self.e.penalties.rowBias(self.gpa, 0, stream.penalties, &.{}, stream.logit_bias);
         }
         try self.e.forward(&.{.{ .cache = cache, .rows = 1, .undo = self.e.learning != null }}, &.{token}, .{ .draws = &.{pick(stream.sampling, position)} });
         cache.last = null;
@@ -503,7 +502,7 @@ pub const Lanes = struct {
                 ids[total] = w.pending;
                 @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
                 for (w.positions, 0..) |p, r| picks[total + r] = pick(w.stream.sampling, p);
-                if (w.stream.penalties.active()) try self.e.penalties.stageWindow(self.gpa, w, parts[n].cache.len, total);
+                if (w.stream.penalties.active() or w.stream.logit_bias.len > 0) try self.e.penalties.stageWindow(self.gpa, w, parts[n].cache.len, total);
                 masked = masked or w.masks.len != 0;
                 total += w.rows();
             }
@@ -519,7 +518,7 @@ pub const Lanes = struct {
             for (windows[at..][0..n], out[at..][0..n]) |w, o| {
                 for (o.sampled, w.positions, 0..) |*t, p, r| {
                     const mask = if (w.masks.len > 0) w.masks[r * draws.mask_words ..][0..draws.mask_words] else &.{};
-                    t.* = if (masked) try draws.draw(self.gpa, self.e.rowLogits(row + r), w.stream.sampling, p, mask) else self.e.tokens[row + r];
+                    t.* = if (masked) try draws.processed(self.gpa, self.e.rowLogits(row + r), w.stream.sampling, p, mask, w.stream.logit_bias.len > 0) else self.e.tokens[row + r];
                 }
                 @memcpy(o.drafts, w.tokens);
                 row += w.rows();
