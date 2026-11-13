@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const chat = @import("chat.zig");
 const reply_text = @import("reply_text.zig");
+const recipient_reply = @import("recipient_reply.zig");
 const tool_stream = @import("tool_stream.zig");
 const tool_parse = @import("tool_parse.zig");
 const tool_lfm2 = @import("tool_lfm2.zig");
@@ -39,6 +40,7 @@ pub const Generation = struct {
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
+    recipient: ?recipient_reply.Reading = null, // a chat whose reply is messages to recipients (Muse Spark's)
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     kimi: ?@import("kimi_reply.zig").Stream = null,
@@ -111,10 +113,12 @@ pub const Generation = struct {
         const raw_visible = g.stops.visible(all, true);
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
-        if (g.thinking) {
-            const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
-            const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
-            const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+        if (g.thinking or g.recipient != null) {
+            const split = if (g.recipient) |*r| try r.split(g.a, text, .streaming) else blk: {
+                const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
+                const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
+                break :blk try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
+            };
             const piece = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
             if (piece.len > 0) {
                 try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), piece);
@@ -242,6 +246,11 @@ pub const Generation = struct {
         if (native) |n| {
             const r = reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
+        } else if (g.recipient) |*rr| {
+            const split = try rr.split(a, text, if (std.mem.eql(u8, reason, "length")) .cut else if (g.stops.matched(raw) != null) .stopped else .ended);
+            const r = reply_text.pyStrip(split.reasoning);
+            reasoning = if (r.len > 0) r else null;
+            content = split.answer;
         } else if (g.thinking) {
             const original_close = try reply_text.closeWhere(a, reply_text.decodeText, g.srv.text, content_tokens, g.srv.close_id);
             const close_at = try @import("tool_minimax.zig").closeAfterRewrite(a, raw_visible, g.tools, original_close);
@@ -255,18 +264,19 @@ pub const Generation = struct {
             reasoning = h.reasoning;
         }
         if (native == null) content = try tool_lfm2.dsml(a, content, g.tools, true);
+        const read = g.thinking or g.recipient != null; // the reply's split text is its content
         if (g.sink) |sink| {
             const thought = g.streamed_reasoning.text.items;
             if (reasoning) |r| if (std.mem.startsWith(u8, r, thought) and r.len > thought.len)
                 try g.emit(sink, try deltaOf(a, "reasoning_content", r[thought.len..]));
-            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
+            const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (read) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
             if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
-            if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
+            if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length") or g.recipient != null) {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
-                try c.finishCut(if (g.thinking) content else text, &out); // a cut value sends its held bytes
+                try c.finishCut(if (read) content else text, &out); // a cut value sends its held bytes
                 for (out.items) |d| try g.emit(sink, d);
             };
         }
