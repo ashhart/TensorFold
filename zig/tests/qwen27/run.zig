@@ -38,7 +38,8 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     for ([_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" }) |name| {
         const template = if (std.mem.eql(u8, name, "norm_input")) sources.norm_input else if (std.mem.eql(u8, name, "norm_xs")) sources.norm_xs else if (std.mem.eql(u8, name, "mlp_xs")) sources.mlp_xs else sources.xsum;
         const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
-        const defines = if (std.mem.eql(u8, name, "mlp_xs")) "constexpr int N=17408;" else "constexpr int K=5120, GS=64;";
+        // the sums' writes (Q27_XS) as a tensor-unit chip compiles them: xsum ignores the define
+        const defines = if (std.mem.eql(u8, name, "mlp_xs")) "\n#define Q27_XS 1\nconstexpr int N=17408;" else "\n#define Q27_XS 1\nconstexpr int K=5120, GS=64;";
         const text = try std.mem.concat(a, u8, &.{ template[0..mark], defines, template[mark + "Q27_SPECIALIZE".len ..] });
         try write(a, io, dir, try std.fmt.allocPrint(a, "{s}.metal", .{name}), text);
     }

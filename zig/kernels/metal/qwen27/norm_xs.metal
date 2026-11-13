@@ -25,7 +25,9 @@ Q27_SPECIALIZE
   constexpr int TPG = K / E;
   threadgroup float red[TPG / 32];
   if (int(m) >= M) {
+#ifdef Q27_XS
     if ((t & 3) == 0) XS[(t >> 2) * MP + m] = 0.0f;
+#endif
     return;
   }
   const int base = int(m) * K + int(t) * E;
@@ -50,6 +52,7 @@ HO[base + i] = h;
     XO[base + i] = x;
     xv[i] = float(x);
   }
+#ifdef Q27_XS
   // a group's 64 values summed in order from zero, as the lane projection's sums are: its four threads take turns
   float gs = 0.0f;
   for (uint turn = 0; turn < 4; turn++) {
@@ -57,5 +60,6 @@ HO[base + i] = h;
     gs = simd_shuffle(gs, ushort((thread_index_in_simdgroup & ~3u) | turn));
   }
   if ((t & 3) == 0) XS[(t >> 2) * MP + m] = gs;
+#endif
 
 }

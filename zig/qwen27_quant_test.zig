@@ -132,3 +132,65 @@ test "qwen27 quant: preparation skips projections that cannot take a decode lane
     try t.expectEqual(@as(u32, 0), k.lanes.count());
     try t.expectEqual(@as(usize, 0), r.libraries);
 }
+
+test "qwen27 quant: a raw projection encodes no barrier of its own, alone or as a stack's members (#2900)" {
+    var r: mtl.Record = .{};
+    var k = quant.Kernels{ .allocator = a, .device = r.device(), .raw_tiles = false };
+    defer k.deinit();
+    // a 4-bit raw matrix of 32-wide groups takes the row kernel, as the raw path does before tensor units
+    var p = matrix(&r, 4096);
+    p.raw = .{ .w = r.virtual(), .scales = r.virtual(), .biases = r.virtual(), .n = 4096, .k = 5120, .group = 32 };
+    try launch(&k, &r, p, 3);
+    try t.expectEqual(@as(usize, 1), r.count);
+    // two raw members of a stack: each the strided row kernel into its own columns, side by side
+    var stack = matrix(&r, 8192);
+    stack.runs = &.{ .{ .linear = p, .first = 0 }, .{ .linear = p, .first = 4096 } };
+    r.count = 0;
+    try launch(&k, &r, stack, 3);
+    try t.expectEqual(@as(usize, 2), r.count);
+    // q and kv, or qkv and zba, from one input into disjoint outputs: the caller's one barrier follows both
+    try t.expectEqual(@as(usize, 0), r.barriers);
+}
+
+test "qwen27 quant: norms and the MLP dispatch their rows alone without XS, the padded rows with it (#2900)" {
+    for ([_]bool{ true, false }) |xs| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .xs = xs };
+        defer k.deinit();
+        const b = quant.Ref{ .buffer = r.virtual() };
+        for ([_]u32{ 1, 5, 16, 17, 63 }) |rows| {
+            r.count = 0;
+            try k.norm(r.encoder(), b, b, b, b, b, b, b, b, 5120, rows);
+            try k.norm(r.encoder(), b, null, b, b, b, b, b, b, 5120, rows);
+            try k.mlp(r.encoder(), b, b, b, b, b, 17408, rows);
+            try t.expectEqual(@as(usize, 3), r.count);
+            // past `rows` a threadgroup only zeroes XS: with no XS it has nothing to do
+            const want: usize = if (xs) quant.padded(rows) else rows;
+            for (r.launches[0..3]) |l| try t.expectEqual(want, l.height);
+        }
+    }
+}
+
+test "qwen27 quant: Q27_XS is defined only where sums are kept, and every XS write sits under it (#2900)" {
+    for ([_]quant.Kind{ .norm, .input_norm, .mlp }) |kind| for ([_]bool{ true, false }) |xs| {
+        const text = try quant.specializedSource(a, .{ .kind = kind, .k = 5120, .n = 17408 }, xs);
+        defer a.free(text);
+        try t.expectEqual(xs, std.mem.indexOf(u8, text, "\n#define Q27_XS 1\n") != null);
+        try t.expect(std.mem.indexOf(u8, text, "Q27_SPECIALIZE") == null);
+        var inside = false;
+        var writes: usize = 0;
+        var lines = std.mem.splitScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            const s = std.mem.trim(u8, line, " ");
+            if (std.mem.eql(u8, s, "#ifdef Q27_XS")) {
+                inside = true;
+            } else if (std.mem.eql(u8, s, "#endif")) {
+                inside = false;
+            } else if (std.mem.indexOf(u8, s, "XS[") != null) {
+                try t.expect(inside);
+                writes += 1;
+            }
+        }
+        try t.expectEqual(@as(usize, 2), writes); // the padded rows' zero and the group sum
+    };
+}

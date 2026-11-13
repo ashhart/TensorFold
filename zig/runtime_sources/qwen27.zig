@@ -9,7 +9,11 @@ pub fn add(s: *Set) !void {
     const quant = @import("../src/families/qwen27/quant_gpu.zig");
     for (std.enums.values(quant.Kind)) |kind| {
         if (kind == .projection) continue;
-        try s.raw("qwen27", @tagName(kind), try quant.specializedSource(s.a, .{ .kind = kind, .k = 512, .n = 1024, .tile = 256 }));
+        // with group sums (tensor units) and without (M1-M4, #2900); a kind the define doesn't touch dedupes to one
+        for ([_]bool{ true, false }) |xs| {
+            const name = if (xs) @tagName(kind) else try std.fmt.allocPrint(s.a, "{s}-no-xs", .{@tagName(kind)});
+            try s.raw("qwen27", name, try quant.specializedSource(s.a, .{ .kind = kind, .k = 512, .n = 1024, .tile = 256 }, xs));
+        }
     }
     const attention = @import("../src/families/qwen27/simd_attention.zig");
     for ([_]bool{ false, true }) |paged| for ([_]bool{ false, true }) |prompt| for ([_][2]u32{ .{ 6, 4 }, .{ 4, 4 }, .{ 8, 4 } }) |g|

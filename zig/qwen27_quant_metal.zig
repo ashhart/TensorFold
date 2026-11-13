@@ -34,8 +34,10 @@ pub const Record = struct {
     fail_pipeline: bool = false,
     current: usize = 0,
     rows: u32 = 0,
-    launches: [256]struct { pipeline: usize, rows: u32 } = undefined,
+    launches: [256]struct { pipeline: usize, rows: u32, height: usize } = undefined,
     count: usize = 0,
+    /// Barriers encoded so far: a projection leaves ordering its output to the caller.
+    barriers: usize = 0,
     pub fn device(r: *Record) Device {
         return .{ .r = r };
     }
@@ -113,12 +115,14 @@ pub const ComputeEncoder = struct {
     pub fn setValue(e: ComputeEncoder, v: anytype, at: usize) void {
         if (@TypeOf(v) == [2]i32 and at == 3) e.r.rows = @intCast(v[0]);
     }
-    pub fn dispatchGroups(e: ComputeEncoder, _: Size, _: Size) void {
-        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows };
+    pub fn dispatchGroups(e: ComputeEncoder, groups: Size, _: Size) void {
+        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows, .height = groups.height };
         e.r.count += 1;
     }
     pub fn dispatchThreads(_: ComputeEncoder, _: Size, _: Size) void {}
-    pub fn barrier(_: ComputeEncoder) void {}
+    pub fn barrier(e: ComputeEncoder) void {
+        e.r.barriers += 1;
+    }
     pub fn end(_: ComputeEncoder) void {}
 };
 pub const Queue = struct {

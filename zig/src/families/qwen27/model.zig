@@ -130,7 +130,7 @@ pub const Model = struct {
         errdefer m.weights.deinit();
         packing.end();
         const pipelines = timing.span(.weight_pipelines);
-        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
+        m.kernels = .{ .allocator = a, .device = m.device, .raw_tiles = !m.device.tensorUnits(), .xs = m.device.tensorUnits(), .long_prompt = quant.longPrompt(std.mem.span(m.device.name()), m.device.tensorUnits()) };
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();

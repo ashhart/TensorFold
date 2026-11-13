@@ -468,6 +468,10 @@ pub fn main(init: std.process.Init) !u8 {
     var attn_rows: @import("metal_q27_attn_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer attn_rows.deinit();
     try attn_rows.collect(o.only);
+    // qwen27's norms and MLP without Q27_XS (before tensor units, #2900): the XS build's rows, bit for bit
+    var q27_xs: @import("metal_q27_xs.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer q27_xs.deinit();
+    try q27_xs.collect(o.only);
     var minimax: minimax_k.Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer minimax.deinit();
     try minimax.collect(o.only);

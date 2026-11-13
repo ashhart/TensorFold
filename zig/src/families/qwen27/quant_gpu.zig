@@ -48,6 +48,8 @@ pub const Kernels = struct {
     simd_bits: ?row.simd_bits.Pipelines = null,
     /// Raw matrices take simd_qmm_bits' tiles; off on tensor units, whose raw matrices are runs short of a lane tile.
     raw_tiles: bool = true,
+    /// Norms and the MLP write group sums (XS) for lane projections; off before tensor units, where nothing reads them.
+    xs: bool = true,
     /// Per [n, k] shape: whether the scalar twin's 1-2 row bits equal the tiles' (checked once on this chip).
     twins: std.AutoHashMapUnmanaged([2]usize, bool) = .empty,
     /// The same for simd_qmm_bits, per [bits, n, k].
@@ -99,26 +101,17 @@ pub const Kernels = struct {
 
     fn get(k: *Kernels, key: Key) !mtl.Pipeline {
         if (k.cache.get(key)) |p| return p;
-        const source = try specializedSource(k.allocator, key);
+        const source = try specializedSource(k.allocator, key, k.xs);
         defer k.allocator.free(source);
         const library = try mtl.Library.fromSource(k.device, source, mtl.CompileOptions.mlx());
         defer library.deinit();
-        const name: [:0]const u8 = switch (key.kind) {
-            .projection => unreachable,
-            .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
-            .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
-            .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
-            .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
-            .ane_input => "q27_ane_input",
-            .mlp_ane => "q27_mlp_ane",
-            .add_ane => "q27_add_ane",
-        };
-        const p = try mtl.Pipeline.init(k.device, library, name, false);
+        const p = try mtl.Pipeline.init(k.device, library, function(key.kind), false);
         errdefer p.deinit();
         try k.cache.put(k.allocator, key, p);
         return p;
     }
 
+    /// y = x W^T over `rows`. Encodes no barrier (#2900): the caller barriers before anything reads y or rewrites x.
     pub fn quant(k: *Kernels, input_encoder: mtl.ComputeEncoder, p: projection.Linear, x: Ref, xs: ?Sums, dims: Ref, y: Ref, rows: u32) !void {
         return k.quantSkip(input_encoder, p, x, xs, dims, y, rows, 0);
     }
@@ -226,7 +219,6 @@ pub const Kernels = struct {
                 if (try k.halfCall(m, x, rows, gn)) |half| {
                     row.simd.encodeHalf(e, half, m, x.buffer, x.offset, y.buffer, y.offset, k.fits_words.?, 0);
                 } else row.simd.encode(e, try row.simd.call(&k.simd.?, raw.n, raw.k, rows, scalar, paired, gn), m, x.buffer, x.offset, y.buffer, y.offset);
-                e.barrier();
                 try span.end();
                 return;
             }
@@ -240,7 +232,6 @@ pub const Kernels = struct {
             e.setValue(call.dims, 4);
             e.setBuffer(y.buffer, y.offset, 5);
             e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
-            e.barrier();
             try span.end();
             return;
         }
@@ -302,7 +293,6 @@ pub const Kernels = struct {
             const scalar = rows <= row.simd.max_scalar_rows and try k.bitTwin(m, raw, whole); // loads the tiles before they're read
             const call = try row.simd_bits.call(&k.simd_bits.?, raw.bits, raw.n, raw.k, rows, stride, scalar, whole);
             row.simd_bits.encode(e, call, m, x.buffer, x.offset, y.buffer, y.offset);
-            e.barrier();
             try span.end();
             return;
         }
@@ -316,7 +306,6 @@ pub const Kernels = struct {
         e.setValue(call.dims, 4);
         e.setBuffer(y.buffer, y.offset, 5);
         e.dispatchGroups(.{ .width = call.groups }, .{ .width = call.threads });
-        e.barrier();
         try span.end();
     }
 
@@ -372,7 +361,7 @@ pub const Kernels = struct {
 
         e.setPipeline(try k.get(.{ .kind = if (residual != null) .norm else .input_norm, .k = width }));
         if (residual) |r| bind(e, .{ h, r, weight, eps, dims, combined, out, xs }) else bind(e, .{ h, weight, eps, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(1, padded(rows), 1), mtl.Size.of(width / 16, 1, 1));
+        e.dispatchGroups(mtl.Size.of(1, k.sumRows(rows), 1), mtl.Size.of(width / 16, 1, 1));
         k.fits = null;
         // tf_sq_fits's words for this output: prompt rows' projections of it may take half operands
         if (k.raw_tiles and rows >= half_rows) {
@@ -441,6 +430,11 @@ pub const Kernels = struct {
         try span.end();
     }
 
+    /// A norm's or the MLP's threadgroup rows: the padded rows (whose XS is zeroed), or the rows alone without XS.
+    fn sumRows(k: *const Kernels, rows: u32) u32 {
+        return if (k.xs) padded(rows) else rows;
+    }
+
     pub fn mlp(k: *Kernels, input_encoder: mtl.ComputeEncoder, gate: Ref, up: Ref, dims: Ref, out: Ref, xs: Ref, width: u32, rows: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .activation);
         errdefer span.cancel();
@@ -448,7 +442,7 @@ pub const Kernels = struct {
 
         e.setPipeline(try k.get(.{ .kind = .mlp, .k = width, .n = width }));
         bind(e, .{ gate, up, dims, out, xs });
-        e.dispatchGroups(mtl.Size.of(width / 64, padded(rows), 1), mtl.Size.of(64, 1, 1));
+        e.dispatchGroups(mtl.Size.of(width / 64, k.sumRows(rows), 1), mtl.Size.of(64, 1, 1));
         try span.end();
     }
 };
@@ -467,8 +461,22 @@ fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
 }
 
-/// The quantized helper specialization compiled by get.
-pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
+/// A helper's Metal function in its specialized source.
+pub fn function(kind: Kind) [:0]const u8 {
+    return switch (kind) {
+        .projection => unreachable,
+        .xsum => "custom_kernel_q27_xsum_bfloat16_t_int32_t_float",
+        .norm => "custom_kernel_q27_norm_xs_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float",
+        .input_norm => "custom_kernel_q27_norm_input_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_float",
+        .mlp => "custom_kernel_q27_mlp_xs_bfloat16_t_bfloat16_t_int32_t_bfloat16_t_float",
+        .ane_input => "q27_ane_input",
+        .mlp_ane => "q27_mlp_ane",
+        .add_ane => "q27_add_ane",
+    };
+}
+
+/// The quantized helper specialization compiled by get; `xs` defines Q27_XS, so norms and the MLP write group sums.
+pub fn specializedSource(a: std.mem.Allocator, key: Key, xs: bool) ![]u8 {
     const template = switch (key.kind) {
         .projection => unreachable,
         .xsum => sources.xsum,
@@ -481,11 +489,16 @@ pub fn specializedSource(a: std.mem.Allocator, key: Key) ![]u8 {
     const definitions = switch (key.kind) {
         .projection => unreachable,
         .xsum => try std.fmt.allocPrint(a, "constexpr int K={d}, GS=64;", .{key.k}),
-        .norm, .input_norm => try std.fmt.allocPrint(a, "constexpr int K={d};", .{key.k}),
-        .mlp => try std.fmt.allocPrint(a, "constexpr int N={d};", .{key.n}),
+        .norm, .input_norm => try std.fmt.allocPrint(a, "{s}constexpr int K={d};", .{ sumsDefine(xs), key.k }),
+        .mlp => try std.fmt.allocPrint(a, "{s}constexpr int N={d};", .{ sumsDefine(xs), key.n }),
         .ane_input, .mlp_ane, .add_ane => try std.fmt.allocPrint(a, "constant constexpr int H={d}, N={d}, A={d};", .{ key.k, key.n, key.tile }),
     };
     defer a.free(definitions);
     const source = try std.mem.concat(a, u8, &.{ template[0..mark], definitions, template[mark + "Q27_SPECIALIZE".len ..] });
     return source;
+}
+
+/// The line that turns on norm_xs', norm_input's and mlp_xs' group sums (their `#ifdef Q27_XS` blocks).
+fn sumsDefine(xs: bool) []const u8 {
+    return if (xs) "\n#define Q27_XS 1\n" else "";
 }

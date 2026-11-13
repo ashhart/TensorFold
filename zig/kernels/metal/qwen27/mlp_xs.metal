@@ -19,7 +19,9 @@ Q27_SPECIALIZE
   const int M = dims[0], MP = dims[1];
   threadgroup bfloat hb[64];
   if (int(m) >= M) {
+#ifdef Q27_XS
     if (t == 0) XS[g * MP + m] = 0.0f;
+#endif
     return;
   }
   const int e = int(m) * N + int(g) * 64 + int(t);
@@ -27,6 +29,7 @@ Q27_SPECIALIZE
   const float gf = float(GATE[fused]);
   const bfloat h = bfloat(gf / (1.0f + metal::exp(-gf)) * float(UP[fused]));
   HOUT[e] = h;
+#ifdef Q27_XS
   hb[t] = h;
   threadgroup_barrier(mem_flags::mem_threadgroup);
   if (t == 0) {
@@ -34,5 +37,6 @@ Q27_SPECIALIZE
     for (int i = 0; i < 64; i++) acc += float(hb[i]);
     XS[g * MP + m] = acc;
   }
+#endif
 
 }
