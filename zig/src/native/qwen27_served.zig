@@ -15,6 +15,7 @@ const Resident = @import("resident.zig").Resident;
 const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const startup = @import("qwen27_startup.zig");
+const reserve = @import("qwen27_reserve.zig");
 const StartupLine = startup.StartupLine;
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
@@ -200,9 +201,7 @@ fn room(model: *const q.model.Model) usize {
 }
 
 /// TF_QWEN27_WORKING_SET_BYTES: a development cap on the device's reported working set.
-fn cap() ?[]const u8 {
-    return if (std.c.getenv("TF_QWEN27_WORKING_SET_BYTES")) |v| std.mem.span(v) else null;
-}
+const cap = reserve.cap;
 
 /// Whether a new slot's `bytes` fit in `free`, once kept prompt states (never the one `restoring`) give theirs back.
 fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, prompt: []const u32) bool {
@@ -285,7 +284,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocato
         why.* = try drafterRefusal(a, dir, d, err);
         return err;
     };
-    const model = try q.model.Model.loadDeferred(gpa, io, dir, 128);
+    const model = try q.model.Model.loadDeferred(gpa, io, dir, reserve.loaded_rows);
     errdefer model.deinit();
     var with = o;
     // the tower before the slots: their room and the cache's budget count it as taken
@@ -345,10 +344,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     var draft_owned = owns_draft;
     errdefer if (draft_owned) draft_model.?.deinit();
     const memory = q.prompt_memory;
-    const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .planes = if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, .current_rows = model.frame.capacity, .left = room(model) };
-    const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
-    const row_policy = q.prompt_rows;
-    const rows = @max(window, try fit_prompt.choose(row_policy.requested(model.device.generation(), model.config.moe(), value), row_policy.override(value) != null));
+    const fit_prompt = reserve.fit(model.config, capacity, window, o.streams, model.device.tensorUnits(), if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, model.frame.capacity, room(model));
+    const rows = try reserve.rows(fit_prompt, model.device.generation(), window);
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
         const ram: ?usize = if (cache_fit.ram()) |r| @intCast(r) else null;
@@ -384,7 +381,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
     h.back.serial_copy_match = policy.serialCopyMatch(units, window, lanes_value);
-    h.back.chunk = h.runner.promptRows(@min(rows, row_policy.requested(model.device.generation(), model.config.moe(), value)));
+    h.back.chunk = h.runner.promptRows(@min(rows, reserve.requested(model.device.generation(), model.config.moe())));
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
     if (h.draft != null) try h.back.measure(io);

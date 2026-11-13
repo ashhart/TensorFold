@@ -5,7 +5,7 @@ const frame = @import("gpu_frame.zig");
 const planning = @import("attention_plan.zig");
 const Budget = @import("gdn_pool.zig").Budget;
 
-const margin: usize = 8 << 30;
+pub const margin: usize = 8 << 30;
 /// RAM a suggested wired limit leaves outside the GPU for macOS and other processes.
 const floor: usize = 4 << 30;
 

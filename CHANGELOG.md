@@ -435,6 +435,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 
 
+- Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prices a Qwen3.8-27B-class start from the charge `serve` itself makes (weights, every stream's KV and state, the prompt scratch) and says whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context. `info` also no longer reads its `model_type` from a parse it had freed (#2761).
+
 - Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
 
 - Tests: host tests drive 200 refused, cancelled or failed requests down each lane-host path they reach (refusal at admission, cancels while queued and mid-request, backend errors, no lane memory, and a mix) and check none strands a lane, page or slot (#3015, for #2135).
