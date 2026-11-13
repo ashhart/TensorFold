@@ -105,7 +105,7 @@ zig/src/cuda/nvfp4.zig	62bd32b4dcc7d4e7f077c2147adf65a1aea7744dda4845b06da72c946
 zig/src/cuda/qlinear.zig	680c653d110b53e52918bb13f7c54c12ffac4097959319281dc7509c085c062f	raw	commits da01294e0, 7f6f940eb, 4cec0eba1, c360607f0, ba1a9a2bb, b631fe069, 0a2a1c681, aca5a88e2, c12503be2, 7b17d0eb7, d7e44b555, 59be20e24, d40bc9e8b, f1f7f9abd, 3915bceaf, e8eabc82c; series patches 14-runtime-foundation.patch, 25-mimo-02.patch; MiMo-only aliases omitted from this candidate; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7f12b30	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name)
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
-zig/src/cuda/root.zig	5dbca351bbf6a42cd83d7b615d4e4624809444d7d2e714b1d71d8eec53c6e606	raw	main 42735f94f0 (#2335: cuda.mla exported)
+zig/src/cuda/root.zig	93ad36ff57714c59140519284e13d287831d51eb7db8394a64216748c93dcd01	raw	main 42735f94f0 (#2335: cuda.mla exported); #2279 (cuda.keyed_graph exported)
 zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
 zig/src/cuda/sample.zig	9e3a31bd0480284ff069148b2d3c92f1e2ba24f16c18362dae9de48ec7fc65fe	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged), #3124
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
