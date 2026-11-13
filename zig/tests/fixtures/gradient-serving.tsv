@@ -117,7 +117,7 @@ zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ff
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
 zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
 zig/src/families/flashnext/cuda_batch_state.zig	ae9d16a76aa56cd3448b3414140cbabd2f918bfb69a094b02be82544f371603c	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged
-zig/src/families/flashnext/cuda_collective.zig	bf475ffb46b3440fcad280f46e34de25cd22b79ed96a0b587d0869e7451d3519	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
+zig/src/families/flashnext/cuda_collective.zig	86038be690d9f3c5fcdef02dd5269364ed7aaf6b71da8c0a7ea821e74221b932	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own; an abort releases the opt-in round graph first; default serving unchanged (#2980)
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	19366ee591270c719fa6f710af0efd4d5a55cfc3e30c923f5ed08771b5c14001	raw
 zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41deeb452d1a679661351a473652b5f39f2da8	raw
@@ -132,7 +132,7 @@ zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a1
 zig/src/families/flashnext/cuda_lanes.zig	1ebf522d252b795b15d58a15eb38d9d3227c341df80522ad8a89d5ff3cfbdac4	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	4b8052db793ba81f0e73e1b9bd77b1780bbc4fd550d90976d017da47e76faaa2	raw
 zig/src/families/flashnext/cuda_lanes_load.zig	241d091d4b5199325665d25ea5d4def81fd15660351a199773c596ca2025fa18	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
-zig/src/families/flashnext/cuda_lanes_restore_test.zig	f9947521a6d9c7d7380ca1b784a93a43b364c6fa5861cad15efd3538d2b8ceff	raw
+zig/src/families/flashnext/cuda_lanes_restore_test.zig	170299815e163b3c4a3fa2a0bc518b029c2ab727540568e69cdb8583b0569aca	raw
 zig/src/families/flashnext/cuda_launch.zig	849584af8bc3cd31f990911d449ec0f828318b05d480fe98fc0c287f5b6fb14d	raw	exports cuda_moe_exchange.zig for its device test; no served change
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
 zig/src/families/flashnext/cuda_media_test.zig	4292f8f7c8f8bf4efd0dfaaa5a6c63e11568f85534127a0ce9feb0ab0be05120	raw
@@ -153,7 +153,7 @@ zig/src/families/flashnext/cuda_ple_nvfp4_test.zig	742bef48f8ddbf7257c18ad78911d
 zig/src/families/flashnext/cuda_projection.zig	42e553d337ee5b2acd2146018a4db96bc471a5cc7bc2a87f567ace934b1b40d5	raw
 zig/src/families/flashnext/cuda_projection_load.zig	335fb41717d28673c3d58e01627e61d37d5e14cf40722335677dc2d994c73916	raw
 zig/src/families/flashnext/cuda_projection_load_test.zig	bcbd6ed2753c863916a2163d1cf72544429c776365702e860f52cd22449354a1	raw
-zig/src/families/flashnext/cuda_prompt.zig	64dfa63d6c9608d04b524689047f3f2bcf193f1c49439252dd7691004e76d81c	raw
+zig/src/families/flashnext/cuda_prompt.zig	fe7e0f8a1ad8c146f8ebd5106bf5d510db0c4bd15b3e3eef095b15d3c37cfee1	raw	opt-in TF_FLASHNEXT_DECODE_GRAPH leaves rounds with pockets eager; default serving unchanged (#2980)
 zig/src/families/flashnext/cuda_prompt_load.zig	334d68cfca85c15c9d986d0c6b4f8f2a38569309b21bdac6d365935d73c115cd	raw
 zig/src/families/flashnext/cuda_prompt_main.zig	2543cd166dc80cd97b1ca1ce930a6150f9d36b52ee231744606f83bf54f0669d	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_prompt_step.zig	e04030fb4a4fdb8780704a1bc0b5ba4b786159ab08a927fe32a636a893129d0c	raw
@@ -163,7 +163,7 @@ zig/src/families/flashnext/cuda_rank_engine.zig	df6a83bcf80edfd94ac4474dbbc2e738
 zig/src/families/flashnext/cuda_rank_media.zig	e5c268c8cf257934bb49fe401ba6213ea8b108258bbfd4d06edb990d568c3c2b	raw
 zig/src/families/flashnext/cuda_rank_memory.zig	072954f4e2e9d6ea66124a209d20a1fa1c7ed391e501310d41880f11ce61ada8	raw
 zig/src/families/flashnext/cuda_rank_wire.zig	ee1ea4202cb6b383e03a3c909d002fbdefb8fee469cae1440714e51291aa30a4	raw
-zig/src/families/flashnext/cuda_round_graph.zig	7fa3a54e93c81de36cf3962d0a68eb72a7dd81b8869f47b6d9ed8b9a6cc325cd	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
+zig/src/families/flashnext/cuda_round_graph.zig	a9b34f461e2c7a77d8b19672677dbf80e5a849c521735ba733ace44ede1ddb0d	raw	opt-in TF_FLASHNEXT_DECODE_GRAPH stages its round before capture; default serving unchanged (#2980)
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
 zig/src/families/flashnext/cuda_snap.zig	bbc66ed7e1aed820b4b60c148b1bbe47b2a5c7e7240c7da7f0bd8504080a6b56	raw	main 4f6017ced (prompt cache marks kept inside the pass), #1953: the prompt cache ladder's values
