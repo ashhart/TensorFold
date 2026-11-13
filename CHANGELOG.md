@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- README: Pick a model gains a GLM-5.3-Flash Jammed XSFP4 NZ5 row, the checkpoint in the `NVFP4_NZ5` form that #2894 reads, and the GLM CUDA recipe names it beside Jammed XSFP4 (#2981). Thanks to @Bizuayeu.
+
 - HIP, Qwen3.8-Flash-Next on RDNA 3.5 (gfx1151): MTP draft chains now stop under a 0.8 confidence floor by default (was 0.3), the same one-rank rule `prefill_step` uses. Replies are unchanged. One stream decodes about 6% faster and four streams 2.8% (greedy) to 4.6% (sampled) faster (#2697). Thanks to @gilby.
 
 - Server: a reply that keeps a tool-call envelope as plain text now says so. `tensorfold.kept_tool_calls` counts the envelopes that name a tool the request did not offer and the malformed ones, and lists up to eight unoffered names, on the whole reply and on a stream's final chunk; `/metrics` gains `kept_tool_calls_unoffered_total` and `kept_tool_calls_malformed_total`. Replies are otherwise unchanged (#2814, for #2800). Thanks to @tarsnake for the report.
