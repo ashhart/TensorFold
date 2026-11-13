@@ -65,7 +65,6 @@ const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
-
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
@@ -584,13 +583,14 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer mtp_rows.destroy();
     const weight_only = try @import("contract_weight_only_suite.zig").Suite.create(a, gpu, s, &kernels);
     defer weight_only.destroy(a);
-    const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, a, &kernels, &affine4, cap);
+    const families = try @import("contract_family_sets.zig").Sets.init(gpu, s, mods[5], a, &kernels, &affine4, cap);
     defer families.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     t0.* = check.now(gpu.io);
     @import("contract_after.zig").keep(&kernels, only);
     try g.runAll(a, kernels.items, 0x6b63, &t);
+    if (only.len == 0) try families.repetition.group.verifyExtraCases();
     return t;
 }
 

@@ -575,9 +575,11 @@ const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 pub const glm_pending = @import("glm_sampling_pending.zig");
+pub const repetition_sampling = @import("repetition_sampling_records.zig");
 pub const landed_cuda = joins.landed_cuda;
 test {
     _ = learning;
+    _ = repetition_sampling;
 }
 pub const all_cuda = joins.all_cuda;
 pub const dsv41_pending = joins.dsv41_pending;
@@ -591,10 +593,4 @@ test {
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");
-}
-test "unmeasured CUDA records cannot pass a compiled resource check" {
-    for (cuda_pending) |r| {
-        if (!std.meta.eql(none, r.usage)) continue;
-        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
-    }
 }

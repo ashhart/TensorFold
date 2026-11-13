@@ -50,6 +50,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const rig_test = b.addRunArtifact(b.addTest(.{ .root_module = rig, .filters = &.{"completed CUDA fixtures"} }));
     b.step("test-cuda-contract-lifetime-host", "Completed CUDA fixtures free buffers once and remain reusable").dependOn(&rig_test.step);
     step.dependOn(&rig_test.step);
+    const repetition_fixture = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/repetition_hf_fixture_test.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) }));
+    b.step("test-repetition-fixture-host", "Pinned Hugging Face repetition cases and their independent assertions").dependOn(&repetition_fixture.step);
+    step.dependOn(&repetition_fixture.step);
     step.dependOn(family);
     const rotary = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/rotary_cache_positions.zig"),

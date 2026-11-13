@@ -93,6 +93,7 @@ pub const landed_cuda = registry.cuda ++
     @import("flashnext_heads_records.zig").records ++
     @import("glm_f32w_pending.zig").records ++
     @import("penalty_sampling_records.zig").records ++
+    registry.repetition_sampling.records ++
     @import("flashnext_attn_lanes_pending.zig").records ++
     @import("glm_l2pf_pending.zig").records;
 pub const all_cuda = @import("qmmf_prompt_records.zig").records ++

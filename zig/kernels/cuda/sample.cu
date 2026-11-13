@@ -6,6 +6,7 @@
 
 #include "logprob_rows.cuh"
 #include "common/reduce.cuh"
+#include "sample_repetition_value.cuh"
 
 namespace tf_sample {
 
@@ -111,7 +112,8 @@ struct Row {
 };
 
 // A block sum in tf_gpu_sample's order: warp butterflies, then warps in order; every thread gets it.
-__device__ __forceinline__ float group_sum(float x, const Row& r, Shared& s) {
+template <typename RowT>
+__device__ __forceinline__ float group_sum(float x, const RowT& r, Shared& s) {
     x = warp_sum(x);
     if (r.lane == 0) s.fsh[r.sg] = x;
     __syncthreads();
@@ -121,7 +123,8 @@ __device__ __forceinline__ float group_sum(float x, const Row& r, Shared& s) {
     return z;
 }
 
-__device__ __forceinline__ float row_max(const Row& r, Shared& s) {
+template <typename RowT>
+__device__ __forceinline__ float row_max(const RowT& r, Shared& s) {
     float lm = -INFINITY;
     for (unsigned i = r.t; i < r.V; i += TG) lm = fmaxf(lm, r.v(i));
     lm = warp_max(lm);
@@ -138,7 +141,8 @@ struct Top {
     unsigned key, above, need, idcut;
 };
 
-__device__ Top top_keys(const Row& r, unsigned want, Shared& s) {
+template <typename RowT>
+__device__ Top top_keys(const RowT& r, unsigned want, Shared& s) {
     const unsigned t = r.t;
     unsigned prefix = 0u, pmask = 0u, need = min(want, r.V), above = 0u, ties = 0u;
     for (int shift = 24; shift >= 0; shift -= 8) {
@@ -202,7 +206,8 @@ __device__ Top top_keys(const Row& r, unsigned want, Shared& s) {
 }
 
 // The candidates, sorted (value desc, id asc): a window near the max holding the rule's tokens, else the C largest.
-__device__ unsigned first_block(const Row& r, float m, float top_p, float near, unsigned kw, float& z, Shared& s) {
+template <typename RowT>
+__device__ unsigned first_block(const RowT& r, float m, float top_p, float near, unsigned kw, float& z, Shared& s) {
     const unsigned t = r.t;
     float ls = 0.0f, lnear[3] = {0.0f, 0.0f, 0.0f};
     unsigned near_count[3] = {0u, 0u, 0u};
@@ -308,7 +313,8 @@ __device__ unsigned first_block(const Row& r, float m, float top_p, float near, 
 }
 
 // The probability mass (over `norm`) of the tokens after `b`, inside `top`, at or above `lo`, and inside `cut`.
-__device__ float mass(const Row& r, float m, float norm, float lo, Mark b, Mark top, Mark cut, bool strict, Shared& s) {
+template <typename RowT>
+__device__ float mass(const RowT& r, float m, float norm, float lo, Mark b, Mark top, Mark cut, bool strict, Shared& s) {
     float x = 0.0f;
     for (unsigned i = r.t; i < r.V; i += TG) {
         const float v = r.v(i);
@@ -321,7 +327,8 @@ __device__ float mass(const Row& r, float m, float norm, float lo, Mark b, Mark 
 }
 
 // The nucleus's last token past the block: the first place whose prefix reaches top_p, by bits of key then id.
-__device__ Mark extend(const Row& r, float m, float norm, float lo, float top_p, float cum, Mark b, Mark top, Shared& s) {
+template <typename RowT>
+__device__ Mark extend(const RowT& r, float m, float norm, float lo, float top_p, float cum, Mark b, Mark top, Shared& s) {
     if (!(cum + mass(r, m, norm, lo, b, top, end_mark(), false, s) >= top_p)) return end_mark();
     unsigned k = 0u;
     for (int bit = 31; bit >= 0; bit--) {
@@ -338,7 +345,8 @@ __device__ Mark extend(const Row& r, float m, float norm, float lo, float top_p,
 }
 
 // The nucleus's last token: the sequential sum over the first block, extended past it when it falls short.
-__device__ Mark nucleus(const Row& r, float m, float lo, float top_p, float near, unsigned kc, bool whole, Mark top, Shared& s) {
+template <typename RowT>
+__device__ Mark nucleus(const RowT& r, float m, float lo, float top_p, float near, unsigned kc, bool whole, Mark top, Shared& s) {
     float z = 0.0f;
     const unsigned n = first_block(r, m, top_p, near, whole ? 0u : kc, z, s);
     const float norm = whole ? z : mass(r, m, 1.0f, -INFINITY, Mark{0xFFFFFFFFu, 0xFFFFFFFFu}, top, end_mark(), false, s);
@@ -442,8 +450,8 @@ __device__ void gpu_sample(const __nv_bfloat16* L, unsigned V, const Rule& rl, u
 }
 
 // The kept tokens' race over the whole row (value - log(-log(u)), ties to the earlier in the order).
-template <bool MAP>
-__device__ void race(const Row& r, float lo, Mark top, Mark cut, unsigned long long seed, unsigned position, const long long* IDS,
+template <bool MAP, typename RowT>
+__device__ void race(const RowT& r, float lo, Mark top, Mark cut, unsigned long long seed, unsigned position, const long long* IDS,
                      unsigned* TOK, Shared& s) {
     float bs = -INFINITY;
     unsigned bk = 0u, bi = 0xFFFFFFFFu;
@@ -540,6 +548,7 @@ extern "C" __global__ void __launch_bounds__(1024) tf_draw(const __nv_bfloat16* 
 }
 
 #include "sample_rows.cuh"
+#include "sample_repetition.cuh"
 
 // The same over a column subset whose token ids are IDS (int64, a draft head's vocabulary): noise and token by id.
 extern "C" __global__ void __launch_bounds__(1024) tf_draw_ids(const __nv_bfloat16* L, unsigned V, const tf_sample::Rule* rule,

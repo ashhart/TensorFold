@@ -20,9 +20,10 @@ pub const Sets = struct {
     shared_down: *SharedDown,
     prompt: *Prompt,
     joint_schema: *@import("contract_joint_schema.zig").Set,
+    repetition: *@import("contract_repetition_set.zig").Set,
 
     /// Each set's kernels appended to `list`, in this order.
-    pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
+    pub fn init(gpu: check.Gpu, s: cuda.Stream, controls: cuda.Module, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
         const pocket = try @import("contract_pocket.zig").Set.init(gpu, s, a, list);
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
@@ -54,6 +55,8 @@ pub const Sets = struct {
         prompt.* = Prompt.init(gpu, s, prompt_lane);
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
+        const repetition = try @import("contract_repetition_set.zig").Set.create(gpu, s, controls, a, list);
+        errdefer repetition.deinit();
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
@@ -67,11 +70,13 @@ pub const Sets = struct {
             .shared_down = shared_down,
             .prompt = prompt,
             .joint_schema = joint_schema,
+            .repetition = repetition,
         };
     }
 
     pub fn deinit(sets: Sets) void {
         sets.joint_schema.deinit();
+        sets.repetition.deinit();
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);
         sets.shared_down.deinit();
