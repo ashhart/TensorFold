@@ -38,12 +38,12 @@
   ],
   "refusals": [
     {
-      "name": "n_two",
+      "name": "n_seventeen",
       "body": {
-        "n": 2
+        "n": 17
       },
       "status": 400,
-      "error": "n must be 1; multiple choices are not supported"
+      "error": "n must be an integer between 1 and 16"
     },
     {
       "name": "top_logprobs_without_logprobs",
