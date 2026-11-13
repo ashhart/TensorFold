@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the CUDA source check (`tools/zig/check_cuda_sources.py`) declares the SDK names main's kernels use, so it passes all 918 checks again (#2902). Thanks to @Bizuayeu.
+
 - Qwen3.8-27B on Metal: slot 0's rewind point is now made even beside a prompt cache that can hold a whole-context state, and the warm pass keeps it, so a client that sends the last reply back without its reasoning resumes in place at its history's end instead of a turn further back (on an M5 Max at 32k with a 5 GiB cache, turns 1-6 of a 7-turn chat took 16.5 s and 18.9 s of summed time to first token against 217 s, with identical replies); a client that sends the reply back as generated makes the same fill calls as before; a background pass at depth runs in narrower chunks, so a request arriving mid-pass at 128k waited 0.5 s against 4.1 s; slot 0's 146 MiB rewind buffer counts against `--prompt-cache-gib` room (#2723). Thanks to @ThinkOffApp.
 
 - Prompt cache on the core pool (the `TF_KV_SHARE` families, Qwen 3.5/3.6 on CUDA, and Qwen 3.5 and Nemotron on HIP): the radix store holds each pool page once, however many entries name it, and pins the node a keep or restore is using. A snapshot save that takes pool pages (Gemma 4, Kolibri-1, Spark2.5, Dory) can no longer make reclaim prune the leaf it is writing to. Replies and cached counts are unchanged. The store also learns checkpoint parts and prefix groups for later steps to use (#2875, part of #2444). Thanks to @laudney.
