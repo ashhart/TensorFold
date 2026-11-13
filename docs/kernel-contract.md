@@ -712,7 +712,7 @@ residual's lerp below and from one half, two ranks' fp32 partials added once in 
 a key head and back, a drafter's tap rows, each bit for bit against a host rule; the output gate's fp32 sigmoid, the
 clamped SwiGLU and the post-norm add into the fp32 residual, each inside float64's range at its rounding points. Eight
 controls, each red at `shapes`: the embedding's product left unrounded, a lerp start-anchored past one half, the
-sigmoid rounded to fp16, the up projection clamped above only, a / rms rounded to bf16, rank 1's partial rounded to
+sigmoid rounded to bf16, the up projection clamped above only, a / rms rounded to bf16, rank 1's partial rounded to
 bf16, each head read from its neighbour, and taps rounded toward zero. Their launches are in `ricursive_tp2_records.zig`.
 
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row

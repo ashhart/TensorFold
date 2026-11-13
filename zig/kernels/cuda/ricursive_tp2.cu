@@ -1,6 +1,5 @@
 // Ripple's own glue at two ranks: embedding scale, value residual, gate, clamped SwiGLU, post-norm add, rank sum, taps.
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
 
@@ -11,51 +10,51 @@ namespace tf_rtp2 {
 // A planted control's dropped step (the contract's red runs); NONE is the served kernel.
 enum Drop { NONE = 0, DROP = 1 };
 
-// x [rows, width] fp32 = bf16(e * scale) of each id's bf16 row (the release scales its bf16 rows); seed = fp16(x).
+// x [rows, width] fp32 = bf16(e * scale) of each id's bf16 row (the release scales its bf16 rows); seed = bf16(x).
 template <int D>
-__device__ __forceinline__ void embed(const int* ids, const __nv_bfloat16* table, float* x, __half* seed, int width, float scale) {
+__device__ __forceinline__ void embed(const int* ids, const __nv_bfloat16* table, float* x, __nv_bfloat16* seed, int width, float scale) {
   const int64_t r = blockIdx.x;
   const __nv_bfloat16* e = table + (int64_t)ids[r] * width;
   for (int i = threadIdx.x; i < width; i += 256) {
     const float p = __fmul_rn(__bfloat162float(e[i]), scale);
     const float v = D == DROP ? p : __bfloat162float(__float2bfloat16_rn(p));
     x[r * width + i] = v;
-    seed[r * width + i] = __float2half_rn(v);
+    seed[r * width + i] = __float2bfloat16_rn(v);
   }
 }
 
-// out = lerp(seed, y, w) as torch.lerp rounds it (fp32 opmath, the end-anchored form past w = 0.5), fp16 in and out.
+// out = lerp(seed, y, w) as torch.lerp rounds it (fp32 opmath, the end-anchored form past w = 0.5), bf16 in and out.
 template <int D>
-__device__ __forceinline__ void lerp(const __half* seed, const __half* y, __half* out, int64_t n, float w) {
+__device__ __forceinline__ void lerp(const __nv_bfloat16* seed, const __nv_bfloat16* y, __nv_bfloat16* out, int64_t n, float w) {
   const int64_t i = (int64_t)blockIdx.x * 256 + threadIdx.x;
   if (i >= n) return;
-  const float s = __half2float(seed[i]), e = __half2float(y[i]);
+  const float s = __bfloat162float(seed[i]), e = __bfloat162float(y[i]);
   const float d = __fsub_rn(e, s);
   const bool start = D == DROP || w < 0.5f;
   const float v = start ? __fadd_rn(s, __fmul_rn(w, d)) : __fsub_rn(e, __fmul_rn(d, __fsub_rn(1.0f, w)));
-  out[i] = __float2half_rn(v);
+  out[i] = __float2bfloat16_rn(v);
 }
 
-// out = fp16(o * sigmoid(g)), the full gate in fp32 over the attention's bf16 output and g_proj's fp16 rows.
+// out = bf16(o * sigmoid(g)), the full gate in fp32 over the attention's bf16 output and g_proj's bf16 rows.
 template <int D>
-__device__ __forceinline__ void gate(const __nv_bfloat16* o, const __half* g, __half* out, int64_t n) {
+__device__ __forceinline__ void gate(const __nv_bfloat16* o, const __nv_bfloat16* g, __nv_bfloat16* out, int64_t n) {
   const int64_t i = (int64_t)blockIdx.x * 256 + threadIdx.x;
   if (i >= n) return;
-  const float gv = __half2float(g[i]);
+  const float gv = __bfloat162float(g[i]);
   float sg = __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-gv)));
-  if (D == DROP) sg = __half2float(__float2half_rn(sg));
-  out[i] = __float2half_rn(__fmul_rn(__bfloat162float(o[i]), sg));
+  if (D == DROP) sg = __bfloat162float(__float2bfloat16_rn(sg));
+  out[i] = __float2bfloat16_rn(__fmul_rn(__bfloat162float(o[i]), sg));
 }
 
-// out = fp16(silu(min(g, limit)) * clamp(u, -limit, limit)) in fp32; limit 0: no clamp.
+// out = bf16(silu(min(g, limit)) * clamp(u, -limit, limit)) in fp32; limit 0: no clamp.
 template <int D>
-__device__ __forceinline__ void swiglu(const __half* g, const __half* u, __half* out, int64_t n, float limit) {
+__device__ __forceinline__ void swiglu(const __nv_bfloat16* g, const __nv_bfloat16* u, __nv_bfloat16* out, int64_t n, float limit) {
   const int64_t i = (int64_t)blockIdx.x * 256 + threadIdx.x;
   if (i >= n) return;
-  float gv = __half2float(g[i]), uv = __half2float(u[i]);
+  float gv = __bfloat162float(g[i]), uv = __bfloat162float(u[i]);
   if (limit > 0.0f) gv = fminf(gv, limit), uv = D == DROP ? fminf(uv, limit) : fminf(fmaxf(uv, -limit), limit);
   const float s = __fmul_rn(gv, __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-gv))));
-  out[i] = __float2half_rn(__fmul_rn(s, uv));
+  out[i] = __float2bfloat16_rn(__fmul_rn(s, uv));
 }
 
 // x [rows, width] += rms(a) * w, all fp32 (PeriNorm's post-attention and post-FFN norms into the residual).
@@ -118,13 +117,13 @@ __device__ __forceinline__ void taps(const float* X, const int* POS, const int* 
   extern "C" __global__ void __launch_bounds__(256) CTL PARAMS { tf_rtp2::BODY<tf_rtp2::DROP> ARGS; }
 
 TF_RTP2(tf_rtp2_embed, tf_rtp2_ctl_embed, embed,
-        (const int* __restrict__ ids, const __nv_bfloat16* __restrict__ table, float* __restrict__ x, __half* __restrict__ seed, int width, float scale),
+        (const int* __restrict__ ids, const __nv_bfloat16* __restrict__ table, float* __restrict__ x, __nv_bfloat16* __restrict__ seed, int width, float scale),
         (ids, table, x, seed, width, scale))
-TF_RTP2(tf_rtp2_lerp, tf_rtp2_ctl_lerp, lerp, (const __half* __restrict__ seed, const __half* __restrict__ y, __half* __restrict__ out, int64_t n, float w),
+TF_RTP2(tf_rtp2_lerp, tf_rtp2_ctl_lerp, lerp, (const __nv_bfloat16* __restrict__ seed, const __nv_bfloat16* __restrict__ y, __nv_bfloat16* __restrict__ out, int64_t n, float w),
         (seed, y, out, n, w))
-TF_RTP2(tf_rtp2_gate, tf_rtp2_ctl_gate, gate, (const __nv_bfloat16* __restrict__ o, const __half* __restrict__ g, __half* __restrict__ out, int64_t n),
+TF_RTP2(tf_rtp2_gate, tf_rtp2_ctl_gate, gate, (const __nv_bfloat16* __restrict__ o, const __nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ out, int64_t n),
         (o, g, out, n))
-TF_RTP2(tf_rtp2_swiglu, tf_rtp2_ctl_swiglu, swiglu, (const __half* __restrict__ g, const __half* __restrict__ u, __half* __restrict__ out, int64_t n, float limit),
+TF_RTP2(tf_rtp2_swiglu, tf_rtp2_ctl_swiglu, swiglu, (const __nv_bfloat16* __restrict__ g, const __nv_bfloat16* __restrict__ u, __nv_bfloat16* __restrict__ out, int64_t n, float limit),
         (g, u, out, n, limit))
 TF_RTP2(tf_rtp2_norm_add, tf_rtp2_ctl_norm_add, norm_add, (const float* __restrict__ A, const float* __restrict__ W, float* __restrict__ X, int width, float eps),
         (A, W, X, width, eps))

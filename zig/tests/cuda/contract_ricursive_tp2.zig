@@ -26,12 +26,6 @@ pub fn rowsAt(comptime n: usize, comptime k: usize) [5]c.Shape {
 const hidden_rows = rowsAt(hidden, 1);
 const head_rows = rowsAt(4 * 10 * 128, 1); // a rank's 4 key heads' 10 query heads a row
 
-pub fn halves(a: std.mem.Allocator, rng: std.Random, n: usize, lo: f32, hi: f32) ![]f16 {
-    const v = try a.alloc(f16, n);
-    for (v) |*x| x.* = @floatCast(lo + rng.float(f32) * (hi - lo));
-    return v;
-}
-
 pub fn launch(f: Function, s: cuda.Stream, blocks: usize, args: anytype) !void {
     var a: cuda.Args = .{};
     inline for (args) |v| a.add(v);
@@ -56,7 +50,7 @@ fn toBf(x: f32) f32 {
     return @floatCast(ref.bf(c.toBf16(x)));
 }
 
-/// x = bf16(e * scale) in fp32 words and seed = fp16(x), each id's row: the bits fp32 and the two roundings give.
+/// x = bf16(e * scale) in fp32 words and seed = bf16(x), each id's row: the bits fp32 and the two roundings give.
 pub const Embed = struct {
     f: Function,
     ctl: bool = false, // control: the product left unrounded
@@ -67,7 +61,7 @@ pub const Embed = struct {
     out: [2]u64 = @splat(0),
 
     pub fn spec(self: *const Embed) c.Spec {
-        const name = if (self.ctl) "control: cuda ricursive_tp2 tf_rtp2_embed without bf16(e * scale)" else "cuda ricursive_tp2 tf_rtp2_embed (x fp32 of bf16(e * scale), seed fp16)";
+        const name = if (self.ctl) "control: cuda ricursive_tp2 tf_rtp2_embed without bf16(e * scale)" else "cuda ricursive_tp2 tf_rtp2_embed (x fp32 of bf16(e * scale), seed bf16)";
         return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .raw, .nan = .{ .stated = "a table's NaN and infinities times the scale, as fp32 gives them" }, .tiles = .{ .{}, elementwise, .{} }, .served = &hidden_rows };
     }
 
@@ -108,26 +102,26 @@ pub const Embed = struct {
 
     pub fn check(self: *const Embed, _: std.mem.Allocator, got: []const u8, msg: []u8) !?[]const u8 {
         const n = self.shape.n;
-        const half = got[self.shape.rows * n * 4 ..];
+        const seed = got[self.shape.rows * n * 4 ..];
         for (0..self.shape.rows) |r| for (0..n) |i| {
             const e: f32 = @floatCast(ref.bf(self.table[@as(usize, @intCast(self.ids[r])) * n + i]));
             const x = toBf(e * embed_scale);
             const hx = read(f32, got, r * n + i);
-            const hs = read(f16, half, r * n + i);
-            if (!sameBits(f32, hx, x) or !sameBits(f16, hs, @floatCast(x))) return try std.fmt.bufPrint(msg, "row {d} col {d}: x {e} seed {e} where {e} is due", .{ r, i, hx, hs, x });
+            const hs = read(u16, seed, r * n + i);
+            if (!sameBits(f32, hx, x) or !sameBits(f32, c.fromBf16(hs), x)) return try std.fmt.bufPrint(msg, "row {d} col {d}: x {e} seed {e} where {e} is due", .{ r, i, hx, c.fromBf16(hs), x });
         };
         return null;
     }
 };
 
-/// out = fp16(lerp(seed, y, w)) in fp32 as torch.lerp forms it: start-anchored below w = 0.5, end-anchored from it.
+/// out = bf16(lerp(seed, y, w)) in fp32 as torch.lerp forms it: start-anchored below w = 0.5, end-anchored from it.
 pub const Lerp = struct {
     f: Function,
     w: f32,
     ctl: bool = false, // control: start-anchored at every w
     shape: c.Shape = undefined,
-    seed: []f16 = &.{},
-    y: []f16 = &.{},
+    seed: []u16 = &.{},
+    y: []u16 = &.{},
     dev: [2]u64 = @splat(0),
     out: u64 = 0,
 
@@ -152,11 +146,11 @@ pub const Lerp = struct {
         self.free(a);
         self.shape = shape;
         const n = shape.rows * shape.n;
-        self.seed = try halves(a, rng, n, -8, 8);
-        self.y = try halves(a, rng, n, -8, 8);
-        if (fill == .nonfinite) for ([_]f16{ std.math.nan(f16), std.math.inf(f16), -std.math.inf(f16) }, 0..) |x, i| if (3 * i + 2 < n) {
-            self.seed[3 * i] = x;
-            self.y[3 * i + 2] = x;
+        self.seed = try ref.bfs(a, rng, n, -8, 8);
+        self.y = try ref.bfs(a, rng, n, -8, 8);
+        if (fill == .nonfinite) for ([_]f32{ ref.nan, ref.inf, -ref.inf }, 0..) |x, i| if (3 * i + 2 < n) {
+            self.seed[3 * i] = c.toBf16(x);
+            self.y[3 * i + 2] = c.toBf16(x);
         };
         self.dev = .{ try ref.input(rig, self.seed), try ref.input(rig, self.y) };
         self.out = try rig.output(n * 2);
@@ -174,12 +168,12 @@ pub const Lerp = struct {
 
     pub fn check(self: *const Lerp, _: std.mem.Allocator, got: []const u8, msg: []u8) !?[]const u8 {
         for (self.seed, self.y, 0..) |sh, yh, i| {
-            const s: f32 = sh;
-            const e: f32 = yh;
+            const s = c.fromBf16(sh);
+            const e = c.fromBf16(yh);
             const d = e - s;
-            const v: f16 = @floatCast(if (self.w < 0.5) s + self.w * d else e - d * (1.0 - self.w));
-            const have = read(f16, got, i);
-            if (!sameBits(f16, have, v)) return try std.fmt.bufPrint(msg, "value {d}: {e} where {e} is due", .{ i, have, v });
+            const v = toBf(if (self.w < 0.5) s + self.w * d else e - d * (1.0 - self.w));
+            const have = c.fromBf16(read(u16, got, i));
+            if (!sameBits(f32, have, v)) return try std.fmt.bufPrint(msg, "value {d}: {e} where {e} is due", .{ i, have, v });
         }
         return null;
     }
