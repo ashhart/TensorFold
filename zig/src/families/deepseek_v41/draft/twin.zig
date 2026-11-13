@@ -16,6 +16,7 @@ const Slot = struct {
     rows: std.ArrayList(f32) = .empty, // the last window's keys, values and taps [rows][3 dim]
     parents: std.ArrayList(i32) = .empty,
     taps: std.ArrayList(f32) = .empty,
+    hist: std.ArrayList(f32) = .empty, // committed rows' taps [len][dim] (Target.history)
     live: bool = false,
 
     fn deinit(s: *Slot, gpa: Allocator) void {
@@ -24,6 +25,7 @@ const Slot = struct {
         s.rows.deinit(gpa);
         s.parents.deinit(gpa);
         s.taps.deinit(gpa);
+        s.hist.deinit(gpa);
     }
 
     fn len(s: Slot, d: usize) usize {
@@ -174,6 +176,8 @@ pub const Twin = struct {
             choices[r] = try t.choose(a, row, draws[r], smp);
         }
         s.base = committed;
+        s.hist.shrinkRetainingCapacity(committed * d);
+        try s.hist.appendSlice(a, s.taps.items);
         for (0..n) |r| { // every row stays until keep (a chain that is never kept keeps them all)
             try s.k.appendSlice(a, s.rows.items[r * 2 * d ..][0..d]);
             try s.v.appendSlice(a, s.rows.items[r * 2 * d + d ..][0..d]);
@@ -182,6 +186,11 @@ pub const Twin = struct {
     }
 
     pub fn target(t: *Twin) iface.Target {
+        return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .history = history } };
+    }
+
+    /// The target without `history`: a plain round's rows are then absorbed in their own round.
+    pub fn targetNoHistory(t: *Twin) iface.Target {
         return .{ .ptr = t, .vtable = &.{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release } };
     }
 
@@ -225,9 +234,11 @@ pub const Twin = struct {
         for (path[1..], path[0 .. path.len - 1]) |r, parent| if (s.parents.items[r] != @as(i32, @intCast(parent))) return error.NotAPath;
         s.k.shrinkRetainingCapacity(s.base * d);
         s.v.shrinkRetainingCapacity(s.base * d);
+        s.hist.shrinkRetainingCapacity(s.base * d);
         for (path) |r| {
             try s.k.appendSlice(t.gpa, s.rows.items[r * 2 * d ..][0..d]);
             try s.v.appendSlice(t.gpa, s.rows.items[r * 2 * d + d ..][0..d]);
+            try s.hist.appendSlice(t.gpa, s.taps.items[r * d ..][0..d]);
         }
     }
 
@@ -236,12 +247,29 @@ pub const Twin = struct {
         const s = &t.slots[slot];
         s.k.shrinkRetainingCapacity(s.base * t.dims.dim);
         s.v.shrinkRetainingCapacity(s.base * t.dims.dim);
+        s.hist.shrinkRetainingCapacity(s.base * t.dims.dim);
     }
 
     fn taps(ptr: *anyopaque, slot: u32) iface.Taps {
         const t = self(ptr);
         const s = &t.slots[slot];
         return .{ .address = @intFromPtr(s.taps.items.ptr), .rows = @intCast(s.taps.items.len / t.dims.dim), .stride = t.dims.dim };
+    }
+
+    fn history(ptr: *anyopaque, slot: u32, start: u64, rows: u32) ?iface.Taps {
+        const t = self(ptr);
+        const s = &t.slots[slot];
+        const d = t.dims.dim;
+        if (start + rows > s.hist.items.len / d) return null;
+        return .{ .address = @intFromPtr(s.hist.items[@intCast(start * d)..].ptr), .rows = rows, .stride = d };
+    }
+
+    /// A committed row's taps (what the drafter's ring should hold at `pos`), for the tests' ring check.
+    pub fn committedTaps(t: *const Twin, slot: u32, pos: u64) ?[]const f32 {
+        const s = &t.slots[slot];
+        const d = t.dims.dim;
+        if (pos >= s.hist.items.len / d) return null;
+        return s.hist.items[@intCast(pos * d)..][0..d];
     }
 
     fn release(ptr: *anyopaque, slot: u32) void {
@@ -286,6 +314,7 @@ pub const Drafter = struct {
     cw: []f32,
     passes: u64 = 0,
     ingests: u64 = 0, // ingest calls (tests)
+    check_ring: bool = false, // each context row must equal the target's committed taps at its position (tests)
     /// `begin` / `collect` (passAsync): the pass reads rings at `begin`, the host takes results at `collect`; all slots
     stash_drafts: []u32,
     stash_conf: []f32,
@@ -435,6 +464,7 @@ pub const Drafter = struct {
                 const pos = ctx.first + i;
                 if (x.tags[ask.slot][pos % ring] != @as(i64, @intCast(pos))) return error.RingStale;
                 const row = x.rings[ask.slot][(pos % ring) * d ..][0..d];
+                if (x.check_ring and !std.mem.eql(f32, t.committedTaps(ask.slot, pos) orelse &.{}, row)) return error.RingWrong;
                 t.project(t.wk, row, kbuf[i * 2 * d ..][0..d]);
                 t.project(t.wv, row, kbuf[i * 2 * d + d ..][0..d]);
                 keys[i] = kbuf[i * 2 * d ..][0..d];
