@@ -1,9 +1,11 @@
-//! simd_qmm's chunk-pair tiles (tf_sq_mmp): M1 and M2 compile them for 224 threads, so those chips keep tf_sq_mma.
+//! simd_qmm's chunk-pair tiles (tf_sq_mmp, tf_sq_mmx, its prepass): M1 and M2 compile them for 224, keeping tf_sq_mma.
 const std = @import("std");
 const limits = @import("limits.zig");
 const registry = @import("registry.zig");
 pub const records = [_]limits.MetalLaunch{
     .{ .name = "simd_qmm tf_sq_mmp_16_4_2_2", .threads = 256, .tg_memory = 16384, .m1 = 224, .m2 = 224, .adapts = true },
+    .{ .name = "simd_qmm tf_sq_mmx_16_4_2_2", .threads = 256, .tg_memory = 16384, .m1 = 224, .m2 = 224, .adapts = true },
+    .{ .name = "simd_qmm tf_sq_prep_s", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
 };
 test "the chunk-pair tiles are in the live and offline collector and fit M1 and M2" {
     for (records) |record| {
