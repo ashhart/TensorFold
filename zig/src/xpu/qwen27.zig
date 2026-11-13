@@ -84,6 +84,8 @@ pub var a8_group: u32 = 0;
 pub var kv8: i32 = 0;
 /// Int8 K/V cache (XPU_KV_INT8=1): 256 int8 per position and head, then float scales after MAX_CTX positions.
 pub var kv_i8 = false;
+/// XPU_ATTN_PREF=CH (a multiple of 32 from 64 to 4096): decode attention reads the prefix once a round on DPAS.
+pub var attn_pref: u32 = 0;
 /// Rotated weights (`hadamard128` in the checkpoint): every GEMM input is rotated by blocks of 128 where it is made.
 pub var rot_on: i32 = 0;
 /// W4A4 on down (and mixer out projections with XPU_PREFILL_INT4_SITES=10): int4 inputs per row group, DPAS u4 × s4.
@@ -183,6 +185,8 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_DUMP")) |v| dump_dir = std.mem.span(v);
         if (std.c.getenv("XPU_PREFILL_INT8") != null) prefill_int8 = true;
         if (std.c.getenv("XPU_KV_INT8") != null) kv_i8 = true;
+        if (std.c.getenv("XPU_ATTN_PREF")) |v| attn_pref = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        if (attn_pref != 0 and (attn_pref % 32 != 0 or attn_pref < 64 or attn_pref > 4096)) return error.AttnPrefNotAMultipleOf32From64To4096;
         if (std.c.getenv("XPU_PREFILL_INT4") != null) prefill_int4 = true;
         if (std.c.getenv("XPU_PREFILL_INT4_SITES")) |v| int4_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_KV8")) |v| kv8 = try std.fmt.parseInt(i32, std.mem.span(v), 10);
@@ -272,6 +276,9 @@ pub const Runner = struct {
             .gdn_step = try d.kernel(md, "gdn_step", 16),
             .attn_decode = try d.kernel(md, "attn_decode", 16),
             .attn_merge = try d.kernel(md, "attn_merge", 16),
+            .attn_pref = try d.kernel(md, "attn_pref", 16),
+            .attn_tail = try d.kernel(md, "attn_tail", 16),
+            .attn_merge2 = try d.kernel(md, "attn_merge2", 16),
             .kv_move = try d.kernel(md, "kv_move", 16),
             .exl3_gemv = try d.kernel(md, "exl3_gemv", 16),
             .rot_heads = try d.kernel(mg, "rot_heads", 16),
@@ -305,7 +312,7 @@ pub const Runner = struct {
             .ngen_narrow = try d.kernel(mn, "w4g_s4dpb", 256),
         };
         // the shared rounds' kernels reach each slot's states through the per-row table (acts.mt)
-        for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
+        for ([_]ze.H{ d.k.attn_prep, d.k.attn_decode, d.k.attn_pref, d.k.attn_tail, d.k.gdn_pre, d.k.gdn_step }) |k| try d.g.indirect(k);
         if (std.c.getenv("XPU_PROFILE") != null) {
             prof.on = true;
             prof.events = try d.g.events(4096);

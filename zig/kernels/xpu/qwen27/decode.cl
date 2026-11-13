@@ -74,9 +74,13 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
 
 // Decode attention by key slices: one subgroup per (row, K/V head, query part, slice). Grid y is AKV * QPARTS.
 #define SPLIT 32
-KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
-                            global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
-                            global const ulong *MT, global const int *POS, int cap) {
+// XPU_ATTN_PREF: the row at pos takes its keys below pref_base(pos, CH) from attn_pref's chunks, cut by position.
+#define PREW 16
+static inline int pref_base(int pos, int CH) { return (max(pos - PREW, 0) / CH) * CH; }
+// The slices of attn_decode (PRE 0) and of attn_tail (PRE: the chunk size, slices start at the row's pref_base).
+static inline void attn_slices(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
+                               global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
+                               global const ulong *MT, global const int *POS, int cap, int PRE) {
   // MT (if non-null): several streams, one row each; with TREE, tree windows; cap > 0: int8 cache (256 bytes per row).
 #if Q27_QPARTS == 1
   // Grid (rows, heads, slices): the tree rows of one key slice run back to back and share its K/V rows in L2.
@@ -92,7 +96,7 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     wf = (int)MT[t * 8 + 6];
     base = TREE ? POS[wf] : 0x7fffffff;
   }
-  const int last = MT ? POS[t] : p0 + DEPTH(t), j0 = sp * SPLIT, j1 = min(j0 + SPLIT, last + 1);
+  const int last = MT ? POS[t] : p0 + DEPTH(t), j0 = sp * SPLIT + (PRE ? pref_base(last, PRE) : 0), j1 = min(j0 + SPLIT, last + 1);
   float q[Q27_QPG][16], o[Q27_QPG][16], m[Q27_QPG], l[Q27_QPG];
   for (int a = 0; a < Q27_QPG; a++) {
     for (int i = 0; i < 16; i++) {
@@ -147,6 +151,12 @@ KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, glo
     }
     for (int i = 0; i < 16; i++) PO[base * 256 + i * 16 + lane] = o[a][i];
   }
+}
+
+KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
+                            global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
+                            global const ulong *MT, global const int *POS, int cap) {
+  attn_slices(Q, KC, VC, PM, PL, PO, p0, NS, scale, TREE, MT, POS, cap, 0);
 }
 
 // Merge of the slices, in order: O bf16 [T, Q27_AQ, 256]. One subgroup per (head, row).
@@ -515,3 +525,5 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
     }
 }
 #endif // Q27_GQA == 6
+
+#include "decode_prefix.cl"
