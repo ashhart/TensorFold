@@ -69,6 +69,8 @@ pub const Worker = struct {
 
     /// prefill: id, positions, prompt len, resumed at, cut count, snapshot slot, page count, the pages, cuts, prompt.
     pub fn prefill(w: *Worker, f: *Follower, m: []const u32) !void {
+        // rank 0's counts are checked against the message before any of them is used to slice it
+        if (m.len < 8 or m[7] > m.len - 8 or m[5] > m.len - 8 - m[7] or m[3] > m.len - 8 - m[7] - m[5]) return error.ShortMessage;
         const held = m[8..][0..m[7]];
         // the cuts sit between the pages and the prompt
         const prompt = m[8 + m[7] + m[5] ..][0..m[3]];
@@ -93,7 +95,8 @@ pub const Worker = struct {
 
     /// verify: graph pick, count, then id, rows, tokens each; every rank derives the plan shape from them.
     pub fn verify(w: *Worker, f: *Follower, m: []const u32) !void {
-        const pick: Pick = @fromBackingInt(m[1]);
+        if (m.len < 3) return error.ShortMessage;
+        const pick = std.enums.fromInt(Pick, m[1]) orelse return error.ShortMessage;
         const n = m[2];
         if (n > max_windows) return error.WindowTooWide;
         var ids: [max_windows]u32 = undefined;
@@ -101,12 +104,14 @@ pub const Worker = struct {
         var at: usize = 3;
         var total: usize = 0;
         for (0..n) |i| {
+            if (m.len - at < 2 or m[at + 1] > m.len - at - 2) return error.ShortMessage;
             const lane = try f.lane(m[at]);
             ids[i] = m[at];
             rows[i] = .{ .caches = &lane.caches, .pos = lane.len, .tokens = m[at + 2 ..][0..m[at + 1]] };
             total += rows[i].tokens.len;
             at += 2 + m[at + 1];
         }
+        if (total > w.out.len) return error.WindowTooWide;
         _ = try w.e.choose(rows[0..n], pick);
         _ = try w.e.verify(rows[0..n], w.reqs[0..total], w.out[0..total]);
         for (ids[0..n], 0..) |id, i| f.lanes.get(id).?.pending = .{ .slot = i, .rows = rows[i].tokens.len };
@@ -114,9 +119,11 @@ pub const Worker = struct {
 
     /// keep: count, then id and rows each; the keeps land in one launch.
     pub fn keep(w: *Worker, f: *Follower, m: []const u32) !void {
+        if (m.len < 2 or m[1] > (m.len - 2) / 2) return error.ShortMessage;
         for (0..m[1]) |i| {
             const lane = try f.lane(m[2 + 2 * i]);
             const p = lane.pending orelse return error.NothingToKeep;
+            if (m[3 + 2 * i] > p.rows) return error.ShortMessage; // a keep is of the window's first rows
             w.e.keep(p.slot, m[3 + 2 * i]);
             lane.len += m[3 + 2 * i];
             lane.pending = null;
