@@ -74,6 +74,9 @@ pub const Draft = struct {
     best: cuda.DeviceBuffer,
     /// Before a window: each DeltaNet layer's conv window and (from the pass) projection rows; the n-gram tail.
     saved: cuda.DeviceBuffer,
+    /// Where the saved n-gram tail and the window's n-gram rows are (in `saved`, or pieces of their own).
+    saved_tail: u64 = 0,
+    saved_nrow: u64 = 0,
     /// A window's DeltaNet end states: swapped in when every row is kept, else the kept rows replay on the sequence's.
     spare: [linear_n]cuda.DeviceBuffer = undefined,
     /// Where `saved` holds each piece and how large the spares are, at the model's heads (its sequence's).
@@ -256,7 +259,65 @@ pub const Draft = struct {
             }
             li += 1;
         }
+        d.saved_tail = d.saved.ptr + d.layout.tail_at;
+        d.saved_nrow = d.saved.ptr + d.layout.nrow_at;
         d.aim();
+    }
+
+    /// A pool lane's draft pieces in initPieces' order; streams and logits, wider than a page, are wideBytes' block.
+    pub fn pieceSizes(gpa: std.mem.Allocator, out: *std.ArrayList(u64), draft_n: usize) !void {
+        const l = Layout.of(pool_heads);
+        try out.appendNTimes(gpa, l.state, linear_n); // spares
+        try out.appendNTimes(gpa, l.conv, linear_n); // saved conv windows
+        try out.appendNTimes(gpa, max_rows * l.proj, linear_n); // saved projection rows
+        // saved n-gram tail and rows, the head's output row, the draft head's scores, best values
+        try out.appendSlice(gpa, &.{ l.nrow_at - l.tail_at, l.saved - l.nrow_at, wide * 2, draft_n * 2, best_bytes });
+        if (!late()) return;
+        try out.append(gpa, log_ctl_bytes); // the pending-row log's control word, then each layer's log
+        try out.appendNTimes(gpa, layer_log_bytes, linear_n);
+    }
+
+    /// A pool lane's `streams` and `logits` in one block outside the pool, each on a 256-byte boundary.
+    pub fn wideBytes(rows: usize) usize {
+        const a = std.mem.alignForward;
+        return a(usize, @max(rows, max_rows) * wide * 2, 256) + a(usize, max_rows * vocab * 2, 256);
+    }
+
+    /// A pool lane's head on pieces: its cache on `paged`'s pages, `at` pieceSizes' addresses, `block` wideBytes'.
+    pub fn initPieces(gpa: std.mem.Allocator, driver: *cuda.Driver, cap: usize, draft_n: usize, rows: usize, paged: *const pages.Paged, at: []const u64, block: u64) !Draft {
+        const l = Layout.of(pool_heads);
+        if (at.len != 3 * linear_n + 5 + if (late()) 1 + linear_n else 0) return error.FlashNextRunTooShort;
+        const B = struct {
+            fn of(dr: *const cuda.Driver, ptr: u64, n: usize) cuda.DeviceBuffer {
+                return .{ .d = dr, .ptr = ptr, .len = n, .borrowed = true };
+            }
+        };
+        const head = wt.attn_n;
+        const rows_cap = @max(rows, max_rows);
+        const streams_len = std.mem.alignForward(usize, rows_cap * wide * 2, 256);
+        var d: Draft = .{ .gen = @import("cuda_window_graph.zig").nextGen(), .gpa = gpa, .cap = cap, .rows_cap = rows_cap, .kc = B.of(driver, paged.at(head, .key), 0), .vc = B.of(driver, paged.at(head, .value), 0), .ikc = B.of(driver, paged.at(head, .index), 0), .pooled = B.of(driver, paged.at(head, .pooled), 0), .pg = paged.pg(), .streams = B.of(driver, block, rows_cap * wide * 2), .out = undefined, .logits = B.of(driver, block + streams_len, max_rows * vocab * 2), .dlogits = undefined, .best = undefined, .saved = B.of(driver, 0, 0), .host = undefined, .layout = l };
+        const n = linear_n;
+        for (&d.spare, at[0..n]) |*b, ptr| b.* = B.of(driver, ptr, l.state);
+        d.saved_tail = at[3 * n];
+        d.saved_nrow = at[3 * n + 1];
+        d.out = B.of(driver, at[3 * n + 2], wide * 2);
+        d.dlogits = B.of(driver, at[3 * n + 3], draft_n * 2);
+        d.best = B.of(driver, at[3 * n + 4], best_bytes);
+        if (late()) d.log = B.of(driver, at[3 * n + 5], log_ctl_bytes);
+        var li: usize = 0;
+        for (&d.keep.layers, 0..) |*lk, layer| {
+            if (!wt.linearLayer(layer)) continue;
+            lk.hist = at[n + li];
+            lk.proj = at[2 * n + li];
+            if (d.log) |b| {
+                lk.log = at[3 * n + 6 + li];
+                lk.log_ctl = b.ptr;
+            }
+            li += 1;
+        }
+        d.host = try gpa.alloc(u16, @max(max_rows * vocab, draft_n));
+        d.aim();
+        return d;
     }
 
     /// Device bytes `initIn` takes from a run: every buffer but the head's cache, each on a 256-byte boundary.

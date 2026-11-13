@@ -79,7 +79,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 29 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 30 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -104,6 +104,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_TABLE_WARM` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_PROFILE` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_VERIFY_HOST_LOGITS` | Exactly `0` or `1`; default off |
+| `TF_FLASHNEXT_STATE_PAGES` | Exactly `0` or `1`; default off; `1` needs `TF_FLASHNEXT_KV_PAGES` |
 | `TF_FLASHNEXT_DRAFTS` | Whole draft count; default 6, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_DRAFTS_GREEDY` | Whole draft count; default 8, then clamped to 1 through 15 |
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |
