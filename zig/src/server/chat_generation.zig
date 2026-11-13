@@ -22,6 +22,14 @@ const nowNs = clock.nowNs;
 const seconds = clock.seconds;
 const deltaOf = reply_text.deltaOf;
 
+/// One chunk's logprobs: ``content`` always, as OpenAI clients read it, and ``key``'s entries.
+fn rowsOf(a: Allocator, key: []const u8, entries: Value) Allocator.Error!Value {
+    const o = try json.newObject(a);
+    try o.put(a, "content", .{ .array = &.{} });
+    try o.put(a, key, entries);
+    return .{ .object = o };
+}
+
 pub const Generation = struct {
     srv: *Server,
     a: Allocator,
@@ -55,7 +63,7 @@ pub const Generation = struct {
     engine_done: bool = false,
     consumed: usize = 0,
     chunk_index: usize = 0,
-    lp: ?@import("logprobs.zig").Stream = null, // the request asked for logprobs: its rows, copied with each round
+    lp: ?@import("logprob_parts.zig").Live = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
 
     fn eos(g: *const Generation, t: u32) bool {
@@ -107,21 +115,21 @@ pub const Generation = struct {
             }
             try fresh.append(g.a, t);
         }
+        const live = g.liveRows();
+        if (live) |l| try l.add(g.srv, g.a, fresh.items);
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
         const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
+        var thought: []const u8 = "";
         if (g.thinking) {
             const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
             const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
             const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
-            const piece = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
-            if (piece.len > 0) {
-                try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), piece);
-                try g.emit(sink, try deltaOf(g.a, "reasoning_content", piece));
-            }
+            thought = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
+            if (thought.len > 0) try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), thought);
             answer = split.answer;
         }
         answer = try tool_lfm2.dsml(g.a, answer, g.tools, false); // the answer only, so a call the reasoning mentions is not made
@@ -129,15 +137,32 @@ pub const Generation = struct {
         const vis = reply_text.heldBack(if (g.srv.info.capability(.reasoning)) reply_text.streamingVisible(shown) else shown, g.calls != null);
         const copied = @intFromPtr(vis.ptr) >= @intFromPtr(g.hidden.items.ptr) and @intFromPtr(vis.ptr) <= @intFromPtr(g.hidden.items.ptr) + g.hidden.items.len;
         const delta = g.streamed.after(vis, !copied);
-        if (delta.len > 0) {
-            try g.streamed.set(g.a, vis, delta);
-            try g.emit(sink, if (g.lp) |*l| (try l.delta(g.srv, g.a, g.thinking, g.ignore_eos, g.collected.items, delta, g.streamed.text.items.len, false)).? else .{ .string = delta });
+        if (delta.len > 0) try g.streamed.set(g.a, vis, delta);
+        // each chunk carries the entries its text settles: reasoning ones before the answer's first text
+        const rows = if (live) |l| try l.settle(g.srv, g.a, g.collected.items[0..l.spelled.ends.items.len], g.thinking, g.stops, g.streamed.text.items, g.streamed_reasoning.text.items) else null;
+        const thought_rows = if (rows) |r| r.get("reasoning_content") else null;
+        if (thought.len > 0 or thought_rows != null) {
+            const d: Value = if (thought.len > 0) try deltaOf(g.a, "reasoning_content", thought) else .{ .object = try json.newObject(g.a) };
+            if (thought_rows) |t| try d.object.put(g.a, "logprobs", try rowsOf(g.a, "reasoning_content", t));
+            try g.emit(sink, d);
+        }
+        const prose_rows: []Value = if (rows) |r| r.get("content").?.array else &.{};
+        if (delta.len > 0 or prose_rows.len > 0) {
+            const d: Value = if (prose_rows.len > 0) try deltaOf(g.a, "content", delta) else .{ .string = delta };
+            if (prose_rows.len > 0) try d.object.put(g.a, "logprobs", try rowsOf(g.a, "content", .{ .array = prose_rows }));
+            try g.emit(sink, d);
         }
         if (g.calls) |*c| {
             var out: std.ArrayList(Value) = .empty;
             try c.feed(answer, &out); // never the reasoning: a call it mentions is not made
             for (out.items) |d| try g.emit(sink, d);
         }
+    }
+
+    /// Logprob state when chunks carry their own entries: without tools, no call can claim streamed text.
+    fn liveRows(g: *Generation) ?*@import("logprob_parts.zig").Live {
+        if (g.tools.len > 0) return null;
+        return if (g.lp) |*l| l else null;
     }
 
     pub fn emit(g: *Generation, sink: Sink, delta: Value) Failure!void {
@@ -269,7 +294,7 @@ pub const Generation = struct {
             const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
-            if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
+            if (rest.len > 0) try g.emit(sink, .{ .string = rest });
             if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
@@ -344,7 +369,7 @@ pub const Generation = struct {
             .speculative = .{ .object = spec },
             .thinking = thinking,
             .effort = effort,
-            .logprobs = if (g.lp) |l| try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items) else null,
+            .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent } else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .loop_stop = stopped,
         };
