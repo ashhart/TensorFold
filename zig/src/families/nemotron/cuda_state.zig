@@ -101,7 +101,7 @@ fn lanePartBytes(c: Config) usize {
     }
     return most;
 }
-const scratch_count = 44;
+const scratch_count = 47;
 
 /// Bytes of the shared expert's fixed plans (Buffers.shared): shared_words, or a latent MoE's plan for every row count.
 fn sharedBytes(c: Config) usize {
@@ -147,7 +147,8 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         ymoe,                              sharedBytes(c),                                 R * kern.pocket_width * 4,
         R * c.latent * 2,                  R * c.latent * 2,                               act_rows * own * sw * 2,
         R * own * 4,                       job,                                            ck8,
-        ck4,                               lanePartBytes(c),
+        ck4,                               lanePartBytes(c),                               W * 32,
+        W * 4,                             W * 4,
     };
 }
 
@@ -297,6 +298,9 @@ pub const Buffers = struct {
     job: u64, // rank 0's job to the other ranks: a header and the rows their shares read (cuda_worker.zig)
     ck8: u64, // the checkpoint's math: e4m3 rows an FP8 projection reads
     ck4: u64, // and a latent MoE's NVFP4 rows (cuda_latent_ck.zig)
+    draw_rules: u64, // a batched draw's rules, one a row (32 bytes each)
+    draw_meta: u64, // its rows' positions, one a row
+    draw_tokens: u64, // a batched draw's tokens, one a row
 
     /// Sizes every buffer for `max_len` cache rows and `nch` attention chunk partials a row; the own sequence's first.
     pub fn init(d: *const cuda.Driver, c: Config, max_len: usize, nch: usize, carve: ?*cuda.Carveout) !Buffers {
@@ -343,11 +347,11 @@ pub const Buffers = struct {
     /// Every scratch field, in scratchSizes' order.
     fn scratchPtrs(b: *Buffers) [scratch_count]*u64 {
         return .{
-            &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden,  &b.p_logits, &b.p_sampled, &b.emb, &b.h[0],         &b.h[1],       &b.y,
-            &b.xs,        &b.delta,     &b.proj,  &b.p_xc,      &b.sy,       &b.g,         &b.gxs, &b.qkv,          &b.q,          &b.att,
-            &b.axs,       &b.po,        &b.pm,    &b.pl,        &b.part,     &b.pick,      &b.wts, &b.plan.members, &b.plan.items, &b.plan.counts,
-            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,      &b.shared,   &b.pocket,    &b.lat, &b.comb,         &b.sact,       &b.sids,
-            &b.job,       &b.ck8,       &b.ck4,   &b.lane_part,
+            &b.logits,    &b.p_meta,    &b.p_ids, &b.p_hidden,  &b.p_logits,   &b.p_sampled, &b.emb,         &b.h[0],         &b.h[1],       &b.y,
+            &b.xs,        &b.delta,     &b.proj,  &b.p_xc,      &b.sy,         &b.g,         &b.gxs,         &b.qkv,          &b.q,          &b.att,
+            &b.axs,       &b.po,        &b.pm,    &b.pl,        &b.part,       &b.pick,      &b.wts,         &b.plan.members, &b.plan.items, &b.plan.counts,
+            &b.plan.rank, &b.plan.hist, &b.act,   &b.ymoe,      &b.shared,     &b.pocket,    &b.lat,         &b.comb,         &b.sact,       &b.sids,
+            &b.job,       &b.ck8,       &b.ck4,   &b.lane_part, &b.draw_rules, &b.draw_meta, &b.draw_tokens,
         };
     }
 
