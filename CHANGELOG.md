@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP, Qwen3.8-Flash-Next on RDNA 3.5 (gfx1151): MTP draft chains now stop under a 0.8 confidence floor by default (was 0.3), the same one-rank rule `prefill_step` uses. Replies are unchanged. One stream decodes about 6% faster and four streams 2.8% (greedy) to 4.6% (sampled) faster (#2697). Thanks to @gilby.
+
 - Server: a reply that keeps a tool-call envelope as plain text now says so. `tensorfold.kept_tool_calls` counts the envelopes that name a tool the request did not offer and the malformed ones, and lists up to eight unoffered names, on the whole reply and on a stream's final chunk; `/metrics` gains `kept_tool_calls_unoffered_total` and `kept_tool_calls_malformed_total`. Replies are otherwise unchanged (#2814, for #2800). Thanks to @tarsnake for the report.
 
 - CI: the app workflow keeps its Linux AppImage artifact for 3 days instead of GitHub's default 90 (#2966).
@@ -271,7 +273,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CUDA: Flash Next's router logits template (`route_logits`) moves into the shared header `common/router_mma.cuh`, with a K-sliced form for GLM's router; its kernels compile to the same machine code on sm_80, sm_86, sm_89, sm_120 and sm_121 (#2556, part of #2535). Thanks to @laudney.
 - Qwen3.8-Flash-Next on HIP: a decode round's n-gram table rows are gathered over parked workers, and the pages they need are asked for first, so the page faults of first-time text overlap instead of running one after another on one thread; on a Strix Halo iGPU four cold distinct streams decode about 38% faster, and a cold 8K prompt's first token comes about 10% sooner with its reply decoding about 25% faster. Replies are unchanged.
 - Qwen3.8-Flash-Next on HIP stops its MTP draft chains under a 0.8 confidence floor by default instead of the HIP-wide 0.3; `--mtp-confidence` still overrides it, and the other HIP families keep 0.3. On a Strix Halo iGPU one-stream decode is about 6% faster on code and on chat, and four distinct streams about 3%, with one-stream throughput on `tools/bench_prompts.json` unchanged. Replies are unchanged.
-- Qwen3.8-Flash-Next on one RDNA 3.5 GPU (the Strix Halo and other gfx115x iGPUs) stops its MTP draft chains under a 0.8 confidence floor by default instead of the HIP-wide 0.3; other cards, several GPUs and the other HIP families keep 0.3, and `--mtp-confidence` still overrides it. On a Strix Halo iGPU one-stream decode is about 6% faster on code and on chat, and four distinct streams about 3%, with one-stream throughput on `tools/bench_prompts.json` unchanged. Replies are unchanged (#2697). Thanks to @gilby.
 
 - Prompt cache: long conversations survive 8 to 16 agents sending follow-ups at once. Redundant states are evicted before each conversation's newest one, admission never evicts a state a queued request resumes, concurrent keeps reserve their room, and the default budget scales with the room left after streams on Metal and unified-memory CUDA (discrete CUDA hosts keep 8 GiB, Flash Next's batch host 16 GiB). On Qwen3.8-27B with DFlash2 at 16 agents, a follow-up's median first token drops from 546 s to 16.5 s on an M3 Ultra and from 90-114 s to 28 s on a GB10, with every reply unchanged (#2699).
 
