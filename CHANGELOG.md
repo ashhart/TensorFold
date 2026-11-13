@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tokenizer: a split pattern is held to a work allowance per piece (2,048 instructions a byte, counted, not timed) and refused at load when too deep or too large, so a crafted tokenizer or prompt can't hang the pre-tokenizer; every split of the patterns we serve is unchanged (#3071).
+
 - Cluster pull: a pull that would leave a file held only in part is refused unless the caller allows unverified bytes (off by default); a pull that ends whole still resumes and is checked against the manifest's hash (#3074).
 
 - Server: under connection pressure (96 of 128 slots open) one client address holds at most a quarter of the slots, and an idle keep-alive connection gives its slot up only when every slot is taken. New flags: `--max-connections` (1–1024), `--max-connections-per-address` (0 turns the share off) and `--trusted-proxy ADDRESS` (repeatable; never counted, like loopback). IPv6 clients are counted by /64. Below pressure nothing is refused (#3048).
