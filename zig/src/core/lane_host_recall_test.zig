@@ -26,6 +26,7 @@ const Box = struct {
         defer b.mutex.unlock(std.testing.io);
         switch (e.*) {
             .prefilled => |c| b.cached = c,
+            .progress => {},
             .logprobs, .prompt_logprobs, .audio => {},
             .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
             .finished => |f| {

@@ -61,8 +61,9 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
             return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
         }
         fn prefillYield(ctx: *anyopaque) bool {
-            if (!yield(ctx)) return false;
             const c: *Context = @ptrCast(@alignCast(ctx));
+            @import("lane_host_progress.zig").chunk(c.host, c.host.lone_job.?); // the driver's call, as a fill queue's
+            if (!yield(ctx)) return false;
             c.partial = true;
             return true;
         }

@@ -19,6 +19,7 @@ const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const cancel_ids = @import("cancel_ids.zig");
+const ClientOut = @import("openai_client.zig").ClientOut;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -39,6 +40,8 @@ pub const Out = struct {
         reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
         /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
         keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
+        /// A prompt's progress as a translated route's own event (Responses); null: a chunk with no choices.
+        progress: ?*const fn (ctx: *anyopaque, p: @import("engine_api").Progress) error{Closed}!void = null,
     };
 };
 
@@ -53,38 +56,6 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     var client: ClientOut = .{ .conn = conn, .a = a, .startup_at = startup_at };
     run(srv, a, client.out(), .{ .conn = conn }, is_chat, body);
 }
-
-/// A chat reply written straight to the client.
-const ClientOut = struct {
-    startup_at: ?u64 = null,
-    conn: *Conn,
-    a: Allocator,
-
-    fn out(c: *ClientOut) Out {
-        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
-    }
-
-    fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        return sse.open(c.conn);
-    }
-
-    fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        return if (payload) |p| sse.data(c.conn, c.a, p) else sse.done(c.conn);
-    }
-
-    fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        routes.sendValue(c.conn, c.a, status, payload);
-        if (status == 200 and c.conn.response_complete and !c.conn.broken) @import("startup_receipt.zig").complete(c.startup_at, payload);
-    }
-
-    fn keepalive(ctx: *anyopaque) error{Closed}!void {
-        const c: *ClientOut = @ptrCast(@alignCast(ctx));
-        return sse.comment(c.conn);
-    }
-};
 
 /// Whether the client has gone, read between rounds (Python's socket_cancellation).
 pub const Gone = @import("stream_live.zig").Gone;
@@ -155,7 +126,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         input.temperature = if (t == .float) t.float else std.fmt.parseFloat(f64, t.int) catch 0;
     };
     const sampling = try json.newObject(cx.a);
-    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed", "priority", "model", "draft", "thinking_budget", "ignore_eos", "return_token_ids", "stop", "grammar_budget" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "min_p", "presence_penalty", "frequency_penalty", "seed", "priority", "model", "draft", "thinking_budget", "ignore_eos", "return_token_ids", "return_progress", "stop", "grammar_budget" } ++ grammar.fields) |k| if (body.get(k)) |v| try sampling.put(cx.a, k, v);
     try grammar.refusal(cx, body);
     if (input.tools.len > 0 and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice"))) try sampling.put(cx.a, "tool_call_required", .{ .bool = true });
     if (body.field("parallel_tool_calls")) |p| if (p == .bool and !p.bool) try sampling.put(cx.a, "tool_call_single", .{ .bool = true });
@@ -449,6 +420,16 @@ const Run = struct {
             s.pending.clearRetainingCapacity();
         }
 
+        /// A prompt's progress (``return_progress``) as a chunk with no choices, which a client reading choices skips.
+        fn progress(ctx: *anyopaque, p: @import("engine_api").Progress) error{Closed}!void {
+            const s: *StreamSink = @ptrCast(@alignCast(ctx));
+            if (!s.opened) return; // nothing goes before the stream's head
+            if (s.run.out.vt.progress) |own| return own(s.run.out.ctx, p);
+            const c = s.run.chunk(null, null) catch return error.Closed;
+            @import("prompt_progress.zig").put(s.run.a, c.object, p) catch return error.Closed;
+            return s.run.emit(c);
+        }
+
         fn call(ctx: *anyopaque, delta: Value) error{Closed}!void {
             const s: *StreamSink = @ptrCast(@alignCast(ctx));
             const r = s.run;
@@ -520,7 +501,7 @@ const Run = struct {
         defer if (!handed) r.srv.release(prepared.preparing, prepared.request);
         var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
-        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };
+        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin, .progress = StreamSink.progress };
         var live = gone;
         live.out = r.out;
         live.opened = &sink_state.opened;

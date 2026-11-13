@@ -142,7 +142,7 @@ const Wire = struct {
     payload: Value = .null,
 
     fn out(w: *Wire) openai.Out {
-        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole, .keepalive = keepalive } };
+        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole, .keepalive = keepalive, .progress = progress } };
     }
 
     fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
@@ -156,6 +156,12 @@ const Wire = struct {
     fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
         const w: *Wire = @ptrCast(@alignCast(ctx));
         return w.reply.chunk(payload);
+    }
+
+    /// A prompt's progress (``return_progress``) as a ``tensorfold.progress`` event, which typed clients pass over.
+    fn progress(ctx: *anyopaque, p: @import("engine_api").Progress) error{Closed}!void {
+        const r = @as(*Wire, @ptrCast(@alignCast(ctx))).reply;
+        return r.event("tensorfold.progress", &.{ .{ "done", try r.int(p.done) }, .{ "total", try r.int(p.total) }, .{ "cached", try r.int(p.cached) } });
     }
 
     fn keepalive(ctx: *anyopaque) error{Closed}!void {
