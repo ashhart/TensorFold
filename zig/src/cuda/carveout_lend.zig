@@ -19,6 +19,8 @@ pub const Claim = struct { fd: linux.fd_t, dev: abi.DevicePtr, size: usize, vmm:
 const request_max = 4096;
 /// A reply's JSON: the daemon's own replies are a few hundred bytes.
 pub const reply_max = 4096;
+/// The bytes of a refusal's `error` text kept for the log.
+pub const reason_max = 128;
 /// CMSG_SPACE for two descriptors is 40 bytes, and the daemon sends one.
 const control_max = 64;
 
@@ -27,11 +29,35 @@ const SockaddrUn = extern struct { family: linux.sa_family_t = linux.AF.UNIX, pa
 /// The bytes a sockaddr_un's path holds, terminator included.
 const path_max = 108;
 
+/// A refusal's `error` text as the daemon sent it, its first `reason_max` bytes; empty when the reply gave none.
+pub const Reason = struct {
+    held: [reason_max]u8 = undefined,
+    len: usize = 0,
+    cut: bool = false, // the text ran past `reason_max` bytes
+
+    fn keep(r: *Reason, from: []const u8) void {
+        r.len = @min(from.len, reason_max);
+        @memcpy(r.held[0..r.len], from[0..r.len]);
+        r.cut = from.len > reason_max;
+    }
+
+    pub fn text(r: *const Reason) []const u8 {
+        return r.held[0..r.len];
+    }
+
+    /// `, the daemon said "..."` with each byte outside printable ASCII as `\xNN`; nothing when no text came.
+    pub fn format(r: Reason, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (r.len == 0) return;
+        try w.print(", the daemon said \"{f}\"", .{std.ascii.hexEscape(r.text(), .lower)});
+        if (r.cut) try w.print(" (its first {d} bytes)", .{reason_max});
+    }
+};
+
 /// Claims `want` bytes from the daemon at `path` and maps the grant for the current device; the socket stays open.
-pub fn claim(d: *const Driver, path: []const u8, key: []const u8, want: usize) Error!Claim {
+pub fn claim(d: *const Driver, path: []const u8, key: []const u8, want: usize, said: *Reason) Error!Claim {
     // Linux alone has the daemon and the driver library the mapping opens by name: elsewhere there is nobody to ask.
     if (comptime builtin.os.tag != .linux) return error.NoDaemon;
-    const s = try slab(path, key, want);
+    const s = try slab(path, key, want, said);
     errdefer _ = linux.close(s.sock);
     errdefer _ = linux.close(s.fd);
     var device: abi.Device = 0;
@@ -55,15 +81,15 @@ pub fn release(c: Claim) void {
 /// A lending daemon lends whole slices of this size; an ask is rounded UP to it, so a grant is never short.
 pub const gran: usize = 2 << 20;
 
-/// The protocol half: one alloc request, its reply, and the descriptor that came with it.
-pub fn slab(path: []const u8, key: []const u8, want: usize) Error!Slab {
+/// The protocol half: one alloc request, its reply and the descriptor with it; a refusal's reason goes to `said`.
+pub fn slab(path: []const u8, key: []const u8, want: usize, said: *Reason) Error!Slab {
     // Whole slices, rounded up: the daemon rounds up too, so an unrounded ask can pass what is free and be refused.
     if (want == 0) return error.SliceTooSmall;
     const ask = std.mem.alignForward(usize, want, gran);
     const sock = try connect(path);
     errdefer _ = linux.close(sock);
     try send(sock, key, ask);
-    const reply = try receive(sock);
+    const reply = try receive(sock, said);
     errdefer _ = linux.close(reply.fd);
     if (reply.size < want or reply.size == 0) return error.SliceTooSmall; // less than planned is a refusal
     // The reply's size is the authority. A seekable descriptor's own length is checked too, its offset put back.
@@ -110,8 +136,8 @@ pub fn send(sock: linux.fd_t, key: []const u8, want: usize) Error!void {
 
 const Reply = struct { size: usize, fd: linux.fd_t };
 
-/// One reply datagram: its JSON and the descriptor in its ancillary data; a truncated or fd-less reply is refused.
-fn receive(sock: linux.fd_t) Error!Reply {
+/// One reply datagram: its JSON decides, then the descriptor in its ancillary data has to be there for a grant.
+fn receive(sock: linux.fd_t, said: *Reason) Error!Reply {
     var buf: [reply_max]u8 = undefined;
     var control: [control_max]u8 align(linux.cmsg_align) = undefined;
     var iov = [_]std.posix.iovec{.{ .base = &buf, .len = buf.len }};
@@ -119,11 +145,13 @@ fn receive(sock: linux.fd_t) Error!Reply {
     const rc = linux.recvmsg(sock, &msg, 0);
     if (linux.errno(rc) == .AGAIN) return error.DaemonSilent;
     if (linux.errno(rc) != .SUCCESS) return error.DaemonRefused;
+    const lent = takeFd(control[0..msg.controllen]); // taken before anything is refused, so every refusal closes it
+    errdefer if (lent) |fd| {
+        _ = linux.close(fd);
+    };
     if (msg.flags & linux.MSG.TRUNC != 0) return error.DaemonRefused;
-    const lent = takeFd(control[0..msg.controllen]) orelse return error.DaemonRefused;
-    errdefer _ = linux.close(lent);
-    const size = grantedSize(buf[0..rc]) orelse return error.DaemonRefused;
-    return .{ .size = size, .fd = lent };
+    const size = granted(buf[0..rc], said) orelse return error.DaemonRefused;
+    return .{ .size = size, .fd = lent orelse return error.DaemonRefused };
 }
 
 /// The first descriptor in the ancillary data; any others are closed, so a daemon that sends two leaks nothing.
@@ -146,8 +174,8 @@ fn takeFd(control: []const u8) ?linux.fd_t {
     return found;
 }
 
-/// The granted size of a reply: `ok` true and an integer `size`; null for a refusal or anything else.
-fn grantedSize(text: []const u8) ?usize {
+/// The granted size of a reply: `ok` true and an integer `size`. A refusal's `error` text is kept in `said`.
+fn granted(text: []const u8, said: *Reason) ?usize {
     // A parsed object costs several times the text it came from, so a datagram of the largest size still fits.
     var scratch: [8 * reply_max]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&scratch);
@@ -157,7 +185,12 @@ fn grantedSize(text: []const u8) ?usize {
         else => return null,
     };
     const ok = obj.get("ok") orelse return null;
-    if (ok != .bool or !ok.bool) return null;
+    if (ok != .bool) return null;
+    if (!ok.bool) {
+        const why = obj.get("error") orelse return null;
+        if (why == .string) said.keep(why.string);
+        return null;
+    }
     const size = obj.get("size") orelse return null;
     const n = switch (size) {
         .integer => |i| i,
