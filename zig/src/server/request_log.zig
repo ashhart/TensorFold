@@ -1,4 +1,4 @@
-//! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images redacted, for replays.
+//! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images and salts redacted.
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
@@ -7,7 +7,7 @@ const meta = @import("file_meta.zig").meta;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
-/// The body with every image part's URL replaced, the rest kept.
+/// The body with every image part's URL and any cache salt replaced, the rest kept.
 fn redact(a: Allocator, v: Value) Allocator.Error!Value {
     switch (v) {
         .array => |items| {
@@ -32,7 +32,7 @@ fn redact(a: Allocator, v: Value) Allocator.Error!Value {
                 return .{ .object = copy };
             }
             const out = try json.newObject(a);
-            for (o.keys(), o.values()) |k, item| try out.put(a, k, try redact(a, item));
+            for (o.keys(), o.values()) |k, item| try out.put(a, k, if (std.mem.eql(u8, k, "cache_salt")) .{ .string = "<redacted>" } else try redact(a, item));
             return .{ .object = out };
         },
         else => return v,
@@ -66,7 +66,7 @@ fn warnOnce(path: []const u8, why: []const u8) void {
     std.log.warn("TENSORFOLD_REQUEST_LOG {s} gets no requests: {s}", .{ path, why });
 }
 
-test "the request log is created owner-only and keeps image URLs out" {
+test "the request log is created owner-only and keeps image URLs and cache salts out" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -81,6 +81,7 @@ test "the request log is created owner-only and keeps image URLs out" {
     const body = try json.newObject(a);
     const file = (try json.parse(a, "{\"type\": \"file\", \"file\": {\"filename\": \"a.pdf\", \"file_data\": \"JVBERi1zZWNyZXQ=\"}}")).ok;
     try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{ .{ .object = part }, file }) });
+    try body.put(a, "cache_salt", .{ .string = "tenant-secret-salt" });
     append(a, path, .{ .object = body });
     if (comptime @import("builtin").os.tag != .windows) { // Windows files have no mode bits
         const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{}); // Linux's libc has no stat for std.c
@@ -89,6 +90,7 @@ test "the request log is created owner-only and keeps image URLs out" {
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 16));
     try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tenant-secret-salt") == null and std.mem.indexOf(u8, text, "cache_salt") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "JVBERi1zZWNyZXQ=") == null and std.mem.indexOf(u8, text, "a.pdf") != null);
 }
 

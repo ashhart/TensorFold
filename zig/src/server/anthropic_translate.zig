@@ -218,7 +218,7 @@ pub fn translate(cx: *Cx, body: Value, count: bool) errors.Refused!Value {
         if (s != .bool) return cx.refuse("stream must be a boolean");
         try chat.put(a, "stream", s);
     }
-    for ([_][]const u8{ "temperature", "top_p", "top_k" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
+    for ([_][]const u8{ "temperature", "top_p", "top_k", "cache_salt" }) |k| if (body.get(k)) |v| try chat.put(a, k, v);
     if (body.get("stop_sequences")) |stops| {
         const ok = stops == .array and for (stops.array) |s| {
             if (s != .string or s.string.len == 0) break false;

@@ -140,12 +140,12 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache,
-warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The vision, speech,
-embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
+thinking_budget, reasoning, answer_limit, structures, logprobs, penalties, prompt_logprobs, prompt_cache, cache_salt
+([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only and slide_conversations. The
+vision, speech, embeddings, readouts and rerank fields report whether that user feature is present. The last two fields,
 thinking_switch and thinking_applicable, are the loaded chat template's and tokenizer's thinking facts (see
-[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean,
-including false, and no callback details or addresses are exposed.
+[Reasoning](#reasoning)), set once at startup on the same Info flags. Every field is a JSON boolean, including false,
+and no callback details or addresses are exposed.
 
 Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
 Flags describe the engine; request combinations, context, template and format constraints still apply.
@@ -1072,6 +1072,28 @@ default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /
 `--trusted-proxy ADDRESS` (repeatable, up to 64; an exact IPv4 or IPv6 address, for a proxy, load balancer or Docker's
 bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
 a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
+
+## Prompt cache salts
+
+By default a kept prompt state is resumed by any request whose prompt starts with the same tokens, whoever sent it.
+`cache_salt` (a non-empty string of at most 1024 bytes, on `/v1/chat/completions`, `/v1/completions`, `/v1/responses`
+and `/v1/messages`) keeps a request's states apart: a state kept under one salt is resumed only by requests with the
+same salt, and states kept without a salt only by requests without one. `serve --cache-salt-per-key` salts every request
+by the API key it matched as well (a request's own `cache_salt` then counts within that key, and no salt a client sends
+stands for another key's), so two keys never resume each other's states; a server without API keys logs that the option
+salts nothing. The salt is hashed with HMAC-SHA-256 under the server's [tool-call id key](#messages-and-tools) (random
+at each start unless `TENSORFOLD_TOOL_ID_KEY_FILE` names one), so no cache key or state name can be tested against a
+guessed salt, and the salt itself is never echoed, stored or logged (`TENSORFOLD_REQUEST_LOG` writes `<redacted>`). The
+hash masks the first four words of the request's cache key. Salts never change the tokens of a reply, and a request
+without a salt is keyed exactly as before. Salted states stay in RAM: they are not written to the `--prompt-cache-disk`
+store, and a salted request never reads a state from it. A salted request also neither drafts from nor adds to the
+`--recall` record, neither reads nor writes `--compact-memory` notes, and a salted `/v1/imprint` ask reports and loads
+only its salt's states. The server's own requests for a salted conversation (the next turn's background prefill,
+compaction's notes, Cortheon's research planner and the server rounds it keeps) stay under the same salt. Engines on the
+shared lane host with its prompt cache report `capabilities.cache_salt` and take salts. Any other engine (one whose own
+host keeps states by tokens alone, a family's own paged cache under `TF_KV_SHARE`, or no prompt cache) returns HTTP 400
+for a salted request, naming its backend, rather than accept a salt it cannot keep apart, and does not start with
+`--cache-salt-per-key`. `TENSORFOLD_SEED_SALT` is unrelated: it only seeds sampling.
 
 ## Conversations on disk
 
