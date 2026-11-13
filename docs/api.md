@@ -1278,6 +1278,22 @@ server sends the counters described under [Responses](#responses). For memory fi
 [`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
 `tensorfold:process_footprint_bytes`.
 
+### Stall sentinel
+
+`--stall-seconds N` (off by default) watches the engine thread: when one round stays open for N seconds, the engine
+reports unhealthy. `/health` answers 503 `{"status": "unavailable"}`, new model requests are refused with
+`engine_unavailable`, the server logs one line naming the model type, and `/metrics` counts the episode in
+`tensorfold:engine_stalls_total`, which the scrape carries only while the flag is on. When the round ends, health and
+admission come back and the count stays. With `--stall-exit` (which needs `--stall-seconds`) the server then exits
+with status 70, so a service manager restarts it.
+
+A round is one pass of the engine loop: admissions, a burst of short prompts, at most one step of a long prompt and
+one decode round. Idle time is not counted. A family that fills a long prompt in one call holds one round for all of
+it, so N must exceed the slowest prompt call the server takes; 120 or more suits most deployments. An engine without
+the shared lane host refuses the flag by name. Open SSE streams keep their keepalives while a round is stalled:
+`: keepalive` comments on OpenAI streams and `ping` events on Messages, after `TF_SSE_KEEPALIVE_S` silent seconds
+(15 by default).
+
 ## Cancel a request
 
 `POST /v1/requests/{id}/cancel` (or `/requests/{id}/cancel`) cancels a running or queued request by the id its

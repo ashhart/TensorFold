@@ -149,6 +149,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
         var status: api.Status = .{};
         var streams: [512]u32 = undefined;
         const stub = m.readStatusParked(srv, &status, &streams); // the manager lock guards the read; no engine write
+        @import("metrics.zig").renderStalls(&out.writer, status) catch return;
         const info = m.readInfo(srv);
         const memory = m.readMemory(srv, false);
         // parked: no engine holds counters; the HTTP and process families still render
@@ -160,6 +161,7 @@ pub fn metrics(srv: *Server, conn: *Conn, a: Allocator) void {
         var status: api.Status = .{};
         var streams: [512]u32 = undefined;
         srv.engine.status(&status, &streams);
+        @import("metrics.zig").renderStalls(&out.writer, status) catch return;
         if (liveRead(snap, status)) {
             ledgerCounts(&status, snap);
             srv.metrics.render(srv.io, &out.writer, status, streams[0..@min(status.streams, streams.len)], srv.info, srv.engine.memory(false), srv.info.context_window) catch return;
