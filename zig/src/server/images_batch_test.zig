@@ -27,7 +27,7 @@ fn sequence(count: usize, seed: ?u64) !void {
     for (data, 0..) |item, index| {
         const reported = try seedOf(item);
         try t.expectEqual(stub.seeds[index], reported);
-        if (seed) |start| try t.expectEqual(start + @as(u64, @intCast(index)), reported) else try t.expect(reported < 1 << 53);
+        try t.expectEqual((seed orelse 42) + @as(u64, @intCast(index)), reported);
         var solo: h.Stub = .{};
         const single = try h.ask(a, &solo, try body(a, 1, reported));
         try t.expectEqual(@as(u16, 200), single.status);
