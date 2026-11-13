@@ -24,6 +24,11 @@ pub fn rest(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) 
     _ = object.getEmittedBin();
     const check = b.step("check-metal-prefill-rest-host", "Actual remaining Metal prompt callback bodies without shaders or execution");
     check.dependOn(&object.step);
+    // LFM3's prompt pass a chunk a call (#3021): its cuts, a decode between chunks, a cancel, the whole pass's yield
+    const lfm3_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm3/prefill_steps_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const lfm3_run = b.addRunArtifact(b.addTest(.{ .root_module = lfm3_root, .filters = &.{"LFM3 Metal steps:"} }));
+    lfm3_run.has_side_effects = true;
+    b.step("test-lfm3-metal-steps-host", "LFM3 Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&lfm3_run.step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen4_metal.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
     @import("qwen4.zig").metalNative(b, b.graph.host, host);
