@@ -186,8 +186,7 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
         const head = try r.name("output_hypernetworks_mlps.{d}", .{choice.candidate});
         const classifier = try layer.mlp(head, mask_token, 3);
         mask_rows[slot] = try r.matmul(pixels.tensor, classifier, pixels.height * pixels.width, 1, pixels.channels);
-        const pointer_token = table.mask(state.queries, slot, if (options.multiplex) 0 else choice.candidate);
-        var pointer = try owner.mlp(if (r.config.version == .sam31 and !options.multiplex) "interactive_obj_ptr_proj" else "obj_ptr_proj", pointer_token, 3);
+        var pointer = try owner.mlp(if (r.config.version == .sam31 and !options.multiplex) "interactive_obj_ptr_proj" else "obj_ptr_proj", mask_token, 3);
         if (choice.score <= 0) {
             pointer = if (r.config.version == .sam31) try owner.linear("no_obj_ptr_linear", pointer) else try owner.parameter("no_obj_ptr");
             mask_rows[slot] = empty_mask;
