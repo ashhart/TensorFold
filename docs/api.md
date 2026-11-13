@@ -288,7 +288,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
-| `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match | Both |
+| `response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`, `structured_outputs` | A JSON schema, any JSON object, a regex, a choice or an EBNF grammar the reply must match; on the native server also `structural_tag`, JSON regions inside free text | Both |
 | `grammar_budget` | Boolean, default false. Under a grammar (the fields above, or a required tool call), never draw a token after which the reply could no longer complete within `max_tokens`; see [Structured output](#structured-output) | Native |
 | `ignore_eos` | Disable model end-of-sequence stopping; the reply limit still applies | Both |
 | `stop` | Stop at a string or any string in a list; omit the matched text from the response | Both |
@@ -535,6 +535,23 @@ refuse structured requests. Drafting stays on: the drafts the head holds on the 
 back to the host before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key,
 closing markup), and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies
 are the same.
+
+The native server also takes `response_format: {"type": "structural_tag", "structures": [...], "triggers": [...]}` on
+`/v1/chat/completions` and `/v1/completions`. The reply is free text, and each structure's `begin` string opens a region
+that must be JSON matching its `schema` and close with its `end` string. Each structure is
+`{"begin": "<weather>", "schema": {...}, "end": "</weather>"}`: `begin` and `end` are non-empty strings of at most 256
+bytes, and `schema` is a JSON schema object (or its JSON text, or `true`). `triggers` are the strings that open a
+region: each must start at least one structure's `begin`, and every `begin` must start with exactly one of them.
+Without `triggers`, each distinct `begin` that no shorter `begin` starts is a trigger. A trigger can't appear in the
+free text except as the start of a region, so with `"triggers": ["<"]` every `<` opens a structure. Outside regions the
+text is unconstrained; inside one, its JSON allows at most 32 blank characters between two tokens, as `json_schema`
+does. A reply may hold any number of regions, including none, and can't end inside one. A request takes up to 64
+structures and 64 triggers, compiling to at most 1 MiB of grammar; a malformed list returns HTTP 400 before any stream
+starts, naming the structure and field. xgrammar's own `{"type": "structural_tag", "format": {...}}` form is refused.
+The server compiles the request onto the same grammar engine as the other formats (xgrammar's `triggered_tags`), so
+the backends, drafting and thinking work as described above, and `grammar_budget` as described below. As with the
+other formats, it takes the place of the strict-tool grammar under `tool_choice: "auto"` and is refused beside
+`tool_choice: "required"` or a named function. Requests without it are unchanged.
 
 On the native server, `/v1/chat/completions` and `/v1/responses` enforce `tool_choice: "required"` and a named
 function with the engine's token grammar. Chat uses `{"type":"function","function":{"name":"lookup"}}`;

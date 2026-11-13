@@ -240,7 +240,7 @@ fn list(a: Allocator, items: []const Value) Allocator.Error!Value {
 }
 
 /// {"type": kind, fields...}.
-fn node(a: Allocator, kind: []const u8, entries: []const struct { []const u8, Value }) Allocator.Error!Value {
+pub fn node(a: Allocator, kind: []const u8, entries: []const struct { []const u8, Value }) Allocator.Error!Value {
     const o = try json.newObject(a);
     try o.put(a, "type", .{ .string = kind });
     for (entries) |e| try o.put(a, e[0], e[1]);
