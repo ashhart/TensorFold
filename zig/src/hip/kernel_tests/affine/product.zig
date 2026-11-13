@@ -101,7 +101,14 @@ pub const Product = struct {
     fn makePlan(p: *Product, pairs: usize) !void {
         const c = p.c;
         p.expert_of = try gpa.alloc(u32, pairs);
-        if (c.shared or c.served) {
+        if (c.loads.len != 0) {
+            var at: usize = 0;
+            for (c.loads, 0..) |load, e| {
+                @memset(p.expert_of[at..][0..load], @intCast(e));
+                at += load;
+            }
+            std.debug.assert(at == pairs and c.loads.len <= c.experts);
+        } else if (c.shared or c.served) {
             drawServed(p.expert_of, c, &p.rig.rng);
         } else for (p.expert_of, 0..) |*e, i| {
             e.* = if (c.even) @intCast(i % c.experts) else @intCast(p.rig.rng.next() % c.experts);
