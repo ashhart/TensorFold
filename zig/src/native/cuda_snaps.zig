@@ -142,12 +142,12 @@ test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
         pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
     };
     _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
-    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512, 0).intermediate);
     _ = env.setenv("TF_PROMPT_INTERMEDIATE", "0", 1);
     defer _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
-    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512, 0).intermediate);
     _ = env.setenv("TF_PROMPT_INTERMEDIATE", "1", 1);
-    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512).intermediate);
+    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512, 0).intermediate);
 }
 
 test {
