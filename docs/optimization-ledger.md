@@ -380,6 +380,10 @@ below; these are estimates for planning a port, not results.
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the
     target.
 
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | deepseek_v41 (M), timed cost table | opt-in; M5 Ultra code +1..+6 %, 3 chat cells −2..−4 %; M3 Ultra 5 cells +1..+4 %, 3 −1..−2 % | [#2952] |
+
 18. **Copy drafts.** Where a reply repeats earlier text, the lane host drafts the continuation from the context
     (`copy_index.zig`) and the target verifies it. It needs no drafter weights; [#2022] brought verified root and
     context copies to five CUDA lane hosts at once (opt-in). GLM's issue is [#1910].
@@ -614,4 +618,5 @@ below; these are estimates for planning a port, not results.
 [#2633]: https://github.com/ashhart/TensorFold/pull/2633
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
+[#2952]: https://github.com/ashhart/TensorFold/pull/2952
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
