@@ -653,6 +653,33 @@ backend mask hook. A missing library or grammar compilation error is also refuse
 
 The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
 
+### Strict tools under `tool_choice: "auto"`
+
+With tools offered and `tool_choice` omitted or `"auto"`, a tool marked `"strict": true` inside `function` is held
+to its `parameters` schema when the backend has token-grammar support and the grammar library loads. The reply may be
+plain text or calls, and text outside the call markup is free. Inside a call the name is one of the offered tools, a
+strict tool's arguments must follow its schema, and a tool not marked strict takes any JSON object.
+`parallel_tool_calls: false` allows one call; unset or `true` allows several. Auto never requires a call: a text-only
+reply is not an error. Chat passes the tools through; Responses copies the tool's top-level `strict` into `function`.
+Anthropic Messages tools carry no `strict` flag, so they are held only when the switch below is on.
+
+`TENSORFOLD_TOOL_GRAMMAR=1` holds every auto tools request the same way: each offered tool's arguments must follow
+its schema, marked strict or not. Only the value `1` turns it on, with ASCII spaces around it ignored; unset, empty,
+`0` and any other text leave it off, and none of those is refused at startup. Unset is the default. The switch
+applies only to auto: `required` and a named function already constrain the reply to schema-valid calls, so it
+changes nothing there. Where the backend lacks token-grammar support or the grammar library does not load, an auto
+request is served unconstrained rather than refused; the `required` and named cases in that position are refused
+before generation with HTTP 400 and the backend's or library's reason, as described above. A strict auto grammar
+xgrammar cannot compile is also refused before generation with HTTP 400, for example:
+`strict tools under tool_choice "auto" on backend 'qwen27': the grammar cannot be enforced: <xgrammar's reason>`.
+LFM2's template writes its calls as one EBNF rule rather than a triggered tag, so strict tools under auto are not
+grammar-held there.
+
+The legacy `TF_DSV41_TOOL_GRAMMAR` name takes `0` or `1`. When `TENSORFOLD_TOOL_GRAMMAR` is set, even to an empty
+value, it is read instead and the legacy name is ignored, even if the legacy value is malformed. A malformed legacy
+value without that override logs the accepted form at start and exits with status 1, for example:
+`TF_DSV41_TOOL_GRAMMAR="true": expected 0 or 1 (ignored while TENSORFOLD_TOOL_GRAMMAR is set)`.
+
 `grammar_budget: true` (native server, off by default) keeps a constrained reply completable within its token limit, so
 a required tool call or a JSON value cut by `max_tokens` still parses. Before each draw, a token is masked when no
 continuation after it reaches a place where the grammar could end within the draws left (`max_tokens`, counted after
