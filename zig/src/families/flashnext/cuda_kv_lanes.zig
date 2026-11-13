@@ -24,6 +24,11 @@ pub fn pagingOf(v: ?[]const u8) !usize {
     return n;
 }
 
+/// TF_FLASHNEXT_KV_PAGES at load: our own glue, no --slide, one rank (two for an EXL3 pack).
+pub fn refusePages(page_tokens: usize, tp: usize, exl3: bool, slide: bool, captured: bool) !void {
+    if (page_tokens > 0 and ((tp != 1 and !exl3) or slide or captured)) return error.FlashNextPagesUnsupported;
+}
+
 /// TF_FLASHNEXT_KV_PAGES_ALL=1: every stream on pages, none on its own contiguous caches (checks).
 pub fn pagedOnly() bool {
     const v = @import("core").profile.get(.TF_FLASHNEXT_KV_PAGES_ALL) orelse return false;

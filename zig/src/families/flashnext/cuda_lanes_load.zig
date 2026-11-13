@@ -35,7 +35,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
     if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const page_tokens = try @import("cuda_kv_lanes.zig").paging();
-    if (page_tokens > 0 and (o.slide or captured != null)) return error.FlashNextPagesUnsupported;
+    try @import("cuda_kv_lanes.zig").refusePages(page_tokens, o.tp, mode == .exl3, o.slide, captured != null);
     // pending DeltaNet rows run on one GPU only: TF_FLASHNEXT_KEEP_LATE=1 with tensor parallel is refused
     const Draft = @import("cuda_mtp_draft.zig").Draft;
     const late_fits = o.tp == 1;
