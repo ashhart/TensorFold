@@ -98,6 +98,7 @@ fn collective(pair: *[2]c_int) !Collective {
     c.failed = false;
     c.release = null;
     c.comm = @ptrFromInt(0x1000);
+    c.parent = null;
     c.link = .{ .fd = pair[0] };
     c.timeout_ms = 1000;
     c.lib.api.ncclAllReduce = Fake.allReduce;
