@@ -39,6 +39,9 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
 - `--prompt-cache-gib 0` is required with drafts at `--tp 2`, and `--idle-unload` is refused with `--tp`.
+- A prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's
+  rows and gathers the sums: rank 0 sends 3.43 MiB a prompt token over two GB10s' RoCE link instead of 5.81, with the
+  same bytes in every written row. Decode rounds and verify windows keep the all-reduce.
 - At `--tp 2` each stream's window verifies alone, so concurrent streams do not yet share a verify pass.
 
 ## Experimental K32 prompt experts

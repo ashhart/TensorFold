@@ -186,8 +186,6 @@ pub const cuda = @import("flashnext_cuda_records.zig").cuda ++ [_]CudaRecord{
     .{ .launch = .{ .name = "exl3_experts tf_exl3_plan_rotate", .symbol = "tf_exl3_plan_rotate", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 33, .static = 0, .bound = 0 }, .{ .regs = 33, .static = 0, .bound = 0 }, .{ .regs = 31, .static = 0, .bound = 0 }, .{ .regs = 31, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_plan_finish", .symbol = "tf_exl3_plan_finish", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_rotate", .symbol = "tf_exl3_prompt_rotate", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 20, .static = 0, .bound = 0 }, .{ .regs = 20, .static = 0, .bound = 0 } } },
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu", .symbol = "tf_exl3_prompt_gu", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 124, .static = 43264, .bound = 256 }, .{ .regs = 124, .static = 43264, .bound = 256 } } },
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down", .symbol = "tf_exl3_prompt_down", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_tc_0", .symbol = "tf_exl3_tc_0", .image = "exl3_candidate", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_tc_1", .symbol = "tf_exl3_tc_1", .image = "exl3_candidate", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_tc_2", .symbol = "tf_exl3_tc_2", .image = "exl3_candidate", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
@@ -311,8 +309,6 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "drama3_codec c_snake", .usage = .{ .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 } } },
         .{ .name = "drama3_fp8 decode gate-up", .usage = .{ .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 163, .static = 0, .bound = 128 }, .{ .regs = 163, .static = 0, .bound = 128 } } },
         .{ .name = "drama3_fp8 prompt gate-up", .usage = .{ .{ .regs = 199, .static = 32768, .bound = 128 }, .{ .regs = 199, .static = 32768, .bound = 128 }, .{ .regs = 199, .static = 32768, .bound = 128 }, .{ .regs = 214, .static = 32768, .bound = 128 }, .{ .regs = 214, .static = 32768, .bound = 128 } } },
-        .{ .name = "exl3_experts tf_exl3_prompt_gu", .usage = .{ .{ .regs = 128, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 } } },
-        .{ .name = "exl3_experts tf_exl3_prompt_down", .usage = .{ .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 } } },
         .{ .name = "latent tf_super_topk_few", .usage = .{ .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 } } },
         .{ .name = "ck tf_ck4_up_relu2_few", .usage = .{ .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 } } },
         .{ .name = "mamba tf_nemo_scan", .usage = .{ .{ .regs = 138, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 } } },
@@ -339,6 +335,7 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 }
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
+    if (@import("exl3_prompt_pending.zig").owns(r.launch.name)) return none;
     if (release) |v| if (v.major == 13 and v.minor == 0) if (@import("measurements/main_130.zig").lookup(r.launch.name)) |u| return u;
     var u = r.usage;
     const rel = release orelse return u;
@@ -591,6 +588,7 @@ test {
     _ = @import("minimax_cuda_records.zig");
     _ = @import("glm_f32w_pending.zig");
     _ = @import("glm_l2pf_pending.zig");
+    _ = @import("exl3_prompt_pending.zig");
     _ = @import("registry_pending_test.zig");
     _ = @import("flashnext_pages_pending.zig");
     _ = @import("flashnext_attn_lanes_pending.zig");

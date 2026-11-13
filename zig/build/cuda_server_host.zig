@@ -20,6 +20,8 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup_spans, .filters = &.{"startup receipt:"} })).step);
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"startup receipt:"} })).step);
     @import("q27_profile_host.zig").steps(b, server_tests);
+    // the open-connection limit, one address's share under pressure and its flags (#3048), on Linux hosts too
+    b.step("test-connection-admission-host", "Connection limit, per-address share, trusted proxies and idle shedding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "security: ", "connection CLI:" } })).step);
     b.step("test-drama-cfg-host", "Drama CFG CLI, HTTP and voice transitions without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"CFG"} })).step);
     b.step("test-speech-redraw-deadline-host", "Busy speech redraw expiry without counting an unsubmitted take").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a busy redraw stops at its latest start"} })).step);
     @import("proposal_vocab_host.zig").steps(b, mods.core);
@@ -69,6 +71,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     const publication = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark publication:"} }));
     b.step("test-benchmark-publication-host", "Benchmark command publication boundaries with inert effects").dependOn(&publication.step);
     b.step("test-benchmark-routing-host", "Benchmark command routing from explicit model capabilities").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark routing:"} })).step);
+    b.step("test-benchmark-cancel-host", "A cancelled local benchmark saves its receipt, exits 130 and never publishes").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a cancelled local run"} })).step);
     const server_step = b.step(
         "test-server-cpu",
         "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",

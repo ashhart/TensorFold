@@ -29,6 +29,7 @@ pub const Model = struct {
     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
     draft_confidence: ?f64 = null,
+    floor_rates: bool = false, // Constants.floor_rates: a head whose steps cost more than the floor's cut saves
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     window_costs_lone: bool = false, // window_costs price a lone stream only; shared forwards use shared_costs
@@ -45,6 +46,7 @@ pub const Model = struct {
     granted_depth: bool = false, // with draft_probabilities: every stream drafts its last grant plus a slack
     draft_slack: u32 = 0, // drafts past a stream's last grant, short or not (0: the Constants' own)
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
+    plain_streams: u32 = 0, // a shared round with this many streams or more drafts none (0: off)
     copy_first: bool = false, // a copy ahead takes the round: the head holds no drafts for it (a drafter's own pass)
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass, timed at load
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
@@ -79,6 +81,7 @@ pub const Config = struct {
     batch_streams: u32,
     node_probabilities: bool,
     granted_depth: bool = false, // Model.granted_depth
+    plain_streams: u32 = 0, // Model.plain_streams
     fill_lanes: u32 = 0, // rows a window may grow to with suffix-match branches (0: off; lanes/fill.zig)
     fill_match: u32 = 8, // context tokens a suffix-match branch must match (shorter ones are coincidental phrases)
     fill_floor: f64 = 0.35, // the share of grafted rows a stream must keep to go on reading its chain back every round
@@ -166,6 +169,7 @@ pub const Config = struct {
             .batch_streams = if (streams) (if (m.max_streams != 0) m.max_streams else 32) else 1,
             .node_probabilities = m.draft_probabilities or m.draft_confidence != null,
             .granted_depth = m.granted_depth and m.draft_probabilities,
+            .plain_streams = m.plain_streams,
             .draft_streams = m.draft_streams,
             .head_trees = m.head_trees,
             .join_tail = m.join_tail,
@@ -185,6 +189,7 @@ pub const Config = struct {
                 .grant_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).grant_slack,
                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
                 .copy_first = m.copy_first and !m.context_copies,
+                .floor_rates = m.floor_rates,
                 .hold_costs = m.hold_costs,
             },
             .draft_step_ms = m.draft_step_ms,
