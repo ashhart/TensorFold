@@ -143,6 +143,11 @@ pub const WindowAttention = struct {
         return if (w.win > 0) (w.win + chunk_keys - 2) / chunk_keys + 1 else (w.ring + chunk_keys - 1) / chunk_keys;
     }
 
+    /// Chunks a row at `p` has partials in (window_rows_fault.cuh's liveChunks): no window, up to its own; else all.
+    pub fn liveChunks(w: Window, p: usize) usize {
+        return if (w.win > 0) chunks(w) else @min(chunks(w), p / chunk_keys + 1);
+    }
+
     /// Key tiles a decode row's window can touch (its partials a key head).
     pub fn tiles(w: Window) usize {
         return if (w.win > 0) (w.win + 62) / 64 + 1 else (w.ring + 63) / 64 + 1;
@@ -348,4 +353,16 @@ test "wide geometry rejects empty heads and preserves all sixteen GQA ratios" {
     w.hk = 1;
     w.d = 0;
     try std.testing.expect(!wideShape(w));
+}
+
+test "a row's live chunks: no window, only its own position's (positions 0, 255, 256, 1000, 32767); a window, every one" {
+    const WA = WindowAttention;
+    for ([_]usize{ 32768, 131072 }) |context| {
+        const w: Window = .{ .h = 16, .hk = 1, .d = 512, .win = 0, .ring = context, .scale = 1 };
+        try std.testing.expectEqual(context / chunk_keys, WA.chunks(w)); // 128 or 512 chunks a row's merge looped over
+        for ([_]usize{ 0, 255, 256, 1000, 32767 }, [_]usize{ 1, 1, 2, 4, 128 }) |p, live| try std.testing.expectEqual(live, WA.liveChunks(w, p));
+    }
+    const windowed: Window = .{ .h = 16, .hk = 8, .d = 256, .win = 1024, .ring = 1536, .scale = 1 };
+    try std.testing.expectEqual(WA.chunks(windowed), WA.liveChunks(windowed, 0));
+    try std.testing.expectEqual(WA.chunks(windowed), WA.liveChunks(windowed, 100000));
 }
