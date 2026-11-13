@@ -395,8 +395,7 @@ pub const Model = struct {
                     break :blk a.alpha;
                 },
                 .mlp => |p| blk: {
-                    try m.proj(lin, s, p.gate, h, x.mg, n, prompt);
-                    try m.proj(lin, s, p.up, h, x.mu, n, prompt);
+                    try m.projMany(lin, s, &.{ p.gate, p.up }, h, &.{ x.mg, x.mu }, n, prompt);
                     try k.act.swigluL2(s, x.mg, c.intermediate, x.mu, c.intermediate, p.su_g, p.su_u, x.m, n, c.intermediate, eps);
                     try m.proj(lin, s, p.down, x.m, x.out, n, prompt);
                     break :blk p.alpha;
@@ -416,10 +415,7 @@ pub const Model = struct {
     fn attention(m: *Model, k: *const Kernels, s: cuda.Stream, lin: cuda.qlinear.Linear, a: wts.Attn, step: schedule.Step, h: u64, n: usize, prompt: bool, p0: usize, slot: usize, fslot: usize, flat: bool) !void {
         const c = m.c;
         const x = m.s;
-        try m.proj(lin, s, a.q, h, x.q, n, prompt);
-        try m.proj(lin, s, a.k, h, x.kk, n, prompt);
-        try m.proj(lin, s, a.v, h, x.vv, n, prompt);
-        try m.proj(lin, s, a.g, h, x.g, n, prompt);
+        try m.projMany(lin, s, &.{ a.q, a.k, a.v, a.g }, h, &.{ x.q, x.kk, x.vv, x.g }, n, prompt);
         const full = step.kind == .full;
         const cache = step.cache.?;
         const dh: i64 = @intCast(c.head_dim);
@@ -453,6 +449,12 @@ pub const Model = struct {
         const rows: cuda.qlinear.Rows = .{ .x = in, .part = m.s.part };
         try (if (prompt) lin.prompt(s, w, rows, out, n) else lin.decode(s, w, rows, out, n));
     }
+
+    /// Projections of one input: decode rows in one grouped NVFP4 launch (each output's bits unchanged), prompts each.
+    fn projMany(m: *const Model, lin: cuda.qlinear.Linear, s: cuda.Stream, ws: []const cuda.qlinear.Weight, in: u64, outs: []const u64, n: usize, prompt: bool) !void {
+        if (!prompt) return lin.decodeMany(s, ws, .{ .x = in, .part = m.s.part }, outs, n);
+        for (ws, outs) |w, out| try m.proj(lin, s, w, in, out, n, true);
+    }
 };
 
 test "the forward's launches type-check against the shared operators" {
@@ -474,4 +476,26 @@ test "Dory queued upload: Model inputs survive caller mutation until stream comp
         }
     };
     try @import("cuda_upload_test.zig").check(Send.send);
+}
+
+test "Dory's decode groups share K slices at the pinned shapes: q, k, v and g 4, gate and up 2" {
+    const text = try config.pinnedText(std.testing.allocator);
+    defer std.testing.allocator.free(text);
+    var why: config.Why = .{};
+    const c = try config.parse(std.testing.allocator, text, &why);
+    const d = c.hidden;
+    var lane: cuda.qmmf.Lane = undefined;
+    lane.clusters = true; // sm_90 on, GB10 included: K slices meet in a cluster
+    const groups = [_]struct { sk: u32, n: []const usize }{
+        .{ .sk = 4, .n = &.{ c.qDim(), c.kvDim(), c.kvDim(), c.qDim() } },
+        .{ .sk = 2, .n = &.{ c.intermediate, c.intermediate } },
+    };
+    for (groups) |group| {
+        var parts: [4]cuda.qmmf.Many = undefined;
+        for (group.n, 0..) |n, i| {
+            parts[i] = .{ .w = cuda.nvfp4.weight(1, 2, 1, n, d), .out = (i + 1) << 32 };
+            try std.testing.expectEqual(group.sk, cuda.qmmf.slices(parts[i].w));
+        }
+        for ([_]usize{ 1, 2, 16, window_rows, round_rows }) |rows| try std.testing.expect(cuda.qmmf.manyEligible(lane, rows, parts[0..group.n.len]));
+    }
 }
