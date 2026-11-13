@@ -330,6 +330,15 @@ fn rowKernels(gpu: Gpu, stream: cuda.Stream) !void {
     args.add(dst_a.ptr);
     args.add(dst_b.ptr);
     try cuda.launch.launch(gather, .{ .grid = .{ .x = 2 }, .block = .{ .x = 256 } }, stream, &args);
+    try stream.synchronize();
+    const gathered = try gpa.alloc(u32, 2 * words);
+    defer gpa.free(gathered);
+    var diffs: usize = 0;
+    // the gather, read before the last-row gather overwrites both rows: part k's row lands at dst row k
+    try dst_a.download(0, std.mem.sliceAsBytes(gathered));
+    if (!std.mem.eql(u32, gathered, ha[0 .. 2 * words])) diffs += 1;
+    try dst_b.download(0, std.mem.sliceAsBytes(gathered));
+    if (!std.mem.eql(u32, gathered, hb[0 .. 2 * words])) diffs += 1;
     var l: nemotron.kernels.LastRows = std.mem.zeroes(nemotron.kernels.LastRows);
     l.a[0] = a.ptr + words * 4;
     l.b[0] = b.ptr + words * 4;
@@ -359,9 +368,19 @@ fn rowKernels(gpu: Gpu, stream: cuda.Stream) !void {
     defer gpa.free(got_b);
     try dst_a.download(0, std.mem.sliceAsBytes(got_a));
     try dst_b.download(0, std.mem.sliceAsBytes(got_b));
-    var diffs: usize = 0;
-    if (got_a[0] != ha[words] or got_a[1] != ha[0]) diffs += 1;
-    if (got_b[0] != hb[words] or got_b[1] != hb[0]) diffs += 1;
+    // dst row 0 is source row 1 and row 1 row 0; row 0's token then at tok_at, its probability at prob_at (j, j - 1)
+    const want_a = try gpa.alloc(u32, 2 * words);
+    defer gpa.free(want_a);
+    const want_b = try gpa.alloc(u32, 2 * words);
+    defer gpa.free(want_b);
+    for ([_][]u32{ want_a, want_b }, [_][]const u32{ ha, hb }) |w, h| {
+        @memcpy(w[0..words], h[words .. 2 * words]);
+        @memcpy(w[words .. 2 * words], h[0..words]);
+    }
+    want_a[@intCast(s.tok_at)] = ha[0];
+    want_b[@intCast(s.prob_at)] = hb[0];
+    if (!std.mem.eql(u32, got_a, want_a)) diffs += 1;
+    if (!std.mem.eql(u32, got_b, want_b)) diffs += 1;
     try check.expect(diffs == 0, "nemotron-draws: {d} row kernels differ", .{diffs});
     check.pass("nemotron-draws: gather, ordered last-row gather and scatter keep their rows", .{});
 }
