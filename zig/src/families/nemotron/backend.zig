@@ -490,7 +490,7 @@ pub const Metal = struct {
         self.drain() catch {
             @import("prompt_flight.zig").forget(self, s);
         };
-        _ = self.steps.at.remove(s); // a stream that left mid-pass
+        self.steps.forget(s); // a stream that left mid-pass no longer owns the prompt ids
         if (self.caches.fetchRemove(s)) |kv| {
             kv.value.deinit(&self.pool);
             self.gpa.destroy(kv.value);

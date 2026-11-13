@@ -77,6 +77,7 @@ const Ops = struct {
     pub fn load(o: Ops, s: *lanes.Stream) void {
         const ids = s.prompt();
         @memcpy(o.m.prompt.slice(u32, ids.len), ids);
+        o.m.steps.ids = s;
     }
 
     /// The stream's cache opened, its ids loaded and a kept state restored: the row its pass starts from.
@@ -93,7 +94,7 @@ const Ops = struct {
             _ = self.caches.remove(s);
         }
         const c = try @import("residency.zig").openCache(self, s, rows_needed);
-        @memcpy(self.prompt.slice(u32, ids.len), ids);
+        o.load(s);
         s.cached = 0;
         var at: usize = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there

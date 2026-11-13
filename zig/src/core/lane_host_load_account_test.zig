@@ -67,6 +67,27 @@ const Host = struct {
 const prompt: [1000]u32 = @splat(5);
 const request: api.Request = .{ .prompt = &prompt, .max_tokens = 4 };
 
+test "cancel retirement credits a newly landed tail once before discarding the pass" {
+    var x: Host = undefined;
+    try x.init();
+    defer x.deinit();
+    const j = try std.testing.allocator.create(Job);
+    j.* = x.job(&request, 0);
+    const Sink = struct {
+        fn event(_: *anyopaque, _: api.Id, _: *const api.Event) void {}
+    };
+    j.sink = .{ .ctx = &x, .event = Sink.event };
+    load.calling(&x.host, j);
+    Hand.wait(400);
+    j.stream.fill_at.store(400, .monotonic);
+    load.progress(&x.host, j);
+    load.calling(&x.host, j);
+    Hand.wait(400);
+    j.stream.fill_at.store(800, .monotonic);
+    x.host.finish(j, .cancelled, "");
+    try std.testing.expectEqual([2]u64{ 800, 800 }, x.work());
+}
+
 test "waiting between a pass's calls is not busy time; each chunk's work moves with its own time" {
     var x: Host = undefined;
     try x.init();

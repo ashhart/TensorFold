@@ -30,6 +30,7 @@ pub fn takeCancels(h: *LaneHost) void {
         h.unlock();
         if (found) |job| {
             if (job.fill_began and job.prefilled == null and !job.stream.finished) if (h.core.backend.vtable.cancel_prefill) |keep_prefix| {
+                @import("lane_host_load.zig").calling(h, job);
                 keep_prefix(h.core.backend.ptr, &job.stream) catch |err| {
                     _ = dropFailed(h, job, err);
                     continue;

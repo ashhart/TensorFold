@@ -5,7 +5,16 @@ const flight = @import("prompt_flight.zig");
 const Stream = lanes.Stream;
 
 /// Streams whose prompt passes run a chunk a call (prefill_step): each one's next prompt row.
-pub const Steps = struct { at: std.AutoHashMapUnmanaged(*Stream, usize) = .empty };
+pub const Steps = struct {
+    at: std.AutoHashMapUnmanaged(*Stream, usize) = .empty,
+    ids: ?*Stream = null,
+
+    /// A retired stream cannot remain the shared prompt buffer's owner, even if its address is reused.
+    pub fn forget(steps: *Steps, s: *Stream) void {
+        _ = steps.at.remove(s);
+        if (steps.ids == s) steps.ids = null;
+    }
+};
 
 /// Rows of a chunk from `at` whose next token the prompt holds (`n` tokens): the MTP head absorbs these.
 pub fn absorbed(at: usize, rows: usize, n: usize) usize {
@@ -41,11 +50,16 @@ pub fn step(b: anytype, ops: anytype, s: *Stream) !bool {
         return e;
     };
     errdefer _ = map.remove(s);
-    // the prompt buffer is every pass's: the chunks queued before this one land, then it holds this prompt
-    try b.drain();
-    ops.load(s);
+    // Another prompt's ids may replace the shared buffer only after all its readers have landed.
+    if (ops.steps().ids != s) {
+        try b.drain();
+        ops.load(s);
+    }
     var next: usize = 0;
-    const end = try chunk(b, ops, s, map.get(s).?, &next);
+    const end = chunk(b, ops, s, map.get(s).?, &next) catch |err| {
+        if (err == error.Cancelled) try cancel(b, ops, s);
+        return err;
+    };
     if (end < s.prompt_len) {
         map.getPtr(s).?.* = end;
         return false;
@@ -59,6 +73,7 @@ pub fn step(b: anytype, ops: anytype, s: *Stream) !bool {
 pub fn cancel(b: anytype, ops: anytype, s: *Stream) !void {
     const at = ops.steps().at.get(s) orelse return;
     try b.drain();
+    s.fill_at.store(@intCast(at), .monotonic);
     s.keepInterruptedPrefill(@intCast(at));
 }
 
