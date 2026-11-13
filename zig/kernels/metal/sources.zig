@@ -24,8 +24,10 @@ pub const gemma4_fused = @embedFile("gemma4/fused.metal");
 pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
 /// The prefill GEMM template and its one kernel macro, ahead of every family's gemm_nax instantiations.
 const gemm_nax = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal");
+/// gemm_nax and the image towers' shared glue: bf16 rounding, threadgroup sum and max, row softmax.
+const vision_glue = gemm_nax ++ @embedFile("prefill/vision_glue.metal");
 /// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
-pub const gemma4_vision = gemm_nax ++ @embedFile("gemma4/vision.metal");
+pub const gemma4_vision = vision_glue ++ @embedFile("gemma4/vision.metal");
 
 /// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
 pub const lfm2 = @embedFile("lfm2/lfm2.metal") ++ @embedFile("lfm2/lfm2_segments.metal");
@@ -141,9 +143,9 @@ pub const glm_gather = @embedFile("glm_gather.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
-pub const glm_vision = gemm_nax ++ @embedFile("glm_vision.metal");
+pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
-pub const core_qwen_vision = gemm_nax ++ @embedFile("core/qwen_vision.metal");
+pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
@@ -186,7 +188,7 @@ pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
 /// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
 pub const step5_glue = @embedFile("step5/glue.metal");
 /// MiniMax-M3's glue at transformers' rounding points: norms, rotation, SwiGLU-OAI, router, indexer, decode attention.
-pub const minimax_m3_glue = @embedFile("minimax_m3/glue.metal");
+pub const minimax_m3_glue = @embedFile("core/bf16_argmax.metal") ++ @embedFile("minimax_m3/glue.metal");
 /// MiniMax-M3's prompt attention on the tensor units over each row's kept index blocks.
 pub const minimax_m3_attention_nax = @embedFile("minimax_m3/attention_nax.metal");
 /// MiniMax-M3's DSpark drafter (norms, q/k into its context rings, block attention, the Markov chain) and the taps.
@@ -197,20 +199,24 @@ pub const minimax_m3_experts = @embedFile("minimax_m3/experts.metal");
 pub const minimax_m3_dflash2 = @embedFile("minimax_m3/dflash2.metal");
 /// MiniMax-M3's indexer block scores on the tensor units (a prompt chunk's).
 pub const minimax_m3_index_nax = @embedFile("minimax_m3/index_nax.metal");
+/// Flint's glue at the reference's rounding points: embed, norms, q/k rotation, SwiGLU, residual and MoE adds.
+pub const flint_glue = @embedFile("flint/glue.metal");
+/// Flint's attention on the tensor units: prompt tiles, decode partials and their merge, with sinks.
+pub const flint_attention_nax = @embedFile("flint/attention_nax.metal");
 /// Step-5's sparse indexer (summaries, scores, top-k) and its sliding, sparse and dense attention.
 pub const step5_sparse = @embedFile("step5/sparse.metal");
 /// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
 pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
 /// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
-pub const step5_vision = gemm_nax ++ @embedFile("step5/vision.metal");
+pub const step5_vision = vision_glue ++ @embedFile("step5/vision.metal");
 /// Spark2.5's glue at its PyTorch rounding points: embed, fp32 residual adds and norms, rope, head gate, exact GELU.
-pub const spark25_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("spark25/glue.metal");
+pub const spark25_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("spark25/glue.metal");
 /// Spark2.5's prompt attention on the tensor units (gemma4's prompt kernel; nax.h inlined at load).
 pub const spark25_attention_nax = @embedFile("spark25/attention_nax.metal");
 /// Spark2.5's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
 pub const spark25_gemm = gemm_nax ++ @embedFile("spark25/gemm.metal");
 /// Llama's glue at HF's rounding points: embed, a bf16 residual and its norm, rope with bf16 cos and sin, SiLU.
-pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("llama/glue.metal");
+pub const llama_glue = @embedFile("core/bf16_matvec.metal") ++ @embedFile("core/bf16_argmax.metal") ++ @embedFile("llama/glue.metal");
 /// Llama's prompt attention on the tensor units (gemma4's prompt kernel, every key; nax.h inlined at load).
 pub const llama_attention_nax = @embedFile("llama/attention_nax.metal");
 /// Llama's bf16 prompt projections on gemm_nax's tensor-unit GEMM (nax.h inlined at load).
