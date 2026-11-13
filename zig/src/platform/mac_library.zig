@@ -1,8 +1,9 @@
 //! macOS library names: dyld searches the working directory for a bare name, so one is resolved to full paths here.
 const std = @import("std");
 
-/// The folders dyld searches for a bare name when DYLD_FALLBACK_LIBRARY_PATH is unset.
-const fallback = "/usr/local/lib:/usr/lib";
+/// The folder dyld searches for a bare name when DYLD_FALLBACK_LIBRARY_PATH is unset, for binaries built since late
+/// 2023 (`man dyld`); not /usr/local/lib, which Homebrew can write to on Intel Macs.
+const fallback = "/usr/lib";
 
 /// `name` loaded: a path as given, a bare name from DYLD_LIBRARY_PATH's folders, then the fallback's, never from here.
 pub fn open(comptime Api: type, name: []const u8) ?Api.Handle {
@@ -53,13 +54,13 @@ const Fake = struct {
 
 test "security: a bare library name is never tried in the working directory, only in full-path folders" {
     const t = std.testing;
-    // with nothing set: dyld's two default folders, in its order, and the name alone is never handed to the loader
+    // with nothing set: dyld's default folder only, and the name alone is never handed to the loader
     Fake.reset(null, null, "");
     try t.expectEqual(@as(?usize, null), open(Fake, "libturbojpeg.0.dylib"));
-    try t.expectEqual(@as(usize, 2), Fake.count);
-    try t.expectEqualStrings("/usr/local/lib/libturbojpeg.0.dylib", Fake.tried[0]);
-    try t.expectEqualStrings("/usr/lib/libturbojpeg.0.dylib", Fake.tried[1]);
-    // the user's folders come first and replace the defaults; one that is relative, empty or `.` is passed over
+    try t.expectEqual(@as(usize, 1), Fake.count);
+    try t.expectEqualStrings("/usr/lib/libturbojpeg.0.dylib", Fake.tried[0]);
+    // the user's folders come first and replace the default; this skips one that is relative, empty or `.` (dyld
+    // itself still applies DYLD_* entries to every load: those are the operator's own settings)
     Fake.reset("relative/lib:.::/opt/mine", "/opt/fall:lib", "/opt/fall/libwebpdecoder.3.dylib");
     try t.expectEqual(@as(?usize, 7), open(Fake, "libwebpdecoder.3.dylib"));
     try t.expectEqual(@as(usize, 2), Fake.count);
