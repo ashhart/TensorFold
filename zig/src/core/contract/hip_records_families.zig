@@ -23,6 +23,7 @@ test "HIP record counts stay pinned in their owning files" {
         @import("hip_records_dense_text.zig").records.len,
         @import("hip_records_draft.zig").records.len,
         @import("hip_records_embed.zig").records.len,
+        @import("hip_records_exl3.zig").records.len,
         @import("hip_records_gdn.zig").records.len,
         @import("hip_records_glm_ocr.zig").records.len,
         @import("hip_records_item.zig").records.len,
