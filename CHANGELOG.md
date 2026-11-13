@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Qwen3.8-Flash-Next on Strix Halo (gfx1151): `--mtp-drafts N` now takes up to seven, the window's eight rows less the pending one, and a stream that is alone in a round chains up to N MTP drafts; rounds shared by several streams keep at most three a stream, and without the flag the head drafts three as before, so replies and speed stay as they were (#3053). Thanks to @gilby.
+- Qwen3.8-Flash-Next on HIP: `--mtp-drafts N` now takes up to seven on every HIP device that serves Flash Next, the window's eight rows less the pending one, and a stream that is alone in a round chains up to N MTP drafts; rounds shared by several streams keep at most three a stream, `--tp` above 1 keeps the limit of three, and without the flag the head drafts three as before, so replies and speed stay as they were (#3053). Thanks to @gilby.
 
 - Qwen3.8-Flash-Next on Strix Halo (gfx1151): a verify window holds eight rows, so a lone stream's copy drafts grow to seven tokens a round while they land, where they stopped at three; rounds shared by several streams keep three-token copies, and MTP drafts default to three. A lone stream rewriting text it has seen runs about 26% faster; other cells are unchanged, and so are replies (#2730). Thanks to @gilby.
 
