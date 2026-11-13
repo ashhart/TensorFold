@@ -5,6 +5,10 @@ const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
 const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
+const kern = @import("cuda_kernels.zig");
+const sampler = @import("cuda_sampler.zig");
+const Config = @import("config.zig").Config;
+const weights = @import("cuda_weights.zig");
 const Backend = @import("cuda_lanes.zig").Cuda;
 const reuse = @import("cuda_reuse.zig");
 const common = @import("cuda_subset_restore_test.zig");
@@ -65,6 +69,9 @@ const Frame = struct {
         }
         @memset(mem(u16, head.logits)[0..272], 0xffff);
     }
+    fn region(ptr: u64, len: usize) []u8 {
+        return @as([*]u8, @ptrFromInt(ptr))[0..len];
+    }
     fn arg(comptime T: type, args: [*]?*anyopaque, at: usize) T {
         return @as(*const T, @ptrCast(@alignCast(args[at].?))).*;
     }
@@ -76,9 +83,53 @@ const Frame = struct {
         const e = col % 2 + 2 * ((col % 16) / 8);
         return ((((tg * 8 + jj) * 4 + kt) * 32 + lane) * 4 + e);
     }
-    fn kernel(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+    fn kernel(f: cuda.abi.Function, gx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, params: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const args = params.?;
-        if (@intFromPtr(f) == 1) {
+        const handle = @intFromPtr(f);
+        if (handle == 4) { // gather rows
+            const g = arg(kern.GatherRows, args, 0);
+            const dst_a = arg(u64, args, 1);
+            const dst_b = arg(u64, args, 2);
+            for (0..gx) |r| {
+                var k: usize = 0;
+                while (k < 8 and !(r >= @as(usize, @intCast(g.row0[k])) and r < @as(usize, @intCast(g.row0[k])) + @as(usize, @intCast(g.rows[k])))) : (k += 1) {}
+                if (k == 8) continue;
+                const at = r - @as(usize, @intCast(g.row0[k]));
+                const wa: usize = @intCast(g.wa);
+                const wb: usize = @intCast(g.wb);
+                @memcpy(region(dst_a + r * wa, wa), region(g.a[k] + at * wa, wa));
+                if (g.b[k] != 0) @memcpy(region(dst_b + r * wb, wb), region(g.b[k] + at * wb, wb));
+            }
+            return 0;
+        }
+        if (handle == 5) { // gather last
+            const g = arg(kern.LastRows, args, 0);
+            const dst_a = arg(u64, args, 1);
+            const dst_b = arg(u64, args, 2);
+            const wa: usize = @intCast(arg(i32, args, 3));
+            const wb: usize = @intCast(arg(i32, args, 4));
+            const n: usize = @intCast(arg(i32, args, 5));
+            for (0..n) |k| {
+                @memcpy(region(dst_a + k * wa, wa), region(g.a[k], wa));
+                if (g.b[k] != 0) @memcpy(region(dst_b + k * wb, wb), region(g.b[k], wb));
+            }
+            return 0;
+        }
+        if (handle == 6) { // scatter rows
+            const tok = arg(u64, args, 0);
+            const prob = arg(u64, args, 1);
+            const g = arg(kern.ScatterRows, args, 2);
+            for (0..gx) |r| {
+                var k: usize = 0;
+                while (k < 8 and !(r >= @as(usize, @intCast(g.row0[k])) and r < @as(usize, @intCast(g.row0[k])) + @as(usize, @intCast(g.rows[k])))) : (k += 1) {}
+                if (k == 8) continue;
+                const at = r - @as(usize, @intCast(g.row0[k]));
+                mem(u32, g.tok[k])[@as(usize, @intCast(g.tok_at)) + at] = mem(u32, tok)[r];
+                mem(f32, g.prob[k])[@as(usize, @intCast(g.prob_at)) + at] = mem(f32, prob)[r];
+            }
+            return 0;
+        }
+        if (handle == 1) {
             const x = mem(u16, arg(u64, args, 0));
             const w = mem(u16, arg(u64, args, 1));
             const out = mem(u16, arg(u64, args, 4));
@@ -115,7 +166,7 @@ const Frame = struct {
             pick = @intCast(c);
         };
         const out = arg(u64, args, 5);
-        errors += @intFromBool(out != @intFromPtr(&buffers[slot].ids) + level * 4);
+        errors += @intFromBool(out != @intFromPtr(&buffers[slot].ids) + level * 4 and out != h.tok_rows + draws * 4);
         const ids = if (subset) mem(u32, arg(u64, args, 6)) else null;
         mem(u32, out)[0] = if (ids) |table| table[pick] else pick;
         const prob = arg(u64, args, if (subset) 7 else 6);
@@ -134,14 +185,29 @@ const Frame = struct {
 const Scratch = struct {
     pinned: [5000]u32 align(16) = @splat(0),
     meta: [33]u32 = @splat(0),
-    metas: [66]u32 = @splat(0),
-    hin: [2 * D]u16 = @splat(0),
-    tok: [2]u32 = @splat(0),
-    row: [2 * D]u16 = @splat(0),
-    outs: [2 * D]u16 = @splat(0),
+    metas: [8 * 33]u32 = @splat(0),
+    hin: [8 * D]u16 = @splat(0),
+    tok: [8]u32 = @splat(0),
+    row: [8 * D]u16 = @splat(0),
+    outs: [8 * D]u16 = @splat(0),
     out: [D]u16 = @splat(0),
-    logits: [272]u16 = @splat(0xffff),
-    xs: [2]f32 = @splat(0),
+    logits: [8 * 128]u16 = @splat(0xffff),
+    rules: [8 * 8]u32 align(8) = @splat(0),
+    pos_slab: [8]u32 = @splat(0),
+    tok_rows: [8]u32 = @splat(0),
+    prob_rows: [8]f32 = @splat(0),
+    flog: [8 * 64]f32 = @splat(0),
+    vals: [8 * 28]f32 = @splat(0),
+    cols: [8 * 28]i64 = @splat(0),
+    cand: [8 * 28]i64 = @splat(0),
+    topk: [9000]u8 align(16) = @splat(0),
+    invalid: [1]u32 = @splat(0),
+    fp: [1]u32 = @splat(0),
+    probs: [8]f32 = @splat(0),
+    own_ids: [8][2]u32 = @splat(@splat(0)), // a part's tokens, a level each
+    own_probs: [8][2]f32 = @splat(@splat(0)), // a part's probabilities, a level each
+    atok: [8]u32 = @splat(0),
+    rxs: [8]f32 = @splat(0),
     fn head(s: *Scratch, e: *Engine, d: *cuda.Driver) Head {
         var h: Head = undefined;
         h.e = e;
@@ -152,11 +218,11 @@ const Scratch = struct {
         h.absorb_graphs = @splat(null);
         h.first_graphs = @splat(@splat(null));
         h.chain_graphs = @splat(@splat(null));
-        inline for (.{ "meta", "metas", "hin", "tok", "row", "outs", "out", "logits" }) |field| @field(h, field) = @intFromPtr(&@field(s, field));
-        h.rxs = @intFromPtr(&s.xs);
+        inline for (.{ "meta", "metas", "hin", "tok", "row", "outs", "out", "logits", "rules", "pos_slab", "tok_rows", "prob_rows", "flog", "vals", "cols", "cand", "topk", "invalid", "fp", "probs", "atok", "rxs" }) |field| @field(h, field) = @intFromPtr(&@field(s, field));
         return h;
     }
 };
+
 fn request(s: *lanes.Stream, depth: u32) lanes.backend.DraftRequest {
     return .{ .stream = s, .follow = &.{}, .first = .{ .value = 1 }, .rows = null, .start = s.prompt_len, .position = s.prompt_len + 1, .depth = depth };
 }
@@ -196,6 +262,9 @@ test "restored head: 15 and 16 token transitions reach mixed shrinking real chai
     e.k.modelopt = .{ .lane = lane, .gemm = undefined, .experts = undefined, .pack = undefined };
     e.k.draws.draw_fn = .{ .d = &d, .handle = @ptrFromInt(2) };
     e.k.draws.draw_ids_fn = .{ .d = &d, .handle = @ptrFromInt(3) };
+    e.k.gather_rows = .{ .d = &d, .handle = @ptrFromInt(4) };
+    e.k.gather_last = .{ .d = &d, .handle = @ptrFromInt(5) };
+    e.k.scatter_rows = .{ .d = &d, .handle = @ptrFromInt(6) };
     e.b = undefined;
     e.b.lane_part = 0;
     e.w.draft_count = 64;
@@ -304,4 +373,113 @@ test "restored head: 15 and 16 token transitions reach mixed shrinking real chai
         try e.stream.synchronize();
     }
     for (Fake.used) |live| try t.expect(!live);
+}
+
+const Count = struct {
+    var draw: usize = 0;
+    var entries: [4]usize = @splat(0);
+    var levels: usize = 0;
+    fn reset() void {
+        draw = 0;
+        entries = @splat(0);
+        levels = 0;
+    }
+    fn kernel(f: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+        const h = @intFromPtr(f);
+        if (h >= 2 and h <= 13) draw += 1;
+        return 0;
+    }
+    fn network(_: *Head, _: []const mtp.Span, tail: bool) !void {
+        if (!tail) return;
+        entries[levels] = draw;
+        levels += 1;
+    }
+};
+
+test "batched draws: eight parts take 15 or fewer greedy draw-side launches a level and 2 sampled" {
+    var d = Fake.driver();
+    d.api.cuLaunchKernel = Count.kernel;
+    const ctx: cuda.Context = .{ .d = &d, .handle = null, .device = 0 };
+    cuda.copy_source.setCurrent(null);
+    const e = try t.allocator.create(Engine);
+    defer t.allocator.destroy(e);
+    Fake.e = e;
+    Fake.used = @splat(false);
+    e.* = undefined;
+    e.gpa = t.allocator;
+    e.ctx = &ctx;
+    e.stream = .{ .d = &d, .handle = null };
+    defer e.stream.synchronize() catch unreachable;
+    e.c = std.mem.zeroes(Config);
+    e.c.hidden = D;
+    e.c.kv_heads = 1;
+    e.c.head_dim = 1;
+    e.c.layers = 1;
+    e.c.kinds[0] = .attention;
+    e.c.vocab = 128;
+    e.max_len = 64;
+    e.nch = 1;
+    e.sampling = null;
+    e.own = undefined;
+    e.own.untaught = false;
+    e.bound = &e.own;
+    e.side = undefined;
+    e.tp = null;
+    e.vision = null;
+    e.slot = 0;
+    var bufs: @import("cuda_state.zig").Buffers = undefined;
+    bufs.lane_part = 0;
+    bufs.ck8 = 0;
+    e.b = bufs;
+    e.k.d = &d;
+    e.k.triton = null;
+    e.k.ck = null;
+    e.k.ggml = null;
+    const f10: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(10) };
+    const f1: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(1) };
+    const lane: cuda.qmmf.Lane = .{ .mod = undefined, .fns = @splat(@splat(f1)), .f32_fns = @splat(@splat(f1)), .reduce = @splat(f1), .half = @splat(@splat(@splat(f1))), .half_below = 0, .clusters = false };
+    e.k.modelopt = .{ .lane = lane, .gemm = undefined, .experts = undefined, .pack = undefined };
+    e.k.torch = .{ .argmax = f10, .hist = f10, .digit = f10, .count = f10, .prefix = f10, .compact = f10, .to_f32 = f10, .lookup = f10, .strided = f10, .mamba_a = f10 };
+    e.k.glue = undefined;
+    e.k.glue.keyed = .{ .d = &d, .handle = @ptrFromInt(11) };
+    e.k.draws = undefined;
+    e.k.draws.draw_fn = .{ .d = &d, .handle = @ptrFromInt(2) };
+    e.k.draws.draw_ids_fn = .{ .d = &d, .handle = @ptrFromInt(3) };
+    e.k.draws.draw_ids_rows_fn = .{ .d = &d, .handle = @ptrFromInt(12) };
+    e.k.gather_rows = .{ .d = &d, .handle = @ptrFromInt(20) };
+    e.k.gather_last = .{ .d = &d, .handle = @ptrFromInt(21) };
+    e.k.scatter_rows = .{ .d = &d, .handle = @ptrFromInt(13) };
+    e.w = undefined;
+    e.w.draft_count = 64;
+    var ids: [64]u32 = undefined;
+    for (&ids, 0..) |*id, i| id.* = @intCast(i);
+    e.w.draft_ids = @intFromPtr(&ids);
+    e.w.draft_coverage = null;
+    var raw: [128 * D]u16 = @splat(0);
+    var dense: [128 * D]u16 = undefined;
+    cuda.qmmf.packBf16(&dense, &raw, 128, D);
+    e.w.head = .{ .bf16 = .{ .mode = .bf16, .codes = @intFromPtr(&dense), .scales = 0, .n = 128, .k = D, .npad = 128 } };
+    e.w.draft_head = .{ .bf16 = .{ .mode = .bf16, .codes = @intFromPtr(&dense), .scales = 0, .n = 64, .k = D, .npad = 128 } };
+    var scratch: Scratch = .{};
+    var h = scratch.head(e, &d);
+    e.head = &h;
+    Head.test_network = Count.network;
+    defer Head.test_network = null;
+    var parts: [8]mtp.Part = undefined;
+    const rule = sampler.rule(.{ .seed = 1, .temperature = 1, .top_k = 1 });
+    for (&parts, 0..) |*p, k| p.* = .{ .k_cache = @intFromPtr(&scratch.meta), .v_cache = @intFromPtr(&scratch.meta), .table = 0, .probs = @intFromPtr(&scratch.own_probs[k][0]), .ids = @intFromPtr(&scratch.own_ids[k][0]), .hidden = @intFromPtr(&scratch.hin), .sampled = @intFromPtr(&scratch.own_ids[k][0]), .rule = null, .pos = 0, .keep = 1, .depth = 2, .vocab = .subset, .rule_host = null };
+    Count.reset();
+    try h.chains(&parts);
+    try t.expectEqual(@as(usize, 2), Count.levels);
+    try t.expectEqual(@as(usize, 15), Count.entries[1] - Count.entries[0]);
+    try t.expectEqual(@as(usize, 15), Count.draw - Count.entries[1]);
+    for (&parts) |*p| {
+        p.rule = @intFromPtr(&scratch.rules);
+        p.rule_host = rule;
+    }
+    Count.reset();
+    try h.chains(&parts);
+    try t.expectEqual(@as(usize, 2), Count.levels);
+    try t.expectEqual(@as(usize, 2), Count.entries[1] - Count.entries[0]);
+    try t.expectEqual(@as(usize, 2), Count.draw - Count.entries[1]);
 }
