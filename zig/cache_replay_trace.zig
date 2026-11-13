@@ -2,7 +2,7 @@
 const std = @import("std");
 pub const Kind = enum { agent, one_off, idle_seed, idle_return };
 pub const Shape = enum { steady, churn, idle_gap };
-pub const Request = struct { kind: Kind, session: u32, history: u32, tokens: []u32, hash: u64, round: u32 };
+pub const Request = struct { kind: Kind, session: u32, history: u32, tokens: []u32, hash: u64, round: u32, shared: []const u32 = &.{} };
 pub const Trace = struct {
     arena: std.heap.ArenaAllocator,
     requests: []Request,
