@@ -192,8 +192,7 @@ pub const Prompt = struct {
 
     const Shape = struct { bm: usize, bn: usize, threads: u32, shared: u32, blocks: usize = std.math.maxInt(usize) };
 
-    /// One grid over 2-8 NVFP4 projections of one bf16 input, every member keeping its own prompt_lean bits:
-    /// the same band, fragments, mma chain and epilogue as its own launch, the tiles shared out by `first`.
+    /// One grid over 2-8 NVFP4 projections of one bf16 input, each keeping its own band, chain and epilogue.
     pub const ManyMember = struct { w: qmmf.Weight, out: u64 };
 
     pub fn matmulMany(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, members: []const ManyMember, out: qmmf.Out) !void {

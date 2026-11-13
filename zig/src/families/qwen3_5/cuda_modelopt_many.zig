@@ -12,8 +12,7 @@ pub const min_rows: usize = 2048;
 /// prompt_many.cu's part count.
 pub const max_parts: usize = cuda.nvfp4.parts_max;
 
-/// Every member's outputs, as the dense MLP's gate and up share the layer input on
-/// nvidia/Qwen3.8-27B-NVFP4 (MLPs NVFP4): k 5120, 17408 outputs, two to eight of them.
+/// Every member's outputs: the dense MLP's gate and up share one layer input (k 5120, 17408 out, 2-8 parts).
 pub fn admitted(e: *const Engine, ws: []const Weight, rows: usize) bool {
     if (!e.prompt_many or rows < min_rows or ws.len < 2 or ws.len > max_parts) return false;
     if (e.mo == null) return false;
