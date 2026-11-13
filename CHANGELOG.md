@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the dashboard page's test runs on every OS, so Linux CI covers it, and no longer expects a paged prefix cache tile the page never had; `zig build test` passes on Macs again (#2946).
+
 - Video input: libtfvideo decodes MPEG-4 Part 2 and H.264 streams that declare no B-frames on up to four frame threads, 2.1x to 3.4x faster on Mac and Linux, with every frame equal to before, damaged clips included; H.264 with B-frames keeps the single-threaded path, because frame threads conceal damage there differently, and a stream that contradicts its own headers falls back to it (#2863). Thanks to @swbiggart.
 
 - Qwen 3.5, 3.6 and 3.8 on CUDA: decode windows of 2 to 8 rows run at 4 or 8 rows instead of being padded to 16, about 1.5% faster at four streams on a GB10, with the same tokens (#2934, fixes #2909).
