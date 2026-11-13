@@ -69,7 +69,9 @@ pub const steps_decode_share = 0.25;
 
 /// LaneHost's prompt share in steps: the flag's (through Info, with its row cap), the env's, else the default above.
 fn applyShare(h: *api.LaneHost, backend: Model) void {
-    if (!backend.steps or backend.decode_share != null or @import("sys").environment.Process.get(.{}, "TENSORFOLD_PREFILL_SHARE") != null) return;
+    // a blank TENSORFOLD_PREFILL_SHARE is unset, as LaneHost reads it
+    const env_share = @import("sys").environment.Process.get(.{}, "TENSORFOLD_PREFILL_SHARE") orelse "";
+    if (!backend.steps or backend.decode_share != null or env_share.len > 0) return;
     h.share.p = 1 - steps_decode_share;
 }
 
