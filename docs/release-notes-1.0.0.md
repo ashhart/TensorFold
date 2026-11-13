@@ -24,7 +24,7 @@ The server exposes OpenAI chat and completion routes, Anthropic Messages and tok
 
 Metal engines support configurable idle keepalive through `--keep-warm`. A load-time probe selects a prebuilt packed-kernel library when macOS 26.3's runtime compiler rejects that kernel.
 
-Release archives target macOS arm64 and Linux aarch64 for the GB10. They contain `bin/tensorfold-native`, runtime information and license notices. CUDA needs a compatible NVIDIA driver and the qualified kernel assets described in the deployment instructions; paired Metal serving needs its transport and peer configuration. See [README.md](README.md) for installation and [RUNBOOK.md](RUNBOOK.md) for deployment.
+Release archives target macOS arm64 and Linux aarch64 for the GB10. They contain `bin/tensorfold-native`, runtime information and license notices. CUDA needs a compatible NVIDIA driver and the qualified kernel assets described in the deployment instructions; paired Metal serving needs its transport and peer configuration. See [README.md](../README.md) for installation and [RUNBOOK.md](../RUNBOOK.md) for deployment.
 
 The shipped commands include `--version`, `--help`, `capabilities --json`, `serve MODEL`, and `pull`, `models` and `info` for checkpoints in the Hugging Face cache. Use `serve MODEL --help` and the capabilities output for supported flags and backends.
 
@@ -42,9 +42,9 @@ On the GB10, greedy and sampled replies equal the one-token reference, seeds and
 
 ## Moving from Python 0.6
 
-The Python 0.6.6 engine remains on the `python-0.6` branch and the `v0.6.6` tag. Its historical release entries remain in [CHANGELOG.md](CHANGELOG.md). The native release's model table and capabilities define its supported options; older Python CLI features and model backends are maintained on the Python line. A `pip install` of 1.0.0 stops with directions instead of replacing a working 0.6.6 install.
+The Python 0.6.6 engine remains on the `python-0.6` branch and the `v0.6.6` tag. Its historical release entries remain in [CHANGELOG.md](../CHANGELOG.md). The native release's model table and capabilities define its supported options; older Python CLI features and model backends are maintained on the Python line. A `pip install` of 1.0.0 stops with directions instead of replacing a working 0.6.6 install.
 
-TensorFold is Apache-2.0. Earlier code retains the bundled MIT notice, and model weights retain their own licenses; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+TensorFold is Apache-2.0. Earlier code retains the bundled MIT notice, and model weights retain their own licenses; see [LICENSE](../LICENSE), [NOTICE](../NOTICE) and [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
 ## Contributors
 
