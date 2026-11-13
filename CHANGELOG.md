@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Grammar budget: exploring a grammar counts its parser work and stops at a fixed limit (2^38 steps); a grammar past it is refused with HTTP 400 and never served a partial mask, and every grammar under it explores and masks exactly as before. There is no time limit, so the answer does not depend on the machine or its load (#3037).
+
 - XPU families: a token id at or past the embedding table is refused before the lookup, and each checkpoint's embedding shape and packing are checked when it loads; an 8-bit Qwen3.8-27B MLX checkpoint on XPU is now refused at load by name (#3047).
 
 - HIP families: a token id at or past the embedding table is refused before the lookup, and each checkpoint's embedding shape is checked when it loads (#3046).
