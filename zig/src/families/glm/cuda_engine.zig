@@ -471,22 +471,28 @@ pub const Engine = struct {
 
     const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
 
-    /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
-    pub fn verifyShared(e: *Engine, parts: []const Part) !void {
-        const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+    /// verifyShared's parts as one forward's segments and rows, each stream's prompt twin given back first.
+    pub fn sharedParts(e: *Engine, parts: []const Part, segs: *[max_shared]fw.Seg, ids: *[shared_rows]u32) !usize {
         if (parts.len == 0 or parts.len > max_shared) return error.WindowTooWide;
-        var segs: [max_shared]fw.Seg = undefined;
-        var ids: [shared_rows]u32 = undefined;
         var rows: usize = 0;
         for (parts, 0..) |p, i| {
             if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
             for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
             try e.bind(p.slot);
-            if (e.pages) |q| try q.giveTwin(p.slot);
+            if (e.pages) |q| try q.giveTwin(p.slot); // TF_GLM_KV_SPLIT: no decode round reads a prompt's twin
             segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
             @memcpy(ids[rows..][0..p.ids.len], p.ids);
             rows += p.ids.len;
         }
+        return rows;
+    }
+
+    /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
+    pub fn verifyShared(e: *Engine, parts: []const Part) !void {
+        const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+        var segs: [max_shared]fw.Seg = undefined;
+        var ids: [shared_rows]u32 = undefined;
+        const rows = try e.sharedParts(parts, &segs, &ids);
         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
         const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null, .owners = if (e.room) |*r| r else null };
         try f.run(@ptrCast(ids[0..rows]));

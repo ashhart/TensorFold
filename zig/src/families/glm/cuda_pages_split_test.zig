@@ -77,6 +77,11 @@ pub const Fake = struct {
     e: Engine,
 
     pub fn init(f: *Fake, split: bool) !void {
+        return f.initAt(split, 0, 2);
+    }
+
+    /// `init` as rank `rank` of `world`: an owner class a rank.
+    pub fn initAt(f: *Fake, split: bool, rank: usize, world: usize) !void {
         F.live = 0;
         F.puts = 0;
         F.at = @splat(0);
@@ -101,7 +106,7 @@ pub const Fake = struct {
         f.e.settings = .{ .kv_split = split };
         f.e.w = undefined;
         f.e.w.config = .{};
-        f.e.w.share = try shard.Share.of(&f.e.w.config, 0, 2);
+        f.e.w.share = try shard.Share.of(&f.e.w.config, rank, world);
         f.e.w.layers = &f.layers;
         f.e.share = f.e.w.share; // rank 0 of two: an owner class each
     }
@@ -370,17 +375,20 @@ test "GLM KV split twins: a fresh pass borrows the other class's pages, every ra
     defer f.deinit(p);
     const w = try p.openTwinned(1, 1500, 100, 1); // class 1's stream: rank 1 owns it, rank 0 borrows a twin
     const n = w.len / 2;
-    try expectEqual(@as(usize, 4), n);
+    const m = pages_mod.need(p.layout, 1500, 0); // the prompt's pages: the twin goes back before a reply row is written
+    try expect(n == 4 and m == 3);
     for (w[0..n]) |id| try expectEqual(@as(u32, 1), id % 2);
-    for (w[n..]) |id| try expectEqual(@as(u32, 0), id % 2); // the twin: rank 0's class
+    for (w[n..][0..m]) |id| try expectEqual(@as(u32, 0), id % 2); // the twin: rank 0's class
+    try std.testing.expectEqualSlices(u32, w[m..n], w[n + m ..]); // past the prompt: the stream's own ids
     try std.testing.expectEqualSlices(u32, w[0..n], F.table(f.st(1).table, n)); // the pooled keys' table: its ids
-    for (w[n..], F.table(f.st(1).ltable, n)) |id, local| try expectEqual(id / 2, local); // the latent rows: the twin's
+    for (w[n..][0..m], F.table(f.st(1).ltable, m)) |id, local| try expectEqual(id / 2, local); // the latent rows: the twin's
+    try expectEqual(@as(u32, 8), F.table(f.st(1).ltable, n)[m]); // and the reply's on the trash page, as untwinned
     try expect(f.st(1).twin and f.st(1).attends() == null and f.st(1).owner.? == 1);
     const fetch = @import("cuda_owner_fetch.zig"); // twinned: no history fetch, each rank attends its own rows
     const away: fetch.Away = .{ .heads = 32, .to = 1 };
     try expect(!fetch.fetches(true, f.st(1).attends(), 4096, 512, 1 << 20, away) and fetch.fetches(true, f.st(1).owner, 4096, 512, 1 << 20, away));
     try expectEqual(@as(usize, 0), f.st(1).lpages.len); // a kept state still takes its latent rows from the owner
-    try expectEqual(@as(usize, 4), p.pool.classFree(0));
+    try expectEqual(@as(usize, 8 - m), p.pool.classFree(0)); // the reply's page stays free for another stream
     try std.testing.expectEqualSlices(u32, w, @import("cuda_pages_twin.zig").wire(p, 1, w[0..n]));
     try p.giveTwin(1); // the first decode round, on every rank
     for (F.table(f.st(1).ltable, n)) |local| try expectEqual(@as(u32, 8), local); // the trash page again
@@ -398,7 +406,7 @@ test "GLM KV split twins: none when a class lacks the pages or a pass resumes a 
     const p = try f.pool(4, 16, true);
     defer f.deinit(p);
     _ = try p.openOn(1, 3000, 100, 0); // 7 of class 0's 8
-    const lone = try p.openTwinned(2, 1500, 100, 1); // a twin needs 4 of class 0: none
+    const lone = try p.openTwinned(2, 1500, 100, 1); // a twin needs 3 of class 0: none
     try expect(lone.len == 4 and !f.st(2).twin);
     p.close(2);
     p.close(1);
@@ -430,4 +438,108 @@ test "GLM KV split twins: a follower maps a twinned begin, its own class's twin,
     try std.testing.expectEqualSlices(u32, &.{0}, F.table(f.st(1).table, 1));
     try expect(f.st(1).twin and f.st(1).attends() == null);
     p.close(1);
+    try p.mapBegin(1, &.{ 1, 3, 6, 3 }, 0, 1, true); // a twin of the prompt's page, then the stream's id: the trash page
+    try std.testing.expectEqualSlices(u32, &.{ 3, 8 }, F.table(f.st(1).ltable, 2));
+    p.close(1);
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 6, 1 }, 0, 1, true)); // not the stream's id there
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 6, 5 }, 0, 1, true));
+    try std.testing.expectError(error.ResidueMismatch, p.mapBegin(1, &.{ 1, 3, 1, 3 }, 0, 1, true)); // no page of its class
+    try expect(!p.used[1]);
+}
+
+test "GLM KV split twins: TF_KV_POISON fills a twin's latent rows on the rank that borrows it, before its pass" {
+    var pooled: u64 = 0;
+    var latent: u64 = 0;
+    {
+        var f: Fake = undefined;
+        try f.init(true);
+        const p = try f.pool(4, 16, true);
+        defer f.deinit(p);
+        p.poison = true;
+        const w = try p.openTwinned(1, 1500, 100, 1); // rank 1's stream: rank 0 fills its pooled keys, then its twin's rows
+        const n = w.len / 2;
+        const m = pages_mod.need(p.layout, 1500, 0);
+        pooled = state.pkPageBytes(&f.e.w);
+        latent = state.latentPageBytes(&f.e.w);
+        const base = p.arena.?.ptr;
+        try expectEqual(n + m, F.fills.items.len);
+        for (w[0..n], F.fills.items[0..n]) |id, x| try expectEqual([2]u64{ base + id * pooled, pooled / 4 }, x);
+        for (w[n..][0..m], F.fills.items[n..]) |id, x| try expectEqual([2]u64{ base + 16 * pooled + id / 2 * latent, latent / 4 }, x);
+    }
+    var g: Fake = undefined; // a follower of rank 1's stream: its twin's rows filled as rank 0's were
+    try g.init(true);
+    const q = try g.pool(4, 16, false);
+    defer g.deinit(q);
+    q.poison = true;
+    try q.mapBegin(1, &.{ 1, 3, 6, 3 }, 0, 1, true);
+    try expectEqual(@as(usize, 3), F.fills.items.len); // two pages' pooled keys and the twin page's latent rows
+    try expectEqual([2]u64{ q.arena.?.ptr + 16 * pooled + 3 * latent, latent / 4 }, F.fills.items[2]);
+}
+
+test "GLM KV split twins: a shared window's parts give each stream's twin back before its forward" {
+    var f: Fake = undefined;
+    try f.init(true);
+    const p = try f.pool(4, 16, true);
+    defer f.deinit(p);
+    f.e.pages = p;
+    defer f.e.pages = null;
+    _ = try p.openTwinned(1, 600, 100, 1); // 2 pages, both the prompt's: a twin of 2 on class 0
+    _ = try p.openOn(2, 600, 100, 0);
+    try expect(f.st(1).twin and p.pool.classFree(0) == 4);
+    const engine = @import("cuda_engine.zig");
+    var segs: [engine.max_shared]@import("cuda_forward.zig").Seg = undefined;
+    var ids: [engine.shared_rows]u32 = undefined;
+    var out: [3]u32 = undefined;
+    const parts = [_]engine.Part{ .{ .slot = 2, .ids = &.{9}, .out = out[0..1] }, .{ .slot = 1, .ids = &.{ 7, 8 }, .out = out[1..3] } };
+    try expectEqual(@as(usize, 3), try f.e.sharedParts(&parts, &segs, &ids)); // as verifyShared calls it
+    try std.testing.expectEqualSlices(u32, &.{ 9, 7, 8 }, ids[0..3]);
+    try expect(segs[1].st == f.st(1) and segs[1].row0 == 1 and segs[1].rows == 2);
+    try expect(!f.st(1).twin and f.st(1).attends().? == 1 and !@import("cuda_pages_twin.zig").twinned(p, 1));
+    try expectEqual(@as(usize, 6), p.pool.classFree(0)); // the twin's pages back: only slot 2's two are out
+    for (F.table(f.st(1).ltable, 2)) |local| try expectEqual(@as(u32, 8), local);
+    try std.testing.expectError(error.SlotTwice, f.e.sharedParts(&.{ parts[0], parts[0] }, &segs, &ids));
+    p.close(1);
+    p.close(2);
+}
+
+test "GLM KV split twins at three ranks: each owner's wire carries the other two classes' twins, and each rank maps its own" {
+    for (0..3) |o| {
+        const owner: u32 = @intCast(o);
+        var wire: [12]u32 = undefined;
+        {
+            var f: Fake = undefined;
+            try f.initAt(true, 0, 3);
+            const p = try f.pool(4, 24, true); // 8 pages a class
+            defer f.deinit(p);
+            try expectEqual(@as(u32, 3), p.pool.classes);
+            const w = try p.openTwinned(1, 1500, 100, owner);
+            try expectEqual(wire.len, w.len); // its 4 ids, then a twin a class: 3 pages and the reply's id
+            @memcpy(&wire, w);
+            for (0..3) |k| try expectEqual(@as(usize, if (k == o) 4 else 5), p.pool.classFree(@intCast(k)));
+            try p.giveTwin(1);
+            for (0..3) |k| try expectEqual(@as(usize, if (k == o) 4 else 8), p.pool.classFree(@intCast(k)));
+        }
+        for (wire[0..4]) |id| try expectEqual(owner, id % 3);
+        for (0..3) |r| {
+            var f: Fake = undefined;
+            try f.initAt(true, r, 3);
+            const p = try f.pool(4, 24, false); // rank r following rank 0's begin
+            defer f.deinit(p);
+            try p.mapBegin(1, &wire, 0, owner, true);
+            try std.testing.expectEqualSlices(u32, wire[0..4], F.table(f.st(1).table, 4));
+            const lt = F.table(f.st(1).ltable, 4);
+            if (r == o) {
+                for (wire[0..4], lt) |id, local| try expectEqual(id / 3, local); // the owner: its own places
+            } else {
+                const twin = wire[4 * (1 + if (r < o) r else r - 1) ..][0..4]; // class order, the owner's left out
+                for (twin[0..3], lt[0..3]) |id, local| try expect(id % 3 == r and local == id / 3);
+                try expect(twin[3] == wire[3] and lt[3] == 8); // past the prompt: the stream's id, the trash page
+            }
+            try expect(f.st(1).twin and f.st(1).attends() == null);
+            try p.giveTwin(1);
+            if (r != o) for (F.table(f.st(1).ltable, 4)) |local| try expectEqual(@as(u32, 8), local);
+            try expect(!f.st(1).twin and f.st(1).attends().? == owner);
+            p.close(1);
+        }
+    }
 }

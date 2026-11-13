@@ -282,7 +282,7 @@ pub const Pages = struct {
         if (adopted.len > 0) try Upload.write(&up, l.ids.items, 0);
         try p.pool.cover(l, n, .{ .ctx = &up, .write = Upload.write });
         try p.mapped(slot, l.ids.items, adopted.len);
-        if (!twin or !try twins.borrow(p, slot, l.ids.items.len)) return l.ids.items;
+        if (!twin or !try twins.borrow(p, slot, l.ids.items.len, need(p.layout, prompt, 0))) return l.ids.items; // the prompt's pages
         errdefer twins.drop(p, slot);
         const w = twins.wire(p, slot, l.ids.items);
         try twins.map(p, slot, try twins.mine(p, w, owner));
@@ -337,6 +337,13 @@ pub const Pages = struct {
         st.capacity = @min(ids.len * state.page_rows, p.e.capacity);
         p.used[slot] = true;
         if (kv_host.active) |*g| try g.invalidate(p.e.stream); // the row cache may hold these pages' old rows
+    }
+
+    /// TF_KV_POISON: NaN over the latent rows of `ids`, pages of this rank's class (a prompt twin's, before its pass).
+    pub fn poisonLatent(p: *const Pages, ids: []const u32) !void {
+        if (!p.poison) return;
+        const r = p.parts()[1];
+        for (ids) |id| try p.e.d.check(p.e.d.api.cuMemsetD32Async(r.at + @as(u64, p.region().entry(id)) * r.bytes, 0xFFFF_FFFF, r.bytes / 4, p.e.stream.handle), "cuMemsetD32Async");
     }
 
     /// The stream on paged slot `slot` ended: its sequence reaches no rows, and rank 0's lease gives its pages back.
