@@ -58,8 +58,7 @@ pub const Config = struct {
     loop_guard: bool = false,
     /// --loop-guard-stop: a guarded reply ends where the guard fires, with a loop error and no answer or calls.
     loop_stop: bool = false,
-    /// Seconds the idle keepalive runs after the last request ends (0: off).
-    keep_warm_s: i64 = 900,
+    keep_warm_s: i64 = 900, // seconds the idle keepalive runs after the last request ends (0: off)
     /// Seconds of idle past the last request before the engine closes; the next request reloads it (0: never).
     idle_unload_s: i64 = 0,
     dashboard: bool = false,
