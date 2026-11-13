@@ -301,8 +301,7 @@ pub const Metal = struct {
             try kv_pages.grow(c, at + rows);
             try @import("prompt_flight.zig").submit(self, s, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             at += rows;
-            // landed tokens only: the newest chunk is still queued on the GPU
-            s.fill_at.store(@intCast(at - rows), .monotonic);
+            @import("prompt_flight.zig").advanced(s, at, rows);
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
         if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
