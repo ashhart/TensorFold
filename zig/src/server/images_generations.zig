@@ -52,6 +52,7 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     };
     var cx: Cx = .{ .a = a };
     const id = try ids.make(a, "images-", 32);
+    c.id = id;
     const received = clock.nowNs(srv.io);
     var png: std.ArrayList(u8) = .empty;
     defer png.deinit(srv.gpa);

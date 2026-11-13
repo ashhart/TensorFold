@@ -62,6 +62,8 @@ pub const Conn = struct {
     method: []const u8 = "",
     path: []const u8 = "",
     requestline: []const u8 = "",
+    /// The reply id once assigned (chatcmpl-, cmpl-, speech-, images-); null until then.
+    id: ?[]const u8 = null,
     headers: []Header = &.{},
     key_label: ?[]const u8 = null,
     key_scopes: scope.Scopes = scope.full,
@@ -235,6 +237,7 @@ pub const Conn = struct {
         c.key_label = null;
         c.key_scopes = scope.full;
         c.key_digest = null;
+        c.id = null;
         c.counted = false;
         c.response_complete = false;
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {

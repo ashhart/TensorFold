@@ -463,3 +463,4 @@ Python 0.6.6 remains a separate release line.
 
 For a bug report, include the version, checkpoint revision, public reproducing request, exact command and relevant startup/request logs.
 `TENSORFOLD_LOG_TIME=1` starts each server log line, the `[tensorfold]` lines and every engine's warnings, with its UTC time (`2026-10-30T18:54:04.123Z [tensorfold] ...`), to match the log against other records.
+`serve --log-json` writes each request start and end as one JSON object on that `[tensorfold]` line (`event` `start` or `end`, the request id when one is assigned, HTTP status when known, and `prompt`/`tokens` only when the `ended` path already has them). Without the flag the text access, `ended` and `refused` lines are unchanged. JSON never includes API keys, Authorization headers or request bodies.
