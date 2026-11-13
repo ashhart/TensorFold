@@ -419,6 +419,7 @@ pub fn Namespace(comptime Tri: type) type {
         /// One chunk of the stream's prompt between the other streams' rounds; the first call opens its caches.
         fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
             const self = of(ptr);
+            if (self.lanes.getPtr(s) == null and self.kv.waits(s.prompt().len + s.max_new, self.lanes.count())) return false;
             const l = if (self.lanes.getPtr(s)) |x| (if (x.filled != null) x else try self.open(s)) else try self.open(s);
             return self.step(s, l, 0);
         }
