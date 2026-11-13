@@ -10,7 +10,7 @@ const ledger = @import("lane_host_ledger.zig");
 /// The queued job to admit (its index), or null to hold; the caller holds the lock.
 pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return null; // under memory pressure nothing starts or is read ahead
-    if (h.disk.holding()) return null; // a flush waits for the requests in flight: nothing starts or is read ahead
+    if (h.disk.holding()) return null; // a flush or drop waits for the requests in flight: nothing starts or reads
     if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
     if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return null;

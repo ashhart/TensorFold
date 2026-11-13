@@ -14,6 +14,10 @@ const Conn = http_conn.Conn;
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 const Ask = api.ImprintAsk;
+const flush = @import("cache_flush.zig");
+
+/// POST: one conversation's kept states forgotten (the bodiless DELETE /v1/imprint forgets every disk state).
+pub const forget_path = "/v1/imprint/forget";
 
 /// An answer comes from the engine thread between rounds; a long prompt pass can hold it this long.
 const wait_ms = 10 * 60 * 1000;
@@ -46,6 +50,49 @@ pub fn forget(srv: *Server, conn: *Conn, a: Allocator) void {
     answer(srv, conn, a, ask);
 }
 
+/// POST /v1/imprint/forget: the chat body's conversation, keyed as its next request would be, dropped by the engine.
+pub fn forgetOne(srv: *Server, conn: *Conn, a: Allocator) void {
+    const keyed = if (srv.keys) |k| k.enabled() else false;
+    if (!@import("cancel_ids.zig").allowed(keyed, conn)) {
+        _ = http_body.read(conn, a, http_body.limit) catch {}; // dropped, so it cannot reach the next request
+        if (keyed) return @import("auth_scope_reply.zig").deny(conn, false, .route);
+        const message = "without API keys, only a direct loopback caller may forget a conversation";
+        const why = flush.failure(a, message, "permission_error", "loopback_only") catch return;
+        return routes.sendValue(conn, a, 403, why);
+    }
+    // --idle-unload: a resident engine is not parked under the forget; a parked one is not loaded for it
+    const idle = srv.idle_manager;
+    if (idle) |m| m.begin();
+    defer if (idle) |m| m.end();
+    if (idle) |m| if (m.isParked()) {
+        _ = http_body.read(conn, a, http_body.limit) catch {};
+        const message = "the model is unloaded: no state is in RAM, and those on disk stay until it is loaded";
+        const why = flush.failure(a, message, "server_error", "model_unloaded") catch return;
+        return routes.sendValue(conn, a, 503, why);
+    };
+    var cx: errors.Cx = .{ .a = a };
+    const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
+    const input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
+    const p = chat.prepare(srv, &cx, input, Never{}) catch return refuse(conn, a, &cx);
+    defer srv.release(p.preparing, p.request);
+    var named = p.request;
+    named.prompt = p.request.cacheKey(); // states are kept under it: an image's rows by its content
+    const ask = make(srv, .drop, named) catch return conn.sendError(a, 500, "out of memory", null) catch {};
+    @import("warm.zig").forgetting(srv); // no warm pass of a reply running now keeps a state after the drop
+    const t0 = std.Io.Clock.awake.now(srv.io);
+    const held = flush.hold(srv.io, a, srv.engine, ask, wait_ms, "forget");
+    const refused = held catch return conn.sendError(a, 500, "out of memory", null) catch {};
+    if (refused) |r| {
+        if (r.status == 501) free(srv, ask);
+        return routes.sendValue(conn, a, r.status, r.body); // a 503's ask stays the engine's, leaked rather than freed
+    }
+    defer free(srv, ask);
+    const out = reply(a, ask) catch return conn.sendError(a, 500, "out of memory", null) catch {};
+    const ns = t0.durationTo(std.Io.Clock.awake.now(srv.io)).toNanoseconds();
+    out.object.put(a, "waited_seconds", .{ .float = @as(f64, @floatFromInt(ns)) / 1e9 }) catch {};
+    routes.sendValue(conn, a, 200, out);
+}
+
 /// The question in the server's own memory: if the wait runs out, the engine may still write into it (it then leaks).
 fn make(srv: *Server, op: api.ImprintOp, r: api.Request) !*Ask {
     const ask = try srv.gpa.create(Ask);
@@ -54,6 +101,10 @@ fn make(srv: *Server, op: api.ImprintOp, r: api.Request) !*Ask {
     ask.prompt = try srv.gpa.dupe(u32, r.prompt);
     ask.starts = try srv.gpa.dupe(u32, r.chunks);
     ask.spans = try srv.gpa.dupe([2]u32, r.decode_spans);
+    const pictures = try srv.gpa.alloc(api.Image, r.images.len);
+    for (pictures, r.images) |*to, from| to.* = from;
+    for (pictures) |*to| to.pixels = &.{}; // a frame is the images' grid alone: the request's pixels go with it
+    ask.images = pictures;
     return ask;
 }
 
@@ -61,6 +112,7 @@ fn free(srv: *Server, ask: *Ask) void {
     srv.gpa.free(ask.prompt);
     srv.gpa.free(ask.starts);
     srv.gpa.free(ask.spans);
+    srv.gpa.free(ask.images);
     srv.gpa.destroy(ask);
 }
 
@@ -87,10 +139,22 @@ fn reply(a: Allocator, ask: *const Ask) !Value {
         .load => "imprint.load",
         .forget => "imprint.forget",
         .flush => "prompt_cache.flush",
+        .drop => "imprint.forget_conversation",
     } });
     try o.put(a, "disk", .{ .bool = ask.disk });
     if (ask.op == .forget) {
         try o.put(a, "freed_bytes", try json.intValue(a, ask.freed));
+        return .{ .object = o };
+    }
+    if (ask.op == .drop) {
+        try o.put(a, "found", .{ .bool = ask.dropped + ask.disk_dropped + ask.shared > 0 }); // false: none kept
+        try o.put(a, "states", try json.intValue(a, ask.dropped));
+        try o.put(a, "ram_bytes", try json.intValue(a, ask.ram_freed));
+        try o.put(a, "disk_states", try json.intValue(a, ask.disk_dropped));
+        try o.put(a, "disk_bytes", try json.intValue(a, ask.freed));
+        try o.put(a, "shared_states", try json.intValue(a, ask.shared)); // kept: others build on them
+        try o.put(a, "ram_tokens", try json.intValue(a, x.ram)); // what its next request would still resume
+        try o.put(a, "disk_tokens", try json.intValue(a, x.disk));
         return .{ .object = o };
     }
     try o.put(a, "tokens", try json.intValue(a, x.tokens));

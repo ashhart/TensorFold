@@ -429,3 +429,32 @@ test "auth scopes HTTP: the prompt cache flush route needs a full key, a loopbac
     }
     try t.expectEqual(@as(u32, full_keys.len), engine.flushes.load(.monotonic));
 }
+
+test "auth scopes HTTP: the conversation forget route needs a full key, a loopback caller's included" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = "/v1/imprint/forget";
+    const body = "{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}";
+    for (restricted) |key| {
+        const denied = try h.ask(a, "POST", path, key, body);
+        try expectStatus(denied, 403);
+        try t.expect(std.mem.indexOf(u8, denied, "\"code\": \"insufficient_scope\"") != null);
+    }
+    try expectStatus(try h.ask(a, "POST", path, "", body), 401);
+    try t.expectEqual(@as(u32, 0), engine.flushes.load(.monotonic));
+    for (full_keys) |key| {
+        const done = try h.ask(a, "POST", path, key, body);
+        try expectStatus(done, 200);
+        try t.expectEqualStrings("imprint.forget_conversation", (try payload(a, done)).strField("object").?);
+    }
+    try t.expectEqual(@as(u32, full_keys.len), engine.flushes.load(.monotonic));
+}

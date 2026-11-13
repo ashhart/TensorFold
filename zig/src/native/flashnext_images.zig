@@ -177,7 +177,7 @@ pub fn key(a: Allocator, r: *const api.Request) ![]const u32 {
     const f = vp.frameKey(r.images);
     if (f == 0) return r.cacheKey();
     const k = try a.dupe(u32, r.cacheKey());
-    k[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&k[0])) & 0x7fff_ffff));
+    k[0] = api.prompt_cache.framed(k[0], f);
     return k;
 }
 

@@ -258,7 +258,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw }, .forgets = warm.forgets.load(.seq_cst) };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -281,6 +281,7 @@ const Run = struct {
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
     call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
+    forgets: u64, // warm.forgets as it began: a forget since then leaves its next turn unwarmed
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -396,7 +397,8 @@ const Run = struct {
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
         if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
-        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort, reply.prompt_tokens);
+        const sent: Value = .{ .object = message };
+        warm.reply(r.srv, r.plan.input, sent, reply.thinking, reply.effort, reply.prompt_tokens, r.forgets);
     }
 
     fn wholeBody(r: *Run, o: *json.Object, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!void {

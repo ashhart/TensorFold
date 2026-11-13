@@ -68,6 +68,11 @@ pub fn keepBornFrame(s: *pc.Store, prompt: []const u32, born: u32, at: u32, owne
     return s.keepBorn(prompt, born, at, owner, starts, spans);
 }
 
+/// An image request's first cache word on a framed family: its frame mixed in, so a state fits that frame alone.
+pub fn framed(first: u32, frame: u32) u32 {
+    return 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(frame, std.mem.asBytes(&first)) & 0x7fff_ffff));
+}
+
 /// Current disk formats have no image metadata. Their reserved image words cannot be read or published safely.
 pub fn diskSafe(tokens: []const u32) bool {
     for (tokens) |word| if (word & 0x8000_0000 != 0) return false;

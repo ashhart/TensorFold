@@ -23,17 +23,9 @@ pub fn answer(gpa: Allocator, io: std.Io, a: Allocator, engine: api.Engine, ms: 
     const ask = try gpa.create(Ask);
     ask.* = .{ .op = .flush };
     const t0 = std.Io.Clock.awake.now(io);
-    if (!engine.imprintAsk(ask)) {
-        gpa.destroy(ask);
-        return .{ .status = 501, .body = try failure(a, "this engine keeps no prompt states it can drop", "invalid_request_error", "not_supported") };
-    }
-    if (!ask.wait(io, ms)) {
-        const withdrawn = ask.withdraw(); // not yet taken: it never runs, and admissions go on at once
-        if (withdrawn or !ask.wait(io, ms)) {
-            log.line("prompt cache flush: the engine did not answer in {d} s", .{ms / 1000});
-            const why = if (withdrawn) "the requests in flight did not end in time: the flush was withdrawn and nothing was dropped" else "the engine did not finish the flush in time";
-            return .{ .status = 503, .body = try failure(a, why, "server_error", "timeout") };
-        }
+    if (try hold(io, a, engine, ask, ms, "flush")) |refused| {
+        if (refused.status == 501) gpa.destroy(ask);
+        return refused;
     }
     defer gpa.destroy(ask);
     const o = try json.newObject(a);
@@ -47,7 +39,23 @@ pub fn answer(gpa: Allocator, io: std.Io, a: Allocator, engine: api.Engine, ms: 
     return .{ .status = 200, .body = .{ .object = o } };
 }
 
-fn failure(a: Allocator, message: []const u8, kind: []const u8, code: []const u8) !json.Value {
+/// A flush or drop put to `engine` and waited for: null once answered, else its 501 (untaken) or 503 (left to it).
+pub fn hold(io: std.Io, a: Allocator, engine: api.Engine, ask: *Ask, ms: u32, what: []const u8) !?Reply {
+    if (!engine.imprintAsk(ask)) {
+        const none = "this engine keeps no prompt states it can drop";
+        return .{ .status = 501, .body = try failure(a, none, "invalid_request_error", "not_supported") };
+    }
+    if (ask.wait(io, ms)) return null;
+    const withdrawn = ask.withdraw(); // not yet taken: it never runs, and admissions go on at once
+    if (!withdrawn and ask.wait(io, ms)) return null;
+    log.line("prompt cache {s}: the engine did not answer in {d} s", .{ what, ms / 1000 });
+    const late = "the requests in flight did not end in time: it was withdrawn and nothing was dropped";
+    const slow = "the engine did not finish in time";
+    const why = try std.fmt.allocPrint(a, "{s}: {s}", .{ what, if (withdrawn) late else slow });
+    return .{ .status = 503, .body = try failure(a, why, "server_error", "timeout") };
+}
+
+pub fn failure(a: Allocator, message: []const u8, kind: []const u8, code: []const u8) !json.Value {
     const err = try json.newObject(a);
     try err.put(a, "message", .{ .string = message });
     try err.put(a, "type", .{ .string = kind });
@@ -73,6 +81,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         const message = "the model is unloaded: no state is in RAM, and those on disk stay until a flush while it is loaded";
         return routes.sendValue(conn, a, 503, failure(a, message, "server_error", "model_unloaded") catch return);
     };
+    @import("warm.zig").forgetting(srv); // no warm pass of a reply running now keeps a state after the flush
     const got = answer(srv.gpa, srv.io, a, srv.engine, wait_ms) catch return conn.sendError(a, 500, "out of memory", null) catch {};
     routes.sendValue(conn, a, got.status, got.body);
 }
