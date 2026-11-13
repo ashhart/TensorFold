@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen 3.5, 3.6 and 3.8 on CUDA: decode windows of 2 to 8 rows run at 4 or 8 rows instead of being padded to 16, about 1.5% faster at four streams on a GB10, with the same tokens (#2934, fixes #2909).
+
 - Server: `POST /v1/requests/{id}/cancel` cancels a running or queued request by its `chatcmpl-`, `cmpl-` or `resp_` id through the same engine cancel a disconnect sends; the reply ends `cancelled` with the tokens it had, and other streams are unchanged. With API keys only a full or `[admin]` key may cancel; a server without keys answers only direct loopback callers and refuses proxied requests (403 `loopback_only`) (#3193, fixes #3172).
 
 - Qwen 3.5, 3.6 and 3.8 on CUDA: a served one-row step no longer copies the recurrent state for a rollback that can't happen, so decode is 1-2% faster at one stream and about 4% at four on a GB10, with the same tokens (#2933, fixes #2908).
