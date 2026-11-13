@@ -234,7 +234,7 @@ fn fillAt(h: *LaneHost, at: usize) void {
     load.progress(h, job);
     @import("lane_host_status.zig").publish(h); // a reader sees the rows this chunk added
     if (h.trace != null) line.rows_to = if (done) job.stream.prompt_len else job.stream.fill_at.load(.monotonic);
-    if (!done) return;
+    if (!done) return @import("lane_host_progress.zig").chunk(h, job);
     _ = h.filling.orderedRemove(at);
     h.prefilled(job, job.began);
     if (job.request.promptOnly()) {
