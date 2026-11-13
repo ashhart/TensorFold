@@ -32,9 +32,11 @@ pub const Record = struct {
     released: usize = 0,
     live_bytes: usize = 0,
     fail_pipeline: bool = false,
+    tensor_units: bool = true,
     current: usize = 0,
     rows: u32 = 0,
-    launches: [256]struct { pipeline: usize, rows: u32 } = undefined,
+    launches: [256]struct { pipeline: usize, rows: u32, grid: Size, stride: i32 } = undefined,
+    sums_stride: i32 = 0,
     count: usize = 0,
     pub fn device(r: *Record) Device {
         return .{ .r = r };
@@ -65,8 +67,8 @@ pub const Buffer = struct {
 };
 pub const Device = struct {
     r: *Record,
-    pub fn tensorUnits(_: Device) bool {
-        return true;
+    pub fn tensorUnits(d: Device) bool {
+        return d.r.tensor_units;
     }
     pub fn generation(_: Device) usize {
         return 17;
@@ -111,10 +113,13 @@ pub const ComputeEncoder = struct {
     }
     pub fn setBuffer(_: ComputeEncoder, _: Buffer, _: usize, _: usize) void {}
     pub fn setValue(e: ComputeEncoder, v: anytype, at: usize) void {
-        if (@TypeOf(v) == [2]i32 and at == 3) e.r.rows = @intCast(v[0]);
+        if (@TypeOf(v) == [2]i32 and at == 3) {
+            e.r.rows = @intCast(v[0]);
+            e.r.sums_stride = v[1];
+        }
     }
-    pub fn dispatchGroups(e: ComputeEncoder, _: Size, _: Size) void {
-        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows };
+    pub fn dispatchGroups(e: ComputeEncoder, grid: Size, _: Size) void {
+        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows, .grid = grid, .stride = e.r.sums_stride };
         e.r.count += 1;
     }
     pub fn dispatchThreads(_: ComputeEncoder, _: Size, _: Size) void {}

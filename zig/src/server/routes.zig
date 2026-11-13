@@ -128,12 +128,13 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
-    if (!is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
+    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
     const group: api.load_ledger.RouteGroup = if (is_chat) .chat_completions else if (is_responses) .responses else if (is_anthropic) .messages else if (is_embedding) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
-    const is_text = is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
+    const is_text = is_ocr or is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
     const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding, .rerank = is_rerank, .systemone = is_systemone };
     var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
     defer entered.held.release();
@@ -148,6 +149,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
     if (is_responses) return responses.post(srv, conn, a);
+    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a);
     openai.post(srv, conn, a, is_chat);
 }
 
