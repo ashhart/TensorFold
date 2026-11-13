@@ -24,7 +24,7 @@ pub const max_world = 16;
 
 /// The hello's first word, and its layout's version: a rank of another build is refused before its fields are read.
 const magic: u32 = 0x4c484654;
-const layout: u32 = 2;
+const layout: u32 = 3;
 
 /// Milliseconds rank 0 keeps telling late ranks that the group was refused before it gives up on them.
 const linger_ms = 5000;
@@ -32,7 +32,7 @@ const linger_ms = 5000;
 /// Milliseconds a rank waits for rank 0's side of the key proof: rank 0 may be busy with other connections.
 const proof_ms = 600_000;
 
-/// What a rank says when it joins: its place, its GPU and RCCL, and what it runs.
+/// What a rank says when it joins: its place, its GPU and RCCL, how its tensors cross, and what it runs.
 pub const Hello = extern struct {
     magic: u32 = magic,
     layout: u32 = layout,
@@ -40,6 +40,8 @@ pub const Hello = extern struct {
     world: u32,
     gpu: u32,
     rccl: u32,
+    /// sys.rank_auth.tensors' mode: sealed and clear ranks would wait on each other inside RCCL.
+    tensors: u32 = 0,
     ident: Identity,
 };
 
@@ -53,6 +55,7 @@ pub fn differs(lead: Hello, h: Hello, taken: []const bool) ?Field {
     if (h.rank == 0 or h.rank >= lead.world or taken[h.rank]) return .rank;
     if (h.gpu != lead.gpu) return .gpu;
     if (h.rccl != lead.rccl) return .rccl;
+    if (h.tensors != lead.tensors) return .tensors;
     if (!std.mem.eql(u8, &h.ident.program, &lead.ident.program)) return .program;
     if (!std.mem.eql(u8, &h.ident.config, &lead.ident.config)) return .config;
     if (!std.mem.eql(u8, &h.ident.weights, &lead.ident.weights)) return .weights;

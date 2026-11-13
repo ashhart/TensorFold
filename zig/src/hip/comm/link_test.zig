@@ -84,6 +84,18 @@ test "a rank started with another world size is refused on every rank before RCC
     }
 }
 
+test "security: a rank whose tensors cross another way is refused on every rank, by name, before RCCL starts" {
+    var sealed = hello(1, 2);
+    sealed.tensors = 2; // rank 0 sends clear tensors and this rank would speak TLS: each would wait on the other in RCCL
+    var ranks = [_]Rank{ .{ .hello = hello(0, 2), .port = 0 }, .{ .hello = sealed, .port = 0 } };
+    try group(&ranks);
+    for (ranks) |r| {
+        try std.testing.expectEqual(@as(?link.Error, error.RanksDiffer), r.err);
+        try std.testing.expectEqual(agree.Fault{ .field = .tensors, .rank = 1 }, r.fault);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, agree.Field.tensors.what(), "TF_RANK_TENSORS") != null);
+}
+
 test "a rank with other weights is refused, and so is the rank that matched before it" {
     var other = hello(2, 3);
     other.ident.weights[31] = 9;
@@ -116,6 +128,9 @@ test "hellos differ field by field in a fixed order" {
     h = hello(1, 2);
     h.ident.program[5] = 0;
     try std.testing.expectEqual(agree.Field.program, link.differs(lead, h, &taken).?);
+    h = hello(1, 2);
+    h.tensors = 2;
+    try std.testing.expectEqual(agree.Field.tensors, link.differs(lead, h, &taken).?);
     h = hello(1, 2);
     h.layout = 1;
     try std.testing.expectEqual(agree.Field.layout, link.differs(lead, h, &taken).?);
