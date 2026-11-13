@@ -218,6 +218,8 @@ pub const Drafter = struct {
         return s;
     }
 
+    pub const snapshotSlot = slot;
+
     /// A fresh sequence on slot `i` whose rows are tapped from position `from` (0, or a kept prompt state's).
     pub fn restart(dr: *Drafter, i: u32, from: usize) !void {
         const s = try dr.slot(i);

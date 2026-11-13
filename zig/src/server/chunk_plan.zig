@@ -13,6 +13,7 @@ pub const Plan = struct {
     openers: []const u32 = &.{}, // the special tokens that open any message
     assistant: []const u32 = &.{}, // the tokens that open an assistant message
     min_chunk: u32 = 256,
+    all_openers: bool = false, // every opener a start: a planned warm family's next turn resumes past the reply
 
     /// Resume points: every assistant message's start, and the second message's.
     fn points(p: Plan, a: Allocator, ids: []const u32) ![]u32 {
@@ -20,6 +21,10 @@ pub const Plan = struct {
         var seen: usize = 0;
         if (p.openers.len > 0) for (ids, 0..) |t, i| {
             if (std.mem.indexOfScalar(u32, p.openers, t) == null) continue;
+            if (p.all_openers) {
+                if (i > 0) try found.append(a, @intCast(i));
+                continue;
+            }
             seen += 1;
             if (seen == 2) {
                 try found.append(a, @intCast(i));
@@ -112,7 +117,8 @@ pub fn markers(srv: *Server, a: Allocator, step: u32) !Plan {
         if (i >= user.len or user[i] != t) break i;
     } else null;
     const special = header.len > 0 and srv.text.isSpecial(header[0]);
-    return .{ .step = step, .openers = openers, .assistant = if (cut != null and special) header[0 .. cut.? + 1] else &.{} };
+    const all = srv.info.prefill_messages == .all; // a planned warm family's next message starts are cuts too
+    return .{ .step = step, .openers = openers, .assistant = if (cut != null and special) header[0 .. cut.? + 1] else &.{}, .all_openers = all };
 }
 
 fn render(srv: *Server, a: Allocator, talk: []Value, thinking: bool, generation: bool) ?[]const u32 {
@@ -166,4 +172,19 @@ test "chunk starts match PrefillPlan.chunks" {
     try std.testing.expectEqualSlices(u32, &.{ 8, 14, 22, 28 }, try (Plan{ .step = 8, .openers = &.{10}, .assistant = &.{ 10, 7 }, .min_chunk = 4 }).starts(a, &talk));
     try std.testing.expectEqualSlices(u32, &.{ 8, 16 }, try (Plan{ .step = 8 }).starts(a, &ids));
     try std.testing.expectEqualSlices(u32, &.{}, try (Plan{}).starts(a, &ids));
+}
+
+test "warm message cuts: every message start is a cut, the user header after a short reply too, alike in a prefix" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ids = [_]u32{ 1, 10, 99, 20, 30, 99, 40, 50, 99, 60, 70, 99, 80 };
+    const ordinary: Plan = .{ .step = 2048, .min_chunk = 1, .openers = &.{99}, .assistant = &.{ 99, 40 } };
+    try std.testing.expectEqualSlices(u32, &.{5}, try ordinary.starts(a, &ids)); // the second message's, the reply's
+    var warm = ordinary;
+    warm.all_openers = true;
+    const starts = try warm.starts(a, &ids);
+    try std.testing.expectEqualSlices(u32, &.{ 2, 5, 8, 11 }, starts);
+    try std.testing.expectEqualSlices(u32, starts[0..3], try warm.starts(a, ids[0..10])); // a warm pass's prompt
+    try std.testing.expectEqualSlices(u32, starts, try warm.starts(a, ids[0..12]));
 }

@@ -1,6 +1,7 @@
 //! Prompt-sized snapshots on each rank; the existing chunk grid and the live sequence's layout do not change.
 const std = @import("std");
 const cuda = @import("cuda");
+const drafter_snap = @import("cuda_drafter_snap.zig");
 const types = @import("cuda_engine_types.zig");
 pub const pages = @import("cuda_snapshot_pages.zig");
 pub const layout = @import("cuda_snapshot_layout.zig");
@@ -28,7 +29,7 @@ pub fn bytes(e: anytype, at: usize) u64 {
     const head: ?usize = if (e.mtp) @min(e.capacity, std.math.add(usize, at, @import("cuda_state.zig").window_rows) catch return std.math.maxInt(u64)) else null;
     // a paged sequence holds its request's rows: its prefix is counted to the capacity, in a window's bytes
     const n = layout.Plan.size(&e.cur.st, &e.c, e.capacity, at, head, heldPages(e, at)) catch return std.math.maxInt(u64);
-    return pages.rounded(n) catch std.math.maxInt(u64);
+    return pages.rounded(std.math.add(usize, n, drafter_snap.bytes(e)) catch return std.math.maxInt(u64)) catch std.math.maxInt(u64);
 }
 
 pub fn keep(e: anytype) !u64 {
@@ -45,7 +46,8 @@ pub fn keepAs(e: anytype, id: u64) !void {
     if (e.cur.st.pending != 0 or e.cur.st.mtp_len > e.cur.st.pos + @import("cuda_state.zig").window_rows)
         return error.NotAtMark;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
-    const plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
+    var plan = try layout.Plan.init(&e.cur.st, &e.c, e.cur.st.pos, if (e.mtp) e.cur.st.mtp_len else null, heldPages(e, e.cur.st.pos));
+    const drafter_from = try drafter_snap.append(e, &plan);
     var lease = try pool.take(plan.len);
     errdefer {
         cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot copy did not drain");
@@ -55,18 +57,20 @@ pub fn keepAs(e: anytype, id: u64) !void {
     errdefer e.gpa.free(cur);
     try pool.move(e.stream, &lease, &plan, true);
     try e.stream.synchronize();
-    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared });
+    e.snaps.putAssumeCapacityNoClobber(id, .{ .lease = lease, .len = plan.len, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base }, .shared = plan.shared, .drafter_from = drafter_from });
 }
 
 pub fn restore(e: anytype, id: u64) !void {
     const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
     // the kept state's own parity picks the half a live-half keep carries; the slot's dead half stays as it is
-    const plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
+    var plan = try layout.Plan.initFor(&e.cur.st, &e.c, s.pos, if (e.mtp) s.mtp_len else null, s.shared, s.cur);
+    if (s.drafter_from != null) _ = try drafter_snap.span(e, &plan);
     if (plan.len != s.len) return error.SnapshotSize;
     errdefer cuda.completion.drain(e.d, e.stream, "a failed GLM snapshot restore did not drain");
     try pool.move(e.stream, &s.lease, &plan, false);
     try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
+    if (s.drafter_from) |from| try drafter_snap.restore(e, from);
     e.cur.in_head = 0;
     try e.stream.synchronize();
 }

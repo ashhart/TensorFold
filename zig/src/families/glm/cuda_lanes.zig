@@ -181,7 +181,7 @@ pub const Lanes = struct {
     }
 
     fn cancelled(ptr: ?*anyopaque) bool {
-        return @as(*lanes.Stream, @ptrCast(@alignCast(ptr.?))).isCancelled();
+        return @import("cuda_prefill_stop.zig").stop(@ptrCast(@alignCast(ptr.?)));
     }
 
     // -- the vtable ---------------------------------------------------------------------------------------------

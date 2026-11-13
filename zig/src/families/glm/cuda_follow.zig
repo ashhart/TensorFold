@@ -22,7 +22,7 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
+    flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared (1), DFlash2 rings kept (2)
     a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -207,7 +207,7 @@ pub const Leader = struct {
 
     /// Every rank's prompt cache at rank 0's budget (snapshots.agree), its states past the pool's pages as rank 0's.
     pub fn snapshots(x: Leader, budget: u64) !void {
-        try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget, .flags = @intFromBool(x.e.share_pages) }, &.{});
+        try x.send(.{ .kind = @backingInt(Kind.snapshots), .a = budget, .flags = @as(u32, @intFromBool(x.e.share_pages)) | @as(u32, @intFromBool(x.e.snap_drafter)) << 1 }, &.{});
         try @import("cuda_snapshots.zig").agree(x.e, budget);
     }
 
@@ -432,6 +432,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
             },
             .snapshots => {
                 e.share_pages = h.flags & 1 != 0; // TF_KV_SHARE on rank 0: a kept state leaves the shared store's pages out
+                e.snap_drafter = h.flags & 2 != 0; // TF_GLM_REQUEST_STARTS on rank 0: every rank keeps DFlash2's ring alike
                 try @import("cuda_snapshots.zig").agree(e, h.a);
             },
             .drop => for (step.ids) |id| e.dropState(id),

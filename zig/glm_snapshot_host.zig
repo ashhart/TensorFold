@@ -42,7 +42,7 @@ test "GLM snapshots: a short prefix fits 4 GiB even with a 524288-token configur
     defer seq.st.deinit();
     e.cur = &seq;
     e.c = w.config;
-    e.mtp = true;
+    e.mtp, e.snap_drafter = .{ true, false }; // the MTP head, no DFlash2 ring (cuda_drafter_snap)
     e.capacity = seq.st.capacity;
     for ([_]u32{ 2048, 34816, 266240 }) |at| {
         std.debug.print("GLM snapshot sizing rank=0 world=2 at={d} bytes={d} arena={d}\n", .{ at, glm.native.snap_bytes(&e, at), seq.st.arena.buf.len });
@@ -426,7 +426,7 @@ test "GLM snapshots: 0.3 GiB fits the first default TP2 prefix at 256K but not a
     defer seq.st.deinit();
     e.cur = &seq;
     e.c = w.config;
-    e.mtp = true;
+    e.mtp, e.snap_drafter = .{ true, false }; // the MTP head, no DFlash2 ring (cuda_drafter_snap)
     e.capacity = seq.st.capacity;
     const minimum = glm.native.snap_min_bytes(&e);
     const budget: u64 = 322122547;
