@@ -393,11 +393,12 @@ pub const Engine = struct {
         return &e.batch_s.?;
     }
 
-    /// The scratch's sizes for `rows`: the format, head_local's rows and whether the lane reduces through native_part.
+    /// The scratch's sizes for `rows`: the format, head_local's rows (main's unless EXL3) and whether the lane reduces.
     pub fn scratchSizes(e: *const Engine, rows: usize) @import("cuda_batch_state.zig").Sizes {
         const one = @import("cuda_batch_state.zig").head_rows_one;
         const classic = if (e.collective != null) @max(rows, one) else one;
-        return .{ .exl3_lanes = e.exl3_lanes, .format = e.scratch_format, .head_rows = @min(rows, @min(classic, e.head_local_rows)), .lane_reduce = !e.batch_k.native_lane.clusters };
+        const head_rows = if (e.scratch_format == .classic and !e.exl3_lanes) classic else @min(rows, @min(classic, e.head_local_rows));
+        return .{ .exl3_lanes = e.exl3_lanes, .format = e.scratch_format, .head_rows = head_rows, .lane_reduce = !e.batch_k.native_lane.clusters };
     }
 
     /// The batched pass over `ids` from `seq.fed` in chunks of at most `chunk` rows; a window's hooks take one chunk.
