@@ -167,3 +167,36 @@ test "dsv41 metal pool: a slot past the sixteenth sizes its run by its max new t
     say(blocks == 2, "slot 19 of 20, a 300-id prompt with 16 new tokens: a run of {d} blocks (2 expected, 6 the whole window)", .{blocks});
     try testing.expectEqual(@as(u32, 2), blocks);
 }
+
+test "dsv41 metal pool: with the prompt cache on, moved runs and a kept state restored into a new run equal serial" {
+    const n = [_]usize{ 300, 300, 300, 300, 600 };
+    var prompts: [5][]u32 = undefined;
+    for (&prompts, n, 0..) |*p, len, i| p.* = try ids(len, 40 + i);
+    defer for (prompts) |p| gpa.free(p);
+    var want: [5][]u32 = undefined;
+    try reference(&prompts, &want);
+    defer for (want) |w| gpa.free(w);
+    const m = try fs.open(gpa, io, seed, .{ .slots = 4, .drafts = false, .pool = 2000, .cache_bytes = 1 << 30 });
+    defer fs.close(m);
+    const t = m.t;
+    var runs = [_]Run{ .{ .slot = 0, .prompt = prompts[0] }, .{ .slot = 1, .prompt = prompts[1] }, .{ .slot = 2, .prompt = prompts[2] }, .{ .slot = 3, .prompt = prompts[3] }, .{ .slot = 0, .prompt = prompts[4] }, .{ .slot = 2, .prompt = prompts[0] } };
+    defer for (&runs) |*r| r.out.deinit(gpa);
+    for (runs[0..4]) |*r| try r.begin(t);
+    for (0..5) |_| for (runs[0..4]) |*r| try r.step(t);
+    try runs[0].finish(t);
+    try runs[2].finish(t);
+    const moves0 = t.pool.?.runs[1].?.start;
+    try runs[4].begin(t); // seats 1 and 3 slide down under their live requests
+    const moved = moves0 != t.pool.?.runs[1].?.start;
+    for ([_]usize{ 1, 3 }) |i| try runs[i].finish(t);
+    const hits0 = t.stats.hits;
+    try runs[5].begin(t); // the first prompt again: its kept state restored into a run elsewhere
+    const hit = t.stats.hits > hits0;
+    try runs[5].finish(t);
+    try runs[4].finish(t);
+    var bad: usize = 0;
+    for (runs, [_][]u32{ want[0], want[1], want[2], want[3], want[4], want[0] }) |r, w| bad += @intFromBool(!std.mem.eql(u32, r.out.items, w));
+    say(bad == 0 and moved and hit, "cache on: {d} of 6 replies differ from serial; runs slid down: {}; a kept state restored: {}", .{ bad, moved, hit });
+    try testing.expect(moved and hit);
+    try testing.expectEqual(@as(usize, 0), bad);
+}
