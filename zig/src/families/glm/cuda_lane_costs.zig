@@ -1,4 +1,4 @@
-//! Rank 0 keeps MTP prices and each drafter's expert-form choice per build and timing identity.
+//! Rank 0 keeps MTP prices and each drafter's expert forms by window width per build and timing identity.
 const std = @import("std");
 const sys = @import("sys");
 const cuda = @import("cuda");
@@ -66,8 +66,8 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const block = e.drafter != null;
     const parts = try keyParts(e, ctx, &name, &shape, pin);
     const key = if (parts) |v| cache.key(gpa, io, &v) catch null else null;
-    if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (measurements.reusable(kept, block) and (pin == null or pin.? == (kept.fact != 0))) {
-        try x.expertForm(kept.fact != 0);
+    if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (measurements.reusable(kept, block) and (pin == null or kept.fact == measurements.every(pin.?))) {
+        try x.expertForm(measurements.rows(kept.fact));
         try x.idle();
         report(kept, "kept", block, pin != null);
         return tableFor(kept, block);
@@ -101,7 +101,7 @@ fn pinnedForm() !?bool {
 /// A load that times nothing still sends a named form to every rank; unnamed, the forms stay classic.
 fn untimed(x: anytype, pin: ?bool) !?Table {
     const f = pin orelse return null;
-    try x.expertForm(f);
+    try x.expertForm(measurements.rows(measurements.every(f)));
     try x.idle();
     std.log.info(untimed_line, .{if (f) "factored" else "classic"});
     return null;
@@ -113,7 +113,8 @@ const form_line = "glm: expert form ({s}): {s}{s}; DFlash2 keeps its seed window
 const untimed_line = "glm: expert form (untimed): {s} (TF_GLM_EXPERT_FORM)";
 
 fn report(k: Kept, how: []const u8, block: bool, pinned: bool) void {
-    const form = if (k.fact != 0) "factored" else "classic";
+    var buf: [64]u8 = undefined;
+    const form = words(k.fact, &buf);
     if (block) {
         std.log.info(form_line, .{ how, form, named(pinned) });
         return;
@@ -123,6 +124,25 @@ fn report(k: Kept, how: []const u8, block: bool, pinned: bool) void {
 
 fn named(pinned: bool) []const u8 {
     return if (pinned) " (TF_GLM_EXPERT_FORM)" else "";
+}
+
+/// One word when every width shares a form, else the more common form and the widths where the other runs.
+fn words(fact: u64, buf: []u8) []const u8 {
+    if (fact == 0) return "classic";
+    if (fact == measurements.all) return "factored";
+    const most = @as(usize, @popCount(fact)) * 2 > widths.len;
+    const other = if (most) measurements.all & ~fact else fact;
+    const head = std.fmt.bufPrint(buf, "{s}, {s} at", .{ if (most) "factored" else "classic", if (most) "classic" else "factored" }) catch return "by width";
+    var len = head.len;
+    var left: usize = @popCount(other);
+    for (widths, 0..) |w, i| {
+        if ((other >> @intCast(i)) & 1 == 0) continue;
+        left -= 1;
+        const sep: []const u8 = if (len == head.len) " " else if (left == 0) " and " else ", ";
+        len += (std.fmt.bufPrint(buf[len..], "{s}{d}", .{ sep, w }) catch return "by width").len;
+    }
+    len += (std.fmt.bufPrint(buf[len..], " {s}", .{if (other == 1) "row" else "rows"}) catch return "by width").len;
+    return buf[0..len];
 }
 
 /// Cache identity: the GPU and driver, this checkpoint and drafter, the settings a window's time follows, a named form.
@@ -174,8 +194,8 @@ const Scratch = struct {
     held: [@max(max_held, engine.max_drafts)]u32 = undefined,
     chances: [@max(max_held, engine.max_drafts)]f64 = undefined,
 
-    pub fn form(s: *Scratch, fact: bool) !void {
-        try s.x.expertForm(fact);
+    pub fn form(s: *Scratch, fact: u64) !void {
+        try s.x.expertForm(measurements.rows(fact));
     }
 
     pub fn window(s: *Scratch, i: usize) !f64 {
@@ -290,11 +310,11 @@ test "GLM cost identity: a named form's startup line ends at (TF_GLM_EXPERT_FORM
 
 test "GLM cost identity: a load that times nothing sends a named form to every rank once, and nothing unnamed" {
     const Leader = struct {
-        form: ?bool = null,
+        form: ?u64 = null,
         sent: usize = 0,
         idles: usize = 0,
-        pub fn expertForm(l: *@This(), fact: bool) !void {
-            l.form = fact;
+        pub fn expertForm(l: *@This(), forms: u64) !void {
+            l.form = forms;
             l.sent += 1;
         }
         pub fn idle(l: *@This()) !void {
@@ -304,8 +324,20 @@ test "GLM cost identity: a load that times nothing sends a named form to every r
     for ([_]?bool{ null, false, true }) |pin| {
         var l: Leader = .{};
         try std.testing.expect((try untimed(&l, pin)) == null);
-        try std.testing.expectEqual(pin, l.form);
+        try std.testing.expectEqual(if (pin) |f| @as(?u64, measurements.rows(measurements.every(f))) else null, l.form);
         try std.testing.expectEqual(@as(usize, @intFromBool(pin != null)), l.sent);
         try std.testing.expectEqual(l.sent, l.idles);
     }
+}
+
+test "GLM cost identity: a raced line names the more common form and the widths where the other runs" {
+    var buf: [64]u8 = undefined;
+    const all = measurements.all;
+    try std.testing.expectEqualStrings("classic", words(0, &buf));
+    try std.testing.expectEqualStrings("factored", words(all, &buf));
+    try std.testing.expectEqualStrings("factored, classic at 4 and 6 rows", words(all & ~@as(u64, 0b11000), &buf));
+    try std.testing.expectEqualStrings("factored, classic at 32 rows", words(all >> 1, &buf));
+    try std.testing.expectEqualStrings("classic, factored at 1 row", words(1, &buf));
+    try std.testing.expectEqualStrings("classic, factored at 1, 2 and 32 rows", words(0b10_0000_0011, &buf));
+    try std.testing.expectEqualStrings("classic, factored at 8, 12, 16, 24 and 32 rows", words(0b11_1110_0000, &buf));
 }

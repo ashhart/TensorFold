@@ -17,7 +17,13 @@ pub const Kernels = struct {
     nvfp4: cuda.experts.Nvfp4Experts,
     b32: ?cuda.experts32.Nvfp4b32Experts, // loaded for a csf0_v1 checkpoint alone (wantsBlock32)
     router: cuda.grouped.Router,
-    fact: bool = false, // decode windows on NVFP4's factored tiles (the same bits): load timing picks it (cuda_lane_costs)
+    fact: u64 = 0, // bit r - 1: a decode window of r rows on NVFP4's factored tiles (the same bits); load timing picks them by width (cuda_lane_costs)
+
+    /// Whether a decode window of `rows` runs on the factored tiles; past 64 rows, as 64 do.
+    pub fn factored(ks: *const Kernels, rows: usize) bool {
+        const r = @min(rows, 64);
+        return r > 0 and (ks.fact >> @intCast(r - 1)) & 1 != 0;
+    }
 
     /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too.
     pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: bool) !Kernels {

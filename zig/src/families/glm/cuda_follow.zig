@@ -23,7 +23,7 @@ pub const Header = extern struct {
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
     flags: u32 = 0, // begin: sampled; draft: from the prompt (1), chances (2); prefill, chunk: prompt_logprobs (1); chunk: indexer rows split (2); verify, shared: whole rows; snapshots: pages shared
-    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
+    a: u64 = 0, // begin: the prompt cache's pages first in its table; keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length; form: a bit a window's rows
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -315,10 +315,10 @@ pub const Leader = struct {
         try x.e.draftBlock(reqs);
     }
 
-    /// Every rank's decode windows on the factored expert form or not (the same bits; load timing picks it).
-    pub fn expertForm(x: Leader, fact: bool) !void {
-        try x.send(.{ .kind = @backingInt(Kind.form), .a = @intFromBool(fact) }, &.{});
-        x.e.m.experts.fact = fact;
+    /// Every rank's expert forms, bit r - 1 for a window of r rows (the same bits; load timing picks them by width).
+    pub fn expertForm(x: Leader, forms: u64) !void {
+        try x.send(.{ .kind = @backingInt(Kind.form), .a = forms }, &.{});
+        x.e.m.experts.fact = forms;
     }
 
     /// The other ranks leave their loops.
@@ -412,7 +412,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 try e.prefillMany(decoded, &firsts);
             },
             .keep => try e.keep(@intCast(h.a)),
-            .form => e.m.experts.fact = h.a != 0,
+            .form => e.m.experts.fact = h.a,
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);

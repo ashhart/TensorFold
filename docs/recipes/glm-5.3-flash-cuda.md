@@ -104,14 +104,20 @@ pending, so keep the default policy until that checkpoint's complete cost and re
 ## Window prices
 
 Decode windows reach 32 rows and MTP chains 15 drafts. With drafts and enough scratch context, rank 0 races
-classic NVFP4 experts against the factored form over real text on every rank, keeping the faster form with the same
-bits. MTP also times windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, with straight lines between them, and a
-chained draft step. Its startup line reports `glm: windows (timed)` and the expert form. DFlash2 keeps the existing
-seed forward and step prices in lone and shared rounds; it times only the target expert-form race and reports
-`glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or published to the lane core.
-`TF_GLM_EXPERT_FORM=classic` or `factored` names the form instead and skips the race, so launches compare at one
-form, and a load that times nothing still runs it (`glm: expert form (untimed)`); a named form's startup line puts
-`(TF_GLM_EXPERT_FORM)` after the form's word.
+classic NVFP4 experts against the factored form, which gives the same bits, over real text on every rank at windows
+of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows. Five untimed sweeps of every width on both forms come first, then each
+width's timed windows take the two forms in turn, classic first on even rounds and factored first on odd ones, so
+neither form is timed in a load's first seconds, and a drift through the race or a window right after a switch of
+form falls on both alike. Each width keeps its faster form, classic unless factored is more than 1% faster, and a
+window runs on the form of the narrowest timed width that holds it. `TF_GLM_EXPERT_FORM=classic` or `factored`
+names one form for every width instead and skips the race, so launches compare at one form, and a load that times
+nothing still runs it (`glm: expert form (untimed)`); a named form's startup line puts `(TF_GLM_EXPERT_FORM)` after
+the form's word. MTP prices each width at its kept form's time, with straight lines between them, and a chained
+draft step. Its startup line reports `glm: windows (timed)` and the forms: one word when every width shares one,
+else the more common form and the widths where the other runs, as in `experts factored, classic at 4 and 6 rows`.
+DFlash2 keeps the existing seed forward and step prices in lone and shared rounds; it times only the target
+expert-form race and reports `glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or
+published to the lane core.
 
 The measurements stay in `~/.cache/tensorfold/window-costs`, keyed by the build, GPU/driver, full checkpoint and drafter
 identity, drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul
