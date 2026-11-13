@@ -223,6 +223,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);
+    const many_stress = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_qmmf_many.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    const many_stress_run = b.addRunArtifact(b.addTest(.{ .root_module = many_stress, .filters = &.{"qmmf many stress:"} }));
+    many.step.dependOn(&many_stress_run.step);
     @import("cuda_checkpoint_cache_host.zig").steps(b, step);
     b.step("test-lfm2-load-host", "LFM2 decision model metadata and load ownership without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lfm2Module(b, host, .debug, cuda, mods.core) })).step);
     engines_build.qwen3HostTest(b, engines_build.qwen3Module(b, host, .debug, cuda, mods.core, mods.lanes, mods.api), step);

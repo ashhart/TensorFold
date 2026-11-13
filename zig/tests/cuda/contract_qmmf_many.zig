@@ -18,6 +18,30 @@ fn depth(shape: c.Shape) usize {
     return shape.k / 16 + 24;
 }
 
+fn fixture(data: Dense, fill: g.Fill, seed: u64, member: usize, codes: []u8, scales: []u8) f32 {
+    const shape = data.shape;
+    const n = shape.n;
+    if (fill == .stress) {
+        for (0..shape.rows) |row| for (0..shape.k / 2) |k| {
+            data.x[row * shape.k + k] = c.toBf16(512);
+            data.x[row * shape.k + shape.k / 2 + k] = c.toBf16(if (k < 8) 516 else 512);
+        };
+    } else data.fillX(fill, seed, 2);
+    for (scales, 0..) |*v, i| v.* = if (fill == .stress or (i + member) % 2 == 0) 0x38 else 0x30;
+    @memset(codes, 0);
+    const scale: f32 = if (fill == .stress) 1 else 1 + @as(f32, @floatFromInt(member)) * 0.25;
+    for (0..n) |j| for (0..shape.k) |k| {
+        const first = if (fill == .stress) k % (shape.k / 2) else k;
+        const mag: u8 = @intCast(1 + (first * 7 + j * 3 + member) % 7);
+        const nib = mag | @as(u8, if (fill == .stress and k >= shape.k / 2) 8 else 0);
+        codes[j * (shape.k / 2) + k / 2] |= nib << @as(u3, @intCast((k % 2) * 4));
+        const value = ([_]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 })[mag];
+        const group_scale: f64 = if (scales[j * (shape.k / 16) + k / 16] == 0x38) 1 else 0.5;
+        data.w[j * shape.k + k] = (if (nib & 8 != 0) -value else value) * group_scale * scale;
+    };
+    return scale;
+}
+
 const Product = struct {
     rig: Rig,
     lane: *const q.Lane,
@@ -64,24 +88,12 @@ const Product = struct {
             const n = shape.n + member * 65;
             const data = try Dense.init(a, .{ .rows = shape.rows, .n = n, .k = shape.k }, 1);
             p.d[member] = data;
-            data.fillX(fill, seed, 2);
-            if (member == 0) p.x = try p.rig.input(std.mem.sliceAsBytes(data.x));
             const codes = try a.alloc(u8, n * shape.k / 2);
             defer a.free(codes);
             const scales = try a.alloc(u8, n * (shape.k / 16));
             defer a.free(scales);
-            for (scales, 0..) |*v, i| v.* = if (fill == .stress or (i + member) % 2 == 0) 0x38 else 0x30;
-            @memset(codes, 0);
-            const scale: f32 = if (fill == .stress) 1 else 1 + @as(f32, @floatFromInt(member)) * 0.25;
-            for (0..n) |j| for (0..shape.k) |k| {
-                const first = if (fill == .stress) k % (shape.k / 2) else k;
-                const mag: u8 = @intCast(1 + (first * 7 + j * 3 + member) % 7);
-                const nib = mag | @as(u8, if (fill == .stress and k >= shape.k / 2) 8 else 0);
-                codes[j * (shape.k / 2) + k / 2] |= nib << @as(u3, @intCast((k % 2) * 4));
-                const value = ([_]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 })[mag];
-                const group_scale: f64 = if (scales[j * (shape.k / 16) + k / 16] == 0x38) 1 else 0.5;
-                data.w[j * shape.k + k] = (if (nib & 8 != 0) -value else value) * group_scale * scale;
-            };
+            const scale = fixture(data, fill, seed, member, codes, scales);
+            if (member == 0) p.x = try p.rig.input(std.mem.sliceAsBytes(data.x));
             const npad = cuda.nvfp4.padded(n);
             const words = try a.alloc(u32, npad / 64 * (shape.k / 64) * 512);
             defer a.free(words);
@@ -182,4 +194,40 @@ pub fn run(gpu: check.Gpu) !void {
     try g.runAll(gpu.gpa, kernels.items, 0x713, &tally);
     std.debug.print("SUMMARY NVFP4 grouped gates 1-4: {d} pass, {d} fail; {d} controls red, {d} missed\n", .{ tally.passed, tally.failed, tally.caught, tally.missed });
     try check.expect(tally.problems() == 0, "grouped NVFP4 contract failed", .{});
+}
+
+test "qmmf many stress: both part counts reject reduced sums in every order" {
+    const a = std.testing.allocator;
+    const shape: c.Shape = .{ .rows = 1, .n = 7, .k = 4096 };
+    const data = try Dense.init(a, shape, 1);
+    defer data.deinit();
+    const codes = try a.alloc(u8, shape.n * shape.k / 2);
+    defer a.free(codes);
+    const scales = try a.alloc(u8, shape.n * shape.k / 16);
+    defer a.free(scales);
+    for ([_]usize{ 2, 4 }) |members| for ([_]u32{ 1, 2, 4 }) |sk| {
+        var product: Product = .{ .rig = undefined, .lane = undefined, .members = members, .sk = sk, .control = false, .name = "host fixture" };
+        const spec = product.kernel().spec;
+        for (0..members) |member| {
+            _ = fixture(data, .stress, 0x713, member, codes, scales);
+            var want: [7]f64 = undefined;
+            var mag: [7]f64 = undefined;
+            var got: [7]f64 = undefined;
+            try data.reference(&want, &mag);
+            for (mag) |m| try std.testing.expect(m < 0x1p24);
+            for ([_]g.Order{ .sequential, .pairwise, .strided }) |order| {
+                try data.simulate(.f32, order, &got);
+                try std.testing.expectEqualSlices(f64, &want, &got);
+                for ([_]c.Accum{ .f16, .bf16 }, [_]f64{ spec.sums.f16, spec.sums.bf16 }) |acc, need| {
+                    try data.simulate(acc, order, &got);
+                    var miss: f64 = 0;
+                    for (got, want) |value, exact| {
+                        const ratio = if (std.math.isFinite(value)) @abs(value - exact) / c.boundExact(spec, exact) else std.math.inf(f64);
+                        miss = @max(miss, ratio);
+                    }
+                    try std.testing.expect(miss >= need);
+                }
+            }
+        }
+    };
 }
