@@ -74,20 +74,26 @@ const Wire = struct {
     var taken: usize = 0;
     var sends: usize = 0;
     var recvs: usize = 0;
+    var to: usize = 0; // a bit for each rank sent to, and received from
+    var from: usize = 0;
 
     fn reset() void {
+        to = 0;
+        from = 0;
         for (sent.items) |x| t.allocator.free(x);
         sent.clearAndFree(t.allocator);
         taken = 0;
         sends = 0;
         recvs = 0;
     }
-    fn ncclSend(ptr: u64, n: usize, _: cuda.nccl.DataType, _: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+    fn ncclSend(ptr: u64, n: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+        to |= @as(usize, 1) << @intCast(peer);
         sent.append(t.allocator, t.allocator.dupe(u8, rec.bytes(ptr, n)) catch return 1) catch return 1;
         sends += 1;
         return 0;
     }
-    fn ncclRecv(ptr: u64, n: usize, _: cuda.nccl.DataType, _: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+    fn ncclRecv(ptr: u64, n: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+        from |= @as(usize, 1) << @intCast(peer);
         if (taken == sent.items.len or sent.items[taken].len != n) return 1; // every receive meets a send of its size
         @memcpy(rec.bytes(ptr, n), sent.items[taken]);
         taken += 1;
@@ -100,11 +106,11 @@ const Wire = struct {
         _ = w.d;
         @memcpy(rec.bytes(dst, n), rec.bytes(src, n));
     }
-    pub fn send(_: Wire, ptr: u64, n: usize, _: u32) !void {
-        if (ncclSend(ptr, n, .u8, 0, null, null) != 0) return error.Wire;
+    pub fn send(_: Wire, ptr: u64, n: usize, peer: u32) !void {
+        if (ncclSend(ptr, n, .u8, @intCast(peer), null, null) != 0) return error.Wire;
     }
-    pub fn recv(_: Wire, ptr: u64, n: usize, _: u32) !void {
-        if (ncclRecv(ptr, n, .u8, 0, null, null) != 0) return error.Wire;
+    pub fn recv(_: Wire, ptr: u64, n: usize, peer: u32) !void {
+        if (ncclRecv(ptr, n, .u8, @intCast(peer), null, null) != 0) return error.Wire;
     }
 };
 
@@ -157,6 +163,9 @@ test "GLM KV split carry: the home's latent rows land in the owner's places, in 
         try t.expectEqual(sent, got);
         try t.expectEqual(carry.bytes(&recv_plan), got);
         try t.expectEqual(std.math.divCeil(usize, got, n) catch unreachable, Wire.sends); // the same pieces on both sides
+        try t.expectEqual(Wire.sends, Wire.recvs);
+        try t.expect(Wire.to == 1 << 0 and Wire.from == 1 << 1); // the home to the owner, and no other rank
+        try t.expectEqual(@as(usize, 0), try carry.run(Wire{ .d = &d }, &send_plan, .none, 2, &.{}, 0, room.ptr, n)); // a third rank's side
         try t.expectEqual(Wire.sends, Wire.recvs);
         const have = try parts(&recv_plan);
         defer free(have);
@@ -231,6 +240,69 @@ test "GLM KV split carry: a restore off its home moves each rank's own parts and
     resumed[0].st.owner = null;
     f[0].e.cur = &resumed[0];
     try t.expectError(error.KvSplitAway, f[0].e.restoreState(ids[0]));
+    for (&f) |*x| x.e.cur = &x.seq;
+}
+
+test "GLM KV split carry at three ranks: the home sends to the owner alone, and the third rank posts nothing" {
+    var d = rec.init();
+    var f: [3]Fixture = undefined;
+    for (&f, 0..) |*x, r| try x.init(&d, r, 3, true);
+    defer for (&f) |*x| x.deinit();
+    var pg: [3]Pages = undefined;
+    for (&pg) |*p| p.* = try Pages.init(&d, f[0].e.c);
+    defer for (&pg) |*p| p.kv.free();
+    var odd_at: [cap]u32 = undefined;
+    var even_at: [cap]u32 = undefined;
+    for (&odd_at, &even_at, odd, even) |*o, *e, x, y| {
+        o.* = x / 2;
+        e.* = y / 2;
+    }
+    var lib: cuda.nccl.Library = .{ .lib = undefined, .api = undefined };
+    lib.api.ncclSend = Wire.ncclSend;
+    lib.api.ncclRecv = Wire.ncclRecv;
+    var rooms: [3]cuda.DeviceBuffer = undefined;
+    for (&rooms) |*r| r.* = try cuda.DeviceBuffer.alloc(&d, 3000);
+    defer for (&rooms) |*r| r.free();
+    // kept on rank 1's stream, resumed on rank 0's: rank 2 holds neither stream's latent rows
+    var kept: [3]Seq = .{ try pg[0].seq(&d, &f[0], &odd, 1, &.{}), try pg[1].seq(&d, &f[1], &odd, 1, &odd_at), try pg[2].seq(&d, &f[2], &odd, 1, &.{}) };
+    defer for (&kept) |*k| k.st.deinit();
+    var resumed: [3]Seq = .{ try pg[0].seq(&d, &f[0], &even, 0, &even_at), try pg[1].seq(&d, &f[1], &even, 0, &.{}), try pg[2].seq(&d, &f[2], &even, 0, &.{}) };
+    defer for (&resumed) |*k| k.st.deinit();
+    var want: [3][]std.ArrayList(u8) = undefined;
+    var ids: [3]u64 = undefined;
+    for (0..3) |r| {
+        fill(pg[r].kv, 31 + r);
+        fill(kept[r].st.arena.buf, 37 + r);
+        try kept[r].st.restoreHost(f[r].e.stream, at, at, &.{1}, .{ 0, 0 });
+        want[r] = try parts(&try Plan.init(&kept[r].st, &f[r].e.c, at, at, 0));
+        try f[r].e.prepareSnapshots(4 * f[r].e.stateBytes(at));
+        f[r].e.cur = &kept[r];
+        ids[r] = try f[r].e.keepState();
+        f[r].e.room = .{ .buf = rooms[r], .rank = r, .world = 3, .rows = 1, .lw = f[r].e.c.kv_lora, .heads = @splat(0), .lib = &lib, .comm = null };
+    }
+    defer for (want) |w| free(w);
+    defer Wire.reset();
+    Wire.reset();
+    for (0..3) |r| @memset(rec.bytes(pg[r].kv.ptr, pg[r].kv.len), 0xE9);
+    for ([_]usize{ 1, 0 }) |r| { // the home, then the owner
+        f[r].e.cur = &resumed[r];
+        try f[r].e.restoreState(ids[r]);
+    }
+    const posted = Wire.sends;
+    try t.expect(posted > 1 and Wire.recvs == posted and Wire.taken == posted);
+    f[2].e.cur = &resumed[2];
+    try f[2].e.restoreState(ids[2]); // the third rank: its own parts alone, nothing sent or received
+    try t.expect(Wire.sends == posted and Wire.recvs == posted);
+    try t.expect(Wire.to == 1 << 0 and Wire.from == 1 << 1); // rank 1 to rank 0; none to or from rank 2
+    for (0..3) |r| {
+        const plan = try Plan.init(&resumed[r].st, &f[r].e.c, at, at, 0);
+        const have = try parts(&plan);
+        defer free(have);
+        for (plan.parts[0..plan.count], want[r], want[1], have) |part, mine, home, h| {
+            if (!plan.holds(part)) continue; // ranks 1 and 2 hold none of the resumed stream's latent rows
+            try t.expectEqualSlices(u8, if (part.alt) home.items else mine.items, h.items);
+        }
+    }
     for (&f) |*x| x.e.cur = &x.seq;
 }
 
