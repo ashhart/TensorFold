@@ -17,6 +17,7 @@ const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
 const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
+const witness = @import("witness.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
 const recall = @import("recall_routes.zig");
@@ -105,6 +106,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
+    if (std.mem.eql(u8, route, witness.path)) return witness.route(srv, conn, a);
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);

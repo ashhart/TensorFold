@@ -57,7 +57,7 @@ fn validLabel(label: []const u8) bool {
 }
 
 const listing = [_][]const u8{ "/models", "/v1/models", "/v1/voices" };
-const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest" };
+const reading = [_][]const u8{ "/memory", "/v1/memory", "/metrics", "/v1/metrics", "/v1/load", "/stats", "/dashboard", "/v1/benchmark/manifest", "/v1/execution/witness" };
 const inferring = [_][]const u8{
     "/chat/completions",      "/v1/chat/completions", "/completions",           "/v1/completions",
     "/messages",              "/v1/messages",         "/messages/count_tokens", "/v1/messages/count_tokens",
@@ -94,7 +94,7 @@ fn oneOf(route: []const u8, names: []const []const u8) bool {
     return false;
 }
 
-pub const Denial = enum { route, response_history, response_storage };
+pub const Denial = enum { route, response_history, response_storage, execution_witness };
 
 /// The stored Responses are the server's, so a restricted key's request must be stateless: store false, no parent.
 pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
@@ -103,4 +103,11 @@ pub fn responseDenial(scopes: Scopes, body: json.Value) ?Denial {
     const store = body.get("store") orelse return .response_storage;
     if (store != .bool or store.bool) return .response_storage;
     return null;
+}
+
+/// The witness is read-scoped, so a reply binds it only for a key that may read it: admin, or one with read.
+pub fn witnessDenial(scopes: Scopes, body: json.Value) ?Denial {
+    if (scopes.admin or scopes.read or body != .object) return null;
+    const asked = body.get("execution_witness") orelse return null;
+    return if (asked == .bool and asked.bool) .execution_witness else null;
 }
