@@ -706,16 +706,40 @@ A startup capacity estimate is not a measured release capacity.
 
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
-model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from the
-host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start it
-with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
-when you know the machine's headroom: a larger one leaves more for other work, a smaller one more for KV caches. The
-reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
-GPU's memory can freeze the host, so lower it only with room to spare.
+model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
+`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
+model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
+the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
+once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
+with a smaller `--context` or `--parallel`.
+`TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
+one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
+workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
+only with room to spare.
 
-On a discrete card (an RTX 3090, an A100) the server sizes its window from the card's own free memory, as the driver
-reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
-0.5 GiB up.
+On a discrete card (an RTX 3090, an A100) the budget is the card's own free memory, as the driver reports it, less a
+reserve of a 32nd of the card and at least 1 GiB, and the plan is the same. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that
+one from 0.5 GiB up.
+
+With pages, the plan takes the engine's own window first, then each other stream's fixed part, then the prompt cache:
+a named `--prompt-cache-gib` comes before every window but the engine's own, and an unnamed one after the whole
+windows the budget holds, half of what they leave but at least 16 GiB and at most all of it (#2987 shows what that
+does to `TF_KV_SHARE`'s states). The cache then holds the kept states (on GLM with `TF_KV_SHARE`, a slot a state, the
+rest of it made pages), and the rest of the budget becomes pages, up to the streams' windows plus the cache's pages.
+The settings that decide each part:
+
+| Setting | Kind | Scope | Unset | What it decides | Read in |
+|---|---|---|---|---|---|
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | environment | the host: every CUDA native family, each rank at load | a tenth of RAM, at least 4 GiB (unified); a 32nd of the card, at least 1 GiB (discrete) | what the budget leaves free | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` | environment | the host: every CUDA native family, each rank at load | none | a cap on the budget, the weights included | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `--context` | flag | the launch | the family's default, capped at the model's own window | a stream's window; `0` takes the model's own | `zig/src/server/cli.zig`, `zig/src/native/cuda_window.zig` |
+| `--parallel` | flag | the launch | `auto`: up to 8 | the streams | `zig/src/server/cli.zig` |
+| `--prompt-cache-gib` | flag | the launch | after the whole windows, as above | the prompt cache's budget | `zig/src/server/cli.zig`; unset, `zig/src/native/cuda_kv_pool.zig` (`budgetOf`) and `cuda_memory.zig` |
+| `TF_KV_SHARE` | environment, in the profile registry | the launch, on the families of the core page adapter | off: copies | prompts kept as pool pages, with at most this many states past them | `zig/src/core/kv_prompts.zig` |
+| `TF_GLM_KV_HOST_GIB` | environment | GLM | one window and 16 pages | GLM's host KV pages with `TF_GLM_KV_HOST=1`, outside the device pool | `zig/src/families/glm/cuda_kv_host.zig` |
+| the pool's pages | none | the core plan | — | what is left | `zig/src/core/kv_pool.zig` (`plan`) |
+
+Measured numbers for one launch are in #3000.
 
 ## Compaction
 

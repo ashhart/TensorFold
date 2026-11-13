@@ -118,7 +118,7 @@ pub fn reserve(s: *pc.Store, prompt: []const u32, born: u32, from: ?*pc.Entry, m
     }
 }
 
-/// Select the endpoint first; only interior, rewind and extra shared cuts compete for room after it.
+/// The endpoint first; interior, rewind and extra shared cuts compete for the room after it, ladder rungs last.
 pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: []const u32, spans: []const modes.Span, from: ?*pc.Entry, born: u32, endpoint: u32) ![]const u32 {
     if (s.reservation_guard == null) return marks;
     defer a.free(marks);
@@ -134,15 +134,15 @@ pub fn fitting(s: *pc.Store, a: std.mem.Allocator, prompt: []const u32, marks: [
             if (bytes > 0) room.slots -= 1;
         }
     }
-    for (marks) |at| {
-        if (end == at) continue;
+    for ([_]bool{ false, true }) |rungs| for (marks) |at| { // ladder checkpoints take only what every other mark leaves
+        if (end == at or @import("prompt_intermediate.zig").is(s.rules, prompt.len, at) != rungs) continue;
         const bytes = if (exists(s, prompt, at, spans)) 0 else s.family.vtable.bytes(s.family.ptr, at);
         if (bytes == 0 or (bytes <= room.bytes and room.slots > 0)) {
             try out.append(a, at);
             room.bytes -= bytes;
             if (bytes > 0) room.slots -= 1;
         }
-    }
+    };
     const fitted = try out.toOwnedSlice(a);
     s.counts.trimmed += marks.len - fitted.len;
     if (s.reservation_guard.?.promise) |promise| {
