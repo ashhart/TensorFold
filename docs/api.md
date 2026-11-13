@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -125,6 +125,7 @@ routes still require when keys are on. Without the flag no reply carries a CORS 
 | `POST /v1/messages/count_tokens` | Render the same model prompt without generating |
 | `POST /tokenize`, `POST /v1/tokenize` | vLLM's: a `prompt`'s token IDs, or the IDs a chat request's `messages` render to |
 | `POST /detokenize`, `POST /v1/detokenize` | vLLM's: the text of `tokens`, special tokens included |
+| `POST /apply-template`, `POST /v1/apply-template` | `{"prompt": TEXT}`: the text a `/tokenize` body's `messages` render to (tools, `reasoning_effort`, `chat_template_kwargs`, `add_generation_prompt`, media expanded), special tokens included; no engine work |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |

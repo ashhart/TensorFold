@@ -97,7 +97,7 @@ test "request provenance: chat usage equals tokenize count and exact prompt ids 
             @memcpy(conn.buf[0..bytes.len], bytes);
             conn.start = 0;
             conn.end = bytes.len;
-            tokens.post(srv, &conn, a, false);
+            tokens.post(srv, &conn, a, "/tokenize");
             const at = std.mem.indexOf(u8, wire.bytes.items, "\r\n\r\n") orelse return error.MissingReply;
             const tokenized = (try json.parse(a, wire.bytes.items[at + 4 ..])).ok;
             try std.testing.expectEqual(used, tokenized.get("count").?.int64().?);
@@ -175,4 +175,64 @@ test "request provenance: media prompt keeps authored image and video markers wh
     var cx: @import("errors.zig").Cx = .{ .a = a };
     const ids = try @import("prompt.zig").renderIds(srv, &cx, try f.messages(a, "<|image|> <|video|> <video> <|im_end|> <think>"), &.{}, false, null, true);
     for (hf.tok.added) |token| try std.testing.expectEqual(@as(usize, if (token.id == image or token.id == video or token.id == end) 1 else 0), std.mem.count(u32, ids, &.{token.id}));
+}
+
+fn templateRequest(srv: *Server, a: Allocator, body: json.Value, path: []const u8) !json.Value {
+    const bytes = try json.stringify(a, body, .{});
+    var wire: Wire = .{ .a = a };
+    var conn = try http.Conn.init(a, -1, "fixture");
+    defer conn.deinit();
+    conn.write_hooks = .{ .ctx = &wire, .write = Wire.write };
+    conn.version = "HTTP/1.1";
+    conn.method = "POST";
+    conn.path = path;
+    conn.quiet_log = true;
+    var headers = [_]http.Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{bytes.len}) }};
+    conn.headers = &headers;
+    @memcpy(conn.buf[0..bytes.len], bytes);
+    conn.end = bytes.len;
+    @import("routes.zig").dispatch(srv, &conn, a);
+    try std.testing.expect(std.mem.startsWith(u8, wire.bytes.items, "HTTP/1.1 200 "));
+    const at = std.mem.indexOf(u8, wire.bytes.items, "\r\n\r\n") orelse return error.MissingReply;
+    return (try json.parse(a, wire.bytes.items[at + 4 ..])).ok;
+}
+
+test "apply-template: rendered text retains special tokens and re-encodes to tokenize IDs on every fixture" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (f.names, 0..) |_, index| {
+        var fixture = try f.Fixture.init(a, index);
+        defer fixture.deinit();
+        var problem: []const u8 = "";
+        const hf = try HfText.load(a, std.testing.io, fixture.path, null, a, &problem);
+        defer hf.deinit();
+        var script: Script = .{};
+        const srv = try Server.init(a, std.testing.io, script.engine(), hf.text(), .{
+            .served_name = "m",
+            .model_ids = &.{"m"},
+            .enable_thinking = false,
+            .use_drafts = false,
+        }, null);
+        defer srv.deinit();
+        for ([_]bool{ false, true }) |generation| {
+            const body = try json.newObject(a);
+            try body.put(a, "model", .{ .string = "m" });
+            try body.put(a, "messages", try f.messages(a, "Hello world!"));
+            try body.put(a, "add_generation_prompt", .{ .bool = generation });
+            try body.put(a, "reasoning_effort", .{ .string = "none" });
+            const kwargs = try json.newObject(a);
+            try kwargs.put(a, "enable_thinking", .{ .bool = false });
+            try body.put(a, "chat_template_kwargs", .{ .object = kwargs });
+            const original = try templateRequest(srv, a, .{ .object = body }, "/tokenize");
+            for ([_][]const u8{ "/apply-template", "/v1/apply-template" }) |path| {
+                const applied = try templateRequest(srv, a, .{ .object = body }, path);
+                const plain = try json.newObject(a);
+                try plain.put(a, "prompt", applied.get("prompt").?);
+                try plain.put(a, "add_special_tokens", .{ .bool = false });
+                const encoded = try templateRequest(srv, a, .{ .object = plain }, "/tokenize");
+                try std.testing.expectEqualDeep(original.get("tokens").?, encoded.get("tokens").?);
+            }
+        }
+    }
 }
