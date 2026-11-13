@@ -7,6 +7,7 @@ const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
 const kern = @import("cuda_kernels.zig");
 const sampler = @import("cuda_sampler.zig");
+const shared_draw = @import("cuda_shared_draw.zig");
 const Config = @import("config.zig").Config;
 const weights = @import("cuda_weights.zig");
 const Backend = @import("cuda_lanes.zig").Cuda;
@@ -482,4 +483,37 @@ test "batched draws: eight parts take 15 or fewer greedy draw-side launches a le
     try t.expectEqual(@as(usize, 2), Count.levels);
     try t.expectEqual(@as(usize, 2), Count.entries[1] - Count.entries[0]);
     try t.expectEqual(@as(usize, 2), Count.draw - Count.entries[1]);
+}
+
+test "shared draw: a batch is refused when the modes differ and carries the rows' rules when they match" {
+    var words: [1024]u32 align(16) = @splat(0);
+    const pinned: cuda.HostBuffer = .{ .d = undefined, .bytes = std.mem.sliceAsBytes(&words) };
+    const greedy = [_]shared_draw.SharedDraw{ .{ .sampling = null, .pos = 5, .rows = 1 }, .{ .sampling = null, .pos = 6, .rows = 1 } };
+    try t.expect(!shared_draw.batch(&greedy, pinned, 100, 200, 300, 0, 64).?.sampled);
+    const s: @import("lanes").Sampling = .{ .seed = 7, .temperature = 1, .top_k = 1 };
+    const sampled = [_]shared_draw.SharedDraw{ .{ .sampling = s, .pos = 5, .rows = 1 }, .{ .sampling = s, .pos = 6, .rows = 1 } };
+    const b = shared_draw.batch(&sampled, pinned, 100, 200, 300, 0, 64).?;
+    try t.expect(b.sampled);
+    try t.expectEqual(@as(usize, 64), b.host_rules.len);
+    try t.expectEqual(@as(i32, 5), b.host_meta[0]);
+    try t.expectEqual(@as(i32, 6), b.host_meta[1]);
+    const mixed = [_]shared_draw.SharedDraw{ .{ .sampling = null, .pos = 5, .rows = 1 }, .{ .sampling = s, .pos = 6, .rows = 1 } };
+    try t.expect(shared_draw.batch(&mixed, pinned, 100, 200, 300, 0, 64) == null);
+}
+
+test "shared draw: a multi-row batch carries every row's rule and position" {
+    var words: [1024]u32 align(16) = @splat(0);
+    const pinned: cuda.HostBuffer = .{ .d = undefined, .bytes = std.mem.sliceAsBytes(&words) };
+    const a: lanes.Sampling = .{ .seed = 11, .temperature = 1, .top_k = 5 };
+    const b: lanes.Sampling = .{ .seed = 22, .temperature = 0.7, .top_k = 9 };
+    const parts = [_]shared_draw.SharedDraw{
+        .{ .sampling = a, .pos = 10, .rows = 1 },
+        .{ .sampling = b, .pos = 20, .rows = 2 },
+        .{ .sampling = a, .pos = 30, .rows = 1 },
+    };
+    const got = shared_draw.batch(&parts, pinned, 100, 200, 300, 0, 64).?;
+    try t.expectEqual(@as(usize, 4 * 8 * 4), got.host_rules.len);
+    const want = [_]sampler.Rule{ sampler.rule(a), sampler.rule(b), sampler.rule(b), sampler.rule(a) };
+    for (want, 0..) |r, row| try t.expectEqualSlices(u8, std.mem.asBytes(&r), got.host_rules[row * 32 ..][0..32]);
+    try t.expectEqualSlices(i32, &.{ 10, 20, 21, 30 }, got.host_meta);
 }
