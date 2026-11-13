@@ -873,6 +873,14 @@ An over-long input is named before the batch limit is checked, so a client learn
 not that the batch is too full. `dimensions` crops each vector to that many leading values and renormalizes it; a
 model with Matryoshka (MRL) widths takes any width in its declared range (32 to 4,096 for Qwen3-Embedding-8B).
 
+## Speech speed
+
+`POST /v1/audio/speech` takes `speed`. Absent, `null` or `1` sends the take exactly as before. Any other value needs
+the server's `--speech-speed` flag (off by default) and a number from 0.25 to 4: the finished take is stretched to its
+length divided by `speed` with waveform-similarity overlap-add (WSOLA) before it is encoded, so the pitch stays. A
+streamed reply (`stream: true`) takes only speed 1. Without the flag, other values are refused with HTTP 400 and the
+flag's name. The stretch runs on the server's CPU after synthesis, in time that grows with the stretched length.
+
 ## Responses
 
 `choices[0].message.content` holds the answer. Reasoning uses `reasoning_content`, or
