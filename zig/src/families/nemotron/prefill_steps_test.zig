@@ -74,10 +74,13 @@ const Ops = struct {
     }
     pub fn load(o: Ops, s: *lanes.Stream) void {
         if (o.queue.flights.items.len != 0) o.loads_on_empty.* = false;
+        o.map.ids = s;
         o.log.append(gpa, .{ .load = s.id[0] }) catch @panic("out of memory");
     }
-    pub fn open(_: Ops, s: *lanes.Stream) !usize {
+    pub fn open(o: Ops, s: *lanes.Stream) !usize {
         if (s.isCancelled()) return error.Cancelled;
+        try o.queue.drain();
+        o.load(s);
         return 0;
     }
     pub fn finish(_: Ops, _: *lanes.Stream) !void {}
@@ -152,8 +155,10 @@ test "Nemotron Metal steps: the MTP head absorbs every prompt row but the last, 
 
 const Kept = struct {
     log: *std.ArrayList(Event),
-    fn at(ptr: *anyopaque, _: *lanes.Stream, row: u32) void {
+    published: ?u32 = null,
+    fn at(ptr: *anyopaque, s: *lanes.Stream, row: u32) void {
         const k: *Kept = @ptrCast(@alignCast(ptr));
+        k.published = s.fill_at.load(.monotonic);
         k.log.append(gpa, .{ .keep = row }) catch @panic("out of memory");
     }
 };
@@ -176,6 +181,91 @@ test "Nemotron Metal steps: a cancel between chunks lands the queue and keeps th
     try pass.cancel(&q, ops, &s);
     try t.expectEqual(@as(usize, 0), q.flights.items.len);
     try t.expectEqual(Event{ .keep = 11 }, log.items[log.items.len - 1]);
+    try t.expectEqual(@as(?u32, 11), kept.published);
+    try t.expectEqual(@as(u32, 11), s.fill_at.load(.monotonic));
+}
+
+test "Nemotron Metal steps: consecutive chunks retain the prompt ids and one queued chunk" {
+    const ids: [29]u32 = @splat(7);
+    var s = try lanes.Stream.init(gpa, .{ .id = "a", .prompt = &ids, .max_new = 1 });
+    defer s.deinit(gpa);
+    var q: Queue = .{};
+    defer q.deinit();
+    var log: std.ArrayList(Event) = .empty;
+    defer log.deinit(gpa);
+    var map: pass.Steps = .{};
+    defer map.at.deinit(gpa);
+    var empty = true;
+    const ops: Ops = .{ .log = &log, .map = &map, .queue = &q, .loads_on_empty = &empty };
+    try t.expect(!try pass.step(&q, ops, &s));
+    const drains = q.drains;
+    for (0..2) |_| {
+        try t.expect(!try pass.step(&q, ops, &s));
+        try t.expectEqual(drains, q.drains);
+        try t.expectEqual(@as(usize, 1), q.flights.items.len);
+    }
+    var loads: usize = 0;
+    for (log.items) |e| if (e == .load) {
+        loads += 1;
+    };
+    try t.expectEqual(@as(usize, 1), loads);
+    try t.expectEqualSlices(u32, &.{ 8, 8 }, s.prefill_widths.items);
+    try t.expect(empty);
+}
+
+test "Nemotron Metal steps: changing the prompt owner drains before each id reload" {
+    const ids: [29]u32 = @splat(7);
+    var a = try lanes.Stream.init(gpa, .{ .id = "a", .prompt = &ids, .max_new = 1 });
+    defer a.deinit(gpa);
+    var b = try lanes.Stream.init(gpa, .{ .id = "b", .prompt = &ids, .max_new = 1 });
+    defer b.deinit(gpa);
+    var q: Queue = .{};
+    defer q.deinit();
+    var log: std.ArrayList(Event) = .empty;
+    defer log.deinit(gpa);
+    var map: pass.Steps = .{};
+    defer map.at.deinit(gpa);
+    var empty = true;
+    const ops: Ops = .{ .log = &log, .map = &map, .queue = &q, .loads_on_empty = &empty };
+    for ([_]*lanes.Stream{ &a, &a, &b, &a }) |s| try t.expect(!try pass.step(&q, ops, s));
+    var loaded: std.ArrayList(u8) = .empty;
+    defer loaded.deinit(gpa);
+    for (log.items) |e| if (e == .load) {
+        try loaded.append(gpa, e.load);
+    };
+    try t.expectEqualSlices(u8, "aba", loaded.items);
+    try t.expectEqual(@as(usize, 3), q.drains);
+    try t.expect(empty);
+}
+
+test "Nemotron Metal steps: cancellation inside a step publishes and keeps its landed tail" {
+    const Stop = struct {
+        fn yes(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    const ids: [29]u32 = @splat(7);
+    var log: std.ArrayList(Event) = .empty;
+    defer log.deinit(gpa);
+    var kept: Kept = .{ .log = &log };
+    var s = try lanes.Stream.init(gpa, .{ .id = "c", .prompt = &ids, .max_new = 1, .reuse = .{ .hook = .{ .ptr = &kept, .at = Kept.at } } });
+    defer s.deinit(gpa);
+    var q: Queue = .{};
+    defer q.deinit();
+    var map: pass.Steps = .{};
+    defer map.at.deinit(gpa);
+    var empty = true;
+    const ops: Ops = .{ .log = &log, .map = &map, .queue = &q, .loads_on_empty = &empty };
+    for (0..2) |_| try t.expect(!try pass.step(&q, ops, &s));
+    var stop: u8 = 0;
+    s.cancel_check = .{ .ptr = &stop, .check = Stop.yes };
+    try t.expectError(error.Cancelled, pass.step(&q, ops, &s));
+    try t.expectEqual(@as(?u32, 16), kept.published);
+    try t.expectEqual(@as(u32, 16), s.fill_at.load(.monotonic));
+    try t.expectEqual(@as(usize, 0), q.flights.items.len);
+    try t.expectEqual(@as(usize, 0), map.at.count());
+    map.forget(&s);
+    try t.expectEqual(@as(?*lanes.Stream, null), map.ids);
 }
 
 /// The lanes fake with Nemotron's stepping in front (cap 4), every chunk, load and decode logged.
