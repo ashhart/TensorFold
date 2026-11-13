@@ -85,6 +85,8 @@ const linux_fast = [_][]const u8{
     "test-grammar-error-host",
     "test-info-config",
     "test-native-options-host",
+    "test-template-limits-host",
+    "test-originals-host",
 };
 
 const linux_hip = [_][]const u8{
@@ -300,11 +302,13 @@ const macos_fast = [_][]const u8{
     "test-glm-disk-charge-host",
     "test-living-metal-host",
     "test-metal-formats-host",
+    "test-originals-host",
     "test-persistence-identity-host",
     "test-qwen27-bank-boundary-host",
     "test-qwen27-prompt-floor-host",
     "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
+    "test-template-limits-host",
 };
 
 const macos_lanes = [_][]const u8{

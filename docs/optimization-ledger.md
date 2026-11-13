@@ -396,6 +396,8 @@ below; these are estimates for planning a port, not results.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
+    Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
+    16-row default; sampled and shared requests keep the lane core ([#3013](https://github.com/ashhart/TensorFold/issues/3013)).
 
 17. **DSpark drafters.** A drafter that ships with the release (DeepSeek-V4.1's `mtp.i` blocks, MiniMax-M3.1's, Kimi
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the
@@ -467,6 +469,10 @@ below; these are estimates for planning a port, not results.
 
 25. **Tensor parallel ranks.** A model splits over two or more GPUs or hosts, so a model that doesn't fit one box
     runs, and decode reads each rank's share of the weights. Mixed Metal and CUDA ranks are tracked in [#1236].
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (C), TP=2 | prompt passes reduce-scatter the experts' slots by rows: rank 0 sends 5.81 → 3.43 MiB a prompt token, cold prefill +26.5..+26.8 % on two GB10s, +30.9..+33.9 % on two RTX PRO 6000s, same replies | [#2977] |
 
 26. **Pipeline stages.** Layer ranges on different nodes, one hidden row a token over Ethernet, so a GB10 and a Mac
     can serve one model ([#2005]). The stage link and its protocol are [#2012] and [#2060]; the 27B as a stage is
@@ -661,3 +667,4 @@ below; these are estimates for planning a port, not results.
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
 [#1603]: https://github.com/ashhart/TensorFold/issues/1603
+[#2977]: https://github.com/ashhart/TensorFold/pull/2977
