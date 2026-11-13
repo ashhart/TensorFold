@@ -4,6 +4,8 @@ const std = @import("std");
 pub fn steps(b: *std.Build) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true });
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const warm = b.createModule(.{ .root_source_file = b.path("zig/src/native/planned_warm.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = lanes }, .{ .name = "engine_api", .module = api } } });
+    b.step("test-metal-planned-warm-host", "Planned cache warm policy and unchanged normal marks without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = warm })).step);
     const interrupted = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_interrupted_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     b.step("test-lane-interrupted-host", "Interrupted prompt retention and clean retries without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = interrupted, .filters = &.{"interrupted prefill:"} })).step);
     const halt = b.addTest(.{ .root_module = api, .filters = &.{ "halt (", "halt fails" } });

@@ -3,6 +3,12 @@ const lanes = @import("lanes");
 
 pub const Prompt = struct { stream: *lanes.Stream, rows: usize };
 
+/// A background pass stops at its next chunk boundary; release still owns and drains the queued flight.
+pub inline fn checkpoint(s: *const lanes.Stream) !void {
+    if (s.isCancelled()) return error.Cancelled;
+    if (s.yields()) return error.Yielded;
+}
+
 /// The original prompt cuts: requested boundaries, the decision row, and the configured row cap.
 pub inline fn rows(s: *const lanes.Stream, at: usize, cap: usize, decision: ?usize, next: *usize) usize {
     while (next.* < s.chunks.len and s.chunks[next.*] <= at) next.* += 1;
