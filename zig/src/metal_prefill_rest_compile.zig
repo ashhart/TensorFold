@@ -12,6 +12,15 @@ export fn lfm2PrefillCompile(b: *tf.lfm2_moe.backend.Metal, s: *lanes.Stream) bo
     return true;
 }
 
+export fn lfm3PrefillCompile(b: *tf.lfm3.backend.Metal, s: *lanes.Stream) bool {
+    const backend = b.backend();
+    backend.prefill(s) catch return false;
+    // the stepped pass and its cancel (#3021), which the lane host calls between rounds
+    _ = backend.vtable.prefill_step.?(backend.ptr, s, 0) catch return false;
+    backend.vtable.cancel_prefill.?(backend.ptr, s) catch return false;
+    return true;
+}
+
 export fn step5PrefillCompile(b: *tf.step5.backend.Metal, s: *lanes.Stream) bool {
     b.backend().prefill(s) catch return false;
     return true;
