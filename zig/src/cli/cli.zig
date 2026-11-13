@@ -9,7 +9,7 @@ const lora_merge = @import("core").lora_merge;
 
 const usage =
     \\usage: tensorfold models [--json]
-    \\       tensorfold info MODEL
+    \\       tensorfold info MODEL [--context N] [--parallel N|auto]
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
     \\       tensorfold plan MODEL [--memory-gb GIB] [--ram GB]...
@@ -75,11 +75,12 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         };
         return lora_merge.run(init.gpa, init.io, &out.interface, &err.interface, m.dense, m.adapter, m.dest, m.shipped);
     }
-    if (args.len != 2) {
+    const start = if (args.len >= 2) info.parseStart(args[2..]) else null;
+    if (start == null) {
         try err.interface.writeAll(usage);
         return 2;
     }
-    return info.run(a, init.io, &out.interface, env, null, args[1]);
+    return info.runStart(a, init.io, &out.interface, env, null, args[1], start.?);
 }
 
 test "wants only the checkpoint subcommands" {
