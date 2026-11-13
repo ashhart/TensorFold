@@ -133,7 +133,7 @@ zig/src/families/flashnext/cuda_lanes.zig	1ebf522d252b795b15d58a15eb38d9d3227c34
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	4b8052db793ba81f0e73e1b9bd77b1780bbc4fd550d90976d017da47e76faaa2	raw
 zig/src/families/flashnext/cuda_lanes_load.zig	241d091d4b5199325665d25ea5d4def81fd15660351a199773c596ca2025fa18	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	f9947521a6d9c7d7380ca1b784a93a43b364c6fa5861cad15efd3538d2b8ceff	raw
-zig/src/families/flashnext/cuda_launch.zig	849584af8bc3cd31f990911d449ec0f828318b05d480fe98fc0c287f5b6fb14d	raw	exports cuda_moe_exchange.zig for its device test; no served change
+zig/src/families/flashnext/cuda_launch.zig	f8bebb5ed074e6c8ab8cef667cb01fa2bb1a2b2d6a4d3874a92291390278d9f7	raw	exports cuda_moe_exchange.zig for its device test; no served change; #2837 (Flash Next TP=2 graph replay)
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
 zig/src/families/flashnext/cuda_media_test.zig	4292f8f7c8f8bf4efd0dfaaa5a6c63e11568f85534127a0ce9feb0ab0be05120	raw
 zig/src/families/flashnext/cuda_mix.zig	248a2a86b3f377531f5b713c408ba99f73604510f4afe34ffae52615d5863c2c	raw
