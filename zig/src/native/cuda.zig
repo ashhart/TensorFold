@@ -162,10 +162,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
-    if (o.remote_prefill.produce != null and !std.mem.eql(u8, o.model_type, "qwen3_5")) {
-        problem.* = "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)";
-        return null;
-    }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
@@ -584,7 +580,6 @@ test "Learner ownership: direct Nemotron trainer destruction drains before its f
 test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }

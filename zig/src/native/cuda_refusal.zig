@@ -29,6 +29,8 @@ pub fn backend(o: api.Open) ?[]const u8 {
     // Fish and Qwen4 open outside family(), so their --tp is refused here
     if (std.mem.eql(u8, o.model_type, "fish_omni") or std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))
         if (unranked(o)) |why| return why;
+    if (o.remote_prefill.produce != null and !std.mem.eql(u8, o.model_type, "qwen3_5"))
+        return "--mcdma-produce exports Qwen3.8-27B (qwen3_5) states only (#1594 step 2b)";
     return null;
 }
 

@@ -276,7 +276,7 @@ test "a reply's end keeps its prompt's born: newest conversations precede redund
     try @import("qwen27_reply_cache_test.zig").replyBorn(keepEnd, snapshots, &fake.live);
 }
 
-test "a reply's end is born with its request's prompt (the history mark it kept outlives it), and on a pulled prefix is kept only with TF_PREFILL_KEEP, marked remote" {
+test "a reply on a pulled prefix keeps main priority and is kept only with TF_PREFILL_KEEP, marked remote" {
     try @import("qwen27_reply_cache_test.zig").born(keepEnd);
 }
 

@@ -329,10 +329,9 @@ pub fn born(keepEnd: anytype) !void {
     var s = try lanes.Stream.init(gpa, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
     defer s.deinit(gpa);
     try s.context.appendSlice(gpa, tokens[at + 7 ..]);
-    keepEnd(&store, false, gpa, &s, tokens.len); // three states pass the budget: the least recently used goes
-    try t.expect(store.find(&other, &.{}, &.{}) == null);
-    const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted; // a regenerate resumes it
-    try t.expectEqual(at, history.at);
+    keepEnd(&store, false, gpa, &s, tokens.len); // keep main's reply priority: the older history goes when both do not fit
+    try t.expect(store.find(&other, &.{}, &.{}) != null);
+    try t.expect(store.find(prompt, &.{}, &.{}) == null);
     try t.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
     try t.expectEqual(@as(usize, 2), fake.live);
     s.reuse.remote = true; // a reply on a pulled prefix (#1594 step 2b): with TF_PREFILL_KEEP off, never kept
