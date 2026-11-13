@@ -106,7 +106,7 @@ test "draft sources: XPU verify gives each window row the logprob row of its own
         .{ .sampled = &sb, .drafts = &.{} },
         .{ .sampled = &sc, .drafts = &.{}, .rows = &rc },
     };
-    try @import("xpu_lanes.zig").windowRows(&src, &win, &out, &.{ 2, 3, 2 });
+    try @import("xpu_logrow.zig").windowRows(&src, &win, &out, &.{ 2, 3, 2 });
     for (ra, 0..) |r, i| try std.testing.expectEqual(@as(u32, @intCast(i)), r.ids[0]);
     for (rc, 5..) |r, i| try std.testing.expectEqual(@as(u32, @intCast(i)), r.ids[0]); // after the other windows' 5 rows
     try std.testing.expectEqual(@as(u8, 1), ra[0].count);

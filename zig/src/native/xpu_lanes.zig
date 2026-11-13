@@ -14,19 +14,6 @@ const TAP_ROW = 5 * xq.D * 2; // bf16 [5 D]
 /// A kept prompt state (prompt cache): the slot's states after `at` tokens and its DFlash2 context.
 pub const Kept = struct { snap: xq.Runner.Snap, ctx: ?*anyopaque = null, range: [2]u32 = .{ 0, 0 } };
 
-/// Logprobs: each window row's raw distribution (row `n` of the block is `src.rowLogits(n)`), with the token it drew.
-pub fn windowRows(src: anytype, windows: []const be.Window, out: []const be.Verified, widths: []const u32) !void {
-    var row: u32 = 0;
-    for (windows, out, widths) |w, o, width| {
-        if (o.rows.len == width) {
-            for (o.rows, o.sampled) |*lp, pick| {
-                lp.* = logrow.row(try src.rowLogits(row), pick, w.stream.logprobs orelse 0);
-                row += 1;
-            }
-        } else row += width;
-    }
-}
-
 pub const Lanes = struct {
     gpa: Allocator,
     runner: *xq.Runner,
@@ -464,7 +451,7 @@ pub const Lanes = struct {
             }
             @memcpy(o.drafts, w.tokens);
         }
-        try windowRows(r, windows, out, b.widths[0..windows.len]); // logprobs, for the streams that asked
+        try logrow.windowRows(r, windows, out, b.widths[0..windows.len]); // logprobs, for the streams that asked
         b.count = windows.len;
     }
 
@@ -555,8 +542,8 @@ pub const Lanes = struct {
             defer r.taps_on = false;
             var sampled: Sampled = .{ .b = b, .s = s.sampling orelse .{ .seed = 0 } };
             const drawer: ?xq.drafter.Draw = if (s.sampling) |sp| .{ .ctx = &sampled, .row = Sampled.row, .gumbel = Sampled.gumbel, .temperature = sp.temperature } else null;
-            var logged: Logged = .{ .b = b, .k = s.logprobs orelse 0 };
-            const note: ?xq.drafter.Note = if (s.logprobs != null) .{ .ctx = &logged, .f = Logged.take } else null;
+            var logged: logrow.Logged = .{ .runner = b.runner, .k = s.logprobs orelse 0 };
+            const note: ?xq.drafter.Note = if (s.logprobs != null) .{ .ctx = &logged, .f = logrow.Logged.take } else null;
             const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, note, &out);
             s.rounds += 1;
             s.drafted += round.drafted;
@@ -571,17 +558,6 @@ pub const Lanes = struct {
         }
         return false;
     }
-
-    /// The raw distribution behind each token a tree round's walk chose, by its place on the accepted path.
-    const Logged = struct {
-        b: *Lanes,
-        k: u8,
-        rows: [xq.drafter.MAXL]lanes.LogprobRow = undefined,
-        fn take(c_: *anyopaque, at: u32, row: u32, pick: u32) anyerror!void {
-            const c: *@This() = @ptrCast(@alignCast(c_));
-            c.rows[at] = logrow.row(try c.b.runner.rowLogits(row), pick, c.k);
-        }
-    };
 
     const Sampled = struct {
         b: *Lanes,
