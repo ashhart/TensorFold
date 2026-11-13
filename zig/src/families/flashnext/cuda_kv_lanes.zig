@@ -86,6 +86,12 @@ pub const State = struct {
         return false;
     }
 
+    /// Whether a new stream of `rows` rows waits for the arena's thread before its open (Pool.waits); own stream: no.
+    pub fn waits(s: *const State, rows: usize, others: usize) bool {
+        if (s.choose() != .pool) return false;
+        return s.pool.?.waits(@min(rows + mtp.max_rows, prompt.max_tokens), others > 0);
+    }
+
     /// The lane host's admission: the own stream is free, or a lane and the request's pages are.
     pub fn fits(s: *const State, prompt_rows: u32, max_tokens: u32) bool {
         const p = s.pool orelse return true;
@@ -187,6 +193,32 @@ pub const Pool = struct {
         const k = p.layout.runPages();
         for (p.lanes) |x| if (!x.used) return p.pool.fits(p.layout.pages(cap) + k) and p.pool.findRun(k) != null;
         return false;
+    }
+
+    /// Whether an open of `cap` rows waits: with other streams running, the pieces its run and pages reach that are not
+    /// mapped go to the arena's thread, so no round waits on a map; true until they are. Alone, or a piece the thread
+    /// failed: false, and the open maps on its own thread as before (or fails with LaneMemory).
+    pub fn waits(p: *Pool, cap: usize, others: bool) bool {
+        if (!others or !p.arena.lazy()) return false;
+        const k = p.layout.runPages();
+        const n = p.layout.pages(cap);
+        var ids: [2048]u32 = undefined;
+        if (n > ids.len or !p.pool.fits(n + k)) return false;
+        const run = p.pool.findRun(k) orelse return false;
+        const pb = p.layout.pageBytes();
+        var posted = false;
+        if (!p.meet(@as(u64, run) * pb, k * pb, &posted)) return false;
+        for (nextPages(&p.pool, k, ids[0..n])) |id| if (!p.meet(@as(u64, id) * pb, pb, &posted)) return false;
+        return posted;
+    }
+
+    fn meet(p: *Pool, off: u64, n: u64, posted: *bool) bool {
+        switch (p.arena.reach(off, n)) {
+            .mapped => {},
+            .posted => posted.* = true,
+            .caller => return false,
+        }
+        return true;
     }
 
     /// A free lane's cleared cache (a copy) with `cap` rows' pages and its run; LaneMemory: not now.

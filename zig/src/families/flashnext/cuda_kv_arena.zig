@@ -71,6 +71,7 @@ pub const Ahead = struct {
     m: Mapper,
     hooks: Hooks,
     queued: []bool,
+    failed: []bool, // pieces the thread could not map: an open waiting on them maps them itself, or fails as it would
     busy: ?usize = null, // the piece the thread maps now
     stop: bool = false,
     mu: std.Io.Mutex = .init, // the flags, the queue, `busy` and `stop`
@@ -92,8 +93,11 @@ pub const Ahead = struct {
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, z: *Lazy, m: Mapper, hooks: Hooks) !Ahead {
         const queued = try gpa.alloc(bool, z.mapped.len);
+        errdefer gpa.free(queued);
+        const failed = try gpa.alloc(bool, z.mapped.len);
         @memset(queued, false);
-        return .{ .gpa = gpa, .io = io, .z = z, .m = m, .hooks = hooks, .queued = queued };
+        @memset(failed, false);
+        return .{ .gpa = gpa, .io = io, .z = z, .m = m, .hooks = hooks, .queued = queued, .failed = failed };
     }
 
     /// The thread stopped and joined, what it had queued left unmapped; before the pieces go back.
@@ -106,27 +110,42 @@ pub const Ahead = struct {
             t.join();
         }
         a.gpa.free(a.queued);
+        a.gpa.free(a.failed);
         a.* = undefined;
     }
 
     /// The pieces over [off, off + n) not mapped nor on their way, queued for the thread (started on the first post).
     pub fn post(a: *Ahead, off: u64, n: u64) void {
-        if (n == 0 or off + n > a.z.len) return;
+        _ = a.reach(off, n);
+    }
+
+    pub const Reach = enum { mapped, posted, caller };
+
+    /// As post, and what an open over [off, off + n) would meet: all mapped, pieces on the thread's way (the open
+    /// waits), or a piece the thread failed or cannot take (caller: the open maps it itself, or fails as before).
+    pub fn reach(a: *Ahead, off: u64, n: u64) Reach {
+        if (n == 0) return .mapped;
+        if (off + n > a.z.len) return .caller;
         a.mu.lockUncancelable(a.io);
         defer a.mu.unlock(a.io);
         var any = false;
+        var waits = false;
         var k: usize = @intCast(off / a.z.piece);
         while (k * a.z.piece < off + n) : (k += 1) {
-            if (a.z.mapped[k] or a.queued[k] or a.busy == k) continue;
+            if (a.z.mapped[k]) continue;
+            if (a.failed[k]) return .caller;
+            waits = true;
+            if (a.queued[k] or a.busy == k) continue;
             a.queued[k] = true;
             any = true;
         }
-        if (!any) return;
+        if (!waits) return .mapped;
         if (a.thread == null) a.thread = std.Thread.spawn(.{}, run, .{a}) catch {
             @memset(a.queued, false);
-            return;
+            return .caller;
         };
-        a.changed.broadcast(a.io);
+        if (any) a.changed.broadcast(a.io);
+        return .posted;
     }
 
     /// As Lazy.ensure on the caller's thread: a piece the thread has in hand waited for, one still queued taken back.
@@ -144,6 +163,7 @@ pub const Ahead = struct {
             defer a.maps.unlock(a.io);
             try a.z.mapPiece(a.m, k, zero);
             a.z.mapped[k] = true;
+            a.failed[k] = false;
         }
     }
 
@@ -166,6 +186,7 @@ pub const Ahead = struct {
             };
             a.queued[k] = false;
             if (!bound) { // no context on this thread: the caller maps it when it needs it
+                a.failed[k] = true;
                 a.changed.broadcast(a.io);
                 continue;
             }
@@ -180,6 +201,7 @@ pub const Ahead = struct {
             a.mu.lockUncancelable(a.io);
             a.busy = null;
             if (ok) a.z.mapped[k] = true;
+            a.failed[k] = !ok;
             a.changed.broadcast(a.io);
         }
     }
@@ -292,13 +314,18 @@ pub const Arena = struct {
 
     /// Bytes [off, off + n) mapped ahead on the arena's thread, the caller's context current on it; no io: nothing.
     pub fn post(a: *Arena, off: u64, n: u64) void {
-        const s = a.pieces orelse return;
-        const io = s.io orelse return;
+        _ = a.reach(off, n);
+    }
+
+    /// As post, and what an open over [off, off + n) meets (Ahead.reach); one buffer: mapped; no thread: caller.
+    pub fn reach(a: *Arena, off: u64, n: u64) Ahead.Reach {
+        const s = a.pieces orelse return .mapped;
+        const io = s.io orelse return .caller;
         if (s.ahead == null) {
-            if (s.d.?.api.cuCtxGetCurrent(&s.context) != cuda.abi.success or s.context == null) return;
-            s.ahead = Ahead.init(s.gpa, io, &s.lazy.?, Mapper.vmm(&s.vmm), .{ .ctx = s, .enter = Pieces.enter, .zero = Pieces.zero, .leave = Pieces.leave }) catch return;
+            if (s.d.?.api.cuCtxGetCurrent(&s.context) != cuda.abi.success or s.context == null) return .caller;
+            s.ahead = Ahead.init(s.gpa, io, &s.lazy.?, Mapper.vmm(&s.vmm), .{ .ctx = s, .enter = Pieces.enter, .zero = Pieces.zero, .leave = Pieces.leave }) catch return .caller;
         }
-        s.ahead.?.post(off, n);
+        return s.ahead.?.reach(off, n);
     }
 
     /// Whether the arena maps its pieces on first use (else every byte is there from the start).
@@ -406,6 +433,27 @@ test "a piece the arena's thread fails to map goes back unmarked, and ensure map
     try std.testing.expect(flags[0] and f.chunks == 2);
     try std.testing.expectEqual(@as(u64, piece_bytes), f.zeroed);
     try std.testing.expectEqual(std.Thread.getCurrentId(), f.mapped_by.?);
+}
+
+test "reach: unmapped pieces go to the arena's thread at once; mapped: mapped; a piece it failed: the caller's" {
+    var f: Fake = .{ .slow = true };
+    var flags: [8]bool = @splat(false);
+    var z: Lazy = .{ .base = 1 << 40, .len = 2 << 30, .piece = piece_bytes, .mapped = &flags };
+    var a = try Ahead.init(std.testing.allocator, std.testing.io, &z, f.mapper(), f.hooks());
+    defer a.deinit();
+    try std.testing.expectEqual(Ahead.Reach.posted, a.reach(0, piece_bytes + 1)); // returns before a 50 ms map
+    try std.testing.expectEqual(@as(u32, 0), f.chunks);
+    try std.testing.expectEqual(Ahead.Reach.posted, a.reach(0, 1)); // still on its way: posted, not twice
+    a.settle();
+    try std.testing.expect(flags[0] and flags[1] and f.chunks == 2 and f.mapped_by.? != std.Thread.getCurrentId());
+    try std.testing.expectEqual(Ahead.Reach.mapped, a.reach(0, piece_bytes + 1));
+    f.fail_at = f.chunks; // the next map fails on the thread
+    try std.testing.expectEqual(Ahead.Reach.posted, a.reach(2 * piece_bytes, 1));
+    a.settle();
+    try std.testing.expect(!flags[2]);
+    try std.testing.expectEqual(Ahead.Reach.caller, a.reach(2 * piece_bytes, 1)); // no endless wait
+    try a.ensure(2 * piece_bytes, 1, &f); // the caller maps it, and it is a plain piece again
+    try std.testing.expectEqual(Ahead.Reach.mapped, a.reach(2 * piece_bytes, 1));
 }
 
 test "a 6 GiB range maps only the pieces its pages use, each once, zeroed, and every mapped piece goes back" {
