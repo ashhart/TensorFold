@@ -77,8 +77,10 @@ pub const Reply = struct {
     /// The template switches the prompt was rendered with (the next turn's prefill renders with them too).
     thinking: bool = false,
     effort: ?[]const u8 = null,
-    /// ``choices[0].logprobs`` (``{"content": [...]}``) for a request that asked; null otherwise.
+    /// ``choices[0].logprobs`` (prose, reasoning and call entries) for a request that asked; null otherwise.
     logprobs: ?Value = null,
+    /// The tokens and target rows ``logprobs`` are projected from, once the route's tool policy is final.
+    probability_rows: ?@import("logprob_parts.zig").Capture = null,
     /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
     prompt_logprobs: ?Value = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
@@ -218,7 +220,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         // The answer quota is separate only on engines that enforce it.
         if (srv.info.capability(.answer_limit)) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
     }
-    if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, reasoning, request.think_budget, count);
+    request.logprobs = input.logprobs;
     request.prompt_logprobs = input.prompt_logprobs;
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames };
