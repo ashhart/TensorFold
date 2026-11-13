@@ -163,6 +163,7 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const mtp_run = b.addRunArtifact(b.addTest(.{ .root_module = mtp_policy, .filters = &.{"mtp policy:"} }));
     b.step("test-nemotron-mtp-policy-host", "Nemotron controls through shared rounds, resumes and handoff without a GPU").dependOn(&mtp_run.step);
     b.step("test-nemotron-restored-head-host", "Actual Nemotron cache restore, bind and captured draft dispatch without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"restored head:"} })).step);
+    b.step("test-nemotron-draw-host", "Batched MTP and target draws without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{ "batched draws:", "shared draw:" } })).step);
     b.step("test-nemotron-subset-head-host", "Actual subset-head ownership and row gathering without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"subset head:"} })).step);
     step.dependOn(&mtp_run.step);
     const decode_host = b.createModule(.{ .root_source_file = b.path("zig/qwen35_decode_host.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "core", .module = mods.core }} });

@@ -8,6 +8,7 @@ const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
 const mtp = @import("cuda_mtp.zig");
+const sampler = @import("cuda_sampler.zig");
 const Head = mtp.Head;
 const state = @import("cuda_state.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
@@ -98,7 +99,6 @@ pub const Cuda = struct {
             .prompt_rows = true,
         } };
     }
-
     /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
     pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
         const words = (self.e.c.vocab + 31) / 32;
@@ -530,7 +530,7 @@ pub const Cuda = struct {
             }
             if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
             try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
-            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .rule_host = if (self.e.sampling) |x| sampler.rule(x) else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;
             batched += 1;
