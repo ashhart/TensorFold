@@ -176,6 +176,7 @@ fn join(
         ),
         error.NoRccl => refuse(a, problem, "{s}", .{@import("sys").optional_libraries.spec(.rccl).message}),
         error.NoId => refuse(a, problem, "RCCL gave no id", .{}),
+        error.RankTensorsNoTls, error.RankTensorsRefused, error.RankTensorsNet, error.RankTensorsRdma => refuse(a, problem, "RCCL: {s}", .{@import("sys").rank_auth.explain(err).?}),
         error.RanksDiffer => if (fault.field == .layout)
             refuse(
                 a,

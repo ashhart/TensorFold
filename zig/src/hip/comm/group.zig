@@ -23,7 +23,10 @@ const Joined = struct {
 pub fn join(gpa: std.mem.Allocator, io: std.Io, j: collective.Join) collective.JoinError!collective.Group {
     const g = try gpa.create(Joined);
     errdefer gpa.destroy(g);
-    g.rccl = rccl_mod.Rccl.open(j.policy.rccl_lib.slice()) catch return error.NoRccl;
+    g.rccl = rccl_mod.Rccl.open(j.policy.rccl_lib.slice()) catch |e| return switch (e) {
+        error.RcclUnavailable, error.MissingSymbol, error.RcclFailed, error.Invalid => error.NoRccl,
+        else => |unsealed| unsealed, // a keyed group whose RCCL cannot run TLS: the operator is told why
+    };
     errdefer g.rccl.close();
     const version = g.rccl.version() catch return error.NoRccl;
     const mine: rccl_mod.UniqueId = if (j.rank == 0) g.rccl.uniqueId() catch return error.NoId else undefined;

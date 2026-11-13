@@ -19,7 +19,7 @@ pub const JoinError = error{
     LinkClosed,
     BadRank,
     RanksDiffer,
-} || rank_auth.Error || rank_auth.key.Error || std.mem.Allocator.Error;
+} || rank_auth.Error || rank_auth.tensors.Error || std.mem.Allocator.Error;
 
 pub const Identity = agreement.Identity;
 pub const Field = agreement.Field;

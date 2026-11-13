@@ -2,8 +2,9 @@
 
 const std = @import("std");
 const abi = @import("../abi.zig");
+const tensors = @import("sys").rank_auth.tensors;
 
-pub const Error = error{ RcclUnavailable, MissingSymbol, RcclFailed, Invalid };
+pub const Error = error{ RcclUnavailable, MissingSymbol, RcclFailed, Invalid } || tensors.Error;
 
 /// ncclUniqueId: the opaque 128 bytes rank 0 makes and every rank passes to its init.
 pub const UniqueId = extern struct { internal: [128]u8 };
@@ -59,6 +60,10 @@ pub const Rccl = struct {
                     return error.MissingSymbol;
                 };
             }
+            // a keyed group's RCCL runs TLS on its sockets under a key from the group's, or the rank does not start
+            var loaded: c_int = 0;
+            _ = api.ncclGetVersion(&loaded);
+            _ = try tensors.apply(lib.lookup(tensors.SetEncryption, tensors.symbol), loaded, "RCCL");
             return .{ .lib = lib, .api = api };
         }
         @import("sys").optional_libraries.warn(.rccl);
@@ -72,6 +77,7 @@ pub const Rccl = struct {
     fn check(r: *const Rccl, code: c_int, what: []const u8) Error!void {
         if (code == 0) return;
         std.log.err("{s}: RCCL error {d}: {s}", .{ what, code, std.mem.span(r.api.ncclGetErrorString(code)) });
+        if (std.mem.startsWith(u8, what, "ncclCommInit")) if (tensors.hint()) |h| std.log.err("{s}: {s}", .{ what, h });
         return error.RcclFailed;
     }
 
