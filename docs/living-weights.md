@@ -8,6 +8,39 @@ It is not a prompt cache, a retrieval index or an adapter: each fact it keeps be
 model, written into the checkpoint's own safetensors files. Nothing the model already had is changed. It shipped in 1.0.3
 as Sliding Weights (experimental), and its flag and API use the name `slide`.
 
+## At a glance
+
+Start a Nemotron 3.5 Lightning server with `--slide` and tell it something: each fact that passes the lesson's checks
+is written into the checkpoint folder's files. It is experimental: related facts can disturb each other, recall drops
+past a few dozen facts and with thinking on, and learned facts cost some decode speed on a Mac.
+[Known issues](known-issues.md#living-weights---slide) has the details.
+
+```sh
+tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
+hub="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+src="$hub/snapshots/$(cat "$hub/refs/main")"
+mkdir -p ~/models && cp -RL "$src" ~/models/nemotron-living   # always teach a copy
+(umask 077; openssl rand -hex 24 > ~/models/slide-key)        # --slide starts only with a key
+tensorfold serve ~/models/nemotron-living --slide --api-key-file ~/models/slide-key
+```
+
+Leave that server running and send a lesson from another terminal:
+
+```sh
+curl -N http://127.0.0.1:8080/v1/slide/learn -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+  -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
+```
+
+Send it a document instead and it finds the facts in it and learns them one by one. Open
+`http://127.0.0.1:8080/slide` to watch in 3D: the facts, the neurons each one took in the model's layers, the shard
+files that hold them, and the lesson running now.
+
+Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
+other. On an APFS volume, `cp -cRL` makes a clone that shares the original's data until lessons change it. It rewrites
+the folder's files: before the first lesson the server keeps the originals in a hidden snapshot, and
+`tensorfold slide rollback ~/models/nemotron-living` puts them back, undoing every lesson. The rest of this guide covers
+the key, teaching files and web pages, omp's `/learn` command, the 3D view, undoing lessons, and what to expect.
+
 ## Repeating a lesson
 
 The same text and supplied questions can take different steps and choose different neurons on separate runs.
