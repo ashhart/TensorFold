@@ -170,7 +170,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         m.state_row = 0;
     }
     var rule: DepthRule = .{ .pair = r.tp != null };
-    var by_cost: ?CostDepth = if (r.tp == null and fz.rows_load.preM5Decode(r.device)) .{} else null; // 0.6.5's rule, the pre-M5 decode
+    var by_cost: ?CostDepth = if (r.tp == null and fz.rows_load.preM5Decode(r)) .{} else null; // 0.6.5's rule, the pre-M5 decode
     var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
     const busy_log = platform.c.getenv("FZ_BUSY") != null; // dev: the GPU's busy share of a reply's rounds
     var busy_s: f64 = 0;

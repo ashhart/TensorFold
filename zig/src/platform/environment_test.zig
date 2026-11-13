@@ -89,6 +89,8 @@ const valid = [_]Case{
     .{ .name = "TF_ANE_COLUMNS", .raw = "3072", .n = 3072 },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_M5_ROWS", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_M5_ROWS", .raw = "1", .n = 1 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "0", .n = 0 },
     .{ .name = "GLM_EHPROJ_NAX", .raw = "1", .n = 1 },
     .{ .name = "XPU_A8_BITS", .raw = "4", .n = 4 },

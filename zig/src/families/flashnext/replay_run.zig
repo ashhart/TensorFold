@@ -74,6 +74,7 @@ pub const Run = struct {
     dense_target: bool = false,
     skip: u32 = 0,
     sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: the 4/32 expert kernels read scales and biases through scale_index's tables
+    m5_rows: bool = false, // TF_FLASHNEXT_M5_ROWS: a GPU with tensor units decodes on the pre-M5 path (rows_load.preM5Decode)
     sbix: std.AutoHashMapUnmanaged(@import("scale_index.zig").Key, [2]Buf) = .empty,
     sb_pairs: usize = 0, // the most distinct pairs any indexed tensor has
     hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)
