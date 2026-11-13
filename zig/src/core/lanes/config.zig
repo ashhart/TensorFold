@@ -30,6 +30,7 @@ pub const Model = struct {
     plain_guard: bool = false, // plain rounds compete with drafted depths
     rate_guard: bool = false, // with plain_guard: plain rounds also compete on measured tokens a ms (EXL3 offload)
     draft_confidence: ?f64 = null,
+    floor_rates: bool = false, // Constants.floor_rates: a head whose steps cost more than the floor's cut saves
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
     window_costs_lone: bool = false, // window_costs price a lone stream only; shared forwards use shared_costs
@@ -188,6 +189,7 @@ pub const Config = struct {
                 .grant_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).grant_slack,
                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
                 .copy_first = m.copy_first and !m.context_copies,
+                .floor_rates = m.floor_rates,
                 .hold_costs = m.hold_costs,
             },
             .draft_step_ms = m.draft_step_ms,
