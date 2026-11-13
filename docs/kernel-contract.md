@@ -259,6 +259,14 @@ oracle in the kernel's fp32 order whose silu may move by exp's error, and the do
 DeepSeek-only copy of Kimi K3's chains with the full E8M0 scale range) against its bytes (also over the release's real
 FP4 expert bytes), each with four controls. The copied plan and combine (`tf_dsv41_route_plan`, `tf_dsv41_xp_combine`)
 are checked end to end through the GPU's own plan, and every launch is recorded for gate 5.
+Metal also checks DeepSeek V4.1's FP8 rows tile (`fp8_tile.metal`, `tf_dsv41_fp8_tile_*`), which runs decode launches
+of 6 to 16 rows on simdgroup MMA: one registration replaces `tf_dsv41_fp8_w*` run one row a launch and must be
+bit-equal to it at every shape of its shapes gate (the seven release projections and every row count from 1 to 16),
+beside f32, bf16, forced-form and release-fixture registrations against float64. A probe holds the tile byte-equal to
+the row kernel one row a launch on every dense FP8 shape the decode forward runs, f32 and bf16, rows 1 to 16 from row 0
+and 1 to 15 from row 1 at every form, the 16/17 seam and a three-launch batch, with NaN and Inf planted. Four controls
+go red: non-finite inputs flushed, group and slice roots added in a chain, group roots rounded to fp16, and writes past
+its output.
 The row-split seam's four kernels (`pair_rows.metal`, launched by `pair_rows.zig`) move bf16 frames, never sums:
 `pair_stage` copies this rank's half of a frame row into the slot the relay sends, and `pair_gather` writes both halves
 of every row, its own natively and the peer's from the relayed frame. `pair_argmax` flags a row whose logits are not
