@@ -109,17 +109,28 @@ const Capped = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
         const c: *Capped = @ptrCast(@alignCast(ctx));
-        return if (c.take(len)) c.child.rawAlloc(len, alignment, ra) else null;
+        if (!c.take(len)) return null;
+        if (c.child.rawAlloc(len, alignment, ra)) |p| return p;
+        c.left += len; // the child refused, so nothing was spent
+        return null;
     }
 
     fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
         const c: *Capped = @ptrCast(@alignCast(ctx));
-        return c.take(new_len -| memory.len) and c.child.rawResize(memory, alignment, new_len, ra);
+        const more = new_len -| memory.len;
+        if (!c.take(more)) return false;
+        if (c.child.rawResize(memory, alignment, new_len, ra)) return true;
+        c.left += more; // the arena asks to grow a block in place before it takes a new one, and is often refused
+        return false;
     }
 
     fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
         const c: *Capped = @ptrCast(@alignCast(ctx));
-        return if (c.take(new_len -| memory.len)) c.child.rawRemap(memory, alignment, new_len, ra) else null;
+        const more = new_len -| memory.len;
+        if (!c.take(more)) return null;
+        if (c.child.rawRemap(memory, alignment, new_len, ra)) |p| return p;
+        c.left += more;
+        return null;
     }
 
     fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
@@ -127,6 +138,20 @@ const Capped = struct {
         c.child.rawFree(memory, alignment, ra);
     }
 };
+
+test "security: a render's byte cap counts what its allocator gave, not what it refused" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 1, .resize_fail_index = 0 });
+    var capped: Capped = .{ .child = failing.allocator(), .left = 4096 };
+    const a = capped.allocator();
+    const block = try a.alloc(u8, 1024);
+    defer a.free(block);
+    // the child grows nothing in place and gives no second block, so the cap has given nothing more
+    try std.testing.expect(!a.resize(block, 3072));
+    try std.testing.expect(a.remap(block, 3072) == null);
+    try std.testing.expectError(error.OutOfMemory, a.alloc(u8, 2048));
+    try std.testing.expectEqual(@as(usize, 3072), capped.left);
+    try std.testing.expect(!capped.spent);
+}
 
 fn report(gpa: Allocator, diag: ?*Diag, comptime fmt: []const u8, args: anytype) Error {
     if (diag) |d| d.msg = std.fmt.allocPrint(gpa, fmt, args) catch return error.OutOfMemory;
