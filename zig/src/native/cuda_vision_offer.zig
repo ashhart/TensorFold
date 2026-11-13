@@ -238,3 +238,21 @@ test "actual Qwen offer keeps its image_url type and template-owned markers" {
     try std.testing.expectEqualSlices(u32, &q.markers, held.markers);
     try std.testing.expect(held.wrap == null and held.video == null);
 }
+
+/// Info.audio for a family's audio encoder (Nemotron 3.5 Transcribe's): its WAV prepare, locator and limits.
+pub fn audio(x: ?*nemotron.audio.Audio) ?api.AudioOffer {
+    const a = x orelse return null;
+    if (a.encoder == null) return null;
+    const prepare = struct {
+        fn f(ctx: *anyopaque, al: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedAudio {
+            _ = ctx;
+            var p = try nemotron.audio.prepare(al, bytes);
+            if (p.rows > max_tokens) {
+                p.deinit(al);
+                return error.AudioTooLong;
+            }
+            return .{ .samples = p.samples, .tokens = p.rows, .hash = p.hash };
+        }
+    }.f;
+    return .{ .ctx = a, .prepare = prepare, .locator = "<|audio|>", .audio_tokens = a.rows.limit, .max_audios = nemotron.audio.max_clips };
+}

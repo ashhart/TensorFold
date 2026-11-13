@@ -112,6 +112,7 @@ test {
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
     _ = @import("images.zig");
+    _ = @import("audio.zig");
     _ = @import("images_video_marker_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");

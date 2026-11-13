@@ -19,6 +19,7 @@ pub const kv_ledger = @import("kv_ledger.zig");
 
 /// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
 pub const Image = lanes.stream.Image;
+pub const Audio = lanes.stream.Audio;
 
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
@@ -87,6 +88,8 @@ pub const Request = struct {
     prompt_logprobs: ?u8 = null,
     /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
     images: []const Image = &.{},
+    /// Audio clips whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.audio`` is set.
+    audios: []const Audio = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
 
@@ -115,6 +118,8 @@ pub const VideoSource = vision_types.VideoSource;
 pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
+pub const PreparedAudio = vision_types.PreparedAudio;
+pub const AudioOffer = vision_types.AudioOffer;
 pub const VisionOpen = vision_types.VisionOpen;
 
 pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
@@ -223,6 +228,8 @@ pub const Info = struct {
     pictures: bool = false,
     /// Image input (--vision); null: text only.
     vision: ?Vision = null,
+    /// Audio input (a speech model's encoder); null: none.
+    audio: ?AudioOffer = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.
@@ -529,30 +536,9 @@ pub const Engine = struct {
     }
 };
 
-/// A backend's own driver for a lone greedy stream (the GPU round), which LaneHost runs while the stream is alone.
-pub const Lone = struct {
-    ctx: *anyopaque,
-    sampled: bool = false, // it drives sampled streams too
-    plain: bool = false, // it drives streams with drafts off too
-    logprobs: bool = false, // it gives each token its logprob row too
-    structures: bool = false, // it masks each window's rows by the stream's grammar too
-    images: bool = true, // it takes image requests too (false: they stay in the lane core)
-    // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
-    min_budget: u32 = 0,
-    resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens
-    /// Prefills (or resumes) `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core.
-    run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
-};
-
-/// What a lone driver tells the host between rounds: tokens landed; and asks: hand the stream over now?
-pub const LoneHooks = struct {
-    ctx: *anyopaque,
-    committed: *const fn (ctx: *anyopaque) void,
-    yield: *const fn (ctx: *anyopaque) bool,
-    resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
-    // After a completed nonfinal prompt call, true transfers the unfinished pass to the shared fill queue.
-    prefill_yield: ?*const fn (ctx: *anyopaque) bool = null,
-};
+/// A backend's own driver for a lone greedy stream, and what it tells the host between rounds (lane_host_lone.zig).
+pub const Lone = @import("lane_host_lone.zig").Lone;
+pub const LoneHooks = @import("lane_host_lone.zig").LoneHooks;
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;

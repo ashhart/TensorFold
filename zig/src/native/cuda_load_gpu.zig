@@ -190,6 +190,7 @@ test "native Bolt load failure keeps destinations and kernel GPU parents through
     e.k.d = d;
     e.k.modelopt = null;
     e.k.ggml = null;
+    e.k.bf16x = null;
     e.k.triton = null;
     e.k.affine.split = null;
     e.k.latent = null;
@@ -299,6 +300,7 @@ fn partialEngine(g: *Gpu) !*nemotron.Engine {
     e.k.d = d;
     e.k.modelopt = null;
     e.k.ggml = null;
+    e.k.bf16x = null;
     e.k.triton = null;
     e.k.affine.split = null;
     e.k.latent = null;

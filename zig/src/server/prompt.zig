@@ -7,12 +7,13 @@ const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
 const chat = @import("chat.zig");
 const images = @import("images.zig");
+const audio = @import("audio.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 
 /// With image input, `ids` holds each image's tokens, `images` the images and `cache_key` the prompt the cache matches.
-pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{} };
+pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, audios: []const api.Audio = &.{}, cache_key: []const u32 = &.{} };
 
 /// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
 pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
@@ -98,7 +99,9 @@ const RenderedIds = struct { ids: []u32, closed: bool };
 
 /// The template's ids for `messages`; with image input, a marker the text spells is ordinary text (images.zig).
 fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!RenderedIds {
-    var rendered = try srv.text.render(a, messages, options, problem);
+    // audio input: the messages the chat template renders (audio.zig)
+    const view = if (srv.info.audio) |o| try audio.forTemplate(a, messages, o.locator) else messages;
+    var rendered = try srv.text.render(a, view, options, problem);
     if (srv.info.vision) |v| if (v.video) |o| if (o.video_text.len > 0) {
         const word = try srv.text.tokenString(a, o.video_token);
         rendered = try rendered.replaceTemplate(a, o.video_text, word);
@@ -159,6 +162,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     if (history_len > 0) history_len = continuedLen(srv, cx, input.messages, input.tools, thinking, effort, history, history_len);
     // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
     if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
+    // audio input: the rendered prompt with each clip's rows (audio.zig)
+    if (try audio.expand(srv.info.audio, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .audios = x.audios, .cache_key = x.cache_key };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len) };

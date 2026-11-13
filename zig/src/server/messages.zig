@@ -5,6 +5,7 @@ const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pdf = @import("pdf.zig");
 const api = @import("engine_api");
+const audio = @import("audio.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -28,12 +29,13 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
     return normalizeWith(cx, messages, late_system, needs_user_after_tool, .{});
 }
 
-/// The media parts an engine reads: image_url (``Info.vision``), video_url (``video``), and PDFs (``--vision-pdf``).
+/// Media parts an engine reads: images and videos (``Info.vision``), PDFs (``--vision-pdf``), audio (``Info.audio``).
 pub const Media = struct {
     native_deepseek: bool = false,
     images: bool = false,
     videos: bool = false,
     pdfs: bool = false,
+    audio: bool = false,
     image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
     max_images: u32 = 50,
 
@@ -129,18 +131,24 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                     has_image = true;
                     continue;
                 }
+                if (media.audio and (std.mem.eql(u8, kind, "input_audio") or std.mem.eql(u8, kind, "audio_url"))) {
+                    if (!std.mem.eql(u8, role.?.string, "user")) return cx.refuse("audio parts are accepted in user messages only");
+                    try parts.append(cx.a, try audio.part(cx, part, kind));
+                    has_image = true;
+                    continue;
+                }
                 if (media.videos and std.mem.eql(u8, kind, "video_url")) {
                     if (!std.mem.eql(u8, role.?.string, "user")) return cx.refuse("video_url parts are supported only in user messages");
                     try parts.append(cx.a, try videoPart(cx, part));
                     has_image = true;
                     continue;
                 }
-                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
+                if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.audio) "content parts must be text, input_audio or audio_url; image and video inputs are unsupported" else if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 if (media.native_deepseek and part_index > 0) try text.appendSlice(cx.a, "\n\n");
                 try text.appendSlice(cx.a, t.string);
-                if (images) {
+                if (images or media.audio) {
                     const tp = try json.newObject(cx.a);
                     try tp.put(cx.a, "type", .{ .string = "text" });
                     try tp.put(cx.a, "text", t);

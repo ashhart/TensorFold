@@ -10,9 +10,11 @@ const Grouped = @import("contract_gb10_many.zig").Registrations;
 
 pub const Sets = struct {
     gpa: std.mem.Allocator,
+    bf16_experts: *@import("contract_experts_bf16.zig").Set,
     pocket: *@import("contract_pocket.zig").Set,
     minimax: *@import("contract_minimax.zig").Set,
     moss: *@import("contract_moss_image.zig").Set,
+    nemo_audio: *@import("contract_nemo_audio.zig").Set,
     modelopt: *@import("contract_flashnext_modelopt.zig").Set,
     grouped: *Grouped,
     flashnext: *@import("contract_flashnext_more.zig").Set,
@@ -23,12 +25,16 @@ pub const Sets = struct {
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
+        const bf16_experts = try @import("contract_experts_bf16.zig").Set.init(gpu, s, a, list);
+        errdefer bf16_experts.deinit();
         const pocket = try @import("contract_pocket.zig").Set.init(gpu, s, a, list);
         errdefer pocket.deinit();
         const minimax = try @import("contract_minimax.zig").Set.init(gpu, s, a, list);
         errdefer minimax.deinit();
         const moss = try @import("contract_moss_image.zig").Set.init(gpu, s, a, list);
         errdefer moss.deinit();
+        const nemo_audio = try @import("contract_nemo_audio.zig").Set.init(gpu, s, a, list);
+        errdefer nemo_audio.deinit();
         const modelopt = try @import("contract_flashnext_modelopt.zig").Set.init(gpu, s, a, list);
         errdefer modelopt.deinit();
         const grouped = try gpu.gpa.create(Grouped);
@@ -57,9 +63,11 @@ pub const Sets = struct {
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
         return .{
             .gpa = gpu.gpa,
+            .bf16_experts = bf16_experts,
             .pocket = pocket,
             .minimax = minimax,
             .moss = moss,
+            .nemo_audio = nemo_audio,
             .modelopt = modelopt,
             .grouped = grouped,
             .flashnext = flashnext,
@@ -81,8 +89,10 @@ pub const Sets = struct {
         sets.grouped.deinit();
         sets.gpa.destroy(sets.grouped);
         sets.modelopt.deinit();
+        sets.nemo_audio.deinit();
         sets.moss.deinit();
         sets.minimax.deinit();
         sets.pocket.deinit();
+        sets.bf16_experts.deinit();
     }
 };

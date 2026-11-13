@@ -193,6 +193,7 @@ pub const Server = struct {
     pub fn media(srv: *const Server) @import("messages.zig").Media {
         var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
         result.native_deepseek = srv.text.native_deepseek;
+        result.audio = srv.info.audio != null;
         return result;
     }
 
@@ -208,6 +209,7 @@ pub const Server = struct {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
+        try @import("audio.zig").bindLocator(&srv.info, text);
         if (config.voices_dir) |dir| {
             if (srv.info.speech == null) return error.VoicesRequireSpeech;
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
