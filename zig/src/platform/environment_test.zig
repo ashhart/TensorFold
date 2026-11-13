@@ -36,6 +36,12 @@ test "environment: every strict reader refuses bad text before opening a model, 
 
 const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 const valid = [_]Case{
+    .{ .name = "TF_Q27_METAL4", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_METAL4", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_FLAT_GLUE", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_FLAT_GLUE", .raw = "1", .n = 1 },
+    .{ .name = "TF_Q27_QK", .raw = "0", .n = 0 },
+    .{ .name = "TF_Q27_QK", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },

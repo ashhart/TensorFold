@@ -8,14 +8,14 @@ const FilePin = struct { name: []const u8, sha256: []const u8 };
 const Case = struct { name: []const u8, parents: []const []const i32, starts: []const u32, capacities: []const u32, keep: []const []const u32, files: [2]FilePin };
 const Manifest = struct { schema: []const u8, cases: []const Case };
 const Counts = struct { cases: usize = 0, rows: usize = 0, checked_bytes: usize = 0, raw_partial_bytes: usize = 0, kept_rows: usize = 0, next_rows: usize = 0, two_layer_same_cb_cases: usize = 0, negative_controls: usize = 0 };
-const Field = enum { qg, raw_k, v, q_gain, k_gain, norm_q, norm_k, query, key, out };
+const Field = enum { qg, raw_k, v, q_gain, k_gain, norm_q, norm_k, query, key, out, mixed };
 const Frame = struct {
-    buffers: [10]mtl.Buffer,
+    buffers: [11]mtl.Buffer,
     rows: u32,
     pub fn init(device: mtl.Device, file: *const core.safetensors.File, rows: u32, next: bool) !Frame {
         const r: usize = rows;
-        const sizes = [_]usize{ r * 12288 * 2, r * 1024 * 2, r * 1024 * 2, 512, 512, r * 6144 * 2, r * 1024 * 2, r * 6144 * 2, r * 1024 * 2, r * 6144 * 2 };
-        var buffers: [10]mtl.Buffer = undefined;
+        const sizes = [_]usize{ r * 12288 * 2, r * 1024 * 2, r * 1024 * 2, 512, 512, r * 6144 * 2, r * 1024 * 2, r * 6144 * 2, r * 1024 * 2, r * 6144 * 2, r * 2048 * 2 };
+        var buffers: [11]mtl.Buffer = undefined;
         var made: usize = 0;
         errdefer for (buffers[0..made]) |buffer| buffer.deinit();
         for (sizes, &buffers) |n, *buffer| {
@@ -29,6 +29,11 @@ const Frame = struct {
             const actual_prefix = if (i < 3) prefix else "";
             const t = try tensor(file, try std.fmt.bufPrint(&name, "{s}{s}", .{ actual_prefix, field }), .bf16, sizes[i]);
             @memcpy(buffers[i].contents()[0..sizes[i]], t.bytes);
+        }
+        const mixed = buffers[10].slice(u16, r * 2048);
+        for (0..r) |row| {
+            @memcpy(mixed[row * 2048 ..][0..1024], buffers[1].slice(u16, r * 1024)[row * 1024 ..][0..1024]);
+            @memcpy(mixed[row * 2048 + 1024 ..][0..1024], buffers[2].slice(u16, r * 1024)[row * 1024 ..][0..1024]);
         }
         return .{ .buffers = buffers, .rows = rows };
     }
@@ -46,10 +51,10 @@ const Frame = struct {
         }
     }
     fn preprocess(f: *const Frame, op: *const q.Attention, e: mtl.ComputeEncoder, scratch: *const q.Scratch) !void {
-        try op.preprocess(e, .{ .qg = f.get(.qg), .key = f.get(.raw_k), .q_gain = f.get(.q_gain), .k_gain = f.get(.k_gain), .norm_q = f.get(.norm_q), .norm_k = f.get(.norm_k), .query = f.get(.query), .rotated_key = f.get(.key), .positions = scratch.get(.positions), .rows = f.rows, .eps = 1e-6, .theta = 10000000 });
+        try op.preprocess(e, .{ .qg = f.get(.qg), .mixed = f.get(.mixed), .q_gain = f.get(.q_gain), .k_gain = f.get(.k_gain), .norm_q = f.get(.norm_q), .norm_k = f.get(.norm_k), .query = f.get(.query), .rotated_key = f.get(.key), .positions = scratch.get(.positions), .rows = f.rows, .eps = 1e-6, .theta = 10000000 });
     }
-    fn encode(f: *const Frame, op: *const q.Attention, e: mtl.ComputeEncoder, scratch: *const q.Scratch, binding: *const q.Binding, plan: q.Plan, caches: []const Ref, gate: bool) !void {
-        try op.encode(e, scratch, binding, plan, f.get(.query), f.get(.key), f.get(.v), f.get(.out), caches, if (gate) f.get(.qg) else null, false, false);
+    fn encodeContiguous(f: *const Frame, op: *const q.Attention, e: mtl.ComputeEncoder, scratch: *const q.Scratch, binding: *const q.Binding, plan: q.Plan, caches: []const Ref, gate: bool) !void {
+        try op.encodeContiguous(e, scratch, binding, plan, f.get(.query), f.get(.key), f.get(.v), f.get(.out), caches, if (gate) f.get(.qg) else null, false, false);
     }
 };
 const CacheOwner = struct {
@@ -213,7 +218,7 @@ fn runCase(init: std.process.Init, device: mtl.Device, queue: mtl.Queue, op: *co
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
         try frames[layer].preprocess(op, e, &scratch);
-        try frames[layer].encode(op, e, &scratch, &bindings[layer], raw_plan, owners[layer].caches[0..streams], false);
+        try frames[layer].encodeContiguous(op, e, &scratch, &bindings[layer], raw_plan, owners[layer].caches[0..streams], false);
         try terminal(cb, e);
         try checkFrame(&files[layer], &frames[layer], false, false, count);
         try partials(&files[layer], &scratch, raw_plan, count);
@@ -226,7 +231,7 @@ fn runCase(init: std.process.Init, device: mtl.Device, queue: mtl.Queue, op: *co
     const pair_e = pair.compute(.serial);
     for (&frames, &owners, &bindings) |*frame, *owner, *binding| {
         try frame.preprocess(op, pair_e, &scratch);
-        try frame.encode(op, pair_e, &scratch, binding, plan, owner.caches[0..streams], false);
+        try frame.encodeContiguous(op, pair_e, &scratch, binding, plan, owner.caches[0..streams], false);
     }
     try terminal(pair, pair_e);
     for (&frames, &owners, &files) |*frame, *owner, *file| {
@@ -236,7 +241,7 @@ fn runCase(init: std.process.Init, device: mtl.Device, queue: mtl.Queue, op: *co
     count.two_layer_same_cb_cases += 1;
     const gated = queue.commandBuffer();
     const gated_e = gated.compute(.serial);
-    for (&frames, &owners, &bindings) |*frame, *owner, *binding| try frame.encode(op, gated_e, &scratch, binding, plan, owner.caches[0..streams], true);
+    for (&frames, &owners, &bindings) |*frame, *owner, *binding| try frame.encodeContiguous(op, gated_e, &scratch, binding, plan, owner.caches[0..streams], true);
     try terminal(gated, gated_e);
     for (&frames, &files) |*frame, *file| {
         try checkFrame(file, frame, false, true, count);
@@ -274,7 +279,7 @@ fn runCase(init: std.process.Init, device: mtl.Device, queue: mtl.Queue, op: *co
     const next_e = next_cb.compute(.serial);
     for (&next_frames, &bindings, &owners) |*frame, *binding, *owner| {
         try frame.preprocess(op, next_e, &scratch);
-        try frame.encode(op, next_e, &scratch, binding, next_plan, owner.caches[0..streams], true);
+        try frame.encodeContiguous(op, next_e, &scratch, binding, next_plan, owner.caches[0..streams], true);
     }
     try terminal(next_cb, next_e);
     for (&next_frames, &files, &owners) |*frame, *file, *owner| {
