@@ -352,6 +352,9 @@ test {
     _ = @import("voice_cli.zig");
     _ = @import("drama_voice_store.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
+    _ = @import("speech_cli.zig");
+    _ = @import("speech_tempo.zig");
+    _ = @import("speech_tempo_http_test.zig");
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
