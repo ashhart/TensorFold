@@ -48,6 +48,8 @@ pub const Tensor = struct {
 pub const File = struct {
     name: []const u8,
     size: u64,
+    /// The length prefix and JSON header together; zero for a synthetic estimate without a header.
+    header_bytes: u64 = 0,
     /// The Hub's SHA-256 of the whole file, when the manifest gives it.
     sha256: ?[32]u8 = null,
 };
@@ -140,7 +142,7 @@ pub fn load(io: std.Io, a: Allocator, dir: []const u8) !Checkpoint {
         const buf = try a.alloc(u8, 8 + n);
         if (try file.readPositionalAll(io, buf, 0) != buf.len) return error.BadHeader;
         try tensors.appendSlice(a, try parseHeaderInFile(a, @intCast(i), buf, len));
-        try files.append(a, .{ .name = f, .size = len });
+        try files.append(a, .{ .name = f, .size = len, .header_bytes = 8 + n });
     }
     return .{ .files = files.items, .tensors = tensors.items };
 }
@@ -247,6 +249,7 @@ test "a folder's one file loads the tensors its image parses to, in 1 MiB" {
     try std.testing.expectEqualDeep(try parseHeader(fixtures.allocator(), 0, good), loaded.tensors);
     try std.testing.expectEqual(@as(usize, 1), loaded.files.len);
     try std.testing.expectEqual(@as(u64, good.len), loaded.files[0].size);
+    try std.testing.expectEqual(8 + std.mem.readInt(u64, good[0..8], .little), loaded.files[0].header_bytes);
     for (loaded.tensors, [_]u8{ 3, 9 }) |t, fill| for (good[t.start..][0..t.bytes]) |b| try std.testing.expectEqual(fill, b);
 }
 
