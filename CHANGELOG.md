@@ -63,9 +63,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - EXL3 deep prefill uses decode-exact prompt tiles and canonical float64 partials with one final float32 rounding, including empty-sibling zero signs. One rank reuses the root kernel and branch buffer without allocating a partial-gather region; TP reduction probes run under `test-flashnext-contract-host` (#1443). Thanks to @BlivionIaG.
 
-- EXL3 TP head sharding and MTP residency use registered, strict `0`/`1` settings; blank is unset and malformed text refuses before expert allocation. The TP memory runner propagates the same refusals (#1442).
-
-- CUDA EXL3 Flash Next adds expert-parallel TP and MTP drafts, preserving the first slice's canonical expert reduction through typed float64 NCCL partials and one final float32 rounding, with scratch reserved once for the configured rows; main's prepared prompt-mark snapshots are unchanged (#1442). Thanks to @BlivionIaG.
+- CUDA EXL3 Flash Next: expert-parallel TP=2 with the same tokens as TP=1, and MTP drafts (#1442). Thanks to @BlivionIaG.
 
 - CUDA tests: Flash Next's real-weight EXL3 layer oracle attaches its expert pool before executing the family pass (#1441). Thanks to @BlivionIaG.
 
