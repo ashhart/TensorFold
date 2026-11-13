@@ -50,6 +50,7 @@ const usage =
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
+    \\       tensorfold config validate FILE
     \\       tensorfold cluster init|check|status
     \\       tensorfold serve [MODEL] --cluster FILE
     \\       tensorfold node --name NAME --cluster FILE
@@ -70,6 +71,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     // Cluster commands must work without a model load. node joins over MCDMA, through the library each node names.
     if (args.len >= 2 and cluster.cli.wants(@ptrCast(args[1..]))) return cluster.cli.main(init, args[1..]);
+    if (args.len >= 2 and cluster.validate.wants(@ptrCast(args[1..]))) return cluster.validate.main(init, args[1..]);
     // The checkpoint commands must work without a model, driver or GPU too.
     if (args.len >= 2 and checkpoint_cli.wants(@ptrCast(args[1..]))) return checkpoint_cli.main(init, args[1..]);
     // A leading flag is not a command: the usage covers it, without touching the GPU.
