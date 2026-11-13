@@ -202,6 +202,9 @@ pub const Server = struct {
         srv.* = .{ .tool_ids = tool_ids, .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         srv.config.tool_id_key = null; // its key is zeroed: `tool_ids` is the one copy
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
+        // a crash between a note's or the graph's write and its rename leaves a temporary behind
+        if (config.compact_memory) |dir| platform.atomic_file.discardStale(io, dir, null);
+        if (config.slide_graph) |path| platform.atomic_file.discardStale(io, std.fs.path.dirname(path) orelse ".", std.fs.path.basename(path));
         if (srv.info.embeddings != null and srv.info.capability(.text_generation)) return error.InvalidEmbeddingCapabilities;
         if (srv.info.readouts != null and (srv.info.capability(.text_generation) or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
         if (srv.info.vision) |vision| if (@import("vision_markers.zig").firstUnsafe(text, vision)) |id| {
