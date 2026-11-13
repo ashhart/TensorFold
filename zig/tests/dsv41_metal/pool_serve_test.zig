@@ -152,3 +152,18 @@ test "dsv41 metal pool: through LaneHost, four requests that cannot all fit wait
     say(bad == 0, "4 requests of 3 blocks over 8 through LaneHost: {d} replies differ from unpooled serial", .{bad});
     try testing.expectEqual(@as(usize, 0), bad);
 }
+
+test "dsv41 metal pool: a slot past the sixteenth sizes its run by its max new tokens, not the whole window" {
+    const p = try ids(300, 80);
+    defer gpa.free(p);
+    const m = try fs.open(gpa, io, seed, .{ .slots = 20, .drafts = false, .pool = 2000 });
+    defer fs.close(m);
+    const t = m.t;
+    var r = Run{ .slot = 19, .prompt = p };
+    defer r.out.deinit(gpa);
+    try r.begin(t);
+    const blocks = t.pool.?.runs[19].?.blocks;
+    try r.finish(t);
+    say(blocks == 2, "slot 19 of 20, a 300-id prompt with 16 new tokens: a run of {d} blocks (2 expected, 6 the whole window)", .{blocks});
+    try testing.expectEqual(@as(u32, 2), blocks);
+}
