@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 (gates 1–4, a planted control for each width, gate-5 records on the four RDNA chips); its 1×8 tile at those widths spills to scratch on gfx1100, listed as a known finding (#TBD, part of #3061).
+
 - Tests: `tf-cuda-test flashnext-rank RANK PORT timeout` passes again on two GPUs. NCCL start-up keeps its 30 s bound and only the stalled collective gets 200 ms, and both ranks meet once their communicators are up, so `timeout` and `eof` fail the collective under test, not the start-up (#2976, fixes #2975). Thanks to @swbiggart.
 
 - Tokenizer: a split pattern is held to a work allowance per piece (2,048 instructions a byte, counted, not timed) and refused at load when too deep or too large, so a crafted tokenizer or prompt can't hang the pre-tokenizer; every split of the patterns we serve is unchanged (#3071).
