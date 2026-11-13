@@ -284,6 +284,7 @@ of the user-facing options; this table says where each is read.
 | `XPU_TREE`, `XPU_BLOCK` | `native/xpu.zig`, `qwen27_main.zig` | Tree nodes per round (server 15; the test runner 0, i.e. chains) and drafter block rows (8). |
 | `XPU_PREFILL_INT8`, `XPU_PREFILL_INT4`, `XPU_PREFILL_INT4_SITES` | `Runner.init` | W4A8 and W4A4 prompt GEMMs (local options; W4A4 needs W4A8 and rotated weights, else `Int4NeedsRotatedWeightsAndInt8`). |
 | `XPU_KV_INT8` | `Runner.init` | int8 K/V cache. |
+| `XPU_ATTN_PREF` | `Runner.init` | Chunk size of the prefix decode attention (`attn_pref`, `attn_tail`, `attn_merge2`); unset: `attn_decode` and `attn_merge`. |
 | `XPU_PROFILE` | `Runner.init` | GPU time per kernel (timestamp events), printed by `profReport` after the prompt and the decode (test runner). |
 | `XPU_DUMP_H=FILE` | `Runner.init` | Append every row's final normed hidden state (fp16) to FILE, for the quality studies. |
 | `XPU_DUMP=DIR` | `Runner.init` | The first forward writes the residual stream after the embedding and after layers 0-3 (comparison with the Python port's layer reference). |
