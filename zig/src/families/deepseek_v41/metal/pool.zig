@@ -203,6 +203,24 @@ pub fn setting(tokens: ?u64, seats: u32, context: u32, problem: *[]const u8, buf
     return .{ .tokens = t, .blocks = @intCast(blocksFor(t)), .window = @intCast(@min(context, t)) };
 }
 
+/// The startup line's seat words: "N slots of C positions" unset (as before), else the pool's size and bytes.
+pub fn seatWords(buf: []u8, slots: u32, limit: u32, s: ?Setting, block_bytes: u64) []const u8 {
+    const x = s orelse return std.fmt.bufPrint(buf, "{d} slots of {d} positions", .{ slots, limit }) catch "slots";
+    const mib = @as(u64, x.blocks) * block_bytes >> 20;
+    return std.fmt.bufPrint(buf, "{d} slots sharing a pool of {d} positions ({s}={d}; a request up to {d}; {d} bytes a position, {d} MiB)", .{ slots, tokensOf(x.blocks), name, x.tokens, limit, block_bytes / block, mib }) catch "slots";
+}
+
+/// The refusal when the pool and the slots' own state pass the device's working set; null when they fit.
+pub fn tooLarge(buf: []u8, tokens: u64, need: u64, used: u64, limit: u64) ?[]const u8 {
+    if (used + need <= limit) return null;
+    const gib = struct {
+        fn of(b: u64) f64 {
+            return @as(f64, @floatFromInt(b)) / (1 << 30);
+        }
+    }.of;
+    return std.fmt.bufPrint(buf, "{s}={d} needs {d:.2} GiB for the pool and the slots beside {d:.2} GiB already allocated, past this GPU's {d:.2} GiB working set; lower {s}", .{ name, tokens, gib(need), gib(used), gib(limit), name }) catch name;
+}
+
 test {
     _ = @import("pool_test.zig");
 }

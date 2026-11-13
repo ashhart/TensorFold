@@ -34,7 +34,8 @@ const Held = struct {
     }
 };
 
-pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64 };
+/// `pool`: TF_DSV41_POOL_TOKENS for the slots (null: `limit` positions a slot).
+pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, pool: ?u64 = null };
 
 /// The tiny model from `seed` served on this GPU; the returned model owns the rig (closed with it).
 pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Metal {
@@ -59,7 +60,10 @@ pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Me
     errdefer h.w.deinit();
     const env: pkg.target.Env = .{ .device = r.device, .queue = r.queue, .c = &r.c, .p = &r.p, .tables = &r.tables, .s = &r.s, .model = h.f.model(), .lookup = h.f.lookup() };
     const parts: pkg.serve.Parts = .{ .env = env, .top = &r.top.?, .dspark = &h.w, .owner = .{ .ctx = h, .close = Held.close } };
-    return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk } });
+    var why: []const u8 = "";
+    var buf: [320]u8 = undefined;
+    const ps = try pkg.pool.setting(o.pool, o.slots, limit, &why, &buf);
+    return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk }, .pool = ps });
 }
 
 /// Closes a model `open` made (the served engine closes its own through serve_lanes).

@@ -71,6 +71,17 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     step.dependOn(&serve_run.step);
     const serve_step = b.step("test-dsv41-metal-serve", "DeepSeek-V4.1 Metal served through LaneHost: concurrent, drafted, cached, seeded, cancelled");
     serve_step.dependOn(&serve_run.step);
+    // the slots over one shared pool (TF_DSV41_POOL_TOKENS): runs slide down, a full pool waits, replies equal serial
+    const pool_mod = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/pool_serve_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "dsv41_metal", .module = p.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = p.host } },
+    });
+    const pool_run = b.addRunArtifact(b.addTest(.{ .root_module = pool_mod }));
+    pool_run.has_side_effects = true;
+    b.step("test-dsv41-metal-pool", "DeepSeek-V4.1 Metal: slots sharing one pool of positions, bit-equal to unpooled serial").dependOn(&pool_run.step);
     // the release-checkpoint steps (TF_DSV41_REAL) stay opt-in, so the umbrella holds the default device suites
     const all = b.step("test-dsv41-metal-all", "DeepSeek-V4.1 Metal: every device test step on this GPU (layer, served)");
     all.dependOn(step);
