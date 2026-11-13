@@ -89,7 +89,7 @@ zig/src/cuda/cublaslt.zig	c6e3b8892cad23bd08c7d9843da8117670e3a881e0708a89cdf72f
 zig/src/cuda/driver.zig	f20856bd06afe9365ab9ca1bc39800ccb260ade2704197c033e1344a0c8dd742	raw	commits e9bf05ffd, b923e554c, b2c75a98a; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/embed_rows.zig	09fb2e612f43297c19d2cb77d45139dd98212a20075da0a15069a70544f72f6b	raw
 zig/src/cuda/exlr8.zig	1e2164096ae949a8a9a4903df82c7c0c184a6f5e1ba5ba4423038a42b0633fc6	raw
-zig/src/cuda/experts.zig	1a2490128498525cb73bfe6f379a1dabfab4d62ceef9dec7e794abe2edc4e82d	raw
+zig/src/cuda/experts.zig	1450c0f7874f0cb5b9ae3a8bebf845f283214863b60cf401a26fdb1898ee7271	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change)
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
@@ -115,9 +115,9 @@ zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0b
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
-zig/src/families/flashnext/cuda_batch.zig	56f8c52532fe797f897eab2ce10db0d91afe0a6291f4423c4231482145248e05	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #1441 artifact identity; #1443 artifact identity
-zig/src/families/flashnext/cuda_batch_state.zig	6d3697b0151ccfc3fe654be760e39a23507172d9f32efc2b7237a49ea14a2723	raw	main 4f6017ced (prompt cache marks kept inside the pass), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning); #1441 artifact identity; #1442 artifact identity; #1443 artifact identity
-zig/src/families/flashnext/cuda_collective.zig	b3924b5c81e4b50b0b32cb589032ff29aedef49de4f8712ff831c3e77718913a	raw	#1442 artifact identity; #1443 artifact identity
+zig/src/families/flashnext/cuda_batch.zig	56f8c52532fe797f897eab2ce10db0d91afe0a6291f4423c4231482145248e05	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
+zig/src/families/flashnext/cuda_batch_state.zig	25b94199158bf5430afa127880c6b42b6f181cb4fc267c483994f0235ed9d9a7	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged
+zig/src/families/flashnext/cuda_collective.zig	d4524fd8836fed1baa5f5fb3ebac046e485697bb3973d3612390e1700f2fffec	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	2b52cb9d0b2d6cd05820561f4d12d190d32d6fc152978dbb8b28fe9f8995e595	raw	#1441 artifact identity
 zig/src/families/flashnext/cuda_draft_affine.zig	2ec22bec1a38a6d2cc7e16a65d41deeb452d1a679661351a473652b5f39f2da8	raw
@@ -131,9 +131,9 @@ zig/src/families/flashnext/cuda_images.zig	5bd8a6c06cb69440522f4392794d9ef52b376
 zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a124de2a7019041ed1f7483b2a4a2d7c99	raw
 zig/src/families/flashnext/cuda_lanes.zig	f0223719149aa0ac3f4cbdaedaba90d3e2128f3141bbd1540458ade002a769f4	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning); #1441 artifact identity; #1442 artifact identity; #1443 artifact identity; #1444 artifact identity
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	14117526660a65977bbe2ae1c87f5736c8c5576ffadd95248cb08cb708d9384b	raw	#1441 artifact identity
-zig/src/families/flashnext/cuda_lanes_load.zig	a24fb6975bb2b59d0b766467beb758e7b75ed9d629926382e7c7d6c9bad6af2f	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning); #1441 artifact identity; #1442 artifact identity; #1443 artifact identity; #1444 artifact identity
+zig/src/families/flashnext/cuda_lanes_load.zig	a24fb6975bb2b59d0b766467beb758e7b75ed9d629926382e7c7d6c9bad6af2f	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning); #1441 artifact identity
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	8102838dc5cf9f7c0230d05bf5eb78e433cf0c454a976ef58f9cf3beeb9c6764	raw	#1442 artifact identity
-zig/src/families/flashnext/cuda_launch.zig	6704c5688846b9d4eca0ef4a99b8af38c49e804c9845dedd065c0ed471ee297c	raw	main ab2d08ac3 (#2802: pins that Flash Next declares no chunk_invariant; no served change), c274b45cc1 (env_validate exported for the tool mains; no served change); #1441 artifact identity; #1442 artifact identity
+zig/src/families/flashnext/cuda_launch.zig	b3aedd184b23e880c96e4f658910d45520d2710c6a33d85739e20f25735229fc	raw	exports cuda_moe_exchange.zig for its device test; no served change
 zig/src/families/flashnext/cuda_media.zig	394601e8a807f5516f501efcaefa6fb3308f392ee322db7296b11c90814f8eea	raw
 zig/src/families/flashnext/cuda_media_test.zig	4292f8f7c8f8bf4efd0dfaaa5a6c63e11568f85534127a0ce9feb0ab0be05120	raw
 zig/src/families/flashnext/cuda_mix.zig	248a2a86b3f377531f5b713c408ba99f73604510f4afe34ffae52615d5863c2c	raw

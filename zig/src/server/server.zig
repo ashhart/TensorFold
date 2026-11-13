@@ -12,6 +12,7 @@ const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
 const reply_text = @import("reply_text.zig");
 const http_conn = @import("http_conn.zig");
+const admission = @import("http_admission.zig");
 const listener_mod = @import("listener.zig");
 const routes = @import("routes.zig");
 const responses = @import("responses.zig");
@@ -104,6 +105,8 @@ pub const Config = struct {
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
+    /// --max-connections-per-address, --trusted-proxy: one address's share from three quarters full.
+    peering: @import("http_admission.zig").Peering = .{},
     /// --max-inflight, --max-inflight-per-key, --requests-per-second, --request-burst; all zero: no admission.
     admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
@@ -159,6 +162,8 @@ pub const Server = struct {
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    /// Open connections by remote address, for the per-address share of the slots.
+    peers: admission.Peers = .{},
     draining: std.atomic.Value(bool) = .init(false),
     generating: std.atomic.Value(u32) = .init(0),
     /// Model requests holding a reservation, when config.admission is on.
@@ -382,8 +387,9 @@ pub const Server = struct {
         const st = if (request.structure) |*s| s else return;
         const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
         if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
-        const ready = g.budgetReady() catch false;
-        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        const ready = g.budgetReadiness() catch .uncovered;
+        if (ready == .over_work) return cx.refuse("grammar_budget cannot be kept for this grammar: exploring its parser states passes the fixed work limit, a step count that is the same on every machine; send it without grammar_budget");
+        if (ready != .ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
         st.budget = true;
     }
 
@@ -430,8 +436,9 @@ pub const Server = struct {
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
             if (!srv.admitConnection(c.fd)) continue;
-            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind }) catch {
-                _ = srv.open_connections.fetchSub(1, .acq_rel);
+            const slot = admission.peerSlot(&srv.peers, srv.io, &srv.open_connections, srv.config.max_connections, srv.config.peering, c.fd, c.peer) orelse continue;
+            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind, slot }) catch {
+                admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
                 _ = platform.posix.system.close(c.fd);
                 continue;
             };
@@ -440,20 +447,20 @@ pub const Server = struct {
     }
 
     pub fn admitConnection(srv: *Server, fd: platform.posix.socket_t) bool {
-        const admission = @import("http_admission.zig");
         if (admission.acquire(&srv.open_connections, srv.config.max_connections)) return true;
         admission.reject(fd);
         return false;
     }
 
-    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool) void {
-        defer _ = srv.open_connections.fetchSub(1, .acq_rel);
+    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool, slot: u16) void {
+        defer admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
         defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
         const peer = listener_mod.peerText(&peer_buf, accepted.peer);
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;
         defer conn.deinit();
         conn.timeouts = srv.config.timeouts;
+        conn.shed = .{ .open = &srv.open_connections, .limit = srv.config.max_connections };
         var browser = srv.config.browser;
         browser.loopback_bind = loopback_bind;
         conn.auth_enabled = srv.keys != null and srv.keys.?.enabled();

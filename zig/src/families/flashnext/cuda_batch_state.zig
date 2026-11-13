@@ -304,7 +304,7 @@ pub const Scratch = struct {
     shared_out: u64 = 0,
     y: u64 = 0,
     branch: u64 = 0,
-    /// A layer's MoE output in fp32 [cap, dims] when something adds to it, and the pocket's activations [cap, 128].
+    /// A layer's MoE output in fp32 [cap + 1, dims] when something adds to it, and the pocket's activations [cap, 128].
     moe_f32: u64 = 0,
     pocket_act: u64 = 0,
     ple_emb: u64 = 0,
@@ -447,9 +447,9 @@ pub const Scratch = struct {
             if (format == .classic) cap * moe_w * 2 else null,
             if (format == .classic) cap * dims * 4 else null,
             if (format == .classic) pairs * moe_w * 2 else null,
-            pairs * dims * 4,
+            (pairs + slots) * dims * 4,
             cap * dims * 2,
-            cap * dims * 4,
+            (cap + 1) * dims * 4,
             cap * pocket_stride * 4,
             cap * dims * 2,
             cap * (dims / 32) * 4,

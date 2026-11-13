@@ -5,6 +5,7 @@ const core = @import("core");
 const glm = @import("glm_cuda");
 const check = @import("check.zig");
 const qr = @import("quant_ref_tests.zig");
+const compact_prompt = @import("glm_exl3_compact.zig");
 const Gpu = check.Gpu;
 
 const fmt = core.exl3_format;
@@ -101,23 +102,57 @@ const Run = struct { ey: u64, rows: usize };
 
 /// The family's dispatch on `x` (bf16 [rows][D]) and `pk`: ey [rows][slots][D] fp32, the shared slot left as filled.
 fn run(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, s: Set, x: []const u16, pk: []const i32, rows: usize, prompt: bool) !Run {
-    const P = rows * glm.exl3.top_k;
+    return runMode(r, k, ek, s, x, pk, rows, prompt, false, null);
+}
+
+fn runMode(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, s: Set, x: []const u16, pk: []const i32, rows: usize, prompt: bool, legacy: bool, sentinel: ?u32) !Run {
+    const P = rows * slots;
     const tile: usize = if (prompt) glm.experts.staged_tile else glm.experts.tile;
     const wide = P > cuda.grouped.small;
     const plan: cuda.grouped.Plan = .{
         .members = try r.zeros(P * 4),
-        .items = try r.zeros(cuda.grouped.maxItems(P, E, tile) * 12),
+        .items = try r.zeros(cuda.grouped.maxItems(P, E + 1, tile) * 12),
         .counts = try r.zeros(8),
         .rank = try r.zeros((if (wide) P else 1) * 4),
-        .hist = try r.zeros((if (wide) (P + 1023) / 1024 * E else 1) * 4),
+        .hist = try r.zeros((if (wide) (P + 1023) / 1024 * (E + 1) else 1) * 4),
     };
-    const sz = glm.exl3.scratchBytes(rows, D, N, prompt, s.shx);
+    const sz: [4]usize = if (legacy) .{ compact_prompt.scratchBytes(rows, D, N, s.shx), 4, 4, 4 } else glm.exl3.scratchBytes(rows, D, N, prompt, s.shx);
     const sc: glm.exl3.Scratch = .{ .picks = try r.zeros(sz[0]), .xg = try r.zeros(sz[1]), .xu = try r.zeros(sz[2]), .z = try r.zeros(sz[3]) };
-    const ey = try r.zeros(rows * slots * D * 4);
+    const ey = if (sentinel) |value| blk: {
+        const words = try r.a.alloc(u32, rows * slots * D);
+        @memset(words, value);
+        break :blk try r.dev(std.mem.sliceAsBytes(words));
+    } else try r.zeros(rows * slots * D * 4);
     const xd = try r.zeros(P * N * 2);
-    try glm.exl3.run(k, ek, r.s, s.experts(), sc, plan, try r.dev(std.mem.sliceAsBytes(x)), D, try r.dev(std.mem.sliceAsBytes(pk)), slots, rows, E, D, N, limit, prompt, ey, xd);
+    const xp = try r.dev(std.mem.sliceAsBytes(x));
+    const picks_dev = try r.dev(std.mem.sliceAsBytes(pk));
+    if (legacy) {
+        try compact_prompt.run(k, ek, r.s, s.experts(), sc, plan, xp, D, picks_dev, slots, rows, E, D, N, limit, ey);
+    } else try glm.exl3.run(k, ek, r.s, s.experts(), sc, plan, xp, D, picks_dev, slots, rows, E, D, N, limit, prompt, ey, xd);
     try r.s.synchronize();
     return .{ .ey = ey, .rows = rows };
+}
+
+/// Every routed FP32 word against the compact 1,024-row prompt caller; the shared writer alone owns the ninth slot.
+fn largeBytes(r: *Rig, k: *const glm.exl3.Kernels, ek: *const glm.experts.Kernels, s: Set) !void {
+    const sentinel: u32 = 0x4b123456;
+    for ([_]usize{ 2054, 4102 }) |rows| {
+        const x = try r.bfs(rows * D, 1.0);
+        const pk = try picks(r, rows);
+        const direct = try runMode(r, k, ek, s, x, pk, rows, true, false, sentinel);
+        const legacy = try runMode(r, k, ek, s, x, pk, rows, true, true, sentinel);
+        const got = try r.back(direct.ey, rows * slots * D * 4);
+        const want = try r.back(legacy.ey, rows * slots * D * 4);
+        for (0..rows) |m| {
+            const at = m * slots * D * 4;
+            try check.expect(std.mem.eql(u8, got[at..][0 .. 8 * D * 4], want[at..][0 .. 8 * D * 4]), "glm-exl3 prompt: row {d}/{d}, slots 0-7 equal the 1024-call path (shared rotation {})", .{ m, rows, s.shx });
+            for (0..D) |j| {
+                const off = at + (8 * D + j) * 4;
+                try check.expect(std.mem.readInt(u32, got[off..][0..4], .little) == sentinel and std.mem.readInt(u32, want[off..][0..4], .little) == sentinel, "glm-exl3 prompt: row {d}/{d} shared slot column {d} keeps its sentinel", .{ m, rows, j });
+            }
+        }
+        std.debug.print("GLM EXL3 DIRECT BYTES PASS rows={d} shared_rotation={} routed_words={d} shared_sentinel_words={d}\n", .{ rows, s.shx, rows * 8 * D, rows * D });
+    }
 }
 
 /// The kernels' SwiGLU: gate and up rounded to bf16 and limited, silu to bf16, the product to bf16.
@@ -204,6 +239,7 @@ pub fn run_(gpu: Gpu) !void {
     defer ek.unload();
     for ([_]bool{ true, false }) |one| {
         const s = try weights(&r, one);
+        try largeBytes(&r, &k, &ek, s);
         for ([_]usize{ 1, 3, 8 }) |rows| { // decode windows
             const x = try r.bfs(rows * D, 1.0);
             const pk = try picks(&r, rows);

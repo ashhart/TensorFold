@@ -1,6 +1,7 @@
 //! The Sliding Weights fact graph: what was taught, how far each lesson is, where its neurons went; never the weights.
 const std = @import("std");
 const builtin = @import("builtin");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const slide_model = @import("slide_model.zig");
@@ -468,14 +469,14 @@ pub const Graph = struct {
         defer scratch.deinit();
         const a = scratch.allocator();
         const body = try g.document(a, false);
-        const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{path});
         if (std.fs.path.dirname(path)) |dir| try Io.Dir.cwd().createDirPath(g.io, dir);
         const fault: Fault = if (builtin.is_test) g.fault else .none;
         if (builtin.is_test) g.fault = .none;
         if (fault == .write) return error.GraphWrite;
-        try Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body });
+        // taught facts are private: owner-only, through a unique temporary that follows no link
+        const staged = try platform.atomic_file.stagePrivate(a, path, &.{body});
         if (fault == .rename) return error.GraphRename;
-        try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io);
+        try platform.atomic_file.commit(a, staged, path);
     }
 
     fn load(g: *Graph) !void {
