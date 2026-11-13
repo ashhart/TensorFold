@@ -29,4 +29,5 @@ test {
 
 test {
     _ = @import("lane_activity_test.zig");
+    _ = @import("lane_stall.zig");
 }
