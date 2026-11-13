@@ -12,6 +12,8 @@ pub const Row = struct {
     items: u32 = 0,
     /// The most pairs a routed plan holds per item: more than `pairs_per_item * items` is refused (0: any).
     pairs_per_item: f32 = 0,
+    /// A routed prompt item of at most this many rows takes its kernel's K-parallel passes (0: none does).
+    few_rows: u32 = 0,
     plain: bool = true,
     routed: bool = true,
 };
