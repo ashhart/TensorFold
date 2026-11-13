@@ -223,6 +223,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Metal: Qwen 3.5, LFM2-MoE, MiniMax-M3 (with its DFlash2 and DSpark drafters), Step-5 and Spark-X read MLX affine modules through one core reader, `core/quant/mlx_affine.zig`, and LFM3 takes its modules' stored shapes from it while keeping its own checks; loads are unchanged, and a module the reader refuses now reports `UnexpectedAffineTensor` and is named in the log (#2583, part of #2460). Thanks to @jschmied.
 
+- Qwen3.6-35B-A3B on Metal: the 4-bit text checkpoint serves on the routed expert path, with 16 query heads over 2 in the attention plan and the kernel contract's routed and attention cases at its widths; `tf-qwen27-run --stages DIR` writes each layer's stream, the final norm and the logits for a float64 comparison (part of #931). Thanks to @cshintov.
+
 ## 1.2.7
 
 - GLM-5.3-Flash on CUDA: with `TF_GLM_LAYERS=N`, serve's start-up memory check counts the weights by tensor from the shard headers, only those the load reads (the first N layers, the MTP layer when drafts are on, the embedding, norm and head), where it counted every checkpoint file. A 20-layer thin load of the 163.6 GiB checkpoint now counts 66.6 GiB without drafts. Unset, the count is the files' as before (#2788, fixes #2745). Thanks to @wojo.
