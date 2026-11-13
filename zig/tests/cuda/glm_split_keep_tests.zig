@@ -58,7 +58,7 @@ pub fn keepCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id
     var ref: Run = .{ .logits = try zeros(a, 5 * 4 * V) };
     try x.bind(whole);
     try x.begin(null);
-    try ref.go(x, e, ids, null, null, V);
+    try ref.go(x, e, ids, null, null, V, null);
     try x.release(whole);
     var failed = false;
     var kept: [2]u64 = undefined; // the state at `mark`, kept on a stream of owner 0 and of owner 1
@@ -72,16 +72,30 @@ pub fn keepCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id
     };
     for (paths) |path| {
         try x.bind(paged);
-        const held = if (path.twin) try pages.openTwinned(paged, len, 64, path.owner) else try pages.openOn(paged, len, 64, path.owner);
+        var watch: Watch = .{ .pages = pages, .owner = path.owner };
+        for (watch.free[0..l.classes], 0..) |*n, k| n.* = pages.pool.classFree(@intCast(k));
+        // the twinned pass asks for a reply of 2,048: its twin is the prompt's 18 pages, not its own 22
+        const held = if (path.twin) try pages.openTwinned(paged, len, 2048, path.owner) else try pages.openOn(paged, len, 64, path.owner);
         if (path.twin and !glm.pages_twin.twinned(pages, paged)) {
             std.debug.print("FAIL keep: the {s} pass found no twin pages\n", .{path.name});
             failed = true;
         }
+        if (path.twin) for (0..l.classes) |k| {
+            const took = watch.free[k] - pages.pool.classFree(@intCast(k));
+            if (k != path.owner and (took != P.need(l, len, 0) or took >= held.len / l.classes)) {
+                std.debug.print("FAIL keep: the {s} pass's twin took {d} pages of class {d}, not the prompt's {d} (the stream holds {d})\n", .{ path.name, took, k, P.need(l, len, 0), held.len / l.classes });
+                failed = true;
+            }
+        };
         try x.beginOn(null, held, 0);
         var keeper: Keeper = .{ .e = e };
         var run: Run = .{ .logits = try zeros(a, 5 * 4 * V) };
         const from: ?glm.engine.Resume = if (path.from) |h| .{ .id = kept[h], .at = mark } else null;
-        try run.go(x, e, ids, from, if (from == null and path.mark) keeper.marks() else null, V);
+        try run.go(x, e, ids, from, if (from == null and path.mark) keeper.marks() else null, V, if (path.twin) &watch else null);
+        if (path.twin and !watch.back) {
+            std.debug.print("FAIL keep: the {s} pass still held its twin, or the other classes' pages, after its first verify window\n", .{path.name});
+            failed = true;
+        } else if (path.twin) std.debug.print("  {s}: the twin took the prompt's {d} pages a class, all back after the first verify window\n", .{ path.name, P.need(l, len, 0) });
         if (from == null and path.mark) kept[path.owner] = keeper.id orelse {
             std.debug.print("FAIL keep: the {s} pass kept no state at {d}\n", .{ path.name, mark });
             return error.TestFailed;
@@ -103,7 +117,7 @@ pub fn keepCheck(gpu: Gpu, checkpoint: []const u8, rank: c_int, world: c_int, id
         failed = true;
     }
     if (failed) return error.TestFailed;
-    check.pass("kv split keeps at TP={d}: a twinned and an owner-computed pass, a state kept on each owner, resumed at home and carried each way, equal a fresh whole window byte for byte; the pool idle after", .{world});
+    check.pass("kv split keeps at TP={d}: a twinned and an owner-computed pass, a state kept on each owner, resumed at home and carried each way, equal a fresh whole window byte for byte; the twin the prompt's pages alone, given back at the first verify window; the pool idle after", .{world});
 }
 
 /// One pass: the prompt (resumed or from 0), its first token's logits, then four windows of 1 to 4 rows.
@@ -112,7 +126,7 @@ const Run = struct {
     outs: [10]u32 = @splat(0),
     logits: []u16,
 
-    fn go(r: *Run, x: anytype, e: anytype, ids: []const u32, from: anytype, marks: anytype, V: usize) !void {
+    fn go(r: *Run, x: anytype, e: anytype, ids: []const u32, from: anytype, marks: anytype, V: usize, watch: ?*Watch) !void {
         r.first = try x.prefill(ids, from, null, marks); // a resume restores on every rank before its first chunk
         try cuda.memory.download(e.d, e.bp.logits, std.mem.sliceAsBytes(r.logits[0..V]));
         var at: usize = 0;
@@ -120,10 +134,27 @@ const Run = struct {
             var w: [4]u32 = undefined;
             for (w[0..rows], 0..) |*u, k| u.* = @intCast(100 + (rows * 31 + k * 13) % 5000);
             try x.verify(w[0..rows], r.outs[at..][0..rows], 0);
+            if (rows == 1) if (watch) |v| v.look(e); // the first decode round gave the twin back
             try cuda.memory.download(e.d, e.bd.logits, std.mem.sliceAsBytes(r.logits[rows * 4 * V ..][0 .. rows * V]));
             try x.keep(rows);
             at += rows;
         }
+    }
+};
+
+/// A twinned pass's give-back on rank 0: after its first verify window no twin, and every other class's pages back.
+const Watch = struct {
+    pages: *@import("glm_cuda").pages.Pages,
+    owner: u32,
+    free: [16]usize = @splat(0), // each class's free pages before the stream opened
+    back: bool = false,
+
+    fn look(w: *Watch, e: anytype) void {
+        var ok = !@import("glm_cuda").pages_twin.twinned(w.pages, paged) and !e.seqs.items[paged].?.st.twin;
+        for (0..w.pages.pool.classes) |k| if (k != w.owner and w.pages.pool.classFree(@intCast(k)) != w.free[k]) {
+            ok = false;
+        };
+        w.back = ok;
     }
 };
 
