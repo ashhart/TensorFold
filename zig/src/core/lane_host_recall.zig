@@ -20,18 +20,18 @@ pub fn attach(ctx: *anyopaque, store: *Store) void {
     h.recall = store;
 }
 
-/// A drafted request's reader of the record (null: no record, or a request that drafts nothing).
+/// A drafted request's reader of the record (null: no record, a request that drafts nothing, or a salted one).
 pub fn reader(h: *LaneHost, job: *Job) ?*lanes.recall.Reader {
     const store = h.recall orelse return null;
-    if (!job.request.drafts) return null;
+    if (!job.request.drafts or job.request.salted) return null;
     job.recall.reader = .{ .gpa = h.gpa, .shared = &store.shared };
     job.recall.reading = true;
     return &job.recall.reader;
 }
 
-/// Its prompt and reply go in unless it is a background pass, a lesson's untaught request or prompt-only (no reply).
+/// Its prompt and reply go in unless it is a background pass, an untaught, prompt-only (no reply) or salted request.
 fn writes(job: *const Job) bool {
-    return !job.request.background and !job.request.untaught and !job.request.promptOnly();
+    return !job.request.background and !job.request.untaught and !job.request.promptOnly() and !job.request.salted;
 }
 
 /// The prompt pass ended: what came before its resume point an earlier request read already.

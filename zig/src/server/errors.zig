@@ -34,6 +34,8 @@ pub const Cx = struct {
     clear_thinking: ?bool = null,
     /// The request controls a native prompt renderer must retain in every prefix probe.
     template_fields: @import("json").Value = .null,
+    /// The request's prompt-cache salt, for the server's own requests it makes (compaction's notes); 0: none.
+    cache_salt: u64 = 0,
 
     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
         cx.kind = kind;

@@ -203,11 +203,11 @@ pub fn userKey(a: Allocator, messages: []const Value) Allocator.Error!u64 {
 }
 
 /// `messages` with every earlier reply's hidden messages back in front of it.
-pub fn splice(a: Allocator, store: *Store, messages: []const Value) Allocator.Error![]const Value {
+pub fn splice(a: Allocator, store: *Store, messages: []const Value, salt: u64) Allocator.Error![]const Value {
     var out: std.ArrayList(Value) = .empty;
     var found = false;
     for (messages, 0..) |m, i| {
-        if (std.mem.eql(u8, role(m), "assistant")) if (store.get(a, try replyKey(a, messages, i))) |stored| {
+        if (std.mem.eql(u8, role(m), "assistant")) if (store.get(a, try replyKey(a, messages, i) ^ salt)) |stored| {
             switch (json.parseText(a, stored) catch return error.OutOfMemory) {
                 .ok => |v| if (v == .array) {
                     if (!found) try out.appendSlice(a, messages[0..i]);
@@ -238,12 +238,13 @@ test "a kept exchange goes back in front of its reply, whitespace and argument o
     const turn = [_]Value{ try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", "It added  std.Io.\n") };
     store.put(try replyKey(a, &turn, 1), "[{\"role\": \"tool\", \"content\": \"notes\"}]");
     const later = [_]Value{ try msg(a, "system", "s"), try msg(a, "user", "What changed in Zig 0.17?"), try msg(a, "assistant", " It added std.Io."), try msg(a, "user", "And 0.16?") };
-    const out = try splice(a, &store, &later);
+    const out = try splice(a, &store, &later, 0);
     try std.testing.expectEqual(@as(usize, 5), out.len);
+    try std.testing.expectEqual(later.len, (try splice(a, &store, &later, 0x5a17)).len); // another cache salt: not its own
     try std.testing.expectEqualStrings("tool", out[2].strField("role").?);
     try std.testing.expectEqualStrings("assistant", out[3].strField("role").?);
     const other = [_]Value{ try msg(a, "user", "Different question"), try msg(a, "assistant", "It added std.Io.") };
-    try std.testing.expectEqual(@as(usize, 2), (try splice(a, &store, &other)).len);
+    try std.testing.expectEqual(@as(usize, 2), (try splice(a, &store, &other, 0)).len);
     const call_a = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"c1\", \"function\": {\"name\": \"bash\", \"arguments\": \"{\\\"b\\\": 1, \\\"a\\\": 2}\"}}]}")).ok;
     const call_b = (try json.parseText(a, "{\"role\": \"assistant\", \"content\": null, \"tool_calls\": [{\"id\": \"zz\", \"function\": {\"name\": \"bash\", \"arguments\": {\"a\": 2, \"b\": 1}}}]}")).ok;
     const u = try msg(a, "user", "run it");

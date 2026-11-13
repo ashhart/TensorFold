@@ -43,7 +43,7 @@ test "security: a conversation note is owner-only and is not written through a p
         const link = try std.fmt.allocPrint(a, "notes/{s}{s}", .{ key, ext });
         try tmp.dir.symLink(io, victim, link, .{});
     }
-    compact_mem.storeMem(&srv, a, msgs, 1, "a private summary");
+    compact_mem.storeMem(&srv, a, msgs, 1, "a private summary", 0);
 
     try testing.expectEqualStrings("untouched", try tmp.dir.readFileAlloc(io, "victim.txt", a, .limited(64)));
     for ([_][]const u8{ ".md", ".json" }) |ext| {
@@ -52,7 +52,12 @@ test "security: a conversation note is owner-only and is not written through a p
     }
     const note = try std.fmt.allocPrint(a, "notes/{s}.md", .{key});
     try testing.expectEqualStrings("a private summary", try tmp.dir.readFileAlloc(io, note, a, .limited(64)));
-    try testing.expectEqualStrings("a private summary", compact_mem.loadMem(&srv, a, msgs).?.note);
+    try testing.expectEqualStrings("a private summary", compact_mem.loadMem(&srv, a, msgs, 0).?.note);
+    try testing.expect(compact_mem.loadMem(&srv, a, msgs, 0x5a17) == null); // a salted request reads no shared note
+    const other = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"salted\"}]")).ok.items().?;
+    compact_mem.storeMem(&srv, a, other, 1, "a salted summary", 0x5a17); // nor writes one another salt would read
+    const salted = try std.fmt.allocPrint(a, "notes/{s}.md", .{try compact_mem.conversationKey(a, other)});
+    try testing.expectError(error.FileNotFound, tmp.dir.readFileAlloc(io, salted, a, .limited(64)));
 }
 
 test "security: a folder the note writer makes is the owner's alone" {
@@ -67,7 +72,7 @@ test "security: a folder the note writer makes is the owner's alone" {
     srv.config = .{ .served_name = "test", .model_ids = &.{"test"}, .compact_memory = dir };
     srv.io = io;
     const msgs = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"hello\"}]")).ok.items().?;
-    compact_mem.storeMem(&srv, a, msgs, 1, "note");
+    compact_mem.storeMem(&srv, a, msgs, 1, "note", 0);
     const st = try std.Io.Dir.cwd().statFile(io, dir, .{});
     try testing.expectEqual(@as(u32, 0), @as(u32, @intCast(st.permissions.toMode() & 0o077)));
 }
