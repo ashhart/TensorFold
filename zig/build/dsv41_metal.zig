@@ -41,7 +41,9 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
         .imports = &.{ .{ .name = "dsv41_metal", .module = p.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = p.host } },
     });
     // the package's own checks run with the default test step; its device suites run from their named steps
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = p.pkg })).step);
+    const pkg_run = b.addRunArtifact(b.addTest(.{ .root_module = p.pkg }));
+    test_step.dependOn(&pkg_run.step);
+    b.step("test-dsv41-metal-host", "DeepSeek-V4.1 Metal: the package's host checks alone, no device run").dependOn(&pkg_run.step);
     const step = b.step("test-dsv41-metal", "DeepSeek-V4.1 Metal layer and forward: float64 stages, rows at once == one at a time");
     // serve_lanes over the CPU twin, checked here so no CUDA step has to depend on the neutral served engine
     const lanes_test = b.createModule(.{

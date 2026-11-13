@@ -9,6 +9,7 @@ pub const weights = @import("weights.zig");
 pub const mapped = @import("mapped.zig");
 pub const model_weights = @import("model_weights.zig");
 pub const kv = @import("kv.zig");
+pub const pool = @import("pool.zig");
 pub const rope = @import("rope.zig");
 pub const scratch = @import("scratch.zig");
 pub const ctx = @import("ctx.zig");
@@ -40,4 +41,5 @@ test {
     _ = dspark;
     _ = dspark_plan;
     _ = pass;
+    _ = pool;
 }
