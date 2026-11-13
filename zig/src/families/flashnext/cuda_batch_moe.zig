@@ -15,7 +15,7 @@ pub fn moeAdds(self: anytype, layer: usize, keep: LayerKeep) !void {
     const s = self.s;
     const n = self.rows;
     // a prompt pass's rank exchange (cuda_moe_exchange.zig) already left the sum in moe_f32
-    // The EXL3 branch already holds the canonical reduction in moe_f32.
+    // moe_f32 may already hold the sum: the EXL3 canonical branch, or a prompt pass's rank exchange
     if (!self.pending_f32 and !canon) try sumSlots(self, 0, n);
     if (add) |m| try m.add(m.ctx, layer, s.mixed, s.picks, s.wts, s.moe_f32, n);
     if (keep.moe_branch != 0) try self.sumSlices(s.moe_f32, keep.moe_branch, true, n * dims, 1);
