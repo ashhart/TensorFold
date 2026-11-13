@@ -259,6 +259,12 @@ fn printF64PerRow(tag: []const u8, ref64: []const f64, got: []const u16, W: u32,
     }
 }
 
+fn printMixVsMixF64(tag: []const u8, mix_y: []const f32, ref64: []const f64, W: u32, rows: u32) void {
+    var worst: f64 = 0;
+    for (mix_y, ref64) |m, f| worst = @max(worst, @abs(@as(f64, m) - f));
+    std.debug.print("{s} mix vs mixF64 worst abs {e} ({d} heads, {d} rows)\n", .{ tag, worst, W / kda.dim, rows });
+}
+
 fn check(rows: u32) !void {
     const a = std.testing.allocator;
     const s = kda.Shape{ .heads = 16, .lower_bound = -5, .eps = 1e-6 };
@@ -312,6 +318,7 @@ fn check(rows: u32) !void {
     try l.dispatch(g, 0, rows, seg_commit);
     const got = l.y();
     try gateGlmVsMix(want, got, W, rows);
+    printMixVsMixF64("k3_kda", want, want64, W, rows);
     printF64PerRow("k3_kda", want64, got, W, rows);
 }
 
@@ -377,6 +384,12 @@ fn checkDump(bytes: []const u8) !void {
     defer a.free(S_host);
     @memset(S_host, 0);
     try kda.mix(want, S_host, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    const mix64 = try a.alloc(f64, want_n);
+    defer a.free(mix64);
+    const S64 = try a.alloc(f64, H * D * D);
+    defer a.free(S64);
+    @memset(S64, 0);
+    try kda.mixF64(mix64, S64, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
 
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -387,6 +400,7 @@ fn checkDump(bytes: []const u8) !void {
     try l.dispatch(g, 0, rows, seg_commit);
     const got = l.y();
     try gateGlmVsMix(want, got, W, rows);
+    printMixVsMixF64("k3_kda dump", want, mix64, W, rows);
     printF64PerRow("k3_kda dump", want64, got, W, rows);
 }
 
@@ -455,6 +469,7 @@ test "k3_kda 4 rows equals 2+2 with S and conv carried" {
     try checkSeam();
 }
 
-test "k3_kda 32 rows vs mixF64 computed in the test" {
+test "k3_kda 32 rows vs mix, mixF64 computed in the test" {
+    // GPU vs mixF64 is printed, not gated; a GLM bound vs mixF64 cannot hold at bf16.
     try check(32);
 }
