@@ -3,13 +3,14 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const api = @import("engine_api");
 const errors = @import("../errors.zig");
+const pdf = @import("../pdf.zig");
 
 /// One page of a request: its index in the source document, the pixel size its quads refer to, and its blocks.
 pub const OcrPage = struct {
     index: u32, // 0-based page index in the source document
     width: u32,
     height: u32,
-    dpi: u32, // 72 for an image
+    dpi: u32, // render DPI of a PDF page; 72 for an image
     blocks: []api.ocr.OcrBlock, // validated, reading order
 };
 
@@ -44,7 +45,9 @@ pub const Fault = struct {
     }
 };
 
-/// One document of a request: a page image.
+/// One document of a request: an image or a PDF and the pages chosen from it.
 pub const Source = struct {
     bytes: []const u8,
+    kind: enum { image, pdf },
+    sel: pdf.Selection,
 };
