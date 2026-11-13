@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: `TF_DSV41_POOL_TOKENS` lets the slots share one pool of positions instead of `--context` each, so four slots can share 1,048,576 positions while any one request still uses up to `--context`; a request holds its prompt, `max_tokens` and one window of drafts, waits while too few positions are free, and its tokens equal an unpooled run; unset, memory and startup lines are as before.
+
 - DeepSeek-V4.1 on Metal: decode launches of 6 to 16 rows (draft verify windows, alone or with other streams' rows) run the dense FP8 projections on a simdgroup-matrix tile that splits K over simdgroups in the row kernel's own group tree, so every row's bits equal the row kernel's one row at a time; launches of 1 to 5 rows keep the row kernel. On synthetic layers of the release's shapes on an M5 Max, the layers of a 16-row window take about 26% less GPU time and an 8-row one about 13% less, with fewer rows unchanged; `time-dsv41-metal-synth` times the dispatch classes per row without a checkpoint (#2973, part of #1676).
 
 - DeepSeek-V4.1 on Metal: rounds with three or more decoding streams decode plain, with no draft pass and no drafter ingest, since drafts lose there; when fewer streams decode again the drafter takes the rows it missed from the target, so its drafts are the ones it would have made (#1720, part of #1676).
