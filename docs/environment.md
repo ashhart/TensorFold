@@ -34,6 +34,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | Whole nonnegative lookahead count; default 1 |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
+| `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
 | `TF_FLASHNEXT_CHUNK` | Whole prompt rows from 1 through 16384 per pass; default 1536 |
