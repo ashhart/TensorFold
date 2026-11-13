@@ -30,7 +30,8 @@ Default path (switch unset), `measured` and `head` builds: `token_sha` equals #2
 drafted and `"draft": false`.
 
 With the switch, drafted equals `"draft": false` equals a second drafted run at every cell (0, 8K, 32K twice;
-131K once), and on 329 of 329 battery items. `head` returns the `measured` build's hashes on both paths (8K and
+131K once), and on the 211 battery items run with `"draft": false` (211 of 211; the other 118 were not run that
+way). A second card returns the first card's drafted text on 329 of 329 items. `head` returns the `measured` build's hashes on both paths (8K and
 32K, B70 #2).
 
 Decode tokens/s on B70 #1, drafted, code / prose, default against the switch in one session:
