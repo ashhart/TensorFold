@@ -237,6 +237,7 @@ pub const Fate = struct {
             if (std.c.poll(&p, @intCast(n + 1), -1) <= 0) continue;
             for (p[0..n], who[0..n]) |*q, r| if (q.revents != 0) {
                 if (!f.readFrame(r, q.fd)) return;
+                while (sock.waiting(q.fd)) if (!f.readFrame(r, q.fd)) return; // frames one sealed record carried
             };
         }
     }
@@ -256,6 +257,7 @@ pub const Fate = struct {
                 continue;
             }
             if (ready > 0 and p[0].revents != 0 and !f.readFrame(0, fd)) return;
+            while (sock.waiting(fd)) if (!f.readFrame(0, fd)) return; // frames one sealed record carried
         }
     }
 

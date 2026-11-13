@@ -10,7 +10,6 @@ pub const max_ranks = 64;
 
 /// The CPU a plan thread pinned itself to (TF_TP_PLAN_PIN), -1 until one did; an engine's CPU isolation keeps off it.
 pub var pinned_cpu: std.atomic.Value(i32) = .init(-1);
-const more: u32 = 0x8000; // MSG_MORE: the length and the ints leave as one segment
 
 pub const Error = error{ PeerClosed, TooLarge, NotRankZero, NotFollower };
 
@@ -110,7 +109,7 @@ pub const PlanLink = struct {
         const bytes = std.mem.sliceAsBytes(ints);
         const len: u32 = @intCast(bytes.len);
         for (p.fds[1..p.world]) |fd| {
-            if (std.c.send(fd, &len, 4, std.posix.MSG.NOSIGNAL | more) != 4) return error.PeerClosed;
+            sock.sendMore(fd, std.mem.asBytes(&len)) catch return error.PeerClosed; // the length and the ints: one segment
             sock.sendAll(fd, bytes) catch return error.PeerClosed;
         }
         p.sent += 1;
