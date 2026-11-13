@@ -213,6 +213,8 @@ pub const RoundProf = struct {
 
     /// The summary: one line a launch shape (slots, rows, drafted or plain), the command buffers, the drafter's passes.
     pub fn write(p: *const RoundProf, w: *std.Io.Writer) !void {
+        // no round since the last summary: nothing to say (the summary at close after a periodic one)
+        if (p.rounds == p.since) return;
         try w.print("dsv41 round profile: rounds {d} to {d} ({d} rounds; mean and percentiles cover these rounds); ms mean/p50/p95\n", .{ p.since + 1, p.rounds, p.rounds - p.since });
         for (p.groups, 0..) |bs, slots| for (bs, 0..) |ds, b| for (ds, 0..) |g, drafted| if (g) |gg| if (gg.n > 0) {
             try w.print("slots {d} rows {s} {s} n {d}:", .{ slots, row_buckets[b], if (drafted == 1) "drafted" else "plain", gg.n });
@@ -360,4 +362,22 @@ test "each periodic summary covers only the rounds since the last, and says so" 
     try p.write(&w);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "rounds 3 to 3 (1 rounds; mean and percentiles cover these rounds)") != null);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), " wait 9.000/9.000/9.000") != null);
+}
+
+test "a summary with no round since the last one writes nothing" {
+    const a = std.testing.allocator;
+    const p = try RoundProf.init(a);
+    defer p.deinit();
+    p.clock = fakeClock;
+    fake_now = 1;
+    var buf: [4096]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try p.write(&w);
+    try std.testing.expectEqual(@as(usize, 0), w.buffered().len);
+    var r = p.begin(1, 1);
+    fake_now += 1_000_000;
+    r.lap(.wait);
+    r.end();
+    try p.write(&w);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "rounds 1 to 1 (1 rounds;") != null);
 }
