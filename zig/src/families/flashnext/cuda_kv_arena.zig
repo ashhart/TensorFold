@@ -243,9 +243,13 @@ pub const Arena = struct {
         }
     };
 
+    /// The pieces open libcuda.so.1 through std.DynLib: Linux only; elsewhere the arena is one cuMemAlloc, as before.
+    const pieces_os = @import("builtin").os.tag == .linux;
+
     /// `len` bytes reserved as pieces on `device` (`ensure` maps them; with `io` a thread too); else one cuMemAlloc.
     pub fn alloc(gpa: std.mem.Allocator, d: *const cuda.Driver, len: usize, device: ?cuda.abi.Device, io: ?std.Io) !Arena {
         const dev = device orelse return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
+        if (comptime !pieces_os) return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
         if (len <= piece_bytes) return .{ .buf = try cuda.DeviceBuffer.alloc(d, len) };
         const s: ?*Pieces = blk: {
             const vmm = cuda.arena.Vmm.open(d, dev, len) catch break :blk null;
@@ -314,7 +318,7 @@ pub const Arena = struct {
     }
 
     fn destroy(p: *Pieces) void {
-        p.vmm.close();
+        if (comptime pieces_os) p.vmm.close();
         p.gpa.destroy(p);
     }
 };
