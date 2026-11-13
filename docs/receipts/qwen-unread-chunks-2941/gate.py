@@ -20,9 +20,9 @@ def tokenize(base, model):
         return json.loads(resp.read())["tokens"]
 
 
-def request(base, model, name, prompt, tokens=16):
+def request(base, model, name, prompt, tokens=16, temperature=0, seed=None, draft=False):
     item = {"name": name, "kind": "completion", "prompt": prompt}
-    r = bench.stream(base, model, item, tokens, 0, None, draft=False)
+    r = bench.stream(base, model, item, tokens, temperature, seed, draft=draft)
     return {k: r.get(k) for k in ("prompt_tokens", "cached_tokens", "token_sha256", "output_sha256", "ttft_s", "error")}
 
 
@@ -43,15 +43,32 @@ def main():
             rows.append(row)
             print(json.dumps(row), flush=True)
         json.dump(rows, open(out, "w"), indent=2)
-    elif mode == "chat":
+    elif mode == "sampled":
+        rows = []
+        for n in (8192, 32768):
+            row = request(base, model, f"sampled-{n}", ids[:n], 16, 1.0, 1234)
+            row["length"] = n
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+        json.dump(rows, open(out, "w"), indent=2)
+    elif mode == "drafted":
+        rows = []
+        for n in (8192, 32768):
+            row = request(base, model, f"drafted-{n}", ids[:n], 16, draft=True)
+            row["length"] = n
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+        json.dump(rows, open(out, "w"), indent=2)
+    elif mode in ("chat", "chat8k", "chat16k"):
+        chars = {"chat": 30000, "chat8k": 36000, "chat16k": 70000}[mode]
         text = "".join(open(os.path.join(os.path.dirname(os.__file__), n), encoding="utf-8", errors="replace").read()
-                       for n in sorted(os.listdir(os.path.dirname(os.__file__))) if n.endswith(".py"))[:30000]
+                       for n in sorted(os.listdir(os.path.dirname(os.__file__))) if n.endswith(".py"))[:chars]
         first = chat(base, model, "prefix", "Explain this Python code in one sentence.\n\n" + text, 2)
         second = chat(base, model, "resumed", "Explain this Python code in one sentence.\n\n" + text + "\n\nAnswer in one word.", 16)
         print(json.dumps({"prefix": first, "resumed": second}), flush=True)
         json.dump({"prefix": first, "resumed": second}, open(out, "w"), indent=2)
     else:
-        raise SystemExit(f"mode must be cold or resume, not {mode}")
+        raise SystemExit(f"mode must be cold, sampled, drafted, chat, chat8k or chat16k, not {mode}")
 
 
 if __name__ == "__main__":
