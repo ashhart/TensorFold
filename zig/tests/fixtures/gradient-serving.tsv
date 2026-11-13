@@ -111,7 +111,7 @@ zig/src/cuda/sample.zig	5d374b5cd2108fd90b383cfec0a63bdce038eef8c380289495e5b9d0
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
 zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125db2199fa6	raw	commits e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/tp_group.zig	1a2acbdf2de6b827218deb45df5b5845beecde4eb718a4e4b3966582db51d7a7	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally); #2918 (communicator abort through its owner)
-zig/src/cuda/tp_watch.zig	4de1a9f14d514f1cbb5576b1db33cc11bd504b5a434ad3e7787af6d3a40c91a7	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512), #3041: liveness lines prove the rank key through tp_line.zig
+zig/src/cuda/tp_watch.zig	2df019a4326bba24fada7b8edccf161e5b6e6520b96952edf7a7b7775d8d1e76	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512), #3041: liveness lines prove the rank key through tp_line.zig, #3102: a keyed group's records cross sealed through tp_line.zig
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
