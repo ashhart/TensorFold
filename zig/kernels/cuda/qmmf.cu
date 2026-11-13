@@ -68,6 +68,53 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
 #include "qmmf_body.cuh"
 }
 
+// Grouped NVFP4 decode changes only the block's part and tile address; its arithmetic body stays the same.
+struct ManyPart {
+    const unsigned char* codes;
+    const uint8_t* scales;
+    void* out;
+    float scale;
+    int n, npad, tiles;
+};
+struct ManyParts { ManyPart p[4]; int count; };
+static_assert(sizeof(ManyPart) == 40 && sizeof(ManyParts) == 168, "grouped launch ABI");
+
+template <int BM, bool CLUSTER>
+__device__ __forceinline__ void qmmf_many_body(const __nv_bfloat16* x, ManyParts parts,
+                                               int M, int K, int SK, int ldx, int group) {
+    constexpr int MODE = FP4, BN = 64, WM = 1, WN = 4, STAGES = 4;
+    constexpr bool F32 = false, FUSE = false;
+    int local_tile = int(blockIdx.x);
+    const ManyPart* selected = nullptr;
+    for (int i = 0; i < parts.count && i < 4; ++i) {
+        if (local_tile < parts.p[i].tiles) { selected = &parts.p[i]; break; }
+        local_tile -= parts.p[i].tiles;
+    }
+    if (selected == nullptr) return;
+    const unsigned char* w = selected->codes;
+    const uint8_t* bs = selected->scales;
+    void* out = selected->out;
+    float* part = nullptr;
+    const float scale = selected->scale;
+    const int N = selected->n, npad = selected->npad;
+#define TF_QMMF_GROUPED
+#include "qmmf_body.cuh"
+#undef TF_QMMF_GROUPED
+}
+
+#define TF_QMMF_MANY(NAME, BM, CLUSTER) \
+extern "C" __global__ void __launch_bounds__(128) NAME( \
+        const __nv_bfloat16* x, ManyParts parts, int M, int K, int SK, int ldx, int group) { \
+    qmmf_many_body<BM, CLUSTER>(x, parts, M, K, SK, ldx, group); \
+}
+TF_QMMF_MANY(tf_qmmf_many16, 16, false)
+TF_QMMF_MANY(tf_qmmf_many16c, 16, true)
+TF_QMMF_MANY(tf_qmmf_many32, 32, false)
+TF_QMMF_MANY(tf_qmmf_many32c, 32, true)
+TF_QMMF_MANY(tf_qmmf_many64, 64, false)
+TF_QMMF_MANY(tf_qmmf_many64c, 64, true)
+#undef TF_QMMF_MANY
+
 // The shared down has one K slice; only the output address changes from the existing BF16-weight product.
 #define TF_SHARED_DOWN(NAME, BM, BN) \
 extern "C" __global__ void __launch_bounds__(128) NAME( \
