@@ -106,13 +106,8 @@ pub const Fill = struct {
 fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     const ids = stream.prompt();
     if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
-    // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
-    var media: ?vision_prompt.Media = null;
-    if (stream.images.len > 0) {
-        const v = self.vision orelse return error.QwenServedWithoutVision;
-        media = try vision_prompt.Media.init(self.gpa, v, ids, stream.images);
-    }
-    errdefer if (media) |*m| m.deinit();
+    // an image prompt: its images through the tower once the resume is known, then every chunk at its t, h, w positions
+    if (stream.images.len > 0 and self.vision == null) return error.QwenServedWithoutVision;
     const seen = try self.seenOf(stream.images);
     self.seen.put(self.gpa, stream, seen) catch |err| {
         self.gpa.free(seen);
@@ -120,7 +115,7 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
     };
     errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
     // TF_QWEN_KV_SHARE: the kept pages this prompt resumes, adopted; images and request cuts keep their own grid
-    const share = self.prefix != null and media == null and stream.chunks.len == 0;
+    const share = self.prefix != null and stream.images.len == 0 and stream.chunks.len == 0;
     const shared = if (share) try self.prefix.?.open(ids, stream.max_new, stream.history_len, stream.shared_prefixes) else null;
     errdefer if (shared) |x| self.gpa.free(x.plan.marks);
     const cache = if (shared) |x| x.cache else try self.take(ids.len, stream.max_new);
@@ -148,6 +143,8 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
         } else stream.reuse_failed = true;
     }
     cache.untaught = stream.untaught;
+    // the images a kept state holds skip the tower (their rows are never spliced); positions still come from all
+    const media: ?vision_prompt.Media = if (stream.images.len > 0) try vision_prompt.Media.init(self.gpa, self.vision.?, ids, stream.images, at) else null;
     stream.fill_at.store(@intCast(at), .monotonic);
     return .{ .at = at, .media = media, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
 }
