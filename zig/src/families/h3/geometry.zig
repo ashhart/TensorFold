@@ -1,6 +1,6 @@
 //! H3's host admission, before shader compilation, buffer allocation or indexing caller data.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 
 pub const scalar_max = std.math.maxInt(i32);
 pub const tile_rows = 64;

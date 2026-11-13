@@ -2,8 +2,8 @@
 const std = @import("std");
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
-    const st = b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = target });
-    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/geometry_test.zig"), .target = target, .imports = &.{.{ .name = "safetensors", .module = st }} });
+    const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .Debug, .link_libc = true });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/geometry_test.zig"), .target = target, .imports = &.{.{ .name = "core", .module = core }} });
     const filter = b.option([]const u8, "h3-filter", "Run one H3 host regression");
     const cases = b.addTest(.{ .root_module = root, .filters = if (filter) |f| &.{f} else &.{} });
     const run = b.addRunArtifact(cases);
@@ -17,13 +17,22 @@ pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Bu
     metal.linkSystemLibrary("objc", .{});
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     const kernels = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") });
-    const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = st }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
+    const model = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/h3.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
     const tool = b.addExecutable(.{ .name = "tf-h3-host-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/h3_dit.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "h3", .module = model }, .{ .name = "metal", .module = metal } } }) });
     b.step("compile-h3-host", "Compile the actual H3 tool without compiling or executing shaders").dependOn(&tool.step);
-    const modulation = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/modulation.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "safetensors", .module = st }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
+    const modulation = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/modulation.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "h3_kernels", .module = kernels } } });
     const rounding = b.addRunArtifact(b.addTest(.{ .root_module = modulation, .filters = &.{"modulation bf16:"} }));
     b.step("test-h3-modulation-bf16", "H3's host bf16 rounding against the copy it replaced, no GPU").dependOn(&rounding.step);
     test_step.dependOn(&rounding.step);
+    const ahead = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/read_ahead.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{.{ .name = "core", .module = core }} });
+    const read_test = b.addTest(.{ .root_module = ahead });
+    const read_step = b.step("test-h3-read-ahead", "H3 whole-shard reads, truncated or missing files, and prefetch disabled");
+    for ([_][]const u8{ "16", "0" }) |count| {
+        const reads = b.addRunArtifact(read_test);
+        reads.setEnvironmentVariable("TF_LOAD_PREFETCH", count);
+        read_step.dependOn(&reads.step);
+    }
+    test_step.dependOn(read_step);
 }
 
 pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) void {
@@ -52,7 +61,7 @@ pub fn targets(b: *std.Build, cuda: *std.Build.Module, all: *std.Build.Step) voi
 }
 
 fn module(b: *std.Build, target: std.Build.ResolvedTarget, cuda: *std.Build.Module) *std.Build.Module {
-    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_lib.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "safetensors", .module = safetensors(b, target) } } });
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_lib.zig"), .target = target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = coreModule(b, target) } } });
     m.addAnonymousImport("fatbin_h3", .{ .root_source_file = b.addWriteFiles().add("h3-compile-only.fatbin", "") });
     m.addCSourceFile(.{ .file = b.path("zig/tests/cuda/h3_abi_test.c"), .flags = &.{"-std=c11"} });
     return m;
@@ -71,13 +80,13 @@ pub fn library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "safetensors", .module = safetensors(b, target) } },
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = coreModule(b, target) } },
     }) });
     lib.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = image });
     step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 }
 
-/// core's safetensors reader alone, for the CUDA side's checkpoint (h3/checkpoint.zig).
-pub fn safetensors(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/safetensors.zig"), .target = target });
+/// The core module for the CUDA side's checkpoint (h3/checkpoint.zig).
+pub fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
 }
