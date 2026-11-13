@@ -22,6 +22,8 @@ pub const Family = struct {
     gpa: std.mem.Allocator,
     model: Model,
     live: u64 = 0,
+    held_bytes: u64 = 0,
+    peak_bytes: u64 = 0,
     pub fn snapshots(f: *Family) pc.Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } };
     }
@@ -38,6 +40,8 @@ pub const Family = struct {
         const copy = try f.gpa.create(State);
         copy.* = own.*;
         f.live += 1;
+        f.held_bytes += f.model.bytes(at);
+        f.peak_bytes = @max(f.peak_bytes, f.held_bytes);
         return copy;
     }
     fn restore(_: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) !void {
@@ -47,6 +51,8 @@ pub const Family = struct {
     }
     fn drop(ptr: *anyopaque, saved: pc.Saved) void {
         const f = of(ptr);
+        const state: *const State = @ptrCast(@alignCast(saved));
+        f.held_bytes -= f.model.bytes(state.at);
         f.gpa.destroy(@as(*State, @ptrCast(@alignCast(saved))));
         f.live -= 1;
     }
