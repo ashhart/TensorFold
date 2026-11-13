@@ -64,7 +64,44 @@ fn construct(a: Args, settings: Settings) anyerror!void {
 }
 
 fn run(w: *World, rank: usize, world: usize, text: ?[]const u8, kv8: bool) !void {
-    return startup.open(std.testing.io, Place{ .rank = rank, .world = world }, text, Settings{ .kv8 = kv8 }, Watch{ .world = w, .rank = rank }, Args{ .world = w, .rank = rank }, construct, recordReport);
+    return runWithHost(w, rank, world, text, kv8, false);
+}
+
+fn runWithHost(w: *World, rank: usize, world: usize, text: ?[]const u8, kv8: bool, kv_host: bool) !void {
+    return startup.open(std.testing.io, Place{ .rank = rank, .world = world }, text, Settings{ .kv8 = kv8 }, kv_host, Watch{ .world = w, .rank = rank }, Args{ .world = w, .rank = rank }, construct, recordReport);
+}
+
+test "GLM startup: FP8 host KV refuses before reporting or constructing at every page selection" {
+    const modes = [_]?[]const u8{ null, "auto", "off", "0", "on", "1", "all" };
+    for ([_]usize{ 1, 2, 3, 16 }) |world| for (modes) |mode| for (0..@min(world, 2)) |rank| {
+        var w: World = .{ .expected_world = world };
+        try std.testing.expectError(error.GlmFp8HostKvUnsupported, runWithHost(&w, rank, world, mode, true, true));
+        try std.testing.expect(!w.constructed[rank]);
+        try std.testing.expectEqual(@as(usize, 0), w.reports);
+        try std.testing.expectEqual(@as(usize, 1), w.notifications);
+    };
+}
+
+test "GLM startup: BF16 host KV requires pages and reaches construction when pages are selected" {
+    for ([_]usize{ 1, 2, 3, 16 }) |world| {
+        for ([_][]const u8{ "off", "0" }) |mode| {
+            var refused: World = .{ .expected_world = world };
+            try std.testing.expectError(error.GlmKvHostNeedsPages, runWithHost(&refused, 0, world, mode, false, true));
+            try std.testing.expect(!refused.constructed[0]);
+            try std.testing.expectEqual(@as(usize, 0), refused.reports);
+        }
+        for ([_][]const u8{ "on", "1", "all" }) |mode| {
+            var allowed: World = .{ .expected_world = world };
+            try runWithHost(&allowed, 0, world, mode, false, true);
+            try std.testing.expect(allowed.constructed[0]);
+            try std.testing.expect(allowed.settings[0].?.pages);
+        }
+    }
+    var single_auto: World = .{ .expected_world = 1 };
+    try std.testing.expectError(error.GlmKvHostNeedsPages, runWithHost(&single_auto, 0, 1, null, false, true));
+    var multi_auto: World = .{ .expected_world = 2 };
+    try runWithHost(&multi_auto, 0, 2, null, false, true);
+    try std.testing.expect(multi_auto.constructed[0]);
 }
 
 fn refusal(rank: usize) !void {
