@@ -866,8 +866,8 @@ with `b64_json` (the PNG) and `seed`, the integer seed that picture used.
 
 An explicit `seed` is an integer from 0 through 18446744073709551615. Picture `i`, counting from zero, uses
 `seed + i`; a request whose last seed would pass that range is HTTP 400 before any picture starts. Without `seed`,
-each picture draws its own seed below 2^53, so a JavaScript client reads it exactly (the route used a fixed 42
-before). A reported seed sent back with `n: 1` and the same other fields gives the same PNG bytes:
+the pictures start from 42, as a one-picture request always has, so picture `i` uses `42 + i`. A reported seed
+sent back with `n: 1` and the same other fields gives the same PNG bytes:
 `{"model":"m","prompt":"A red kite","n":4,"seed":42}` returns seeds 42, 43, 44 and 45, each picture the same as the
 `n: 1` request with that seed.
 
