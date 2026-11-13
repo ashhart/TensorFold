@@ -99,6 +99,7 @@ const valid = [_]Case{
     .{ .name = "TF_SLIDE_FIT_GIB", .raw = "4", .n = 4 },
     .{ .name = "TF_SLIDE_POCKET_DUMP", .raw = "/tmp/pocket rows", .n = 0 },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
+    .{ .name = "TF_NCCL_LIB", .raw = "/fixture/nccl/libnccl.so.2", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
 };
 
