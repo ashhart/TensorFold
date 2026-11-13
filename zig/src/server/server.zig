@@ -325,17 +325,17 @@ pub const Server = struct {
             .min_p = @floatCast(number(options.get("min_p")) orelse 0.0),
         };
     }
-
-    /// The request's penalties over configured defaults; unsupported non-default values are refused by name.
+    /// Additive penalties use configured defaults; repetition is request-only and defaults to identity.
     pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value, instruct: bool) errors.Refused!api.Penalties {
         const options = try json.newObject(cx.a);
         if (srv.samplingDefaults(instruct, f)) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
-        try merge(options, cx, try fields.parseNumbers(cx, f));
+        const supplied = try fields.parseNumbers(cx, f);
+        try merge(options, cx, supplied);
         const presence = number(options.get("presence_penalty")) orelse 0;
         const frequency = number(options.get("frequency_penalty")) orelse 0;
-        if (!srv.info.capability(.penalties) and (presence != 0 or frequency != 0))
-            return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
-        return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency) };
+        const repetition = try fields.repetitionFactor(cx, number(supplied.get("repetition_penalty")) orelse 1, srv.info.capability(.repetition_penalty), srv.backendName());
+        if (!srv.info.capability(.penalties) and (presence != 0 or frequency != 0)) return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
+        return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency), .repetition = repetition };
     }
 
     /// A specific engine name, or the server's backend identity when the shared host uses its default name.

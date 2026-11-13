@@ -9,6 +9,13 @@ const Allocator = std.mem.Allocator;
 pub const efforts = [_][]const u8{ "none", "minimal", "low", "medium", "high", "xhigh", "max" };
 const effort_order = [_][]const u8{ "max", "xhigh", "high", "medium", "low", "minimal" }; // highest first
 
+/// Admit a parsed repetition factor under the engine's declared capability.
+pub fn repetitionFactor(cx: *Cx, factor: f64, supported: bool, backend: []const u8) errors.Refused!f32 {
+    const effective: f32 = @floatCast(factor);
+    if (!supported and effective != 1) return cx.fail(.request, "repetition_penalty is not supported by backend '{s}'", .{backend});
+    return effective;
+}
+
 /// Python's type name for ``'<type>' object has no attribute 'get'``.
 pub fn typeName(v: Value) []const u8 {
     return switch (v) {
@@ -61,7 +68,7 @@ pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {
     try requireObject(cx, fields);
     _ = try stopOptions(cx, fields);
     const parsed = try json.copyObject(cx.a, fields.object);
-    for (integer_fields ++ [_][]const u8{ "temperature", "top_p", "min_p", "presence_penalty", "frequency_penalty" }) |name| {
+    for (integer_fields ++ [_][]const u8{ "temperature", "top_p", "min_p", "presence_penalty", "frequency_penalty", "repetition_penalty" }) |name| {
         const value = fields.field(name) orelse continue;
         const integer = for (integer_fields) |f| {
             if (std.mem.eql(u8, f, name)) break true;
@@ -69,7 +76,10 @@ pub fn parseNumbers(cx: *Cx, fields: Value) errors.Refused!Value {
         const number: ?Value = if (integer) toInt(cx.a, value) catch null else toFloat(value);
         const n = number orelse return cx.fail(.request, "{s} must be {s} or null", .{ name, if (integer) "an integer" else "a finite number" });
         if (std.mem.eql(u8, name, "min_p") and !(n.float >= 0 and n.float <= 1)) return cx.refuse("min_p must be between 0 and 1, or null");
-        if (std.mem.endsWith(u8, name, "_penalty") and !(n.float >= -2 and n.float <= 2)) return cx.fail(.request, "{s} must be between -2 and 2, or null", .{name});
+        if (std.mem.eql(u8, name, "repetition_penalty")) {
+            const f: f32 = @floatCast(n.float);
+            if (!(f > 0) or !std.math.isFinite(f)) return cx.refuse("repetition_penalty must be a finite positive float32, or null");
+        } else if (std.mem.endsWith(u8, name, "_penalty") and !(n.float >= -2 and n.float <= 2)) return cx.fail(.request, "{s} must be between -2 and 2, or null", .{name});
         const stored = if (std.mem.eql(u8, name, "top_k") and n.int[0] == '-') Value{ .int = "0" } else n;
         try parsed.put(cx.a, name, stored);
     }
@@ -347,4 +357,30 @@ test "efforts and numbers" {
     defer arena.deinit();
     try std.testing.expectEqualStrings("-12", (try pyIntText(arena.allocator(), " -0_12 ")).?);
     try std.testing.expect(try pyIntText(arena.allocator(), "8.0") == null);
+}
+
+test "repetition factor rejects invalid values and accepts positive f32 values" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    for ([_][]const u8{ "0", "-1", "true", "\"nan\"", "\"inf\"", "\"bad\"", "1e-100", "1e100" }) |value| {
+        const body = try std.fmt.allocPrint(a, "{{\"repetition_penalty\":{s}}}", .{value});
+        try std.testing.expectError(error.Refused, parseNumbers(&cx, (try json.parse(a, body)).ok));
+    }
+    for ([_][]const u8{ "0.5", "1.0", "3.0", "\"1.1\"" }) |value| {
+        const body = try std.fmt.allocPrint(a, "{{\"repetition_penalty\":{s}}}", .{value});
+        const parsed = try parseNumbers(&cx, (try json.parse(a, body)).ok);
+        try std.testing.expect(parsed.get("repetition_penalty").? == .float);
+    }
+}
+
+test "repetition capability checks the effective float32 factor" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
+
+    try std.testing.expectEqual(@as(f32, 1), try repetitionFactor(&cx, 1.00000001, false, "test"));
+    try std.testing.expectEqual(@as(f32, 1), try repetitionFactor(&cx, 0.99999999, false, "test"));
+    try std.testing.expectError(error.Refused, repetitionFactor(&cx, 1.0000002, false, "test"));
 }

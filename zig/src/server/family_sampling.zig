@@ -46,6 +46,30 @@ pub fn resolve(a: std.mem.Allocator, model_type: []const u8, generation_config: 
     return if (out.count() > 0) json.Value{ .object = out } else null;
 }
 
+test "generation defaults exclude request-only repetition factor" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const defaults = (try resolve(arena.allocator(), "glm_moe_dsa", "{\"do_sample\":false,\"repetition_penalty\":1.1}", .{})).?;
+    try std.testing.expect(defaults.get("repetition_penalty") == null);
+    try std.testing.expectEqual(@as(?f64, 0), defaults.get("temperature").?.float64());
+}
+
+test "checkpoint repetition default is named as request-only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const got = try startup(arena.allocator(), "glm_moe_dsa", "{\"repetition_penalty\":1.1}", .{}, true, "none");
+    try std.testing.expect(std.mem.indexOf(u8, got.note.?, "repetition_penalty") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.note.?, "generation_config.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got.note.?, "request") != null);
+}
+
+test "checkpoint repetition effective identity needs no startup note" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "{\"repetition_penalty\":1}", "{\"repetition_penalty\":1.00000001}" }) |config|
+        try std.testing.expect((try requestOnlyRepetitionNote(arena.allocator(), config)) == null);
+}
+
 /// True when generation_config.json says ``do_sample: false``: the checkpoint decodes greedily.
 pub fn greedyConfig(a: std.mem.Allocator, generation_config: ?[]const u8) !bool {
     const bytes = generation_config orelse return false;
@@ -79,23 +103,45 @@ pub const Startup = struct {
     problem: ?[]const u8 = null,
 };
 
+/// A checkpoint repetition factor is request-only, so name the ignored value for the operator.
+pub fn requestOnlyRepetitionNote(a: std.mem.Allocator, generation_config: ?[]const u8) !?[]const u8 {
+    const bytes = generation_config orelse return null;
+    const parsed = try json.parse(a, bytes);
+    if (parsed != .ok) return null;
+    const raw = parsed.ok.get("repetition_penalty") orelse return null;
+    const factor = raw.float64() orelse return null;
+    if (!std.math.isFinite(factor) or factor <= 0) return null;
+    const effective: f32 = @floatCast(factor);
+    if (!std.math.isFinite(effective) or effective == 1) return null;
+    const note: []const u8 = try std.fmt.allocPrint(a, "repetition_penalty {d} from generation_config.json is request-only: pass it in each request", .{factor});
+    return note;
+}
+
+fn joinedNote(a: std.mem.Allocator, first: ?[]const u8, second: ?[]const u8) !?[]const u8 {
+    const x = first orelse return second;
+    const y = second orelse return x;
+    const note: []const u8 = try std.fmt.allocPrint(a, "{s}; {s}", .{ x, y });
+    return note;
+}
+
 /// ``--instruct-sampling text`` at startup: the set and a note, or the problem that refuses the start.
 pub fn startup(a: std.mem.Allocator, model_type: []const u8, generation_config: ?[]const u8, flags: Flags, penalties: bool, text: []const u8) !Startup {
+    const repetition_note = try requestOnlyRepetitionNote(a, generation_config);
     if (try greedyConfig(a, generation_config))
-        return .{ .note = "--instruct-sampling is not served: generation_config.json has do_sample false, so replies decode greedily" };
+        return .{ .note = try joinedNote(a, repetition_note, "--instruct-sampling is not served: generation_config.json has do_sample false, so replies decode greedily") };
     const set = resolveInstruct(a, model_type, generation_config, flags, penalties, text) catch |e| switch (e) {
         error.NoInstructSet => return .{ .problem = try std.fmt.allocPrint(a, "--instruct-sampling card: model type {s} has no instruct set in its family defaults; give name=value pairs", .{model_type}) },
         error.InvalidInstructSampling => return .{ .problem = try std.fmt.allocPrint(a, "argument --instruct-sampling: {s}: '{s}'", .{ (try pairsProblem(a, text)).?, text }) },
         else => |x| return x,
-    } orelse return .{};
-    if (penalties) return .{ .set = set };
+    } orelse return .{ .note = repetition_note };
+    if (penalties) return .{ .set = set, .note = repetition_note };
     for ([_][]const u8{ "presence_penalty", "frequency_penalty" }) |k| if (set.get(k)) |v| if ((v.float64() orelse 0) != 0)
         return .{ .problem = try std.fmt.allocPrint(a, "--instruct-sampling names {s} {d}, but this engine applies no penalties: name 0 or leave it out", .{ k, v.float64().? }) };
     const note: ?[]const u8 = if (hasInstruct(model_type) and std.mem.indexOf(u8, text, "presence_penalty") == null)
         "presence_penalty 1.5 from the model card's instruct set is not served: this engine applies no penalties"
     else
         null;
-    return .{ .set = set, .note = note };
+    return .{ .set = set, .note = try joinedNote(a, repetition_note, note) };
 }
 
 /// ``--instruct-sampling``'s text checked: null when it reads, else what is wrong with it, for the argument's refusal.

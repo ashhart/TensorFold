@@ -237,7 +237,10 @@ fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]cons
 
 /// The family's defaults, generation_config.json's sampling, then the serve flags (family_sampling.resolve).
 fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args, model_type: []const u8) !?json.Value {
-    return @import("family_sampling.zig").resolve(a, model_type, try generationConfig(a, io, dir), samplingFlags(args));
+    const family = @import("family_sampling.zig");
+    const config = try generationConfig(a, io, dir);
+    if (args.instruct_sampling == null) if (try family.requestOnlyRepetitionNote(a, config)) |note| log.line("{s}", .{note});
+    return family.resolve(a, model_type, config, samplingFlags(args));
 }
 
 /// --instruct-sampling's set for sampled chats with thinking off (family_sampling.startup), or ``problem``.

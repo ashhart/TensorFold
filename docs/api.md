@@ -282,6 +282,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
 | `presence_penalty`, `frequency_penalty` | OpenAI's, from -2 to 2: before each draw, greedy or sampled, a token the reply already holds loses `presence_penalty` from its logit and `frequency_penalty` once for each time it holds it; the prompt's tokens do not count. Drafted replies equal undrafted ones with them. Applied by Qwen3.8-27B and Qwen3.5-MoE on CUDA; other engines refuse nonzero values with 400; zero, null and omitted values keep working | Native |
+| `repetition_penalty` | Request-only positive finite float32 factor; omitted or null is 1. GLM-5.3-Flash on CUDA transforms each distinct token present in the full prompt, committed reply and current verification ancestry once: negative BF16 logits are widened to float32 and multiplied by the factor, nonnegative logits are divided, before temperature and filtering. Unsupported engines refuse an effective nonidentity float32 factor with 400 | Native |
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
