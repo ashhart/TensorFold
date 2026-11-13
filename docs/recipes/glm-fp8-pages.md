@@ -30,12 +30,3 @@ Build the runner with real CUDA images using the repository's normal CUDA build 
 The paged reference uses 513 keys, page table `[2, 0]`, a nonzero layer offset and an untouched physical-page guard.
 It compares code and scale bytes with contiguous E4M3, then compares dense and sparse attention at both 16-head and
 32-head dispatch widths. A sparse row with zero selected keys preserves its output.
-
-## Qualification status
-
-The shared kernel contract registers the paged writer and dense/sparse 16/32-head readers, with a swapped-page
-control for each case. The three launch records intentionally carry pending resource usage until the generated
-`glm_glue` image is measured for every supported compiler and SM target.
-
-Host checks establish routing, ownership and registration only. CUDA numerical execution, compiled resource
-measurements, full-model exactness, default-path performance and paged-path performance remain required device gates.
