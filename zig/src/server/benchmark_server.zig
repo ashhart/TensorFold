@@ -46,10 +46,10 @@ pub fn argv(a: Allocator, plan: Plan) ![]const []const u8 {
     return out.items;
 }
 
-/// The parent's variables without the API key, request log, seed salt and upload token; no live line or update check.
+/// Parent variables minus the API key, request log, journal, seed salt and upload token; no live line or update check.
 pub fn environ(a: Allocator, parent: *const std.process.Environ.Map) !std.process.Environ.Map {
     var env = try parent.clone(a);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| _ = env.orderedRemove(k);
+    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_REQUEST_JOURNAL", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| _ = env.orderedRemove(k);
     try env.put("TENSORFOLD_NO_LIVE", "1");
     try env.put("TENSORFOLD_NO_UPDATE_CHECK", "1");
     try env.put("HF_HUB_OFFLINE", "1");
