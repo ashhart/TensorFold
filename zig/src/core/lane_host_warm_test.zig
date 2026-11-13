@@ -54,6 +54,11 @@ test "a background warm pass steps aside for a request that arrives during it, a
     var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/warm.jsonl", .{tmp.sub_path});
+    defer gpa.free(path);
+    host.trace = try @import("lane_trace.zig").Trace.open(gpa, std.testing.io, path);
     try host.start();
     defer host.stop();
     const prompt = [_]u32{ 2, 7, 1, 8 };
@@ -80,6 +85,25 @@ test "a background warm pass steps aside for a request that arrives during it, a
     try std.testing.expectEqual(Reason.cancelled, warm.wait()); // it stepped aside at its next chunk
     try std.testing.expectEqual(Reason.length, real.wait());
     try std.testing.expectEqual(@as(usize, 48), real.tokens);
+    const trace = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, gpa, .limited(1 << 20));
+    defer gpa.free(trace);
+    var lines = std.mem.tokenizeScalar(u8, trace, '\n');
+    var start: i96 = 0;
+    var end: i96 = 0;
+    var foreground: i96 = 0;
+    while (lines.next()) |line| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
+        defer parsed.deinit();
+        const v = parsed.value.object;
+        if (std.mem.eql(u8, v.get("kind").?.string, "warm")) {
+            start = @intCast(v.get("t0_ns").?.integer);
+            end = @intCast(v.get("t1_ns").?.integer);
+            if (end != 0) try std.testing.expect(!v.get("ok").?.bool);
+        }
+        if (std.mem.eql(u8, v.get("kind").?.string, "submit") and v.get("id").?.integer == 2)
+            foreground = @intCast(v.get("t0_ns").?.integer);
+    }
+    try std.testing.expect(start > 0 and foreground >= start and end >= foreground);
 }
 
 test "a warm pass waits for a quiet engine: a request sent right after the reply goes first and the pass runs no chunk" {

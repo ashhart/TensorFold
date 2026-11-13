@@ -153,6 +153,12 @@ the draft head's KV rows (`zig/src/families/nemotron/snapshot.zig`). A later req
 resumes there. Both the keep and the resume are copies on the GPU, on the engine's own queue, so neither waits for the
 host. `--prompt-cache-gib` sizes the memory as for Flash Next; `0` turns it off.
 
+With the prompt cache enabled, an idle pass can prefill the completed reply for a later turn. It keeps only existing
+planned boundaries with the MTP head's one-token lookahead, so a short reply may offer no later reusable point.
+The pass waits 150 ms for an immediate follow-up and yields at its next chunk boundary when another request arrives.
+It lands each background chunk before submitting another, retaining the foreground pass's existing lookahead.
+`TF_LANE_TRACE` records a warm pass's start and end, including an interrupted pass.
+
 Measured on an M5 Ultra (256 GB), macOS 27.0.1, Zig 0.17.0, checkpoint revision `d9d758fb`, with
 `--context 32768 --temperature 0 --no-thinking`, greedy, 96 reply tokens, a 9.2k-token chat over four turns:
 

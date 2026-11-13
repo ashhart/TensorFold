@@ -238,6 +238,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
+    @import("planned_warm.zig").enable(&h.host);
     errdefer if (h.cache) |*store| store.deinit();
     h.learned = null;
     if (o.learn) |root| {

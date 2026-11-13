@@ -53,10 +53,82 @@ fn fill(f: *Fake, s: *lanes.Stream, cap: usize, decision: ?usize) !void {
     var at: usize = 0;
     var next: usize = 0;
     while (at < s.prompt_len) {
+        try workflow.checkpoint(s);
         const n = workflow.rows(s, at, cap, decision, &next);
         try workflow.submit(f, s, .{ .rows = n });
         at += n;
+        workflow.advanced(s, at, n);
     }
+}
+
+test "Nemotron prefill widths: arrival during the first warm chunk prevents a second chunk being queued" {
+    const Stop = struct {
+        f: *Fake,
+        fn ready(ptr: *anyopaque) bool {
+            const p: *@This() = @ptrCast(@alignCast(ptr));
+            return p.f.states[0].waits > 0;
+        }
+    };
+    const ids: [12]u32 = @splat(7);
+    var f: Fake = .{};
+    defer f.deinit();
+    var stop: Stop = .{ .f = &f };
+    var s = try lanes.Stream.init(a, .{ .id = "warm", .prompt = &ids, .max_new = 0, .yield_check = .{ .ptr = &stop, .check = Stop.ready } });
+    defer s.deinit(a);
+    try t.expectError(error.Yielded, fill(&f, &s, 8, null));
+    try t.expectEqual(@as(usize, 1), f.submitted);
+    try t.expectEqualSlices(u32, &.{8}, s.prefill_widths.items);
+    try t.expectEqual(@as(u32, 8), s.fill_at.load(.monotonic));
+    try t.expectEqual(@as(usize, 0), f.flights.items.len);
+    try t.expectEqual(@as(usize, 1), f.states[0].waits);
+    try t.expectEqual(@as(usize, 1), f.states[0].releases);
+}
+
+test "Nemotron prefill widths: a warm pass checks arrivals with its previous chunks landed and released" {
+    const Stop = struct {
+        f: *Fake,
+        fn ready(ptr: *anyopaque) bool {
+            const p: *@This() = @ptrCast(@alignCast(ptr));
+            return p.f.submitted >= 2;
+        }
+    };
+    const ids: [24]u32 = @splat(7);
+    var f: Fake = .{};
+    defer f.deinit();
+    var stop: Stop = .{ .f = &f };
+    var s = try lanes.Stream.init(a, .{ .id = "warm", .prompt = &ids, .max_new = 0, .yield_check = .{ .ptr = &stop, .check = Stop.ready } });
+    defer s.deinit(a);
+    try t.expectError(error.Yielded, fill(&f, &s, 8, null));
+    try t.expectEqual(@as(usize, 2), f.submitted);
+    try t.expectEqualSlices(u32, &.{ 8, 8 }, s.prefill_widths.items);
+    try t.expectEqual(@as(usize, 0), f.flights.items.len);
+    try f.drain();
+    try t.expectEqualSlices(u32, &.{ 8, 8 }, s.prefill_widths.items);
+    for (f.states[0..2]) |cb| {
+        try t.expectEqual(@as(usize, 1), cb.waits);
+        try t.expectEqual(@as(usize, 1), cb.releases);
+    }
+    var foreground = try lanes.Stream.init(a, .{ .id = "foreground", .prompt = &ids, .max_new = 1 });
+    defer foreground.deinit(a);
+    try fill(&f, &foreground, 8, null);
+    try f.drain();
+    try t.expectEqualSlices(u32, &.{ 8, 8, 8 }, foreground.prefill_widths.items);
+}
+
+test "Nemotron prefill widths: a pending cancel wins over yield and submits no chunk" {
+    const Stop = struct {
+        fn yes(_: *anyopaque) bool {
+            return true;
+        }
+    };
+    var dummy: u8 = 0;
+    var s = try lanes.Stream.init(a, .{ .id = "cancel", .prompt = &.{ 1, 2, 3 }, .max_new = 0, .cancel_check = .{ .ptr = &dummy, .check = Stop.yes }, .yield_check = .{ .ptr = &dummy, .check = Stop.yes } });
+    defer s.deinit(a);
+    var f: Fake = .{};
+    defer f.deinit();
+    try t.expectError(error.Cancelled, fill(&f, &s, 8, null));
+    try t.expectEqual(@as(usize, 0), f.submitted);
+    try t.expectEqual(@as(usize, 0), f.flights.items.len);
 }
 
 test "Nemotron prefill widths: actual requested cuts, decision row and cap land in order with one chunk ahead" {

@@ -234,7 +234,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const ids = s.prompt();
         try limits.check(ids.len, s.max_new, self.o.capacity);
-        if (s.isCancelled()) return error.Cancelled;
+        try @import("prompt_flight.zig").checkpoint(s);
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + max_lanes + 1); // the reply and a widest window past it
         try self.drain();
         if (self.caches.get(s)) |old| {
@@ -297,12 +297,11 @@ pub const Metal = struct {
         while (at < ids.len) {
             const decision: ?usize = if (c.decide == lesson_route.none) null else @intCast(c.decide);
             const rows = @import("prompt_flight.zig").rows(s, at, self.o.chunk, decision, &k);
-            if (s.isCancelled()) return error.Cancelled; // release() waits for the chunk still in flight
+            try @import("prompt_flight.zig").checkpoint(s);
             try kv_pages.grow(c, at + rows);
             try @import("prompt_flight.zig").submit(self, s, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             at += rows;
-            // landed tokens only: the newest chunk is still queued on the GPU
-            s.fill_at.store(@intCast(at - rows), .monotonic);
+            @import("prompt_flight.zig").advanced(s, at, rows);
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
         if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);
