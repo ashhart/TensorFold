@@ -22,6 +22,7 @@ const id_all: u32 = (1 << id_parts) - 1;
 var ending = std.atomic.Value(bool).init(false);
 var ready_peers = std.atomic.Value(usize).init(0);
 var lines: [max_lines]posix.socket_t = undefined;
+var seals: [max_lines]?*tp_line.Sealed = @splat(null); // each line's seal: a keyed group's records cross sealed
 var line_count: usize = 0;
 var my_rank: usize = 0;
 var peer_digest: [max_lines][32]u8 = undefined; // each line's ready record: its rank's checkpoint digest
@@ -72,11 +73,11 @@ pub fn start(io: std.Io, rank: usize, world: usize) !void {
         posix.setsockopt(server, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&one)) catch return error.SocketFailed;
         if (posix.errno(posix.system.bind(server, @ptrCast(&addr), @sizeOf(posix.sockaddr.in))) != .SUCCESS) return error.BindFailed;
         if (posix.errno(posix.system.listen(server, 16)) != .SUCCESS) return error.BindFailed;
-        try tp_line.gather(server, &secret, world, &lines, tp_line.wait_ms);
+        try tp_line.gather(server, &secret, world, &lines, &seals, tp_line.wait_ms);
         line_count = world - 1;
         startup_log.connected(startup_log.log, rank, world - 1, std.mem.bigToNative(u16, addr.port), 0);
     } else {
-        lines[0], const tries = try tp_line.reach(io, &addr, &secret, rank, world);
+        lines[0], seals[0], const tries = try tp_line.reach(io, &addr, &secret, rank, world);
         line_count = 1;
         startup_log.connected(startup_log.log, rank, 1, 0, tries);
     }
@@ -84,18 +85,7 @@ pub fn start(io: std.Io, rank: usize, world: usize) !void {
 }
 
 fn send(r: Record) void {
-    for (lines[0..line_count]) |fd| {
-        const b = std.mem.asBytes(&r);
-        var at: usize = 0;
-        while (at < b.len) {
-            const rc = posix.system.write(fd, b[at..].ptr, b.len - at);
-            switch (posix.errno(rc)) {
-                .SUCCESS => at += @intCast(rc),
-                .INTR => {},
-                else => break,
-            }
-        }
-    }
+    for (lines[0..line_count], seals[0..line_count]) |fd, seal| tp_line.write(fd, seal, std.mem.asBytes(&r));
 }
 
 /// This rank loaded `digest`'s bytes: it tells the others, waits for theirs, and stops if any rank's bytes differ.
@@ -197,20 +187,7 @@ pub fn stop() noreturn {
 /// A line's records; it closing or carrying an error stops this rank unless it ends on purpose.
 fn watch(fd: posix.socket_t, line: usize) void {
     var r: Record = undefined;
-    while (true) {
-        const b = std.mem.asBytes(&r);
-        var at: usize = 0;
-        while (at < b.len) {
-            const rc = posix.system.read(fd, b[at..].ptr, b.len - at);
-            switch (posix.errno(rc)) {
-                .SUCCESS => if (rc == 0) break else {
-                    at += @intCast(rc);
-                },
-                .INTR => {},
-                else => break,
-            }
-        }
-        if (at < b.len) break;
+    while (tp_line.read(fd, seals[line], std.mem.asBytes(&r))) {
         if (r.kind == ready_kind) {
             @memcpy(&peer_digest[line], r.text[0..32]);
             peer_rank[line] = r.rank;
