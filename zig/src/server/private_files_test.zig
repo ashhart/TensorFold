@@ -5,6 +5,7 @@ const json = @import("json");
 const compact_mem = @import("compact_mem.zig");
 const server = @import("server.zig");
 const Graph = @import("slide_graph.zig").Graph;
+const fakes = @import("compact_test.zig");
 const testing = std.testing;
 const io = testing.io;
 
@@ -94,4 +95,45 @@ test "security: the fact graph is owner-only and is not written through a plante
     var again = Graph.init(testing.allocator, io, path);
     defer again.deinit();
     try testing.expectEqual(@as(usize, 1), again.facts.items.len);
+}
+
+test "a server open clears a crash's stale temporaries but keeps a live writer's and every other file" {
+    // the pid check is POSIX's; Windows' day-old fallback would need Dir.setTimestamps, which Zig 0.17 lacks there
+    if (platform.windows) return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "notes");
+    try tmp.dir.createDirPath(io, "graphs");
+    const root = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const live = try std.fmt.allocPrint(a, ".tmp.{d}.0", .{platform.c.getpid()});
+    // no process has pid 999999999 (Linux's pid_max is at most 2^22, macOS's 99999)
+    const stale = [_][]const u8{ "notes/k.md.tmp.999999999.0", "notes/k.json.tmp.999999999.12", "graphs/graph.json.tmp.999999999.3" };
+    const kept = [_][]const u8{
+        "notes/k.md",                  "notes/k.md.tmp.not-a-pid.0",
+        "notes/k.md.tmp.+999999999.0", "notes/k.md.tmp.999999999.0.extra",
+        "notes/k.md.tmp.0999999999.0", "notes/k.md.tmp.999_999_999.0",
+        "notes/k.md.tmp.0.0",          "notes/k.md.tmp.4294967295.0",
+        "notes/.tmp.999999999.0",
+        "graphs/other.json.tmp.999999999.0", // another file's, in a folder the graph may share
+        try std.fmt.allocPrint(a, "notes/k.md{s}", .{live}),
+        try std.fmt.allocPrint(a, "graphs/graph.json{s}", .{live}),
+    };
+    for (stale ++ kept) |name| try tmp.dir.writeFile(io, .{ .sub_path = name, .data = "x" });
+
+    var eng: fakes.Eng = .{ .window = 256 };
+    defer fakes.freePrompts(&eng);
+    var text: fakes.Text = .{};
+    const srv = try server.Server.init(testing.allocator, io, eng.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .compact_memory = try std.fmt.allocPrint(a, "{s}/notes", .{root}),
+        .slide_graph = try std.fmt.allocPrint(a, "{s}/graphs/graph.json", .{root}),
+    }, null);
+    defer srv.deinit();
+
+    for (stale) |name| try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, name, .{}));
+    for (kept) |name| _ = try tmp.dir.statFile(io, name, .{});
 }
