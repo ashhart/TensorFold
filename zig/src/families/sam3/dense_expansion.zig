@@ -84,8 +84,18 @@ fn encode(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, rows
     var pipes: [6]gpu.mtl.Pipeline = undefined;
     const names = if (activate) kernel.gelu_names else kernel.names;
     for ([_]usize{ 0, 1, 2, 3, 5, 4 }) |i| pipes[i] = try g.pipeline(names[i]);
-    const pass = g.command();
-    kernel.encode(gpu.mtl, pass.enc, pipes, [_]gpu.Tensor{ x, weight, bias, output, domain, components, residuals }, shape);
-    try g.finish(pass.cb, pass.enc);
+    const refs = [_]gpu.Tensor{ x, weight, bias, output, domain, components, residuals };
+    if (g.operator_observer != null) {
+        inline for (0..6) |phase| {
+            const pass = g.command();
+            g.operator_name = names[phase];
+            kernel.encodePhase(gpu.mtl, pass.enc, pipes, refs, shape, phase);
+            try g.finish(pass.cb, pass.enc);
+        }
+    } else {
+        const pass = g.command();
+        kernel.encode(gpu.mtl, pass.enc, pipes, refs, shape);
+        try g.finish(pass.cb, pass.enc);
+    }
     return .{ .output = output, .components = components, .domain = domain, .residuals = residuals };
 }

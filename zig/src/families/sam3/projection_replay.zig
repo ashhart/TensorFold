@@ -86,6 +86,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     const a = init.arena.allocator();
     var file = try st.File.open(init.gpa, init.io, args[0]);
     defer file.close(init.io);
+    if ((file.get("linear_output") != null) != activated) return error.ProjectionCaptureActivationMismatch;
     const input = file.get("input") orelse return error.MissingProjectionInput;
     const weight = file.get("weight") orelse return error.MissingProjectionWeight;
     const bias_source = file.get("bias") orelse return error.MissingProjectionBias;
