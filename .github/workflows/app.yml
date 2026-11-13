@@ -137,6 +137,8 @@ jobs:
           name: tensorfold-linux-appimage
           path: app/release/linux/*.AppImage
           if-no-files-found: error
+          # ~230 MB a run: kept 3 days, not GitHub's 90 (2,069 copies, 475 GB of Actions storage by 12 Nov)
+          retention-days: 3
 
   mobile:
     runs-on: ubuntu-24.04
