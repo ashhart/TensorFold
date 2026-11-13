@@ -371,7 +371,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         why.* = try std.fmt.allocPrint(a, "--parallel {d} needs {d:.1} GiB for its streams and {d}-row prompt scratch at a {d}-token context; {d:.1} GiB remains beside the weights and an 8 GiB margin{f}", .{ o.streams, cache_fit.gibs(try fit_prompt.cost(rows, @max(o.streams, 1))), rows, capacity, cache_fit.gibs(fit_prompt.left), tail });
         return err;
     };
-    if (try fit_prompt.warning(rows, slots, window, platform.memory_policy.free(), platform.memory_policy.pressure())) |line|
+    if (try fit_prompt.warning(rows, slots, window, platform.memory_policy.available(), platform.memory_policy.pressure())) |line|
         std.log.warn("Qwen3.8-27B startup {f}", .{line});
     if (model.frame.capacity != rows) {
         const next = try q.gpu_frame.Frame.init(model.device, model.config, rows);
