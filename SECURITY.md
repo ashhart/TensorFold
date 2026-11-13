@@ -68,12 +68,12 @@ is closed. It is sent no checkpoint identity, no NCCL or RCCL id and no prompt, 
 
 The proof shows which process connected. On a group with a key, every byte the engine itself sends between ranks
 after the proof crosses in ChaCha20-Poly1305 records under a key the proof leaves at both ends. That covers the
-tensor-parallel bootstrap, fate and plan links, the ROCm ranks' command link and the Flash Next pair's control link, so
-a host on the path reads no settings, plan or failure reason, and a record it changes, drops or replays closes the
-link. A group with no key, which meets on one host only, is not sealed. The ranks' liveness lines are still clear
-text. The tensors do not cross on any of these links. NCCL, RCCL and RDMA carry them, and that traffic is clear text
-too, so run the ranks on a network you trust or on an encrypted one. The cluster links (`serve --cluster`,
-`tensorfold node`) are a separate transport and do not use this key.
+tensor-parallel bootstrap, fate and plan links, the ranks' liveness lines, the ROCm ranks' command link and the Flash
+Next pair's control link, so a host on the path reads no settings, plan, failure reason or NCCL id, and a record it
+changes, drops or replays closes the link. A group with no key, which meets on one host only, is not sealed. The
+tensors do not cross on those links. NCCL, RCCL and RDMA carry them, and that traffic is clear text, so run the ranks
+on a network you trust or on an encrypted one. The cluster links (`serve --cluster`, `tensorfold node`) are a separate
+transport and do not use this key.
 
 ## Release files
 
