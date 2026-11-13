@@ -6,6 +6,15 @@ const Allocator = std.mem.Allocator;
 var serial: std.atomic.Value(u64) = .init(0);
 
 pub fn stage(a: Allocator, path: []const u8, parts: []const []const u8) ![:0]const u8 {
+    return stageAs(a, path, parts, 0o644);
+}
+
+/// `stage` for private data: only the owner can read the file.
+pub fn stagePrivate(a: Allocator, path: []const u8, parts: []const []const u8) ![:0]const u8 {
+    return stageAs(a, path, parts, 0o600);
+}
+
+fn stageAs(a: Allocator, path: []const u8, parts: []const []const u8, mode: platform.c.mode_t) ![:0]const u8 {
     for (0..32) |_| {
         const name = try std.fmt.allocPrintSentinel(a, "{s}.tmp.{d}.{d}", .{
             path, platform.c.getpid(), serial.fetchAdd(1, .monotonic),
@@ -16,7 +25,7 @@ pub fn stage(a: Allocator, path: []const u8, parts: []const []const u8) ![:0]con
             .EXCL = true,
             .NOFOLLOW = true,
             .CLOEXEC = true,
-        }, @as(platform.c.mode_t, 0o644));
+        }, mode);
         if (fd < 0) {
             const cause = platform.c.errno(fd);
             a.free(name);
@@ -43,6 +52,11 @@ pub fn commit(a: Allocator, temporary: [:0]const u8, path: []const u8) !void {
 
 pub fn replace(a: Allocator, path: []const u8, parts: []const []const u8) !void {
     try commit(a, try stage(a, path, parts), path);
+}
+
+/// `replace` for private data: the published file is readable by its owner only.
+pub fn replacePrivate(a: Allocator, path: []const u8, parts: []const []const u8) !void {
+    try commit(a, try stagePrivate(a, path, parts), path);
 }
 
 fn writeAll(fd: platform.c.fd_t, bytes: []const u8) !void {

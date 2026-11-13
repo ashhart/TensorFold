@@ -128,6 +128,8 @@ pub const Scratch = struct { picks: u64, xg: u64, xu: u64, z: u64 };
 pub const top_k = 8;
 /// Rows a call to the common experts takes: each call reads every expert's weights, so a prompt pass needs few calls.
 pub const chunk_rows = 1024;
+/// The prompt item plan has no decode grouper's shared-memory cap; one call covers a supported whole prompt pass.
+pub const prompt_rows = 4096;
 fn layer(w: Experts, count: usize, dims: usize, width: usize, limit: f32) common.Layer {
     return .{ .gate = w.gt, .up = w.ut, .down = w.dt, .gate_k2 = w.k2, .up_k2 = w.k2, .down_k2 = w.k2, .suh_g = w.suh_g, .suh_u = w.suh_u, .svh_g = w.svh_g, .svh_u = w.svh_u, .suh_d = w.suh_d, .svh_d = w.svh_d, .experts = count, .dims = dims, .width = width, .codebook = .mcg, .limit = limit, .act_mode = 0, .uniform_k2 = 8, .shared_input = w.shx };
 }
@@ -141,10 +143,10 @@ fn picksBytes(rows: usize) usize {
     return std.mem.alignForward(usize, cap * top_k * 4, 256);
 }
 pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool) [4]usize {
-    const n: usize = @min(rows, chunk_rows);
     var l = shape(dims, width);
     l.shared_input = shx;
-    if (prefill and common.prompt.eligible(l)) return .{ picksBytes(rows) + (common.prompt.bytes(l, n, top_k) catch unreachable), 4, 4, 4 };
+    if (prefill and common.prompt.eligible(l)) return .{ common.prompt.bytes(l, @min(rows, prompt_rows), top_k + 1) catch unreachable, 4, 4, 4 };
+    const n: usize = @min(rows, chunk_rows);
     return .{ picksBytes(rows) + (common.scratchBytes(shape(dims, width), n, top_k) catch unreachable), 4, 4, 4 };
 }
 /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
@@ -157,22 +159,30 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
     if (slots != top_k + 1) return error.UnsupportedTopK;
     if (dims % 256 != 0 or width % 128 != 0) return error.NotExl3Mcg4;
     const l = layer(w, count, dims, width, limit);
+    if (prompt and common.prompt.eligible(l)) {
+        const scratch = try common.prompt.scratch(sc.picks, l, @min(rows, prompt_rows), slots);
+        var at: usize = 0;
+        while (at < rows) : (at += prompt_rows) {
+            const n: usize = @min(prompt_rows, rows - at);
+            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, picks + at * slots * 4, n, scratch, plan_buf, ey + at * slots * dims * 4, count);
+        }
+        return;
+    }
+    return compact(k, stream, w, sc, x, x_stride, picks, slots, rows, count, dims, width, limit, ey);
+}
+
+/// Compact routed picks and output for decode or prompt layers without the whole-pass kernel.
+fn compact(k: *const Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, ey: u64) !void {
+    const l = layer(w, count, dims, width, limit);
     const cap: usize = @min(rows, chunk_rows);
     const arena = sc.picks + picksBytes(rows);
-    const fused = prompt and common.prompt.eligible(l);
     var at: usize = 0;
     while (at < rows) : (at += chunk_rows) {
         const n: usize = @min(chunk_rows, rows - at);
         try copyRows(stream, sc.picks, top_k * 4, picks + at * slots * 4, slots * 4, top_k * 4, n, "EXL3 compact route rows");
-        const output = if (fused) blk: {
-            const scratch = try common.prompt.scratch(arena, l, cap, top_k);
-            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf);
-            break :blk scratch.y;
-        } else blk: {
-            const scratch = try common.scratch(arena, l, cap, top_k);
-            try k.runSlots(stream, l, x + at * x_stride * 2, x_stride, .bf16, sc.picks, n, scratch);
-            break :blk scratch.y;
-        };
+        const scratch = try common.scratch(arena, l, cap, top_k);
+        try k.runSlots(stream, l, x + at * x_stride * 2, x_stride, .bf16, sc.picks, n, scratch);
+        const output = scratch.y;
         try copyRows(stream, ey + at * slots * dims * 4, slots * dims * 4, output, top_k * dims * 4, top_k * dims * 4, n, "EXL3 routed output slots");
     }
 }

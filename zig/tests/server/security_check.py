@@ -112,6 +112,11 @@ def cases():
     yield "GET conflicting framing is rejected", [400], (
         b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n"
         b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+    # a body no route reads is taken only to keep the connection in step, so it has a small cap of its own
+    for size, expected in ((65536, 200), (65537, 400)):
+        yield f"GET body of {size} bytes against the unread cap", [expected], (
+            b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\nContent-Length: "
+            + str(size).encode() + b"\r\n\r\n" + b"x" * size)
     yield "GET body preserves a genuine following request", [200, 200], (
         b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 4\r\n\r\ndata"
         b"GET /v1/models HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer " + KEY

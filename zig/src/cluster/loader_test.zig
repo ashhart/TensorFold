@@ -57,10 +57,11 @@ const Seen = struct {
     }
 };
 
-/// A peer that reads its own copy; `corrupt` flips a byte after hashing, as a bad link would.
+/// A peer that reads its own copy; `corrupt` flips a byte after hashing (a bad link), `lying` before it (a bad peer).
 const Peer = struct {
     files: [2][]const u8,
     corrupt: bool = false,
+    lying: bool = false,
     calls: u32 = 0,
     fn source(p: *Peer) loader.Source {
         return .{ .ptr = p, .pull = pull };
@@ -69,6 +70,7 @@ const Peer = struct {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         p.calls += 1;
         @memcpy(out, p.files[file][@intCast(offset)..][0..out.len]);
+        if (p.lying) out[0] ^= 0xff;
         var sha: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(out, &sha, .{});
         if (p.corrupt) out[0] ^= 0xff;
@@ -152,4 +154,69 @@ test "a missing shard is pulled from a peer, checked chunk by chunk, and not pul
     defer again.release(a);
     try std.testing.expectEqual(calls, peer.calls);
     try std.testing.expectEqual(@as(u64, 0), again.pulled_bytes);
+}
+
+/// A sink that takes whatever bytes it is handed, to show what a load would have mapped.
+const Any = struct {
+    ranges: u32 = 0,
+    fn sink(s: *Any) loader.Sink {
+        return .{ .ptr = s, .run = run };
+    }
+    fn run(ptr: *anyopaque, _: loader.Range, _: u64, _: []align(loader.page) const u8) anyerror!void {
+        const s: *Any = @ptrCast(@alignCast(ptr));
+        s.ranges += 1;
+    }
+};
+
+test "security: a file pulled whole is checked against the manifest, whatever hash its sender gave" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src_dir = std.testing.tmpDir(.{});
+    defer src_dir.cleanup();
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    const sh = try shards(a, src_dir.dir);
+    try dst.dir.writeFile(io, .{ .sub_path = names[0], .data = sh.files[0] });
+    const all = [_]loader.Range{.{ .file = 1, .offset = 0, .len = sh.files[1].len }};
+    const record = ".tensorfold/" ++ names[1] ++ ".ranges";
+
+    // a peer whose chunks match the hashes it sends, and whose bytes are not the checkpoint's
+    var liar: Peer = .{ .files = .{ sh.files[0], sh.files[1] }, .lying = true };
+    var any: Any = .{};
+    try std.testing.expectError(error.HashMismatch, loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, &all, liar.source(), any.sink(), null));
+    try std.testing.expectEqual(@as(u32, 0), any.ranges);
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, names[1], .{}));
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, record, .{}));
+
+    // an honest peer afterwards: the file is pulled again, checked, and kept as a plain whole file
+    var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
+    var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
+    var rep = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, &all, peer.source(), seen.sink(), null);
+    defer rep.release(a);
+    try std.testing.expect(rep.pulled == 1 and rep.hashed == 1 and rep.unverified_bytes == 0);
+    try std.testing.expectEqual(@as(u64, sh.files[1].len), rep.pulled_bytes);
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, record, .{}));
+    const calls = peer.calls;
+    var again = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, &all, peer.source(), seen.sink(), null);
+    defer again.release(a);
+    try std.testing.expect(again.local == 1 and again.pulled == 0 and peer.calls == calls);
+}
+
+test "security: bytes pulled into a file still held in part are reported as unverified" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src_dir = std.testing.tmpDir(.{});
+    defer src_dir.cleanup();
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    const sh = try shards(a, src_dir.dir);
+    const part = [_]loader.Range{.{ .file = 1, .offset = 0, .len = 4096 }};
+    var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
+    var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
+    var rep = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, &part, peer.source(), seen.sink(), null);
+    defer rep.release(a);
+    try std.testing.expect(rep.pulled == 1 and rep.hashed == 0);
+    try std.testing.expectEqual(@as(u64, 4096), rep.unverified_bytes);
 }

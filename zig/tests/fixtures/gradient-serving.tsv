@@ -89,7 +89,7 @@ zig/src/cuda/cublaslt.zig	c6e3b8892cad23bd08c7d9843da8117670e3a881e0708a89cdf72f
 zig/src/cuda/driver.zig	f20856bd06afe9365ab9ca1bc39800ccb260ade2704197c033e1344a0c8dd742	raw	commits e9bf05ffd, b923e554c, b2c75a98a; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/embed_rows.zig	09fb2e612f43297c19d2cb77d45139dd98212a20075da0a15069a70544f72f6b	raw
 zig/src/cuda/exlr8.zig	1e2164096ae949a8a9a4903df82c7c0c184a6f5e1ba5ba4423038a42b0633fc6	raw
-zig/src/cuda/experts.zig	1a2490128498525cb73bfe6f379a1dabfab4d62ceef9dec7e794abe2edc4e82d	raw
+zig/src/cuda/experts.zig	1450c0f7874f0cb5b9ae3a8bebf845f283214863b60cf401a26fdb1898ee7271	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change)
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/graph.zig	17639aaef0298c934b3f5ad3511925169c096ae57ede8ebee655faa838844f7b	raw
 zig/src/cuda/grouped.zig	5fa1f39394b701eab59383bc7ed214ea3e17652a1229236df49f5281e6e764b5	raw	commits e1be0806d; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
