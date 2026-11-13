@@ -5,19 +5,19 @@ pub const records = [2]Record{
     .{
         .launch = .{ .name = "ModelOpt NVFP4 product", .symbol = "tf_nvfp4_gemm", .image = "affine_tiles", .threads = 256 },
         .usage = .{
-            .{ .vgprs = 29, .sgprs = 49, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 29, .sgprs = 49, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 29, .sgprs = 49, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 31, .sgprs = 48, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 138, .sgprs = 38, .lds = 11264, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 138, .sgprs = 38, .lds = 11264, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 138, .sgprs = 38, .lds = 11264, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 137, .sgprs = 40, .lds = 11264, .private = 0, .bound = 256, .wave = 32 },
         },
     },
     .{
         .launch = .{ .name = "ModelOpt FP8 product", .symbol = "tf_fp8_gemm", .image = "affine_tiles", .threads = 256 },
         .usage = .{
-            .{ .vgprs = 15, .sgprs = 36, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 15, .sgprs = 36, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 15, .sgprs = 36, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 17, .sgprs = 38, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 58, .sgprs = 46, .lds = 12288, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 56, .sgprs = 46, .lds = 12288, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 56, .sgprs = 46, .lds = 12288, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 58, .sgprs = 47, .lds = 12288, .private = 0, .bound = 256, .wave = 32 },
         },
     },
 };
