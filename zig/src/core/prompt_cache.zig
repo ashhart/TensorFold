@@ -78,6 +78,7 @@ pub const Pages = struct {
 };
 /// What a family's states depend on beyond their position.
 pub const Rules = @import("prompt_rules.zig").Rules;
+pub const Eviction = @import("prompt_cache_decay.zig").Policy;
 
 pub const Entry = struct {
     image_frame: u32 = 0, // the family frame can affect text rows before the first image
@@ -90,6 +91,7 @@ pub const Entry = struct {
     born: u32, // the prompt length of the request that kept it (a reply's end and its warm pass: that reply's): a later turn's is longer
     used: u64, // the store's clock at its last keep or resume
     seen: Seen = .{}, // wall-clock created and last-use times and resumes, for the dashboard (never policy)
+    resume_credit: u2 = 0, // bounded policy metadata, separate from dashboard history
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     rewind: bool = false, // selected as a rewind: a reply born with this request does not supersede it
@@ -131,6 +133,8 @@ pub const Store = struct {
     hold: bool = false, // memory pressure: lookups plan no marks and keeps refuse, so no new state is kept
     over: []const u8 = "", // what refusing a state past the whole budget adds: the setting that keeps it otherwise
     keep_others: bool = false, // a new state may evict only its own conversation's states (prompt_cache_others.zig)
+    eviction: Eviction = .main,
+    resume_carry: @import("prompt_cache_decay.zig").Credit = .{},
     repeat_log: @import("prompt_cache_repeat.zig").Log = .{},
     const SHARED_KEYS = 64;
     pub const lookupUserImages = images.lookupUser;
@@ -139,7 +143,7 @@ pub const Store = struct {
     pub const keepBornFrame = images.keepBornFrame;
 
     pub fn init(gpa: Allocator, family: Snapshots, rules: Rules, budget: u64) Store {
-        return .{ .gpa = gpa, .family = family, .rules = rules, .budget = budget };
+        return .{ .gpa = gpa, .family = family, .rules = rules, .budget = budget, .eviction = @import("prompt_cache_decay.zig").fromEnv() };
     }
 
     pub fn deinit(s: *Store) void {
@@ -302,6 +306,7 @@ pub const Store = struct {
 
     /// `lookupUser`; with `disk` false only RAM states (a retry after a refusal must not recall the refused one).
     fn lookupUserAt(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, user_end: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, disk: bool) !Lookup {
+        s.resume_carry = .{};
         s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
@@ -363,6 +368,7 @@ pub const Store = struct {
         s.imprint = null;
         s.disk = null;
         s.active_rewind_at = 0;
+        s.resume_carry = .{};
     }
 
     /// Forget a failed peer state matching the token prefix and canonical spans through at.
@@ -502,6 +508,7 @@ pub const Store = struct {
 
     /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
     pub const victimBut = policy.victimBut;
+    pub const victimMain = policy.victimMain;
     const extended = policy.extended;
 };
 

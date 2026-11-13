@@ -1,9 +1,10 @@
 //! Replay-only eviction alternatives; the native selector is called directly and production files stay unchanged.
 const std = @import("std");
 const pc = @import("cache");
-pub const Policy = enum { main, saved_seconds_per_byte, recency, frequency_probation };
+pub const Policy = enum { main, saved_seconds_per_byte, recency, frequency_probation, decayed_resume };
 pub fn victim(s: *const pc.Store, p: Policy, skip: ?*pc.Entry, prompt: []const u32) ?usize {
-    if (p == .main) return s.victimBut(skip, prompt, @intCast(prompt.len));
+    if (p == .main) return s.victimMain(skip, prompt, @intCast(prompt.len));
+    if (p == .decayed_resume) return @import("cache_replay_decay.zig").victim(s, skip, prompt);
     var best: ?usize = null;
     for (s.entries.items, 0..) |e, i| {
         if (e.borrowers > 0 or e == skip) continue;

@@ -13,6 +13,7 @@ pub const Replay = struct {
     pub fn init(r: *Replay, a: std.mem.Allocator, selected: policy.Policy, budget: u64, bytes: model.Model) void {
         r.* = .{ .family = .{ .gpa = a, .model = bytes }, .store = undefined, .selected = selected };
         r.store = pc.Store.init(a, r.family.snapshots(), .{ .chunk = 1 }, budget);
+        r.store.eviction = .main;
     }
     pub fn deinit(r: *Replay) void {
         r.store.deinit();
@@ -22,8 +23,9 @@ pub const Replay = struct {
         var own: model.State = .{};
         const before = r.store.counts;
         const a = r.store.gpa;
-        const prior = if (r.selected == .frequency_probation) r.store.find(req.tokens, &.{}, &.{}) else null;
-        const carry_hits = if (prior) |e| if (!e.shared) e.seen.hits +| 1 else 0 else 0;
+        const prior = if (r.selected == .frequency_probation or r.selected == .decayed_resume) r.store.find(req.tokens, &.{}, &.{}) else null;
+        const resumes = if (prior) |e| if (!e.shared) e.seen.hits +| 1 else 0 else 0;
+        const carry_hits = if (r.selected == .decayed_resume) @min(resumes, 2) else resumes;
         const carry_at = if (prior) |e| e.at else 0;
         const plan = if (r.selected == .main and !r.adapter_main)
             try r.store.begin(a, req.tokens, req.history, req.shared, &.{}, &own, &.{})

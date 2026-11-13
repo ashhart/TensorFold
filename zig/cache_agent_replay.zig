@@ -1,4 +1,4 @@
-//! E24 measurements: real snapshot store rows, not device latency or model output claims.
+//! Frozen cohort-change measurements: real snapshot store rows, not device latency or model output claims.
 const std = @import("std");
 const traces = @import("cache_agent_trace.zig");
 const run = @import("cache_replay_run.zig");
@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init) !void {
     for (std.enums.values(traces.Shape)) |shape| {
         var trace = try traces.make(init.gpa, shape);
         defer trace.deinit();
-        for (traces.budgets) |budget| for ([_]run.policy.Policy{ .main, .frequency_probation }) |selected| {
+        for (traces.budgets) |budget| for ([_]run.policy.Policy{ .main, .decayed_resume }) |selected| {
             var replay: run.Replay = undefined;
             replay.init(init.gpa, selected, budget, .{});
             defer replay.deinit();
