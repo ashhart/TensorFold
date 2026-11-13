@@ -90,7 +90,7 @@ pub fn within(io: Io, deadline: Io.Timestamp, seconds: i64) Io.Timestamp {
     return if (one.nanoseconds < deadline.nanoseconds) one else deadline;
 }
 
-fn remaining(io: Io, deadline: Io.Timestamp, f: *Failure) Error!i64 {
+pub fn remaining(io: Io, deadline: Io.Timestamp, f: *Failure) Error!i64 {
     const left = Io.Clock.awake.now(io).durationTo(deadline).toMilliseconds();
     if (left <= 0) return fail(f, "image download timed out");
     return left;
@@ -225,183 +225,24 @@ fn readInto(a: std.mem.Allocator, io: Io, r: *Io.Reader, data: *std.ArrayList(u8
     }
 }
 
-/// A TCP connection to the checked address on port 443, its connect bounded by `ms` (std's connect has no timeout).
-fn connect(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
-    // the socket calls below are libc's on Linux and macOS; a Windows server refuses image URLs by name
-    return if (comptime @import("builtin").os.tag == .windows) fail(f, "image URLs are not supported on Windows yet") else connectPosix(addr, ms, f);
-}
-
-fn connectPosix(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
-    const c = std.c;
-    const failed = "image download failed or timed out";
-    var storage: c.sockaddr.storage = undefined;
-    var len: c.socklen_t = undefined;
-    switch (addr) {
-        .ip4 => |v| {
-            const sa: *c.sockaddr.in = @ptrCast(@alignCast(&storage));
-            sa.* = std.mem.zeroes(c.sockaddr.in);
-            sa.family = c.AF.INET;
-            sa.port = std.mem.nativeToBig(u16, 443);
-            sa.addr = @bitCast(v.bytes);
-            len = @sizeOf(c.sockaddr.in);
-        },
-        .ip6 => |v| {
-            const sa: *c.sockaddr.in6 = @ptrCast(@alignCast(&storage));
-            sa.* = std.mem.zeroes(c.sockaddr.in6);
-            sa.family = c.AF.INET6;
-            sa.port = std.mem.nativeToBig(u16, 443);
-            sa.addr = v.bytes;
-            len = @sizeOf(c.sockaddr.in6);
-        },
-    }
-    const fd = c.socket(@as(c_uint, storage.family), c.SOCK.STREAM, 0);
-    if (fd < 0) return fail(f, failed);
-    errdefer _ = c.close(fd);
-    _ = c.fcntl(fd, c.F.SETFD, @as(c_int, c.FD_CLOEXEC));
-    const flags = c.fcntl(fd, c.F.GETFL);
-    const nonblock: c_int = @bitCast(@as(u32, @bitCast(c.O{ .NONBLOCK = true })));
-    if (flags < 0 or c.fcntl(fd, c.F.SETFL, flags | nonblock) < 0) return fail(f, failed);
-    if (c.connect(fd, @ptrCast(&storage), len) != 0) {
-        if (c.errno(@as(c_int, -1)) != .INPROGRESS) return fail(f, failed);
-        var pfd = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.OUT, .revents = 0 }};
-        if (c.poll(&pfd, 1, @intCast(@min(ms, std.math.maxInt(c_int)))) != 1) return fail(f, failed);
-        var err: c_int = 0;
-        var err_len: c.socklen_t = @sizeOf(c_int);
-        if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.ERROR, &err, &err_len) != 0 or err != 0) return fail(f, failed);
-    }
-    if (c.fcntl(fd, c.F.SETFL, flags) < 0) return fail(f, failed);
-    const tv: c.timeval = .{ .sec = @intCast(@divTrunc(ms, 1000)), .usec = @intCast(@mod(ms, 1000) * 1000) };
-    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, &tv, @sizeOf(c.timeval));
-    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.SNDTIMEO, &tv, @sizeOf(c.timeval));
-    return .{ .socket = .{ .handle = fd, .address = addr } };
-}
-
 var trust: @import("media_fetch_tls.zig").Trust = .{};
 
-/// The first address `host` resolves to, once every one of them is checked public.
-fn resolve(io: Io, host: []const u8, f: *Failure) Error!net.IpAddress {
-    const unresolved = "image host could not be resolved";
-    const inner = "image URLs must resolve only to public internet addresses";
-    if (net.IpAddress.parseIp4(host, 443)) |literal| return if (publicIp(literal)) literal else fail(f, inner) else |_| {}
-    const name = net.HostName.init(std.mem.trimEnd(u8, host, ".")) catch return fail(f, unresolved);
-    var results: [32]net.HostName.LookupResult = undefined;
-    var q: Io.Queue(net.HostName.LookupResult) = .init(&results);
-    // the lookup runs beside its reader: alone on this thread it would wait forever to queue a 33rd address
-    var looking = io.concurrent(net.HostName.lookup, .{ name, io, &q, .{ .port = 443 } }) catch return fail(f, unresolved);
-    var first: ?net.IpAddress = null;
-    var public = true;
-    while (q.getOneUncancelable(io)) |r| switch (r) {
-        .address => |addr| {
-            public = public and publicIp(addr);
-            if (first == null) first = addr;
-        },
-        .canonical_name => {},
-    } else |_| {}
-    looking.await(io) catch return fail(f, unresolved);
-    if (!public) return fail(f, inner);
-    return first orelse fail(f, unresolved);
-}
-
-/// The network: every address the host resolves to checked public, then TLS verified for the host on the first.
+/// Every lookup address is checked public before TCP and host-verified TLS use the first working address.
 const Network = struct {
     fn request(_: Network, a: std.mem.Allocator, io: Io, u: Url, max_bytes: usize, deadline: Io.Timestamp, media_types: []const []const u8, f: *Failure) Error!Got {
-        const addr = try resolve(io, u.host, f);
-        try trust.ensure(io, f);
-        const stream = try connect(addr, try remaining(io, deadline, f), f);
+        const stream = try @import("media_fetch_net.zig").openVia(a, io, u.host, deadline, f, Network{});
         defer stream.close(io);
         return @import("media_fetch_tls.zig").request(&trust, a, io, stream, u, max_bytes, deadline, media_types, f);
     }
-};
 
-/// One host resolved through a lookup that gives `addresses`, on a thread its test can stop waiting for.
-const Canned = struct {
-    var addresses: []const net.IpAddress = &.{};
-    /// The lookup fails once it has given its addresses.
-    var fails = false;
-    var table: Io.VTable = undefined;
-    var failure: Failure = .{};
-    var first: ?net.IpAddress = null;
-    var done: std.atomic.Value(bool) = .init(false);
-
-    /// Set when a test stops waiting, so a lookup left with no reader ends with its test.
-    var abandoned: std.atomic.Value(bool) = .init(false);
-
-    /// As std's lookup on a libc host: each address queued in turn, however many, waiting while the queue is full.
-    fn lookup(_: ?*anyopaque, _: net.HostName, q: *Io.Queue(net.HostName.LookupResult), _: net.HostName.LookupOptions) net.HostName.LookupError!void {
-        const io = std.testing.io;
-        defer q.close(io);
-        for (addresses) |addr| while ((q.put(io, &.{.{ .address = addr }}, 0) catch return error.NameServerFailure) == 0) {
-            if (abandoned.load(.acquire)) return error.NameServerFailure;
-            io.sleep(.fromMilliseconds(1), .awake) catch {};
-        };
-        if (fails) return error.NameServerFailure;
+    pub fn prepare(_: Network, io: Io, f: *Failure) Error!void {
+        try trust.ensure(io, f);
     }
 
-    fn work(whole_request: bool) void {
-        const real = std.testing.io;
-        table = real.vtable.*;
-        table.netLookup = lookup;
-        table.async = Io.noAsync; // a busy Io runs an async task in place, where the lookup would have no reader
-        const io: Io = .{ .userdata = real.userdata, .vtable = &table };
-        const url: Url = .{ .host = "many.example", .target = "/" };
-        failure = .{};
-        first = null;
-        if (whole_request) {
-            _ = (Network{}).request(std.testing.allocator, io, url, 1, .{ .nanoseconds = 0 }, &image_media, &failure) catch {};
-        } else first = resolve(io, url.host, &failure) catch null;
-        done.store(true, .release);
-    }
-
-    /// Whether the host resolves or is refused within five seconds: `resolve` alone, or a whole request for the URL.
-    fn finishes(whole_request: bool) !bool {
-        done.store(false, .release);
-        abandoned.store(false, .release);
-        const thread = try std.Thread.spawn(.{}, work, .{whole_request});
-        defer thread.join();
-        for (0..500) |_| {
-            if (done.load(.acquire)) return true;
-            std.testing.io.sleep(.fromMilliseconds(10), .awake) catch {};
-        }
-        abandoned.store(true, .release);
-        return false;
+    pub fn connect(_: Network, addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
+        return @import("media_fetch_net.zig").connect(addr, ms, f);
     }
 };
-
-test "security: a host with more addresses than the lookup's queue holds resolves, each address still checked" {
-    const inner = "image URLs must resolve only to public internet addresses";
-    const unresolved = "image host could not be resolved";
-    var many: [40]net.IpAddress = undefined;
-    for (&many, 0..) |*addr, i| addr.* = .{ .ip4 = .{ .bytes = .{ 8, 8, 4, @intCast(i + 1) }, .port = 443 } };
-    Canned.fails = false;
-    // 32 addresses fill the queue; a 33rd used to wait forever, its reader being the thread that was waiting
-    for ([_]usize{ 1, 32, 33, 40 }) |n| {
-        Canned.addresses = many[0..n];
-        try std.testing.expect(try Canned.finishes(false));
-        try std.testing.expect(Canned.first.?.eql(&many[0]));
-    }
-    // one address the policy refuses, refusing the request: past the queue's end, then first with 39 still to come
-    for ([_]usize{ 39, 0 }) |at| {
-        const public = many[at];
-        defer many[at] = public;
-        many[at] = .{ .ip4 = .{ .bytes = .{ 10, 0, 0, 1 }, .port = 443 } };
-        for ([_]bool{ true, false }) |whole_request| {
-            try std.testing.expect(try Canned.finishes(whole_request));
-            try std.testing.expect(Canned.first == null);
-            try std.testing.expectEqualStrings(inner, Canned.failure.text);
-        }
-    }
-    // a lookup that fails after giving public addresses, and one that gives none, resolve nothing
-    Canned.addresses = many[0..3];
-    Canned.fails = true;
-    try std.testing.expect(try Canned.finishes(false));
-    try std.testing.expect(Canned.first == null);
-    try std.testing.expectEqualStrings(unresolved, Canned.failure.text);
-    Canned.addresses = &.{};
-    Canned.fails = false;
-    try std.testing.expect(try Canned.finishes(false));
-    try std.testing.expect(Canned.first == null);
-    try std.testing.expectEqualStrings(unresolved, Canned.failure.text);
-}
 
 test "public addresses as Python's ipaddress checks them" {
     const ip4 = struct {
@@ -563,4 +404,5 @@ test "responses as images_http._request reads them: redirects, types, lengths, e
 
 test {
     _ = @import("media_fetch_tls.zig");
+    _ = @import("media_fetch_net.zig");
 }
