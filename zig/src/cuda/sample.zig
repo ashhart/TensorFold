@@ -75,6 +75,7 @@ pub const Draws = struct {
     slices: ?[2]Function = null,
     /// tf_penalize_rows; null in a kernel set built before it, where penalties are not offered.
     penalize_fn: ?Function = null,
+    bias_fn: ?Function = null, // tf_bias_rows; old images keep refusing logit_bias
 
     /// sample.cu's SW: a slice's entries.
     pub const draw_slice = 8192;
@@ -85,7 +86,7 @@ pub const Draws = struct {
     pub const topk_slice = 4096;
 
     pub fn resolve(mod: Module) !Draws {
-        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .draw_ids_rows_fn = mod.function("tf_draw_ids_rows") catch null, .slices = slicesOf(mod), .penalize_fn = mod.function("tf_penalize_rows") catch null };
+        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .draw_ids_rows_fn = mod.function("tf_draw_ids_rows") catch null, .slices = slicesOf(mod), .penalize_fn = mod.function("tf_penalize_rows") catch null, .bias_fn = mod.function("tf_bias_rows") catch null };
     }
 
     fn slicesOf(mod: Module) ?[2]Function {
@@ -183,7 +184,15 @@ pub const Draws = struct {
     /// `n` entries at `entries` (n rows, n tokens, then n fp32 amounts): each takes its amount from its row's logit.
     pub fn penalize(d: *const Draws, s: Stream, logits: u64, vocab: usize, entries: u64, n: usize) !void {
         if (n == 0) return;
-        const f = d.penalize_fn orelse return error.PenaltiesUnsupported;
+        return sparse(d.penalize_fn orelse return error.PenaltiesUnsupported, s, logits, vocab, entries, n);
+    }
+
+    pub fn biasRows(d: *const Draws, s: Stream, logits: u64, vocab: usize, entries: u64, n: usize) !void {
+        if (n == 0) return;
+        return sparse(d.bias_fn orelse return error.LogitBiasUnsupported, s, logits, vocab, entries, n);
+    }
+
+    fn sparse(f: Function, s: Stream, logits: u64, vocab: usize, entries: u64, n: usize) !void {
         var a: launch_.Args = .{};
         inline for (.{ logits, @as(u32, @intCast(vocab)), entries, entries + n * 4, entries + n * 8, @as(u32, @intCast(n)) }) |v| a.add(v);
         try launch_.launch(f, .{ .grid = .{ .x = @intCast((n + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &a);

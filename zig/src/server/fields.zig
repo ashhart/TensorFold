@@ -6,6 +6,8 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
+pub const logitBias = @import("logit_bias.zig").parse;
+
 pub const efforts = [_][]const u8{ "none", "minimal", "low", "medium", "high", "xhigh", "max" };
 const effort_order = [_][]const u8{ "max", "xhigh", "high", "medium", "low", "minimal" }; // highest first
 
