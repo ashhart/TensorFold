@@ -29,12 +29,10 @@ const idle_unload = @import("idle_unload.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// auto compacts near the window. fraction compacts past that share of it.
 pub const CompactAt = union(enum) { auto, fraction: f64 };
 
 pub const Identity = @import("identity.zig").Identity;
-
 /// The most a kept-alive connection's arena keeps between requests; a longer request's memory goes back.
 pub const connection_arena_limit: usize = 1 << 20;
 
@@ -156,6 +154,7 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
+    background_jobs: @import("responses_background.zig").Manager = .{}, // background: true responses still running
     /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
     ws_cache_bytes: std.atomic.Value(usize) = .init(0),
     tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
@@ -264,6 +263,7 @@ pub const Server = struct {
     }
 
     pub fn deinit(srv: *Server) void {
+        srv.background_jobs.shutdown(srv); // they stop and end before the engine, store and counts they use go
         srv.load.detach(false); // an engine still attached is still open: it stops writing before anything here frees
         srv.stopKeepalive();
         if (srv.grammars) |g| g.close();
