@@ -183,8 +183,7 @@ pub const Pipeline = struct {
         api.vkCmdDispatch(cmd, groups[0], groups[1], groups[2]);
     }
 
-    /// Records one dispatch into the open command buffer, after a compute barrier only if it conflicts with a dispatch
-    /// since the last barrier; submitted with half a batch, or with the next copy or fill.
+    /// Records one dispatch, after a barrier only on a conflict; submits at half a batch or at a copy or fill.
     pub fn run(p: *const Pipeline, cmds: *commands.Commands, push: []const u8, groups: [3]u32, timeout_ns: u64) Error!void {
         var reads: [max_bindings]hazard.Range = undefined;
         var writes: [max_bindings]hazard.Range = undefined;

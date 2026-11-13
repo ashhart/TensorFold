@@ -23,7 +23,7 @@ pub const Commands = struct {
     hazards: Hazards = .{},
     /// Set by the first successful submit, never cleared: a later begin records a fence barrier, even after a discard.
     submitted_before: bool = false,
-    /// Set by a state-corrupting failure (signaled fence, invalid buffer, or a failed submit or wait): begin and submit refuse.
+    /// Set by a state-corrupting failure (signaled fence, invalid buffer, failed submit or wait): begin, submit refuse.
     poison: ?Error = null,
 
     pub fn init(dev: *const Device) Error!Commands {
@@ -196,7 +196,7 @@ pub fn recordFill(dev: *const Device, cmd: c.VkCommandBuffer, dst: Buffer, offse
     dev.api.vkCmdFillBuffer(cmd, dst.handle, offset, len, value);
 }
 
-/// Fills `len` bytes of device buffer `dst` at `offset` with `value`, after earlier dispatches and copies; submits the batch.
+/// Fills `len` bytes of buffer `dst` at `offset` with `value`, after earlier dispatches and copies; submits the batch.
 pub fn fill(cmds: *Commands, dst: Buffer, offset: u64, len: u64, value: u32, timeout_ns: u64) Error!void {
     if (dst.dev != cmds.dev or dst.kind != .device) return error.Invalid;
     try fillRange(dst.len, offset, len);
