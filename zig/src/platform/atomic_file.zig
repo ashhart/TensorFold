@@ -5,6 +5,19 @@ const Allocator = std.mem.Allocator;
 
 var serial: std.atomic.Value(u64) = .init(0);
 
+threadlocal var last_failure: ?platform.c.E = null;
+
+/// The OS error behind the latest `ShardWrite` on this thread, for client and log messages.
+pub fn causeName() []const u8 {
+    return if (last_failure) |e| @tagName(e) else "unknown";
+}
+
+fn failed(rc: anytype) error{ShardWrite} {
+    const cause = platform.c.errno(rc);
+    last_failure = if (cause == .SUCCESS) null else cause;
+    return error.ShardWrite;
+}
+
 pub fn stage(a: Allocator, path: []const u8, parts: []const []const u8) ![:0]const u8 {
     return stageAs(a, path, parts, 0o644);
 }
@@ -15,6 +28,7 @@ pub fn stagePrivate(a: Allocator, path: []const u8, parts: []const []const u8) !
 }
 
 fn stageAs(a: Allocator, path: []const u8, parts: []const []const u8, mode: platform.c.mode_t) ![:0]const u8 {
+    last_failure = null;
     for (0..32) |_| {
         const name = try std.fmt.allocPrintSentinel(a, "{s}.tmp.{d}.{d}", .{
             path, platform.c.getpid(), serial.fetchAdd(1, .monotonic),
@@ -30,24 +44,29 @@ fn stageAs(a: Allocator, path: []const u8, parts: []const []const u8, mode: plat
             const cause = platform.c.errno(fd);
             a.free(name);
             if (cause == .EXIST) continue;
+            last_failure = cause;
             return error.ShardWrite;
         }
         errdefer a.free(name);
         errdefer _ = platform.c.unlink(name);
         defer _ = platform.c.close(fd);
         for (parts) |part| try writeAll(fd, part);
-        if (platform.c.fsync(fd) != 0) return error.ShardWrite;
+        const synced = platform.c.fsync(fd);
+        if (synced != 0) return failed(synced);
         return name;
     }
+    last_failure = .EXIST;
     return error.ShardWrite;
 }
 
 pub fn commit(a: Allocator, temporary: [:0]const u8, path: []const u8) !void {
+    last_failure = null;
     defer a.free(temporary);
     errdefer _ = platform.c.unlink(temporary);
     const destination = try a.dupeSentinel(u8, path, 0);
     defer a.free(destination);
-    if (platform.c.rename(temporary, destination) != 0) return error.ShardWrite;
+    const renamed = platform.c.rename(temporary, destination);
+    if (renamed != 0) return failed(renamed);
 }
 
 pub fn replace(a: Allocator, path: []const u8, parts: []const []const u8) !void {
@@ -64,7 +83,7 @@ fn writeAll(fd: platform.c.fd_t, bytes: []const u8) !void {
     while (done < bytes.len) {
         const n = platform.c.write(fd, bytes.ptr + done, @min(bytes.len - done, 1 << 30));
         if (n < 0 and platform.c.errno(n) == .INTR) continue;
-        if (n <= 0) return error.ShardWrite;
+        if (n <= 0) return failed(n);
         done += @intCast(n);
     }
 }
