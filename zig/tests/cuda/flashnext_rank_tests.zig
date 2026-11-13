@@ -6,7 +6,14 @@ const flash = @import("flashnext");
 const check = @import("check.zig");
 const wire = flash.rank_wire;
 
-pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
+pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
+    const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "eof-scatter", "timeout-scatter", "exchange" };
+    for (modes) |m| {
+        if (std.mem.eql(u8, m, mode_arg)) break;
+    } else return error.UnknownRankMode;
+    // eof-scatter and timeout-scatter: the peer fails during a reduce-scatter, the first collective
+    const scatter = std.mem.endsWith(u8, mode_arg, "-scatter");
+    const mode = if (scatter) mode_arg[0 .. mode_arg.len - "-scatter".len] else mode_arg;
     const missing = std.mem.eql(u8, mode, "missing");
     const started = wire.now();
     if (missing) {
@@ -42,6 +49,10 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
     if (std.mem.eql(u8, mode, "timeout")) collective.timeout_ms = 200;
     var stream = try cuda.Stream.init(gpu.d, true);
     defer stream.deinit();
+    if (std.mem.eql(u8, mode, "exchange")) {
+        try @import("flashnext_exchange_tests.zig").run(gpu, &collective, stream, rank);
+        return meet(link, rank, 99);
+    }
     if (std.mem.eql(u8, mode, "eof") or std.mem.eql(u8, mode, "timeout")) {
         // both communicators are up before the peer fails, so the failure meets the collective, not the init
         try meet(link, rank, 98);
@@ -52,18 +63,19 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
             } else {
                 sleepSixTenths();
             }
-            check.pass("rank 1: injected {s}", .{mode});
+            check.pass("rank 1: injected {s}", .{mode_arg});
             return;
         }
-        var values = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&@as(f32, 1)));
+        var values = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&[2]f32{ 1, 1 }));
         defer values.free();
         const start = wire.now();
-        completeSum(&collective, stream, values.ptr, 1) catch |err| {
+        completeSum(&collective, stream, values.ptr, 1, scatter) catch |err| {
             try check.expect(err == error.RankDisconnected or err == error.RankTimeout or err == error.NcclFailed, "failure is surfaced ({s})", .{@errorName(err)});
             try check.expect(collective.failed and collective.comm == null, "failed communicator is aborted and cannot be reused", .{});
             try check.expect(wire.now() - start < 3 * std.time.ns_per_s, "failed collective terminates within bound", .{});
             try std.testing.expectError(error.RankDisconnected, collective.sum(stream, values.ptr, 1));
-            check.pass("rank 0: {s} surfaced as {s}, aborted, and refused reuse within bound", .{ mode, @errorName(err) });
+            try std.testing.expectError(error.RankDisconnected, collective.sumBlock(stream, values.ptr, 1));
+            check.pass("rank 0: {s} surfaced as {s}, aborted, and refused reuse within bound", .{ mode_arg, @errorName(err) });
             return;
         };
         return error.ExpectedRankFailure;
@@ -124,8 +136,8 @@ fn meet(link: wire.Link, rank: usize, sequence: u64) !void {
     }
 }
 
-fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64, count: usize) !void {
-    try c.sum(stream, values, count);
+fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64, count: usize, scatter: bool) !void {
+    if (scatter) try c.sumBlock(stream, values, count) else try c.sum(stream, values, count);
     try c.finish(stream);
 }
 

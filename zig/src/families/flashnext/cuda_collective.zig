@@ -8,6 +8,7 @@ const Advanced = struct {
     ncclCommInitRankConfig: *const fn (*nccl.Comm, c_int, nccl.UniqueId, c_int, *nccl.Config) callconv(.c) nccl.Result,
     ncclCommAbort: *const fn (nccl.Comm) callconv(.c) nccl.Result,
     ncclCommGetAsyncError: *const fn (nccl.Comm, *nccl.Result) callconv(.c) nccl.Result,
+    ncclReduceScatter: @FieldType(nccl.Api, "ncclAllReduce"),
 };
 
 pub const GraphState = enum(u32) { eager, capture, pending, ready, failed, timed_out };
@@ -256,6 +257,16 @@ pub const Collective = struct {
         errdefer c.abort();
         try c.link.checkPeer();
         try c.submitted(c.lib.api.ncclAllReduce(values, values, count, .f32, .sum, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+    }
+
+    /// sum's FP32 sum of block `rank` of `values` (blocks of `count`) alone, left in place there: a reduce-scatter.
+    pub fn sumBlock(c: *Collective, stream: cuda.Stream, values: u64, count: usize) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        if (count == 0) return;
+        errdefer c.abort();
+        try c.link.checkPeer();
+        try c.submitted(c.api.ncclReduceScatter(values, values + c.rank * count * 4, count, .f32, .sum, c.comm, stream.handle));
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 };

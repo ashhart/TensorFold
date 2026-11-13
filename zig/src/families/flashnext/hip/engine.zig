@@ -304,9 +304,7 @@ pub const Engine = struct {
             defer hc.deinit(e.gpa);
             var ones = try hip.DeviceBuffer.alloc(&e.driver, rows * e.cfg.hc_count * e.act.size());
             defer ones.free();
-            var ho = o;
-            ho.prefill = true;
-            _ = try head_mod.run(ho, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
+            _ = try head_mod.run(o, true, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
         }
         _ = try e.logits(o, out.mixed, verify_rows);
         // the peak, not what is left at the end: each layer hands its scratch back when it is done

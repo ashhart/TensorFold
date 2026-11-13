@@ -4,9 +4,7 @@ const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 const alloc = @import("allocate.zig");
 pub const pricedBatched = alloc.pricedBatched;
-
 pub const Constants = @import("depth_constants.zig").Constants;
-
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
 
@@ -63,8 +61,9 @@ pub const Rule = struct {
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
+    plain_streams: u32 = 0, // a shared round with this many streams or more drafts none (0: off; a family's switch)
     batch_rows: u32,
-    batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
+    batched_heads: bool = false, // one batch drafts every stream of a shared round (steps: the deepest stream's)
     row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
@@ -304,6 +303,8 @@ pub const Rule = struct {
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
+        // drafts lose here: none asked, no head pass
+        if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
         if (r.confidence_floor != null) {
             for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
             return;
