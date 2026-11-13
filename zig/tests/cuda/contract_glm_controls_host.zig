@@ -9,10 +9,10 @@ const g = @import("core").contract.gates;
 const registry = @import("core").contract.registry;
 const t = std.testing;
 
-const fp8_launches = [_]struct { symbol: []const u8, threads: u32, dynamic: u32, static: u32 }{
-    .{ .symbol = "tf_glm_lat_write_fp8_paged", .threads = 512, .dynamic = 0, .static = 64 },
-    .{ .symbol = "tf_glm_chunks_16_fp8_paged", .threads = 256, .dynamic = glm.glue.chunksSmem(16), .static = 0 },
-    .{ .symbol = "tf_glm_chunks_32_fp8_paged", .threads = 256, .dynamic = glm.glue.chunksSmem(32), .static = 0 },
+const fp8_launches = [_]struct { symbol: []const u8, threads: u32, dynamic: u32, static: u32, bound: u32 }{
+    .{ .symbol = "tf_glm_lat_write_fp8_paged", .threads = 512, .dynamic = 0, .static = 64, .bound = 512 },
+    .{ .symbol = "tf_glm_chunks_16_fp8_paged", .threads = 256, .dynamic = glm.glue.chunksSmem(16), .static = 0, .bound = 256 },
+    .{ .symbol = "tf_glm_chunks_32_fp8_paged", .threads = 256, .dynamic = glm.glue.chunksSmem(32), .static = 0, .bound = 256 },
 };
 
 fn fp8Inventory(records: []const registry.CudaRecord) !void {
@@ -24,15 +24,14 @@ fn fp8Inventory(records: []const registry.CudaRecord) !void {
             r.launch.dynamic != want.dynamic or r.launch.opt_in != (want.dynamic > 48 * 1024))
             return error.BadFp8PagedLaunch;
         for (r.usage) |usage| {
-            if (usage.regs != 0) return error.UnmeasuredFp8PagedUsage;
-            if (usage.static != 0) return error.UnmeasuredFp8PagedUsage;
+            if (usage.regs == 0 or usage.static != want.static or usage.bound != want.bound)
+                return error.BadFp8PagedUsage;
         }
-        if (!r.later_pending) return error.UnmeasuredFp8PagedUsage;
-        _ = want.static; // static bytes are documented here; compiler evidence remains deliberately pending.
+        if (!r.later_pending) return error.BadFp8PagedUsage;
     }
 }
 
-test "GLM page contract: paged FP8 launches are registered with exact geometry and honest pending usage" {
+test "GLM page contract: paged FP8 launches carry measured 13.0 usage and pending later compilers" {
     try fp8Inventory(&registry.all_cuda);
 }
 
@@ -51,8 +50,8 @@ test "GLM page contract: missing and wrong paged FP8 launch controls are rejecte
     wrong[1].launch.dynamic -= 16;
     try t.expectError(error.BadFp8PagedLaunch, fp8Inventory(&wrong));
     wrong = records;
-    wrong[0].usage[0].regs = 1;
-    try t.expectError(error.UnmeasuredFp8PagedUsage, fp8Inventory(&wrong));
+    wrong[0].usage[0].regs = 0;
+    try t.expectError(error.BadFp8PagedUsage, fp8Inventory(&wrong));
 }
 
 fn validate(kernels: []const g.Kernel) !void {
