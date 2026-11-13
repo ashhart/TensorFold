@@ -13,8 +13,8 @@ pub const elements = 16;
 /// The threads a row is spread over, as the kernel launches it.
 pub const threads = hidden / elements;
 
-/// The threadgroup memory the fused kernel's one set of partials takes: the squares the normalisation reads.
-pub const group_memory = (threads / 32) * 4;
+/// The threadgroup memory the kernel's one set of partials takes, in the 16-byte units the Metal compiler allocates.
+pub const group_memory = std.mem.alignForward(usize, (threads / 32) * 4, 16);
 
 /// The operator's parameters: the strength, the rows and the hidden width.
 pub const Params = struct {
