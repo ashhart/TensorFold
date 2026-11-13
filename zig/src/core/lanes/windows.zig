@@ -233,6 +233,14 @@ pub fn who(s: *Stream) depth.Who {
     return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
 }
 
+/// cfg.plain_streams: a shared round this wide drafts none, its copies included (each window its pending row).
+fn plainCopies(e: *const Engine, plans: []Plan) void {
+    if (e.cfg.plain_streams == 0 or plans.len < e.cfg.plain_streams) return;
+    for (plans) |*p| if (p.kind == .copy) {
+        p.* = .{ .stream = p.stream, .position = p.position, .kind = .none };
+    };
+}
+
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
 pub fn anySampled(plans: []const Plan) bool {
     for (plans) |p| if (p.stream.sampling != null) return true;
@@ -241,6 +249,7 @@ pub fn anySampled(plans: []const Plan) bool {
 
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
 pub fn allocate(e: *Engine, plans: []Plan) !void {
+    plainCopies(e, plans);
     if (e.trim) |t| return trimmed(e, plans, t);
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);

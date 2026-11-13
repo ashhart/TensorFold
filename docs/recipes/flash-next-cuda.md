@@ -39,6 +39,9 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
 - `--prompt-cache-gib 0` is required with drafts at `--tp 2`, and `--idle-unload` is refused with `--tp`.
+- A prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's
+  rows and gathers the sums: rank 0 sends 3.43 MiB a prompt token over two GB10s' RoCE link instead of 5.81, with the
+  same bytes in every written row. Decode rounds and verify windows keep the all-reduce.
 - At `--tp 2` each stream's window verifies alone, so concurrent streams do not yet share a verify pass.
 
 ## Experimental K32 prompt experts
@@ -129,6 +132,10 @@ The family plugs into the core's pieces and adds no scheduler:
   `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; a successful resume counts toward
   `tensorfold:prompt_tokens_cached_total`. The chunk and budget host fixtures exercise this policy; real-model
   resumed/fresh parity and TTFT for this interior state still need the GPU gate.
+- `TF_PROMPT_INTERMEDIATE=1` keeps up to four intermediate states at power-of-two positions under a long prompt's
+  history, so a later request that keeps a compacted prefix resumes inside it. On one GB10 (NVFP4, `--no-drafts`,
+  an 8 GiB cache), a 104K-token request keeping its first 100K resumed 65,536 tokens instead of 2 (TTFT 19.9 s
+  against 50.7 s, same tokens); a cold 165K prompt paid 0.9 s more and the cache held two more states. Off by default.
 - Shared row kernels: the token rows (`embed_rows.cu`, groups of 32 and a copy a hyper-connection stream), the MTP
   head's RMS rows with their group sums (`norms.cu`), the router logits and softmax top-k (`route_rows.cu`), and the
   routed experts over a window's or a chunk's rows on the core's plan (`cuda/grouped.zig`, `experts_rows.cu`).

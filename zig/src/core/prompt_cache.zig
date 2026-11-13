@@ -9,6 +9,7 @@ const lifetime = @import("prompt_cache_lifetime.zig");
 const policy = @import("prompt_cache_policy.zig");
 const cuts = @import("prompt_cuts.zig");
 const interior = @import("prompt_interior.zig");
+const intermediate = @import("prompt_intermediate.zig");
 const index = @import("prompt_cache_index.zig");
 const forks = @import("prompt_cache_fork.zig");
 pub const others = @import("prompt_cache_others.zig");
@@ -91,6 +92,7 @@ pub const Entry = struct {
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
     rewind: bool = false, // selected as a rewind: a reply born with this request does not supersede it
     branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
+    intermediate: bool = false, // any kept state at a ladder position: once superseded, goes after other copies but before any newest state
     expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
     borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
     ext: std.ArrayList(*Entry) = .empty, // live extensions born no earlier
@@ -330,16 +332,20 @@ pub const Store = struct {
             a.free(ordinary);
             return err;
         };
+        const marked = intermediate.add(s, a, prompt, from, history_len, starts, spans, marks_, endpoint, endpoint_bytes, e) catch |err| {
+            a.free(marks_);
+            return err;
+        };
         for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
-            for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
+            for (marked) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
         var primary = @import("prompt_cache_reserve.zig").endpointFor(s, prompt, from, history_len, starts, spans);
-        if (history_len == 0 and primary == 0) for (marks_) |at| {
+        if (history_len == 0 and primary == 0) for (marked) |at| {
             if (at != s.active_rewind_at) primary = @max(primary, at);
         };
-        s.reserve(prompt, born, e, marks_, spans, primary);
-        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marks_, spans, e, born, primary);
+        s.reserve(prompt, born, e, marked, spans, primary);
+        const fitted = try @import("prompt_cache_reserve.zig").fitting(s, a, prompt, marked, spans, e, born, primary);
         if (e) |entry| entry.borrowers += 1;
         return .{ .entry = e, .marks = fitted };
     }
@@ -510,6 +516,7 @@ test {
     _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
     _ = @import("prompt_cache_interior_test.zig");
+    _ = @import("prompt_cache_intermediate_test.zig");
     _ = @import("prompt_cache_branch_test.zig");
     _ = @import("prompt_cache_newest_test.zig");
     _ = @import("prompt_cache_fork_test.zig");
