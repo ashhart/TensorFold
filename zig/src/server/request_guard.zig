@@ -10,6 +10,7 @@ pub const Policy = struct {
     loopback_bind: bool = true,
     allowed_hosts: []const []const u8 = &.{},
     allowed_origins: []const []const u8 = &.{},
+    cors_origins: []const []const u8 = &.{},
 
     pub fn blocked(p: Policy, headers: []const http.Header) ?Reason {
         var host: ?[]const u8 = null;
@@ -41,11 +42,30 @@ pub const Policy = struct {
         const o = parseOrigin(origin.?) orelse return .origin;
 
         if (!o.https and o.port == (h.port orelse 80) and sameHost(o.authority.host, h.host)) return null;
-        for (p.allowed_origins) |name| {
-            const allowed = parseOrigin(name) orelse continue;
-            if (o.https == allowed.https and o.port == allowed.port and sameHost(o.authority.host, allowed.authority.host)) return null;
+        for ([_][]const []const u8{ p.allowed_origins, p.cors_origins }) |names| {
+            for (names) |name| {
+                const allowed = parseOrigin(name) orelse continue;
+                if (o.https == allowed.https and o.port == allowed.port and sameHost(o.authority.host, allowed.authority.host)) return null;
+            }
         }
         return .origin;
+    }
+
+    /// Echo only one parsed, exactly configured origin; --allowed-origin alone never enables CORS.
+    pub fn corsOrigin(p: Policy, headers: []const http.Header) ?[]const u8 {
+        var value: ?[]const u8 = null;
+        for (headers) |h| if (std.ascii.eqlIgnoreCase(h.name, "Origin")) {
+            if (value != null) return null;
+            value = h.value;
+        };
+        const raw = value orelse return null;
+        const o = parseOrigin(raw) orelse return null;
+        for (p.cors_origins) |name| {
+            const allowed = parseOrigin(name) orelse continue;
+            if (o.https == allowed.https and o.port == allowed.port and sameHost(o.authority.host, allowed.authority.host))
+                return raw;
+        }
+        return null;
     }
 };
 
@@ -111,12 +131,21 @@ fn sameHost(a: []const u8, b: []const u8) bool {
 pub const host_message = "Host header is not allowed on this loopback bind; use --allowed-host NAME for a trusted name";
 pub const origin_message = "Origin header does not match this server; use --allowed-origin ORIGIN for a trusted origin";
 pub fn allow(conn: *http.Conn, policy: Policy, a: std.mem.Allocator) bool {
+    conn.cors_origin = null;
+    conn.cors_vary = policy.cors_origins.len > 0;
     if (conn.path.len == 0 or conn.path[0] != '/' or std.mem.indexOfScalar(u8, conn.path, '#') != null or invalidTarget(conn.path)) {
         conn.close = true;
         conn.sendError(a, 400, "Unsupported HTTP request target", null) catch {};
         return false;
     }
-    const reason = policy.blocked(conn.headers) orelse return true;
+    const reason = policy.blocked(conn.headers) orelse {
+        conn.cors_origin = policy.corsOrigin(conn.headers);
+        if (policy.cors_origins.len > 0 and std.mem.eql(u8, conn.method, "OPTIONS") and conn.header("Access-Control-Request-Method") != null) {
+            @import("cors.zig").preflight(conn, a);
+            return false;
+        }
+        return true;
+    };
     const body: []const u8 = switch (reason) {
         .host => "{\"error\": {\"message\": \"" ++ host_message ++ "\", \"type\": \"invalid_request_error\"}}",
         .origin => "{\"error\": {\"message\": \"" ++ origin_message ++ "\", \"type\": \"invalid_request_error\"}}",
