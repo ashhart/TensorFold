@@ -135,7 +135,7 @@ fn check(world: usize, owner: u32, chunks: []const usize, seed: u64) !void {
     var out: [max_chunk]u64 = undefined;
     var pos: usize = 0;
     for (chunks) |rows| {
-        if (!fetch.fetches(true, owner, pos, rows, trash * page)) return error.PastTheRoom;
+        if (pos + rows > trash * page) return error.PastTheRoom;
         for (0..layers) |l| {
             w.wire_n = null;
             var order: [3]usize = undefined; // the owner first: a broadcast's receivers take what its root posted
@@ -184,13 +184,34 @@ test "GLM owner fetch: 200 random streams" {
 }
 
 test "GLM owner fetch: a chunk fetches only on owner-only rows of a prompt, and only while its rows fit the room" {
-    try std.testing.expect(fetch.fetches(true, 0, 10, 5, 15));
-    try std.testing.expect(!fetch.fetches(true, 0, 10, 6, 15));
-    try std.testing.expect(!fetch.fetches(false, 1, 0, 4, 15)); // a decode or verify window: its owner attends
-    try std.testing.expect(!fetch.fetches(true, null, 0, 4, 15)); // every rank holds every row
-    try std.testing.expectEqual(@as(usize, 262_144), fetch.roomRows(256 << 20, 512)); // TP=2's room at 4,096 rows
+    const two: fetch.Away = .{ .heads = 32, .to = 1 }; // TP=2: the other rank's 32 heads
+    try std.testing.expect(fetch.fetches(true, 0, 10, 5, 15, two));
+    try std.testing.expect(!fetch.fetches(true, 0, 10, 6, 15, two));
+    try std.testing.expect(!fetch.fetches(false, 1, 0, 4, 15, two)); // a decode or verify window: its owner attends
+    try std.testing.expect(!fetch.fetches(true, null, 0, 4, 15, two)); // every rank holds every row
+    try std.testing.expectEqual(@as(usize, 131_072), fetch.roomRows(128 << 20, 512)); // TP=2's room by default: 2,048-row chunks
+    try std.testing.expectEqual(@as(usize, 262_144), fetch.roomRows(256 << 20, 512)); // and with TF_GLM_CHUNK_SOLO=4096
     try std.testing.expectEqual(fetch.From.pages, fetch.from(1, 1));
     try std.testing.expectEqual(fetch.From.room, fetch.from(1, 0));
+}
+
+test "GLM owner fetch: a chunk fetches only while its history's broadcast moves no more bytes than its exchange" {
+    const room = 131_072;
+    const big = 1 << 30; // a room that never binds: the byte rule alone
+    const two: fetch.Away = .{ .heads = 32, .to = 1 };
+    // TP=2, a row 1,024 bytes: the broadcast moves host_pos rows, the exchange 2 x rows x 32
+    try std.testing.expect(fetch.fetches(true, 0, room - 2048, 2048, room, two)); // full chunks: every one in the room
+    try std.testing.expect(fetch.fetches(true, 0, 64 * 200, 200, big, two)); // equal bytes: the fetch
+    try std.testing.expect(!fetch.fetches(true, 0, 64 * 200 + 1, 200, big, two));
+    try std.testing.expect(!fetch.fetches(true, 0, 60_000, 200, room, two)); // a follow-up: 58.6 MiB a layer against 12.5
+    try std.testing.expect(!fetch.fetches(true, 0, 100_000, 1, room, two)); // a 1-row tail: 97.7 MiB against 64 KiB
+    try std.testing.expect(fetch.fetches(true, 0, 64, 1, room, two) and !fetch.fetches(true, 0, 65, 1, room, two));
+    try std.testing.expect(fetch.fetches(true, 1, 0, 1, room, two)); // a first chunk has no history to move
+    // TP=3 (22, 21, 21 heads): the broadcast reaches two ranks; the exchange moves the other two ranks' heads
+    const from0: fetch.Away = .{ .heads = 42, .to = 2 };
+    const from1: fetch.Away = .{ .heads = 43, .to = 2 };
+    try std.testing.expect(fetch.fetches(true, 0, 42 * 100, 100, big, from0) and !fetch.fetches(true, 0, 42 * 100 + 1, 100, big, from0));
+    try std.testing.expect(fetch.fetches(true, 1, 43 * 100, 100, big, from1) and !fetch.fetches(true, 1, 43 * 100 + 1, 100, big, from1));
 }
 
 test "GLM owner fetch: mutants are caught" {
