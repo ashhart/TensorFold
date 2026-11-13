@@ -317,12 +317,8 @@ fn mixMathRatio(want: []const f64, got: []const f32, W: u32, rows: u32, k: i32) 
 }
 
 fn gateMixMath(want: []const f64, got: []const f32, W: u32, rows: u32, H: u32) !void {
-    var k: i32 = 16;
-    var ratio = mixMathRatio(want, got, W, rows, k);
-    while (ratio > 0.5 and k > 1) {
-        k -= 1;
-        ratio = mixMathRatio(want, got, W, rows, k);
-    }
+    const k: i32 = 16;
+    const ratio = mixMathRatio(want, got, W, rows, k);
     const margin: f64 = if (ratio > 0) 1.0 / ratio else std.math.inf(f64);
     std.debug.print("mixAs f32 no-bf16 vs dump 2^-{d} margin {d:.2}x ({d} heads, {d} rows)\n", .{ k, margin, H, rows });
     try std.testing.expect(ratio <= 0.5);
