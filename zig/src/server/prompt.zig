@@ -12,7 +12,7 @@ const Value = json.Value;
 const Cx = errors.Cx;
 
 /// With image input, `ids` holds each image's tokens, `images` the images and `cache_key` the prompt the cache matches.
-pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{} };
+pub const Rendered = struct { ids: []const u32, history_len: usize = 0, rewind_len: usize = 0, user_end: usize = 0, images: []const api.Image = &.{}, cache_key: []const u32 = &.{}, frames: []const ?api.Size = &.{} };
 
 /// Where lessons decide to act on a reply: the row before the generation prompt's `<think>`, else before its last.
 pub fn decideOf(srv: *const Server, ids: []const u32) u32 {
@@ -158,7 +158,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
     if (history_len > 0) history_len = continuedLen(srv, cx, input.messages, input.tools, thinking, effort, history, history_len);
     // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
-    if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
+    if (try images.expandWith(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len, input.image_bytes)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key, .frames = x.frames };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len, .user_end = userEnd(input.messages, history_len) };

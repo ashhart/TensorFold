@@ -116,6 +116,8 @@ pub const FrameSink = vision_types.FrameSink;
 pub const PreparedVideo = vision_types.PreparedVideo;
 pub const VideoOffer = vision_types.VideoOffer;
 pub const VisionOpen = vision_types.VisionOpen;
+pub const Size = vision_types.Size;
+pub const ocr = @import("engine_ocr.zig");
 
 pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
@@ -223,6 +225,7 @@ pub const Info = struct {
     pictures: bool = false,
     /// Image input (--vision); null: text only.
     vision: ?Vision = null,
+    ocr: ?ocr.Ocr = null, // OCR reader for /v1/ocr; null: no OCR route
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// The learner reads conversation prompts at any length through taps.
@@ -248,15 +251,8 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
-
-/// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
-pub const Ledger = struct {
-    ctx: *anyopaque,
-    total: u64,
-    cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
-    standing: kv_ledger.Standing = .{}, // streams paid at load, in `total`: the engine's own sequence (#1943)
-};
+pub const Admit = @import("engine_admission.zig").Admit;
+pub const Ledger = @import("engine_admission.zig").Ledger;
 
 pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
 pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
@@ -378,18 +374,12 @@ pub const Opened = struct {
     follow: ?*const fn (*anyopaque) anyerror!void = null,
 };
 
-pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
-
 /// A backend's words for its own refusals (a request it cannot serve); null: the error's name.
 pub const Explain = struct { ctx: ?*anyopaque = null, text: *const fn (ctx: ?*anyopaque, err: anyerror) ?[]const u8 };
 
-/// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
-pub const MemorySource = struct {
-    ctx: ?*anyopaque = null,
-    read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
-};
-
 pub const HealthSource = @import("engine_status.zig").HealthSource;
+pub const Memory = @import("engine_status.zig").Memory;
+pub const MemorySource = @import("engine_status.zig").MemorySource;
 pub const Status = @import("engine_status.zig").Status;
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale, InvalidRequest, MemoryPressure }; // Stale: put-back has not reached the device

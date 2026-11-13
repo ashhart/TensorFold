@@ -5,6 +5,19 @@ const kv = @import("kv_pool.zig");
 /// Where a pass resumes and the marks it keeps states at (`marks` the store's allocation, freed by `free`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
+/// What a pass asks the store about (prompt_radix.Query as a family on the core pool gives it).
+pub const Query = struct {
+    /// The words the store compares: the request's cache key, one word a model row; for text, the prompt.
+    key: []const u32,
+    /// The prompt's length; a key of another length reuses nothing.
+    prompt_len: u32,
+
+    /// A query of `key` alone, as long as its prompt.
+    pub fn of(key: []const u32) Query {
+        return .{ .key = key, .prompt_len = @intCast(key.len) };
+    }
+};
+
 /// The store as a family sees it: a prompt pass begins, keeps at its marks, and reports once its prompt is in.
 pub const Prompts = struct {
     ctx: *anyopaque,
@@ -12,20 +25,20 @@ pub const Prompts = struct {
 
     pub const VTable = struct {
         /// The deepest state `prompt` resumes: its pages into `adopt` (held once more), the rest restored into `owner`.
-        begin: *const fn (ctx: *anyopaque, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!Plan,
+        begin: *const fn (ctx: *anyopaque, q: Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!Plan,
         /// At `at` the store takes the pages of `mine` it lacks and the state; `path`'s first n replace the stream's.
-        keep: *const fn (ctx: *anyopaque, prompt: []const u32, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize,
+        keep: *const fn (ctx: *anyopaque, q: Query, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize,
         /// One log line after a prompt pass: where it resumed and how many states it kept.
         report: *const fn (ctx: *anyopaque, prompt: usize, from: u32, kept: u64) void,
         free: *const fn (ctx: *anyopaque, marks: []const u32) void,
     };
 
-    pub fn begin(p: Prompts, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) !Plan {
-        return p.vtable.begin(p.ctx, prompt, history_len, shared, owner, adopt);
+    pub fn begin(p: Prompts, q: Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) !Plan {
+        return p.vtable.begin(p.ctx, q, history_len, shared, owner, adopt);
     }
 
-    pub fn keep(p: Prompts, prompt: []const u32, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
-        return p.vtable.keep(p.ctx, prompt, at, owner, mine, path);
+    pub fn keep(p: Prompts, q: Query, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
+        return p.vtable.keep(p.ctx, q, at, owner, mine, path);
     }
 
     pub fn report(p: Prompts, prompt: usize, from: u32, kept: u64) void {
@@ -37,8 +50,8 @@ pub const Prompts = struct {
     }
 
     /// `begin`, its marks in `gpa` for a lane to own; a failure gives `adopt`'s pages back.
-    pub fn plan(p: Prompts, gpa: std.mem.Allocator, pool: *kv.Pool, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) !Plan {
-        const got = try p.begin(prompt, history_len, shared, owner, adopt);
+    pub fn plan(p: Prompts, gpa: std.mem.Allocator, pool: *kv.Pool, q: Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) !Plan {
+        const got = try p.begin(q, history_len, shared, owner, adopt);
         defer p.free(got.marks);
         const marks = gpa.dupe(u32, got.marks) catch |e| {
             for (adopt.items) |id| pool.release(id);
@@ -48,13 +61,13 @@ pub const Prompts = struct {
     }
 
     /// At mark `at` the store takes the stream's pages and state; pages it held replace `l`'s, the whole table written.
-    pub fn keepPages(p: Prompts, gpa: std.mem.Allocator, pool: *kv.Pool, l: *kv.Lease, prompt: []const u32, at: usize, owner: *anyopaque, page_tokens: usize, table: kv.Table) !bool {
+    pub fn keepPages(p: Prompts, gpa: std.mem.Allocator, pool: *kv.Pool, l: *kv.Lease, q: Query, at: usize, owner: *anyopaque, page_tokens: usize, table: kv.Table) !bool {
         const n = at / page_tokens;
         const path = try gpa.alloc(u32, n);
         defer gpa.free(path);
         const mine = try gpa.dupe(u32, l.ids.items);
         defer gpa.free(mine);
-        const shared = p.keep(prompt, @intCast(at), owner, mine[0..n], path);
+        const shared = p.keep(q, @intCast(at), owner, mine[0..n], path);
         if (std.mem.eql(u32, mine[0..shared], path[0..shared])) return shared == n;
         @memcpy(mine[0..shared], path[0..shared]); // the same tokens' rows: a resume from any row is exact
         try table.write(table.ctx, mine, 0);
@@ -163,10 +176,10 @@ const Stub = struct {
     fn of(ctx: *anyopaque) *Stub {
         return @ptrCast(@alignCast(ctx));
     }
-    fn begin(_: *anyopaque, _: []const u32, _: u32, _: []const u32, _: *anyopaque, _: *std.ArrayList(u32)) anyerror!Plan {
+    fn begin(_: *anyopaque, _: Query, _: u32, _: []const u32, _: *anyopaque, _: *std.ArrayList(u32)) anyerror!Plan {
         return .{ .from = 256, .marks = try testing.allocator.dupe(u32, &.{512}) };
     }
-    fn keep(ctx: *anyopaque, _: []const u32, _: u32, _: *anyopaque, mine: []const u32, path: []u32) usize {
+    fn keep(ctx: *anyopaque, _: Query, _: u32, _: *anyopaque, mine: []const u32, path: []u32) usize {
         @memcpy(path, Stub.of(ctx).held[0..mine.len]);
         return mine.len;
     }
@@ -203,7 +216,7 @@ test "keeping swaps the store's pages in and writes the whole table: a table of 
     const p: Prompts = .{ .ctx = &stub, .vtable = &Stub.vtable };
     var w: Written = .{};
     var owner: u8 = 0;
-    const whole = try p.keepPages(testing.allocator, &pool, &l, &.{ 1, 2, 3 }, 512, &owner, 256, .{ .ctx = &w, .write = Written.write });
+    const whole = try p.keepPages(testing.allocator, &pool, &l, .of(&.{ 1, 2, 3 }), 512, &owner, 256, .{ .ctx = &w, .write = Written.write });
     try testing.expect(whole);
     try testing.expectEqual(@as(usize, 0), w.from);
     try testing.expectEqual(@as(usize, 4), w.cap);
@@ -221,7 +234,7 @@ test "a plan's marks are the lane's own; a blob's pages come from the pool and g
     var adopt: std.ArrayList(u32) = .empty;
     defer adopt.deinit(testing.allocator);
     var owner: u8 = 0;
-    const got = try p.plan(testing.allocator, &pool, &.{1}, 1, &.{}, &owner, &adopt);
+    const got = try p.plan(testing.allocator, &pool, .of(&.{1}), 1, &.{}, &owner, &adopt);
     defer testing.allocator.free(got.marks);
     try testing.expectEqual(@as(u32, 256), got.from);
     try testing.expectEqualSlices(u32, &.{512}, got.marks);

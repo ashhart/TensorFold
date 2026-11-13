@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -168,11 +168,11 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 ## Rerank
 
 `POST /v1/rerank` (also `/rerank`, and by `PUT` as SGLang takes it) scores each document against a query with a
-reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`: the engine declares the reranker and
-its label tokens (`1_LogitScore/config.json`), and its startup line says `qwen3 reranker`. Every other server answers
-the route with HTTP 400 "this model is not a reranker", and a reranker server answers chat, completion, Responses,
-Messages, speech, decision, System One and embedding requests with HTTP 400 "this model is a reranker: use POST
-/v1/rerank".
+reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`, and the native CUDA engine `-0.6B`, `-4B`
+and `-8B`: the engine declares the reranker and its label tokens (`1_LogitScore/config.json`), and its startup line
+says `qwen3 reranker`. Every other server answers the route with HTTP 400 "this model is not a reranker", and a
+reranker server answers chat, completion, Responses, Messages, speech, decision, System One and embedding requests
+with HTTP 400 "this model is a reranker: use POST /v1/rerank".
 
 | Field | Meaning |
 | --- | --- |
@@ -192,6 +192,95 @@ instruction as plain text (text that spells a special token stays text). The sco
 context window before the first is scored, so a refused request costs no GPU work; a prompt past the window (with a
 `max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
 400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
+
+## OCR
+
+The native HIP engine reads page images through Mistral's OCR contract when it serves a model with an OCR reader
+and `--vision`.
+
+| Route | Contract | Request | Reply | Written for |
+| --- | --- | --- | --- | --- |
+| `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+
+One family has a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
+orientation), never in the model's resized frame.
+
+| Model | What the reader returns | Geometry |
+| --- | --- | --- |
+| dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
+
+Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
+and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
+Embedding, reranker and readout engines refuse the OCR route as they refuse chat. The route takes the `inference`
+key scope.
+
+### Reader Markdown
+
+The reader writes block text in one Markdown flavour, the one Mistral's page Markdown uses:
+
+- Headings with `#` markers: a title is `#`, a section header `##` unless the model gives a level.
+- GFM pipe tables, or one HTML `<table>` when a table has row or column spans a pipe table cannot hold; a table
+  block holds exactly one table.
+- Display math as `$$…$$` and inline math as `$…$`, the LaTeX kept as the model wrote it.
+- Lists with `-` or `1.` markers, and code in fenced blocks.
+- No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
+  own image references.
+
+### Pages and budgets
+
+- Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
+  16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
+  decoded pixels disagree is refused as bad input.
+- PDF documents and `pages` are not read: a PDF document is HTTP 400 "PDF documents are not read on POST /v1/ocr;
+  send each page as a PNG, JPEG or WebP image", and any non-null `pages` is HTTP 400 "pages selects pages of a PDF
+  document; POST /v1/ocr reads one page image".
+- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, at most 32 MiB.
+  `http://` URLs are refused.
+- Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
+  pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
+  page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
+  file); without it `include_image_base64` is HTTP 400.
+
+The page is read as one user turn (the page image, then the reader's prompt), greedy, with thinking off and
+`max_tokens` equal to all the context the prompt leaves. It succeeds only when the reply stops on its end token
+and the reader can parse it.
+
+### Failures
+
+| Failure | Mistral |
+| --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
+| Engine fault or out of memory | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
+
+An unreadable page's message names its index, and the model's raw text goes to the server log, never to the
+client. 422 means the same request fails the same way again under greedy decoding; a 503 carries `Retry-After`.
+A client that disconnects stops the request before its page is read.
+
+### Mistral: `POST /v1/ocr`
+
+| Field | Meaning |
+| --- | --- |
+| `model` | Any string or null. The reply names the requested id when it is the served name or an `--alias`, else the served name, so `--alias mistral-ocr-latest` lets copied examples echo it |
+| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes must be a PNG, JPEG or WebP image; a PDF is HTTP 400 (above). `{"type": "file"}` is HTTP 400 |
+| `pages` | Any non-null value is HTTP 400 (above): an image has one page |
+| `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
+| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
+| `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
+| `image_limit`, `image_min_size` | Choose which pictures to keep, in reading order (`image_min_size` against the box's width and height, then the running count against `image_limit`). A dropped picture has no image entry, Markdown link or block |
+| `include_image_base64` | Add `image_base64`, a `data:image/jpeg;base64,...` crop of the picture's box, to each kept image |
+| `confidence_scores_granularity` | Accepted; no scores are returned |
+| `bbox_annotation_format`, `document_annotation_format`, `document_annotation_prompt` | Any non-null value is HTTP 400 "annotations are not supported" |
+
+`null` means absent for every optional field, and unknown keys are ignored. Each page carries `index`, `markdown`
+(blocks joined by a blank line, pictures as `![img-N.jpeg](img-N.jpeg)`), `images`, `tables`, `header`, `footer`,
+`dimensions` (`dpi`, `height`, `width`) and `blocks`; `hyperlinks` is left out. A block has `type` (`text`,
+`title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
+`content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
+blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size. An
+image's `dimensions.dpi` is 72.
 
 ## System One on a Clef engine
 
@@ -706,16 +795,40 @@ A startup capacity estimate is not a measured release capacity.
 
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
-model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from the
-host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start it
-with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
-when you know the machine's headroom: a larger one leaves more for other work, a smaller one more for KV caches. The
-reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
-GPU's memory can freeze the host, so lower it only with room to spare.
+model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
+`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
+model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
+the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
+once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
+with a smaller `--context` or `--parallel`.
+`TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
+one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
+workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
+only with room to spare.
 
-On a discrete card (an RTX 3090, an A100) the server sizes its window from the card's own free memory, as the driver
-reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
-0.5 GiB up.
+On a discrete card (an RTX 3090, an A100) the budget is the card's own free memory, as the driver reports it, less a
+reserve of a 32nd of the card and at least 1 GiB, and the plan is the same. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that
+one from 0.5 GiB up.
+
+With pages, the plan takes the engine's own window first, then each other stream's fixed part, then the prompt cache:
+a named `--prompt-cache-gib` comes before every window but the engine's own, and an unnamed one after the whole
+windows the budget holds, half of what they leave but at least 16 GiB and at most all of it (#2987 shows what that
+does to `TF_KV_SHARE`'s states). The cache then holds the kept states (on GLM with `TF_KV_SHARE`, a slot a state, the
+rest of it made pages), and the rest of the budget becomes pages, up to the streams' windows plus the cache's pages.
+The settings that decide each part:
+
+| Setting | Kind | Scope | Unset | What it decides | Read in |
+|---|---|---|---|---|---|
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | environment | the host: every CUDA native family, each rank at load | a tenth of RAM, at least 4 GiB (unified); a 32nd of the card, at least 1 GiB (discrete) | what the budget leaves free | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` | environment | the host: every CUDA native family, each rank at load | none | a cap on the budget, the weights included | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `--context` | flag | the launch | the family's default, capped at the model's own window | a stream's window; `0` takes the model's own | `zig/src/server/cli.zig`, `zig/src/native/cuda_window.zig` |
+| `--parallel` | flag | the launch | `auto`: up to 8 | the streams | `zig/src/server/cli.zig` |
+| `--prompt-cache-gib` | flag | the launch | after the whole windows, as above | the prompt cache's budget | `zig/src/server/cli.zig`; unset, `zig/src/native/cuda_kv_pool.zig` (`budgetOf`) and `cuda_memory.zig` |
+| `TF_KV_SHARE` | environment, in the profile registry | the launch, on the families of the core page adapter | off: copies | prompts kept as pool pages, with at most this many states past them | `zig/src/core/kv_prompts.zig` |
+| `TF_GLM_KV_HOST_GIB` | environment | GLM | one window and 16 pages | GLM's host KV pages with `TF_GLM_KV_HOST=1`, outside the device pool | `zig/src/families/glm/cuda_kv_host.zig` |
+| the pool's pages | none | the core plan | — | what is left | `zig/src/core/kv_pool.zig` (`plan`) |
+
+Measured numbers for one launch are in #3000.
 
 ## Compaction
 

@@ -162,7 +162,7 @@ concurrent one its run alone.
 | DFlash2 | Prose, 16 streams | 526.0 | 583.6 |
 
 One-stream runs are `tools/bench_openai.py` at 512 tokens and stream runs `tools/bench_concurrent.py` at 256. DFlash2's
-weights are CC BY-NC-ND 4.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
+weights are Apache-2.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
 are unchanged at about 4,430 tok/s from 8K to 131K tokens, and a repeated code reply reaches about 850 tok/s with
 windows of up to 32 rows. Other GPUs and rank counts are not covered here.
 
@@ -249,6 +249,15 @@ without solo at 3, with the same tokens; in another, 8 pieces without solo staye
 Long prompts and long runs of replies heat a GB10. The runbook's [heat bands](../../RUNBOOK.md#linux-and-cuda) (with a
 1,035,295-token prompt at TP=3), [CPU pinning](../../RUNBOOK.md#gb10-cpu-pinning-for-long-cuda-runs) and
 [GPU clock cap](../../RUNBOOK.md#gb10-gpu-clock-cap-for-long-cuda-runs) each carry a measured GLM-5.3-Flash run.
+
+## Windows past 1,048,576 tokens
+
+GLM-5.3-Flash's attention keeps no rotary positions (`qk_rope_head_dim` is 0, and KDA keeps none), so only its trained
+length, config.json's 1,048,576 tokens, bounds the window. `TF_GLM_CONTEXT_CEILING` sets the window `--context` may ask
+for and `--context 0` serves. GLM reads it at its open, and the startup log says when the window passes the trained
+length, past which the quality is the operator's to check. On three GB10s with `Bizuayeu/GLM-5.3-Flash-XSFP4`,
+`TF_GLM_CONTEXT_CEILING=2097152`, `--context 2097152 --parallel 1` and no prompt cache, rank 0 took 4,097 KV pages, and
+a 1,996,430-token prompt answered all three of its passphrases.
 
 ## Shared KDA operator
 

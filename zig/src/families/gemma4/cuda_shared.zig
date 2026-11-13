@@ -108,7 +108,7 @@ pub fn opening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
     var adopted = false;
     errdefer if (!adopted) for (adopt.items) |id| x.pool.?.release(id);
     const pr = if (s.images.len == 0) x.prompts else null;
-    const plan: core.kv_prompts.Plan = if (pr) |p| try p.begin(prompt, s.history_len, s.shared_prefixes, s, &adopt) else .{};
+    const plan: core.kv_prompts.Plan = if (pr) |p| try p.begin(.of(prompt), s.history_len, s.shared_prefixes, s, &adopt) else .{};
     var l: Lane = .{ .slot = slot, .last = x.slot_bufs[2 * slot].ptr, .rule = x.slot_bufs[2 * slot + 1].ptr, .marks = plan.marks, .shared = pr != null };
     errdefer {
         x.m.caps[slot] = 0;
@@ -147,7 +147,7 @@ pub fn marked(x: anytype, s: *Stream, l: anytype, at: usize) !void {
     if (std.mem.indexOfScalar(u32, l.marks, @intCast(at)) != null) {
         const M = Map(@TypeOf(x));
         var map: M = .{ .x = x, .slot = l.slot };
-        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, s, fwd.pages.tokens, .{ .ctx = &map, .write = M.write })) l.kept += 1;
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, .of(s.prompt()), at, s, fwd.pages.tokens, .{ .ctx = &map, .write = M.write })) l.kept += 1;
     }
     if (at == s.prompt().len) pr.report(at, s.cached, l.kept);
 }
