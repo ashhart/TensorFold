@@ -249,5 +249,6 @@ test {
     _ = @import("device_test.zig");
     _ = @import("tcp_test.zig");
     _ = @import("fate_test.zig");
+    _ = @import("sealed_test.zig");
     _ = @import("fate_lifetime_test.zig");
 }

@@ -72,6 +72,35 @@ pub const Seal = struct {
         s.at += n;
         return n;
     }
+
+    /// Opened bytes no reader has taken yet: a socket that shows nothing to read may still have these.
+    pub fn waiting(s: *const Seal) usize {
+        return s.end - s.at;
+    }
+};
+
+/// A record arriving in pieces, for a reader with deadlines: it fills `want` from its socket, then calls `fed`.
+pub const Arriving = struct {
+    wire: [max_record]u8 = undefined,
+    have: usize = 0,
+
+    fn end(a: *const Arriving) Error!usize {
+        return if (a.have < head_len) head_len else head_len + try Seal.bodyLen(a.wire[0..head_len]);
+    }
+
+    /// Where the record's next bytes go: the rest of its head, then of its body. A head no record has is refused here.
+    pub fn want(a: *Arriving) Error![]u8 {
+        return a.wire[a.have..try a.end()];
+    }
+
+    /// `n` more bytes are in `want`. A record that is whole is opened into `seal`, whose `take` then has its bytes.
+    pub fn fed(a: *Arriving, seal: *Seal, n: usize) Error!void {
+        a.have += n;
+        const whole = try a.end();
+        if (a.have < head_len or a.have < whole) return;
+        a.have = 0;
+        try seal.open(a.wire[0..head_len], a.wire[head_len..whole]);
+    }
 };
 
 const Pair = struct {
@@ -154,4 +183,50 @@ test "security: the wire shows none of the bytes a record carries" {
     try std.testing.expectEqual(head_len + words.len + tag_len, len);
     try std.testing.expect(std.mem.indexOf(u8, wire[0..len], "prompt") == null);
     try std.testing.expect(std.mem.indexOf(u8, wire[0..len], "4021") == null);
+}
+
+test "rank seal: a record that arrives a few bytes at a time opens once it is whole, and not before" {
+    var p = Pair.of("the group's key");
+    const words = "prompt token ids: 17 4021 9 88213";
+    var first: [max_record]u8 = undefined;
+    var second: [max_record]u8 = undefined;
+    const a = p.connector.seal(words, &first);
+    const b = p.connector.seal("stop", &second);
+    var stream: [2 * max_record]u8 = undefined;
+    @memcpy(stream[0..a], first[0..a]);
+    @memcpy(stream[a..][0..b], second[0..b]);
+    var arriving: Arriving = .{};
+    var got: [words.len + 4]u8 = undefined;
+    var read: usize = 0;
+    var at: usize = 0;
+    while (at < a + b) {
+        // a socket gives what it has: here three bytes at most, never past the record it is in
+        const want = try arriving.want();
+        const n = @min(3, want.len);
+        @memcpy(want[0..n], stream[at..][0..n]);
+        at += n;
+        try arriving.fed(&p.acceptor, n);
+        // nothing of a record can be read until its tag has been checked
+        if (at < a) try std.testing.expectEqual(@as(usize, 0), p.acceptor.waiting());
+        read += p.acceptor.take(got[read..]);
+    }
+    try std.testing.expectEqualStrings(words ++ "stop", &got);
+}
+
+test "security: a record altered on its way, or a head no record has, is refused piece by piece too" {
+    var p = Pair.of("the group's key");
+    var wire: [max_record]u8 = undefined;
+    const len = p.connector.seal("stop", &wire);
+    wire[head_len] ^= 1;
+    var arriving: Arriving = .{};
+    @memcpy((try arriving.want())[0..head_len], wire[0..head_len]);
+    try arriving.fed(&p.acceptor, head_len);
+    @memcpy(try arriving.want(), wire[head_len..len]);
+    try std.testing.expectError(error.RankSealBroken, arriving.fed(&p.acceptor, len - head_len));
+    try std.testing.expectEqual(@as(usize, 0), p.acceptor.waiting());
+    // a head that claims more than a record holds: refused before a byte is read for it, and from then on
+    var long: Arriving = .{};
+    @memcpy((try long.want())[0..head_len], &[_]u8{ 1, 64, 0, 0 });
+    try std.testing.expectError(error.RankSealBroken, long.fed(&p.acceptor, head_len));
+    try std.testing.expectError(error.RankSealBroken, long.want());
 }
