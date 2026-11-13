@@ -272,6 +272,7 @@ const macos_adapters = [_][]const u8{
     "test-flashnext-pack-cache",
     "test-gguf-linux-compile",
     "test-h3-modulation-bf16",
+    "test-h3-read-ahead",
     "test-masked-values-host",
     "test-metal-counters-host",
     "test-minimax-info-host",

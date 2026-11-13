@@ -1,7 +1,7 @@
 //! MiniMax H3 / FastH3's transformer on Metal in the checkpoint's bf16: one denoising forward over the packed rows.
 const std = @import("std");
 const mtl = @import("metal");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const tensors = @import("tensors.zig");
 const kernels = @import("h3_kernels");
 const block = @import("block.zig");
@@ -129,7 +129,7 @@ pub const Model = struct {
     }
 
     /// `checkpoint_dir`: the FastH3 transformer folder of `shards` files. `case`: tools/zig/h3_case.py's output.
-    pub fn load(gpa: std.mem.Allocator, checkpoint_dir: []const u8, shards: usize, case: *Tensors, options: Options) !*Model {
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, checkpoint_dir: []const u8, shards: usize, case: *Tensors, options: Options) !*Model {
         const device = try mtl.Device.init();
         if (!@import("source.zig").available(device)) return error.NeedsTensorUnits;
         const self = try gpa.create(Model);
@@ -143,6 +143,7 @@ pub const Model = struct {
         self.spent = @splat(0);
         self.checkpoint = try Checkpoint.open(gpa, device, checkpoint_dir, shards);
         const ck = &self.checkpoint;
+        try ck.readAhead(gpa, io);
         self.base = ck.entry("blocks.0.attn.qkv_proj.weight") != null;
         const prefix = if (self.base) "blocks" else "transformer_blocks";
         const to_q = ck.entry(if (self.base) "blocks.0.attn.qkv_proj.weight" else "transformer_blocks.0.attn.to_q.weight") orelse return error.MissingTensor;
