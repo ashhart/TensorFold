@@ -153,6 +153,7 @@ pub const landed_cuda = registry.cuda ++ @import("muse_cuda_records.zig").cuda +
     @import("glm_l2pf_pending.zig").records;
 pub const all_cuda = @import("qmmf_prompt_records.zig").records ++
     @import("moetile_records.zig").records ++
+    @import("qmmf_many_records.zig").records ++
     @import("gb10_many_records.zig").records ++
     @import("nvfp4_tile_pending.zig").records ++
     landed_cuda ++
@@ -183,4 +184,5 @@ test {
     _ = @import("inkling2_dflash2_metal_records.zig");
     _ = @import("zonos3_cuda_records.zig");
     _ = @import("hy4_ihc_hc_records.zig");
+    _ = @import("qmmf_many_records.zig");
 }
