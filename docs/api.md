@@ -707,11 +707,12 @@ A startup capacity estimate is not a measured release capacity.
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
 model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
-`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
-model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
-the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
-once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
-with a smaller `--context` or `--parallel`.
+`MemAvailable`, at most the free memory CUDA reports, less a reserve (a tenth of RAM, at least 4 GiB). CUDA does not
+count the page cache as free, so before loading, the server drops the checkpoint's own shards from it. On native CUDA
+a stream's window is `--context`, the model's own window at `--context 0`, or, when it is unset, the family's default
+capped at the model's own window; on the paged families the streams and pages then fill the budget up to the streams'
+windows plus the cache's pages, so once those exceed it, the free memory after load is the reserve. To leave room for
+other containers, start the server with a smaller `--context` or `--parallel`.
 `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
 one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
 workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it

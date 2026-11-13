@@ -8,6 +8,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const family_memory = @import("cuda_family_memory.zig");
 const pool = family_memory.pool;
+const page_drop = @import("cuda_page_drop.zig");
 const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
@@ -254,6 +255,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         },
     };
+    // unified memory: the checkpoint's cached pages leave the page cache before admission reads CUDA's free (#1857)
+    if ((try g.ctx.attribute(.integrated)) != 0) _ = page_drop.drop(a, io, o.dir);
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
@@ -514,6 +517,7 @@ test {
     _ = windows;
     _ = @import("cuda_startup_test.zig");
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
+    _ = page_drop;
     _ = refusals;
     _ = lane_backend;
     _ = snaps;
