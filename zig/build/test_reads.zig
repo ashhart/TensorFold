@@ -17,6 +17,8 @@ const reads = [_]struct { root: []const u8, files: []const []const u8 }{
     .{ .root = "zig/src/server/root.zig", .files = &.{
         "zig/src/families/deepseek_v41/fixtures/serve/mini_tokenizer.json",
         "zig/src/families/deepseek_v41/fixtures/serve/template.jsonl",
+        "packaging/grafana/tensorfold-engine.json",
+        "zig/src/server/metrics.zig",
     } },
     .{ .root = "zig/src/families/lfm2/lfm2.zig", .files = &.{"zig/tests/fixtures/lfm2/images.json"} },
 };
