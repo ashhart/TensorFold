@@ -153,7 +153,7 @@ zig/src/families/flashnext/cuda_ple_nvfp4_test.zig	742bef48f8ddbf7257c18ad78911d
 zig/src/families/flashnext/cuda_projection.zig	991edc6e63301f971d119e5787e6db6bacbfec2cbf6f30011ad873973000c4e5	raw	#1441 artifact identity
 zig/src/families/flashnext/cuda_projection_load.zig	750051ef542d43d7726ca43c33e3cad8d99e6ee07604c63f5df30164a8b0a940	raw	#1441 artifact identity
 zig/src/families/flashnext/cuda_projection_load_test.zig	bcbd6ed2753c863916a2163d1cf72544429c776365702e860f52cd22449354a1	raw
-zig/src/families/flashnext/cuda_prompt.zig	5d9f114591b86d35bf7964180a40d0819d6bc786aa56f0a87d1be204f08e0b7b	raw	#1441 artifact identity; #1442 artifact identity; #1443 artifact identity
+zig/src/families/flashnext/cuda_prompt.zig	ede3fcc5483e44833add5a1f17161107b3a2a5119b38cd662401afd6cdf0420f	raw	#1441 artifact identity; #1442 artifact identity; #1443 artifact identity
 zig/src/families/flashnext/cuda_prompt_load.zig	e51d065247748bfd96632c323e3df2306623dcd6495f0b17866d1b4070ace0f4	raw	#1441 artifact identity
 zig/src/families/flashnext/cuda_prompt_main.zig	2543cd166dc80cd97b1ca1ce930a6150f9d36b52ee231744606f83bf54f0669d	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_prompt_step.zig	e04030fb4a4fdb8780704a1bc0b5ba4b786159ab08a927fe32a636a893129d0c	raw
