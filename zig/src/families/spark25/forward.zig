@@ -324,11 +324,11 @@ pub const Model = struct {
         }
     }
 
-    /// Same-input affine-4 native projections share the GB10 grid; prompt and mixed widths keep their launches.
+    /// Same-input affine-4 decode projections share a grid on PDL or segmented-split devices; prompt routes stay put.
     pub fn projectMany(m: *const Model, k: *const kern.Kernels, s: cuda.Stream, ls: []const wts.Proj, x: u64, xs: u64, outs: []const u64, rows: usize, prompt: bool) !void {
         if (ls.len == 0 or ls.len != outs.len) return error.ShapeMismatch;
         const A = cuda.qlinear.Affine4Kernels;
-        if (k.affine.pdl and !prompt and ls.len >= 2 and ls.len <= A.segs_max) grouped: {
+        if ((k.affine.pdl or k.affine.split != null) and !prompt and ls.len >= 2 and ls.len <= A.segs_max) grouped: {
             var many: [A.segs_max]A.Out = undefined;
             for (ls, outs, many[0..ls.len]) |l, out, *v| {
                 if (l != .a4 or l.k() != ls[0].k()) break :grouped;

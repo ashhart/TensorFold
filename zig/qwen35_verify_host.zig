@@ -34,6 +34,7 @@ pub const Trace = struct {
         }
         if (id == 8) {
             const segs = @as(*const cuda.qlinear.Segs, @ptrCast(@alignCast(a[2].?))).*;
+            if (segs.count > 1) grouped += 1;
             for (segs.s[0..@intCast(segs.count)]) |seg| {
                 calls[count] = .{ .id = id, .x = x, .xs = xs, .out = seg.p.out, .rows = rows, .sk = seg.p.sk, .row_tiles = 1, .grid = gx, .shared = shared };
                 count += 1;
