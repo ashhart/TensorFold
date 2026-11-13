@@ -8,18 +8,18 @@ The change covers page geometry, constructors, write/read launch arguments, logi
 snapshot code/scale spans, including shared-prefix skipping. It retains the existing MTP page part.
 It introduces no new setting or default.
 
-## Host regressions
+## Reproduction
 
 Use the Zig version in `.zig-version`. These checks use synthetic inputs and recording CUDA calls:
 
 ```sh
-zig build test-glm-startup-host test-glm-fp8-kv-host test-glm-pages-host test-glm-tp3-host \
-  test-glm-snapshots-host test-glm-admission-host compile-glm-native-open compile-glm-fp8-gate-host
+zig build test-glm-startup-host test-glm-fp8-kv-host test-glm-pages-host \
+  test-glm-page-contract-host test-glm-snapshots-host test-glm-admission-host \
+  compile-glm-native-open compile-glm-fp8-gate-host
 ```
 
-Before the repair, two regression tests fail: explicit FP8 paging returns `Fp8OnPages`, and the synthetic
-DSA-plus-MTP layout charges 2,176 bytes per token instead of 1,160. The focused repaired run passes 76 tests.
-The additional tests inspect actual constructors, launch ABIs, logical token units and shuffled snapshot scales.
+These checks inspect startup refusal before construction, page geometry, constructors, launch ABIs, logical sparse
+token units, shuffled snapshot scales, numerical-case registration and the three paged-FP8 resource records.
 
 ## Synthetic device reference
 
@@ -31,9 +31,11 @@ The paged reference uses 513 keys, page table `[2, 0]`, a nonzero layer offset a
 It compares code and scale bytes with contiguous E4M3, then compares dense and sparse attention at both 16-head and
 32-head dispatch widths. A sparse row with zero selected keys preserves its output.
 
-The same cache implementation passed this numerical reference on a separate, pinned 1.2.7 integration build on GB10.
-That source also carried a repetition-processing repair. Its result is evidence for that integration build.
-The main-based contribution has host evidence only. Its device reference, full-model exactness, default-path and
-paged-path performance remain unrun. The three new paged-FP8 exports also require shared kernel-contract
-registrations, planted controls and measured launch-resource records before complete kernel qualification.
-The existing numerical reference supplies a separate scoped check.
+## Qualification status
+
+The shared kernel contract registers the paged writer and dense/sparse 16/32-head readers, with a swapped-page
+control for each case. The three launch records intentionally carry pending resource usage until the generated
+`glm_glue` image is measured for every supported compiler and SM target.
+
+Host checks establish routing, ownership and registration only. CUDA numerical execution, compiled resource
+measurements, full-model exactness, default-path performance and paged-path performance remain required device gates.
