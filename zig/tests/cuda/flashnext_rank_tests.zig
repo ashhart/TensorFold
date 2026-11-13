@@ -6,7 +6,7 @@ const flash = @import("flashnext");
 const check = @import("check.zig");
 const wire = flash.rank_wire;
 
-pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
+pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8, master: []const u8) !void {
     const modes = [_][]const u8{ "sum", "eof", "timeout", "missing", "eof-scatter", "timeout-scatter", "exchange" };
     for (modes) |m| {
         if (std.mem.eql(u8, m, mode_arg)) break;
@@ -17,12 +17,12 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
     const missing = std.mem.eql(u8, mode, "missing");
     const started = wire.now();
     if (missing) {
-        try std.testing.expectError(error.RankTimeout, wire.Link.open(gpu.io, "127.0.0.1", port, rank, 200));
+        try std.testing.expectError(error.RankTimeout, wire.Link.open(gpu.io, master, port, rank, 200));
         try check.expect(wire.now() - started < 3 * std.time.ns_per_s, "missing peer startup is bounded", .{});
         check.pass("rank {d}: missing peer startup timed out within bound", .{rank});
         return;
     }
-    const link = try wire.Link.open(gpu.io, "127.0.0.1", port, rank, 30_000);
+    const link = try wire.Link.open(gpu.io, master, port, rank, 30_000);
     defer link.close();
     var no_delay: c_int = 0;
     var option_len: std.posix.socklen_t = @sizeOf(c_int);
@@ -43,8 +43,11 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
         try check.sameBytes("fragmented control frame payload", &payload, "payload");
         try link.sendHeader(.{ .kind = .ack, .sequence = 1 }, until);
     }
+    const before = try gpu.ctx.memInfo();
+    const opened = wire.now();
     var collective = try flash.collective.Collective.init(link, rank, 30_000);
     defer collective.deinit();
+    check.pass("rank {d}: init {d} ms, {d} MiB of device memory", .{ rank, (wire.now() - opened) / std.time.ns_per_ms, (before.free -| (try gpu.ctx.memInfo()).free) >> 20 });
     // the peer's silence bounds the collective, not NCCL's initialization, which can take longer than this
     if (std.mem.eql(u8, mode, "timeout")) collective.timeout_ms = 200;
     var stream = try cuda.Stream.init(gpu.d, true);
@@ -61,7 +64,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
             if (std.mem.eql(u8, mode, "eof")) {
                 _ = std.c.shutdown(link.fd, std.posix.SHUT.RDWR);
             } else {
-                sleepSixTenths();
+                outlive();
             }
             check.pass("rank 1: injected {s}", .{mode_arg});
             return;
@@ -80,6 +83,11 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
         };
         return error.ExpectedRankFailure;
     }
+    var probe = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.asBytes(&@as(f32, 1)));
+    defer probe.free();
+    const returned = collective.lib.api.ncclAllReduce(probe.ptr, probe.ptr, 1, .f32, .sum, collective.comm, stream.handle);
+    try check.expect(returned == 0, "rank {d}: a collective returns enqueued, not in progress on NCCL's thread ({d})", .{ rank, returned });
+    try collective.finish(stream);
     for ([_]usize{ 0, 1, 17, 4099, 1_000_003 }, 0..) |count, seq| {
         const host = try gpu.gpa.alloc(f32, @max(1, count));
         defer gpu.gpa.free(host);
@@ -120,6 +128,7 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode_arg: []const u8) !void {
         };
     }
     try meet(link, rank, 99);
+    check.pass("rank {d}: a collective returns enqueued; {d} MiB of device memory after the collectives", .{ rank, (before.free -| (try gpu.ctx.memInfo()).free) >> 20 });
     check.pass("rank {d}: BF16 all-gather preserves every bit and rank column order for empty, scalar, tail and vocabulary-half rows", .{rank});
     check.pass("rank {d}: two-process chained NCCL FP32 sums exact for empty, scalar, tail and 1,000,003 values; fragmented framed control preserved", .{rank});
 }
@@ -141,9 +150,9 @@ fn completeSum(c: *flash.collective.Collective, stream: cuda.Stream, values: u64
     try c.finish(stream);
 }
 
-/// The injected 0.6 s peer delay; this POSIX-only NCCL test never runs on Windows.
-fn sleepSixTenths() void {
+/// The injected peer delay outlives rank 0's 3 s bound; this POSIX-only NCCL test never runs on Windows.
+fn outlive() void {
     if (builtin.os.tag == .windows) return;
-    const delay: std.c.timespec = .{ .sec = 0, .nsec = 600_000_000 };
+    const delay: std.c.timespec = .{ .sec = 4, .nsec = 0 };
     _ = std.c.nanosleep(&delay, null);
 }
