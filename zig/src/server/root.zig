@@ -392,6 +392,9 @@ test {
     _ = @import("audio_out.zig");
     _ = @import("flac.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_format_http_test.zig"); // over a Unix socket pair
+    _ = @import("speech_cli.zig");
+    _ = @import("speech_tempo.zig");
+    _ = @import("speech_tempo_http_test.zig");
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");

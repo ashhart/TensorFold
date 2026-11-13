@@ -14,6 +14,7 @@ const speech_sampling = @import("speech_sampling.zig");
 const speech_redraw = @import("speech_redraw.zig");
 const speech_register = @import("speech_register_log.zig");
 const audio_out = @import("audio_out.zig");
+const tempo = @import("speech_tempo.zig");
 const drama_cfg = @import("drama_cfg.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
@@ -39,7 +40,7 @@ const zonos_codes = "speaker_reference_codes";
 const zonos_clip = "ref_audio";
 
 /// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
-const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
+const modifier_fields = [_][]const u8{ "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
 
 pub const Format = audio_out.Format;
 
@@ -95,6 +96,8 @@ fn checkFields(cx: *Cx, body: Value, takes: Takes) errors.Refused!void {
             return cx.refuse("stream_format must be one of: audio, sse");
         } else if (std.mem.eql(u8, key, "sample_rate") or std.mem.eql(u8, key, "channels")) {
             continue; // checked with the format and stream in prepare
+        } else if (std.mem.eql(u8, key, "speed")) {
+            continue; // checked with the flag and stream in prepare
         } else if (speech_sampling.isField(key) or (takes.zonos and (std.mem.eql(u8, key, zonos_codes) or std.mem.eql(u8, key, zonos_clip)))) {
             continue; // validated together before building the prompt
         } else if (listed(&modifier_fields, key)) {
@@ -187,6 +190,17 @@ fn voiceRefs(srv: *Server, cx: *Cx, raw: Value) errors.Refused![]const @import("
             return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
     };
+}
+
+/// ``speed``: absent, null or 1 leaves the take as synthesized; 0.25 to 4 needs --speech-speed and a whole reply.
+fn speedOf(srv: *Server, cx: *Cx, value: Value, stream: bool) errors.Refused!f64 {
+    if (value == .null) return 1;
+    const speed = if (value == .int or value == .float) value.float64() orelse 0 else 0;
+    if (!(speed >= tempo.min_speed and speed <= tempo.max_speed)) return cx.refuse("speed must be a number from 0.25 to 4");
+    if (speed == 1) return 1;
+    if (!srv.config.speech.speed) return cx.refuse("speed other than 1 needs the server's --speech-speed flag");
+    if (stream) return cx.refuse("stream=true requires speed 1");
+    return speed;
 }
 
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
@@ -511,7 +525,7 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
     const cases = [_][2][]const u8{
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"voice\": \"default\", \"response_format\": \"wav\", \"speed\": null, \"references\": null}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_audio\": null}", "unknown speech request field: stream_audio" },
-        .{ "{\"model\": \"m\", \"input\": \"hi\", \"speed\": 1.0}", "speed is not supported by this model" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"speed\": 1.0}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": false, \"stream_format\": \"audio\"}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": null, \"stream_format\": null}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": \"yes\"}", "stream must be a boolean" },
