@@ -28,8 +28,8 @@ const max_steps: u32 = 200;
 const default_side: u16 = 1024;
 const default_steps: u32 = 50;
 const default_guidance: f32 = 3;
-/// Drawn seeds stay below 2^53, so a JavaScript client reads the reported seed exactly.
-const drawn_seeds: u64 = 1 << 53;
+/// The seed of a request that names none, as on main: picture i uses it plus i, so `n: 1` is unchanged.
+const default_seed: u64 = 42;
 
 /// The body fields this route answers; `quality` and every other key are refused by name.
 const served_fields = [_][]const u8{ "model", "prompt", "n", "size", "response_format", "negative_prompt", "seed", "steps", "guidance" };
@@ -180,12 +180,7 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
         return cx.fail(.request, "a prompt of {d} tokens exceeds the maximum allowed length of {d} tokens", .{ negative_ids.len, cap.max_prompt_tokens });
     var seeds: [4]u64 = @splat(0);
     for (seeds[0..@intCast(count)], 0..) |*value, index| {
-        if (seed) |given| {
-            value.* = given + @as(u64, @intCast(index));
-        } else {
-            srv.io.random(std.mem.asBytes(value));
-            value.* %= drawn_seeds;
-        }
+        value.* = (seed orelse default_seed) + @as(u64, @intCast(index));
     }
     return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seeds = seeds, .count = @intCast(count) };
 }

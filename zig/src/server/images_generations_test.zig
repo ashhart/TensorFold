@@ -288,6 +288,7 @@ test "omitted seed, steps, guidance, negative_prompt and size reach the engine a
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const item = (try json.parse(arena.allocator(), reply.body)).ok.get("data").?.array[0];
+    try t.expectEqual(@as(u64, 42), stub.seed);
     try t.expectEqual(stub.seed, try std.fmt.parseInt(u64, item.get("seed").?.int, 10));
     try t.expectEqual(@as(u32, 50), stub.steps);
     try t.expectEqual(@as(f32, 3), stub.guidance);
