@@ -54,13 +54,23 @@ pub const attention_io = blk: {
     break :blk s;
 };
 
+/// A chunk's two page bases for keys and values; a second page only when the chunk reaches it.
+const chunk_pages =
+    "  static_assert(PCK == 2 * TF_PAGE_TOKENS, \"a prompt chunk is two pages\");\n" ++
+    "  const bool p0 = kbeg < kend, p1 = kend > kbeg + TF_PAGE_TOKENS;\n" ++
+    "  const device bfloat* k0 = p0 ? q27_page_base(k, caches[0], kbeg, hk) : k;\n" ++
+    "  const device bfloat* k1 = p1 ? q27_page_base(k, caches[0], kbeg + TF_PAGE_TOKENS, hk) : k0;\n" ++
+    "  const device bfloat* v0 = p0 ? q27_page_base(v, caches[0], kbeg, hk) : v;\n" ++
+    "  const device bfloat* v1 = p1 ? q27_page_base(v, caches[0], kbeg + TF_PAGE_TOKENS, hk) : v0;\n";
+
 /// A prompt kernel's keys and values: no head stride (a page's head runs are inside it), each step based at its page.
 fn prompt(comptime text: []const u8) []const u8 {
     var s = text;
     s = edit(s, "caches[0].keys + (int64_t)hk * args.key_stride + h * PH", "caches[0].keys + h * PH", 1);
     s = edit(s, "caches[0].values + (int64_t)hk * args.value_stride + h * PH", "caches[0].values + h * PH", 1);
-    // every step (main's, the masked steps and the edge) based at its page
-    s = edit(s, "(r, kt, kend, q, k, v, xs", "(r, kt, kend, q, q27_page_base(k, caches[0], kt, hk), q27_page_base(v, caches[0], kt, hk), xs", 4);
+    // a 512-key chunk is two pages: their bases once, then every step (main's, masked, edge) picks its page's
+    s = edit(s, "caches[0].values + h * PH;\n", "caches[0].values + h * PH;\n" ++ chunk_pages, 1);
+    s = edit(s, "(r, kt, kend, q, k, v, xs", "(r, kt, kend, q, kt < kbeg + TF_PAGE_TOKENS ? k0 : k1, kt < kbeg + TF_PAGE_TOKENS ? v0 : v1, xs", 4);
     s = edit(s, "q27_nonfinite(v, max(seen, kbeg), kend, lane)", "q27_nonfinite_paged(v, caches[0], uint(hk), max(seen, kbeg), kend, lane)", 1);
     return s;
 }
