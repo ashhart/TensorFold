@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metal: MiniMax-M3, Spark2.5 and Llama take their NaN-aware bf16 argmax from one shared source; the compiled code is unchanged (#2949, part of #2251). Thanks to @jschmied.
+
 - Metal: the image towers of GLM, Step-5, Gemma 4 and Qwen share one source for bf16 rounding, threadgroup sum and max, row softmax and LayerNorm statistics; the compiled code is unchanged (#2948, part of #2251). Thanks to @jschmied.
 
 - Tests: the dashboard page's test runs on every OS, so Linux CI covers it, and no longer expects a paged prefix cache tile the page never had; `zig build test` passes on Macs again (#2946).
