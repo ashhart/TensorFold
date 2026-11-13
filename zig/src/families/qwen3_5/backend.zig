@@ -66,7 +66,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = self, .logit_bias = true, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -125,14 +125,14 @@ pub const Metal = struct {
         const self = cast(ptr);
         const cache = try self.cacheOf(stream);
         if (position != cache.len) return error.InvalidQwenPosition;
-        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
+        return try @import("draw.zig").biased(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{}, stream.logit_bias);
     }
 
     fn firstMaskedFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64, mask: []const u32) !u64 {
         const self = cast(ptr);
         const cache = try self.cacheOf(stream);
         if (position != cache.len) return error.InvalidQwenPosition;
-        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, mask);
+        return try @import("draw.zig").biased(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, mask, stream.logit_bias);
     }
 
     fn queueFn(ptr: *anyopaque, stream: *lanes.Stream, feed: be.Feed, position: u64) !u64 {
@@ -145,7 +145,7 @@ pub const Metal = struct {
         };
         try coverRows(cache, cache.len + 1);
         try fwd.run(self.model, &self.scratch, &.{.{ .cache = cache, .rows = 1 }}, &.{token}, false, .all);
-        return try draw(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{});
+        return try @import("draw.zig").biased(self.gpa, cache.logits.slice(u16, c.vocab), stream.sampling, position, &.{}, stream.logit_bias);
     }
 
     fn readFn(_: *anyopaque, handle: u64) !u32 {
@@ -178,7 +178,7 @@ pub const Metal = struct {
             if (o.sampled.len != w.rows() or o.drafts.len != w.tokens.len) return error.InvalidQwenOutputs;
             for (o.sampled, w.positions, 0..) |*t, p, r| {
                 const mask = if (w.masks.len > 0) w.masks[r * mask_words ..][0..mask_words] else &.{};
-                t.* = try draw(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask);
+                t.* = try @import("draw.zig").biased(self.gpa, logits[(base + r) * c.vocab ..][0..c.vocab], w.stream.sampling, p, mask, w.stream.logit_bias);
             }
             @memcpy(o.drafts, w.tokens);
             base += w.rows();
