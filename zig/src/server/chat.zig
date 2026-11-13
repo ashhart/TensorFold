@@ -64,6 +64,8 @@ pub const Sink = struct {
     /// Called only after admission, with cancellation and mailbox draining already guarded.
     begin: ?*const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void = null,
     tokens: ?*const fn (ctx: *anyopaque, offset: usize, ids: []const u32) error{Closed}!void = null,
+    /// A prompt's progress, for ``return_progress`` requests; null: the stream shows none, and the engine sends none.
+    progress: ?*const fn (ctx: *anyopaque, p: api.Progress) error{Closed}!void = null,
 };
 
 pub const Reply = struct {
@@ -234,6 +236,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     }
     request.logprobs = input.logprobs;
     request.prompt_logprobs = input.prompt_logprobs;
+    request.return_progress = flag(f, "return_progress") orelse false;
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
     const deadline: ?i96 = if (f.get("deadline_s")) |v| blk: {
         const s = (if (v == .bool) null else v.float64()) orelse return cx.refuse("deadline_s must be a number of seconds");
@@ -269,6 +272,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     if (srv.info.capability(.decides)) return cx.refuse("this model makes decisions and does not write text: use POST /v1/systemone");
     var stop_hook: StopHook = .{ .srv = srv, .stops = .{ .strings = stops_opt.strings } };
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
+    request.return_progress = request.return_progress and sink != null and sink.?.progress != null; // a stream that shows it
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
     defer box.deinit();
     if (sink != null) request.unread = &box.unread; // a streamed reply's reader can fall behind; a whole one cannot
