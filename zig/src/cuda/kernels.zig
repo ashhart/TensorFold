@@ -22,8 +22,7 @@ pub fn supports(capability: u32) ?bool {
     return covers(target_sms, capability);
 }
 
-/// Whether SASS for one of `sms` runs on a GPU of `capability`: the same SM or, below sm_90 where no image is
-/// arch-specific, one of the same major and an equal or lower minor (the driver runs sm_86 SASS on an sm_89 GPU).
+/// Whether SASS for one of `sms` runs on a `capability` GPU: the same SM or, below sm_90, a lower minor of its major.
 pub fn covers(sms: []const u32, capability: u32) bool {
     for (sms) |sm| {
         if (sm == capability) return true;
