@@ -289,8 +289,8 @@ pub const Gemma = struct {
         return if (x.pool != null) shared.opening(Lane, x, s) else shared.legacyOpening(Lane, x, s);
     }
 
-    /// Every image of the prompt through the embedder into the lane's buffer, in prompt order.
-    pub fn encodeImages(x: *Gemma, s: *Stream, l: *Lane) !void {
+    /// The images a pass resumed at `from` reads, through the embedder into the lane's buffer (laid out for all).
+    pub fn encodeImages(x: *Gemma, s: *Stream, l: *Lane, from: usize) !void {
         const v = x.vision orelse return error.GemmaServedWithoutVision;
         const p = s.prompt();
         var rows: usize = 0;
@@ -305,15 +305,22 @@ pub const Gemma = struct {
         const width = x.m.geo.hidden * 2;
         var buf = try cuda.DeviceBuffer.alloc(x.d, rows * width);
         errdefer buf.free();
-        var at: usize = 0;
-        for (s.images) |im| {
-            try v.encode(x.d, x.s, im.pixels, im.gh, im.gw, buf.ptr + at * width);
-            at += im.tokens;
-        }
+        const Encoder = struct {
+            x: *Gemma,
+            v: *cv.Vision,
+            base: u64,
+            width: usize,
+            pub fn encode(e: @This(), im: lanes.stream.Image, row: usize) !void {
+                try e.v.encode(e.x.d, e.x.s, im.pixels, im.gh, im.gw, e.base + row * e.width);
+            }
+        };
+        // a kept state holds the images before `from`: their rows are never spliced, so they are not encoded
+        try image_rows.encode(s.images, from, Encoder{ .x = x, .v = v, .base = buf.ptr, .width = width });
         l.images = buf;
     }
 
     const image_pool = @import("image.zig").pool;
+    const image_rows = @import("cuda_image_rows.zig");
 
     /// Whether position `p` cuts through an image (strictly inside its rows).
     fn insideImage(s: *const Stream, p: usize) bool {
@@ -355,16 +362,9 @@ pub const Gemma = struct {
             end = if (im.at > at) im.at else im.at + im.tokens;
         };
         var injects: [max_injects]fwd.Inject = undefined;
-        var n: usize = 0;
-        var off: usize = 0;
-        for (s.images) |im| {
-            if (im.at >= at and im.at + im.tokens <= end) {
-                if (n == injects.len) return error.GemmaImagesInChunk;
-                injects[n] = .{ .row = im.at - at, .rows = im.tokens, .src = l.images.?.ptr + off * x.m.geo.hidden * 2 };
-                n += 1;
-            }
-            off += im.tokens;
-        }
+        var whole: [max_injects]image_rows.Splice = undefined;
+        const n = try image_rows.splices(s.images, at, end, &whole);
+        for (whole[0..n], injects[0..n]) |sp, *in| in.* = .{ .row = sp.row, .rows = sp.rows, .src = l.images.?.ptr + sp.off * x.m.geo.hidden * 2 };
         const done = end == p.len;
         try x.run(&.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end], .images = injects[0..n] }}, true, end - at - 1, @intFromBool(done));
         l.tap = .{ .row = 0, .start = at, .rows = end - at, .gen = x.gen };
