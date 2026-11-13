@@ -373,3 +373,76 @@ fn unread() !void {
 test "Qwen stepped prefill: a chunk nothing reads stops its last layer at the keys" {
     try unread();
 }
+
+const forward = @import("cuda_forward.zig");
+const engine = @import("cuda_engine.zig");
+const geom = @import("cuda_geometry.zig");
+const layer_defs = @import("cuda_layers.zig");
+const Trace = @import("cuda_launch_trace.zig").Trace;
+
+fn fnHandle(n: usize) @import("cuda").Function {
+    return .{ .d = undefined, .handle = @ptrFromInt(n) };
+}
+
+test "Qwen stepped prefill: an unread chunk's last layer launches K/V, both head norms and RoPE, then stops" {
+    var trace = Trace.init(t.allocator);
+    defer trace.deinit();
+    @import("cuda_launch_trace.zig").active = &trace;
+    defer @import("cuda_launch_trace.zig").active = null;
+    const bf: layer_defs.Proj = .{ .bf = .{ .w = 0, .n = 1, .k = 1 } };
+    const attn: layer_defs.Attention = .{ .q = bf, .k = bf, .v = bf, .o = bf, .q_norm = 0, .k_norm = 0 };
+    const mlp: layer_defs.Mlp = .{ .dense = .{ .gate = bf, .up = bf, .down = bf } };
+    const one = layer_defs.Layer{ .input_norm = 0, .post_norm = 0, .mlp = mlp, .mixer = .{ .attention = attn } };
+    var ls = [_]layer_defs.Layer{one};
+    const g: geom.Geometry = .{
+        .hidden = 64,
+        .intermediate = 128,
+        .layers = 1,
+        .vocab = 16,
+        .k_heads = 1,
+        .v_heads = 1,
+        .q_heads = 2,
+        .kv_heads = 1,
+        .eps = 1e-6,
+        .tied = true,
+        .context = 4096,
+        .linear = @splat(false),
+        .embeds = false,
+    };
+    var e: engine.Engine = undefined;
+    e.gpa = t.allocator;
+    e.g = g;
+    e.layers = &ls;
+    e.fns = undefined;
+    e.fns.head_norm = fnHandle(1);
+    e.fns.head_norm_shift = fnHandle(2);
+    e.fns.rope = fnHandle(3);
+    e.fp8 = undefined;
+    e.fp8.rope = fnHandle(3);
+    e.kv8 = false;
+    e.rope_table = 0;
+    e.tables.ptr = 0;
+    e.features = 0;
+    e.int8 = .{};
+    e.learning = null;
+    e.mlp = null;
+    e.pockets = .{ .gpa = t.allocator, .d = undefined, .hidden = 64 };
+    e.taught = 0;
+    e.n_taps = 0;
+    e.x = 0;
+    e.xs = 0;
+    e.kraw = 0;
+    e.vraw = 0;
+    e.qraw = 0;
+    e.qn = 0;
+    e.kn = 0;
+    e.y = 0;
+    e.mix = 0;
+    e.r = 0;
+    var shape = engine.Engine.Shape.init(32, 1, false, false, 1);
+    shape.unread = true;
+    try forward.body(&e, shape);
+    const want = [_]Trace.Tag{ .norm, .kv, .{ .launch = 1 }, .{ .launch = 1 }, .{ .launch = 3 } };
+    try t.expectEqual(want.len, trace.tags.items.len);
+    for (want, trace.tags.items) |w, got| try t.expect(std.meta.eql(w, got));
+}

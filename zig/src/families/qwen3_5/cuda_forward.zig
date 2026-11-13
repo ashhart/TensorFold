@@ -87,7 +87,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 if (unread and last_layer) return; // the keys, values and their rotary rows are all this chunk keeps
                 if (prompt and nseg == 1 and (g.q_heads / g.kv_heads) % 2 == 0) {
                     // a prompt chunk's rows over its own cache: tensor-core tiles in place of the decode partials
-                    try @import("cuda_prompt.zig").runFrom(e, @intCast(ai), t0, total);
+                    try e.promptAttention(@intCast(ai), t0, total);
                 } else {
                     const args = .{ geo, e.qn, t_segs, t_rows, t_anc, @as(c_int, ai), t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po };
                     const tile_rows: usize = if (shape.mt2) 32 / group else 64 / group;
