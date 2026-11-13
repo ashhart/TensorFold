@@ -23,7 +23,11 @@ export fn sparkPrefillCompile(b: *tf.spark25_metal.backend.Metal, s: *lanes.Stre
 }
 
 export fn minimaxPrefillCompile(b: *tf.minimax_m3.backend.Metal, s: *lanes.Stream) bool {
-    b.backend().prefill(s) catch return false;
+    const backend = b.backend();
+    backend.prefill(s) catch return false;
+    // the stepped pass and its cancel (#3021), which the lane host calls between rounds
+    _ = backend.vtable.prefill_step.?(backend.ptr, s, 0) catch return false;
+    backend.vtable.cancel_prefill.?(backend.ptr, s) catch return false;
     return true;
 }
 

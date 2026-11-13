@@ -34,6 +34,8 @@ pub const Cache = struct {
     tap: Tap = .{},
     /// The prompt's last tapped row, kept for the first draft (the prompt scratch serves the next pass).
     last_tap: ?mtl.Buffer = null,
+    /// A stepped prompt pass's latest chunk's tapped rows in a scratch, written at forward `gen` (#3021).
+    chunk_tap: ?struct { tap: Tap, gen: u64 } = null,
     layer_at: [cfg.max_layers]usize = @splat(0),
     capacity: usize,
     len: usize = 0,
