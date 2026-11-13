@@ -4,7 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Nemotron 3.5 Lightning on HIP: oQ mixed-width MLX checkpoints load, each matrix read at its own width (MLX affine 4, 5, 6 or 8 bits in groups of 64); other widths, unquantized projections and an MTP head inside the model's shards are refused by name, and so is the MTP head file beside a model not stored 4-bit in groups of 64. The stock 4-bit checkpoint reads as before (#TBD, part of #3061).
+- Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states (the stock head is 4-bit in groups of 64), so it drafts beside an oQ checkpoint of any width; a head at a width the launches do not read is refused by name (#TBD, part of #3061).
+
+- Nemotron 3.5 Lightning on HIP: oQ mixed-width MLX checkpoints load, each matrix read at its own width (MLX affine 4, 5, 6 or 8 bits in groups of 64); other widths, unquantized projections and an MTP head inside the model's shards are refused by name. The stock 4-bit checkpoint reads as before (#TBD, part of #3061).
 
 - Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 (gates 1–4, a planted control for each width, gate-5 records on the four RDNA chips); its 1×8 tile at those widths spills to scratch on gfx1100, listed as a known finding (#TBD, part of #3061).
 
