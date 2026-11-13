@@ -23,6 +23,7 @@ const cancel_ids = @import("cancel_ids.zig");
 const ClientOut = @import("openai_client.zig").ClientOut;
 const prompt_list = @import("prompt_list.zig");
 const completion_prompt = @import("completion_prompt.zig");
+const ClientOut = @import("openai_client.zig").ClientOut;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -42,6 +43,8 @@ pub const Out = struct {
         reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
         /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
         keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
+        /// A prompt's progress as a translated route's own event (Responses); null: a chunk with no choices.
+        progress: ?*const fn (ctx: *anyopaque, p: @import("engine_api").Progress) error{Closed}!void = null,
     };
 };
 
@@ -410,6 +413,16 @@ pub const Run = struct {
             s.pending.clearRetainingCapacity();
         }
 
+        /// A prompt's progress (``return_progress``) as a chunk with no choices, which a client reading choices skips.
+        fn progress(ctx: *anyopaque, p: @import("engine_api").Progress) error{Closed}!void {
+            const s: *StreamSink = @ptrCast(@alignCast(ctx));
+            if (!s.opened) return; // nothing goes before the stream's head
+            if (s.run.out.vt.progress) |own| return own(s.run.out.ctx, p);
+            const c = s.run.chunk(null, null) catch return error.Closed;
+            @import("prompt_progress.zig").put(s.run.a, c.object, p) catch return error.Closed;
+            return s.run.emit(c);
+        }
+
         fn call(ctx: *anyopaque, delta: Value) error{Closed}!void {
             const s: *StreamSink = @ptrCast(@alignCast(ctx));
             const r = s.run;
@@ -491,7 +504,7 @@ pub const Run = struct {
         defer if (!handed) r.srv.release(prepared.preparing, prepared.request);
         var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
-        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin, .tokens = if (r.plan.token_stream) token_stream.sinkTokens(StreamSink) else null };
+        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin, .progress = StreamSink.progress, .tokens = if (r.plan.token_stream) token_stream.sinkTokens(StreamSink) else null };
         var live = gone;
         live.out = r.out;
         live.opened = &sink_state.opened;
