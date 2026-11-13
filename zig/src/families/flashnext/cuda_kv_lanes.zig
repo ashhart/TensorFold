@@ -195,10 +195,9 @@ pub const Pool = struct {
         return false;
     }
 
-    /// Whether an open of `cap` rows waits: with other streams running, the pieces its run and pages reach that are not
-    /// mapped go to the arena's thread, so no round waits on a map; true until they are. Alone, or a piece the thread
-    /// failed: false, and the open maps on its own thread as before (or fails with LaneMemory).
+    /// Whether an open of `cap` rows waits: beside other streams, the arena's thread maps its pieces; true until then.
     pub fn waits(p: *Pool, cap: usize, others: bool) bool {
+        // alone, or a piece the thread failed: false; the open maps on its own thread, as before (or fails: LaneMemory)
         if (!others or !p.arena.lazy()) return false;
         const k = p.layout.runPages();
         const n = p.layout.pages(cap);

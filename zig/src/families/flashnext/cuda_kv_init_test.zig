@@ -283,8 +283,7 @@ test "kv safety: Flash Next open into unmapped pieces beside a running stream wa
     try std.testing.expect(!pool.waits(320, false));
     try std.testing.expect(s.ahead == null and std.mem.indexOfScalar(bool, &mapped, true) == null);
 
-    // beside a running stream: pages 0-19 reach pieces 0 and 1, the run (pages 88-95) piece 5; the call returns at
-    // once and the arena's thread maps them
+    // beside a running stream: pages 0-19 reach pieces 0-1, the run (88-95) piece 5; posted, the call returns at once
     const t0 = std.Io.Clock.awake.now(std.testing.io);
     try std.testing.expect(pool.waits(320, true));
     const took = t0.durationTo(std.Io.Clock.awake.now(std.testing.io)).toNanoseconds();

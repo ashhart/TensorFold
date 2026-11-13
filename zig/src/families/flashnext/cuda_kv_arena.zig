@@ -119,10 +119,10 @@ pub const Ahead = struct {
         _ = a.reach(off, n);
     }
 
+    /// An open's pieces: mapped; posted (the arena's thread maps them, the open waits); caller (it maps them itself).
     pub const Reach = enum { mapped, posted, caller };
 
-    /// As post, and what an open over [off, off + n) would meet: all mapped, pieces on the thread's way (the open
-    /// waits), or a piece the thread failed or cannot take (caller: the open maps it itself, or fails as before).
+    /// As post, and what an open over [off, off + n) meets; a piece the thread failed or cannot take is the caller's.
     pub fn reach(a: *Ahead, off: u64, n: u64) Reach {
         if (n == 0) return .mapped;
         if (off + n > a.z.len) return .caller;
