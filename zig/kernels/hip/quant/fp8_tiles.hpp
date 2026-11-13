@@ -67,7 +67,7 @@ __device__ __forceinline__ void fp8_block(ModelFp8 a) {
             float q[4];
 #pragma unroll
             for (int r = 0; r < 4; ++r) q[r] = 0.f;
-#pragma unroll
+            // not unrolled: 64 steps of four rows spill the thread's registers
             for (int j = 0; j < kFpChunk; ++j) {
                 const float lvl = fp8_level(codes[col][j]);
 #pragma unroll
