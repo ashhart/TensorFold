@@ -879,6 +879,29 @@ The reply is written once every picture has finished. A refusal, a failed genera
 and returns that error with no pictures. A client that disconnects cancels the current picture, and the later
 pictures are never submitted.
 
+## Image generation streams
+
+With `stream: true`, on an engine that reports its denoising steps, the route answers `text/event-stream`. After
+each step it sends `image_generation.progress` with `index` (the picture, from 0), `seed`, `step` (from 1) and
+`total_steps`; when the picture is done, `image_generation.completed` carries its `b64_json` PNG, `index` and
+`seed`. With `n` above 1 the pictures follow one another on the same stream, each counting its own steps, and one
+`data: [DONE]` ends it. Each event's `type` is its event name, OpenAI's for the completed picture and the previews.
+
+`preview_interval: N`, an integer from 1 through `steps` sent with `stream: true` to an engine that makes previews,
+adds `image_generation.partial_image` after every Nth step's progress event. Its `b64_json` is a separate PNG of at
+most 128 pixels a side and 81,920 bytes, with `width`, `height`, `step`, `total_steps`, `index`, `seed` and
+`partial_image_index` (from 0). Previews do not change the picture: the final PNG bytes are the same with or without
+`stream` and `preview_interval`, and no preview is made unless one is asked for. For example,
+`{"model":"m","prompt":"A red kite","seed":42,"steps":8,"stream":true,"preview_interval":2}` sends progress for
+steps 1 to 8, previews after steps 2, 4, 6 and 8, then the picture.
+
+A request without `stream`, or with `stream: false`, gets the whole JSON reply as before. `stream` on an engine
+without step progress, `preview_interval` without `stream` or on an engine without previews, and a value out of
+range are HTTP 400 before anything is submitted. A refusal before the stream starts is the usual HTTP error; once it
+has started, a failure is an `error` event holding OpenAI's error object, then `data: [DONE]`, and the pictures
+already completed stay sent. A client that disconnects, or a write that fails, cancels the picture at its next step,
+and no later picture is submitted.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of

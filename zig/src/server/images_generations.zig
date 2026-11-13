@@ -15,6 +15,7 @@ const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Mailbox = @import("mailbox.zig").Mailbox;
 const streaming = @import("speech_stream.zig");
+const progress = @import("images_progress.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -32,7 +33,7 @@ const default_guidance: f32 = 3;
 const default_seed: u64 = 42;
 
 /// The body fields this route answers; `quality` and every other key are refused by name.
-const served_fields = [_][]const u8{ "model", "prompt", "n", "size", "response_format", "negative_prompt", "seed", "steps", "guidance" };
+const served_fields = [_][]const u8{ "model", "prompt", "n", "size", "response_format", "negative_prompt", "seed", "steps", "guidance", "stream", "preview_interval" };
 
 /// One checked request: exactly what the engine's image host needs.
 const Plan = struct {
@@ -44,6 +45,8 @@ const Plan = struct {
     guidance: f32,
     seeds: [4]u64,
     count: u8,
+    stream: bool,
+    preview_interval: u32,
 };
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
@@ -59,6 +62,20 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     defer png.deinit(srv.gpa);
     const raw = http_body.readJson(c, &cx) catch |e| return refused(c, a, &cx, id, e);
     const plan = prepare(srv, &cx, cap, raw) catch |e| return refused(c, a, &cx, id, e);
+    if (plan.stream) {
+        var writer: progress.Writer = .{ .conn = c };
+        for (0..plan.count) |index| {
+            png.clearRetainingCapacity();
+            var result: api.ImageResult = .{};
+            const completed = progress.generate(srv, c, &cx, imageRequest(srv, plan, plan.seeds[index], &result, &png), plan.preview_interval, index, &writer) catch |e| {
+                if (writer.started) return writer.refused(&cx, id, e);
+                return refused(c, a, &cx, id, e);
+            };
+            if (!completed) return;
+        }
+        writer.done();
+        return log.line("images prompt={d} negative={d} count={d} stream seconds={d:.2}", .{ plan.prompt.len, plan.negative.len, plan.count, clock.seconds(clock.nowNs(srv.io) - received) });
+    }
     const data = a.alloc(Value, plan.count) catch |e| return refused(c, a, &cx, id, e);
     for (data, 0..) |*item, index| {
         png.clearRetainingCapacity();
@@ -158,6 +175,20 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
         if (given < 1 or given > steps_most) return cx.fail(.request, "steps must be from 1 to {d}", .{steps_most});
         steps = @intCast(given);
     }
+    var stream = false;
+    if (raw.get("stream")) |v| {
+        if (v != .bool) return cx.refuse("stream must be a boolean");
+        stream = v.bool;
+    }
+    if (stream and !cap.progress) return cx.refuse("stream is not supported: this image engine does not report step progress");
+    var interval: u32 = 0;
+    if (raw.get("preview_interval")) |v| {
+        if (!stream) return cx.refuse("preview_interval requires stream: true");
+        const n = v.int64() orelse return cx.refuse("preview_interval must be an integer from 1 through steps");
+        if (n < 1 or n > steps) return cx.refuse("preview_interval must be an integer from 1 through steps");
+        if (!cap.previews) return cx.refuse("preview_interval is not supported by this image engine");
+        interval = @intCast(n);
+    }
     var guidance: f32 = default_guidance;
     if (raw.get("guidance")) |v| {
         const given = v.float64() orelse return cx.refuse("guidance must be a number");
@@ -182,13 +213,11 @@ fn prepare(srv: *Server, cx: *Cx, cap: api.ImageInfo, raw: Value) errors.Refused
     for (seeds[0..@intCast(count)], 0..) |*value, index| {
         value.* = (seed orelse default_seed) + @as(u64, @intCast(index));
     }
-    return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seeds = seeds, .count = @intCast(count) };
+    return .{ .prompt = prompt_ids, .negative = negative_ids, .width = width, .height = height, .steps = steps, .guidance = guidance, .seeds = seeds, .count = @intCast(count), .stream = stream, .preview_interval = interval };
 }
 
-/// Submits once and waits for ``finished``; nothing has been written to the connection when it returns.
-fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api.ImageResult, png: *std.ArrayList(u8)) errors.Refused!void {
-    if (c.peerGone()) return cx.fail(.capacity, "the client left before the picture was ready", .{});
-    const request: api.ImageRequest = .{
+fn imageRequest(srv: *Server, plan: Plan, seed: u64, result: *api.ImageResult, png: *std.ArrayList(u8)) api.ImageRequest {
+    return .{
         .prompt = plan.prompt,
         .negative = plan.negative,
         .width = plan.width,
@@ -200,17 +229,18 @@ fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api
         .png = png,
         .alloc = srv.gpa,
     };
+}
+
+/// Submits once and waits for ``finished``; nothing has been written to the connection when it returns.
+fn generate(srv: *Server, c: *Conn, cx: *Cx, plan: Plan, seed: u64, result: *api.ImageResult, png: *std.ArrayList(u8)) errors.Refused!void {
+    if (c.peerGone()) return cx.fail(.capacity, "the client left before the picture was ready", .{});
+    const request = imageRequest(srv, plan, seed, result, png);
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
     const engine_id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin();
     defer if (srv.keepalive) |k| k.end();
-    srv.engine.submitImage(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
-        error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
-        error.Closed => cx.fail(.capacity, "the scheduler is closed", .{}),
-        error.InvalidRequest => cx.fail(.request, "the engine refused this image request's prompt, size or steps", .{}),
-        error.Unsupported => cx.fail(.capacity, "this model does not serve images", .{}),
-    };
+    srv.engine.submitImage(engine_id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return progress.submitRefused(cx, e);
     // The engine holds request, png and result until finished: this thread writes nothing before that.
     _ = streaming.settle(srv, c, &box, engine_id, null) orelse return cx.fail(.capacity, "the client left before the picture was ready", .{});
     // the finished event is the last one: the reason it carried is the one the log and the refusals both read
