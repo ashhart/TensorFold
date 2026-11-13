@@ -117,6 +117,21 @@ keyframe level, as a first frame's are), the audio rows with the references' cle
 video. Its geometry has an eighth count, the reference audio rows: they enter on every pass at timestep 1 and are
 never stepped. `steps=N` on the released weights makes their own grid of N + 1 points (video shift 12, audio 3).
 
+## Cold start: weights read ahead
+
+`Model.load` reads the transformer shards into the page cache before the first forward, using core's
+`checkpoint_read_ahead` reader with spans of at most 8 MiB. Metal then reads the unchanged bf16 weights through the
+same zero-copy mappings. Missing or truncated shards fail the load before any forward runs.
+
+`TF_LOAD_PREFETCH` selects 0–16 reader threads (16 by default); `0` disables read-ahead and leaves page faults to the
+mapping. This affects only transformer loading, not the prompt encoder or decoder.
+
+The `tf-h3-dit` load and wall times against main at 2048 and 4096 are not measured: every case available here is
+image-only, and the tool's geometry refuses a case without audio rows (`H3EmptyMedia`).
+
+`zig build test-h3-read-ahead` checks multi-piece, multi-file byte counts, truncated and missing files, and disabled
+read-ahead. The nightly macOS host checks run this target.
+
 ## Not done
 
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.
