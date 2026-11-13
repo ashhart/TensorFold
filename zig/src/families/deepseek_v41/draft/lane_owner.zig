@@ -35,10 +35,7 @@ pub fn init(gpa: std.mem.Allocator, target: iface.Target, pass: iface.Pass, pric
     return x;
 }
 pub fn deinit(x: *ln.Lanes) void {
-    for (x.by_slot) |st| if (st) |owner| {
-        owner.shown.deinit(x.gpa);
-        x.gpa.destroy(owner);
-    };
+    for (x.by_slot) |st| if (st) |owner| x.drop(owner);
     x.streams.deinit(x.gpa);
     x.free.deinit(x.gpa);
     x.drawn.deinit(x.gpa);

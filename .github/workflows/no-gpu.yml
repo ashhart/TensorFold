@@ -127,6 +127,9 @@ jobs:
       # A unit test that hangs fails by name after 10 minutes instead of holding the runner until the job's limit.
       - name: zig build test
         run: zig build -Dfixed-cpu test --test-timeout 10m
+      # DeepSeek-V4.1's host tests: keyed sampling, DSpark and the shared lane core, and the row and device plans. No GPU.
+      - name: zig build test-dsv41-draft test-dsv41-device-host
+        run: zig build -Dfixed-cpu test-dsv41-draft test-dsv41-device-host --test-timeout 10m
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
         run: zig build -Dfixed-cpu test-kernel-contract
