@@ -1,6 +1,6 @@
 //! Serialized H3 case fixtures run through the reader used by Model.load, without a Metal device.
 const std = @import("std");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const g = @import("geometry.zig");
 const schedule = @import("schedule.zig");
 const testing = std.testing;
