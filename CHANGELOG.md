@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 Lightning on HIP: the MTP head file is read at the width its own metadata states (the stock head is 4-bit in groups of 64), so it drafts beside an oQ checkpoint of any width; a head at a width the launches do not read is refused by name (#3251, part of #3061).
+
+- Nemotron 3.5 Lightning on HIP: oQ mixed-width MLX checkpoints load, each matrix read at its own width (MLX affine 4, 5, 6 or 8 bits in groups of 64); other widths, unquantized projections and an MTP head inside the model's shards are refused by name, and so is the MTP head file beside a model not stored 4-bit in groups of 64. The stock 4-bit checkpoint reads as before (#3242, part of #3061).
+
+- Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 (gates 1–4, a planted control for each width, gate-5 records on the four RDNA chips); its 1×8 tile at those widths spills to scratch on gfx1100, listed as a known finding (#3163, part of #3061).
+
 - Video input: libtfvideo decodes MPEG-4 Part 2 and H.264 streams that declare no B-frames on up to four frame threads, 2.1x to 3.4x faster on Mac and Linux, with every frame equal to before, damaged clips included; H.264 with B-frames keeps the single-threaded path, because frame threads conceal damage there differently, and a stream that contradicts its own headers falls back to it (#2863). Thanks to @swbiggart.
 - Video on Linux: `libtfvideo.so` links with a version script that exports only its four `tf_video_*` functions, so on x86_64 `zig build video` links `tools/zig/build_ffmpeg.sh`'s FFmpeg with its assembly, where before the link stopped on thousands of `R_X86_64_PC32` relocations against FFmpeg's own tables. Its frames equal PyAV 19.0.1's byte for byte on 23 clips. On aarch64 the library stops exporting FFmpeg's API; real video there is unchecked. macOS is unchanged (#2861). Thanks to @swbiggart.
 - Qwen 3.5, 3.6 and 3.8 on CUDA: decode windows of 2 to 8 rows run at 4 or 8 rows instead of being padded to 16, about 1.5% faster at four streams on a GB10, with the same tokens (#2934, fixes #2909).

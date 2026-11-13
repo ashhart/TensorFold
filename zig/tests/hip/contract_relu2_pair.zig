@@ -29,7 +29,7 @@ const names = [2][]const u8{
 };
 
 pub fn spec(k: kit.Kind) c.Spec {
-    var s = relu2_k.spec(k);
+    var s = relu2_k.spec(k, 4, false);
     s.name = names[@intFromBool(k == .bf16)];
     s.nan = .{ .stated = "the separate launches' bytes and every float64 output class" };
     s.depth = depth;
