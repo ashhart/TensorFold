@@ -73,7 +73,7 @@ pub const Identity = struct {
     }
 };
 
-pub fn write(a: std.mem.Allocator, io: std.Io, path: []const u8, identity: Identity, loaded: *sam.Model, samples: []const Sample, warmup: usize, parameters: anytype, masks_hash: [64]u8) !void {
+pub fn write(a: std.mem.Allocator, io: std.Io, path: []const u8, identity: Identity, loaded: *sam.Model, load_seconds: f64, samples: []const Sample, warmup: usize, parameters: anytype, masks_hash: [64]u8) !void {
     if (warmup >= samples.len) return error.InvalidWarmup;
     const process_info = mtl.objc.msg(mtl.objc.Id, mtl.objc.class("NSProcessInfo"), "processInfo", .{});
     const json = try std.json.Stringify.valueAlloc(a, .{
@@ -91,12 +91,17 @@ pub fn write(a: std.mem.Allocator, io: std.Io, path: []const u8, identity: Ident
         .physical_ram_bytes = mtl.objc.msg(u64, process_info, "physicalMemory", .{}),
         .parameters = parameters,
         .timing_scope = "session API only; excludes checkpoint load, hashes, output and comparisons",
+        .load_seconds_including_checkpoint_metadata_and_metal_library = load_seconds,
+        .load_and_seed_seconds = load_seconds + samples[0].wall_seconds,
         .cold_seed = samples[0],
         .propagation = try summarize(a, samples[1..]),
         .warmup_frames = warmup,
         .after_warmup = try summarize(a, samples[1 + warmup ..]),
         .samples = samples,
         .peak_metal_bytes = loaded.gpu.peak_bytes,
+        .pipeline_compile_seconds = loaded.gpu.pipeline_compile_seconds,
+        .parameter_prepare_seconds = loaded.store.parameter_prepare_seconds,
+        .checkpoint_read_seconds = loaded.store.checkpoint_read_seconds,
         .process_memory = @import("process_memory").read(),
     }, .{ .whitespace = .indent_2 });
     defer a.free(json);

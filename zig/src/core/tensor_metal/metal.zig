@@ -71,6 +71,11 @@ pub const Tensor = struct {
     }
 };
 
+pub const OperatorObserver = struct {
+    context: *anyopaque,
+    write: *const fn (*anyopaque, []const u8, f64) anyerror!void,
+};
+
 pub const Gpu = struct {
     pub const Pass = struct { cb: mtl.CommandBuffer, enc: mtl.ComputeEncoder };
     const WeightKey = struct { address: usize, count: usize, source: st.DType, target: DType };
@@ -85,6 +90,7 @@ pub const Gpu = struct {
     gpu_seconds: f64 = 0,
     wait_seconds: f64 = 0,
     allocation_seconds: f64 = 0,
+    pipeline_compile_seconds: f64 = 0,
     allocations: usize = 0,
     submissions: usize = 0,
     buffer_cache_limit: usize = 0,
@@ -99,6 +105,10 @@ pub const Gpu = struct {
     compact_gemm: bool = false,
     attention_probabilities: ?Tensor = null,
     attention_stats: ?Tensor = null,
+    attention_partials: ?Tensor = null,
+    operator_observer: ?OperatorObserver = null,
+    operator_active: bool = false,
+    operator_name: []const u8 = "",
     weight_cache: std.AutoHashMapUnmanaged(WeightKey, Tensor) = .empty,
     batch: ?struct { pass: Pass, pool: mtl.objc.Pool } = null,
 
@@ -119,6 +129,7 @@ pub const Gpu = struct {
         if (self.batch != null) self.endBatch() catch {};
         if (self.attention_probabilities) |t| t.deinit();
         if (self.attention_stats) |t| t.deinit();
+        if (self.attention_partials) |t| t.deinit();
         self.clearWeights();
         for (self.spares.items) |slot| slot.buffer.deinit();
         self.spares.deinit(self.allocator);
@@ -150,6 +161,14 @@ pub const Gpu = struct {
 
     pub fn reserveAttention(self: *Gpu, rows: usize, keys: usize, heads: usize, batch: usize) !void {
         if (self.attention_two_pass) try @import("attention_two_pass.zig").prepare(self, rows, keys, heads, batch);
+    }
+
+    pub fn splitAttentionWorkspace(self: *Gpu, rows: usize, keys: usize, heads: usize, batch: usize, chunk_blocks: usize) ![3]Tensor {
+        return @import("attention_two_pass.zig").splitWorkspace(self, rows, keys, heads, batch, chunk_blocks);
+    }
+
+    pub fn deviceSplitAttentionWorkspace(self: *Gpu, planes: usize, splits: usize, dim: usize, flags: usize) ![3]Tensor {
+        return @import("attention_two_pass.zig").deviceSplitWorkspace(self, planes, splits, dim, flags);
     }
 
     fn allocBuffer(self: *Gpu, count: usize, dtype: DType, device_only: bool, pooled: bool) !Tensor {
@@ -273,7 +292,12 @@ pub const Gpu = struct {
     }
 
     pub fn pipeline(self: *Gpu, name: []const u8) !mtl.Pipeline {
-        if (self.pipelines.get(name)) |p| return p;
+        if (self.pipelines.getEntry(name)) |entry| {
+            if (self.operator_active) self.operator_name = entry.key_ptr.*;
+            return entry.value_ptr.*;
+        }
+        const started = mtl.clock.seconds();
+        defer self.pipeline_compile_seconds += mtl.clock.seconds() - started;
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
         const library = if (std.mem.indexOf(u8, name, "_compact_") != null) blk: {
@@ -298,6 +322,7 @@ pub const Gpu = struct {
         const p = try mtl.Pipeline.init(self.device, library, name, false);
         errdefer p.deinit();
         try self.pipelines.put(self.allocator, key, p);
+        if (self.operator_active) self.operator_name = key;
         return p;
     }
 
@@ -313,7 +338,10 @@ pub const Gpu = struct {
             std.log.err("Metal command failed: {s}", .{msg});
             return error.GpuFailure;
         }
-        self.gpu_seconds += cb.gpuSeconds();
+        const seconds = cb.gpuSeconds();
+        self.gpu_seconds += seconds;
+        if (self.operator_active) if (self.operator_observer) |observer|
+            try observer.write(observer.context, self.operator_name, seconds);
     }
 
     pub fn command(self: *Gpu) Pass {
@@ -324,10 +352,30 @@ pub const Gpu = struct {
 
     pub fn beginBatch(self: *Gpu) !void {
         if (self.batch != null) return error.NestedGpuBatch;
+        self.openBatch();
+    }
+
+    fn openBatch(self: *Gpu) void {
+        std.debug.assert(self.batch == null);
         const pool = mtl.objc.Pool.push();
         const cb = self.queue.commandBuffer();
         const enc = cb.compute(.serial);
         self.batch = .{ .pass = .{ .cb = cb, .enc = enc }, .pool = pool };
+    }
+
+    pub fn beginOperator(self: *Gpu) !bool {
+        if (self.operator_observer == null) return false;
+        std.debug.assert(!self.operator_active);
+        const batched = self.batch != null;
+        if (batched) try self.endBatch();
+        self.operator_active = true;
+        return batched;
+    }
+
+    pub fn endOperator(self: *Gpu, batched: bool) void {
+        if (self.operator_observer == null) return;
+        self.operator_active = false;
+        if (batched) self.openBatch();
     }
 
     pub fn endBatch(self: *Gpu) !void {
@@ -339,6 +387,8 @@ pub const Gpu = struct {
 
     pub fn dispatch(self: *Gpu, name: []const u8, buffers: []const Tensor, params: anytype, grid: mtl.Size, group: mtl.Size) !void {
         if (grid.width == 0 or grid.height == 0 or grid.depth == 0 or group.width == 0 or group.height == 0 or group.depth == 0) return error.EmptyGpuDispatch;
+        const batched = try self.beginOperator();
+        defer self.endOperator(batched);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const p = try self.pipeline(name);
@@ -370,6 +420,8 @@ pub const Gpu = struct {
         const ys = try std.math.mul(usize, m, n);
         if (batch == 0 or x.dtype != w.dtype or x.dtype != out.dtype or x.count != try std.math.mul(usize, xs, batch) or
             w.count != try std.math.mul(usize, ws, batch) or out.count != try std.math.mul(usize, ys, batch)) return error.MatrixShape;
+        const batched = try self.beginOperator();
+        defer self.endOperator(batched);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var name: [64]u8 = undefined;

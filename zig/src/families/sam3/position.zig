@@ -47,8 +47,8 @@ pub fn spatial(r: *ops.Runtime, height: usize, width: usize, channels: usize) !o
     const half = channels / 2;
     for (0..height * width) |pixel| {
         const coordinates = [2]f32{
-            @as(f32, @floatFromInt(pixel / width)) / (@as(f32, @floatFromInt(height - 1)) + 1e-6),
-            @as(f32, @floatFromInt(pixel % width)) / (@as(f32, @floatFromInt(width - 1)) + 1e-6),
+            spatialCoordinate(pixel / width, height),
+            spatialCoordinate(pixel % width, width),
         };
         for (0..channels) |channel| {
             const exponent = @as(f32, @floatFromInt((channel % half) / 2 * 2)) / @as(f32, @floatFromInt(half));
@@ -57,4 +57,16 @@ pub fn spatial(r: *ops.Runtime, height: usize, width: usize, channels: usize) !o
         }
     }
     return r.remember(key, output);
+}
+
+fn spatialCoordinate(index: usize, extent: usize) f32 {
+    return @as(f32, @floatFromInt(index + 1)) / (@as(f32, @floatFromInt(extent)) + 1e-6);
+}
+
+test "SAM spatial positions begin at the first cell and reach the normalized extent" {
+    const phase = spatialCoordinate(0, 72) * (2 * std.math.pi);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.08715574154023614), @sin(phase), 2e-8);
+    try std.testing.expectEqual(@as(f32, 0.5), spatialCoordinate(35, 72));
+    try std.testing.expectEqual(@as(f32, 1), spatialCoordinate(71, 72));
+    try std.testing.expectEqual(@as(f32, 1), spatialCoordinate(143, 144));
 }

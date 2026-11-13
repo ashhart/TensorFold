@@ -171,19 +171,45 @@ fn step(block: Layer, input: ops.Tensor, image: ops.Tensor, memories: Memories, 
     return r.add(output, try block.feedForward(try block.norm("norm3", output, 1e-5), true));
 }
 
+fn observePlan(r: *ops.Runtime, history: []const Memory, plan: selection.Plan) !void {
+    if (r.observer == null) return;
+    const mark = r.mark();
+    defer r.trim(mark, &.{});
+    const spatial = try r.alloc(plan.spatial.len * 2);
+    for (plan.spatial.constSlice(), 0..) |entry, at| {
+        spatial.slice(f32, spatial.count)[at * 2] = @floatFromInt(history[entry.history].index);
+        spatial.slice(f32, spatial.count)[at * 2 + 1] = @floatFromInt(entry.temporal);
+    }
+    try r.observe("tracker.spatial_plan", spatial, &.{ plan.spatial.len, 2 });
+    const pointers = try r.alloc(plan.pointers.len * 2);
+    for (plan.pointers.constSlice(), 0..) |entry, at| {
+        pointers.slice(f32, pointers.count)[at * 2] = @floatFromInt(history[entry.history].index);
+        pointers.slice(f32, pointers.count)[at * 2 + 1] = @floatFromInt(entry.relative);
+    }
+    try r.observe("tracker.pointer_plan", pointers, &.{ plan.pointers.len, 2 });
+}
+
 pub fn propagate(r: *ops.Runtime, features: [3]ops.Feature, history: []const Memory, index: usize, frames: usize, direction: selection.Direction, active: u16) !Result {
     const mark = r.mark();
     errdefer r.trim(mark, &.{});
     const multiplex = r.config.version == .sam31;
     const plan = try selection.select(history, index, frames, direction, multiplex);
     if (plan.pointers.len == 0 or plan.spatial.len == 0) return error.MissingConditioningFrame;
+    try observePlan(r, history, plan);
     const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
     const pointer_positions = try r.a.alloc(ops.Tensor, plan.pointers.len);
     for (plan.pointers.constSlice(), pointer_positions) |entry, *encoded| encoded.* = try pointerPosition(owner, entry.relative, @min(frames, r.config.pointer_frames), history[entry.history].pointer.count);
     const side = r.config.featureSide();
     const spatial = try position.spatial(r, side, side, r.config.hidden);
-    _ = try position.spatial(r, side, side, r.config.memory_width);
-    if (!multiplex) try r.g.reserveAttention(side * side, plan.spatial.len * side * side + plan.pointers.len * r.config.hidden / r.config.memory_width, 1, 1);
+    const memory_position = try position.spatial(r, side, side, r.config.memory_width);
+    try r.observe("tracker.position", spatial, &.{ 1, side, side, r.config.hidden });
+    try r.observe("tracker.memory_spatial_position", memory_position, &.{ 1, side, side, r.config.memory_width });
+    if (!multiplex) {
+        const keys = plan.spatial.len * side * side + plan.pointers.len * r.config.hidden / r.config.memory_width;
+        if (r.split_attention) {
+            _ = try r.g.splitAttentionWorkspace(side * side, keys, 1, 1, @import("sam3_kernels").attention_split.chunk_blocks);
+        } else try r.g.reserveAttention(side * side, keys, 1, 1);
+    }
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     const memories = try Memories.gather(r, owner, history, plan, pointer_positions);

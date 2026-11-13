@@ -32,6 +32,28 @@ pub fn prepare(g: *gpu.Gpu, rows: usize, keys: usize, heads: usize, batch: usize
     _ = try workspace(g, rows, try std.math.divCeil(usize, keys, 32), heads, batch);
 }
 
+pub fn splitWorkspace(g: *gpu.Gpu, rows: usize, keys: usize, heads: usize, batch: usize, chunk_blocks: usize) ![3]Tensor {
+    if (rows == 0 or keys == 0 or heads == 0 or batch == 0 or chunk_blocks == 0) return error.AttentionShape;
+    const blocks = try std.math.divCeil(usize, keys, 32);
+    if (blocks > std.math.maxInt(i32) / 32) return error.AttentionTooLarge;
+    const splits = try std.math.divCeil(usize, blocks, chunk_blocks);
+    const planes = try std.math.mul(usize, try std.math.mul(usize, batch, heads), rows);
+    return .{
+        try reserve(g, &g.attention_probabilities, try std.math.mul(usize, planes, blocks * 32)),
+        try reserve(g, &g.attention_stats, try std.math.mul(usize, try std.math.mul(usize, planes, splits), try std.math.add(usize, chunk_blocks, 2))),
+        try reserve(g, &g.attention_partials, try std.math.mul(usize, try std.math.mul(usize, planes, splits), 256)),
+    };
+}
+
+pub fn deviceSplitWorkspace(g: *gpu.Gpu, planes: usize, splits: usize, dim: usize, flags: usize) ![3]Tensor {
+    const split_planes = try std.math.mul(usize, planes, splits);
+    return .{
+        try reserve(g, &g.attention_partials, try std.math.mul(usize, split_planes, dim)),
+        try reserve(g, &g.attention_stats, try std.math.mul(usize, split_planes, 3)),
+        try reserve(g, &g.attention_probabilities, flags),
+    };
+}
+
 pub fn run(g: *gpu.Gpu, q: Tensor, k: Tensor, v: Tensor, out: Tensor, p: [24]i32, scale: f32) !void {
     const work = try workspace(g, @intCast(p[2]), @intCast(p[6]), @intCast(p[1]), @intCast(p[0]));
     const scores = try g.pipeline("im_attention_scores256");

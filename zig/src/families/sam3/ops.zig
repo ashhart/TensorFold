@@ -11,6 +11,10 @@ pub const Runtime = struct {
     store: *Store,
     a: std.mem.Allocator,
     precision: enum { fp32, mixed } = .mixed,
+    split_attention: bool = false,
+    device_projections: bool = false,
+    device_attention: bool = false,
+    compensated_norm: bool = false,
     config: @import("config.zig").Config = .of(.sam31),
     vision_ready: bool = false,
     observer: ?@import("observe.zig").Observer = null,
@@ -109,7 +113,11 @@ pub const Runtime = struct {
         return self.own(try self.g.upload(values, .f32));
     }
     pub fn weight(self: *Runtime, key: []const u8) !Tensor {
-        return self.own(try self.g.weight(try self.store.get(key), .f32));
+        const started = gpu.mtl.clock.seconds();
+        defer self.store.parameter_prepare_seconds += gpu.mtl.clock.seconds() - started;
+        const source = try self.store.get(key);
+        self.store.checkpoint_read_seconds += gpu.mtl.clock.seconds() - started;
+        return self.own(try self.g.weight(source, .f32));
     }
     pub fn add(self: *Runtime, x: Tensor, y: Tensor) !Tensor {
         return self.own(try ops.point(self.g, x, y, if (x.count == y.count) 0 else 1, y.count));
@@ -128,11 +136,19 @@ pub const Runtime = struct {
         return out;
     }
     pub fn gelu(self: *Runtime, x: Tensor) !Tensor {
+        if (x.dtype == .f32) {
+            const output = try self.device(x.count);
+            try self.g.dispatch("im_sam_gelu", &.{ x, output }, @as(u32, @intCast(x.count)), Size.of(x.count, 1, 1), Size.of(256, 1, 1));
+            return output;
+        }
         return self.own(try ops.gelu(self.g, x, true));
     }
     pub fn norm(self: *Runtime, key: []const u8, x: Tensor, width: usize, eps: f32) !Tensor {
         const w = try self.weight(try self.name("{s}.weight", .{key}));
         const b = try self.weight(try self.name("{s}.bias", .{key}));
+        if (self.compensated_norm and self.precision == .fp32 and width == 1024 and eps == 1e-5 and
+            std.mem.startsWith(u8, key, "detector.backbone.vision_backbone.trunk."))
+            return self.own(try @import("normalization.zig").run(self.g, x, w, b, width, eps));
         return self.own(try ops.norm(self.g, x, w, b, width, false, eps));
     }
     pub fn visionNorm(self: *Runtime, key: []const u8, x: Tensor, windowed: bool) !Tensor {
@@ -153,17 +169,27 @@ pub const Runtime = struct {
     }
     pub fn visionLinear(self: *Runtime, key: []const u8, x: Tensor, width: usize, activate: bool) !Tensor {
         if (self.precision == .fp32) {
-            const out = try self.linear(key, x, width);
-            return if (activate) self.gelu(out) else out;
+            return self.visionF32Projection(key, x, width, activate);
         }
         return self.visionProjection(key, x, width, activate, null, false);
     }
     pub fn visionResidual(self: *Runtime, key: []const u8, x: Tensor, width: usize, residual: Tensor, windowed: bool) !Tensor {
         if (self.precision == .fp32) {
-            const projected = try self.linear(key, x, width);
+            const projected = try self.visionF32Projection(key, x, width, false);
             return self.add(residual, if (windowed) try self.window(projected, 1024, true) else projected);
         }
         return self.visionProjection(key, x, width, false, residual, windowed);
+    }
+    fn visionF32Projection(self: *Runtime, key: []const u8, x: Tensor, width: usize, activate: bool) !Tensor {
+        if (!self.device_projections) {
+            const output = try self.linear(key, x, width);
+            return if (activate) self.gelu(output) else output;
+        }
+        const w = try self.weight(try self.name("{s}.weight", .{key}));
+        const b = try self.weight(try self.name("{s}.bias", .{key}));
+        if (activate and w.tensor_operand_exact and (try self.store.get(try self.name("{s}.weight", .{key}))).dtype == .f16)
+            return self.own(try @import("dense_expansion.zig").run(self.g, x, w, b, x.count / width, b.count, width, true));
+        return self.own(try @import("dense_device.zig").run(self.g, x, w, b, x.count / width, b.count, width, if (activate) .nk_gelu else .nk));
     }
     fn visionProjection(self: *Runtime, key: []const u8, x: Tensor, width: usize, activate: bool, residual: ?Tensor, windowed: bool) !Tensor {
         const source = try self.store.get(try self.name("{s}.weight", .{key}));
@@ -225,6 +251,11 @@ pub const Runtime = struct {
         const keys = k.count / width;
         const dim = width / heads;
         if (width % heads != 0 or k.count != v.count) return error.SamAttentionShape;
+        if (self.split_attention and bias == null and !causal and dim == 256 and q.dtype == .f32)
+            return self.own(try @import("attention_split.zig").run(self.g, q, k, v, .{ 1, heads, rows, keys, dim }));
+        if (self.device_attention and self.precision == .fp32 and self.config.version == .sam31 and bias == null and !causal and
+            dim == 32 and rows == self.config.featureSide() * self.config.featureSide() and keys >= rows)
+            return self.own(try @import("attention_split32.zig").run(self.g, q, k, v, .{ 1, heads, rows, keys, dim }));
         if (self.precision == .mixed and bias == null and !causal and dim == 32) {
             if (rows < 5184 or keys < 5184) return self.own(try flash(self.g, q, k, v, rows, keys, heads, 1));
             const start = self.mark();
@@ -256,6 +287,10 @@ pub const Runtime = struct {
         return out;
     }
     pub fn visionAttention(self: *Runtime, q: Tensor, k: Tensor, v: Tensor, global: bool) !Tensor {
+        if (self.device_attention and self.precision == .fp32) {
+            if (global) return self.own(try @import("attention_split32.zig").run(self.g, q, k, v, .{ 1, 16, 5184, 5184, 64 }));
+            return self.own(try @import("attention_device.zig").run(self.g, q, k, v, .{ 9, 16, 576, 576, 64 }));
+        }
         return self.own(if (self.precision == .mixed) try flash(self.g, q, k, v, if (global) 5184 else 576, if (global) 5184 else 576, 16, if (global) 1 else 9) else if (global) try ops.attention(self.g, q, k, v, 5184, 16, 16, false, 0.125) else try ops.attentionBatched(self.g, q, k, v, 576, 16, 16, false, 0.125, 9));
     }
     pub fn mha(self: *Runtime, key: []const u8, q: Tensor, k: Tensor, v: Tensor, heads: usize, width: usize, bias: ?Tensor) !Tensor {
@@ -276,6 +311,7 @@ pub const Runtime = struct {
         pass.enc.setBuffer(out.buffer, out.offset, 1);
         pass.enc.setValue([4]u32{ @intCast(x.height), @intCast(x.width), @intCast(x.channels), @intFromBool(bilinear) }, 2);
         pass.enc.setValue([2]u32{ @intCast(h), @intCast(w) }, 3);
+        pass.enc.setValue([2]f32{ @as(f32, @floatFromInt(x.height)) / @as(f32, @floatFromInt(h)), @as(f32, @floatFromInt(x.width)) / @as(f32, @floatFromInt(w)) }, 4);
         pass.enc.dispatchThreads(Size.of(out.count, 1, 1), Size.of(256, 1, 1));
         try self.g.finish(pass.cb, pass.enc);
         return feature(out, h, w, x.channels);
@@ -296,12 +332,19 @@ pub const Runtime = struct {
         };
         const out = try self.device(oh * ow * n);
         var p = Conv{ .h = @intCast(x.height), .w = @intCast(x.width), .c = @intCast(x.channels), .n = @intCast(n), .k = @intCast(k), .oh = @intCast(oh), .ow = @intCast(ow), .stride = @intCast(stride), .pad = @intCast(pad), .first = 0, .rows = 0 };
-        if (transposed and self.precision == .mixed) {
+        const device_deconvolution = self.device_projections and self.precision == .fp32 and n <= 4736 / 4 and x.channels <= 4736;
+        if (transposed and (self.precision == .mixed or device_deconvolution)) {
             const batch = self.g.batch == null;
             if (batch) try self.g.beginBatch();
             errdefer if (batch and self.g.batch != null) self.g.endBatch() catch {};
             const matrix = try self.convMatrix(key, raw, n, x.channels, k, true);
-            const product = try self.matmul(x.tensor, matrix, x.height * x.width, 4 * n, x.channels);
+            const product = if (device_deconvolution) projected: {
+                const zero = try self.own(try self.g.allocDedicated(4 * n, .f32));
+                @memset(zero.slice(f32, zero.count), 0);
+                const result = try self.device(x.height * x.width * 4 * n);
+                try @import("dense_device.zig").into(self.g, x.tensor, matrix, zero, result, x.height * x.width, 4 * n, x.channels, .nk);
+                break :projected result;
+            } else try self.matmul(x.tensor, matrix, x.height * x.width, 4 * n, x.channels);
             try self.g.dispatch("im_sam_deconv_shuffle", &.{ product, bias, out }, p, Size.of(out.count, 1, 1), Size.of(256, 1, 1));
             if (batch) try self.g.endBatch();
             return feature(out, oh, ow, n);
@@ -328,8 +371,12 @@ pub const Runtime = struct {
                 break :columns_ cols;
             };
             const dst = view(out, first * n, rows * n);
-            try self.g.matmulInto(cols, matrix, dst, rows, n, width);
-            try self.g.dispatch("im_sam_bias", &.{ dst, bias }, [2]u32{ @intCast(dst.count), @intCast(n) }, Size.of(dst.count, 1, 1), Size.of(256, 1, 1));
+            if (self.device_projections and self.precision == .fp32 and n <= 4736 and width <= 4736) {
+                try @import("dense_device.zig").into(self.g, cols, matrix, bias, dst, rows, n, width, if (k == 3) .nk_compensated else .nk);
+            } else {
+                try self.g.matmulInto(cols, matrix, dst, rows, n, width);
+                try self.g.dispatch("im_sam_bias", &.{ dst, bias }, [2]u32{ @intCast(dst.count), @intCast(n) }, Size.of(dst.count, 1, 1), Size.of(256, 1, 1));
+            }
             self.trim(mark_, &.{});
             first += rows;
         }

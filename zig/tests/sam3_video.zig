@@ -5,6 +5,7 @@ const clock = @import("metal").clock;
 const Capture = @import("sam3_capture.zig").Capture;
 const receipt = @import("sam3_receipt.zig");
 const Trace = @import("sam3_trace.zig").Trace;
+const OperatorProfile = @import("sam3_operator_profile.zig").Profile;
 
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
@@ -13,6 +14,9 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print(
             \\tf-sam3-video CHECKPOINT FRAMES OUTPUT_PREFIX --point ID X Y | --box ID X0 Y0 X1 Y1 | --seed-reference MASKS
             \\  --start N --frames N --reverse --fp32 --exercise-lifecycle --baseline-attention --baseline-gemm
+            \\  --split-attention --device-projections --device-attention
+            \\  --compensated-normalization
+            \\  --operator-profile FILE.json (synchronizes every operation; separate from timing)
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
             \\  --trace DIR --trace-frames N,N (NHWC tensors; recomputes preprocessing and trunk)
@@ -31,11 +35,16 @@ pub fn main(init: std.process.Init) !void {
     var exercise = false;
     var fp32 = false;
     var attention_two_pass = true;
+    var split_attention = false;
+    var device_projections = false;
+    var device_attention = false;
+    var compensated_norm = false;
     var compact_gemm = (sam.LoadOptions{}).compact_gemm;
     var reference_path: ?[]const u8 = null;
     var seed_path: ?[]const u8 = null;
     var raw_path: ?[]const u8 = null;
     var benchmark_path: ?[]const u8 = null;
+    var operator_profile_path: ?[]const u8 = null;
     var warmup: usize = 0;
     var trace_path: ?[]const u8 = null;
     var trace_frames: std.ArrayList(usize) = .empty;
@@ -63,6 +72,22 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, flag, "--baseline-attention")) {
             attention_two_pass = false;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--split-attention")) {
+            split_attention = true;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--device-projections")) {
+            device_projections = true;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--device-attention")) {
+            device_attention = true;
+            continue;
+        }
+        if (std.mem.eql(u8, flag, "--compensated-normalization")) {
+            compensated_norm = true;
             continue;
         }
         if (std.mem.eql(u8, flag, "--baseline-gemm")) {
@@ -94,6 +119,10 @@ pub fn main(init: std.process.Init) !void {
                 trace_path = value;
                 continue;
             }
+            if (std.mem.eql(u8, flag, "--operator-profile")) {
+                operator_profile_path = value;
+                continue;
+            }
             if (std.mem.eql(u8, flag, "--trace-frames")) {
                 var parts = std.mem.splitScalar(u8, value, ',');
                 while (parts.next()) |part| {
@@ -109,6 +138,7 @@ pub fn main(init: std.process.Init) !void {
     if (count == 0) return error.EmptyVideo;
     if (warmup >= count or (warmup != 0 and benchmark_path == null)) return error.InvalidWarmup;
     if (trace_path != null and benchmark_path != null) return error.TraceTimingRequiresSeparateRuns;
+    if (operator_profile_path != null and (trace_path != null or benchmark_path != null)) return error.OperatorProfilingRequiresSeparateRun;
     if (trace_path == null and (trace_frames.items.len != 0 or trace_layers)) return error.ExpectedTraceDirectory;
     if (trace_path != null and trace_frames.items.len == 0) try trace_frames.append(a, start);
     var file = try st.File.open(init.gpa, init.io, args[2]);
@@ -153,7 +183,8 @@ pub fn main(init: std.process.Init) !void {
     for (seeds.items) |seed| try unusedOutput(init.io, try std.fmt.allocPrint(a, "{s}-{d}.pgm", .{ args[3], seed.id }));
     if (benchmark_path) |path| try unusedOutput(init.io, path);
     if (raw_path) |path| try unusedOutput(init.io, path);
-    const identity: ?receipt.Identity = if (benchmark_path != null) try receipt.Identity.load(a, init.io, args[1], frames.bytes, seeds.items) else null;
+    if (operator_profile_path) |path| try unusedOutput(init.io, path);
+    const identity: ?receipt.Identity = if (benchmark_path != null or operator_profile_path != null) try receipt.Identity.load(a, init.io, args[1], frames.bytes, seeds.items) else null;
     const ids = try a.alloc(u64, seeds.items.len);
     for (seeds.items, ids) |seed, *id| id.* = seed.id;
     var capture: ?Capture = if (raw_path) |path| try Capture.create(a, init.io, .cwd(), path, ids, .{ .width = width, .height = height }, count, start, reverse) else null;
@@ -162,11 +193,21 @@ pub fn main(init: std.process.Init) !void {
     var masks_hash = std.crypto.hash.sha2.Sha256.init(.{});
     var trace: ?Trace = if (trace_path) |path| try Trace.init(init.gpa, init.io, path, trace_frames.items, trace_layers) else null;
     defer if (trace) |*output| output.deinit();
+    const load_started = clock.seconds();
     const loaded = try sam.Model.load(init.gpa, init.io, args[1], .{
         .precision = if (fp32) .float32 else .checkpoint,
         .compact_gemm = compact_gemm,
+        .split_attention = split_attention,
+        .device_projections = device_projections,
+        .device_attention = device_attention,
+        .compensated_norm = compensated_norm,
     });
     defer loaded.deinit();
+    const load_seconds = clock.seconds() - load_started;
+    var operator_profile = OperatorProfile{ .allocator = init.gpa };
+    defer operator_profile.deinit();
+    if (operator_profile_path != null) loaded.gpu.operator_observer = .{ .context = &operator_profile, .write = OperatorProfile.record };
+    defer loaded.gpu.operator_observer = null;
     loaded.gpu.attention_two_pass = attention_two_pass;
     const started = clock.seconds();
     if (exercise) {
@@ -234,16 +275,21 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (capture) |*output| try output.finish(init.io);
+    if (operator_profile_path) |path| try operator_profile.write(a, init.io, path, identity.?, count, loaded.gpu.gpu_seconds);
     if (benchmark_path) |path| {
         var digest: [32]u8 = undefined;
         masks_hash.final(&digest);
-        try receipt.write(a, init.io, path, identity.?, loaded, samples, warmup, .{
+        try receipt.write(a, init.io, path, identity.?, loaded, load_seconds, samples, warmup, .{
             .input_shape = frames.shape[0..frames.rank],
             .start = start,
             .frames = count,
             .reverse = reverse,
             .object_ids = ids,
             .attention_two_pass = attention_two_pass,
+            .split_attention = loaded.split_attention,
+            .device_projections = loaded.device_projections,
+            .device_attention = loaded.device_attention,
+            .compensated_norm = loaded.compensated_norm,
             .compact_gemm = compact_gemm,
         }, std.fmt.bytesToHex(digest, .lower));
     }

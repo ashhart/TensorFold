@@ -134,7 +134,7 @@ fn readMember(io: std.Io, file: std.Io.File, m: Member, out: []u8) !void {
     if (readU32(&head, 0) != 0x04034b50) return error.BadArchive;
     const data: u64 = m.local + @as(u64, head.len) + @as(u64, readU16(&head, 26)) + @as(u64, readU16(&head, 28));
     if (try file.readPositionalAll(io, out, data) != out.len) return error.ShortRead;
-    if (std.hash.Crc32.hash(out) != m.crc) return error.ChecksumMismatch;
+    if (@import("crc32.zig").hash(out) != m.crc) return error.ChecksumMismatch;
 }
 
 /// The central directory: every member stored (method 0), zip64 records honoured.

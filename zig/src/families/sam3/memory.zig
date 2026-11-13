@@ -80,7 +80,7 @@ const Encoder = struct {
 
     fn masks(self: Encoder, input: ops.Feature, active: u16, conditioning: u16, hard: bool) !ops.Feature {
         const r = self.owner.runtime;
-        const side = if (self.multiplex) r.config.featureSide() * 16 else r.config.image_size;
+        const side = r.config.image_size;
         const resized = try r.resize(input, side, side, true);
         const channels: usize = if (self.multiplex and !self.sparse) r.config.bucket_size * 2 else 1;
         const output = try r.device(side * side * channels);
@@ -99,7 +99,7 @@ const Encoder = struct {
             try r.g.dispatch("im_sam_memory_masks", &.{ resized.tensor, output }, parameters, Size.of(output.count, 1, 1), Size.of(256, 1, 1));
         }
         const encoded = ops.feature(output, side, side, channels);
-        return if (self.multiplex) encoded else r.resize(encoded, r.config.featureSide() * 16, r.config.featureSide() * 16, true);
+        return r.resize(encoded, r.config.featureSide() * 16, r.config.featureSide() * 16, true);
     }
 
     fn downsample(self: Encoder, input_mask: ops.Feature, conditioning: u16, keep: ops.Tensor, mark: usize) !ops.Feature {
@@ -167,7 +167,9 @@ pub fn encode(r: *ops.Runtime, image: ops.Tensor, prediction: decoder.Result, ac
     if (encoder.sparse) mask = ops.feature(try r.columns(mask.tensor, mask.height * mask.width, r.config.bucket_size, 0, 1), mask.height, mask.width, 1);
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
-    const down = try encoder.downsample(try encoder.masks(mask, active, conditioning, from_points), conditioning, absent, mark);
+    const memory_mask = try encoder.masks(mask, active, conditioning, from_points);
+    try r.observe("tracker.memory_mask_input", memory_mask.tensor, &.{ 1, memory_mask.height, memory_mask.width, memory_mask.channels });
+    const down = try encoder.downsample(memory_mask, conditioning, absent, mark);
     const encoded = try r.add(try encoder.fuse(image, down), absent);
     const visible = if (prediction.scores[0] > 0) 2 / (1 + @exp(-prediction.scores[0])) - 1 else 0;
     const memory = Memory{
