@@ -468,7 +468,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     const g = &d.generation;
     const cap = try copyRows();
     var extra: u32 = @min(cap, 16); // grows while copies land whole, shrinks when most miss
-    var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = 5 }) };
+    var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = b.serial_copy_match }) };
     defer copies.lookup.deinit();
     _ = try s.commit(b.gpa, &.{try (q.session.Session{ .runner = b.runner }).greedy()}, &.{});
     hooks.committed(hooks.ctx);
@@ -484,7 +484,11 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         const before = b.runner.gpu_seconds;
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
-        const result = try g.runRound(room, @min(b.nodes, 15), s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
+        const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
+        const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
+            try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
+        else
+            try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
         if (result.extended > 0) {

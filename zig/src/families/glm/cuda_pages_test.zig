@@ -530,3 +530,9 @@ test "every host allocation failure while making the pages leaves no device buff
         }
     }.run, .{});
 }
+
+test "capacity keeps a verify window past the context and a multiple of 64" {
+    try expectEqual(@as(usize, 8256), native.capacity(8192));
+    try expectEqual(@as(usize, 330624), native.capacity(330529));
+    try expect(native.capacity(330529) % 64 == 0);
+}

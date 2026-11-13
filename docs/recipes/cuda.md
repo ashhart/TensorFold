@@ -358,6 +358,7 @@ Unified-memory GPUs share physical RAM with host buffers and file-backed model d
 host's available memory, reclaimable page cache included, less a floor of a tenth of RAM (at least 4 GiB) that
 `TENSORFOLD_MEMORY_RESERVE_GIB` can move, and considers mapped-table residency when sizing an automatic
 window. It accounts for stream count and retained caches where concurrency is enabled.
+The native engine's memory plan and its settings are in the [API reference](../api.md#context-and-errors).
 
 Two-rank Flash Next, Nemotron and GLM requests finish on both ranks after a client disconnects, keeping the
 collective sequence aligned. MLX disk snapshots and cache-budget flags do not configure these CUDA

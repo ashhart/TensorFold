@@ -276,6 +276,7 @@ pub const Fx = struct {
         const prompt = s.prompt();
         const total = prompt.len + s.max_new + cache.max_window + 1;
         if (prompt.len == 0 or total > f.e.o.capacity) return error.PromptTooLong;
+        for (prompt) |t| if (t >= f.e.cfg.vocab) return error.InvalidToken; // before the other ranks hear the prompt
         const gop = try f.lanes.getOrPut(f.gpa, s);
         if (gop.found_existing) f.free(gop.value_ptr.*);
         errdefer f.lanes.removeByPtr(gop.key_ptr);
@@ -353,6 +354,7 @@ pub const Fx = struct {
             const n = if (last) rows - 1 else rows;
             if (n > 0) _ = try head_mod.run(
                 e.ops(&e.arena),
+                true,
                 m,
                 &e.host,
                 hc,
@@ -536,6 +538,7 @@ pub const Fx = struct {
             const o = e.ops(&e.arena);
             var out = try head_mod.run(
                 o,
+                false,
                 m,
                 &e.host,
                 hc,
@@ -560,6 +563,7 @@ pub const Fx = struct {
                 if (d + 1 == depth or prob[0] < stop_under) break;
                 out = try head_mod.run(
                     o,
+                    false,
                     m,
                     &e.host,
                     hc,

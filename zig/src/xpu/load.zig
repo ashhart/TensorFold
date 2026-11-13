@@ -196,6 +196,7 @@ pub fn loadGptq(d: *Dev, c: *const Checkpoint) !Model {
     const stage = try d.alloc_(800 << 20);
     const e = try c.get("model.embed_tokens.weight");
     if (!std.mem.eql(u8, e.dtype, "F16")) return error.UnexpectedDtype;
+    if (e.bytes.len != q.VOCAB * D * 2) return error.UnexpectedShape; // embed_dense reads row id of [VOCAB, D] unchecked
     m.embed_w = try d.alloc_(e.bytes.len);
     try d.copyIn(m.embed_w, e.bytes);
     m.embed_s = null;
@@ -259,6 +260,10 @@ pub fn load(d: *Dev, c: *const Checkpoint) !Model {
     var m: Model = undefined;
     const stage = try d.alloc_(800 << 20);
     const e_w = try c.get("model.embed_tokens.weight");
+    const e_s = try c.get("model.embed_tokens.scales");
+    const e_b = try c.get("model.embed_tokens.biases");
+    // embed reads row id unchecked: [VOCAB, D / 8] words of 8 values, [VOCAB, D / 64] bf16 scales and biases
+    if (e_w.bytes.len != q.VOCAB * (D / 8) * 4 or e_s.bytes.len != q.VOCAB * (D / 64) * 2 or e_b.bytes.len != e_s.bytes.len) return error.UnexpectedShape;
     m.embed_w = try d.upload(e_w.bytes);
     m.embed_s = try bf16Tensor(d, c, "model.embed_tokens.scales");
     m.embed_b = try bf16Tensor(d, c, "model.embed_tokens.biases");

@@ -53,7 +53,6 @@ pub const Engine = struct {
     grammar_workers: @import("grammar_parallel.zig").State = .{},
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
-
     pub fn init(gpa: Allocator, cfg: *const Config, backend: be.Backend, clock: be.Clock) Engine {
         return .{
             .gpa = gpa,
@@ -75,6 +74,7 @@ pub const Engine = struct {
                 .node_probabilities = cfg.node_probabilities,
                 .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
+                .plain_streams = cfg.plain_streams,
                 .batch_rows = cfg.batch_rows,
                 .batched_heads = cfg.draft_streams,
             },

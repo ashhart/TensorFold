@@ -9,6 +9,43 @@ const Metal = @import("qwen27_lanes.zig").Metal;
 const t = std.testing;
 const a = t.allocator;
 
+/// Reply ends keep their request's provenance; spare budget also retains the pre-reply regenerate state.
+pub fn replyBorn(keepEnd: anytype, snapshots: pc.Snapshots, live: *usize) !void {
+    const at: u32 = 5000;
+    for ([_]bool{ false, true }) |roomy| {
+        const rows: u64 = 3 * at + @as(u64, if (roomy) 107 else 100);
+        var store = pc.Store.init(a, snapshots, .{ .warm = .on }, rows << 16);
+        defer store.deinit();
+        var other: [at + 7]u32 = undefined;
+        for (&other, 0..) |*word, i| word.* = @intCast(i);
+        try t.expect(store.keep(&other, at, null, &.{}, &.{}));
+        var tokens: [at + 107]u32 = undefined;
+        for (&tokens, 0..) |*word, i| word.* = @intCast(1_000_000 + i);
+        const prompt = tokens[0 .. at + 7];
+        try t.expect(store.keep(prompt, at, null, &.{}, &.{}));
+        var s = try lanes.Stream.init(a, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
+        defer s.deinit(a);
+        try s.context.appendSlice(a, tokens[at + 7 ..]);
+        keepEnd(&store, a, &s, tokens.len);
+        const newest_other = store.find(&other, &.{}, &.{}) orelse return error.NewestConversationEvicted;
+        try t.expectEqual(at, newest_other.at);
+        const reply = store.entries.items[store.entries.items.len - 1];
+        try t.expectEqual(@as(u32, tokens.len), reply.at);
+        try t.expectEqual(@as(u32, at + 7), reply.born);
+        try t.expectEqual(@as(usize, if (roomy) 3 else 2), store.entries.items.len);
+        try t.expectEqual(store.entries.items.len, live.*);
+        if (roomy) {
+            const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted;
+            try t.expectEqual(at, history.at);
+            const plan = try store.begin(a, prompt, at, &.{}, &.{}, null, &.{});
+            defer a.free(plan.marks);
+            try t.expectEqual(at, plan.from);
+            try t.expectEqual(@as(u64, 1), store.counts.hits);
+        } else try t.expect(store.find(prompt, &.{}, &.{}) == null);
+    }
+    try t.expectEqual(@as(usize, 0), live.*);
+}
+
 const Family = struct {
     at: u32 = 0,
     sum: u64 = 0,

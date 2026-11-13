@@ -130,8 +130,8 @@ pub const Layout = struct {
         l.head.head_sha = sha;
     }
 
-    /// The header read back from bytes (at least head_bytes of them), every field and offset checked.
-    pub fn decode(gpa: std.mem.Allocator, bytes: []const u8) !Layout {
+    /// The header read back from bytes (at least head_bytes), every field checked; no chunk is past `max_stride`.
+    pub fn decode(gpa: std.mem.Allocator, bytes: []const u8, max_stride: u64) !Layout {
         if (bytes.len < @sizeOf(Head)) return error.BadHeader;
         var h: Head = undefined;
         @memcpy(std.mem.asBytes(&h), bytes[0..@sizeOf(Head)]);
@@ -154,6 +154,7 @@ pub const Layout = struct {
         var nd: u64 = 0;
         for (segs) |s| {
             if (s.chunk == 0 or s.stride != up(s.chunk) or s.first_digest != nd or s.offset % 4096 != 0) return error.BadHeader;
+            if (s.stride > max_stride) return error.BadHeader;
             if (s.nchunks != (std.math.add(u64, s.nbytes, s.chunk - 1) catch return error.BadHeader) / s.chunk) return error.BadHeader;
             if (s.nchunks > 0 and (std.math.add(u64, s.offset, @as(u64, s.nchunks - 1) * s.stride + up(s.nbytes - @as(u64, s.nchunks - 1) * s.chunk)) catch return error.BadHeader) > h.total) return error.BadHeader;
             nd += s.nchunks;
@@ -187,13 +188,28 @@ test "a layout encodes, decodes, and refuses a damaged header" {
     l.digests[1][5] = 9;
     var buf: [8192]u8 = undefined;
     l.encode(&buf);
-    var back = try Layout.decode(gpa, &buf);
+    var back = try Layout.decode(gpa, &buf, 1 << 20);
     defer back.deinit(gpa);
     try std.testing.expectEqual(l.head.total, back.head.total);
     try std.testing.expectEqual(@as(u8, 9), back.digests[1][5]);
     try std.testing.expectEqualStrings("comp.20", back.find(.pool, "comp.20").?.nameOf());
     buf[200] ^= 0x40;
-    try std.testing.expectError(error.ChecksumMismatch, Layout.decode(gpa, &buf));
+    try std.testing.expectError(error.ChecksumMismatch, Layout.decode(gpa, &buf, 1 << 20));
+}
+
+test "security: a file whose chunk is larger than the reader's buffer is refused" {
+    const gpa = std.testing.allocator;
+    const head: Head = .{ .key = @splat(1), .compat = @splat(2), .tag = 3, .kind = 0, .page = 256, .world = 1, .rank = 0, .first_page = 0, .npages = 1, .nseg = 0, .ndigest = 0, .pos = 0 };
+    var l = try Layout.build(gpa, head, &.{.{ .name = segName("ids"), .kind = .ids, .family = 0, .nbytes = 3 << 20, .chunk = 2 << 20 }});
+    defer l.deinit(gpa);
+    var buf: [8192]u8 = undefined;
+    l.encode(&buf);
+    // the header is whole and its checksum holds; only the buffer it would be read into is too small
+    try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf, 1 << 20));
+    try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf, (2 << 20) - 4096));
+    var fits = try Layout.decode(gpa, &buf, 2 << 20);
+    defer fits.deinit(gpa);
+    try std.testing.expectEqual(@as(u32, 2 << 20), fits.segs[0].chunk);
 }
 
 /// One blob segment built whole, then given `nbytes` or `offset` as a file could carry them, re-hashed and decoded.
@@ -204,12 +220,12 @@ fn decodeWrapped(nbytes: ?u64, offset: ?u64) !void {
     defer l.deinit(gpa);
     var buf: [8192]u8 = undefined;
     l.encode(&buf);
-    var whole = try Layout.decode(gpa, &buf);
+    var whole = try Layout.decode(gpa, &buf, 1 << 20);
     whole.deinit(gpa);
     if (nbytes) |n| l.segs[0].nbytes = n;
     if (offset) |o| l.segs[0].offset = o;
     l.encode(&buf);
-    try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf));
+    try std.testing.expectError(error.BadHeader, Layout.decode(gpa, &buf, 1 << 20));
 }
 
 const isolate = @import("sys").isolate;

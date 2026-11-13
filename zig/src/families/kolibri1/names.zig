@@ -6,7 +6,7 @@ const Config = @import("config.zig").Config;
 const Tensor = core.checkpoint.Tensor;
 const Checkpoint = core.checkpoint.Checkpoint;
 
-pub const block = 128; // the checkpoint's scale block, both ways
+pub const block = core.quant.fp8.block; // the checkpoint's scale block, both ways
 
 /// A block-FP8 projection as stored: e4m3 codes [n, k] and fp32 scale_inv [ceil(n/128), ceil(k/128)].
 pub const Fp8 = struct { w: Tensor, s: Tensor };
@@ -42,10 +42,6 @@ pub const Map = struct {
     }
 };
 
-fn blocks(n: usize) usize {
-    return (n + block - 1) / block;
-}
-
 const Names = struct {
     ck: *Checkpoint,
     buf: [160]u8 = undefined,
@@ -59,9 +55,8 @@ const Names = struct {
     }
 
     fn fp8(self: *Names, n: usize, k: usize, comptime fmt: []const u8, args: anytype) !Fp8 {
-        const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .f8_e4m3, &.{ n, k });
-        const s = try self.ck.expect(try self.name(fmt ++ ".weight_scale_inv", args), .f32, &.{ blocks(n), blocks(k) });
-        return .{ .w = w, .s = s };
+        const h = try core.quant.fp8.read(self.ck, try self.name(fmt, args), n, k, .f32, null);
+        return .{ .w = h.weight, .s = h.scale_inv };
     }
 
     fn expert(self: *Names, c: Config, comptime pre: []const u8, args: anytype) !Expert {
@@ -130,7 +125,7 @@ fn writeTiny(a: std.mem.Allocator, tmp: testing.TmpDir) !void {
     const Add = struct {
         fn fp8(list: anytype, al: std.mem.Allocator, pre: []const u8, n: usize, k: usize) !void {
             try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight", .{pre}), .dtype = "F8_E4M3", .shape = try al.dupe(usize, &.{ n, k }) });
-            try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale_inv", .{pre}), .dtype = "F32", .shape = try al.dupe(usize, &.{ blocks(n), blocks(k) }) });
+            try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale_inv", .{pre}), .dtype = "F32", .shape = try al.dupe(usize, &.{ core.quant.fp8.blocks(n), core.quant.fp8.blocks(k) }) });
         }
         fn bf(list: anytype, al: std.mem.Allocator, name: []const u8, shape: []const usize) !void {
             try list.append(al, .{ .name = name, .dtype = "BF16", .shape = try al.dupe(usize, shape) });

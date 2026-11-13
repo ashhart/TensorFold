@@ -135,7 +135,14 @@ pub const Model = struct {
     };
     /// The lane core prices complete candidate prefixes with its calibrated landing rates.
     pub fn selection(p: Proposal) selector.Options {
-        return .{ .nodes = p.nodes, .children = if (p.costs.len > 0) 16 else 4, .costs = if (p.defer_price) &.{} else p.costs, .overhead_ms = if (p.defer_price) 0 else p.overhead_ms };
+        var options = if (p.costs.len > 0) loneSelection(p.nodes) else selector.Options{ .nodes = p.nodes };
+        options.costs = if (p.defer_price) &.{} else p.costs;
+        options.overhead_ms = if (p.defer_price) 0 else p.overhead_ms;
+        return options;
+    }
+    /// A lone lane's full candidate tree, before the core prices its prefixes.
+    pub fn loneSelection(nodes: u32) selector.Options {
+        return .{ .nodes = nodes, .children = 16 };
     }
     /// Trees for 2 to 8 streams from one frame: each stream's new taps into its own caches, then one block pass.
     pub fn proposeBatch(m: *Model, entries: []const Proposal, out: []selector.Tree) !void {

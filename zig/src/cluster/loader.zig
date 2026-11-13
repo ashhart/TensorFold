@@ -1,4 +1,4 @@
-//! A rank's tensors onto its GPU: files mapped zero-copy, missing ranges pulled from a peer, sizes and SHA-256 checked.
+//! A rank's tensors onto its GPU: files mapped zero-copy, missing ranges pulled from a peer, whole files hashed.
 const std = @import("std");
 const checkpoint = @import("checkpoint.zig");
 const plan_mod = @import("plan.zig");
@@ -69,6 +69,8 @@ pub const Report = struct {
     pulled_bytes: u64 = 0,
     mapped_bytes: u64 = 0,
     hashed: u32 = 0,
+    /// Bytes mapped from files held in part, pulled now or earlier: their senders vouch for them, no manifest hash.
+    unverified_bytes: u64 = 0,
     /// The file mappings the sink's buffers point into; they must outlive the model.
     maps: std.ArrayList([]align(page) u8) = .empty,
 
@@ -84,9 +86,11 @@ pub const Options = struct {
     chunk: usize = 64 << 20,
     /// Hash whole local files against the manifest's SHA-256 (cached by size and mtime in .tensorfold/).
     verify: bool = true,
+    /// Map a file held only in part though the manifest has its hash, which a part cannot be checked against.
+    unverified: bool = false,
 };
 
-pub const Error = error{ MissingShard, HashMismatch, SizeMismatch };
+pub const Error = error{ MissingShard, HashMismatch, SizeMismatch, UnverifiedShard };
 
 const state_dir = ".tensorfold";
 
@@ -108,9 +112,20 @@ pub fn load(io: Io, a: Allocator, dir: Io.Dir, o: Options, ranges: []const Range
             if (o.verify and f.sha256 != null) rep.hashed += @intFromBool(try verifyWhole(io, a, dir, f));
             rep.local += 1;
         } else {
+            // a chunk's hash is its sender's own: only the manifest decides, and only for a file that ends up whole
+            const have = try recorded(io, a, dir, f);
+            defer a.free(have);
+            const whole = try coversWith(a, have, pieces, f.size);
+            if (!whole and o.verify and f.sha256 != null and !o.unverified) return error.UnverifiedShard;
             const src = source orelse return error.MissingShard;
-            rep.pulled_bytes += try pull(io, a, dir, o, ranges[i].file, f, pieces, src, progress, &done, total);
+            const got = try pull(io, a, dir, o, ranges[i].file, f, pieces, src, progress, &done, total);
+            rep.pulled_bytes += got.bytes;
             rep.pulled += 1;
+            if (got.whole and o.verify and f.sha256 != null) {
+                rep.hashed += @intFromBool(try settle(io, a, dir, f));
+            } else for (pieces) |r| {
+                rep.unverified_bytes += r.len;
+            }
         }
         const mem = try mapInto(io, dir, f, pieces, sink, &rep.mapped_bytes);
         try rep.maps.append(a, mem);
@@ -161,12 +176,42 @@ fn verifyWhole(io: Io, a: Allocator, dir: Io.Dir, f: checkpoint.File) !bool {
     return true;
 }
 
-/// Pull the ranges this sparse copy still lacks, checking each chunk's SHA-256, and record what landed.
-fn pull(io: Io, a: Allocator, dir: Io.Dir, o: Options, index: u32, f: checkpoint.File, pieces: []const Range, src: Source, progress: ?Progress, done: *u64, total: u64) !u64 {
+/// A file now held whole is checked against the manifest; one that fails is removed, so its bytes are never mapped.
+fn settle(io: Io, a: Allocator, dir: Io.Dir, f: checkpoint.File) !bool {
+    const record = try sidecar(a, f, "ranges");
+    defer a.free(record);
+    const hashed = verifyWhole(io, a, dir, f) catch |e| {
+        if (e == error.HashMismatch) {
+            dir.deleteFile(io, record) catch {};
+            dir.deleteFile(io, f.name) catch {};
+        }
+        return e;
+    };
+    dir.deleteFile(io, record) catch {};
+    return hashed;
+}
+
+/// True when the recorded chunks cover every byte of a file of `size` bytes.
+fn coversAll(have: [][2]u64, size: u64) bool {
+    std.mem.sort([2]u64, have, {}, struct {
+        fn before(_: void, x: [2]u64, y: [2]u64) bool {
+            return x[0] < y[0];
+        }
+    }.before);
+    var end: u64 = 0;
+    for (have) |h| {
+        if (h[0] > end) return false;
+        end = @max(end, h[0] +| h[1]);
+    }
+    return end >= size;
+}
+
+/// The chunks a sparse copy's ranges record lists, as offset and length; none when there is no record.
+fn recorded(io: Io, a: Allocator, dir: Io.Dir, f: checkpoint.File) ![][2]u64 {
     const record = try sidecar(a, f, "ranges");
     defer a.free(record);
     var have: std.ArrayList([2]u64) = .empty;
-    defer have.deinit(a);
+    errdefer have.deinit(a);
     if (dir.readFileAlloc(io, record, a, .limited(64 << 20))) |text| {
         defer a.free(text);
         var lines = std.mem.splitScalar(u8, text, '\n');
@@ -177,6 +222,26 @@ fn pull(io: Io, a: Allocator, dir: Io.Dir, o: Options, index: u32, f: checkpoint
             try have.append(a, .{ off, len });
         }
     } else |_| {}
+    return have.toOwnedSlice(a);
+}
+
+/// True when the recorded chunks and the ranges about to be pulled cover every byte of a file of `size` bytes.
+fn coversWith(a: Allocator, have: []const [2]u64, pieces: []const Range, size: u64) !bool {
+    const all = try a.alloc([2]u64, have.len + pieces.len);
+    defer a.free(all);
+    @memcpy(all[0..have.len], have);
+    for (pieces, all[have.len..]) |r, *x| x.* = .{ r.offset, r.len };
+    return coversAll(all, size);
+}
+
+const Pulled = struct { bytes: u64, whole: bool };
+
+/// Pull the ranges this sparse copy still lacks, checking each chunk against its sender's hash, and record what landed.
+fn pull(io: Io, a: Allocator, dir: Io.Dir, o: Options, index: u32, f: checkpoint.File, pieces: []const Range, src: Source, progress: ?Progress, done: *u64, total: u64) !Pulled {
+    const record = try sidecar(a, f, "ranges");
+    defer a.free(record);
+    var have: std.ArrayList([2]u64) = .fromOwnedSlice(try recorded(io, a, dir, f));
+    defer have.deinit(a);
     const file = dir.openFile(io, f.name, .{ .mode = .read_write }) catch try dir.createFile(io, f.name, .{ .read = true, .truncate = false });
     defer file.close(io);
     if (try file.length(io) != f.size) try file.setLength(io, f.size);
@@ -209,7 +274,7 @@ fn pull(io: Io, a: Allocator, dir: Io.Dir, o: Options, index: u32, f: checkpoint
             if (progress) |p| p.report(p.ptr, done.* + at - r.offset, total);
         }
     }
-    return pulled;
+    return .{ .bytes = pulled, .whole = coversAll(have.items, f.size) };
 }
 
 fn covered(have: []const [2]u64, at: u64, n: usize) bool {

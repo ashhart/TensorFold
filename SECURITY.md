@@ -55,3 +55,10 @@ SHA-256. The Mac app is signed and notarized.
 Malformed or folded headers and unsupported request targets are refused before routing. Each request on a pooled
 connection is checked afresh. Rejections close before `100 Continue` and unread bodies are not dispatched. Key files
 must be regular files without group or other read/write permission; use `chmod 600`.
+
+## Cluster nodes
+
+A cluster node on a real host takes only the nodes its cluster file names, each on the link the file gives it, and it
+believes a node only about itself. Another node's word cannot add a member, choose the leader or end a member's run.
+The links carry no key: the node at the far end of a link is whichever host MCDMA connected there, and a node of the
+file is trusted about itself.

@@ -168,11 +168,11 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 ## Rerank
 
 `POST /v1/rerank` (also `/rerank`, and by `PUT` as SGLang takes it) scores each document against a query with a
-reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`: the engine declares the reranker and
-its label tokens (`1_LogitScore/config.json`), and its startup line says `qwen3 reranker`. Every other server answers
-the route with HTTP 400 "this model is not a reranker", and a reranker server answers chat, completion, Responses,
-Messages, speech, decision, System One and embedding requests with HTTP 400 "this model is a reranker: use POST
-/v1/rerank".
+reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`, and the native CUDA engine `-0.6B`, `-4B`
+and `-8B`: the engine declares the reranker and its label tokens (`1_LogitScore/config.json`), and its startup line
+says `qwen3 reranker`. Every other server answers the route with HTTP 400 "this model is not a reranker", and a
+reranker server answers chat, completion, Responses, Messages, speech, decision, System One and embedding requests
+with HTTP 400 "this model is a reranker: use POST /v1/rerank".
 
 | Field | Meaning |
 | --- | --- |
@@ -576,9 +576,12 @@ drafted, `"draft": false` and concurrent replies stay the same with it on. When 
 grammar's shortest reply, the mask is not applied and the reply is cut as without it. The first request for a grammar
 explores its parser states over the tokenizer's tokens (on the request thread, then kept for the last eight grammars);
 a grammar with more than 16,384 such states is only masked where its explored states decide it, never beyond what
-completes. It is refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with token-level,
-budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with thinking on they
-start after the think end.
+completes. Exploring is also limited by a fixed amount of work, counted in parser and token steps rather than time, so
+the same grammar gets the same answer on every machine and under any load. The limit is about 256 times what
+`json_object` takes over a 250,000-token vocabulary; a grammar past it gets HTTP 400 that names the limit, and is never
+masked in part. It is also refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with
+token-level, budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with
+thinking on they start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
@@ -703,16 +706,40 @@ A startup capacity estimate is not a measured release capacity.
 
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
-model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from the
-host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start it
-with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
-when you know the machine's headroom: a larger one leaves more for other work, a smaller one more for KV caches. The
-reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
-GPU's memory can freeze the host, so lower it only with room to spare.
+model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
+`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
+model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
+the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
+once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
+with a smaller `--context` or `--parallel`.
+`TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
+one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
+workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
+only with room to spare.
 
-On a discrete card (an RTX 3090, an A100) the server sizes its window from the card's own free memory, as the driver
-reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
-0.5 GiB up.
+On a discrete card (an RTX 3090, an A100) the budget is the card's own free memory, as the driver reports it, less a
+reserve of a 32nd of the card and at least 1 GiB, and the plan is the same. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that
+one from 0.5 GiB up.
+
+With pages, the plan takes the engine's own window first, then each other stream's fixed part, then the prompt cache:
+a named `--prompt-cache-gib` comes before every window but the engine's own, and an unnamed one after the whole
+windows the budget holds, half of what they leave but at least 16 GiB and at most all of it (#2987 shows what that
+does to `TF_KV_SHARE`'s states). The cache then holds the kept states (on GLM with `TF_KV_SHARE`, a slot a state, the
+rest of it made pages), and the rest of the budget becomes pages, up to the streams' windows plus the cache's pages.
+The settings that decide each part:
+
+| Setting | Kind | Scope | Unset | What it decides | Read in |
+|---|---|---|---|---|---|
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | environment | the host: every CUDA native family, each rank at load | a tenth of RAM, at least 4 GiB (unified); a 32nd of the card, at least 1 GiB (discrete) | what the budget leaves free | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` | environment | the host: every CUDA native family, each rank at load | none | a cap on the budget, the weights included | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `--context` | flag | the launch | the family's default, capped at the model's own window | a stream's window; `0` takes the model's own | `zig/src/server/cli.zig`, `zig/src/native/cuda_window.zig` |
+| `--parallel` | flag | the launch | `auto`: up to 8 | the streams | `zig/src/server/cli.zig` |
+| `--prompt-cache-gib` | flag | the launch | after the whole windows, as above | the prompt cache's budget | `zig/src/server/cli.zig`; unset, `zig/src/native/cuda_kv_pool.zig` (`budgetOf`) and `cuda_memory.zig` |
+| `TF_KV_SHARE` | environment, in the profile registry | the launch, on the families of the core page adapter | off: copies | prompts kept as pool pages, with at most this many states past them | `zig/src/core/kv_prompts.zig` |
+| `TF_GLM_KV_HOST_GIB` | environment | GLM | one window and 16 pages | GLM's host KV pages with `TF_GLM_KV_HOST=1`, outside the device pool | `zig/src/families/glm/cuda_kv_host.zig` |
+| the pool's pages | none | the core plan | — | what is left | `zig/src/core/kv_pool.zig` (`plan`) |
+
+Measured numbers for one launch are in #3000.
 
 ## Compaction
 
@@ -921,6 +948,13 @@ A retryable refusal on an inference route answers 503 and names its wait in the 
 | `memory_pressure` | The host is under critical memory pressure and takes no new request until it eases |
 
 A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
+
+Connections are limited apart from requests. The server holds at most `--max-connections N` open connections (1-1024,
+default 128). From three quarters of them open, one address may hold `--max-connections-per-address N` (0-1024; by
+default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /64. Loopback clients and each
+`--trusted-proxy ADDRESS` (repeatable, up to 64; an exact IPv4 or IPv6 address, for a proxy, load balancer or Docker's
+bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
+a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
 
 ## Conversations on disk
 

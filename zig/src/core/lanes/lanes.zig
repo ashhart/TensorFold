@@ -63,6 +63,7 @@ test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
     _ = @import("late_draft_test.zig");
+    _ = @import("deep_chain_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
     _ = @import("loop_stop_test.zig");
@@ -84,6 +85,7 @@ test {
     _ = @import("depth_probe_test.zig");
     _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");
+    _ = @import("depth_floor_test.zig");
     _ = @import("lone_backoff_test.zig");
     _ = @import("fill_test.zig");
     _ = @import("fill_trim_test.zig");
