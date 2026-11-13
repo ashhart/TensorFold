@@ -13,10 +13,12 @@ on:
 permissions:
   contents: read
 
-# A pull request's newer push cancels its older run; every push to main keeps its own.
+# A pull request's newer push cancels its older run, and a newer push to main cancels main's older run: a landing train
+# pushes one commit a PR (seven runs in four minutes on 13 Nov), and the train's own run already tested the tree they
+# end at. The nightly schedule keeps a group of its own.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   benchmark-clients:
