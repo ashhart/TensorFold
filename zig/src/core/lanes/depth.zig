@@ -49,6 +49,7 @@ pub const Rule = struct {
     k: Constants = .{},
     prior: []const f64,
     most_drafts: u32,
+    shared_cap: u32 = 0, // Model.shared_mtp_cap: most a shared round chains a stream; a lone one chains most_drafts (0: off)
     family_costs: *const Table,
     shared_costs: *const Table,
     mtp_step_ms: f64,
@@ -150,7 +151,7 @@ pub const Rule = struct {
         if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
-            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
+            const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else if (r.shared_cap != 0) r.most_drafts else 3;
             return @max(1, @min(most, want));
         }
         var best: i64 = 1;
@@ -299,15 +300,15 @@ pub const Rule = struct {
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
         // drafts lose here: none asked, no head pass
         if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
+        const top: i64 = if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts;
         if (r.confidence_floor != null) {
-            for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
+            for (whos, out) |*w, *o| o.* = @min(try r.headDepth(w, null, probe), top);
             return;
         }
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
-                const inner = try r.headDepth(w, null, probe);
-                const granted: i64 = if (w.granted) |g| g else r.most_drafts;
-                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
+                const inner = @min(try r.headDepth(w, null, probe), top);
+                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, @as(i64, w.granted orelse r.most_drafts) + r.k.draft_slack), probe);
             }
             if (r.granted_depth) capPass(out, r.batch_rows);
             if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHolds(whos, sampled, out);
@@ -320,7 +321,7 @@ pub const Rule = struct {
         var made: usize = 0;
         defer for (probs[0..made]) |p| r.gpa.free(p);
         for (whos, most, probs) |w, *m, *p| {
-            m.* = @min(@as(i64, r.most_drafts), @max(1, w.draft_room - 1));
+            m.* = @min(top, @max(1, w.draft_room - 1));
             p.* = try alloc.chainProbabilities(r.gpa, try r.rates(w), @intCast(m.*));
             made += 1;
         }

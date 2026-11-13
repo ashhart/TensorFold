@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-Flash-Next on HIP: `--mtp-drafts N` now takes up to seven on every HIP device that serves Flash Next, the window's eight rows less the pending one, and a stream that is alone in a round chains up to N MTP drafts; rounds shared by several streams keep at most three a stream, `--tp` above 1 keeps the limit of three, and without the flag the head drafts three as before, so replies and speed stay as they were (#3053). Thanks to @gilby.
+
+- Qwen3.8-Flash-Next on Strix Halo (gfx1151): a verify window holds eight rows, so a lone stream's copy drafts grow to seven tokens a round while they land, where they stopped at three; rounds shared by several streams keep three-token copies, and MTP drafts default to three. A lone stream rewriting text it has seen runs about 26% faster; other cells are unchanged, and so are replies (#2730). Thanks to @gilby.
+
 - Intel XPU: Qwen3.8-27B's prompt `gdn_out` kernel keeps its scale bookkeeping in cheaper exact forms, for 22.6% less kernel time on an Arc Pro B70 (734 to 569 ms over a 32K prompt) with byte-identical outputs, its fallback included (#2921, refs #2859). Thanks to @dinadur.
 
 - OCR: the native HIP engine reads page images through `POST /v1/ocr` in Mistral's OCR contract (its Python and TypeScript SDKs), with dots.mocr's reader (a box for each layout block). Mistral crops share one image budget per request (256 images, 4 times the page pixels, 16 MiB plus 2 MiB a page). An option that changes content and that TensorFold cannot apply, such as annotations, is refused, and so are PDF documents and `pages`. A page cut at the context limit or out of its model's format fails the request with HTTP 422; `docs/api.md` lists the contract's fields, statuses and limits (#2570, #2440). Thanks to @laudney.

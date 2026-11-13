@@ -65,6 +65,7 @@ pub const Engine = struct {
                 .k = cfg.k,
                 .prior = cfg.depth_prior,
                 .most_drafts = cfg.most_drafts,
+                .shared_cap = cfg.shared_mtp_cap,
                 .family_costs = &cfg.family_costs,
                 .shared_costs = &cfg.shared_costs,
                 .mtp_step_ms = cfg.mtp_step_ms,
@@ -126,9 +127,7 @@ pub const Engine = struct {
         }
         if (live.items.len > 1 and e.cfg.family_streams) {
             // a shared round is synchronous: a stream that ran a step ahead lands its queued token first
-            for (live.items) |s| {
-                if (s.inflight != null) try e.landInflight(s);
-            }
+            for (live.items) |s| if (s.inflight != null) try e.landInflight(s);
             var kept: usize = 0;
             for (live.items) |s| {
                 if (s.finished) continue;

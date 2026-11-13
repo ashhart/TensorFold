@@ -529,6 +529,8 @@ zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dopti
   --parallel 1 --context 131072
 ```
 
+The MTP head chains three drafts a stream by default. `--mtp-drafts N`, up to seven (the verify window's eight rows less the pending one), lets a stream that is alone in a round chain up to N; rounds shared by several streams keep at most three a stream, and `--tp` above 1 refuses more than three. Seven helps where a lone stream's drafts land often (greedy code and chat); on copy-heavy edit text, where copied drafts already fill most of the window, seven ran 0.8% slower than three on one Strix Halo iGPU (gfx1151), and on a sampled chat reply it ran 1% to 3% slower, so pick a lower N for that kind of work. `--mtp-drafts 0` stops the head's drafts.
+
 ## Draft vocabulary provenance
 
 The Flash Next dump tool accepts `--draft-vocab default` for the shipped list,
