@@ -72,6 +72,7 @@ const Harness = struct {
     accept: std.Thread = undefined,
     stop: std.atomic.Value(bool) = .init(false),
     unix_path: ?[:0]const u8 = null,
+    cors_origins: []const []const u8 = &.{},
 
     fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
@@ -81,6 +82,7 @@ const Harness = struct {
             .use_drafts = false,
             .keep_warm_s = 0,
             .dashboard = true,
+            .browser = .{ .cors_origins = h.cors_origins },
         }, keys);
         errdefer h.srv.deinit();
         h.listener = if (h.unix_path) |path| try listener.Listener.openUnix(path) else try listener.Listener.open(.{ .ip4 = .loopback(0) });
@@ -394,4 +396,44 @@ test "auth scopes HTTP: the request cancel route needs a full key, a loopback ca
     for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), 200);
     try t.expect(e.asked.load(.acquire));
     try expectStatus(try h.ask(a, "POST", "/v1/requests/chatcmpl-nobody/cancel", "admin-secret", ""), 404);
+}
+
+test "CORS HTTP: a listed origin's preflight is answered before keys, its requests still need one, and its replies and streams carry the origin" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{ .cors_origins = &.{"https://ui.invalid"} };
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ask = "Access-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: authorization, content-type\r\nConnection: close\r\n\r\n";
+    const preflight = try h.exchange(a, "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://ui.invalid\r\n" ++ ask);
+    try expectStatus(preflight, 204);
+    for ([_][]const u8{ "Access-Control-Allow-Origin: https://ui.invalid\r\n", "Vary: Origin\r\n", "Access-Control-Allow-Headers: authorization, x-api-key, content-type, anthropic-version, anthropic-beta, anthropic-dangerous-direct-browser-access\r\n" }) |want|
+        try t.expect(std.mem.indexOf(u8, preflight, want) != null);
+    try t.expect(std.mem.indexOf(u8, preflight, "Access-Control-Allow-Credentials") == null);
+    const foreign = try h.exchange(a, "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://other.invalid\r\n" ++ ask);
+    try expectStatus(foreign, 403);
+    try t.expect(std.mem.indexOf(u8, foreign, "Access-Control-Allow-Origin") == null);
+    const body = "{\"model\":\"m\",\"prompt\":\"hello\",\"max_tokens\":1,\"stream\":true}";
+    const post = "POST /v1/completions HTTP/1.1\r\nHost: localhost\r\nOrigin: https://ui.invalid\r\n{s}Content-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}";
+    const unauthorized = try h.exchange(a, try std.fmt.allocPrint(a, post, .{ "", body.len, body }));
+    try expectStatus(unauthorized, 401);
+    try t.expect(std.mem.indexOf(u8, unauthorized, "Access-Control-Allow-Origin: https://ui.invalid\r\n") != null);
+    const scoped = try h.exchange(a, try std.fmt.allocPrint(a, post, .{ "Authorization: Bearer read-secret\r\n", body.len, body }));
+    try expectStatus(scoped, 403);
+    try t.expect(std.mem.indexOf(u8, scoped, "Access-Control-Allow-Origin: https://ui.invalid\r\n") != null);
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
+    const streamed = try h.exchange(a, try std.fmt.allocPrint(a, post, .{ "Authorization: Bearer infer-secret\r\n", body.len, body }));
+    try expectStatus(streamed, 200);
+    for ([_][]const u8{ "Content-Type: text/event-stream", "Access-Control-Allow-Origin: https://ui.invalid\r\n", "Vary: Origin\r\n", "data: [DONE]" }) |want|
+        try t.expect(std.mem.indexOf(u8, streamed, want) != null);
+    try t.expectEqual(@as(u32, 1), engine.calls.load(.acquire));
+    const plain = try h.ask(a, "GET", "/health", "", "");
+    try expectStatus(plain, 200);
+    try t.expect(std.mem.indexOf(u8, plain, "Access-Control-Allow-Origin") == null);
 }

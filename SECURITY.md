@@ -44,7 +44,9 @@ are refused. Both checks run before authentication, body processing and routing,
 Their HTTP 403 replies name Host/Origin and the relevant exception flag.
 
 Clients without Origin keep working with a valid Host, and no Content-Type restriction is introduced.
-The server sends no CORS headers; an origin exception does not grant cross-origin browser reads.
+An `--allowed-origin` exception sends no CORS headers and does not grant cross-origin browser reads. Only origins
+named with `--cors-origin ORIGIN` (exact, no wildcard, no credentials mode) get CORS preflights and
+`Access-Control-Allow-Origin`; their requests still need a valid key when keys are on.
 These browser checks do not replace `--api-key` for network access. See [API headers](docs/api.md#browser-request-headers).
 
 ## Release files
