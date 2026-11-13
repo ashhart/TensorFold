@@ -5,6 +5,7 @@ test {
 
 test {
     _ = @import("src/families/flashnext/grammar_host_test.zig");
+    _ = @import("src/families/flashnext/penalties.zig");
 }
 
 test {

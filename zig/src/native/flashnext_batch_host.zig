@@ -140,7 +140,7 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     plan.room_bytes = final.room;
     plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = tf.flashnext_backend.decodeShare(decode_share, std.c.getenv("TENSORFOLD_PREFILL_SHARE") != null), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .decode_share = tf.flashnext_backend.decodeShare(decode_share, std.c.getenv("TENSORFOLD_PREFILL_SHARE") != null), .prompt_cache_plan = plan, .structures = true, .penalties = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     h.back.fill_grows = h.host.share.p < 1; // a share of 1 asked for keeps today's small steps
     // FLASHNEXT_NO_LONE=1: lone requests on shared rounds. Images always; sampled, plain on tensor units (unmeasured).
     const measured = !eng.r.device.tensorUnits();

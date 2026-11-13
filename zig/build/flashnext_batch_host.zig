@@ -27,6 +27,7 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     schedule_step.dependOn(&schedule_run.step);
     all.dependOn(schedule_step);
     b.step("test-flashnext-buffer-plan-host", "Production prompt allocations counted without making any GPU buffer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next memory:"} })).step);
+    b.step("test-flashnext-penalties-host", "Flash Next presence and frequency entries, staged and dispatched on a recording device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next penalties:"} })).step);
     b.step("test-flashnext-vision-contracts-host", "Flash Next masked draws and vision contracts without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next contracts:"} })).step);
     b.step("test-flashnext-load-context-host", "Independent long and ordinary Flash Next load settings without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{ "Flash Next context:", "load sets no DeltaNet" } })).step);
     b.step("test-flashnext-rotary-bound-host", "Scalar rotary error propagation and contract hooks without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary bound:"} })).step);
