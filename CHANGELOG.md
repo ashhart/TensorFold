@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the macOS nightly runs `zig build test-native`, the Metal engine host tests, installing the Metal toolchain when the runner lacks it and printing its cold and warm wall time (#2891, fixes #2880).
+
 - Tests: `qwen27_served`'s reply-history test follows #2699's rule (each conversation's newest state is kept first under pressure), and a new case checks that a regenerate restores at the history mark when the cache has room, so `zig build test-native` passes on main again (#2889, fixes #2881).
 
 - Serve: a later `--compact-at` replaces an earlier one, as for every other serve flag; `--compact-at auto --compact-at 0.5` used to keep automatic compaction because the fraction never cleared it (#2883). Thanks to @laudney.
