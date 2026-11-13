@@ -16,6 +16,11 @@ fn useServer() void {
     worker.server_exe = @import("pdf_worker_exe").path;
 }
 
+/// One render of `pdf_bytes` by the render deadline.
+fn job(pdf_bytes: []const u8, sel: pdf.Selection, caps: pdf.Caps) pdf.Job {
+    return .{ .pdf_bytes = pdf_bytes, .sel = sel, .caps = caps, .deadline_ns = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + pdf.render_timeout_ns };
+}
+
 fn expectMissingLibrary(cx: Cx) !void {
     const libs = sys.optional_libraries;
     try std.testing.expectEqual(errors.Kind.unimplemented, cx.kind);
@@ -29,15 +34,15 @@ test "tensorfold-native PDF render worker: renders a text PDF in its spawned wor
     const a = arena.allocator();
     var cx: Cx = .{ .a = a };
     var budget: pdf.Budget = .{};
-    var jpegs: std.ArrayList([]const u8) = .empty;
-    const deadline_ns = std.Io.Clock.awake.now(std.testing.io).toNanoseconds() + pdf.render_timeout_ns;
-    worker.render(&cx, try worker.argv(a), text_pdf, 4, 4, deadline_ns, &budget, &jpegs) catch |err| {
+    var pages: std.ArrayList(pdf.Page) = .empty;
+    const total = worker.render(&cx, try worker.argv(a), job(text_pdf, .{ .all_within = 4 }, pdf.chatCaps(4)), &budget, &pages) catch |err| {
         try std.testing.expectEqual(error.Refused, err);
         return expectMissingLibrary(cx);
     };
-    try std.testing.expectEqual(@as(usize, 1), jpegs.items.len);
-    try std.testing.expectEqual(pdf.Budget{ .images_used = 1, .pdf_pages_used = 1, .encoded_bytes = jpegs.items[0].len, .pixels_used = 400 * 400 }, budget);
-    try std.testing.expectEqual([2]u32{ 400, 400 }, pdf.jpegSize(jpegs.items[0]).?);
+    try std.testing.expectEqual(@as(u32, 1), total);
+    try std.testing.expectEqual(@as(usize, 1), pages.items.len);
+    try std.testing.expectEqual(pdf.Budget{ .images_used = 1, .pdf_pages_used = 1, .encoded_bytes = pages.items[0].jpeg.len, .pixels_used = 400 * 400 }, budget);
+    try std.testing.expectEqual([2]u32{ 400, 400 }, pdf.jpegSize(pages.items[0].jpeg).?);
 }
 
 test "tensorfold-native PDF render worker: libpdfium renders in the spawned worker and enforces request-wide page, byte and pixel caps" {
@@ -64,4 +69,75 @@ test "tensorfold-native PDF render worker: libpdfium renders in the spawned work
     var second_cx: Cx = .{ .a = a };
     try std.testing.expectError(error.Refused, pdf.expandBytes(&second_cx, pdf.minimal_two_page_pdf, "image_url", 4, 3, &budget, &parts));
     try std.testing.expect(std.mem.indexOf(u8, second_cx.message, "at most 3 pages") != null);
+}
+
+test "tensorfold-native PDF render worker: a list selection renders only its pages, with their indices, size and DPI" {
+    useServer();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var budget: pdf.Budget = .{};
+    var pages: std.ArrayList(pdf.Page) = .empty;
+    const total = worker.render(&cx, try worker.argv(a), job(pdf.minimal_two_page_pdf, .{ .list = &.{1} }, pdf.ocrCaps(16)), &budget, &pages) catch |err| {
+        try std.testing.expectEqual(error.Refused, err);
+        return expectMissingLibrary(cx);
+    };
+    try std.testing.expectEqual(@as(u32, 2), total);
+    try std.testing.expectEqual(@as(usize, 1), pages.items.len);
+    const p = pages.items[0];
+    try std.testing.expectEqual(pdf.Page{ .index = 1, .jpeg = p.jpeg, .width = 400, .height = 400, .dpi = 144 }, p);
+    var out_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, worker.render(&out_cx, try worker.argv(a), job(pdf.minimal_two_page_pdf, .{ .list = &.{ 0, 2 } }, pdf.ocrCaps(16)), &budget, &pages));
+    try std.testing.expectEqualStrings("page 2 is out of range; the document has 2 pages", out_cx.message);
+    try std.testing.expectEqual(errors.Kind.request, out_cx.kind);
+}
+
+test "tensorfold-native PDF render worker: two chat PDFs share one request budget" {
+    useServer();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var parts: std.ArrayList(Value) = .empty;
+    var budget: pdf.Budget = .{};
+    for (0..2) |_| {
+        var cx: Cx = .{ .a = a };
+        pdf.expandBytes(&cx, pdf.minimal_two_page_pdf, "image_url", 4, 4, &budget, &parts) catch |err| {
+            if (err == error.Refused and cx.kind == .unimplemented) return expectMissingLibrary(cx);
+            return err;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 4), parts.items.len);
+    try std.testing.expectEqual(@as(u32, 4), budget.pdf_pages_used);
+    try std.testing.expectEqual(@as(u64, 4 * 400 * 400), budget.pixels_used);
+    var pages_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, pdf.expandBytes(&pages_cx, pdf.minimal_two_page_pdf, "image_url", 4, 4, &budget, &parts));
+    try std.testing.expectEqualStrings("a PDF may have at most 4 pages (--vision-max-images, TENSORFOLD_MAX_PDF_PAGES); this request has 6", pages_cx.message);
+    var images_cx: Cx = .{ .a = a };
+    try std.testing.expectError(error.Refused, pdf.expandBytes(&images_cx, pdf.minimal_two_page_pdf, "image_url", 4, 8, &budget, &parts));
+    try std.testing.expectEqualStrings("a request may hold at most 4 images (--vision-max-images); it has 6", images_cx.message);
+    try std.testing.expectEqual(@as(usize, 4), parts.items.len);
+}
+
+test "tensorfold-native PDF render worker: a measure returns each page's size and DPI with no JPEG bytes" {
+    useServer();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var budget: pdf.Budget = .{};
+    var pages: std.ArrayList(pdf.Page) = .empty;
+    var measure = job(pdf.minimal_two_page_pdf, .{ .all_within = 16 }, pdf.ocrCaps(16));
+    measure.measure = true;
+    const total = worker.render(&cx, try worker.argv(a), measure, &budget, &pages) catch |err| {
+        try std.testing.expectEqual(error.Refused, err);
+        return expectMissingLibrary(cx);
+    };
+    try std.testing.expectEqual(@as(u32, 2), total);
+    try std.testing.expectEqual(@as(usize, 2), pages.items.len);
+    for (pages.items, 0..) |p, i| {
+        try std.testing.expectEqual(@as(usize, 0), p.jpeg.len);
+        try std.testing.expectEqual(pdf.Page{ .index = @intCast(i), .jpeg = p.jpeg, .width = 400, .height = 400, .dpi = 144 }, p);
+    }
+    try std.testing.expectEqual(pdf.Budget{ .images_used = 2, .pdf_pages_used = 2, .pixels_used = 2 * 400 * 400 }, budget);
 }
