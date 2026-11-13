@@ -19,7 +19,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
-        error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs our own glue and no --slide: unset it",
+        error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs our own glue and no --slide, and one rank unless the checkpoint is EXL3: unset it",
         error.FlashNextKvHostNeedsExl3 => "TF_FLASHNEXT_KV_HOST needs an EXL3 Flash Next checkpoint; unset it for MLX or ModelOpt",
         error.BadFlashNextKvHost => "TF_FLASHNEXT_KV_HOST takes a nonnegative whole MiB budget fitting a native byte count; TF_FLASHNEXT_KV_FRAMES and TF_FLASHNEXT_KV_SLOTS take positive whole frame counts (blank is unset)",
         error.FlashNextTierRanksDisagree => "the tensor-parallel ranks disagree on the host K/V tier; restart both with matching checkpoints and TF_FLASHNEXT_KV_HOST, TF_FLASHNEXT_KV_FRAMES and TF_FLASHNEXT_KV_SLOTS",
@@ -60,4 +60,19 @@ test "exl3: load refusals are diagnosed without borrowing request diagnostics" {
     }
     for ([_]anyerror{ error.UnsupportedQuantization, error.BadRank }) |err|
         try testing.expectEqual(@as(?[]const u8, null), open(err));
+}
+
+test "exl3: pages at --tp 2 are refused for a pack that is not EXL3 and accepted for EXL3" {
+    const t = @import("std").testing;
+    const kv_lanes = @import("cuda_kv_lanes.zig");
+    try t.expectError(error.FlashNextPagesUnsupported, kv_lanes.refusePages(256, 2, false, false, false));
+    const words = open(error.FlashNextPagesUnsupported).?;
+    try t.expect(@import("std").mem.indexOf(u8, words, "TF_FLASHNEXT_KV_PAGES") != null);
+    try t.expect(@import("std").mem.indexOf(u8, words, "unless the checkpoint is EXL3") != null);
+    try t.expectEqualStrings(words, explain(error.FlashNextPagesUnsupported).?);
+    try kv_lanes.refusePages(256, 2, true, false, false);
+    try kv_lanes.refusePages(256, 1, false, false, false);
+    try kv_lanes.refusePages(0, 2, false, false, false);
+    try t.expectError(error.FlashNextPagesUnsupported, kv_lanes.refusePages(256, 1, true, true, false));
+    try t.expectError(error.FlashNextPagesUnsupported, kv_lanes.refusePages(256, 2, true, false, true));
 }
