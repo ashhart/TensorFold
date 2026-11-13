@@ -9,6 +9,7 @@ const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
 const auth_scope = @import("auth_scope.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
@@ -116,6 +117,10 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (cancel_ids.match(route)) |rid| { // an admin action: answered at once, outside admission
+        discardBody(conn, a);
+        return cancel_ids.post(srv, conn, a, rid);
+    }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
     const is_images = std.mem.eql(u8, route, "/v1/images/generations");

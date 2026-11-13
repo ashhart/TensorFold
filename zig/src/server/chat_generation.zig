@@ -28,6 +28,8 @@ pub const Generation = struct {
     box: *Mailbox,
     id: api.Id,
     reply_id: []const u8, // the id the client gets, which the done line prints
+    asked: ?*const std.atomic.Value(bool) = null, // POST /v1/requests/{id}/cancel's ask (cancel_ids.zig)
+    cancel_sent: bool = false, // the ask went to the engine once; the loop then reads until the engine finishes
     seed: ?u64 = null,
     sink: ?Sink,
     thinking: bool,
@@ -200,6 +202,11 @@ pub const Generation = struct {
                 g.cancel();
                 return error.Cancelled;
             }
+            // the cancel route: the engine's cancel, as a disconnect sends it; the reply then ends "cancelled"
+            if (g.asked) |x| if (!g.cancel_sent and g.reason == null and x.load(.acquire)) {
+                g.srv.engine.cancel(g.id);
+                g.cancel_sent = true;
+            };
             if (chunk == null and @hasDecl(Gone, "beat")) {
                 // queueing and a long prefill send nothing: a client that times out a silent stream would leave
                 const now = nowNs(g.srv.io);

@@ -9,6 +9,7 @@ const pyrepr = @import("pyrepr.zig");
 const ids = @import("ids.zig");
 const translate_mod = @import("responses_translate.zig");
 const store_mod = @import("responses_store.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const Sink = @import("responses_sink.zig").Sink;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -96,6 +97,8 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
     const base = newBase(srv, a, body, t) catch return .{ .streamed = null };
     var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history };
     var out: Wire = .{ .reply = &reply };
+    cancel_ids.alias = base.get("id").?.string; // the cancel route takes the response's id too
+    defer cancel_ids.alias = null;
     openai.runNamed(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format, true);
     if (out.opened or conn.broken) return .{ .streamed = reply.final };
     const status = out.status orelse return .{ .streamed = null };
@@ -367,15 +370,16 @@ const Reply = struct {
     fn finish(r: *Reply, reason: ?[]const u8, chat_usage: ?Value, stats: ?Value) E!Value {
         const length = reason != null and std.mem.eql(u8, reason.?, "length");
         const filtered = reason != null and std.mem.eql(u8, reason.?, @import("loop_stop.zig").finish_reason);
+        const cancelled = reason != null and std.mem.eql(u8, reason.?, "cancelled"); // POST /v1/requests/{id}/cancel
         const incomplete = length or filtered;
-        const status = if (incomplete) "incomplete" else "completed";
-        if (!incomplete and !r.warmup) {
+        const status = if (cancelled) "cancelled" else if (incomplete) "incomplete" else "completed";
+        if (!incomplete and !cancelled and !r.warmup) {
             const all_reasoning = for (r.items.items) |item| {
                 if (!std.mem.eql(u8, item.get("type").?.string, "reasoning")) break false;
             } else true;
             if (all_reasoning) _ = try r.open("message", "", ""); // an empty answer is still a message
         }
-        try r.close(status);
+        try r.close(if (cancelled) "incomplete" else status); // an output item is never "cancelled"
         const final = json.copyObject(r.a, r.base) catch return error.Closed;
         try r.put(final, "status", .{ .string = status });
         try r.put(final, "output", try r.itemsValue());
@@ -385,11 +389,12 @@ const Reply = struct {
             try r.put(d, "reason", .{ .string = if (filtered) "content_filter" else "max_output_tokens" });
             try r.put(final, "incomplete_details", .{ .object = d });
         } else try r.put(final, "incomplete_details", .null);
-        if (!incomplete) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));
+        if (!incomplete and !cancelled) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));
         if (stats) |s| if (s != .null) try r.put(final, "tensorfold", s);
         r.final = .{ .object = final };
         if (r.keep) r.store(.{ .object = final });
-        try r.event(if (incomplete) "response.incomplete" else "response.completed", &.{.{ "response", .{ .object = final } }});
+        // a cancelled response ends with the terminal event clients know for a cut reply, its status "cancelled"
+        try r.event(if (incomplete or cancelled) "response.incomplete" else "response.completed", &.{.{ "response", .{ .object = final } }});
         return .{ .object = final };
     }
 
