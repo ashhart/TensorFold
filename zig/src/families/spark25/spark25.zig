@@ -15,4 +15,5 @@ test {
     _ = snap;
     _ = backend;
     _ = native;
+    _ = @import("prompt_tail.zig"); // which prompt rows the last layer runs
 }

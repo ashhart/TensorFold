@@ -304,7 +304,10 @@ pub const Engine = struct {
         if (start >= ids.len or start % prompt_rows != 0 or start != e.cur.st.pos) return error.BadChunk;
         if (cancel) |x| if (x.check(x.ptr)) return error.Cancelled;
         const rows = @min(ids.len - start, prompt_rows);
-        const f = e.forward(&e.bp);
+        var f = e.forward(&e.bp);
+        // the last layer's rows nothing reads stop at their cache writes: every rank derives the same rows from these
+        const reach: ?usize = if (e.drafter) |dr| dr.w.c.window + window_rows else null;
+        f.tail = @import("cuda_prompt_tail.zig").first(.{ .rows = rows, .start = start, .len = ids.len, .draft = reach, .watched = f.watch != null });
         const seg = [_]fw.Seg{.{ .st = &e.cur.st, .row0 = 0, .rows = rows }};
         try f.run(@ptrCast(ids[start..][0..rows]), &seg);
         try fw.Forward.commit(&seg, &.{rows});
