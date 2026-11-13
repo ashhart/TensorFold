@@ -75,6 +75,9 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 27. Profiles | done [#1944] | done [#1944] | done [#1959] | done [#1944] | done [#2061] |
 | 28. Scale index | ? | open M[#2760] | ? | ? | ? |
 | 29. DSpine | done C[#2633] | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | failed H[#1603] | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | failed H[#1603] | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | failed H[#1603] | ? | ? | ? |
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
@@ -107,6 +110,9 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 27. Profiles | done [#1944] | done [#1944] | open [#2306] | yes | yes |
 | 28. Scale index | ? | ? | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? | ? |
 
 | Optimization | lfm2m | lfm3 | qwen4 | ling |
 | --- | --- | --- | --- | --- |
@@ -139,6 +145,9 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
 
 q3.5 `qwen3_5` (C, M, H, X), fnext `flashnext` (C, M, H), glm `glm` (C, M), gem4 `gemma4` (C, M, X),
 nemo `nemotron` (C, M, H, X), kol1 `kolibri1` (C), spk25 `spark25` (C, M),
@@ -177,6 +186,9 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 27. Profiles | yes | yes | yes | yes |
 | 28. Scale index | ? | ? | ? | ? |
 | 29. DSpine | open M[#2634] | no (scores) | no (no drafter) | no (no drafter) |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
 
 | Optimization | gdsa | kimi | qwen3 |
 | --- | --- | --- | --- |
@@ -209,6 +221,9 @@ ling `ling` (host package only, no engine yet; CUDA plan in [#850]).
 | 27. Profiles | yes | yes | yes |
 | 28. Scale index | ? | ? | ? |
 | 29. DSpine | no (no drafter) | no (no drafter) | no (prompt) |
+| 30. Small-kernel fusion | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? |
 
 q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores decisions and writes no text),
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
@@ -255,6 +270,12 @@ below; these are estimates for planning a port, not results.
 | 27. Profiles | none | none | none | names the opt-in switches |
 | 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
 | 29. DSpine | none | medium | low | Qwen3.8-27B; agent 2–20 % faster, chat and code 10–19 % slower |
+| 30. Small-kernel fusion | ? | ? | ? | ? |
+| 31. Stream-tile prefetch | ? | ? | ? | ? |
+| 32. Filled-item prompt grid | ? | ? | ? | ? |
+| 30. Small-kernel fusion | none | low | none | HIP Flash Next: 1.2–2.0 % of a round for the hyper-connection block, 2.4–4.0 % for all four groups |
+| 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
+| 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
 
 ## The optimizations
 
@@ -466,6 +487,30 @@ below; these are estimates for planning a port, not results.
     ([#2633]); the Metal binding ([#2634]) is still open. On a GB10, against DFlash2: agent prompts decode 2–20 %
     faster, chat and code 10–19 % slower. It needs the checkpoint's own DSpine drafter, so other families have none.
 
+30. **Small-kernel fusion.** Launches under 20 µs, fused into one launch where they sit next to each other, to save the
+    gap between dispatches (2.0 µs median) and the per-launch floor (the cheapest kernels run 1.3 µs). Bounded under the
+    bar on Flash Next HIP, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | hyper-connection block 1.2–2.0 % of a round, all four groups together 2.4–4.0 %; estimates from measured gaps and launch counts, not built | [#1603], main `6c5cef894`, gfx1151 |
+
+31. **Prefetched and double-buffered stream tiles.** A separate stream-tile family for the hyper-connection
+    projections that prefetches or double-buffers the weight loads, bit-equal to the plain kernel at 1–8 rows. On
+    Flash Next HIP it gained nothing, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | code 46.01–46.30 tok/s and chat 39.87–40.10 tok/s against main, every token hash equal | [#1603], one Strix Halo iGPU (gfx1151) |
+
+32. **Routed-expert prompt grid sized by filled items.** The prompt launch's grid follows the items actually filled
+    and not the decode tile's capacity, where about 91 % of the blocks exit empty at 4,096 rows. On Flash Next HIP the
+    empty blocks cost almost nothing, so the row is `failed` ([#1603]).
+
+    | Family | Gain (measured) | Where |
+    | --- | --- | --- |
+    | flashnext (H) | first-token ratios 0.99–1.01, prompt tok/s at most 1.2 % better, decode and concurrency level | [#1603], one Strix Halo iGPU (gfx1151) |
+
 [#458]: https://github.com/ashhart/TensorFold/pull/458
 [#468]: https://github.com/ashhart/TensorFold/pull/468
 [#519]: https://github.com/ashhart/TensorFold/pull/519
@@ -615,3 +660,4 @@ below; these are estimates for planning a port, not results.
 [#2634]: https://github.com/ashhart/TensorFold/pull/2634
 [#2784]: https://github.com/ashhart/TensorFold/pull/2784
 [#2764]: https://github.com/ashhart/TensorFold/issues/2764
+[#1603]: https://github.com/ashhart/TensorFold/issues/1603
