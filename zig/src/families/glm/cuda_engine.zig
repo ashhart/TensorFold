@@ -8,6 +8,8 @@ const weights = @import("cuda_weights.zig");
 const fw = @import("cuda_forward.zig");
 const ranks = @import("cuda_ranks.zig");
 const sampler = @import("cuda_sampler.zig");
+const repetition = @import("cuda_repetition.zig");
+const repetition_device = @import("cuda_repetition_device.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const heat = @import("heat");
 const modelopt = @import("core").modelopt;
@@ -84,6 +86,8 @@ pub const Engine = struct {
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
     pairs: cuda.DeviceBuffer, // every rank's (value, id) of a greedy draw
     smp: sampler.Sampler,
+    processor_rows: repetition_device.Device = .{},
+    drawing_draft: bool = false,
     seqs: std.ArrayList(?*Seq) = .empty, // every stream's sequence by slot (the lane backend's), slot 0 made at init
     cur: *Seq = undefined, // the bound slot's: every step below runs on it
     slot: u32 = 0,
@@ -234,6 +238,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.processor_rows.deinit();
         e.gpa.free(e.packs.ptrs);
         e.gpa.free(e.packs.bits);
         if (e.drafter) |dr| dr.deinit();
@@ -312,6 +317,7 @@ pub const Engine = struct {
 
     /// Frees slot `slot`'s sequence (slot 0 stays, and a paged one gives its pages back) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
+        e.processor_rows.table.len = 0;
         if (e.images) |v| v.release(slot);
         const paged = if (e.pages) |p| p.paged(slot) else false;
         if (paged) e.pages.?.close(slot) else if (slot != 0) e.free(slot);
@@ -510,6 +516,8 @@ pub const Engine = struct {
 
     /// decode.draft: the MTP head absorbs the kept rows (committed first) with `follow`, then chains `depth` drafts.
     pub fn draft(e: *Engine, from_prompt: bool, follow: []const u32, depth: usize, out: []u32, chances: ?[]f64) !void {
+        e.drawing_draft = true;
+        defer e.drawing_draft = false;
         if (!e.mtp) return error.NoDraftHead;
         if (depth > max_drafts) return error.TooDeep;
         var one: [1]fw.Rank = undefined;
@@ -544,12 +552,26 @@ pub const Engine = struct {
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
     pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
-        if (e.structured) return e.drawWhole(logits, rows, first, bits, out);
+        const processed = try e.processor(rows, first);
+        if (e.structured or processed != null) return e.drawWhole(logits, rows, first, bits, out);
         if (e.cur.sampling) |s| {
             try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
             return e.checkGathers(); // the draw read rows the forward's gathers made
         }
         try @import("cuda_engine_pick.zig").greedyRows(e, logits, rows, out);
+    }
+
+    pub fn processor(e: *const Engine, rows: usize, first: u64) !?sampler.Processor {
+        if (e.drawing_draft) return null;
+        return e.processor_rows.find(e.slot, first, rows);
+    }
+
+    pub fn prepareProcessors(e: *Engine, table: repetition.Table, words: usize) !void {
+        for (table.rows[0..table.len]) |r| {
+            if (r.slot >= e.seqs.items.len or e.seqs.items[r.slot] == null) return error.BadProcessorTable;
+        }
+        if (table.len != 0) try e.smp.prepareProcessor(e.stream, table.len);
+        try e.processor_rows.prepare(e.d, e.stream, table, words);
     }
 
     pub const promptHead = @import("cuda_structured.zig").promptHead;

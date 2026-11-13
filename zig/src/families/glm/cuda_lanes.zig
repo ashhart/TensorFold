@@ -8,6 +8,7 @@ const dflash = @import("dflash.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const share_mod = @import("cuda_share.zig");
 const cuda = @import("cuda");
+const repetition = @import("cuda_repetition.zig");
 const be = lanes.backend;
 /// First tokens a handle names.
 const ring = 1024;
@@ -18,8 +19,9 @@ const shared_head_drafts = 3; // an MTP chain's most drafts in a shared round, w
 const copy_policy = @import("cuda_copy_policy.zig");
 const lane_costs = @import("cuda_lane_costs.zig");
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
-const Lane = struct {
+pub const Lane = struct {
     slot: u32,
+    history: ?repetition.History = null,
     pending_rows: ?usize = null,
     held: [@max(max_held, engine.max_drafts)]u32 = undefined,
     chances: [@max(max_held, engine.max_drafts)]f64 = undefined, // each held draft's chance: DFlash2's selector's, or the MTP head's (--mtp-confidence)
@@ -39,13 +41,18 @@ pub const Lanes = struct {
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
+    processor_stage: ?repetition.Stage = null,
     bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
     bits_dev: u64 = 0,
 
     pub fn deinit(self: *Lanes) void {
         if (self.bits) |*b| b.free();
         var it = self.lanes.valueIterator();
-        while (it.next()) |l| self.x.e.gpa.free(l.marks);
+        while (it.next()) |l| {
+            self.x.e.gpa.free(l.marks);
+            if (l.history) |*h| h.deinit(self.x.e.gpa);
+        }
+        if (self.processor_stage) |*s| s.deinit(self.x.e.gpa);
         self.lanes.deinit(self.x.e.gpa);
     }
 
@@ -147,6 +154,34 @@ pub const Lanes = struct {
         };
     }
 
+    pub fn resetProcessors(self: *Lanes) !*repetition.Stage {
+        if (self.processor_stage == null) self.processor_stage = try repetition.Stage.init(self.x.e.c.vocab);
+        self.processor_stage.?.reset();
+        return &self.processor_stage.?;
+    }
+
+    pub fn addProcessor(self: *Lanes, s: *const lanes.Stream, first: u64, prefix: []const u32, ids: []const u32) !void {
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        const factor = s.penalties.repetition;
+        if (factor != 1) {
+            if (l.history == null) l.history = try repetition.History.init(self.x.e.gpa, self.x.e.c.vocab, s.prompt());
+            _ = try l.history.?.sync(self.x.e.gpa, prefix);
+        }
+        try self.processor_stage.?.add(self.x.e.gpa, l.slot, first, factor, if (l.history) |*h| h else null, ids);
+    }
+
+    pub fn promptProcessor(self: *Lanes, s: *const lanes.Stream) !void {
+        const stage = try self.resetProcessors();
+        try self.addProcessor(s, s.prompt_len, s.prompt(), &.{});
+        try self.x.processors(stage);
+    }
+
+    fn forget(self: *Lanes, s: *const lanes.Stream) void {
+        var kv = self.lanes.fetchRemove(s) orelse return;
+        if (kv.value.history) |*h| h.deinit(self.x.e.gpa);
+        self.x.e.gpa.free(kv.value.marks);
+    }
+
     /// The lowest slot no stream holds.
     fn freeSlot(self: *const Lanes) u32 {
         var slot: u32 = 0;
@@ -172,7 +207,7 @@ pub const Lanes = struct {
     }
 
     /// The stream's sequence bound, its last verify committed (`kept` rows, else all of them).
-    fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
+    pub fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
         try self.x.bind(l.slot);
         if (l.pending_rows) |rows| try self.x.keep(kept orelse rows);
@@ -194,6 +229,7 @@ pub const Lanes = struct {
         try sink.prepare();
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
+        try self.promptProcessor(s);
         var keeps: share_mod.Keeps = undefined;
         const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
         self.lanes.getPtr(s).?.first = self.take(first);
@@ -225,6 +261,9 @@ pub const Lanes = struct {
     }
 
     pub fn many(self: anytype, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
+        const stage = try self.resetProcessors();
+        for (ss) |s| try self.addProcessor(s, s.prompt_len, s.prompt(), &.{});
+        try self.x.processors(stage);
         try self.x.prefillMany(parts, firsts);
         for (ss) |s| lanes.prefill_widths.completed(self.x.e.gpa, s, s.prompt_len);
         for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
@@ -246,6 +285,7 @@ pub const Lanes = struct {
         try sink.prepare();
         self.x.e.prompt_logprobs = sink.want();
         defer self.x.e.prompt_logprobs = null;
+        try self.promptProcessor(s);
         var keeps: share_mod.Keeps = undefined;
         const step = try self.x.chunk(s.prompt(), at, !@import("cuda_prompt_solo.zig").othersDecode(&self.lanes, s), from, .{ .ptr = s, .check = cancelled }, self.marksOf(s, &keeps));
         if (step.first) |first| {
@@ -296,7 +336,7 @@ pub const Lanes = struct {
         const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
         errdefer {
             self.x.e.release(self.lanes.get(s).?.slot);
-            _ = self.lanes.remove(s);
+            self.forget(s);
         }
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.beginOn(s.sampling, pages, adopt.items.len);
@@ -332,7 +372,7 @@ pub const Lanes = struct {
         l.first = null;
         errdefer {
             if (self.x.e.pages) |p| p.close(l.slot);
-            _ = self.lanes.remove(s);
+            self.forget(s);
         }
         const pages = try self.pagesFor(l.slot, prompt, max_new, adopted);
         try self.x.bind(l.slot);
@@ -417,6 +457,7 @@ pub const Lanes = struct {
         const bits = try self.putBits(0, 1, mask);
         if (bits == 0) return error.InvalidGrammarMasks;
         try self.x.bind(l.slot);
+        try self.promptProcessor(s);
         return self.take(try self.x.redraw(@intCast(position), bits));
     }
 
@@ -443,67 +484,7 @@ pub const Lanes = struct {
 
     /// Each window in its own forward on its stream's sequence (the core sends one when no forward is shared).
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
-        const self = of(ptr);
-        if (windows.len > 1) return self.verifyShared(windows, out);
-        for (windows, out) |w, *o| {
-            if (w.parents != null) return error.TreesNotBuilt;
-            const l = try self.bind(w.stream, null);
-            const rows = w.rows();
-            if (rows > max_rows) return error.WindowTooWide;
-            if (w.held > l.held_n) return error.NoHeldDrafts;
-            const pos = self.x.e.pos();
-            for (w.positions, 0..) |p, r| if (p != pos + 1 + r) return error.PositionMismatch;
-            var ids: [max_rows]u32 = undefined;
-            ids[0] = w.pending;
-            const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
-            @memcpy(ids[1..][0..drafts.len], drafts);
-            var sampled: [max_rows]u32 = undefined;
-            const bits = try self.putBits(0, rows, w.masks); // before the step goes out: a refusal after it strands the ranks
-            self.x.e.structured = bits != 0;
-            defer self.x.e.structured = false;
-            try self.x.verify(ids[0..rows], sampled[0..rows], bits);
-            @memcpy(o.sampled[0..rows], sampled[0..rows]);
-            @memcpy(o.drafts[0..drafts.len], drafts);
-            l.pending_rows = rows;
-        }
-    }
-
-    /// A round's windows in one forward (Engine.verifyShared), each stream's rows on its own sequence.
-    fn verifyShared(self: *Lanes, windows: []const be.Window, out: []be.Verified) !void {
-        if (windows.len > engine.max_shared) return error.WindowTooWide;
-        var parts: [engine.max_shared]engine.Part = undefined;
-        var ids: [engine.max_shared][max_rows]u32 = undefined;
-        var sampled: [engine.max_shared][max_rows]u32 = undefined;
-        var lane: [engine.max_shared]*Lane = undefined;
-        var row: usize = 0; // the windows' rows so far: each one's grammar rows start there in the bits
-        var structured = false;
-        for (windows, 0..) |w, k| {
-            if (w.parents != null) return error.TreesNotBuilt;
-            const l = try self.bind(w.stream, null);
-            const rows = w.rows();
-            if (rows > max_rows) return error.WindowTooWide;
-            if (w.held > l.held_n) return error.NoHeldDrafts;
-            const pos = self.x.e.pos();
-            for (w.positions, 0..) |p, r| if (p != pos + 1 + r) return error.PositionMismatch;
-            ids[k][0] = w.pending;
-            const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
-            @memcpy(ids[k][1..][0..drafts.len], drafts);
-            const bits = try self.putBits(row, rows, w.masks);
-            structured = structured or bits != 0;
-            parts[k] = .{ .slot = l.slot, .ids = ids[k][0..rows], .out = sampled[k][0..rows], .bits = bits };
-            lane[k] = l;
-            row += rows;
-        }
-        self.x.e.structured = structured; // one window under a grammar: the whole step draws from whole rows
-        defer self.x.e.structured = false;
-        try self.x.verifyShared(parts[0..windows.len]);
-        self.shared += 1;
-        for (out[0..windows.len], parts[0..windows.len], lane[0..windows.len]) |*o, p, l| {
-            const rows = p.ids.len;
-            @memcpy(o.sampled[0..rows], p.out);
-            @memcpy(o.drafts[0 .. rows - 1], p.ids[1..rows]);
-            l.pending_rows = rows;
-        }
+        return @import("cuda_lane_verify.zig").run(of(ptr), windows, out);
     }
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
@@ -587,7 +568,8 @@ pub const Lanes = struct {
     /// The stream left the rounds: its sequence is freed, or its pages given back, on every rank (slot 0 stays).
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const self = of(ptr);
-        const kv = self.lanes.fetchRemove(s) orelse return;
+        var kv = self.lanes.fetchRemove(s) orelse return;
+        if (kv.value.history) |*h| h.deinit(self.x.e.gpa);
         self.x.e.gpa.free(kv.value.marks);
         self.x.release(kv.value.slot) catch |err| std.log.err("releasing slot {d}: {s}", .{ kv.value.slot, @errorName(err) });
         if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});

@@ -8,12 +8,17 @@ const Engine = @import("cuda_engine.zig").Engine;
 
 /// Structured output's draw: the rows whole on every rank (Sampler.gather); rank 0 masks them by `bits` and draws.
 pub fn drawWhole(e: anytype, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+    const processor = if (comptime @hasDecl(@TypeOf(e.*), "processor")) try e.processor(rows, first) else null;
     try e.smp.gather(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, e.smp.full.ptr);
     if (e.share.rank != 0) {
         try e.stream.synchronize();
         return e.checkGathers();
     }
     if (bits != 0) try e.smp.mask(e.stream, rows, bits, (e.c.vocab + 31) / 32);
+    if (processor) |p| {
+        try e.smp.drawProcessed(e.stream, rows, first, if (e.cur.sampling) |s| sampler.rule(s) else null, p, out);
+        return e.checkGathers();
+    }
     if (e.cur.sampling) |s| {
         try e.smp.drawFull(e.stream, rows, first, sampler.rule(s), out);
         return e.checkGathers();

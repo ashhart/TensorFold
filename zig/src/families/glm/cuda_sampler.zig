@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const Span = @import("cuda_shard.zig").Span;
 const Exchange = @import("cuda_forward.zig").Exchange;
+pub const Processor = @import("cuda_repetition_device.zig").Processor;
 
 pub const Sampling = lanes.Sampling;
 
@@ -38,6 +39,8 @@ pub const Sampler = struct {
     meta: cuda.DeviceBuffer,
     tok: cuda.DeviceBuffer,
     prob: cuda.DeviceBuffer,
+    repetition_draw: ?cuda.Function = null,
+    repetition_greedy: ?cuda.Function = null,
 
     pub fn init(d: *const cuda.Driver, vocab: usize, rows: usize) !Sampler {
         var m = try cuda.Module.load(d, cuda.kernels.sample);
@@ -64,6 +67,57 @@ pub const Sampler = struct {
         s.rule.free();
         s.full.free();
         s.module.unload();
+    }
+
+    /// Active shared windows can exceed the original sampled window; identity retains the original allocation.
+    pub fn prepareProcessor(s: *Sampler, stream: cuda.Stream, rows: usize) !void {
+        if (rows > @import("cuda_repetition.zig").max_rows) return error.WindowTooWide;
+        if (s.repetition_draw == null) {
+            const draw_kernel = try s.module.function("tf_draw_repetition");
+            const greedy_kernel = try s.module.function("tf_greedy_repetition");
+            s.repetition_draw = draw_kernel;
+            s.repetition_greedy = greedy_kernel;
+        }
+        if (rows <= s.rows) return;
+        try stream.synchronize();
+        var full = try cuda.DeviceBuffer.alloc(s.d, rows * s.vocab * 2);
+        errdefer full.free();
+        var tok = try cuda.DeviceBuffer.alloc(s.d, rows * 4);
+        errdefer tok.free();
+        const prob = try cuda.DeviceBuffer.alloc(s.d, rows * 4);
+        s.full.free();
+        s.tok.free();
+        s.prob.free();
+        s.full = full;
+        s.tok = tok;
+        s.prob = prob;
+        s.rows = rows;
+    }
+
+    /// The transform stays F32 inside the selected kernel; the whole BF16 input rows remain unchanged.
+    pub fn drawProcessed(s: *Sampler, stream: cuda.Stream, rows: usize, first: u64, r: ?Rule, p: Processor, out: []u32) !void {
+        if (rows == 0 or rows > s.rows or out.len < rows or first == 0) return error.WindowTooWide;
+        var args: cuda.Args = .{};
+        args.add(s.full.ptr);
+        args.add(@as(u32, @intCast(s.vocab)));
+        if (r) |rule_value| {
+            try s.rule.uploadAsync(0, std.mem.asBytes(&rule_value), stream.handle);
+            const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 };
+            try s.meta.uploadAsync(0, std.mem.asBytes(&meta), stream.handle);
+            args.add(s.rule.ptr);
+            args.add(s.meta.ptr);
+            args.add(@as(i32, 0));
+            args.add(s.tok.ptr);
+            args.add(s.prob.ptr);
+        }
+        args.add(p.bits);
+        args.add(p.words);
+        args.add(p.factors);
+        if (r == null) args.add(s.tok.ptr);
+        const kernel = if (r == null) s.repetition_greedy.? else s.repetition_draw.?;
+        try cuda.launch.launch(kernel, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
+        try stream.synchronize();
+        try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
     }
 
     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
