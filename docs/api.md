@@ -576,9 +576,12 @@ drafted, `"draft": false` and concurrent replies stay the same with it on. When 
 grammar's shortest reply, the mask is not applied and the reply is cut as without it. The first request for a grammar
 explores its parser states over the tokenizer's tokens (on the request thread, then kept for the last eight grammars);
 a grammar with more than 16,384 such states is only masked where its explored states decide it, never beyond what
-completes. It is refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with token-level,
-budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with thinking on they
-start after the think end.
+completes. Exploring is also limited by a fixed amount of work, counted in parser and token steps rather than time, so
+the same grammar gets the same answer on every machine and under any load. The limit is about 256 times what
+`json_object` takes over a 250,000-token vocabulary; a grammar past it gets HTTP 400 that names the limit, and is never
+masked in part. It is also refused with HTTP 400 when the loaded `libtfgrammar` predates it, and for grammars with
+token-level, budgeted, captured or left-recursive rules. The masks follow from xgrammar's byte-level parse; with
+thinking on they start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
@@ -921,6 +924,13 @@ A retryable refusal on an inference route answers 503 and names its wait in the 
 | `memory_pressure` | The host is under critical memory pressure and takes no new request until it eases |
 
 A capacity refusal keeps the frozen Python engine's shape (`type` `invalid_request_error` and its message) and still carries no `Retry-After`; the code is native's addition. The Messages routes keep their Anthropic envelope, which has no code field, and the Sliding Weights learn/delete and imprint routes keep their own 503 bodies.
+
+Connections are limited apart from requests. The server holds at most `--max-connections N` open connections (1-1024,
+default 128). From three quarters of them open, one address may hold `--max-connections-per-address N` (0-1024; by
+default a quarter of the limit; 0 turns it off). An IPv6 address counts by its /64. Loopback clients and each
+`--trusted-proxy ADDRESS` (repeatable, up to 64; an exact IPv4 or IPv6 address, for a proxy, load balancer or Docker's
+bridge gateway) are never counted. A refused connection gets 503 with `Retry-After: 1`. Only with every slot taken does
+a connection waiting for its next request give its slot up, after 5 seconds; a request in progress is never cut.
 
 ## Conversations on disk
 

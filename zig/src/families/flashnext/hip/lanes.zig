@@ -279,6 +279,7 @@ pub const Fx = struct {
         const prompt = s.prompt();
         const total = prompt.len + s.max_new + cache.max_window + 1;
         if (prompt.len == 0 or total > f.e.o.capacity) return error.PromptTooLong;
+        for (prompt) |t| if (t >= f.e.cfg.vocab) return error.InvalidToken; // before the other ranks hear the prompt
         const gop = try f.lanes.getOrPut(f.gpa, s);
         if (gop.found_existing) f.free(gop.value_ptr.*);
         errdefer f.lanes.removeByPtr(gop.key_ptr);

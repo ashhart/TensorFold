@@ -142,15 +142,17 @@ test "a missing shard is pulled from a peer, checked chunk by chunk, and not pul
     const p = try plan.plan(a, sh.ck, &s, &nodes, .{ .context = 16 });
     const ranges = try loader.needs(a, &p, sh.ck, 1);
     var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
-    try std.testing.expectError(error.MissingShard, loader.load(io, a, dst.dir, .{ .files = sh.ck.files }, ranges, null, seen.sink(), null));
+    // this rank reads part of the second file, so the copy stays held in part: allowed here, refused by default
+    const o: loader.Options = .{ .files = sh.ck.files, .chunk = 4096, .unverified = true };
+    try std.testing.expectError(error.MissingShard, loader.load(io, a, dst.dir, o, ranges, null, seen.sink(), null));
     var bad: Peer = .{ .files = .{ sh.files[0], sh.files[1] }, .corrupt = true };
-    try std.testing.expectError(error.HashMismatch, loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, ranges, bad.source(), seen.sink(), null));
+    try std.testing.expectError(error.HashMismatch, loader.load(io, a, dst.dir, o, ranges, bad.source(), seen.sink(), null));
     var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
-    var rep = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, ranges, peer.source(), seen.sink(), null);
+    var rep = try loader.load(io, a, dst.dir, o, ranges, peer.source(), seen.sink(), null);
     defer rep.release(a);
     try std.testing.expect(rep.pulled == 1 and rep.local == 1 and rep.pulled_bytes > 0 and rep.pulled_bytes < sh.files[1].len);
     const calls = peer.calls;
-    var again = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, ranges, peer.source(), seen.sink(), null);
+    var again = try loader.load(io, a, dst.dir, o, ranges, peer.source(), seen.sink(), null);
     defer again.release(a);
     try std.testing.expectEqual(calls, peer.calls);
     try std.testing.expectEqual(@as(u64, 0), again.pulled_bytes);
@@ -203,7 +205,7 @@ test "security: a file pulled whole is checked against the manifest, whatever ha
     try std.testing.expect(again.local == 1 and again.pulled == 0 and peer.calls == calls);
 }
 
-test "security: bytes pulled into a file still held in part are reported as unverified" {
+test "security: a file that would stay held in part is refused before a byte is pulled, unless that is allowed" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -215,8 +217,21 @@ test "security: bytes pulled into a file still held in part are reported as unve
     const part = [_]loader.Range{.{ .file = 1, .offset = 0, .len = 4096 }};
     var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
     var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
-    var rep = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, &part, peer.source(), seen.sink(), null);
+    // the manifest has this file's hash and a part cannot be checked against it: nothing is asked of the peer
+    const strict: loader.Options = .{ .files = sh.ck.files, .chunk = 4096 };
+    try std.testing.expectError(error.UnverifiedShard, loader.load(io, a, dst.dir, strict, &part, peer.source(), seen.sink(), null));
+    try std.testing.expectEqual(@as(u32, 0), peer.calls);
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, names[1], .{}));
+    // allowed by name, the bytes are mapped and counted, on this run and on a later one that pulls nothing
+    var allowing = strict;
+    allowing.unverified = true;
+    var rep = try loader.load(io, a, dst.dir, allowing, &part, peer.source(), seen.sink(), null);
     defer rep.release(a);
     try std.testing.expect(rep.pulled == 1 and rep.hashed == 0);
     try std.testing.expectEqual(@as(u64, 4096), rep.unverified_bytes);
+    var again = try loader.load(io, a, dst.dir, allowing, &part, peer.source(), seen.sink(), null);
+    defer again.release(a);
+    try std.testing.expect(again.pulled_bytes == 0 and again.unverified_bytes == 4096);
+    // and the copy on disk is still refused to a load that did not allow it
+    try std.testing.expectError(error.UnverifiedShard, loader.load(io, a, dst.dir, strict, &part, peer.source(), seen.sink(), null));
 }
