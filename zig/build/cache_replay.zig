@@ -23,4 +23,21 @@ pub fn steps(b: *std.Build) void {
     b.step("cache-agent-replay", "Fixed long shared-system agents, phased chats and one-off prompt traces").dependOn(&agent_run.step);
     const agent_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_agent_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"agent cache replay:"} });
     b.step("test-cache-agent-host", "Native shared-prefix replay, adapter equivalence and exact rows without devices").dependOn(&b.addRunArtifact(agent_tests).step);
+    const decay_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_decay_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"cache decay:"} });
+    b.step("test-cache-decay-host", "Bounded resume priority, cohort replacement and native eviction protections").dependOn(&b.addRunArtifact(decay_tests).step);
+    const confirm = b.addExecutable(.{ .name = "tf-cache-confirm-replay", .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_confirm_replay.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }) });
+    const confirm_main = b.addRunArtifact(confirm);
+    confirm_main.addArg("main");
+    confirm_main.has_side_effects = true;
+    b.step("cache-confirm-main", "Native baseline on the fixed confirmation seeds").dependOn(&confirm_main.step);
+    const confirm_decay = b.addRunArtifact(confirm);
+    confirm_decay.addArg("decayed_resume");
+    confirm_decay.has_side_effects = true;
+    b.step("cache-confirm-decayed", "Frozen selector on the fixed confirmation seeds").dependOn(&confirm_decay.step);
+    const confirm_native = b.addRunArtifact(confirm);
+    confirm_native.addArg("native_decayed");
+    confirm_native.has_side_effects = true;
+    b.step("cache-confirm-native", "Native store opt-in on the fixed confirmation seeds").dependOn(&confirm_native.step);
+    const confirm_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/cache_confirm_test.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = imports }), .filters = &.{"cache confirm:"} });
+    b.step("test-cache-confirm-host", "Native replay equivalence on fresh confirmation seeds").dependOn(&b.addRunArtifact(confirm_tests).step);
 }
