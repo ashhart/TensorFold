@@ -139,7 +139,9 @@ pub const Engine = struct {
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
         const spelling = index.ngramSpelling(map);
-        e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, &e.cfg, e.weights.model.ple.layer, spelling);
+        e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, io, &e.cfg, e.weights.model.ple.layer, spelling);
+        // 1: the gather's threads must be gone before anything they read is freed (deinit runs last to first)
+        errdefer e.tables.deinit(e.keep.allocator());
         const c = mixers.qkConstants(e.cfg.key_dim);
         var w: [2]hip.DeviceBuffer = undefined;
         for (&w, [_]f32{ c.q, c.k }) |*b, v| {
@@ -200,6 +202,7 @@ pub const Engine = struct {
         e.drawer.deinit();
         e.arena.deinit();
         e.host.staging.free();
+        e.tables.deinit(e.keep.allocator());
         for (&e.qk) |*b| b.free();
         e.weights.deinit();
         e.keep.deinit();
@@ -301,9 +304,7 @@ pub const Engine = struct {
             defer hc.deinit(e.gpa);
             var ones = try hip.DeviceBuffer.alloc(&e.driver, rows * e.cfg.hc_count * e.act.size());
             defer ones.free();
-            var ho = o;
-            ho.prefill = true;
-            _ = try head_mod.run(ho, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
+            _ = try head_mod.run(o, true, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
         }
         _ = try e.logits(o, out.mixed, verify_rows);
         // the peak, not what is left at the end: each layer hands its scratch back when it is done

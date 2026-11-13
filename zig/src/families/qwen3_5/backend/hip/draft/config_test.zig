@@ -82,6 +82,11 @@ test "a window past the HIP tap ring is refused, the ring's own width accepted" 
     try refused(error.UnsupportedDraftConfig, "\"sliding_window\": 2048", "\"sliding_window\": 15");
 }
 
+test "the ring holds the window and a whole block more" {
+    const c = try Config.parse(gpa, stock, q27);
+    try std.testing.expect(c.ringRows() >= c.window + c.block);
+}
+
 test "shapes the kernels do not run are refused" {
     try refused(error.UnsupportedDraftConfig, "\"head_dim\": 128", "\"head_dim\": 64");
     try refused(error.UnsupportedDraftConfig, "\"conv_kernel_size\": 2", "\"conv_kernel_size\": 3");
