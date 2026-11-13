@@ -299,15 +299,15 @@ pub const Rule = struct {
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
+        const top: i64 = if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts;
         if (r.confidence_floor != null) {
-            for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
+            for (whos, out) |*w, *o| o.* = @min(try r.headDepth(w, null, probe), top);
             return;
         }
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
-                const inner = try r.headDepth(w, null, probe);
-                const granted: i64 = if (w.granted) |g| g else r.most_drafts;
-                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
+                const inner = @min(try r.headDepth(w, null, probe), top);
+                o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, @as(i64, w.granted orelse r.most_drafts) + r.k.draft_slack), probe);
             }
             if (r.granted_depth) capPass(out, r.batch_rows);
             if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHolds(whos, sampled, out);
@@ -320,7 +320,7 @@ pub const Rule = struct {
         var made: usize = 0;
         defer for (probs[0..made]) |p| r.gpa.free(p);
         for (whos, most, probs) |w, *m, *p| {
-            m.* = @min(@as(i64, if (r.shared_cap != 0) @min(r.most_drafts, r.shared_cap) else r.most_drafts), @max(1, w.draft_room - 1));
+            m.* = @min(top, @max(1, w.draft_room - 1));
             p.* = try alloc.chainProbabilities(r.gpa, try r.rates(w), @intCast(m.*));
             made += 1;
         }

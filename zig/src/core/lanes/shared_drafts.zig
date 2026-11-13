@@ -33,7 +33,8 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         if (!s.drafts) continue;
         const cap = if (e.backend.vtable.draft_capacity) |f| f(e.backend.ptr, s) else e.cfg.most_drafts;
         const shared = if (e.cfg.shared_drafts > 0) e.cfg.shared_drafts else e.cfg.most_drafts; // Model.shared_drafts
-        const most = @min(cap, shared, e.cfg.most_drafts, if (limits) |l| l.depths[i] else e.cfg.most_drafts, @as(u32, @intCast(@max(0, s.draftRoom() - 1))));
+        const chain = if (e.cfg.shared_mtp_cap > 0) e.cfg.shared_mtp_cap else e.cfg.most_drafts; // Model.shared_mtp_cap
+        const most = @min(cap, shared, chain, e.cfg.most_drafts, if (limits) |l| l.depths[i] else e.cfg.most_drafts, @as(u32, @intCast(@max(0, s.draftRoom() - 1))));
         if (most == 0) continue;
         head.* = true;
         const cached = s.draft_chances.items;
