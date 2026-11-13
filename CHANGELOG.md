@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Serve: the background prefill of a chat reply's next turn now renders the reply with its reasoning when the client sends reasoning back, as agent clients such as omp do, so that turn resumes past the reply instead of before it. With thinking on, the guess left the reasoning out and missed every time: in one omp session with Qwen3.8-Flash-Next on an M5 Ultra, requests waited 40.8 s in total behind background passes they then redid. In an omp tool loop the next requests now resume at the background pass's end and prefill only the new tool result. A client whose history has no reasoning gets the old guess.
+
 - CI: the app workflow keeps its Linux AppImage artifact for 3 days instead of GitHub's default 90 (#2966).
 
 - CI: the Linux no-GPU job runs `zig build test-host`, which collects the named host tests and compile checks apart from nine reviewed exclusions (the optional xgrammar steps, the release-path check, the two large-state timing commands, which stay available for explicit runs, and four fixture and source-pin checks held back under #2031); the build graph refuses empty checks, stale exclusions and aliases that bring excluded work back (#2095, part of #2031). Thanks to @garvrao80.

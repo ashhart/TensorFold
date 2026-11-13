@@ -25,13 +25,28 @@ const Pass = struct {
     }
 };
 
-/// Prefill the conversation, `message` (the reply as sent) and the next turn's opening, on `warm_turns` engines.
-pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) void {
-    if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
-    start(srv, input, message, thinking, effort, prompt_len) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+/// Whether the client sends reasoning back: its latest assistant message has `reasoning_content`, or there is none.
+pub fn echoesReasoning(messages: Value) bool {
+    if (messages != .array) return false;
+    var i = messages.array.len;
+    while (i > 0) {
+        i -= 1;
+        const m = messages.array[i];
+        if (m != .object) continue;
+        const role = m.get("role") orelse continue;
+        if (role != .string or !std.mem.eql(u8, role.string, "assistant")) continue;
+        return m.get("reasoning_content") != null;
+    }
+    return true;
 }
 
-fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
+/// Prefill the conversation, the reply as its client will send it back and the next turn's opening (warm_turns).
+pub fn reply(srv: *Server, input: chat.Input, message: Value, reasoning: ?[]const u8, thinking: bool, effort: ?[]const u8, prompt_len: usize) void {
+    if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
+    start(srv, input, message, reasoning, thinking, effort, prompt_len) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+}
+
+fn start(srv: *Server, input: chat.Input, sent: Value, reasoning: ?[]const u8, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
     const p = try srv.gpa.create(Pass);
     p.* = .{ .gpa = srv.gpa, .arena = .init(srv.gpa), .request = undefined };
     var handed = false;
@@ -40,6 +55,14 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
         srv.gpa.destroy(p);
     };
     const a = p.arena.allocator();
+    var message = sent;
+    const r = reasoning orelse "";
+    if (r.len > 0 and sent == .object and echoesReasoning(input.messages)) {
+        const copy = try json.newObject(a);
+        for (sent.object.keys(), sent.object.values()) |k, v| try copy.put(a, k, v);
+        try copy.put(a, "reasoning_content", .{ .string = r });
+        message = .{ .object = copy };
+    }
     const clear = input.fields.get("clear_thinking");
     var cx: errors.Cx = .{ .a = a, .clear_thinking = if (clear != null and clear.? == .bool) clear.?.bool else null };
     const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
