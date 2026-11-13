@@ -59,16 +59,16 @@ pub fn rounds(e: *Engine) !void {
 /// fz_gdn keeping one state for a lone stream beside shared sessions: their rounds keep their kernels.
 pub fn keepLoneStates(e: *Engine) !void {
     const r = e.r;
-    if (r.gdn_kept != null or r.tp != null or r.device.tensorUnits() or e.tree != null) return;
+    if (r.gdn_kept != null or r.tp != null or e.tree != null) return;
     r.gdn_kept = try fz.gdn_step.compile(r, true);
     const n_lin: usize = 36;
     e.m.recs = .{ .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) }, .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) } };
 }
 
-/// fz_gdn keeping one state a layer, kept rows replayed (the recorded bits): no tensor units, shared rounds only.
+/// fz_gdn keeping one state a layer, kept rows replayed (the recorded bits), on every Mac.
 pub fn keepStates(e: *Engine) !void {
     const r = e.r;
-    if (r.gdn_kept != null or r.tp != null or r.device.tensorUnits() or e.tree != null) return;
+    if (r.gdn_kept != null or r.tp != null or e.tree != null) return;
     r.gdn_pipe = r.gdn_pipe orelse try fz.gdn_step.compile(r, false);
     r.gdn_kept = try fz.gdn_step.compile(r, true);
     const n_lin: usize = 36;

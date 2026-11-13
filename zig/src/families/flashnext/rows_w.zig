@@ -53,10 +53,10 @@ pub fn rps2(n: usize) u8 {
     return if (n % 2 == 0) 2 else 1;
 }
 
-/// How 4-bit dots make nibbles at `rows` rows: converts at 1 row, then half (M3, M4) or the exponent trick.
+/// How 4-bit dots make nibbles at `rows` rows: converts at 1 row, then half (M3 to M5) or the exponent trick (M1, M2).
 pub fn nib(generation: u32, rows: usize) u8 {
-    if (rows < 2 or generation >= 17) return 0;
-    return if (generation == 15 or generation == 16) 1 else 2;
+    if (rows < 2) return 0;
+    return if (generation >= 15) 1 else 2;
 }
 
 /// Whether the product takes the matrix-unit twin at `rows` rows.
