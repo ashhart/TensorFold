@@ -54,7 +54,7 @@ fn matrixRefused(comptime F: type, policy: hip.Policy, caps: hip.Caps) ?[]const 
 }
 
 /// The tensor-parallel flags as the Python ROCm server checks them, and the flags this engine cannot take.
-fn checkGroup(comptime F: type, a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
+pub fn checkGroup(comptime F: type, a: Allocator, o: api.Open, problem: *[]const u8) Refused!void {
     if (o.drafter != null) return refuse(a, problem, "--drafter: the HIP engine runs no DFlash2 drafter yet; serve without --drafter", .{});
     if (o.tp != 1 and o.tp != 2 and o.tp != 4 and o.tp != 8) return refuse(a, problem, "--tp {d} is not a supported ROCm world size; choose 1, 2, 4 or 8", .{o.tp});
     if (o.tp > 1 and o.master.len == 0) return refuse(a, problem, "--tp > 1 needs --master: rank 0's address on the link between the machines", .{});
@@ -532,20 +532,6 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, follower, &problem));
 }
 
-test "--mtp-drafts: Flash Next takes seven at --tp 1 and three above it, every other HIP family three; past that refused by name" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var problem: []const u8 = "";
-    inline for (.{ .{ flashnext.native, "qwen4_exp", 7, 1, "" }, .{ qwen35.native, "qwen3_5", 3, 1, "" }, .{ flashnext.native, "qwen4_exp", 3, 2, " with --tp above 1" }, .{ qwen35.native, "qwen3_5", 3, 2, "" } }) |c| {
-        var o: api.Open = .{ .dir = "d", .model_type = c[1], .mtp_drafts = c[2], .tp = c[3], .master = if (c[3] > 1) "node0" else "" };
-        try checkGroup(c[0], a, o, &problem);
-        o.mtp_drafts = c[2] + 1;
-        try std.testing.expectError(error.Refused, checkGroup(c[0], a, o, &problem));
-        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--mtp-drafts {d}: the HIP engine drafts at most {d}{s}", .{ c[2] + 1, c[2], c[4] }), problem);
-    }
-}
-
 test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
     const fp8: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .kv8 = true };
     try std.testing.expectEqualStrings(kv8_refusal, cacheRefused(fp8).?);
@@ -570,6 +556,7 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
 
 test {
     _ = @import("draft_sources_hip_test.zig");
+    _ = @import("mtp_drafts_hip_test.zig");
 }
 
 test "slide admission: hip refuses before checkpoint or device access" {
