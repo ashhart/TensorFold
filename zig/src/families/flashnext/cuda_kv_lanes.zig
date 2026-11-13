@@ -22,6 +22,15 @@ pub fn pagingOf(v: ?[]const u8) !usize {
     return n;
 }
 
+/// TF_FLASHNEXT_STATE_PAGES=1 (with TF_FLASHNEXT_KV_PAGES): a lane's states and draft buffers as pieces, no run.
+pub fn statePages() !bool {
+    return statePagesOf(@import("core").profile.get(.TF_FLASHNEXT_STATE_PAGES));
+}
+
+pub fn statePagesOf(v: ?[]const u8) !bool {
+    return @import("sys").environment.value(bool, "TF_FLASHNEXT_STATE_PAGES", v, false) catch error.BadFlashNextStatePages;
+}
+
 /// TF_FLASHNEXT_KV_PAGES_ALL=1: every stream on pages, none on its own contiguous caches (checks).
 pub fn pagedOnly() bool {
     const v = @import("core").profile.get(.TF_FLASHNEXT_KV_PAGES_ALL) orelse return false;
@@ -55,6 +64,62 @@ pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layo
     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
     return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run };
 }
+
+/// `layout` with the run as pieces (TF_FLASHNEXT_STATE_PAGES): their pages, the head's streams and logits by row.
+pub fn layoutPieces(capacity: usize, tokens: usize, head: ?Head, extra: usize) !kv.Layout {
+    var l = layout(capacity, tokens, head, extra);
+    var buf: [64 << 10]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var m = pieceMap(fba.allocator(), head, l.pageBytes()) catch |err| {
+        const why = "TF_FLASHNEXT_KV_PAGES={d}: a page holds {d} bytes, a lane's largest piece {d}: set {d} or more";
+        const args = .{ tokens, l.pageBytes(), largestPiece(head), smallestRows(head) };
+        if (err == error.PieceOverPage and !@import("builtin").is_test) std.log.err(why, args);
+        return err;
+    };
+    defer m.deinit(fba.allocator());
+    l.run_bytes = 0;
+    l.pieces = m.summary();
+    return l;
+}
+
+/// A lane's piece sizes in order: each DeltaNet layer's state, then its conv tail, the n-gram tail; then the head's.
+fn pieceSizes(gpa: std.mem.Allocator, sizes: *std.ArrayList(u64), head: ?Head) !void {
+    try sizes.appendNTimes(gpa, state_bytes, wt.linear_n);
+    try sizes.appendNTimes(gpa, conv_bytes, wt.linear_n);
+    try sizes.append(gpa, tail_bytes);
+    if (head) |h| try mtp.Draft.pieceSizes(gpa, sizes, h.draft_n, h.rows);
+}
+
+/// A lane's largest piece as the packer places it (256-byte aligned).
+pub fn largestPiece(head: ?Head) u64 {
+    var buf: [64 << 10]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    var sizes: std.ArrayList(u64) = .empty;
+    pieceSizes(fba.allocator(), &sizes, head) catch unreachable; // a few hundred sizes, well inside buf
+    return std.mem.alignForward(u64, std.mem.max(u64, sizes.items), 256);
+}
+
+/// The smallest TF_FLASHNEXT_KV_PAGES whose page holds a lane's largest piece (the head's layer widens a page).
+pub fn smallestRows(head: ?Head) usize {
+    const most = largestPiece(head);
+    var n: usize = wt.index_ratio;
+    while (pages.valid(n) and layout(0, n, head, 0).pageBytes() < most) n += wt.index_ratio;
+    return n;
+}
+
+/// A lane's pieces packed on `page_bytes` pages and checked.
+fn pieceMap(gpa: std.mem.Allocator, head: ?Head, page_bytes: u64) !kv.pieces.Map {
+    var sizes: std.ArrayList(u64) = .empty;
+    defer sizes.deinit(gpa);
+    try pieceSizes(gpa, &sizes, head);
+    var m = try kv.pieces.pack(gpa, sizes.items, page_bytes, 256);
+    errdefer m.deinit(gpa);
+    try kv.pieces.check(gpa, m);
+    return m;
+}
+
+/// Pieces of a lane's own state: 36 states, 36 conv tails, the n-gram tail; the head's follow.
+const seq_pieces = 2 * wt.linear_n + 1;
 
 /// Where a stream's caches came from: no pool, the one stream on its own caches beside a pool, or a pool lane.
 pub const From = enum { none, own, pool };
@@ -94,7 +159,7 @@ pub const State = struct {
     }
 };
 
-/// One pool lane: its cache's views (its run's states, its stream's pages), that stream's lease and its run.
+/// One pool lane: its cache's views, that stream's lease and its run (or pieces).
 const Lane = struct { seq: prompt.Seq, lease: kv.Lease = .{}, used: bool = false, run: u32 = 0 };
 
 pub const Pool = struct {
@@ -106,6 +171,8 @@ pub const Pool = struct {
     pool: kv.Pool,
     arena: cuda.DeviceBuffer,
     lanes: []Lane,
+    /// Where each piece of a lane's state lies on its state pages (TF_FLASHNEXT_STATE_PAGES), else null: a run.
+    map: ?kv.pieces.Map = null,
 
     /// `streams` lanes and `count` pages of layout `l`, made and touched now; a lane holds only its table idle.
     pub fn init(gpa: std.mem.Allocator, e: *prompt.Engine, l: kv.Layout, capacity: usize, head: ?Head, streams: usize, count: usize) !*Pool {
@@ -119,6 +186,9 @@ pub const Pool = struct {
         errdefer arena.free();
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .capacity = capacity, .head = head, .pool = try kv.Pool.init(gpa, count, page_bytes), .arena = arena, .lanes = &.{} };
         errdefer p.pool.deinit();
+        if (l.pieces != null) p.map = try pieceMap(gpa, head, page_bytes);
+        errdefer if (p.map) |*m| m.deinit(gpa);
+        if (l.pieces) |want| if (!std.meta.eql(p.map.?.summary(), want)) return error.FlashNextPiecesMoved;
         p.lanes = try gpa.alloc(Lane, streams);
         errdefer gpa.free(p.lanes);
         var made: usize = 0;
@@ -163,22 +233,23 @@ pub const Pool = struct {
         cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: the pool did not drain at close");
         for (p.lanes) |*x| {
             if (x.used) {
-                p.pool.releaseRun(x.run, p.layout.runPages());
+                if (p.map == null) p.pool.releaseRun(x.run, p.layout.runPages());
                 p.pool.finish(&x.lease);
             }
             x.seq.deinit(p.gpa);
         }
         p.gpa.free(p.lanes);
+        if (p.map) |*m| m.deinit(p.gpa);
         p.arena.free();
         p.pool.deinit();
         p.gpa.destroy(p);
     }
 
-    /// Whether a lane is free, the pool can promise a cache of `cap` rows and a run now, and a run is free.
+    /// Whether a lane is free, the pool can promise a cache of `cap` rows and its state now, and a run is free.
     pub fn fits(p: *const Pool, cap: usize) bool {
         if (cap > p.capacity + window_rows) return false;
-        const k = p.layout.runPages();
-        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.layout.pages(cap) + k) and p.pool.findRun(k) != null;
+        const k = p.layout.statePages();
+        for (p.lanes) |x| if (!x.used) return p.pool.fits(p.layout.pages(cap) + k) and (p.map != null or p.pool.findRun(k) != null);
         return false;
     }
 
@@ -188,14 +259,17 @@ pub const Pool = struct {
         const x = for (p.lanes) |*x| {
             if (!x.used) break x;
         } else return error.LaneMemory;
-        const k = p.layout.runPages();
+        const k = p.layout.statePages();
         const n = p.layout.pages(cap);
         if (n > mostPages(p.capacity, p.layout.page_tokens)) return error.PromptTooLong;
         try p.pool.promise(&x.lease, n + k);
         errdefer p.pool.finish(&x.lease);
-        // the run first: pages fill from the bottom, runs from the top; a fragmented pool waits (LaneMemory)
-        const run = p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
-        errdefer p.pool.releaseRun(run, k);
+        // the run first: pages fill from the bottom, runs from the top; fragmented, it waits (LaneMemory); pieces: any
+        const run = if (p.map != null) blk: {
+            try p.pool.takeState(&x.lease, k);
+            break :blk 0;
+        } else p.pool.claimRun(&x.lease, k) orelse return error.LaneMemory;
+        errdefer if (p.map == null) p.pool.releaseRun(run, k);
         errdefer cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: a failed lane open did not drain");
         var up: Upload = .{ .p = p, .table = x.seq.paged.?.table };
         try p.pool.cover(&x.lease, n, .{ .ctx = &up, .write = Upload.write });
@@ -213,10 +287,18 @@ pub const Pool = struct {
         return p.arena.ptr + @as(u64, x.run) * p.layout.pageBytes();
     }
 
-    /// The lane's states as views of its run, laid out afresh (a kept window swaps state buffers with the head's).
+    /// The lane's states as views of its run or its pieces, laid out afresh (a kept window swaps them with the head's).
     fn mapStates(p: *Pool, seq: *prompt.Seq) !void {
-        if (p.layout.runPages() * p.layout.pageBytes() < seqRunBytes()) return error.FlashNextRunTooShort;
         const x = p.laneOf(seq).?;
+        if (p.map) |m| {
+            const d = p.e.driver;
+            const ids = x.lease.state.items;
+            for (seq.state, 0..) |*b, i| b.* = .{ .d = d, .ptr = m.addr(i, p.arena.ptr, ids), .len = state_bytes, .borrowed = true };
+            for (seq.conv, 0..) |*b, i| b.* = .{ .d = d, .ptr = m.addr(wt.linear_n + i, p.arena.ptr, ids), .len = conv_bytes, .borrowed = true };
+            seq.tail = .{ .d = d, .ptr = m.addr(2 * wt.linear_n, p.arena.ptr, ids), .len = tail_bytes, .borrowed = true };
+            return;
+        }
+        if (p.layout.runPages() * p.layout.pageBytes() < seqRunBytes()) return error.FlashNextRunTooShort;
         var at = p.runBase(x);
         for (seq.conv) |*b| {
             b.* = .{ .d = p.e.driver, .ptr = at, .len = conv_bytes, .borrowed = true };
@@ -233,6 +315,12 @@ pub const Pool = struct {
     pub fn draft(p: *Pool, seq: *const prompt.Seq, cap: usize) !mtp.Draft {
         const h = p.head orelse return error.FlashNextRunTooShort;
         const x = p.laneOf(seq) orelse return error.UnknownStream;
+        if (p.map) |m| {
+            const at = try p.gpa.alloc(u64, m.at.len - seq_pieces);
+            defer p.gpa.free(at);
+            for (at, seq_pieces..) |*a, i| a.* = m.addr(i, p.arena.ptr, x.lease.state.items);
+            return mtp.Draft.initPieces(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, at);
+        }
         const run_len = p.layout.runPages() * p.layout.pageBytes();
         if (run_len < seqRunBytes()) return error.FlashNextRunTooShort;
         return mtp.Draft.initIn(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, p.runBase(x) + seqRunBytes(), run_len - seqRunBytes());
@@ -249,7 +337,7 @@ pub const Pool = struct {
         const x = p.laneOf(seq) orelse return false;
         if (!x.used) return true;
         cuda.completion.drain(p.e.driver, p.e.stream.*, "flashnext: a closed stream did not drain");
-        p.pool.releaseRun(x.run, p.layout.runPages());
+        if (p.map == null) p.pool.releaseRun(x.run, p.layout.runPages());
         p.pool.finish(&x.lease);
         if (seq.media) |*m| m.deinit(); // the stream's image state, held by its copy
         seq.media = null;
@@ -317,4 +405,5 @@ test "a stream's pages: its rows and a drafted window, no more than a full windo
 test {
     _ = @import("cuda_kv_init_test.zig");
     _ = @import("cuda_kv_lifetime_test.zig");
+    _ = @import("cuda_kv_pieces_test.zig");
 }

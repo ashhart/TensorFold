@@ -65,6 +65,8 @@ const valid = [_]Case{
     .{ .name = "TF_QMMF_HALF_BELOW", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_STATE_PAGES", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_STATE_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
@@ -227,6 +229,19 @@ test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA
         const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
         a.free(why);
         try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .metal = true })) == null);
+    }
+    try t.expect(!try e.value(bool, name, null, false));
+    try t.expect(try e.value(bool, name, "1", false));
+}
+
+test "environment: TF_FLASHNEXT_STATE_PAGES is exact 0 or 1, refused when Flash Next loads, before any device work" {
+    const name = "TF_FLASHNEXT_STATE_PAGES";
+    for ([_][]const u8{ "off", "false", "no", "on", "true", "yes", "2", " 0", "1 ", "01" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .flashnext = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, name) != null);
+        try t.expect((try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })) == null);
     }
     try t.expect(!try e.value(bool, name, null, false));
     try t.expect(try e.value(bool, name, "1", false));

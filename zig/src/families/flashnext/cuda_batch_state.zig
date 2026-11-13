@@ -144,6 +144,8 @@ pub const Hooks = struct {
     keep: ?*Keep = null,
     /// Device [rows, wide] bf16: every row's streams after the last MoE write-back (the MTP head's input); 0: none.
     streams: u64 = 0,
+    /// With blocks, `streams` by row through pages (TF_FLASHNEXT_STATE_PAGES): the pass's row 0 is row `from`.
+    stream_rows: @import("core").kv_pool.pieces.Placed = .{},
     /// A training pass's adds to each layer's MoE output, in place of the model's own (Model.pocket).
     moe_add: ?MoeAdd = null,
     /// The rows are prompt tokens (a fill), not a decode or verify window.
