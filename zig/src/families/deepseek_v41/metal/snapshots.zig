@@ -37,28 +37,36 @@ pub fn poolRowsOf(c: *const Config, slot: *const kv.Slot, layer: u32, len: u64) 
 fn runs(c: *const Config, slot: *const kv.Slot, len: u64, out: *[4 * 64]Run) []Run {
     var n: usize = 0;
     for (slot.regions, 0..) |r, l| {
-        out[n] = .{ .buf = r.window, .len = r.window.length() };
+        out[n] = .{ .buf = r.window, .off = 0, .len = r.window.length() };
         n += 1;
         if (r.pool) |p| {
             const rows = poolRowsOf(c, slot, @intCast(l), len);
-            out[n] = .{ .buf = p, .len = rows * c.head_dim * 2 };
-            out[n + 1] = .{ .buf = r.keys.?, .len = rows * kv.index_key_bytes };
+            out[n] = .{ .buf = p, .off = r.pool_off, .len = rows * c.head_dim * 2 };
+            out[n + 1] = .{ .buf = r.keys.?, .off = r.keys_off, .len = rows * kv.index_key_bytes };
             n += 2;
         }
         if (r.carry) |k| {
-            out[n] = .{ .buf = k, .len = k.length() };
+            out[n] = .{ .buf = k, .off = 0, .len = k.length() };
             n += 1;
         }
     }
     return out[0..n];
 }
 
-const Run = struct { buf: mtl.Buffer, len: usize };
+const Run = struct {
+    buf: mtl.Buffer,
+    off: usize,
+    len: usize,
+
+    fn bytes(r: Run) []u8 {
+        return r.buf.contents()[r.off..][0..r.len];
+    }
+};
 
 /// Zeroes what a state of up to `high` positions may have written: a reused slot reads as a new one.
 pub fn clear(c: *const Config, slot: *const kv.Slot, high: u64) void {
     var buf: [4 * 64]Run = undefined;
-    for (runs(c, slot, high, &buf)) |r| @memset(r.buf.contents()[0..r.len], 0);
+    for (runs(c, slot, high, &buf)) |r| @memset(r.bytes(), 0);
     for (slot.regions) |*r| kv.resetCarry(r, c);
 }
 
@@ -120,7 +128,7 @@ pub const Store = struct {
         errdefer st.a.free(e.bytes);
         var at: usize = 0;
         for (rs) |r| {
-            @memcpy(e.bytes[at..][0..r.len], r.buf.contents()[0..r.len]);
+            @memcpy(e.bytes[at..][0..r.len], r.bytes());
             at += r.len;
         }
         e.taps = try st.a.dupe(u16, ring);
@@ -136,7 +144,7 @@ pub const Store = struct {
         var buf: [4 * 64]Run = undefined;
         var at: usize = 0;
         for (runs(c, slot, e.ids.len, &buf)) |r| {
-            @memcpy(r.buf.contents()[0..r.len], e.bytes[at..][0..r.len]);
+            @memcpy(r.bytes(), e.bytes[at..][0..r.len]);
             at += r.len;
         }
         @memcpy(ring, e.taps);

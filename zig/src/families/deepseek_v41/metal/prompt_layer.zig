@@ -167,7 +167,7 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     const b: attn.Bind = .{
         .q = cv(attn.Ref, x.at(s.qrope, o, 2 * QH)),
         .w = cv(attn.Ref, s.lin),
-        .c = .{ .buf = if (src) |r| r.pool.? else region.window },
+        .c = cv(attn.Ref, if (src) |r| kv.poolRef(r) else whole(region.window)),
         .i = cv(attn.Ref, x.at(s.sel, o, 4 * attn.max_selected)),
         .m = cv(attn.Ref, s.metaAt((if (ratio > 0) s.rec.comp else s.rec.swa) + 8 * (o - x.a))),
         .sk = cv(attn.Ref, w.sink),
@@ -206,10 +206,10 @@ fn compress(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio:
     try g.mv(gp, e, latn, w.ix_wk.?, x.at(s.ik, from, 2 * IXD), n, D, IXD, false);
     g.rmsnorm(gp, e, x.at(s.ik, from, 2 * IXD), w.ix_k_norm.?, x.at(s.ikn, from, 2 * IXD), n, IXD, c.eps);
     try g.rope(gp, e, x.at(s.ikn, from, 2 * IXD), x.at(s.ikr, from, 2 * IXD), cpos, table, n, 1, IXD, @intCast(x.tables.positions));
-    const keys = whole(region.keys.?);
+    const keys = kv.keysRef(region);
     cp.fp4pack(&x.p.compress, e, x.at(s.ikr, from, 2 * IXD), keys, keys, n, .{ .blocks = IXD / 32, .in_stride = IXD, .code_row = 68, .scale_row = 68, .scale_off = IXD / 2, .dest = dest });
     try g.rope(gp, e, latn, x.at(s.latr, from, 2 * D), cpos, table, n, 1, D, @intCast(x.tables.positions));
-    cp.fp4rt(&x.p.compress, e, x.at(s.latr, from, 2 * D), whole(region.pool.?), dest, n, D);
+    cp.fp4rt(&x.p.compress, e, x.at(s.latr, from, 2 * D), kv.poolRef(region), dest, n, D);
 }
 
 /// The selection of rows [o, b): FP4 queries and weights, then scores, candidates and the top-512 a few rows at a time.
@@ -234,7 +234,7 @@ fn indexer(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, ratio: 
         const vis = x.byRatio(s.rec.vis, ratio, t);
         const cmask = x.at(s.cmask, t, s.blocks);
         if (keys > 0) {
-            try ix.encode(&x.p.index, e, cv(ix.Ref, x.at(s.ixqc, t, IX / 2)), cv(ix.Ref, x.at(s.ixqs, t, IX / 32)), cv(ix.Ref, x.at(s.ixw, t, 2 * c.index_heads)), .{ .buf = src.keys.? }, cv(ix.Ref, s.scores), cv(ix.Ref, if (masked) cmask else s.scores), .{
+            try ix.encode(&x.p.index, e, cv(ix.Ref, x.at(s.ixqc, t, IX / 2)), cv(ix.Ref, x.at(s.ixqs, t, IX / 32)), cv(ix.Ref, x.at(s.ixw, t, 2 * c.index_heads)), cv(ix.Ref, kv.keysRef(src)), cv(ix.Ref, s.scores), cv(ix.Ref, if (masked) cmask else s.scores), .{
                 .rows = rows,
                 .keys = keys,
                 .start = t + 1,

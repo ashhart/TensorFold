@@ -6,6 +6,7 @@ const weights = @import("weights.zig");
 const scratch = @import("scratch.zig");
 const pipelines = @import("pipelines.zig");
 const indexer = @import("indexer.zig");
+const kv = @import("kv.zig");
 
 const Ctx = ctx_.Ctx;
 const Ref = ctx_.Ref;
@@ -80,13 +81,13 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
     if (kv_src) {
         g.rmsnorm(gp, e, s.ik, w.ix_k_norm.?, s.ikn, R, c.index_dim, c.eps);
         for (segs) |*px| {
-            cp.fp4rt(&x.p.compress, e, px.row(s.latr, D * 2), whole(px.slot.regions[l].pool.?), px.byRatio(Meta.dest, ratio), px.rows, D);
+            cp.fp4rt(&x.p.compress, e, px.row(s.latr, D * 2), kv.poolRef(&px.slot.regions[l]), px.byRatio(Meta.dest, ratio), px.rows, D);
         }
         e.barrier();
         try g.rope(gp, e, s.ikn, s.ikr, cpos, table, R, 1, c.index_dim, @intCast(x.tables.positions));
         e.barrier();
         for (segs) |*px| {
-            const keys = whole(px.slot.regions[l].keys.?);
+            const keys = kv.keysRef(&px.slot.regions[l]);
             const p: cp.Pack = .{ .blocks = c.index_dim / 32, .in_stride = c.index_dim, .code_row = 68, .scale_row = 68, .scale_off = c.index_dim / 2, .dest = px.byRatio(Meta.dest, ratio) };
             cp.fp4pack(&x.p.compress, e, px.row(s.ikr, c.index_dim * 2), keys, keys, px.rows, p);
         }
@@ -100,7 +101,7 @@ pub fn encode(x: *const Ctx, e: mtl.ComputeEncoder, w: *const weights.Layer) !vo
         const b: attn.Bind = .{
             .q = cv(attn.Ref, px.row(s.qrope, c.heads * D * 2)),
             .w = .{ .buf = region.window },
-            .c = .{ .buf = if (src) |r| r.pool.? else region.window },
+            .c = cv(attn.Ref, if (src) |r| kv.poolRef(r) else whole(region.window)),
             .i = cv(attn.Ref, px.row(s.sel, attn.max_selected * 4)),
             .m = cv(attn.Ref, px.metaRow(if (ratio > 0) Meta.attn_comp else Meta.attn_swa, 8)),
             .sk = cv(attn.Ref, w.sink),
