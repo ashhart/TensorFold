@@ -1,6 +1,6 @@
 zig/kernels/cuda/affine4_pack.cu	cbc03ae0622574b57ae266091ea9f26888b21b2b1c020a031940eacddcf8ff14	raw
 zig/kernels/cuda/ck_lane.cu	652fa9993c0c6905e6564681bcca07dc61c1d7f448e2e91ada377a59174dd5e1	raw	commits c0a58fd30; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/contract_controls.cu	b331c9cd4ce9cbf2183290e1e6f83261b4eecd16d1681ce98053f3cd837fd45b	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off)
+zig/kernels/cuda/contract_controls.cu	60964aacd4d70b7dbc7a8a62a69aa1472daaf613dcdd13b418831da40ddb2858	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off); #3123 (the window_rows part controls take the live-chunk count, as the kernels they mirror)
 zig/kernels/cuda/contract_ctl_router.cuh	9320ff62a3bf4e06cb43f6a630a8cb1d5705471d83df6e965f5297ac2cd59d33	raw
 zig/kernels/cuda/embed_rows.cu	7ec99588b7628578864e3020a01cdc330c209160d25ac30498c3a13708a9ed26	raw
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
