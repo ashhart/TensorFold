@@ -292,8 +292,7 @@ below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0
 Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) are TensorFold's own.
 
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
-The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
-without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model card states Apache-2.0 too. Each checkpoint keeps its own license.
 
 ## Structured output: libtfgrammar
 
