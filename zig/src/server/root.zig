@@ -112,8 +112,10 @@ test {
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
+    _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
+    _ = @import("chat_ocr_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
@@ -286,4 +288,13 @@ test {
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("ocr/types_test.zig");
+    _ = @import("ocr/geometry_test.zig");
+    _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/mistral_test.zig");
+    _ = @import("ocr/mistral_sdk_test.zig");
+    _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/prompt_ids_test.zig");
 }

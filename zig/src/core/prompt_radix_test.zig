@@ -84,7 +84,7 @@ fn seq(comptime n: usize, from: u32) [n]u32 {
 /// A pass over `prompt` as a backend runs it: begin, then a keep at each mark, the stream taking the tree's pages.
 fn pass(f: *Fake, s: *Store, a: Allocator, prompt: []const u32, history: u32, shared: []const u32, mine: *std.ArrayList(u32)) !Plan {
     mine.clearRetainingCapacity();
-    const plan = try s.begin(a, prompt, history, shared, null, mine);
+    const plan = try s.begin(a, .of(prompt), history, shared, null, mine);
     var fresh: [32]u32 = undefined;
     const more = (prompt.len + 3) / 4 - mine.items.len;
     f.lane(fresh[0..more]);
@@ -92,7 +92,7 @@ fn pass(f: *Fake, s: *Store, a: Allocator, prompt: []const u32, history: u32, sh
     for (plan.marks) |m| {
         var path: [32]u32 = undefined;
         const n = m / 4;
-        const kept = s.keep(prompt, m, null, mine.items[0..n], path[0..n]);
+        const kept = s.keep(.of(prompt), m, null, mine.items[0..n], path[0..n]);
         for (path[0..kept.shared], 0..) |id, i| if (mine.items[i] != id) {
             f.refs[id] += 1;
             f.refs[mine.items[i]] -= 1;
@@ -237,7 +237,7 @@ test "a state past the limits is refused, and a failed copy keeps no state" {
     // the same state again takes no second copy
     var path: [5]u32 = undefined;
     const held = [_]u32{ 0, 1, 2, 3, 4 };
-    _ = s.keep(&t, 20, null, &held, &path);
+    _ = s.keep(.of(&t), 20, null, &held, &path);
     try std.testing.expectEqual(@as(usize, 1), f.live);
     // a restore that fails drops the entry and the pass starts from the start
     f.fail_restore = true;
@@ -276,7 +276,7 @@ test "reclaim frees the pages of the least valuable leaf nobody holds, and spare
     try std.testing.expectEqual(@as(usize, 1), s.tree.snaps);
     for (y_pages) |id| f.refs[id] -= 1;
     s.limit(.{ .pages = 40, .snaps = 0 });
-    try std.testing.expectEqual(@as(usize, 0), s.tree.held_pages);
+    try std.testing.expectEqual(@as(usize, 0), s.tree.heldPages());
     try std.testing.expectEqual(@as(usize, 0), f.live);
 }
 
@@ -333,7 +333,7 @@ fn goldenRun(a: Allocator, f: *Fake, s: *Store, out: *std.ArrayList(Row)) !void 
     for (passes) |p| {
         const plan = try pass(f, s, a, p.prompt, p.history, p.shared, &mine);
         const c = s.tree.counts;
-        try out.append(a, .{ .from = plan.from, .marks = plan.marks, .snaps = s.tree.snaps, .pages = s.tree.held_pages, .bytes = s.tree.held(), .hits = c.hits, .misses = c.misses, .kept = c.kept, .evicted = c.evicted, .refused = c.refused });
+        try out.append(a, .{ .from = plan.from, .marks = plan.marks, .snaps = s.tree.snaps, .pages = s.tree.heldPages(), .bytes = s.tree.held(), .hits = c.hits, .misses = c.misses, .kept = c.kept, .evicted = c.evicted, .refused = c.refused });
         f.leave(mine.items);
     }
 }
@@ -412,7 +412,7 @@ fn sharedAfter(branch: usize, lookahead: u32) !usize {
     var own: [5]u32 = undefined;
     f.lane(&own);
     var path: [5]u32 = undefined;
-    const kept = s.keep(&second, 20, null, &own, &path);
+    const kept = s.keep(.of(&second), 20, null, &own, &path);
     f.leave(&own);
     try std.testing.expect(kept.held);
     try std.testing.expectEqual(s.tree.snaps, f.live);
@@ -461,9 +461,9 @@ test "planned: a keep off the grid is refused, one on it kept" {
     defer f.leave(&own);
     var path: [4]u32 = undefined;
     const prompt = seq(24, 0);
-    try std.testing.expect(!s.keep(&prompt, 12, null, own[0..3], path[0..3]).held);
+    try std.testing.expect(!s.keep(.of(&prompt), 12, null, own[0..3], path[0..3]).held);
     try std.testing.expectEqual(@as(usize, 0), s.tree.snaps);
-    try std.testing.expect(s.keep(&prompt, 16, null, &own, &path).held);
+    try std.testing.expect(s.keep(.of(&prompt), 16, null, &own, &path).held);
     try std.testing.expectEqual(@as(usize, 1), s.tree.snaps);
 }
 
@@ -502,7 +502,7 @@ test "GLM's shape, a grid of four pages and lookahead 1: a chat resumes at its h
     try std.testing.expectEqualSlices(u32, &.{48}, plan.marks);
     f.leave(mine.items);
     try std.testing.expectEqual(@as(usize, 2), s.tree.snaps);
-    try std.testing.expectEqual(@as(usize, 12), s.tree.held_pages);
+    try std.testing.expectEqual(@as(usize, 12), s.tree.heldPages());
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
 

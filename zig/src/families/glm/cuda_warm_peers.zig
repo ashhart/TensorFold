@@ -111,7 +111,22 @@ pub fn post(g: *const cuda.tp_group.Group, stream: cuda.Stream, buffer: u64, pee
         }
         break :posting {};
     };
-    const ended = g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd");
+    const closed = g.lib.api.ncclGroupEnd();
+    // split's warm-up is its first exchange with every rank; from four ranks a ring has some that are not neighbours
+    const refuse = peers == .every and g.world >= 4;
+    if (closed != 0 and refuse) refuseSplit(g.rank); // before check, which stops every rank and hands the others its name
+    const ended = g.lib.check(closed, if (refuse) "REFUSE TF_GLM_PREFILL_REDUCE=split at ncclGroupEnd" else "ncclGroupEnd");
     try posted;
     try ended;
+}
+
+/// The latest rank that refused split, which a test build keeps instead of printing the refusal.
+pub var refused_rank: ?usize = null;
+
+fn refuseSplit(rank: usize) void {
+    if (@import("builtin").is_test) {
+        refused_rank = rank;
+        return;
+    }
+    std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} could not finish its start-up exchange with every other rank; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=gather\n", .{rank});
 }
