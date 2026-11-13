@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- XPU families: a token id at or past the embedding table is refused before the lookup, and each checkpoint's embedding shape and packing are checked when it loads; an 8-bit Qwen3.8-27B MLX checkpoint on XPU is now refused at load by name (#3047).
+
 - HIP families: a token id at or past the embedding table is refused before the lookup, and each checkpoint's embedding shape is checked when it loads (#3046).
 
 - Tokenizer: a token id past the cap (2^24) is refused when the tokenizer loads, instead of growing the id table without bound (#3033).
