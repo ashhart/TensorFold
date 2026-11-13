@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: `qwen27_served`'s reply-history test follows #2699's rule (each conversation's newest state is kept first under pressure), and a new case checks that a regenerate restores at the history mark when the cache has room, so `zig build test-native` passes on main again (#2889, fixes #2881).
+
 - Serve: a later `--compact-at` replaces an earlier one, as for every other serve flag; `--compact-at auto --compact-at 0.5` used to keep automatic compaction because the fraction never cleared it (#2883). Thanks to @laudney.
 
 - GLM-5.3-Flash on CUDA: `TF_GLM_CONTEXT_CEILING` (opt-in) lets GLM open windows past 1,048,576 tokens, read once when the model opens; with it unset nothing changes, and cold prompts and decode on two and three GB10s read level with main (#2765, refs #2663). Thanks to @Bizuayeu.
