@@ -127,7 +127,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
+    const is_rerank = @import("score_routes.zig").route(route);
     const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
     if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
@@ -144,7 +144,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
-    if (is_rerank) return @import("rerank.zig").post(srv, conn, a);
+    if (is_rerank) return @import("score_routes.zig").post(srv, conn, a);
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);

@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/score`, `/v1/score`, `/v2/rerank`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -114,6 +114,9 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
+| `POST /score`, `POST /v1/score` | Text-pair scores in request order, using the configured reranker |
+| `POST /rerank`, `POST /v1/rerank` | Ranked documents; a `texts` body selects the TEI response shape |
+| `POST /v2/rerank` | Cohere-style ranked `results` over the same score hook |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
 | `POST /v1/imprint/resume` | How much of a chat body's conversation resumes, and from where ([on disk](#conversations-on-disk)) |
 | `POST /v1/imprint/load` | A chat body's conversation state read from disk into RAM now |
@@ -192,6 +195,41 @@ instruction as plain text (text that spells a special token stays text). The sco
 context window before the first is scored, so a refused request costs no GPU work; a prompt past the window (with a
 `max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
 400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
+
+### Score and rerank compatibility shapes
+
+These translations use the same configured reranker, query/document template, yes/no label tokens and score or
+decision hook described above. They add no engine or model support. Other models return HTTP 400, and an engine
+without either scoring hook returns a named refusal. The routes require the `inference` key scope. Only the
+existing `/rerank` and `/v1/rerank` aliases also accept PUT.
+
+| Request | Response |
+| --- | --- |
+| `/score` or `/v1/score`: `{"text_1":"query","text_2":["a","b"]}` | A list object whose `data` entries contain `index`, `object:"score"` and `score`, in input order; also `id`, `created`, `model` and token `usage` |
+| `/rerank` or `/v1/rerank`: `{"query":"q","texts":["a","b"]}` | TEI-style array of `{index,score}`, best first; `return_text:true` adds `text` |
+| `/v2/rerank`: `{"query":"q","documents":["a","b"]}` | `{id,results:[{index,relevance_score}],meta:{api_version:{version:"2"}}}` |
+
+`/score` accepts strings or non-empty string lists on either side. Equal-length lists are paired; one item on
+either side broadcasts to the other list. Unequal longer lists are refused. Every pair is validated before any
+inference. Scores are the existing sigmoid(yes minus no), not generation log probabilities. Pair-scoring requests
+return every pair; rerank-only fields such as `top_n` or `return_documents` are refused there.
+
+A `texts` body with no `documents` selects the TEI shape; a `documents` body at `/rerank` or `/v1/rerank` keeps the
+existing response and defaults. Both new rerank shapes return the same scores as that response, best first, equal
+scores in request order, and `index` is the input's position in the request. Both take a positive integer `top_n`
+(an extension on TEI, whose request has none), capped to the number of inputs. TEI inputs are strings;
+`return_documents:true` is also taken as `return_text`. TEI `raw_scores:true` returns the label logit difference
+(yes minus no) the score is the sigmoid of, sorted by that value before `top_n`, so scores that round to 1 still
+rank. Cohere's v2 request takes string documents and returns `index` and `relevance_score` only; `{"text":...}`
+objects and `return_documents:true` (Cohere v1's fields) are also taken, the latter adding a `document` object that
+wraps a string as `{"text":...}` and returns a supplied object as sent.
+
+`model`, when given on the new shapes, must name this server or an alias. `instruction`/`instruct` and `max_length`
+use the existing reranker semantics. TEI does not truncate unless `truncate:true`; only right truncation is
+supported (`truncation_direction:"Right"`). Pair scoring also refuses an over-limit prompt by default; a positive
+`truncate_prompt_tokens` explicitly sets its truncation cap, and cannot be combined with `max_length`. The normal
+context-window check still applies. Cohere-style requests retain the reranker's default right truncation cap.
+`rank_fields`, `max_tokens_per_doc` and `priority` are refused by name. No vendor billing units are invented.
 
 ## OCR
 

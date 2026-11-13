@@ -4,12 +4,10 @@ const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
 const openai = @import("openai.zig");
-const http_body = @import("http_body.zig");
 const reply_text = @import("reply_text.zig");
 const model_text = @import("model_text.zig");
 const wait = @import("wait_reason.zig");
 const Server = @import("server.zig").Server;
-const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
@@ -28,6 +26,8 @@ const Ask = struct {
     return_documents: bool,
     return_logits: bool,
     return_ids: bool,
+    /// False refuses a prompt past max_length instead of cutting it (the TEI and pair-score shapes' default).
+    truncate: bool = true,
 };
 
 /// #1895's default cap on a prompt's tokens: the model card's max_length.
@@ -36,41 +36,9 @@ pub const max_length_default = 8192;
 /// One document's score and the label logits it came from.
 const Scored = struct { score: f64, yes: f64, no: f64 };
 
-pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
-    var cx: Cx = .{ .a = a };
-    const raw = http_body.readJson(conn, &cx) catch |err| {
-        if (err == error.OutOfMemory) outOfMemory(&cx);
-        return sendErr(conn, &cx);
-    };
-    const Gone = struct {
-        conn: *Conn,
-        fn check(g: @This()) bool {
-            return g.conn.peerGone();
-        }
-    };
-    const value = reply(srv, &cx, raw, Gone{ .conn = conn }) catch |err| {
-        if (err == error.Cancelled) {
-            conn.close = true;
-            return;
-        }
-        if (err == error.OutOfMemory) outOfMemory(&cx);
-        return sendErr(conn, &cx);
-    };
-    send(conn, a, 200, value);
-}
-
 /// Compact separators and UTF-8 as it is.
 pub fn encode(a: Allocator, v: Value) Allocator.Error![]u8 {
     return json.stringify(a, v, .{ .compact = true, .ascii = false }) catch return error.OutOfMemory;
-}
-
-fn send(conn: *Conn, a: Allocator, code: u16, v: Value) void {
-    conn.sendJson(code, encode(a, v) catch return);
-}
-
-fn outOfMemory(cx: *Cx) void {
-    cx.kind = .server;
-    cx.message = "out of memory";
 }
 
 /// The server's error envelope, as every route sends it: `{"error": {"message", "type", ...}}`.
@@ -78,15 +46,16 @@ pub fn errorBody(cx: *const Cx) Allocator.Error!Value {
     return openai.wrapError(cx.a, try openai.errorBody(cx.a, cx, "documents"));
 }
 
-fn sendErr(conn: *Conn, cx: *Cx) void {
-    const body = errorBody(cx) catch return;
-    send(conn, cx.a, cx.status(), body);
-}
-
 /// The ranked documents, or the refusal; `gone` says the client left (checked before each document's pass).
 pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
+    return replyOptions(srv, cx, body, gone, true);
+}
+
+/// `reply`, but a prompt past max_length is refused when `truncate` is false (score_routes.zig's shapes).
+pub fn replyOptions(srv: *Server, cx: *Cx, body: Value, gone: anytype, truncate: bool) Failure!Value {
     const labels = srv.info.rerank orelse return cx.refuse("this model is not a reranker");
-    const ask = try parse(cx, body);
+    var ask = try parse(cx, body);
+    ask.truncate = truncate;
     // each prompt is built in a scratch arena and dropped: a small body of many documents keeps no ids alive
     var scratch = std.heap.ArenaAllocator.init(srv.gpa);
     defer scratch.deinit();
@@ -147,6 +116,19 @@ pub fn reply(srv: *Server, cx: *Cx, body: Value, gone: anytype) Failure!Value {
         row.* = .{ .score = 1.0 / (1.0 + @exp(no - yes)), .yes = yes, .no = no };
     }
     return build(srv, cx, ask, &frame, scored, tokens);
+}
+
+/// The prompts `replyOptions` would score, built and checked with no engine work: a request of pairs checks all first.
+pub fn validate(srv: *Server, cx: *Cx, body: Value, truncate: bool) errors.Refused!void {
+    var ask = try parse(cx, body);
+    ask.truncate = truncate;
+    var arena: std.heap.ArenaAllocator = .init(srv.gpa);
+    defer arena.deinit();
+    var frame: ?Frame = null;
+    for (ask.documents, 0..) |doc, i| {
+        _ = arena.reset(.retain_capacity);
+        _ = try ready(srv, cx, arena.allocator(), ask, &frame, doc, i);
+    }
 }
 
 /// A failed pass: a server error while the engine is healthy, else the engine is unavailable.
@@ -359,6 +341,7 @@ fn ready(srv: *Server, cx: *Cx, a: Allocator, ask: Ask, frame: *?Frame, document
     var ids = built.ids;
     const cap = ask.max_length;
     if (ids.len > cap) {
+        if (!ask.truncate) return cx.fail(.request, "document {d}: the prompt has {d} tokens, past max_length {d}, and truncation is disabled", .{ i, ids.len, cap });
         const f = frame.* orelse try frameOf(srv, cx, ask);
         frame.* = f;
         // a tail this template renders otherwise for this document, a cut leaving no document token: refused

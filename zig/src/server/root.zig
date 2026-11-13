@@ -167,6 +167,7 @@ test {
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
     _ = @import("rerank_test.zig");
+    _ = @import("score_routes_test.zig");
     _ = @import("rerank_ids_test.zig");
     _ = @import("rerank_cut_test.zig");
     _ = @import("rerank_decide_test.zig");

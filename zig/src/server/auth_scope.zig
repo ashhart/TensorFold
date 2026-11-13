@@ -64,7 +64,8 @@ const inferring = [_][]const u8{
     "/responses",             "/v1/responses",        "/tokenize",              "/v1/tokenize",
     "/detokenize",            "/v1/detokenize",       "/v1/audio/speech",       "/v1/embeddings",
     "/v1/images/generations", "/decisions",           "/v1/decisions",          "/systemone",
-    "/v1/systemone",          "/rerank",              "/v1/rerank",             "/v1/ocr",
+    "/v1/systemone",          "/rerank",              "/v1/rerank",             "/v2/rerank",
+    "/score",                 "/v1/score",            "/v1/ocr",
 };
 
 /// A gated request a key may make: the route as the dispatcher reads it, matched exactly, never by suffix.
