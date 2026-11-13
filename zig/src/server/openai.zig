@@ -167,6 +167,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
     input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
+    input.kept_probs = try @import("kept_probs.zig").asked(cx, body, logprobs);
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
         if (p != .bool) return cx.refuse("parallel_tool_calls must be a boolean");
@@ -294,7 +295,7 @@ const Run = struct {
             const rows = if (d == .object) d.object.get("logprobs") else null;
             try choice.put(a, "text", if (d == .object) d.object.get("content") orelse .{ .string = "" } else d);
             try choice.put(a, "finish_reason", if (finish) |f| .{ .string = f } else .null);
-            try choice.put(a, "logprobs", if (rows) |v| try @import("logprobs.zig").legacy(a, v, &r.text_offset) else .null);
+            try choice.put(a, "logprobs", if (rows) |v| try @import("logprobs.zig").legacy(a, v, &r.text_offset, r.plan.input.kept_probs) else .null);
         }
         const list = try a.alloc(Value, 1);
         list[0] = .{ .object = choice };
@@ -413,7 +414,7 @@ const Run = struct {
             try choice.put(a, "text", .{ .string = reply.content });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });
             var from: usize = 0;
-            try choice.put(a, "logprobs", if (reply.logprobs) |lp| try @import("logprobs.zig").legacy(a, lp, &from) else .null);
+            try choice.put(a, "logprobs", if (reply.logprobs) |lp| try @import("logprobs.zig").legacy(a, lp, &from, r.plan.input.kept_probs) else .null);
             if (reply.prompt_logprobs) |p| try choice.put(a, "prompt_logprobs", p);
         }
         const list = try a.alloc(Value, 1);

@@ -5,12 +5,13 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const reply_text = @import("reply_text.zig");
 const Server = @import("server.zig").Server;
+const kept_probs = @import("kept_probs.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
 /// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows; ``text_offset`` counts on from `offset` chars.
-pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
+pub fn legacy(a: Allocator, rows: Value, offset: *usize, kept: bool) Allocator.Error!Value {
     const items = rows.object.get("content").?.array;
     const tokens = try a.alloc(Value, items.len);
     const lps = try a.alloc(Value, items.len);
@@ -34,6 +35,7 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     try out.put(a, "token_logprobs", .{ .array = lps });
     try out.put(a, "top_logprobs", .{ .array = tops });
     try out.put(a, "text_offset", .{ .array = offsets });
+    if (try kept_probs.legacy(a, items, kept)) |k| try out.put(a, "kept_probs", k);
     return .{ .object = out };
 }
 
@@ -58,14 +60,16 @@ fn promptEntry(srv: *Server, a: Allocator, o: *json.Object, id: u32, logprob: f3
     try o.put(a, try std.fmt.allocPrint(a, "{d}", .{id}), .{ .object = e });
 }
 
-fn entries(srv: *Server, a: Allocator, tokens: []const u32, rows: []const api.LogprobRow) error{ Failed, OutOfMemory }![]Value {
+fn entries(srv: *Server, a: Allocator, tokens: []const u32, rows: []const api.LogprobRow, opts: kept_probs.Opts) error{ Failed, OutOfMemory }![]Value {
     const content = try a.alloc(Value, tokens.len);
     for (content, tokens, rows) |*slot, id, r| {
         if (r.token != id or std.math.isNan(r.logprob)) return error.Failed;
         const o = try entry(srv, a, id, r.logprob);
-        const top = try a.alloc(Value, r.count);
-        for (top, r.ids[0..r.count], r.logprobs[0..r.count]) |*t, alt, lp| t.* = .{ .object = try entry(srv, a, alt, lp) };
+        const shown = @min(r.count, opts.shown);
+        const top = try a.alloc(Value, shown);
+        for (top, r.ids[0..shown], r.logprobs[0..shown]) |*t, alt, lp| t.* = .{ .object = try entry(srv, a, alt, lp) };
         try o.put(a, "top_logprobs", .{ .array = top });
+        if (opts.kept) try o.put(a, "kept_probs", try kept_probs.value(srv, a, r, opts.sampling));
         slot.* = .{ .object = o };
     }
     return content;
@@ -96,8 +100,8 @@ pub fn project(srv: *Server, cx: *Cx, reply: *@import("chat.zig").Reply, tools: 
 }
 
 /// One token's entry; a token the reply shows only part of keeps its row but shows those `bytes` and its ``token_id``.
-pub fn rowValue(srv: *Server, a: Allocator, id: u32, row: api.LogprobRow, bytes: []const u8, cropped: bool) error{ Failed, OutOfMemory }!Value {
-    const made = try entries(srv, a, &.{id}, &.{row});
+pub fn rowValue(srv: *Server, a: Allocator, id: u32, row: api.LogprobRow, bytes: []const u8, cropped: bool, opts: kept_probs.Opts) error{ Failed, OutOfMemory }!Value {
+    const made = try entries(srv, a, &.{id}, &.{row}, opts);
     if (!cropped) return made[0];
     const o = made[0].object;
     try o.put(a, "token", .{ .string = try validText(a, bytes) });
