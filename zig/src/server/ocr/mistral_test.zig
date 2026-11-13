@@ -1,4 +1,4 @@
-//! Mistral /v1/ocr request decoding (field refusals), table forms and the error envelope.
+//! Mistral /v1/ocr request decoding (pages bounds, field refusals), table forms and the error envelope.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -17,7 +17,46 @@ fn value(a: Allocator, text: []const u8) !json.Value {
     };
 }
 
-const facts: mistral.Facts = .{ .fetch = null };
+/// ``pages`` decoded against a 16-page budget: the indices, or the fault's message.
+fn pages(a: Allocator, text: []const u8, fault: *types.Fault) ![]const u32 {
+    return mistral.pageList(a, fault, try value(a, text), 16);
+}
+
+test "ocr mistral: pages bounds hold before any allocation and dedupe within the page budget" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fault: types.Fault = undefined;
+    try t.expectError(error.Faulted, pages(a, "\"0-4294967295\"", &fault));
+    try t.expectEqualStrings("pages selects too many pages", fault.message);
+    try t.expectEqual(types.Class.bad_input, fault.class);
+    try t.expectEqualStrings("pages", fault.loc[1]);
+    try t.expectError(error.Faulted, pages(a, "\"0-99999999999\"", &fault));
+    try t.expect(std.mem.indexOf(u8, fault.message, "99999999999") != null);
+    var hundred: std.ArrayList(u8) = .empty;
+    var two_thousand: std.ArrayList(u8) = .empty;
+    for ([_]struct { *std.ArrayList(u8), usize }{ .{ &hundred, 100 }, .{ &two_thousand, 2000 } }) |c| {
+        try c[0].append(a, '[');
+        for (0..c[1]) |i| try c[0].appendSlice(a, if (i == 0) "0" else ",0");
+        try c[0].append(a, ']');
+    }
+    try t.expectEqualSlices(u32, &.{0}, try pages(a, hundred.items, &fault));
+    try t.expectError(error.Faulted, pages(a, two_thousand.items, &fault));
+    try t.expectEqualStrings("pages selects too many pages", fault.message);
+    const sixteen = try pages(a, "\"0-15,0-15\"", &fault);
+    try t.expectEqual(@as(usize, 16), sixteen.len);
+    try t.expectEqual(@as(u32, 15), sixteen[15]);
+    try t.expectEqualSlices(u32, &.{ 0, 2, 3, 4, 7 }, try pages(a, "\" 7 , 2 - 4,0\"", &fault));
+    try t.expectEqualSlices(u32, &.{ 1, 3 }, try pages(a, "[3, 1, 3]", &fault));
+    try t.expectError(error.Faulted, pages(a, "\"0-16\"", &fault));
+    try t.expect(std.mem.indexOf(u8, fault.message, "TENSORFOLD_MAX_PDF_PAGES") != null);
+    for ([_][]const u8{ "\"4-2\"", "\"\"", "[]", "\"1,,2\"", "\"x\"", "[-1]", "[1.0]", "true", "\"-3\"" }) |bad| {
+        try t.expectError(error.Faulted, pages(a, bad, &fault));
+        try t.expectEqual(types.Class.bad_input, fault.class);
+    }
+}
+
+const facts: mistral.Facts = .{ .pdf = false, .fetch = null, .pages_left = 16 };
 
 /// A request body around ``doc`` (a document object) and ``extra`` fields.
 fn body(a: Allocator, doc: []const u8, extra: []const u8) !json.Value {
@@ -42,16 +81,17 @@ test "ocr mistral: explicit nulls mean absent, and each document form decodes" {
     const doc = try imageDoc(a);
     const r = try mistral.decode(a, try body(a, doc, nulls), facts, &fault);
     try t.expectEqual(mistral.Options{}, r.options);
+    try t.expect(r.source.kind == .image);
     try t.expectEqual(r.source.bytes.len, r.doc_size);
-    // image_url as {url, detail}, and document_url with an image data URL
+    // image_url as {url, detail}, document_url with an image data URL, and pages [0] or "0" on an image
     const url = doc[std.mem.indexOf(u8, doc, "data:").? .. doc.len - 2];
     for ([_][]const u8{
         try std.fmt.allocPrint(a, "{{\"type\": \"image_url\", \"image_url\": {{\"url\": \"{s}\", \"detail\": \"high\"}}}}", .{url}),
         try std.fmt.allocPrint(a, "{{\"type\": \"document_url\", \"document_url\": \"{s}\", \"document_name\": \"scan\"}}", .{url}),
-    }) |d| {
-        const got = try mistral.decode(a, try body(a, d, ""), facts, &fault);
+    }) |d| for ([_][]const u8{ "", ", \"pages\": [0]", ", \"pages\": \"0\"" }) |extra| {
+        const got = try mistral.decode(a, try body(a, d, extra), facts, &fault);
         try t.expectEqualSlices(u8, r.source.bytes, got.source.bytes);
-    }
+    };
     const set = try mistral.decode(a, try body(a, doc, ", \"table_format\": \"html\", \"extract_header\": true, \"include_blocks\": false, \"image_limit\": 2, \"image_min_size\": 9, \"confidence_scores_granularity\": \"word\""), facts, &fault);
     try t.expectEqual(mistral.Options{ .tables = .html, .header = true, .blocks = false, .image_limit = 2, .image_min_size = 9 }, set.options);
 }
@@ -69,16 +109,15 @@ test "ocr mistral: content-changing and malformed fields are refused with their 
         .{ .doc = doc, .extra = ", \"include_image_base64\": \"yes\"", .field = "include_image_base64", .says = "must be a boolean" },
         .{ .doc = doc, .extra = ", \"image_limit\": -1", .field = "image_limit", .says = "non-negative integer" },
         .{ .doc = doc, .extra = ", \"confidence_scores_granularity\": \"line\"", .field = "confidence_scores_granularity", .says = "must be" },
-        .{ .doc = doc, .extra = ", \"pages\": [0]", .field = "pages", .says = "pages selects pages of a PDF document; POST /v1/ocr reads one page image" },
-        .{ .doc = doc, .extra = ", \"pages\": \"0-2\"", .field = "pages", .says = "pages selects pages of a PDF document" },
+        .{ .doc = doc, .extra = ", \"pages\": [1]", .field = "pages", .says = "only page 0" },
         .{ .doc = doc, .extra = ", \"model\": 3", .field = "model", .says = "model must be" },
         .{ .doc = "{\"type\": \"file\", \"file_id\": \"f\"}", .extra = "", .field = "document", .says = "file documents are not supported; send document_url with a data URL" },
         .{ .doc = "{\"type\": \"document_url\", \"document_url\": \"https://example.com/a.pdf\"}", .extra = "", .field = "document", .says = "--vision-urls" },
         .{ .doc = "{\"type\": \"image_url\", \"image_url\": \"http://example.com/a.png\"}", .extra = "", .field = "document", .says = "public HTTPS URLs" },
         .{ .doc = "{\"type\": \"image_url\", \"image_url\": \"data:image/png;base64,!!\"}", .extra = "", .field = "document", .says = "invalid document data URL encoding" },
-        .{ .doc = "{\"type\": \"image_url\", \"image_url\": \"data:text/plain,hello\"}", .extra = "", .field = "document", .says = "the document is not a PNG, JPEG or WebP image" },
+        .{ .doc = "{\"type\": \"image_url\", \"image_url\": \"data:text/plain,hello\"}", .extra = "", .field = "document", .says = "not a PDF, PNG, JPEG or WebP" },
         .{ .doc = "{\"type\": \"video_url\"}", .extra = "", .field = "document", .says = "document.type must be" },
-        .{ .doc = pdf_doc, .extra = "", .field = "document", .says = "PDF documents are not read on POST /v1/ocr; send each page as a PNG, JPEG or WebP image" },
+        .{ .doc = pdf_doc, .extra = "", .field = "document", .says = "--vision-pdf" },
     };
     for (cases) |c| {
         var fault: types.Fault = undefined;
@@ -167,7 +206,8 @@ test "ocr mistral: a PNG whose text chunk says %PDF- is an image, not a PDF" {
     const b64 = try a.alloc(u8, enc.calcSize(png.len));
     const doc = try std.fmt.allocPrint(a, "{{\"type\": \"image_url\", \"image_url\": \"data:image/png;base64,{s}\"}}", .{enc.encode(b64, png)});
     var fault: types.Fault = undefined;
-    // a PDF document would be refused; the image is read
+    // with --vision-pdf off a PDF would be refused; the image is read
     const req = try mistral.decode(a, try body(a, doc, ""), facts, &fault);
+    try t.expectEqual(.image, req.source.kind);
     try t.expectEqual(png.len, req.source.bytes.len);
 }
