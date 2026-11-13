@@ -94,6 +94,8 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 The API also serves completions, Responses and Anthropic Messages. `/v1/models` lists the served name.
 On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WINDOWS.md).
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
+`tensorfold device` says whether this machine is supported, which formats it serves and how much memory weights may take
+([device check](docs/device.md)).
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
 
 `tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.

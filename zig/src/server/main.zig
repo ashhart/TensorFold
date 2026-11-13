@@ -16,6 +16,7 @@ const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
+const device_cli = @import("device_cli.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
@@ -60,10 +61,13 @@ pub fn main(init: std.process.Init) !u8 {
         try std.Io.File.stdout().writeStreamingAll(io, "tensorfold-native " ++ @import("build_options").version ++ "\n");
         return 0;
     }
-    if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
+    // help and a bare run lead with what this machine runs: the saved profile, or a quick scan with no driver
+    if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h") or std.mem.eql(u8, argv[1], "help"))) {
+        try std.Io.File.stdout().writeStreamingAll(io, device_cli.summary(init));
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
         return 0;
     }
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "device")) return device_cli.main(init, argv[2..]);
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "web")) {
         const options = @import("build_options");
         return web_cli.main(init, argv[2..], .{ .version = options.version, .is_release = options.is_release });
@@ -96,7 +100,7 @@ pub fn main(init: std.process.Init) !u8 {
         } else return benchmark.main(init, argv[2..], engines.capabilities(a));
     }
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("usage: tensorfold-native capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
+        std.debug.print("{s}usage: tensorfold-native capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags]\n", .{if (argv.len < 2) device_cli.summary(init) else ""});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -131,6 +135,8 @@ pub fn main(init: std.process.Init) !u8 {
         return fail(problem);
     };
     if (args.silence.refusal(model_type) orelse args.redraw.refusal(model_type)) |why| return fail(why);
+    // a current device profile's certain facts refuse a model this machine cannot run at all; otherwise nothing changes
+    if (device_cli.serveRefusal(a, io, init.environ_map, model_type)) |why| return fail(why);
     // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
     var unheld: []const u8 = "";
     const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {

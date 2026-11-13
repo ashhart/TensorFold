@@ -195,6 +195,7 @@ pub fn build(b: *std.Build) void {
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
+    @import("zig/build/device.zig").steps(b, test_step);
     @import("zig/build/sessions_writes.zig").steps(b);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
     @import("zig/build/tp_check.zig").add(b, target, test_step);
