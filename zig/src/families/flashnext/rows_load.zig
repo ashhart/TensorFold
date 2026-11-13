@@ -1,4 +1,4 @@
-//! Rows mode without tensor units (0.6.6's pre-M5 decode): every dense lane also as MLX-layout members for rows_w.
+//! Rows mode (0.6.6's pre-M5 decode, an M5's with TF_FLASHNEXT_M5_ROWS=1): dense lanes also as MLX-layout members.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -13,9 +13,14 @@ const Prompt = replay.Prompt;
 const D = replay.D;
 const KO = 6144; // the attention and DeltaNet output projections' inputs
 
-/// Whether decode reads its dense projections on the row kernels: no tensor units and FZ_M3_LANES unset.
-pub fn on(device: mtl.Device) bool {
-    return !device.tensorUnits() and platform.c.getenv("FZ_M3_LANES") == null;
+/// Whether decode reads its dense projections on the row kernels: the pre-M5 decode and FZ_M3_LANES unset.
+pub fn on(r: *const Run) bool {
+    return preM5Decode(r) and platform.c.getenv("FZ_M3_LANES") == null;
+}
+
+/// The pre-M5 decode (row kernels, grouped experts, cost depth, gated lanes): no tensor units, or TF_FLASHNEXT_M5_ROWS.
+pub fn preM5Decode(r: *const Run) bool {
+    return !r.device.tensorUnits() or r.m5_rows;
 }
 
 /// `d` on the run's encoder at `rows` rows, unless the role is knocked out.
@@ -275,7 +280,7 @@ fn warm(r: *Run, d: *const rows_w.Dense) !void {
 /// Rows mode for `m`'s dense projections (the lanes stay loaded for TP and the 6-bit fast paths); off: nothing.
 pub fn attach(p: *const Prompt, m: *Model, mtp_root: []const u8) !void {
     const r = m.r;
-    if (!on(r.device)) return;
+    if (!on(r)) return;
     const sh = try r.arena.create(rows_w.Shared);
     const sums = rows_w.Shared.max_rows * (rows_w.Shared.max_k / 8) * 4;
     sh.* = .{

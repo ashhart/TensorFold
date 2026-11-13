@@ -207,6 +207,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
     r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null and !r.device.tensorUnits();
+    r.m5_rows = try platform.environment.read(bool, "TF_FLASHNEXT_M5_ROWS", false);
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -408,14 +409,14 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     const grouped_rows = try platform.environment.read(usize, "TF_FLASHNEXT_GROUPED_ROWS", 5);
     var grouped = false;
     for (&m.layers) |*L| grouped = grouped or (L.xw != null and @import("gx.zig").applies(L.xw.?));
-    if (grouped and grouped_rows != 0 and r.tp == null and r.fsr == null and !r.device.tensorUnits()) {
+    if (grouped and grouped_rows != 0 and r.tp == null and r.fsr == null and fz.rows_load.preM5Decode(r)) {
         r.gx = try @import("gx.zig").init(r, grouped_rows);
         std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
     }
     if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
     if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
-    // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
-    const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
+    // GPU-gated lanes at this probability product: 0.4 on the pre-M5 decode (FZ_GATE=tau sets it, FZ_GATE=off none)
+    const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (fz.rows_load.preM5Decode(r)) "0.4" else null;
     if (r.tp == null) if (gate_tau) |v| if (!std.mem.eql(u8, v, "off")) {
         const tau = try std.fmt.parseFloat(f32, v);
         const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else @import("gate.zig").WMAX; // dev

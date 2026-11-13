@@ -41,6 +41,9 @@ release fixes it, and the release notes say which one.
   16,384-row run reached 38.9 s. With the prompt cache off, repeats stay within about 1%.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
+- On an M5 Mac, `TF_FLASHNEXT_M5_ROWS=1` makes Flash Next decode different tokens from the default, because decode
+  then reads its dense projections on the row kernels M1 to M4 use, which add in a different order from the tensor
+  units. Drafted and `"draft": false` replies still match each other in either mode.
 - @Bizuayeu's regression run on shipped 1.1.0 loaded the whole GLM-5.3-Flash NVFP4 checkpoint on two GB10s at TP=2 in 302.1 s, kept one token hash per prompt across three runs and found a passphrase in 199,307 tokens; scored prompts and more than two ranks were not covered ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).
 - DeepSeek-V4.1 CUDA pieces land in this release, but no release binary serves DeepSeek checkpoints until its whole-model gate ([#827](https://github.com/ashhart/TensorFold/pull/827)) passes.
 
