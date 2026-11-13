@@ -86,6 +86,7 @@ test {
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
     _ = @import("images_generations.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("images_batch_test.zig"); // uses a socketpair test
     _ = @import("drama_cfg.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_cfg_test.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair

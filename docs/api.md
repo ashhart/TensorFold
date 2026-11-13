@@ -857,6 +857,28 @@ The reply's `tensorfold` object carries `context_window` and `context_used`, and
 to chat completions with a `messages` array, and to the Responses API, which runs as one; a completions request
 with a plain string prompt is never compacted.
 
+## Image generation
+
+On an engine that generates images, POST `/v1/images/generations` takes `model`, `prompt` and `n` from 1 through 4
+(default 1). The pictures run one after another through the engine's one-picture call with the same prompt, negative
+prompt, size, steps and guidance; only the seed differs. The reply's `data` array is in request order, each item
+with `b64_json` (the PNG) and `seed`, the integer seed that picture used.
+
+An explicit `seed` is an integer from 0 through 18446744073709551615. Picture `i`, counting from zero, uses
+`seed + i`; a request whose last seed would pass that range is HTTP 400 before any picture starts. Without `seed`,
+each picture draws its own seed below 2^53, so a JavaScript client reads it exactly (the route used a fixed 42
+before). A reported seed sent back with `n: 1` and the same other fields gives the same PNG bytes:
+`{"model":"m","prompt":"A red kite","n":4,"seed":42}` returns seeds 42, 43, 44 and 45, each picture the same as the
+`n: 1` request with that seed.
+
+`n` outside 1 to 4, or not an integer, is HTTP 400 "n must be from 1 to 4". The other fields are `negative_prompt`,
+`size` (`WIDTHxHEIGHT`), `steps`, `guidance` and `response_format: "b64_json"`; the engine may tighten the size, step
+and prompt limits, and URL output is not served. A server whose model does not generate images answers 404.
+
+The reply is written once every picture has finished. A refusal, a failed generation or a cancel stops the sequence
+and returns that error with no pictures. A client that disconnects cancels the current picture, and the later
+pictures are never submitted.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of
