@@ -239,6 +239,8 @@ test {
     _ = @import("slide_talks.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
+    _ = @import("responses_background.zig");
+    _ = @import("responses_background_test.zig");
     _ = @import("message_starts_test.zig");
     _ = @import("message_starts_proof_test.zig");
     _ = @import("message_marks_test.zig");
