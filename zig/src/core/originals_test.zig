@@ -264,7 +264,7 @@ test "a rollback puts back every kept file byte for byte, removes what lessons a
         try std.testing.expect(!exists(io, try path(a, dir, "living-weights-00001.safetensors")));
         try std.testing.expect(!exists(io, try path(a, dir, shard2 ++ ".tmp")));
         try std.testing.expectEqual(@as(usize, 1), r.graphs.len);
-        try std.testing.expect(std.fs.path.isAbsolute(r.graphs[0]) and !exists(io, graph));
+        try std.testing.expect(std.fs.path.isAbsolute(r.graphs[0].path) and r.graphs[0].err == null and !exists(io, graph));
         try std.testing.expect(r.left.len == 0 and !exists(io, try std.mem.concat(a, u8, &.{ graph, originals.taught_suffix })));
         try std.testing.expect(exists(io, try path(a, dir, ".cache/huggingface/x.metadata")));
         try std.testing.expect(!(try originals.keep(io, dir, null, o, a, &why)).made); // the next lesson reuses it
@@ -302,9 +302,67 @@ test "security: a rollback leaves a fact graph its snapshot lists unless the gra
     _ = try originals.keep(io, dir, mine, o, a, &why);
     const again = try originals.rollback(io, dir, o, a, &why);
     try std.testing.expectEqual(@as(usize, 1), again.graphs.len);
-    try std.testing.expectEqualStrings(mine, again.graphs[0]);
+    try std.testing.expectEqualStrings(mine, again.graphs[0].path);
     try std.testing.expect(!exists(io, mine) and exists(io, other));
     try std.testing.expectEqualStrings("/another/model/folder\n", try read(a, io, others));
+}
+
+/// A removed graph's folders file turned into a folder, which no unlink of a file removes.
+fn stuck(taught: []const u8) void {
+    Io.Dir.cwd().deleteFile(std.testing.io, taught) catch {};
+    Io.Dir.cwd().createDir(std.testing.io, taught, .default_dir) catch {};
+}
+
+test "security: a removed fact graph takes its folders file along, and one that stays is reported, not fatal" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    var why: []const u8 = "";
+    const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+    const graph = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/shared.json", .{ here, tmp.sub_path });
+    const taught = try std.mem.concat(a, u8, &.{ graph, originals.taught_suffix });
+    const facts = "{\"facts\": [{\"id\": 1, \"text\": \"I like blue.\"}], \"next\": 2}";
+    // another folder learned from this graph too: a graph made here later must not inherit its name
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = taught, .data = "/another/model/folder\n" });
+    for ([_]?*const fn ([]const u8) void{ null, stuck }) |hook| {
+        const o: originals.Options = .{ .clones = false, .free = plenty, .graph_gone = hook };
+        _ = try originals.keep(io, dir, graph, o, a, &why);
+        try Io.Dir.cwd().writeFile(io, .{ .sub_path = graph, .data = facts });
+        try teach(a, io, dir);
+        const r = try originals.rollback(io, dir, o, a, &why);
+        try std.testing.expectEqual(@as(usize, kept_files), r.files);
+        try std.testing.expect(r.graphs.len == 1 and r.left.len == 0 and !exists(io, graph));
+        // a folders file that stays is the rollback's to report, after the files are back
+        try std.testing.expectEqual(hook != null, r.graphs[0].err != null);
+        try std.testing.expectEqual(hook != null, exists(io, taught));
+    }
+}
+
+test "security: a folders file that cannot be read leaves its fact graph, and the rollback still finishes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try model(a, io, tmp);
+    var why: []const u8 = "";
+    const o: originals.Options = .{ .clones = false, .free = plenty };
+    _ = try originals.keep(io, dir, null, o, a, &why);
+    const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
+    const graph = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}/mine.json", .{ here, tmp.sub_path });
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = graph, .data = "{\"facts\": [], \"next\": 1}" });
+    try Io.Dir.cwd().createDir(io, try std.mem.concat(a, u8, &.{ graph, originals.taught_suffix }), .default_dir);
+    const list = try path(a, dir, originals.folder_name ++ "/graphs");
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = list, .data = try std.mem.concat(a, u8, &.{ graph, "\n" }) });
+    try teach(a, io, dir);
+    const r = try originals.rollback(io, dir, o, a, &why);
+    try std.testing.expectEqual(@as(usize, kept_files), r.files);
+    try std.testing.expect(r.graphs.len == 0 and r.left.len == 1 and r.left[0].err != null and exists(io, graph));
 }
 
 test "a rollback removes only what TensorFold writes there: files the user added after the snapshot stay" {
