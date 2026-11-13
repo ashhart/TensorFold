@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on CUDA: `zig build dsv41-assets` now builds `tf-dsv41-assets` at ReleaseSafe whatever `-Doptimize` says, so `aot-needs` plans the same Triton variants about 15 times faster (713 s against 45 s at a 65,536-token context on a Mac; a GB10 run at 524,288 tokens went from about 45 minutes to under 7) (#3007, found on #2270). Thanks to @Defilan.
+
 - Docs: the CUDA memory plan says what each setting decides and which file reads it, including that `--context` is capped at the model's own window and `--context 0` takes it (#3028). Thanks to @Bizuayeu.
 
 - Qwen3.8-27B with DFlash2 on M5 Macs: one greedy request at the default 16-row window uses the long-copy driver again, so copy-heavy replies such as a whole-file rewrite run at about 792 tok/s instead of 241 on an M5 Ultra (#3013). Every copied token is still verified by the target, so replies are the same tokens. Sampled requests, concurrent streams, wider windows and M1-M4 Macs keep the lane loop; `TF_QWEN27_LANES=1` keeps every request on lanes (#3069).
