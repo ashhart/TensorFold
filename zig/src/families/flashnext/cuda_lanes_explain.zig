@@ -18,7 +18,7 @@ pub fn explain(err: anyerror) ?[]const u8 {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest => "TF_FLASHNEXT_KV_PAGES and _PAGE_TEST take positions a page, a multiple of 4",
-        error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs our own glue and no --slide: unset it",
+        error.FlashNextPagesUnsupported => "TF_FLASHNEXT_KV_PAGES needs our own glue and no --slide, and one rank unless the checkpoint is EXL3: unset it",
         error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
         error.BadDenseSplit => "TF_FLASHNEXT_SPLIT_DENSE takes 1 (split the BF16 dense projections at --tp 2, the default) or 0",
         error.DecodeGraphWithDenseSplit => "TF_FLASHNEXT_DECODE_GRAPH is not qualified with the dense split: unset it or set TF_FLASHNEXT_SPLIT_DENSE=0",
@@ -38,4 +38,19 @@ test "--tp refusals at load are worded, and a request's words stay out of a load
     // generic errors other load paths raise at one GPU too, and a request's out-of-memory, keep cuda.zig's own words
     for ([_]anyerror{ error.UnsupportedQuantization, error.BadRank, error.OutOfDeviceMemory, error.PromptTooLong }) |e|
         try t.expect(open(e) == null);
+}
+
+test "exl3: pages at --tp 2 are refused for a pack that is not EXL3 and accepted for EXL3" {
+    const t = @import("std").testing;
+    const kv_lanes = @import("cuda_kv_lanes.zig");
+    try t.expectError(error.FlashNextPagesUnsupported, kv_lanes.refusePages(256, 2, false, false, false));
+    const words = open(error.FlashNextPagesUnsupported).?;
+    try t.expect(@import("std").mem.indexOf(u8, words, "TF_FLASHNEXT_KV_PAGES") != null);
+    try t.expect(@import("std").mem.indexOf(u8, words, "unless the checkpoint is EXL3") != null);
+    try t.expectEqualStrings(words, explain(error.FlashNextPagesUnsupported).?);
+    try kv_lanes.refusePages(256, 2, true, false, false);
+    try kv_lanes.refusePages(256, 1, false, false, false);
+    try kv_lanes.refusePages(0, 2, false, false, false);
+    try t.expectError(error.FlashNextPagesUnsupported, kv_lanes.refusePages(256, 1, true, true, false));
+    try t.expectError(error.FlashNextPagesUnsupported, kv_lanes.refusePages(256, 2, true, false, true));
 }
