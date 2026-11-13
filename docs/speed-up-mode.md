@@ -24,7 +24,7 @@ idle and with 36 busy threads on the first Mac.
 
 Macs with less memory, such as 64 GB Mac minis, can't run Flash Next in this mode today, since every Mac holds the whole
 model. One such Mac can serve Nemotron 3.5 Lightning 30B-A3B 4-bit, 17 GiB, on the Zig engine: see
-[ZIG-PREVIEW.md](../ZIG-PREVIEW.md). Spreading one model's layers over several smaller Macs needs a pipeline mode, which
+[the native preview](zig-preview.md). Spreading one model's layers over several smaller Macs needs a pipeline mode, which
 isn't built.
 
 ## Setup
