@@ -142,9 +142,25 @@ pub fn chooseOrdered(gpa: Allocator, order: []const Candidate, position: u64, s:
     defer gpa.free(scaled);
     const t = @max(s.temperature, 1e-6);
     for (scaled, order[0..k]) |*x, o| x.* = o.value / t;
-    var keep = k;
+    const keep = try kept(gpa, scaled, s);
+    var best: usize = 0;
+    var best_score = -std.math.inf(f64);
+    for (0..keep) |j| {
+        const gumbel = -log(-log(uniform(s.seed, position, order[j].id)));
+        const score = scaled[j] + gumbel;
+        if (j == 0 or score > best_score) {
+            best = j;
+            best_score = score;
+        }
+    }
+    return order[best].id;
+}
+
+/// How many of the sorted, scaled candidates the sampler keeps: top_p's cumulative cut, then min_p's floor.
+pub fn kept(gpa: Allocator, scaled: []const f64, s: Sampling) !usize {
+    var keep = scaled.len;
     if (s.top_p > 0.0 and s.top_p < 1.0) {
-        const probs = try gpa.alloc(f64, k);
+        const probs = try gpa.alloc(f64, scaled.len);
         defer gpa.free(probs);
         for (probs, scaled) |*p, x| p.* = exp(x - scaled[0]);
         const total = pairwiseSum(probs);
@@ -165,17 +181,7 @@ pub fn chooseOrdered(gpa: Allocator, order: []const Candidate, position: u64, s:
         }
         keep = n;
     }
-    var best: usize = 0;
-    var best_score = -std.math.inf(f64);
-    for (0..keep) |j| {
-        const gumbel = -log(-log(uniform(s.seed, position, order[j].id)));
-        const score = scaled[j] + gumbel;
-        if (j == 0 or score > best_score) {
-            best = j;
-            best_score = score;
-        }
-    }
-    return order[best].id;
+    return keep;
 }
 
 const Lead = struct { value: f64, id: u64, score: f64 };

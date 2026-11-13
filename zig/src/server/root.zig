@@ -187,6 +187,7 @@ test {
     _ = @import("logprobs_test.zig");
     _ = @import("logprob_parts_test.zig");
     _ = @import("completion_echo_test.zig");
+    _ = @import("kept_probs.zig");
     _ = @import("limit_pins_test.zig");
     _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
