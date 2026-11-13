@@ -9,6 +9,7 @@ on:
       - 'README.md'
       - '.github/workflows/app.yml'
   push:
+    branches: [main]
     paths:
       - 'app/**'
       - 'README.md'
