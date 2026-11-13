@@ -152,7 +152,9 @@ The engine maps that slice with CUDA's virtual-memory calls, so this source work
 dumb buffer (the driver on kindling spark-os refuses `DRM_IOCTL_MODE_CREATE_DUMB`), and it needs neither the
 card's device node nor `modeset=1`. A daemon that does not answer within 10 seconds, a refused claim, a slice
 shorter than asked and a key file that is missing, not a regular file or empty on its first line each stop the
-load with the cause named. The GPU's L2 cache does not hold the lent slice. On a GB10 with dispramd, reading the same 8 MiB 200 times ran at
+load with the cause named. A refused claim's line also quotes the daemon's own reason, escaped and cut at 128 bytes,
+so a wrong key (`missing or unknown key`) reads differently from a full reservation (`not enough free carveout`).
+The GPU's L2 cache does not hold the lent slice. On a GB10 with dispramd, reading the same 8 MiB 200 times ran at
 209 GB/s from the slice against 810 GB/s from ordinary device memory, while one pass over 1.5 GiB ran the same
 (244 against 238 GB/s) and a `cuMemcpyDtoD` into or out of the slice ran at about half speed (59 against 111 GB/s).
 A kernel that rereads rows, as attention over a KV cache does, runs at memory speed and not cache speed, which is the

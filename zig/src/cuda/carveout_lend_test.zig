@@ -145,7 +145,7 @@ fn openFds() usize {
     if (linux.errno(rc) != .SUCCESS) return 0;
     const fd: linux.fd_t = @intCast(rc);
     defer _ = linux.close(fd);
-    var buf: [2048]u8 = undefined;
+    var buf: [2048]u8 align(@alignOf(linux.dirent64)) = undefined;
     var n: usize = 0;
     while (true) {
         const r = linux.getdents64(fd, &buf, buf.len);
@@ -173,7 +173,8 @@ test "a granted claim carries the size the daemon granted, and the descriptor by
     var d: Daemon = .{};
     try d.start(&tmp, "granted", .{ .payload = "{\"ok\": true, \"base\": 10739515392, \"size\": 4194304}", .lent = lent });
     defer d.stop();
-    const s = try slab(d.path, "kindlingai_1", 1 << 20);
+    var said: lend.Reason = .{};
+    const s = try slab(d.path, "kindlingai_1", 1 << 20, &said);
     defer _ = linux.close(s.sock);
     defer _ = linux.close(s.fd);
     try t.expectEqual(@as(usize, 4 << 20), s.size); // the grant, not the 1 MiB ask
@@ -190,15 +191,18 @@ test "a granted claim carries the size the daemon granted, and the descriptor by
     try t.expectEqual(@as(i64, 2 << 20), obj.get("size").?.integer); // the 1 MiB ask, rounded up to a whole slice
 }
 
-test "a refused claim is DaemonRefused" {
+test "a wrong key is refused with the daemon's own reason" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     var d: Daemon = .{};
-    const reply = "{\"ok\": false, \"error\": \"not enough free carveout\", \"base\": 1, \"size\": 2, \"free\": 3, \"largest\": 4}";
-    try d.start(&tmp, "refused", .{ .payload = reply });
+    // The reference daemon's answer to an unknown key: no descriptor, and the connection closed behind it.
+    try d.start(&tmp, "wrong-key", .{ .payload = "{\"ok\": false, \"error\": \"missing or unknown key\"}", .close_after_reply = true });
     defer d.stop();
-    try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.DaemonRefused, slab(d.path, "not-the-key", 1 << 20, &said));
+    try t.expectEqualStrings("missing or unknown key", said.text());
+    try t.expectFmt(", the daemon said \"missing or unknown key\"", "{f}", .{said});
 }
 
 test "a reply that is not the expected JSON is DaemonRefused" {
@@ -224,7 +228,8 @@ test "a reply that is not the expected JSON is DaemonRefused" {
         var d: Daemon = .{};
         try d.start(&tmp, try std.fmt.bufPrint(&name, "m{d}", .{i}), .{ .payload = payload, .lent = lent });
         defer d.stop();
-        try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20));
+        var said: lend.Reason = .{};
+        try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20, &said));
         d.stop();
     }
 }
@@ -238,10 +243,11 @@ test "a zero-byte grant is SliceTooSmall even when nothing was asked for" {
     var d: Daemon = .{};
     try d.start(&tmp, "zero", .{ .payload = "{\"ok\": true, \"size\": 0}", .lent = lent });
     defer d.stop();
-    try t.expectError(error.SliceTooSmall, slab(d.path, "kindlingai_1", 0));
+    var said: lend.Reason = .{};
+    try t.expectError(error.SliceTooSmall, slab(d.path, "kindlingai_1", 0, &said));
 }
 
-test "a reply longer than the client's buffer is DaemonRefused, not a truncated parse" {
+test "a reply longer than the client's buffer is DaemonRefused, not a truncated parse, and its descriptor is closed" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
@@ -252,25 +258,34 @@ test "a reply longer than the client's buffer is DaemonRefused, not a truncated 
     const head = "{\"ok\": true, \"size\": 2097152}";
     @memcpy(payload[0..head.len], head);
     @memset(payload[head.len..], ' ');
+    const baseline = openFds(); // before the daemon exists, so its listener is not in the count
     var d: Daemon = .{};
     try d.start(&tmp, "long", .{ .payload = &payload, .lent = lent });
     defer d.stop();
-    try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20, &said));
+    d.stop();
+    try t.expectEqual(baseline, openFds()); // the descriptor that came with the cut reply was closed
 }
 
-test "a refusal that carries a size is refused, not read as a grant" {
+test "a refusal that carries a size is refused, not read as a grant, and a descriptor sent with it is closed" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var d: Daemon = .{};
     defer d.stop();
     const lent = try memfd("refused");
     defer _ = linux.close(lent);
-    // "not enough free carveout" carries a size and a descriptor, so trusting the size alone would read it as a grant.
+    const baseline = openFds(); // before the daemon exists, so its listener is not in the count
+    // "not enough free carveout" carries a size; with a descriptor too, trusting the size alone would read a grant.
     try d.start(&tmp, "refused-size", .{
         .payload = "{\"ok\": false, \"error\": \"not enough free carveout\", \"base\": 10739515392, \"size\": 2145386496, \"free\": 0, \"largest\": 0}",
         .lent = lent,
     });
-    try std.testing.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 4 << 20));
+    var said: lend.Reason = .{};
+    try std.testing.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 4 << 20, &said));
+    try std.testing.expectEqualStrings("not enough free carveout", said.text());
+    d.stop();
+    try std.testing.expectEqual(baseline, openFds());
 }
 
 test "an ask between two slices is rounded up, so the grant is never less than planned" {
@@ -282,7 +297,8 @@ test "an ask between two slices is rounded up, so the grant is never less than p
     defer _ = linux.close(lent);
     try d.start(&tmp, "round-up", .{ .payload = "{\"ok\": true, \"base\": 10739515392, \"size\": 4194304}", .lent = lent });
     const ask = (3 << 20) + 1;
-    const s = try slab(d.path, "kindlingai_1", ask);
+    var said: lend.Reason = .{};
+    const s = try slab(d.path, "kindlingai_1", ask, &said);
     defer _ = linux.close(s.fd);
     defer _ = linux.close(s.sock);
     try std.testing.expect(s.size >= ask); // never quietly less than asked
@@ -292,7 +308,7 @@ test "an ask between two slices is rounded up, so the grant is never less than p
     try std.testing.expectEqual(@as(i64, 4194304), parsed.value.object.get("size").?.integer); // rounded up on the wire
 }
 
-test "a refusal followed by the daemon closing the connection is still the cause, not a broken pipe" {
+test "a full reservation is refused with the daemon's own reason, though the daemon closes the connection after it" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var d: Daemon = .{};
@@ -302,7 +318,28 @@ test "a refusal followed by the daemon closing the connection is still the cause
         .payload = "{\"ok\": false, \"error\": \"not enough free carveout\", \"base\": 10739515392, \"size\": 2145386496, \"free\": 0, \"largest\": 0}",
         .close_after_reply = true,
     });
-    try std.testing.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 4 << 20));
+    var said: lend.Reason = .{};
+    try std.testing.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 4 << 20, &said));
+    try std.testing.expectEqualStrings("not enough free carveout", said.text());
+    try std.testing.expectFmt(", the daemon said \"not enough free carveout\"", "{f}", .{said});
+}
+
+test "the daemon's reason is cut to reason_max bytes, and every byte outside printable ASCII is escaped" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var d: Daemon = .{};
+    defer d.stop();
+    // An escape sequence, a C1 control as UTF-8 and more text than is kept: none of it may reach a terminal raw.
+    const xs: [200]u8 = @splat('x');
+    try d.start(&tmp, "loud", .{ .payload = "{\"ok\": false, \"error\": \"\\u001b[2J\\u009b31m" ++ xs ++ "\"}" });
+    var said: lend.Reason = .{};
+    try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20, &said));
+    try t.expectEqual(@as(usize, lend.reason_max), said.text().len);
+    var buf: [1024]u8 = undefined;
+    const line = try std.fmt.bufPrint(&buf, "{f}", .{said});
+    try t.expectEqualStrings(", the daemon said \"\\x1b[2J\\xc2\\x9b31m" ++ xs[0..119] ++ "\" (its first 128 bytes)", line);
+    for (line) |c| try t.expect(c >= 0x20 and c < 0x7f);
 }
 
 test "a grant smaller than the ask is SliceTooSmall, not a smaller pool" {
@@ -314,22 +351,26 @@ test "a grant smaller than the ask is SliceTooSmall, not a smaller pool" {
     var d: Daemon = .{};
     try d.start(&tmp, "short", .{ .payload = "{\"ok\": true, \"size\": 2097152}", .lent = lent });
     defer d.stop();
-    try t.expectError(error.SliceTooSmall, slab(d.path, "kindlingai_1", 4 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.SliceTooSmall, slab(d.path, "kindlingai_1", 4 << 20, &said));
 }
 
-test "a reply with no descriptor is DaemonRefused" {
+test "a grant with no descriptor is DaemonRefused, with no reason of the daemon's to report" {
     const t = std.testing;
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();
     var d: Daemon = .{};
     try d.start(&tmp, "nofd", .{ .payload = "{\"ok\": true, \"base\": 10739515392, \"size\": 2097152}" });
     defer d.stop();
-    try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.DaemonRefused, slab(d.path, "kindlingai_1", 1 << 20, &said));
+    try t.expectFmt("", "{f}", .{said});
 }
 
 test "a missing socket is NoDaemon" {
     const t = std.testing;
-    try t.expectError(error.NoDaemon, slab(".zig-cache/tmp/absent/d.sock", "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.NoDaemon, slab(".zig-cache/tmp/absent/d.sock", "kindlingai_1", 1 << 20, &said));
 }
 
 test "the daemon sees the socket close as the release" {
@@ -341,7 +382,8 @@ test "the daemon sees the socket close as the release" {
     var d: Daemon = .{};
     try d.start(&tmp, "release", .{ .payload = "{\"ok\": true, \"size\": 2097152}", .lent = lent, .wait_close = true });
     defer d.stop();
-    const s = try slab(d.path, "kindlingai_1", 1 << 20);
+    var said: lend.Reason = .{};
+    const s = try slab(d.path, "kindlingai_1", 1 << 20, &said);
     _ = linux.close(s.fd); // the mapping would hold its own reference; the socket is the claim
     _ = linux.close(s.sock);
     d.stop();
@@ -369,17 +411,19 @@ test "claim refuses a missing socket, a refused claim and a short grant before i
     defer tmp.cleanup();
     const d = NoCuda.driver();
     NoCuda.calls = 0;
-    try t.expectError(error.NoDaemon, claim(&d, ".zig-cache/tmp/absent/d.sock", "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.NoDaemon, claim(&d, ".zig-cache/tmp/absent/d.sock", "kindlingai_1", 1 << 20, &said));
     const lent = try memfd("half");
     defer _ = linux.close(lent);
     var refused: Daemon = .{};
     try refused.start(&tmp, "claim-refused", .{ .payload = "{\"ok\": false, \"error\": \"unknown op\"}" });
     defer refused.stop();
-    try t.expectError(error.DaemonRefused, claim(&d, refused.path, "kindlingai_1", 1 << 20));
+    try t.expectError(error.DaemonRefused, claim(&d, refused.path, "kindlingai_1", 1 << 20, &said));
+    try t.expectEqualStrings("unknown op", said.text()); // the reason reaches the caller of claim
     var short: Daemon = .{};
     try short.start(&tmp, "claim-short", .{ .payload = "{\"ok\": true, \"size\": 2097152}", .lent = lent });
     defer short.stop();
-    try t.expectError(error.SliceTooSmall, claim(&d, short.path, "kindlingai_1", 4 << 20));
+    try t.expectError(error.SliceTooSmall, claim(&d, short.path, "kindlingai_1", 4 << 20, &said));
     try t.expectEqual(@as(u32, 0), NoCuda.calls); // every refusal above happened before any driver call
 }
 
@@ -394,7 +438,8 @@ test "a claim the protocol half accepts reaches the driver, and a driver that ca
     defer d.stop();
     const drv = NoCuda.driver();
     NoCuda.calls = 0;
-    try t.expectError(error.VmmUnavailable, claim(&drv, d.path, "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.VmmUnavailable, claim(&drv, d.path, "kindlingai_1", 1 << 20, &said));
     try t.expectEqual(@as(u32, 1), NoCuda.calls);
 }
 
@@ -430,7 +475,8 @@ test "a second descriptor in the reply is closed, not leaked" {
     // wait_close holds the daemon's connection open, so the count below is not racing its close.
     try d.start(&tmp, "two", .{ .payload = "{\"ok\": true, \"size\": 2097152}", .lent = first, .extra = second, .wait_close = true });
     defer d.stop();
-    const s = try slab(d.path, "kindlingai_1", 1 << 20);
+    var said: lend.Reason = .{};
+    const s = try slab(d.path, "kindlingai_1", 1 << 20, &said);
     // the listener, the client's socket, the daemon's connection and the one descriptor kept: the second was closed
     try t.expectEqual(baseline + 4, openFds());
     _ = linux.close(s.sock);
@@ -450,7 +496,8 @@ test "a daemon that accepts and never answers is DaemonSilent, and the client le
     const saved = lend.wait_s;
     lend.wait_s = 1;
     defer lend.wait_s = saved;
-    try t.expectError(error.DaemonSilent, slab(d.path, "kindlingai_1", 1 << 20));
+    var said: lend.Reason = .{};
+    try t.expectError(error.DaemonSilent, slab(d.path, "kindlingai_1", 1 << 20, &said));
     d.thread.?.join(); // the daemon's own connection ends once it saw the client close
     d.thread = null;
     try t.expect(d.observed.closed);

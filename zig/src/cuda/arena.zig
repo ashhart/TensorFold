@@ -286,28 +286,27 @@ pub const Vmm = struct {
         return at;
     }
 
-    /// Maps a slice another process shared as an fd (CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR) in a range of ours.
+    /// Maps a slice another process shared as a POSIX fd at the next free address of the range `open` reserved.
     pub fn mapSlice(v: *Vmm, fd: c_int, len: usize) Error!u64 {
         const import = v.api.importFd orelse return error.Unsupported; // an older driver: the lent slice cannot be mapped
+        if (v.va + v.va_len - v.next < len) return error.OutOfMemory; // the reserved range has no room for it
         const handle_type_posix_fd: c_int = 1;
-        var va: u64 = 0;
-        if (v.api.reserve(&va, len, v.granularity, 0, 0) != abi.success) return error.CudaFailed;
-        errdefer _ = v.api.addressFree(va, len);
         var h: u64 = 0;
         if (import(&h, @ptrFromInt(@as(usize, @intCast(fd))), handle_type_posix_fd) != abi.success)
             return error.CudaFailed;
-        errdefer _ = v.api.release(h);
-        if (v.api.map(va, len, 0, h, 0) != abi.success) return error.CudaFailed;
-        errdefer _ = v.api.unmap(va, len);
+        defer _ = v.api.release(h); // the mapping keeps its own reference to the memory
+        const at = v.next;
+        if (v.api.map(at, len, 0, h, 0) != abi.success) return error.CudaFailed;
+        errdefer _ = v.api.unmap(at, len);
         const desc: AccessDesc = .{ .loc_id = v.device };
-        if (v.api.setAccess(va, len, &desc, 1) != abi.success) return error.CudaFailed;
-        _ = v.api.release(h); // the mapping keeps its own reference to the memory
-        return va;
+        if (v.api.setAccess(at, len, &desc, 1) != abi.success) return error.CudaFailed;
+        v.next += len;
+        return at;
     }
 
+    /// Unmaps what `mapSlice` mapped; its addresses stay reserved until `close` frees the whole range.
     pub fn unmapSlice(v: *Vmm, base: u64, len: usize) void {
         _ = v.api.unmap(base, len);
-        _ = v.api.addressFree(base, len);
     }
 
     fn fail(v: *Vmm, call: []const u8, code: c_int) ?u64 {
@@ -482,6 +481,64 @@ test "arena: VMM keeps the first failed driver call and its code, later failures
     v.failed = null; // past the reserved range: no driver call at all
     try t.expectEqual(@as(?u64, null), be.chunk(be.ctx, 8 << 20));
     try t.expectEqualStrings("the reserved range", v.failed.?.call);
+}
+
+test "arena: a lent slice maps into the range open reserved, and unmapping it leaves the addresses to close" {
+    const t = std.testing;
+    const Api = struct {
+        var reserves: u32 = 0;
+        var frees: u32 = 0;
+        var imports: u32 = 0;
+        var releases: u32 = 0;
+        var unmaps: u32 = 0;
+        var mapped: u64 = 0;
+        fn reserve(_: *u64, _: usize, _: usize, _: u64, _: c_ulonglong) callconv(.c) abi.Result {
+            reserves += 1;
+            return abi.success;
+        }
+        fn addressFree(_: u64, _: usize) callconv(.c) abi.Result {
+            frees += 1;
+            return abi.success;
+        }
+        fn importFd(h: *u64, _: ?*anyopaque, _: c_int) callconv(.c) abi.Result {
+            imports += 1;
+            h.* = 9;
+            return abi.success;
+        }
+        fn release(_: u64) callconv(.c) abi.Result {
+            releases += 1;
+            return abi.success;
+        }
+        fn map(at: u64, _: usize, _: usize, _: u64, _: c_ulonglong) callconv(.c) abi.Result {
+            mapped = at;
+            return abi.success;
+        }
+        fn unmap(_: u64, _: usize) callconv(.c) abi.Result {
+            unmaps += 1;
+            return abi.success;
+        }
+        fn setAccess(_: u64, _: usize, _: *const Vmm.AccessDesc, _: usize) callconv(.c) abi.Result {
+            return abi.success;
+        }
+    };
+    var v: Vmm = .{ .lib = undefined, .device = 0, .prop = .{}, .granularity = 2 << 20, .va = 1 << 40, .va_len = 4 << 20, .next = 1 << 40, .api = undefined };
+    v.api.reserve = Api.reserve;
+    v.api.addressFree = Api.addressFree;
+    v.api.importFd = Api.importFd;
+    v.api.release = Api.release;
+    v.api.map = Api.map;
+    v.api.unmap = Api.unmap;
+    v.api.setAccess = Api.setAccess;
+    const at = try v.mapSlice(5, 4 << 20);
+    try t.expectEqual(@as(u64, 1 << 40), at); // the start of the range open reserved
+    try t.expectEqual(at, Api.mapped);
+    try t.expectEqual(@as(u32, 0), Api.reserves); // no second range
+    try t.expectEqual(@as(u32, 1), Api.releases); // the mapping holds the memory, the handle is let go
+    try t.expectError(error.OutOfMemory, v.mapSlice(5, 2 << 20)); // the range is full: refused before any import
+    try t.expectEqual(@as(u32, 1), Api.imports);
+    v.unmapSlice(at, 4 << 20);
+    try t.expectEqual(@as(u32, 1), Api.unmaps);
+    try t.expectEqual(@as(u32, 0), Api.frees); // the addresses are close's to free, with the whole range
 }
 
 test "Failure boundaries: a free range survives failure inserting its live address" {
