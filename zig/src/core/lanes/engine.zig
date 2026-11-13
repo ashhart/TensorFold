@@ -10,7 +10,6 @@ const ev = @import("events.zig");
 const win = @import("windows.zig");
 const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
-const fill = @import("fill.zig");
 const trail = @import("trail.zig");
 const lone_costs = @import("lone_costs.zig");
 const open = @import("open.zig");
