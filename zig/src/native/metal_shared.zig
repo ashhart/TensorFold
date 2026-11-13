@@ -19,7 +19,7 @@ pub fn deviceName(a: Allocator, _: ?u32) ?[]const u8 {
 }
 
 /// The M generation in a Metal device name ("Apple M5 Max": 5).
-fn generation(name: []const u8) ?u32 {
+pub fn generation(name: []const u8) ?u32 {
     var words = std.mem.tokenizeScalar(u8, name, ' ');
     if (!std.ascii.eqlIgnoreCase(words.next() orelse return null, "apple")) return null;
     const word = words.next() orelse return null;

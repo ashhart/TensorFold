@@ -106,7 +106,13 @@ test {
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
+    _ = @import("families/lfm2_moe/dspark_config.zig");
+    _ = @import("families/lfm2_moe/dspark_quant.zig");
     _ = @import("families/lfm2_moe/dspark_test.zig");
+    _ = @import("families/lfm2_moe/dspark_hold_test.zig");
+    _ = @import("families/lfm2_moe/dspark_bf16_test.zig");
+    _ = @import("families/lfm2_moe/dspark_tap_test.zig");
+    _ = @import("families/lfm2_moe/dspark_stage.zig");
     _ = @import("families/deepseek_v41/metal/glue.zig"); // the launch wrappers' shape refusals, reached by no other test root
 }
 

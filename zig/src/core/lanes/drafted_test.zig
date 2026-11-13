@@ -140,123 +140,10 @@ pub const FakeDrafter = struct {
     }
 };
 
-/// The fake target holding features as `Features` promises (a keep overwrites what it drops), refusing anything else.
-pub const Strict = struct {
-    inner: be.Backend,
-    snaps: std.AutoHashMapUnmanaged(*sm.Stream, Snap) = .empty,
-    refused: u32 = 0,
-    taps: [8]u32 = undefined,
-    tap_count: usize = 0, // the layers it keeps, told before any forward
+pub const Strict = @import("drafted_strict.zig").Strict;
 
-    const Snap = struct { start: u64 = 0, rows: std.ArrayList(u32) = .empty, valid: usize = 0 };
-    const poison: u32 = 0xdead;
-
-    pub fn deinit(x: *Strict) void {
-        var it = x.snaps.valueIterator();
-        while (it.next()) |v| v.rows.deinit(gpa);
-        x.snaps.deinit(gpa);
-    }
-
-    pub fn backend(x: *Strict) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .release = release } };
-    }
-
-    fn self(ptr: *anyopaque) *Strict {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn snap(x: *Strict, s: *sm.Stream) !*Snap {
-        const got = try x.snaps.getOrPut(gpa, s);
-        if (!got.found_existing) got.value_ptr.* = .{};
-        return got.value_ptr;
-    }
-
-    fn prefill(ptr: *anyopaque, s: *sm.Stream) anyerror!void {
-        const x = self(ptr);
-        try x.inner.prefill(s);
-        const sn = try x.snap(s);
-        sn.start = s.cached;
-        sn.rows.clearRetainingCapacity();
-        try sn.rows.appendSlice(gpa, s.prompt()[s.cached..]);
-        sn.valid = sn.rows.items.len;
-    }
-
-    fn first(ptr: *anyopaque, s: *sm.Stream, position: u64) anyerror!u64 {
-        return self(ptr).inner.first(s, position);
-    }
-
-    fn firstMasked(ptr: *anyopaque, s: *sm.Stream, position: u64, mask: []const u32) anyerror!u64 {
-        const in = self(ptr).inner;
-        return in.vtable.first_masked.?(in.ptr, s, position, mask);
-    }
-
-    fn queue(ptr: *anyopaque, s: *sm.Stream, feed: be.Feed, position: u64) anyerror!u64 {
-        const x = self(ptr);
-        (try x.snap(s)).valid = 0;
-        return x.inner.queue(s, feed, position);
-    }
-
-    fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
-        return self(ptr).inner.read(handle);
-    }
-
-    fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
-        const x = self(ptr);
-        try x.inner.verify(windows, out);
-        for (windows) |w| {
-            if (w.held != 0) return error.HeldReachedTarget; // Drafted hands host tokens
-            const sn = try x.snap(w.stream);
-            sn.start = w.positions[0] - 1;
-            sn.rows.clearRetainingCapacity();
-            try sn.rows.append(gpa, w.pending);
-            try sn.rows.appendSlice(gpa, w.tokens);
-            sn.valid = sn.rows.items.len;
-        }
-    }
-
-    fn keep(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
-        const x = self(ptr);
-        try x.inner.keep(windows, paths);
-        for (windows, paths) |w, path| {
-            const sn = try x.snap(w.stream);
-            sn.valid = @min(sn.valid, path.len);
-            @memset(sn.rows.items[sn.valid..], poison);
-        }
-    }
-
-    fn prepare(ptr: *anyopaque, taps: []const u32) anyerror!void {
-        const x = self(ptr);
-        if (x.snaps.count() > 0) return error.PreparedAfterForward;
-        @memcpy(x.taps[0..taps.len], taps);
-        x.tap_count = taps.len;
-    }
-
-    fn draftNone(_: *anyopaque, _: []const be.DraftRequest) anyerror!void {
-        return error.TargetDraftCalled;
-    }
-
-    fn features(ptr: *anyopaque, s: *sm.Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
-        const x = self(ptr);
-        if (!std.mem.eql(u32, taps, x.taps[0..x.tap_count])) return error.TapsNotPrepared;
-        const sn = x.snaps.getPtr(s) orelse return error.UnknownStream;
-        if (start < sn.start or start + count > sn.start + sn.valid) {
-            x.refused += 1;
-            return error.RowsNotHeld;
-        }
-        return .{ .buffer = @intFromPtr(sn.rows.items.ptr), .offset = (start - sn.start) * 4, .rows = count, .row_bytes = 4, .space = .host, .dtype = .u32 };
-    }
-
-    fn release(ptr: *anyopaque, s: *sm.Stream) void {
-        const x = self(ptr);
-        x.inner.release(s);
-        if (x.snaps.fetchRemove(s)) |kv| {
-            var v = kv.value;
-            v.rows.deinit(gpa);
-        }
-    }
-};
-
-pub const Mode = enum { plain, wrapped, wrapped_early };
+/// `wrapped_held`: the target reads held drafts from the drafter itself (`Drafted.held_on_target`).
+pub const Mode = enum { plain, wrapped, wrapped_early, wrapped_held };
 pub const Case = struct { root_copies: bool = false, prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
 pub const Out = struct {
     tokens: [][]u32,
@@ -265,6 +152,7 @@ pub const Out = struct {
     cached: u32 = 0,
     head: FakeDrafter,
     rounds: u64,
+    seen: Strict.Stats = .{},
 };
 
 var costs: [16]Cost = undefined;
@@ -279,11 +167,13 @@ pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     defer target.deinit();
     var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched } };
     var strict: Strict = .{ .inner = target.backend() };
+    if (mode == .wrapped_held) strict.reads = head.drafter();
     defer strict.deinit();
     var target_backend = strict.backend();
     target_backend.first_before_draft = mode == .wrapped_early;
     target_backend.penalties = mode == .wrapped_early;
     var wrapped = try Drafted.init(gpa, target_backend, head.drafter());
+    wrapped.held_on_target = mode == .wrapped_held;
     defer wrapped.deinit();
     try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().first_before_draft);
     try std.testing.expectEqual(mode == .wrapped_early, wrapped.backend().penalties);
@@ -320,7 +210,7 @@ pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     };
     for (streams) |*s| try engine.addStream(s);
     while (engine.activeCount() > 0) try engine.step();
-    var out: Out = .{ .tokens = try gpa.alloc([]u32, cases.len), .cached = streams[0].cached, .head = head, .rounds = target.rounds };
+    var out: Out = .{ .tokens = try gpa.alloc([]u32, cases.len), .cached = streams[0].cached, .head = head, .rounds = target.rounds, .seen = strict.stats };
     out.head.lanes = .empty; // the counters only; the lanes are freed below
     for (out.tokens, streams) |*o, *s| {
         o.* = try gpa.dupe(u32, s.emitted());
@@ -572,6 +462,7 @@ test "the early first token equals the late one after a complete prompt restore"
 test {
     _ = @import("drafted_role_test.zig");
     _ = @import("drafted_step_test.zig");
-    _ = @import("drafted_held_test.zig");
     _ = @import("drafted_adopt_test.zig");
+    _ = @import("drafted_held_test.zig");
+    _ = @import("head_enrollment_test.zig");
 }

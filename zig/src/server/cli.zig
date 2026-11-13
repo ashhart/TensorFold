@@ -105,7 +105,7 @@ pub const flags = [_]Flag{
     .{ .name = "--slide-drift-gate", .kind = .store_true, .native = true },
     .{ .name = "--slide-graph", .native = true },
     .{ .name = "--drafter", .native = true },
-    .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
+    .{ .name = "--drafter-bits", .choices = &.{ "0", "4", "8" }, .native = true },
     .{ .name = "--rope-yarn", .native = cuda_build },
     .{ .name = "--record", .native = true },
     .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },
@@ -159,7 +159,6 @@ pub const flags = [_]Flag{
     // the native server's own: Cortheon's reasoning program and server-run web research for every chat request
     .{ .name = "--cortheon", .kind = .store_true, .native = true },
 };
-
 /// The variables this binary honours as the Python engine does, then the CUDA build's or the Metal build's.
 pub const env = [_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_NO_LIVE", "TENSORFOLD_SEED_SALT", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_TOOL_ID_KEY_FILE", "TENSORFOLD_PHASE_METRICS", "TENSORFOLD_LIBPDFIUM", "TENSORFOLD_MAX_PDF_PAGES", "HF_HOME", "HF_HUB_CACHE", "BRAVE_SEARCH_API_KEY" } ++
     (if (cuda_build) [_][]const u8{ "TF_CUDA_DEVICE", "TF_CUDA_SEGMENTS", "TENSORFOLD_CUDA_KERNELS", "TENSORFOLD_MEMORY_RESERVE_GIB", "TENSORFOLD_CUDA_MEMORY_LIMIT_GB", "TENSORFOLD_P2P_DIAGNOSTICS", "TENSORFOLD_P2P_PROBE" } else [_][]const u8{}) ++
@@ -229,7 +228,7 @@ pub const Args = struct {
     compact_memory: ?[]const u8 = null,
     drafter: ?[]const u8 = null,
     drafter_name: ?[]const u8 = null, // retained before hub resolution for the engine's serving line
-    drafter_bits: u8 = 4,
+    drafter_bits: ?u8 = null, // null: not given (a family without its own default takes 4)
     rope_yarn: ?f64 = null, // YaRN with this factor over the checkpoint's trained window (Qwen3.5/3.6 on CUDA)
     record: ?[]const u8 = null, // drafter training rows written under this folder
     kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
@@ -533,7 +532,8 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .drafts = !args.no_drafts,
         .drafter = args.drafter,
         .drafter_name = args.drafter_name orelse args.drafter,
-        .drafter_bits = args.drafter_bits,
+        .drafter_bits = args.drafter_bits orelse 4,
+        .drafter_bits_given = args.drafter_bits != null,
         .rope_yarn = args.rope_yarn,
         .record = args.record,
         .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
@@ -580,7 +580,7 @@ pub const ranks = @import("cli_gpu_flags.zig").ranks;
 
 const cli = @This();
 
-/// The private flag helpers cli_test.zig checks.
+/// The private flag helpers used by the CLI tests.
 pub const Test = if (builtin.is_test) struct {
     pub const cuda_build = cli.cuda_build;
     pub const native_serves = cli.native_serves;

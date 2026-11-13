@@ -48,7 +48,7 @@ fn replay(n: usize, intercept: f64, slope: f64, head_ms: f64, enabled: bool) !Re
     for (1..129) |round| {
         _ = e.arena.reset(.retain_capacity);
         var whos: [8]depth.Who = undefined;
-        for (streams[0..n], whos[0..n]) |*s, *w| w.* = win.who(s);
+        for (streams[0..n], whos[0..n]) |*s, *w| w.* = win.who(s, e.cfg.k.hold_costs.len > 0);
         var offered: [8]i64 = undefined;
         var unused: u8 = 0;
         try e.rule.budgets(whos[0..n], .{ .ptr = &unused, .copy = noCopy }, false, offered[0..n]);
@@ -166,4 +166,159 @@ test "shared depth probe: every eighth grant adds at most one row and rotates st
         try t.expectEqual(@as(i64, @intFromBool(round % 8 == 0)), extras);
     }
     for (seen) |s| try t.expect(s);
+}
+
+test "a depth's acceptance estimate moves by the configured weight of the newest round" {
+    const empty: @import("table.zig").Table = .{};
+    var rule: depth.Rule = .{ .gpa = gpa, .k = .{ .depth_rate = 0.08 }, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?depth.State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try rule.observeDepth(who, 2, 1); // the first draft landed, the second did not
+    try t.expectApproxEqAbs(@as(f64, 0.54), st.?.p[0], 1e-12);
+    try t.expectApproxEqAbs(@as(f64, 0.46), st.?.p[1], 1e-12);
+}
+
+test "depth picks the most tokens a ms and probes deeper" {
+    var fc: @import("table.zig").Table = .{};
+    defer fc.deinit(gpa);
+    for (1..5) |w| try fc.put(gpa, @intCast(w), 5.0 + @as(f64, @floatFromInt(w)));
+    const shared: @import("table.zig").Table = .{};
+    var rule: depth.Rule = .{ .gpa = gpa, .prior = &.{ 0.9, 0.9, 0.9 }, .most_drafts = 3, .family_costs = &fc, .shared_costs = &shared, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = false, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?depth.State = null;
+    defer if (st) |*s| s.deinit(gpa);
+    const who: depth.Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    try t.expectEqual(@as(i64, 3), try rule.depth(who));
+}
+
+test "costed forced rounds retain a due plain-recovery trial until a draft can run" {
+    var slots = [_]?f64{ null, 10, 10 };
+    const costs: @import("table.zig").Table = .{ .slots = &slots };
+    var rule: depth.Rule = .{ .gpa = gpa, .k = .{ .hold_costs = &.{.{ .streams = 1, .depth = 1, .ms = 100 }} }, .prior = &.{0.5}, .most_drafts = 1, .family_costs = &costs, .shared_costs = &costs, .mtp_step_ms = 100, .plain_guard = true, .node_probabilities = false, .batch_rows = 2 };
+    defer rule.deinit();
+    var state: ?depth.State = .{ .p = try gpa.dupe(f64, &.{0.5}), .rounds = 19, .plain = 7, .wait = 8 };
+    defer state.?.deinit(gpa);
+    var whos = [_]depth.Who{.{ .state = &state, .draft_room = 64, .finished = false, .forced = true }};
+    var unused: u8 = 0;
+    const probe: depth.Probe = .{ .ptr = &unused, .copy = noCopy };
+    var out: [1]i64 = undefined;
+    for (0..3) |_| {
+        try rule.budgets(&whos, probe, false, &out);
+        try t.expectEqual(@as(i64, 0), out[0]);
+        try t.expectEqual(@as(?u64, 7), state.?.plain);
+        try t.expectEqual(@as(?u64, 8), state.?.wait);
+        try t.expectEqual(@as(u64, 19), state.?.rounds);
+    }
+    try t.expectEqual(@as(i64, 0), try rule.headDepth(&whos[0], null, probe));
+    try t.expectEqual(@as(?u64, 7), state.?.plain);
+    try t.expectEqual(@as(?u64, 8), state.?.wait);
+    try t.expectEqual(@as(u64, 19), state.?.rounds);
+    whos[0].forced = false;
+    try rule.budgets(&whos, probe, false, &out);
+    try t.expectEqual(@as(i64, 1), out[0]);
+    try t.expectEqual(@as(?u64, 0), state.?.plain);
+    try t.expectEqual(@as(?u64, 16), state.?.wait);
+    try t.expectEqual(@as(u64, 20), state.?.rounds);
+}
+
+test "drafts-off shared rounds advance unpriced depth probes but not costed probes" {
+    var costs: [8]Cost = undefined;
+    for (&costs, 1..) |*c, rows| c.* = .{ .width = @intCast(rows), .ms = 6 + 2 * @as(f64, @floatFromInt(rows)) };
+    for ([_]bool{ false, true }) |priced| {
+        var cfg = try Config.init(gpa, .{
+            .exact_width = 8,
+            .mtp = true,
+            .speculate = true,
+            .speculate_early = false,
+            .drafts = 3,
+            .draft_prior = &.{0.5},
+            .window_costs = &costs,
+            .mtp_step_ms = 0,
+            .hidden_rows = true,
+            .batch_rows = 8,
+            .max_streams = 2,
+            .draft_streams = true,
+            .hold_costs = if (priced) &.{.{ .streams = 1, .depth = 1, .ms = 0.01 }} else &.{},
+        }, 8, 7);
+        defer cfg.deinit(gpa);
+        cfg.timed = false;
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer e.deinit();
+        e.rule.k.depth_probe_every = 8;
+        try e.rule.observeOverhead(2, 2, cfg.shared_costs.get(2).?, false, 0);
+        var streams: [2]Stream = undefined;
+        var made: usize = 0;
+        defer for (streams[0..made]) |*s| s.deinit(gpa);
+        for (&streams) |*s| {
+            s.* = try Stream.init(gpa, .{ .id = "cadence", .prompt = &.{1}, .max_new = 100, .eos = &.{}, .drafts = false });
+            made += 1;
+            try e.addStream(s);
+        }
+        for (0..7) |_| try e.step();
+        try t.expectEqual(@as(u64, 7), e.shared_rounds);
+        try t.expectEqual(@as(u64, if (priced) 0 else 7), e.rule.shared_rounds);
+        try t.expectEqual(@as(usize, 0), target.drafts_calls);
+        for (&streams) |*s| s.drafts = true;
+        try e.step();
+        // The first offered shared head is a probe only if the seven target-only rounds counted.
+        try t.expectEqual(@as(u32, if (priced) 1 else 2), streams[0].next.?.count);
+        try t.expectEqual(@as(u32, 1), streams[1].next.?.count);
+        try t.expectEqual(@as(usize, if (priced) 1 else 2), target.lanes.get(&streams[0]).?.held.items.len);
+        try t.expectEqual(@as(usize, 1), target.lanes.get(&streams[1]).?.held.items.len);
+        try t.expectEqual(@as(usize, 1), target.drafts_calls);
+        try t.expectEqual(@as(usize, 2), target.drafts_most);
+        try t.expectEqual(@as(u64, if (priced) 1 else 8), e.rule.shared_rounds);
+    }
+}
+
+test "target-only shared reservations preserve unpriced depth probe cadence" {
+    var costs: [8]Cost = undefined;
+    for (&costs, 1..) |*c, rows| c.* = .{ .width = @intCast(rows), .ms = 6 + 2 * @as(f64, @floatFromInt(rows)) };
+    for ([_]bool{ false, true }) |priced| for ([_]bool{ false, true }) |limited| for ([_]bool{ false, true }) |granted| {
+        var cfg = try Config.init(gpa, .{
+            .exact_width = 8,
+            .mtp = true,
+            .speculate = true,
+            .speculate_early = false,
+            .drafts = 3,
+            .draft_prior = &.{0.5},
+            .window_costs = &costs,
+            .mtp_step_ms = 0,
+            .hidden_rows = true,
+            .batch_rows = 8,
+            .max_streams = 2,
+            .draft_streams = true,
+            .allocate_shared_drafts = true,
+            .limit_shared_drafts = limited,
+            .draft_probabilities = granted,
+            .granted_depth = granted,
+            .hold_costs = if (priced) &.{.{ .streams = 1, .depth = 1, .ms = 0.01 }} else &.{},
+        }, 8, 7);
+        defer cfg.deinit(gpa);
+        cfg.timed = false;
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer e.deinit();
+        e.rule.k.depth_probe_every = 8;
+        var streams: [2]Stream = undefined;
+        var made: usize = 0;
+        defer for (streams[0..made]) |*s| s.deinit(gpa);
+        for (&streams) |*s| {
+            s.* = try Stream.init(gpa, .{ .id = "shared-cadence", .prompt = &.{1}, .max_new = 100, .eos = &.{}, .drafts = false });
+            made += 1;
+            try e.addStream(s);
+        }
+        for (0..7) |_| try e.step();
+        try t.expectEqual(@as(u64, 7), e.shared_rounds);
+        // Main reaches rule.budgets through shared reservations only for a legacy depth cap.
+        try t.expectEqual(@as(u64, if (!priced and limited and !granted) 7 else 0), e.rule.shared_rounds);
+        try t.expectEqual(@as(usize, 0), target.drafts_calls);
+    };
 }

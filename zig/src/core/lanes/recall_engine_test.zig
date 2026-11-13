@@ -258,8 +258,9 @@ fn copyWith(stub: *Stub, shared: *recall.Shared, p: []const u32) !win.Copy {
     var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = p, .max_new = 16, .eos = &.{96}, .proposer = stub.proposer(), .recall = &r });
     defer s.deinit(gpa);
     engine.alone = false;
-    const c = try win.copyProposal(&engine, &s);
-    return .{ .tokens = try gpa.dupe(u32, c.tokens), .recalled = c.recalled };
+    var c = try win.copyProposal(&engine, &s);
+    c.tokens = try gpa.dupe(u32, c.tokens);
+    return c;
 }
 
 test "a priced proposer's copy is taken as it gives it, and its none stands: no gate, no Recall in its place" {
