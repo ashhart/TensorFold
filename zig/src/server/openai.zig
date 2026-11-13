@@ -31,14 +31,10 @@ pub const Out = struct {
     vt: *const VTable,
 
     pub const VTable = struct {
-        /// 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none).
-        open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void,
-        /// One ``data:`` payload; null is ``[DONE]``.
-        event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void,
-        /// A whole JSON reply.
-        reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
-        /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
-        keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
+        open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void, // 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none)
+        event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void, // one ``data:`` payload; null is ``[DONE]``
+        reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void, // a whole JSON reply
+        keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null, // bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none
     };
 };
 
