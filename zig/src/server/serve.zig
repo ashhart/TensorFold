@@ -198,6 +198,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .keep_warm_s = args.keep_warm,
         .idle_unload_s = args.idle_unload,
         .admission = args.admission,
+        .max_connections = args.connections.max,
+        .peering = args.connections.peering,
         .default_sampling = s.sampling,
         .instruct_sampling = s.instruct,
         .use_drafts = !args.no_drafts,

@@ -172,7 +172,7 @@ pub const Engine = struct {
             head_kv,
         );
         errdefer e.pool.deinit();
-        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams);
+        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams, d.vocab);
         errdefer e.plan.deinit();
         e.wins = try e.gpa.alloc(rounds.Window, streams);
         e.sized = true;
@@ -230,6 +230,7 @@ pub const Engine = struct {
 
     /// `tokens` as int32 ids in fresh arena memory, the copy queued on the stream.
     pub fn ids(e: *Engine, o: hip.ops.Ops, tokens: []const u32) !u64 {
+        for (tokens) |t| if (t >= e.weights.model.dims.vocab) return error.TokenOutsideVocabulary; // no kernel bounds an id
         const dst = try o.arena.of(i32, tokens.len);
         try hip.runtime.check(e.driver.api.hipMemcpyHtoDAsync(
             @ptrFromInt(dst),

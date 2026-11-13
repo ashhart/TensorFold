@@ -6,6 +6,8 @@ const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
 
 pub const limit = 32 * 1024 * 1024;
+/// A body no route reads is taken only to keep the connection in step, so it gets a small cap of its own.
+pub const unread_limit = 64 * 1024;
 const metadata_limit = 65536;
 
 /// A body, or the refusal a RequestError carries (the connection then closes).
@@ -33,7 +35,10 @@ fn strip(s: []const u8) []const u8 {
 
 /// Reads one body without consuming the next request on the connection.
 pub fn read(c: *Conn, a: Allocator, max: usize) Allocator.Error!Body {
-    const too_big = try std.fmt.allocPrint(a, "request body exceeds the {d} MiB limit", .{max / (1024 * 1024)});
+    const too_big = if (max >= 1024 * 1024)
+        try std.fmt.allocPrint(a, "request body exceeds the {d} MiB limit", .{max / (1024 * 1024)})
+    else
+        try std.fmt.allocPrint(a, "request body exceeds the {d} KiB limit", .{max / 1024});
     var transfers = false;
     var lengths = false;
     for (c.headers) |h| {

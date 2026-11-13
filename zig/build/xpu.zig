@@ -116,11 +116,12 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const install = b.addInstallArtifact(exe, .{});
     b.step("xpu-qwen27", "Build the Qwen3.8-27B XPU forward runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&install.step);
     // device tests: a skip message and exit 0 without a Level Zero device or a model (`xpu-tests` is Nemotron's, -Dxpu)
-    const tests_step = b.step("xpu-qwen27-tests", "Build the 27B XPU device tests (tf-xpu-qwen27-means-test, -seam-test, -close-test)");
+    const tests_step = b.step("xpu-qwen27-tests", "Build the 27B XPU device tests (means, seam, close and tf-xpu-qwen27-tail-test)");
     for ([_][2][]const u8{
         .{ "tf-xpu-qwen27-means-test", "zig/src/xpu/means_test.zig" },
         .{ "tf-xpu-qwen27-seam-test", "zig/src/xpu/seam_test.zig" },
         .{ "tf-xpu-qwen27-close-test", "zig/src/xpu/close_test.zig" },
+        .{ "tf-xpu-qwen27-tail-test", "zig/src/xpu/tail_test.zig" },
     }) |t| {
         const m = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize, .link_libc = true });
         m.addImport("xpu_qwen27_kernels", embedded);
@@ -367,4 +368,18 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const shape_tests = b.addRunArtifact(b.addTest(.{ .root_module = shape }));
     b.step("test-qwen27-config-xpu-host", "The XPU 27B runner's config.json shape and layer pattern without devices or ocloc").dependOn(&shape_tests.step);
     step.dependOn(&shape_tests.step);
+    const tail_tests = b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"xpu prompt tail:"} }));
+    b.step("test-qwen27-prompt-tail-xpu-host", "The XPU 27B layer-63 prompt-tail plan without devices").dependOn(&tail_tests.step);
+    step.dependOn(&tail_tests.step);
+    // the device seam check is compiled on the host too; running it needs a B70 and a checkpoint
+    const tail_test = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze }, .{ .name = "core", .module = core }, .{ .name = "xpu_qwen27_kernels", .module = empty } } });
+    const tail_exe = b.addExecutable(.{ .name = "tf-xpu-qwen27-tail-test-host", .root_module = tail_test });
+    b.step("compile-xpu-qwen27-tail-host", "Compile the XPU 27B prompt-tail device check without devices").dependOn(&tail_exe.step);
+    const linux = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu });
+    const core_linux = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true });
+    core_linux.addImport("gpu_memory", @import("gpu_memory.zig").module(b, linux));
+    const ze_linux = zeModule(b, linux, .ReleaseFast);
+    const empty_linux = b.createModule(.{ .root_source_file = b.addWriteFiles().add("draft_xpu_images.zig", "pub const drafter = [_]u8{};\npub const glue_g = [_]u8{};\npub const glue = [_]u8{};\npub const rows = [_]u8{};\npub const rows_g = [_]u8{};\npub const decode = [_]u8{};\npub const gemm = [_]u8{};\npub const gdn = [_]u8{};\npub const ngen_wide = [_]u8{};\npub const ngen_narrow = [_]u8{};\npub const gemm128 = [_]u8{};\npub const ngen_wide128 = [_]u8{};\npub const ngen_narrow128 = [_]u8{};\npub const ngen_swiglu = [_]u8{};\npub const ngen_swiglu128 = [_]u8{};\npub const ngen_a8 = [_]u8{};\npub const ngen_a8_swiglu = [_]u8{};\npub const ngen_a4 = [_]u8{};\npub const ngen_geglu = [_]u8{};\n"), .target = linux });
+    const tail_linux = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tail_test.zig"), .target = linux, .optimize = .ReleaseFast, .link_libc = true, .imports = &.{ .{ .name = "ze", .module = ze_linux }, .{ .name = "core", .module = core_linux }, .{ .name = "xpu_qwen27_kernels", .module = empty_linux } } });
+    b.step("compile-xpu-qwen27-tail-linux", "Cross-compile the XPU 27B prompt-tail device check for Linux").dependOn(&b.addExecutable(.{ .name = "tf-xpu-qwen27-tail-test", .root_module = tail_linux }).step);
 }
