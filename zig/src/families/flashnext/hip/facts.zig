@@ -3,6 +3,14 @@ const std = @import("std");
 const lanes = @import("lanes");
 const cache = @import("cache.zig");
 
+/// MTP drafts the HIP head takes at most: `--mtp-drafts` is refused past it (native/hip.zig's check).
+pub const mtp_max_drafts: u32 = 3;
+
+/// The policy's `--mtp-drafts` capped at the head's.
+pub fn capDrafts(asked: u8) u32 {
+    return @min(mtp_max_drafts, @as(u32, asked));
+}
+
 /// A shared round's copy window and a lone stream's first: the pending row and three copies; lone runs grow past it.
 const shared_copy_rows = 4;
 
