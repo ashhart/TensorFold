@@ -427,6 +427,16 @@ test "a text route on an image engine is a 400 that names the images route" {
     try t.expectEqual(@as(usize, 0), stub.calls);
 }
 
+test "POST /v1/ocr on an image engine is the same 400, before the engine" {
+    var stub: Stub = .{ .inline_ = true };
+    const reply = try ask(&stub, "POST /v1/ocr", "{\"model\":\"m\",\"document\":{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"}}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try t.expect(std.mem.indexOf(u8, reply.head, " 400 ") != null);
+    try t.expect(std.mem.indexOf(u8, reply.body, "POST /v1/images/generations") != null);
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
 test "an images request to a text-only engine is the unknown-path 404" {
     var stub: Stub = .{ .caps = null };
     const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");

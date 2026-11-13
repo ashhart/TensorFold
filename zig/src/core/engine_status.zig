@@ -12,6 +12,14 @@ pub const FsrSource = struct {
     read: *const fn (*anyopaque) ?Status.FsrCache,
 };
 
+pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
+
+/// A backend's own memory counts for LaneHost; read from HTTP threads, so it must not touch the GPU.
+pub const MemorySource = struct {
+    ctx: ?*anyopaque = null,
+    read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
+};
+
 pub const Status = struct {
     healthy: bool = true,
     /// Engine-thread publication; all retained states, including long-message interior cuts and spare storage.

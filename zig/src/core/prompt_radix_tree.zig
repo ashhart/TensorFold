@@ -4,6 +4,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const pc = @import("prompt_cache.zig");
+const parts = @import("prompt_radix_parts.zig");
 
 pub const Saved = pc.Saved;
 pub const Snapshots = pc.Snapshots;
@@ -12,7 +13,10 @@ pub const Counts = pc.Counts;
 
 /// The state kept at a node's end.
 pub const Entry = struct {
-    saved: Saved,
+    /// The family's legacy snapshot; null when it declares none (its state is in `parts`).
+    saved: ?Saved,
+    /// The checkpoint groups' pages (C3), each id named in the tree's `holds`.
+    parts: []parts.Part = &.{},
     bytes: u64,
     /// The length of the prompt that kept it: a later turn's is longer.
     born: u32,
@@ -28,6 +32,17 @@ pub const Entry = struct {
     branched: bool = false,
 };
 
+/// A matched position: `pages` logical pages into `node` (1 to its count).
+pub const Hit = struct {
+    node: *Node,
+    pages: usize,
+
+    /// The tokens below the position.
+    pub fn at(h: Hit, t: *const Tree) u32 {
+        return h.node.end - @as(u32, @intCast((t.npages(h.node) - h.pages) * t.page));
+    }
+};
+
 pub const Node = struct {
     parent: ?*Node,
     /// Tokens up to the end of this node.
@@ -38,6 +53,8 @@ pub const Node = struct {
     kids: std.ArrayList(*Node) = .empty,
     entry: ?Entry = null,
     used: u64 = 0,
+    /// A keep or a restore in progress here: no eviction or prune takes this node, its entry or its path.
+    pins: u32 = 0,
 };
 
 pub const Tree = struct {
@@ -46,33 +63,44 @@ pub const Tree = struct {
     pages: Pages,
     /// Tokens a page holds.
     page: usize,
+    /// Prefix groups: page ids a logical page, page-major on each node (`pages[p * per + g]`).
+    per: usize = 1,
     /// Tokens past a page that its rows read (the family's lookahead): a page matches only when they match too.
     ahead: usize,
     root: *Node,
     clock: u64 = 0,
-    /// Pages and snapshots the tree holds.
-    held_pages: usize = 0,
+    /// The pages the tree holds, one pool reference each however many nodes name them.
+    holds: parts.Holds = .{},
+    /// Snapshots the tree holds.
     snaps: usize = 0,
     counts: Counts = .{},
 
-    pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, page: usize, ahead: usize) !Tree {
+    pub fn init(gpa: Allocator, family: Snapshots, pages: Pages, page: usize, ahead: usize, per: usize) !Tree {
         const root = try gpa.create(Node);
         root.* = .{ .parent = null, .end = 0, .tokens = &.{}, .pages = &.{} };
-        return .{ .gpa = gpa, .family = family, .pages = pages, .page = page, .ahead = ahead, .root = root };
+        return .{ .gpa = gpa, .family = family, .pages = pages, .page = page, .per = per, .ahead = ahead, .root = root };
+    }
+
+    /// Logical pages of `n`: its ids over the prefix groups.
+    pub fn npages(t: *const Tree, n: *const Node) usize {
+        return n.pages.len / t.per;
     }
 
     pub fn deinit(t: *Tree) void {
         t.drop(t.root);
+        t.holds.deinit(t.gpa);
+    }
+
+    /// Distinct pages the tree holds: what its page limit counts.
+    pub fn heldPages(t: *const Tree) usize {
+        return t.holds.count();
     }
 
     fn drop(t: *Tree, n: *Node) void {
         for (n.kids.items) |k| t.drop(k);
         n.kids.deinit(t.gpa);
-        if (n.entry) |e| {
-            t.family.vtable.drop(t.family.ptr, e.saved);
-            t.gpa.free(e.last);
-        }
-        for (n.pages) |id| t.pages.vtable.release(t.pages.ptr, id);
+        if (n.entry) |e| t.dropEntry(e);
+        for (n.pages) |id| t.holds.drop(t.pages, id);
         t.gpa.free(n.tokens);
         t.gpa.free(n.pages);
         t.gpa.destroy(n);
@@ -93,7 +121,7 @@ pub const Tree = struct {
     fn common(t: *const Tree, n: *const Node, tokens: []const u32, most: usize) usize {
         const w = t.page + t.ahead;
         var p: usize = 0;
-        while (p < n.pages.len and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..w], tokens[p * t.page ..][0..w])) p += 1;
+        while (p < t.npages(n) and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..w], tokens[p * t.page ..][0..w])) p += 1;
         return p;
     }
 
@@ -105,7 +133,7 @@ pub const Tree = struct {
         while (at + t.page <= limit_at) {
             const c = t.child(node, prompt[at..]) orelse break;
             const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
-            if (p < c.pages.len) break;
+            if (p < t.npages(c)) break;
             at += p * t.page;
             node = c;
             if (c.entry != null and c.end % step == 0) best = c;
@@ -113,17 +141,53 @@ pub const Tree = struct {
         return best;
     }
 
-    /// Pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, into `path` if any; `last` the end node.
+    /// The deepest page edge `prompt` repeats up to `limit_at`, inside a node too: where a page-only store resumes.
+    pub fn deepestPage(t: *const Tree, prompt: []const u32, limit_at: usize) ?Hit {
+        var node = t.root;
+        var at: usize = 0;
+        var best: ?Hit = null;
+        while (at + t.page <= limit_at) {
+            const c = t.child(node, prompt[at..]) orelse break;
+            const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
+            if (p == 0) break;
+            best = .{ .node = c, .pages = p };
+            if (p < t.npages(c)) break;
+            at += p * t.page;
+            node = c;
+        }
+        return best;
+    }
+
+    /// The ids of the path to `h`, each held once more for the caller; the nodes marked used.
+    pub fn takeTo(t: *Tree, h: Hit, adopt: *std.ArrayList(u32)) !void {
+        var path: std.ArrayList(*Node) = .empty;
+        defer path.deinit(t.gpa);
+        var w: ?*Node = h.node.parent;
+        while (w) |x| : (w = x.parent) if (x.parent != null) try path.append(t.gpa, x);
+        try adopt.ensureUnusedCapacity(t.gpa, h.at(t) / t.page * t.per);
+        while (path.pop()) |x| t.hand(x, x.pages, adopt);
+        t.hand(h.node, h.node.pages[0 .. h.pages * t.per], adopt);
+    }
+
+    fn hand(t: *Tree, n: *Node, ids: []const u32, adopt: *std.ArrayList(u32)) void {
+        for (ids) |id| {
+            t.pages.vtable.retain(t.pages.ptr, id);
+            adopt.appendAssumeCapacity(id);
+        }
+        t.touch(n);
+    }
+
+    /// Logical pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, their ids into `path` if any.
     pub fn heldPrefix(t: *const Tree, tokens: []const u32, np: usize, path: ?[]u32, last: *?*Node) usize {
         var node = t.root;
         var pi: usize = 0;
         while (pi < np) {
             const c = t.child(node, tokens[pi * t.page ..]) orelse break;
             const p = t.common(c, tokens[pi * t.page ..], np - pi);
-            if (path) |out| @memcpy(out[pi..][0..p], c.pages[0..p]);
+            if (path) |out| @memcpy(out[pi * t.per ..][0 .. p * t.per], c.pages[0 .. p * t.per]);
             pi += p;
             node = c;
-            if (p < c.pages.len) break;
+            if (p < t.npages(c)) break;
         }
         last.* = if (node == t.root) null else node;
         return pi;
@@ -141,7 +205,7 @@ pub const Tree = struct {
         defer path.deinit(t.gpa);
         var w: ?*Node = n;
         while (w) |x| : (w = x.parent) if (x.parent != null) try path.append(t.gpa, x);
-        try adopt.ensureUnusedCapacity(t.gpa, n.end / t.page);
+        try adopt.ensureUnusedCapacity(t.gpa, n.end / t.page * t.per);
         while (path.pop()) |x| {
             for (x.pages) |id| {
                 t.pages.vtable.retain(t.pages.ptr, id);
@@ -151,28 +215,30 @@ pub const Tree = struct {
         }
     }
 
-    /// Puts `tokens` (whole pages, `mine` the caller's, and `ahead` more) in the tree; the end node, `path` its pages.
+    /// Puts `tokens` (whole pages, `mine` the caller's ids page-major, `ahead` more) in the tree; `path` gets its ids.
     pub fn insert(t: *Tree, tokens: []const u32, mine: []const u32, path: []u32) !*Node {
-        const np = mine.len;
+        const np = mine.len / t.per;
         var node = t.root;
         var pi: usize = 0;
         while (pi < np) {
             const c = t.child(node, tokens[pi * t.page ..]) orelse {
                 const leaf = try t.gpa.create(Node);
                 errdefer t.gpa.destroy(leaf);
-                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]), .pages = try t.gpa.dupe(u32, mine[pi..]) };
-                errdefer t.gpa.free(leaf.tokens);
-                errdefer t.gpa.free(leaf.pages);
+                const own_tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]);
+                errdefer t.gpa.free(own_tokens);
+                const own_pages = try t.gpa.dupe(u32, mine[pi * t.per ..]);
+                errdefer t.gpa.free(own_pages);
+                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = own_tokens, .pages = own_pages };
+                try t.holds.reserve(t.gpa, leaf.pages.len); // before the leaf is linked: what follows cannot fail
                 try node.kids.append(t.gpa, leaf);
-                for (leaf.pages) |id| t.pages.vtable.retain(t.pages.ptr, id);
-                @memcpy(path[pi..], leaf.pages);
-                t.held_pages += leaf.pages.len;
+                for (leaf.pages) |id| t.holds.shareAssumeCapacity(t.pages, id);
+                @memcpy(path[pi * t.per ..], leaf.pages);
                 t.touch(leaf);
                 return leaf;
             };
             const p = t.common(c, tokens[pi * t.page ..], np - pi);
-            const up = if (p < c.pages.len) try t.split(c, p) else c;
-            @memcpy(path[pi..][0..p], up.pages);
+            const up = if (p < t.npages(c)) try t.split(c, p) else c;
+            @memcpy(path[pi * t.per ..][0 .. p * t.per], up.pages);
             t.touch(up);
             node = up;
             pi += p;
@@ -186,11 +252,11 @@ pub const Tree = struct {
         errdefer t.gpa.destroy(up);
         const head_tokens = try t.gpa.dupe(u32, c.tokens[0 .. p * t.page + t.ahead]); // its pages, the tail's first `ahead`
         errdefer t.gpa.free(head_tokens);
-        const head_pages = try t.gpa.dupe(u32, c.pages[0..p]);
+        const head_pages = try t.gpa.dupe(u32, c.pages[0 .. p * t.per]);
         errdefer t.gpa.free(head_pages);
         const tail_tokens = try t.gpa.dupe(u32, c.tokens[p * t.page ..]);
         errdefer t.gpa.free(tail_tokens);
-        const tail_pages = try t.gpa.dupe(u32, c.pages[p..]);
+        const tail_pages = try t.gpa.dupe(u32, c.pages[p * t.per ..]);
         errdefer t.gpa.free(tail_pages);
         const parent = c.parent.?;
         up.* = .{ .parent = parent, .end = parent.end + @as(u32, @intCast(p * t.page)), .tokens = head_tokens, .pages = head_pages, .used = c.used };
@@ -206,11 +272,32 @@ pub const Tree = struct {
         return up;
     }
 
+    /// An entry's snapshot, parts and prompt go.
+    fn dropEntry(t: *Tree, e: Entry) void {
+        if (e.saved) |saved| t.family.vtable.drop(t.family.ptr, saved);
+        t.dropParts(e.parts);
+        t.gpa.free(e.last);
+    }
+
+    /// Parts made by a keep go back: each id's name in `holds`, then the slices.
+    pub fn dropParts(t: *Tree, ps: []parts.Part) void {
+        t.dropEach(ps);
+        t.gpa.free(ps);
+    }
+
+    /// Each part's ids go back and its id slice is freed; the caller frees `ps` itself.
+    pub fn dropEach(t: *Tree, ps: []const parts.Part) void {
+        for (ps) |part| {
+            for (part.ids) |id| t.holds.drop(t.pages, id);
+            t.gpa.free(part.ids);
+        }
+    }
+
     /// Frees the state at `n`, and the nodes below nothing keeps.
     pub fn evict(t: *Tree, n: *Node) void {
         const e = n.entry orelse return;
-        t.family.vtable.drop(t.family.ptr, e.saved);
-        t.gpa.free(e.last);
+        std.debug.assert(n.pins == 0); // a keep or a restore in progress
+        t.dropEntry(e);
         n.entry = null;
         t.snaps -= 1;
         t.counts.evicted += 1;
@@ -221,10 +308,9 @@ pub const Tree = struct {
     pub fn prune(t: *Tree, start: *Node) void {
         var n = start;
         while (n.parent) |parent| {
-            if (n.kids.items.len > 0 or n.entry != null) return;
+            if (n.kids.items.len > 0 or n.entry != null or n.pins > 0) return;
             const slot = std.mem.indexOfScalar(*Node, parent.kids.items, n).?;
             _ = parent.kids.swapRemove(slot);
-            t.held_pages -= n.pages.len;
             t.drop(n);
             n = parent;
         }
@@ -245,7 +331,7 @@ pub const Tree = struct {
     }
 
     fn weakestLeaf(t: *const Tree, n: *Node, best: *?*Node) void {
-        if (n.parent != null and n.kids.items.len == 0 and t.idle(n) and (best.* == null or lessValuable(n, best.*.?))) best.* = n;
+        if (n.parent != null and n.kids.items.len == 0 and n.pins == 0 and t.idle(n) and (best.* == null or lessValuable(n, best.*.?))) best.* = n;
         for (n.kids.items) |k| t.weakestLeaf(k, best);
     }
 
@@ -260,7 +346,7 @@ pub const Tree = struct {
 
     /// Bytes the tree holds: its pages and its snapshots.
     pub fn held(t: *const Tree) u64 {
-        var n: u64 = t.held_pages * t.pages.bytes;
+        var n: u64 = t.heldPages() * t.pages.bytes;
         sum(t.root, &n);
         return n;
     }
