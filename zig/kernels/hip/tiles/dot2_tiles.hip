@@ -8,7 +8,7 @@
 #include "quant/mlx_tiles.hpp"
 #include "quant/dense_tiles.hpp"
 #include "quant/nvfp4_tiles.hpp"
-#include "quant/fp8_tiles.hpp"
+#include "quant/fp8_tiles.hpp"  // ModelOpt FP8's product, beside the NVFP4 one above
 
 namespace tf {
 namespace rocm {
