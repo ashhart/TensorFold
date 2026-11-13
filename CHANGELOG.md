@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Cortheon: a page link survives whitespace around `href` or inside its URL: `href ="…"` and a quote after a newline are kept, an unquoted link ends at a tab, CR or LF, and a tab or newline wrapped inside a link is not part of the address (#3006). Thanks to @ppardus.
+
 - Slide rollback: a fact graph is removed only when its own folders file names the folder being rolled back, and its folders file goes with it; a graph whose folders file can't be read is left in place and printed (#3073).
 
 - Chat templates: a template is held to a nesting depth at load, and its render to a step count, stack depth and scratch memory, so a crafted template can't hang or exhaust the server; real templates use a small fraction of each limit, render byte-identically, and render as fast as before (#3072).
