@@ -280,6 +280,7 @@ const macos_adapters = [_][]const u8{
     "test-qwen-dense-route-host",
     "test-qwen27-draft-tree-host",
     "test-qwen27-facts-host",
+    "test-qwen35-metal-steps-host",
     "test-recurrent-forks",
     "test-shared-head-cost-metal-host",
     "test-slide-metal-host",

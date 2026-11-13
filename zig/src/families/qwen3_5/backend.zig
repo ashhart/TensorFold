@@ -17,6 +17,7 @@ test "zero grant: an attached Qwen drafter resumes after a long shared skip" {
     try lanes.shared_draft_check.check(b.facts(), true);
 }
 const snapshot = @import("snapshot.zig");
+const prefill = @import("prefill.zig");
 
 pub const Options = struct { capacity: usize, chunk: usize = 128, streams: u32 = 8 };
 
@@ -30,6 +31,7 @@ pub const Metal = struct {
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *st.Cache) = .empty,
     pages: ?*kvp.Pages = null, // TF_QWEN35_METAL_KV_PAGES=1: the streams' keys and values in the core pool's pages
     taken: []bool = &.{}, // a lane a paged stream holds
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, usize) = .empty, // each stepped prompt pass's next row (#3021)
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -55,6 +57,7 @@ pub const Metal = struct {
             self.gpa.destroy(cache.*);
         }
         self.caches.deinit(self.gpa);
+        self.fills.deinit(self.gpa);
         if (self.pages) |p| p.deinit();
         self.gpa.free(self.taken);
         self.scratch.deinit();
@@ -66,7 +69,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .reports_fill = true } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
@@ -103,6 +106,13 @@ pub const Metal = struct {
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
         const self = cast(ptr);
+        const cache = try self.opening(stream);
+        errdefer self.drop(stream);
+        try prefill.run(cache, stream, self.options.chunk, self, promptChunk);
+    }
+
+    /// The prompt checked, a lane admitted (paged) and the stream's cache made: what a pass runs on.
+    fn opening(self: *Metal, stream: *lanes.Stream) !*st.Cache {
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
         const capacity = @min(self.options.capacity, ids.len + stream.max_new + st.window_rows);
@@ -112,8 +122,37 @@ pub const Metal = struct {
         errdefer self.gpa.destroy(cache);
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache);
-        errdefer _ = self.caches.remove(stream);
-        try @import("prefill.zig").run(cache, stream, self.options.chunk, self, promptChunk);
+        return cache;
+    }
+
+    /// One chunk a call at the whole pass's cuts, each through promptChunk (no chunk_invariant: `max_rows` unused).
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+        const self = cast(ptr);
+        if (!self.fills.contains(stream)) {
+            const cache = try self.opening(stream);
+            errdefer self.drop(stream);
+            try self.fills.put(self.gpa, stream, prefill.open(cache, stream));
+        }
+        errdefer self.drop(stream);
+        const done = try prefill.step(try self.cacheOf(stream), stream, self.fills.getPtr(stream).?, self.options.chunk, self, promptChunk);
+        if (done) _ = self.fills.remove(stream);
+        return done;
+    }
+
+    /// The host cancels between chunks: the state at the last chunk's end is kept (no prompt work runs).
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        const self = cast(ptr);
+        if (self.fills.get(stream)) |at| stream.keepInterruptedPrefill(@intCast(at));
+    }
+
+    /// A pass that failed, or a stream that leaves (mid-pass too): its row, lane and cache go.
+    fn drop(self: *Metal, stream: *lanes.Stream) void {
+        _ = self.fills.remove(stream);
+        if (self.caches.fetchRemove(stream)) |entry| {
+            if (entry.value.paged) |p| leaveLane(self, p.lane);
+            entry.value.deinit();
+            self.gpa.destroy(entry.value);
+        }
     }
 
     fn promptChunk(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
@@ -195,12 +234,7 @@ pub const Metal = struct {
     }
 
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
-        const self = cast(ptr);
-        if (self.caches.fetchRemove(stream)) |entry| {
-            if (entry.value.paged) |p| leaveLane(self, p.lane);
-            entry.value.deinit();
-            self.gpa.destroy(entry.value);
-        }
+        cast(ptr).drop(stream);
     }
 };
 
