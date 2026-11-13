@@ -253,7 +253,7 @@ below; these are estimates for planning a port, not results.
 | 25. TP ranks | big | big | big | scale-out: models past one box |
 | 26. Pipeline | none | none | big | fits models across nodes; adds hops |
 | 27. Profiles | none | none | none | names the opt-in switches |
-| 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
+| 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode on every Mac |
 | 29. DSpine | none | medium | low | Qwen3.8-27B; agent 2–20 % faster, chat and code 10–19 % slower |
 
 ## The optimizations
@@ -463,7 +463,7 @@ below; these are estimates for planning a port, not results.
 28. **Scale index.** An affine checkpoint stores a bf16 scale and bias beside every group's codes, a fifth of the
     bytes at 4 bits in groups of 32, and a tensor holds few distinct pairs. A 16-bit index a group into the tensor's
     table of pairs gives a kernel the same two values from fewer bytes. Flash Next's 4-bit expert kernels read it on
-    Macs before tensor units behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
+    every Mac behind `TF_FLASHNEXT_SCALE_INDEX` ([#2760], plan in [#2751]); the prompt gathers and the
     dense rows still read the stored arrays. `?` cells: the same count has not been run on those checkpoints.
 
 29. **DSpine drafter.** Tencent's DSpine-b16 for Qwen3.8-27B, opt-in by `--drafter` with its folder, never the

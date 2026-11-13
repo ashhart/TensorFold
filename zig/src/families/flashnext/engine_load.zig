@@ -206,7 +206,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     }
     const m = try arena.create(Model);
     m.* = .{ .r = r, .cap = r.window.capacity, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
-    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null and !r.device.tensorUnits();
+    r.sb_index = try platform.environment.read(bool, "TF_FLASHNEXT_SCALE_INDEX", false) and r.fsr == null and r.tp == null;
     for (0..LAYERS) |i| {
         const linear = i % 4 != 3;
         var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
