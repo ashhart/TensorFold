@@ -132,3 +132,127 @@ test "qwen27 quant: preparation skips projections that cannot take a decode lane
     try t.expectEqual(@as(u32, 0), k.lanes.count());
     try t.expectEqual(@as(usize, 0), r.libraries);
 }
+
+const wide_formats = [_]lane_projection.Format{
+    .{ .bits = 8, .group = 64 }, .{ .bits = 6, .group = 32 }, .{ .bits = 5, .group = 64 },
+    .{ .bits = 3, .group = 32 }, .{ .bits = 2, .group = 64 }, .{ .bits = 8, .group = 128 },
+};
+
+test "qwen27 quant: non-reg layouts admit whole prompt chunks with row-block source variants" {
+    for (wide_formats) |format| {
+        const long = lane_projection.Layout{ .n = 64, .k = 5120, .format = format, .rows = 2048, .row_blocks = true };
+        try long.validate();
+        var short = long;
+        short.rows = 16;
+        const text = try lane_projection.source(a, long);
+        defer a.free(text);
+        const old = try lane_projection.source(a, short);
+        defer a.free(old);
+        try t.expect(std.mem.indexOf(u8, old, "#define TF_ROW_BLOCKS 0\n") != null);
+        try t.expect(std.mem.indexOf(u8, text, "#define TF_ROW_BLOCKS 1\n") != null);
+        for ([_]usize{ 0, 15, 17, 2064 }) |rows| {
+            short.rows = rows;
+            try t.expectError(error.InvalidSchedule, short.validate());
+        }
+    }
+}
+
+test "qwen27 quant: each non-reg whole prompt is one projection dispatch" {
+    for (wide_formats) |format| for ([_]u32{ 17, 1065, 2048 }) |rows| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true, .prompt = true };
+        defer k.deinit();
+        var p = matrix(&r, 64);
+        p.bits = format.bits;
+        p.group = @intCast(format.group);
+        const ref = quant.Ref{ .buffer = r.virtual() };
+        const producer: ?quant.Sums = if (format.bits == 8 and format.group == 64) .{ .ref = ref, .stride = 2080 } else null;
+        try k.quant(r.encoder(), p, ref, producer, ref, ref, rows);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(rows, r.launches[0].rows);
+        try t.expectEqual(@as(usize, (rows + 15) / 16), r.launches[0].grid.height);
+        try t.expectEqual(@as(i32, if (producer != null) 2080 else @intCast((rows + 15) / 16 * 16)), r.launches[0].stride);
+        var entries = k.lanes.valueIterator();
+        const entry = entries.next().?;
+        try t.expectEqual(@as(u32, 2048), entry.max_rows);
+        if (entry.sums_buffer) |b| try t.expectEqual(@as(usize, 2048 * (5120 / format.group) * 4), b.length());
+        // A decode or verify row still uses the short key and its original 16-row steps.
+        k.prompt = false;
+        r.count = 0;
+        try k.quant(r.encoder(), p, ref, producer, ref, ref, 17);
+        try t.expectEqual(@as(usize, 2), r.count);
+        try t.expectEqual(@as(u32, 16), r.launches[0].rows);
+        try t.expectEqual(@as(u32, 1), r.launches[1].rows);
+        try t.expectEqual(@as(usize, 1), r.launches[0].grid.height);
+        try t.expectEqual(@as(u32, 2), k.lanes.count());
+        k.prompt = true;
+        k.long_prompt = false;
+        r.count = 0;
+        try k.quant(r.encoder(), p, ref, producer, ref, ref, 2048);
+        try t.expectEqual(@as(usize, 128), r.count);
+        for (r.launches[0..r.count]) |call| {
+            try t.expectEqual(@as(u32, 16), call.rows);
+            try t.expectEqual(@as(usize, 1), call.grid.height);
+        }
+    };
+}
+
+test "qwen27 quant: cooperative and older-chip projections keep their 16-row limits" {
+    var r: mtl.Record = .{};
+    var layout = lane_projection.Layout{ .n = 64, .k = 512, .format = .{ .bits = 4, .group = 64 }, .cooperative = true };
+    const coop = try lane_projection.Projection.init(a, r.device(), layout);
+    defer coop.deinit();
+    try t.expectEqual(@as(u32, 16), coop.max_rows);
+    const ref = lane_projection.Ref{ .buf = r.virtual() };
+    try coop.encode(r.encoder(), ref, ref, ref, ref, 16);
+    try t.expectEqual(@as(usize, 1), r.launches[0].grid.height);
+    try t.expectError(error.InvalidRows, coop.encode(r.encoder(), ref, ref, ref, ref, 17));
+    layout.rows = 2048;
+    try t.expectError(error.InvalidSchedule, layout.validate());
+    layout.cooperative = false;
+    layout.format = .{ .bits = 6, .group = 32 };
+    r.tensor_units = false;
+    const old = try lane_projection.Projection.init(a, r.device(), layout);
+    defer old.deinit();
+    try t.expectEqual(@as(u32, 16), old.max_rows);
+    try t.expectError(error.InvalidRows, old.encode(r.encoder(), ref, ref, ref, ref, 17));
+    const over_budget = lane_projection.Layout{ .n = 2048, .k = 5120, .format = .{ .bits = 8, .group = 128 }, .sk = 8 };
+    try t.expectError(error.ThreadgroupMemoryLimit, over_budget.validate());
+}
+
+test "qwen27 quant: default non-reg callers retain scalar source and 16-row capacity" {
+    for (wide_formats) |format| {
+        var r: mtl.Record = .{};
+        const layout = lane_projection.Layout{ .n = 64, .k = 5120, .format = format };
+        const text = try lane_projection.source(a, layout);
+        defer a.free(text);
+        try t.expect(std.mem.indexOf(u8, text, "#define TF_ROW_BLOCKS 0\n") != null);
+        const p = try lane_projection.Projection.init(a, r.device(), layout);
+        defer p.deinit();
+        try t.expectEqual(@as(u32, 16), p.max_rows);
+        const ref = lane_projection.Ref{ .buf = r.virtual() };
+        try p.encode(r.encoder(), ref, ref, ref, ref, 16);
+        try t.expectEqual(@as(usize, 1), r.launches[0].grid.height);
+        try t.expectError(error.InvalidRows, p.encode(r.encoder(), ref, ref, ref, ref, 17));
+    }
+}
+
+test "qwen27 quant: non-reg prompt key opts in only above 16 rows" {
+    for (wide_formats) |format| for ([_]u32{ 16, 17 }) |rows| {
+        var r: mtl.Record = .{};
+        var k = quant.Kernels{ .allocator = a, .device = r.device(), .long_prompt = true, .prompt = true };
+        defer k.deinit();
+        var p = matrix(&r, 64);
+        p.bits = format.bits;
+        p.group = @intCast(format.group);
+        const ref = quant.Ref{ .buffer = r.virtual() };
+        const sums: ?quant.Sums = if (format.bits == 8 and format.group == 64) .{ .ref = ref, .stride = 32 } else null;
+        try k.quant(r.encoder(), p, ref, sums, ref, ref, rows);
+        var entries = k.lanes.iterator();
+        const entry = entries.next().?;
+        try t.expectEqual(rows > 16, entry.key_ptr.long);
+        try t.expectEqual(@as(u32, if (rows > 16) 2048 else 16), entry.value_ptr.max_rows);
+        try t.expectEqual(@as(usize, 1), r.count);
+        try t.expectEqual(@as(usize, if (rows > 16) 2 else 1), r.launches[0].grid.height);
+    };
+}
