@@ -339,8 +339,8 @@ pub const Model = struct {
         for (ls, outs) |l, out| try m.project(k, s, l, x, xs, out, rows, prompt);
     }
 
-    /// Every chain's rows (a prompt chunk, or decode windows); rows [head0, head0 + heads)'s logits at s.logits.
-    pub fn forward(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, prompt: bool, head0: usize, heads: usize) !void {
+    /// Every chain's rows; rows [head0, head0 + heads)'s logits at s.logits; the last layer from `tail` (prompt_tail).
+    pub fn forward(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, prompt: bool, head0: usize, heads: usize, tail: ?usize) !void {
         var rows: usize = 0;
         for (chains) |c| {
             if (c.tokens.len == 0 or c.slot >= m.slots or c.p0 + c.tokens.len > m.context) return error.BadChain;
@@ -349,6 +349,8 @@ pub const Model = struct {
         }
         if (rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
         if (heads > round_rows or head0 + heads > rows) return error.BadWindow;
+        const t0: usize = tail orelse 0;
+        if (t0 > rows or (t0 > 0 and !prompt) or (heads > 0 and head0 < t0)) return error.BadWindow; // the head reads tail rows
         const ids = try m.gpa.alloc(i32, 3 * rows);
         defer m.gpa.free(ids);
         var at: usize = 0;
@@ -364,7 +366,7 @@ pub const Model = struct {
         try m.upload(s, m.s.pos, std.mem.sliceAsBytes(ids[rows .. 2 * rows]));
         try m.upload(s, m.s.slot, std.mem.sliceAsBytes(ids[2 * rows ..]));
         // a decode forward's launches depend on its row count only (positions and slots are read on the device)
-        if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, chains, rows, prompt, head0, heads);
+        if (prompt or !m.graphed or head0 != 0 or heads != rows) return m.launch(k, s, chains, rows, prompt, head0, heads, t0);
         if (m.graphs[rows] == null) m.graphs[rows] = try m.capture(k, s, rows);
         try m.graphs[rows].?.launchOn(s);
     }
@@ -373,7 +375,7 @@ pub const Model = struct {
     fn capture(m: *Model, k: *const kern.Kernels, s: cuda.Stream, rows: usize) !cuda.graph.Exec {
         try s.synchronize();
         try cuda.graph.beginCapture(s, .thread_local);
-        m.launch(k, s, &.{}, rows, false, 0, rows) catch |e| {
+        m.launch(k, s, &.{}, rows, false, 0, rows, 0) catch |e| {
             if (cuda.graph.endCapture(s)) |g| {
                 var gg = g;
                 gg.deinit();
@@ -386,27 +388,34 @@ pub const Model = struct {
     }
 
     /// The forward's launches over staged ids, positions and slots: no host copies, so a graph can hold them.
-    fn launch(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, rows: usize, prompt: bool, head0: usize, heads: usize) !void {
+    fn launch(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, rows: usize, prompt: bool, head0: usize, heads: usize, t0: usize) !void {
         const h = m.geo.hidden;
         const x = m.s;
         try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.e, rows, h, .{ .bits = @intCast(m.w.config.bits), .group = cfg.group });
         // the reference's residual is fp32 from the embedding on: res = 0 + e, then layer 0's input norm
         try (DeviceBuffer{ .d = m.d, .ptr = x.res, .len = rows * h * 4, .borrowed = true }).fill8(0, s.handle);
         try m.residual(k, s, x.e, m.w.layers[0].input_norm, rows);
-        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt);
+        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt, if (i + 1 == m.layers) t0 else 0);
         if (heads == 0) return;
-        try m.project(k, s, m.w.head, x.n + head0 * h * 2, x.xs + head0 * (h / 64) * 4, x.logits, heads, false);
+        // the last layer's normed rows sit from buffer row 0 at its tail's first row
+        const at = head0 - t0;
+        try m.project(k, s, m.w.head, x.n + at * h * 2, x.xs + at * (h / 64) * 4, x.logits, heads, false);
     }
 
     /// res += x (bf16 [rows, hidden]); s.n = bf16(norm(res) w), s.xs its 64-value sums.
     fn residual(m: *Model, k: *const kern.Kernels, s: cuda.Stream, x: u64, w: u64, rows: usize) !void {
+        return m.residualFrom(k, s, x, w, rows, 0);
+    }
+
+    /// `residual` on res's rows from `t0` (a prompt tail's): s.n and s.xs from their row 0.
+    fn residualFrom(m: *Model, k: *const kern.Kernels, s: cuda.Stream, x: u64, w: u64, rows: usize, t0: usize) !void {
         const h = m.geo.hidden;
-        try k.norms.addRms(s, x, .bf16, m.s.res, null, w, m.s.n, .bf16, rows, h, cfg.eps);
+        try k.norms.addRms(s, x, .bf16, m.s.res + t0 * h * 4, null, w, m.s.n, .bf16, rows, h, cfg.eps);
         try k.act.groupSums(s, m.s.n, h, m.s.xs, rows, h);
     }
 
-    /// Layer i on the rows: residual in s.res, its normed input (and sums) in s.n (s.xs); the same on return.
-    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool) !void {
+    /// Layer i on the rows: residual in s.res, its normed input (and sums) in s.n (s.xs); rows before `t0` stop.
+    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool, t0: usize) !void {
         const geo = m.geo;
         const l = m.w.layers[i];
         const x = m.s;
@@ -424,11 +433,14 @@ pub const Model = struct {
         const w: Window = .{ .h = geo.query_heads, .hk = geo.kv_heads, .d = dh, .win = if (is_full) 0 else cfg.window, .ring = len, .scale = cfg.scale, .p32 = true, .pg = pg };
         // paged: `put` writes into the pages the bits the rows kernel would have written into a linear cache
         if (pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
+        if (t0 == rows) return; // the caches hold the chunk's keys and values; nothing reads its rows
+        const tail_rows = rows - t0;
         if (prompt) {
             const c = chains[0];
             const off = if (pg != null) 0 else c.slot * len * kw * 2; // pages: the layer's region, the slot's row
             const pw: Window = if (is_full) .{ .h = w.h, .hk = w.hk, .d = w.d, .win = 0, .ring = 0, .scale = cfg.scale, .p32 = true, .pg = m.pagesFor(c.slot) } else w;
-            try k.win.promptRows(s, x.qr, m.kc[i] + off, m.vc[i] + off, x.att, c.p0, rows, pw, null);
+            // the tail's rows as a chunk at its own position: every key before it is in the cache already
+            try k.win.promptRows(s, x.qr + t0 * qw * 2, m.kc[i] + off, m.vc[i] + off, x.att + t0 * qw * 2, c.p0 + t0, tail_rows, pw, null);
         } else {
             var r: usize = 0;
             while (r < rows) : (r += attend_rows) {
@@ -436,14 +448,15 @@ pub const Model = struct {
                 try k.win.decode(s, x.qr + r * qw * 2, m.kc[i], m.vc[i], x.att + r * qw * 2, x.pos + r * 4, x.slot + r * 4, w, x.part, n);
             }
         }
-        try k.act.headGate(s, x.att, x.qkvg + (qw + 2 * kw) * 2, @intCast(ld), x.ag, x.xs, rows, geo.query_heads, dh);
-        try m.project(k, s, l.out, x.ag, x.xs, x.o, rows, prompt);
-        try m.residual(k, s, x.o, l.post_attention, rows);
-        try m.projectMany(k, s, &.{ l.gate, l.up }, x.n, x.xs, &.{ x.gate, x.up }, rows, prompt);
-        try k.act.gegluErf(s, x.gate, geo.intermediate, x.up, geo.intermediate, x.act, x.xs, rows, geo.intermediate);
-        try m.project(k, s, l.down, x.act, x.xs, x.y, rows, prompt);
+        const gate = x.qkvg + (qw + 2 * kw) * 2 + t0 * @as(usize, @intCast(ld)) * 2;
+        try k.act.headGate(s, x.att + t0 * qw * 2, gate, @intCast(ld), x.ag, x.xs, tail_rows, geo.query_heads, dh);
+        try m.project(k, s, l.out, x.ag, x.xs, x.o, tail_rows, prompt);
+        try m.residualFrom(k, s, x.o, l.post_attention, tail_rows, t0);
+        try m.projectMany(k, s, &.{ l.gate, l.up }, x.n, x.xs, &.{ x.gate, x.up }, tail_rows, prompt);
+        try k.act.gegluErf(s, x.gate, geo.intermediate, x.up, geo.intermediate, x.act, x.xs, tail_rows, geo.intermediate);
+        try m.project(k, s, l.down, x.act, x.xs, x.y, tail_rows, prompt);
         const next = if (i + 1 < m.layers) m.w.layers[i + 1].input_norm else m.w.final_norm;
-        try m.residual(k, s, x.y, next, rows);
+        try m.residualFrom(k, s, x.y, next, tail_rows, t0);
     }
 };
 
