@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on two Macs (opt-in, `--speed-up`): a pair serves one greedy stream over MCDMA with attention whole on each Mac and the MLP and lm_head split, and its tokens equal one Mac's on the recorded fixtures; `--drafter` runs on it (rank 0 drafts, rank 1 replays the tree). Both ranks refuse to start, naming the difference, when their build, GPU family, checkpoint, weight format or command protocol differ, and a pair's `/health` names the two-Mac mode. A pair decodes slower than one Mac: 4.58 against 14.41 tokens a second at plain greedy decode on the contributor's two Macs. `tf-qwen27-tp-check` checks a pair against one Mac on one Mac, and `tools/qwen27/pair_accept.py` against a recorded single-Mac oracle (#1434, with #1435, #1436, #1437 and #2529). Thanks to @akol1.
+
 - Tests: `tf-cuda-test flashnext-rank RANK PORT timeout` passes again on two GPUs. NCCL start-up keeps its 30 s bound and only the stalled collective gets 200 ms, and both ranks meet once their communicators are up, so `timeout` and `eof` fail the collective under test, not the start-up (#2976, fixes #2975). Thanks to @swbiggart.
 
 - Tokenizer: a split pattern is held to a work allowance per piece (2,048 instructions a byte, counted, not timed) and refused at load when too deep or too large, so a crafted tokenizer or prompt can't hang the pre-tokenizer; every split of the patterns we serve is unchanged (#3071).
@@ -17,6 +19,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - XPU families: a token id at or past the embedding table is refused before the lookup, and each checkpoint's embedding shape and packing are checked when it loads; an 8-bit Qwen3.8-27B MLX checkpoint on XPU is now refused at load by name (#3047).
 
 - HIP families: a token id at or past the embedding table is refused before the lookup, and each checkpoint's embedding shape is checked when it loads (#3046).
+
 
 - Tokenizer: a token id past the cap (2^24) is refused when the tokenizer loads, instead of growing the id table without bound (#3033).
 
@@ -55,6 +58,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CI: the serving pins (`test-gradient-serving` and `test-qwen-serving-host`) run on every pull request, not only in the nightly, so a change to a pinned serving file carries its re-pin. `experts.zig` is re-pinned for #2843 (#3011).
 
 - Tests: the images route test fixture can no longer hang a test run on macOS. Its route closes its end of the socket on every exit and the client's writes are bounded, so a route that answers before reading a large body ends the write at once (#3010).
+
+
 
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 

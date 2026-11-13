@@ -26,3 +26,8 @@ export fn qwen27WidthsCompile(init: *std.process.Init) u8 {
     @import("tests/qwen27/lanes_check.zig").main(init.*) catch return 1;
     return 0;
 }
+
+export fn qwen27TpCheckCompile(init: *std.process.Init) u8 {
+    @import("tests/qwen27/tp_check.zig").main(init.*) catch return 1;
+    return 0;
+}

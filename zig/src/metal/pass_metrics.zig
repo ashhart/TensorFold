@@ -1,10 +1,10 @@
 //! Opt-in, thread-local pass receipts; scopes partition host time without splitting GPU command buffers.
 const std = @import("std");
-pub const Phase = enum { planning, drafter, selector, verify, sampling, keep };
+pub const Phase = enum { planning, drafter, draft_head, selector, verify, sampling, keep };
 pub const Bucket = struct { ms: f64 = 0, wait_ms: f64 = 0, gpu_ms: f64 = 0, waits: u64 = 0, commits: u64 = 0, allocations: u64 = 0, bytes: u64 = 0, buffers: u64 = 0 };
 threadlocal var active: bool = false;
 threadlocal var clock: ?*const fn () f64 = null;
-threadlocal var buckets: [6]Bucket = @splat(.{});
+threadlocal var buckets: [7]Bucket = @splat(.{});
 threadlocal var current: Phase = .planning;
 threadlocal var changed: f64 = 0;
 threadlocal var started: f64 = 0;

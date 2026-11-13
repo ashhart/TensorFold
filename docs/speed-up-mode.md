@@ -12,6 +12,10 @@ The server loads Flash Next straight from its checkpoint, with no dump to make a
 On our two M5 Ultras, set up as below, `"draft": false` replies equalled drafted ones and both Macs gave the same reply,
 idle and with 36 busy threads on the first Mac.
 
+Qwen3.8-27B runs on two Macs too, with the same build, MCDMA setup and settings files:
+[Qwen3.8-27B on two Macs](recipes/qwen3.8-27b.md#two-macs-over-thunderbolt) covers what its pair serves, what it
+refuses and how it compares with one Mac.
+
 ## What you need
 
 - Two Apple silicon Macs, each with enough memory for the whole model. Flash Next 6-bit is 158 GB of weights. On our

@@ -61,7 +61,7 @@ fn program(b: *std.Build, name: []const u8, about: []const u8, path: []const u8,
 }
 
 /// The core lane, shared-context and 27B programs and host tests; the 27B's module takes `core` from qwen27_core.zig.
-pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, s: Shared, test_step: *std.Build.Step) void {
+pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, s: Shared, test_step: *std.Build.Step, build_options: *std.Build.Module) void {
     const core_row = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core_row })).step);
     const core_lane = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
@@ -113,6 +113,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-projection-cases", "Build real-input production projection precision replay", "zig/tests/qwen27/projection_cases.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
+    // the TP gate before any wire: ranks = 1 parity, then two rank-local shards through the loopback link
+    const tp_check = program(b, "tf-qwen27-tp-check", "The 27B TP gate: ranks = 1 parity, then the two-rank loopback stream (SKIP without a checkpoint)", "zig/tests/qwen27/tp_check.zig", target, true, engine_only);
+    test_step.dependOn(&b.addRunArtifact(tp_check).step);
     _ = program(b, "tf-qwen27-pages-resume", "Build kept states saved, restored and moved through KV pages against main's, no models", "zig/tests/qwen27/pages_resume.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-empty-keep", "Build shared empty/full keep state checks", "zig/tests/qwen27/empty_keep.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-keep-error", "Build the check that a failing keep returns its error, never aborting", "zig/tests/qwen27/keep_error.zig", target, false, engine_only);
@@ -123,6 +126,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
+    host.addImport("build_options", build_options);
     const served: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } };
     _ = program(b, "tf-qwen27-speed-served", "Build long secondary-slot prompt and shared drafting checks", "zig/tests/qwen27/speed_served.zig", target, false, served);
     _ = program(b, "tf-qwen27-served-check", "Build synthetic CLI versus served-host token check", "zig/tests/qwen27/served.zig", target, false, served);

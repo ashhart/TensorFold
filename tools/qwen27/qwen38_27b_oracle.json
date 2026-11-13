@@ -1,0 +1,70 @@
+{
+  "description": "Single-host Qwen3.8-27B 4-bit receipts: one Mac, no drafter, temperature 0, seed 1234. runtime is the build that recorded that case's token_sha, so each case names the exact binary that must reproduce it: the four single-turn cases came from 1.1.2 and chat-two-turn-128, recorded later, from 1.1.7. gpu_family is the Metal family that produced every token_sha here (apple-m<generation>, the value tensorfold-native capabilities --json prints as chip): pair_accept.py refuses a pair on another family, because before the M5 the bits come from simd_qmm and on the M5 from the lane kernels with their own K splits. A paired run must reproduce every token_sha here.",
+  "gpu_family": "apple-m4",
+  "checkpoint_revision": "22d8d538154e0e5b6f8dcb1fcc74a60a0798104c",
+  "quantization": "4-bit affine, group 64",
+  "decoding": {
+    "temperature": 0.0,
+    "seed": 1234,
+    "drafter": false,
+    "parallel": 1
+  },
+  "cases": [
+    {
+      "name": "code-128",
+      "endpoint": "/v1/completions",
+      "prompt": "Write a short Python function that computes the Fibonacci sequence and explain it.",
+      "max_tokens": 128,
+      "runtime": "tensorfold-native 1.1.2",
+      "token_sha": "f5c9409cfe40"
+    },
+    {
+      "name": "code-256",
+      "endpoint": "/v1/completions",
+      "prompt": "Write a short Python function that computes the Fibonacci sequence and explain it.",
+      "max_tokens": 256,
+      "runtime": "tensorfold-native 1.1.2",
+      "token_sha": "2b28aa2108de"
+    },
+    {
+      "name": "chat-128",
+      "endpoint": "/v1/chat/completions",
+      "thinking": false,
+      "prompt": "Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.",
+      "max_tokens": 128,
+      "runtime": "tensorfold-native 1.1.2",
+      "token_sha": "b69b0269917f"
+    },
+    {
+      "name": "chat-256",
+      "endpoint": "/v1/chat/completions",
+      "thinking": false,
+      "prompt": "Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example.",
+      "max_tokens": 256,
+      "runtime": "tensorfold-native 1.1.2",
+      "token_sha": "a06fab348fbe"
+    },
+    {
+      "name": "chat-two-turn-128",
+      "endpoint": "/v1/chat/completions",
+      "thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example."
+        },
+        {
+          "role": "assistant",
+          "content": "### How Matrix Multiplication Uses a GPU (In Plain English)\n\nTo understand how a GPU handles matrix multiplication, it helps to compare it to a CPU (the main processor in your computer).\n\n#### The Analogy: The Chef vs. The Kitchen Crew\n*   **The CPU (Central Processing Unit)** is like a **single, highly skilled chef**. They are very fast at doing complex, sequential tasks (like writing code or managing a database). If you ask them to chop 1,000 onions, they will chop one, then the next, then the next. It\u2019s precise, but it takes time because"
+        },
+        {
+          "role": "user",
+          "content": "Now give the same example for a 3 by 3 matrix."
+        }
+      ],
+      "max_tokens": 128,
+      "runtime": "tensorfold-native 1.1.7",
+      "token_sha": "7d156013fbdd"
+    }
+  ]
+}

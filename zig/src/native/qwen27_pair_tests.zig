@@ -1,0 +1,368 @@
+//! The pair's refusals and its seam-sized chunk: the words, the guards, and the window the served pass may ask for.
+const std = @import("std");
+const tf = @import("tensorfold");
+const q = tf.qwen27;
+const lanes = tf.lanes;
+const lb = @import("qwen27_lanes.zig");
+const pair_mod = @import("qwen27_pair.zig");
+const pair_flags = @import("qwen27_pair_flags.zig");
+const slot_mod = @import("qwen27_slots.zig");
+const served = @import("qwen27_served.zig");
+const fabric = @import("fabric");
+const Fingerprint = tf.pair_rows.Fingerprint;
+
+test "qwen27 pair: rank 1 refuses a request by name before its backend moves round state" {
+    try std.testing.expectEqualStrings("speed-up mode: this Mac runs rank 0's requests; send requests to rank 0", served.words(null, error.FollowsPeer).?);
+    // `link` is the only `Metal` field the guard reads: the rest staying undefined proves no other step ran
+    var pair: lb.Pair = undefined;
+    pair.rank = 1;
+    var l: lb.Link = undefined;
+    l.pair = &pair;
+    var m: lb.Metal = undefined;
+    m.link = &l;
+    try std.testing.expectError(error.FollowsPeer, pair_mod.refuseFollower(m.link));
+    pair.rank = 0;
+    try pair_mod.refuseFollower(m.link); // rank 0's own requests run on it
+    m.link = null;
+    try pair_mod.refuseFollower(m.link); // no pair: nothing to refuse for
+}
+
+test "qwen27 pair: a sampled or grammar request is refused by name at the head of prefill" {
+    try std.testing.expectEqualStrings("speed-up mode: a pair answers greedy only; send the request with sampling and grammar off", served.words(null, error.PairGreedyOnly).?);
+    // `link` is the only `Metal` field and the stream's two: the rest staying undefined proves no other step ran
+    var pair: lb.Pair = undefined;
+    pair.rank = 0;
+    var l: lb.Link = undefined;
+    l.pair = &pair;
+    var m: lb.Metal = undefined;
+    m.link = &l;
+    var s: lanes.Stream = undefined;
+    s.sampling = null;
+    s.grammar = null;
+    try pair_mod.refuseSampling(m.link, &s); // a greedy stream runs on a pair
+    s.sampling = std.mem.zeroes(lanes.Sampling);
+    try std.testing.expectError(error.PairGreedyOnly, pair_mod.refuseSampling(m.link, &s));
+    s.sampling = null;
+    var grammar: lanes.grammar.Constraint = undefined;
+    s.grammar = &grammar;
+    try std.testing.expectError(error.PairGreedyOnly, pair_mod.refuseSampling(m.link, &s));
+    m.link = null;
+    try pair_mod.refuseSampling(m.link, &s); // a single Mac samples and constrains freely
+}
+
+test "qwen27 pair: the served chunk from promptRows fits the window" {
+    // the served pass asks for the generation's rows (`model.promptRows(generation)`); a pair caps them at the window
+    const chunk = lb.pairChunk(q.model.promptRows(q.config.Config{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 124160, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 }, 0));
+    try std.testing.expect(chunk <= lb.batch_rows);
+    try std.testing.expect(lb.seamBytes(chunk) <= lb.pairBytes());
+    // the uncapped pass would stage a wider seam than the window, so the cap is what keeps the exchange legal
+    try std.testing.expect(lb.seamBytes(512) > lb.pairBytes());
+}
+
+test "qwen27 pair: a pair never resumes a slot in place, and one Mac keeps the switch it read" {
+    // `attach` passes `Metal.init`'s switch through `slotResume`; a refusal that put it back on would turn this red
+    var pair: lb.Pair = undefined;
+    pair.rank = 0;
+    try std.testing.expect(!lb.slotResume(true, &pair)); // rank 0, which would resume
+    pair.rank = 1;
+    try std.testing.expect(!lb.slotResume(true, &pair)); // rank 1, which resets
+    // a single Mac keeps main's in-place resume where slot 0 stands (#1197), and `TF_QWEN27_SLOT_RESUME=0` stays off
+    try std.testing.expect(lb.slotResume(true, null));
+    try std.testing.expect(!lb.slotResume(false, null));
+}
+
+test "qwen27 pair: --vision is refused on a pair, by name" {
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PairNoVision, pair_flags.refuse(false, false, false, true, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "--vision does not run on a pair"));
+    try pair_flags.refuse(false, false, false, false, &why); // a single Mac sets none of the flags this refuses
+}
+
+test "qwen27 pair: --drafter runs on a pair: rank 0 drafts, rank 1 replays the tree rounds" {
+    // `open` reads `.drafter` through this helper: the tree protocol replays rank 0's draft rounds
+    const pair = served.Options{
+        .context = 4096,
+        .streams = 1,
+        .pair = "rank0.json",
+        .drafter = "z-lab/Qwen3.8-27B-DFlash2",
+    };
+    var why: []const u8 = "";
+    try pair_flags.refuseOptions(true, pair, false, &why);
+    // a drafter the caller already bound reaches `attach` with no flag in the options, and is accepted too
+    var plain = pair;
+    plain.drafter = null;
+    try pair_flags.refuseOptions(true, plain, true, &why);
+    // the other pair refusals still stand
+    var cache = pair;
+    cache.drafter = null;
+    cache.cache_gib = 8;
+    try std.testing.expectError(error.PairNoCache, pair_flags.refuseOptions(true, cache, false, &why));
+    // one Mac keeps every flag: with no pair there is nothing to refuse
+    try pair_flags.refuseOptions(false, pair, false, &why);
+}
+
+test "qwen27 pair: the fingerprint names the fact two Macs differ on" {
+    const same: tf.pair_rows.Fingerprint = .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 64 };
+    try std.testing.expectEqual(@as(?[]const u8, null), try tf.pair_rows.fingerprintProblem(std.testing.allocator, same, same)); // equal facts refuse nothing
+    // each fact by name: the message says which one differed and both sides' words
+    const cases = [_]tf.pair_rows.Fingerprint{
+        .{ .version = 8, .chip = 4, .checkpoint = 0xA11CE, .format = 64 }, // another build
+        .{ .version = 7, .chip = 5, .checkpoint = 0xA11CE, .format = 64 }, // an M5 beside an M4
+        .{ .version = 7, .chip = 4, .checkpoint = 0xB0B, .format = 64 }, // another checkpoint (quantization, shapes)
+        .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 128 }, // another weight format
+        .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 64, .protocol = 9 }, // another command set
+    };
+    const names = [_][]const u8{ "engine version", "GPU family", "checkpoint", "weight format", "command protocol" };
+    for (cases, names) |peer, name| {
+        const why = (try tf.pair_rows.fingerprintProblem(std.testing.allocator, same, peer)).?;
+        defer std.testing.allocator.free(why);
+        try std.testing.expect(std.mem.indexOf(u8, why, name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, why, "match neither Mac alone") != null);
+    }
+    // a uniform tag 0 travels the wire as 1 (ready cannot signal a 0); both sides normalize
+    const uniform: tf.pair_rows.Fingerprint = .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 0 };
+    const decoded: tf.pair_rows.Fingerprint = .{ .version = 7, .chip = 4, .checkpoint = 0xA11CE, .format = 1 };
+    try std.testing.expectEqual(@as(?[]const u8, null), try tf.pair_rows.fingerprintProblem(std.testing.allocator, uniform, decoded));
+    try std.testing.expectEqual(@as(?[]const u8, null), try tf.pair_rows.fingerprintProblem(std.testing.allocator, decoded, uniform));
+}
+
+/// One rank of a pair whose link is the fake fabric: the fields `ready` and `next` read are set, the rest unset.
+fn fakeRank(c: *fabric.fake.Cluster, rank: u32, layout: @FieldType(lb.Pair, "l")) lb.Pair {
+    var p: lb.Pair = undefined;
+    p.rank = rank;
+    p.peer = 1 - rank;
+    p.l = layout;
+    p.rd = c.endpoint(rank);
+    p.win = c.windows[rank];
+    p.stop = .init(false);
+    p.broken = .init(false);
+    p.cmd = 0;
+    return p;
+}
+
+/// A rank's `ready` and what it answered: no error, or the refusal and its words.
+const Ready = struct {
+    p: lb.Pair,
+    fp: Fingerprint,
+    why: []const u8 = "",
+    err: ?anyerror = null,
+
+    fn run(r: *Ready) void {
+        r.p.ready(r.fp, std.testing.allocator, &r.why) catch |err| {
+            r.err = err;
+        };
+    }
+};
+
+/// Both ranks' `ready` at once over one fake link, rank 1 on its own thread as on its own Mac.
+fn readyBoth(zero: Fingerprint, one: Fingerprint) ![2]Ready {
+    const layout: @FieldType(lb.Pair, "l") = .{ .slot = 16384 };
+    const c = try fabric.fake.Cluster.init(std.testing.allocator, 2, layout.window(), .immediate, null);
+    defer c.deinit();
+    var ranks = [2]Ready{ .{ .p = fakeRank(c, 0, layout), .fp = zero }, .{ .p = fakeRank(c, 1, layout), .fp = one } };
+    const t = try std.Thread.spawn(.{}, Ready.run, .{&ranks[1]});
+    ranks[0].run();
+    t.join();
+    return ranks;
+}
+
+test "qwen27 pair: ready refuses another checkpoint, GPU family or command set by name, through the link's words" {
+    const m4: Fingerprint = .{ .version = 7, .chip = pair_mod.chipGeneration("Apple M4 Max"), .checkpoint = 0xA11CE, .format = 64, .protocol = pair_mod.protocol };
+    for (try readyBoth(m4, m4)) |r| try std.testing.expectEqual(@as(?anyerror, null), r.err); // alike: both come up
+    var m5 = m4;
+    m5.chip = pair_mod.chipGeneration("Apple M5 Ultra");
+    var other = m4;
+    other.checkpoint = 0xB0B;
+    var commands = m4;
+    commands.protocol +%= 1; // a build whose commands differ, though its version string is the same
+    for ([_]Fingerprint{ m5, other, commands }, [_][]const u8{ "GPU family", "checkpoint", "command protocol" }) |peer, name| {
+        // each rank compares its own facts with the words the other signalled, so both refuse, naming the fact
+        const ranks = try readyBoth(m4, peer);
+        for (ranks) |r| {
+            defer std.testing.allocator.free(r.why);
+            try std.testing.expectEqual(@as(?anyerror, error.PairFingerprintMismatch), r.err);
+            try std.testing.expect(std.mem.indexOf(u8, r.why, name) != null);
+        }
+    }
+}
+
+test "qwen27 pair: the GPU family is the generation the Metal device names" {
+    try std.testing.expectEqual(@as(u64, 4), pair_mod.chipGeneration("Apple M4 Max"));
+    try std.testing.expectEqual(@as(u64, 3), pair_mod.chipGeneration("Apple M3 Ultra"));
+    try std.testing.expectEqual(@as(u64, 5), pair_mod.chipGeneration("Apple M5"));
+    try std.testing.expectEqual(@as(u64, 0), pair_mod.chipGeneration("Apple"));
+    try std.testing.expectEqual(@as(u64, 0), pair_mod.chipGeneration("AMD Radeon Pro"));
+}
+
+test "qwen27 pair: a pair's /health names the two-Mac mode, and one Mac's Info is unchanged" {
+    const api = @import("engine_api");
+    // `attach` builds its Info and passes it through `withPolicy`: one Mac's comes back as it went in
+    const info: api.Info = .{ .name = "qwen27", .lanes = 4, .context_window = 32768, .prefill_step = 512 };
+    try std.testing.expect(std.meta.eql(info, pair_flags.withPolicy(info, false)));
+    // main's default policy is empty, and `/health` prints a policy only when it is not, so one Mac shows none
+    try std.testing.expectEqualStrings((api.Info{}).policy, pair_flags.withPolicy(info, false).policy);
+    // a pair's line carries "pair", the word record_oracle.py refuses on, and says what the pair answers
+    const pair = pair_flags.withPolicy(info, true);
+    try std.testing.expectEqualStrings(pair_flags.healthPolicy(true), pair.policy);
+    try std.testing.expect(std.mem.indexOf(u8, pair.policy, "pair") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pair.policy, "greedy") != null);
+    var rest = pair;
+    rest.policy = info.policy;
+    try std.testing.expect(std.meta.eql(info, rest)); // the policy is the only field a pair changes
+}
+
+/// Rank 0's half of `Pair.send` over the fake link: its own frame, written to rank 1's command words and flagged.
+fn post(zero: *lb.Pair, kind: u32, words: []const u32) !void {
+    zero.cmd += 1;
+    const n = zero.frame(kind, words);
+    try zero.rd.write(1, zero.l.cmdIn(), zero.win[zero.l.cmdOut()..][0..n]);
+    try zero.rd.signal(1, zero.l.flags() + tf.pair_rows.CMD_FLAG, zero.cmd);
+}
+
+/// What rank 1's `follow` checks before it replays a frame: `Pair.next` reads it off the link, `decode` checks it.
+fn replayed(one: *lb.Pair, words: *std.ArrayList(u32), slots: u32) !pair_mod.Command {
+    const kind = (try one.next(std.testing.allocator, words)) orelse return error.LinkEnded;
+    return pair_mod.decode(kind, words.items, slots);
+}
+
+test "qwen27 pair: rank 1 reads a .tree and a .commit off the link, and refuses a malformed frame or a slot it lacks" {
+    const gpa = std.testing.allocator;
+    const layout: @FieldType(lb.Pair, "l") = .{ .slot = 16384 };
+    const c = try fabric.fake.Cluster.init(gpa, 2, layout.window(), .immediate, null);
+    defer c.deinit();
+    var zero = fakeRank(c, 0, layout);
+    var one = fakeRank(c, 1, layout);
+    var sent: std.ArrayList(u32) = .empty;
+    defer sent.deinit(gpa);
+    var got: std.ArrayList(u32) = .empty;
+    defer got.deinit(gpa);
+    // a drafted round as `Link.tree` and `Link.commit` encode it: three rows, the root's two children, then a path
+    const ids = [_]u32{ 248044, 11, 12 };
+    const parents = [_]i32{ -1, 0, 0 };
+    try pair_mod.encode(&sent, gpa, .{ .tree = .{ .slot = 0, .ids = &ids, .parents = @ptrCast(&parents) } });
+    try post(&zero, @backingInt(pair_mod.Kind.tree), sent.items);
+    const tree = (try replayed(&one, &got, 1)).tree;
+    try std.testing.expectEqualSlices(u32, &ids, tree.ids);
+    for (parents, tree.parents) |want, word| try std.testing.expectEqual(want, @as(i32, @bitCast(word)));
+    try pair_mod.encode(&sent, gpa, .{ .commit = .{ .slot = 0, .path = &.{ 0, 2 } } });
+    try post(&zero, @backingInt(pair_mod.Kind.commit), sent.items);
+    try std.testing.expectEqualSlices(u32, &.{ 0, 2 }, (try replayed(&one, &got, 1)).commit.path);
+    // the same tree for slot 1, on a rank 1 whose runner holds one slot: refused before the slot indexes anything
+    try pair_mod.encode(&sent, gpa, .{ .tree = .{ .slot = 1, .ids = &ids, .parents = @ptrCast(&parents) } });
+    try post(&zero, @backingInt(pair_mod.Kind.tree), sent.items);
+    try std.testing.expectError(error.SlotOutOfRange, replayed(&one, &got, 1));
+    // malformed frames: a row count past the words, a .tree cut to its slot, a commit short of its path, a flag of 2
+    const bad = [_]struct { pair_mod.Kind, []const u32 }{
+        .{ .tree, &.{ 0, 3, 248044, 11, 12, 0xFFFFFFFF, 0 } },
+        .{ .tree, &.{0} },
+        .{ .commit, &.{ 0, 2, 0 } },
+        .{ .step, &.{0} },
+        .{ .chunk, &.{ 0, 1, 2, 0, 11 } },
+    };
+    const why = [_]anyerror{ error.CommandLength, error.CommandLength, error.CommandLength, error.CommandLength, error.CommandFlag };
+    for (bad, why) |frame, err| {
+        try post(&zero, @backingInt(frame[0]), frame[1]);
+        try std.testing.expectError(err, replayed(&one, &got, 1));
+    }
+    try post(&zero, 99, &.{0}); // a command this build does not know
+    try std.testing.expectError(error.UnknownCommand, replayed(&one, &got, 1));
+}
+
+test "qwen27 pair: every command decodes to what was encoded, slot first" {
+    const gpa = std.testing.allocator;
+    var words: std.ArrayList(u32) = .empty;
+    defer words.deinit(gpa);
+    const commands = [_]pair_mod.Command{
+        .{ .begin = 0 },
+        .{ .chunk = .{ .slot = 0, .ids = &.{ 1, 2, 3 }, .last = true, .decoded = false } },
+        .{ .step = .{ .slot = 0, .token = 7 } },
+        .{ .tree = .{ .slot = 0, .ids = &.{ 5, 6 }, .parents = &.{ 0xFFFFFFFF, 0 } } },
+        .{ .commit = .{ .slot = 0, .path = &.{0} } },
+        .{ .end = 0 },
+    };
+    for (commands) |command| {
+        try pair_mod.encode(&words, gpa, command);
+        const back = try pair_mod.decode(@backingInt(std.meta.activeTag(command)), words.items, 1);
+        try std.testing.expectEqual(std.meta.activeTag(command), std.meta.activeTag(back));
+        try std.testing.expectEqual(command.slot(), back.slot());
+        try std.testing.expectEqual(words.items[0], back.slot());
+    }
+}
+
+test "qwen27 pair: TF_QWEN27_LANES=0 with --drafter is refused by name on a pair, and one Mac keeps its serial loop" {
+    // `attach` passes the window policy's own reading of the switch, so "0" here is the setting's own text
+    const serial = try @import("qwen27_window.zig").serial(false, 16, "0");
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PairSerialDraft, pair_flags.refuseSerial(true, true, serial, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "TF_QWEN27_LANES=0 does not run on a pair with --drafter"));
+    try pair_flags.refuseSerial(true, false, serial, &why); // no drafter: no serial draft loop is installed
+    try pair_flags.refuseSerial(true, true, try @import("qwen27_window.zig").serial(false, 16, null), &why); // lanes
+    try pair_flags.refuseSerial(false, true, serial, &why); // one Mac runs its serial loop as on main
+}
+
+test "qwen27 pair: one Mac measures before its lane config, as on main; a pair measures after both are ready" {
+    try std.testing.expect(lb.measuresFirst(null));
+    var pair: lb.Pair = undefined;
+    pair.rank = 0;
+    try std.testing.expect(!lb.measuresFirst(&pair));
+}
+
+test "qwen27 pair: the chunked prefill refuses as prefill does, and rank 1 names rank 0 first" {
+    // `link` is the only `Metal` field and the stream's two: the rest staying undefined proves no other step ran
+    var pair: lb.Pair = undefined;
+    pair.rank = 0;
+    var l: lb.Link = undefined;
+    l.pair = &pair;
+    var m: lb.Metal = undefined;
+    m.link = &l;
+    var s: lanes.Stream = undefined;
+    s.sampling = std.mem.zeroes(lanes.Sampling);
+    s.grammar = null;
+    // `prefill_step` is the lane host's other way into a prompt: a sampled stream on rank 0 stops at its head too
+    try std.testing.expectError(error.PairGreedyOnly, slot_mod.prefillStep(&m, &s, 0));
+    try std.testing.expectError(error.PairGreedyOnly, pair_mod.refuseRequest(m.link, &s));
+    // rank 1 serves no request: it says where to send it before what the request asked for
+    pair.rank = 1;
+    try std.testing.expectError(error.FollowsPeer, slot_mod.prefillStep(&m, &s, 0));
+    try std.testing.expectError(error.FollowsPeer, pair_mod.refuseRequest(m.link, &s));
+    s.sampling = null;
+    try std.testing.expectError(error.FollowsPeer, pair_mod.refuseRequest(m.link, &s));
+    pair.rank = 0;
+    try pair_mod.refuseRequest(m.link, &s); // rank 0's greedy stream runs
+    m.link = null;
+    s.sampling = std.mem.zeroes(lanes.Sampling);
+    try pair_mod.refuseRequest(m.link, &s); // one Mac samples freely
+}
+
+test "qwen27 pair: a GPU generation or checkpoint identity a rank cannot read refuses by name, never a 0" {
+    const a = std.testing.allocator;
+    var why: []const u8 = "";
+    const digest: [32]u8 = @splat(0xA1);
+    const fp = try pair_mod.identityFacts("Apple M4 Max", digest, 64, a, &why);
+    try std.testing.expectEqual(@as(u64, 4), fp.chip);
+    try std.testing.expectEqual(std.mem.readInt(u64, digest[0..8], .little), fp.checkpoint);
+    try std.testing.expectEqual(@as(u64, 64), fp.format);
+    try std.testing.expectEqual(pair_mod.protocol, fp.protocol);
+    // a 0 would travel as 1, as the peer's unreadable fact would, and `ready` would pass the two: refuse here instead
+    try std.testing.expectError(error.PairIdentityUnreadable, pair_mod.identityFacts("AMD Radeon Pro", digest, 64, a, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "names no Apple generation") != null);
+    a.free(why);
+    const unread: anyerror![32]u8 = error.FileNotFound;
+    try std.testing.expectError(error.PairIdentityUnreadable, pair_mod.identityFacts("Apple M5 Ultra", unread, 64, a, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "checkpoint's identity (FileNotFound)") != null);
+    a.free(why);
+}
+
+test "qwen27 pair: a pair serves one stream and refuses --learn, by name" {
+    var why: []const u8 = "";
+    try std.testing.expectError(error.PairOneStream, pair_flags.refuseStreams(true, 2, &why));
+    try std.testing.expectEqualStrings("--speed-up serves one greedy stream: pass --parallel 1", why);
+    try pair_flags.refuseStreams(true, 1, &why);
+    try pair_flags.refuseStreams(false, 8, &why); // one Mac serves its streams
+    try std.testing.expectError(error.PairNoLearn, pair_flags.refuse(false, false, true, false, &why));
+    try std.testing.expect(std.mem.startsWith(u8, why, "--learn does not run on a pair"));
+    var learn = served.Options{ .context = 4096, .streams = 1, .pair = "rank0.json", .learn = .{ .root = "learned", .dir = "model", .drafter = null, .cap = 1 << 30, .floor = 0, .daily = 0 } };
+    try std.testing.expectError(error.PairNoLearn, pair_flags.refuseOptions(true, learn, false, &why));
+    learn.pair = null;
+    try pair_flags.refuseOptions(false, learn, false, &why); // one Mac learns as on main
+}
