@@ -1,8 +1,7 @@
 //! macOS library names: dyld searches the working directory for a bare name, so one is resolved to full paths here.
 const std = @import("std");
 
-/// The folder dyld searches for a bare name when DYLD_FALLBACK_LIBRARY_PATH is unset, for binaries built since late
-/// 2023 (`man dyld`); not /usr/local/lib, which Homebrew can write to on Intel Macs.
+/// dyld's default folder for a bare name (`man dyld`), without /usr/local/lib, which Homebrew writes to on Intel Macs.
 const fallback = "/usr/lib";
 
 /// `name` loaded: a path as given, a bare name from DYLD_LIBRARY_PATH's folders, then the fallback's, never from here.
@@ -59,8 +58,7 @@ test "security: a bare library name is never tried in the working directory, onl
     try t.expectEqual(@as(?usize, null), open(Fake, "libturbojpeg.0.dylib"));
     try t.expectEqual(@as(usize, 1), Fake.count);
     try t.expectEqualStrings("/usr/lib/libturbojpeg.0.dylib", Fake.tried[0]);
-    // the user's folders come first and replace the default; this skips one that is relative, empty or `.` (dyld
-    // itself still applies DYLD_* entries to every load: those are the operator's own settings)
+    // the user's folders come first and replace the default; a relative, empty or `.` one is skipped here, not by dyld
     Fake.reset("relative/lib:.::/opt/mine", "/opt/fall:lib", "/opt/fall/libwebpdecoder.3.dylib");
     try t.expectEqual(@as(?usize, 7), open(Fake, "libwebpdecoder.3.dylib"));
     try t.expectEqual(@as(usize, 2), Fake.count);
