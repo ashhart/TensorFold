@@ -79,11 +79,12 @@ pub const Bufs = struct {
         for (plan.zero) |z| b.each(c, z.start, z.blocks, 0, zero);
     }
 
-    fn move(bytes: []u8, from: [2]usize, to: [2]usize) void {
+    /// One buffer's span copied to a lower one, overlapping or not (a move never goes up).
+    pub fn move(bytes: []u8, from: [2]usize, to: [2]usize) void {
         std.mem.copyForwards(u8, bytes[to[0]..][0..to[1]], bytes[from[0]..][0..from[1]]);
     }
 
-    fn zero(bytes: []u8, at: [2]usize, _: [2]usize) void {
+    pub fn zero(bytes: []u8, at: [2]usize, _: [2]usize) void {
         @memset(bytes[at[0]..][0..at[1]], 0);
     }
 
@@ -97,6 +98,10 @@ pub const Bufs = struct {
         };
     }
 };
+
+test {
+    _ = @import("pool_moves_test.zig");
+}
 
 test "a block's rows start 256-byte aligned in every pooled buffer at the release's shapes" {
     const c: Config = .{};
