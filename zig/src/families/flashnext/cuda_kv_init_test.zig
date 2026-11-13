@@ -151,3 +151,52 @@ test "kv safety: Flash Next page IDs and arena size refuse before allocation" {
     try std.testing.expectEqual(@as(usize, 0), Device.allocs);
     try Device.released();
 }
+
+/// A VMM whose cuMemCreate fails: every piece the arena reaches will not map.
+const NoMemory = struct {
+    var creates: usize = 0;
+    fn create(_: *u64, _: usize, _: *const cuda.arena.Vmm.Prop, _: c_ulonglong) callconv(.c) cuda.abi.Result {
+        creates += 1;
+        return 2; // CUDA_ERROR_OUT_OF_MEMORY
+    }
+};
+
+test "kv safety: Flash Next open whose arena piece will not map returns LaneMemory and leaves the pool idle" {
+    const arena = @import("cuda_kv_arena.zig");
+    var d = Device.driver();
+    var e = engine(&d);
+    defer finish(&d, e.stream.*);
+    const pool = try pages.Pool.init(gpa, &e, layout, 64, null, 2, 8);
+    var live = true;
+    defer if (live) {
+        pool.arena.pieces = null;
+        pool.deinit();
+    };
+    // the arena as pieces mapped on first use, none mapped yet, through the failing VMM
+    var mapped = [_]bool{false};
+    var s: arena.Arena.Pieces = .{ .gpa = gpa, .vmm = undefined, .d = &d };
+    s.vmm.va = pool.arena.buf.ptr;
+    s.vmm.va_len = arena.piece_bytes;
+    s.vmm.next = s.vmm.va;
+    s.vmm.granularity = 2 << 20;
+    s.vmm.device = 0;
+    s.vmm.prop = .{};
+    s.vmm.failed = null;
+    s.vmm.api.create = NoMemory.create;
+    s.lazy = .{ .base = pool.arena.buf.ptr, .len = pool.arena.buf.len, .piece = arena.piece_bytes, .mapped = &mapped };
+    pool.arena.pieces = &s;
+    NoMemory.creates = 0;
+    const before = pool.pool.census();
+
+    try std.testing.expectError(error.LaneMemory, pool.open(64));
+    try std.testing.expectEqual(@as(usize, 1), NoMemory.creates); // the open reached the piece
+    try std.testing.expect(!mapped[0]);
+    for (pool.lanes) |x| try std.testing.expect(!x.used);
+    try std.testing.expectEqualDeep(before, pool.pool.census()); // promised 0, every page free again
+    try std.testing.expect(pool.fits(64)); // a free lane, the pages and a run: the run went back too
+
+    pool.arena.pieces = null;
+    live = false;
+    pool.deinit();
+    try Device.released();
+}
