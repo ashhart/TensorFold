@@ -36,6 +36,7 @@ pub fn join(gpa: std.mem.Allocator, io: std.Io, j: collective.Join) collective.J
         .world = j.world,
         .gpu = Device.groupId(j.caps),
         .rccl = version,
+        .tensors = @backingInt(@import("sys").rank_auth.tensors.current() orelse .one_host),
         .ident = j.ident,
     };
     const secret = try @import("sys").rank_auth.Secret.fromEnv(); // TF_RANK_SECRET_FILE: the key every rank proves

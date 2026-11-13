@@ -1,4 +1,4 @@
-//! Ranks' liveness lines: a TCP line from each rank to rank 0, open before NCCL: rank 0's NCCL id, ready, error, wake.
+//! Ranks' liveness lines, a TCP line from each rank to rank 0 before NCCL: its id and tensor mode, ready, error, wake.
 const std = @import("std");
 const platform = @import("sys");
 const startup_log = @import("startup_log.zig");
@@ -6,12 +6,13 @@ const posix = @import("sys").posix;
 const tp_line = @import("tp_line.zig");
 const auth = platform.rank_auth;
 
-/// One record on a line: ready, an error and its name, rank 0's wake, or a part of rank 0's NCCL id.
+/// One record on a line: ready, an error and its name, rank 0's wake, a part of its NCCL id, or how its tensors cross.
 const Record = extern struct { kind: u32, rank: u32, text: [56]u8 = @splat(0) };
 const ready_kind: u32 = 1;
 const error_kind: u32 = 2;
 const wake_kind: u32 = 3;
 const id_kind: u32 = 4;
+const tensors_kind: u32 = 5;
 const max_lines = tp_line.max_lines;
 const id_len = 128; // ncclUniqueId's bytes
 const id_part = 48; // an id record's bytes, from text[8]; its part's number is text[0]
@@ -32,6 +33,7 @@ var slept: u32 = 0; // the wakes this rank's sleeps took
 var watch_io: std.Io = undefined; // the watchers' futex wakes
 var id_bytes: [id_len]u8 = undefined; // rank 0's NCCL id as this rank's line carried it
 var id_seen = std.atomic.Value(u32).init(0); // a bit for each part of it taken
+var peer_tensors = std.atomic.Value(u32).init(0); // rank 0's tensor mode as this rank's line carried it, plus one
 
 /// This rank ends on purpose (rank 0 sends its end header, or a rank leaves on one).
 pub fn ended() void {
@@ -54,6 +56,8 @@ pub fn explain(e: anyerror) ?[]const u8 {
         error.BindFailed => "rank 0 could not listen on NCCL_COMM_ID's port + 1, where the ranks' liveness lines meet: another process may hold it (often an earlier server still exiting) or NCCL_COMM_ID's host may not be this machine's; wait for that process to exit or choose another NCCL_COMM_ID port",
         error.RankNeverCame => "not every rank connected its liveness line within 5 minutes on NCCL_COMM_ID's port + 1: start every rank with the same NCCL_COMM_ID and check that port is reachable",
         error.AcceptFailed => "rank 0 could not accept another rank's liveness line on NCCL_COMM_ID's port + 1",
+        error.RankTensorsDiffer => "this rank's " ++ auth.tensors.env_name ++ " differs from rank 0's: set it alike on every rank, sealed or clear",
+        error.RankNeverSentTensors => "rank 0 did not say how the group's tensors cross within 15 minutes: every rank must run this build",
         else => auth.explain(e), // the key proof on a line, or TF_RANK_SECRET_FILE's file
     };
 }
@@ -123,6 +127,23 @@ pub fn open() bool {
 /// Rank 0: every other rank's sleep returns (its next step follows on NCCL).
 pub fn wake() void {
     send(.{ .kind = wake_kind, .rank = @intCast(my_rank) });
+}
+
+/// Before NCCL starts: rank 0 says how the group's tensors cross, and a rank that differs stops every rank by name.
+pub fn agreeTensors(mode: u8) !void {
+    if (line_count == 0) return;
+    var mine: Record = .{ .kind = tensors_kind, .rank = 0 };
+    mine.text[0] = mode;
+    if (my_rank == 0) return send(mine);
+    var waited: usize = 0;
+    while (peer_tensors.load(.acquire) == 0) : (waited += 1) {
+        if (waited >= 90_000) return error.RankNeverSentTensors; // 15 minutes
+        std.Io.sleep(watch_io, .fromMilliseconds(10), .awake) catch {};
+    }
+    if (peer_tensors.load(.acquire) == @as(u32, mode) + 1) return;
+    if (!@import("builtin").is_test) std.log.err("rank {d}: {s}; every rank stops", .{ my_rank, explain(error.RankTensorsDiffer).? });
+    fail(auth.tensors.env_name ++ " differs from rank 0's"); // one rank on TLS and one not would wait on each other inside NCCL
+    return error.RankTensorsDiffer;
 }
 
 /// Until rank 0's next wake record, which may already be here: a wait that spins neither CUDA nor NCCL.
@@ -201,6 +222,10 @@ fn watch(fd: posix.socket_t, line: usize) void {
         }
         if (r.kind == id_kind) {
             takePart(&r);
+            continue;
+        }
+        if (r.kind == tensors_kind) {
+            peer_tensors.store(@as(u32, r.text[0]) + 1, .release);
             continue;
         }
         if (r.kind == error_kind and !ending.load(.acquire)) {
@@ -540,4 +565,35 @@ test "tp id coverage: the wire oracle rejects missing parts and changed ID bytes
     records[1].text[8] ^= 1;
     records[2].text[0] = 1;
     try std.testing.expectError(error.BadIdPart, id_test.verify(&records, &id));
+}
+
+test "security: rank 0 says how its tensors cross before NCCL, and a rank that differs stops by name" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var pair: [2]c_int = undefined;
+    if (ProcessTest.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+    ending.store(false, .release);
+    watch_io = std.testing.io;
+    lines[0] = pair[0];
+    line_count = 1;
+    const watcher = try std.Thread.spawn(.{}, watch, .{ pair[0], 0 });
+    defer {
+        ending.store(true, .release);
+        for (pair) |fd| _ = posix.system.shutdown(fd, posix.SHUT.RDWR);
+        watcher.join();
+        for (pair) |fd| _ = posix.system.close(fd);
+        ending.store(false, .release);
+        line_count = 0;
+    }
+    var r: Record = undefined;
+    my_rank = 0; // rank 0 sends its mode: here sealed, which is 2
+    try agreeTensors(2);
+    try std.testing.expectEqual(@as(isize, 64), posix.system.read(pair[1], std.mem.asBytes(&r), 64));
+    try std.testing.expectEqualSlices(u8, &.{ tensors_kind, 0, 0, 0, 0, 0, 0, 0, 2 }, std.mem.asBytes(&r)[0..9]);
+    my_rank = 1; // another rank: rank 0 says clear, so a clear rank goes on and a sealed one stops and tells rank 0 why
+    r.text[0] = 1;
+    try std.testing.expectEqual(@as(isize, 64), posix.system.write(pair[1], std.mem.asBytes(&r), 64));
+    try agreeTensors(1);
+    try std.testing.expectError(error.RankTensorsDiffer, agreeTensors(2));
+    try std.testing.expectEqual(@as(isize, 64), posix.system.read(pair[1], std.mem.asBytes(&r), 64));
+    try std.testing.expectEqualStrings("TF_RANK_TENSORS differs from rank 0's", std.mem.sliceTo(&r.text, 0));
 }

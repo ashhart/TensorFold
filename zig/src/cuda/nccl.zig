@@ -45,7 +45,7 @@ pub const Config = extern struct {
     graph_stream_ordering: c_int = std.math.minInt(c_int),
 };
 
-pub const Error = platform.optional_libraries.Failure || tensors.Error || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion };
+pub const Error = platform.optional_libraries.Failure || tensors.Error || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion, RankTensorsDiffer, RankNeverSentTensors };
 
 pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
 
@@ -95,7 +95,8 @@ pub const Library = struct {
         // a keyed group: NCCL's sockets run TLS under a key from the group's before its first call, or no rank starts
         var loaded: c_int = 0;
         _ = api.ncclGetVersion(&loaded);
-        _ = try tensors.apply(lib.lookup(tensors.SetEncryption, tensors.symbol), loaded, "NCCL");
+        const mode = try tensors.apply(lib.lookup(tensors.SetEncryption, tensors.symbol), loaded, "NCCL");
+        try tp_watch.agreeTensors(@backingInt(mode)); // ranks that differ stop here, by name, not inside NCCL
         return .{ .lib = lib, .api = api };
     }
 

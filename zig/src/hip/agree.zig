@@ -22,6 +22,7 @@ pub const Field = enum(u32) {
     program,
     config,
     weights,
+    tensors,
 
     /// The refusal's words for it.
     pub fn what(f: Field) []const u8 {
@@ -34,6 +35,7 @@ pub const Field = enum(u32) {
             .program => "executable (run the same build on every rank)",
             .config => "config.json",
             .weights => "weights (the shards' headers or sampled tensor bytes)",
+            .tensors => "TF_RANK_TENSORS (sealed on every rank, or clear on every rank)",
         };
     }
 };

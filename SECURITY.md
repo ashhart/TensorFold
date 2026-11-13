@@ -83,6 +83,8 @@ TLS 1.3.
   starts. Build the library with `TLS_BACKEND=OPENSSL3`.
 - To run a keyed group on InfiniBand or RoCE, or with a library without TLS, set `TF_RANK_TENSORS=clear` on every
   rank. The tensors then cross as plain bytes, so do that only on a network you trust or on an encrypted one.
+- Ranks that differ on it do not start: before NCCL or RCCL runs, a rank compares its setting with rank 0's, and the
+  refusal names `TF_RANK_TENSORS` on every rank.
 
 ## Release files
 
