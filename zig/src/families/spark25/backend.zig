@@ -246,7 +246,7 @@ pub const Spark = struct {
     fn plan(x: *Spark, s: *Stream, adopt: *std.ArrayList(u32)) !kp.Plan {
         const pr = x.prompts orelse return .{};
         x.pending = null;
-        return pr.plan(x.gpa, &x.pool.?, s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
+        return pr.plan(x.gpa, &x.pool.?, .of(s.prompt()), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
     }
 
     /// A new lane's table starts with the kept pages, held once more by its lease (rows below `from`, never written).
@@ -325,7 +325,7 @@ pub const Spark = struct {
     /// TF_KV_SHARE: at mark `at` the store takes the lane's pages and rings; pages it held already replace the lane's.
     fn keepPages(x: *Spark, pr: kp.Prompts, s: *Stream, l: *Lane, at: usize) !void {
         var map: Map = .{ .x = x, .slot = l.slot };
-        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, @ptrCast(s), fwd.page_tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, .of(s.prompt()), at, @ptrCast(s), fwd.page_tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
     }
 
     /// One chunk from `l.fill` to the next grid line or mark. `_: u32` keeps its grid.
