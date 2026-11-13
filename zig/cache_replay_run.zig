@@ -16,16 +16,19 @@ pub const Replay = struct {
     }
     pub fn deinit(r: *Replay) void {
         r.store.deinit();
-        std.debug.assert(r.family.live == 0);
+        std.debug.assert(r.family.live == 0 and r.family.held_bytes == 0);
     }
     pub fn request(r: *Replay, req: trace.Request) !Observation {
         var own: model.State = .{};
         const before = r.store.counts;
         const a = r.store.gpa;
+        const prior = if (r.selected == .frequency_probation) r.store.find(req.tokens, &.{}, &.{}) else null;
+        const carry_hits = if (prior) |e| if (!e.shared) e.seen.hits +| 1 else 0 else 0;
+        const carry_at = if (prior) |e| e.at else 0;
         const plan = if (r.selected == .main and !r.adapter_main)
-            try r.store.begin(a, req.tokens, req.history, &.{}, &.{}, &own, &.{})
+            try r.store.begin(a, req.tokens, req.history, req.shared, &.{}, &own, &.{})
         else
-            try policy.begin(&r.store, r.selected, a, req.tokens, req.history, &own);
+            try policy.begin(&r.store, r.selected, a, req.tokens, req.history, &own, req.shared);
         defer a.free(plan.marks);
         if (own.at != plan.from) return error.RestorePosition;
         for (plan.marks) |at| {
@@ -36,6 +39,10 @@ pub const Replay = struct {
                 if (!policy.roomForKeep(&r.store, req.tokens, at)) return error.UnexpectedNativeEviction;
             }
             if (!r.store.keep(req.tokens, at, &own, &.{}, &.{})) return error.KeepRefused;
+            if (carry_hits > 0 and at >= carry_at) if (r.store.find(req.tokens, &.{}, &.{})) |e| {
+                // Experimental replay metadata follows a resumed session, never a shared system prefix.
+                if (!e.shared and e.at == at) e.seen.hits = @max(e.seen.hits, carry_hits);
+            };
             if (!std.meta.eql(live, own)) return error.LiveStateEvicted;
         }
         own.advance(req.tokens, @intCast(req.tokens.len));
@@ -45,8 +52,8 @@ pub const Replay = struct {
             held += e.bytes;
             if (e.borrowers != 0) return error.BorrowLeak;
         }
-        if (held != r.store.held or held > r.store.budget or r.family.live != r.store.entries.items.len) return error.ByteAccounting;
-        r.peak_bytes = @max(r.peak_bytes, held);
+        if (held != r.store.held or held != r.family.held_bytes or r.family.peak_bytes > r.store.budget or r.family.live != r.store.entries.items.len) return error.ByteAccounting;
+        r.peak_bytes = @max(r.peak_bytes, r.family.peak_bytes);
         return .{ .from = plan.from, .recompute = @intCast(req.tokens.len - plan.from), .held = held, .evicted = r.store.counts.evicted - before.evicted, .refused = r.store.counts.refused - before.refused, .kept = r.store.counts.kept - before.kept, .fingerprint = fingerprint(&r.store) };
     }
 };
