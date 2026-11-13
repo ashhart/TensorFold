@@ -122,6 +122,16 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
 
+A completions `prompt` that is a list of two or more strings (at most 64) runs each string as its own request,
+with the body's other fields (`max_tokens`, `seed`, `stop` and the rest) as that prompt alone would have them; `n`
+must still be 1. The reply has one choice a prompt, `index` in list order, each with the text, stop and `tensorfold`
+block that prompt alone gets, and `usage` sums every prompt's and every reply's tokens; the first refusal in list
+order is the reply. A stream sends each prompt's chunks with its `index`, then the finishes in list order, then one
+usage chunk when `stream_options.include_usage` is set (otherwise the last finish carries the summed usage). Up to
+eight prompts run at once, and one at a time under `--max-inflight` or `--max-inflight-per-key`, where the request
+holds one place. A one-string list, a list of token IDs, a list of token-ID lists and a mixed list keep their
+one-prompt meaning (lists inside are decoded and joined with a newline).
+
 `/tokenize` takes vLLM's fields: a `prompt` string (`add_special_tokens`, default true), or `messages` with the
 chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
 (default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
