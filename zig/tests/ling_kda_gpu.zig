@@ -376,6 +376,8 @@ fn checkDump(bytes: []const u8) !void {
     const want64 = try a.alloc(f64, want_n);
     defer a.free(want64);
     @memcpy(std.mem.sliceAsBytes(want64), bytes[off .. off + want_n * 8]);
+    off += want_n * 8;
+    try std.testing.expectEqual(bytes.len, off);
 
     roundInputs(proj, fgate, braw, g2);
     const want = try a.alloc(f32, want_n);
@@ -453,7 +455,7 @@ test "k3_kda on Ling-tiny (16 heads, D=128, 4 taps) matches kda.mix on two rows"
     try check(2);
 }
 
-test "k3_kda on Ling-tiny (16 heads, D=128, 4 taps) vs mix and mixF64 on four rows" {
+test "k3_kda on Ling-tiny (16 heads, D=128, 4 taps) matches kda.mix on four rows" {
     try check(4);
 }
 
