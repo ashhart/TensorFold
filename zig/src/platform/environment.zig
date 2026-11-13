@@ -58,6 +58,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .cuda, .kind = .size, .min = 1, .max = 16384, .forms = "a whole prompt-row count from 1 to 16384 a pass (default 1536)" },
     .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .cuda, .kind = .size, .min = 1, .max = 16384, .forms = "a whole prompt-row count from the busy chunk (TF_FLASHNEXT_CHUNK) to 16384; an EXL3 pack refuses it" },
