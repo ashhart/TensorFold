@@ -18,13 +18,14 @@ pub const stage_fwd = @import("cuda_stage_forward.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
-pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
 
 /// Rows of one forward at most: a prompt chunk, or a shared round's windows.
 pub const max_rows = Round.max_rows;
+/// The cold pass's chunk: its cuts, the kept states and resumes sit on this grid (a solo pass merges whole ones).
+pub const grid_rows = Round.grid_rows;
 /// Streams' windows in one forward at most.
 pub const max_segs = Round.max_segs;
 /// Rows of a verify forward at most: each row's logits are kept and drawn.
@@ -114,6 +115,8 @@ pub const Engine = struct {
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
+    /// A prompt forward's rows at most (grid_rows, or TF_QWEN35_CHUNK_SOLO's): the scratch rows and the tap rings.
+    prompt_rows: usize,
     // weights
     embed_w: u64,
     embed_s: u64,
@@ -219,6 +222,7 @@ pub const Engine = struct {
         e.rope_table = 0; // plain rope until cuda_rope.zig uploads a YaRN table (the engine starts undefined)
         e.rope_buf = null;
         e.window_rows = most_window;
+        e.prompt_rows = try @import("cuda_solo.zig").rows(span != null); // refused before anything allocates
         e.arena_at = 0;
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
@@ -232,7 +236,7 @@ pub const Engine = struct {
         e.held = null;
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
-        if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
+        if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, e.prompt_rows));
         errdefer if (e.boundary) |*b| b.free();
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer core.checkpoint.cache.close(&ck);
@@ -279,7 +283,7 @@ pub const Engine = struct {
         e.layers = try gpa.alloc(Layer, g.layers);
         errdefer gpa.free(e.layers);
         if (g.exl3) {
-            e.kit = try x3w.Kit.init(gpa, d, g);
+            e.kit = try x3w.Kit.init(gpa, d, g, e.prompt_rows);
             errdefer e.kit.?.deinit(gpa);
             try x3w.load(e, &ck);
         } else {
@@ -345,9 +349,14 @@ pub const Engine = struct {
         return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
     }
 
-    /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
+    /// A stream's tap ring: tapRows() rows of the tapped layers' residuals.
     pub fn tapBytes(e: *const Engine) usize {
-        return tap_rows * e.n_taps * e.g.hidden * 2;
+        return e.tapRows() * e.n_taps * e.g.hidden * 2;
+    }
+
+    /// Rows a stream's tap ring holds: the drafter's window and the widest forward (a solo pass's rows) more.
+    pub fn tapRows(e: *const Engine) usize {
+        return caches.tap_window + e.prompt_rows;
     }
 
     /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
@@ -418,10 +427,10 @@ pub const Engine = struct {
         for (parts, 0..) |p, index| {
             for (parts[0..index]) |prior| if (prior.cache == p.cache) return error.InvalidQwenSegments;
             if (p.rows == 0 or p.cache.len > p.cache.cap or p.rows > p.cache.cap - p.cache.len) return error.QwenContextFull;
-            if (p.rows > max_rows - total) return error.InvalidQwenSegments;
+            if (p.rows > e.prompt_rows - total) return error.InvalidQwenSegments;
             total += p.rows;
         }
-        if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
+        if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > e.prompt_rows) return error.InvalidQwenSegments;
         if (e.learning != null and total != 1) return error.BadLearningRows;
         if (keep == .hidden and e.learning == null) return error.BadLearningRows;
         const record = keep.verifies();

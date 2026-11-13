@@ -106,7 +106,7 @@ test "prompt int8: enable allocates once, failure retains no owner, and deinit i
     try e.int8.enable(&e);
     try T.expectEqual(@as(usize, 3), Trace.allocations);
     try T.expect(e.int8.on);
-    try T.expectEqual(cuda.w4a8.Kernels.scratch(q.engine.max_rows, 512), e.int8.buf.?.len);
+    try T.expectEqual(cuda.w4a8.Kernels.scratch(q.engine.grid_rows, 512), e.int8.buf.?.len);
     e.int8.deinit();
     try T.expect(!e.int8.on and e.int8.buf == null and e.int8.ws == 0);
     e.int8.deinit();

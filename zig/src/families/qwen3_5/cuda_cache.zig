@@ -8,8 +8,8 @@ const Engine = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
 const recurrent = @import("cuda_recurrent.zig");
 
-/// Rows a drafter's tap ring holds a stream: its window and a prompt chunk more.
-pub const tap_rows = 2048 + engine.max_rows;
+/// Rows a drafter's tap ring holds a stream behind a forward's rows (Engine.tapRows): its window at most.
+pub const tap_window = 2048;
 
 /// Kept rows a cache may hold pending, and the pending count at which a recorded slot scan writes the state back.
 pub const pend_cap = 48;
@@ -128,7 +128,7 @@ pub const Cache = struct {
     /// A window's log and before in one block (recurrent_workspace.Overlay); runs and adaptive caches have none.
     block: ?DeviceBuffer = null,
     kv: DeviceBuffer,
-    /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
+    /// A drafter's tapped rows (`Engine.taps`), a ring of tapRows(): the row at position p in slot p % tapRows().
     tap: ?DeviceBuffer = null,
     /// The newest verify window's records (qwen35.cuh's LogRow), held until its keep completes.
     log: DeviceBuffer,
@@ -287,7 +287,7 @@ pub const Cache = struct {
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
+        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = @intCast(e.tapRows()), .taps = @intCast(e.n_taps), .delta = self.delta };
         if (self.paged) |p| {
             sg.kv = p.base;
             sg.pt = p.table.ptr;

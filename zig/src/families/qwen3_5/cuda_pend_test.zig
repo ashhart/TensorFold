@@ -76,6 +76,7 @@ fn engine(d: *cuda.Driver) E {
     e.geo = .{ .hid = 5120, .nk = 16, .nv = 48, .qh = 24, .kvh = 4, .nl = 48 };
     e.kv8 = false;
     e.n_taps = 0;
+    e.prompt_rows = @import("cuda_engine.zig").grid_rows;
     const f = struct {
         fn at(dd: *cuda.Driver, i: usize) cuda.Function {
             return .{ .d = dd, .handle = @ptrFromInt(i) };

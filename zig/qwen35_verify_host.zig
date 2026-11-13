@@ -81,6 +81,7 @@ fn device(d: *cuda.Driver, gb10: bool, wide: bool) q.engine.Engine {
     var e: q.engine.Engine = undefined;
     e.int8 = .{};
     e.kit = null;
+    e.prompt_rows = q.engine.grid_rows;
     e.d = d;
     e.stream = .{ .d = d, .handle = null };
     e.fns.sums = function(d, 1);

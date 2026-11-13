@@ -114,7 +114,7 @@ pub fn bind(t: *Target, ctx: *const cuda.Context) void {
 
 /// A fixed prompt's state at the first chunk cut, hashed (a kernel or driver change moves it), and its prompt rate.
 pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Target) !struct { hash: u64, rate: f64 } {
-    var toks: [engine.max_rows + 40 + 7]u32 = undefined;
+    var toks: [engine.grid_rows + 40 + 7]u32 = undefined;
     for (&toks, 0..) |*x, i| x.* = @intCast(1000 + i * 7919 % 50000);
     const Hook = struct {
         t: *Target,
@@ -130,7 +130,7 @@ pub fn probe(a: Allocator, io: std.Io, backend: lanes.backend.Backend, t: *Targe
     };
     var hook: Hook = .{ .t = t };
     defer if (hook.saved) |saved| reuse.drop(t, saved);
-    const marks = [_]u32{engine.max_rows};
+    const marks = [_]u32{engine.grid_rows};
     var s = try lanes.Stream.init(a, .{ .id = "probe", .prompt = &toks, .max_new = 1, .reuse = .{ .marks = &marks, .hook = .{ .ptr = &hook, .at = Hook.at } } });
     defer s.deinit(a);
     const ns = pass: {

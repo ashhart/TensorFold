@@ -7,6 +7,7 @@ const Driver = @import("prefill_widths_cuda_fake.zig").Driver;
 const t = std.testing;
 const Cache = struct { delta: i64 = 0 };
 const Engine = struct {
+    prompt_rows: usize = q.engine.grid_rows,
     fail: bool = false,
     stream: ?cuda.Stream = null,
     pub fn forward(e: *@This(), _: anytype, _: []const u32, _: q.engine.Keep) !void {
@@ -18,6 +19,8 @@ const Backend = struct {
     gpa: std.mem.Allocator = t.allocator,
     e: *Engine,
     cache: Cache = .{},
+    caches: std.AutoHashMapUnmanaged(*lanes.Stream, *Cache) = .empty, // streams beside: none decodes
+    fills: std.AutoHashMapUnmanaged(*lanes.Stream, void) = .empty,
     prefix: ?struct {
         pub fn keep(_: @This(), _: *Cache, _: []const u32, _: usize) !void {}
     } = null,
@@ -29,7 +32,7 @@ const Backend = struct {
     }
 };
 test "CUDA prefill widths: Qwen target cold cuts, one pass, resumed cuts and a failed forward" {
-    const cap = q.engine.max_rows;
+    const cap = q.engine.grid_rows;
     const ids = try t.allocator.alloc(u32, 2 * cap + 17);
     defer t.allocator.free(ids);
     @memset(ids, 1);
@@ -53,6 +56,31 @@ test "CUDA prefill widths: Qwen target cold cuts, one pass, resumed cuts and a f
     var f: q.prefill.Fill = .{ .at = 0, .media = null };
     try t.expectError(error.PlantedForward, q.prefill.chunk(&b, &s, &f, 0));
     try t.expectEqual(@as(usize, 0), s.prefill_widths.items.len);
+}
+
+test "CUDA prefill widths: Qwen solo passes (TF_QWEN35_CHUNK_SOLO) merge cold cuts up to their rows, alone" {
+    const cap = q.engine.grid_rows;
+    const ids = try t.allocator.alloc(u32, 2 * cap + 17);
+    defer t.allocator.free(ids);
+    @memset(ids, 1);
+    var d = Driver.init();
+    var e: Engine = .{ .prompt_rows = 2 * cap, .stream = .{ .d = &d, .handle = null } };
+    var b: Backend = .{ .e = &e };
+    var s = try lanes.Stream.init(t.allocator, .{ .id = "solo", .prompt = ids, .chunks = &.{13}, .max_new = 1 });
+    defer s.deinit(t.allocator);
+    var f: q.prefill.Fill = .{ .at = 0, .media = null };
+    while (!try q.prefill.chunk(&b, &s, &f, 0)) {}
+    try t.expectEqualSlices(u32, &.{ 13, 2 * cap, 4 }, s.prefill_widths.items); // whole chunks merge, the rest alone
+    // another stream decodes (a cache, no fill): the grid chunk again; a cap keeps its own cuts
+    var other = try lanes.Stream.init(t.allocator, .{ .id = "other", .prompt = &.{1}, .max_new = 1 });
+    defer other.deinit(t.allocator);
+    defer b.caches.deinit(t.allocator);
+    try b.caches.put(t.allocator, &other, &b.cache);
+    var s2 = try lanes.Stream.init(t.allocator, .{ .id = "busy", .prompt = ids, .chunks = &.{13}, .max_new = 1 });
+    defer s2.deinit(t.allocator);
+    var f2: q.prefill.Fill = .{ .at = 0, .media = null };
+    while (!try q.prefill.chunk(&b, &s2, &f2, 0)) {}
+    try t.expectEqualSlices(u32, &.{ 13, cap, cap, 4 }, s2.prefill_widths.items);
 }
 
 test "CUDA prefill widths: Qwen failed completion wait records no target pass" {

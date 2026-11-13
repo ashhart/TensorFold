@@ -53,7 +53,7 @@ fn drafter(e: anytype, io: std.Io, dir: []const u8) !u64 {
     while (try it.next(io)) |f| {
         if (std.mem.endsWith(u8, f.name, ".safetensors")) total += (try d.statFile(io, f.name, .{})).size;
     }
-    return total / 16 * 5 + try draft.Draft.streamBytesFor(c, e.g.hidden);
+    return total / 16 * 5 + try draft.Draft.streamBytesFor(c, e.g.hidden, e.tapRows());
 }
 
 /// The rows copied to the pinned host memory the device reads in place.

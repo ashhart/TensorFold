@@ -24,6 +24,7 @@ test {
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_prompt_tail.zig");
+    _ = @import("cuda_solo.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
