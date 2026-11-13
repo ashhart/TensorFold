@@ -123,6 +123,7 @@ pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
 pub const SpeechResult = @import("speech_api.zig").SpeechResult;
 pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
 pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
+pub const EncodeVoiceError = error{ BadWav, Closed, Failed, OutOfMemory };
 pub const ImageRequest = @import("image_api.zig").ImageRequest;
 pub const ImageResult = @import("image_api.zig").ImageResult;
 pub const ImageInfo = @import("image_api.zig").ImageInfo;
@@ -440,6 +441,8 @@ pub const Engine = struct {
         load: ?*const fn (ctx: *anyopaque, producer: ?load_ledger.Producer) void = null,
         /// Asked once per whole request: the returned message is the refusal, up to `refusal_bytes`; null: accepted.
         refusal: ?*const fn (ctx: *anyopaque, request: *const Request, out: []u8) ?[]const u8 = null,
+        /// A reference WAV file's codec rows in `gpa`, on the speech engine's own thread; null: it encodes no voices.
+        encode_voice: ?*const fn (ctx: *anyopaque, gpa: Allocator, wav: []const u8) EncodeVoiceError![][10]i32 = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -557,7 +560,6 @@ pub const LaneHost = @import("lane_host.zig").LaneHost;
 pub const prefill_env = @import("lane_host_env.zig");
 /// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
 pub const Rounds = @import("lane_host.zig").Rounds;
-
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
 /// The same for a paged cache over the backend's own KV pages (prompt_radix.zig).
@@ -568,7 +570,6 @@ pub const cache_modes = @import("cache_modes.zig");
 /// Learned prompt-cache states on disk (prompt_imprint.zig), and when a shared cut goes there (prompt_learn.zig).
 pub const prompt_imprint = @import("prompt_imprint.zig");
 pub const prompt_learn = @import("prompt_learn.zig");
-
 /// A question about a conversation's kept states, in RAM and on disk (rows_ask.zig).
 pub const ImprintAsk = @import("rows_ask.zig").Ask;
 pub const ImprintOp = @import("rows_ask.zig").Op;
@@ -576,7 +577,6 @@ pub const ImprintDisk = @import("rows_ask.zig").Disk;
 
 /// Recall's record of the ids earlier requests read and wrote, for drafts (not the prompt cache's learned states).
 pub const recall_store = lanes.recall_store;
-
 /// The idle keepalive's ticker and target contract.
 pub const keepalive = @import("keepalive.zig");
 
