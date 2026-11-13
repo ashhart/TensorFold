@@ -33,6 +33,7 @@ pub const Fixture = struct {
         f.e.snaps = .empty;
         f.e.snap_pages = null;
         f.e.snap_setup = null;
+        f.e.snap_drafter = false; // no DFlash2 ring in these states (cuda_drafter_snap)
         f.e.dropped = .empty;
         f.e.next_snap = 1;
         f.e.announce = 0;

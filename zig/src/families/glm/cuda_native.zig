@@ -33,6 +33,8 @@ pub const request_starts = true;
 pub const request_starts_switch = "TF_GLM_REQUEST_STARTS";
 /// Starts closer than 256 tokens merge, as in the measured pair receipts (#2404); a 1-row minimum needs its own run.
 pub const request_min_chunk: u32 = 256;
+/// Opted in, a warm pass after this quiet keeps the next turn's own cuts inside the reply; the cuts stay as above.
+pub const request_starts_warm_quiet: u64 = 150 * std.time.ns_per_ms;
 /// TF_GLM_PROMPT_TAIL=1: a prompt that names no history keeps its last chunk start, as the KV pages' store does.
 pub const snap_tail = "TF_GLM_PROMPT_TAIL";
 /// `explain` words this family's open refusals too (where to set the rank and the id).

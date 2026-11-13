@@ -350,6 +350,7 @@ test {
 
 test {
     _ = @import("request_starts_turns_test.zig");
+    _ = @import("glm_warm_cuts_test.zig");
     _ = @import("thinking_request_test.zig");
     _ = @import("voice_cli.zig");
     _ = @import("drama_voice_store.zig");
