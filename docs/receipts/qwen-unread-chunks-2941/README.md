@@ -36,6 +36,23 @@ run; the diff adds no log line.
 The prompts are the server tokenizer's output for Python 3.12.3's standard-library source; the raw arrays were
 tokenized once per server start, so a different Python version changes the text but not the equality check.
 
+## Quiet-GB10 A/B (reported by @jschmied)
+
+A separate quiet-GB10 run, base `a3aecd8d0` against head `e7c385e96` (the same `zig/` diff as this head, apart from
+hunk offsets), one fresh server an arm in base-head-head-base order, 3 rounds, SM clock capped at 2300 MHz, page
+cache dropped before every server, 16 greedy tokens. Binary md5: base `1375faa01aeefc2f9ac40c907d6dab81`, head
+`a479e68ff08992d57ff66f15faf52e3f`. Every `token_sha256`/`output_sha256` equals this receipt's:
+
+| Prompt | Base TTFT median [min-max] | Head TTFT median [min-max] | Paired head - base, per round | Adjacent pairs slower |
+| ---: | ---: | ---: | --- | ---: |
+| 2,048 | 0.3275 s [0.3238-0.3291] | 0.3259 s [0.3224-0.3272] | +1.8 / -4.5 / -2.7 ms | 3 of 6 |
+| 8,192 | 1.2360 s [1.2353-1.2437] | 1.2328 s [1.2273-1.2356] | -3.1 / -9.9 / -1.5 ms | 0 of 6 |
+| 32,768 | 5.8006 s [5.7908-5.8210] | 5.7695 s [5.7437-5.7825] | -28.4 / -61.8 / -23.0 ms | 0 of 6 |
+
+At 32K the median per-round delta is -28.4 ms and the median of the six adjacent pairs is -34.5 ms (-0.5 to
+-0.6 %); 8K gains about 3-4 ms and 2K is level. The raw per-arm rows, gate output and server logs are with
+@jschmied.
+
 ## Sampled and drafted replies
 
 The same 8,192 and 32,768 token prompts at temperature 1.0 with seed 1234, then the same prompts with the server's
