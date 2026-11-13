@@ -73,8 +73,8 @@ pub const cfgs = [_]Cfg{
     .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
 } ++ @import("window_rows_shapes.zig").cases(Cfg) ++ paged ++ equality;
 
-/// A row's chunks past its own position are empty with no window: rows from the first key to a 32K context's last.
-const bounded_at = [_]usize{ 0, 255, 256, 1000, 32767 };
+/// Rows from the first key to a 32K context's last; the longest and the chunk edges first (gate 4 takes four).
+const bounded_at = [_]usize{ 32767, 255, 256, 0, 1000 };
 
 fn boundedAt(comptime h: usize, comptime context: usize) []const c.Shape {
     return &[_]c.Shape{.{ .rows = bounded_at.len, .n = h, .k = context }};
@@ -267,7 +267,7 @@ pub const Rows = struct {
         _ = self.arena.reset(.retain_capacity);
         const f = self.f;
         if (shape.n != f.h or shape.rows == 0 or (!f.prompt and shape.k == 0)) return false;
-        if (f.positions.len > 0 and (shape.rows != f.positions.len or shape.k != f.ring)) return false; // its own rows only
+        if (f.positions.len > 0 and (shape.rows > f.positions.len or shape.k != f.ring)) return false; // its first rows
         if (f.prompt and f.ring > 0 and shape.rows + f.win > f.ring) return false; // chunk + window fit the ring
         const a = self.arena.allocator();
         var prng = std.Random.DefaultPrng.init(seed);
@@ -496,8 +496,10 @@ test "the bounded merge's registrations: contexts 32768 and 131072, positions 0 
         seen += 1;
         try std.testing.expect(f.win == 0 and f.ctl == .none and !f.prompt and f.streams == 1);
         try std.testing.expect(f.ring == 32768 or f.ring == 131072);
-        try std.testing.expectEqualSlices(usize, &.{ 0, 255, 256, 1000, 32767 }, f.positions);
+        try std.testing.expectEqualSlices(usize, &.{ 32767, 255, 256, 0, 1000 }, f.positions);
         try std.testing.expectEqual(f.positions.len, f.served[0].rows);
+        // gates 1-3 take all five rows; gate 4 (gates.zig's sums) the first four: the longest row and both chunk edges
+        for ([_]usize{ 32767, 255, 256 }) |x| try std.testing.expect(std.mem.indexOfScalar(usize, f.positions[0..4], x) != null);
         for (f.positions) |p| try std.testing.expect(p < f.ring);
     };
     try std.testing.expectEqual(@as(usize, 4), seen);
