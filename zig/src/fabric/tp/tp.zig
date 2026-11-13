@@ -57,6 +57,10 @@ pub const Session = struct {
         errdefer lib.close();
         const v = try lib.version();
         try b.agree(std.mem.asBytes(&v), "NCCL version");
+        // ranks that differ here would wait on each other inside NCCL: one speaking TLS, the other not
+        const tensors = @import("sys").rank_auth.tensors;
+        try b.agree(&.{@backingInt(tensors.current().?)}, tensors.env_name);
+        if (cfg.backend == .roce and cfg.roce_wire == .verbs) try tensors.rdma("TF_COMM_BACKEND=roce");
         var id: cuda.nccl.UniqueId = undefined;
         if (cfg.rank == 0) try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
         try b.broadcast(&id.internal, &id.internal);

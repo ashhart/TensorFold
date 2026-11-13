@@ -71,9 +71,18 @@ after the proof crosses in ChaCha20-Poly1305 records under a key the proof leave
 tensor-parallel bootstrap, fate and plan links, the ranks' liveness lines, the ROCm ranks' command link and the Flash
 Next pair's control link, so a host on the path reads no settings, plan, failure reason or NCCL id, and a record it
 changes, drops or replays closes the link. A group with no key, which meets on one host only, is not sealed. The
-tensors do not cross on those links. NCCL, RCCL and RDMA carry them, and that traffic is clear text, so run the ranks
-on a network you trust or on an encrypted one. The cluster links (`serve --cluster`, `tensorfold node`) are a separate
-transport and do not use this key.
+cluster links (`serve --cluster`, `tensorfold node`) are a separate transport and do not use this key.
+
+The tensors do not cross on those links. NCCL, RCCL or RDMA carries them. On a CUDA group with a key, each rank gives
+NCCL a key made from the group's before its first NCCL call (`ncclSetEncryption`, NCCL 2.32.3 or later), names NCCL's
+Socket network and keeps the engine's RoCE paths off, so NCCL's bootstrap and its tensors cross under TLS 1.3.
+
+- A rank whose NCCL cannot do that does not start, and nothing falls back to plain bytes. An older NCCL has no such
+  call. One built without TLS, as its PyPI wheels are, fails when its communicator starts. Build NCCL with
+  `TLS_BACKEND=OPENSSL3`.
+- To run a keyed group on InfiniBand or RoCE, or with an NCCL without TLS, set `TF_RANK_TENSORS=clear` on every rank.
+  The tensors then cross as plain bytes, so do that only on a network you trust or on an encrypted one.
+- RCCL on the ROCm ranks is still clear text.
 
 ## Release files
 

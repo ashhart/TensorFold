@@ -4,6 +4,7 @@ const std = @import("std");
 const platform = @import("sys");
 const abi = @import("abi.zig");
 const tp_watch = @import("tp_watch.zig");
+const tensors = platform.rank_auth.tensors;
 
 pub const minimum_version: c_int = 23000;
 
@@ -44,7 +45,7 @@ pub const Config = extern struct {
     graph_stream_ordering: c_int = std.math.minInt(c_int),
 };
 
-pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion };
+pub const Error = platform.optional_libraries.Failure || tensors.Error || error{ LibraryUnavailable, MissingSymbol, NcclFailed, NcclVersion };
 
 pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
 
@@ -91,6 +92,10 @@ pub const Library = struct {
                 return platform.optional_libraries.unavailable(.nccl);
             };
         }
+        // a keyed group: NCCL's sockets run TLS under a key from the group's before its first call, or no rank starts
+        var loaded: c_int = 0;
+        _ = api.ncclGetVersion(&loaded);
+        _ = try tensors.apply(lib.lookup(tensors.SetEncryption, tensors.symbol), loaded, "NCCL");
         return .{ .lib = lib, .api = api };
     }
 
@@ -112,6 +117,7 @@ pub const Library = struct {
         if (@import("builtin").is_test) return error.NcclFailed; // a test's injected failure: the runner fails error logs
         const s = self.api.ncclGetErrorString(r);
         std.log.err("{s}: {s} ({d})", .{ what, if (s) |p| std.mem.span(p) else "?", r });
+        if (std.mem.startsWith(u8, what, "ncclCommInit")) if (tensors.hint()) |h| std.log.err("{s}: {s}", .{ what, h });
         tp_watch.fatal(what); // with the ranks' lines open, every rank stops with it; with none, the caller hears it
         return error.NcclFailed;
     }

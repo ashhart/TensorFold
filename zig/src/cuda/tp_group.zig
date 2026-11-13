@@ -73,6 +73,10 @@ pub const Group = struct {
     /// Gathers up to `max_bytes` a rank go by RoCE writes if every rank asks (roce.wanted) and reaches all; else NCCL.
     pub fn openRoce(g: *Group, gpa: std.mem.Allocator, io: std.Io, d: *const driver.Driver, s: Stream, max_bytes: usize) !void {
         if (g.world < 2 or g.fast != null) return;
+        if (@import("sys").rank_auth.tensors.current() == .sealed) {
+            if (g.rank == 0) std.log.info("RoCE all-gather: this group has a key and RDMA carries plain bytes, so NCCL carries every gather", .{});
+            return;
+        }
         if (g.world > roce.max_world) {
             if (g.rank == 0) std.log.info("RoCE all-gather: {d} ranks; this path carries at most {d}, NCCL carries every gather", .{ g.world, roce.max_world });
             return;

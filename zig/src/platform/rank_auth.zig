@@ -4,6 +4,8 @@ const builtin = @import("builtin");
 pub const key = @import("rank_key.zig");
 /// Sealed records for every byte after the proof, under the session key the proof leaves at both ends.
 pub const seal = @import("rank_seal.zig");
+/// A keyed group's tensors inside NCCL or RCCL: TLS on the library's sockets, or the rank does not start.
+pub const tensors = @import("rank_tensors.zig");
 const environment = @import("environment.zig");
 const windows = builtin.os.tag == .windows;
 const posix = if (windows) @import("win_posix.zig") else std.posix;
@@ -190,7 +192,7 @@ fn acceptAs(fd: posix.socket_t, secret: *const Secret, allowed: []const Purpose,
     return .{ .purpose = purpose, .rank = rank, .world = world, .session = session(&secret.key, purpose, theirs, &mine) };
 }
 
-/// What a failed proof or an unusable key file means, naming the setting; null for any other error.
+/// What a failed proof, an unusable key file or unsealed tensors mean, naming the setting; null for any other error.
 pub fn explain(e: anyerror) ?[]const u8 {
     return switch (e) {
         error.RankAuthKeyRequired => "ranks on more than one host need a shared key: " ++ set_key,
@@ -207,7 +209,7 @@ pub fn explain(e: anyerror) ?[]const u8 {
         error.SecretTooShort => std.fmt.comptimePrint("{s} names a file with fewer than {d} bytes of secret: make one with {s}", .{ env_name, least_bytes, make_key }),
         error.SecretTooLong => env_name ++ " names a file over 4 KiB",
         error.NoRandom => "the system's random source could not be read for the key proof",
-        else => null,
+        else => tensors.explain(e),
     };
 }
 
@@ -408,4 +410,5 @@ test {
     _ = fixture;
     _ = key;
     _ = seal;
+    _ = tensors;
 }
