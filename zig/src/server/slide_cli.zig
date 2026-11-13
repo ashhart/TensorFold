@@ -35,9 +35,14 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
     const gb = @as(f64, @floatFromInt(r.bytes)) / 1e9;
     try w.print(done, .{ dir, r.files, gb, r.cloned, api.originals.folder_name, r.seconds });
     for (r.removed) |name| try w.print("tensorfold: removed {s}, which a lesson added\n", .{name});
-    for (r.graphs) |path| try w.print("tensorfold: removed the fact graph {s}\n", .{path});
+    const suffix = api.originals.taught_suffix;
+    for (r.graphs) |g| {
+        try w.print("tensorfold: removed the fact graph {s}\n", .{g.path});
+        if (g.err) |e| try w.print("tensorfold: could not remove {s}{s} ({s}): delete it by hand\n", .{ g.path, suffix, @errorName(e) });
+    }
     const left = "tensorfold: left the fact graph {s}: no {s} file beside it says this folder learned from it\n";
-    for (r.left) |path| try w.print(left, .{ path, api.originals.taught_suffix });
+    const unread = "tensorfold: left the fact graph {s}: its {s} file could not be read ({s})\n";
+    for (r.left) |g| if (g.err) |e| try w.print(unread, .{ g.path, suffix, @errorName(e) }) else try w.print(left, .{ g.path, suffix });
     try w.flush();
     return 0;
 }

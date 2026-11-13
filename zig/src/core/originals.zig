@@ -28,6 +28,7 @@ pub const Options = struct {
     tamper: ?*const fn ([:0]const u8) void = null, // tests: a kept or put-back file changed before it is checked
     uncloned: ?*const fn ([:0]const u8) bool = null, // tests: the files this file system will not clone
     checked: bool = false, // this process made or checked the snapshot already: a later lesson reuses it unread
+    graph_gone: ?*const fn ([]const u8) void = null, // tests: a removed fact graph's folders file, before it goes
 };
 
 /// A snapshot made now (`made`) or found (`checked`: hashed now), its files, bytes, clones and seconds; `taught` too.
@@ -47,11 +48,15 @@ pub const Restored = struct {
     bytes: u64 = 0,
     cloned: usize = 0,
     removed: []const []const u8 = &.{},
-    graphs: []const []const u8 = &.{},
-    /// Fact graphs the snapshot lists that stayed: nothing beside them says this folder learned from them.
-    left: []const []const u8 = &.{},
+    /// Fact graphs removed; `err` is why the folders file beside one stayed.
+    graphs: []const Graph = &.{},
+    /// Fact graphs the snapshot lists that stayed: nothing beside them names this folder, or (`err`) it was unreadable.
+    left: []const Graph = &.{},
     seconds: f64 = 0,
 };
+
+/// A fact graph a rollback removed or left, and the error from the folders file beside it.
+pub const Graph = struct { path: []const u8, err: ?anyerror = null };
 
 /// A process's hold on a model folder, gone when it is released or the process ends.
 pub const Hold = struct {
@@ -245,7 +250,7 @@ fn rollbackFiles(io: Io, dir: []const u8, o: Options, a: Allocator, why: *[]cons
         return error.NotRestored;
     }
     out.removed = try removeAdded(a, io, dir, entries);
-    try removeGraphs(a, io, snap, dir, &out);
+    try removeGraphs(a, io, snap, dir, o, &out);
     files.syncDir(a, dir);
     out.seconds = since(io, t0);
     return out;
@@ -418,15 +423,15 @@ fn lessonFile(name: []const u8) bool {
 }
 
 /// The fact graphs the snapshot lists, removed where they still read as one and their own folders file names `dir`.
-fn removeGraphs(a: Allocator, io: Io, snap: []const u8, dir: []const u8, out: *Restored) !void {
+fn removeGraphs(a: Allocator, io: Io, snap: []const u8, dir: []const u8, o: Options, out: *Restored) !void {
     const at = try join(a, snap, graphs_name);
     const list = Io.Dir.cwd().readFileAlloc(io, at, a, .limited(1 << 20)) catch |e| switch (e) {
         error.FileNotFound => return,
         else => return e,
     };
     const home = try Io.Dir.cwd().realPathFileAlloc(io, dir, a);
-    var gone: std.ArrayList([]const u8) = .empty;
-    var left: std.ArrayList([]const u8) = .empty;
+    var gone: std.ArrayList(Graph) = .empty;
+    var left: std.ArrayList(Graph) = .empty;
     var lines = std.mem.splitScalar(u8, list, '\n');
     while (lines.next()) |path| {
         if (!std.fs.path.isAbsolute(path)) continue;
@@ -435,14 +440,23 @@ fn removeGraphs(a: Allocator, io: Io, snap: []const u8, dir: []const u8, out: *R
         if (v != .object or v.object.get("facts") == null or v.object.get("next") == null) continue;
         // the snapshot's list sits in the folder, which a copied repository fills: the graph's side decides
         const taught = try std.mem.concat(a, u8, &.{ path, taught_suffix });
-        const folders = try lineList(a, io, taught);
+        // the files are back already: a folders file that cannot be read names no folder, and the graph stays
+        const folders = lineList(a, io, taught) catch |e| {
+            try left.append(a, .{ .path = path, .err = e });
+            continue;
+        };
         if (!inLines(home, folders)) {
-            try left.append(a, path);
+            try left.append(a, .{ .path = path });
             continue;
         }
         if (platform.c.unlink(try a.dupeSentinel(u8, path, 0)) != 0) return error.RemoveFailed;
-        try gone.append(a, path);
-        try writeLines(a, taught, folders, home);
+        if (o.graph_gone) |hook| hook(taught);
+        // its folders go with it, or a graph made later at this path would take them on; one left is only reported
+        const stayed: ?anyerror = if (Io.Dir.cwd().deleteFile(io, taught)) null else |e| switch (e) {
+            error.FileNotFound => null,
+            else => e,
+        };
+        try gone.append(a, .{ .path = path, .err = stayed });
     }
     out.graphs = gone.items;
     out.left = left.items;
@@ -461,15 +475,6 @@ fn inLines(line: []const u8, list: []const u8) bool {
     var lines = std.mem.splitScalar(u8, list, '\n');
     while (lines.next()) |l| if (std.mem.eql(u8, l, line)) return true;
     return false;
-}
-
-/// `list` without `drop`, written back; a list left empty takes its file with it.
-fn writeLines(a: Allocator, file: []const u8, list: []const u8, drop: []const u8) !void {
-    var rest: std.ArrayList(u8) = .empty;
-    var lines = std.mem.splitScalar(u8, list, '\n');
-    while (lines.next()) |l| if (l.len > 0 and !std.mem.eql(u8, l, drop)) try rest.print(a, "{s}\n", .{l});
-    if (rest.items.len > 0) return files.writeWhole(a, file, rest.items);
-    _ = platform.c.unlink(try a.dupeSentinel(u8, file, 0));
 }
 
 /// `graph`, made absolute, listed once in the snapshot's graphs file, and `dir` once in the graph's folders file.
