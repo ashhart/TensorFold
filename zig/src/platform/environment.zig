@@ -40,6 +40,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .scope = .common, .kind = .u64, .trim = " \t", .first_digit = true, .forms = "whole unsigned 64-bit milliseconds (capped at 1099511627776)" },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding at least 32 key bytes" },
     .{ .name = "TF_RANK_SECRET_FILE", .scope = .common, .kind = .path, .forms = "a path without control characters to a file only its owner can read, holding 32 bytes to 4 KiB of key" },
+    .{ .name = "TF_RANK_TENSORS", .scope = .common, .kind = .word, .trim = " \t", .words = &.{ "sealed", "clear" }, .forms = "sealed or clear" },
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .scope = .cuda, .kind = .path, .forms = "a captured kernel set's folder without control characters, or native for the engine's own kernels" },
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },

@@ -48,6 +48,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_RESTORE_PREFETCH_MS", .raw = "1099511627777", .n = 1099511627777 },
     .{ .name = "TENSORFOLD_TOOL_ID_KEY_FILE", .raw = "/etc/tensorfold/tool id.key", .n = 0 },
     .{ .name = "TF_RANK_SECRET_FILE", .raw = "/etc/tensorfold/rank.key", .n = 0 },
+    .{ .name = "TF_RANK_TENSORS", .raw = "sealed", .n = 0 },
+    .{ .name = "TF_RANK_TENSORS", .raw = " clear\t", .n = 1 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "0", .n = 0 },
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
