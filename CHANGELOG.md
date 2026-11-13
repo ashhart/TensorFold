@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CI: the Linux no-GPU job runs `zig build test-host`, which collects the named host tests and compile checks apart from nine reviewed exclusions (the optional xgrammar steps, the release-path check, the two large-state timing commands, which stay available for explicit runs, and four fixture and source-pin checks held back under #2031); the build graph refuses empty checks, stale exclusions and aliases that bring excluded work back (#2095, part of #2031). Thanks to @garvrao80.
+
 - Tests: the TCP bootstrap's three-rank gather test and the multi-rank RoCE vote test join every rank they started before returning, so a failed spawn or check no longer leaves threads writing to a finished test's frame (#2963). Thanks to @Defilan.
 
 - GLM-5.3-Flash on CUDA: a tensor-parallel abort reaches the ranks' communicator from the engine's start, once, and a start-up failure after an abort no longer destroys the communicator again; serving and replies are unchanged (#2918, part of #2560). Thanks to @laudney.
