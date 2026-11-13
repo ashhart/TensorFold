@@ -191,6 +191,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .max_tokens = @intCast(@min(limit, std.math.maxInt(u32))),
         .sampling = sampling,
         .penalties = try srv.resolvePenalties(cx, f, instruct),
+        .logit_bias = try fields_mod.logitBias(cx, f, srv.info.capability(.logit_bias), srv.text.vocabSize()),
         .eos = if (stops_opt.ignore_eos) &.{} else srv.eos,
         .drafts = drafts,
         .background = background,

@@ -121,6 +121,7 @@ pub const Spec = struct {
     max_new: u32,
     eos: []const u32 = &.{},
     sampling: ?Sampling = null,
+    logit_bias: []const @import("logit_bias.zig").Entry = &.{},
     penalties: Penalties = .{}, // where the backend applies them (Backend.VTable.penalties)
     drafts: bool = true,
     proposer: ?Proposer = null,
@@ -158,6 +159,7 @@ pub const Stream = struct {
     max_new: u32,
     eos: []const u32,
     sampling: ?Sampling,
+    logit_bias: []const @import("logit_bias.zig").Entry = &.{},
     penalties: Penalties = .{},
     drafts: bool,
     proposer: ?Proposer,
@@ -261,6 +263,7 @@ pub const Stream = struct {
             .eos = spec.eos,
             .sampling = spec.sampling,
             .penalties = spec.penalties,
+            .logit_bias = spec.logit_bias,
             .drafts = spec.drafts,
             .proposer = if (spec.drafts) spec.proposer else null,
             .recall = if (spec.drafts) spec.recall else null,

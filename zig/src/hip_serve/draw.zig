@@ -24,11 +24,12 @@ pub const Request = struct {
     /// OpenAI penalties count reply tokens only; history may also contain prompt tokens.
     reply: []const u32 = &.{},
     penalties: lanes.sampling.Penalties = .{},
+    logit_bias: []const lanes.logit_bias.Entry = &.{},
 };
 
 /// Whether a row is drawn on the host from the whole row.
 fn whole(r: Request) bool {
-    return r.mask.len > 0 or r.keep != null or r.repetition != 1 or r.penalties.active() or r.forced != null;
+    return r.mask.len > 0 or r.keep != null or r.repetition != 1 or r.penalties.active() or r.logit_bias.len > 0 or r.forced != null;
 }
 
 fn greedy(s: ?lanes.Sampling) bool {
@@ -164,11 +165,12 @@ pub const Drawer = struct {
     pub fn drawHost(w: *const Drawer, row: []u16, r: Request) !u32 {
         if (r.forced) |id| {
             if (id >= row.len) return error.BadForcedToken;
+            if (lanes.logit_bias.find(r.logit_bias, id)) |b| if (b.ban) return error.NoAllowedToken;
             if (r.mask.len > 0 and (id / 32 >= r.mask.len or (r.mask[id / 32] >> @intCast(id % 32)) & 1 == 0)) return error.NoAllowedToken;
             return id;
         }
         if (r.mask.len > 0) sample.mask(row, w.dtype, r.mask);
-        if (r.repetition == 1 and !r.penalties.active()) return sample.draw(w.gpa, row, w.dtype, r.sampling, r.position);
+        if (r.repetition == 1 and !r.penalties.active() and r.logit_bias.len == 0) return sample.draw(w.gpa, row, w.dtype, r.sampling, r.position);
         const values = try w.gpa.alloc(f32, row.len);
         defer w.gpa.free(values);
         for (values, 0..) |*v, i| v.* = sample.widen(row, w.dtype, i);
@@ -202,6 +204,15 @@ pub fn process(a: std.mem.Allocator, values: []f32, r: Request) !void {
             v.* -= r.penalties.of(count);
         };
     }
+    try lanes.logit_bias.apply(values, r.logit_bias);
+    if (r.logit_bias.len > 0) {
+        var allowed = false;
+        for (values) |v| if (std.math.isFinite(v)) {
+            allowed = true;
+            break;
+        };
+        if (!allowed) return error.NoAllowedToken;
+    }
 }
 
 test "repetition keeps FP32 ranking and counts prompt tokens once, OpenAI penalties count only reply tokens" {
@@ -212,4 +223,17 @@ test "repetition keeps FP32 ranking and counts prompt tokens once, OpenAI penalt
     try std.testing.expectEqual(@as(f32, 2), values[3]);
     try std.testing.expectEqual(@as(u32, 1), try sample.drawWide(std.testing.allocator, values[0..2], null, 0));
     try std.testing.expectError(error.BadHistoryToken, process(std.testing.allocator, &values, .{ .sampling = null, .position = 0, .repetition = 1.1, .history = &.{4} }));
+}
+
+test "logit_bias draws ban a token at every seed and shift greedy picks without changing a solo row" {
+    const a = std.testing.allocator;
+    const drawer: Drawer = .{ .gpa = a, .d = undefined, .dtype = .bf16, .vocab = 3, .rows = 1, .host = undefined, .dev = undefined, .row = undefined };
+    var words = [_]u16{ 0x4120, 0x4110, 0 };
+    const bias = [_]lanes.logit_bias.Entry{ .{ .token = 0, .value = -100, .ban = true }, .{ .token = 2, .value = 20 } };
+    try std.testing.expectEqual(@as(u32, 2), try drawer.drawHost(&words, .{ .sampling = null, .position = 0, .logit_bias = &bias }));
+    for (0..128) |seed| {
+        try std.testing.expect(try drawer.drawHost(&words, .{ .sampling = .{ .seed = seed, .top_k = 0, .top_p = 1 }, .position = seed, .logit_bias = &bias }) != 0);
+    }
+    try std.testing.expectEqual(@as(u32, 0), try drawer.drawHost(&words, .{ .sampling = null, .position = 0 }));
+    try std.testing.expectError(error.NoAllowedToken, drawer.drawHost(&words, .{ .sampling = null, .position = 0, .logit_bias = &bias, .forced = 0 }));
 }

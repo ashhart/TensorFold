@@ -54,6 +54,7 @@ pub const Config = config.Config;
 pub const Model = config.Model;
 pub const Stream = stream.Stream;
 pub const Sampling = sampling.Sampling;
+pub const logit_bias = @import("logit_bias.zig");
 pub const Penalties = sampling.Penalties;
 pub const SuffixLookup = proposer.SuffixLookup;
 pub const LogprobRow = logprob.Row;
