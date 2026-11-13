@@ -88,9 +88,14 @@ const equality = [_]Cfg{
     .{ .name = "cuda window_rows decode, bounded merge equals every chunk's: tf_wrows_merge_256, 16/4 heads, no window, context 131072", .h = 16, .hk = 4, .win = 0, .ring = 131072, .streams = 1, .positions = &bounded_at, .equal = true, .served = boundedAt(16, 131072) },
 };
 
-/// The equality registrations' baseline merge in contract_controls.cu: every chunk, empty or not.
+/// The equality registrations' baseline merge in contract_wrows_controls.cuh: every chunk, empty or not.
 pub fn baselineMerge(d: usize) [:0]const u8 {
     return if (d == 512) "tf_ctl_wrows_merge_all_512" else "tf_ctl_wrows_merge_all_256";
+}
+
+/// Its baseline partials: every chunk written, empty ones as m = -inf, as one block a chunk wrote them.
+pub fn baselinePart(d: usize) [:0]const u8 {
+    return if (d == 512) "tf_ctl_wrows_part_all_512" else "tf_ctl_wrows_part_all_256";
 }
 
 const paged_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 257 } };
@@ -387,15 +392,17 @@ pub const Rows = struct {
         return null;
     }
 
-    /// The same rows through the merge over every chunk (Fault ALL): its bytes must be the bounded merge's.
+    /// The same rows through the partials and merge of every chunk (Fault ALL): its bytes must be the bounded ones'.
     fn baseline(self: *Rows, got: []const u8) !?[]const u8 {
         var k = self.fns;
         k.merge = try self.ctl.?.function(baselineMerge(self.f.d));
+        k.part = try self.ctl.?.function(baselinePart(self.f.d));
+        if (self.f.d == 512) try k.part.allowDynamicShared(wa.staged_smem);
         try WA.decodeWith(&k, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.before, self.dev[3], self.dev[4], self.win(), self.scratch, self.call.rows);
         try self.rig.s.synchronize();
         const want = try self.rig.bytes(self.before, got.len);
         const at = std.mem.indexOfDiff(u8, got, want) orelse return null;
-        return try std.fmt.bufPrint(&self.msg, "the bounded merge's output differs from the merge over every chunk from byte {d} (row {d})", .{ at, at / (self.f.h * self.f.d * 2) });
+        return try std.fmt.bufPrint(&self.msg, "the bounded partials and merge differ from every chunk's from byte {d} (row {d})", .{ at, at / (self.f.h * self.f.d * 2) });
     }
 
     pub fn reference(self: *Rows, want: []f64, mag: []f64) !void {
@@ -495,4 +502,5 @@ test "the bounded merge's registrations: contexts 32768 and 131072, positions 0 
     };
     try std.testing.expectEqual(@as(usize, 4), seen);
     try std.testing.expectEqualStrings("tf_ctl_wrows_merge_all_512", baselineMerge(512));
+    try std.testing.expectEqualStrings("tf_ctl_wrows_part_all_256", baselinePart(256));
 }
