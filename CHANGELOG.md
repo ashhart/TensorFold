@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B with DFlash2 on M5 Macs: one greedy request at the default 16-row window uses the long-copy driver again, so copy-heavy replies such as a whole-file rewrite run at about 792 tok/s instead of 241 on an M5 Ultra (#3013). Every copied token is still verified by the target, so replies are the same tokens. Sampled requests, concurrent streams, wider windows and M1-M4 Macs keep the lane loop; `TF_QWEN27_LANES=1` keeps every request on lanes (#3069).
+
 - Cortheon: a page link survives whitespace around `href` or inside its URL: `href ="…"` and a quote after a newline are kept, an unquoted link ends at a tab, CR or LF, and a tab or newline wrapped inside a link is not part of the address (#3006). Thanks to @ppardus.
 
 - Slide rollback: a fact graph is removed only when its own folders file names the folder being rolled back, and its folders file goes with it; a graph whose folders file can't be read is left in place and printed (#3073).
