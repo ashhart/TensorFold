@@ -281,7 +281,7 @@ void main() {
         d * params.in_strides[3];
     // Load 16 independent V elements before the 16 in-order FMAs.
 
-    // A 64-key block spilled load registers and ran 9x slower.
+    // A wider key block spills registers, so this loop loads values in smaller chunks.
     for (; key + 16u <= key_end; key += 16u) {
       float vv[16];
       for (uint index = 0u; index < 16u; ++index) {
