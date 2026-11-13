@@ -176,9 +176,9 @@ Unsupported image input, audio, video and non-text output requests receive HTTP 
 
 Each native GET /v1/models entry, including every configured alias, includes a capabilities object.
 It reports the loaded engine's boolean Info flags: text_generation, context_fitted, call_gates, loop_guard,
-thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, prompt_logprobs,
-prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures, greedy_only,
-slide_conversations and folded_memory. folded_memory is true when `--slide` has attached the engine's folded memory
+thinking_budget, reasoning, reasoning_optional, answer_limit, structures, logprobs, penalties, logit_bias,
+prompt_logprobs, prompt_cache, cache_salt ([salts](#prompt-cache-salts)), warm_turns, plain_only, decides, pictures,
+greedy_only, slide_conversations and folded_memory. folded_memory is true when `--slide` has attached the engine's folded memory
 weights (living weights), and false when learning is off. The vision, speech, embeddings, readouts and rerank fields
 report whether that user feature is present. The last two fields, thinking_switch and thinking_applicable, are the
 loaded chat template's and tokenizer's thinking facts (see

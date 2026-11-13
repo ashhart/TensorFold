@@ -176,7 +176,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk_u32, .decode_share = o.decode_share, .structures = true, .witness = metal_witness.source(bound) });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = served, .context_window = @intCast(window), .prefill_step = chunk_u32, .decode_share = o.decode_share, .structures = true, .logit_bias = true, .witness = metal_witness.source(bound) });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     if (o.prompt_cache_gib) |budget_gib| {
