@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 4.9% for a lone drafted stream and 12.9% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen5 x16 slot, and only the with and without pairs compare (#3051, for #3050).
+
 - Server: a grammar over 512 KiB is refused with HTTP 400 before it is compiled, so one oversized schema can no longer hold the grammar compiler for a minute (#3038).
 
 - Qwen3.8-27B on XPU: the target's and the DFlash2 drafter's RoPE tables come from core's exact helper, so they hold the reference's fp32 words; 15 of 32 and 18 of 64 values move by 1 ulp (#2000, part of #1852).
@@ -323,8 +325,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: prompt passes no longer write the GDN tails buffer, which nothing read. Replies are unchanged; on an M5 Ultra with the MLX 4-bit checkpoint, time to first token is 0.45% to 1.16% shorter at 2K, 8K and 32K prompts, one and four streams (#2915, for #2905).
 
 - Flash Next on CUDA at `--tp 2`: a prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's rows and gathers the sums, where it all-reduced every slot; decode rounds and verify windows keep the all-reduce. Every reduced value is the same single add and the slots are summed in the writeback's order, so replies keep their tokens. Over two GB10s' RoCE link rank 0 sends 3.43 MiB a prompt token instead of 5.81, and cold prefill of 2k to 32k tokens is 26.5% to 26.8% faster there and 30.9% to 33.9% faster on two RTX PRO 6000s (an 8,192-token prompt: 7.12 to 5.62 s and 3.61 to 2.70 s) (#2977). Thanks to @swbiggart.
-
-- Qwen3.8-27B on Intel GPUs: `logprobs` and `top_logprobs` are served, for a lone drafted stream, plain streams and shared rounds, greedy and sampled, with the tokens bit-equal to a request without them and a drafted stream's rows equal to a plain one's; `prompt_logprobs` is still refused. Decode costs 6.3% for a lone drafted stream and 13.6% for two streams at once (a total rate, prefill included); these are an order of magnitude from one Arc Pro B70 in a Gen4 x4 slot, and only the with and without pairs compare (#3050).
 
 - Tests: `tf-cuda-test flashnext-rank RANK PORT timeout` passes again on two GPUs. NCCL start-up keeps its 30 s bound and only the stalled collective gets 200 ms, and both ranks meet once their communicators are up, so `timeout` and `eof` fail the collective under test, not the start-up (#2976, fixes #2975). Thanks to @swbiggart.
 
