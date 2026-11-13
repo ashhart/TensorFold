@@ -10,6 +10,7 @@ test "stable profile: missing family rows have the requested classes and exact s
         .{ .id = .GEMMA_DRAFT_BF16, .family = "gemma4", .backend = "metal", .class = .debug },
         .{ .id = .TF_ANE_COLUMNS, .family = "qwen3_5", .backend = "metal", .class = .experimental },
         .{ .id = .TF_PROMPT_ROWS, .family = "qwen3_5_moe", .backend = "metal", .class = .arithmetic },
+        .{ .id = .TF_QWEN35_CPU_WINDOWS, .family = "qwen3_5", .backend = "cpu", .class = .identical },
     }) |c| {
         const row = p.entry(c.id);
         try t.expectEqual(c.class, row.class);

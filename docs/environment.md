@@ -53,6 +53,9 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
+| `TF_QWEN35_CPU_THREADS` | Whole count 1 through 255 of CPU worker threads beside the engine thread; unset: the logical CPUs less one. The three `TF_QWEN35_CPU_*` settings are checked only by the `zig build native-cpu` binary |
+| `TF_QWEN35_CPU_WINDOWS` | `0` or `1`; `1` admits verify windows of up to 16 rows on the CPU engine once its exactness check passes |
+| `TF_QWEN35_CPU_TRACE` | `0` or `1`; `1` prints each one-token draw's top two logits and their margin on stderr |
 
 The video-token reader has no fixed model-independent token ceiling. Its unsigned storage width is not a useful token budget.
 The request geometry and model context decide whether a parsed budget fits; zero remains accepted as before.

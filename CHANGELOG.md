@@ -522,6 +522,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   GB10) with its joint schema head on the GPU (HIP's kernels and products, on cuBLASLt with FP32 compute), and chat
   is refused by name; `TF_LANE_TRACE` gains a `cancel` line for a request cancelled between two prompt calls (#2458,
   part of #2324). Thanks to @laudney.
+- CPU: `zig build native-cpu` builds `tensorfold-native` with a CPU engine that serves Qwen3.5-2B MLX 4-bit on the host's cores, x86_64 or arm64, no GPU (`backends: ["cpu"]`; default builds unchanged): the lane core, prompt cache and sampler as the GPU engines use them, the registered projection and RMS norm, fp32 sums in the attention and the delta rule's recurrence, and every other row computed in float64 and rounded to bf16 through fp32, so the same bytes come back at 1 to 8 threads (and, for the list case, on x86_64 as on arm64; a pinned digest of a synthetic forward checks Linux, Windows and macOS in CI); every operation is registered in the kernel contract (`zig build cpu-contract`: 15 kernels through gates 1 to 4, 36 planted controls), and `tools/zig/cpu_fidelity.py` with `tf-qwen35-cpu-forward` compares its teacher-forced logits with a float64 reference row by row, every top-token difference with both margins (#2551, part of #2448). Thanks to @Whq02.
 
 ## 1.2.4
 

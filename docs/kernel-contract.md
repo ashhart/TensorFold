@@ -119,9 +119,10 @@ native zebins the audit reads, so the GRF mode the record states is the loaded i
 id it ran on. `xpu-contract-run` runs it on this card. On a host without ocloc, `-Dxpu-images=DIR` links zebins that
 another host made with the commands the receipt records.
 
-On any host, with no device, `zig build cpu-contract` runs the CPU kernels (Qwen3.5-2B's affine projection and RMS
-norm on the host's cores) through gates 1 to 4 and their eight controls; a CPU kernel has no launch, so gate 5 has
-nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
+On any host, with no device, `zig build cpu-contract` runs the CPU engine's operations (Qwen3.5-2B's affine projection
+and RMS norm, its embedding, residual add, MLP activation, attention gate, rotary, head norms, attention and the delta
+rule's inputs, decay and recurrence on the host's cores) through gates 1 to 4 and their 36 controls; a CPU kernel has no
+launch, so gate 5 has nothing to check. `zig build test-kernel-contract`, CI's no-device step, runs the same gates as a test, and `zig build
 test` the kernels' own test that the bytes are the same at 1 to 16 threads and at column splits every 8 columns to 256 and every 256 beyond (each alignment of the four-tile pass), on x86_64 and arm64.
 
 `--only` filters generic Metal launch labels too; both global launch-limit controls still run.
@@ -436,7 +437,18 @@ so gate 2's five runs are five thread counts (the 16-output a and b projections 
 run on two). Eight controls: a projection zeroing a non-finite activation, writing its
 activations, skipping the rows past its last block of eight, and summing each group in half; a norm taking a
 non-finite input as zero, writing its output over its input, scaling by the next element's weight, and summing its
-squares in bf16.
+squares in bf16. The CPU engine's other operations (`cpu_ops.zig`, `cpu_mixers.zig`) are registered beside them, each
+at a decode step's, a verify window's, the verify batch's and a prompt chunk's rows (the per-segment delta rule at a
+step's, a window's and a chunk's): the embedding, residual add, MLP activation, attention
+gate and rotary (one float64 expression an output, rounded to bf16 through fp32, no sums); the q/k head norm over 256 and the delta
+rule's gated output norm over 128 (the `rows` family's RMS reference); the attention (one query row's softmax over up to
+4096 keys, its bound carrying the fp32 dots' error through the softmax); the delta rule's inputs (the four-tap conv,
+SiLU, L2 norms and beta), its decay (fp32) and its recurrence (one head's fp32 state over a window, its bound carried
+through the state token by token). Twenty-eight more controls: each taking a non-finite input as zero, the residual
+add, attention, recurrence and delta inputs writing an input, each reading a wrong operand (the next group's scale, half
+the residual, the next up value, the query half as the gate, the next position, the next weight or z, the row's own key
+left out, the decay skipped, the taps reversed, a's sign flipped), and the attention and the recurrence summing in half
+precision.
 
 CUDA also checks the mla image (`mla.cu`, MLA over a 512-wide latent with 64 roped columns and 128-wide heads, on
 GLM's chunk bodies): the head-wise gate, the rope (plain, and with YaRN's attention factor at 900,000 positions), the

@@ -1,23 +1,38 @@
-//! The CPU kernels' contract: gates 1 to 4 over the projection and the norm on this host's cores, no device.
+//! The CPU kernels' contract: gates 1 to 4 over every operation of the CPU engine on this host's cores, no device.
 const std = @import("std");
 const builtin = @import("builtin");
 const contract = @import("contract");
 const proj = @import("contract_projection.zig");
 const norm = @import("contract_norm.zig");
+const rows = @import("contract_rows.zig");
+const attn = @import("contract_attention.zig");
+const norms = @import("contract_norms.zig");
+const delta = @import("contract_delta.zig");
+const pre = @import("contract_delta_inputs.zig");
 
 const g = contract.gates;
 const seed: u64 = 0x6370_7531;
 
-/// Every registration and control: the projection's three chain classes and the norm, then their eight controls.
+/// Every registration and control: the projection's chain classes, the norms, the rows, the attention, the delta rule.
 const Suite = struct {
     projs: [std.enums.values(proj.Which).len]proj.Proj,
     norms: [std.enums.values(norm.Which).len]norm.Norm,
-    kernels: [std.enums.values(proj.Which).len + std.enums.values(norm.Which).len]g.Kernel,
+    rows: [std.enums.values(rows.Which).len]rows.Row,
+    attns: [std.enums.values(attn.Which).len]attn.Attn,
+    heads: [std.enums.values(norms.Which).len]norms.Norm,
+    chains: [std.enums.values(delta.Which).len]delta.Chain,
+    pres: [std.enums.values(pre.Which).len]pre.Pre,
+    kernels: [std.enums.values(proj.Which).len + std.enums.values(norm.Which).len + std.enums.values(rows.Which).len + std.enums.values(attn.Which).len + std.enums.values(norms.Which).len + std.enums.values(delta.Which).len + std.enums.values(pre.Which).len]g.Kernel,
 
     fn init(a: std.mem.Allocator) Suite {
         var s: Suite = undefined;
         for (&s.projs, std.enums.values(proj.Which)) |*p, w| p.* = proj.Proj.init(a, w);
         for (&s.norms, std.enums.values(norm.Which)) |*n, w| n.* = norm.Norm.init(a, w);
+        for (&s.rows, std.enums.values(rows.Which)) |*r, w| r.* = rows.Row.init(a, w);
+        for (&s.attns, std.enums.values(attn.Which)) |*t, w| t.* = attn.Attn.init(a, w);
+        for (&s.heads, std.enums.values(norms.Which)) |*h, w| h.* = norms.Norm.init(a, w);
+        for (&s.chains, std.enums.values(delta.Which)) |*d, w| d.* = delta.Chain.init(a, w);
+        for (&s.pres, std.enums.values(pre.Which)) |*x, w| x.* = pre.Pre.init(a, w);
         return s;
     }
 
@@ -32,6 +47,26 @@ const Suite = struct {
             s.kernels[at] = n.kernel();
             at += 1;
         };
+        for (&s.rows) |*r| if (r.kernel().control == null) {
+            s.kernels[at] = r.kernel();
+            at += 1;
+        };
+        for (&s.attns) |*t| if (t.kernel().control == null) {
+            s.kernels[at] = t.kernel();
+            at += 1;
+        };
+        for (&s.heads) |*h| if (h.kernel().control == null) {
+            s.kernels[at] = h.kernel();
+            at += 1;
+        };
+        for (&s.chains) |*d| if (d.kernel().control == null) {
+            s.kernels[at] = d.kernel();
+            at += 1;
+        };
+        for (&s.pres) |*x| if (x.kernel().control == null) {
+            s.kernels[at] = x.kernel();
+            at += 1;
+        };
         for (&s.projs) |*p| if (p.kernel().control != null) {
             s.kernels[at] = p.kernel();
             at += 1;
@@ -40,12 +75,37 @@ const Suite = struct {
             s.kernels[at] = n.kernel();
             at += 1;
         };
+        for (&s.rows) |*r| if (r.kernel().control != null) {
+            s.kernels[at] = r.kernel();
+            at += 1;
+        };
+        for (&s.attns) |*t| if (t.kernel().control != null) {
+            s.kernels[at] = t.kernel();
+            at += 1;
+        };
+        for (&s.heads) |*h| if (h.kernel().control != null) {
+            s.kernels[at] = h.kernel();
+            at += 1;
+        };
+        for (&s.chains) |*d| if (d.kernel().control != null) {
+            s.kernels[at] = d.kernel();
+            at += 1;
+        };
+        for (&s.pres) |*x| if (x.kernel().control != null) {
+            s.kernels[at] = x.kernel();
+            at += 1;
+        };
         return s.kernels[0..at];
     }
 
     fn deinit(s: *Suite) void {
         for (&s.projs) |*p| p.deinit();
         for (&s.norms) |*n| n.deinit();
+        for (&s.rows) |*r| r.deinit();
+        for (&s.attns) |*t| t.deinit();
+        for (&s.heads) |*h| h.deinit();
+        for (&s.chains) |*d| d.deinit();
+        for (&s.pres) |*x| x.deinit();
     }
 };
 
@@ -63,17 +123,17 @@ pub fn main(init: std.process.Init) !u8 {
     return if (t.problems() == 0) 0 else 1;
 }
 
-test "the CPU projection and norm pass gates 1 to 4, and each planted control goes red at its gate" {
+test "every CPU operation passes gates 1 to 4, and each planted control goes red at its gate" {
     var suite = Suite.init(std.testing.allocator);
     defer suite.deinit();
     g.quiet = true;
     defer g.quiet = false;
     var t: g.Tally = .{};
     try g.runAll(std.testing.allocator, suite.list(), seed, &t);
-    try std.testing.expectEqual(@as(usize, 4), t.kernels);
-    try std.testing.expectEqual(@as(usize, 4), t.passed);
-    try std.testing.expectEqual(@as(usize, 8), t.controls);
-    try std.testing.expectEqual(@as(usize, 8), t.caught);
+    try std.testing.expectEqual(@as(usize, 15), t.kernels);
+    try std.testing.expectEqual(@as(usize, 15), t.passed);
+    try std.testing.expectEqual(@as(usize, 36), t.controls);
+    try std.testing.expectEqual(@as(usize, 36), t.caught);
     try std.testing.expectEqual(@as(usize, 0), t.known);
     try std.testing.expectEqual(@as(usize, 0), t.problems());
 }
@@ -82,4 +142,9 @@ test {
     _ = @import("contract_rig.zig");
     _ = proj;
     _ = norm;
+    _ = rows;
+    _ = attn;
+    _ = norms;
+    _ = delta;
+    _ = pre;
 }

@@ -16,6 +16,7 @@ pub fn environment(a: Allocator, args: cli.Args) !?[]const u8 {
         if (std.mem.eql(u8, backend, "cuda")) flags.cuda = true;
         if (std.mem.eql(u8, backend, "metal")) flags.metal = true;
         if (std.mem.eql(u8, backend, "xpu")) flags.xpu = true;
+        if (std.mem.eql(u8, backend, "cpu")) flags.cpu = true;
     }
     return settings.refusal(a, settings.Process{}, flags);
 }
