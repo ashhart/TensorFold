@@ -17,7 +17,7 @@ pub const Span = struct {
         encoder.setBuffer(s.buffer, s.offset, index);
     }
 
-    fn overlaps(a: Span, b: Span) bool {
+    pub fn overlaps(a: Span, b: Span) bool {
         return a.buffer.id == b.buffer.id and a.offset < b.offset + b.bytes and b.offset < a.offset + a.bytes;
     }
 };
@@ -55,6 +55,7 @@ pub const Buffers = struct {
     keeps: Span,
     kept_rows: Span,
     slot_steps: Span,
+    flows: ?Span = null,
 
     pub fn check(b: Buffers, sizes: abi.Bytes, kinds: abi.WeightKinds, p: abi.Params, plan: Plan) !void {
         try b.qkv.check(sizes.qkv);
@@ -105,6 +106,8 @@ pub const Round = struct {
     tree_mode: TreeMode = .auto,
     compact: bool,
     slot_kernel: usize, // which tree_slots kernel holds the plan's peak of live states
+    out_sums: ?@import("quant_gpu.zig").Sums = null,
+    column_kernel: ?usize = null, // which column scan holds them, if the plan's trees fit one
 
     pub fn init(shape: abi.Shape, kinds: abi.WeightKinds, p: abi.Params, plan: Plan, b: Buffers, pipelines: Pipelines) !Round {
         if (plan.parents.len != p.rows or plan.segments.len == 0 or plan.keeps.len != plan.segments.len or (plan.compact and plan.slot_steps.len != p.rows)) return error.BadGdnPlan;
@@ -114,10 +117,25 @@ pub const Round = struct {
         for (pipelines.tree_slots) |pipeline| if (pipeline.simdWidth() != 32 or pipeline.maxThreads() < 128) return error.UnsupportedGdnPipeline;
         const slots = @import("core_delta").slotKernel(plan.slot_peak);
         if (plan.compact) for (plan.segments) |segment| try @import("core").tree_slots.validate(plan.parents[segment.first..][0..segment.rows], plan.slot_steps[segment.first..][0..segment.rows], segment.first, @import("core_delta").slot_kernels[slots]);
-        return .{ .slot_kernel = slots, .compact = plan.compact, .p = p, .b = b, .pipelines = pipelines, .segments = plan.segments.len, .conv_width = shape.conv };
+        const columns = if (plan.flowing and pipelines.columns != null and b.flows != null) @import("core_delta").columnKernel(plan.slot_peak) else null;
+        return .{ .slot_kernel = slots, .column_kernel = columns, .compact = plan.compact, .p = p, .b = b, .pipelines = pipelines, .segments = plan.segments.len, .conv_width = shape.conv };
+    }
+
+    /// All-bf16 weights and four taps over 128-wide heads, the shape the vector conv reads.
+    fn usesVectors(r: Round) bool {
+        return @import("core_delta").flat_glue and r.pipelines.pre_vectors != null and r.p.dk == 128 and r.p.dv == 128 and r.p.taps == 4 and r.p.weight_flags & 7 == 0;
     }
 
     pub fn prepare(r: Round, e: metal.ComputeEncoder) void {
+        if (r.usesVectors()) {
+            e.setPipeline(r.pipelines.pre_vectors.?);
+            bind(e, .{ r.b.qkv, r.b.a, r.b.b, r.b.history, r.b.conv_weight, r.b.a_log, r.b.dt, r.b.windows, r.b.row_slots }, 0);
+            e.setValue(r.p, 9);
+            bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing }, 10);
+            e.dispatchGroups(.{ .width = 1, .height = 2 * r.p.nk + r.p.nv, .depth = r.p.rows }, .{ .width = 32, .height = 1, .depth = 1 });
+            e.barrier();
+            return;
+        }
         e.setPipeline(r.pipelines.pre);
         bind(e, .{ r.b.qkv, r.b.a, r.b.b, r.b.history, r.b.conv_weight, r.b.a_log, r.b.dt, r.b.windows, r.b.row_slots }, 0);
         e.setValue(r.p, 9);
@@ -141,24 +159,32 @@ pub const Round = struct {
         return r.p.dk == 128 and r.compact and r.tree_mode != .snapshot;
     }
 
+    /// A shared round's windows step their state in the slot scan, so only a lone tree takes the columns.
+    fn usesColumns(r: Round) bool {
+        return @import("core_delta").flat_glue and r.usesSlots() and r.p.dv == 128 and r.p.advance == 0 and r.column_kernel != null;
+    }
+
     pub fn forward(r: Round, e: metal.ComputeEncoder) void {
-        e.setPipeline(if (r.usesSlots()) r.pipelines.tree_slots[r.slot_kernel] else r.pipelines.tree);
-        bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.state, r.b.parents, r.b.segments }, 0);
-        e.setValue(r.p, 8);
-        bind(e, .{ r.b.recurrent, r.b.snapshots }, 9);
-        if (r.usesSlots()) {
-            r.b.slot_steps.bind(e, 11);
-            r.b.state.bind(e, 12);
-            (r.b.before orelse r.b.state).bind(e, 13);
+        if (r.usesColumns()) {
+            e.setPipeline(r.pipelines.columns.?[r.column_kernel.?]);
+            bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.state, r.b.segments }, 0);
+            e.setValue(r.p, 7);
+            bind(e, .{ r.b.recurrent, r.b.flows.? }, 8);
+            e.dispatchGroups(.{ .width = 1, .height = r.p.dv / 4, .depth = r.p.nv * r.segments }, .{ .width = 32, .height = 1, .depth = 1 });
+        } else {
+            e.setPipeline(if (r.usesSlots()) r.pipelines.tree_slots[r.slot_kernel] else r.pipelines.tree);
+            bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.state, r.b.parents, r.b.segments }, 0);
+            e.setValue(r.p, 8);
+            bind(e, .{ r.b.recurrent, r.b.snapshots }, 9);
+            if (r.usesSlots()) {
+                r.b.slot_steps.bind(e, 11);
+                r.b.state.bind(e, 12);
+                (r.b.before orelse r.b.state).bind(e, 13);
+            }
+            r.stateGrid(e);
         }
-        r.stateGrid(e);
         e.barrier();
-        e.setPipeline(r.pipelines.post);
-        bind(e, .{ r.b.recurrent, r.b.z, r.b.norm }, 0);
-        e.setValue(r.p, 3);
-        r.b.output.bind(e, 4);
-        e.dispatchGroups(.{ .width = 1, .height = r.p.nv, .depth = r.p.rows }, .{ .width = 32, .height = 1, .depth = 1 });
-        e.barrier();
+        r.gate(e);
     }
 
     pub fn forwardChain(r: Round, e: metal.ComputeEncoder, chain: metal.Pipeline) void {
@@ -176,10 +202,15 @@ pub const Round = struct {
         e.barrier();
     }
     pub fn gate(r: Round, e: metal.ComputeEncoder) void {
-        e.setPipeline(r.pipelines.post);
+        const xs = if (r.p.dv == 128) r.out_sums else null;
+        e.setPipeline(if (xs != null) r.pipelines.post_sums.? else r.pipelines.post);
         bind(e, .{ r.b.recurrent, r.b.z, r.b.norm }, 0);
         e.setValue(r.p, 3);
         r.b.output.bind(e, 4);
+        if (xs) |x| {
+            e.setBuffer(x.ref.buffer, x.ref.offset, 5);
+            e.setValue(x.stride, 6);
+        }
         e.dispatchGroups(.{ .width = 1, .height = r.p.nv, .depth = r.p.rows }, .{ .width = 32 });
         e.barrier();
     }

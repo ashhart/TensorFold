@@ -64,6 +64,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     }) }));
     b.step("test-fatbin-zstd-host", "Bounded compressed-image reader and encoded expansion controls").dependOn(&zstd.step);
     step.dependOn(&zstd.step);
+    const out_sums = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/q27_out_sums_inputs.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    }) }));
+    b.step("test-q27-out-sums-host", "BF16 output sums keep a discriminating accumulator fixture").dependOn(&out_sums.step);
+    step.dependOn(&out_sums.step);
     const delta = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/delta_slots_contract_test.zig"),
         .target = b.graph.host,
@@ -111,6 +118,14 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
             .{ .name = "masked_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/masked_value_sources.zig"), .imports = &.{.{ .name = "kernel_sources", .module = sources }} }) },
         },
     }) });
+    const sums_check = b.addExecutable(.{ .name = "tf-q27-out-sums", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/q27_out_sums_run.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal_mod }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "contract", .module = module(b, target, .ReleaseSafe) } },
+    }) });
+    b.step("tf-q27-out-sums", "Build every real Qwen27 layer's stored-output sums and projection byte check").dependOn(&b.addInstallArtifact(sums_check, .{}).step);
     const install = b.addInstallArtifact(exe, .{});
     b.step("tf-kernel-contract", "Build the kernel contract's Metal gates and controls (no run)").dependOn(&install.step);
     const limits_run = b.addRunArtifact(exe);

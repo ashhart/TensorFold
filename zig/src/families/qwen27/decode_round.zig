@@ -7,6 +7,8 @@ const forward = @import("forward.zig");
 const Ref = @import("projection.zig").Ref;
 /// Layers a verify encodes before committing them, so the GPU starts while the CPU encodes the rest.
 const commit_every = 4;
+/// Passes past this many rows are prompt chunks (128 rows and up), 3.5% slower on Metal 4 with qk: Metal 3 takes them.
+const metal4_rows = 64;
 const wts = @import("gpu_weights.zig");
 const attn = @import("attention.zig");
 const abi = @import("gdn_contract.zig");
@@ -14,6 +16,7 @@ const GdnPool = @import("gdn_pool_gpu.zig").Pool;
 const GdnHook = @import("gdn_hook.zig").Hook;
 const GdnPlan = @import("gdn_plan.zig").Plan;
 const Round = @import("round_plan.zig").Round;
+const fingerprint = @import("round_fingerprint.zig").fingerprint;
 const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
@@ -28,6 +31,12 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
     const msg = cb.failure() orelse return false;
     std.log.err("qwen27: {s} failed on the GPU: {s}", .{ what, msg });
     return true;
+}
+
+/// The flat kernels or the general ones, for every round after this; TF_Q27_FLAT_GLUE=0 keeps the general ones.
+pub fn setFlatGlue(on: bool) void {
+    @import("core_delta").flat_glue = on;
+    @import("core").tree_round_gpu.chunked_picks = on;
 }
 
 pub const Runner = struct {
@@ -55,6 +64,8 @@ pub const Runner = struct {
     tail: ?forward.Tail = null,
     accepted_chain: bool = false,
     last_gpu_seconds: f64 = 0,
+    /// Verify passes take the model's Metal 4 context when it has one; an A/B tool turns it off for one runner.
+    metal4: bool = true,
     gpu_seconds: f64 = 0, // with a trace attached: every pass's GPU-busy seconds, its spans' and share's buffers too
     trace: ?*@import("core").gpu_profile.Trace = null, // TF_Q27_PROFILE's: each pass run while it is enabled is a round
     current_round: ?*const Round = null,
@@ -87,6 +98,7 @@ pub const Runner = struct {
     }
 
     fn build(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32, paged: bool) !Runner {
+        setFlatGlue(try @import("sys").environment.read(bool, "TF_Q27_FLAT_GLUE", @import("core_delta").flat_glue));
         if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const geometry = try attn.planning.Geometry.fromConfig(m.config, m.device.tensorUnits());
         const linear_index = try a.alloc(u32, m.config.layers);
@@ -304,7 +316,7 @@ pub const Runner = struct {
         const spanned = if (r.trace) |t| t.spanned else 0; // a profiled pass's spans commit buffers of their own
         const handed = if (r.model.ane) |share| share.gpu_seconds else 0;
         var stages = forward.Stages{ .model = r.model, .rows = @intCast(round.ids.len), .hooks = .{ .ptr = r, .gdn = gdnForward, .attention = attentionForward, .tap = if (r.capture_taps) tap else null, .keys = if (r.keysOnly(head)) keysForward else null }, .head = head, .tail = r.tail, .images = placed.images, .reduce = r.reduce, .picks = r.picks };
-        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.model.queue}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
+        r.last_gpu_seconds = @import("core").segments.runCommitting(r.model.device, &.{r.passQueue(round.ids.len)}, r.model.config.layers, .concurrent, &stages, commit_every) catch |err| {
             r.failed = true;
             return err;
         };
@@ -325,6 +337,13 @@ pub const Runner = struct {
         if (accepted) {
             for (round.slots, round.windows) |slot, window| r.offsets[slot] = window.start + @as(u32, @intCast(window.parents.len));
         } else r.active = fingerprint(round);
+    }
+
+    /// The model's Metal 4 queue, unless the pass is a prompt chunk or needs Metal 3: a trace, the Neural Engine, seams
+    fn passQueue(r: *const Runner, rows: usize) mtl.Queue {
+        const c = r.model.metal4 orelse return r.model.queue;
+        if (!r.metal4 or rows > metal4_rows or c.broken or r.trace != null or r.model.ane != null or r.reduce != null) return r.model.queue;
+        return c.asQueue();
     }
 
     pub fn keep(r: *Runner, round: *const Round, paths: []const []const u32) !void {
@@ -480,7 +499,7 @@ pub const Runner = struct {
 
     fn metadata(r: *Runner) @import("gdn_pool_gpu.zig").Metadata {
         const f = &r.model.frame;
-        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps) };
+        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps), .flows = f.get(.flows) };
     }
 
     pub fn promptRows(r: *const Runner, requested: u32) u32 {
@@ -501,7 +520,7 @@ pub const Runner = struct {
 
     fn gdnForward(ptr: *anyopaque, e: mtl.ComputeEncoder, block: usize, weights: wts.Gdn, frame: *Frame, rows: u32) !void {
         const r: *Runner = @ptrCast(@alignCast(ptr));
-        var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain };
+        var hook = GdnHook{ .pool = &r.gdn, .quant = &r.model.kernels, .glue = r.model.glue, .plan = r.current_gdn orelse return error.RoundNotReady, .linear_index = r.linear_index, .accepted_chain = r.accepted_chain, .out_sums = if (forward.outSums(r.model, r.reduce)) forward.sums(frame, .sums, rows) else null };
         try GdnHook.forward(&hook, e, block, weights, frame, rows);
     }
 
@@ -520,7 +539,7 @@ pub const Runner = struct {
         try r.model.glue.unstack(e, f.get(.mixed), f.get(.value), .{ .rows = rows, .width = kv, .stride = 2 * kv, .offset = kv });
         e.barrier();
         try r.attention.preprocess(e, .{ .qg = f.get(.q_gate), .key = f.get(.key), .q_gain = wts.ref(weights.q_norm), .k_gain = wts.ref(weights.k_norm), .norm_q = f.get(.norm_query), .norm_k = f.get(.norm_key), .query = f.get(.query), .rotated_key = f.get(.rotated_key), .positions = f.get(.positions), .rows = rows, .eps = r.model.config.eps, .theta = r.model.config.rope_theta, .h_end = r.current_placed.h_end, .w_end = r.current_placed.w_end, .plane = f.capacity, .geometry = r.geometry });
-        try r.attention.encode(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null);
+        try r.attention.encodeSums(e, &r.scratch, &r.bindings[layer], plan, f.get(.query), f.get(.rotated_key), f.get(.value), f.get(.mixer_out), caches, f.get(.q_gate), r.model.kernels.prompt, r.reduce != null, if (forward.outSums(r.model, r.reduce)) forward.sums(f, .sums, rows) else null);
     }
 
     /// Whether a pass at `head` runs its last layer's keys and values alone (prompt_tail.zig's facts on this runner).
@@ -572,22 +591,4 @@ fn allocation(a: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mt
         return err;
     };
     return b;
-}
-
-fn fingerprint(round: *const Round) [32]u8 {
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update(std.mem.sliceAsBytes(round.ids));
-    hash.update(std.mem.sliceAsBytes(round.slots));
-    hash.update(std.mem.sliceAsBytes(round.feed_positions));
-    hash.update(std.mem.sliceAsBytes(round.draw_positions));
-    hash.update(std.mem.sliceAsBytes(round.firsts));
-    for (round.windows) |window| {
-        hash.update(std.mem.asBytes(&window.start));
-        hash.update(std.mem.asBytes(&window.taps));
-        hash.update(std.mem.sliceAsBytes(window.parents));
-        hash.update(std.mem.sliceAsBytes(window.conv));
-    }
-    var out: [32]u8 = undefined;
-    hash.final(&out);
-    return out;
 }

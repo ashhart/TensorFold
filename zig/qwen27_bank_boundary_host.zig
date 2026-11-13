@@ -2,6 +2,21 @@
 const std = @import("std");
 const q = @import("tensorfold").qwen27;
 
+test "qwen27 bank boundary: out sums are only supplied by unsplit tensor-unit decode producers" {
+    const Device = struct {
+        units: bool,
+        pub fn tensorUnits(d: @This()) bool {
+            return d.units;
+        }
+    };
+    const Kernels = struct { prompt: bool };
+    const Model = struct { device: Device, kernels: Kernels };
+    for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |prompt| for ([_]?u8{ null, 1 }) |reduce| {
+        const model = Model{ .device = .{ .units = units }, .kernels = .{ .prompt = prompt } };
+        try std.testing.expectEqual(units and !prompt and reduce == null, q.forward.outSums(&model, reduce));
+    };
+}
+
 test "qwen27 bank boundary: a pending keep rejects resizing and trimming" {
     var runner: q.decode_round.Runner = undefined;
     runner.failed = false;

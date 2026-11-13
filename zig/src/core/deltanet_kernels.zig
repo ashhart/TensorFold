@@ -16,7 +16,18 @@ pub fn markList(rows: u32, marks: []const u32) ![MARKS]u32 {
     return list;
 }
 
-pub const Pipelines = struct { pre: metal.Pipeline, tree: metal.Pipeline, tree_slots: [slot_kernels.len]metal.Pipeline, replay: metal.Pipeline, post: metal.Pipeline, conv_commit: metal.Pipeline };
+pub const Pipelines = struct { pre: metal.Pipeline, tree: metal.Pipeline, tree_slots: [slot_kernels.len]metal.Pipeline, replay: metal.Pipeline, post: metal.Pipeline, conv_commit: metal.Pipeline, columns: ?[column_kernels.len]metal.Pipeline = null, pre_vectors: ?metal.Pipeline = null, post_sums: ?metal.Pipeline = null };
+
+/// Fitting rounds take the column scan, vector conv and row-side activation; off, the general kernels (checks).
+pub var flat_glue = true;
+
+/// Slots of each column scan; a tree past the last takes `tree_slots`.
+pub const column_kernels = [_]usize{ 1, 2, 4 };
+
+pub fn columnKernel(peak: usize) ?usize {
+    for (column_kernels, 0..) |slots, index| if (peak <= slots) return index;
+    return null;
+}
 
 /// Register slots of each tree_slots kernel; a tree takes the first that holds its peak of live states.
 pub const slot_kernels = [_]usize{ 1, 2, 4, 8, 16 };
@@ -70,6 +81,19 @@ pub const Kernels = struct {
             done += 1;
         }
         if (pipelines[7].simdWidth() != 32 or pipelines[7].maxThreads() < 128) return error.UnsupportedGdnPipeline;
+        var columns: [column_kernels.len]metal.Pipeline = undefined;
+        var columns_done: usize = 0;
+        errdefer for (columns[0..columns_done]) |p| p.deinit();
+        inline for ([_][]const u8{ "columns_1", "columns_2", "columns_4" }, 0..) |name, index| {
+            columns[index] = try metal.Pipeline.init(device, library, "tf_delta_gdn_" ++ name, false);
+            columns_done += 1;
+        }
+        const pre_vectors = try metal.Pipeline.init(device, library, "tf_delta_gdn_pre_vectors", false);
+        errdefer pre_vectors.deinit();
+        const post_sums = try metal.Pipeline.init(device, library, "tf_delta_gdn_post_sums", false);
+        errdefer post_sums.deinit();
+        for (columns) |p| if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedGdnPipeline;
+        if (pre_vectors.simdWidth() != 32 or pre_vectors.maxThreads() < 32) return error.UnsupportedGdnPipeline;
         return .{
             .library = library,
             .pipelines = .{
@@ -79,6 +103,9 @@ pub const Kernels = struct {
                 .replay = pipelines[2],
                 .post = pipelines[3],
                 .conv_commit = pipelines[4],
+                .columns = columns,
+                .pre_vectors = pre_vectors,
+                .post_sums = post_sums,
             },
             .publish = pipelines[5],
             .clear = pipelines[6],
@@ -108,6 +135,9 @@ pub const Kernels = struct {
             k.pre_step,
         }) |p| p.deinit();
         for (k.pipelines.tree_slots) |p| p.deinit();
+        if (k.pipelines.post_sums) |p| p.deinit();
+        if (k.pipelines.columns) |columns| for (columns) |p| p.deinit();
+        if (k.pipelines.pre_vectors) |p| p.deinit();
         k.library.deinit();
     }
 };

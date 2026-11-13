@@ -175,10 +175,12 @@ pub const packed_metallib = @import("nemotron_packed_metallib").bytes;
 /// The core lane projection (tensor units): every window row's sums in one weight read, and its row order.
 pub const core_lane_projection = @embedFile("core/lane_projection.metal");
 pub const core_lane_order = @embedFile("core/lane_order.metal");
+/// qk: the M5's 4-bit g64 products on the lane layout as load leaves it, tf_lane_reg's words (core/qk_projection.zig).
+pub const core_qk = @embedFile("core/qk.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).
 pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 /// The core DeltaNet kernels (core/deltanet_kernels.zig).
-pub const core_deltanet = @embedFile("core/deltanet.metal") ++ "\n" ++ @embedFile("core/deltanet_slots.metal");
+pub const core_deltanet = @embedFile("core/deltanet.metal") ++ "\n" ++ @embedFile("core/deltanet_slots.metal") ++ "\n" ++ @embedFile("core/deltanet_sums.metal");
 /// 4-bit projections on simdgroup-matrix tiles before the M5 (core/simd_qmm.zig).
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).

@@ -374,11 +374,12 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
 }
 
 // A single Mac's 24 heads are known at compile time: main's kernel, so one Mac runs unpaired code.
-kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device const float* PMA [[buffer(1)]], device const float* PLA [[buffer(2)]],
-    device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
-    device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
-    device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
-    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
+template <bool SUMS>
+inline void q27_attn_merge_single_body(device const float* POA, device const float* PMA, device const float* PLA,
+    device const float* POB, device const float* PMB, device const float* PLB,
+    device const int* meta, device const int* nodes, device bfloat* OUT,
+    device const bfloat* QG, uint gated, uint3 threadgroup_position_in_grid, uint thread_index_in_simdgroup,
+    device float* XS, uint stride) {
   const uint lane = thread_index_in_simdgroup;
   const uint hk = threadgroup_position_in_grid.x;
   const uint r = threadgroup_position_in_grid.y;
@@ -434,4 +435,31 @@ kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device 
       OUT[index] = static_cast<bfloat>(float(v) * q27_round(1.0f / (1.0f + exp(-gate)), 0));
     } else OUT[index] = v;
   }
+  if (SUMS) {
+    simdgroup_barrier(mem_flags::mem_device);
+    if ((lane & 7) == 0) {
+      const int gr = 4 * h + int(lane / 8);
+      const device bfloat* row = OUT + int64_t(node) * (G * KVH) * D;
+      float acc = 0.0f;
+      for (int i = 0; i < 64; i++) acc += float(row[gr * 64 + i]);
+      XS[gr * stride + node] = acc;
+    }
+  }
+}
+
+kernel void q27_attn_merge_single(device const float* POA [[buffer(0)]], device const float* PMA [[buffer(1)]], device const float* PLA [[buffer(2)]],
+    device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
+    device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
+    device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
+  q27_attn_merge_single_body<false>(POA, PMA, PLA, POB, PMB, PLB, meta, nodes, OUT, QG, gated, threadgroup_position_in_grid, thread_index_in_simdgroup, nullptr, 0);
+}
+
+[[kernel, max_total_threads_per_threadgroup(32)]] void q27_attn_merge_single_sums(device const float* POA [[buffer(0)]], device const float* PMA [[buffer(1)]], device const float* PLA [[buffer(2)]],
+    device const float* POB [[buffer(3)]], device const float* PMB [[buffer(4)]], device const float* PLB [[buffer(5)]],
+    device const int* meta [[buffer(6)]], device const int* nodes [[buffer(7)]], device bfloat* OUT [[buffer(8)]],
+    device const bfloat* QG [[buffer(9)]], constant uint& gated [[buffer(10)]],
+    device float* XS [[buffer(11)]], constant uint& stride [[buffer(12)]],
+    uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]], uint thread_index_in_simdgroup [[thread_index_in_simdgroup]]) {
+  q27_attn_merge_single_body<true>(POA, PMA, PLA, POB, PMB, PLB, meta, nodes, OUT, QG, gated, threadgroup_position_in_grid, thread_index_in_simdgroup, XS, stride);
 }
