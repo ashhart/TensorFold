@@ -190,7 +190,7 @@ pub const Arena = struct {
     buf: cuda.DeviceBuffer,
     pieces: ?*Pieces = null,
 
-    const Pieces = struct {
+    pub const Pieces = struct {
         gpa: std.mem.Allocator,
         vmm: cuda.arena.Vmm,
         lazy: ?Lazy = null,
