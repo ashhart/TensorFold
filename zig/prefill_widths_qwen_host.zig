@@ -9,6 +9,17 @@ const Cache = struct { delta: i64 = 0 };
 const Engine = struct {
     fail: bool = false,
     stream: ?cuda.Stream = null,
+    layers: [2]void = .{ {}, {} },
+    taps: [8]u32 = undefined,
+    n_taps: usize = 0,
+    learning: ?*const anyopaque = null,
+    mlp: ?*const anyopaque = null,
+    pockets: struct {
+        pub fn any(_: @This()) bool {
+            return false;
+        }
+    } = .{},
+    int8: struct { on: bool = false } = .{},
     pub fn forward(e: *@This(), _: anytype, _: []const u32, _: q.engine.Keep) !void {
         if (e.fail) return error.PlantedForward;
         if (e.stream) |stream| try stream.synchronize();

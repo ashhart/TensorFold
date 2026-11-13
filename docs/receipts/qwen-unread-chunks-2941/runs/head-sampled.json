@@ -1,0 +1,20 @@
+[
+  {
+    "prompt_tokens": 8192,
+    "cached_tokens": 0,
+    "token_sha256": "eabb9ee47126ea56d086699c051f993c9578286e7c7f5fcf62c8782225706828",
+    "output_sha256": "bfda9f689c88a5004b7d32e325e391984d27b4528088f66a62348dbb4b9f63f1",
+    "ttft_s": 1.2701901760010514,
+    "error": null,
+    "length": 8192
+  },
+  {
+    "prompt_tokens": 32768,
+    "cached_tokens": 0,
+    "token_sha256": "bfdffc1b07cf64389fcfbbf4787d66ae1129eab9b716182e6d9b27aa0b80ff84",
+    "output_sha256": "3e1bd53ec06abd9b91c90f32f037c0ff187ee2eefeba47425ff757c9c74424b5",
+    "ttft_s": 5.967192418000195,
+    "error": null,
+    "length": 32768
+  }
+]

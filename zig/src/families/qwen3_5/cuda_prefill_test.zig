@@ -62,6 +62,14 @@ const Fake = struct {
     const Pages = struct {
         pub fn log(_: *Pages, _: usize, _: usize) void {}
     };
+    const Pockets = struct {
+        held: bool = false,
+        pub fn any(p: *const Pockets) bool {
+            return p.held;
+        }
+    };
+    const Int8 = struct { on: bool = false };
+    const Keep = @import("cuda_engine.zig").Keep;
     const Engine = struct {
         rows: std.ArrayList(usize) = .empty,
         x: u64 = 0,
@@ -71,11 +79,20 @@ const Fake = struct {
         piece_calls: usize = 0,
         piece_rows: usize = 0,
         reset_fails: bool = false,
+        keeps: std.ArrayList(Keep) = .empty,
+        layers: [2]void = .{ {}, {} },
+        taps: [8]u32 = undefined,
+        n_taps: usize = 0,
+        learning: ?*const anyopaque = null,
+        mlp: ?*const anyopaque = null,
+        pockets: Pockets = .{},
+        int8: Int8 = .{},
         pub fn forward(e: *Engine, parts: anytype, ids: []const u32, keep: E.Keep) !void {
             var rows: usize = 0;
             inline for (parts) |p| rows += p.rows;
             try t.expectEqual(rows, ids.len);
             try e.rows.append(t.allocator, ids.len);
+            try e.keeps.append(t.allocator, keep);
             if (keep == .rows) {
                 e.piece_calls += 1;
                 e.piece_rows += rows;
@@ -83,6 +100,10 @@ const Fake = struct {
                 e.whole_calls += 1;
                 e.whole_rows += rows;
             }
+        }
+        fn deinit(e: *Engine) void {
+            e.rows.deinit(t.allocator);
+            e.keeps.deinit(t.allocator);
         }
     };
     gpa: std.mem.Allocator = t.allocator,
@@ -123,7 +144,7 @@ const Fake = struct {
 /// One stepped pass at the caps in turn, a forward a step of at most its cap's rows: where each forward ended.
 fn pass(prompt: []const u32, chunks: []const u32, caps: []const u32, ends: *std.ArrayList(usize)) !void {
     var e: Fake.Engine = .{};
-    defer e.rows.deinit(t.allocator);
+    defer e.deinit();
     var f: Fake = .{ .e = &e };
     defer f.deinit();
     var s = try lanes.Stream.init(t.allocator, .{ .id = "cap", .prompt = prompt, .max_new = 1, .chunks = chunks });
@@ -190,7 +211,7 @@ fn marks() !void {
     @memset(prompt, 3);
     for ([_]u32{ 0, 512 }) |cap| {
         var e: Fake.Engine = .{};
-        defer e.rows.deinit(t.allocator);
+        defer e.deinit();
         var f: Fake = .{ .e = &e };
         defer f.deinit();
         var probe: Probe = .{};
@@ -255,7 +276,7 @@ pub fn whole() !void {
         }
     };
     var eng: Fake.Engine = .{};
-    defer eng.rows.deinit(t.allocator);
+    defer eng.deinit();
     var toks: [E.max_rows + 8]u32 = undefined;
     for (&toks, 0..) |*x, i| x.* = @intCast(i % 7);
     var fake: Fake = .{ .e = &eng, .capacity = toks.len + 1 };
@@ -300,7 +321,7 @@ test "Qwen whole prefill: a text stream runs its pass once and a readout only it
 /// A failed restore resets the cache under `try`: a reset error leaves opening instead of filling from row 0.
 pub fn reset() !void {
     var eng: Fake.Engine = .{ .reset_fails = true };
-    defer eng.rows.deinit(t.allocator);
+    defer eng.deinit();
     var fake: Fake = .{ .e = &eng, .restore_ok = false };
     defer fake.deinit();
     var toks: [3 * E.max_rows]u32 = @splat(3);
@@ -313,4 +334,115 @@ pub fn reset() !void {
 
 test "Qwen prefill opening: a failed reset propagates out of the opening" {
     try reset();
+}
+
+/// A 32K fill: every chunk but the last is unread, and a reader on the last layer keeps every chunk's rows.
+fn unread() !void {
+    const m = @import("cuda_engine.zig").max_rows;
+    const prompt = try t.allocator.alloc(u32, 8 * m);
+    defer t.allocator.free(prompt);
+    @memset(prompt, 3);
+    const Reader = enum { none, tap, learning, mlp, pockets, int8 };
+    for (std.enums.values(Reader)) |reader| {
+        var e: Fake.Engine = .{};
+        defer e.deinit();
+        switch (reader) {
+            .none => {},
+            .tap => {
+                e.taps[0] = 1; // the last layer's tap
+                e.n_taps = 1;
+            },
+            .learning => e.learning = @ptrCast(&e),
+            .mlp => e.mlp = @ptrCast(&e),
+            .pockets => e.pockets.held = true,
+            .int8 => e.int8.on = true,
+        }
+        var f: Fake = .{ .e = &e };
+        defer f.deinit();
+        var s = try lanes.Stream.init(t.allocator, .{ .id = "unread", .prompt = prompt, .max_new = 1 });
+        defer s.deinit(t.allocator);
+        while (!try prefill.step(&f, &s, 0)) {}
+        try t.expectEqual(@as(usize, 8), e.keeps.items.len);
+        for (e.keeps.items, 0..) |keep, i| {
+            const want_none = reader == .none and i + 1 < e.keeps.items.len;
+            if (want_none) try t.expect(keep == .none) else try t.expect(keep == .last);
+        }
+    }
+}
+
+test "Qwen stepped prefill: a chunk nothing reads stops its last layer at the keys" {
+    try unread();
+}
+
+const forward = @import("cuda_forward.zig");
+const engine = @import("cuda_engine.zig");
+const geom = @import("cuda_geometry.zig");
+const layer_defs = @import("cuda_layers.zig");
+const Trace = @import("cuda_launch_trace.zig").Trace;
+
+fn fnHandle(n: usize) @import("cuda").Function {
+    return .{ .d = undefined, .handle = @ptrFromInt(n) };
+}
+
+test "Qwen stepped prefill: an unread chunk's last layer launches K/V, both head norms and RoPE, then stops" {
+    var trace = Trace.init(t.allocator);
+    defer trace.deinit();
+    @import("cuda_launch_trace.zig").active = &trace;
+    defer @import("cuda_launch_trace.zig").active = null;
+    const bf: layer_defs.Proj = .{ .bf = .{ .w = 0, .n = 1, .k = 1 } };
+    const attn: layer_defs.Attention = .{ .q = bf, .k = bf, .v = bf, .o = bf, .q_norm = 0, .k_norm = 0 };
+    const mlp: layer_defs.Mlp = .{ .dense = .{ .gate = bf, .up = bf, .down = bf } };
+    const one = layer_defs.Layer{ .input_norm = 0, .post_norm = 0, .mlp = mlp, .mixer = .{ .attention = attn } };
+    var ls = [_]layer_defs.Layer{one};
+    const g: geom.Geometry = .{
+        .hidden = 64,
+        .intermediate = 128,
+        .layers = 1,
+        .vocab = 16,
+        .k_heads = 1,
+        .v_heads = 1,
+        .q_heads = 2,
+        .kv_heads = 1,
+        .eps = 1e-6,
+        .tied = true,
+        .context = 4096,
+        .linear = @splat(false),
+        .embeds = false,
+    };
+    var e: engine.Engine = undefined;
+    e.gpa = t.allocator;
+    e.g = g;
+    e.layers = &ls;
+    e.fns = undefined;
+    e.fns.head_norm = fnHandle(1);
+    e.fns.head_norm_shift = fnHandle(2);
+    e.fns.rope = fnHandle(3);
+    e.fp8 = undefined;
+    e.fp8.rope = fnHandle(3);
+    e.kv8 = false;
+    e.rope_table = 0;
+    e.tables.ptr = 0;
+    e.features = 0;
+    e.int8 = .{};
+    e.learning = null;
+    e.mlp = null;
+    e.pockets = .{ .gpa = t.allocator, .d = undefined, .hidden = 64 };
+    e.taught = 0;
+    e.n_taps = 0;
+    e.x = 0;
+    e.xs = 0;
+    e.kraw = 0;
+    e.vraw = 0;
+    e.qraw = 0;
+    e.qn = 0;
+    e.kn = 0;
+    e.y = 0;
+    e.mix = 0;
+    e.r = 0;
+    var shape = engine.Engine.Shape.init(32, 1, false, false, 1);
+    shape.unread = true;
+    try forward.body(&e, shape);
+    const want = [_]Trace.Tag{ .norm, .kv, .{ .launch = 1 }, .{ .launch = 1 }, .{ .launch = 3 } };
+    try t.expectEqual(want.len, trace.tags.items.len);
+    for (want, trace.tags.items) |w, got| try t.expect(std.meta.eql(w, got));
 }
