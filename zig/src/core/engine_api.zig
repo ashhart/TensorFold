@@ -248,15 +248,8 @@ pub const Info = struct {
     }
 };
 
-pub const Admit = struct { ctx: *anyopaque, fits: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) bool };
-
-/// The bytes the lane host may promise at once, and what one request's caches cost at most (core/kv_ledger.zig).
-pub const Ledger = struct {
-    ctx: *anyopaque,
-    total: u64,
-    cost: *const fn (ctx: *anyopaque, prompt: u32, max_tokens: u32) u64,
-    standing: kv_ledger.Standing = .{}, // streams paid at load, in `total`: the engine's own sequence (#1943)
-};
+pub const Admit = @import("engine_admission.zig").Admit;
+pub const Ledger = @import("engine_admission.zig").Ledger;
 
 pub const PromptCacheCapacity = @import("engine_cache_plan.zig").PromptCacheCapacity;
 pub const PromptCachePlan = @import("engine_cache_plan.zig").PromptCachePlan;
