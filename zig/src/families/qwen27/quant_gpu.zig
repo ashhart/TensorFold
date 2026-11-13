@@ -181,6 +181,15 @@ pub const Kernels = struct {
         return entry;
     }
 
+    /// Whether `p`'s rows from a 128-row boundary take the dispatches a whole pass makes there (the prompt tail).
+    pub fn blockRows(k: *const Kernels, p: projection.Linear) bool {
+        if (k.long_prompt) return false;
+        for (p.runs) |run| if (run.linear.raw) |raw| if (!k.tiled(raw)) return false;
+        if (p.runs.len > 0) return true;
+        if (p.raw) |raw| return raw.bits != 4 and k.tiled(raw);
+        return true;
+    }
+
     /// Compiles at load the decode-row pipeline a later `quant` of `p` takes (for shapes no target layer uses).
     pub fn prepareDecode(k: *Kernels, p: projection.Linear) !void {
         if (p.runs.len > 0 or p.raw != null or p.tile != 32 or k.prompt) return;

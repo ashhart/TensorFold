@@ -10,6 +10,7 @@ pub const tokenizer = @import("tokenizer");
 pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 
 pub const segments = @import("src/core/segments.zig");
+pub const prompt_tail = @import("src/core/prompt_tail.zig");
 
 pub const checkpoint_host = checkpoint;
 pub const lane_projection = @import("core_lane");

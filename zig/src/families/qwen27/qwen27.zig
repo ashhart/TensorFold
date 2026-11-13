@@ -35,6 +35,7 @@ pub const prompt_gpu = @import("prompt_gpu.zig");
 pub const prompt_state = @import("prompt_state.zig");
 pub const prompt_marks = @import("prompt_marks.zig");
 pub const prompt_state_gpu = @import("prompt_state_gpu.zig");
+pub const prompt_tail = @import("prompt_tail.zig");
 pub const quant_gpu = @import("quant_gpu.zig");
 pub const ane_mlp = @import("ane_mlp.zig");
 pub const round_plan = @import("round_plan.zig");
@@ -69,6 +70,7 @@ test {
     _ = prompt_glue;
     _ = prompt_state;
     _ = prompt_marks;
+    _ = prompt_tail;
     _ = config;
     _ = affine;
     _ = widths;
