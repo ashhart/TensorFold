@@ -17,7 +17,7 @@ DeepSeek requires sm_90 or newer and remains refused by the release server pendi
 Nemotron's `--precision checkpoint` is refused on an A100 because it needs Blackwell (compute capability 12.x).
 GLM also refuses an FP8 or MXFP8 projection on sm_80 to sm_89 when its shape needs split-K partial storage that
 this family does not hold. CUDA `--slide` learning is admitted only on sm_121.
-See the [qualified models](../../README.md#qualified-models), [changes](../../CHANGELOG.md) and
+See the [qualified models](../supported-models.md#qualified-models), [changes](../../CHANGELOG.md) and
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda) for recorded serving scope.
 Native [GLM](glm-5.3-flash-cuda.md) has TP=2 and TP=3 serving receipts; native EXL3 loading and DFlash2 drafting
 also exist for the families and formats recorded there.
