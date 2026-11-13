@@ -57,6 +57,15 @@ pub const Fns = struct {
     gdn_slots_4: cuda.Function,
     gdn_slots_8: cuda.Function,
     gdn_slots_16: cuda.Function,
+    // the same scans reading a pool lane's state table (qwen35.cuh TF_Q35_TWICE)
+    gdn_pre_table: cuda.Function,
+    conv_commit_table: cuda.Function,
+    gdn_chain_table: cuda.Function,
+    gdn_slots_1_table: cuda.Function,
+    gdn_slots_2_table: cuda.Function,
+    gdn_slots_4_table: cuda.Function,
+    gdn_slots_8_table: cuda.Function,
+    gdn_slots_16_table: cuda.Function,
     gdn_post: cuda.Function,
     head_norm: cuda.Function,
     head_norm_shift: cuda.Function,
@@ -76,7 +85,7 @@ pub const Fns = struct {
 };
 
 /// qwen35_keep.cu's kernels (Cache.keep).
-pub const Keeps = struct { apply: cuda.Function, apply_pend: cuda.Function, conv: cuda.Function, compact: cuda.Function };
+pub const Keeps = struct { apply: cuda.Function, apply_pend: cuda.Function, conv: cuda.Function, compact: cuda.Function, apply_table: cuda.Function, apply_pend_table: cuda.Function, conv_table: cuda.Function };
 
 /// qwen35_kv8.cu's kernels: the cache writes, attention reads and keep's moves over e4m3 rows (--kv-cache fp8).
 pub const Kv8 = struct { rope: cuda.Function, attn_partial: cuda.Function, attn_rows: cuda.Function, attn_partial8_whole: cuda.Function, attn_rows8_whole: cuda.Function, compact: cuda.Function };

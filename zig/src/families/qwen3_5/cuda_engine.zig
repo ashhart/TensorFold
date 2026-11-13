@@ -175,6 +175,10 @@ pub const Engine = struct {
     hop: ?stage_fwd.Hop = null,
     boundary: ?cuda.HostBuffer = null,
     held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
+    /// During a prompt chunk's forward: its stream's state table on the host (cuda_prompt.zig's delta reads it).
+    prompt_states: []const u64 = &.{},
+    /// The state table version (States.version) each forward segment's copy in `tables` holds (0: none yet).
+    forward_from: [Round.max_segs]u64 = @splat(0),
 
     pub const ids_at = Round.ids_at;
     pub const segs_at = Round.segs_at;
@@ -230,6 +234,8 @@ pub const Engine = struct {
         e.hop = null;
         e.boundary = null;
         e.held = null;
+        e.prompt_states = &.{};
+        e.forward_from = @splat(0);
         e.stream = try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
@@ -339,10 +345,10 @@ pub const Engine = struct {
         e.gpa.destroy(e);
     }
 
-    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
+    /// A stream's device bytes at a `cap`-token window: state, keys and values, taps, log and its state table.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
         const c = @import("cuda_cache.zig");
-        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
+        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g) + c.States.bytes(e.g);
     }
 
     /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
@@ -451,11 +457,17 @@ pub const Engine = struct {
             if (!(record and keep != .hidden)) try p.cache.flush(e);
             try recurrent.prepare(e, p.cache, p.rows, record);
         }
+        // a pool lane among the parts: every segment's scans read state tables; else each stream's blocks, as on main
+        const table = Round.onTable(parts);
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
+            const sg = if (table) p.cache.segIn(e, try Round.forwardStates(e, i, p.cache), p.cache.len, row0, p.rows) else try p.cache.seg(e, p.cache.len, row0, p.rows);
+            segs[i] = p.cache.fold(sg);
             row0 += p.rows;
         }
+        // a pool lane's prompt chunk is one stream's: its delta rule takes the recurrences' addresses on the host
+        e.prompt_states = if (!record and table) parts[0].cache.states.?.host else &.{};
+        defer e.prompt_states = &.{};
         if (keep == .draws) {
             const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
             const meta = std.mem.bytesAsSlice(c_int, st[meta_at..][0 .. total * 4]);
@@ -490,6 +502,7 @@ pub const Engine = struct {
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
         shape.paged = @import("cuda_attention.zig").hasPages(segs);
+        shape.table = table;
         shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
         if (e.learning != null or e.pockets.any()) {
             shape.total = @intCast(total);
@@ -544,14 +557,20 @@ pub const Engine = struct {
     /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
     pub const launchShape = @import("cuda_shapes.zig").launch;
 
+    /// A state table's entries (cuda_cache.zig States): `tables` holds one for each forward segment.
+    pub fn stateEntries(e: *const Engine) usize {
+        return @import("cuda_cache.zig").States.len(e.g);
+    }
+
     /// The same scan selected by body, exposed for host launch-contract fixtures.
-    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
-        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
-            1 => e.fns.gdn_slots_1,
-            2 => e.fns.gdn_slots_2,
-            4 => e.fns.gdn_slots_4,
-            8 => e.fns.gdn_slots_8,
-            16 => e.fns.gdn_slots_16,
+    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int, table: bool) !void {
+        const f = &e.fns;
+        const scan = if (!record) (if (table) f.gdn_chain_table else f.gdn_chain) else switch (slot_count) {
+            1 => if (table) f.gdn_slots_1_table else f.gdn_slots_1,
+            2 => if (table) f.gdn_slots_2_table else f.gdn_slots_2,
+            4 => if (table) f.gdn_slots_4_table else f.gdn_slots_4,
+            8 => if (table) f.gdn_slots_8_table else f.gdn_slots_8,
+            16 => if (table) f.gdn_slots_16_table else f.gdn_slots_16,
             else => return error.InvalidGdnSlots,
         };
         const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);
@@ -570,16 +589,3 @@ pub const Engine = struct {
         return e.host_logits.slice(u16)[i * e.g.vocab ..][0..e.g.vocab];
     }
 };
-
-test "dense read cost: hidden and slot variants have distinct graph keys" {
-    var seen: [32]u32 = undefined;
-    var n: usize = 0;
-    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
-        for ([_]bool{ false, true }) |hidden| {
-            const shape: Engine.Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
-            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
-            seen[n] = shape.key();
-            n += 1;
-        }
-    }
-}

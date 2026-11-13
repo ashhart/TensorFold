@@ -130,6 +130,34 @@ const Fixture = struct {
     }
 };
 
+/// A forward's state tables start this far past its segments (qwen35.cuh SEG_STATES, cuda_round.zig states_at).
+const seg_states = 232480;
+const entries = 4 * nl + most;
+
+/// A stream's state table (cuda_cache.zig States) for these blocks (0: none); tails 0, no scan reads them.
+fn table(state: u64, before: u64, log: u64) [entries]u64 {
+    var t: [entries]u64 = @splat(0);
+    for (0..nl) |l| {
+        t[l] = state + l * rec * 4;
+        if (before != 0) t[2 * nl + l] = before + l * rec * 4;
+    }
+    if (log != 0) for (0..most) |r| {
+        t[4 * nl + r] = log + r * nl * log_row;
+    };
+    return t;
+}
+
+/// Which instantiation runs: main's name (Seg's blocks) or _table (the state table, a pool lane's on pieces).
+var tab = false;
+
+/// A keep launch's Seg: the blocks as main's kernels take them, or for _table a table input holding them.
+fn tabled(rig: *rig_.Rig, state: u64, before: u64, log: u64) !Seg {
+    if (!tab) return .{ .rec = state, .before = before, .log = log };
+    const t = table(state, before, log);
+    const at = try rig.input(std.mem.sliceAsBytes(&t));
+    return .{ .rec = at, .conv = at + nl * 8, .before = at + 2 * nl * 8, .log = at + 4 * nl * 8 };
+}
+
 /// Pending rows i and j of a buffer swapped, every layer's heads.
 fn swapRows(pend: []u8, i: usize, j: usize) void {
     for (pend[i * nl * head ..][0 .. nl * head], pend[j * nl * head ..][0 .. nl * head]) |*x, *y| std.mem.swap(u8, x, y);
@@ -145,21 +173,42 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     const total = 2 * f.rows;
     var segs: [2]Seg = undefined;
     var src: [2]u64 = .{ 0, 0 };
+    // each stream's state, window log and pre-round state, which its Seg reaches through its table
+    var states: [2]u64 = undefined;
+    var logs: [2]u64 = undefined;
+    var befores: [2]u64 = .{ 0, 0 };
+    var kept: [2]Seg = undefined; // tf_q35k_apply's: the state and the path's source log
     for (0..2, &segs) |st, *sg| {
         const state = try rig.scratch(nl * rec * 4);
         try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = state, .len = nl * rec * 4 }).upload(0, std.mem.sliceAsBytes(f.state[st]));
-        sg.* = .{ .rec = state, .log = try rig.scratch(f.rows * nl * log_row), .row0 = @intCast(st * f.rows), .rows = @intCast(f.rows) };
-        if (f.rows == 1) sg.before = try rig.scratch(nl * rec * 4);
+        states[st] = state;
+        logs[st] = try rig.scratch(f.rows * nl * log_row);
+        if (f.rows == 1) befores[st] = try rig.scratch(nl * rec * 4);
+        sg.* = try tabled(&rig, state, befores[st], logs[st]);
+        sg.row0 = @intCast(st * f.rows);
+        sg.rows = @intCast(f.rows);
         const n = f.n[st] - (if (st == 0) drop else 0);
         if (apply != null) {
-            if (f.n[st] > 0) src[st] = try rig.input(f.src[st]);
+            if (f.n[st] > 0) {
+                src[st] = try rig.input(f.src[st]);
+                kept[st] = try tabled(&rig, state, 0, src[st]);
+            }
         } else if (n > 0) {
             sg.pn = sign * @as(c_int, @intCast(n));
             sg.plog = try rig.input(if (st == 0) pend0 else f.pend[st]);
         }
     }
     const params = [5]c_int{ 0, 0, @intCast(total), 2, 1 }; // P: the forward's rows, its windows, recorded
-    const segs_d = try rig.input(std.mem.sliceAsBytes(&segs));
+    // the segments, then each one's table where the scans find it
+    const block = try a.alignedAlloc(u8, .@"8", seg_states + 2 * entries * 8);
+    defer a.free(block);
+    @memset(block, 0);
+    @memcpy(block[0 .. 2 * @sizeOf(Seg)], std.mem.sliceAsBytes(&segs));
+    for (0..2) |st| {
+        const t = table(states[st], befores[st], logs[st]);
+        @memcpy(block[seg_states + st * entries * 8 ..][0 .. entries * 8], std.mem.sliceAsBytes(&t));
+    }
+    const segs_d = try rig.input(block);
     const q = try rig.input(std.mem.sliceAsBytes(f.q));
     const k = try rig.input(std.mem.sliceAsBytes(f.k));
     const v = try rig.input(std.mem.sliceAsBytes(f.v));
@@ -173,7 +222,7 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     if (apply) |ap| {
         for (0..2) |st| if (src[st] != 0) {
             var args: cuda.Args = .{};
-            inline for (.{ geo, Seg{ .rec = segs[st].rec, .log = src[st] }, f.path[st] }) |x| args.add(x);
+            inline for (.{ geo, kept[st], f.path[st] }) |x| args.add(x);
             try cuda.launch.launch(ap, .{ .grid = .{ .x = 1, .y = dk / 4, .z = nv * nl }, .block = .{ .x = 32, .y = 4 } }, s, &args);
         };
     }
@@ -185,9 +234,9 @@ fn launch(gpu: check.Gpu, s: cuda.Stream, apply: ?cuda.Function, scan: cuda.Func
     var out: Out = undefined;
     for (0..nl) |l| out.y[l] = try a.dupe(u8, try rig.bytes(y[l], total * nv * dk * 2));
     for (0..2) |st| {
-        out.state[st] = try a.dupe(u8, try rig.bytes(segs[st].rec, nl * rec * 4));
-        out.log[st] = try a.dupe(u8, try rig.bytes(segs[st].log, f.rows * nl * log_row));
-        out.before[st] = if (f.rows == 1) try a.dupe(u8, try rig.bytes(segs[st].before, nl * rec * 4)) else &.{};
+        out.state[st] = try a.dupe(u8, try rig.bytes(states[st], nl * rec * 4));
+        out.log[st] = try a.dupe(u8, try rig.bytes(logs[st], f.rows * nl * log_row));
+        out.before[st] = if (f.rows == 1) try a.dupe(u8, try rig.bytes(befores[st], nl * rec * 4)) else &.{};
     }
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "qwen35 pending: a launch changed an input or a guard", .{});
     return out;
@@ -212,11 +261,13 @@ fn landed(gpu: check.Gpu, s: cuda.Stream, fun: cuda.Function, from_pend: bool, f
     try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = state, .len = nl * rec * 4 }).upload(0, std.mem.sliceAsBytes(f.state[0]));
     const n = f.n[0] - drop;
     const rows = if (from_pend) (if (n > 0) try rig.input(pend) else 0) else try rig.input(f.src[0]);
+    var sg = try tabled(&rig, state, 0, if (from_pend) 0 else rows);
+    if (from_pend) sg.plog = rows;
     const seen = try a.dupe(u8, try rig.inputBytes());
     var args: cuda.Args = .{};
     if (from_pend) {
-        inline for (.{ geo, Seg{ .rec = state, .plog = rows }, @as(c_int, @intCast(n)) }) |x| args.add(x);
-    } else inline for (.{ geo, Seg{ .rec = state, .log = rows }, f.path[0] }) |x| args.add(x);
+        inline for (.{ geo, sg, @as(c_int, @intCast(n)) }) |x| args.add(x);
+    } else inline for (.{ geo, sg, f.path[0] }) |x| args.add(x);
     try cuda.launch.launch(fun, .{ .grid = .{ .x = 1, .y = dk / 4, .z = nv * nl }, .block = .{ .x = 32, .y = 4 } }, s, &args);
     const out = try a.dupe(u8, try rig.bytes(state, nl * rec * 4));
     try check.expect(try rig.intact() and !rig.overlap() and std.mem.eql(u8, seen, try rig.inputBytes()), "qwen35 pending: a keep launch changed an input or a guard", .{});
@@ -230,10 +281,21 @@ pub fn run(gpu: check.Gpu) !void {
     defer mod.unload();
     var keep = try cuda.Module.load(gpu.d, cuda.kernels.qwen35_keep);
     defer keep.unload();
-    const apply = try keep.function("tf_q35k_apply");
-    const apply_pend = try keep.function("tf_q35k_apply_pend");
+    for ([_]bool{ false, true }) |t| {
+        tab = t;
+        defer tab = false;
+        try runOne(gpu, s, &mod, &keep);
+    }
+}
+
+/// Every case on one instantiation (`tab`): main's kernels, or the _table ones.
+fn runOne(gpu: check.Gpu, s: cuda.Stream, mod: *cuda.Module, keep: *cuda.Module) !void {
+    const what = if (tab) "_table" else "";
+    std.debug.print("qwen35 pending: the {s} instantiation\n", .{if (tab) "_table (state table)" else "main (Seg's blocks)"});
+    const apply = try keep.function(if (tab) "tf_q35k_apply_table" else "tf_q35k_apply");
+    const apply_pend = try keep.function(if (tab) "tf_q35k_apply_pend_table" else "tf_q35k_apply_pend");
     var fns: [scans.len]cuda.Function = undefined;
-    inline for (scans, 0..) |sc, i| fns[i] = try mod.function(std.fmt.comptimePrint("tf_q35_gdn_slots_{d}", .{sc.slots}));
+    inline for (scans, 0..) |sc, i| fns[i] = try mod.function(if (tab) std.fmt.comptimePrint("tf_q35_gdn_slots_{d}_table", .{sc.slots}) else std.fmt.comptimePrint("tf_q35_gdn_slots_{d}", .{sc.slots}));
     var red: [scans.len + 1][2]bool = @splat(@splat(false)); // each scan's, then tf_q35k_apply_pend's: dropped, swapped
     var cases: [scans.len]usize = @splat(0);
     var scratch = std.heap.ArenaAllocator.init(gpu.gpa);
@@ -254,7 +316,7 @@ pub fn run(gpu: check.Gpu) !void {
                 red[scans.len][c] = red[scans.len][c] or moved;
                 try check.expect(moved, "qwen35 pending tf_q35k_apply_pend: {s} still landed tf_q35k_apply's state (control missed) at {d} rows", .{ if (c == 0) "a dropped row" else "two swapped rows", n });
             };
-            std.debug.print("PASS qwen35 pending tf_q35k_apply_pend: {d} rows equal tf_q35k_apply's path, 5 repeats, guards\n", .{n});
+            std.debug.print("PASS qwen35 pending tf_q35k_apply_pend{s}: {d} rows equal tf_q35k_apply's path, 5 repeats, guards\n", .{ what, n });
         }
         for (windows, 0..) |win, wi| {
             var arena = std.heap.ArenaAllocator.init(gpu.gpa);
@@ -273,7 +335,7 @@ pub fn run(gpu: check.Gpu) !void {
                         defer _ = scratch.reset(.retain_capacity);
                         const got = try launch(gpu, s, null, scan, sc.r, f, sign, f.pend[0], 0, scratch.allocator());
                         same(f, sign, got, want) catch |err| {
-                            std.debug.print("  at tf_q35_gdn_slots_{d}, {s}, {d} rows pending, sign {d}\n", .{ sc.slots, win.what, n, sign });
+                            std.debug.print("  at tf_q35_gdn_slots_{d}{s}, {s}, {d} rows pending, sign {d}\n", .{ sc.slots, what, win.what, n, sign });
                             return err;
                         };
                     }
@@ -289,10 +351,10 @@ pub fn run(gpu: check.Gpu) !void {
                 cases[si] += 1;
                 ran += 1;
             }
-            std.debug.print("PASS qwen35 pending: {s}, {d} rows pending, {d} scans (slot peak {d}): rows out, logs and states equal tf_q35k_apply then the scan, {s}, 5 repeats, guards\n", .{ win.what, n, ran, f.peak, if (f.rows == 1) "written back" else "written back and not" });
+            std.debug.print("PASS qwen35 pending{s}: {s}, {d} rows pending, {d} scans (slot peak {d}): rows out, logs and states equal tf_q35k_apply then the scan, {s}, 5 repeats, guards\n", .{ what, win.what, n, ran, f.peak, if (f.rows == 1) "written back" else "written back and not" });
         }
     }
     for (scans, cases, 0..) |sc, nc, si| try check.expect(nc > 0 and red[si][0] and red[si][1], "qwen35 pending tf_q35_gdn_slots_{d}: no case, or a control never fired", .{sc.slots});
     try check.expect(red[scans.len][0] and red[scans.len][1], "qwen35 pending tf_q35k_apply_pend: a control never fired", .{});
-    std.debug.print("PASS qwen35 pending: controls RED as planted (a dropped pending row, two swapped) on every scan and tf_q35k_apply_pend\n", .{});
+    std.debug.print("PASS qwen35 pending{s}: controls RED as planted (a dropped pending row, two swapped) on every scan and tf_q35k_apply_pend\n", .{what});
 }

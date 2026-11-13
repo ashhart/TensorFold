@@ -102,6 +102,7 @@ test "Qwen paged reuse: a bf16 save and restore copy a page each into the copy's
     cache.paged = .{ .base = 0x100000, .table = .{ .d = &d, .ptr = 0x90000, .len = 0 }, .ids = &ids, .tokens = 16, .own_ids = false };
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
     cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
+    cache.pieces = null; // one block: the runs read it too
     for ([_]bool{ true, false }) |device| {
         Mock.pinned = 0;
         Mock.flat_host = 0;
