@@ -6,6 +6,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Qwen3.8-Flash-Next on M5 Macs: `TF_FLASHNEXT_M5_ROWS=1` (opt-in) decodes on the pre-M5 path, with the row kernels, grouped experts, the cost depth rule and gated lanes, while prompts stay on the tensor units. On an M5 Ultra, one stream over 16 prompts runs about 16% faster (greedy median 200 to 235 tok/s, sampled 179 to 227) and `"draft": false` decode 22% faster, but four streams are up to 6% slower, so it stays off by default. Its tokens differ from the default's: drafted and `"draft": false` replies match on 16 of 16 prompts, concurrent replies match solo ones, and the R1 quality cell passes with 39 of 40 exact answers on both. With it unset, replies are unchanged.
 
+- CI: the app workflow keeps its Linux AppImage artifact for 3 days instead of GitHub's default 90 (#2966).
+
+- CI: the Linux no-GPU job runs `zig build test-host`, which collects the named host tests and compile checks apart from nine reviewed exclusions (the optional xgrammar steps, the release-path check, the two large-state timing commands, which stay available for explicit runs, and four fixture and source-pin checks held back under #2031); the build graph refuses empty checks, stale exclusions and aliases that bring excluded work back (#2095, part of #2031). Thanks to @garvrao80.
+
+- Tests: the TCP bootstrap's three-rank gather test and the multi-rank RoCE vote test join every rank they started before returning, so a failed spawn or check no longer leaves threads writing to a finished test's frame (#2963). Thanks to @Defilan.
+
 ## 1.2.8
 
 - GLM-5.3-Flash on CUDA: a tensor-parallel abort reaches the ranks' communicator from the engine's start, once, and a start-up failure after an abort no longer destroys the communicator again; serving and replies are unchanged (#2918, part of #2560). Thanks to @laudney.
