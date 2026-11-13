@@ -7,6 +7,7 @@ const cfg = @import("../config.zig");
 const shards = @import("../shards.zig");
 
 const Shards = shards.Shards;
+const fp8 = core.quant.fp8;
 
 pub const Gdn = struct { proj: u64, conv: u64, a_log: u64, dt_bias: u64, norm: u64, out: u64 };
 pub const Attn = struct { qkv: u64, q_norm: u64, k_norm: u64, o: u64 };
@@ -114,6 +115,18 @@ fn fmt(buf: []u8, comptime f: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, f, args) catch unreachable;
 }
 
+/// An expert projection's e4m3 codes by the shared block-FP8 reader; a refused one stays Drama's BadExpert.
+fn codes(sh: *const Shards, module: []const u8, n: usize, k: usize, why: ?*core.modelopt.Why) ![]const u8 {
+    const t = fp8.weight(sh, module, n, k, why) catch |e| return if (e == error.UnexpectedTensor) error.BadExpert else e;
+    return t.bytes;
+}
+
+/// Its f32 weight_scale_inv blocks copied into `out` bit for bit; a refused one stays Drama's BadExpertScale.
+fn scalesInto(sh: *const Shards, module: []const u8, n: usize, k: usize, out: []f32, why: ?*core.modelopt.Why) !void {
+    const t = fp8.scales(sh, module, n, k, .f32, why) catch |e| return if (e == error.UnexpectedTensor) error.BadExpertScale else e;
+    fp8.widen(t, out, false) catch return error.BadExpertScale;
+}
+
 const PackJob = struct {
     sh: *const Shards,
     layer: usize,
@@ -135,28 +148,24 @@ const PackJob = struct {
         const gpa = std.heap.c_allocator;
         const n = cfg.expert_width;
         const k = cfg.hidden;
-        var nb: [160]u8 = undefined;
         var e = j.first;
         while (e < cfg.experts) : (e += j.stride) {
             const base = "model.language_model.layers.{d}.mlp.experts.{d}.";
-            const g = try j.sh.get(fmt(&nb, base ++ "gate_proj.weight", .{ j.layer, e }));
-            const u = try j.sh.get(fmt(&nb, base ++ "up_proj.weight", .{ j.layer, e }));
-            const dn = try j.sh.get(fmt(&nb, base ++ "down_proj.weight", .{ j.layer, e }));
-            if (!g.is(.f8_e4m3, &.{ n, k }) or !u.is(.f8_e4m3, &.{ n, k }) or !dn.is(.f8_e4m3, &.{ k, n })) return error.BadExpert;
+            var mb: [3][160]u8 = undefined;
+            const mods = [3][]const u8{ fmt(&mb[0], base ++ "gate_proj", .{ j.layer, e }), fmt(&mb[1], base ++ "up_proj", .{ j.layer, e }), fmt(&mb[2], base ++ "down_proj", .{ j.layer, e }) };
+            const g = try codes(j.sh, mods[0], n, k, null);
+            const u = try codes(j.sh, mods[1], n, k, null);
+            const dn = try codes(j.sh, mods[2], k, n, null);
             const per_up = n * k * 2 / 4;
-            try cuda.experts.Fp8Experts.packGateUp(gpa, j.up[e * per_up ..][0..per_up], g.bytes, u.bytes, n, k);
+            try cuda.experts.Fp8Experts.packGateUp(gpa, j.up[e * per_up ..][0..per_up], g, u, n, k);
             const per_down = k * n / 4;
-            cuda.experts.Fp8Experts.packOne(j.down[e * per_down ..][0..per_down], dn.bytes, k, n);
-            const gs = try j.sh.get(fmt(&nb, base ++ "gate_proj.weight_scale_inv", .{ j.layer, e }));
-            const us = try j.sh.get(fmt(&nb, base ++ "up_proj.weight_scale_inv", .{ j.layer, e }));
-            const ds = try j.sh.get(fmt(&nb, base ++ "down_proj.weight_scale_inv", .{ j.layer, e }));
-            if (!gs.is(.f32, &.{ n / 128, k / 128 }) or !us.is(.f32, &.{ n / 128, k / 128 }) or !ds.is(.f32, &.{ k / 128, n / 128 })) return error.BadExpertScale;
+            cuda.experts.Fp8Experts.packOne(j.down[e * per_down ..][0..per_down], dn, k, n);
             const per_us = 2 * (n / 128) * (k / 128);
-            const usd = std.mem.sliceAsBytes(j.up_scale[e * per_us ..][0..per_us]);
-            @memcpy(usd[0..gs.bytes.len], gs.bytes);
-            @memcpy(usd[gs.bytes.len..][0..us.bytes.len], us.bytes);
+            const us = j.up_scale[e * per_us ..][0..per_us];
+            try scalesInto(j.sh, mods[0], n, k, us[0 .. per_us / 2], null);
+            try scalesInto(j.sh, mods[1], n, k, us[per_us / 2 ..], null);
             const per_ds = (k / 128) * (n / 128);
-            @memcpy(std.mem.sliceAsBytes(j.down_scale[e * per_ds ..][0..per_ds]), ds.bytes);
+            try scalesInto(j.sh, mods[2], k, n, j.down_scale[e * per_ds ..][0..per_ds], null);
             for ([_][]const u8{ "gate_proj.weight", "up_proj.weight", "down_proj.weight" }) |suffix| {
                 var nb2: [160]u8 = undefined;
                 const name = std.fmt.bufPrint(&nb2, "model.language_model.layers.{d}.mlp.experts.{d}.{s}", .{ j.layer, e, suffix }) catch unreachable;
@@ -302,4 +311,71 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     try stager.finish();
     if (opt.log) std.log.info("drama3: weights on the device: {d:.2} GB", .{@as(f64, @floatFromInt(w.bytes)) / 1e9});
     return w;
+}
+
+test "drama experts: block-FP8 experts pack through the shared reader, f32 scales bit for bit, Drama's refusals kept" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const n = cfg.expert_width;
+    const k = cfg.hidden;
+    const sb = (n / 128) * (k / 128);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var prng = std.Random.DefaultPrng.init(0xd3a3);
+    const pre = "model.language_model.layers.0.mlp.experts.1.";
+    const projs = [3][]const u8{ "gate_proj", "up_proj", "down_proj" };
+    var codes_: [3][]u8 = undefined;
+    var inv: [3][sb]u32 = undefined;
+    var entries: [6]core.checkpoint_fixture.Entry = undefined;
+    var names: [6][96]u8 = undefined;
+    for (0..3) |p| {
+        codes_[p] = try a.alloc(u8, n * k);
+        prng.random().bytes(codes_[p]);
+        prng.random().bytes(std.mem.sliceAsBytes(&inv[p]));
+        const shape: []const usize = if (p == 2) &.{ k, n } else &.{ n, k };
+        const blocks: []const usize = if (p == 2) &.{ k / 128, n / 128 } else &.{ n / 128, k / 128 };
+        entries[2 * p] = .{ .name = fmt(&names[2 * p], pre ++ "{s}.weight", .{projs[p]}), .dtype = "F8_E4M3", .shape = shape, .bytes = codes_[p] };
+        entries[2 * p + 1] = .{ .name = fmt(&names[2 * p + 1], pre ++ "{s}.weight_scale_inv", .{projs[p]}), .dtype = "F32", .shape = blocks, .bytes = std.mem.sliceAsBytes(&inv[p]) };
+    }
+    defer for (codes_) |c| a.free(c);
+    inv[1][5] = 0x7f800123; // a NaN with a payload: Drama copies scales as stored, no finiteness rule
+    try core.checkpoint_fixture.write(a, io, tmp.dir, "model.safetensors", &entries);
+    var index: std.ArrayList(u8) = .empty;
+    defer index.deinit(a);
+    try index.appendSlice(a, "{\"weight_map\":{");
+    for (entries, 0..) |e, i| try index.print(a, "{s}\"{s}\":\"model.safetensors\"", .{ if (i > 0) "," else "", e.name });
+    try index.appendSlice(a, "}}");
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = index.items });
+    const cwd = try std.process.currentPathAlloc(io, a);
+    defer a.free(cwd);
+    const dir = try std.fmt.allocPrint(a, "{s}/.zig-cache/tmp/{s}", .{ cwd, tmp.sub_path });
+    defer a.free(dir);
+    var sh = try Shards.open(a, io, dir);
+    defer sh.close(io);
+    const per_up = n * k * 2 / 4;
+    const per_down = k * n / 4;
+    const up = try a.alloc(u32, 2 * per_up);
+    defer a.free(up);
+    const down = try a.alloc(u32, 2 * per_down);
+    defer a.free(down);
+    var up_scale: [2 * 2 * sb]f32 = undefined;
+    var down_scale: [2 * sb]f32 = undefined;
+    var job: PackJob = .{ .sh = &sh, .layer = 0, .first = 1, .stride = cfg.experts, .up = up, .down = down, .up_scale = &up_scale, .down_scale = &down_scale };
+    try job.work();
+    const want_up = try a.alloc(u32, per_up);
+    defer a.free(want_up);
+    try cuda.experts.Fp8Experts.packGateUp(a, want_up, codes_[0], codes_[1], n, k);
+    try std.testing.expectEqualSlices(u32, want_up, up[per_up..]);
+    const want_down = try a.alloc(u32, per_down);
+    defer a.free(want_down);
+    cuda.experts.Fp8Experts.packOne(want_down, codes_[2], k, n);
+    try std.testing.expectEqualSlices(u32, want_down, down[per_down..]);
+    try std.testing.expectEqualSlices(u32, &(inv[0] ++ inv[1]), @ptrCast(up_scale[2 * sb ..]));
+    try std.testing.expectEqualSlices(u32, &inv[2], @ptrCast(down_scale[sb..]));
+    // a weight or scale of the wrong shape keeps Drama's own error, the reason named by tensor
+    var why: core.modelopt.Why = .{};
+    try std.testing.expectError(error.BadExpert, codes(&sh, pre ++ "down_proj", n, k, &why));
+    try std.testing.expectEqualStrings(pre ++ "down_proj.weight: f8_e4m3 { 2048, 512 }, expected f8_e4m3 { 512, 2048 }", why.text());
+    try std.testing.expectError(error.BadExpertScale, scalesInto(&sh, pre ++ "down_proj", n, k, down_scale[0..sb], &why));
+    try std.testing.expectEqualStrings(pre ++ "down_proj.weight_scale_inv: f32 { 16, 4 }, expected f32 { 4, 16 }", why.text());
 }
