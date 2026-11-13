@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-Flash-Next on M5 Macs: `TF_FLASHNEXT_M5_ROWS=1` (opt-in) decodes on the pre-M5 path, with the row kernels, grouped experts, the cost depth rule and gated lanes, while prompts stay on the tensor units. On an M5 Ultra, one stream over 16 prompts runs about 16% faster (greedy median 200 to 235 tok/s, sampled 179 to 227) and `"draft": false` decode 22% faster, but four streams are up to 6% slower, so it stays off by default. Its tokens differ from the default's: drafted and `"draft": false` replies match on 16 of 16 prompts, concurrent replies match solo ones, and the R1 quality cell passes with 39 of 40 exact answers on both. With it unset, replies are unchanged.
+
 - HIP on gfx1151: the routed prompt tile runs an expert of at most 8 rows in K-parallel passes inside the same launch, with the matrix path's bytes; with Qwen3.6-35B-A3B on a Radeon 8060S, served cold prompts of 64 to 256 tokens are 11% to 22% faster (1.5% at 1,024), and logits and served tokens equal main's. Other cards' tables leave it off (#2878, fixes #2795). Thanks to @AbrahamCete.
 
 - Internal: one block-FP8 reader in `core/quant/fp8.zig` loads Flash Next's, Kolibri-1's and Drama 3's FP8 weights and their scales, widening bf16 scales by the same bit shift and copying f32 ones as before; every packed buffer is byte-identical, and only Flash Next refuses non-finite scales, as before (#2892, #2460 item 7). Thanks to @jschmied.

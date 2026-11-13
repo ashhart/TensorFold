@@ -1,4 +1,5 @@
-//! Rows mode without tensor units (0.6.6's pre-M5 decode): every dense lane also as MLX-layout members for rows_w.
+//! Rows mode (0.6.6's pre-M5 decode; on tensor units with TF_FLASHNEXT_M5_ROWS=1): every dense lane also as
+//! MLX-layout members for rows_w.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -13,9 +14,20 @@ const Prompt = replay.Prompt;
 const D = replay.D;
 const KO = 6144; // the attention and DeltaNet output projections' inputs
 
-/// Whether decode reads its dense projections on the row kernels: no tensor units and FZ_M3_LANES unset.
+/// Whether decode reads its dense projections on the row kernels: the pre-M5 decode and FZ_M3_LANES unset.
 pub fn on(device: mtl.Device) bool {
-    return !device.tensorUnits() and platform.c.getenv("FZ_M3_LANES") == null;
+    return preM5Decode(device) and platform.c.getenv("FZ_M3_LANES") == null;
+}
+
+/// Whether decode takes the pre-M5 path: the row kernels, grouped experts, the cost depth rule and gated lanes at
+/// tau 0.4. Every GPU without tensor units; with them, only when TF_FLASHNEXT_M5_ROWS is exactly 1. On an M5 Ultra
+/// that path is 16-17% faster at one stream (1 to 4 rows a round each pay a whole 16-row tensor block) and up to 6%
+/// slower at four streams, and its tokens differ from the tensor-unit decode's. Prompt kernels stay on the tensor
+/// units either way.
+pub fn preM5Decode(device: mtl.Device) bool {
+    if (!device.tensorUnits()) return true;
+    const v = platform.c.getenv("TF_FLASHNEXT_M5_ROWS") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
 }
 
 /// `d` on the run's encoder at `rows` rows, unless the role is knocked out.
