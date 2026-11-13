@@ -162,7 +162,7 @@ concurrent one its run alone.
 | DFlash2 | Prose, 16 streams | 526.0 | 583.6 |
 
 One-stream runs are `tools/bench_openai.py` at 512 tokens and stream runs `tools/bench_concurrent.py` at 256. DFlash2's
-weights are CC BY-NC-ND 4.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
+weights are Apache-2.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
 are unchanged at about 4,430 tok/s from 8K to 131K tokens, and a repeated code reply reaches about 850 tok/s with
 windows of up to 32 rows. Other GPUs and rank counts are not covered here.
 

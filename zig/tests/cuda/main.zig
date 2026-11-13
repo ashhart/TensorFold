@@ -262,6 +262,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "fp8-experts")) return fp8_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "bf16-experts")) return if (rest.len == 0) @import("bf16_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_bf16.zig").run(gpu) else error.UnknownCommand;
     if (std.mem.eql(u8, cmd, "projection-f32")) return projection_f32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);

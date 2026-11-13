@@ -52,7 +52,7 @@ pub const Options = struct {
     mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
     learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (cuda_env)
 };
-/// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
+/// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, Apache-2.0 weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
 /// The smallest room among the other ranks and whose it is.
 pub const Peer = struct { bytes: u64, rank: usize };
