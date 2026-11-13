@@ -27,7 +27,12 @@ const Fake = struct {
         probes += 1;
         return a.dupe(u8, text orelse return null) catch null;
     }
-    pub fn env(_: [*:0]const u8) ?[:0]const u8 {
+    var host_counts: ?[:0]const u8 = null;
+    var wsl_distro: ?[:0]const u8 = null;
+    pub fn env(name: [*:0]const u8) ?[:0]const u8 {
+        const n = std.mem.span(name);
+        if (std.mem.eql(u8, n, "TENSORFOLD_UNIFIED_HOST_COUNTS")) return host_counts;
+        if (std.mem.eql(u8, n, "WSL_DISTRO_NAME")) return wsl_distro;
         return null;
     }
 };
@@ -133,4 +138,38 @@ test "the pool names the parked share it counted, for the debug log line" {
     try t.expectEqual(6 * g, (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
     Fake.zones = null;
     try t.expectEqual(@as(u64, 0), (try poolFor(false, Fake, t.allocator, t.io, &ctx, &problem)).?.parked);
+}
+
+test "Windows pool: WSL2 reads it too, TENSORFOLD_UNIFIED_HOST_COUNTS takes only 0 or 1, and refuses a typo by name" {
+    var driver: cuda.Driver = undefined;
+    driver.api.cuDeviceGetAttribute = Fake.attribute;
+    driver.api.cuMemGetInfo_v2 = Fake.memInfo;
+    const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    Fake.missing = false;
+    Fake.integrated = 1;
+    Fake.text = "MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n";
+    Fake.zones = null;
+    defer Fake.host_counts = null;
+    defer Fake.wsl_distro = null;
+    Fake.wsl_distro = "Ubuntu";
+    Fake.probes = 0;
+    const wsl = (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?;
+    try t.expectEqual(@as(u64, 40 << 30), wsl.free);
+    try t.expectEqual(@as(usize, 0), Fake.probes);
+    Fake.host_counts = "1";
+    try t.expectEqual(@as(u64, 24 << 30), (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?.free);
+    Fake.wsl_distro = null;
+    Fake.host_counts = "0";
+    try t.expectEqual(@as(u64, 40 << 30), (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?.free);
+    for ([_][:0]const u8{ "2", "01", "true", "yes" }) |typo| {
+        Fake.host_counts = typo;
+        problem = "";
+        try t.expect((try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)) == null);
+        try t.expect(std.mem.startsWith(u8, problem, "TENSORFOLD_UNIFIED_HOST_COUNTS=\""));
+    }
+    Fake.host_counts = null;
+    try t.expectEqual(@as(u64, 24 << 30), (try poolFor(false, Fake, arena.allocator(), t.io, &ctx, &problem)).?.free);
 }

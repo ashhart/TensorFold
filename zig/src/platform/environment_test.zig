@@ -56,6 +56,8 @@ const valid = [_]Case{
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .raw = "1792", .n = 1792 },
+    .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .raw = "1", .n = 1 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
     .{ .name = "TF_DSPINE_WINDOW", .raw = "16", .n = 16 },

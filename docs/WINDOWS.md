@@ -166,6 +166,10 @@ loads and runs exactly as before.
 - Integrated unified-memory GPUs on Windows (such as RTX Spark N1X `sm_121`) admit against the WDDM CUDA device pool
   (`cuMemGetInfo_v2`) while keeping the unified 10% reserve and 4 GiB default floor. A fresh device receipt must check
   the WDDM budget, allocation deltas and equality cells; source admission alone does not qualify the device.
+- Under WSL2 the Linux build sees the same integrated N1X, but `/proc/meminfo` there is WSL's RAM (about 30 GiB on a
+  128 GB machine whose firmware gives the GPU 96 GB), not the GPU's pool. With `WSL_DISTRO_NAME` set the integrated
+  admission reads the CUDA pool, as on Windows; `TENSORFOLD_UNIFIED_HOST_COUNTS=1` restores procfs, `=0` forces the pool,
+  and the CUDA backend refuses any other value at startup, naming the variable.
 - The API key file is checked for type and size; Windows keeps access in ACLs, not mode bits, so the "unreadable by
   other users" check is the folder's ACL rather than `chmod 600`.
 
@@ -173,3 +177,28 @@ loads and runs exactly as before.
 
 - No io_uring, `ulimit` or Linux `/proc/meminfo` probe, and no `SIGHUP` (the key file is still reread when it changes).
 - `TF_HEAT_*` thermal pacing reads Linux's `/sys/class/thermal` and does nothing on Windows.
+
+## RTX Spark N1X: a receipt (2026-11-04)
+
+An HP OmniBook X 14 (RTX Spark N1X, 128 GB, driver 617.21 / CUDA 13.4), HP Performance mode, plugged in, 1.2.2 with the
+WSL admission change above:
+
+- Native build: Zig 0.17.0, the CUDA 13.4 Windows-on-Arm toolkit assembled from NVIDIA's redistributable archives
+  (`redistrib_13.4.3.json`, `windows-arm64`: nvcc, cudart, crt, cccl, nvvm, nvrtc, nvJitLink, nvptxcompiler, cuBLAS,
+  NVTX, profiler API; winget's `Nvidia.CUDA` has no arm64 installer), VS 2022 Build Tools with the ARM64 C++ tools
+  (`vcvarsall arm64`), `zig build native install -Dsm=121 -Dstrip=true`. `tf-cuda-test info`: sm_121, 48 SMs,
+  113,103 MiB total; `smoke` passes; `glue` 1473 of 1473 byte-equal.
+- `Blackfrost-AI/CYBER-FROST-3.8-FP4-Local` (Flash Next, ModelOpt mixed): 72.65 GiB, 4 streams at a 32,768-token
+  window, ready in 35-46 s. vcruz305's `bench_v1.py` / `concurrency.py` clients, greedy, 400 tokens, client end-to-end:
+
+| | WSL2 (Linux build) | native Windows |
+| --- | ---: | ---: |
+| One stream, code / DevOps / prose (tok/s) | 43.8 / 42.2 / 35.7 | 50.4 / 40.2 / 37.3 |
+| First token, short prompt (s) | 0.21-0.24 | 0.22-0.28 (clients over a ~6 ms tunnel) |
+| First token, 17,850-token prompt (s) | 10.2 | 10.9 |
+| 1 / 2 / 4 streams, aggregate (tok/s) | 36.4 / 50.2 / 65.6 | 36.6 / 54.4 / 70.0 |
+| Left for streams after the model and reserve | 15.4 GiB | 19.0 GiB |
+
+The GPU ran at about 2.1 GHz and 42-49 W (the laptop's power cap; in Windows' power-saving mode it runs near 1.4 GHz).
+The same laptop serving the same model through exllamav3 (vcruz305's EXL3 recipe, Cyber Frost 3.87 bpw) gave 38.6 /
+34.5 / 27.8 tok/s, a first token in 0.74-0.80 s, and 36.2 tok/s aggregate at four streams.
