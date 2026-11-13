@@ -28,6 +28,7 @@ test {
     _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
     _ = @import("admission_cli.zig");
+    _ = @import("connection_cli.zig");
     _ = @import("request_admission_test.zig");
     _ = @import("request_admission_http_test.zig");
     _ = @import("vision_markers_test.zig");
@@ -75,6 +76,7 @@ test {
     _ = @import("cli.zig");
     _ = @import("cli_test.zig");
     _ = @import("cli_profile_test.zig");
+    _ = @import("compact_at_cli_test.zig");
     _ = @import("unix_socket_cli_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
@@ -148,6 +150,7 @@ test {
     _ = @import("late_system_test.zig");
     _ = @import("compact.zig");
     _ = @import("compact_test.zig");
+    _ = @import("private_files_test.zig");
     _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");

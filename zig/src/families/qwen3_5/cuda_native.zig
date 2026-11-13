@@ -414,7 +414,7 @@ pub const Lanes = struct {
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        if (stream.readout != null) while (!try readout.step(cast(ptr), stream, 0)) {} else return prefill.run(cast(ptr), stream);
+        return prefill.whole(cast(ptr), stream);
     }
 
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {

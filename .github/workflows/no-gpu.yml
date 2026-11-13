@@ -133,6 +133,10 @@ jobs:
       # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
       - name: zig build test-golden
         run: zig build -Dfixed-cpu test-golden
+      # The serving pins ran only in the nightly, so a PR that touched a pinned file landed green and turned the
+      # next nightly red (10-12 Nov). Run them on every PR: a changed pinned file needs its re-pin in the same PR.
+      - name: zig build test-gradient-serving test-qwen-serving-host
+        run: zig build -Dfixed-cpu test-gradient-serving test-qwen-serving-host
       # Hostile HTTP framing, API keys and download paths, on the CPU.
       - name: zig build test-server-security test-pull-security
         run: zig build -Dfixed-cpu test-server-security test-pull-security
@@ -331,7 +335,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, adapters, deepseek, lanes, deferred]
+        suite: [fast, adapters, native, deepseek, lanes, deferred]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -340,11 +344,29 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
+      - name: Metal toolchain for native engine host checks
+        if: matrix.suite == 'native'
+        run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
       - name: Host checks and aggregate wall time
         shell: bash
         env:
           SUITE: ${{ matrix.suite }}
         run: |
           printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          if [ "$SUITE" = native ]; then
+            printf 'Native source: %s\n' "$GITHUB_SHA"
+            status=0
+            for phase in initial warm; do
+              TIMEFORMAT="test-native $phase wall seconds: %R"
+              if { time zig build test-host-ci-macos-native --test-timeout 30m --summary all; }; then
+                printf 'test-native %s exit: 0\n' "$phase"
+              else
+                code=$?
+                printf 'test-native %s exit: %s\n' "$phase" "$code"
+                status=$code
+              fi
+            done
+            exit "$status"
+          fi
           TIMEFORMAT='Host checks wall seconds: %R'
           time zig build "test-host-ci-macos-$SUITE" --test-timeout 30m

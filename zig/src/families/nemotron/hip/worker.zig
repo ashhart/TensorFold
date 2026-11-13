@@ -33,6 +33,8 @@ pub const Worker = struct {
 
     /// prefill: id, resumed at, snapshot slot, page count, the pages, prompt length, the prompt.
     pub fn prefill(w: *Worker, f: *Follower, m: []const u32) !void {
+        // rank 0's counts are checked against the message before either is used to slice it
+        if (m.len < 6 or m[4] > m.len - 6 or m[5 + m[4]] > m.len - 6 - m[4]) return error.ShortMessage;
         const table = m[5..][0..m[4]];
         const prompt = m[6 + m[4] ..][0..m[5 + m[4]]];
         f.close(m[1]);
@@ -52,6 +54,7 @@ pub const Worker = struct {
 
     /// verify: the window count, then each window's id, rows and tokens; every rank runs the same round.
     pub fn verify(w: *Worker, f: *Follower, m: []const u32) !void {
+        if (m.len < 2) return error.ShortMessage;
         const n = m[1];
         var ls: [64]*Lane = undefined;
         var toks: [64][]const u32 = undefined;
@@ -71,6 +74,7 @@ pub const Worker = struct {
 
     /// keep: id, rows of the last window kept.
     pub fn keep(w: *Worker, f: *Follower, m: []const u32) !void {
+        if (m.len < 3) return error.ShortMessage;
         try w.h.keepRows(try f.lane(m[1]), m[2]);
     }
 
