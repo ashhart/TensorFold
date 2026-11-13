@@ -22,8 +22,11 @@
     // a grouped launch's block: its projection's tile and K slice, as that projection's own launch numbers them
     const int2 at = tile_of(tile, M, N, BM, BN, group);
     const int m0 = at.x, n0 = at.y, g0 = slice * per;
+#elif defined(TF_QMMF_GROUPED)
+    const int2 at = tile_of(local_tile, M, N, BM, BN, group);
 #else
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
+#endif
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
 #endif
 
