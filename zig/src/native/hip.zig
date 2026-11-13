@@ -63,7 +63,7 @@ fn checkGroup(comptime F: type, a: Allocator, o: api.Open, problem: *[]const u8)
     if (o.tp == 1 and o.rank != 0) return refuse(a, problem, "--rank must be 0 when --tp 1", .{});
     if (o.rank >= o.tp) return refuse(a, problem, "--rank {d} not in [0, --tp {d})", .{ o.rank, o.tp });
     if (o.keep) |n| if (n < 0) return refuse(a, problem, "--checkpoint-slots must be 0 or more", .{});
-    if (o.mtp_drafts) |n| if (n > fam.mtpMost(F)) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most {d}", .{ n, fam.mtpMost(F) });
+    if (o.mtp_drafts) |n| if (n > fam.mtpMost(F, o.tp)) return refuse(a, problem, "--mtp-drafts {d}: the HIP engine drafts at most {d}{s}", .{ n, fam.mtpMost(F, o.tp), if (fam.mtpMost(F, o.tp) < fam.mtpMost(F, 1)) " with --tp above 1" else "" });
     if (o.mtp_confidence) |c| if (c < 0 or c > 1) return refuse(a, problem, "--mtp-confidence must be from 0 to 1", .{});
     if (o.prompt_cache_gib) |g| if (g < 0) return refuse(a, problem, "--prompt-cache-gib must be 0 or more", .{});
 }
@@ -531,17 +531,17 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     try std.testing.expectError(error.Refused, checkGroup(qwen35.native, a, follower, &problem));
 }
 
-test "--mtp-drafts: Flash Next's head takes seven and every other HIP family three; past that it is refused by name" {
+test "--mtp-drafts: Flash Next takes seven at --tp 1 and three above it, every other HIP family three; past that refused by name" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     var problem: []const u8 = "";
-    inline for (.{ .{ flashnext.native, "qwen4_exp", 7 }, .{ qwen35.native, "qwen3_5", 3 } }) |c| {
-        var o: api.Open = .{ .dir = "d", .model_type = c[1], .mtp_drafts = c[2] };
+    inline for (.{ .{ flashnext.native, "qwen4_exp", 7, 1, "" }, .{ qwen35.native, "qwen3_5", 3, 1, "" }, .{ flashnext.native, "qwen4_exp", 3, 2, " with --tp above 1" }, .{ qwen35.native, "qwen3_5", 3, 2, "" } }) |c| {
+        var o: api.Open = .{ .dir = "d", .model_type = c[1], .mtp_drafts = c[2], .tp = c[3], .master = if (c[3] > 1) "node0" else "" };
         try checkGroup(c[0], a, o, &problem);
         o.mtp_drafts = c[2] + 1;
         try std.testing.expectError(error.Refused, checkGroup(c[0], a, o, &problem));
-        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--mtp-drafts {d}: the HIP engine drafts at most {d}", .{ c[2] + 1, c[2] }), problem);
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "--mtp-drafts {d}: the HIP engine drafts at most {d}{s}", .{ c[2] + 1, c[2], c[4] }), problem);
     }
 }
 

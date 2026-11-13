@@ -43,9 +43,9 @@ pub fn refused(comptime F: type, o: api.Open) ?[]const u8 {
     return null;
 }
 
-/// Most `--mtp-drafts` the family's head takes: its `mtp_max_drafts`, else three.
-pub fn mtpMost(comptime F: type) u32 {
-    return if (@hasDecl(F, "mtp_max_drafts")) F.mtp_max_drafts else 3;
+/// Most `--mtp-drafts` the family's head takes at `tp` ranks: its `mtp_max_drafts` on one rank, else three.
+pub fn mtpMost(comptime F: type, tp: u32) u32 {
+    return if (@hasDecl(F, "mtp_max_drafts") and tp == 1) F.mtp_max_drafts else 3;
 }
 
 /// The family's offer, or the empty one (text, the host's defaults) when its Loaded carries none.
@@ -118,10 +118,12 @@ test "a Loaded without an offer gives the empty one; --vision with no offered im
     try std.testing.expect(!textOnly(.{ .dir = "d", .model_type = "plain" }, empty));
 }
 
-test "a family takes three MTP drafts unless it declares `mtp_max_drafts`" {
+test "a family takes three MTP drafts unless it declares `mtp_max_drafts`, and three past one rank" {
     const Deep = struct {
         pub const mtp_max_drafts: u32 = 7;
     };
-    try std.testing.expectEqual(@as(u32, 3), mtpMost(Plain));
-    try std.testing.expectEqual(@as(u32, 7), mtpMost(Deep));
+    try std.testing.expectEqual(@as(u32, 3), mtpMost(Plain, 1));
+    try std.testing.expectEqual(@as(u32, 7), mtpMost(Deep, 1));
+    try std.testing.expectEqual(@as(u32, 3), mtpMost(Deep, 2));
+    try std.testing.expectEqual(@as(u32, 3), mtpMost(Plain, 2));
 }
