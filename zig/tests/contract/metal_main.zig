@@ -415,6 +415,9 @@ pub fn main(init: std.process.Init) !u8 {
     var moe: Moe = .{};
     defer moe.deinit(a);
     try moe.collect(a, device, queue, o, &kernels);
+    var row_wide: @import("metal_row_wide.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer row_wide.deinit();
+    try row_wide.collect(o.only);
     var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
