@@ -11,6 +11,8 @@ const dense_in = contract.dense;
 const family = llama.family;
 const G33 = family.nanbeige43;
 const G3 = family.nanbeige41;
+const G7 = family.bimo7b;
+const DH = llama.DH;
 
 /// core/bf16_matvec.metal's tf_bf16_mv_args, as forward.zig fills it.
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
@@ -20,30 +22,36 @@ fn matvecDepth(s: c.Shape) usize {
     return s.k / 32 + 8;
 }
 
-/// The row projection ll_matvec_ROWS: Y[r, j] = bf16(sum X[r, i] W[j, i]) in fp32, ROWS rows a launch.
+/// ll_matvec_ROWS: Y[r, j] = bf16(sum X[r, i] W[j, i]) in fp32, ROWS rows a launch; the bias_ form adds b[j] first.
 pub const Matvec = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     lib: mtl.Library,
     pipe: mtl.Pipeline,
     per: u32,
+    biased: bool,
     mutation: controls.Mutation,
     name: []const u8,
     served: [2]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     d: ?dense_in.Dense = null,
     w16: []u16 = &.{},
+    b16: []u16 = &.{}, // the bias [n], the biased form's
     x: rig_.Ref = undefined,
     w: rig_.Ref = undefined,
+    bias: rig_.Ref = undefined,
     y: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, per: u32, mutation: controls.Mutation) !Matvec {
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, per: u32, biased: bool, mutation: controls.Mutation) !Matvec {
         const lib = try controls.glueLibrary(device, a, mutation);
         errdefer lib.deinit();
-        const name = try std.fmt.allocPrint(a, "llama glue ll_matvec_{d}", .{per});
+        const name = try std.fmt.allocPrint(a, "llama glue ll_matvec_{s}{d}", .{ if (biased) "bias_" else "", per });
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .mutation = mutation, .name = name, .served = .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G3.hidden } } };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .lib = lib, .pipe = try llama.pipelineOf(lib, device, fun), .per = per, .biased = biased, .mutation = mutation, .name = name, .served = if (biased)
+            .{ .{ .rows = per, .n = G7.heads * DH, .k = G7.hidden }, .{ .rows = per, .n = G7.kv_heads * DH, .k = G7.hidden } }
+        else
+            .{ .{ .rows = per, .n = 1024, .k = G33.intermediate }, .{ .rows = per, .n = G33.hidden, .k = G3.hidden } } };
     }
 
     fn drop(p: *Matvec) void {
@@ -51,6 +59,8 @@ pub const Matvec = struct {
         p.d = null;
         p.a.free(p.w16);
         p.w16 = &.{};
+        p.a.free(p.b16);
+        p.b16 = &.{};
         p.rig.reset();
     }
 
@@ -79,6 +89,11 @@ pub const Matvec = struct {
         try denseWeights(p.w16, d, s, fill, seed);
         p.x = try p.rig.input(std.mem.sliceAsBytes(d.x));
         p.w = try p.rig.input(std.mem.sliceAsBytes(p.w16));
+        if (p.biased) {
+            p.b16 = try p.a.alloc(u16, s.n);
+            biasVector(p.b16, seed);
+            p.bias = try p.rig.input(std.mem.sliceAsBytes(p.b16));
+        }
         p.y = try p.rig.output(d.outputs() * 2);
         return true;
     }
@@ -99,19 +114,37 @@ pub const Matvec = struct {
             e.setBuffer(p.w.buf, p.w.off, 1);
             e.setValue(MArgs{ .rows = here, .n = @intCast(s.n), .k = @intCast(s.k), .ldy = @intCast(s.n) }, 2);
             e.setBuffer(p.y.buf, p.y.off + at * s.n * 2, 3);
+            if (p.biased) e.setBuffer(p.bias.buf, p.bias.off, 4);
             e.dispatchGroups(mtl.Size.of((s.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
         }
         try p.rig.finish(pass);
     }
 
     pub fn reference(p: *Matvec, want: []f64, mag: []f64) !void {
-        return p.d.?.reference(want, mag);
+        try p.d.?.reference(want, mag);
+        if (!p.biased) return;
+        for (0..p.shape.rows) |r| for (0..p.shape.n) |j| {
+            const b = c.fromBf16(p.b16[j]);
+            want[r * p.shape.n + j] += b;
+            mag[r * p.shape.n + j] += @abs(b);
+        };
     }
 
     pub fn simulate(p: *Matvec, acc: c.Accum, order: g.Order, out: []f64) !void {
-        return p.d.?.simulate(acc, order, out);
+        try p.d.?.simulate(acc, order, out);
+        if (!p.biased) return;
+        for (0..p.shape.rows) |r| for (0..p.shape.n) |j| {
+            out[r * p.shape.n + j] += c.fromBf16(p.b16[j]); // joins the simd-summed fp32 total
+        };
     }
 };
+
+/// A bf16 bias [n] in [-1, 1) for a dense family's biased projections.
+pub fn biasVector(b16: []u16, seed: u64) void {
+    var prng = std.Random.DefaultPrng.init(seed ^ 0xb1a5);
+    const rng = prng.random();
+    for (b16) |*v| v.* = c.toBf16(rng.float(f32) * 2 - 1);
+}
 
 /// Bf16 weights for a dense family: random in [-1, 1), or gate 4's integers, mirrored and negated over the halves.
 pub fn denseWeights(w16: []u16, d: dense_in.Dense, s: c.Shape, fill: g.Fill, seed: u64) !void {
@@ -130,16 +163,17 @@ fn gemmDepth(s: c.Shape) usize {
     return s.k / 16 + 16;
 }
 
-/// The prompt GEMM ll_gemm_AB: A whole 64-row tiles of M, B whole 128-column tiles of N; a probe pads to its form.
+/// The prompt GEMM ll_gemm_AB (bf16 out) or ll_gemm_f32_AB (fp32 sums): A whole 64-row tiles, B whole 128-column tiles.
 pub const Gemm = struct {
     a: std.mem.Allocator,
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     am: bool,
     an: bool,
+    wide: bool, // the fp32-sums form
     mutation: controls.Mutation,
     name: []const u8,
-    served: [2]c.Shape,
+    served: [3]c.Shape,
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     d: ?dense_in.Dense = null,
     w16: []u16 = &.{},
@@ -147,17 +181,19 @@ pub const Gemm = struct {
     w: rig_.Ref = undefined,
     y: rig_.Ref = undefined,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, am: bool, an: bool, mutation: controls.Mutation) !Gemm {
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, am: bool, an: bool, wide: bool, mutation: controls.Mutation) !Gemm {
         const plain = try family.gemmSource(device, a);
         defer a.free(plain);
         const src = try controls.apply(a, plain, mutation);
         defer a.free(src);
-        const name = try std.fmt.allocPrint(a, "llama gemm ll_gemm_{d}{d}", .{ @intFromBool(am), @intFromBool(an) });
+        const name = try std.fmt.allocPrint(a, "llama gemm ll_gemm_{s}{d}{d}", .{ if (wide) "f32_" else "", @intFromBool(am), @intFromBool(an) });
         errdefer a.free(name);
         const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
         const rows: usize = if (am) 256 else 100;
         const n: usize = if (an) 1024 else 1088;
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, fun), .am = am, .an = an, .mutation = mutation, .name = name, .served = .{ .{ .rows = rows, .n = n, .k = G33.hidden }, .{ .rows = if (am) 64 else 33, .n = if (an) G3.hidden else G3.hidden + 64, .k = G3.hidden } } };
+        // Bimo's q (3,584 wide, bf16) or k (512, fp32 sums) over its 3,584 hidden, a chunk's and a window's rows
+        const bimo: c.Shape = .{ .rows = if (am) 128 else 33, .n = if (an) (if (wide) G7.kv_heads * DH else G7.heads * DH) else G7.hidden + 64, .k = G7.hidden };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .pipe = try rig_.pipeline(device, src, fun), .am = am, .an = an, .wide = wide, .mutation = mutation, .name = name, .served = .{ .{ .rows = rows, .n = n, .k = G33.hidden }, .{ .rows = if (am) 64 else 33, .n = if (an) G3.hidden else G3.hidden + 64, .k = G3.hidden }, bimo } };
     }
 
     fn drop(p: *Gemm) void {
@@ -178,7 +214,7 @@ pub const Gemm = struct {
     const vt = g.hooks(Gemm);
 
     pub fn kernel(p: *Gemm) g.Kernel {
-        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = gemmDepth, .out = .bf16, .tiles = .{ .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 128, .step = 1, .min = 1 }, .{ .size = 256, .step = 256, .min = 256 } }, .served = &p.served }, .ctx = p, .vt = &vt }, p.mutation);
+        return controls.mark(.{ .spec = .{ .name = p.name, .accum = .f32, .depth = gemmDepth, .out = if (p.wide) .f32 else .bf16, .tiles = .{ .{ .size = 64, .step = 1, .min = 1 }, .{ .size = 128, .step = 1, .min = 1 }, .{ .size = 256, .step = 256, .min = 256 } }, .served = &p.served }, .ctx = p, .vt = &vt }, p.mutation);
     }
 
     /// The shape the kernel runs at: whole tiles where its form assumes them (the padded rows are the probe's too).
@@ -199,7 +235,7 @@ pub const Gemm = struct {
         try denseWeights(p.w16, d, s, fill, seed);
         p.x = try p.rig.input(std.mem.sliceAsBytes(d.x));
         p.w = try p.rig.input(std.mem.sliceAsBytes(p.w16));
-        p.y = try p.rig.output(d.outputs() * 2);
+        p.y = try p.rig.output(d.outputs() * @as(usize, if (p.wide) 4 else 2));
         return true;
     }
 

@@ -13,6 +13,7 @@ const family = llama.family;
 
 const matvec_rows = [_]u32{ 1, 2, 4, 8, 16, 32 };
 const matvec_names = [_][]const u8{ "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32" };
+const matvec_bias_names = [_][]const u8{ "ll_matvec_bias_1", "ll_matvec_bias_2", "ll_matvec_bias_4", "ll_matvec_bias_8", "ll_matvec_bias_16", "ll_matvec_bias_32" };
 const q4_names = [_][]const u8{ "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32" };
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
@@ -121,17 +122,17 @@ pub const Set = struct {
             try s.merge.append(a, p);
             try kernels.append(a, p.kernel());
         }
-        for (matvec_rows, matvec_names) |rows, fun| {
+        for ([_]bool{ false, true }) |biased| for (matvec_rows, if (biased) matvec_bias_names else matvec_names) |rows, fun| {
             functions[n] = fun;
             n += 1;
             var name_buf: [40]u8 = undefined;
             if (!wanted(only, try std.fmt.bufPrint(&name_buf, "llama glue {s}", .{fun}))) continue;
             const p = try a.create(dense.Matvec);
             errdefer a.destroy(p);
-            p.* = try dense.Matvec.init(a, device, queue, rows, .none);
+            p.* = try dense.Matvec.init(a, device, queue, rows, biased, .none);
             try s.matvec.append(a, p);
             try kernels.append(a, p.kernel());
-        }
+        };
         for (matvec_rows, q4_names) |rows, fun| {
             functions[n] = fun;
             n += 1;
@@ -152,18 +153,19 @@ pub const Set = struct {
             try s.dequant.append(a, p);
             try kernels.append(a, p.kernel());
         }
-        for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |form| {
-            const fun = family.gemm_names[@as(usize, @intFromBool(form[0])) * 2 + @intFromBool(form[1])];
+        for ([_]bool{ false, true }) |wide| for ([_][2]bool{ .{ false, false }, .{ false, true }, .{ true, false }, .{ true, true } }) |form| {
+            const names = if (wide) family.gemm_f32_names else family.gemm_names;
+            const fun = names[@as(usize, @intFromBool(form[0])) * 2 + @intFromBool(form[1])];
             functions[n] = fun;
             n += 1;
             var name_buf: [40]u8 = undefined;
             if (!tensor or !wanted(only, try std.fmt.bufPrint(&name_buf, "llama gemm {s}", .{fun}))) continue;
             const p = try a.create(dense.Gemm);
             errdefer a.destroy(p);
-            p.* = try dense.Gemm.init(a, device, queue, form[0], form[1], .none);
+            p.* = try dense.Gemm.init(a, device, queue, form[0], form[1], wide, .none);
             try s.gemm.append(a, p);
             try kernels.append(a, p.kernel());
-        }
+        };
         functions[n] = family.attention_name;
         n += 1;
         for (family.geometries) |geo| {
@@ -190,6 +192,8 @@ pub const Set = struct {
                 .add_norm_no_residual => .add_norm,
                 .silu_swapped => .silu,
                 .prep_first_position => .prep,
+                .prep_unscaled_cos => .prep,
+                .bias_round_no_bias, .bias_round_twice => .bias_round,
                 else => null,
             };
             if (glue) |w| {
@@ -222,17 +226,17 @@ pub const Set = struct {
                     try s.merge.append(a, p);
                     try kernels.append(a, p.kernel());
                 },
-                .matvec_drops_tail => {
+                .matvec_drops_tail, .matvec_bias_dropped => {
                     const p = try a.create(dense.Matvec);
                     errdefer a.destroy(p);
-                    p.* = try dense.Matvec.init(a, device, queue, 4, m);
+                    p.* = try dense.Matvec.init(a, device, queue, 4, m == .matvec_bias_dropped, m);
                     try s.matvec.append(a, p);
                     try kernels.append(a, p.kernel());
                 },
-                .gemm_untransposed => if (tensor) {
+                .gemm_untransposed, .gemm_f32_untransposed => if (tensor) {
                     const p = try a.create(dense.Gemm);
                     errdefer a.destroy(p);
-                    p.* = try dense.Gemm.init(a, device, queue, false, false, m);
+                    p.* = try dense.Gemm.init(a, device, queue, false, false, m == .gemm_f32_untransposed, m);
                     try s.gemm.append(a, p);
                     try kernels.append(a, p.kernel());
                 },
@@ -285,6 +289,12 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
         .{ .name = "llama glue ll_matvec_8", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_matvec_16", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_matvec_32", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_matvec_bias_1", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_matvec_bias_2", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_matvec_bias_4", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_matvec_bias_8", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_matvec_bias_16", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_matvec_bias_32", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_q4_matvec_1", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_q4_matvec_2", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_q4_matvec_4", .threads = 256, .tg = 0 },
@@ -292,6 +302,7 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
         .{ .name = "llama glue ll_q4_matvec_16", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_q4_matvec_32", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_q4_dequant", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_bias_round", .threads = 256, .tg = 0 },
     };
     for (decls) |d| {
         if (!wanted(only, d.name)) continue;
@@ -301,7 +312,7 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
     if (!tensor) return problems;
     const gemm = try family.gemmSource(device, a);
     defer a.free(gemm);
-    for (family.gemm_names) |fun| {
+    for (family.gemm_names ++ family.gemm_f32_names) |fun| {
         const name = try std.fmt.allocPrint(a, "llama gemm {s}", .{fun});
         defer a.free(name);
         if (!wanted(only, name)) continue;

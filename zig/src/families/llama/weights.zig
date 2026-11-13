@@ -17,7 +17,9 @@ pub const Int4 = struct {
     zeros: Tensor,
 };
 
-pub const Attention = struct { q: Dense, k: Dense, v: Dense, o: Dense };
+/// Qwen2's q, k and v biases, bf16 [n] each as the release stores them.
+pub const Bias = struct { q: Tensor, k: Tensor, v: Tensor };
+pub const Attention = struct { q: Dense, k: Dense, v: Dense, o: Dense, bias: ?Bias = null };
 pub const Mlp = struct { gate: Dense, up: Dense, down: Dense };
 pub const Layer = struct { input_norm: Tensor, post_norm: Tensor, attn: Attention, mlp: Mlp };
 
@@ -83,12 +85,13 @@ fn int4(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usiz
     return .{ .buf = got[0].buffer, .off = got[0].offset, .n = n, .k = k, .int4 = .{ .scales = got[1], .zeros = got[2] } };
 }
 
-fn norm(c: *const ck.Checkpoint, hidden: usize, prefix: []const u8, suffix: []const u8) !Tensor {
+/// A bf16 vector [n] in place: a norm's weight or a projection's bias.
+fn vector(c: *const ck.Checkpoint, n: usize, prefix: []const u8, suffix: []const u8) !Tensor {
     var buf: [256]u8 = undefined;
-    const n = try name(&buf, prefix, suffix);
-    const t = try c.get(n);
-    require(t, &.{hidden}) catch |err| {
-        std.log.err("llama: {s} is not bf16[{d}]", .{ n, hidden });
+    const full = try name(&buf, prefix, suffix);
+    const t = try c.get(full);
+    require(t, &.{n}) catch |err| {
+        std.log.err("llama: {s} is not bf16[{d}]", .{ full, n });
         return err;
     };
     return t;
@@ -126,7 +129,7 @@ pub fn load(gpa: std.mem.Allocator, c: *const ck.Checkpoint, f: *const cfg.Confi
     var w = Weights{
         .embed = try dense(c, "model.", "embed_tokens.weight", f.vocab, h),
         .head = try dense(c, "", "lm_head.weight", f.vocab, h),
-        .norm = try norm(c, h, "model.", "norm.weight"),
+        .norm = try vector(c, h, "model.", "norm.weight"),
         .layers = try gpa.alloc(Layer, f.layers),
     };
     errdefer w.deinit(gpa);
@@ -139,13 +142,14 @@ pub fn load(gpa: std.mem.Allocator, c: *const ck.Checkpoint, f: *const cfg.Confi
         const m = try name(&mb, p, "mlp.");
         const proj = Proj{ .c = c, .weights = f.weights };
         l.* = .{
-            .input_norm = try norm(c, h, p, "input_layernorm.weight"),
-            .post_norm = try norm(c, h, p, "post_attention_layernorm.weight"),
+            .input_norm = try vector(c, h, p, "input_layernorm.weight"),
+            .post_norm = try vector(c, h, p, "post_attention_layernorm.weight"),
             .attn = .{
                 .q = try proj.get(a, "q_proj", f.queryWidth(), h),
                 .k = try proj.get(a, "k_proj", f.kvWidth(), h),
                 .v = try proj.get(a, "v_proj", f.kvWidth(), h),
                 .o = try proj.get(a, "o_proj", h, f.queryWidth()),
+                .bias = if (f.bias) .{ .q = try vector(c, f.queryWidth(), a, "q_proj.bias"), .k = try vector(c, f.kvWidth(), a, "k_proj.bias"), .v = try vector(c, f.kvWidth(), a, "v_proj.bias") } else null,
             },
             .mlp = .{
                 .gate = try proj.get(m, "gate_proj", f.intermediate, h),

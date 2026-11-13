@@ -11,7 +11,7 @@ const Glue = @import("model.zig").Glue;
 /// The glue kernels' constants (glue.metal's ll_args).
 const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, eps: f32 = 0 };
 /// The q, k and v preparation's constants (glue.metal's ll_prep_args).
-const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32 };
+const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32, mscale: f32 };
 /// The bf16 row projection's constants (core/bf16_matvec.metal's tf_bf16_mv_args).
 const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 /// The int4 row projection's constants (glue.metal's ll_q4_args).
@@ -34,10 +34,11 @@ const Enc = struct {
         if (groups) x.e.dispatchGroups(g3, t3) else x.e.dispatchThreads(g3, t3);
     }
 
-    /// y [rows, d.n] (rows `ldy` apart, at byte `out_off`) = x W^T: the GEMM a prompt chunk, the row kernels a window.
-    fn dense(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
+    /// y [rows, d.n] (rows `ldy` apart, at `out_off`) = x W^T + bias in the fp32 sums: a chunk's GEMM, a window's rows.
+    fn dense(x: Enc, d: wts.Dense, bias: ?wts.Tensor, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
         const e = x.e;
         if (d.int4) |q| {
+            std.debug.assert(bias == null); // the INT4 release carries none
             if (n_rows <= st.batch_rows) return x.q4Rows(&.{d}, in, out, out_off, n_rows, ldy);
             const ma = MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) };
             // a prompt chunk: W as bf16 (as the decompressor makes it) into the scratch, then the bf16 GEMM on it
@@ -45,17 +46,25 @@ const Enc = struct {
             return x.gemmOn(.{ .buf = x.s.wq, .off = 0, .n = d.n, .k = d.k }, in, out, out_off, n_rows, ldy);
         }
         if (n_rows <= st.batch_rows) {
-            // the variant holding the rows in registers: 1, 2, 4, 8, 16 or 32
-            const variant: Glue = if (n_rows <= 1) .matvec_1 else if (n_rows <= 2) .matvec_2 else if (n_rows <= 4) .matvec_4 else if (n_rows <= 8) .matvec_8 else if (n_rows <= 16) .matvec_16 else .matvec_32;
+            // the variant holding the rows in registers: 1, 2, 4, 8, 16 or 32; the biased form for a biased projection
+            const variant: Glue = if (bias != null)
+                (if (n_rows <= 1) .matvec_bias_1 else if (n_rows <= 2) .matvec_bias_2 else if (n_rows <= 4) .matvec_bias_4 else if (n_rows <= 8) .matvec_bias_8 else if (n_rows <= 16) .matvec_bias_16 else .matvec_bias_32)
+            else
+                (if (n_rows <= 1) .matvec_1 else if (n_rows <= 2) .matvec_2 else if (n_rows <= 4) .matvec_4 else if (n_rows <= 8) .matvec_8 else if (n_rows <= 16) .matvec_16 else .matvec_32);
             e.setPipeline(x.m.pipe(variant));
             e.setBuffer(in, 0, 0);
             e.setBuffer(d.buf, d.off, 1);
             e.setValue(MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) }, 2);
             e.setBuffer(out, out_off, 3);
+            if (bias) |bv| e.setBuffer(bv.buffer, bv.offset, 4);
             e.dispatchGroups(mtl.Size.of((d.n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
             return;
         }
-        x.gemmOn(d, in, out, out_off, n_rows, ldy);
+        const bv = bias orelse return x.gemmOn(d, in, out, out_off, n_rows, ldy);
+        // the fp32 sums into the scratch (rows d.n apart), then the bias and the rounding into y
+        x.gemmWith(x.m.gemm_f32, d, in, x.s.sums, 0, n_rows, d.n);
+        const ma = MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) };
+        x.glue(.bias_round, ma, &.{ b(x.s.sums), t(bv), A, bo(out, out_off) }, .{ d.n, n_rows, 1 }, .{ 256, 1, 1 }, false);
     }
 
     /// Up to three int4 tensors on the same input as one dispatch of the row kernel, their columns side by side.
@@ -76,13 +85,18 @@ const Enc = struct {
         x.glue(variant, qa, &bufs, .{ (n[0] + n[1] + n[2] + 7) / 8, 1, 1 }, .{ 256, 1, 1 }, true);
     }
 
-    /// The tensor-unit GEMM of a prompt chunk on bf16 d.
+    /// The tensor-unit GEMM of a prompt chunk on bf16 d, its bf16 outputs.
     fn gemmOn(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
+        x.gemmWith(x.m.gemm, d, in, out, out_off, n_rows, ldy);
+    }
+
+    /// The GEMM of a prompt chunk on bf16 d through `forms` (bf16 or fp32 outputs), whole tiles choosing the form.
+    fn gemmWith(x: Enc, forms: [2][2]mtl.Pipeline, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
         const e = x.e;
         const M: usize = n_rows;
         const tn = (d.n + 127) / 128;
         const tm = (M + 63) / 64;
-        e.setPipeline(x.m.gemm[@intFromBool(M % 64 == 0)][@intFromBool(d.n % 128 == 0)]);
+        e.setPipeline(forms[@intFromBool(M % 64 == 0)][@intFromBool(d.n % 128 == 0)]);
         e.setBuffer(in, 0, 0);
         e.setBuffer(d.buf, d.off, 1);
         var p: [16]i32 = @splat(0);
@@ -157,10 +171,10 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     for (W.layers, 0..) |l, i| try layer(x, segments, l, i, n, if (i + 1 < W.layers.len) W.layers[i + 1].input_norm else null);
     if (out.all) {
         x.glue(.norm, normed, &.{ b(s.resid), t(W.norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
-        x.dense(W.head, s.x, s.logits_all, 0, n, c.vocab);
+        x.dense(W.head, null, s.x, s.logits_all, 0, n, c.vocab);
     } else {
         x.glue(.norm, normed, &.{ bo(s.resid, (n - 1) * h * 2), t(W.norm), A, b(s.x) }, .{ 1, 1, 1 }, .{ 256, 1, 1 }, true);
-        x.dense(W.head, s.x, segments[0].cache.logits, 0, 1, c.vocab);
+        x.dense(W.head, null, s.x, segments[0].cache.logits, 0, 1, c.vocab);
         if (out.draw) |d| pick(x, segments[0].cache.logits, d);
     }
     x.e.end();
@@ -231,25 +245,26 @@ fn layer(x: Enc, segments: []const Segment, l: wts.Layer, i: usize, n: usize, ne
     if (l.attn.q.int4 != null and n <= st.batch_rows) {
         x.q4Rows(&.{ l.attn.q, l.attn.k, l.attn.v }, s.x, s.q, 0, n, qkvw);
     } else {
-        x.dense(l.attn.q, s.x, s.q, 0, n, qkvw);
-        x.dense(l.attn.k, s.x, s.q, c.queryWidth() * 2, n, qkvw);
-        x.dense(l.attn.v, s.x, s.q, (c.queryWidth() + c.kvWidth()) * 2, n, qkvw);
+        const bias = l.attn.bias;
+        x.dense(l.attn.q, if (bias) |v| v.q else null, s.x, s.q, 0, n, qkvw);
+        x.dense(l.attn.k, if (bias) |v| v.k else null, s.x, s.q, c.queryWidth() * 2, n, qkvw);
+        x.dense(l.attn.v, if (bias) |v| v.v else null, s.x, s.q, (c.queryWidth() + c.kvWidth()) * 2, n, qkvw);
     }
     var base: usize = 0;
     for (segments) |seg| {
         try attention(x, seg.cache, i, base, seg.rows);
         base += seg.rows;
     }
-    x.dense(l.attn.o, s.att, s.y, 0, n, h);
+    x.dense(l.attn.o, null, s.att, s.y, 0, n, h);
     x.glue(.add_norm, normed, &.{ b(s.resid), b(s.y), t(l.post_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
     if (l.mlp.gate.int4 != null and n <= st.batch_rows) {
         x.q4Rows(&.{ l.mlp.gate, l.mlp.up }, s.x, s.gu, 0, n, 2 * c.intermediate);
     } else {
-        x.dense(l.mlp.gate, s.x, s.gu, 0, n, 2 * c.intermediate);
-        x.dense(l.mlp.up, s.x, s.gu, c.intermediate * 2, n, 2 * c.intermediate);
+        x.dense(l.mlp.gate, null, s.x, s.gu, 0, n, 2 * c.intermediate);
+        x.dense(l.mlp.up, null, s.x, s.gu, c.intermediate * 2, n, 2 * c.intermediate);
     }
     x.glue(.silu_gu, Args{ .rows = nr, .width = @intCast(c.intermediate) }, &.{ b(s.gu), A, b(s.act) }, .{ c.intermediate, n, 1 }, .{ 256, 1, 1 }, false);
-    x.dense(l.mlp.down, s.act, s.y, 0, n, h);
+    x.dense(l.mlp.down, null, s.act, s.y, 0, n, h);
     if (next) |w| {
         x.glue(.add_norm, normed, &.{ b(s.resid), b(s.y), t(w), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
     } else x.glue(.add, Args{ .rows = nr, .width = @intCast(h) }, &.{ b(s.resid), b(s.y), A }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
@@ -264,7 +279,7 @@ fn attention(x: Enc, cache: *st.Cache, i: usize, base: usize, n: usize) !void {
     const qn = bo(s.qn, base * qrow);
     const o = bo(s.att, base * qrow);
     const nr: u32 = @intCast(n);
-    const pa = PArgs{ .rows = nr, .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .pos = @intCast(start), .stride = @intCast(c.qkvWidth()) };
+    const pa = PArgs{ .rows = nr, .heads = @intCast(c.heads), .kv_heads = @intCast(c.kv_heads), .pos = @intCast(start), .stride = @intCast(c.qkvWidth()), .mscale = c.ropeScale() };
     const keys = bo(cache.kv, cache.keys(i));
     const values = bo(cache.kv, cache.values(i));
     x.glue(.prep, pa, &.{ bo(s.q, base * c.qkvWidth() * 2), b(x.m.inv), A, qn, keys, values }, .{ c.heads + c.kv_heads, n, 1 }, .{ 32, 1, 1 }, true);

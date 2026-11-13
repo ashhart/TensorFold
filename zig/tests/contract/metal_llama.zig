@@ -13,10 +13,13 @@ pub const family = tf.llama.contracts;
 pub const DH = 128;
 const G33 = family.nanbeige43;
 const G3 = family.nanbeige41;
+const G7 = family.bimo7b;
 
 /// glue.metal's argument structs, as forward.zig fills them.
 pub const Args = extern struct { rows: u32 = 0, width: u32 = 0, heads: u32 = 0, eps: f32 = 0 };
-const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32 };
+const PArgs = extern struct { rows: u32, heads: u32, kv_heads: u32, pos: u32, stride: u32, mscale: f32 };
+/// core/bf16_matvec.metal's tf_bf16_mv_args, as forward.zig fills it for ll_bias_round (its k unread).
+const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 
 /// A value through fp32 and then bf16, as the kernels round.
 pub fn bf(v: f64) f64 {
@@ -44,7 +47,7 @@ pub fn pipelineOf(lib: mtl.Library, device: mtl.Device, name: []const u8) !mtl.P
     return mtl.Pipeline.init(device, lib, z, false);
 }
 
-pub const Which = enum { embed, norm, add, add_norm, silu, prep };
+pub const Which = enum { embed, norm, add, add_norm, silu, prep, bias_round };
 
 pub fn function(w: Which) []const u8 {
     return switch (w) {
@@ -54,6 +57,7 @@ pub fn function(w: Which) []const u8 {
         .add_norm => "ll_add_norm",
         .silu => "ll_silu_gu",
         .prep => "ll_prep",
+        .bias_round => "ll_bias_round",
     };
 }
 
@@ -66,7 +70,9 @@ pub fn spec(w: Which) c.Spec {
         .add => .{ .name = "llama glue ll_add", .accum = .none, .depth = none, .out = .bf16, .in_place = true, .served = widths, .sums = no_sums },
         .add_norm => .{ .name = "llama glue ll_add_norm", .accum = .f32, .depth = normDepth, .ops = 3, .mids = 3, .out = .bf16, .in_place = true, .tiles = anyk, .served = widths, .sums = rms_sums },
         .silu => .{ .name = "llama glue ll_silu_gu", .accum = .none, .depth = none, .ops = 3, .mids = 1, .out = .bf16, .served = &.{ .{ .rows = 32, .n = G33.intermediate, .k = G33.intermediate }, .{ .rows = 2048, .n = G3.intermediate, .k = G3.intermediate } }, .sums = no_sums },
-        .prep => .{ .name = "llama glue ll_prep", .accum = .none, .depth = none, .ops = 5, .mids = 2, .out = .bf16, .served = &.{ .{ .rows = 32, .n = G33.heads + G33.kv_heads, .k = (G33.heads + 2 * G33.kv_heads) * DH }, .{ .rows = 2048, .n = G3.heads + G3.kv_heads, .k = (G3.heads + 2 * G3.kv_heads) * DH } }, .sums = no_sums },
+        .prep => .{ .name = "llama glue ll_prep", .accum = .none, .depth = none, .ops = 5, .mids = 2, .out = .bf16, .served = &.{ .{ .rows = 32, .n = G33.heads + G33.kv_heads, .k = (G33.heads + 2 * G33.kv_heads) * DH }, .{ .rows = 2048, .n = G3.heads + G3.kv_heads, .k = (G3.heads + 2 * G3.kv_heads) * DH }, .{ .rows = 2048, .n = G7.heads + G7.kv_heads, .k = (G7.heads + 2 * G7.kv_heads) * DH } }, .sums = no_sums },
+        // a prompt chunk's q, and a window's k, of Bimo-7B-CyberAgent: fp32 sums with the bias, rounded once
+        .bias_round => .{ .name = "llama glue ll_bias_round", .accum = .none, .depth = none, .out = .bf16, .served = &.{ .{ .rows = 2048, .n = G7.heads * DH, .k = G7.heads * DH }, .{ .rows = 100, .n = G7.kv_heads * DH, .k = G7.kv_heads * DH } }, .sums = no_sums },
     };
 }
 
@@ -81,6 +87,8 @@ pub const Glue = struct {
     shape: c.Shape = .{ .rows = 0, .n = 0, .k = 0 },
     geo: family.Geometry = G33,
     pos: u32 = 0,
+    mscale: f32 = 1, // prep: the factor the cosines and sines carry (YaRN's at Bimo's geometry)
+    cf: []f32 = &.{}, // bias_round: the fp32 sums
     r: ?rows_in.Rows = null,
     x: []u16 = &.{}, // the residual's first contents (add, add_norm), gu (silu), q|k|v (prep), the logits (argmax)
     y: []u16 = &.{}, // the added rows (add, add_norm)
@@ -107,6 +115,8 @@ pub const Glue = struct {
         p.ids = &.{};
         p.a.free(p.inv);
         p.inv = &.{};
+        p.a.free(p.cf);
+        p.cf = &.{};
         p.rig.reset();
     }
 
@@ -201,7 +211,7 @@ pub const Glue = struct {
                 p.out[0] = try p.rig.output(n * 2);
             },
             .prep => {
-                p.geo = if (s.n == G3.heads + G3.kv_heads) G3 else G33;
+                p.geo = if (s.n == G3.heads + G3.kv_heads) G3 else if (s.n == G7.heads + G7.kv_heads) G7 else G33;
                 const stride = (p.geo.heads + 2 * p.geo.kv_heads) * DH;
                 if (s.k != stride) return false;
                 p.pos = if (s.rows <= 64) 8192 else 0; // a window past a long prompt, or a prompt's first chunk
@@ -209,12 +219,34 @@ pub const Glue = struct {
                 random16(rng, p.x, -3, 3);
                 if (fill == .nonfinite) plant(p.x, stride, s.rows);
                 p.inv = try p.a.alloc(f32, DH / 2);
-                for (p.inv, 0..) |*f, i| f.* = @floatCast(1.0 / std.math.pow(f64, 1.2e8, @as(f64, @floatFromInt(2 * i)) / DH));
+                if (p.geo.heads == G7.heads) { // Bimo's YaRN table (theta 1e4, 4x over 8,192) and its attention factor
+                    const y = tf.rope_yarn.yarnOf(DH, 10000, 4, 8192);
+                    @memcpy(p.inv, &y.freq);
+                    p.mscale = y.scale;
+                } else {
+                    for (p.inv, 0..) |*f, i| f.* = @floatCast(1.0 / std.math.pow(f64, 1.2e8, @as(f64, @floatFromInt(2 * i)) / DH));
+                    p.mscale = 1;
+                }
                 p.in[0] = try p.rig.input(std.mem.sliceAsBytes(p.x));
                 p.in[1] = try p.rig.input(std.mem.sliceAsBytes(p.inv));
                 p.out[0] = try p.rig.output(s.rows * p.geo.heads * DH * 2);
                 p.out[1] = try p.rig.output((p.pos + s.rows) * p.geo.kv_heads * DH * 2);
                 p.out[2] = try p.rig.output((p.pos + s.rows) * p.geo.kv_heads * DH * 2);
+            },
+            .bias_round => {
+                p.cf = try p.a.alloc(f32, n);
+                for (p.cf) |*v| v.* = rng.float(f32) * 16 - 8;
+                if (fill == .nonfinite) {
+                    const put = [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) };
+                    for (put, 0..) |f, r| if (r < s.rows) {
+                        p.cf[r * w + w / 2] = f;
+                    };
+                }
+                p.y = try p.a.alloc(u16, w); // the bias
+                random16(rng, p.y, -1, 1);
+                p.in[0] = try p.rig.input(std.mem.sliceAsBytes(p.cf));
+                p.in[1] = try p.rig.input(std.mem.sliceAsBytes(p.y));
+                p.out[0] = try p.rig.output(n * 2);
             },
         }
         return true;
@@ -281,9 +313,16 @@ pub const Glue = struct {
                 for (p.out[1..]) |o| @memset(p.rig.bytes(o, p.pos * p.geo.kv_heads * DH * 2), 0);
                 e.setBuffer(p.in[0].buf, p.in[0].off, 0);
                 e.setBuffer(p.in[1].buf, p.in[1].off, 1);
-                e.setValue(PArgs{ .rows = rows, .heads = p.geo.heads, .kv_heads = p.geo.kv_heads, .pos = p.pos, .stride = w }, 2);
+                e.setValue(PArgs{ .rows = rows, .heads = p.geo.heads, .kv_heads = p.geo.kv_heads, .pos = p.pos, .stride = w, .mscale = p.mscale }, 2);
                 for (p.out, 3..) |o, slot| e.setBuffer(o.buf, o.off, slot);
                 e.dispatchGroups(mtl.Size.of(p.geo.heads + p.geo.kv_heads, s.rows, 1), mtl.Size.of(32, 1, 1));
+            },
+            .bias_round => {
+                e.setBuffer(p.in[0].buf, p.in[0].off, 0);
+                e.setBuffer(p.in[1].buf, p.in[1].off, 1);
+                e.setValue(MArgs{ .rows = rows, .n = w, .k = w, .ldy = w }, 2);
+                e.setBuffer(p.out[0].buf, p.out[0].off, 3);
+                e.dispatchThreads(grid, threads);
             },
         }
         try p.rig.finish(pass);
@@ -345,10 +384,15 @@ pub const Glue = struct {
                 mag[r * w + i] = @abs(want[r * w + i]);
             },
             .prep => try p.prepReference(want, mag),
+            .bias_round => for (0..s.rows) |r| for (0..w) |i| {
+                const sum: f64 = p.cf[r * w + i];
+                want[r * w + i] = bf(sum + xv(p.y, i));
+                mag[r * w + i] = @abs(sum) + @abs(xv(p.y, i));
+            },
         }
     }
 
-    /// HF's rotation of q and k (fp32 angle, bf16 cos and sin), v copied: QN, then caches of pos + rows slots.
+    /// HF's rotation of q and k (fp32 angle, bf16 cos and sin times mscale), v copied: QN, then pos + rows cache slots.
     fn prepReference(p: *Glue, want: []f64, mag: []f64) !void {
         const s = p.shape;
         const geo = p.geo;
@@ -368,8 +412,11 @@ pub const Glue = struct {
                 for (0..DH) |d| {
                     const i = d % (DH / 2);
                     const angle: f32 = position * p.inv[i]; // the kernel's fp32 angle
-                    const cs = bf(@cos(@as(f64, angle)));
-                    const sn = bf(@sin(@as(f64, angle)));
+                    // HF's cos and sin in fp32, times the attention factor in fp32, then bf16 (the kernel's roundings)
+                    const c32: f32 = @floatCast(@cos(@as(f64, angle)));
+                    const s32: f32 = @floatCast(@sin(@as(f64, angle)));
+                    const cs = bf(c32 * p.mscale);
+                    const sn = bf(s32 * p.mscale);
                     const x = xv(p.x, src + d);
                     const other = if (d < DH / 2) -xv(p.x, src + d + DH / 2) else xv(p.x, src + d - DH / 2);
                     want[dst + d] = bf(bf(x * cs) + bf(other * sn));
