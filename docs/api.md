@@ -1200,6 +1200,26 @@ server sends the counters described under [Responses](#responses). For memory fi
 [`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
 `tensorfold:process_footprint_bytes`.
 
+## Cancel a request
+
+`POST /v1/requests/{id}/cancel` (or `/requests/{id}/cancel`) cancels a running or queued request by the id its
+reply carries: a chat completion's `chatcmpl-`, a completion's `cmpl-`, or a Responses `resp_` id. The engine takes
+the same cancel a client disconnect sends, and every other stream's tokens are unchanged. The reply ends well formed
+with the tokens it had (none when it was queued): `finish_reason: "cancelled"`, or a Responses `status: "cancelled"`
+in its `response.incomplete` event. A Cortheon turn runs no further rounds. The answer is 200
+`{"id": ..., "object": "request.cancel", "cancelled": true}`, or 404 with the code `request_not_found` when no
+request holds the id: it was written out, or never existed. An id is held from the request's start until its reply is
+written, so a cancel that arrives as the reply ends leaves that ending as it was. The body, if any, is ignored.
+
+With API keys it is an admin route: a full or `[admin]` key may cancel from any address, a scoped key gets 403
+`insufficient_scope` (see [Key scopes](#key-scopes)) and a missing key 401. A server without keys answers only a
+caller whose socket is on the loopback address (127.0.0.0/8 or ::1) and refuses everyone else with 403
+`loopback_only`, so an open server never lets one client cancel another's request. The socket's own address decides;
+a forwarded address is never read. Behind a reverse proxy every caller's socket is the proxy's, so a keyless server
+also refuses a request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `Via`,
+`CF-Connecting-IP` or `True-Client-IP`. A proxy that adds none of them cannot be told apart from a local caller: give
+a proxied server keys.
+
 ## The Responses API
 
 `POST /v1/responses` takes OpenAI's Responses request and runs it as the equivalent chat completion, through the

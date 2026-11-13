@@ -19,7 +19,7 @@ pub const Shape = struct {
 
     pub fn init(rows: usize, segments: usize, record: bool, taps: bool, slots: u8) Shape {
         std.debug.assert(rows > 0 and rows <= @as(usize, if (record) Round.most_verify else Round.max_rows) and segments > 0 and segments <= rows);
-        const bucket: usize = if (rows == 1) 1 else std.mem.alignForward(usize, rows, 16);
+        const bucket: usize = if (rows == 1) 1 else if (rows <= 4) 4 else if (rows <= 8) 8 else std.mem.alignForward(usize, rows, 16);
         const windows = std.math.ceilPowerOfTwo(usize, segments) catch unreachable;
         return .{ .total = @intCast(if (record) bucket else rows), .nseg = @intCast(if (record) windows else segments), .record = record, .prompt = !record, .taps = taps, .slots = slots };
     }
@@ -64,6 +64,17 @@ test "Qwen stage: the head piece keys its own graph, apart from the layers' and 
         try std.testing.expectEqual(@as(u32, 1) << 31, head.key() ^ whole.key());
         try std.testing.expectEqual(@as(u32, 1) << 31, head.key() ^ layers.key());
     };
+}
+
+test "one-row and 2-8-row windows take the smaller buckets" {
+    try std.testing.expectEqual(@as(u16, 1), Shape.init(1, 1, true, false, 1).total);
+    for ([_]usize{ 2, 3, 4 }) |rows| try std.testing.expectEqual(@as(u16, 4), Shape.init(rows, 1, true, false, 1).total);
+    for ([_]usize{ 5, 6, 7, 8 }) |rows| try std.testing.expectEqual(@as(u16, 8), Shape.init(rows, 1, true, false, 1).total);
+    for ([_]usize{ 9, 16 }) |rows| try std.testing.expectEqual(@as(u16, 16), Shape.init(rows, 1, true, false, 1).total);
+    for ([_]usize{ 17, 32 }) |rows| try std.testing.expectEqual(@as(u16, 32), Shape.init(rows, 1, true, false, 1).total);
+    const four = Shape.init(4, 4, true, false, 1);
+    try std.testing.expectEqual(@as(u16, 4), four.total);
+    try std.testing.expectEqual(@as(u8, 4), four.nseg);
 }
 
 test "every captured verify shape keys its own graph: a shape after another never replays the other's (#2138)" {
