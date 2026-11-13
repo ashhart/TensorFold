@@ -249,12 +249,18 @@ pub const LaneHost = struct {
         return job.host.closing or std.mem.indexOfScalar(Id, job.host.cancels.items, job.id) != null;
     }
 
-    /// A background pass's yield hook: a foreground request waits or a stream decodes (read under the lock).
+    /// A background pass's yield hook: a foreground request waits, a prompt fills or a stream decodes (under the lock).
     pub fn yieldsTo(ctx: *anyopaque) bool {
         const job: *Job = @ptrCast(@alignCast(ctx));
         job.host.lock();
         defer job.host.unlock();
-        return job.host.foregroundWaiting() or job.host.core.activeCount() > 0;
+        return job.host.otherWork(job);
+    }
+
+    /// Work a background pass gives way to: a queued foreground request, another prompt filling, a decoding stream.
+    fn otherWork(h: *const LaneHost, job: *const Job) bool {
+        for (h.filling.items) |j| if (j != job) return true; // the lane thread's own list: the pass runs on it
+        return h.foregroundWaiting() or h.core.activeCount() > 0;
     }
 
     /// A foreground request is queued (they queue ahead of every background one); the caller holds the lock.
@@ -267,7 +273,7 @@ pub const LaneHost = struct {
         const until: std.Io.Timeout = .{ .deadline = .fromNow(h.io, .{ .raw = .fromNanoseconds(h.warm_quiet), .clock = .awake }) };
         h.lock();
         defer h.unlock();
-        while (!h.closing and !h.foregroundWaiting() and h.core.activeCount() == 0 and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
+        while (!h.closing and !h.otherWork(job) and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null) {
             h.wake.waitTimeout(h.io, &h.mutex, until) catch |e| return e == error.Timeout;
         }
         h.load.yields += @intFromBool(!h.closing and std.mem.indexOfScalar(Id, h.cancels.items, job.id) == null); // foreground work came

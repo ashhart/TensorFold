@@ -124,6 +124,11 @@ The family plugs into the core's pieces and adds no scheduler:
 - The core's prompt cache keeps and resumes a stream's state at the marks it asks for. The family copies the state
   (`cuda_snap.zig`), with the MTP head's cache rows for a drafting stream; the head reads one token past a row, so
   states keep with a lookahead of 1, as Nemotron's do.
+- Warm turns, on one GPU with a prompt cache: after a chat reply, once nothing else has run for 150 ms, a background
+  pass prefills the reply as the next turn's prompt renders it and keeps the state one token short of its end, as
+  Nemotron's warm turns do, so the next turn resumes past the reply. The pass runs in chunks of the busy chunk's rows
+  (1,536 by default). A request that arrives, or a prompt still going in, stops it before its next chunk, and the
+  cache keeps what it filled. With `--tp`, no pass runs.
 - For a last user message of at least 8,192 tokens, the lane cache may also keep one state inside that message.
   It chooses the latest existing cold chunk cut leaving at least 2,048 tokens outside the state's key, for a
   replacement question after the same document. It uses the loaded prompt pass size and adds no chunk split.
