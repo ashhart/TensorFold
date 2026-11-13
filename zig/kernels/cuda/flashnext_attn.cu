@@ -273,21 +273,9 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         const int i = e / (HD / 8), v = e % (HD / 8);
         qmm_frag::cp16z(&qs[i][8 * v], Q + (static_cast<long long>(r) * H + hk * G + min(i, G - 1)) * HD + 8 * v, i < G);
     }
-    // PAGED with the next tile ahead: a tile's key (k1) and page id (p1) load a tile before it, the next key (k2) two
-    static_assert(!(PAGED && NB == 2 && FUSE), "the ahead ids follow one chunk");
-    int k1 = -1, p1 = 0, k2 = -1;
-    auto key_of = [&](int t0) { const int ki = start + t0 + threadIdx.x; return ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1; };
     // a tile's key ids, then its keys and values staged as two cp.async groups
     auto load = [&](int t0, int buf) {
-        if constexpr (PAGED && NB == 2) {
-            if (threadIdx.x < TK) {
-                key_ids[buf][threadIdx.x] = k1;
-                key_at[buf][threadIdx.x] = page_at(pg, p1, max(k1, 0), pg.ptok, static_cast<long long>(HK) * HD) + hk * HD;
-                k1 = k2;
-                p1 = page_id(pg, max(k2, 0), pg.ptok);
-                k2 = key_of(t0 + 2 * TK);
-            }
-        } else if (threadIdx.x < TK) {
+        if (threadIdx.x < TK) {
             const int ki = start + t0 + threadIdx.x;
             const int key = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
             key_ids[buf][threadIdx.x] = key;
@@ -319,7 +307,6 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.0f, 0.0f};
     float o[8][4] = {};
     const int tiles = min(n - start, CH);
-    if (PAGED && NB == 2 && threadIdx.x < TK) { k1 = key_of(0); p1 = page_id(pg, max(k1, 0), pg.ptok); k2 = key_of(TK); }
     if (NB == 2) load(0, 0);
     for (int t0 = 0, it = 0; t0 < tiles; t0 += TK, ++it) {
         const int buf = NB == 2 ? it & 1 : 0;
