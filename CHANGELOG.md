@@ -8,6 +8,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 
 
+
+
 - Qwen3.8-Flash-Next on HIP: verify windows run their DeltaNet from the round's plan, so a window writes no state snapshot a row, and its keep replays the kept rows through the same scan. Drafted and undrafted replies are unchanged: every drafted reply equals the same request with drafts off, and concurrent streams equal solo ones. Decode is 2–4% faster on Strix Halo (gfx1151) at one to four streams; shapes the plan kernels cannot take keep the per-row path, and no variable selects it (#2728). Thanks to @gilby.
 - Qwen3.8-Flash-Next on HIP: verify windows run their DeltaNet from the round's plan, so a window writes no state snapshot a row, and its keep replays the kept rows through the same scan. Drafted and undrafted replies are unchanged: every drafted reply equals the same request with drafts off, concurrent streams equal solo ones, and a resumed prompt equals a fresh one. Decode is 2–4% faster on Strix Halo (gfx1151) at one to four streams; shapes the plan kernels cannot take keep the per-row path, and no variable selects it. Thanks to @gilby.
 - Slide rollback: a fact graph is removed only when its own folders file names the folder being rolled back, and its folders file goes with it; a graph whose folders file can't be read is left in place and printed (#3073).
