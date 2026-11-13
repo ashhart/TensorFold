@@ -158,7 +158,10 @@ const Fixture = struct {
     }
     fn deinit(f: *Fixture) void {
         f.pool.deinit();
-        inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |name| @field(f.metadata, name).buffer.deinit();
+        inline for (@typeInfo(gpu.Metadata).@"struct".field_names) |name| {
+            const ref = if (comptime std.mem.eql(u8, name, "flows")) @field(f.metadata, name).? else @field(f.metadata, name);
+            ref.buffer.deinit();
+        }
         f.scratch.deinit();
         f.output.deinit();
     }

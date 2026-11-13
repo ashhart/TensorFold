@@ -231,7 +231,7 @@ pub const Attn = struct {
     pub fn run(t: *Attn) !void {
         const s = &t.st.?;
         const p = t.rig.begin();
-        t.op.encode(p.e, &s.scratch, &s.binding, s.plan, at_.ref(t.refs[0]), at_.ref(t.refs[1]), at_.ref(t.refs[2]), at_.ref(t.refs[4]), t.caches[0..t.rd.streams], at_.ref(t.refs[3]), t.reg.which == .prompt, false) catch |err| {
+        t.op.encodeContiguous(p.e, &s.scratch, &s.binding, s.plan, at_.ref(t.refs[0]), at_.ref(t.refs[1]), at_.ref(t.refs[2]), at_.ref(t.refs[4]), t.caches[0..t.rd.streams], at_.ref(t.refs[3]), t.reg.which == .prompt, false) catch |err| {
             p.e.end();
             p.pool.pop();
             return err;
