@@ -28,7 +28,7 @@ pub const Kernels = struct {
         k.mod.unload();
     }
 
-    /// x fp32 [rows, width] = bf16(table[id] * scale), seed fp16 the same rows.
+    /// x fp32 [rows, width] = bf16(table[id] * scale), seed bf16 the same rows.
     pub fn embed(k: *const Kernels, s: cuda.Stream, ids: u64, table: u64, x: u64, seed: u64, rows: usize, width: usize, scale: f32) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ ids, table, x, seed }) |v| a.add(v);
@@ -37,7 +37,7 @@ pub const Kernels = struct {
         try cuda.launch.launch(k.embed_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, s, &a);
     }
 
-    /// out fp16 [n] = lerp(seed, y, w).
+    /// out bf16 [n] = lerp(seed, y, w).
     pub fn lerp(k: *const Kernels, s: cuda.Stream, seed: u64, y: u64, out: u64, n: usize, w: f32) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ seed, y, out }) |v| a.add(v);
@@ -46,7 +46,7 @@ pub const Kernels = struct {
         try cuda.launch.launch(k.lerp_fn, .{ .grid = .{ .x = blocks(n) }, .block = .{ .x = 256 } }, s, &a);
     }
 
-    /// out fp16 [n] = o (bf16) * sigmoid(g (fp16)).
+    /// out bf16 [n] = o (bf16) * sigmoid(g (bf16)).
     pub fn gate(k: *const Kernels, s: cuda.Stream, o: u64, g: u64, out: u64, n: usize) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ o, g, out }) |v| a.add(v);
@@ -54,7 +54,7 @@ pub const Kernels = struct {
         try cuda.launch.launch(k.gate_fn, .{ .grid = .{ .x = blocks(n) }, .block = .{ .x = 256 } }, s, &a);
     }
 
-    /// out fp16 [n] = silu(min(g, limit)) * clamp(u, -limit, limit).
+    /// out bf16 [n] = silu(min(g, limit)) * clamp(u, -limit, limit).
     pub fn swiglu(k: *const Kernels, s: cuda.Stream, g: u64, u: u64, out: u64, n: usize, limit: f32) !void {
         var a: cuda.Args = .{};
         for ([_]u64{ g, u, out }) |v| a.add(v);

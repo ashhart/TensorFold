@@ -516,12 +516,12 @@ pub const Model = struct {
         for (m.w.layers, m.caches, 0..) |*l, *ca, li| {
             const kc = ca.kv.ptr;
             const vc = ca.kv.ptr + m.slots * ca.ring * kw * 2;
-            try m.norms.rms(s, b.x, .f32, l.input_norm, b.y, .f16, n, h, c.eps);
-            try m.dense.prompt(s, l.q, b.y, .f16, n, b.q, .bf16);
-            try m.dense.prompt(s, l.k, b.y, .f16, n, b.k, .bf16);
-            try m.dense.prompt(s, l.g, b.y, .f16, n, b.g, .f16);
+            try m.norms.rms(s, b.x, .f32, l.input_norm, b.y, .bf16, n, h, c.eps);
+            try m.dense.prompt(s, l.q, b.y, .bf16, n, b.q, .bf16);
+            try m.dense.prompt(s, l.k, b.y, .bf16, n, b.k, .bf16);
+            try m.dense.prompt(s, l.g, b.y, .bf16, n, b.g, .bf16);
             try m.k.lerp(s, b.seed, b.y, b.vin, n * h, l.blend); // only V sees the value residual
-            try m.dense.prompt(s, l.v, b.vin, .f16, n, b.v, .bf16);
+            try m.dense.prompt(s, l.v, b.vin, .bf16, n, b.v, .bf16);
             const src: cuda.qk_rows.Src = .{ .q = b.q, .q_ld = @intCast(qw), .q_hs = hd, .k = b.k, .k_ld = @intCast(kw), .k_hs = hd, .v = b.v, .v_ld = @intCast(kw), .v_hs = hd };
             const shape: cuda.qk_rows.Shape = if (l.global) .{ .norms = l.qk_norm, .eps = c.eps } else .{ .norms = l.qk_norm, .inv = b.inv, .rot = hd, .eps = c.eps };
             try m.qk.rowsFrom(s, src, .{ .h = m.hq, .hk = m.hk, .dim = hd }, shape, pos, slots, .{ .q = b.qo, .k = b.ko, .v = b.vo, .kc = kc, .vc = vc, .len = ca.ring }, n);
@@ -541,15 +541,15 @@ pub const Model = struct {
                 try m.tree.run(s, b.qo, b.ko, b.vo, rws, Tree.scratch(b.tree, n, m.hq, m.hk, ng, hd), b.q, n, m.hq, m.hk, hd, ng, c.scale());
             }
             try m.k.gate(s, b.q, b.g, b.gated, n * qw);
-            try m.dense.prompt(s, l.o, b.gated, .f16, n, b.parts + m.rank() * n * h * 4, .f32);
+            try m.dense.prompt(s, l.o, b.gated, .bf16, n, b.parts + m.rank() * n * h * 4, .f32);
             try m.sumRanks(b.a, n * h * 4);
             try m.k.normAdd(s, b.a, l.post_attn, b.x, n, h, c.eps);
-            try m.norms.rms(s, b.x, .f32, l.pre_ffn, b.y, .f16, n, h, c.eps);
+            try m.norms.rms(s, b.x, .f32, l.pre_ffn, b.y, .bf16, n, h, c.eps);
             const gu_up = b.gu + n * m.ff * 2;
-            try m.dense.prompt(s, l.gate, b.y, .f16, n, b.gu, .f16);
-            try m.dense.prompt(s, l.up, b.y, .f16, n, gu_up, .f16);
+            try m.dense.prompt(s, l.gate, b.y, .bf16, n, b.gu, .bf16);
+            try m.dense.prompt(s, l.up, b.y, .bf16, n, gu_up, .bf16);
             try m.k.swiglu(s, b.gu, gu_up, b.act, n * m.ff, c.clamp);
-            try m.dense.prompt(s, l.down, b.act, .f16, n, b.parts + m.rank() * n * h * 4, .f32);
+            try m.dense.prompt(s, l.down, b.act, .bf16, n, b.parts + m.rank() * n * h * 4, .f32);
             try m.sumRanks(b.a, n * h * 4);
             try m.k.normAdd(s, b.a, l.post_ffn, b.x, n, h, c.eps);
             for (m.taps[0..m.n_taps], 0..) |t, ti| if (t == li) try m.k.taps(s, b.x, pos, slots, m.tap_ring, tap_rows, m.n_taps, ti, h, n);
@@ -560,9 +560,9 @@ pub const Model = struct {
         }
         const hr: usize = @intCast(hw.head);
         if (hr == 0) return;
-        try m.norms.rms(s, b.x + (n - hr) * h * 4, .f32, m.w.final_norm, b.y, .f16, hr, h, c.eps);
+        try m.norms.rms(s, b.x + (n - hr) * h * 4, .f32, m.w.final_norm, b.y, .bf16, hr, h, c.eps);
         const lg = b.logits + m.rank() * hr * m.vr * 4;
-        try m.dense.prompt(s, m.w.head, b.y, .f16, hr, lg, .f32);
+        try m.dense.prompt(s, m.w.head, b.y, .bf16, hr, lg, .f32);
         try m.group.allGather(s, lg, b.logits, hr * m.vr * 4);
     }
 };

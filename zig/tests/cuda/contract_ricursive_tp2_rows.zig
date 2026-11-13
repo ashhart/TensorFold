@@ -13,7 +13,6 @@ const Sums = ref.Sums;
 const Function = cuda.Function;
 const launch = glue.launch;
 const grid = glue.grid;
-const halves = glue.halves;
 const elementwise = glue.elementwise;
 
 const eps: f32 = 1e-6;
@@ -22,28 +21,28 @@ const gate_rows = glue.rowsAt(40 * 128, 1); // a rank's query heads x head dim
 const ffn_rows = glue.rowsAt(20480, 1); // a rank's FFN width
 const norm_rows = glue.rowsAt(5120, 5120);
 
-fn halfOf(v: f64) f64 {
-    return @floatCast(@as(f16, @floatCast(v)));
+fn bfOf(v: f64) f64 {
+    return c.fromBf16(c.toBf16(@floatCast(v)));
 }
 
-/// To fp16, nearest even: monotone, so the range's ends round to the range's ends.
-fn hf(a: Iv) Iv {
-    return .{ .m = halfOf(a.m), .lo = halfOf(a.lo), .hi = halfOf(a.hi) };
+/// To bf16 by way of fp32, nearest even each step: monotone, so the range's ends round to the range's ends.
+fn bfi(a: Iv) Iv {
+    return .{ .m = bfOf(a.m), .lo = bfOf(a.lo), .hi = bfOf(a.hi) };
 }
 
-/// out = fp16(o * sigmoid(g)) in fp32: o bf16 in [-4, 4), g fp16 in [-12, 12).
+/// out = bf16(o * sigmoid(g)) in fp32: o bf16 in [-4, 4), g bf16 in [-12, 12).
 pub const Gate = struct {
     f: Function,
-    ctl: bool = false, // control: the sigmoid rounded to fp16 first
+    ctl: bool = false, // control: the sigmoid rounded to bf16 first
     shape: c.Shape = undefined,
     o: []u16 = &.{},
-    gv: []f16 = &.{},
+    gv: []u16 = &.{},
     dev: [2]u64 = @splat(0),
     out: u64 = 0,
 
     pub fn spec(self: *const Gate) c.Spec {
-        const name = if (self.ctl) "control: cuda ricursive_tp2 tf_rtp2_gate with fp16(sigmoid(g))" else "cuda ricursive_tp2 tf_rtp2_gate (fp32 sigmoid, one fp16 rounding)";
-        return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .f16, .tiles = .{ .{}, elementwise, .{} }, .served = &gate_rows };
+        const name = if (self.ctl) "control: cuda ricursive_tp2 tf_rtp2_gate with bf16(sigmoid(g))" else "cuda ricursive_tp2 tf_rtp2_gate (fp32 sigmoid, one bf16 rounding)";
+        return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .bf16, .tiles = .{ .{}, elementwise, .{} }, .served = &gate_rows };
     }
 
     pub fn control(self: *const Gate) ?g.Gate {
@@ -63,9 +62,9 @@ pub const Gate = struct {
         self.shape = shape;
         const n = shape.rows * shape.n;
         self.o = try ref.bfs(a, rng, n, -4, 4);
-        self.gv = try halves(a, rng, n, -12, 12);
+        self.gv = try ref.bfs(a, rng, n, -12, 12);
         if (fill == .nonfinite) for ([_]f32{ ref.nan, ref.inf, -ref.inf }, 0..) |x, i| if (2 * i + 1 < n) {
-            self.gv[2 * i] = @floatCast(x);
+            self.gv[2 * i] = c.toBf16(x);
             self.o[2 * i + 1] = c.toBf16(x);
         };
         self.dev = .{ try ref.input(rig, self.o), try ref.input(rig, self.gv) };
@@ -83,23 +82,23 @@ pub const Gate = struct {
     }
 
     pub fn solve(self: *const Gate, _: std.mem.Allocator, _: Sums, out: []Iv) !void {
-        for (out, self.o, self.gv) |*v, oh, gh| v.* = hf(Iv.of(ref.bf(oh)).mul(Iv.of(gh).sigmoid()));
+        for (out, self.o, self.gv) |*v, oh, gh| v.* = bfi(Iv.of(ref.bf(oh)).mul(Iv.of(ref.bf(gh)).sigmoid()));
     }
 };
 
-/// out = fp16(silu(min(g, 20)) * clamp(u, -20, 20)) in fp32, g and u fp16 in [-30, 30): past the clamp both ways.
+/// out = bf16(silu(min(g, 20)) * clamp(u, -20, 20)) in fp32, g and u bf16 in [-30, 30): past the clamp both ways.
 pub const SwiGlu = struct {
     f: Function,
     ctl: bool = false, // control: u clamped above only
     shape: c.Shape = undefined,
-    gv: []f16 = &.{},
-    u: []f16 = &.{},
+    gv: []u16 = &.{},
+    u: []u16 = &.{},
     dev: [2]u64 = @splat(0),
     out: u64 = 0,
 
     pub fn spec(self: *const SwiGlu) c.Spec {
-        const name = if (self.ctl) "control: cuda ricursive_tp2 tf_rtp2_swiglu, up clamped above only" else "cuda ricursive_tp2 tf_rtp2_swiglu (clamp 20, fp32, one fp16 rounding)";
-        return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .f16, .nan = .{ .stated = "fminf and fmaxf: +Inf gate or up reads as the limit, -Inf up as -limit; a -Inf gate gives NaN" }, .tiles = .{ .{}, elementwise, .{} }, .served = &ffn_rows };
+        const name = if (self.ctl) "control: cuda ricursive_tp2 tf_rtp2_swiglu, up clamped above only" else "cuda ricursive_tp2 tf_rtp2_swiglu (clamp 20, fp32, one bf16 rounding)";
+        return .{ .name = name, .accum = .none, .depth = ref.noSums, .out = .bf16, .nan = .{ .stated = "fminf and fmaxf: +Inf gate or up reads as the limit, -Inf up as -limit; a -Inf gate gives NaN" }, .tiles = .{ .{}, elementwise, .{} }, .served = &ffn_rows };
     }
 
     pub fn control(self: *const SwiGlu) ?g.Gate {
@@ -118,13 +117,13 @@ pub const SwiGlu = struct {
         self.free(a);
         self.shape = shape;
         const n = shape.rows * shape.n;
-        self.gv = try halves(a, rng, n, -30, 30);
-        self.u = try halves(a, rng, n, -30, 30);
+        self.gv = try ref.bfs(a, rng, n, -30, 30);
+        self.u = try ref.bfs(a, rng, n, -30, 30);
         if (fill == .nonfinite and n > 4) {
-            self.gv[0] = std.math.inf(f16);
-            self.u[1] = std.math.inf(f16);
-            self.u[2] = -std.math.inf(f16);
-            self.gv[3] = -std.math.inf(f16); // -Inf x sigmoid(-Inf) = -Inf x 0: the one NaN the clamps let through
+            self.gv[0] = c.toBf16(ref.inf);
+            self.u[1] = c.toBf16(ref.inf);
+            self.u[2] = c.toBf16(-ref.inf);
+            self.gv[3] = c.toBf16(-ref.inf); // -Inf x sigmoid(-Inf) = -Inf x 0: the one NaN the clamps let through
         }
         self.dev = .{ try ref.input(rig, self.gv), try ref.input(rig, self.u) };
         self.out = try rig.output(n * 2);
@@ -142,9 +141,9 @@ pub const SwiGlu = struct {
 
     pub fn solve(self: *const SwiGlu, _: std.mem.Allocator, _: Sums, out: []Iv) !void {
         for (out, self.gv, self.u) |*v, gh, uh| {
-            const gc = Iv.of(gh).atMost(limit);
-            const uc = Iv.of(uh).atMost(limit).atLeast(-limit);
-            v.* = hf(gc.mul(gc.sigmoid()).mul(uc));
+            const gc = Iv.of(ref.bf(gh)).atMost(limit);
+            const uc = Iv.of(ref.bf(uh)).atMost(limit).atLeast(-limit);
+            v.* = bfi(gc.mul(gc.sigmoid()).mul(uc));
         }
     }
 };
