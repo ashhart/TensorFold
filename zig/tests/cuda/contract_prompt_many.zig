@@ -209,10 +209,20 @@ pub const Product = struct {
 
     pub fn reference(_: *Product, _: []f64, _: []f64) !void {}
 
-    /// Same-process A-B-A of separate lean launches against the fused launch; not an end-to-end claim.
+    /// Downloads every fused output, so the fused arm pays the same host copy the lean arm pays.
+    fn landed(self: *Product) !void {
+        for (self.outs[0..self.parts], self.ws[0..self.parts]) |out, w| {
+            _ = try self.rig.bytes(out, self.rows_n * w.n * 2);
+        }
+    }
+
+    /// Same-process A-B-A of separate lean launches against the fused launch; both arms time their output download.
     pub fn time(self: *Product, fused: bool, reps: usize, io: std.Io) !i96 {
         const start = gpu_check.now(io);
-        for (0..reps) |_| if (fused) try self.run() else {
+        for (0..reps) |_| if (fused) {
+            try self.run();
+            try self.landed();
+        } else {
             _ = try self.replaced();
         };
         return @divTrunc(gpu_check.now(io) - start, @as(i96, @intCast(reps)));
@@ -303,7 +313,7 @@ pub fn bench(gpu: gpu_check.Gpu) !void {
         const base: f64 = @floatFromInt(@divTrunc(a1 + a2, 2));
         const candidate: f64 = @floatFromInt(b);
         std.debug.print("BENCH prompt_many rows={d} parts={d}: A1={d:.3} ms B={d:.3} ms A2={d:.3} ms speedup={d:.4}x\n", .{
-            shape.rows,                                       product.parts, @as(f64, @floatFromInt(a1)) / std.time.ns_per_ms,
+            shape.rows,                     product.parts,                                    @as(f64, @floatFromInt(a1)) / std.time.ns_per_ms,
             candidate / std.time.ns_per_ms, @as(f64, @floatFromInt(a2)) / std.time.ns_per_ms, base / candidate,
         });
     }
