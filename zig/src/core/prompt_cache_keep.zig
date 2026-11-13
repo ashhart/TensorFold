@@ -22,6 +22,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
     for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at) and images.matches(s, e)) {
         e.used = e.seen.touch(s.clock); // the same state again: no copy
         e.shared = e.shared or shared;
+        @import("prompt_cache_decay.zig").kept(s, e, prompt);
         e.rewind = e.rewind or (at == s.active_rewind_at and sharedKey(e.tokens) == s.active_rewind_key);
         if (shared) learned.learn(s, e, starts);
         return true;
@@ -81,6 +82,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
         return s.fail(at, error.OutOfMemory);
     };
     policy.link(s, e);
+    @import("prompt_cache_decay.zig").kept(s, e, prompt);
     s.held += charged;
     s.counts.kept += 1;
     if (shared) learned.learn(s, e, starts);
