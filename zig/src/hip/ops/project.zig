@@ -235,7 +235,7 @@ pub fn projectRoutedPlainRelu2(
 
 /// matmul_routed on a stack of experts: every item in one launch; out (pairs, N) fp32.
 pub fn projectRouted(o: Ops, x: Tensor, proj: Projection, items: u64, count: usize, members: u64, pairs: usize, x_div: usize, rows: usize, expert_rows: usize) Error!u64 {
-    switch (proj.handle orelse return 0) {
+    switch (proj.handle orelse return error.BadShape) {
         .mlx => |h| return affineRouted(o, x, affineOf(proj, h), items, count, members, pairs, x_div, rows, expert_rows),
         .dense, .bf16 => return error.BadShape,
     }

@@ -52,7 +52,8 @@ __device__ __forceinline__ void fp8_block(ModelFp8 a) {
         for (int i = tid; i < kFpTileN * kFpChunk; i += blockDim.x) {
             const int col = i / kFpChunk, j = i % kFpChunk;
             const int c = n0 + col < a.n ? n0 + col : a.n - 1;
-            codes[col][j] = w[static_cast<long long>(c) * a.k + kc + j];
+            const int at = kc + j < a.k ? kc + j : a.k - 1;
+            codes[col][j] = w[static_cast<long long>(c) * a.k + at];
         }
         for (int i = tid; i < kFpTileM * kFpChunk; i += blockDim.x) {
             const int row = i / kFpChunk, j = i % kFpChunk;

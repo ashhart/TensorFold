@@ -337,13 +337,8 @@ pub const Engine = struct {
         const m = e.model();
         const lane = state.Caches.deviceBytes(m, capacity) + m.spec.hidden * m.act.size() + m.taps.ringBytes(m.spec.hidden) + if (e.vision) |v| v.laneBytes(capacity) else @as(usize, 0);
         // under tensor parallelism only rank 0 holds the head
-        const head = if (e.o.rank > 0) 0 else mtp.Head.deviceBytes(e.gpa, &e.driver, &e.lib, &e.weights, m, @min(rows, mtp.max_chains)) catch |err| {
-            return err;
-        };
-        const sized = e.sizeBytes(rows, capacity, pool_pages) catch |err| {
-            return err;
-        };
-        return sized + streams * lane + snapshots * memory.linearBytes(m.spec) + head;
+        const head = if (e.o.rank > 0) 0 else try mtp.Head.deviceBytes(e.gpa, &e.driver, &e.lib, &e.weights, m, @min(rows, mtp.max_chains));
+        return try e.sizeBytes(rows, capacity, pool_pages) + streams * lane + snapshots * memory.linearBytes(m.spec) + head;
     }
 
     /// The memory a plan may take, as the native backends count it: free (host's when shared), reserve and cap.

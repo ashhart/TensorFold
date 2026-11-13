@@ -59,8 +59,7 @@ pub fn squeezed(w: Tensor) ?Tensor {
 /// `_packed`: a projection in whichever format its tensors are in; a bf16 one's are BF16 as stored, or fp32 widened.
 pub fn projection(a: std.mem.Allocator, t: *const Table, key: []const u8) !host.Projection {
     if (modelopt.algo(t, key)) |what| return modelopt.read(a, t, key, what);
-    // a ModelOpt checkpoint's own text layers run on the row-invariant dense kernels, never on rocBLAS; the vision
-    // tower keeps rocBLAS, since its 1,152 x 4,304 linears are not a dense tile's shape
+    // a ModelOpt checkpoint's text layers read dense; its vision tower keeps rocBLAS (1,152 x 4,304 is no tile)
     const tower = std.mem.startsWith(u8, key, "model.visual.") or std.mem.startsWith(u8, key, "vision_tower.");
     if (t.quant == .bf16 and t.modelopt and !tower) return .{ .dense = try quant.dense.readStored(a, t, key) };
     if (t.quant == .bf16 and t.widen) {
