@@ -15,6 +15,7 @@ pub const ctx = @import("ctx.zig");
 pub const layer = @import("layer.zig");
 pub const attn = @import("attn.zig");
 pub const indexer = @import("indexer.zig");
+pub const segs = @import("segs.zig");
 pub const moe = @import("moe.zig");
 pub const forward = @import("forward.zig");
 pub const prompt = @import("prompt.zig");
