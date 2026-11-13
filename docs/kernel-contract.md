@@ -412,6 +412,10 @@ CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair 
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
+CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 weights: Nemotron 3.5 Transcribe's routed
+and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
+the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
+decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks Flash Next EXL3's canonical expert reduction (`flashnext_batch.cu`): the float32 root,
 float64 `fn_exl3_leaf_partial` over leaves 0-31, 32-63, all 64 and an interior subtree, and
 `fn_exl3_leaf_finish` over the pieces of 2, 3, 5 and 8 ranks (rows 1, 2, 5 and 16 at width 2560).

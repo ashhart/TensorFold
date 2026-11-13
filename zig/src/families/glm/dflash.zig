@@ -1,4 +1,4 @@
-//! DFlash2 drafts (--drafter): incoai/GLM-5.3-Flash-DFlash2 (CC BY-NC-ND 4.0, read unmodified), after z-lab (MIT).
+//! DFlash2 drafts (--drafter): incoai/GLM-5.3-Flash-DFlash2 (Apache-2.0, read unmodified), after z-lab (MIT).
 const std = @import("std");
 const cuda = @import("cuda");
 const mm = @import("cuda_mm.zig");
