@@ -7,7 +7,7 @@ const tableLen = @import("cuda_pages.zig").tableLen;
 /// Rank 0's twins: slot i's lease of class c at i * classes + c (its owner's unused), and its begin step's ids.
 pub const Twins = struct {
     leases: []kv.Lease = &.{},
-    wire: []u32 = &.{}, // slot i's from i * classes * table: its ids, then each twin's in class order
+    wire: []u32 = &.{}, // slot i's from i * classes * table: its ids, then each twin's in class order, as long as the ids
     on: []bool = &.{}, // slot i holds twins now
 
     pub fn init(gpa: std.mem.Allocator, streams: usize, classes: u32, table: usize) !Twins {
@@ -28,28 +28,37 @@ pub const Twins = struct {
     }
 };
 
-/// Rank 0, a fresh pass of `slot` on its `n` pages: a twin of every other class when each has `n` pages now, else none.
-pub fn borrow(p: *Pages, slot: u32, n: usize) !bool {
+/// Rank 0, a fresh pass of `slot` on `n` pages: a twin of its first `m` (the prompt's) in every other class, or none.
+pub fn borrow(p: *Pages, slot: u32, n: usize, m: usize) !bool {
     const c = p.pool.classes;
-    if (c == 1 or p.twin.on.len == 0) return false;
+    if (c == 1 or p.twin.on.len == 0 or m == 0 or m > n) return false;
     const owner = p.leases[slot].owner;
-    for (0..c) |k| if (k != owner and p.pool.availableIn(@intCast(k)) < n) return false;
+    for (0..c) |k| if (k != owner and p.pool.availableIn(@intCast(k)) < m) return false;
     errdefer drop(p, slot);
     p.twin.on[slot] = true;
     for (0..c) |k| if (k != owner) {
         const l = &p.twin.leases[slot * c + k];
         l.owner = @intCast(k);
-        try p.pool.promise(l, n);
-        try p.pool.cover(l, n, null);
+        try p.pool.promise(l, m);
+        try p.pool.cover(l, m, null);
     };
     const w = p.twin.wire[slot * c * tableLen(p.e.capacity) ..][0 .. c * n];
-    @memcpy(w[0..n], p.leases[slot].ids.items);
+    const ids = p.leases[slot].ids.items; // a twin's wire: its m pages, then the stream's ids
+    @memcpy(w[0..n], ids);
     var at = n;
     for (0..c) |k| if (k != owner) {
-        @memcpy(w[at..][0..n], p.twin.leases[slot * c + k].ids.items);
+        @memcpy(w[at..][0..m], p.twin.leases[slot * c + k].ids.items);
+        @memcpy(w[at + m ..][0 .. n - m], ids[m..]);
         at += n;
     };
     return true;
+}
+
+/// A twin's own pages in its wire: the leading ids of class `rank` (the stream's ids after them are its owner's).
+pub fn own(ids: []const u32, rank: u32, classes: u32) usize {
+    var m: usize = 0;
+    while (m < ids.len and ids[m] % classes == rank) m += 1;
+    return m;
 }
 
 /// The begin step's ids for `slot`'s `ids`: the ids alone, or (twinned) the ids then each twin's in class order.
@@ -72,14 +81,19 @@ pub fn mine(p: *const Pages, wire_ids: []const u32, owner: u32) ![]const u32 {
     if (rank == owner) return &.{};
     const k = if (rank < owner) rank else rank - 1; // the twins come in class order, the owner's left out
     const ids = wire_ids[n * (1 + k) ..][0..n];
-    for (ids) |id| if (id % c != rank) return error.ResidueMismatch;
+    const m = own(ids, rank, c);
+    if (m == 0) return error.ResidueMismatch; // a twin holds the prompt's pages: at least one, of this rank's class
+    for (ids[m..], wire_ids[m..n]) |id, its| if (id != its) return error.ResidueMismatch; // past them: the stream's ids
     return ids;
 }
 
 /// Every rank: `slot`'s stream is twinned for its prompt pass; this rank's latent table points into its twin `ids`.
 pub fn map(p: *Pages, slot: u32, ids: []const u32) !void {
     const st = &p.e.seqs.items[slot].?.st;
-    if (ids.len > 0) try upload(p, slot, ids);
+    if (ids.len > 0) {
+        try p.poisonLatent(ids[0..own(ids, @intCast(p.e.share.rank), p.pool.classes)]); // a row read before its write shows
+        try upload(p, slot, ids);
+    }
     st.twin = true; // every rank attends its own heads (no exchange) until the twin goes back
 }
 
