@@ -73,7 +73,7 @@ pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*any
         return s.fail(at, err);
     };
     const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-    e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .seen = .of(s, last[0..n], decoded, starts, at), .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .own = last };
+    e.* = .{ .tokens = last[0..n], .images = image_ids, .image_frame = s.image_frame, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .seen = .of(s, last[0..n], decoded, starts, at), .last = last, .shared = shared, .rewind = at == s.active_rewind_at and sharedKey(last[0..n]) == s.active_rewind_key, .intermediate = @import("prompt_intermediate.zig").is(s.rules, prompt.len, at), .own = last };
     owns_decoded = false;
     owns_images = false;
     index.add(s, e) catch {

@@ -56,6 +56,7 @@ pub const Metal = struct {
     owners: [max_streams]?*lanes.Stream = @splat(null), // the stream each runner slot holds
     contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
     draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
+    serial_copy_match: i64 = 5, // the lone callback's suffix rule, chosen once with its serving policy
     release_hook: ?Release = null,
     checkpoint_hook: ?lanes.stream.MarkHook = null, // unplanned prompt states only when the cache has room
     grow: ?Grow = null,
