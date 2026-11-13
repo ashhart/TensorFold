@@ -132,6 +132,11 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         own.kv.head = if (own.head) |h| .{ .draft_n = h.ids.len, .rows = draft_rows } else null;
         const head_bytes = if (own.head) |h| mtp.Draft.bytes(window, h.ids.len, draft_rows, own.engine.heads) else 0;
         own.kv.layout = try @import("cuda_kv_lanes.zig").layout(o.context, page_tokens, own.kv.head, stream_bytes - own_seq_bytes - head_bytes);
+        if (own.ranks) |r| {
+            const kvl = @import("cuda_kv_lanes.zig");
+            const run_pages = try r.room(~@as(u64, own.kv.layout.?.runPages()));
+            own.kv.layout = kvl.withRunPages(own.kv.layout.?, @intCast(~run_pages));
+        }
     }
     // What a stream holds, by piece.
     try @import("exl3/kv/cuda_exl3_kv.zig").logStream(own.engine, window, stream_bytes);
