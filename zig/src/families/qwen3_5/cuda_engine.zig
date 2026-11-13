@@ -55,8 +55,8 @@ pub const Mlp = layers.Mlp;
 const Fns = layers.Fns;
 pub const Keeps = layers.Keeps;
 const Kv8 = layers.Kv8;
-/// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
-pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null };
+/// A window: for a tree `parents` names each row's parent (-1: first row); `undo` keeps a one-row rollback copy.
+pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null, undo: bool = true };
 
 /// An image prompt's rows for its prompt chunks: the staged tables' rows.
 pub const Images = Round.Images;
@@ -433,6 +433,13 @@ pub const Engine = struct {
         for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
     }
 
+    /// A window's staged segment: one-row windows that skip their rollback copy read no `before`.
+    pub fn stagedSeg(c: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize, undo: bool) Seg {
+        var sg = c.fold(c.seg(e, len, row0, rows));
+        if (rows == 1 and !undo) sg.before = 0;
+        return sg;
+    }
+
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         try e.admit(parts, ids, keep);
@@ -449,11 +456,11 @@ pub const Engine = struct {
             try p.cache.settle(e);
             // pending kept rows ride in a recorded slot scan; any other pass reads the state as written
             if (!(record and keep != .hidden)) try p.cache.flush(e);
-            try recurrent.prepare(e, p.cache, p.rows, record);
+            try recurrent.prepare(e, p.cache, p.rows, record, p.undo);
         }
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
-            segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
+            segs[i] = stagedSeg(p.cache, e, p.cache.len, row0, p.rows, p.undo);
             row0 += p.rows;
         }
         if (keep == .draws) {
@@ -485,7 +492,7 @@ pub const Engine = struct {
         var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
         if (record) for (parts) |p| {
             try recurrent.mark(p.cache, false);
-            if (p.rows == 1) try recurrent.mark(p.cache, true);
+            if (p.rows == 1 and p.undo) try recurrent.mark(p.cache, true);
         };
         shape.hidden = keep == .hidden;
         shape.rows = keep == .rows;
@@ -498,7 +505,7 @@ pub const Engine = struct {
         e.features = if (images) |im| im.features else 0;
         defer e.features = 0;
         if (g.whole == 0) try e.launchShape(shape) else try stage_fwd.run(e, shape, total);
-        for (parts) |p| p.cache.advanced(p.rows, record);
+        for (parts) |p| p.cache.advanced(p.rows, record, p.undo);
         if (!g.heads) return recurrent.completed(e); // a stage without the head: no logits to keep
         if (e.held) |h| return h.hold(st, shape, total); // rank 0 with rounds in flight: its head runs at `land`
         try e.land(parts, keep, total);

@@ -10,6 +10,18 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 (gates 1–4, a planted control for each width, gate-5 records on the four RDNA chips); its 1×8 tile at those widths spills to scratch on gfx1100, listed as a known finding (#3163, part of #3061).
 
+- Video input: libtfvideo decodes MPEG-4 Part 2 and H.264 streams that declare no B-frames on up to four frame threads, 2.1x to 3.4x faster on Mac and Linux, with every frame equal to before, damaged clips included; H.264 with B-frames keeps the single-threaded path, because frame threads conceal damage there differently, and a stream that contradicts its own headers falls back to it (#2863). Thanks to @swbiggart.
+- Video on Linux: `libtfvideo.so` links with a version script that exports only its four `tf_video_*` functions, so on x86_64 `zig build video` links `tools/zig/build_ffmpeg.sh`'s FFmpeg with its assembly, where before the link stopped on thousands of `R_X86_64_PC32` relocations against FFmpeg's own tables. Its frames equal PyAV 19.0.1's byte for byte on 23 clips. On aarch64 the library stops exporting FFmpeg's API; real video there is unchecked. macOS is unchanged (#2861). Thanks to @swbiggart.
+- Qwen 3.5, 3.6 and 3.8 on CUDA: decode windows of 2 to 8 rows run at 4 or 8 rows instead of being padded to 16, about 1.5% faster at four streams on a GB10, with the same tokens (#2934, fixes #2909).
+
+- Server: `POST /v1/requests/{id}/cancel` cancels a running or queued request by its `chatcmpl-`, `cmpl-` or `resp_` id through the same engine cancel a disconnect sends; the reply ends `cancelled` with the tokens it had, and other streams are unchanged. With API keys only a full or `[admin]` key may cancel; a server without keys answers only direct loopback callers and refuses proxied requests (403 `loopback_only`) (#3193, fixes #3172).
+
+- Qwen 3.5, 3.6 and 3.8 on CUDA: a served one-row step no longer copies the recurrent state for a rollback that can't happen, so decode is 1-2% faster at one stream and about 4% at four on a GB10, with the same tokens (#2933, fixes #2908).
+
+- Metal: Recursive's Flint (40B-A2.5B MoE) is served natively from `RecursiveSI/flint-int4` on M5-class Macs, with its kernels and 2048-wide router under the kernel contract, a 262,144-token window, copy drafts and the prompt cache; `FLINT_LOAD_LIMIT_GB` caps its memory, and Step-5 now shares the same load budget, so a `STEP5_LOAD_LIMIT_GB` above the Mac's RAM is refused by name (#1177, fixes #1175). Thanks to @BobClawblaw.
+
+- CI: a newer push to main cancels main's older No GPU run (a landing train pushes one commit a PR, and the train's own run has tested the tree), the nightly keeps its own run, and the app checks run on pushes to main only (#3230).
+
 - Intel XPU: Qwen3.8-27B's prompt `gdn_out` kernel keeps its scale bookkeeping in cheaper exact forms, for 22.6% less kernel time on an Arc Pro B70 (734 to 569 ms over a 32K prompt) with byte-identical outputs, its fallback included (#2921, refs #2859). Thanks to @dinadur.
 
 - OCR: the native HIP engine reads page images through `POST /v1/ocr` in Mistral's OCR contract (its Python and TypeScript SDKs), with dots.mocr's reader (a box for each layout block). Mistral crops share one image budget per request (256 images, 4 times the page pixels, 16 MiB plus 2 MiB a page). An option that changes content and that TensorFold cannot apply, such as annotations, is refused, and so are PDF documents and `pages`. A page cut at the context limit or out of its model's format fails the request with HTTP 422; `docs/api.md` lists the contract's fields, statuses and limits (#2570, #2440). Thanks to @laudney.
