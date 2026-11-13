@@ -55,6 +55,7 @@ const Lane = struct {
     asked: std.ArrayList(api.Id) = .empty,
     stop: std.atomic.Value(bool) = .init(false),
     cancels: std.atomic.Value(usize) = .init(0),
+    sent: std.atomic.Value(usize) = .init(0), // tokens the worker has handed a sink
     worker: ?std.Thread = null,
 
     const Job = struct { id: api.Id, sink: api.Sink, max: u32, first: u32 };
@@ -109,6 +110,10 @@ const Lane = struct {
         return l.jobs.items.len >= n;
     }
 
+    fn streamed(l: *Lane, n: usize) !bool {
+        return l.sent.load(.acquire) >= n;
+    }
+
     fn askedFor(l: *Lane, id: api.Id) bool {
         l.mutex.lockUncancelable(l.io);
         defer l.mutex.unlock(l.io);
@@ -133,6 +138,7 @@ const Lane = struct {
                 }
                 const tok: u32 = if (i == 0) j.first else 'a' + @as(u32, @intCast(i % 26));
                 j.sink.event(j.sink.ctx, j.id, &.{ .tokens = &.{tok} });
+                _ = l.sent.fetchAdd(1, .release);
                 std.Io.sleep(l.io, .fromMilliseconds(1), .awake) catch {};
             }
             j.sink.event(j.sink.ctx, j.id, &.{ .finished = .{ .reason = reason } });
@@ -345,6 +351,8 @@ test "request cancel: a Responses turn cancelled by its resp_ id ends with statu
     const th = try std.Thread.spawn(.{}, respond, .{ srv, thread_arena.allocator(), &answer });
     try waitFor(holds, .{ a, "resp_" });
     try waitFor(Lane.queued, .{ &lane, 1 }); // submitted, so the cancel reaches the engine
+    // and past its first token, so there is text so far (13 Nov: a slow Windows runner cancelled before it)
+    try waitFor(Lane.streamed, .{ &lane, 1 });
     const rid = (try heldName(a, "resp_", "")).?;
     try t.expectEqual(@as(u16, 200), (try cancelBy(srv, a, rid)).status);
     th.join();
