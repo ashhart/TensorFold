@@ -82,10 +82,7 @@ pub const Host = struct {
         return h.follow_fn.?(h.family);
     }
     const readiness = @import("cuda_startup_phase.zig").readiness;
-    fn halt(ctx: *anyopaque, reason: []const u8) void {
-        const h: *Host = @ptrCast(@alignCast(ctx));
-        h.host.halt(reason);
-    }
+    const halt = @import("cuda_host_halt.zig").halt;
     pub fn close(p: *anyopaque) void {
         @import("cuda_host_close.zig").close(@as(*Host, @ptrCast(@alignCast(p))));
     }

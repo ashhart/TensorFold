@@ -96,8 +96,7 @@ pub const Config = struct {
     slide_graph: ?[]const u8 = null,
     slide_drift_gate: bool = false,
     slide_forget: bool = false, // opt-in least-used unpinned eviction when a new lesson finds a full pocket
-    /// A fact whose check a delete fails, to test its put-back (0: none); only -Dslide-test-hooks builds set it.
-    slide_forget_fail: u32 = 0,
+    slide_forget_fail: u32 = 0, // a fact a delete fails to check, to test its put-back (0: none; test-hook builds)
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.
     cortheon: bool = false,
     /// BRAVE_SEARCH_API_KEY: Cortheon searches through Brave instead of DuckDuckGo.
