@@ -2,7 +2,7 @@
 
 The model combines Mamba-2, attention and MoE blocks. The native family is `zig/src/families/nemotron/`, on Metal
 and CUDA; the native prompt reuse, routed experts and shared rounds sections below describe it, and the
-[README](../../README.md#qualified-models) lists its qualified checkpoints and hardware.
+[README](../supported-models.md#qualified-models) lists its qualified checkpoints and hardware.
 
 The MLX execution, CUDA, draft vocabulary and measurements sections describe the Python engine,
 frozen at 0.6.6 and available at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its MLX family

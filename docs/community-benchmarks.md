@@ -1,5 +1,8 @@
 # Community benchmarks
 
+`tensorfold benchmark MODEL` runs public code and chat fixtures on a cached model and saves a portable receipt;
+`--publish` optionally submits it for review at tensorfold.dev; [Publishing](#publishing) says which receipts it accepts today.
+
 Run repeatable code and chat workloads on a model you have already downloaded:
 
 ```sh
