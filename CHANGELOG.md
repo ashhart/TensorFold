@@ -4,8 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on Metal: a decode round over several streams writes every stream's window key, compressed rows and index keys, pools its ratio-2 carries and attends in one dispatch a stage over a table of the streams' state, with the same bits as a dispatch a stream (#2954, part of #1676).
-- DeepSeek-V4.1 on Metal: a decode round over several streams scores every stream's index keys, picks their candidate blocks and their top 512 in one dispatch a stage, with one barrier between stages instead of one a stream, and the same bits (#2954, part of #1676).
+- DeepSeek-V4.1 on Metal: a decode round over several streams runs each per-stream stage (window key, compressed rows and index keys, ratio-2 pooling, decode attention, index scores, candidate blocks and the top 512) as one dispatch over a table of the streams' state, with one barrier between stages instead of one a stream and the same bits; on the release weights three and four streams decode 1.5 to 3.1% faster on an M5 Ultra and 0.8 to 2.8% faster on an M3 Ultra, one and two streams are level, and every token is unchanged (#2954, part of #2984).
 - DeepSeek-V4.1 on Metal: rounds with three or more decoding streams decode plain, with no draft pass and no drafter ingest, since drafts lose there; when fewer streams decode again the drafter takes the rows it missed from the target, so its drafts are the ones it would have made (#1720, part of #1676).
 
 - Flash Next: twenty-nine `TF_FLASHNEXT_*` settings refuse a malformed value by name at startup, before any device work on CUDA, and a Metal load refuses them too; blank `TF_FLASHNEXT_KV_PAGE_TEST` and `TF_FLASHNEXT_KEEP_LATE` read as unset, and a non-finite confidence is refused (#2585, part of #2370). Thanks to @devopsfortunato.
