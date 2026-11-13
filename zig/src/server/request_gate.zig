@@ -23,9 +23,19 @@ pub const Held = struct {
     srv: *Server,
     group: RouteGroup,
     lease: ?admission.Lease = null,
+    owned: bool = true, // false once `take` moved the counts and lease out: `release` then does nothing
+
+    /// The counts and lease, moved to a holder that outlives the route (a background response, until it ends).
+    pub fn take(h: *Held) Held {
+        const moved = h.*;
+        h.owned = false;
+        return moved;
+    }
 
     /// Undoes `enter` in reverse order: the lease, the idle window, the load ledger, then the in-progress count.
     pub fn release(h: *Held) void {
+        if (!h.owned) return;
+        h.owned = false;
         if (h.lease) |*lease| lease.release();
         if (h.srv.idle_manager) |m| m.end();
         h.srv.load.leave(h.group);

@@ -129,6 +129,7 @@ routes still require when keys are on. Without the flag no reply carries a CORS 
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
+| `POST /v1/responses/{id}/cancel` | Cancel a [background response](#background-responses) that is queued or running |
 | `POST /score`, `POST /v1/score` | Text-pair scores in request order, using the configured reranker |
 | `POST /rerank`, `POST /v1/rerank` | Ranked documents; a `texts` body selects the TEI response shape |
 | `POST /v2/rerank` | Cohere-style ranked `results` over the same score hook |
@@ -1538,7 +1539,7 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, file IDs and
+others), `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, file IDs and
 remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
 `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
 `include` takes a list of OpenAI's names. `message.output_text.logprobs` asks for logprobs where the engine has them
@@ -1547,6 +1548,36 @@ remote file URLs (`input_file` parts with inline `file_data` run on a model star
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
 `web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of
 strings, is refused.
+
+### Background responses
+
+`background: true` answers the POST at once with the response object, `status: "queued"`, `background: true` and no
+output; the reply is generated after the POST returns, and leaving the connection does not cancel it.
+`GET /v1/responses/{id}` polls it: `queued`, then `in_progress` (output stays empty while it runs), then the
+finished response as a request sent without `background` returns it: `completed`, `incomplete`, `failed` or
+`cancelled`. The reply runs through the same chat path as that request, so the same body and seed give the same
+tokens. A finished background response is an ordinary stored response: `previous_response_id` continues it (one still
+running is refused), and it is kept, evicted and lost on restart as every stored response is.
+
+`POST /v1/responses/{id}/cancel` (or `/responses/{id}/cancel`) cancels a queued or running one. A running reply ends
+as [Cancel a request](#cancel-a-request) ends it, with the text it had; the route waits up to 2 s for that end and
+answers 200 with the response, `status: "cancelled"`. `POST /v1/requests/{id}/cancel` with the same `resp_` id does
+the same. A second cancel answers the cancelled response again, a background response that has already ended
+otherwise answers 400, as does a response not created with `background`, and an unknown id 404.
+`DELETE /v1/responses/{id}` on a running one stops it, and nothing of it is kept.
+
+`background: true` needs `store: true` (the default) and refuses `stream: true`: there is no event stream to start
+or resume (a GET of a background response with `stream=true`, as `starting_after` resumes one, answers 400), so poll
+instead. It is an HTTP request only; a Responses socket refuses it, and a true value that is not a boolean, such as
+`1`, is refused. At most 64
+background responses are queued or running at once on a server, 16 for one API key, holding 256 MiB of copied
+requests in all; past those a create answers 429 `background_limit_exceeded` before any work starts. Each keeps its
+request's place under `--max-inflight` until it is stored, and a stop gives it the drain window any request in
+progress gets.
+
+Stored responses are the server's, so with API keys only a full or `[admin]` key may create, poll or cancel one; a
+scoped key gets 403 (see [Key scopes](#key-scopes)). A server without keys takes the response's id, 128 random bits,
+as the right to read, cancel or delete it, as it does for `GET` and `DELETE`.
 
 ### WebSocket mode
 
