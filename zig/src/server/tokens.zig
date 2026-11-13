@@ -1,4 +1,4 @@
-//! vLLM's /tokenize and /detokenize (the ids the chat and completion routes would run), and a reply's token SHA.
+//! vLLM's /tokenize and /detokenize (the ids chat and completions would run), /apply-template, a reply's token SHA.
 const std = @import("std");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -15,12 +15,34 @@ const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
 
-pub const paths = [_][]const u8{ "/tokenize", "/v1/tokenize", "/detokenize", "/v1/detokenize" };
+pub const paths = [_][]const u8{ "/tokenize", "/v1/tokenize", "/detokenize", "/v1/detokenize", "/apply-template", "/v1/apply-template" };
 
 fn flag(cx: *Cx, body: Value, name: []const u8, default: bool) errors.Refused!bool {
     const v = body.get(name) orelse return default;
     if (v != .bool) return cx.fail(.request, "{s} must be a boolean", .{name});
     return v.bool;
+}
+
+/// The ids a body renders to, with main's named effort and media expansion preserved.
+fn messageIds(srv: *Server, cx: *Cx, body: Value) errors.Refused![]const u32 {
+    const generation = try flag(cx, body, "add_generation_prompt", true);
+    const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+    const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
+        error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
+        else => |x| return x,
+    };
+    const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
+    const on = thinking.enable orelse srv.config.enable_thinking;
+    cx.clear_thinking = thinking.clear;
+    cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels);
+    cx.template_fields = body;
+    const ids = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), generation) catch |e| switch (e) {
+        error.Refused => return cx.other(cx.message),
+        else => |x| return x,
+    };
+    // media expanded as the chat route expands them: each image's tokens, each video's frame groups
+    if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, msgs, ids, 0)) |x| return x.ids;
+    return ids;
 }
 
 fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
@@ -29,23 +51,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     const strings = try flag(cx, body, "return_token_strs", false);
     var ids: []const u32 = undefined;
     if (body.has("messages")) {
-        const generation = try flag(cx, body, "add_generation_prompt", true);
-        const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
-        const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
-            error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
-            else => |x| return x,
-        };
-        const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
-        const on = thinking.enable orelse srv.config.enable_thinking;
-        cx.clear_thinking = thinking.clear;
-        cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels);
-        cx.template_fields = body;
-        ids = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), generation) catch |e| switch (e) {
-            error.Refused => return cx.other(cx.message),
-            else => |x| return x,
-        };
-        // media expanded as the chat route expands them: each image's tokens, each video's frame groups
-        if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, msgs, ids, 0)) |x| ids = x.ids;
+        ids = try messageIds(srv, cx, body);
     } else {
         const text = body.get("prompt");
         if (text == null or text.? != .string) return cx.refuse("prompt must be a string (or send messages)");
@@ -88,11 +94,23 @@ fn detokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     return .{ .object = o };
 }
 
-pub fn post(srv: *Server, conn: *Conn, a: Allocator, detok: bool) void {
+/// The prompt text /tokenize's `messages` render to, decoded with its special tokens: no engine work.
+fn applyTemplate(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
+    if (body != .object) return cx.refuse("the request body must be a JSON object");
+    if (!body.has("messages")) return cx.refuse("messages is required");
+    const text = try srv.text.decode(cx.a, try messageIds(srv, cx, body));
+    const o = try json.newObject(cx.a);
+    try o.put(cx.a, "prompt", .{ .string = text });
+    return .{ .object = o };
+}
+
+/// `route` is one of `paths`.
+pub fn post(srv: *Server, conn: *Conn, a: Allocator, route: []const u8) void {
     var cx: Cx = .{ .a = a };
     const reply = blk: {
         const body = http_body.readJson(conn, &cx) catch break :blk null;
-        break :blk (if (detok) detokenize(srv, &cx, body) else tokenize(srv, &cx, body)) catch null;
+        const run = if (std.mem.endsWith(u8, route, "/apply-template")) applyTemplate(srv, &cx, body) else if (std.mem.endsWith(u8, route, "/detokenize")) detokenize(srv, &cx, body) else tokenize(srv, &cx, body);
+        break :blk run catch null;
     };
     if (reply) |r| return routes.sendValue(conn, a, 200, r);
     const o = json.newObject(a) catch return;

@@ -437,3 +437,29 @@ test "CORS HTTP: a listed origin's preflight is answered before keys, its reques
     try expectStatus(plain, 200);
     try t.expect(std.mem.indexOf(u8, plain, "Access-Control-Allow-Origin") == null);
 }
+
+test "apply-template: both routes need an inference key and render without engine work" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}";
+    for ([_][]const u8{ "/apply-template", "/v1/apply-template" }) |path| {
+        for ([_][]const u8{ "infer-secret", "both-secret", "admin-secret" }) |key| {
+            const reply = try h.ask(a, "POST", path, key, body);
+            try expectStatus(reply, 200);
+            try t.expectEqualStrings("prompt", (try payload(a, reply)).get("prompt").?.string);
+        }
+        try expectStatus(try h.ask(a, "POST", path, "read-secret", body), 403);
+        try expectStatus(try h.ask(a, "POST", path, "", body), 401);
+        try expectStatus(try h.ask(a, "POST", path, "infer-secret", "{\"prompt\":\"hello\"}"), 400);
+    }
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire));
+}
