@@ -6,6 +6,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Ling-3.0-tiny: a host KDA reference, and a Metal check that Kimi's `k3_kda` matches it at Ling-tiny's shape; nothing is served yet (part of #1247).
 
+- Tests: `tf-cuda-test flashnext-rank RANK PORT timeout` passes again on two GPUs. NCCL start-up keeps its 30 s bound and only the stalled collective gets 200 ms, and both ranks meet once their communicators are up, so `timeout` and `eof` fail the collective under test, not the start-up (#2976, fixes #2975). Thanks to @swbiggart.
+
 - Tokenizer: a split pattern is held to a work allowance per piece (2,048 instructions a byte, counted, not timed) and refused at load when too deep or too large, so a crafted tokenizer or prompt can't hang the pre-tokenizer; every split of the patterns we serve is unchanged (#3071).
 
 - Cluster pull: a pull that would leave a file held only in part is refused unless the caller allows unverified bytes (off by default); a pull that ends whole still resumes and is checked against the manifest's hash (#3074).
