@@ -222,6 +222,10 @@ The family plugs into the core's pieces and adds no scheduler:
   `tensorfold:prompt_cache_states` and `tensorfold:prompt_cache_bytes`; a successful resume counts toward
   `tensorfold:prompt_tokens_cached_total`. The chunk and budget host fixtures exercise this policy; real-model
   resumed/fresh parity and TTFT for this interior state still need the GPU gate.
+- `TF_PROMPT_INTERMEDIATE=1` keeps up to four intermediate states at power-of-two positions under a long prompt's
+  history, so a later request that keeps a compacted prefix resumes inside it. On one GB10 (NVFP4, `--no-drafts`,
+  an 8 GiB cache), a 104K-token request keeping its first 100K resumed 65,536 tokens instead of 2 (TTFT 19.9 s
+  against 50.7 s, same tokens); a cold 165K prompt paid 0.9 s more and the cache held two more states. Off by default.
 - Shared row kernels: the token rows (`embed_rows.cu`, groups of 32 and a copy a hyper-connection stream), the MTP
   head's RMS rows with their group sums (`norms.cu`), the router logits and softmax top-k (`route_rows.cu`), and the
   routed experts over a window's or a chunk's rows on the core's plan (`cuda/grouped.zig`, `experts_rows.cu`).

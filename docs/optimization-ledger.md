@@ -375,6 +375,8 @@ below; these are estimates for planning a port, not results.
 
 16. **DFlash and DFlash2 drafters.** An external block drafter reads the target's hidden taps and drafts a block (or a
     tree) a step. It needs a trained drafter for each target; see [training a drafter](recipes/training-a-drafter.md).
+    Qwen27 Metal retains its target-verified long-copy tail for an eligible lone greedy request at the M5
+    16-row default; sampled and shared requests keep the lane core ([#3013](https://github.com/ashhart/TensorFold/issues/3013)).
 
 17. **DSpark drafters.** A drafter that ships with the release (DeepSeek-V4.1's `mtp.i` blocks, MiniMax-M3.1's, Kimi
     K3's) drafts from the target's taps with a confidence schedule. Applies wherever a DSpark drafter exists for the
