@@ -34,7 +34,6 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
     try write(a, io, dir, "gdn.metal", gdn_source.text);
-    try write(a, io, dir, "prompt.metal", sources.prompt_glue ++ sources.prompt_state);
     for ([_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" }) |name| {
         const template = if (std.mem.eql(u8, name, "norm_input")) sources.norm_input else if (std.mem.eql(u8, name, "norm_xs")) sources.norm_xs else if (std.mem.eql(u8, name, "mlp_xs")) sources.mlp_xs else sources.xsum;
         const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
