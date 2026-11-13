@@ -134,7 +134,7 @@ pub fn opening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
         try x.upload(l.rule, std.mem.asBytes(&rule));
         l.sampled = true;
     }
-    if (s.images.len > 0) try x.encodeImages(s, &l);
+    if (s.images.len > 0) try x.encodeImages(s, &l, l.fill.?);
     try x.lanes.put(x.gpa, s, l);
     x.free[slot] = false;
     s.fill_at.store(@intCast(l.fill.?), .monotonic);
@@ -173,8 +173,8 @@ pub fn legacyOpening(comptime Lane: type, x: anytype, s: *Stream) !*Lane {
         l.sampled = true;
     }
     s.cached = 0;
-    if (s.images.len > 0) try x.encodeImages(s, l);
-    l.fill = x.resumeAt(s, l, p.len);
+    l.fill = x.resumeAt(s, l, p.len); // first, so the images its kept state holds are not encoded
+    if (s.images.len > 0) try x.encodeImages(s, l, l.fill.?);
     s.fill_at.store(@intCast(l.fill.?), .monotonic);
     return l;
 }
