@@ -3,8 +3,9 @@
 For opt-in phase timings from native entry to the first completed reply, see the [startup receipt](startup-receipt.md).
 
 The native engine serves `TensorFold/Qwen3.8-27B-MLX-4bit` on Metal, qualified on M5 Max and M3 Ultra, from
-`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) only when `--drafter` names
-the drafter; without it the model decodes plain. On CUDA the native engine serves the MLX affine checkpoints (2, 3,
+`zig/src/families/qwen27/`. It drafts with DFlash2 (`zig/src/families/qwen27/dflash/`) when `--drafter` names
+the drafter, or by itself when the cache holds `z-lab/Qwen3.8-27B-DFlash2`; `--drafter none` serves without it.
+On CUDA the native engine serves the MLX affine checkpoints (2, 3,
 4, 5, 6 and 8 bits in groups of 64) from `zig/src/families/qwen3_5/cuda_*.zig`, with DFlash2 drafts and
 `--kv-cache fp8`. It also reads ModelOpt NVFP4 and FP8 exports, and turboderp's EXL3 packs (`mul1` codebook) with
 DFlash2 drafts through the shared EXL3 module, on one GPU.
