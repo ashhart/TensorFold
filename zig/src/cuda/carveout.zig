@@ -184,6 +184,8 @@ pub const Spans = struct {
 pub const default_socket = "/run/dispram/dispram.sock";
 pub const default_key = "kindlingai_1";
 pub const gran = @import("carveout_lend.zig").gran; // one owner for the slice size
+/// A daemon's refusal in its own words, for the line that reports it.
+const Reason = @import("carveout_lend.zig").Reason;
 
 /// The display memory held for the KV planes: a dumb buffer's mapping, or a lent slice's with its daemon connection.
 pub const Carveout = struct {
@@ -197,7 +199,7 @@ pub const Carveout = struct {
     spans: Spans,
     vmm: ?@import("arena.zig").Vmm = null, // the daemon slice's mapping; the card path has none
 
-    /// Opens `want` from its source. A refusal is logged once, here: the cause, then the setting that changes it.
+    /// Opens `want` from its source. A refusal is logged once: the cause, a daemon's reason, the setting to change.
     pub fn from(d: *const Driver, want: Request) Error!Carveout {
         const mib = want.bytes >> 20;
         switch (want.backend) {
@@ -216,8 +218,9 @@ pub const Carveout = struct {
                     if (!builtin.is_test) std.log.err("{s}", .{problem});
                     return err;
                 } else want.key;
-                return openDaemon(d, want.socket, key, want.bytes) catch |err| {
-                    if (!builtin.is_test) std.log.err("display carveout of {d} MiB from the daemon at {s}: {t} (run the daemon, set TF_CUDA_CARVEOUT_SOCKET and TF_CUDA_CARVEOUT_KEY or TF_CUDA_CARVEOUT_KEY_FILE, or TF_CUDA_CARVEOUT_SOURCE=drm)", .{ mib, want.socket, err });
+                var said: Reason = .{};
+                return openDaemon(d, want.socket, key, want.bytes, &said) catch |err| {
+                    if (!builtin.is_test) std.log.err("display carveout of {d} MiB from the daemon at {s}: {t}{f} (run the daemon, set TF_CUDA_CARVEOUT_SOCKET and TF_CUDA_CARVEOUT_KEY or TF_CUDA_CARVEOUT_KEY_FILE, or TF_CUDA_CARVEOUT_SOURCE=drm)", .{ mib, want.socket, err, said });
                     return err;
                 };
             },
@@ -286,8 +289,8 @@ pub const Carveout = struct {
     }
 
     /// The daemon backend: claims what a lending daemon holds, over its socket with its key, keeping the socket open.
-    pub fn openDaemon(d: *const Driver, socket: []const u8, key: []const u8, want: usize) Error!Carveout {
-        const claimed = try @import("carveout_lend.zig").claim(d, socket, key, want);
+    pub fn openDaemon(d: *const Driver, socket: []const u8, key: []const u8, want: usize, said: *Reason) Error!Carveout {
+        const claimed = try @import("carveout_lend.zig").claim(d, socket, key, want, said);
         return .{ .d = d, .backend = .daemon, .fd = claimed.fd, .handle = 0, .host = undefined, .dev = claimed.dev, .flags = 0, .spans = .{ .size = claimed.size }, .vmm = claimed.vmm };
     }
 
