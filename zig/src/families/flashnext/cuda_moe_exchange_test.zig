@@ -81,6 +81,7 @@ fn collective(pair: *[2]c_int, rank: usize, timeout_ms: u64) !Collective {
     c.failed = false;
     c.release = null;
     c.comm = @ptrFromInt(0x1000);
+    c.parent = null;
     c.link = .{ .fd = pair[0] };
     c.timeout_ms = timeout_ms;
     c.rank = rank;

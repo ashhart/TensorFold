@@ -93,6 +93,7 @@ fn session(engine: *prompt.Engine, rank: usize, pair: *[2]c_int) !ranks.Session 
     s.collective.failed = false;
     s.collective.release = null;
     s.collective.comm = @ptrFromInt(0x1000);
+    s.collective.parent = null;
     s.collective.link = .{ .fd = pair[0] };
     s.collective.timeout_ms = 1000;
     s.collective.lib.api.ncclBroadcast = Fake.broadcast;
