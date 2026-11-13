@@ -6,7 +6,16 @@ pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--help")) {
-        std.debug.print("tf-sam3-tensors ACTUAL.safetensors EXPECTED.safetensors ACTUAL_KEY EXPECTED_KEY OUTPUT.json\nReports every column; passes only finite, byte-exact tensors with identical dtype and shape.\n", .{});
+        std.debug.print("tf-sam3-tensors --list CAPTURE.safetensors\ntf-sam3-tensors ACTUAL.safetensors EXPECTED.safetensors ACTUAL_KEY EXPECTED_KEY OUTPUT.json\nReports every column; passes only finite, byte-exact tensors with identical dtype and shape.\n", .{});
+        return;
+    }
+    if (args.len == 3 and std.mem.eql(u8, args[1], "--list")) {
+        var file = try st.File.open(init.gpa, init.io, args[2]);
+        defer file.close(init.io);
+        for (file.names.keys()) |name| {
+            const tensor = file.get(name).?;
+            std.debug.print("{s} {s} {any}\n", .{ name, @tagName(tensor.dtype), tensor.shape[0..tensor.rank] });
+        }
         return;
     }
     if (args.len != 6) return error.ExpectedTwoFilesTwoKeysAndOutput;

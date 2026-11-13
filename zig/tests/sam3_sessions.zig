@@ -93,7 +93,44 @@ fn equal(phase: []const u8, want: Prediction, got: Prediction) !void {
     }
 }
 
-pub fn check(a: std.mem.Allocator, io: std.Io, model: *sam.Model, images: [2]sam.Image, indices: [2]usize, frames: usize, seeds: []const sam.session.Seed) !void {
+fn cancelWaiting(a: std.mem.Allocator, io: std.Io, session: *sam.Session, image: sam.Image, index: usize) !void {
+    session.model.mutex.lockUncancelable(io);
+    defer session.model.mutex.unlock(io);
+    var gate: std.Io.Event = .unset;
+    var job = Advance{ .a = a, .io = io, .session = session, .image = image, .index = index, .gate = &gate };
+    defer if (job.output) |*output| output.deinit();
+    var future = try io.concurrent(Advance.run, .{&job});
+    defer future.cancel(io);
+    job.ready.waitUncancelable(io);
+    gate.set(io);
+    future.cancel(io);
+    const failure = job.failure orelse return error.SessionCancellationFailed;
+    if (failure != error.Canceled or job.output != null) return error.SessionCancellationFailed;
+    std.debug.print("SAM session: queued frame observes I/O cancellation before changing state\n", .{});
+}
+
+fn closedSessionBytes(template: *const Work) !u64 {
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        var job = Work{ .a = template.a, .io = template.io, .model = template.model, .images = template.images, .indices = template.indices, .frames = template.frames, .seeds = template.seeds };
+        defer job.deinit();
+        try job.execute();
+    }
+    return template.model.gpu.device.allocated();
+}
+
+fn released(template: *const Work) !void {
+    const baseline = try closedSessionBytes(template);
+    var after = baseline;
+    for (0..3) |_| {
+        after = try closedSessionBytes(template);
+        if (after > baseline) return error.SessionGpuRetention;
+    }
+    std.debug.print("SAM session: three closes return to warmed Metal baseline {d} bytes (last {d})\n", .{ baseline, after });
+}
+
+fn checkConcurrent(a: std.mem.Allocator, io: std.Io, model: *sam.Model, images: [2]sam.Image, indices: [2]usize, frames: usize, seeds: []const sam.session.Seed) !void {
     var solo = [2]Work{
         .{ .a = a, .io = io, .model = model, .images = images, .indices = indices, .frames = frames, .seeds = seeds },
         .{ .a = a, .io = io, .model = model, .images = .{ images[1], images[0] }, .indices = .{ indices[1], indices[0] }, .frames = frames, .seeds = seeds },
@@ -104,6 +141,7 @@ pub fn check(a: std.mem.Allocator, io: std.Io, model: *sam.Model, images: [2]sam
     defer shared.deinit();
     var seeded = try shared.seed(a, images[0], indices[0], seeds);
     seeded.deinit();
+    try cancelWaiting(a, io, &shared, images[1], indices[1]);
     var duplicate_gate: std.Io.Event = .unset;
     var duplicates = [2]Advance{
         .{ .a = a, .io = io, .session = &shared, .image = images[1], .index = indices[1], .gate = &duplicate_gate },
@@ -153,4 +191,14 @@ pub fn check(a: std.mem.Allocator, io: std.Io, model: *sam.Model, images: [2]sam
         for (0..2) |step| try equal("concurrent sessions", want.outputs[step].?, got.outputs[step].?);
     }
     std.debug.print("SAM sessions: concurrent forward/reverse runs on one model match solo byte for byte\n", .{});
+}
+
+pub fn check(a: std.mem.Allocator, io: std.Io, model: *sam.Model, images: [2]sam.Image, indices: [2]usize, frames: usize, seeds: []const sam.session.Seed) !void {
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        try checkConcurrent(a, io, model, images, indices, frames, seeds);
+    }
+    const template = Work{ .a = a, .io = io, .model = model, .images = images, .indices = indices, .frames = frames, .seeds = seeds };
+    try released(&template);
 }

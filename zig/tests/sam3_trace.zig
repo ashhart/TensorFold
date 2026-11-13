@@ -36,9 +36,9 @@ pub const Trace = struct {
         var runtime = session.model.runtime(a);
         defer runtime.deinit();
         var context = Context{ .a = a, .entries = &tensors };
-        if (self.layers) runtime.observer = .{ .context = &context, .write = record };
         const prepared = try sam.model.prepareImage(&runtime, image);
         try feature(a, &tensors, "preprocessed_nhwc", prepared);
+        if (self.layers) runtime.observer = .{ .context = &context, .write = record };
         const trunk = try sam.model.encodeTrunk(&runtime, image);
         try feature(a, &tensors, "trunk.0", trunk);
         for (session.features.?, 0..) |value, i| try feature(a, &tensors, try std.fmt.allocPrint(a, "pyramid.propagation.{d}", .{i}), value);

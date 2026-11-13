@@ -14,6 +14,10 @@ pub const LoadOptions = struct {
     version: ?@import("config.zig").Version = null,
     precision: enum { checkpoint, float32 } = .checkpoint,
     compact_gemm: bool = true,
+    split_attention: bool = false,
+    device_projections: bool = false,
+    device_attention: bool = false,
+    compensated_norm: bool = false,
     scratch_cache_bytes: usize = 2 << 30,
 };
 
@@ -38,6 +42,10 @@ pub const Model = struct {
     gpu: *gpu.Gpu,
     tokenizer: ?tokenizer.Tokenizer = null,
     precision: @FieldType(ops.Runtime, "precision"),
+    split_attention: bool = false,
+    device_projections: bool = false,
+    device_attention: bool = false,
+    compensated_norm: bool = false,
     mutex: std.Io.Mutex = .init,
 
     pub fn load(allocator: std.mem.Allocator, io: std.Io, path: []const u8, options: LoadOptions) !*Model {
@@ -58,7 +66,19 @@ pub const Model = struct {
         if (options.tokenizer_path) |file| text = try tokenizer.loadTokenizer(io, allocator, file);
         errdefer if (text) |*t| t.deinit();
         const self = try allocator.create(Model);
-        self.* = .{ .allocator = allocator, .io = io, .config = config, .store = store, .gpu = device, .tokenizer = text, .precision = if (options.precision == .float32 or weights.dtype != .f16) .fp32 else .mixed };
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .config = config,
+            .store = store,
+            .gpu = device,
+            .tokenizer = text,
+            .precision = if (options.precision == .float32 or weights.dtype != .f16) .fp32 else .mixed,
+            .split_attention = options.split_attention and device.device.tensorUnits(),
+            .device_projections = options.device_projections and device.device.tensorUnits() and (options.precision == .float32 or weights.dtype != .f16),
+            .device_attention = options.device_attention and device.device.tensorUnits() and (options.precision == .float32 or weights.dtype != .f16),
+            .compensated_norm = options.compensated_norm and device.device.tensorUnits() and (options.precision == .float32 or weights.dtype != .f16),
+        };
         return self;
     }
 
@@ -71,7 +91,7 @@ pub const Model = struct {
     }
 
     pub fn runtime(self: *Model, arena: std.mem.Allocator) ops.Runtime {
-        return .{ .g = self.gpu, .store = &self.store, .a = arena, .precision = self.precision, .config = self.config };
+        return .{ .g = self.gpu, .store = &self.store, .a = arena, .precision = self.precision, .config = self.config, .split_attention = self.split_attention, .device_projections = self.device_projections, .device_attention = self.device_attention, .compensated_norm = self.compensated_norm };
     }
 
     pub fn tokenize(self: *const Model, allocator: std.mem.Allocator, text: []const u8) ![]u32 {
@@ -159,6 +179,7 @@ pub fn prepareImage(r: *ops.Runtime, image: prompts.Image) !ops.Feature {
                 @as(f32, @floatFromInt(image.rgb[y * stride + x])) / 127.5 - 1;
         }
     }
+    try r.observe("input.normalized_rgb", tensor, &.{ 1, image.size.height, image.size.width, 3 });
     return r.resize(ops.feature(tensor, image.size.height, image.size.width, 3), 1008, 1008, true);
 }
 

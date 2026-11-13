@@ -10,6 +10,11 @@ const Params = extern struct { h: u32, w: u32, c: u32, n: u32, k: u32, oh: u32, 
 const name = "metal sam3 deconvolution four outputs";
 const unaligned_name = "metal sam3 deconvolution unaligned weights";
 const control_name = "control: sam3 deconvolution fp16 sums";
+const matrix_name = "metal sam3 deconvolution matrix";
+
+pub fn matrixText(a: std.mem.Allocator) ![]u8 {
+    return sources.tensor_library.source(a, sources.sam3_source);
+}
 
 fn depth(shape: c.Shape) usize {
     return shape.k + 1;
@@ -22,6 +27,12 @@ const Probe = struct {
     baseline: mtl.Pipeline,
     control: bool,
     unaligned: bool,
+    matrix: bool = false,
+    matrix_passes: [5]?mtl.Pipeline = @splat(null),
+    weight_pass: ?mtl.Pipeline = null,
+    shuffle_pass: ?mtl.Pipeline = null,
+    work: [3]rig_.Ref = undefined,
+    zero: rig_.Ref = undefined,
     shape: c.Shape = undefined,
     p: Params = undefined,
     x: []f32 = &.{},
@@ -34,11 +45,11 @@ const Probe = struct {
     fn kernel(self: *Probe) g.Kernel {
         return .{
             .spec = .{
-                .name = if (self.control) control_name else if (self.unaligned) unaligned_name else name,
+                .name = if (self.matrix) matrix_name else if (self.control) control_name else if (self.unaligned) unaligned_name else name,
                 .accum = .f32,
                 .depth = depth,
                 .out = .f32,
-                .replaces = "one-output SAM FP32 deconvolution",
+                .replaces = if (self.matrix) null else "one-output SAM FP32 deconvolution",
                 .served = &.{
                     .{ .rows = 72 * 72, .n = 512, .k = 1024 },
                     .{ .rows = 144 * 144, .n = 256, .k = 512 },
@@ -112,12 +123,40 @@ const Probe = struct {
             } else input.* = try self.rig.input(bytes);
         }
         self.out = try self.rig.output(self.count() * 4);
-        self.base = try self.rig.scratch(self.count() * 4);
+        if (self.matrix) {
+            self.work[0] = try self.rig.scratch(self.w.len * 4);
+            self.work[1] = try self.rig.scratch(self.count() * 4);
+            self.work[2] = try self.rig.scratch(7 * 4);
+            const zero = try self.a.alloc(f32, 4 * shape.n);
+            defer self.a.free(zero);
+            @memset(zero, 0);
+            self.zero = try self.rig.input(std.mem.sliceAsBytes(zero));
+        } else self.base = try self.rig.scratch(self.count() * 4);
         return true;
     }
 
     fn launch(self: *Probe, baseline: bool) !void {
         const pass = self.rig.begin();
+        if (self.matrix) {
+            pass.e.setPipeline(self.weight_pass.?);
+            pass.e.setBuffer(self.ins[1].buf, self.ins[1].off, 0);
+            pass.e.setBuffer(self.work[0].buf, self.work[0].off, 1);
+            pass.e.setValue([3]u32{ self.p.n, self.p.c, 4 }, 2);
+            pass.e.dispatchThreads(mtl.Size.of(self.w.len, 1, 1), mtl.Size.of(256, 1, 1));
+            pass.e.barrier();
+            const Binding = struct { buffer: mtl.Buffer, offset: usize };
+            var refs: [5]Binding = undefined;
+            for ([_]rig_.Ref{ self.ins[0], self.work[0], self.zero, self.work[1], self.work[2] }, &refs) |ref, *binding|
+                binding.* = .{ .buffer = ref.buf, .offset = ref.off };
+            var pipes: [5]mtl.Pipeline = undefined;
+            for (self.matrix_passes, &pipes) |pipe, *value| value.* = pipe.?;
+            sources.sam3_dense_device.encode(mtl, pass.e, pipes, refs, .{ @intCast(self.shape.rows), @intCast(4 * self.shape.n), @intCast(self.shape.k) }, true);
+            pass.e.setPipeline(self.shuffle_pass.?);
+            for ([_]rig_.Ref{ self.work[1], self.ins[2], self.out }, 0..) |ref, i| pass.e.setBuffer(ref.buf, ref.off, i);
+            pass.e.setValue(self.p, 3);
+            pass.e.dispatchThreads(mtl.Size.of(self.count(), 1, 1), mtl.Size.of(256, 1, 1));
+            return self.rig.finish(pass);
+        }
         pass.e.setPipeline(if (baseline) self.baseline else self.pipe);
         for (self.ins, 0..) |input, i| pass.e.setBuffer(input.buf, input.off, i);
         const output = if (baseline) self.base else self.out;
@@ -176,21 +215,26 @@ const Probe = struct {
         self.free();
         self.rig.deinit();
         self.pipe.deinit();
-        self.baseline.deinit();
+        if (!self.matrix) self.baseline.deinit();
+        for (self.matrix_passes) |pipe| if (pipe) |p| p.deinit();
+        if (self.weight_pass) |p| p.deinit();
+        if (self.shuffle_pass) |p| p.deinit();
     }
 };
 
 pub const Suite = struct {
     a: std.mem.Allocator,
-    probes: [3]?*Probe = @splat(null),
+    probes: [4]?*Probe = @splat(null),
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
-        for (0..3) |i| {
-            const label = if (i == 2) control_name else if (i == 1) unaligned_name else name;
+        for (0..4) |i| {
+            const matrix = i == 3;
+            if (matrix and !device.tensorUnits()) continue;
+            const label = if (matrix) matrix_name else if (i == 2) control_name else if (i == 1) unaligned_name else name;
             if (only) |needle| if (std.mem.indexOf(u8, label, needle) == null) continue;
             const original = sources.sam3_deconv ++ sources.sam3_deconv_baseline;
             if (std.mem.count(u8, original, "sum+=x[pixel*p.c+c]*weight;") != 1) return error.ControlTextNotFoundOnce;
-            const source = if (i == 2) try std.mem.replaceOwned(u8, self.a, original, "sum+=x[pixel*p.c+c]*weight;", "sum=float4(half4(sum+x[pixel*p.c+c]*weight));") else try self.a.dupe(u8, original);
+            const source = if (matrix) try matrixText(self.a) else if (i == 2) try std.mem.replaceOwned(u8, self.a, original, "sum+=x[pixel*p.c+c]*weight;", "sum=float4(half4(sum+x[pixel*p.c+c]*weight));") else try self.a.dupe(u8, original);
             defer self.a.free(source);
             const lib = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
             defer lib.deinit();
@@ -199,8 +243,13 @@ pub const Suite = struct {
             try kernels.ensureUnusedCapacity(self.a, 1);
             const pipe = try mtl.Pipeline.init(device, lib, "im_sam_deconv", false);
             errdefer pipe.deinit();
-            const baseline = try mtl.Pipeline.init(device, lib, "im_sam_deconv_baseline", false);
-            probe.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = pipe, .baseline = baseline, .control = i == 2, .unaligned = i == 1 };
+            const baseline = if (matrix) undefined else try mtl.Pipeline.init(device, lib, "im_sam_deconv_baseline", false);
+            probe.* = .{ .a = self.a, .rig = .{ .a = self.a, .device = device, .queue = queue }, .pipe = pipe, .baseline = baseline, .control = i == 2, .unaligned = i == 1, .matrix = matrix };
+            if (matrix) {
+                for (sources.sam3_dense_device.names, &probe.matrix_passes) |symbol, *slot| slot.* = try mtl.Pipeline.init(device, lib, symbol, false);
+                probe.weight_pass = try mtl.Pipeline.init(device, lib, "im_sam_deconv_weight", false);
+                probe.shuffle_pass = try mtl.Pipeline.init(device, lib, "im_sam_deconv_shuffle", false);
+            }
             self.probes[i] = probe;
             kernels.appendAssumeCapacity(probe.kernel());
         }

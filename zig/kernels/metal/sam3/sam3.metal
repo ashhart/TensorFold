@@ -239,15 +239,20 @@ kernel void im_sam_depthwise(const device float *x, const device float *w, const
     }
     y[i]=sum;
 }
-kernel void im_sam_resize(const device float *x, device float *y, constant uint4 &p, constant uint2 &extra, uint i [[thread_position_in_grid]]) {
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void im_sam_resize(const device float *x, device float *y, constant uint4 &p, constant uint2 &extra, constant float2 &scale, uint i [[thread_position_in_grid]]) {
     uint oh=extra.x, ow=extra.y;
     if(i>=oh*ow*p.z) return;
     uint c=i%p.z, yy=i/p.z/ow, xx=i/p.z%ow;
     if(p.w==0) { y[i]=x[((yy*p.x/oh)*p.y+xx*p.y/ow)*p.z+c]; return; }
-    float sy=max(0.0f,(yy+0.5f)*p.x/oh-0.5f), sx=max(0.0f,(xx+0.5f)*p.y/ow-0.5f);
+    float sy=max(0.0f,fma(yy+0.5f,scale.x,-0.5f)), sx=max(0.0f,fma(xx+0.5f,scale.y,-0.5f));
     uint y0=min(uint(sy),p.x-1), x0=min(uint(sx),p.y-1), y1=min(y0+1,p.x-1), x1=min(x0+1,p.y-1);
     float fy=sy-y0, fx=sx-x0;
-    y[i]=mix(mix(x[(y0*p.y+x0)*p.z+c],x[(y0*p.y+x1)*p.z+c],fx),mix(x[(y1*p.y+x0)*p.z+c],x[(y1*p.y+x1)*p.z+c],fx),fy);
+    float4 samples(x[(y0*p.y+x0)*p.z+c],x[(y0*p.y+x1)*p.z+c],x[(y1*p.y+x0)*p.z+c],x[(y1*p.y+x1)*p.z+c]);
+    if(any((as_type<uint4>(samples)&0x7fffffffu)>=0x7e800000u)) {
+        float top=(1-fx)*samples.x+fx*samples.y, bottom=(1-fx)*samples.z+fx*samples.w;
+        y[i]=(1-fy)*top+fy*bottom;
+    } else y[i]=mix(mix(samples.x,samples.y,fx),mix(samples.z,samples.w,fx),fy);
 }
 kernel void im_sam_group_norm(const device float *x, const device float *w, const device float *b, device float *y, constant uint3 &p, uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
     threadgroup float sums[256], squares[256];

@@ -45,6 +45,8 @@ pub fn norm(g: *Gpu, x: Tensor, weight: Tensor, bias: ?Tensor, width: usize, rms
     const out = try g.allocDevice(x.count, x.dtype);
     errdefer out.deinit();
     const Params = extern struct { width: u32, kind: u32, rms: u32, has_bias: u32, eps: f32 };
+    const batched = try g.beginOperator();
+    defer g.endOperator(batched);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const pipeline = try g.pipeline("im_norm");
@@ -86,6 +88,8 @@ fn attentionBatchedWindow(g: *Gpu, q: Tensor, k: Tensor, v: Tensor, rows: usize,
         (dim != 32 and dim != 64 and dim != 96 and dim != 128 and dim != 256) or q.count != batch * rows * heads * dim or k.count != batch * storage_rows * kv_heads * dim or k.count != v.count) return error.AttentionShape;
     const out = try g.allocDevice(q.count, q.dtype);
     errdefer out.deinit();
+    const batched = try g.beginOperator();
+    defer g.endOperator(batched);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var name: [64]u8 = undefined;

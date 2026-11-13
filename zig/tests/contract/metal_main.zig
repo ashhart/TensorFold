@@ -472,6 +472,12 @@ pub fn main(init: std.process.Init) !u8 {
     var sam3_attention: @import("metal_sam3_attention.zig").Suite = .{ .a = a };
     defer sam3_attention.deinit();
     try sam3_attention.collect(device, queue, &kernels, o.only);
+    var sam3_norm: @import("metal_sam3_norm.zig").Suite = .{ .a = a };
+    defer sam3_norm.deinit();
+    try sam3_norm.collect(device, queue, &kernels, o.only);
+    var sam3_resize: @import("metal_sam3_resize.zig").Suite = .{ .a = a };
+    defer sam3_resize.deinit();
+    try sam3_resize.collect(device, queue, &kernels, o.only);
     var nemotron_ssd: @import("metal_nemotron_ssd_gemm.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer nemotron_ssd.deinit();
     try nemotron_ssd.collect(o.only);

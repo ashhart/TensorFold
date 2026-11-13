@@ -163,10 +163,12 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     try state.run(try layer.child("transformer"));
     const pixels = try upsample(layer, state.image, features);
-    const quality = try layer.mlp("iou_prediction_head", ops.view(state.queries, table.slots * table.width, table.slots * table.width), 3);
+    const quality_logits = try layer.mlp("iou_prediction_head", ops.view(state.queries, table.slots * table.width, table.slots * table.width), 3);
+    const quality = if (r.config.version == .sam3) try r.unary(quality_logits, 1) else quality_logits;
     const scores = try layer.mlp("pred_obj_score_head", ops.view(state.queries, 0, table.slots * table.width), 3);
     try r.g.endBatch();
     if (quality.count != table.slots * table.masks or scores.count != table.slots) return error.SamDecoderShape;
+    try r.observe("decoder.quality", quality, &.{ table.slots, table.masks });
     const selected = choose(table, quality.slice(f32, quality.count), scores.slice(f32, scores.count), options.multimask and !options.multiplex);
     const empty_mask = try r.alloc(pixels.height * pixels.width);
     const empty_pointer = try r.alloc(table.width);

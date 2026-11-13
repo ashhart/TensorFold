@@ -10,6 +10,8 @@ pub const Store = struct {
     io: std.Io,
     source: union(enum) { safetensors: st.File, pytorch: torch.Archive },
     cached: std.StringHashMapUnmanaged(Cached) = .empty,
+    parameter_prepare_seconds: f64 = 0,
+    checkpoint_read_seconds: f64 = 0,
 
     pub fn open(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Store {
         if (std.mem.endsWith(u8, path, ".safetensors"))
