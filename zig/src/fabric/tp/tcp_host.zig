@@ -21,6 +21,12 @@ pub fn run(cfg: tp.Config, gpa: std.mem.Allocator) !u8 {
     const plan = b.releasePlan();
     var fds = [2]tp.sock.Fd{ -1, -1 };
     fds[1 - cfg.rank] = plan[if (cfg.rank == 0) 1 else 0];
+    if (tp.sock.isSealed(fds[1 - cfg.rank])) {
+        // this transport reads and writes the socket itself, so its tensors would cross a keyed group's link unsealed
+        std.debug.print("tcp-host moves tensors as plain bytes: run it without a rank key, on one host\n", .{});
+        tp.sock.close(fds[1 - cfg.rank]);
+        return 2;
+    }
     var r = tp.tcp.Rank.init(gpa, cfg.rank, 2, &fds, .{});
     defer r.deinit();
     const c = r.iface();

@@ -254,5 +254,6 @@ test {
     _ = @import("stage_test.zig");
     _ = @import("stage_hip_test.zig");
     _ = @import("fate_test.zig");
+    _ = @import("sealed_test.zig");
     _ = @import("fate_lifetime_test.zig");
 }

@@ -26,7 +26,7 @@ pub const Bootstrap = struct {
     plan_fds: [max_ranks]sock.Fd = @splat(-1),
     /// Each call's limit for the peers' bytes (the connect timeout).
     timeout_ns: u64,
-    /// The group's key: every connection proves it before its hello (sys.rank_auth).
+    /// The group's key: every connection proves it before its hello, and a keyed group's bytes after it are sealed.
     secret: auth.Secret = .none,
 
     fn deadline(b: *const Bootstrap) u64 {
@@ -48,10 +48,12 @@ pub const Bootstrap = struct {
             for ([_]u32{ 0, 1 }) |role| {
                 const fd = try sock.connect(cfg.master, cfg.link_port, until);
                 if (role == 0) b.fds[0] = fd else b.plan_fds[0] = fd;
-                _ = auth.connect(fd, &b.secret, purposeOf(role), cfg.rank, cfg.world, msUntil(until)) catch |e| {
+                const session = auth.connect(fd, &b.secret, purposeOf(role), cfg.rank, cfg.world, msUntil(until)) catch |e| {
                     log.warn("tp bootstrap: rank {d} and rank 0 did not prove the group's key: {s}", .{ cfg.rank, auth.explain(e) orelse @errorName(e) });
                     return error.Unproven;
                 };
+                // a keyed group's every byte from here is sealed: the hello, the blobs, then the fate and plan frames
+                if (b.secret.keyed) try sock.seal(fd, &session, true);
                 const h: Hello = .{ .magic = magic, .version = version, .world = cfg.world, .rank = cfg.rank, .role = role };
                 try sock.sendBefore(fd, std.mem.asBytes(&h), until);
             }
@@ -83,6 +85,10 @@ pub const Bootstrap = struct {
             const proven = auth.accept(fd, &b.secret, &.{ .tp_control, .tp_plan }, msUntil(until)) catch |e| {
                 var at: [64]u8 = undefined;
                 log.warn("tp bootstrap: a connection from {s} proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
+                sock.close(fd);
+                continue;
+            };
+            if (b.secret.keyed) sock.seal(fd, &proven.session, false) catch {
                 sock.close(fd);
                 continue;
             };
