@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const sig = @import("cuda_signatures.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
+const modelopt = @import("cuda_modelopt.zig");
 const head_dim = geometry.head_dim;
 const max_chunks = 64;
 /// Prompt experts keep the shipped arithmetic boundary, independently of verification capacity.
@@ -120,7 +121,9 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         const rp: u64 = if (tail) 0 else t_params;
         switch (l.mlp) {
             .dense => |m| {
-                if (m.gate == .x3) {
+                // NVFP4 prompt rows: gate, up and the act in one lean pair launch, the same act bytes
+                const paired = e.learning == null and sums == 0 and try modelopt.swiglu(e, m.gate, m.up, x0, e.act, rows, prompt, rp);
+                if (paired) {} else if (m.gate == .x3) {
                     try e.projMany(&.{ m.gate, m.up }, x0, &.{ e.gate, e.up }, rows, prompt); // one EXL3 group launch
                 } else if (e.affine.pdl and !prompt and e.learning == null and m.gate == .a4 and m.up == .a4) {
                     try e.projMany(&.{ m.gate, m.up }, e.x, &.{ e.gate, e.up }, total, false);
@@ -131,7 +134,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(rows * g.intermediate);
                 const act_args = .{ e.gate, e.up, e.act, n, rp, @as(c_int, @intCast(g.intermediate)), sums };
-                try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
+                if (!paired) try e.run(e.fns.mlp_act, .{ (rows * g.intermediate + 1023) / 1024, 1, 1 }, .{ 256, 1, 1 }, act_args);
                 try e.projAgain(m.down, e.act, r0, rows, prompt);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },
