@@ -195,7 +195,7 @@ context window before the first is scored, so a refused request costs no GPU wor
 
 ## OCR
 
-The native HIP engine reads page images through Mistral's OCR contract when it serves a model with an OCR reader
+The native HIP engine reads pages through Mistral's OCR contract when it serves a model with an OCR reader
 and `--vision`.
 
 | Route | Contract | Request | Reply | Written for |
@@ -231,41 +231,48 @@ The reader writes block text in one Markdown flavour, the one Mistral's page Mar
 - Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
   16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
   decoded pixels disagree is refused as bad input.
-- PDF documents and `pages` are not read: a PDF document is HTTP 400 "PDF documents are not read on POST /v1/ocr;
-  send each page as a PNG, JPEG or WebP image", and any non-null `pages` is HTTP 400 "pages selects pages of a PDF
-  document; POST /v1/ocr reads one page image".
-- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, at most 32 MiB.
-  `http://` URLs are refused.
+- PDFs need `--vision-pdf`. PDFium renders each selected page at up to 144 DPI, at most 2048 pixels a side and
+  about 3.6 megapixels; boxes and sizes are in pixels of the rendered page. Mistral reports that DPI (72 for an
+  image). Every PDF of a request is measured before the first page is read (its page count and each selected
+  page's size, with no rendering), so a page index out of range, the page budget or a page that does not load fails
+  before any GPU work. Each page is then rendered just before it is read and freed when it is done, so one rendered
+  page is in memory at a time; a page that loads but does not render fails the request when it is reached.
+- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, and PDFs when
+  `--vision-pdf` is on, at most 32 MiB. `http://` URLs are refused.
+- Page budget: images count one page each and PDFs their selected pages; a request reads at most
+  `TENSORFOLD_MAX_PDF_PAGES` pages (default 16, also the most it may be set to). `--vision-max-images` does not
+  apply. Over the budget, a request is refused before any inference.
 - Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
   pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
   page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
   file); without it `include_image_base64` is HTTP 400.
 
-The page is read as one user turn (the page image, then the reader's prompt), greedy, with thinking off and
-`max_tokens` equal to all the context the prompt leaves. It succeeds only when the reply stops on its end token
-and the reader can parse it.
+Pages are read one at a time, each as one user turn (the page image, then the reader's prompt), greedy, with
+thinking off and `max_tokens` equal to all the context the prompt leaves. A page succeeds only when the reply
+stops on its end token and the reader can parse it.
 
 ### Failures
 
 | Failure | Mistral |
 | --- | --- |
-| Bad input: an undecodable or unsupported file, a page or option the server cannot serve | 400 |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve, over the page budget | 400 |
 | Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
 | The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
-| Engine fault or out of memory | 500 |
+| Engine fault, out of memory, PDF renderer crash or deadline | 500 |
 | Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
 
-An unreadable page's message names its index, and the model's raw text goes to the server log, never to the
-client. 422 means the same request fails the same way again under greedy decoding; a 503 carries `Retry-After`.
-A client that disconnects stops the request before its page is read.
+A failed page fails the whole request: no reply returns some pages and drops others. An unreadable page's
+message names its index, and the model's raw text goes to the server log, never to the client. 422 means the
+same request fails the same way again under greedy decoding; a 503 carries `Retry-After`. A client that disconnects
+stops the request before its next page or PDF render.
 
 ### Mistral: `POST /v1/ocr`
 
 | Field | Meaning |
 | --- | --- |
 | `model` | Any string or null. The reply names the requested id when it is the served name or an `--alias`, else the served name, so `--alias mistral-ocr-latest` lets copied examples echo it |
-| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes must be a PNG, JPEG or WebP image; a PDF is HTTP 400 (above). `{"type": "file"}` is HTTP 400 |
-| `pages` | Any non-null value is HTTP 400 (above): an image has one page |
+| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes decide PDF or image. `{"type": "file"}` is HTTP 400 |
+| `pages` | 0-based page indices as a list or a string such as `"0,2-4"`; duplicates are merged. An image has only page `0`. At most 1024 entries (a range counts its length) before merging, and the page budget after |
 | `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
 | `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
 | `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
@@ -279,8 +286,7 @@ A client that disconnects stops the request before its page is read.
 `dimensions` (`dpi`, `height`, `width`) and `blocks`; `hyperlinks` is left out. A block has `type` (`text`,
 `title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
 `content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
-blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size. An
-image's `dimensions.dpi` is 72.
+blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size.
 
 ## System One on a Clef engine
 
