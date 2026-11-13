@@ -84,6 +84,7 @@ pub const Metal = struct {
     prefetch_encoded: bool = false,
     prepared_keep: ?mtl.CommandBuffer = null, // encoded during verify, committed only after the core chooses its path
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
+    pens: lanes.penalty_rows.Entries = .{}, // the next draw's presence and frequency entries, by frame row
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, slots.Fill) = .empty, // prompt passes the lane host runs by chunks
@@ -142,6 +143,7 @@ pub const Metal = struct {
         b.dropTree();
         b.freeContexts();
         b.fills.deinit(b.gpa);
+        b.pens.deinit(b.gpa);
         b.kept.deinit();
         b.picks.deinit();
         b.ops.deinit();
@@ -157,7 +159,7 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .penalties = true, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
@@ -248,21 +250,26 @@ pub const Metal = struct {
         return if (slot == 0) b.draft else null;
     }
 
-    /// Logits rows [first, first + rows) drawn at their positions: argmax on the GPU, or the stream's keyed sampler.
-    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32) !void {
+    /// Rows [first, first + rows) drawn at their positions: GPU argmax, else on the host (sampled, masked or `pens`).
+    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32, pens: bool) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const width = (@as(usize, vocab) + 31) / 32;
         if (masks.len != 0 and masks.len != rows * width) return error.InvalidQwenMasks;
-        if (s.sampling != null or masks.len > 0) {
+        if (s.sampling != null or masks.len > 0 or pens) {
             const metric = mtl.pass_metrics.phase(.sampling);
             defer metric.end();
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
             // each row's whole-row draw at its own position, the window's rows on threads
-            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks }, rows);
+            return @import("qwen27_draws.zig").each(Rows{ .gpa = b.gpa, .words = words + first * vocab, .vocab = vocab, .width = width, .sampling = s.sampling, .positions = positions, .out = out, .masks = masks, .pens = if (pens) .{ .ctx = &b.pens, .apply = lowerRow } else null, .row0 = first }, rows);
         }
         try b.argmaxRows(first, rows);
         try b.picked(first, rows, out);
+    }
+
+    fn lowerRow(ctx: *const anyopaque, row: u32, logits: []u16) void {
+        const pens: *const lanes.penalty_rows.Entries = @ptrCast(@alignCast(ctx));
+        pens.applyRow(row, logits);
     }
 
     /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
@@ -390,7 +397,7 @@ pub const Metal = struct {
         const b = self(ptr);
         _ = try b.slotFor(s);
         var token: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &token, &.{});
+        try b.draw(s, 0, 1, &.{position}, &token, &.{}, false); // a reply's first token: no count yet
         return b.push(token[0]);
     }
 
@@ -398,7 +405,7 @@ pub const Metal = struct {
         const b = self(ptr);
         _ = try b.slotFor(s);
         var token: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &token, mask);
+        try b.draw(s, 0, 1, &.{position}, &token, mask, false);
         return b.push(token[0]);
     }
 
@@ -415,7 +422,9 @@ pub const Metal = struct {
         }
         slots.charge(b, s, before);
         var next: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &next, &.{});
+        b.pens.clear();
+        try b.pens.stageOne(b.gpa, s, @intCast(position - 1), token, 0); // the reply before the fed token, then it
+        try b.draw(s, 0, 1, &.{position}, &next, &.{}, b.pens.len() > 0);
         return b.push(next[0]);
     }
 
@@ -465,7 +474,9 @@ pub const Metal = struct {
         errdefer b.dropRound();
         b.rows = total;
         if (b.pass_profile and windows.len == 1) std.log.info("q27_offer width={d} rows={d} tree_nodes={d} copy_rows={d}", .{ b.window, total, b.from_tree, total - 1 - b.from_tree });
-        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0;
+        b.pens.clear(); // each penalized window's rows: the reply, its pending token, then the row's own path
+        for (windows, b.round.?.firsts) |w, first| try b.pens.stageWindow(b.gpa, w, b.ids[first + 1 ..][0 .. w.rows() - 1], first);
+        const fused = windows.len == 1 and b.windows[0] == 0 and b.draft != null and total > 1 and windows[0].stream.sampling == null and windows[0].masks.len == 0 and b.pens.len() == 0;
         std.debug.assert(r.tail == null);
         if (fused) r.tail = .{ .ptr = b, .encode = @import("qwen27_keep.zig").encodeTail };
         defer r.tail = null;
@@ -476,11 +487,12 @@ pub const Metal = struct {
         b.rows = total;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
         var greedy = false;
-        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0);
+        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0 and !w.stream.penalties.active());
         if (fused) try @import("qwen27_keep.zig").finishPrefetch(b) else if (greedy) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
-            if (w.stream.sampling != null or w.masks.len > 0) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks) else try b.picked(first, rows, o.sampled);
+            const pens = w.stream.penalties.active();
+            if (w.stream.sampling != null or w.masks.len > 0 or pens) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks, pens) else try b.picked(first, rows, o.sampled);
             @memcpy(o.drafts, b.ids[first + 1 ..][0 .. rows - 1]);
         }
         if (windows.len == 1) @memcpy(b.sampled[0..b.rows], out[0].sampled);
