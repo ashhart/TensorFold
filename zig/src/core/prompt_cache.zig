@@ -72,6 +72,8 @@ pub const Pages = struct {
         holders: *const fn (ptr: *anyopaque, id: u32) u32,
         /// Pages free and not promised to a stream.
         available: *const fn (ptr: *anyopaque) usize,
+        /// `out.len` free pages the store holds itself, reclaiming first (a checkpoint's copies); null: none.
+        hold: ?*const fn (ptr: *anyopaque, out: []u32) bool = null,
     };
 };
 /// What a family's states depend on beyond their position.

@@ -12,6 +12,9 @@ using namespace mpp::tensor_ops;
 #ifndef TF_PRECOMPUTE_SUMS
 #define TF_PRECOMPUTE_SUMS 0
 #endif
+#ifndef TF_ROW_BLOCKS
+#define TF_ROW_BLOCKS 0
+#endif
 #ifndef TF_YS
 #define TF_YS TF_N
 #endif
@@ -141,11 +144,7 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
 #endif
 
 #if TF_PRECOMPUTE_SUMS
-#if TF_BITS == 8
 #define TF_SUM_VALUE(row, g) ((row) < M ? XS[(g) * mdims[1] + (row)] : 0.0f)
-#else
-#define TF_SUM_VALUE(row, g) XS[(g) * 16 + (row)]
-#endif
 #else
 #define TF_SUM_VALUE(row, g) tf_lane_xsum(X, row, g, M)
 #endif
@@ -178,7 +177,21 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
     const device float* XS [[buffer(5)]],
 #endif
     uint sgi [[simdgroup_index_in_threadgroup]], uint lanei [[thread_index_in_simdgroup]],
-    uint tgx [[threadgroup_position_in_grid]]) {
+#if TF_ROW_BLOCKS
+    uint2 tg [[threadgroup_position_in_grid]]
+#else
+    uint tgx [[threadgroup_position_in_grid]]
+#endif
+) {
+#if TF_ROW_BLOCKS
+  const int row0 = int(tg.y) * 16, rows = mdims[0] - row0;
+  if (rows <= 0) return;
+  X += (size_t)row0 * TF_K;
+  Y += (size_t)row0 * TF_YS;
+#if TF_PRECOMPUTE_SUMS
+  XS += row0;
+#endif
+#endif
   const int lane = int(lanei), sg = int(sgi);
   const short qid = short(lane) >> 2;
   const short fm = (qid & 4) | ((short(lane) >> 1) & 3);
@@ -187,8 +200,13 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
 #else
   const short fn = ((qid & 2) | (short(lane) & 1)) * 4;
 #endif
+#if TF_ROW_BLOCKS
+  const int M = min(rows, 16);
+  const int tile = tf_tile(int(tg.x));
+#else
   const int M = mdims[0];
   const int tile = tf_tile(int(tgx));
+#endif
   const int n0 = tile * NT;
   const int g_begin = TF_G0 + (sg * TF_GN) / TF_SK, g_end = TF_G0 + ((sg + 1) * TF_GN) / TF_SK;
   constexpr auto desc = matmul2d_descriptor(16, NT, GS, false, true, false, matmul2d_descriptor::mode::multiply);

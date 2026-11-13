@@ -7,6 +7,7 @@ const fields_mod = @import("fields.zig");
 const reply_text = @import("reply_text.zig");
 const tool_stream = @import("tool_stream.zig");
 const prompt_mod = @import("prompt.zig");
+const images = @import("images.zig");
 const log = @import("log.zig");
 const cached_tokens = @import("cached_tokens.zig");
 const ids = @import("ids.zig");
@@ -43,6 +44,10 @@ pub const Input = struct {
     prompt_logprobs: ?u8 = null,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
+    /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
+    image_bytes: images.ByteLimits = .{},
+    /// With a known window, the reply may fill all the room the prompt leaves; max_tokens otherwise.
+    fill_room: bool = false,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -128,6 +133,7 @@ pub const Prepared = struct {
     token_ids: bool,
     stops: fields_mod.Stops,
     preparing: bool,
+    frames: []const ?api.Size = &.{}, // each image part's tower input size, in part order (prompt.Rendered.frames)
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
@@ -161,7 +167,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         const room = window - n;
         if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.capability(.context_fitted)) ", the most this server's memory budget fits" else "", n });
         if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
-        limit = @min(limit, room);
+        limit = if (input.fill_room) room else @min(limit, room);
     }
     const system_len: usize = if (input.prompt != null) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
     var shared: std.ArrayList(u32) = .empty;
@@ -213,7 +219,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, reasoning, request.think_budget, count);
     request.prompt_logprobs = input.prompt_logprobs;
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames };
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
