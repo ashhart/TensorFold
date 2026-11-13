@@ -271,6 +271,14 @@ fn checkOracle(bytes: []const u8) !void {
     std.debug.print("mixF64 vs kda_inner.py worst abs {e} ({d} heads, {d} rows)\n", .{ worst64, H, rows });
     try std.testing.expect(worst64 < 1e-8);
 
+    const got_math = try a.alloc(f32, want_n);
+    defer a.free(got_math);
+    const S_math = try a.alloc(f32, H * dim * dim);
+    defer a.free(S_math);
+    @memset(S_math, 0);
+    mixAs(f32, false, got_math, S_math, proj, fgate, braw, g2, conv_q, conv_k, conv_v, A_log, dt_bias, o_norm, s, rows);
+    try gateMixMath(want, got_math, W, rows, H);
+
     const got32 = try a.alloc(f32, want_n);
     defer a.free(got32);
     const S32 = try a.alloc(f32, H * dim * dim);
@@ -284,6 +292,68 @@ fn checkOracle(bytes: []const u8) !void {
         for (want[lo .. lo + W], got32[lo .. lo + W]) |w_y, g_y|
             worst = @max(worst, @abs(w_y - @as(f64, g_y)));
         std.debug.print("mix vs dump row {d} worst abs {d:.6} ({d} heads)\n", .{ row, worst, H });
+    }
+}
+
+fn mixMathRatio(want: []const f64, got: []const f32, W: u32, rows: u32, k: i32) f64 {
+    const u = std.math.ldexp(@as(f64, 1.0), -k);
+    var worst: f64 = 0;
+    var r: u32 = 0;
+    while (r < rows) : (r += 1) {
+        const lo = r * W;
+        var rowmax: f64 = 0;
+        for (want[lo .. lo + W]) |v| rowmax = @max(rowmax, @abs(v));
+        for (want[lo .. lo + W], got[lo .. lo + W]) |y, g| {
+            const err = @abs(y - @as(f64, g));
+            const tol = @abs(y) * u + rowmax * u;
+            if (tol == 0) {
+                if (err != 0) worst = std.math.inf(f64);
+            } else {
+                worst = @max(worst, err / tol);
+            }
+        }
+    }
+    return worst;
+}
+
+fn gateMixMath(want: []const f64, got: []const f32, W: u32, rows: u32, H: u32) !void {
+    var k: i32 = 16;
+    var ratio = mixMathRatio(want, got, W, rows, k);
+    while (ratio > 0.5 and k > 1) {
+        k -= 1;
+        ratio = mixMathRatio(want, got, W, rows, k);
+    }
+    const margin: f64 = if (ratio > 0) 1.0 / ratio else std.math.inf(f64);
+    std.debug.print("mixAs f32 no-bf16 vs dump 2^-{d} margin {d:.2}x ({d} heads, {d} rows)\n", .{ k, margin, H, rows });
+    try std.testing.expect(ratio <= 0.5);
+}
+
+test "roundBf16 ties to even, subnormals, inf and NaN" {
+    const Case = struct { src: u32, want: u32 };
+    const cases = [_]Case{
+        .{ .src = 0x00000000, .want = 0x00000000 }, // +0
+        .{ .src = 0x80000000, .want = 0x80000000 }, // -0
+        .{ .src = 0x3f800000, .want = 0x3f800000 }, // 1.0
+        .{ .src = 0xbf800000, .want = 0xbf800000 }, // -1.0
+        .{ .src = 0x3f808000, .want = 0x3f800000 }, // tie to even
+        .{ .src = 0x3f807fff, .want = 0x3f800000 }, // just below that tie
+        .{ .src = 0x3f808001, .want = 0x3f810000 }, // just above that tie
+        .{ .src = 0x3f818000, .want = 0x3f820000 }, // odd tie rounds up
+        .{ .src = 0x3f817fff, .want = 0x3f810000 },
+        .{ .src = 0x3f818001, .want = 0x3f820000 },
+        .{ .src = 0x00000001, .want = 0x00000000 }, // tiny subnormal -> 0
+        .{ .src = 0x00008000, .want = 0x00000000 }, // subnormal tie to even 0
+        .{ .src = 0x00008001, .want = 0x00010000 }, // just above, smallest +bf16 subnormal
+        .{ .src = 0x7f7f0000, .want = 0x7f7f0000 }, // largest finite bf16
+        .{ .src = 0x7f7fffff, .want = 0x7f800000 }, // largest finite f32 -> inf
+        .{ .src = 0x7f800000, .want = 0x7f800000 }, // +inf
+        .{ .src = 0xff800000, .want = 0xff800000 }, // -inf
+        .{ .src = 0x7fc00000, .want = 0x7fc00000 }, // qNaN
+        .{ .src = 0xffc00000, .want = 0xffc00000 },
+    };
+    for (cases) |c| {
+        const got: u32 = @bitCast(roundBf16(@bitCast(c.src)));
+        try std.testing.expectEqual(c.want, got);
     }
 }
 
