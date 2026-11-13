@@ -65,7 +65,7 @@ Its kernels are built with CUDA 13, so TensorFold refuses an older driver at sta
 See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
 ```sh
-V=1.2.7
+V=1.2.8
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;
@@ -201,6 +201,7 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 | Gemma 4 12B, converted MLX 4-bit | `hf download google/gemma-4-12B-it --revision 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7 --local-dir ~/models/gemma-4-12b-hf`<br>`hf download google/gemma-4-12B-it-assistant --revision 46d4c6f13f0ac0ad827b915669b8df9b81c64c51 --local-dir ~/models/gemma-4-12b-assistant` | One Mac (M5 Ultra checked); converted text weights 6.3 GB, image weights 100 MB, plus assistant/caches. MLX 4-bit also served on one GB10. Pre-M5 Metal has a row path; the MTP assistant requires M5 tensor units. | [Convert and serve](docs/recipes/gemma-4-12b-native.md). Upstream download needs `hf`; conversion needs Python, mlx and mlx-lm. Serving is native; [CUDA qualification](CHANGELOG.md#114) includes the MTP assistant. |
 | Step-5-Preview, converted affine | `hf download stepfun-ai/Step-5-Preview --local-dir ~/models/step5-preview-fp8` | One 256 GB Mac; text 166.9 GiB, MTP adds 2.5 GiB and vision 3.7 GiB. | [Convert and serve](docs/recipes/step-5-preview.md). The documented 256 GB setup serves converted affine weights; converting the upstream FP8 download needs Python and mlx. |
 | MiniMax-M3.1-Flash, community affine 3/4-bit | `hf download BobClawblaw/MiniMax-M3.1-Flash-MLX-mix34 --revision 9524999057e0d277d26438606e033e2191fb465c --local-dir ~/models/MiniMax-M3.1-Flash-MLX-mix34`<br>`hf download BobClawblaw/MiniMax-M3.1-Flash-MLX-mix256k --revision 916e7ca1044f1c3e7566163096243c940327224d --local-dir ~/models/MiniMax-M3.1-Flash-MLX-mix256k` | One 256 GB M5 Ultra; 203.7 GiB (32,768-token window) or 189.2 GiB (147,456), plus caches. | [MiniMax-M3.1-Flash](docs/recipes/minimax-m3.1-flash.md). Set `MINIMAX_LOAD_LIMIT_GB`; images with `--vision`. Community checkpoints: lossy conversions of MiniMax's NVFP4 release (KL 0.244 / 0.295). MiniMax Community License. |
+| Recursive Flint 40B-A2.5B, MLX INT4 | `hf download RecursiveSI/flint-int4 --revision 3b93f9053b530488405ae9fca51d4900d6ce21f0 --local-dir ~/models/flint-int4` | One M5 Mac; M5 Ultra checked; 21.4 GiB resident plus caches. M1-M4 untested. | [Flint](docs/recipes/flint.md). Text and tools; always reasons; no draft head. |
 | Kolibri-1, block FP8 (research) | `tensorfold pull Aleph-Alpha/Kolibri-1@e52eb4627d11516b0c01de49210ab5a4e4061444` | One NVIDIA GPU; GB10 measured; 74 GB checkpoint. | [Kolibri](docs/recipes/kolibri-1.md). Text only; copy drafts, no EAGLE-3/neural drafter. |
 | Liquid AI d1-3B, decisions | Not documented yet. | Native CUDA; RAM minimum not published. | [API section below](#serve-flags). `/v1/systemone` and `/v1/decisions`. |
 | Fish Audio Drama 3, speech | Not documented yet. | Native Metal or CUDA; GB10 measured. | [Release audio instructions](CHANGELOG.md#110), [reference voices and dialogue speakers](docs/drama-http-voices.md). `/v1/audio/speech` with [sampling controls](docs/speech-sampling.md); checkpoint and `codec.pth` required. |
