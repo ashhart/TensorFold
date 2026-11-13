@@ -1,0 +1,328 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {"type": "grafana", "uid": "-- Grafana --"},
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(tensorfold:time_to_first_token_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(tensorfold:time_to_first_token_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(tensorfold:time_to_first_token_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "TTFT Quantiles",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(tensorfold:request_time_per_output_token_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(tensorfold:request_time_per_output_token_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(tensorfold:request_time_per_output_token_seconds_bucket{instance=~\"$instance\"}[$__rate_interval])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "TPOT Quantiles",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "sum(rate(tensorfold:generation_tokens_total{instance=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(tensorfold:request_decode_seconds_sum{instance=~\"$instance\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "tokens/s per request",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Decode Rate",
+      "type": "timeseries",
+      "description": "Generated tokens over the seconds finished requests spent decoding: each request's own decode rate."
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "tensorfold:requests_running{instance=~\"$instance\"}",
+          "legendFormat": "running",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:requests_waiting{instance=~\"$instance\"}",
+          "legendFormat": "waiting",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:generation_tokens_running{instance=~\"$instance\"}",
+          "legendFormat": "live generation tokens",
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Requests Running and Waiting",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "id": 5,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "tensorfold:kv_cache_usage_ratio{instance=~\"$instance\"}",
+          "legendFormat": "pool {{pool}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "KV Cache Usage Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {
+        "defaults": {"unit": "short"},
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "accepted / drafted"},
+            "properties": [{"id": "unit", "value": "percentunit"}, {"id": "custom.axisPlacement", "value": "right"}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "id": 6,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "sum(rate(tensorfold:mtp_accepted_total{instance=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(tensorfold:mtp_drafted_total{instance=~\"$instance\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "accepted / drafted",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "rate(tensorfold:mtp_drafted_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "drafted / s",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "rate(tensorfold:mtp_accepted_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "accepted / s",
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Draft Tokens: Accepted over Drafted",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"max": 1, "min": 0, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 7,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "sum(rate(tensorfold:prompt_tokens_cached_total{instance=~\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(tensorfold:prompt_tokens_total{instance=~\"$instance\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "cached prompt token ratio",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Prompt Cache Hit Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 8,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "tensorfold:prompt_cache_bytes{instance=~\"$instance\"}",
+          "legendFormat": "used bytes",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:prompt_cache_budget_bytes{instance=~\"$instance\"}",
+          "legendFormat": "budget bytes",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Prompt Cache Bytes vs Budget",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "id": 9,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "tensorfold:process_footprint_bytes{instance=~\"$instance\"}",
+          "legendFormat": "process footprint (macOS)",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:process_footprint_peak_bytes{instance=~\"$instance\"}",
+          "legendFormat": "process footprint peak (macOS)",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:process_resident_bytes{instance=~\"$instance\"}",
+          "legendFormat": "process resident RSS (Linux)",
+          "refId": "C",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:device_memory_bytes{instance=~\"$instance\"}",
+          "legendFormat": "device memory active (CUDA)",
+          "refId": "D",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:device_memory_peak_bytes{instance=~\"$instance\"}",
+          "legendFormat": "device memory peak (CUDA)",
+          "refId": "E",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "tensorfold:pinned_memory_bytes{instance=~\"$instance\"}",
+          "legendFormat": "pinned host memory (CUDA)",
+          "refId": "F",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Process Footprint and Device Memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "id": 10,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom"}},
+      "targets": [
+        {
+          "expr": "sum by (reason) (rate(tensorfold:admission_rejected_total{instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "rejected: {{reason}}",
+          "refId": "A",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        },
+        {
+          "expr": "rate(tensorfold:client_disconnections_total{instance=~\"$instance\"}[$__rate_interval])",
+          "legendFormat": "client disconnections / s",
+          "refId": "B",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"}
+        }
+      ],
+      "title": "Admission Rejections and Client Disconnections",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["tensorfold", "inference", "prometheus"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource"
+      },
+      {
+        "current": {"selected": true, "text": ["All"], "value": ["$__all"]},
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "definition": "label_values(tensorfold:requests_running, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Instance",
+        "multi": true,
+        "name": "instance",
+        "query": {"qryType": 1, "query": "label_values(tensorfold:requests_running, instance)"},
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timezone": "",
+  "title": "TensorFold Engine",
+  "uid": "tensorfold-engine",
+  "version": 1
+}

@@ -290,6 +290,7 @@ test {
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
     _ = @import("ocr/markdown_test.zig");

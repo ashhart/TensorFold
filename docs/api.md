@@ -974,6 +974,13 @@ An engine that keeps no prompt states leaves all three out.
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.
 
+[packaging/grafana/tensorfold-engine.json](../packaging/grafana/tensorfold-engine.json) is a Grafana dashboard over
+these families: TTFT and TPOT quantiles, the per-request decode rate, running and waiting requests,
+`kv_cache_usage_ratio`, drafts accepted over drafted, cached over total prompt tokens, `prompt_cache_bytes` against
+its budget, process and device memory, and admission refusals. Import it, pick a Prometheus data source, and choose
+instances by their scrape `instance` label. A panel whose family the server leaves out stays empty. A host test fails
+when a query names a family `metrics.zig` does not write.
+
 ### Scheduler load
 
 The scrape also carries the scheduler load a traffic shaper needs, from one ledger the server owns. Every server
