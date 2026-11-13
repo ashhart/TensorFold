@@ -1169,6 +1169,16 @@ has started, a failure is an `error` event holding OpenAI's error object, then `
 already completed stay sent. A client that disconnects, or a write that fails, cancels the picture at its next step,
 and no later picture is submitted.
 
+## Speech formats
+
+`POST /v1/audio/speech` answers in `response_format` `wav` (the default: 16-bit mono at the model's rate), `pcm` (the
+same samples, little-endian, no header), `wav24` (24-bit), `wav32f` (IEEE float WAV carrying the model's samples bit for
+bit at its own rate, unclipped) or `flac` (16-bit FLAC that decodes to the `wav` reply's samples). `mp3`, `opus` and
+`aac` are refused by name. `sample_rate` resamples the take to 8000, 11025, 16000, 22050, 24000, 32000, 44100, 48000,
+88200, 96000, 176400 or 192000 Hz with the band-limited resampler the reference voices use. `channels: 2` writes each
+sample on both channels. Without these fields, or with them at the model's rate and 1, `wav` and `pcm` replies are the
+same bytes as before. A stream (`stream: true`) stays 16-bit mono PCM at the model's rate and refuses other values.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of
