@@ -159,7 +159,7 @@ pub const Engine = struct {
         const block32 = !exl3.isExl3(gpa, text) and try @import("cuda_experts.zig").wantsBlock32(gpa, text);
         var m = try fw.Modules.load(d, ctx, block32);
         errdefer m.deinit();
-        const pair = prompt_pair.wanted(o.settings.pair and !o.settings.kv_split, o.settings.solo, world); // split: one stream's exchanges
+        const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
         var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
         errdefer pieces.deinit();
         if (o.settings.layers > c.layers) return error.BadLayers;
