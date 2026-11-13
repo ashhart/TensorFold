@@ -144,6 +144,7 @@ test {
     _ = @import("stream_scan_text.zig");
     _ = @import("stream_scan_bench.zig");
     _ = @import("stream_memory_wire_test.zig");
+    _ = @import("warm_reasoning_test.zig");
     _ = @import("stream_scan_stages.zig");
     _ = @import("think_tool_tail_test.zig");
     _ = @import("deepseek_reply_test.zig");

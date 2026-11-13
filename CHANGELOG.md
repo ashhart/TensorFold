@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Serve: the background prefill of a chat reply's next turn now renders the reply with its reasoning when the client sends reasoning back, as agent clients such as omp do, so that turn resumes past the reply instead of before it. With thinking on, the guess left the reasoning out and missed every time: in one omp session with Qwen3.8-Flash-Next on an M5 Ultra, requests waited 40.8 s in total behind background passes they then redid. In an omp tool loop the next requests now resume at the background pass's end and prefill only the new tool result. A client whose history has no reasoning gets the old guess.
+
 - GLM-5.3-Flash on CUDA: a tensor-parallel abort reaches the ranks' communicator from the engine's start, once, and a start-up failure after an abort no longer destroys the communicator again; serving and replies are unchanged (#2918, part of #2560). Thanks to @laudney.
 
 - Metal: MiniMax-M3, Spark2.5 and Llama take their NaN-aware bf16 argmax from one shared source; the compiled code is unchanged (#2949, part of #2251). Thanks to @jschmied.
