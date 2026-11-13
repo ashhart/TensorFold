@@ -10,7 +10,7 @@ zig/kernels/cuda/experts.cuh	017728fef063d45f06240a88002f80ec931f967edc5fa44c31b
 zig/kernels/cuda/experts_pack.cu	578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac	raw
 zig/kernels/cuda/experts_prefill.cu	5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc	raw
 zig/kernels/cuda/experts_rows.cu	714b76ad72ff45715c5ebf6b57365f0f41789ad301871f07168a016412df13a7	raw
-zig/kernels/cuda/flashnext_attn.cu	8bcff00513ee49c6ddca57e9cd1107118f69bad81441dd32fa721cf43034b441	raw	this change (the paged decode attention loads each tile's page ids a tile ahead; same keys, same sums)
+zig/kernels/cuda/flashnext_attn.cu	9731e39b67a8adb4a0a42222e9f888877932f2aa7108b1631ea61016083d3b71	raw
 zig/kernels/cuda/flashnext_batch.cu	95260b964fb633d23df28970672d87688f21cdd9073e44f92a1523b54b4ecd99	raw
 zig/kernels/cuda/flashnext_gdn.cu	c7b9712626778d452e18234e2dfc3b26f8112618cdc492957c4b5f5454d64126	raw
 zig/kernels/cuda/flashnext_hc.cu	54fa2cfa22e483341835f6349cf0a8f508459ed1b65804728cb1358ac82b24f1	raw	main 5c7cf5c117, d88c1ed57d (sum_rn and rms_scale shared; same SASS)
