@@ -235,7 +235,7 @@ pub const Tree = struct {
         const s = &t.slots[g.slot];
         if (!s.live) return error.SlotNotLive;
         if (g.start != s.hist.items.len) return error.PositionMismatch;
-        if (out.len < g.tokens.len or g.start + g.tokens.len > t.opt.limit) return error.BadRows;
+        if (out.len < g.tokens.len or g.start + g.tokens.len > s.kv.limit) return error.BadRows;
         for (g.tokens) |id| if (id >= c.vocab) return error.BadToken;
         const o = &tr.open[g.slot];
         o.* = .{};
@@ -385,14 +385,14 @@ pub fn copyRows(c: *const Config, dst: *const kv.Slot, src: *const kv.Slot, from
             var p = from;
             while (p < to) : (p += 1) for (kv.windowRows(c, @intCast(p))) |w| @memcpy(dw[w * row ..][0..row], sw[w * row ..][0..row]);
         }
-        if (d.pool) |dp| {
+        if (d.pool != null) {
             const ratio = c.compressRatio(@intCast(l));
-            const all = kv.poolRows(c, @intCast(l), dst.limit);
+            const all = @min(snapshots.poolRowsOf(c, dst, @intCast(l), to), snapshots.poolRowsOf(c, src, @intCast(l), to));
             const lo: usize = @min(all, from / ratio);
             const hi: usize = @min(all, to / ratio + 1);
-            @memcpy(dp.contents()[lo * row .. hi * row], s.pool.?.contents()[lo * row .. hi * row]);
+            @memcpy(kv.poolBytes(&d, hi * row)[lo * row ..], kv.poolBytes(&s, hi * row)[lo * row ..]);
             const kb = kv.index_key_bytes;
-            @memcpy(d.keys.?.contents()[lo * kb .. hi * kb], s.keys.?.contents()[lo * kb .. hi * kb]);
+            @memcpy(kv.keysBytes(&d, hi * kb)[lo * kb ..], kv.keysBytes(&s, hi * kb)[lo * kb ..]);
         }
         if (d.carry) |dc| @memcpy(dc.contents()[0..dc.length()], s.carry.?.contents()[0..dc.length()]);
     }
