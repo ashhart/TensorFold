@@ -257,6 +257,9 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-tp-id-host", "Bounded NCCL-ID TP fanout and independent wire controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"tp id coverage:"} })).step);
     @import("cuda_readback_host.zig").tests(b, cuda, step);
     b.step("test-cuda-tfq3-host", "CUDA TFQ3 resource ownership and format refusals without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"CUDA TFQ3:"} })).step);
+    const many = b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"qmmf many:"} }));
+    b.step("test-qmmf-many-host", "Grouped NVFP4 tile ownership and compatibility without a GPU").dependOn(&many.step);
+    step.dependOn(&many.step);
     const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
     runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .ReleaseSafe, cuda, draft_ids);

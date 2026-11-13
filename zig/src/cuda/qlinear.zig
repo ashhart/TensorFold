@@ -132,6 +132,8 @@ pub const Linear = struct {
         }
     }
 
+    pub const decodeMany = @import("qlinear_many.zig").decodeMany;
+
     /// Prompt rows: out (rows, n) bf16 by the format's prompt GEMM.
     pub fn prompt(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         switch (w) {
@@ -501,6 +503,7 @@ test "split_k follows the Python shapes" {
 
 test {
     _ = @import("qlinear_test.zig");
+    _ = @import("qlinear_many.zig");
 }
 
 pub const block = exl3.block;
