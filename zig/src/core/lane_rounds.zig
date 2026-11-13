@@ -272,6 +272,7 @@ fn runFinals(h: *LaneHost) void {
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
+        @import("lane_host_backlog.zig").step(h); // slow readers' holds and stalls, before the activity: its wait is idle
         var activity = @import("lane_activity.zig").Activity.enter(h.activity);
         defer activity.end();
         ends.takeCancels(h);

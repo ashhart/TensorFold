@@ -1,6 +1,7 @@
 //! A lane host's lone driver: the backend's own loop runs a lone stream until a foreground request or a cancel waits.
 const LaneHost = @import("lane_host.zig").LaneHost;
 const status = @import("lane_host_status.zig");
+const backlog = @import("lane_host_backlog.zig");
 const Job = LaneHost.Job;
 
 /// An idle driver takes a lone drafted request; plain, sampled, with logprobs, a budget or a grammar when supported.
@@ -28,8 +29,8 @@ pub fn reclaim(h: *LaneHost) void {
     h.unlock();
     const j = job orelse return;
     const s = &j.stream;
-    // a forced close the driver would hand straight back stays in the lane core
-    if (s.paused or s.force.items.len > 0 or s.budgetWithin(lone.min_budget) or !takes(h, j) or h.core.activeCount() != 1) return;
+    // a forced close, or a reader behind, the driver would hand straight back stays in the lane core
+    if (s.paused or s.force.items.len > 0 or s.budgetWithin(lone.min_budget) or backlog.behind(h, j) or !takes(h, j) or h.core.activeCount() != 1) return;
     if (!h.core.detach(s)) return;
     j.prefill_sent = true; // the lane core sent it
     _ = run(h, j, j.began, true);
@@ -58,7 +59,8 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
             const host = c.host;
             host.lock();
             defer host.unlock();
-            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
+            // a reader `limit` behind hands its stream back: the host holds it until its client reads
+            return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing or backlog.behind(host, host.lone_job.?);
         }
         fn prefillYield(ctx: *anyopaque) bool {
             if (!yield(ctx)) return false;
