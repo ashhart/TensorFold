@@ -33,7 +33,7 @@ pub fn spec() c.Spec {
         .served = &served,
         .replaces = "LFM2 BF16 gate and up rows followed by SwiGLU",
         .nan = .{ .stated = "outputs equal the unfused rows and SwiGLU, NaN and infinity classes included" },
-        .sums = .{ .why = "the gate and up dots are exact integers here; SwiGLU maps a wrong sum to a wrong bf16 output" },
+        .sums = .{ .f16 = 50, .why = "the dots are exact integers at k 2048, and SiLU leaves fp16 sums a smaller miss than the default" },
     };
 }
 
@@ -110,16 +110,17 @@ pub const Probe = struct {
         return .{ .spec = s, .ctx = p, .vt = &vt, .control = p.mutation.gate() };
     }
 
-    /// bf16 W [n, k]: small random values, or gate 4's mirrored integers whose halves cancel (partials under 2^24).
-    fn weights(d: Dense, bits: []u16, fill: g.Fill, seed: u64) void {
+    /// bf16 W [n, k]: small random values, or mirrored integers whose halves cancel, the gate's sum kept positive.
+    fn weights(d: Dense, bits: []u16, fill: g.Fill, seed: u64, up: bool) void {
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
         const k = d.shape.k;
+        const sign: f32 = if (up) 1 else -1;
         for (bits) |*b| b.* = c.toBf16(if (fill == .stress) 0 else (rng.float(f32) * 2 - 1) * 0x1p-4);
         if (fill == .stress) for (0..d.shape.n) |j| for (0..k / 2) |i| {
             const v: f32 = @floatFromInt(1 + rng.uintLessThan(u32, 7));
-            bits[j * k + i] = c.toBf16(v);
-            bits[j * k + k / 2 + i] = c.toBf16(-v);
+            bits[j * k + i] = c.toBf16(sign * v);
+            bits[j * k + k / 2 + i] = c.toBf16(-sign * v);
         };
         for (d.w, bits) |*wv, b| wv.* = c.fromBf16(b);
     }
@@ -137,8 +138,8 @@ pub const Probe = struct {
         @memcpy(ud.x, gd.x);
         const bits = try p.a.alloc(u16, 2 * shape.n * shape.k);
         defer p.a.free(bits);
-        weights(gd, bits[0 .. shape.n * shape.k], fill, seed ^ 0x6d);
-        weights(ud, bits[shape.n * shape.k ..], fill, seed ^ 0x75);
+        weights(gd, bits[0 .. shape.n * shape.k], fill, seed ^ 0x6d, false);
+        weights(ud, bits[shape.n * shape.k ..], fill, seed ^ 0x75, true);
         p.exact = fill == .stress;
         const n = gd.outputs();
         p.x = try p.rig.input(std.mem.sliceAsBytes(gd.x));
