@@ -88,3 +88,9 @@ test "security: a render stops at its steps, its recursion and its memory, and s
     // an empty sequence repeated is empty at once, whatever the count
     try rendered("{{ ('' * 1000000000000000000) | length }}|{{ ([] * 1000000000000000000) | length }}", null, "0|0", null);
 }
+
+test "security: a loop's filter takes a step for each item it tests" {
+    // the filter runs no statement list, so each item it tests is counted where it is tested
+    try rendered("{% for b in range(100000) if b < 0 %}{% endfor %}done", .{ .steps = 50_000 }, "", "ran more than 50000 steps");
+    try rendered("{% for b in range(10) if b is even %}{{ b }}{% endfor %}", .{ .steps = 50_000 }, "02468", null);
+}

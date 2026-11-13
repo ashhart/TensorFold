@@ -31,7 +31,7 @@ pub const Ctx = struct {
     /// The stack where the render began; frames differ too much in size for a count of levels to bound it.
     base: usize = 0,
 
-    /// One more statement list or expression: a step of the render, taken only while its recursion has stack left.
+    /// One more statement list or loop-filter test: a step of the render, taken only while the stack has room.
     fn enter(c: *Ctx) Error!void {
         c.steps += 1;
         if (c.steps > c.limits.steps) return c.rt.fail("the chat template ran more than {d} steps", .{c.limits.steps});
@@ -178,6 +178,7 @@ fn execFor(c: *Ctx, act: *Activation, f: *const ast.For) Error!void {
         const tf = try enter(c, act, f.test_frame);
         var kept: std.ArrayList(Value) = .empty;
         for (items) |item| {
+            try c.enter(); // the filter runs no statement list, so each item it tests is a step of its own
             try assignByName(c, tf, f.target, item);
             if (v.truthy(try eval(c, tf, t))) try kept.append(c.rt.a, item);
         }
@@ -446,7 +447,6 @@ pub fn compare(c: *Ctx, op: ast.CmpOp, l: Value, r: Value) Error!bool {
 }
 
 pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
-    try c.enter();
     const rt = &c.rt;
     return switch (e.*) {
         .constant => |k| switch (k) {
