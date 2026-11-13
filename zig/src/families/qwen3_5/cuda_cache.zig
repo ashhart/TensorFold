@@ -36,9 +36,12 @@ pub fn pendBytes(g: anytype) usize {
     return pend_cap * g.deltas() * headBytes(g);
 }
 
-/// qwen35.cuh's Seg and Path.
+/// qwen35.cuh's Seg and Path: rec, conv, before and log point into the stream's States table.
 pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
+
+/// A stream's state table: cuda_states.zig.
+pub const States = @import("cuda_states.zig").States;
 
 /// A cache's keys and values as pages (qwen35.cuh kv_row): page i of the stream's positions at `base` + ids[i] pages.
 pub const Paged = struct {
@@ -121,6 +124,8 @@ pub const Cache = struct {
     paged: ?Paged = null,
     /// A pool lane's drafter ring in its run (the drafter borrows it for the lane's stream).
     drafter_ring: ?u64 = null,
+    /// A pool lane (its run mapped): its kernels read `states` (the _table kernels); false: its blocks, as on main.
+    on_table: bool = false,
     delta: i32 = 0,
     state: DeviceBuffer,
     /// The exact state before a recorded one-row round advances its stable slot in place.
@@ -128,6 +133,8 @@ pub const Cache = struct {
     /// A window's log and before in one block (recurrent_workspace.Overlay); runs and adaptive caches have none.
     block: ?DeviceBuffer = null,
     kv: DeviceBuffer,
+    /// The state table the kernels read the state, before and log through (null: a test's cache without one).
+    states: ?States = null,
     /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
     tap: ?DeviceBuffer = null,
     /// The newest verify window's records (qwen35.cuh's LogRow), held until its keep completes.
@@ -177,8 +184,10 @@ pub const Cache = struct {
     pub fn initPaged(gpa: std.mem.Allocator, e: *Engine, pages: usize, tokens: usize, base: u64) !Cache {
         var table = try DeviceBuffer.alloc(e.d, pages * 4);
         errdefer table.free();
+        var states = try States.init(gpa, e);
+        errdefer states.deinit(gpa);
         const none = try DeviceBuffer.alloc(e.d, 0);
-        return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
+        return .{ .state = none, .before = none, .kv = none, .paged = .{ .base = base, .table = table, .ids = &.{}, .tokens = tokens, .own_ids = false }, .states = states, .log = none, .cap = 0, .logits = try gpa.alloc(u16, e.g.vocab) };
     }
 
     /// Bytes of a pool lane's run: state, log with its rollback copy, tap ring and a drafter's ring, each 256-aligned.
@@ -207,6 +216,7 @@ pub const Cache = struct {
         self.before = beforeView(e, views[1].ptr);
         self.tap = if (e.n_taps > 0) views[2] else null;
         self.drafter_ring = if (ring > 0) views[3].ptr else null;
+        self.on_table = true;
         for ([_]DeviceBuffer{ self.log, views[2], views[3] }) |v| if (v.len > 0) try v.fill8(0, e.stream.handle);
     }
 
@@ -219,6 +229,7 @@ pub const Cache = struct {
         self.log = none;
         self.tap = null;
         self.drafter_ring = null;
+        self.on_table = false;
     }
 
     /// The parts every cache holds itself beside `kv` and `paged` (the caller's to free on failure).
@@ -237,6 +248,8 @@ pub const Cache = struct {
         if (e.n_taps > 0) {
             tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
         }
+        var states = try States.init(gpa, e);
+        errdefer states.deinit(gpa);
         const logits = try gpa.alloc(u16, e.g.vocab);
         errdefer gpa.free(logits);
         errdefer cuda.completion.drain(e.d, e.stream, "qwen3_5: failed cache state initialization did not drain");
@@ -246,7 +259,7 @@ pub const Cache = struct {
         try e.stream.synchronize();
         const scratch = if (adaptive) recurrent.bound(e) else 0;
         e.rec_scratch.cap += scratch;
-        var c: Cache = .{ .owner = if (adaptive) &e.rec_scratch else null, .scratch = scratch, .state = state, .before = before, .kv = kv, .paged = paged, .tap = tap, .log = log, .cap = cap, .logits = logits };
+        var c: Cache = .{ .owner = if (adaptive) &e.rec_scratch else null, .scratch = scratch, .state = state, .before = before, .kv = kv, .paged = paged, .tap = tap, .states = states, .log = log, .cap = cap, .logits = logits };
         c.block = block;
         return c;
     }
@@ -281,13 +294,33 @@ pub const Cache = struct {
         self.log.free();
         if (self.tap) |*t| t.free();
         if (self.pbuf) |*b| b.free();
+        if (self.states) |*t| t.deinit(gpa);
         gpa.free(self.logits);
     }
 
-    /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
-    pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
+    /// The state table rewritten (on the engine's stream, before the launches that read it) if a block moved.
+    pub fn stateTable(self: *Cache, e: *const Engine) !States {
+        const t = &(self.states orelse return error.MissingQwenStates);
+        const from: [3]u64 = .{ self.state.ptr, if (self.before) |b| b.ptr else 0, self.log.ptr };
+        if (t.from) |f| if (std.mem.eql(u64, &f, &from)) return t.*;
+        States.fill(t.host, e.g, from[0], from[1], from[2]);
+        try t.dev.uploadAsync(0, std.mem.sliceAsBytes(t.host), e.stream.handle);
+        t.from = from;
+        return t.*;
+    }
+
+    /// The stream's window of `rows` rows from forward row `row0` after `len` cached positions (pool lane: its table).
+    pub fn seg(self: *Cache, e: *const Engine, len: usize, row0: usize, rows: usize) !Seg {
+        if (self.on_table) return self.segIn(e, (try self.stateTable(e)).at(e.g), len, row0, rows);
         const g = e.g;
-        var sg: Seg = .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
+        const at: [4]u64 = .{ self.state.ptr, self.state.ptr + g.deltas() * g.recBytes(), if (self.before) |b| b.ptr else 0, self.log.ptr };
+        return self.segIn(e, at, len, row0, rows);
+    }
+
+    /// `seg` with `t` (rec, conv, before, log): its blocks, or a state table's entries (States.parts).
+    pub fn segIn(self: *Cache, e: *const Engine, t: [4]u64, len: usize, row0: usize, rows: usize) Seg {
+        const g = e.g;
+        var sg: Seg = .{ .rec = t[0], .conv = t[1], .kv = self.kv.ptr, .tap = if (self.tap) |x| x.ptr else 0, .log = t[3], .before = t[2], .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
         if (self.paged) |p| {
             sg.kv = p.base;
             sg.pt = p.table.ptr;
@@ -323,37 +356,42 @@ pub const Cache = struct {
             return;
         }
         const g = e.g;
-        const sg = self.seg(e, last.start, 0, last.rows);
+        const sg = try self.seg(e, last.start, 0, last.rows);
         try recurrent.mark(self, false);
         // the path's rows join the pending ones; without a log, with the switch off or past pend_cap they land now
         const deferred = keepLate() and self.log.len > 0 and path.len <= pend_cap;
+        const tab = self.on_table;
         if (!deferred) {
             try self.flush(e);
-            try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
+            try e.run(if (tab) e.keeps.apply_table else e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
         }
-        try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
+        try e.run(if (tab) e.keeps.conv_table else e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
         if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
-        if (deferred) try self.pendRows(e, sg.log, path);
+        if (deferred) try self.pendRows(e, path);
         self.last = null;
         self.len = last.start + path.len;
     }
 
     /// The kept path's heads after the pending rows, a run of consecutive rows one copy; a full buffer lands first.
-    fn pendRows(self: *Cache, e: *Engine, log: u64, path: []const u32) !void {
+    fn pendRows(self: *Cache, e: *Engine, path: []const u32) !void {
         const g = e.g;
         if (self.pbuf == null) self.pbuf = try DeviceBuffer.alloc(e.d, pendBytes(g));
         if (@as(usize, @intCast(self.pend)) + path.len > pend_cap) try self.flush(e);
         const hb = headBytes(g);
         const row_log = g.deltas() * g.logRowBytes();
+        const tab = self.on_table;
+        const t: ?States = if (tab) try self.stateTable(e) else null; // a window stream: main's rows, no table
+        const log = self.log.ptr;
         const base = self.pbuf.?.ptr;
         var j: usize = 0;
         while (j < path.len) {
+            // consecutive window rows whose records follow each other in the log, one copy
             var run: usize = 1;
-            while (j + run < path.len and path[j + run] == path[j] + run) run += 1;
+            while (j + run < path.len and path[j + run] == path[j] + run and (!tab or t.?.logRow(g, path[j + run]) == t.?.logRow(g, path[j]) + run * row_log)) run += 1;
             const at: usize = @as(usize, @intCast(self.pend)) + j;
-            const m: cuda.abi.Memcpy2D = .{ .src = log + path[j] * row_log, .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
+            const m: cuda.abi.Memcpy2D = .{ .src = if (tab) t.?.logRow(g, path[j]) else log + path[j] * row_log, .src_pitch = g.logRowBytes(), .dst = base + at * g.deltas() * hb, .dst_pitch = hb, .width = hb, .height = run * g.deltas() };
             // a copy past the log or the pending buffer is refused here, not by the driver mid-reply
-            const src_end = m.src - log + (m.height - 1) * m.src_pitch + m.width;
+            const src_end = if (m.src < log) std.math.maxInt(u64) else m.src - log + (m.height - 1) * m.src_pitch + m.width;
             const dst_end = m.dst - base + (m.height - 1) * m.dst_pitch + m.width;
             if (src_end > self.log.len or dst_end > self.pbuf.?.len) {
                 std.log.err("qwen3_5 pending keep: path {d} rows after {d} pending, path row {d} (window row {d}), run {d}: source end {d} of a {d}-byte log, destination end {d} of a {d}-byte buffer; head {d} bytes, log row {d}", .{ path.len, self.pend, j, path[j], run, src_end, self.log.len, dst_end, self.pbuf.?.len, hb, g.logRowBytes() });
@@ -368,12 +406,12 @@ pub const Cache = struct {
     /// The pending rows landed in the state now (before anything but a recorded slot scan reads it).
     pub fn flush(self: *Cache, e: *Engine) !void {
         if (self.pend == 0) return;
-        var sg = self.seg(e, self.len, 0, 0);
+        var sg = try self.seg(e, self.len, 0, 0);
         sg.plog = self.pbuf.?.ptr;
         const n = self.pend;
         self.pend = 0;
         const g = e.g;
-        try e.run(e.keeps.apply_pend, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, n });
+        try e.run(if (self.on_table) e.keeps.apply_pend_table else e.keeps.apply_pend, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, n });
     }
 
     /// This forward's scan entry with the pending rows, written back (a positive count) at one row or pend_commit.

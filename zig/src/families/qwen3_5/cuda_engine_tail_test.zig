@@ -52,6 +52,9 @@ const Engine = struct {
     tables: cuda.DeviceBuffer = undefined,
     staged: cuda.HostBuffer = undefined,
     host_logits: cuda.HostBuffer = undefined,
+    pub fn stateEntries(_: *const @This()) usize {
+        return 0;
+    }
     pub fn scratch(_: *@This(), _: enum { allocate }) !usize {
         return 0;
     }

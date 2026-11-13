@@ -276,7 +276,7 @@ test "Draft frames: combined target rows above capacity refuse before even settl
     e.kv8 = false;
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 2, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10), .apply_table = function(&driver, 10), .apply_pend_table = function(&driver, 10), .conv_table = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
     var caches: [2]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
     caches[0].last = .{ .start = 0, .rows = 2 };
@@ -303,7 +303,7 @@ test "Draft frames: an unsupported prompt geometry is refused at admission" {
     e.kv8 = false;
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10), .apply_table = function(&driver, 10), .apply_pend_table = function(&driver, 10), .conv_table = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
     var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
     const ids: [129]u32 = @splat(1);
@@ -340,7 +340,7 @@ test "Draft frames: the geometry refusal precedes the request's own state" {
     e.kv8 = false;
     e.g = .{ .hidden = 256, .intermediate = 256, .layers = 1, .vocab = 256, .k_heads = 1, .v_heads = 1, .q_heads = 1, .kv_heads = 1, .eps = 1e-6, .tied = true, .context = 256, .linear = @splat(true) };
     e.geo = .{ .hid = 256, .nk = 1, .nv = 1, .qh = 1, .kvh = 1, .nl = 1 };
-    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10) };
+    e.keeps = .{ .apply = function(&driver, 10), .apply_pend = function(&driver, 10), .conv = function(&driver, 10), .compact = function(&driver, 10), .apply_table = function(&driver, 10), .apply_pend_table = function(&driver, 10), .conv_table = function(&driver, 10) };
     const b: cuda.DeviceBuffer = .{ .d = &driver, .ptr = 1, .len = 1 << 20 };
     var caches: [1]q.engine.Cache = @splat(.{ .state = b, .kv = b, .log = b, .cap = 256, .len = 2, .logits = &.{} });
     caches[0].last = .{ .start = 0, .rows = 2 };

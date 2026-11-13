@@ -16,6 +16,7 @@ pub const Shape = struct {
     mt2: bool = false,
     /// A pipeline stage's piece of the forward (cuda_stage_forward.zig); one engine runs the whole.
     part: @import("cuda_stage_forward.zig").Part = .whole,
+    table: bool = false, // a pool lane among the segments: the scans read state tables (_table kernels)
 
     pub fn init(rows: usize, segments: usize, record: bool, taps: bool, slots: u8) Shape {
         std.debug.assert(rows > 0 and rows <= @as(usize, if (record) Round.most_verify else Round.max_rows) and segments > 0 and segments <= rows);
@@ -26,7 +27,8 @@ pub const Shape = struct {
 
     pub fn key(s: Shape) u32 {
         // captured shapes only: a window bucket's rows fit the low byte
-        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31;
+        std.debug.assert(s.slots <= 16); // Round.variant: 1, 2, 4, 8 or 16 fit bits 19-23
+        return @as(u32, @as(u8, @intCast(s.total))) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.table)) << 26 | @as(u32, @intFromBool(s.hidden)) << 27 | @as(u32, @intFromBool(s.paged)) << 28 | @as(u32, @intFromBool(s.mt2)) << 29 | @as(u32, @intFromBool(s.rows)) << 30 | @as(u32, @intFromBool(s.part == .head)) << 31;
     }
 };
 
@@ -66,6 +68,19 @@ test "Qwen stage: the head piece keys its own graph, apart from the layers' and 
     };
 }
 
+test "dense read cost: hidden and slot variants have distinct graph keys" {
+    var seen: [32]u32 = undefined;
+    var n: usize = 0;
+    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
+        for ([_]bool{ false, true }) |hidden| {
+            const shape: Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
+            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
+            seen[n] = shape.key();
+            n += 1;
+        }
+    }
+}
+
 test "every captured verify shape keys its own graph: a shape after another never replays the other's (#2138)" {
     const gpa = std.testing.allocator;
     var keys: std.AutoHashMapUnmanaged(u32, Shape) = .empty;
@@ -75,11 +90,13 @@ test "every captured verify shape keys its own graph: a shape after another neve
     const variants = [_]u8{ 1, 2, 4, 8, 16 }; // every slot count a window's register peak gives
     for (1..Round.most_window + 1) |peak| try std.testing.expect(std.mem.indexOfScalar(u8, &variants, @intCast(Round.variant(peak))) != null);
     for (1..Round.most_verify + 1) |rows| for (1..@min(rows, Round.max_segs) + 1) |segments| for ([_]bool{ false, true }) |taps| {
-        for (variants) |slots| for (0..8) |bits| {
+        for (variants) |slots| for (0..32) |bits| {
             var s = Shape.init(rows, segments, true, taps, slots);
             s.hidden = bits & 1 != 0;
             s.paged = bits & 2 != 0;
             s.mt2 = bits & 4 != 0;
+            s.table = bits & 8 != 0;
+            s.part = if (bits & 16 != 0) .head else .whole; // a shared bit with table fails here
             try distinct.put(gpa, s, {});
             const got = try keys.getOrPut(gpa, s.key());
             if (got.found_existing) try std.testing.expectEqual(got.value_ptr.*, s) else got.value_ptr.* = s;
