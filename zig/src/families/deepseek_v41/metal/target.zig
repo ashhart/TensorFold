@@ -84,7 +84,7 @@ pub const Target = struct {
     pool: ?pool_.Pool = null,
     pbufs: ?pool_bufs.Bufs = null,
     /// each slot's next request's max new tokens (`admit`), sizing its run
-    max_new: [16]?u64 = @splat(null),
+    max_new: []?u64 = &.{},
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -97,6 +97,9 @@ pub const Target = struct {
         errdefer t.b.deinit();
         t.pr = try prompt.Prompt.init(env.device, c, opt.prompt, opt.limit);
         errdefer t.pr.deinit();
+        t.max_new = try a.alloc(?u64, opt.slots);
+        errdefer a.free(t.max_new);
+        @memset(t.max_new, null);
         if (opt.pool) |ps| {
             t.pool = try pool_.Pool.init(a, opt.slots, ps.blocks);
             t.pbufs = pool_bufs.Bufs.init(a, env.device, c, ps.blocks) catch |e| {
@@ -144,6 +147,7 @@ pub const Target = struct {
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.freePool();
+        t.a.free(t.max_new);
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
@@ -460,8 +464,8 @@ pub const Target = struct {
     fn place(t: *Target, slot: u32, n: usize) !void {
         const p = if (t.pool) |*x| x else return;
         const s = &t.slots[slot];
-        const mn: ?u64 = if (slot < t.max_new.len) t.max_new[slot] else null;
-        if (slot < t.max_new.len) t.max_new[slot] = null;
+        const mn = t.max_new[slot];
+        t.max_new[slot] = null;
         t.giveBack(slot);
         const want = @min(t.opt.limit, @as(u64, n) + (mn orelse t.opt.limit) + R);
         const plan = p.take(slot, want) catch |e| return if (e == error.LaneMemory) error.LaneMemory else error.PastLimit;
