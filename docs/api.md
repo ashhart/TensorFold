@@ -46,7 +46,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | Scope | Routes |
 | --- | --- |
 | `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
-| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
+| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/execution/witness`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
 `/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
@@ -1199,6 +1199,39 @@ The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_
 server sends the counters described under [Responses](#responses). For memory figures on a Mac, use
 [`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
 `tensorfold:process_footprint_bytes`.
+
+## Execution witness
+
+`serve --execution-witness` (off by default) adds `GET /v1/execution/witness`, a read-scoped snapshot of what serves
+replies. Without the flag the route answers 404, nothing is hashed and replies are unchanged. The flag needs an API key
+(`--api-key`, `--api-key-file` or `TENSORFOLD_API_KEY`) or `--unix-socket`, whose owner-only socket stands for one;
+without either the server refuses to start. Hashing starts after the server is ready, on a thread of its own, and a read
+never hashes: it copies the latest snapshot. A stop ends a hash in progress at its next block.
+
+A known snapshot is `{"schema": 1, "state": "known", "witness", "content", "instance", "epoch", "path", "components"}`:
+
+| Field | Meaning |
+| --- | --- |
+| `content` | SHA-256 over `path` and every component; the same files, build and settings give the same value after a restart |
+| `witness` | SHA-256 over `content`, `instance` and `epoch`: a restart or an engine reload always gives a new one |
+| `instance` | 128 random bits drawn when this process started |
+| `epoch` | The engine's generation: 1 at startup, one more each time `--idle-unload` reloads it |
+| `path` | The engine's label for the supported path it attests |
+| `components.engine` | The engine's own digest of what it binds for that path |
+| `components.binary` | The running executable's SHA-256, read from the file the server opened before loading the model (`/proc/self/exe` on Linux, the executable's path elsewhere) |
+| `components.text` | The checkpoint's tokenizer, template, special-token and EOS files (or their absence) and `--chat-template`'s file, whose stamps the server took before loading them |
+| `components.preparation` | The serve defaults a request starts from: sampling, `--instruct-sampling`, max tokens, thinking, loop guard, seed salt, drafts, and the loaded template and EOS ids |
+| `components.environment` | Every `TF_*` and `TENSORFOLD_*` variable the process started with, except `TENSORFOLD_API_KEY`, `TENSORFOLD_TOOL_ID_KEY_FILE` and names ending in `_API_KEY`, `_SECRET`, `_PASSWORD` or `_TOKEN` |
+
+Otherwise the body is `{"schema": 1, "state": "unknown", "reason", "instance", "epoch"}`, and inference is unaffected.
+`reason` is `pending` (still hashing), `unsupported_path` (the engine attests no supported path; every engine so far),
+`feature_excluded` (with `feature` naming the flag: `--slide`, `--learn`, `--learn-conversations`, `--spill-gib`,
+`--compact-at`, `--compact-memory`, `--cortheon`, `--recall`, `--drafter`, `--mtp-drafts`, `--record`, `--vision`,
+`--tp` above 1 or `--speed-up`), `parked` or `reloading` (an idle-unloaded engine), `files_changed` (a text file or
+the executable changed after the server opened or stamped it) or `hash_failed` (a file could not be read; when the
+binary cannot be opened or the text files cannot be stamped at startup, a startup line says why). The engine's facts
+and the epoch are read under the lock every reload takes, so one snapshot never mixes two engines. The snapshot alone
+does not qualify a response cache.
 
 ## Cancel a request
 
