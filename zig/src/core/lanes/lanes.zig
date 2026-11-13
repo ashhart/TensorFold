@@ -64,6 +64,7 @@ pub fn cutPoints(s: *const Stream) []const u32 {
 }
 
 pub const Sampling = sampling.Sampling;
+pub const logit_bias = @import("logit_bias.zig");
 pub const Penalties = sampling.Penalties;
 pub const SuffixLookup = proposer.SuffixLookup;
 pub const LogprobRow = logprob.Row;
