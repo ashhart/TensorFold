@@ -1,9 +1,8 @@
-// The lean prompt tile's shared body: prompt_lean (one projection) and prompt_many's
-// tf_prompt16_many (two to eight sharing one input) compile the same fragments, copy
-// stream, mma chain and epilogue from here, so a later change to the tile cannot split
-// them. This file is a fragment: include it inside a kernel namespace, after
-// qmm_frag.cuh and fp_pairs.cuh. A Raw carries what the launcher passes and names the
-// View that reads back the part a tile serves with that tile's part-local index.
+// The lean prompt tile both prompt_lean and prompt_many's tf_prompt16_many compile, so a change cannot split them.
+
+// Include inside a kernel namespace, after qmm_frag.cuh and fp_pairs.cuh.
+
+// A Raw carries what the launcher passes; a View reads back the part a tile serves with its part-local index.
 
 using namespace qmm_frag;
 using tf_common::mul2;
@@ -153,9 +152,13 @@ struct LeanTile {
     static constexpr int SMEM = T::SMEM + 2 * STAGES * 8;  // the stages, then their full and empty barriers
 };
 
-// prompt_kernel's bits on a 128 x 256 tile: same fragments and mma chain over (g, kt); persistent, mbarrier
-// ring. prompt_lean passes its own parameters through LeanSoloRaw; tf_prompt16_many stages its Parts in
-// shared memory and passes LeanManyRaw, whose view locates each tile's part by its first tile offset.
+// prompt_kernel's bits on a 128 x 256 tile: same fragments and mma chain over (g, kt), persistent mbarrier ring.
+
+// prompt_lean passes its own parameters through LeanSoloRaw.
+
+// tf_prompt16_many stages its Parts in shared memory and passes LeanManyRaw.
+
+// LeanManyRaw's view locates each tile's part by its first tile offset.
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, class Raw>
 __device__ __forceinline__ void lean_tile_body(
         const __nv_bfloat16* __restrict__ x, Raw raw, int M, int K, int ldx, int group) {
