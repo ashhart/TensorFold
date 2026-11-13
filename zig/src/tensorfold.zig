@@ -21,6 +21,7 @@ pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
 pub const npy = @import("core/npy.zig");
 pub const picture = @import("core/picture/picture.zig");
+pub const audio = @import("core/audio.zig");
 pub const ids_json = @import("core/ids_json.zig");
 pub const lanes = @import("lanes");
 pub const segments = @import("core/segments.zig");
