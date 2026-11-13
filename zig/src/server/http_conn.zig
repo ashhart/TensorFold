@@ -45,6 +45,10 @@ pub const Conn = struct {
     timeouts: Timeouts = .{},
     budget: deadline.Budget = .{},
     read_hooks: ?ReadHooks = null,
+    /// Asked each second while no request is in progress; true gives the connection's slot up.
+    shed: ?@import("http_admission.zig").Shed = null,
+    /// No byte of the next request has arrived yet; set by ``readRequest``.
+    awaiting: bool = false,
     write_hooks: ?struct { ctx: *anyopaque, write: *const fn (*anyopaque, []const u8) error{Closed}!void } = null,
     buf: []u8,
     start: usize = 0,
@@ -91,11 +95,10 @@ pub const Conn = struct {
         }
         const wait = try c.budget.wait(c.nowMs(), timeout_ms);
         const got = if (c.read_hooks) |h| try h.read(h.ctx, c.buf[c.end..], wait) else blk: {
-            var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 }};
-            const ready = posix.poll(&fds, wait) catch return error.Closed;
-            if (ready == 0) return error.Timeout;
+            try c.awaitInput(wait);
             break :blk posix.read(c.fd, c.buf[c.end..]) catch return error.Closed;
         };
+        if (got > 0) c.awaiting = false;
         if (got > 0) c.budget.arrived(c.nowMs(), c.timeouts.request);
         _ = try c.budget.wait(c.nowMs(), timeout_ms);
         c.end += got;
@@ -111,6 +114,20 @@ pub const Conn = struct {
     pub fn consume(c: *Conn, n: usize) void {
         std.debug.assert(n <= c.end - c.start);
         c.start += n;
+    }
+
+    /// Waits up to `wait` ms for input; with no request in progress it wakes each second to ask ``shed``.
+    fn awaitInput(c: *Conn, wait: i32) IoError!void {
+        var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 }};
+        var left = wait;
+        while (true) {
+            const slice = if (c.awaiting and c.shed != null) @min(left, 1000) else left;
+            const ready = posix.poll(&fds, slice) catch return error.Closed;
+            if (ready != 0) return;
+            left -= slice;
+            if (left <= 0) return error.Timeout;
+            if (c.shed.?.due(wait - left)) return error.Timeout;
+        }
     }
 
     pub fn nowMs(c: *const Conn) i64 {
@@ -214,6 +231,7 @@ pub const Conn = struct {
     pub fn readRequest(c: *Conn, a: Allocator, idle: bool) Allocator.Error!Outcome {
         c.budget.head(c.nowMs(), idle and c.start == c.end, c.timeouts.request);
         defer c.budget = .{};
+        c.awaiting = c.start == c.end;
         c.key_label = null;
         c.key_scopes = scope.full;
         c.key_digest = null;

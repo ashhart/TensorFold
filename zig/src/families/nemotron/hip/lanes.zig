@@ -265,6 +265,8 @@ pub const Hip = struct {
         const e = h.e;
         const prompt = s.prompt();
         if (prompt.len == 0 or prompt.len + s.max_new + max_window + 1 > e.o.capacity) return error.PromptTooLong;
+        // refused before the other ranks hear the prompt: a rank that fails a step it was sent leaves the group
+        for (prompt) |t| if (t >= e.model_().dims.vocab) return error.TokenOutsideVocabulary;
         const gop = try h.streams.map.getOrPut(h.gpa, s);
         if (gop.found_existing) h.free(gop.value_ptr.*);
         errdefer h.streams.map.removeByPtr(gop.key_ptr);

@@ -79,11 +79,13 @@ const linux_fast = [_][]const u8{
     "compile-glm-prompt-gate-host",
     "compile-pocket-fit-host",
     "test-checkpoint-config",
+    "test-cluster-membership-host",
     "test-cuda-startup-costs-host",
     "test-glm-prompt-arena-host",
     "test-grammar-error-host",
     "test-info-config",
     "test-native-options-host",
+    "test-template-limits-host",
 };
 
 const linux_hip = [_][]const u8{
@@ -295,6 +297,7 @@ const macos_deepseek = [_][]const u8{
 
 const macos_fast = [_][]const u8{
     "check-qwen27-speed-host",
+    "test-cluster-membership-host",
     "test-glm-disk-charge-host",
     "test-living-metal-host",
     "test-metal-formats-host",
@@ -303,6 +306,7 @@ const macos_fast = [_][]const u8{
     "test-qwen27-prompt-floor-host",
     "test-qwen27-reply-cache-host",
     "test-qwen27-startup-host",
+    "test-template-limits-host",
 };
 
 const macos_lanes = [_][]const u8{

@@ -56,7 +56,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
 }
 
 fn consumeBody(conn: *Conn, a: Allocator) bool {
-    const body = http_body.read(conn, a, http_body.limit) catch {
+    const body = http_body.read(conn, a, http_body.unread_limit) catch {
         conn.close = true;
         conn.sendError(a, 500, "out of memory", null) catch {};
         return false;

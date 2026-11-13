@@ -14,14 +14,8 @@ pub fn moeAdds(self: anytype, layer: usize, keep: LayerKeep) !void {
     if (add == null and keep.moe_branch == 0) return;
     const s = self.s;
     const n = self.rows;
-    var a: cuda.Args = .{};
-    a.add(s.y);
-    a.add(s.wts);
-    a.add(s.moe_f32);
-    a.add(batch.cint(dims));
-    a.add(batch.cint(slots));
-    // The EXL3 branch already holds the canonical reduction in moe_f32.
-    if (!canon) try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(n), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
+    // the EXL3 branch holds the canonical reduction in moe_f32, a prompt pass's rank exchange (cuda_moe_exchange.zig) its sum
+    if (!canon and !self.pending_f32) try sumSlots(self, 0, n);
     if (add) |m| try m.add(m.ctx, layer, s.mixed, s.picks, s.wts, s.moe_f32, n);
     if (keep.moe_branch != 0) try self.sumSlices(s.moe_f32, keep.moe_branch, true, n * dims, 1);
     self.pending_f32 = true;
@@ -52,4 +46,16 @@ fn leaf(self: anytype, kernel: cuda.Function, out: u64, start: usize, log: usize
 pub fn kept(self: anytype) void {
     self.canon_f32 = true;
     self.pending_f32 = true;
+}
+
+/// moe_f32's rows [r0, r0 + rows): each row's slots of y times its weights, summed in slot order (fn_moe_sum).
+pub fn sumSlots(self: anytype, r0: usize, rows: usize) !void {
+    const s = self.s;
+    var a: cuda.Args = .{};
+    a.add(s.y + r0 * slots * dims * 4);
+    a.add(s.wts + r0 * slots * 4);
+    a.add(s.moe_f32 + r0 * dims * 4);
+    a.add(batch.cint(dims));
+    a.add(batch.cint(slots));
+    try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(rows), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
 }
