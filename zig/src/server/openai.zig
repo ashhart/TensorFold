@@ -141,6 +141,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
+    input.messages = try @import("deferred_tools.zig").resolve(cx, input.messages, body.get("tools"), srv.text.deferred_native);
     if (!is_chat and input.messages.array.len == 0) input.prompt = try legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
     const first = body.get("max_tokens");

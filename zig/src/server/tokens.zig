@@ -30,7 +30,8 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     var ids: []const u32 = undefined;
     if (body.has("messages")) {
         const generation = try flag(cx, body, "add_generation_prompt", true);
-        const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+        const normalized = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+        const msgs = try @import("deferred_tools.zig").resolve(cx, normalized, body.get("tools"), srv.text.deferred_native);
         const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
             error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
             else => |x| return x,
