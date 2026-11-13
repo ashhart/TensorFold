@@ -168,6 +168,9 @@ pub fn build(b: *std.Build) void {
     _ = server_build.addTo(b, voice_tool, target, optimize);
     const voice_exe = b.addExecutable(.{ .name = "drama3-voice", .root_module = voice_tool });
     b.step("drama3-voice", "Attested Drama voice files from reference WAVs, coded by drama3-generate --encode").dependOn(&b.addInstallArtifact(voice_exe, .{}).step);
+    // the dashboard page is text, so its test runs on every OS and Linux CI sees it (it ran only in the macOS suite)
+    const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     // the backend options are declared for every target, so one build script may pass the same flags on every OS
     const cuda_options = @import("zig/build/options.zig").cuda(b);
     const tp_options = @import("zig/build/options.zig").tp(b);

@@ -18,6 +18,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -250,6 +251,12 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
         return;
     };
     p.input.id = id;
+    // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
+    var asked: cancel_ids.Entry = .{};
+    const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
+    cancel_ids.registry.add(srv.io, &names, &asked);
+    defer cancel_ids.registry.remove(srv.io, &names, &asked);
+    p.input.cancel = &asked.asked;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
