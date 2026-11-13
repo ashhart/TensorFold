@@ -401,6 +401,10 @@ CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair 
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
 down, each bit-equal to the decode instance it replaces; the scaled-code prompt tile is the planted control).
+CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 weights: Nemotron 3.5 Transcribe's routed
+and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
+the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
+decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
@@ -428,6 +432,12 @@ Older SMs build main's loop, and their records are main's.
 CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulated; q/k norm and rotary into packed
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
+
+CUDA also checks Nemotron 3.5 Transcribe's audio encoder glue (`nemo_audio.cu`: log-mel frames, their per-feature
+normalisation, q/k norm and rotary in both stacks' forms, the speaker head's taps, ReLU and predictions, and the fusion
+of the two branches), each output within float64's range at its bf16 points, and its head-64 attention against
+`contract_attn.zig`'s float64 reference (`audio-contract`; eight controls built from `nemo_audio.cuh` with one thing
+dropped each).
 
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's

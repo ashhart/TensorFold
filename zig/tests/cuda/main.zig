@@ -192,6 +192,7 @@ const usage =
     \\  radio-processor REF PICS MODEL  decoded RGB, processor pixels, float resizes and grids against the reference
     \\  radio-kernels             RADIO's float-patch cast and position rows against host references (synthetic rows)
     \\  radio-attention           the head-dim-80 tower attention's time at five sizes, outputs finite (synthetic rows)
+    \\  audio-check MODEL WAV OUT [layers] | audio-contract  Transcribe's audio encoder: a clip's stages to OUT | gates 1-4
     \\  gdn-back                  DeltaNet input gradients against FP64
     \\  q4-back                  Affine input gradients against FP64
     \\  moe-back                  Expert and router input gradients against FP64
@@ -215,6 +216,7 @@ const usage =
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
     \\  fp8-experts <dir>         grouped block-FP8 experts against recorded fixture bytes
     \\  nvfp4-experts <dir>       grouped NVFP4 experts against recorded fixture bytes
+    \\  bf16-experts [contract]   grouped bf16 experts against float64 (repack, up, downs, rows, forms); contract: gates 1-4, controls red
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
@@ -430,6 +432,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "fp8-experts")) return fp8_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4")) return nvfp4_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "bf16-experts")) return if (rest.len == 0) @import("bf16_experts_tests.zig").experts(gpu) else if (std.mem.eql(u8, rest[0], "contract")) @import("contract_experts_bf16.zig").run(gpu) else error.UnknownCommand;
     if (std.mem.eql(u8, cmd, "projection-f32")) return projection_f32_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
@@ -501,6 +504,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "radio-processor")) return radio_tests.processor(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "radio-kernels")) return radio_tests.kernels(gpu);
     if (std.mem.eql(u8, cmd, "radio-attention")) return radio_tests.attention(gpu);
+    if (std.mem.eql(u8, cmd, "audio-contract")) return @import("contract_nemo_audio.zig").run(gpu) else if (std.mem.eql(u8, cmd, "audio-check")) return @import("audio_check.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), rest.len > 3 and std.mem.eql(u8, rest[3], "layers"));
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "tree-accept")) return tree_accept.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "chunk-costs")) return chunk_costs.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
