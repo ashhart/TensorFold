@@ -27,6 +27,8 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (std.mem.eql(u8, name, "joint_schema")) return kk.joint_schema;
     if (std.mem.eql(u8, name, "fp8_experts")) return kk.fp8_experts;
     if (std.mem.eql(u8, name, "mla")) return kk.mla;
+    if (std.mem.eql(u8, name, "ling_glue")) return kk.ling_glue;
+    if (std.mem.eql(u8, name, "ling_act")) return kk.ling_act;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
     inline for (.{ "qwen4_projection", "qwen4_hc", "qwen4_gdn", "qwen4_ple", "gemma4_ple" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);

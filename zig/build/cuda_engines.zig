@@ -44,6 +44,21 @@ pub fn qwen3HostTest(b: *std.Build, m: *std.Build.Module, all: *std.Build.Step) 
     all.dependOn(&run.step);
 }
 
+/// The Ling-3.1-flash CUDA family over the runtime, the core, the lane core and the GLM kernels it reuses.
+pub fn lingCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, glm: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "glm_cuda", glm }, .{ "cuda", cuda }, .{ "core", core }, .{ "lanes", lanes } }) |x| m.addImport(x[0], x[1]);
+    m.addImport("engine_api", glm.import_table.get("engine_api").?); // its disk image names the rows store's types: GLM's, the server's
+    return m;
+}
+
+/// test-ling: Ling-3.1-flash's CUDA family on the host (loader, graph, engine, lanes and routing; no GPU work).
+pub fn lingHost(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, glm: *std.Build.Module, step: *std.Build.Step) void {
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = lingCuda(b, host, .debug, cuda, core, lanes, glm) }));
+    step.dependOn(&run.step);
+    b.step("test-ling", "Ling-3.1-flash's CUDA family on the host: loader, graph, engine and lanes compile, no GPU work").dependOn(&run.step);
+}
+
 /// LFM2 (d1's decision model) on CUDA: config, weights, kernels and the forward that scores labels.
 pub fn lfm2Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2/lfm2.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
@@ -66,6 +81,7 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const api = qwen35.import_table.get("engine_api").?; // family()'s, so the server and qwen3_5 share one
     const canon = canonModule(b, target, optimize);
     const verbs = @import("tp.zig").verbsModule(b, target, optimize);
+    const glm = glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canon, verbs);
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
         .target = target,
@@ -80,9 +96,10 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision, api) },
-            .{ .name = "glm_cuda", .module = glmCudaShared(b, target, optimize, cuda, core, lanes, heat, api, canon, verbs) },
+            .{ .name = "glm_cuda", .module = glm },
             .{ .name = "qwen3_cuda", .module = qwen3Module(b, target, optimize, cuda, core, lanes, api) },
             .{ .name = "minimax_m3_cuda", .module = @import("minimax_cuda.zig").module(b, target, optimize, cuda, core, lanes) },
+            .{ .name = "ling_cuda", .module = lingCuda(b, target, optimize, cuda, core, lanes, glm) },
             .{ .name = "qwen35", .module = qwen35 },
             .{ .name = "kolibri1", .module = @import("kolibri.zig").module(b, target, optimize, cuda, core, lanes) },
             .{ .name = "gemma4_cuda", .module = @import("gemma4_cuda.zig").module(b, target, optimize, cuda, core, lanes) },

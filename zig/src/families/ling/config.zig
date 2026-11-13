@@ -16,8 +16,8 @@ pub const Limits = struct { routed: f32, shared: f32, dense: f32 };
 /// MLA's rope pairs: rope_interleave true is exllamav3's RopeStyle.GPTJ (adjacent pairs), false NeoX (halves).
 pub const RopeStyle = enum { gptj, neox };
 
-/// A linear's format: bf16, FP8 128x128 blocks, ModelOpt NVFP4; EXL3 (#832) adds a variant and a weights_proj reader.
-pub const Quant = enum { bf16, fp8_block128, nvfp4 };
+/// A linear's format: bf16, FP8 128x128 blocks, ModelOpt NVFP4, or EXL3 (exllamav3's trellis, main's shared kernels).
+pub const Quant = enum { bf16, fp8_block128, nvfp4, exl3 };
 
 /// Why parse refused the config, one sentence for the caller's log line (tests read it too).
 pub const Why = struct {
@@ -304,12 +304,19 @@ fn quantization(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
     const method = text(q, "quant_method") orelse "";
     if (std.mem.eql(u8, method, "fp8")) return fp8Block(q, c, why);
     if (std.ascii.eqlIgnoreCase(method, "modelopt")) return modelopt(q, c, why);
-    if (std.ascii.eqlIgnoreCase(method, "exl3")) {
-        why.set("EXL3: Ling's EXL3 weights need the shared EXL3 module (tracker #832), not this loader yet", .{});
+    if (std.ascii.eqlIgnoreCase(method, "exl3")) return exl3(q, c, why);
+    why.set("quantization {s}: the loader reads bf16, FP8 128x128 blocks, ModelOpt NVFP4 or EXL3", .{if (method.len > 0) method else "without quant_method"});
+    return error.Quant;
+}
+
+/// exllamav3's packs: a quantized linear holds `.trellis` (bits in its shape); the loader tells which by the tensors.
+fn exl3(q: std.json.ObjectMap, c: *Config, why: *Why) !void {
+    const book = text(q, "codebook") orelse "mcg";
+    if (!std.mem.eql(u8, book, "mul1") and !std.mem.eql(u8, book, "mcg") and !std.mem.eql(u8, book, "3inst")) {
+        why.set("EXL3 codebook {s}: the shared EXL3 kernels take mul1, mcg or 3inst", .{book});
         return error.Exl3;
     }
-    why.set("quantization {s}: the loader reads bf16, FP8 128x128 blocks or ModelOpt NVFP4", .{if (method.len > 0) method else "without quant_method"});
-    return error.Quant;
+    c.quant = .exl3;
 }
 
 fn tokens(o: std.json.ObjectMap, c: *Config, why: *Why) !void {
@@ -473,8 +480,8 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     return c;
 }
 
-/// The widths the kernels are built for (cuda.zig's tests hold them to glm_kda, glm_glue and the latent cache).
-pub const fixed = .{ .kda_dim = 128, .conv = 4, .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
+/// The widths the kernels are built for (cuda.zig's tests hold them to glm_glue and the latent cache); KDA's: cuda.kda.
+pub const fixed = .{ .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
 /// glue.rmsnorm's instances for q_lora_rank (256 is Ling-3.0-tiny's); the hidden width takes the router's three.
 pub const q_lora_widths = [_]u32{ 256, 512, 1536, 4096 };
 /// The hidden width: the norms' 512, 1536 and 4096, which the router's slices (8 x 64 inputs) also divide.
@@ -486,15 +493,7 @@ fn normWidth(w: u32) bool {
 
 /// Every shape the kernels take fixed, refused at load before anything is allocated or launched.
 fn geometry(o: std.json.ObjectMap, c: *const Config, why: *Why) !void {
-    // KDA: glm_kda.cu's 128-wide heads and 4 taps (a 3-row conv window); one key and value head per query head
-    if (c.kda_dim != fixed.kda_dim) {
-        why.set("head_dim {d}: the KDA kernels take {d}-wide heads", .{ c.kda_dim, fixed.kda_dim });
-        return error.KdaGeometry;
-    }
-    if (c.conv != fixed.conv) {
-        why.set("short_conv_kernel_size {d}: the KDA kernels take {d} taps", .{ c.conv, fixed.conv });
-        return error.KdaGeometry;
-    }
+    // KDA: one key and value head per query head; head_dim and taps are cuda.kda.geometry's, at the family's open
     const kv_heads = if (o.get("num_key_value_heads")) |_| try int(o, "num_key_value_heads", why) else c.kda_heads;
     if (c.kda_heads == 0 or kv_heads != c.kda_heads) {
         why.set("{d} attention heads, {d} key/value heads: the engine runs one key/value head per query head", .{ c.kda_heads, kv_heads });

@@ -339,6 +339,11 @@ CUDA checks the same head (`joint_schema.cu`, `zig/tests/cuda/contract_js_*.zig`
 lexical sums read from the engine's packed BF16 lm_head (`tf_js_lex_sums`) and the head's residual add and broadcast.
 Every kernel has a planted control (`contract_js_controls.cuh`), each naming the gate that catches it.
 
+CUDA also checks Ling-3.1-flash's own kernels (`tf-cuda-test ling-contract`): ling_glue's residual add, MoE combine (by
+slot and by expert), row copy and expanded prompt MLA rows (`tf_ling_pattn`), and ling_act's SwiGLU in Ling's order at
+both blocks with its 64-sums. The shared kernels the family calls (the mla image, the EXL3 finish-after, the
+group-limited top-k) are checked with their own images.
+
 HIP also checks the router over the rows a checkpoint already holds in bf16 (`tf_router_bf16`, and its fp16-activation
 form), bit-equal to the fp32-rows router it replaces at 1 to 16 rows, with both kinds' non-finite plants through gate 1
 and the exact sums of gate 4.

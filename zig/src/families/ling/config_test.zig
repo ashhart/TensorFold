@@ -191,8 +191,16 @@ test "hf_quant_config.json's NVFP4 block when config.json has none; groups other
     try t.expectEqual(config.Quant.bf16, (try config.parseWith(t.allocator, json, null, &why)).quant);
 }
 
-test "EXL3 is refused naming #832; a glob matches whole names only" {
-    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"", error.Exl3, "#832");
+test "an EXL3 pack parses to quant exl3, an unknown codebook is refused; a glob matches whole names only" {
+    {
+        const json = try edit("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\"");
+        defer t.allocator.free(json);
+        var why: config.Why = .{};
+        const c = try config.parse(t.allocator, json, &why);
+        try t.expectEqual(config.Quant.exl3, c.quant);
+        try t.expectEqual(@as(u32, 0), c.plain_n);
+    }
+    try refused("\"quant_method\": \"fp8\"", "\"quant_method\": \"exl3\", \"codebook\": \"e8p\"", error.Exl3, "codebook e8p");
     try t.expect(config.glob("*.mlp.gate", "model.layers.4.mlp.gate"));
     try t.expect(!config.glob("*.mlp.gate", "model.layers.4.mlp.gate_proj"));
     try t.expect(config.glob("model.layers.*.attention*", "model.layers.12.attention.q_proj"));
@@ -217,10 +225,6 @@ const Case = struct { key: []const u8, value: []const u8, err: anyerror, says: [
 
 test "geometry the kernels do not take is refused at load, one value at a time on the tiny config, with the reason" {
     const cases = [_]Case{
-        .{ .key = "head_dim", .value = "64", .err = error.KdaGeometry, .says = "head_dim 64" },
-        .{ .key = "head_dim", .value = "256", .err = error.KdaGeometry, .says = "128-wide heads" },
-        .{ .key = "short_conv_kernel_size", .value = "3", .err = error.KdaGeometry, .says = "short_conv_kernel_size 3" },
-        .{ .key = "short_conv_kernel_size", .value = "5", .err = error.KdaGeometry, .says = "4 taps" },
         .{ .key = "num_attention_heads", .value = "0", .err = error.KdaGeometry, .says = "0 attention heads" },
         .{ .key = "num_attention_heads", .value = "0", .err = error.KdaGeometry, .says = "0 attention heads, 0", .also = .{ "num_key_value_heads", "0" } },
         .{ .key = "num_key_value_heads", .value = "2", .err = error.KdaGeometry, .says = "2 key/value heads" },
@@ -270,7 +274,7 @@ test "the shapes the kernels take are accepted: the tiny config as written and w
         return e;
     };
     const c = try load();
-    try t.expect(c.kda_dim == config.fixed.kda_dim and c.conv == config.fixed.conv and c.kv_lora == config.fixed.kv_lora);
+    try t.expect(c.kda_dim == 128 and c.conv == 4 and c.kv_lora == config.fixed.kv_lora);
 }
 
 test "routing groups: groups of one and a single pick refused (HF's rule differs there); one group, all groups kept, groups of two accepted" {
@@ -307,7 +311,7 @@ test "routing groups: groups of one and a single pick refused (HF's rule differs
     }
 }
 
-test "fixtures/config.json is inclusionAI/Ling-3.1-flash's at a6943f4b, byte for byte (oracle/ling_hf.py pins the same)" {
+test "fixtures/config.json is inclusionAI/Ling-3.1-flash's at a6943f4b, byte for byte" {
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(real, &h, .{});
     try t.expectEqualStrings("6f3773e52a12509e772e698aacacaa156d2402ebb8250812a1da52a03d92f084", &std.fmt.bytesToHex(h, .lower));
