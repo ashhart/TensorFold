@@ -422,6 +422,7 @@ test "serve steps: the prompt share in steps is the flag's, else the env's, else
         .{ .steps = false, .flag = null, .env = null, .p = 1, .cap = false },
         .{ .steps = true, .flag = null, .env = null, .p = 1 - serve_lanes.steps_decode_share, .cap = false },
         .{ .steps = true, .flag = null, .env = "0.5", .p = 0.5, .cap = false },
+        .{ .steps = true, .flag = null, .env = "", .p = 1 - serve_lanes.steps_decode_share, .cap = false },
         .{ .steps = true, .flag = 0.4, .env = "0.5", .p = 0.6, .cap = true },
     };
     for (cases) |c| {
