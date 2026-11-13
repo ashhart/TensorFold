@@ -24,9 +24,9 @@ __device__ __noinline__ void tf_wrows::merge_pg_odd(const __nv_bfloat16* q, cons
 // Dory's full-attention caches in pages (head dim 256, no window): kc/vc a layer's part of page 0, tab a row of ids.
 extern "C" __global__ void __launch_bounds__(NT) tf_wrows_part_256_pg(
     const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, const int* pos, const int* slot,
-    float* po, float* pm, float* pl, int h, int hk, int win, long long ring, float scale, const int* tab,
-    long long page, int tok, int stride) {
-    part<256, NONE, true>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, Pg{tab, page, tok, stride});
+    float* po, float* pm, float* pl, int h, int hk, int win, long long ring, float scale, int chunks,
+    const int* tab, long long page, int tok, int stride) {
+    part<256, NONE, true>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, chunks, Pg{tab, page, tok, stride});
 }
 
 extern "C" __global__ void __launch_bounds__(NT) tf_wrows_merge_256_pg(
@@ -56,9 +56,9 @@ extern "C" __global__ void __launch_bounds__(NT, 1) tf_wrows_prompt_256_p32_pg(
 // Gemma 4's global decode over pages (head dim 512, no window): each key's page from tab, any tok; merge's replay too.
 extern "C" __global__ void __launch_bounds__(NT) tf_wrows_part_512_pg(
     const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc, const int* pos, const int* slot,
-    float* po, float* pm, float* pl, int h, int hk, int win, long long ring, float scale, const int* tab,
-    long long page, int tok, int stride) {
-    part_staged<512, NONE>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, Pg{tab, page, tok, stride});
+    float* po, float* pm, float* pl, int h, int hk, int win, long long ring, float scale, int chunks,
+    const int* tab, long long page, int tok, int stride) {
+    part_staged<512, NONE>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, chunks, Pg{tab, page, tok, stride});
 }
 
 extern "C" __global__ void __launch_bounds__(NT) tf_wrows_merge_512_pg(

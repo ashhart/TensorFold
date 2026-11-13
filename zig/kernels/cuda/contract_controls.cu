@@ -168,8 +168,8 @@ extern "C" __global__ void __launch_bounds__(tf_rms_strided::LT) tf_ctl_tail_moe
 extern "C" __global__ void __launch_bounds__(tf_wrows::NT) tf_ctl_wrows_part_edge(const __nv_bfloat16* q, const __nv_bfloat16* kc,
                                                                                  const __nv_bfloat16* vc, const int* pos, const int* slot,
                                                                                  float* po, float* pm, float* pl, int h, int hk, int win,
-                                                                                 long long ring, float scale) {
-    tf_wrows::part<256, tf_wrows::EDGE>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale);
+                                                                                 long long ring, float scale, int chunks) {
+    tf_wrows::part<256, tf_wrows::EDGE>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, chunks);
 }
 
 extern "C" __global__ void __launch_bounds__(tf_wrows::NT) tf_ctl_wrows_merge_rescale(const float* po, const float* pm, const float* pl,

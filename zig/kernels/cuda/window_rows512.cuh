@@ -10,18 +10,18 @@ constexpr int TK = 32, NSG = 2;
 
 // P: empty, or one Pg (window_pages.cu): key k of slot s at its page, tab[s * stride + k / tok] (no window).
 template <int D, int FAULT, typename... P>
-__device__ __forceinline__ void part_staged(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+__device__ __forceinline__ void part_staged_one(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
                                             const __nv_bfloat16* __restrict__ vc, const int* __restrict__ pos,
                                             const int* __restrict__ slot, float* __restrict__ po, float* __restrict__ pm,
                                             float* __restrict__ pl, int h, int hk, int win, long long ring, float scale,
-                                            P... pg) {
+                                            int c, int chunks, P... pg) {
     constexpr int DPL = D / 32, HW = 4, C = D / 8; // a lane's dims and columns, heads a block (and warp), uint4 a key
     extern __shared__ uint4 tiles[];                       // [NSG][TK][C] K or V tiles; then the runs' partial o
     __shared__ float sp[CK * SP];
     __shared__ float mx[GMAX], ls[GMAX];
     float* ox = reinterpret_cast<float*>(tiles);
     const int64_t r = blockIdx.x;
-    const int G = h / hk, HG = (G + HW - 1) / HW, c = blockIdx.z, chunks = gridDim.z;
+    const int G = h / hk, HG = (G + HW - 1) / HW;
     const int kh = blockIdx.y / HG, hg = blockIdx.y % HG; // the block's heads: hg HW.. of key head kh
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
     const int p = pos[r];
@@ -199,6 +199,20 @@ __device__ __forceinline__ void part_staged(const __nv_bfloat16* __restrict__ q,
     if (threadIdx.x < own) {
         const int hd = hg * HW + threadIdx.x;
         pm[part * G + hd] = mx[hd], pl[part * G + hd] = ls[hd];
+    }
+}
+
+// part_staged_one over the row's live chunks, as window_rows_part.cuh's part (the same stride and bound).
+template <int D, int FAULT, typename... P>
+__device__ __forceinline__ void part_staged(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                                            const __nv_bfloat16* __restrict__ vc, const int* __restrict__ pos,
+                                            const int* __restrict__ slot, float* __restrict__ po, float* __restrict__ pm,
+                                            float* __restrict__ pl, int h, int hk, int win, long long ring, float scale,
+                                            int chunks, P... pg) {
+    const int live = liveChunks(chunks, win, pos[blockIdx.x], FAULT == ALL);
+    for (int c = blockIdx.z; c < live; c += gridDim.z) {
+        part_staged_one<D, FAULT>(q, kc, vc, pos, slot, po, pm, pl, h, hk, win, ring, scale, c, chunks, pg...);
+        __syncthreads(); // the next chunk reuses this one's tiles and scores
     }
 }
 

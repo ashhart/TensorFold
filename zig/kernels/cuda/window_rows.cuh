@@ -98,13 +98,13 @@ __device__ __noinline__ void slow_head(const __nv_bfloat16* qh, KV kv, int lo, i
     }
 }
 
-// Decode partials, a block a (row, key head, chunk): the chunk's max, weights and o; empty chunks write m = -inf.
+// Chunk c's decode partials (part, window_rows_part.cuh, loops over a row's): its max, weights and o; empty: m = -inf.
 template <int D, int FAULT, bool PG = false>
-__device__ __forceinline__ void part(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+__device__ __forceinline__ void part_one(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
                                      const __nv_bfloat16* __restrict__ vc, const int* __restrict__ pos,
                                      const int* __restrict__ slot, float* __restrict__ po, float* __restrict__ pm,
-                                     float* __restrict__ pl, int h, int hk, int win, long long ring, float scale,
-                                     Pg pg = Pg{}) {
+                                     float* __restrict__ pl, int h, int hk, int win, long long ring, float scale, int c,
+                                     int chunks, Pg pg = Pg{}) {
     constexpr int DPL = D / 32;  // a lane's dims of q and k, and its columns of v
     constexpr int HW = 32 / DPL; // query heads a warp takes: 32 q values, then 32 accumulators, a lane
     constexpr int U = 4;         // keys a warp loads at once
@@ -112,7 +112,7 @@ __device__ __forceinline__ void part(const __nv_bfloat16* __restrict__ q, const 
     __shared__ float mx[GMAX], ls[GMAX];
     __shared__ float ox[7 * 4 * 256]; // key runs 1.. partial o, (runs - 1) G D floats at most (G HW: runs 8)
     const int64_t r = blockIdx.x;
-    const int kh = blockIdx.y, c = blockIdx.z, chunks = gridDim.z, G = h / hk;
+    const int kh = blockIdx.y, G = h / hk;
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
     const int p = pos[r];
     const int64_t base = (slot != nullptr ? static_cast<int64_t>(slot[r]) : 0) * ring;
@@ -591,5 +591,7 @@ __device__ __forceinline__ void kernel(const __nv_bfloat16* q, const __nv_bfloat
 }
 
 } // namespace prompt
+
+#include "window_rows_part.cuh" // part: part_one over a row's live chunks, a block a stride of them
 
 } // namespace tf_wrows
