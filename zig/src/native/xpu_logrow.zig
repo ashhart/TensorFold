@@ -1,6 +1,8 @@
 //! A logprob row from one row of the XPU's logits on the host: the normalizer, the pick, the `count` best ids.
 const std = @import("std");
 const lanes = @import("lanes");
+const xq = @import("xpu_qwen27");
+const be = lanes.backend;
 
 const top = lanes.logprob.max_top;
 const lane_width = 8;
@@ -102,6 +104,30 @@ test "draft sources: XPU logprob row: the vector exponential stays near the libr
         }
     }
 }
+
+/// Logprobs: each window row's raw distribution (row `n` of the block is `src.rowLogits(n)`), with the token it drew.
+pub fn windowRows(src: anytype, windows: []const be.Window, out: []const be.Verified, widths: []const u32) !void {
+    var next: u32 = 0;
+    for (windows, out, widths) |w, o, width| {
+        if (o.rows.len == width) {
+            for (o.rows, o.sampled) |*lp, pick| {
+                lp.* = row(try src.rowLogits(next), pick, w.stream.logprobs orelse 0);
+                next += 1;
+            }
+        } else next += width;
+    }
+}
+
+/// The raw distribution behind each token a tree round's walk chose, by its place on the accepted path.
+pub const Logged = struct {
+    runner: *xq.Runner,
+    k: u8,
+    rows: [xq.drafter.MAXL]lanes.LogprobRow = undefined,
+    pub fn take(c_: *anyopaque, at: u32, from: u32, pick: u32) anyerror!void {
+        const c: *@This() = @ptrCast(@alignCast(c_));
+        c.rows[at] = row(try c.runner.rowLogits(from), pick, c.k);
+    }
+};
 
 test "draft sources: XPU logprob row: normalizer, best ids in order, ties to the lower id, a pick outside them" {
     var l: [130]f32 = undefined;
