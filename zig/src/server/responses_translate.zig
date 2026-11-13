@@ -296,6 +296,7 @@ pub fn include(cx: *Cx, given: Value) errors.Refused!void {
 pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
+    try fields.singleChoice(cx, body); // n choices come on /v1/chat/completions and /v1/completions only
     for (refused) |r| if (json.truthyField(body, r[0])) return cx.refuse(r[1]);
     if (body.get("include")) |inc| try include(cx, inc);
     if (body.field("truncation")) |t| if (!(t == .string and std.mem.eql(u8, t.string, "disabled"))) return cx.refuse("truncation must be \"disabled\": a prompt too long for the context is refused");

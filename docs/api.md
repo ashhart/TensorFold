@@ -386,7 +386,15 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `priority` | `background` yields to foreground requests | Both |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 
-`n` must be 1; multiple choices receive HTTP 400.
+`n` takes 1 through 16 choices: each is its own engine request on the one prompt, and later choices resume the
+prompt the first fills (their `tensorfold.cached_tokens` show it). Choice 0 keeps the request's seed (a request that
+names none draws one for all its choices), so `n: 1` is unchanged; choice `i` draws with `mix(seed ^ i)` in 63 bits,
+named in its own `tensorfold.seed`, and a solo request with that seed gives its tokens. Each choice has its own
+tool-call ids, `stop_sequence` and loop-stop `error`. `usage` counts the prompt once and every choice's reply
+tokens. A stream sends every choice's chunks by `index`, then each choice's finish, then one usage chunk when asked.
+`n` above 1 with `logprobs` or a required tool call receives HTTP 400, as do `n` above 16 and, on a `--cortheon`
+server, a chat its turn loop would take (send `"cortheon": false` for several choices). `/v1/responses` and
+`/v1/imprint` serve one reply: `n` other than 1 receives HTTP 400 there.
 
 `modalities` must be absent or `["text"]`, and a truthy top-level `image`, `images`, `image_url`, `input_image`,
 `audio`, `input_audio`, `video` or `video_url` key is refused: this server accepts and produces text only.
@@ -1037,6 +1045,9 @@ from the end of its headers, after the key check and before its body is read or 
 ends, streams included. Each key counts apart, by its digest, whatever its label; a server without keys counts every
 request as one key. A refused request answers 429 with `Retry-After` and the route's error shape (`rate_limit_error`; the
 OpenAI-shaped `code` names the limit) and closes its connection without reading the body. A refusal spends no rate.
+A chat or completion with `n` above 1 holds `n` places under `--max-inflight` and `--max-inflight-per-key` (one rate
+charge): once its body is read it takes the other `n - 1` places, all or none, or answers the same 429 before any
+choice starts; it then counts as both accepted and refused in the metrics.
 
 The rate's buckets live in a table of 128 keys. A key's bucket stays until it has refilled, so cycling keys cannot reset a
 spent rate; with more than 128 keys starting requests within one refill, a further key is refused

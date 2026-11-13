@@ -143,6 +143,8 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding, .rerank = is_rerank, .systemone = is_systemone };
     var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
     defer entered.held.release();
+    conn.lease = if (entered.held.lease) |*lease| lease else null; // n choices count each against the caps
+    defer conn.lease = null;
     if (entered.refusal) |refusal| return refuse(conn, a, is_anthropic, refusal);
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (is_images) return images.post(srv, conn, a) catch {};
@@ -173,7 +175,7 @@ fn refuse(conn: *Conn, a: Allocator, anthropic_shape: bool, refusal: request_gat
 }
 
 /// 429 with Retry-After in the API's own error shape; the unread body is left behind with the connection.
-fn overloaded(conn: *Conn, anthropic_shape: bool, refusal: admission.Refusal) void {
+pub fn overloaded(conn: *Conn, anthropic_shape: bool, refusal: admission.Refusal) void {
     var buf: [320]u8 = undefined;
     const body = (if (anthropic_shape)
         std.fmt.bufPrint(&buf, "{{\"type\": \"error\", \"error\": {{\"type\": \"rate_limit_error\", \"message\": \"{s}\"}}}}", .{admission.message(refusal.reason)})

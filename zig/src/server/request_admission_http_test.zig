@@ -294,6 +294,39 @@ test "admission HTTP: a spent rate refuses after the request ends and the metric
         try t.expect(std.mem.startsWith(u8, line, "tensorfold:admission_rejected_total{reason=\"")); // no key, label or digest
 }
 
+test "admission HTTP: n choices take n in-flight places, all or none, until the reply ends" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try h.start(&engine, null, .{ .max_inflight = 2 });
+    defer h.deinit();
+    const three = "{\"model\":\"m\",\"prompt\":\"x\",\"max_tokens\":1,\"temperature\":0,\"n\":3}";
+    const refused = try h.request(a, try requestText(a, "/v1/completions", "", three));
+    try expectStatus(refused, "HTTP/1.1 429 Too Many Requests\r\n");
+    try t.expect(contains(refused, "Retry-After: 1\r\n") and contains(refused, "\"code\": \"max_inflight_exceeded\"}}"));
+    try t.expectEqual(@as(u32, 0), engine.calls.load(.acquire)); // no choice started
+    engine.hold.store(true, .release);
+    const two = "{\"model\":\"m\",\"prompt\":\"x\",\"max_tokens\":1,\"temperature\":0,\"n\":2}";
+    const fd = try h.begin(try requestText(a, "/v1/completions", "", two));
+    defer _ = posix.system.close(fd);
+    var waited: usize = 0;
+    while (engine.active.load(.acquire) < 2) : (waited += 1) {
+        if (waited == 5000) return error.SubmitTimeout;
+        std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try t.expectEqual(@as(u32, 2), h.srv.admission.snapshot(t.io).inflight);
+    try expectStatus(try h.request(a, try requestText(a, "/v1/completions", "", completion)), "HTTP/1.1 429 ");
+    engine.hold.store(false, .release);
+    const reply = try receive(a, fd);
+    try expectStatus(reply, "HTTP/1.1 200 ");
+    try t.expect(contains(reply, "\"index\": 1"));
+    try t.expectEqual(@as(u32, 0), h.srv.admission.snapshot(t.io).inflight);
+    try t.expectEqual(@as(u64, 2), h.srv.admission.snapshot(t.io).rejected_global);
+    try expectStatus(try h.request(a, try requestText(a, "/v1/completions", "", completion)), "HTTP/1.1 200 ");
+}
+
 test "admission HTTP: with no admission flag nothing is reserved, refused or added to the metrics" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();

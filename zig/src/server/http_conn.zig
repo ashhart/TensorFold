@@ -68,6 +68,8 @@ pub const Conn = struct {
     key_digest: ?[32]u8 = null,
     auth_enabled: bool = false,
     counted: bool = false,
+    /// The admission lease of the request a route handler runs, set by routes (n choices widen it); else null.
+    lease: ?*@import("request_admission.zig").Lease = null,
     hook: ?StatusHook = null,
     broken: bool = false,
     quiet_log: bool = false,

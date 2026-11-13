@@ -39,6 +39,7 @@ pub const Generation = struct {
     asked: ?*const std.atomic.Value(bool) = null, // POST /v1/requests/{id}/cancel's ask (cancel_ids.zig)
     cancel_sent: bool = false, // the ask went to the engine once; the loop then reads until the engine finishes
     seed: ?u64 = null,
+    report_seed: bool = false, // one of n > 1 choices: the tensorfold block names its seed
     sink: ?Sink,
     thinking: bool,
     chat: bool = true,
@@ -323,6 +324,7 @@ pub const Generation = struct {
         try runtime.put(a, "time_to_first_token", if (g.first_ns) |t| .{ .float = seconds(t - received) } else .null);
         try runtime.put(a, "sampling", .{ .string = if (exact) "exact" else "greedy" });
         try runtime.put(a, "drafts", .{ .bool = drafts });
+        if (g.report_seed) try runtime.put(a, "seed", if (g.seed) |v| try json.intValue(a, v) else .null);
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
         const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);

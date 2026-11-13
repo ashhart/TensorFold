@@ -60,8 +60,9 @@ def doc(sha="a" * 64, cached=0, accepted=2, drafted=3, text="hi"):
 
 def refusal(body, fault=None):
     """The error a real server gives for the profile's refused requests, else None."""
-    if body.get("n", 1) != 1:
-        return "n must be 1; multiple choices are not supported"
+    n = body.get("n", 1)
+    if type(n) is not int or not 1 <= n <= 16:
+        return "n must be an integer between 1 and 16"
     if "top_logprobs" in body and not body.get("logprobs"):
         return "top_logprobs requires logprobs: true"
     if abs(body.get("presence_penalty", 0)) > 2 and fault != "refusals":
