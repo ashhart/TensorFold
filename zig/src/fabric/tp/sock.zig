@@ -2,6 +2,10 @@
 const std = @import("std");
 const c = std.c;
 const posix = std.posix;
+const sealed = @import("sealed.zig");
+const auth = @import("sys").rank_auth;
+/// MSG_MORE on Linux: what follows leaves in the same segment.
+const more: u32 = 0x8000;
 
 pub const Fd = c.fd_t;
 
@@ -51,6 +55,7 @@ pub fn accept(fd: Fd, deadline_ns: u64) Error!Fd {
         try waitReadable(fd, deadline_ns);
         const conn = c.accept(fd, null, null);
         if (conn >= 0) {
+            sealed.drop(conn); // a new socket is sealed by its own proof, never by the one its number named before
             _ = c.fcntl(conn, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
             tune(conn);
             return conn;
@@ -73,6 +78,7 @@ pub fn connect(host: []const u8, port: u16, deadline_ns: u64) Error!Fd {
             defer c.freeaddrinfo(res.?);
             const fd = c.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
             if (fd < 0) return error.SocketFailed;
+            sealed.drop(fd);
             _ = c.fcntl(fd, posix.F.SETFD, @as(c_int, posix.FD_CLOEXEC));
             if (connectBefore(fd, res.?.addr.?, res.?.addrlen, deadline_ns)) {
                 tune(fd);
@@ -99,7 +105,7 @@ fn connectBefore(fd: Fd, address: *const posix.sockaddr, len: posix.socklen_t, d
     return c.getsockopt(fd, posix.SOL.SOCKET, posix.SO.ERROR, @ptrCast(&err), &size) == 0 and err == 0;
 }
 
-fn waitWritable(fd: Fd, deadline: u64) Error!void {
+pub fn waitWritable(fd: Fd, deadline: u64) Error!void {
     while (true) {
         const now = nowNs();
         if (now >= deadline) return error.Timeout;
@@ -109,7 +115,23 @@ fn waitWritable(fd: Fd, deadline: u64) Error!void {
     }
 }
 
+/// From here on every byte these helpers move on `fd` is a record sealed under its key proof's `session`.
+pub fn seal(fd: Fd, session: *const auth.Key, connector: bool) Error!void {
+    return sealed.add(fd, session, connector);
+}
+
+/// Whether `fd` carries sealed records.
+pub fn isSealed(fd: Fd) bool {
+    return sealed.of(fd) != null;
+}
+
+/// Whether bytes of a sealed record already wait for `recvExact`, which a poll of the socket does not show.
+pub fn waiting(fd: Fd) bool {
+    return if (sealed.of(fd)) |line| line.seal.waiting() > 0 else false;
+}
+
 pub fn sendBefore(fd: Fd, bytes: []const u8, deadline: u64) Error!void {
+    if (sealed.of(fd)) |line| return line.send(fd, bytes, deadline, 0);
     var at: usize = 0;
     while (at < bytes.len) {
         try waitWritable(fd, deadline);
@@ -120,7 +142,7 @@ pub fn sendBefore(fd: Fd, bytes: []const u8, deadline: u64) Error!void {
     }
 }
 
-fn waitReadable(fd: Fd, deadline_ns: u64) Error!void {
+pub fn waitReadable(fd: Fd, deadline_ns: u64) Error!void {
     while (true) {
         const t = nowNs();
         if (t >= deadline_ns) return error.Timeout;
@@ -133,9 +155,19 @@ fn waitReadable(fd: Fd, deadline_ns: u64) Error!void {
 
 /// Every byte of `bytes`, or `error.Closed`.
 pub fn sendAll(fd: Fd, bytes: []const u8) Error!void {
+    return sendWith(fd, bytes, 0);
+}
+
+/// `sendAll` for bytes more follow at once (a frame's length before its body).
+pub fn sendMore(fd: Fd, bytes: []const u8) Error!void {
+    return sendWith(fd, bytes, more);
+}
+
+fn sendWith(fd: Fd, bytes: []const u8, flags: u32) Error!void {
+    if (sealed.of(fd)) |line| return line.send(fd, bytes, null, flags);
     var off: usize = 0;
     while (off < bytes.len) {
-        const n = c.send(fd, bytes[off..].ptr, bytes.len - off, posix.MSG.NOSIGNAL);
+        const n = c.send(fd, bytes[off..].ptr, bytes.len - off, posix.MSG.NOSIGNAL | flags);
         if (n <= 0) {
             if (n < 0 and posix.errno(n) == .INTR) continue;
             return error.Closed;
@@ -146,6 +178,7 @@ pub fn sendAll(fd: Fd, bytes: []const u8) Error!void {
 
 /// Fills `out` before `deadline_ns` (null: no deadline), or `error.Closed` at the end of the stream.
 pub fn recvExact(fd: Fd, out: []u8, deadline_ns: ?u64) Error!void {
+    if (sealed.of(fd)) |line| return line.recv(fd, out, deadline_ns);
     var off: usize = 0;
     while (off < out.len) {
         if (deadline_ns) |d| try waitReadable(fd, d);
@@ -160,6 +193,7 @@ pub fn recvExact(fd: Fd, out: []u8, deadline_ns: ?u64) Error!void {
 
 /// A non-blocking send of the whole of `bytes` if the socket buffer has room (false: dropped, or the peer is gone).
 pub fn trySend(fd: Fd, bytes: []const u8) bool {
+    if (sealed.of(fd)) |line| return line.trySend(fd, bytes);
     const n = c.send(fd, bytes.ptr, bytes.len, posix.MSG.NOSIGNAL | posix.MSG.DONTWAIT);
     return n == @as(isize, @intCast(bytes.len));
 }
@@ -169,6 +203,7 @@ pub fn hangup(fd: Fd) void {
 }
 
 pub fn close(fd: Fd) void {
+    sealed.drop(fd);
     _ = c.close(fd);
 }
 
