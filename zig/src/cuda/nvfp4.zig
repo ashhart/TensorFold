@@ -20,6 +20,17 @@ pub fn padded(n: usize) usize {
     return (n + 127) / 128 * 128;
 }
 
+/// prompt_many.cu's part: one NVFP4 projection of the shared bf16 input, its tiles from `first`.
+pub const parts_max = 8;
+pub const ManyPart = extern struct { w: u64, bs: u64, scale: f32, out: u64, n: c_int, npad: c_int, first: c_int };
+/// prompt_many.cu's parts, passed by value: `parts_max` projections at most.
+pub const ManyParts = extern struct { p: [parts_max]ManyPart, count: c_int };
+
+comptime {
+    std.debug.assert(@sizeOf(ManyPart) == 48);
+    std.debug.assert(@sizeOf(ManyParts) == 392);
+}
+
 /// Codes [n, k/2] (low nibble first) as qmm.pack tiles them: int32 words [npad/64][k/64][8][32][2], rows past n zero.
 pub fn packWords(out: []u32, codes: []const u8, n: usize, k: usize) void {
     const npad = padded(n);
@@ -70,6 +81,9 @@ pub const Prompt = struct {
     bf16_f32: Function,
     lean: Function, // prompt_lean FP4, bf16 out
     lean_f32: Function, // and fp32 out
+    many: Function, // tf_prompt16_many: one grid over 2-8 NVFP4 projections of one input, each its own lean bits
+    many_f32: Function, // and fp32 out
+    many_mod: Module, // prompt_many.cu's image, unloaded with the prompt module
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
 
     pub const Tile = enum { lean, classic };
@@ -130,15 +144,22 @@ pub const Prompt = struct {
         try lean.allowDynamicShared(leanSharedBytes());
         const lean_f32 = try mod.function(lean_symbols[1]);
         try lean_f32.allowDynamicShared(leanSharedBytes());
+        var many_mod = try Module.load(d, kernels.prompt_many);
+        errdefer many_mod.unload();
+        const many = try many_mod.function("tf_prompt16_many");
+        try many.allowDynamicShared(leanSharedBytes());
+        const many_f32 = try many_mod.function("tf_prompt16_many_f32");
+        try many_f32.allowDynamicShared(leanSharedBytes());
         var dev: abi.Device = 0;
         try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .sms = @intCast(@max(sms, 1)) };
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .many = many, .many_f32 = many_f32, .many_mod = many_mod, .sms = @intCast(@max(sms, 1)) };
     }
 
     pub fn unload(p: *Prompt) void {
         p.mod.unload();
+        p.many_mod.unload();
     }
 
     /// y [m, n] bf16 = prompt rows x [m, k] bf16 (rows `ldx` apart) times an FP4 or FP8 weight (linear._prompt).
@@ -170,6 +191,47 @@ pub const Prompt = struct {
     }
 
     const Shape = struct { bm: usize, bn: usize, threads: u32, shared: u32, blocks: usize = std.math.maxInt(usize) };
+
+    /// One grid over 2-8 NVFP4 projections of one bf16 input, each keeping its own band, chain and epilogue.
+    pub const ManyMember = struct { w: qmmf.Weight, out: u64 };
+
+    pub fn matmulMany(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, members: []const ManyMember, out: qmmf.Out) !void {
+        if (members.len < 2 or members.len > parts_max) return error.TooManyParts;
+        const k = members[0].w.k;
+        const rows_t = (m + lean_bm - 1) / lean_bm;
+        var parts: ManyParts = std.mem.zeroes(ManyParts);
+        var tiles: usize = 0;
+        for (members, 0..) |member, i| {
+            const w = member.w;
+            if (w.mode != .fp4) return error.FormatMismatch;
+            if (w.k != k or w.k % 64 != 0 or w.n == 0 or w.npad < w.n or w.npad != padded(w.n)) return error.InputMismatch;
+            for (members[0..i]) |prev| if (prev.out == member.out) return error.InputMismatch;
+            parts.p[i] = .{
+                .w = w.codes,
+                .bs = w.scales,
+                .scale = w.scale,
+                .out = member.out,
+                .n = @intCast(w.n),
+                .npad = @intCast(w.npad),
+                .first = @intCast(tiles),
+            };
+            tiles += rows_t * ((w.n + lean_bn - 1) / lean_bn);
+        }
+        parts.count = @intCast(members.len);
+        const band = @max(1, @min(rows_t, (12 << 20) / (lean_bm * k * 2)));
+        var args: launch_.Args = .{};
+        args.add(x);
+        args.add(parts);
+        args.add(@as(i32, @intCast(m)));
+        args.add(@as(i32, @intCast(k)));
+        args.add(@as(i32, @intCast(if (m == 1) k else ldx)));
+        args.add(@as(i32, @intCast(band)));
+        try launch_.launch(if (out == .f32) p.many_f32 else p.many, .{
+            .grid = .{ .x = @intCast(@min(p.sms, tiles)), .y = 1, .z = 1 },
+            .block = .{ .x = lean_threads, .y = 1, .z = 1 },
+            .shared = leanSharedBytes(),
+        }, s, &args);
+    }
 
     fn run(s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, f: Function, t: Shape) !void {
         const rows_t = (m + t.bm - 1) / t.bm;

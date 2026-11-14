@@ -133,6 +133,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "qk_rows", .flags = &.{"-O3"} }, // ours: QK norm, RoPE and the cache write (cuda/qk_rows.zig)
     .{ .name = "qmmf", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/qmmf.cu (FP8G, FP4), tensorfold_nvfp4_v3
     .{ .name = "prompt16", .flags = &.{"-O3"}, .native_fp = true }, // nvfp4/prompt.cu FP4/FP8 tile 4, nvfp4_prompt_v1
+    .{ .name = "prompt_many", .flags = &.{"-O3"}, .native_fp = true }, // ours: prompt_lean's FP4 tile over NVFP4 projections of one input
     .{ .name = "tree_attention", .flags = &.{"-O3"} }, // ours: committed keys and paths (cuda/tree_attention.zig)
     .{ .name = "block_attention", .flags = &.{"-O3"} }, // ours: a drafter's block over its context (cuda/block_attention.zig)
     .{ .name = "window_attention", .flags = &.{"-O3"} }, // ours: sliding-window attention (cuda/window_attention.zig)
@@ -202,8 +203,8 @@ test "profile: arch-specific kernels take sm_<n>a from sm_120 on, others plain, 
     try std.testing.expectEqual(@as(?Profile, null), profile(plain, Target.parse("75")));
 }
 
-test "native_fp units: exactly fp8_experts, qmmf and prompt16 (without the flag native-fp only skips)" {
-    const want = [_][]const u8{ "fp8_experts", "qmmf", "prompt16" };
+test "native_fp units: exactly fp8_experts, qmmf, prompt16 and prompt_many (without the flag native-fp only skips)" {
+    const want = [_][]const u8{ "fp8_experts", "qmmf", "prompt16", "prompt_many" };
     var seen: usize = 0;
     for (kernels) |k| {
         if (!k.native_fp) continue;

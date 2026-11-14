@@ -67,6 +67,7 @@ pub const qwen35_bf16_rows: []const u8 = if (available) &Blob("fatbin_qwen35_bf1
 pub const gdn_prefill: []const u8 = if (available) &Blob("fatbin_gdn_prefill").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
+pub const prompt_many: []const u8 = if (available) &Blob("fatbin_prompt_many").bytes else &.{};
 pub const tree_attention: []const u8 = if (available) &Blob("fatbin_tree_attention").bytes else &.{};
 pub const block_attention: []const u8 = if (available) &Blob("fatbin_block_attention").bytes else &.{};
 pub const window_attention: []const u8 = if (available) &Blob("fatbin_window_attention").bytes else &.{};

@@ -13,8 +13,7 @@ const router_k = @import("contract_router.zig");
 const qwen_router_k = @import("contract_qwen_router.zig");
 const glm_router_k = @import("contract_glm_router.zig");
 const mm_k = @import("contract_mm.zig");
-const prefill_many_k = @import("contract_qmm_prefill_many.zig");
-const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
+const many_wire = @import("contract_many_wire.zig");
 const mx_k = @import("contract_mxfp8.zig");
 const half_k = @import("contract_lane_half.zig");
 const wide_k = @import("contract_projection_f32.zig");
@@ -221,12 +220,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     }
     defer for (&verify_controls) |*m| m.deinit();
     for (&verify_controls) |*m| if (m.kernel()) |k| try kernels.append(a, k);
-    var prefill_many = prefill_many_k.Registrations.init(gpu, s, &affine4);
-    defer prefill_many.deinit();
-    try prefill_many.append(cap, a, &kernels);
-    var prefill_tile22 = prefill_tile22_k.Registrations.init(gpu, s, &affine4);
-    defer prefill_tile22.deinit();
-    try prefill_tile22.append(cap, a, &kernels);
+    var many: many_wire.Keep = undefined;
+    try many_wire.wire(gpu, s, cap, a, &affine4, &prompt, &kernels, &many);
+    defer many.deinit();
     var mx = [_]mx_k.Product{
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .clusters = true },
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .clusters = false },

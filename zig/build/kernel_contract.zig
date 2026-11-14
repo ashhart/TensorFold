@@ -157,5 +157,11 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     const prefill_many_bench = b.addRunArtifact(runner);
     prefill_many_bench.addArg("qmm-prefill-many-bench");
     b.step("qmm-prefill-many-bench", "Same-process A-B-A screening for the GB10 prompt launch fusion").dependOn(&prefill_many_bench.step);
+    const prompt_many = b.addRunArtifact(runner);
+    prompt_many.addArg("nvfp4-prompt-many-contract");
+    b.step("nvfp4-prompt-many-contract", "NVFP4 bit-exact multi-projection prompt launch against separate lean launches").dependOn(&prompt_many.step);
+    const prompt_many_bench = b.addRunArtifact(runner);
+    prompt_many_bench.addArg("nvfp4-prompt-many-bench");
+    b.step("nvfp4-prompt-many-bench", "Interleaved same-process screening for the NVFP4 prompt launch fusion").dependOn(&prompt_many_bench.step);
     return install;
 }
