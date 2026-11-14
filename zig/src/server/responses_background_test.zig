@@ -14,6 +14,8 @@ const t = std.testing;
 const Lane = struct {
     io: std.Io,
     mutex: std.Io.Mutex = .init,
+    output_ready: std.Io.Condition = .init,
+    first_tokens: usize = 0,
     jobs: std.ArrayList(Job) = .empty,
     asked: std.ArrayList(api.Id) = .empty,
     taken: std.ArrayList([]const u8) = .empty, // each request's prompt, max_tokens and sampling, as text
@@ -79,6 +81,14 @@ const Lane = struct {
         return l.taken.items.len >= n;
     }
 
+    fn waitFirstTokens(l: *Lane, n: usize) !void {
+        const timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } };
+        const deadline = timeout.toDeadline(l.io);
+        l.mutex.lockUncancelable(l.io);
+        defer l.mutex.unlock(l.io);
+        while (l.first_tokens < n) l.output_ready.waitTimeout(l.io, &l.mutex, deadline) catch return error.Timeout;
+    }
+
     fn askedFor(l: *Lane, id: api.Id) bool {
         l.mutex.lockUncancelable(l.io);
         defer l.mutex.unlock(l.io);
@@ -103,6 +113,12 @@ const Lane = struct {
                 }
                 const tok: u32 = 'a' + @as(u32, @intCast((j.salt +% i) % 26));
                 j.sink.event(j.sink.ctx, j.id, &.{ .tokens = &.{tok} });
+                if (i == 0) {
+                    l.mutex.lockUncancelable(l.io);
+                    l.first_tokens += 1;
+                    l.output_ready.broadcast(l.io);
+                    l.mutex.unlock(l.io);
+                }
                 std.Io.sleep(l.io, .fromMilliseconds(1), .awake) catch {};
             }
             j.sink.event(j.sink.ctx, j.id, &.{ .finished = .{ .reason = reason } });
@@ -220,7 +236,7 @@ test "background Responses: polled in progress, cancelled with its text so far, 
     const srv = try serve(&lane);
     defer srv.deinit();
     const id = (try post(srv, a, long)).body.strField("id").?;
-    try waitFor(Lane.submitted, .{ &lane, 1 });
+    try lane.waitFirstTokens(1);
     _ = try waitStatus(srv, a, id, "in_progress");
     try t.expectEqual(@as(u32, 1), srv.generating.load(.seq_cst)); // the response holds the request gate's count
     const cancelled = try send(srv, a, "POST", try urlOf(a, id, "/cancel"), "", null);
@@ -249,12 +265,12 @@ test "background Responses: the request id cancel route, DELETE while running, a
     defer srv.deinit();
     // POST /v1/requests/{id}/cancel takes the same resp_ id: the response ends "cancelled" with its text so far
     const first = (try post(srv, a, long)).body.strField("id").?;
-    try waitFor(Lane.submitted, .{ &lane, 1 });
+    try lane.waitFirstTokens(1);
     try t.expectEqual(@as(u16, 200), (try send(srv, a, "POST", try std.fmt.allocPrint(a, "/v1/requests/{s}/cancel", .{first}), "", null)).status);
     try t.expect(textOf(try waitStatus(srv, a, first, "cancelled")).len > 0);
     // DELETE stops a running response and keeps nothing of it, even once its turn ends
     const second = (try post(srv, a, long)).body.strField("id").?;
-    try waitFor(Lane.submitted, .{ &lane, 2 });
+    try lane.waitFirstTokens(2);
     const deleted = try send(srv, a, "DELETE", try urlOf(a, second, ""), "", null);
     try t.expectEqual(@as(u16, 200), deleted.status);
     try t.expectEqual(true, deleted.body.get("deleted").?.bool);
