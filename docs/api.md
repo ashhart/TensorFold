@@ -880,6 +880,51 @@ The reply's `tensorfold` object carries `context_window` and `context_used`, and
 to chat completions with a `messages` array, and to the Responses API, which runs as one; a completions request
 with a plain string prompt is never compacted.
 
+## Image generation
+
+On an engine that generates images, POST `/v1/images/generations` takes `model`, `prompt` and `n` from 1 through 4
+(default 1). The pictures run one after another through the engine's one-picture call with the same prompt, negative
+prompt, size, steps and guidance; only the seed differs. The reply's `data` array is in request order, each item
+with `b64_json` (the PNG) and `seed`, the integer seed that picture used.
+
+An explicit `seed` is an integer from 0 through 18446744073709551615. Picture `i`, counting from zero, uses
+`seed + i`; a request whose last seed would pass that range is HTTP 400 before any picture starts. Without `seed`,
+the pictures start from 42, as a one-picture request always has, so picture `i` uses `42 + i`. A reported seed
+sent back with `n: 1` and the same other fields gives the same PNG bytes:
+`{"model":"m","prompt":"A red kite","n":4,"seed":42}` returns seeds 42, 43, 44 and 45, each picture the same as the
+`n: 1` request with that seed.
+
+`n` outside 1 to 4, or not an integer, is HTTP 400 "n must be from 1 to 4". The other fields are `negative_prompt`,
+`size` (`WIDTHxHEIGHT`), `steps`, `guidance` and `response_format: "b64_json"`; the engine may tighten the size, step
+and prompt limits, and URL output is not served. A server whose model does not generate images answers 404.
+
+The reply is written once every picture has finished. A refusal, a failed generation or a cancel stops the sequence
+and returns that error with no pictures. A client that disconnects cancels the current picture, and the later
+pictures are never submitted.
+
+## Image generation streams
+
+With `stream: true`, on an engine that reports its denoising steps, the route answers `text/event-stream`. After
+each step it sends `image_generation.progress` with `index` (the picture, from 0), `seed`, `step` (from 1) and
+`total_steps`; when the picture is done, `image_generation.completed` carries its `b64_json` PNG, `index` and
+`seed`. With `n` above 1 the pictures follow one another on the same stream, each counting its own steps, and one
+`data: [DONE]` ends it. Each event's `type` is its event name, OpenAI's for the completed picture and the previews.
+
+`preview_interval: N`, an integer from 1 through `steps` sent with `stream: true` to an engine that makes previews,
+adds `image_generation.partial_image` after every Nth step's progress event. Its `b64_json` is a separate PNG of at
+most 128 pixels a side and 81,920 bytes, with `width`, `height`, `step`, `total_steps`, `index`, `seed` and
+`partial_image_index` (from 0). Previews do not change the picture: the final PNG bytes are the same with or without
+`stream` and `preview_interval`, and no preview is made unless one is asked for. For example,
+`{"model":"m","prompt":"A red kite","seed":42,"steps":8,"stream":true,"preview_interval":2}` sends progress for
+steps 1 to 8, previews after steps 2, 4, 6 and 8, then the picture.
+
+A request without `stream`, or with `stream: false`, gets the whole JSON reply as before. `stream` on an engine
+without step progress, `preview_interval` without `stream` or on an engine without previews, and a value out of
+range are HTTP 400 before anything is submitted. A refusal before the stream starts is the usual HTTP error; once it
+has started, a failure is an `error` event holding OpenAI's error object, then `data: [DONE]`, and the pictures
+already completed stay sent. A client that disconnects, or a write that fails, cancels the picture at its next step,
+and no later picture is submitted.
+
 ## Embeddings
 
 `POST /v1/embeddings` takes OpenAI's body: `input` is one text, a list of texts, one list of token IDs or a list of

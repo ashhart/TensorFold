@@ -285,7 +285,11 @@ test "omitted seed, steps, guidance, negative_prompt and size reach the engine a
     defer gpa.free(reply.body);
     try t.expect(std.mem.indexOf(u8, reply.head, " 200 ") != null);
     try t.expectEqual(@as(usize, 1), stub.calls);
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const item = (try json.parse(arena.allocator(), reply.body)).ok.get("data").?.array[0];
     try t.expectEqual(@as(u64, 42), stub.seed);
+    try t.expectEqual(stub.seed, try std.fmt.parseInt(u64, item.get("seed").?.int, 10));
     try t.expectEqual(@as(u32, 50), stub.steps);
     try t.expectEqual(@as(f32, 3), stub.guidance);
     try t.expectEqual(@as(usize, 0), stub.negative_len);
@@ -324,8 +328,8 @@ test "a sent size within a smaller host's limits still reaches the engine" {
 const Case = struct { body: []const u8, want: []const u8 };
 
 const refusals = [_]Case{
-    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":2}", .want = "n must be 1" },
-    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":0}", .want = "n must be 1" },
+    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":5}", .want = "n must be from 1 to 4" },
+    .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"n\":0}", .want = "n must be from 1 to 4" },
     .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"1000x1024\"}", .want = "size 1000 must be a positive multiple of 16" },
     .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"2048x2048\"}", .want = "size 2048 is past the 1536 limit a side" },
     .{ .body = "{\"model\":\"m\",\"prompt\":\"hi\",\"size\":\"1552x1024\"}", .want = "size 1552 is past the 1536 limit a side" },
