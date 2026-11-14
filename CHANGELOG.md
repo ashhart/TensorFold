@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA: the release server refuses, by name at startup, a GPU it has no kernels for (#2914, #2904).
+
 - Linux: memory pressure can be read from PSI and MemAvailable; off by default (#2156).
 
 - GLM-5.3-Flash on CUDA: prompts take the TF_GLM_INDEX_CUDA kernels by default (0 keeps tf_glm_scores), with the same tokens; at TP=2 on two GB10s prompts are 44% faster at 2K and 31% at 8K, level at 32K (#3159). Thanks to @Bizuayeu.
