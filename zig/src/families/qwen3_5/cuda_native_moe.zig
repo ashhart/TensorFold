@@ -27,6 +27,9 @@ pub const snap_host = native.snap_host;
 pub const snap_lookahead = native.snap_lookahead;
 pub const snap_grid = native.snap_grid;
 pub const kept_disk = native.kept_disk;
+/// The dense family's warm pass: its wait for the next request and the ends a resume can use.
+pub const warm_quiet = native.warm_quiet;
+pub const warm_usable = native.warm_usable;
 
 pub const request_starts = native.request_starts;
 pub const request_starts_switch = native.request_starts_switch;

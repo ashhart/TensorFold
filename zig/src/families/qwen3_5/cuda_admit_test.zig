@@ -112,3 +112,11 @@ pub fn refusals() !void {
     try t.expectError(error.QwenShareNeedsPages, refused(false, null, "16"));
     try t.expectError(error.QwenShareNeedsPages, refused(false, "100", "16"));
 }
+
+test "Qwen share faults: --parallel N admits N streams at once with every stream on pages" {
+    try admits(native.Lanes);
+}
+
+test "Qwen pages default: --parallel a cap with TF_QWEN_KV_PAGES set, a request waits for pages; unset, a window each" {
+    try caps(native.Lanes);
+}
