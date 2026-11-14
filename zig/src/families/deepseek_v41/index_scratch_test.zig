@@ -43,7 +43,7 @@ fn exercise(k4: bool, tbo: bool, budget: i64) !void {
     try fp.planPrograms(&f, &p, 2048, &layers);
     if (k4 or tbo) try ws.planWorkspace(&f, &original, 2048, &layers);
     if (tbo) try t.expectEqual(ws.planBytes(&original), try fp.workspaceBytes(&f, 2048));
-    const row_sizes: [4]i64 = if (k4) .{ 2049, 3072, 4095, 4096 } else .{ 17, 1025, 2047, 2048 };
+    const row_sizes: []const i64 = if (k4) &.{ 2049, 3072, 4095, 4096 } else &.{ 17, 18, 32, 1025, 2047, 2048 };
     for ([_]bool{ false, true }) |shared| {
         var wp: buffers.Plan = .{ .a = a };
         for (original.sizes.keys(), original.sizes.values()) |k, v| try wp.sizes.put(a, k, v);
