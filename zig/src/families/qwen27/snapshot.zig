@@ -293,7 +293,7 @@ pub fn saveRewind(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring
 
 /// Slot `slot` (reset first) goes back to its rewind point at `at`: no later round wrote its K/V rows before `at`.
 pub fn rewindSlot(a: std.mem.Allocator, r: *Runner, slot: u32, ring: ?Ring, at: u32, buf: mtl.Buffer) !void {
-    try r.reset(slot);
+    try r.clearState(slot); // its pages stay: rows before `at` are the rewind's
     try rewindCopy(a, r, slot, ring, at, buf, false);
     r.offsets[slot] = at;
     if (ring) |g| g.end.* = at;
