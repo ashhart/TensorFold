@@ -35,6 +35,12 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 
 - Both ranks run the same executable (they compare it) and need NCCL 2.30 or later; set `NCCL_SOCKET_IFNAME` and
   `NCCL_IB_HCA` for the link between the hosts. `--master-port` (default 29551) names rank 0's control port.
+- A GB10's ConnectX-7 reaches the chip over two PCIe links, so each cabled port is two RDMA devices (`rocep1s0f0` and
+  `roceP2p1s0f0` for the first port), and one device alone carries about 112 of the port's 200 Gb/s. Give both
+  devices' interfaces an address, list both (`NCCL_IB_HCA==rocep1s0f0:1,roceP2p1s0f0:1`) and, when the interfaces
+  hold other addresses too, set `NCCL_IB_ADDR_RANGE` to a range that covers both; NCCL then puts half its channels on
+  each. On two GB10s joined by one cable this made cold 2,048 to 32,768-token prompts 26.5% to 28.1% faster (1,147
+  to 1,469 tokens/s at 8,192, NCCL 2.32.3), with decode speed and token hashes unchanged.
 - Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.
