@@ -557,8 +557,8 @@ remain strings for the client to validate. Union types and schema references are
 A reply that is not a call returns as content, never an error: prose, JSON that names no offered tool
 (a structured answer), and malformed tool blocks, which keep their text. A GLM argument key written without its
 `<arg_key>` gets that tag back, and the call parses. A well-formed call to a tool the
-request did not offer is returned as a tool call under its valid name, so the client can report the unknown
-tool and the model can correct itself.
+request did not offer is kept as text too, under the name the model wrote, so the client sees the markup it can
+report and the model can correct itself.
 
 When a model end token arrives inside a whole tool call before its closing markup, the server closes the
 markup and returns the call. A GLM value the end token cut off is closed with `</arg_value>` first, and the call
@@ -893,6 +893,10 @@ Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enab
 `prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and a `speculative` object beside
 the block with the draft counters `rounds`, `drafted`, `accepted`, `acceptance_rate`, and
 `tokens_per_round` (the drafter's own counters arrive as `proposer`).
+When a reply keeps tool-call envelopes as text instead of returning them as calls, the block also carries
+`kept_tool_calls`: `unoffered` and `malformed` counts, and `unoffered_names`, the names the model wrote for the
+kept unoffered calls, in order, without duplicates, at most 8 names of 64 bytes each. The whole reply and the
+streamed finish event carry the same object; a reply that kept none has no `kept_tool_calls` field.
 A request that sends `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native
@@ -950,7 +954,8 @@ out of the text rather than reported at a permanent zero.
 The scrape carries `requests_running`, `requests_waiting`, `prompt_tokens_total`, `generation_tokens_total`,
 `generation_tokens_running`, `kv_cache_usage_ratio` (one `pool` label per live stream cache), `mtp_drafted_total` and `mtp_accepted_total`
 (draft tokens verified and kept on finished requests; the engines keep one draft counter, so copies and chain
-drafts share it), `request_latency_seconds`, `time_to_first_token_seconds` and `request_decode_seconds` (each
+drafts share it), `kept_tool_calls_unoffered_total` and `kept_tool_calls_malformed_total` (tool-call envelopes kept as
+text on finished replies, by an unoffered name and by malformed markup), `request_latency_seconds`, `time_to_first_token_seconds` and `request_decode_seconds` (each
 finished request's decode time: the CUDA engine's own figure, or first token to end on the Mac server; its `_sum`
 over `generation_tokens_total` is the decode rate), `request_time_per_output_token_seconds`, `decode_rounds_total`,
 and the `request_prefill_seconds` histogram, all under the `tensorfold:` prefix. TPOT already carries vLLM's name.
