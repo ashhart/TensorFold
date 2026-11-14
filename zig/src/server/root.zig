@@ -76,6 +76,7 @@ test {
     _ = @import("auth.zig");
     _ = @import("cli.zig");
     _ = @import("cli_test.zig");
+    _ = @import("cli_backend_test.zig");
     _ = @import("cli_profile_test.zig");
     _ = @import("compact_at_cli_test.zig");
     _ = @import("toml_flat_test.zig");
