@@ -6,6 +6,7 @@ pub const forward = @import("forward.zig");
 pub const snap = @import("snap.zig");
 pub const backend = @import("backend.zig");
 pub const native = @import("native.zig");
+pub const cuda_disk = @import("cuda_disk.zig");
 
 test {
     _ = config;
@@ -15,4 +16,5 @@ test {
     _ = snap;
     _ = backend;
     _ = native;
+    _ = cuda_disk;
 }

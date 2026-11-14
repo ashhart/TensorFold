@@ -56,7 +56,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | open C[#2392] | open C[#2392] | open [#2215] | open C[#2392] | open C[#2392] |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | done [#2127] | done [#2127] |
 | 7. Host KV tier | yes | open [#1501] | done [#1795] | yes | yes |
-| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
+| 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | open C[#3135] | done C[#1413] M¹ |
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
 | 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
@@ -88,7 +88,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 5. State walk | yes | yes | yes | yes | yes |
 | 6. KV ledger | done [#2127] | done [#2127] | done [#2127] | yes | yes |
 | 7. Host KV tier | yes | yes | yes | yes | yes |
-| 8. Disk cache | yes | yes | yes | yes | done¹ |
+| 8. Disk cache | yes | open [#3135] | open [#3135] | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
 | 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
@@ -519,6 +519,7 @@ below; these are estimates for planning a port, not results.
 [#1394]: https://github.com/ashhart/TensorFold/pull/1394
 [#1411]: https://github.com/ashhart/TensorFold/pull/1411
 [#1413]: https://github.com/ashhart/TensorFold/pull/1413
+[#3135]: https://github.com/ashhart/TensorFold/pull/3135
 [#1423]: https://github.com/ashhart/TensorFold/pull/1423
 [#1426]: https://github.com/ashhart/TensorFold/pull/1426
 [#1434]: https://github.com/ashhart/TensorFold/pull/1434

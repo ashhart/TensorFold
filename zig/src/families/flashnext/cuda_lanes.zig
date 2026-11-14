@@ -39,7 +39,7 @@ pub fn Namespace(comptime Tri: type) type {
         pub const snap_save = snaps.save;
         pub const snap_restore = snaps.restore;
         pub const snap_drop = snaps.drop;
-        pub const kept_disk = @import("cuda_disk.zig").Kept(@This()); // their disk image, as qwen3_5 declares its own
+        pub const kept_view = @import("cuda_disk.zig").View(@This()); // their disk image (native/cuda_kept.zig)
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;
         pub fn attach(p: *anyopaque, streams: u32, count: usize) !void {
