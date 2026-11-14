@@ -134,6 +134,53 @@ python3 tools/bench_fill.py http://127.0.0.1:8080 MODEL --corpus FILE --long 655
 `both_done_s` and the reply's largest gaps for each order, plus `alone` for the sum to compare `both_done_s` with. `exact`
 is true only when every reply's `token_sha256` equals its run alone; the tool exits 1 when it isn't, or when `cold` isn't.
 
+## Sequential agent eviction traces
+
+`tools/bench_cache_agents.py` measures one trace with one request in flight at a time.
+Use `agent_loops` for stable conversations or `agent_cohorts` to replace every conversation halfway through.
+Each agent turn is followed by two unique one-off prompts. Histories grow through public user messages and
+the measured assistant replies, including reasoning when present. One-off replies are discarded.
+Matching token replies preserve identical A/B histories; request fingerprints detect later divergence if replies differ.
+The schedule follows E24's shapes, with tokenizer-dependent chat-template overhead and Python's seeded one-off choices.
+
+```sh
+python3 tools/bench_cache_agents.py run http://127.0.0.1:8080 MODEL \
+  --trace agent_loops --conversations 6 --rounds 48 --prefix-tokens 8192 \
+  --tokens 16 --seed 11 --output A.json
+python3 tools/bench_cache_agents.py compare A.json B.json --output comparison.json
+```
+
+Start a fresh model process for every trace and policy, using the same checkpoint, template, cache budget,
+context, generation settings and idle-machine conditions. Run A with `TF_CACHE_EVICT` unset and B with
+`TF_CACHE_EVICT=decayed_resume`. Repeat separately for `agent_cohorts`. The client does not restart the server,
+clear caches, warm up, retry, or change any policy. Persistent state must not make the two starting caches differ.
+As with the other clients, a first request's observed reuse is recorded rather than presumed cold.
+
+`--prefix-tokens` sizes the standalone system text through authenticated `/tokenize` and `/detokenize` calls,
+including a token-ID roundtrip check. It is not a claim about the rendered chat prompt length. Initial user
+fixtures have roughly another prefix's worth of tokens, with session offsets; growth is a sixteenth of the
+prefix per turn, plus message labels and template overhead. One-off fixture lengths scale from one eighth to
+about one and a half prefixes. The setup calls are tokenizer operations, not inference warmups.
+
+Rows contain trace, request index, conversation, round, turn, request fingerprint/seed, `prompt_tokens`,
+`cached_tokens`, `cache_state`, TTFT, completion state/count, `token_sha`, `token_sha256` and `output_sha256`.
+Usage counters and TTFT follow the evidence rules above; malformed/missing usage remains `unverified`, with
+no fabricated rebuilt-row sum. TTFT is time from send to the first nonempty content or reasoning chunk,
+including HTTP and queueing. Failed/incomplete streams retain a row, stop the schedule and exit 1.
+Missing usage in an otherwise complete reply retains the full schedule but cannot qualify it.
+
+`compare` requires matching settings, fixture/prefix fingerprints, thinking modes, ordered request identities,
+and per-request prompt/completion counts. Text/reasoning output fingerprints must also agree.
+Exactness uses each complete reply's full `token_sha256`; short or
+missing token hashes cannot establish equality. It reports per-request equality and per-trace sums of
+`prompt_tokens - cached_tokens` and TTFT. Incompatible or non-exact pairs retain raw summaries but have no
+comparative deltas. Exit 0 means complete, verified, token-equal evidence; exit 1 means mismatch or unverified
+evidence; invalid receipts/arguments exit 2. It reports cost/time changes without imposing a performance threshold.
+
+Receipts omit raw text, endpoint, model alias, local paths and credentials. Use `--api-key-env NAME` for explicit
+bearer authentication on discovery, tokenizer and inference calls; environment keys are ignored otherwise.
+These remain model-specific served receipts, not physical-memory or hardware qualification claims.
+
 ## Model-free checks
 
 ```sh
