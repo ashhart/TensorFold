@@ -347,8 +347,7 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
     return rest[i];
 }
 
-/// The contract glue's device path, compiled with the runner: the device reaches prepare through the vtable.
-fn compileContractGlue() !void {
+fn compileContractGlue() !void { // the contract glue's device path, built with the runner: prepare through the vtable
     const cores = std.Thread.getCpuCount() catch 1;
     if (cores != 0) return;
     var g: glue_contract.Glue = undefined;
