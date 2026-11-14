@@ -1643,4 +1643,20 @@ await (async () => {
   ok('restore is queue-ordered and origin-aware')
 })()
 
+await (async () => {
+  // Regression for #3338: creating a Kanban entry with ENTER showed two identical
+  // boxes in Todo; one remained after restart. The main process emits ticket:update
+  // for the new ticket (workspace-runtime-ipc tickets:create -> emitTicket) before
+  // the createTicket IPC reply resolves, so the broadcast inserts the ticket via
+  // applyTicketUpdate while createTicket is still awaiting — and createTicket then
+  // prepended the same id a second time without deduping.
+  const ticket = { id: 'kanban-dup', projectId: 'p', title: 'Dup entry', body: '', type: 'task', status: 'todo', priority: 'medium', effort: 'small', tags: [], parentId: null, assignee: null, threadId: null, runState: null, order: 1, createdAt: 1, updatedAt: 1 } as any
+  useStore.setState({ tickets: [], projects: [{ id: 'p' } as any], rooms: [], threads: [], settings: baseSettings as any })
+  api.createTicket = (async () => { useStore.getState().applyTicketUpdate(ticket); return ticket }) as typeof api.createTicket
+  await useStore.getState().createTicket({ projectId: 'p', title: 'Dup entry', type: 'task', priority: 'medium', effort: 'small', status: 'todo' })
+  assert.equal(useStore.getState().tickets.filter((t) => t.id === 'kanban-dup').length, 1, 'ticket:update broadcast + createTicket reply must leave exactly one copy')
+  assert.equal(useStore.getState().tickets.filter((t) => t.id === 'kanban-dup')[0]?.title, 'Dup entry')
+  ok('createTicket dedupes against the ticket:update broadcast (issue #3338)')
+})()
+
 console.log(`\n${passed} passed`)
