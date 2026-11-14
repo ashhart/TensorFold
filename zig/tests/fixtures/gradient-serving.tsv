@@ -56,7 +56,7 @@ zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a
 zig/kernels/cuda/common/router_mma.cuh	3aca244a38f2e4b4f28bf74f333f384b1060b764c25b004cef4e6c636e7cc1dd	raw
 zig/kernels/cuda/qmm_group.cu	8780fd710be3ce2f04e53fa1e69eb062809d3bec6391d9bd49983d0588e374d0	raw
 zig/kernels/cuda/qmm_prefill.cu	45ab2be277c7c17e6cdc6041db45611f2554c6e88f09a295e88751b1c51be1f5	raw
-zig/kernels/cuda/qmmf.cu	13a3cb0b6dec56afeb1f248f0cfe39e2d4d458f2b08272c26adb92fe3efba8fc	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical)
+zig/kernels/cuda/qmmf.cu	d635929293dd7fc4ebe1b1742fd47a0bfde581a632852235a4b13454de2ae5d3	raw	main ec76abd45 (128-row BF16 prompt tile, bytes unchanged), c3acc3466 (K32 staging, bytes unchanged), e32de56c6 (#2721: tf_qmmf_native_fp4_check and the e2m1 pair decode behind -Dnative-fp-decode; default builds byte-identical), #3131
 zig/kernels/cuda/qwen_vision.cu	eeab10300aae424fd957856e4ddba77a3543e9a86bc61701dd09687d7e3b5ea5	raw
 zig/kernels/cuda/rank_sum.cu	3781c3a4441cfef903c1d0712240ad4d7ab4aaf2d3fb18b323597bcec3587909	raw
 zig/kernels/cuda/route_rows.cu	a2bf267f360cb57257aaef9765d4dca93f68523338b0881d710bbfcb01917dad	raw
@@ -102,8 +102,8 @@ zig/src/cuda/mxfp8.zig	2bbe9ea41b462f633b68e7a32c06814a28e34dee284383788c0a8f06e
 zig/src/cuda/nccl.zig	30abc4b904e675916e9bb8c4701ca3f1e5615472da4a5e09d2476865d81afe65	raw	commits 53abe4556, ba1a9a2bb, 05350da4c, 40dccba55, 6bdb12918, b923e554c, 7c9d845c0, 98a5dc657, 143ed758f, 6636e6964; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/norms.zig	c6ac613ff91b31257b5bce55311d8cf38a785862bfad9eb0c7bf0b2ba7b0df95	raw
 zig/src/cuda/nvfp4.zig	62bd32b4dcc7d4e7f077c2147adf65a1aea7744dda4845b06da72c946e6c5277	raw
-zig/src/cuda/qlinear.zig	680c653d110b53e52918bb13f7c54c12ffac4097959319281dc7509c085c062f	raw	commits da01294e0, 7f6f940eb, 4cec0eba1, c360607f0, ba1a9a2bb, b631fe069, 0a2a1c681, aca5a88e2, c12503be2, 7b17d0eb7, d7e44b555, 59be20e24, d40bc9e8b, f1f7f9abd, 3915bceaf, e8eabc82c; series patches 14-runtime-foundation.patch, 25-mimo-02.patch; MiMo-only aliases omitted from this candidate; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7f12b30	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name)
+zig/src/cuda/qlinear.zig	b69874d9db54f50a9f1a8eb5a8e3faa2f493105956f1712ea7e2d8c5e8a0fe3a	raw	commits da01294e0, 7f6f940eb, 4cec0eba1, c360607f0, ba1a9a2bb, b631fe069, 0a2a1c681, aca5a88e2, c12503be2, 7b17d0eb7, d7e44b555, 59be20e24, d40bc9e8b, f1f7f9abd, 3915bceaf, e8eabc82c; series patches 14-runtime-foundation.patch, 25-mimo-02.patch; MiMo-only aliases omitted from this candidate; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate, #3131
+zig/src/cuda/qmmf.zig	a1b139e7618e286f7df0cb3a9dd8e4837673cade4d1b3a8c9cb4f5666d21548f	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name), #3131
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
 zig/src/cuda/root.zig	5dbca351bbf6a42cd83d7b615d4e4624809444d7d2e714b1d71d8eec53c6e606	raw	main 42735f94f0 (#2335: cuda.mla exported)
 zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
