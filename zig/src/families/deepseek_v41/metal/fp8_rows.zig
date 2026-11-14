@@ -18,7 +18,7 @@ const whole_tiers = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 16 };
 const a_names = [_][:0]const u8{ "tf_dsv41_fp8_a_r1", "tf_dsv41_fp8_a_r2", "tf_dsv41_fp8_a_r4", "tf_dsv41_fp8_a_r8", "tf_dsv41_fp8_a_r16" };
 const b_names = [_][:0]const u8{ "tf_dsv41_fp8_b_r1", "tf_dsv41_fp8_b_r2", "tf_dsv41_fp8_b_r4", "tf_dsv41_fp8_b_r8", "tf_dsv41_fp8_b_r16" };
 
-/// The one-launch kernels by split (a: 1, b: 4), row tier and output (f32, bf16).
+/// The one-launch kernels by block kind (a to d), row tier and output (f32, bf16).
 fn wholeName(comptime split: u8, comptime t: u32, comptime out: Out) [:0]const u8 {
     return std.fmt.comptimePrint("tf_dsv41_fp8_w{c}_r{d}_{s}", .{ split, t, @tagName(out) });
 }
@@ -29,7 +29,7 @@ pub const Pipelines = struct {
     f32: mtl.Pipeline,
     bf16: mtl.Pipeline,
     /// [Kind][tier][out f32, bf16]
-    whole: [3][whole_tiers.len][2]mtl.Pipeline,
+    whole: [kinds][whole_tiers.len][2]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.dsv41.fp8_rows);
@@ -44,7 +44,7 @@ pub const Pipelines = struct {
         for (b_names, 0..) |name, i| p.b[i] = try mtl.Pipeline.init(device, lib, name, false);
         p.f32 = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_finish_f32", false);
         p.bf16 = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_finish_bf16", false);
-        inline for (.{ 'a', 'b', 'c' }, 0..) |sp, i| inline for (whole_tiers, 0..) |t, j| inline for (.{ Out.f32, Out.bf16 }, 0..) |o, k| {
+        inline for (.{ 'a', 'b', 'c', 'd', 'e', 'f' }, 0..) |sp, i| inline for (whole_tiers, 0..) |t, j| inline for (.{ Out.f32, Out.bf16 }, 0..) |o, k| {
             p.whole[i][j][k] = try mtl.Pipeline.init(device, lib, wholeName(sp, t, o), false);
         };
         return p;
@@ -118,34 +118,54 @@ pub const Batch = struct { n: u32 = 1, xs: i64 = 0, ws: i64 = 0, ss: i64 = 0, ys
 
 const WholeArgs = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32, xs: i64, ws: i64, ss: i64, ys: i64 };
 
-/// A one-launch block: a (split 1, 4 columns), b (split 4, 4 columns), c (split 4, 8 columns).
-pub const Kind = enum(u2) {
-    a,
-    b,
-    c,
+/// A one-launch block by split and columns; e and f decode each word where it is used and read X 8 bytes at a time.
+pub const Kind = enum(u3) {
+    a, // split 1, 4 columns
+    b, // split 4, 4 columns
+    c, // split 4, 8 columns
+    d, // split 1, 1 column
+    e, // split 1, 2 columns
+    f, // split 4, 4 columns
 
     pub fn columns(k: Kind) u32 {
-        return if (k == .c) 8 else 4;
+        return switch (k) {
+            .c => 8,
+            .d => 1,
+            .e => 2,
+            else => 4,
+        };
+    }
+
+    /// The tiling a simdgroup takes: split 1 is 32 K groups, split 4 is 8.
+    pub fn split(k: Kind) u32 {
+        return if (k == .a or k == .d or k == .e) 1 else 4;
     }
 };
 
-/// The block a call launches with: 8 columns (two a lane share each activation load) for short K up to 4 rows.
+const kinds = @typeInfo(Kind).@"enum".field_names.len;
+
+/// The block a call launches with alone (`encodeWhole` counts its batch's launches as columns).
 pub fn kindOf(c: Call) Kind {
-    if (c.split == 1) return .a;
-    const most: u32 = if (c.rows == 1) 9 else if (c.rows <= 4) 8 else 0;
-    return if (tilesOf(c.k, c.split) <= most) .c else .b;
+    return kindFor(c, 1);
 }
 
-/// `encode`'s two launches as one: a group of `tiles` simdgroups a 4-column block, the same bits, no scratch.
+/// K in whole 1024s and 2048 or more columns a batch: e at 1-5 rows, d above; else f at 2-6 rows and b otherwise.
+fn kindFor(c: Call, launches: u32) Kind {
+    if (c.split == 1) return .a;
+    if (c.k % 1024 == 0 and c.n * launches >= 2048) return if (c.rows <= 5) .e else .d;
+    return if (c.rows >= 2 and c.rows <= 6) .f else .b;
+}
+
+/// `encode`'s two launches as one: a group of `tiles` simdgroups a column block, the same bits, no scratch.
 pub fn encodeWhole(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref, y: Ref, c: Call, b: Batch) !void {
-    return encodeWholeAs(p, e, x, w, s, y, c, b, kindOf(c));
+    return encodeWholeAs(p, e, x, w, s, y, c, b, kindFor(c, b.n));
 }
 
 /// `encodeWhole` with the block chosen by the caller; every kind gives the same bits.
 pub fn encodeWholeAs(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref, y: Ref, c: Call, b: Batch, kind: Kind) !void {
     try check(c);
-    if (b.n == 0 or (kind == .a) != (c.split == 1) or c.n % kind.columns() != 0) return error.BadFp8Shape;
-    const tiles = tilesOf(c.k, c.split);
+    const tiles = tilesOf(c.k, kind.split());
+    if (b.n == 0 or tiles > max_tiles or c.n % kind.columns() != 0) return error.BadFp8Shape;
     const args = WholeArgs{ .K = c.k, .N = c.n, .R = c.rows, .groups = c.k / 32, .tiles = tiles, .blocks = c.n / kind.columns(), .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys };
     e.setPipeline(p.whole[@backingInt(kind)][wholeTier(c.rows)][@backingInt(c.out)]);
     e.setBuffer(x.buf, x.off, 0);

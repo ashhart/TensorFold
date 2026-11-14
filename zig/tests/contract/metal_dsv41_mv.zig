@@ -13,8 +13,12 @@ const mv = tf.dsv41_metal.mv;
 const base = "dsv41 mv ";
 const head_shape: c.Shape = .{ .rows = 16, .n = 129280, .k = 5120 };
 
-/// What a registration varies: the weight type, the output, one launch a row, a planted fault.
-pub const Variant = struct { w: mv.Weight = .bf16, out: mv.Out = .f32, solo: bool = false, ctl: u8 = 0 };
+/// What a registration varies: weights, output, one launch a row, a fault; `gate`: tf_dsv41_route_gate_plan's matvec.
+pub const Variant = struct { w: mv.Weight = .bf16, out: mv.Out = .f32, solo: bool = false, ctl: u8 = 0, gate: bool = false };
+
+/// The gate launch's experts and picks: the release's router.
+const gate_experts = 384;
+const gate_topk = 6;
 
 const served = [_]c.Shape{
     .{ .rows = 16, .n = 64, .k = 5120 }, // indexer weights_proj
@@ -34,6 +38,17 @@ const served = [_]c.Shape{
     .{ .rows = 5, .n = 8197, .k = 544 },
 } ++ everyRow();
 
+/// The router gate's shapes: its 384 experts at the release's k and at k with a partial last step, 1 to 16 rows.
+const gate_served = [_]c.Shape{
+    .{ .rows = 16, .n = 384, .k = 5120 },
+    .{ .rows = 1, .n = 384, .k = 5120 },
+    .{ .rows = 4, .n = 384, .k = 5120 },
+    .{ .rows = 6, .n = 384, .k = 5120 },
+    .{ .rows = 5, .n = 384, .k = 1088 },
+    .{ .rows = 3, .n = 384, .k = 97 },
+    .{ .rows = 2, .n = 384, .k = 31 },
+};
+
 fn everyRow() [16]c.Shape {
     var out: [16]c.Shape = undefined;
     for (&out, 1..) |*s, r| s.* = .{ .rows = r, .n = 48, .k = 1088 };
@@ -47,7 +62,7 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
         .depth = ref.depth,
         .out = if (v.out == .f32) .f32 else .bf16,
         .tiles = .{ .{ .size = 16 }, .{}, .{ .size = 32 } },
-        .served = &served,
+        .served = if (v.gate) &gate_served else &served,
     };
 }
 
@@ -57,6 +72,9 @@ pub const Proj = struct {
     v: Variant,
     name: []const u8,
     pipes: mv.Pipelines,
+    gate: ?mtl.Pipeline = null,
+    /// the gate launch's other buffers: bias, image, picks, weights, the plan's four, its group count
+    extra: [9]rig_.Ref = undefined,
     f: ?ref.Mv = null,
     fill: g.Fill = .random,
     x: rig_.Ref = undefined,
@@ -65,7 +83,12 @@ pub const Proj = struct {
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant, name: []const u8) !Proj {
         var p: Proj = .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .name = name, .pipes = undefined };
-        if (v.ctl == 0) {
+        if (v.gate) {
+            const text = try std.fmt.allocPrint(a, "#define TF_DSV41_E {d}\n#define TF_DSV41_TOPK {d}\n#define TF_GCTL {d}\n{s}", .{ gate_experts, gate_topk, v.ctl, sources.dsv41.route });
+            defer a.free(text);
+            p.gate = try rig_.pipeline(device, text, "tf_dsv41_route_gate_plan");
+            p.pipes = try mv.Pipelines.load(device);
+        } else if (v.ctl == 0) {
             p.pipes = try mv.Pipelines.load(device);
         } else {
             const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ v.ctl, sources.dsv41.mv });
@@ -77,6 +100,7 @@ pub const Proj = struct {
 
     pub fn deinit(p: *Proj) void {
         p.drop();
+        if (p.gate) |x| x.deinit();
         p.pipes.deinit();
         p.rig.deinit();
     }
@@ -105,6 +129,7 @@ pub const Proj = struct {
     }
 
     pub fn prepare(p: *Proj, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        if (p.v.gate and (shape.n != gate_experts or shape.rows > 16)) return false;
         p.drop();
         const f = try ref.Mv.init(p.a, shape, p.v.w == .f32);
         p.f = f;
@@ -113,6 +138,14 @@ pub const Proj = struct {
         p.x = try p.rig.input(std.mem.sliceAsBytes(f.x));
         p.w = try p.rig.input(f.wBytes());
         p.y = try p.rig.output(f.outputs() * p.es());
+        if (p.v.gate) {
+            const pairs = shape.rows * gate_topk;
+            const zeros: [gate_experts * 4]u8 = @splat(0);
+            p.extra[0] = try p.rig.input(&zeros);
+            p.extra[1] = try p.rig.input(zeros[0..shape.rows]);
+            for (p.extra[2..8], [6]usize{ 4 * pairs, 4 * pairs, 12 * pairs, 4, 4 * pairs, 4 * pairs }) |*r, n| r.* = try p.rig.scratch(n);
+            p.extra[8] = try p.rig.input(zeros[0..16]); // the count of groups done: zero again after every launch
+        }
         return true;
     }
 
@@ -128,6 +161,23 @@ pub const Proj = struct {
     /// Rows r0..r0+rows of the prepared call as one launch.
     pub fn encode(p: *Proj, e: anytype, r0: usize, rows: usize) !void {
         const f = p.f.?;
+        if (p.gate) |pipe| {
+            e.setPipeline(pipe);
+            const y = at(p.y, 4 * r0 * f.shape.n);
+            e.setBuffer(y.buf, y.off, 0);
+            for ([_]usize{ 1, 2, 3 }, [_]usize{ 0, 0, 1 }) |slot, i| e.setBuffer(p.extra[i].buf, p.extra[i].off, slot);
+            e.setValue(extern struct { rows: i32, topk: i32, scale: f32, eps: f32 }{ .rows = @intCast(rows), .topk = gate_topk, .scale = 1.5, .eps = 1e-20 }, 4);
+            for (p.extra[2..8], 5..) |r, i| e.setBuffer(r.buf, r.off, i);
+            const x = at(p.x, 2 * r0 * f.shape.k);
+            e.setBuffer(x.buf, x.off, 11);
+            e.setBuffer(p.w.buf, p.w.off, 12);
+            const slices = @min(4, (rows + 1) / 2);
+            const per = (rows + slices - 1) / slices;
+            e.setValue([2]u32{ @intCast(f.shape.k), @intCast(per) }, 13);
+            e.setBuffer(p.extra[8].buf, p.extra[8].off, 14);
+            e.dispatchGroups(mtl.Size.of((gate_experts + 31) / 32 * ((rows + per - 1) / per), 1, 1), mtl.Size.of(1024, 1, 1));
+            return;
+        }
         try mv.encode(&p.pipes, e, at(p.x, 2 * r0 * f.shape.k), at(p.w, 0), at(p.y, p.es() * r0 * f.shape.n), p.call(rows));
     }
 
@@ -229,6 +279,11 @@ pub const Suite = struct {
         .{ .v = .{ .ctl = 2 }, .name = base ++ "control: a partial last K step dropped" },
         .{ .v = .{ .ctl = 3 }, .name = base ++ "control: sums rounded to fp16" },
         .{ .v = .{ .ctl = 4 }, .name = base ++ "control: writes past its output" },
+        .{ .v = .{ .gate = true }, .name = base ++ "router gate in tf_dsv41_route_gate_plan" },
+        .{ .v = .{ .gate = true, .ctl = 1 }, .name = base ++ "router gate control: non-finite inputs flushed" },
+        .{ .v = .{ .gate = true, .ctl = 2 }, .name = base ++ "router gate control: the last K steps dropped" },
+        .{ .v = .{ .gate = true, .ctl = 3 }, .name = base ++ "router gate control: sums rounded to fp16" },
+        .{ .v = .{ .gate = true, .ctl = 4 }, .name = base ++ "router gate control: writes past its output" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
@@ -255,7 +310,7 @@ pub const Suite = struct {
 
     /// The plain probe for a weight type and output, or null when not registered.
     fn find(s: *Suite, w: mv.Weight, out: mv.Out) ?*Proj {
-        for (s.probes.items) |p| if (p.v.ctl == 0 and !p.v.solo and p.v.w == w and p.v.out == out) return p;
+        for (s.probes.items) |p| if (p.v.ctl == 0 and !p.v.solo and !p.v.gate and p.v.w == w and p.v.out == out) return p;
         return null;
     }
 
@@ -265,7 +320,7 @@ pub const Suite = struct {
         var launches: usize = 0;
         var cases: usize = 0;
         for (s.probes.items) |p| {
-            if (p.v.ctl != 0 or p.v.solo) continue;
+            if (p.v.ctl != 0 or p.v.solo or p.v.gate) continue;
             for ([_]c.Shape{ .{ .rows = 300, .n = 384, .k = 5120 }, .{ .rows = 40, .n = 65, .k = 513 }, .{ .rows = 33, .n = 129, .k = 95 } }) |shape| {
                 if (!try p.prepare(shape, .random, seed)) return error.Refused;
                 try p.run();
