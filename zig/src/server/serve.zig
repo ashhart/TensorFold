@@ -178,6 +178,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TENSORFOLD_WIRE: expected spark or native\n", .{});
         return 1;
     };
+    const journal = if (env(s, "TENSORFOLD_REQUEST_JOURNAL")) |path| @import("request_journal.zig").Journal.open(gpa, io, path) catch |e| {
+        std.debug.print("tensorfold: TENSORFOLD_REQUEST_JOURNAL {s}: {s}\n", .{ path, @import("request_journal.zig").why(e) });
+        return 1;
+    } else null;
+    defer if (journal) |j| j.close(); // after the server's own deinit, which runs first
     const config: server_mod.Config = .{
         .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
         .allowed_controls = args.allowed_controls,
@@ -212,6 +217,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .journal = journal,
         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
         .spark_stats = spark_stats,
         .dashboard = args.dashboard,
@@ -294,6 +300,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     @import("startup_receipt.zig").ready(port);
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     drain(srv, io, s.stop, drain_s);
+    if (journal) |j| j.stopped(); // a stop, not a crash: requests still open are not quarantined
     accept_stop.store(true, .release);
     accept.join();
     lis.close();

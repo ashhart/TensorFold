@@ -8,7 +8,7 @@ const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
 /// The body with every image part's URL replaced, the rest kept.
-fn redact(a: Allocator, v: Value) Allocator.Error!Value {
+pub fn redact(a: Allocator, v: Value) Allocator.Error!Value {
     switch (v) {
         .array => |items| {
             const out = try a.alloc(Value, items.len);
@@ -53,7 +53,7 @@ pub fn append(a: Allocator, path: []const u8, body: Value) void {
 }
 
 /// A regular file no one but its owner can read or write: a name in a shared directory can be someone else's file.
-fn private(fd: platform.c.fd_t) bool {
+pub fn private(fd: platform.c.fd_t) bool {
     if (builtin.os.tag == .windows) return true; // NTFS keeps access in ACLs, not mode bits
     const m = meta(fd, null) orelse return false;
     return m.mode & 0o170000 == 0o100000 and m.mode & 0o077 == 0;

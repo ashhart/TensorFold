@@ -113,6 +113,7 @@ test {
     _ = @import("process_resident.zig");
     _ = @import("log.zig");
     _ = @import("request_log.zig");
+    _ = @import("request_journal_test.zig");
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");

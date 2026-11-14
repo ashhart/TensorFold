@@ -1391,3 +1391,58 @@ Connect Claude Code using the ID from `/v1/models`:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```
+
+## Request journal and replay
+
+`TENSORFOLD_REQUEST_JOURNAL=PATH` turns on a request journal; it is off unless set, and only `PATH` and its siblings are
+written. **It holds every chat and completion prompt and reply in full**: treat it like the conversations themselves.
+Image URLs and PDF data are replaced with `<redacted>`, as in `TENSORFOLD_REQUEST_LOG`, which is unchanged. No HTTP header
+is journaled, so API keys and `Authorization` values never reach it. The server creates `PATH` and `PATH.lock`
+owner-only (0600), refuses a symbolic link or a file others can read, and holds `PATH.lock` while it runs, so a second
+server on the same journal does not start. Benchmark child servers never inherit the variable.
+
+Each request writes three JSON lines: `start` before any work (its reply id, route, fingerprint, the client's seed and
+the redacted body), `prepared` before the engine sees it (the seed and sampling the server resolved, the token limit,
+thinking, drafts and the prompt's token count and SHA-256), and `finish` once the reply has gone (status, outcome, the
+reply's size and SHA-256, its `token_sha256`, and the reply bytes in base64 when they fit 4 MiB). Responses and Messages
+requests are journaled in the chat form they are translated to.
+
+Size is bounded: a file rotates at 64 MiB to `PATH.1`, older files move up, and `PATH.3` is the last kept, so the
+journal holds at most 256 MiB. A body or reply too large for one 8 MiB record keeps its size and hash only. Each record
+is one `write` with no sync, so the journal adds three small appends to a request and nothing to its tokens; a full
+disk or a write error loses that record (the server logs it once), never the request. A record survives the server
+process crashing, not a power loss.
+
+On the next start the server reads the kept files. A request that started and never finished, with no clean stop after
+it, was in flight at a crash: a `quarantine` line flags it, and the server never retries it. Its fingerprint is SHA-256
+over the API key's label (as in the access log), the route and the whole body, so it matches only the same key sending
+the same request. One crash only flags what was in flight, since a crash can come from elsewhere (another route, the
+machine) and the requests beside it are not to blame. A request whose fingerprint was in flight at two crashes is
+refused with a 400 `request_quarantined` before the engine sees it, which ends a client's retry loop after the second
+crash. Other requests, and other keys sending the same body, are served as before; the check is one hash lookup. Without
+API keys every client shares one label. A quarantine lapses 24 hours after its last crash, and a clean stop (SIGTERM,
+Ctrl-C) quarantines nothing.
+
+`tools/replay_request.py` lists, clears and replays journaled requests:
+
+```sh
+python3 tools/replay_request.py requests.jsonl --list
+python3 tools/replay_request.py requests.jsonl --id chatcmpl-example --base http://127.0.0.1:8080
+python3 tools/replay_request.py requests.jsonl --clear chatcmpl-example   # or a fingerprint, or all; server stopped
+```
+
+`--list` sends nothing. A replay sends the journaled body once to its route; when the client sent no seed, it adds the
+seed the server drew. It compares the reply's output: every choice's text, reasoning, tool calls (without their ids),
+logprobs and finish reason, the token counts, the stop sequence and `tensorfold.token_sha256`, the SHA-256 of the reply's
+token ids, so equal means the same tokens. Streams compare their joined deltas, whatever their frame boundaries. Reply
+ids, `created`, timings, `cached_tokens` and keepalives are left out; `--whole-body` compares every byte instead and
+will differ on those. A reply too large to keep is compared by its token hash. Exit 0 is equal, 1 is different, and 2
+means there was no finished reply to compare. `--body FILE` supplies the original request when images or a PDF were
+redacted or the body was too large; `--allow-quarantined` sends a quarantined request on purpose; `--key-env NAME`
+names the variable holding the API key (`TENSORFOLD_API_KEY` by default), which is sent and never written.
+
+A replay is exact on the same build, checkpoint, tokenizer, drafter and server flags, since TensorFold's decode gives the
+same tokens for the same prompt and seed with or without drafts, alone or batched. It is not exact across builds or
+checkpoints, after the server's defaults change, when a Messages request relied on the server's thinking default, when
+the body was restored with different media, or for a request whose server ran several generations for it (Cortheon)
+without a client seed or `--prompt-seed`, since only the last drawn seed is journaled.

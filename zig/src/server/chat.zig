@@ -27,6 +27,7 @@ pub const Prompt = union(enum) { text: []const u8, ids: []const u32 };
 pub const Input = struct {
     /// The client itself asked for thinking off (no server, template or route default counts): it must be honored.
     explicit_off: bool = false,
+    trace: ?*@import("request_trace.zig").Trace = null, // the request's journal records; null when the journal is off
     /// The server's own request (a compaction summary, a lesson's wordings): it never takes --instruct-sampling's set.
     own: bool = false,
     messages: Value = .{ .array = &.{} },
@@ -225,6 +226,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     request.logprobs = input.logprobs;
     request.prompt_logprobs = input.prompt_logprobs;
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
+    if (input.trace) |trace| trace.prepared(&request, thinking, effort);
     return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames };
 }
 
