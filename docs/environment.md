@@ -31,6 +31,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
+| `TF_QWEN35_CHUNK_SOLO` | Qwen 3.5/3.6/3.8 on CUDA: 4096 or 8192 rows a prompt pass while no other stream decodes; unset, empty or 4096 is off. Checked when the model loads, with the family's own message |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |

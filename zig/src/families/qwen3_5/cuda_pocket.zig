@@ -43,7 +43,7 @@ pub const Pockets = struct {
         const n = gate.len / p.hidden;
         if (n == 0 or n > to.max_pocket or up.len != gate.len or down.len != gate.len or used > n) return error.UnexpectedTensor;
         if (p.k == null) p.k = try to.PocketKernels.load(p.d);
-        if (p.rows == null) p.rows = try cuda.DeviceBuffer.alloc(p.d, 4096 * 4);
+        if (p.rows == null) p.rows = try cuda.DeviceBuffer.alloc(p.d, @import("cuda_round.zig").max_rows * 4);
         if (p.layers[layer]) |r| if (r.cap != n) return error.PocketOfAnotherSize;
         try s.synchronize();
         var g = try staged(p.d, gate);
@@ -73,7 +73,7 @@ pub const Pockets = struct {
     }
 
     pub fn uploadScales(p: *Pockets, s: cuda.Stream, scales: []const f32) !void {
-        if (scales.len > 4096) return error.UnexpectedTensor;
+        if (scales.len > @import("cuda_round.zig").max_rows) return error.UnexpectedTensor;
         try s.synchronize();
         const next = try staged(p.d, scales);
         if (p.rows) |*old| old.free();

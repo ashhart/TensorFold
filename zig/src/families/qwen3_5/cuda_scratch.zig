@@ -44,7 +44,7 @@ const Take = struct {
 pub fn scratch(e: *E.Engine, mode: Mode) !usize {
     var t: Take = .{ .e = e, .mode = mode };
     const g = e.g;
-    const R = E.max_rows;
+    const R = e.prompt_rows;
     const wide = @max(g.valueWidth(), g.attnWidth(), g.hidden); // y and mix: either mixer's rows
     inline for (.{ "h", "x", "r" }) |name| @field(e, name) = try t.alloc(R * g.hidden * 2);
     e.xs = try t.alloc(R * (@max(g.intermediate, wide) / 64) * 4);

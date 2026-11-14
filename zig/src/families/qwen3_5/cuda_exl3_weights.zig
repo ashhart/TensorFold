@@ -21,7 +21,7 @@ pub const Kit = struct {
     grouped: cuda.exl3_grouped.Grouped,
     b16: b16.Kernels,
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, g: geometry.Geometry) !*Kit {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, g: geometry.Geometry, rows: usize) !*Kit {
         const k = try gpa.create(Kit);
         errdefer gpa.destroy(k);
         k.dense = try cuda.exl3.Dense.load(d);
@@ -33,12 +33,12 @@ pub const Kit = struct {
         k.grouped = .{ .d = d, .kernels = &k.experts };
         if (!g.moe()) return k; // a dense checkpoint's MLP is three Dense projections
         // the grouped experts' scratch grows on first use: allocate it before any graph capture, for the widest call
-        k.grouped.storage = try cuda.DeviceBuffer.alloc(d, try storageBytes(g));
+        k.grouped.storage = try cuda.DeviceBuffer.alloc(d, try storageBytes(g, rows));
         return k;
     }
 
-    pub fn storageBytes(g: geometry.Geometry) !usize {
-        const pairs = engine.max_rows * g.slots();
+    pub fn storageBytes(g: geometry.Geometry, rows: usize) !usize {
+        const pairs = rows * g.slots();
         const up = try cuda.exl3_grouped.Grouped.bytes(g.hidden, g.intermediate, pairs, 64, try ex.plan(g.hidden, g.intermediate, true), 2);
         const down = try cuda.exl3_grouped.Grouped.bytes(g.intermediate, g.hidden, pairs, 64, try ex.plan(g.intermediate, g.hidden, false), 1);
         return @max(up, down);

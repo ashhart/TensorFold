@@ -39,7 +39,7 @@ pub const decision_formats: []const []const u8 = &.{"bf16"};
 const decide = @import("cuda_decide.zig");
 const joint = @import("cuda_joint_readout.zig");
 pub const max_segments: u32 = 1;
-pub const prompt_rows: u32 = E.max_rows;
+pub const prompt_rows: u32 = E.grid_rows;
 /// --drafter loads a DFlash2 draft model (openDrafter), or on the MoE target its MTP layer; DFlash2 has no own head.
 pub const takes_drafter = true;
 /// A request's pages hold one more forward past its prompt and reply (TF_QWEN_KV_PAGES).
@@ -52,7 +52,7 @@ pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
-pub const snap_grid: u32 = E.max_rows;
+pub const snap_grid: u32 = E.grid_rows;
 /// --learn-conversations: the kept states' disk image, the probe their identity hashes, the facts they depend on.
 pub const kept_disk = @import("cuda_disk.zig");
 
@@ -178,7 +178,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     if (page_tokens > 0 and o.slide) return error.QwenPagesNoLearner;
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
-    if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
+    if (share_snaps > 0 and (page_tokens == 0 or E.grid_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
@@ -492,8 +492,8 @@ pub const Lanes = struct {
         var at: usize = 0;
         while (at < windows.len) {
             var parts: [E.max_segs]E.Part = undefined;
-            var ids: [E.max_rows]u32 = undefined;
-            var picks: [E.max_rows]E.Draw = undefined;
+            var ids: [E.grid_rows]u32 = undefined; // verify rows: verify_rows at most
+            var picks: [E.grid_rows]E.Draw = undefined;
             var n: usize = 0;
             var total: usize = 0;
             var masked = false;
@@ -551,14 +551,14 @@ pub const Lanes = struct {
         try self.e.setTaps(taps);
     }
 
-    /// Rows [start, start + count) of a stream's tap ring (slot position % tap_rows), the newest tap_rows rows kept.
+    /// Rows [start, start + count) of a stream's tap ring (slot position % tapRows()), the newest tapRows() rows kept.
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
         if (taps.len != self.e.n_taps) return error.TapsMismatch;
         const cache = try self.cacheOf(stream);
         const ring = cache.tap orelse return error.NoTaps;
         // a long prompt asks for more rows than the ring keeps; the drafter reads only its window of the newest
-        const held_from = cache.written -| E.tap_rows;
+        const held_from = cache.written -| self.e.tapRows();
         if (start + count > cache.written or start + count <= held_from) return error.RowsNotHeld;
         return .{ .buffer = ring.ptr, .offset = start, .rows = count, .row_bytes = @intCast(self.e.n_taps * self.e.g.hidden * 2), .space = .device, .dtype = .bf16 };
     }

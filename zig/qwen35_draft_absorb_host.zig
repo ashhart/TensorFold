@@ -51,6 +51,7 @@ test "Draft precision: DFlash real absorb adapter forwards both row roles and re
     driver.api.cuLaunchKernel = Record.launch;
     var e: q.engine.Engine = undefined;
     e.kit = null;
+    e.prompt_rows = q.engine.grid_rows;
     e.d = &driver;
     e.stream = .{ .d = &driver, .handle = null };
     var d: q.draft.Draft = undefined;
@@ -72,6 +73,7 @@ test "Draft precision: MTP real absorb adapter forwards both row roles and resto
     driver.api.cuLaunchKernel = Record.launch;
     var e: q.engine.Engine = undefined;
     e.kit = null;
+    e.prompt_rows = q.engine.grid_rows;
     e.d = &driver;
     e.stream = .{ .d = &driver, .handle = null };
     e.g.hidden = 256;

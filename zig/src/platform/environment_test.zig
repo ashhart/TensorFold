@@ -72,6 +72,8 @@ const valid = [_]Case{
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "32", .n = 32 },
+    .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "8192", .n = 8192 },
+    .{ .name = "TF_QWEN35_CHUNK_SOLO", .raw = "6144", .n = 6144 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "2048", .n = 2048 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "0", .n = 0 },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .raw = "1000", .n = 1000 },

@@ -63,6 +63,7 @@ const Fake = struct {
         pub fn log(_: *Pages, _: usize, _: usize) void {}
     };
     const Engine = struct {
+        prompt_rows: usize = E.grid_rows,
         rows: std.ArrayList(usize) = .empty,
         x: u64 = 0,
         stream: cuda.Stream = .{ .d = undefined, .handle = null },
@@ -146,7 +147,7 @@ fn pass(prompt: []const u32, chunks: []const u32, caps: []const u32, ends: *std.
 pub fn capped(comptime Lanes: type, backend: anytype) !void {
     var state: Lanes = .{ .gpa = t.allocator, .io = t.io, .e = undefined, .capacity = 32, .target = undefined };
     try t.expect(backend(&state).chunk_invariant); // the lane host offers its cap only to a family that declares it
-    const m = @import("cuda_engine.zig").max_rows;
+    const m = @import("cuda_engine.zig").grid_rows;
     const prompt = try t.allocator.alloc(u32, 3 * m);
     defer t.allocator.free(prompt);
     @memset(prompt, 3);
@@ -184,7 +185,7 @@ fn marks() !void {
             p.n += 1;
         }
     };
-    const m = @import("cuda_engine.zig").max_rows;
+    const m = @import("cuda_engine.zig").grid_rows;
     const prompt = try t.allocator.alloc(u32, 2 * m + 100);
     defer t.allocator.free(prompt);
     @memset(prompt, 3);
@@ -210,7 +211,7 @@ fn marks() !void {
 
 /// fcfs's TOKENS rows reach any family beside a decoder (capRows): Qwen cuts at TOKENS floored to 128 in cold chunks.
 fn policy() !void {
-    const m = @import("cuda_engine.zig").max_rows;
+    const m = @import("cuda_engine.zig").grid_rows;
     const prompt = try t.allocator.alloc(u32, 2 * m + 100);
     defer t.allocator.free(prompt);
     @memset(prompt, 3);
@@ -256,11 +257,11 @@ pub fn whole() !void {
     };
     var eng: Fake.Engine = .{};
     defer eng.rows.deinit(t.allocator);
-    var toks: [E.max_rows + 8]u32 = undefined;
+    var toks: [E.grid_rows + 8]u32 = undefined;
     for (&toks, 0..) |*x, i| x.* = @intCast(i % 7);
     var fake: Fake = .{ .e = &eng, .capacity = toks.len + 1 };
     defer fake.deinit();
-    const keep = [_]u32{E.max_rows};
+    const keep = [_]u32{E.grid_rows};
     var hook: Hook = .{};
     var text = try lanes.Stream.init(t.allocator, .{ .id = "text", .prompt = &toks, .max_new = 1, .reuse = .{ .marks = &keep, .hook = .{ .ptr = &hook, .at = Hook.kept } } });
     defer text.deinit(t.allocator);
@@ -269,7 +270,7 @@ pub fn whole() !void {
     try t.expectEqual(toks.len, fake.e.whole_rows);
     try t.expectEqual(@as(usize, 0), fake.e.piece_calls);
     try t.expectEqual(@as(usize, 1), hook.calls);
-    try t.expectEqual(@as(u32, E.max_rows), hook.at);
+    try t.expectEqual(@as(u32, E.grid_rows), hook.at);
     try t.expectEqual(@as(u32, @intCast(toks.len)), text.fill_at.load(.monotonic));
 
     const spec: lanes.readout.Spec = .{ .question_spans = &.{}, .question_types = &.{}, .option_spans = &.{}, .option_question = &.{}, .logits = &.{} };
@@ -277,7 +278,7 @@ pub fn whole() !void {
     for (&rtoks, 0..) |*x, i| x.* = @intCast(i % 5);
     var probe: ReadoutProbe = .{};
     const vtable: readout.Readout.VTable = .{ .open = ReadoutProbe.open, .consume = ReadoutProbe.consume, .finish = ReadoutProbe.finish, .close = ReadoutProbe.close };
-    const info: lanes.readout.Info = .{ .max_rows = E.max_rows, .max_questions = 1, .max_options = 1 };
+    const info: lanes.readout.Info = .{ .max_rows = E.grid_rows, .max_questions = 1, .max_options = 1 };
     fake.readout.readout = .{ .ctx = &probe, .info = info, .vtable = &vtable };
     var rd = try lanes.Stream.init(t.allocator, .{ .id = "readout", .prompt = &rtoks, .max_new = 0, .drafts = false, .readout = &spec });
     defer rd.deinit(t.allocator);
@@ -303,9 +304,9 @@ pub fn reset() !void {
     defer eng.rows.deinit(t.allocator);
     var fake: Fake = .{ .e = &eng, .restore_ok = false };
     defer fake.deinit();
-    var toks: [3 * E.max_rows]u32 = @splat(3);
+    var toks: [3 * E.grid_rows]u32 = @splat(3);
     var saved: u8 = 0;
-    var s = try lanes.Stream.init(t.allocator, .{ .id = "reset", .prompt = &toks, .max_new = 1, .reuse = .{ .saved = @ptrCast(&saved), .at = @intCast(E.max_rows) } });
+    var s = try lanes.Stream.init(t.allocator, .{ .id = "reset", .prompt = &toks, .max_new = 1, .reuse = .{ .saved = @ptrCast(&saved), .at = @intCast(E.grid_rows) } });
     defer s.deinit(t.allocator);
     try t.expectError(error.FakeReset, prefill.step(&fake, &s, 0));
     try t.expectEqual(@as(usize, 0), eng.whole_calls + eng.piece_calls);

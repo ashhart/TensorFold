@@ -16,12 +16,12 @@ pub const State = struct {
         s.kernels = try cuda.w4a8.Kernels.resolve(m);
     }
 
-    /// Takes the quantized inputs' memory once (a chunk's rows at the widest projection input) and turns int8 on.
+    /// Takes the quantized inputs' memory once (a pass's rows at the widest projection input) and turns int8 on.
     pub fn enable(s: *State, e: anytype) !void {
         if (s.buf == null) {
             const g = e.g;
             const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
-            s.buf = try cuda.DeviceBuffer.alloc(e.d, cuda.w4a8.Kernels.scratch(max_rows, k));
+            s.buf = try cuda.DeviceBuffer.alloc(e.d, cuda.w4a8.Kernels.scratch(e.prompt_rows, k));
             s.ws = s.buf.?.ptr;
             s.flag = try cuda.DeviceBuffer.alloc(e.d, 4);
         }

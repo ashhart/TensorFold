@@ -194,11 +194,11 @@ pub const Draft = struct {
     }
 
     /// One stream's bytes, before the drafter loads: its ring, the target's taps of `hidden` and a frame's scratch.
-    pub fn streamBytesFor(c: Config, hidden: usize) !usize {
+    pub fn streamBytesFor(c: Config, hidden: usize, tap_rows: usize) !usize {
         var d: Draft = undefined;
         d.c = c;
         d.frame_streams = 1;
-        return c.ringBytes() + engine.tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
+        return c.ringBytes() + tap_rows * c.n_taps * hidden * 2 + try d.layout(false);
     }
 
     fn scratchBytes(d: *Draft) !usize {
@@ -341,7 +341,8 @@ pub const Draft = struct {
         if (rows_) |rs| if (rs.len != n or n > engine.most_window) return error.BadDraftRows;
         if (start < ctx.end) ctx.end = start;
         if (start > ctx.end) ctx.begin = start; // a gap (a prompt restored from a cache): the context starts here
-        const keep = @min(c.window, engine.tap_rows - engine.most_verify); // the target's ring holds no more behind its newest
+        // the target's ring holds no more behind its newest
+        const keep = @min(c.window, d.e.tapRows() - engine.most_verify);
         if (n > keep) {
             start += n - keep;
             n = keep;
@@ -354,8 +355,8 @@ pub const Draft = struct {
             if (rows_) |rs| {
                 var tr: TapRows = .{ .n = @intCast(rows), .rows = @splat(0) };
                 for (rs, 0..) |r, i| tr.rows[i] = @intCast(r);
-                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
-            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, engine.tap_rows), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+                try e.run(d.fns.gather_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), tr, @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
+            } else try e.run(d.fns.gather_taps, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ tap_ring, @as(c_int, @intCast(e.tapRows())), @as(c_longlong, @intCast(start)), @as(c_int, @intCast(c.n_taps * c.hidden)), d.taps_in });
             try d.proj(d.w.fc, d.taps_in, d.th, rows);
             try d.norm(d.th, d.w.hidden_norm, d.thn, rows);
             for (d.w.layers, 0..) |l, i| {
