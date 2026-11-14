@@ -34,3 +34,13 @@ pub fn decodes(vision: ?api.Vision) bool {
     @import("log.zig").line("--vision: {s}; video_url parts are refused and /v1/models lists no video", .{message});
     return false;
 }
+
+/// The media a request may carry: the template's vision and PDF, and the image and video inputs /v1/models publishes.
+pub fn media(srv: anytype) @import("messages.zig").Media {
+    var result = @import("messages.zig").Media.ofVision(srv.info.vision, srv.config.vision_pdf);
+    const taken = Inputs.of(srv.info.vision, srv.video_decoder);
+    result.images = taken.image;
+    result.videos = taken.video;
+    result.native_deepseek = srv.text.native_deepseek;
+    return result;
+}
