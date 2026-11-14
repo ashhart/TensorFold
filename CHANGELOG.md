@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: each `/v1/models` entry now ends with `input_types`, the content parts the model takes: `["text"]`, plus `"image"` with `--vision`, plus `"video"` when the checkpoint reads video and the server loads `libtfvideo`. A `video_url` part sent to a model without video now gets HTTP 400 (`invalid_request_error`) instead of a 500, decided by the same startup check, so the listing and the refusal agree; a server whose model reads video loads `libtfvideo` at startup and says once in its log when it is missing. The other keys are unchanged (#3019, for #3004). Thanks to @WebReflection for the design.
+
 - Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
 
 - Tests: a host test drives 200 refused, cancelled and failed requests down every lane-host path and checks none strands a lane, page or slot (#3015, for #2135).
