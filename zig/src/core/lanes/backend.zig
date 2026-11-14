@@ -82,6 +82,8 @@ pub const Backend = struct {
     penalties: bool = false,
     /// Prompt fill gives the same tokens at any chunk cut, so --decode-share may cap its chunk rows; wrappers copy it.
     chunk_invariant: bool = false,
+    /// Rows a prompt chunk is cut to while a stream decodes, so decode rounds wait less; 0: no cut. Wrappers copy it.
+    decoding_rows: u32 = 0,
     ptr: *anyopaque,
     vtable: *const VTable,
 

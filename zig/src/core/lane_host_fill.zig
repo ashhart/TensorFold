@@ -298,11 +298,11 @@ fn short(j: *const LaneHost.Job) bool {
     return j.stream.prompt_len -| j.stream.cached <= Share.short_rows;
 }
 
-/// Fill chunks' cap: only the flag, a chunk-invariant family and live decoders together; else 0 (the engine's own cut).
+/// Fill chunks' cap: 512 under the flag (chunk-invariant family, live decoder), else the family's `decoding_rows`.
 pub fn capRows(h: *const LaneHost) u32 {
     if (h.share.policy != .stock and h.share.call_rows > 0) return h.share.call_rows; // policyRun's hint for the call in flight
-    if (!h.decode_cap or h.share.p >= 1 or !h.core.backend.chunk_invariant) return 0;
-    return if (runnable(h) > 0) decode_cap_rows else 0;
+    if (h.decode_cap and h.share.p < 1 and h.core.backend.chunk_invariant and runnable(h) > 0) return decode_cap_rows;
+    return if (runnable(h) > 0) h.core.backend.decoding_rows else 0; // 0: the engine's own cut
 }
 
 /// A long prompt's step runs now: none owed, or nothing decoding.
