@@ -6,7 +6,7 @@ const api = @import("engine_api");
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
-    if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
+    if (warmQuiet(F) > 0) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
     if (@hasDecl(F, "snap_tail")) rules.tail = if (@import("core").profile.lookup(F.snap_tail)) |v| std.mem.eql(u8, v, "1") else false;
     if (@hasDecl(F, "snap_intermediate")) { // a chunk-invariant family's opt-in ladder of intermediate checkpoints
@@ -18,6 +18,17 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
         rules.grid = F.snap_grid;
     }
     return rules;
+}
+
+/// The family's own wait before a warm pass's first chunk (0: none); `request_starts_warm_quiet` only when opted in.
+pub fn warmQuiet(comptime F: type) u64 {
+    if (@hasDecl(F, "request_starts_warm_quiet")) return if (requestStep(F) > 0) F.request_starts_warm_quiet else 0;
+    return if (@hasDecl(F, "warm_quiet")) F.warm_quiet else 0;
+}
+
+/// Its warm turns resume at the next message's start: every message start is a cut, warm, cold or cache off alike.
+pub fn warmMessages(comptime F: type) bool {
+    return @hasDecl(F, "request_starts_warm_quiet") and requestStep(F) > 0;
 }
 
 /// Native CUDA families own their grid, independently of the server's template chunk starts.
@@ -213,8 +224,7 @@ test "request starts: one family's switch leaves every other family without star
             const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else 0;
             try std.testing.expect(!@hasDecl(F, "request_starts_switch") or grid > 0);
             try std.testing.expectEqual(if (opted) grid else 0, requestStep(F));
-            const glm = opted and on == 1; // GLM keeps 256 apart, as measured; Qwen and the test family keep every start
-            try std.testing.expectEqual(@as(u32, if (opted and !glm) 1 else 256), requestMinimum(F));
+            try std.testing.expectEqual(@as(u32, if (opted) 1 else 256), requestMinimum(F)); // every start, GLM's too
         }
     }
 }

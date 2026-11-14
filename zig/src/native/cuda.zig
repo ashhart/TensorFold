@@ -55,6 +55,7 @@ pub const Host = struct {
     family: *anyopaque,
     release: *const fn (*anyopaque) void,
     inner: lanes.backend.Backend,
+    warm_quiet: u64 = 0, // the family's own quiet before a warm pass (cuda_snaps.warmQuiet; 0: none)
     vtable: lanes.backend.Backend.VTable,
     cfg: lanes.Config,
     clock: lanes.backend.WallClock,
@@ -370,7 +371,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
+    h.* = .{ .warm_quiet = snaps.warmQuiet(F), .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
     h.kv_plan = counted.ledger;
     // a ledger's plan placed the cache already, beside --parallel full-window requests
@@ -461,7 +462,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .prompt_cache = h.store != null,
         .decode_share = o.decode_share,
         .prompt_cache_capacity = cache_capacity,
-        .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
+        .warm_turns = h.store != null and snaps.warmQuiet(F) > 0,
+        .prefill_messages = if (snaps.warmMessages(F)) .all else .assistant,
         .logprobs = served.backend.vtable.first_row != null,
         .prompt_logprobs = served.backend.vtable.prompt_rows,
         .penalties = served.backend.penalties,

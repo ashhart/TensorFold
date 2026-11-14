@@ -85,3 +85,45 @@ test "snap fork: a family that opts in keeps where the questions part, and the n
     try std.testing.expectEqualSlices(u32, &.{ 16, 20 }, planned.marks[1]);
     try std.testing.expectEqual(@as(u32, 16), planned.from[2]);
 }
+
+test "GLM warm turns: only the request-start opt-in turns them on, with every message start a cut" {
+    const snaps = @import("cuda_snaps.zig");
+    const env = @import("sys").env;
+    const Family = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+        pub const request_starts_switch = "TF_GLM_WARM_TEST_STARTS";
+        pub const request_starts_warm_quiet: u64 = 123;
+    };
+    defer _ = env.unsetenv(Family.request_starts_switch);
+    for ([_]?[:0]const u8{ null, "0", "1" }) |v| {
+        _ = if (v) |x| env.setenv(Family.request_starts_switch, x, 1) else env.unsetenv(Family.request_starts_switch);
+        const on = v != null and std.mem.eql(u8, v.?, "1");
+        try std.testing.expectEqual(if (on) @as(u64, 123) else 0, snaps.warmQuiet(Family));
+        try std.testing.expectEqual(on, snaps.warmMessages(Family));
+        try std.testing.expectEqual(if (on) @as(u32, 1) else 256, snaps.requestMinimum(Family));
+        try std.testing.expectEqual(on, snaps.cacheRules(Family).warm != .off);
+    }
+    const Other = struct { // Nemotron's shape: its own quiet, warm whenever a cache is kept, its cuts its own
+        pub const warm_quiet: u64 = 777;
+    };
+    try std.testing.expectEqual(@as(u64, 777), snaps.warmQuiet(Other));
+    try std.testing.expect(!snaps.warmMessages(Other));
+    try std.testing.expectEqual(@as(u64, 150 * std.time.ns_per_ms), snaps.warmQuiet(@import("nemotron").native));
+    const glm: [:0]const u8 = "TF_GLM_REQUEST_STARTS";
+    const saved = if (@import("sys").getenv(glm)) |x| try std.testing.allocator.dupeSentinel(u8, x, 0) else null;
+    defer if (saved) |x| {
+        _ = env.setenv(glm, x, 1);
+        std.testing.allocator.free(x);
+    } else {
+        _ = env.unsetenv(glm);
+    };
+    inline for (@import("cuda.zig").registry) |F| if (comptime std.mem.eql(u8, F.model_type, "glm5_next")) {
+        _ = env.unsetenv(glm); // GLM's default: no warm pass, its cuts and 256-token spacing as on main
+        try std.testing.expect(snaps.warmQuiet(F) == 0 and !snaps.warmMessages(F) and snaps.cacheRules(F).warm == .off);
+        try std.testing.expectEqual(@as(u32, 256), snaps.requestMinimum(F));
+        _ = env.setenv(glm, "1", 1);
+        try std.testing.expect(snaps.warmQuiet(F) == 150 * std.time.ns_per_ms and snaps.warmMessages(F));
+        try std.testing.expect(snaps.requestMinimum(F) == 1 and snaps.cacheRules(F).warm == .waits);
+    };
+}

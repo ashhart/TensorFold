@@ -107,7 +107,7 @@ test "glm request starts: a step runs to the next cut, a solo step only without 
 test "glm request starts: starts 1 and 2 rows apart each end a chunk, and a step from each runs to the next" {
     const m = prefill_rows;
     const len = 3 * m;
-    const cuts = [_]u32{ 1, 2, 1000, 1001, 1003 }; // closer than GLM's request_min_chunk asks for: the cuts still hold
+    const cuts = [_]u32{ 1, 2, 1000, 1001, 1003 }; // starts a row or two apart (every message start): the cuts still hold
     const ends = [_]usize{ 1, 2, 1000, 1001, 1003, 1003 + m, 1003 + 2 * m, len };
     var at: usize = 0;
     for (ends) |end| {

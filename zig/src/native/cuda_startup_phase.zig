@@ -34,7 +34,7 @@ pub fn serve(h: anytype, io: std.Io, facts: lanes.Model, rows: u32, info: api.In
     h.host.explain = explain;
     h.host.health = @import("cuda_readiness.zig").source(h);
     h.host.cache = h.store;
-    h.host.warm_quiet = if (info.warm_turns) nemotron.native.warm_quiet else 0;
+    h.host.warm_quiet = if (info.warm_turns) h.warm_quiet else 0;
     if (h.lone != null) h.host.lone = .{ .ctx = h, .run = callbacks.loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = nemotron.native.lone_min_budget, .resumes = true };
     if (h.learn != null) h.host.learner = callbacks.learner(h);
     kv_pages.install(&h.kv, &h.host); // the pool's first census, before the engine thread owns the pool
