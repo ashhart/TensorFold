@@ -76,9 +76,13 @@ pub const Library = struct {
     lib: platform.DynLib,
     api: Api,
 
+    /// TF_NCCL_LIB's value as the library to open: a path is kept as written; unset, empty and blank keep libnccl.so.2.
+    pub fn pathFrom(raw: ?[]const u8) platform.environment.Error![]const u8 {
+        return try platform.environment.path("TF_NCCL_LIB", raw) orelse "libnccl.so.2";
+    }
+
     fn configuredPath() platform.environment.Error![]const u8 {
-        const environment = platform.environment;
-        return try environment.path("TF_NCCL_LIB", environment.Process.get(.{}, "TF_NCCL_LIB")) orelse "libnccl.so.2";
+        return pathFrom(platform.environment.Process.get(.{}, "TF_NCCL_LIB"));
     }
 
     pub fn open() Error!Library {
