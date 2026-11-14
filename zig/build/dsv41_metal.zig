@@ -96,6 +96,17 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const timing_run = b.addRunArtifact(b.addTest(.{ .root_module = timing }));
     timing_run.has_side_effects = true;
     b.step("time-dsv41-metal-real", "DeepSeek-V4.1 Metal: one release layer's decode timed at 1 and 4 rows").dependOn(&timing_run.step);
+    // synthetic layers of the release's shapes (no checkpoint): dispatch classes a row at 1-16 rows and 4 slots
+    const synth = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/timing_synth.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "dsv41_metal", .module = quick.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = quick.host }, .{ .name = "kernel_sources", .module = sources } },
+    });
+    const synth_run = b.addRunArtifact(b.addTest(.{ .root_module = synth }));
+    synth_run.has_side_effects = true;
+    b.step("time-dsv41-metal-synth", "DeepSeek-V4.1 Metal: synthetic release-shape layers timed per row and dispatch class").dependOn(&synth_run.step);
     const ptime = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/prompt_time.zig"),
         .target = b.graph.host,
