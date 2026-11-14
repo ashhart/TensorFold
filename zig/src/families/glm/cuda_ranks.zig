@@ -30,6 +30,7 @@ pub const Settings = struct {
     kv_host_gib: f64 = 0, // TF_GLM_KV_HOST_GIB: the host pages' GiB (0: one full window)
     l2pf: l2pf.Options = .{}, // TF_GLM_L2PF and its knobs: a decode window's next weights read into L2 beside it
     kv_live_half: bool = false, // TF_GLM_KV_LIVE_HALF=1: a keep carries the live KDA half alone (cuda_snapshot_layout.zig)
+    graphs: bool = false, // TF_GLM_GRAPHS: 1 (verify windows as CUDA graphs, cuda_window_graph) or 0
 
     /// The settings `get` gives, blank text as unset; `problem` names a value that is not one of the choices.
     pub fn read(comptime get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -148,6 +149,10 @@ pub const Settings = struct {
             problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
             return error.BadSetting;
         }
+        s.graphs = @import("sys").environment.value(bool, "TF_GLM_GRAPHS", get("TF_GLM_GRAPHS"), false) catch {
+            problem.* = "TF_GLM_GRAPHS: 0 or 1";
+            return error.BadSetting;
+        };
         if (get("TF_GLM_KV_HOST")) |v| {
             if (std.mem.eql(u8, v, "1")) s.kv_host = 1 else if (!std.mem.eql(u8, v, "0")) {
                 problem.* = "TF_GLM_KV_HOST: 0 or 1";

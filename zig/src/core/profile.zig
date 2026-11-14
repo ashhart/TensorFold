@@ -52,6 +52,7 @@ pub const Switch = enum {
     TF_DSV41_SCHEMA_PROMPT,
     TF_DSV41_ROWS_CAP,
     TF_DSV41_TOOL_GRAMMAR,
+    TF_GLM_GRAPHS,
 };
 pub const Syntax = enum { count, one, auto, present, not_zero };
 pub const Scope = struct { backend: []const u8, families: []const []const u8 };
@@ -185,6 +186,7 @@ pub const entries = [_]Entry{
     .{ .id = .TF_DSV41_SCHEMA_PROMPT, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Response schema in the encoded prompt", .evidence = "#2370" },
     .{ .id = .TF_DSV41_ROWS_CAP, .families = &.{"deepseek_v41"}, .class = .arithmetic, .syntax = .present, .effect = "Rows in each forward bucket", .evidence = "#2370" },
     .{ .id = .TF_DSV41_TOOL_GRAMMAR, .families = &.{"deepseek_v41"}, .class = .experimental, .syntax = .present, .effect = "Legacy alias of the server-wide auto-tool grammar policy", .evidence = "#2370" },
+    .{ .id = .TF_GLM_GRAPHS, .families = &.{"glm5_next"}, .class = .identical, .syntax = .one, .effect = "Replay verify windows as CUDA graphs on each rank", .evidence = "#1490" },
 };
 
 comptime {
