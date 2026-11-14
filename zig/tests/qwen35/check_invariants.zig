@@ -7,6 +7,7 @@ const lanes_session = @import("lanes_session.zig");
 const rows_run = @import("rows_run.zig");
 const check_radix = @import("check_radix.zig");
 const taps_run = @import("taps_run.zig");
+const tail_run = @import("tail_run.zig");
 
 const Ctx = check_ctx.Ctx;
 const Session = lanes_session.Session;
@@ -30,6 +31,7 @@ const cases = blk: {
 pub fn run(c: *Ctx) void {
     rows(c);
     taps(c);
+    tail(c);
     lanesSet(c, "short", c.short);
     lanesSet(c, "long", c.long);
     resumed(c);
@@ -75,6 +77,26 @@ fn taps(c: *Ctx) void {
     const diff = taps_run.graphsCase(c.gpa, c.e, ids, 4) catch |err| return c.report.broke(name, err);
     if (diff) |d| return c.report.fail(name, "tap {d} at position {d}: first difference at column {d}", .{ d.tap, d.position, d.column });
     c.report.pass(name, "a second stream's round, replayed from the first one's graph, leaves its ring byte for byte as eager rounds do", .{});
+}
+
+/// A chunk's last row through the prompt tail, and a chunk that stops at its keys, against the whole chunk.
+fn tail(c: *Ctx) void {
+    if (c.tp()) return c.report.skip("prompt tail", "the forward runs on one rank here; the lane checks run it under tp");
+    const ids = if (c.ids.len >= tail_run.need) c.ids else ids_file.synthetic(c.arena, tail_run.need) catch |err| return c.report.broke("prompt tail", err);
+    for (tail_run.lengths) |len| {
+        const name = named(c, "prompt tail {d} rows: last row, logits and keys == whole chunk", .{len});
+        if (len + tail_run.after > c.e.o.prompt_rows) {
+            c.report.skip(name, "the engine's prompt rows are fewer");
+            continue;
+        }
+        const diff = tail_run.runCase(c.gpa, c.e, ids, len) catch |err| {
+            c.report.broke(name, err);
+            continue;
+        };
+        if (diff) |d| {
+            c.report.fail(name, "{s}: first difference at byte {d}", .{ d.what, d.byte });
+        } else c.report.pass(name, "the tail's last row and logits, and the next rows over its keys, are the whole chunk's", .{});
+    }
 }
 
 /// Where two runs' replies first differ, as a line to print; null when they are equal.
