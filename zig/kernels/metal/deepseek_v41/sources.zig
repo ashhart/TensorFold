@@ -11,6 +11,8 @@ pub const experts_kimi = @embedFile("experts_kimi.metal");
 /// DeepSeek V4.1's routed-expert gate/up (clamped SwiGLU, the reference's activation rounding) over the copy.
 pub const experts = @embedFile("experts.metal");
 pub const xmma = @embedFile("experts_mma.metal");
+/// DeepSeek V4.1's prompt experts on M5 tensor units, appended to xmma: exact groups there, the rest by decode fmas.
+pub const xunits = @embedFile("experts_units.metal");
 /// DeepSeek-V4.1 sparse-attention indexer top-512 over fp32 score rows.
 pub const topk512 = @embedFile("topk512.metal");
 pub const glue = @embedFile("glue.metal");
