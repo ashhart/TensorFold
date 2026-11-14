@@ -19,11 +19,22 @@ pub fn format() !Format {
     return @fromBackingInt(@intCast(try environment.read(u1, name, @backingInt(default_format))));
 }
 
+/// What a backend with no MXFP8 projection for the drafter says when mxfp8 is set.
+pub fn unavailable(comptime backend: []const u8) []const u8 {
+    return name ++ "=mxfp8: Flash Next on " ++ backend ++ " has no MXFP8 projection for the drafter; unset it or set checkpoint";
+}
+
 /// A backend with no MXFP8 projection for the drafter stops the start on mxfp8 rather than loading the stored rows.
-pub fn refuse(backend: []const u8, weights: Format) !void {
+pub fn refuse(comptime backend: []const u8, weights: Format) !void {
     if (weights == .checkpoint) return;
-    if (!@import("builtin").is_test) std.log.err("{s}=mxfp8: Flash Next on {s} has no MXFP8 projection for the drafter; unset it or set checkpoint", .{ name, backend });
+    if (!@import("builtin").is_test) std.log.err("{s}", .{unavailable(backend)});
     return error.InvalidEnvironment;
+}
+
+/// A family flag refusal for a backend with no MXFP8 projection: null keeps the stored rows, else why the start stops.
+pub fn refusal(comptime backend: []const u8, weights: anyerror!Format) ?[]const u8 {
+    const w = weights catch return name ++ ": expected checkpoint or mxfp8 (unset or blank keeps checkpoint)";
+    return if (w == .checkpoint) null else unavailable(backend);
 }
 
 test "unset and blank read checkpoint, the two words read as themselves, and other text is refused" {
@@ -35,11 +46,17 @@ test "unset and blank read checkpoint, the two words read as themselves, and oth
 
 test "Metal and HIP stop the start on mxfp8 and keep checkpoint" {
     try std.testing.expectError(error.InvalidEnvironment, refuse("Metal", .mxfp8));
-    try refuse("HIP", .checkpoint);
-    // each backend's load asks before its first checkpoint or device work
-    try std.testing.expect(before(@embedFile("engine_load.zig"), "pub fn loadConfigured(", "try @import(\"mtp_weights.zig\").refuse(\"Metal\", try @import(\"mtp_weights.zig\").format());", "load_admission.check("));
-    try std.testing.expect(before(@embedFile("hip/engine.zig"), "pub fn load(", "try @import(\"../mtp_weights.zig\").refuse(\"HIP\", try @import(\"../mtp_weights.zig\").format());", "hip.Runtime.open()"));
-    try std.testing.expect(std.mem.indexOf(u8, @embedFile("hip/load.zig"), "mtp_weights.zig") == null);
+    try refuse("Metal", .checkpoint);
+    try std.testing.expectEqualStrings(unavailable("HIP"), refusal("HIP", .mxfp8).?);
+    try std.testing.expect(refusal("HIP", .checkpoint) == null);
+    try std.testing.expect(std.mem.startsWith(u8, refusal("HIP", error.InvalidEnvironment).?, name));
+    // Metal asks before its first checkpoint read; HIP in the flag refusal its backend runs before reading or opening
+    const metal = "try @import(\"mtp_weights.zig\").refuse(\"Metal\", try @import(\"mtp_weights.zig\").format());";
+    try std.testing.expect(before(@embedFile("engine_load.zig"), "pub fn loadConfigured(", metal, "load_admission.check("));
+    const hip = "return @import(\"../mtp_weights.zig\").refusal(\"HIP\", @import(\"../mtp_weights.zig\").format());";
+    try std.testing.expect(before(@embedFile("hip/native.zig"), "pub fn refusal(o: anytype) ?[]const u8 {", hip, "\n}\n"));
+    for ([_][]const u8{ @embedFile("hip/engine.zig"), @embedFile("hip/load.zig") }) |src|
+        try std.testing.expect(std.mem.indexOf(u8, src, "mtp_weights.zig") == null);
 }
 
 /// Whether `call` sits once in `src`, inside the function opened by `entry`, ahead of that function's `first` work.
