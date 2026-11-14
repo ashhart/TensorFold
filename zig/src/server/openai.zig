@@ -19,17 +19,16 @@ const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
 const cancel_ids = @import("cancel_ids.zig");
+const prompt_list = @import("prompt_list.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// Where a chat reply goes: the client's socket, or a Responses or Messages translation of it.
 pub const Out = struct {
     ctx: *anyopaque,
     vt: *const VTable,
-
     pub const VTable = struct {
         /// 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none).
         open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void,
@@ -41,7 +40,6 @@ pub const Out = struct {
         keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
 };
-
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     const startup_at = @import("core").startup_receipt.offset();
@@ -119,6 +117,7 @@ pub const Plan = struct {
     separate_usage: bool,
     policy: tool_stream.Policy,
     named: []const u8,
+    prompts: []const []const u8 = &.{}, // a raw completion's list of prompts, each its own choice (prompt_list.zig)
 };
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
@@ -141,7 +140,8 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
-    if (!is_chat and input.messages.array.len == 0) input.prompt = try legacyPrompt(srv, cx, body.get("prompt"));
+    const prompts: []const []const u8 = if (!is_chat and input.messages.array.len == 0) try prompt_list.texts(cx, body.get("prompt")) else &.{};
+    if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
     const first = body.get("max_tokens");
     const max = if (first != null and first.?.truthy()) first else body.get("max_completion_tokens");
@@ -179,6 +179,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
+        .prompts = prompts,
     };
 }
 
@@ -249,6 +250,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
+    if (p.prompts.len > 0) return prompt_list.run(srv, a, out, gone, p, p.prompts, raw);
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
@@ -260,7 +262,7 @@ fn logRefused(id: []const u8, message: []const u8) void {
     log.line("{s}", .{log.refused(&buf, id, message)});
 }
 
-const Run = struct {
+pub const Run = struct {
     srv: *Server,
     a: Allocator,
     out: Out,
@@ -369,7 +371,7 @@ const Run = struct {
         r.out.vt.event(r.out.ctx, null) catch {};
     }
 
-    fn whole(r: *Run, gone: Gone, field: []const u8) void {
+    pub fn whole(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
@@ -502,7 +504,7 @@ const Run = struct {
         r.out.vt.event(r.out.ctx, null) catch {};
     }
 
-    fn stream(r: *Run, gone: Gone, field: []const u8) void {
+    pub fn stream(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         const tools = r.plan.input.tools.len > 0;
         var cx: Cx = .{ .a = a };
