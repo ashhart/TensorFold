@@ -348,7 +348,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     const fit_prompt = memory.Fit{ .config = model.config, .context = capacity + window, .slots = @max(o.streams, 1), .shared = model.device.tensorUnits(), .ring = if (draft_model) |d| @as(usize, d.ring().window) * d.ring().stride else 0, .planes = if (draft_model) |d| d.graph.config.tap_count else q.taps.layers.len, .current_rows = model.frame.capacity, .left = room(model) };
     const value = if (std.c.getenv("TF_PROMPT_ROWS")) |v| std.mem.span(v) else null;
     const row_policy = q.prompt_rows;
-    const rows = @max(window, try fit_prompt.choose(row_policy.requested(model.device.generation(), model.config.moe(), value), row_policy.override(value) != null));
+    const geometry = try q.attention_plan.Geometry.fromConfig(model.config, units);
+    const rows = @max(window, try fit_prompt.choose(row_policy.frameRequested(model.device.generation(), model.config.moe(), value, geometry), row_policy.override(value) != null));
     const slots = fit_prompt.streams(rows, o.streams_fixed) catch |err| {
         const dev = model.device;
         const ram: ?usize = if (cache_fit.ram()) |r| @intCast(r) else null;
