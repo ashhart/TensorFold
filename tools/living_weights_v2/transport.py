@@ -15,6 +15,28 @@ class TransportError(RuntimeError):
     pass
 
 
+SSE_LINE_LIMIT = 1024 * 1024
+SSE_STREAM_LIMIT = 4 * 1024 * 1024
+SSE_EVENT_LIMIT = 4096
+# The native graph's fact states (zig/src/server/slide_graph.zig State); anything else is an unknown schema.
+GRAPH_STATES = frozenset({"queued", "learning", "learned", "missed", "replaced", "deleting", "deleted"})
+
+
+def checked_graph(facts) -> dict[int, dict]:
+    if not isinstance(facts, (list, tuple)):
+        raise TransportError("unrecognized graph schema: missing facts array")
+    result = {}
+    for fact in facts:
+        if not isinstance(fact, dict) or type(fact.get("id")) is not int or fact["id"] <= 0:
+            raise TransportError("unrecognized graph fact")
+        if type(fact.get("state")) is not str or fact["state"] not in GRAPH_STATES:
+            raise TransportError(f"graph fact {fact['id']} has an unrecognized state")
+        if fact["id"] in result:
+            raise TransportError("duplicate graph fact ID")
+        result[fact["id"]] = fact
+    return result
+
+
 @dataclass(frozen=True)
 class Event:
     kind: str
@@ -47,7 +69,9 @@ class Client:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.headers = {"Authorization": "Bearer " + key, "Accept": "application/json"}
-        self._opener = urllib.request.build_opener(_RejectRedirects())
+        # Loopback requests never go through an ambient http_proxy/https_proxy, which would receive the key.
+        handlers = [_RejectRedirects()] if allow_remote else [urllib.request.ProxyHandler({}), _RejectRedirects()]
+        self._opener = urllib.request.build_opener(*handlers)
 
     def _open(self, path: str, method: str = "GET", payload: dict | None = None):
         data = json.dumps(payload).encode() if payload is not None else None
@@ -77,11 +101,13 @@ class Client:
 
     def events(self, path: str, method: str, payload: dict) -> Iterator[Event]:
         received_done = False
+        kept = 0
+        count = 0
         with self._open(path, method, payload) as response:
             kind = "message"
             lines = []
-            for binary_line in response:
-                if len(binary_line) > 1024 * 1024:
+            while binary_line := response.readline(SSE_LINE_LIMIT + 1):
+                if len(binary_line) > SSE_LINE_LIMIT:
                     raise TransportError("oversized SSE line")
                 try:
                     line = binary_line.decode("utf-8").rstrip("\r\n")
@@ -102,6 +128,10 @@ class Client:
                         raise TransportError("malformed SSE JSON") from exc
                     if not isinstance(parsed, dict):
                         raise TransportError("SSE payload must be a JSON object")
+                    kept += len(content)
+                    count += 1
+                    if kept > SSE_STREAM_LIMIT or count > SSE_EVENT_LIMIT:
+                        raise TransportError("SSE stream exceeds 4 MiB or 4096 events")
                     actual_kind = str(parsed.get("event", kind)) if kind == "message" else kind
                     yield Event(actual_kind, parsed)
                     kind = "message"
@@ -109,7 +139,7 @@ class Client:
                     kind = line[6:].strip()
                 elif line.startswith("data:"):
                     lines.append(line[5:].lstrip(" "))
-                    if sum(map(len, lines)) > 1024 * 1024:
+                    if sum(map(len, lines)) > SSE_LINE_LIMIT:
                         raise TransportError("oversized SSE event")
             if lines and "\n".join(lines) == "[DONE]":
                 received_done = True
@@ -139,18 +169,7 @@ class Client:
             raise TransportError("invalid model listing") from exc
 
     def graph(self) -> dict[int, dict]:
-        response = self.json("/v1/slide/graph")
-        facts = response.get("facts")
-        if not isinstance(facts, list):
-            raise TransportError("unrecognized graph schema: missing facts array")
-        result = {}
-        for fact in facts:
-            if not isinstance(fact, dict) or type(fact.get("id")) is not int or fact["id"] <= 0:
-                raise TransportError("unrecognized graph fact")
-            if fact["id"] in result:
-                raise TransportError("duplicate graph fact ID")
-            result[fact["id"]] = fact
-        return result
+        return checked_graph(self.json("/v1/slide/graph").get("facts"))
 
     def teach(self, text: str) -> tuple[Event, ...]:
         return tuple(self.events("/v1/slide/learn", "POST", {"text": text}))
