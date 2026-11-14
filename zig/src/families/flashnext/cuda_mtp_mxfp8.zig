@@ -9,21 +9,6 @@ const top_code: f32 = 448.0;
 /// The scale's inputs (UE8M0 a 32-input group, 127 is 2^0).
 const group = 32;
 
-/// How the drafter's linears are held in memory; the order is TF_FLASHNEXT_MTP_WEIGHTS' accepted words.
-pub const Format = enum { checkpoint, mxfp8 };
-
-/// What TF_FLASHNEXT_MTP_WEIGHTS selects when it is unset: the rows as the checkpoint stores them.
-pub const default_format: Format = .checkpoint;
-
-pub fn format() !Format {
-    return @fromBackingInt(@intCast(try @import("sys").environment.read(u1, "TF_FLASHNEXT_MTP_WEIGHTS", @backingInt(default_format))));
-}
-
-test "the drafter keeps the checkpoint's rows unless the environment names another format" {
-    try std.testing.expectEqual(Format.checkpoint, default_format);
-    try std.testing.expectEqual(@as(usize, 1), @backingInt(Format.mxfp8));
-}
-
 fn value(bf16: []const u8, i: usize) f32 {
     return @bitCast(@as(u32, std.mem.readInt(u16, bf16[i * 2 ..][0..2], .little)) << 16);
 }
@@ -51,7 +36,7 @@ pub fn encode(bf16: []const u8, n: usize, k: usize, codes: []u8, scales: []u8) v
     }
 }
 
-/// A BF16 matrix [n, k] uploaded as an MXFP8 projection; a shape the packers refuse keeps its BF16 rows.
+/// A BF16 matrix [n, k] uploaded through the MXFP8 projection the mixers of an MXFP8 checkpoint load through.
 pub fn project(gpa: std.mem.Allocator, driver: *const cuda.Driver, bf16: []const u8, n: usize, k: usize) !projection.Projection {
     if (k % 64 != 0 or bf16.len != n * k * 2) return error.UnexpectedTensor;
     const codes = try gpa.alloc(u8, n * k);
@@ -60,6 +45,10 @@ pub fn project(gpa: std.mem.Allocator, driver: *const cuda.Driver, bf16: []const
     defer gpa.free(scales);
     encode(bf16, n, k, codes, scales);
     return projection.mxfp8(gpa, driver, .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = codes }, .{ .dtype = .u8, .rank = 2, .shape = .{ n, k / group, 1, 1, 1 }, .bytes = scales });
+}
+
+test {
+    _ = @import("mtp_weights.zig");
 }
 
 test "a group's scale brings its largest weight under 448 and every code decodes within an eighth of its weight" {
@@ -88,4 +77,19 @@ test "a group's scale brings its largest weight under 448 and every code decodes
         for (0..group) |i| top = @max(top, @abs(core.exlr8.codec.e4m3Value(codes[g * group + i])));
         try std.testing.expect(top > top_code / 2 - 32 and top <= top_code);
     }
+}
+
+test "under mxfp8 a drafter linear stored as anything but BF16 stops the load, and checkpoint keeps every format" {
+    defer projection.recode = .checkpoint;
+    projection.recode = .mxfp8;
+    try projection.recodable("language_model.mtp.fc_embedding", .bf16);
+    try std.testing.expectError(error.InvalidEnvironment, projection.recodable("language_model.mtp.fc_embedding", .f8_e4m3));
+    try std.testing.expectError(error.InvalidEnvironment, projection.recodable("language_model.mtp.fc_hidden", .u32));
+    projection.recode = .checkpoint;
+    try projection.recodable("language_model.mtp.fc_hidden", .u32);
+    // every loader the drafter's window reaches asks before it packs a stored format
+    const load_src = @embedFile("cuda_projection_load.zig");
+    try std.testing.expect(std.mem.count(u8, load_src, "try projection.recodable(prefix, t.dtype);") == 1);
+    try std.testing.expect(std.mem.count(u8, load_src, "try projection.recodable(prefix, first.dtype);") == 1);
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("cuda_prompt_wt.zig"), "try @import(\"cuda_projection.zig\").recodable(prefix, down_tensor.dtype);") != null);
 }

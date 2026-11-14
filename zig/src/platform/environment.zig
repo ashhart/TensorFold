@@ -233,7 +233,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_KV_PAGE_TEST", .scope = .flashnext, .kind = .size, .forms = "a page size the kernels take, whole blocks of the indexer's ratio up to the window (unset: off)" },
     .{ .name = "TF_FLASHNEXT_CONFIDENCE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite number (default -0.4)" },
     .{ .name = "TF_FLASHNEXT_PROMPT", .scope = .flashnext, .kind = .word, .words = &.{"rows"}, .forms = "rows for the rows path (unset or blank keeps the plain path)" },
-    .{ .name = "TF_FLASHNEXT_MTP_WEIGHTS", .scope = .flashnext, .kind = .word, .words = &.{ "checkpoint", "mxfp8" }, .forms = "checkpoint (the rows as stored, the default) or mxfp8 (BF16 drafter linears re-coded at load)" },
+    .{ .name = "TF_FLASHNEXT_MTP_WEIGHTS", .scope = .flashnext, .kind = .word, .words = &.{ "checkpoint", "mxfp8" }, .forms = "checkpoint or mxfp8 (unset or blank keeps checkpoint, the rows as stored; mxfp8 re-codes the drafter's BF16 linears on CUDA)" },
     .{ .name = "TENSORFOLD_API_KEY", .scope = .chat, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "API keys split by commas, without control characters (checked here by tensorfold chat --url)" },
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
