@@ -28,7 +28,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - GLM-5.3-Flash on CUDA with tensor parallelism: a `prompt_logprobs` request over about 100 tokens no longer hangs every rank at TP=3. The logit gather now broadcasts one block a rank, its staging buffers are counted in the startup memory check, and replies are unchanged (#1571, fixes #1559). Thanks to @gilby.
 
-- GLM-5.3-Flash on CUDA: with `TF_GLM_COPIES=1`, `TF_GLM_COPY_SHARE=1` lets copies in shared rounds grow on the lone ramp up to their stream's share of the round's rows (15 tokens at two streams, 7 at four), where every shared copy stayed three tokens wide. Default off, and refused without `TF_GLM_COPIES=1`; replies are unchanged (#N).
+- GLM-5.3-Flash on CUDA: with `TF_GLM_COPIES=1`, `TF_GLM_COPY_SHARE=1` lets copies in shared rounds grow on the lone ramp up to their stream's share of the round's rows (15 tokens at two streams, 7 at four), where every shared copy stayed three tokens wide. Default off, and refused without `TF_GLM_COPIES=1`; replies are unchanged (#3333).
 
 - README: Pick a model gains a GLM-5.3-Flash Jammed XSFP4 NZ5 row, the checkpoint in the `NVFP4_NZ5` form that #2894 reads, and the GLM CUDA recipe names it beside Jammed XSFP4 (#2981). Thanks to @Bizuayeu.
 
