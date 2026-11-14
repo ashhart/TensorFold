@@ -434,7 +434,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     // The core lane, shared-context and Qwen3.8-27B programs and host tests.
     qwen27_build.targets(b, target, optimize, metal, sources, engine, lanes, mods.qwen27, test_step);
     core_checks.targets(b, target, optimize, metal, engine);
-    contract_build.metal(b, target, optimize, metal, engine, sources);
+    contract_build.metal(b, target, optimize, metal, engine, sources, kimi_bytes);
     glm_checks.targets(b, target, optimize, metal, engine, sources);
     flashnext_checks.targets(b, target, optimize, metal, engine);
 
