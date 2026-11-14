@@ -3,6 +3,25 @@ const std = @import("std");
 const exl3 = @import("core").exl3_projection;
 const work = @import("workspace.zig");
 const weights = @import("weights.zig");
+const environment = @import("sys").environment;
+
+const Switches = struct {
+    gateup: bool,
+    shared_down: bool,
+    down_combine: bool,
+};
+var cached: ?Switches = null;
+
+fn switches() Switches {
+    if (cached) |s| return s;
+    const s: Switches = .{
+        .gateup = !(environment.read(bool, "TF_DSV41_NO_FUSE_GATEUP_SWIGLU", false) catch unreachable),
+        .shared_down = !(environment.read(bool, "TF_DSV41_NO_FUSE_SHARED_DOWN", false) catch unreachable),
+        .down_combine = !(environment.read(bool, "TF_DSV41_NO_FUSE_DOWN_COMBINE", false) catch unreachable),
+    };
+    cached = s;
+    return s;
+}
 
 /// Bytes of one rotated down-projection input row (2304 halves).
 const rotated_row_bytes: usize = 2304 * 2;
@@ -37,7 +56,8 @@ pub const Call = struct {
 /// Whether the gate+up call can stop at its sums and hand the routed and shared rows to the fused pass.
 pub fn plan(ws: *const work.Workspace, w: *const weights.Moe, c: Call) !Fusion {
     var out = Fusion{};
-    if (std.c.getenv("TF_DSV41_NO_FUSE_GATEUP_SWIGLU") != null) return out;
+    const sw = switches();
+    if (!sw.gateup) return out;
     if (!c.merged or c.shared_split or !c.swiglu_rot or !c.shared_rot or c.skip_experts or c.mlp_passes != 1) return out;
     if (c.fuse_up_picks != c.picks or w.shared_down == null) return out;
     const r: usize = c.rows;
@@ -45,10 +65,10 @@ pub fn plan(ws: *const work.Workspace, w: *const weights.Moe, c: Call) !Fusion {
     const gate_up_rows = routed * 2 + 2 * r;
     const room = ws.view(.grouping).offset - ws.view(.projection).offset;
     // The shared down joins the routed one: its input rows follow the routed rows in the same scratch.
-    if (std.c.getenv("TF_DSV41_NO_FUSE_SHARED_DOWN") == null and !c.skip_shared and w.down_shared != null and
+    if (sw.shared_down and !c.skip_shared and w.down_shared != null and
         try exl3.scratchBytes(2304, 5120, routed + r) <= room)
     {
-        const combine = std.c.getenv("TF_DSV41_NO_FUSE_DOWN_COMBINE") == null and
+        const combine = sw.down_combine and
             std.c.getenv("TF_DSV41_SKIP_COMBINE") == null and std.c.getenv("TF_DSV41_DOUBLE_COMBINE") == null and c.picks <= 7;
         return .{ .gateup = true, .shared_down = true, .down_combine = combine, .shared_row = routed };
     }

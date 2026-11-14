@@ -368,9 +368,7 @@ pub const Backend = struct {
     /// TF_DSV41_BATCH_MAX: the most one-row windows one batched forward carries (default 4, ceiling 8).
     pub fn batchMax() usize {
         if (batch_max) |v| return v;
-        const raw = std.c.getenv("TF_DSV41_BATCH_MAX");
-        const parsed = if (raw) |e| std.fmt.parseInt(usize, std.mem.span(e), 10) catch 4 else 4;
-        batch_max = std.math.clamp(parsed, 1, 8);
+        batch_max = @import("sys").environment.read(usize, "TF_DSV41_BATCH_MAX", 4) catch unreachable;
         return batch_max.?;
     }
 

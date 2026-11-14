@@ -76,6 +76,7 @@ const headRms = model.headRms;
 const logitsTopK = model.logitsTopK;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
+    try @import("env_validate.zig").startup();
     projection_knobs.apply();
     var arena = std.heap.ArenaAllocator.init(gpa);
     errdefer arena.deinit();

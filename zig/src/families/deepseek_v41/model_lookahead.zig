@@ -39,10 +39,13 @@ pub const State = struct {
     }
 };
 
+var enabled_cache: ?bool = null;
+
 /// TF_DSV41_ENGRAM_LOOKAHEAD=0 stages every chunk's rows before its GPU work, as before.
 fn enabled() bool {
-    const v = std.c.getenv("TF_DSV41_ENGRAM_LOOKAHEAD") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    if (enabled_cache == null)
+        enabled_cache = @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_LOOKAHEAD", true) catch unreachable;
+    return enabled_cache.?;
 }
 
 fn state(m: *Model, slot: u32) !*State {

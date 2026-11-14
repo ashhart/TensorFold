@@ -139,6 +139,21 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_IMAGES", .scope = .dsv41, .kind = .word, .trim = " ", .words = &.{ "0", "native" }, .forms = "native or 0" },
     .{ .name = "TF_DSV41_LAYERS", .scope = .dsv41, .kind = .range, .forms = "lo-hi: two whole layer numbers from 0 to 4294967295 with lo <= hi" },
     .{ .name = "TF_DSV41_ROWS_CAP", .scope = .dsv41, .kind = .u32, .only = &.{ 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48, 64 }, .forms = "1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 32, 48 or 64" },
+    .{ .name = "TF_DSV41_EXL3_FMA_TILES", .scope = .dsv41, .kind = .u32, .trim = " \t\r\n", .only = &.{ 0, 1, 2, 4 }, .forms = "0, 1, 2 or 4 column tiles" },
+    .{ .name = "TF_DSV41_EXL3_FMA_TILE_GROUPS", .scope = .dsv41, .kind = .u32, .trim = " \t\r\n", .forms = "a whole threadgroup threshold from 0 to 4294967295" },
+    .{ .name = "TF_DSV41_BATCH_MAX", .scope = .dsv41, .kind = .u32, .trim = " \t\r\n", .min = 1, .max = 8, .forms = "a whole row count from 1 to 8" },
+    .{ .name = "TF_DSV41_BATCH_ATTN", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_PREFILL_INTERLEAVE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_ENGRAM_LOOKAHEAD", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_WO_CHAIN", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_QNORM", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_QROPE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_OROPE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_IQROPE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_QKV_TAIL", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_GATEUP_SWIGLU", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_SHARED_DOWN", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_NO_FUSE_DOWN_COMBINE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
 };
 
 pub fn rule(name: []const u8) Rule {

@@ -80,6 +80,5 @@ pub fn whole(ptr: *anyopaque, s: *Stream) anyerror!void {
 
 /// TF_DSV41_PREFILL_INTERLEAVE: 0 runs each prompt whole (other streams stop for it); else by chunks.
 pub fn interleaveOn() bool {
-    const v = std.c.getenv("TF_DSV41_PREFILL_INTERLEAVE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    return @import("sys").environment.read(bool, "TF_DSV41_PREFILL_INTERLEAVE", true) catch unreachable;
 }

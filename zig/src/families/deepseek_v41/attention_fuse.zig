@@ -1,5 +1,6 @@
 //! The decode attention chain's fused dispatches (one row); each has a kill switch (TF_DSV41_NO_FUSE_*).
 const std = @import("std");
+const environment = @import("sys").environment;
 const mtl = @import("metal");
 const exl3 = @import("core").exl3_projection;
 const weights = @import("weights.zig");
@@ -32,12 +33,12 @@ var cached: ?Switches = null;
 pub fn switches() Switches {
     if (cached) |s| return s;
     const s: Switches = .{
-        .wo_chain = std.c.getenv("TF_DSV41_NO_FUSE_WO_CHAIN") == null,
-        .qnorm = std.c.getenv("TF_DSV41_NO_FUSE_QNORM") == null,
-        .qrope = std.c.getenv("TF_DSV41_NO_FUSE_QROPE") == null,
-        .orope = std.c.getenv("TF_DSV41_NO_FUSE_OROPE") == null,
-        .iqrope = std.c.getenv("TF_DSV41_NO_FUSE_IQROPE") == null,
-        .qkv_tail = std.c.getenv("TF_DSV41_NO_FUSE_QKV_TAIL") == null,
+        .wo_chain = !(environment.read(bool, "TF_DSV41_NO_FUSE_WO_CHAIN", false) catch unreachable),
+        .qnorm = !(environment.read(bool, "TF_DSV41_NO_FUSE_QNORM", false) catch unreachable),
+        .qrope = !(environment.read(bool, "TF_DSV41_NO_FUSE_QROPE", false) catch unreachable),
+        .orope = !(environment.read(bool, "TF_DSV41_NO_FUSE_OROPE", false) catch unreachable),
+        .iqrope = !(environment.read(bool, "TF_DSV41_NO_FUSE_IQROPE", false) catch unreachable),
+        .qkv_tail = !(environment.read(bool, "TF_DSV41_NO_FUSE_QKV_TAIL", false) catch unreachable),
     };
     cached = s;
     return s;
@@ -64,9 +65,7 @@ pub fn encodeIqRope(ep: *const exl3.Pipelines, ap: *const common.Pipelines, e: m
     });
 }
 
-/// The eight output groups' indexed wo_a call. `chained` fuses its epilogue with wo_b's rotate_in (`encodeWoB` then
-/// runs wo_b over the scratch); `rope` fuses the output's inverse RoPE into the call's own rotate_in (the rope the
-/// read stage left pending). `grouped` still receives wo_a's bf16 output.
+/// The eight output groups' indexed wo_a call, optionally with the output rope in and wo_b's rotate_in out.
 pub fn encodeWoA(ep: *const exl3.Pipelines, ap: *const common.Pipelines, e: mtl.ComputeEncoder, w: *const weights.Attention, work: *const Workspace, q: View, grouped: View, scratch: exl3.View, c: config.Config, chained: bool, rope: ?struct { ratio: u32, position: u32 }) !void {
     for (&w.wo_a) |*m| exl3.useMatrix(e, m.*);
     const q_width = c.heads * c.head_dim;
