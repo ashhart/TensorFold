@@ -177,9 +177,9 @@ The HIP relu^2 replacement retains every non-finite plant and checks both unfuse
 independent float64 output class. No inherited infinity discrepancy is accepted.
 The paired launch retains every table plant and checks both members' separate-launch bytes and every
 float64 output class, without an inherited exception.
-Its 1x8 tile at 5, 6 and 8 bits takes 256 VGPRs and spills to scratch on gfx1100, a gate-5 finding: limits do not count
-scratch, so `spills_on_gfx1100` in `hip_records_relu2_widths.zig` names those three records, and its test fails when a
-record spills that the list does not name or a named one stops spilling.
+Limits do not count scratch, so `spills_on_gfx1100` in `hip_records_relu2_widths.zig` names any relu^2 width record
+that spills on gfx1100 (none under the records' hipcc), and its test fails when a record spills that the list does not
+name or a named one stops spilling.
 
 ## Isolated masked-value panels
 
