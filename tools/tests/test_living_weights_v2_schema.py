@@ -5,6 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/, as the other tool tests do
 from living_weights_v2.assessment import Observation, assess, contains_answer, affirmative_answer
 from living_weights_v2.schema import ManifestError, load_manifest
 
