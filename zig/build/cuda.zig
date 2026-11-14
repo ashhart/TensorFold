@@ -234,6 +234,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     for ([_]*std.Build.Module{ mods.nemotron, mods.qwen35, flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision, mods.api) }) |m| skip_drafts.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"zero grant:"} })).step);
     @import("qmmf_prompt_host.zig").steps(b, cuda, mods.core, step);
     @import("qwen_contract.zig").host(b, mods.core, step);
+    @import("contract_shard_host.zig").host(b, mods.core, step);
     @import("qwen_vision_weights_host.zig").host(b, mods.core, step);
     @import("inc4_host.zig").round(b, cuda, mods.core);
     @import("inc4_host.zig").rows(b, cuda, mods.core);
