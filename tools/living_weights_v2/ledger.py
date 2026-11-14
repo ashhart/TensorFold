@@ -16,34 +16,82 @@ class LedgerError(RuntimeError):
     pass
 
 
-def private_dir(directory: Path) -> None:
-    # Directories this tool creates are 0700; an existing one is left as it is, since it may hold other state.
+def _private(st: os.stat_result, kind) -> bool:
+    return kind(st.st_mode) and st.st_uid == os.getuid() and not stat.S_IMODE(st.st_mode) & 0o077
+
+
+def private_dir(directory: Path) -> tuple[int, int]:
+    """Create missing directories 0700; the journal's own directory must be a real directory of ours with mode 0700."""
+    if os.name != "posix":
+        raise LedgerError("the Living Weights v2 journal requires a POSIX host")
     missing = []
-    while not directory.exists():
-        missing.append(directory)
-        directory = directory.parent
+    probe = directory
+    while not os.path.lexists(probe):
+        missing.append(probe)
+        probe = probe.parent
     for item in reversed(missing):
         try:
             item.mkdir(mode=0o700)
         except FileExistsError:
             pass
+    st = os.lstat(directory)
+    if not _private(st, stat.S_ISDIR):
+        found = stat.S_IMODE(st.st_mode)
+        raise LedgerError(f"{directory} must be a directory you own with mode 700 (it is {found:o}), "
+                          "since it holds the journal; use a private directory of its own")
+    return st.st_dev, st.st_ino
 
 
-def private_journal(path: Path) -> None:
-    """The database, WAL and SHM hold fact text: refuse ones others can open, and create the database 0600."""
-    for item in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
-        try:
-            mode = stat.S_IMODE(item.stat().st_mode)
-        except FileNotFoundError:
-            continue
-        if mode & 0o077:
-            raise LedgerError(f"{item} is open to other users (mode {mode:o}) and holds fact text; "
-                              "run chmod 600 on it first")
-    private_dir(path.parent)
+def _journal_files(path: Path) -> tuple[Path, Path, Path]:
+    return path, Path(str(path) + "-wal"), Path(str(path) + "-shm")
+
+
+def _check_file(item: Path, st: os.stat_result) -> None:
+    if not _private(st, stat.S_ISREG):
+        raise LedgerError(f"{item} must be a regular file you own with mode 600 (it is {stat.S_IMODE(st.st_mode):o}), "
+                          "since it holds fact text")
+
+
+def private_journal(path: Path) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Check the directory, then create the database at 0600 (or check the one there); return both identities."""
+    folder = private_dir(path.parent)
+    flags = os.O_RDWR | os.O_NOFOLLOW
     try:
-        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600))
+        descriptor = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        pass
+        try:
+            descriptor = os.open(str(path), flags)
+        except OSError as exc:
+            raise LedgerError(f"{path} must be a regular file you own with mode 600, not a link") from exc
+    try:
+        st = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    _check_file(path, st)
+    for item in _journal_files(path)[1:]:
+        try:
+            _check_file(item, os.lstat(item))
+        except FileNotFoundError:
+            pass
+    return folder, (st.st_dev, st.st_ino)
+
+
+def verify_journal(path: Path, identities: tuple[tuple[int, int], tuple[int, int]]) -> None:
+    """After SQLite opens it: the same directory and database, and every journal file still private."""
+    folder, database = identities
+    st = os.lstat(path.parent)
+    if (st.st_dev, st.st_ino) != folder or not _private(st, stat.S_ISDIR):
+        raise LedgerError(f"{path.parent} changed while the journal opened")
+    for item in _journal_files(path):
+        try:
+            st = os.lstat(item)
+        except FileNotFoundError:
+            if item == path:
+                raise LedgerError(f"{path} changed while the journal opened") from None
+            continue
+        _check_file(item, st)
+        if item == path and (st.st_dev, st.st_ino) != database:
+            raise LedgerError(f"{path} changed while the journal opened")
 
 
 @contextlib.contextmanager
@@ -53,7 +101,7 @@ def exclusive_file(path: Path) -> Iterator[None]:
     except ImportError as exc:
         raise LedgerError("exclusive locking requires a POSIX host") from exc
     private_dir(path.parent)
-    descriptor = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    descriptor = os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         import fcntl
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -67,8 +115,17 @@ def exclusive_file(path: Path) -> Iterator[None]:
 class Ledger:
     def __init__(self, path: Path):
         self.path = path
-        private_journal(path)  # SQLite gives the WAL and SHM the database file's mode
+        identities = private_journal(path)  # SQLite gives the WAL and SHM the database file's mode
         self.db = sqlite3.connect(path, timeout=2)
+        try:
+            verify_journal(path, identities)
+            self._create()
+            verify_journal(path, identities)
+        except BaseException:
+            self.db.close()
+            raise
+
+    def _create(self) -> None:
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
