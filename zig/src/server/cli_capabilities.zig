@@ -67,6 +67,8 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
         try w.writeAll(", \"kernel_sms\": ");
         try std.json.Stringify.value(sms, .{}, w);
     }
+    try w.writeAll(", \"token_stream_versions\": ");
+    try std.json.Stringify.value(@import("token_stream.zig").versions, .{}, w);
     if (e.p2p) |p| try w.print(", \"p2p\": {s}", .{p});
     try w.writeAll("}\n");
 }
