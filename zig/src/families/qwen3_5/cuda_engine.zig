@@ -16,14 +16,12 @@ const x3w = @import("cuda_exl3_weights.zig");
 const hosted = @import("cuda_host_embed.zig");
 pub const recurrent = @import("cuda_recurrent.zig");
 pub const stage_fwd = @import("cuda_stage_forward.zig");
-
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
 pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
-
 /// Rows of one forward at most: a prompt chunk, or a shared round's windows.
 pub const max_rows = Round.max_rows;
 /// Streams' windows in one forward at most.
