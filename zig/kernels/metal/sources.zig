@@ -148,6 +148,8 @@ pub const glm_vision = vision_glue ++ @embedFile("glm_vision.metal");
 pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal");
 /// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
+/// Idol's denoiser: the prefill GEMM template, then its own steps and head-64 attention.
+pub const idol = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("idol.metal") ++ @embedFile("idol_attention.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.

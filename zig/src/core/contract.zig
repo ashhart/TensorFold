@@ -44,6 +44,7 @@ test {
     _ = @import("contract/glm_rows_records.zig");
     _ = @import("contract/nemotron_experts_records.zig");
     _ = @import("contract/moss_image_records.zig");
+    _ = @import("contract/idol_records.zig");
     _ = @import("contract/metal_pair_records.zig");
     _ = @import("contract/affine_gather_records.zig");
     _ = @import("contract/flint_records.zig");
