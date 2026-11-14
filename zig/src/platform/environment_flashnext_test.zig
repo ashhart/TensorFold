@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 34 settings: 23 switches, 9 integers, 1 real, 1 structured" {
+test "Flash Next strict env: the table holds all 35 settings: 23 switches, 9 integers, 1 real, 2 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 23, 9, 1, 1 }, counts);
+    try t.expectEqual([4]usize{ 23, 9, 1, 2 }, counts);
 }
 
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
@@ -128,6 +128,16 @@ test "Flash Next strict env: the prompt word keeps rows as a present index and r
     // rows is the only word, so it decodes to index 0: present, which the reader reads as the rows path
     try t.expect((try e.value(?u64, name, "rows", null)) != null);
     try t.expect((try e.value(?u64, name, null, null)) == null);
+}
+
+test "Flash Next strict env: the draft head keeps bf16 and affine4 in the reader's order and refuses other text" {
+    const name = "TF_FLASHNEXT_DRAFT_HEAD";
+    try check(name, "bf16", true);
+    try check(name, "affine4", true);
+    // the words' order is the reader's: bf16 is 0 and affine4 is 1, its default
+    try t.expectEqual(@as(u1, 0), try e.value(u1, name, "bf16", 1));
+    try t.expectEqual(@as(u1, 1), try e.value(u1, name, "affine4", 0));
+    for ([_][]const u8{ "BF16", "affine", "fp8", "1", "affine4 " }) |raw| try check(name, raw, false);
 }
 
 test "Flash Next strict env: the late keep reads unset and blank as null, and 0 and 1 as false and true" {

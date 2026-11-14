@@ -266,6 +266,7 @@ pub const rules = [_]Rule{
     .{ .name = "HF_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
     .{ .name = "HUGGING_FACE_HUB_TOKEN", .scope = .hub, .kind = .path, .trim = " \t\n\r\x0b\x0c", .forms = "a Hugging Face token without control characters (pull only)" },
     .{ .name = "HF_TOKEN_PATH", .scope = .hub, .kind = .path, .forms = "a path without control characters to the Hugging Face token file (pull only)" },
+    .{ .name = "TF_FLASHNEXT_DRAFT_HEAD", .scope = .flashnext, .kind = .word, .words = &.{ "bf16", "affine4" }, .forms = "bf16 or affine4 (unset or blank keeps affine4, a bf16 language head's draft rows as 4-bit groups of 32; bf16 keeps the rows as stored)" },
     // Family rank and prompt settings below are read through their own family's startup scope.
     .{ .name = "TF_GLM_INDEX_CUDA", .scope = .glm, .kind = .word, .words = &.{ "1", "0", "scores" }, .forms = "1 (both kernels), 0 (neither) or scores (scores only; unset or blank is both)" },
     .{ .name = "TF_GLM_KV_HOST_GIB", .scope = .glm, .kind = .real, .forms = "a finite GiB amount of at least 0 (unset or blank uses one full window and 16 rows a page)" },
