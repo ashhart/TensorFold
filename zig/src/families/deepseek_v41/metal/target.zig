@@ -76,6 +76,8 @@ pub const Target = struct {
     stats: Stats = .{},
     /// a command buffer failed: the device state is no longer trusted (the health hook)
     failed: bool = false,
+    /// the target's own buffers held resident on the queue (null: no residency sets on this OS)
+    resident: ?mtl.ResidencySet = null,
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -107,7 +109,27 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        t.resident = t.holdResident();
         return t;
+    }
+
+    /// Every buffer the target binds besides the weights, in one residency set on its queue: none waits to be mapped.
+    fn holdResident(t: *const Target) ?mtl.ResidencySet {
+        const set = t.env.device.residencySet(16 + 6 * t.slots.len * t.env.c.layers) catch return null;
+        for ([_]mtl.Buffer{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed }) |b| set.add(b);
+        for (t.slots) |*s| {
+            for (s.kv.regions) |r| {
+                set.add(r.window);
+                inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(r, f)) |b| set.add(b);
+            }
+            if (s.kv.taps) |b| set.add(b);
+            for ([_]mtl.Buffer{ s.tail.x, s.tail.pre, s.ptaps }) |b| set.add(b);
+        }
+        set.commit();
+        set.requestResidency();
+        t.env.queue.addResidencySet(set);
+        std.log.info("dsv41 target: {d:.1} GiB of buffers kept resident in their own set", .{mtl.ResidencySet.gibs(set.allocatedSize())});
+        return set;
     }
 
     fn freeSlot(a: Allocator, s: *Slot) void {
@@ -119,6 +141,10 @@ pub const Target = struct {
     }
 
     pub fn deinit(t: *Target) void {
+        if (t.resident) |set| {
+            t.env.queue.removeResidencySet(set);
+            set.deinit();
+        }
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
