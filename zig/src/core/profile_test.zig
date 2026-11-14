@@ -183,7 +183,7 @@ test "stable profile: Nemotron's paging on Metal has its own scope" {
 }
 
 test "stable profile: every DeepSeek audit group has independent scoped metadata" {
-    const Row = struct { id: p.Switch, class: p.Class };
+    const Row = struct { id: p.Switch, class: p.Class, evidence: []const u8 = "#2370" };
     const rows = [_]Row{
         .{ .id = .TF_DSV41_EXPERT_TOPP, .class = .experimental },
         .{ .id = .TF_DSV41_NUCLEUS, .class = .arithmetic },
@@ -205,6 +205,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
         .{ .id = .TF_DSV41_SCHEMA_PROMPT, .class = .experimental },
         .{ .id = .TF_DSV41_ROWS_CAP, .class = .arithmetic },
         .{ .id = .TF_DSV41_TOOL_GRAMMAR, .class = .experimental },
+        .{ .id = .TF_DSV41_COPY_DRAFTER, .class = .experimental, .evidence = "#2638" },
     };
     var count: usize = 0;
     for (p.entries) |e| if (e.applies("deepseek_v41", "cuda")) {
@@ -215,7 +216,7 @@ test "stable profile: every DeepSeek audit group has independent scoped metadata
         const e = p.entry(row.id);
         try t.expectEqual(row.class, e.class);
         try t.expectEqual(p.Syntax.present, e.syntax);
-        try t.expectEqualStrings("#2370", e.evidence);
+        try t.expectEqualStrings(row.evidence, e.evidence);
         try t.expectEqual(@as(usize, 1), e.families.len);
         try t.expect(e.applies("deepseek_v41", "cuda"));
         try t.expect(!e.applies("glm5_next", "cuda") and !e.applies("deepseek_v41", "metal"));

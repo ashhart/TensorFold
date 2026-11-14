@@ -91,6 +91,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_COEF_LATE", .scope = .dsv41, .kind = .toggle, .trim = " \t", .no_word = false, .forms = "0, 1, true, false, on, off or yes (any case)" },
     .{ .name = "TF_DSV41_LOOKUP", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case); blank turns lookup drafts off" },
     .{ .name = "TF_DSV41_LOOKUP_PLAN", .scope = .dsv41, .kind = .toggle, .trim = " \t", .forms = "0, 1, true, false, on, off, yes or no (any case)" },
+    .{ .name = "TF_DSV41_COPY_DRAFTER", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_GM_V3", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_OWN_PREFILL", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_DRAFTS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },

@@ -61,6 +61,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
+| `TF_DSV41_COPY_DRAFTER` | DeepSeek-V4.1 on CUDA: exactly `0` or `1`; enables the lookup planner (regardless of `TF_DSV41_LOOKUP_PLAN`) with continuation-ranked band matching, adaptive doubling (`8 -> 15`), and expected-yield gating; refused when `TF_DSV41_LOOKUP` is blank or off; default off |
 
 The video-token reader has no fixed model-independent token ceiling. Its unsigned storage width is not a useful token budget.
 The request geometry and model context decide whether a parsed budget fits; zero remains accepted as before.

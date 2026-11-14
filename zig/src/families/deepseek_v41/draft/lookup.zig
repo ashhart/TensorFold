@@ -1,4 +1,4 @@
-//! Priced per-request lookup drafting (TF_DSV41_LOOKUP_PLAN=1): history suffix matches drafted only when they pay.
+//! Priced per-request lookup drafting (TF_DSV41_LOOKUP_PLAN=1, TF_DSV41_COPY_DRAFTER=1): suffix matches that pay.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -12,27 +12,61 @@ pub const bands = [_]struct { least: i64, prior: f64 }{ .{ .least = 0, .prior = 
 pub const prior_weight: f64 = 2.0;
 pub const decay: f64 = 0.85;
 pub const probe_every = 8;
+pub const copy_probe_every = 2;
 pub const probe_match: i64 = 16;
 pub const alt_window = 8;
 pub const candidates = 64;
 pub const extend_to = 64;
+pub const initial_offer: usize = 8;
+/// Conditional per-step continuation floor and slope for active `copy_drafter` span matches (`b >= 1`).
+pub const copy_span_base: f64 = 0.75;
+pub const copy_span_slope: f64 = 0.25;
 /// An image row's virtual id base: never a token to draft
 pub const vbase: u32 = 1 << 24;
 pub const max_rows = depth.slot_rows; // 16
 
-/// TF_DSV41_LOOKUP_PLAN, TF_DSV41_LOOKUP, TF_DSV41_LOOKUP_MIN, TF_DSV41_MAX_ROWS.
+pub fn bandOf(length: i64) usize {
+    var b: usize = 0;
+    for (bands, 0..) |x, i| if (length >= x.least) {
+        b = i;
+    };
+    return b;
+}
+
+/// TF_DSV41_LOOKUP_PLAN, TF_DSV41_COPY_DRAFTER, TF_DSV41_LOOKUP, TF_DSV41_LOOKUP_MIN, TF_DSV41_MAX_ROWS.
 pub const Settings = struct {
     plan: bool = false,
+    copy_drafter: bool = false,
     lookup: bool = true,
     min_match: i64 = 4,
     max_rows: i64 = max_rows,
 
+    pub const copy_drafter_lookup_refusal = "TF_DSV41_COPY_DRAFTER=1 requires TF_DSV41_LOOKUP to be enabled";
+
+    /// Whether `TF_DSV41_LOOKUP` is enabled (`null` defaults to true; blank turns lookup drafts off).
+    pub fn lookupEnabled(raw: ?[]const u8) !bool {
+        const blank_off = raw != null and std.mem.trim(u8, raw.?, " \t").len == 0;
+        return !blank_off and try @import("sys").environment.value(bool, "TF_DSV41_LOOKUP", raw, true);
+    }
+
+    /// Refuses `TF_DSV41_COPY_DRAFTER=1` when `TF_DSV41_LOOKUP` is off or blank, returning the parsed switches.
+    pub fn checkCopyDrafter(environment: anytype) !struct { copy_drafter: bool, lookup: bool } {
+        const copy_drafter = try @import("sys").environment.value(bool, "TF_DSV41_COPY_DRAFTER", environment.get("TF_DSV41_COPY_DRAFTER"), false);
+        const lookup = try lookupEnabled(environment.get("TF_DSV41_LOOKUP"));
+        if (copy_drafter and !lookup) {
+            if (!@import("builtin").is_test) std.log.err("{s}", .{copy_drafter_lookup_refusal});
+            return error.InvalidEnvironment;
+        }
+        return .{ .copy_drafter = copy_drafter, .lookup = lookup };
+    }
+
     pub fn fromEnv() !Settings {
         var s: Settings = .{};
-        s.plan = try @import("sys").environment.read(bool, "TF_DSV41_LOOKUP_PLAN", false);
-        const lookup = @import("sys").getenv("TF_DSV41_LOOKUP");
-        const blank_off = lookup != null and std.mem.trim(u8, lookup.?, " \t").len == 0;
-        s.lookup = !blank_off and try @import("sys").environment.value(bool, "TF_DSV41_LOOKUP", lookup, true);
+        const plan = try @import("sys").environment.read(bool, "TF_DSV41_LOOKUP_PLAN", false);
+        const checked = try checkCopyDrafter(@import("sys").environment.Process{});
+        s.copy_drafter = checked.copy_drafter;
+        s.lookup = checked.lookup;
+        s.plan = plan or s.copy_drafter;
         if (std.c.getenv("TF_DSV41_LOOKUP_MIN")) |v| if (std.mem.span(v).len > 0) {
             s.min_match = std.fmt.parseInt(i64, std.mem.trim(u8, std.mem.span(v), " "), 10) catch return error.BadLookupMin;
         };
@@ -129,6 +163,60 @@ pub const SuffixIndex = struct {
         }
         return m.len;
     }
+
+    /// In the highest matched band (>= min_match), prefer continuation up to `want`, then length, then recency.
+    pub fn matchRanked(x: *SuffixIndex, want: usize, min_match: i64) !Match {
+        const t = x.tokens.items;
+        const L = t.len;
+        if (L <= x.n) return .{ .len = 0, .end = -1 };
+        try x.index();
+        const ends = x.ends.get(x.key(L)) orelse return .{ .len = 0, .end = -1 };
+        const reach = @max(extend_to, x.n);
+        var best: Match = .{ .len = 0, .end = -1 };
+        var best_band: usize = 0;
+        var best_avail: usize = 0;
+        const from = ends.items.len -| candidates;
+        var i = ends.items.len;
+        while (i > from) {
+            i -= 1;
+            const end: usize = ends.items[i];
+            var length: usize = x.n;
+            const limit = @min(reach, end);
+            while (length < limit and t[end - 1 - length] == t[L - 1 - length]) length += 1;
+            const len: i64 = @intCast(length);
+            if (len < min_match) {
+                if (best.len < min_match and len > best.len) best = .{ .len = len, .end = @intCast(end) };
+                continue;
+            }
+            const b = bandOf(len);
+            const avail = @min(want, (L -| length) -| end);
+            if (avail == 0) continue;
+            const take = best.len < min_match or b > best_band or
+                (b == best_band and (avail > best_avail or (avail == best_avail and len > best.len)));
+            if (take) {
+                best = .{ .len = len, .end = @intCast(end) };
+                best_band = b;
+                best_avail = avail;
+            }
+        }
+        return best;
+    }
+
+    /// Up to `count` non-overlapping drafts from `matchRanked`, stopping before the suffix tail or any image row.
+    pub fn proposeRanked(x: *SuffixIndex, count: usize, min_match: i64, out: *std.ArrayList(u32)) !i64 {
+        out.clearRetainingCapacity();
+        const m = try x.matchRanked(count, min_match);
+        if (m.end < 0 or m.len < min_match or count == 0) return m.len;
+        const t = x.tokens.items;
+        const end: usize = @intCast(m.end);
+        const tail = t.len -| @as(usize, @intCast(m.len));
+        const limit = @min(count, tail -| end);
+        for (t[end .. end + limit]) |d| {
+            if (d >= vbase) break;
+            try out.append(x.gpa, d);
+        }
+        return m.len;
+    }
 };
 
 pub const Kind = enum { serial, dspark, lookup };
@@ -142,6 +230,7 @@ pub const Request = struct {
     alt: [alt_window][2]f64 = undefined, // (tokens, ms), oldest first from `alt_head`
     alt_len: usize = 0,
     alt_head: usize = 0,
+    doubled: bool = false,
     kind: Kind = .serial,
     band: usize = 0,
     out: std.ArrayList(u32) = .empty,
@@ -174,16 +263,18 @@ pub const Planner = struct {
         return r;
     }
 
-    fn band(length: i64) usize {
-        var b: usize = 0;
-        for (bands, 0..) |x, i| if (length >= x.least) {
-            b = i;
-        };
-        return b;
-    }
-
     pub fn pOf(r: *const Request, b: usize) f64 {
         return (r.acc[b] + bands[b].prior * prior_weight) / (r.tri[b] + prior_weight);
+    }
+
+    /// Expected accepted drafts of a non-lookup round from the trailing alt window (1.0 for DSpark before any).
+    pub fn altYield(p: *const Planner, r: *const Request) f64 {
+        if (r.alt_len > 0) {
+            var drafts: f64 = 0.0;
+            for (0..r.alt_len) |i| drafts += @max(0.0, r.alt[(r.alt_head + i) % alt_window][0] - 1.0);
+            return drafts / @as(f64, @floatFromInt(r.alt_len));
+        }
+        return if (p.dspark) 1.0 else 0.0;
     }
 
     /// Tokens a modelled ms of recent non-lookup rounds (before any: a one-draft DSpark round, or a serial step).
@@ -209,23 +300,38 @@ pub const Planner = struct {
         r.out.clearRetainingCapacity();
         if (!drafts or room <= 0) return &.{};
         if (p.set.lookup) {
-            const count: usize = @intCast(@min(p.set.max_rows - 1, room));
-            const length = try r.index.propose(count, p.set.min_match, &r.out);
+            const cap: usize = @intCast(@min(p.set.max_rows - 1, room));
+            const count: usize = if (p.set.copy_drafter and !r.doubled) @min(cap, initial_offer) else cap;
+            const length = if (p.set.copy_drafter)
+                try r.index.proposeRanked(count, p.set.min_match, &r.out)
+            else
+                try r.index.propose(count, p.set.min_match, &r.out);
             var ds = r.out.items;
             for (ds, 0..) |d, i| if (std.mem.indexOfScalar(u32, eos, d) != null) {
                 ds = ds[0..i];
                 break;
             };
             if (ds.len > 0) {
-                const b = band(length);
+                const b = bandOf(length);
                 var qs: [max_rows]f64 = undefined;
                 const q = @min(pOf(r, b), 0.995);
-                for (qs[0..ds.len]) |*x| x.* = q;
-                const best = depth.bestK(qs[0..ds.len], p.costs.verify, p.altRate(r), 1);
-                var go = best.k > 0 and best.surplus > 0.0;
+                const probe = if (p.set.copy_drafter)
+                    b >= 1 and r.skipped[b] + 1 >= copy_probe_every
+                else
+                    bands[b].least >= probe_match and r.skipped[b] + 1 >= probe_every;
+                const q_eff = if (p.set.copy_drafter and b >= 1 and (q >= bands[1].prior or probe))
+                    @min(copy_span_base + copy_span_slope * @max(q, bands[b].prior), 0.995)
+                else
+                    q;
+                for (qs[0..ds.len]) |*x| x.* = q_eff;
+                const rate = p.altRate(r);
+                const best = depth.bestK(qs[0..ds.len], p.costs.verify, rate, 1);
+                const copy_yield = best.surplus + rate * p.costs.verify[best.k] - 1.0;
+                const yield_ok = !p.set.copy_drafter or (copy_yield >= p.altYield(r));
+                var go = best.k > 0 and best.surplus > 0.0 and yield_ok;
                 if (!go) {
                     r.skipped[b] += 1;
-                    go = best.k > 0 and bands[b].least >= probe_match and r.skipped[b] >= probe_every;
+                    go = best.k > 0 and probe and yield_ok;
                 }
                 if (go) {
                     r.skipped[b] = 0;
@@ -233,6 +339,7 @@ pub const Planner = struct {
                     r.band = b;
                     return ds[0..best.k];
                 }
+                r.doubled = false;
             }
         }
         if (p.dspark) r.kind = .dspark;
@@ -247,7 +354,9 @@ pub const Planner = struct {
             const b = r.band;
             r.acc[b] = r.acc[b] * decay + k;
             r.tri[b] = r.tri[b] * decay + k + @as(f64, if (kept < drafts) 1.0 else 0.0);
+            r.doubled = p.set.copy_drafter and drafts > 0 and kept >= drafts;
         } else {
+            r.doubled = false;
             const ms = p.costs.windowMs(@intCast(rows)) + (if (r.kind == .dspark) p.costs.draft else 0.0);
             r.pushAlt(k + 1.0, ms);
         }

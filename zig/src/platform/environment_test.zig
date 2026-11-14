@@ -227,6 +227,7 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_GM_V3", raw));
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_DRAFTS", raw));
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
+        try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_COPY_DRAFTER", raw));
     }
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
 }

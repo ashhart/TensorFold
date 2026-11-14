@@ -147,6 +147,10 @@ contributions are in it.
   a change to the TensorFold engine vendored there, Apache-2.0) deferred a kept chain's DeltaNet replay into the next
   slot scan. The Qwen3.5 family's pending kept rows carry its code: the replay and write-back in
   `zig/kernels/cuda/qwen35_slots.cuh`, and `Cache.flush` and `fold` in `zig/src/families/qwen3_5/cuda_cache.zig`.
+- @christopherowen added continuation-ranked band matching, adaptive doubling (`8 -> 15`) and expected-yield gating
+  to DeepSeek-V4.1's lookup planner (`zig/src/families/deepseek_v41/draft/lookup.zig`) in
+  [#2638](https://github.com/ashhart/TensorFold/pull/2638), first tried in
+  [christopherowen/spark-ds41f](https://github.com/christopherowen/spark-ds41f).
 
 ## EXL3
 

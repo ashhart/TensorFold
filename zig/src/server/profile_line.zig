@@ -229,7 +229,7 @@ test "profile line: every independent DeepSeek override is scoped and paths are 
         for ([_][2][]const u8{ .{ "deepseek_v41", "metal" }, .{ "glm5_next", "cuda" } }) |scope|
             try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, scope[0], scope[1], env));
     }
-    try std.testing.expectEqual(@as(usize, 20), count);
+    try std.testing.expectEqual(@as(usize, 21), count);
     try std.testing.expectEqualStrings("profile: stable; registered overrides: none", try format(a, .stable, "deepseek_v41", "cuda", DeepEnv{ .name = "TF_DSV41_TOOL_GRAMMAR", .canonical = "0" }));
 }
 

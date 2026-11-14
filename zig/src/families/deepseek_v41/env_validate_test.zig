@@ -1,6 +1,7 @@
 //! Refusal text and canonical/legacy forms for every setting validated before DeepSeek startup.
 const std = @import("std");
 const e = @import("sys").environment;
+const env_validate = @import("env_validate.zig");
 const t = std.testing;
 
 const Fixture = struct {
@@ -23,25 +24,25 @@ fn group(r: e.Rule) Group {
 
 fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     const fx: Fixture = .{ .name = name, .raw = raw };
-    const why = try e.refusal(t.allocator, fx, .{ .dsv41 = true });
+    const why = try env_validate.refusal(t.allocator, fx);
     defer if (why) |w| t.allocator.free(w);
     if (valid) {
-        try e.checkScope(.dsv41, fx);
+        try env_validate.check(fx);
         return t.expect(why == null);
     }
-    try t.expectError(error.InvalidEnvironment, e.checkScope(.dsv41, fx));
+    try t.expectError(error.InvalidEnvironment, env_validate.check(fx));
     try t.expect(std.mem.startsWith(u8, why.?, name));
     try t.expect(std.mem.indexOf(u8, why.?, raw) != null);
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "DeepSeek strict env: the shared table holds all 81 settings: 48 switches, 14 integers, 16 reals and 3 structured" {
+test "DeepSeek strict env: the shared table holds all 82 settings: 49 switches, 14 integers, 16 reals and 3 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .dsv41) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_DSV41_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 48, 14, 16, 3 }, counts);
+    try t.expectEqual([4]usize{ 49, 14, 16, 3 }, counts);
 }
 
 test "DeepSeek strict env: unset and blank settings both read as the caller's default" {
@@ -130,4 +131,25 @@ test "DeepSeek strict env: the canonical tool grammar masks its legacy alias" {
     try e.checkScope(.dsv41, fx);
     try t.expect(try e.refusal(t.allocator, fx, .{ .dsv41 = true }) == null);
     try t.expectError(error.InvalidEnvironment, e.checkScope(.dsv41, Fixture{ .name = fx.name, .raw = fx.raw }));
+}
+
+test "DeepSeek strict env: copy-drafter lookup-off refusal names TF_DSV41_COPY_DRAFTER and TF_DSV41_LOOKUP" {
+    const Pair = struct {
+        lookup: []const u8,
+        pub fn get(p: @This(), key: []const u8) ?[]const u8 {
+            if (std.mem.eql(u8, key, "TF_DSV41_COPY_DRAFTER")) return "1";
+            if (std.mem.eql(u8, key, "TF_DSV41_LOOKUP")) return p.lookup;
+            return null;
+        }
+    };
+    for ([_][]const u8{ "0", "off", "false", "", " " }) |off| {
+        const pair: Pair = .{ .lookup = off };
+        try t.expectError(error.InvalidEnvironment, env_validate.check(pair));
+        const why = (try env_validate.refusal(t.allocator, pair)).?;
+        defer t.allocator.free(why);
+        try t.expect(std.mem.indexOf(u8, why, "TF_DSV41_COPY_DRAFTER") != null);
+        try t.expect(std.mem.indexOf(u8, why, "TF_DSV41_LOOKUP") != null);
+    }
+    try env_validate.check(Pair{ .lookup = "1" });
+    try t.expect(try env_validate.refusal(t.allocator, Pair{ .lookup = "1" }) == null);
 }

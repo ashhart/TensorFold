@@ -401,6 +401,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: a reply that max_tokens cuts inside a JSON tool call (`<tool_call>` then `{"name": ..., "arguments": ...`, the form Ripple-65B-Preview writes) returns that call with its arguments as far as written, whole and streamed alike, as XML and GLM cuts already are, instead of leaving the markup in `content`; a call cut before its name is whole or its arguments begin, or naming a tool not offered, stays text; a whole `/v1/messages` reply closes a cut call's input as far as written, as its stream does, where an XML cut was a 500 (#2511). Thanks to @ajensenwaud.
 
+- DeepSeek-V4.1: `TF_DSV41_COPY_DRAFTER=1` ranks suffix matches within their length band by available continuation tokens, doubles the copy draft offer from 8 to 15 tokens after a fully accepted copy round, and gates lookup copies against the request's recent non-lookup draft yield (#2638). Thanks to @christopherowen.
+
 - CUDA: the shared MoE routing glue gains group-limited selection in its sigmoid score form: experts split into equal groups, each scored by its two best values, the best groups kept (the lower group on ties) and the top-k taken from them; a grouped route outside that form is refused before launch. Nemotron, the one family on the score form today, keeps its kernels and bytes (#2334, part of #850). Thanks to @ajensenwaud.
 
 - HIP on gfx1151: a skewed-row matrix tile runs three blocks a WGP for prompts up to 8192 codes deep, with the same results as the padded tile, which stays for every other shape (#2087). Thanks to @AbrahamCete.
