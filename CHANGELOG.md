@@ -4,6 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the README's build section says that a Linux `zig build native` compiles for the build machine's CPU, and that `-Dcpu=baseline` or `-Dcpu=x86_64_v3` builds a binary for another machine, with thanks to @Nipale-ai (#3179).
 - HIP, Qwen3.8-Flash-Next on RDNA 3.5 (gfx1151): MTP draft chains now stop under a 0.8 confidence floor by default (was 0.3), the same one-rank rule `prefill_step` uses. Replies are unchanged. One stream decodes about 6% faster and four streams 2.8% (greedy) to 4.6% (sampled) faster (#2697). Thanks to @gilby.
 - Qwen3.8-Flash-Next on HIP stops its MTP draft chains under a 0.8 confidence floor by default instead of the HIP-wide 0.3; `--mtp-confidence` still overrides it, and the other HIP families keep 0.3. On a Strix Halo iGPU one-stream decode is about 6% faster on code and on chat, and four distinct streams about 3%, with one-stream throughput on `tools/bench_prompts.json` unchanged. Replies are unchanged.
 - Server: a reply that keeps a tool-call envelope as plain text now says so. `tensorfold.kept_tool_calls` counts the envelopes that name a tool the request did not offer and the malformed ones, and lists up to eight unoffered names, on the whole reply and on a stream's final chunk; `/metrics` gains `kept_tool_calls_unoffered_total` and `kept_tool_calls_malformed_total`. Replies are otherwise unchanged (#2814, for #2800). Thanks to @tarsnake for the report.

@@ -399,6 +399,10 @@ zig build native -Dcpu=apple_m1
 zig build test test-golden -Dcpu=apple_m1
 ```
 
+On Linux, `zig build native` compiles for the build machine's CPU, so the binary can stop with `Illegal instruction` on a
+machine without the same features (AVX-512, for example). To build for another machine, name its CPU: `-Dcpu=baseline`
+runs on any x86_64, as the release archives do, and `-Dcpu=x86_64_v3` on any x86_64 with AVX2.
+
 Structured output and required tool calls need the release archive's `lib/` or `zig build grammar -Dxgrammar=DIR`; prepare DIR with `git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar` (use the native build's same `--prefix` for grammar).
 
 To build one stripped server for one GPU (`zig build -Dgpu=spark -Dnvcc=...`, about 69% smaller than the four-target server), see [Build a server for one GPU](RUNBOOK.md#build-a-server-for-one-gpu).
