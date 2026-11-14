@@ -60,7 +60,7 @@ pub fn Namespace(comptime Tri: type) type {
             pub const min_prompt: u32 = 512;
         };
 
-        pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, one_stream: bool = false };
+        pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, lanes: u32 = 1, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, one_stream: bool = false, prompt_cache_bytes: u64 = 0 };
         pub const preallocates_lanes = false;
         /// Living Weights' learner (--slide): lessons put neurons in each layer's pocket beside its shared expert.
         pub const slide = slide_mod.Slide(Tri);

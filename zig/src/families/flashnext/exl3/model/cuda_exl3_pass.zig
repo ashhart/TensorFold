@@ -181,6 +181,8 @@ pub const Budget = struct {
     margin: u64 = 256 << 20,
     /// Bytes the family still allocates after the pools: each admitted stream's caches.
     other: u64 = 0,
+    /// Requested prompt-cache bytes protected from optional pool growth.
+    cache_reserve: u64 = 0,
     /// Lines a layer, or null: from free memory (cuda_exl3_round.linesFor).
     lines: ?usize = null,
     /// Rows a planned round holds (the pass's block of routed rows).
@@ -218,6 +220,27 @@ fn streamReservation(stream_bytes: u64, streams: u32) !u64 {
 test "EXL3 pool reserves the requested number of concurrent stream caches" {
     try std.testing.expectEqual(@as(u64, 200), try streamReservation(100, 2));
     try std.testing.expectError(error.InvalidStreamCount, streamReservation(100, 0));
+}
+
+fn growthFit(free: u64, reserve: u64, future: u64, cache: u64, fixed: u64, line_cost: u64, layers: usize) ?usize {
+    return pool_.linesFor(free, reserve, future +| cache +| fixed, line_cost, layers, pool_.min_lines) catch null;
+}
+
+fn autoLines(free: u64, reserve: u64, future: u64, cache: u64, fixed: u64, line_cost: u64, layers: usize) !usize {
+    if (growthFit(free, reserve, future, cache, fixed, line_cost, layers)) |fit| return fit;
+    _ = try pool_.linesFor(free, reserve, future +| fixed, line_cost, layers, pool_.min_lines);
+    if (cache != 0) return pool_.min_lines;
+    return error.PoolTooSmall;
+}
+
+test "optional pool growth leaves an explicitly requested prompt cache" {
+    const without = growthFit(10_000, 100, 200, 0, 0, 10, 10).?;
+    const with_cache = growthFit(10_000, 100, 200, 3_000, 0, 10, 10).?;
+    try std.testing.expectEqual(@as(usize, 97), without);
+    try std.testing.expectEqual(@as(usize, 67), with_cache);
+    try std.testing.expectEqual(@as(?usize, null), growthFit(10_000, 100, 200, 10_000, 0, 10, 10));
+    try std.testing.expectEqual(@as(usize, pool_.min_lines), try autoLines(10_000, 100, 200, 10_000, 0, 10, 10));
+    try std.testing.expectError(error.PoolTooSmall, autoLines(500, 100, 200, 10_000, 0, 10, 10));
 }
 
 pub const Attached = struct { layers: usize = 0, lines: usize = 0, line_bytes: usize = 0, device_bytes: u64 = 0, free_before: u64 = 0, free_after: u64 = 0, scratch_bytes: u64 = 0, graph_reservation: u64 = 0, after_pool_bytes: u64 = 0, bank_bytes: u64 = 0, bank_ns: u64 = 0, prefill_window_bytes: u64 = 0, mtp_pool: ?*pool_.Pool = null };
@@ -303,9 +326,9 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     }
     const pool_room = try memory.available(free, reserve, future);
     const world: usize = if (all[0].tp) |t| t.world else 1;
-    const fit = pool_.linesFor(free, try std.math.add(u64, server_reserve, b.margin), try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines) catch null;
+    const fit = growthFit(free, try std.math.add(u64, server_reserve, b.margin), future, b.cache_reserve, all_fixed, line_cost, n);
     const uniform = try uniformLines();
-    const lines = if (b.lines) |explicit| (if (delta_text != null or uniform) explicit else memory.rankLines(explicit, world, fit)) else try pool_.linesFor(free, reserve, try std.math.add(u64, future, all_fixed), line_cost, n, pool_.min_lines);
+    const lines = if (b.lines) |explicit| (if (delta_text != null or uniform) explicit else memory.rankLines(explicit, world, fit)) else try autoLines(free, reserve, future, b.cache_reserve, all_fixed, line_cost, n);
     if (b.lines) |explicit| if (lines != explicit) std.log.info("flashnext exl3: this rank holds {d} lines a layer, {d} more than the {d} asked for: it has the room (residency never changes output bytes)", .{ lines, lines - explicit, explicit });
     if (lines < pool_.min_lines) return error.PoolTooSmall;
     const startup_bytes = try memory.poolBytes(lines, line_cost, n, all_fixed);

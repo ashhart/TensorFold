@@ -14,6 +14,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flash Next EXL3 with offloaded experts and an MTP head uses completed-round token rates to choose plain or drafted rounds, with bounded probes; transitions that combine a prior window and a new proposal do not enter either rate. Other formats retain their existing draft policy (#1446).
 
+- Flash Next EXL3 pool auto-sizing protects an explicitly requested prompt-cache budget from optional expert-line growth (#1446).
+
 - Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries. Its graph qualification runner propagates prefill configuration refusals (#1445).
 
 - The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
