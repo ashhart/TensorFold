@@ -14,6 +14,7 @@ pub const Mailbox = struct {
     rows: std.ArrayList(api.LogprobRow) = .empty, // one a token of `tokens`, for requests with logprobs
     prompt_rows: ?[]api.LogprobRow = null, // one a prompt token after the first, for requests with prompt_logprobs
     cached: ?u32 = null,
+    progress: ?api.Progress = null, // the newest prompt progress (return_progress requests): a slow reader sends the last
     prefilled_ns: ?i96 = null,
     finished: bool = false,
     reason: api.Reason = .stop,
@@ -32,6 +33,7 @@ pub const Mailbox = struct {
                 m.cached = cached;
                 m.prefilled_ns = std.Io.Clock.awake.now(m.io).toNanoseconds();
             },
+            .progress => |p| m.progress = p,
             .logprobs => |r| m.rows.appendSlice(m.gpa, r) catch {},
             .prompt_logprobs => |r| m.prompt_rows = m.gpa.dupe(api.LogprobRow, r) catch null,
             .tokens => |t| {

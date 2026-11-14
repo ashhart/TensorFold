@@ -89,6 +89,8 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    /// A prompt filled in more than one call sends ``progress`` events before its first token (off: none).
+    return_progress: bool = false,
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {
@@ -133,9 +135,14 @@ pub const speech_guard = @import("speech_guard.zig");
 
 pub const Stats = @import("engine_stats.zig").Stats;
 
+/// ``done`` of a prompt's ``total`` rows are in the cache, ``cached`` of them restored from a kept prefix.
+pub const Progress = struct { done: u32, total: u32, cached: u32 };
+
 pub const Event = union(enum) {
     /// The prompt is in the cache: ``cached`` of its tokens came from a kept prefix.
     prefilled: u32,
+    /// A ``return_progress`` prompt's rows so far, each higher; the last, ``done == total``, precedes ``prefilled``.
+    progress: Progress,
     /// The next ``tokens`` event's logprob rows, one a token (``logprobs`` requests); valid only during the call.
     logprobs: []const LogprobRow,
     /// The prompt's rows, one a prompt token after the first, right after ``prefilled`` (``prompt_logprobs`` requests).

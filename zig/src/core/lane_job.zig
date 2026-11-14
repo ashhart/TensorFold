@@ -23,6 +23,7 @@ pub const Job = struct {
     started: bool = false,
     prefill_sent: bool = false, // a lone driver's prefilled event went out
     fill_began: bool = false, // its first prompt chunk ran
+    progress_rows: u32 = 0, // the most prompt rows a progress event has shown (return_progress requests)
     submitted: i96 = 0,
     admitted_ns: ?i96 = null, // first admission only, retained if a background pass later yields
     fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk

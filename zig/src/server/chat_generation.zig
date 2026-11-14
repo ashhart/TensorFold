@@ -47,6 +47,8 @@ pub const Generation = struct {
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
+    return_progress: bool = false, // the engine sends prompt progress and the sink shows it
+    progress_done: u32 = 0, // the rows of the last progress shown
     tools: []const Value,
     calls: ?tool_stream.Streamer = null,
     collected: std.ArrayList(u32) = .empty,
@@ -173,6 +175,18 @@ pub const Generation = struct {
         g.wrote_ns = nowNs(g.srv.io);
     }
 
+    /// A new prompt progress count to the sink; a client that leaves cancels the reply.
+    fn showProgress(g: *Generation, p: api.Progress) Failure!void {
+        g.progress_done = p.done;
+        const sink = g.sink orelse return;
+        const write = sink.progress orelse return;
+        write(sink.ctx, p) catch {
+            g.cancel();
+            return error.Cancelled;
+        };
+        g.wrote_ns = nowNs(g.srv.io);
+    }
+
     /// End the request and wait for the engine; unfinished requests count as disconnects.
     pub fn cancel(g: *Generation) void {
         if (!g.engine_done) g.srv.engine.cancel(g.id);
@@ -218,7 +232,9 @@ pub const Generation = struct {
             } else {
                 m.cond.waitTimeout(m.io, &m.mutex, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }) catch {};
             }
+            const progress = if (g.return_progress) m.progress else null; // read with the chunk: it precedes its tokens
             m.mutex.unlock(m.io);
+            if (progress) |p| if (p.done > g.progress_done) try g.showProgress(p);
             if (ended) {
                 g.engine_done = true;
                 return;

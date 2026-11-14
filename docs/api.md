@@ -385,6 +385,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `thinking_budget` | Token-count limit inside reasoning | Both |
 | `priority` | `background` yields to foreground requests | Both |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
+| `return_progress` | Boolean, default false. A streamed reply first sends its prompt pass's progress; see [Prompt progress](#prompt-progress) | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -448,6 +449,25 @@ completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, d
 token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
 unless a stop string or a tool call ended the reply.
+
+### Prompt progress
+
+A streamed chat completion, completion or Responses request with `return_progress: true` hears how far its prompt
+pass has come before the reply starts. On chat and completions each count is a chunk of its own with an empty
+`choices` list, as the `include_usage` chunk has, and the counts under `tensorfold.progress`:
+
+```json
+{"id": "chatcmpl-…", "object": "chat.completion.chunk", "created": 1763000000, "model": "m", "choices": [], "tensorfold": {"progress": {"done": 8192, "total": 32768, "cached": 4096}}}
+```
+
+`done` of the prompt's `total` tokens are in the cache, `cached` of them restored from a kept prefix (so `done`
+counts them once, and starts at `cached` or above). A Responses stream sends the same counts as a
+`tensorfold.progress` event: `{"type": "tensorfold.progress", "sequence_number": 2, "done": 8192, "total": 32768,
+"cached": 4096}`. Each count is higher than the last, and the last has `done` equal to `total` and comes before the
+reply's first text. A client that reads behind the prompt pass gets the newest count, not every one. A prompt filled
+in one engine call sends none, as do engines that fill a prompt whole or do not report its rows, a family round
+planner's prompts, replies that are not streamed, the Messages route and requests Cortheon runs. The counts change no
+token: without the field, or with it false, the stream is byte for byte what it was.
 
 ### Replies that quote a template marker
 
@@ -1276,7 +1296,7 @@ same handler and engine path. A response has that chat completion's prompt and t
 - `text.format` takes `json_schema` or `json_object` through the structured-output path, with drafts.
 - `stream`, `store` (default true) and `metadata` (up to 16 string pairs, keys up to 64 characters,
   values up to 512). The chat extensions `draft`, `thinking_budget`, `stop`, `ignore_eos`,
-  `chat_template_kwargs`, `priority`, `return_token_ids` and
+  `chat_template_kwargs`, `priority`, `return_token_ids`, `return_progress` and
   `grammar_budget` pass through.
 
 `output` holds a `reasoning` item (its text as `reasoning_text` content, with an empty `summary`), a `message` with
@@ -1289,7 +1309,8 @@ A stream sends typed events, each with a `sequence_number`: `response.created` a
 output item `response.output_item.added`, `response.content_part.added`, its deltas
 (`response.reasoning_text.delta`, `response.output_text.delta` or `response.function_call_arguments.delta`), their
 `.done` events, `response.content_part.done` and `response.output_item.done`; and last `response.completed`,
-`response.incomplete` or `response.failed`.
+`response.incomplete` or `response.failed`. A `return_progress` request also gets `tensorfold.progress` events
+before the first output item ([Prompt progress](#prompt-progress)).
 
 With `store` true, a finished response is kept in memory (the newest 1,024, up to 256 MiB) before its last event or
 body is sent. `GET /v1/responses/{id}` returns it, `DELETE /v1/responses/{id}` removes it, and
