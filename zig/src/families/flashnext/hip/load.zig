@@ -395,7 +395,6 @@ test "the MTP head's HIP names follow the index's root, so oMLX's top-level mtp.
 pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoint, c: *const config.Config, rank: ?Rank, act: model.Kind, mtp_root: []const u8) !Weights {
     try @import("../readout_fused.zig").refuse("HIP", @import("../readout_fused.zig").on());
     try @import("../fused_split.zig").refuse("HIP", try @import("../fused_split.zig").on());
-    try @import("../mtp_weights.zig").refuse("HIP", try @import("../mtp_weights.zig").format());
     var w: Weights = .{ .gpa = gpa };
     errdefer w.deinit();
     const tables: Tables = .{ .ck = ck, .cfg = c };
