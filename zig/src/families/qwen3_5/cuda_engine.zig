@@ -7,6 +7,7 @@ const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
 const caches = @import("cuda_cache.zig");
 const routed = @import("cuda_routed.zig");
+const scratch_memory = @import("cuda_scratch.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
 const profile = @import("cuda_startup_profile.zig");
@@ -29,19 +30,9 @@ pub const max_rows = Round.max_rows;
 pub const max_segs = Round.max_segs;
 /// Rows of a verify forward at most: each row's logits are kept and drawn.
 pub const most_verify = Round.most_verify;
-/// tf_q35_argmax_slices' blocks a row (ARGMAX_SLICE entries each).
-pub fn argmaxSlices(vocab: usize) usize {
-    return (vocab + 4095) / 4096;
-}
-/// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
-pub const most_window = Round.most_window;
-/// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
-pub const max_chunks = 64;
-
-/// Device allocations are 256-byte aligned, as the driver's are.
-pub fn aligned(n: usize) usize {
-    return std.mem.alignForward(usize, n, 256);
-}
+pub const argmaxSlices = scratch_memory.argmaxSlices;
+pub const most_window = Round.most_window; // Maximum rows a stream's log holds
+pub const aligned = scratch_memory.aligned; // Device allocations are 256-byte aligned
 
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
@@ -108,9 +99,14 @@ pub const Engine = struct {
     moe: cuda.moe.Fns,
     fns: Fns,
     keeps: Keeps,
-    /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
+    /// Persistent model weights; forward scratch has a separate device allocation.
     arena: DeviceBuffer,
     arena_at: usize = 0,
+    /// Forward scratch is a separate device allocation: one additional CUDA allocation/driver object under WDDM.
+    scratch_buf: ?DeviceBuffer = null,
+    scratch_capacity: usize = 0,
+    /// Maximum prompt rows admitted by the configured context (capped by the forward kernel limit).
+    scratch_rows: usize = max_rows,
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -124,7 +120,7 @@ pub const Engine = struct {
     head: Proj,
     final_norm: u64,
     layers: []Layer,
-    // scratch, max_rows rows each
+    // scratch, scratch_capacity rows each
     h: u64,
     x: u64,
     r: u64,
@@ -189,12 +185,12 @@ pub const Engine = struct {
     pub const mpos_at = Round.mpos_at;
     const tables_len = Round.bytes;
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
-        return initStage(gpa, io, ctx, dir, kv8, fit, null);
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize) !*Engine {
+        return initStage(gpa, io, ctx, dir, kv8, fit, prompt_rows_limit, null);
     }
 
     /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
-    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, span: ?stage_fwd.Span) !*Engine {
+    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, prompt_rows_limit: usize, span: ?stage_fwd.Span) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const started = profile.now(io);
         const g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
@@ -220,6 +216,11 @@ pub const Engine = struct {
         e.rope_buf = null;
         e.window_rows = most_window;
         e.arena_at = 0;
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
+        // Reserve the configured ceiling before running the 32-row warm-up forwards.
+        e.scratch_rows = @max(32, @min(max_rows, prompt_rows_limit));
+        errdefer if (e.scratch_buf) |*b| b.free();
         e.graphs = .empty;
         try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
         errdefer @import("cuda_rope_table.zig").free(e);
@@ -300,8 +301,16 @@ pub const Engine = struct {
         e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
     }
 
+    /// Reserve prompt INT8 workspace before serving; prompt forwards are not graph-captured.
+    pub fn warmPromptInt8(e: *Engine) !void {
+        try e.int8.ensureRows(e, e.scratch_rows);
+    }
+
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
     pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
+        // Commit the configured prompt and verify ceiling before admission; warmup then reuses it.
+        try e.ensureScratch(@max(e.scratch_rows, e.verify_rows));
+        if (e.int8.on) try e.int8.ensureRows(e, e.scratch_rows);
         const ids: [32]u32 = @splat(0);
         const greedy: Draw = .{ .rule = null, .position = 33 };
         try e.forward(&.{.{ .cache = warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
@@ -322,6 +331,9 @@ pub const Engine = struct {
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
+        if (e.scratch_buf) |*b| b.free();
+        e.scratch_buf = null;
+        e.scratch_capacity = 0;
         e.penalties.deinit(e.gpa);
         e.host_logits.free();
         e.staged.free();
@@ -367,8 +379,13 @@ pub const Engine = struct {
         return e.arena.ptr + at;
     }
 
-    /// The scratch rows' bytes, or the rows themselves from the arena (cuda_scratch.zig).
-    pub const scratch = @import("cuda_scratch.zig").scratch;
+    pub fn scratch(e: *Engine, rows: usize, mode: scratch_memory.Mode) !usize {
+        return scratch_memory.scratch(e, rows, mode);
+    }
+
+    pub fn ensureScratch(e: *Engine, rows: usize) !void {
+        return scratch_memory.ensureScratch(e, rows);
+    }
 
     pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
         var a: cuda.Args = .{};
@@ -442,9 +459,11 @@ pub const Engine = struct {
 
     /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
     pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
-        try e.admit(parts, ids, keep);
-        const g = e.g;
         const total = ids.len;
+        try e.admit(parts, ids, keep);
+        try scratch_memory.requireCapacity(e.scratch_capacity, total);
+        if (!keep.verifies() and e.int8.on and total > e.int8.capacity) return error.PromptInt8CapacityExceeded;
+        const g = e.g;
         const record = keep.verifies();
         // the tables
         const st = e.staged.bytes;
@@ -578,15 +597,6 @@ pub const Engine = struct {
     }
 };
 
-test "dense read cost: hidden and slot variants have distinct graph keys" {
-    var seen: [32]u32 = undefined;
-    var n: usize = 0;
-    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
-        for ([_]bool{ false, true }) |hidden| {
-            const shape: Engine.Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
-            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
-            seen[n] = shape.key();
-            n += 1;
-        }
-    }
+test {
+    _ = @import("cuda_engine_test.zig");
 }

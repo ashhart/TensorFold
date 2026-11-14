@@ -139,14 +139,12 @@ pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
 pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.pool.items.len > 0 and !l.paged_only) return true;
-    const pg = l.pages orelse return true;
-    return pg.fits(prompt, max_tokens);
+    return if (l.pages) |pg| pg.fits(prompt, max_tokens) else true;
 }
 
 /// The pool the lane host's ledger admits this family's promises by (#1943).
 pub fn ledgerPool(p: *anyopaque) ?*@import("core").kv_pool.Pool {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    return if (l.pages) |pg| &pg.pool else null;
+    return if (@as(*Lanes, @ptrCast(@alignCast(p))).pages) |pg| &pg.pool else null;
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -179,7 +177,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const share_snaps = try prefix_mod.sharing();
     // a kept state sits on a cold pass's chunk cut, so later chunks keep a cold pass's bits: pages divide the chunk
     if (share_snaps > 0 and (page_tokens == 0 or E.max_rows % page_tokens != 0)) return error.QwenShareNeedsPages;
-    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o));
+    const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8, fitOf(o), o.context);
     errdefer e.deinit();
     if (o.rope_yarn) |f| { // --rope-yarn over the downloaded config: its table, and the window it allows
         var arena = std.heap.ArenaAllocator.init(gpa);
@@ -188,7 +186,10 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
         e.g.context = r.ceiling;
         try @import("cuda_rope_table.zig").set(e, r.rope);
     }
-    if (o.prompt_int8) try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
+    if (o.prompt_int8) {
+        try e.int8.enable(e); // --prompt-precision int8: prompt projections quantize their inputs
+        try e.warmPromptInt8(); // allocate the optional INT8 workspace before admission
+    }
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     if (o.slide) _ = try @import("cuda_learn_shape.zig").from(e.g);
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
@@ -224,7 +225,7 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
 fn fitOf(o: Options) ?@import("cuda_host_embed.zig").Fit {
     const r = o.room orelse return null;
     const room = r.read(r.ctx) orelse return null;
-    return .{ .room = room, .context = o.context, .drafter = if (o.drafts) o.drafter else null };
+    return .{ .room = room, .context = o.context, .drafter = if (o.drafts) o.drafter else null, .prompt_int8 = o.prompt_int8 };
 }
 
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
@@ -255,8 +256,7 @@ pub const openDrafter = drafter_open.openDrafter;
 pub const explain = @import("cuda_native_explain.zig").explain;
 
 fn release(p: *anyopaque) void {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    l.deinit();
+    @as(*Lanes, @ptrCast(@alignCast(p))).deinit();
 }
 
 /// The device draw of a stream's rule at `position`: sample.cu's keyed rule, greedy at temperature 0 or without one.
