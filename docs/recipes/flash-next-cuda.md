@@ -121,6 +121,9 @@ An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank, or on two 
 its routed experts in pinned host memory and a pool of expert lines a layer on the device. `tools/exl3_serve_tp2.sh`
 starts a rank. These switches tune it:
 
+Automatic pool growth leaves room for an explicit `--prompt-cache-gib` request where possible; the minimum pool and
+admitted streams still take priority. The startup log reports the resulting cache capacity.
+
 | Name | Default | Effect |
 | --- | --- | --- |
 | `TF_FLASHNEXT_EXPERT_LINES` | from free memory | A whole number of expert lines a layer keeps on the device; the pool refuses fewer than 10. |
