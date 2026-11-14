@@ -18,7 +18,8 @@ pub fn hold(e: anytype, io: std.Io, limit: ?u64) !void {
     try mtl.resident.fields.append(e.gpa, &list, &e.s);
     try mtl.resident.fields.append(e.gpa, &list, &e.q);
     for (&e.pass) |*p| try mtl.resident.fields.append(e.gpa, &list, p);
-    try list.append(e.gpa, e.pair.wbuf);
+    try mtl.resident.fields.append(e.gpa, &list, e.pair);
+    try list.append(e.gpa, e.pair.handoff.ready);
     var snapshots = e.snaps.valueIterator();
     while (snapshots.next()) |snap| try list.append(e.gpa, snap.*.buf);
     e.resident = mtl.resident.Resident.holdUnder(e.gpa, io, e.device, e.queue, list.items, "glm dsa", limit) catch |err| blk: {

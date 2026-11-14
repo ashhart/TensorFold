@@ -2,6 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
+const Pass = @import("pass.zig").Pass;
 const fwd = @import("forward.zig");
 const Fence = @import("../../core/fence.zig").Fence;
 const Ref = @import("weights.zig").Ref;
@@ -17,7 +18,7 @@ fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
     const fence = e.round_fence.?;
     const cb = e.queue.commandBuffer();
     if (from == null and e.ev > 0) cb.waitFor(e.event, e.ev);
-    const b = .{ .cb = cb, .enc = cb.compute(.serial) };
+    var b: Pass = .{ .cb = cb, .enc = cb.compute(.serial) };
     if (from != null) fence.wait(b.enc);
     if (from) |f| {
         b.enc.setPipeline(x.k.copy_u32);
@@ -25,12 +26,12 @@ fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
         b.enc.setValue(@as(u32, 1), 2);
         b.enc.dispatchThreads(fwd.size(1, 1, 1), fwd.size(1, 1, 1));
     }
-    fwd.backbone(x, b.enc, e.sc.ids, 1, pos);
+    fwd.backbone(x, &b, e.sc.ids, 1, pos);
     const draws = @import("draw_rule.zig").promptDraws(e.sampling, pos + 1, e.c.vocab);
     const prior = x.draws;
     x.draws = &draws;
     defer x.draws = prior;
-    fwd.head(x, b.enc, e.sc.hidden, e.sc.logits, to, 1);
+    fwd.head(x, &b, e.sc.hidden, e.sc.logits, to, 1);
     fence.update(b.enc);
     b.enc.end();
     e.ev += 1;

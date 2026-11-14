@@ -29,28 +29,14 @@ kernel void ep_localize(const device int* PICK [[buffer(0)]], const device int* 
   if (theirs) THEIRS[o2 + b2] = i;
   if (t == 0) { LCOUNT[0] = n0; COUNTS[0] = n1; COUNTS[1] = n2; atomic_store_explicit(CNT, uint(n1), memory_order_relaxed); }
 }
-// Exchange x writes its send slot once the peer's x - 1 landed (posted after our x - 2 reached it); give-ups counted
-inline bool ep_slot_free(device atomic_uint* flag, uint x, device atomic_uint* gave_up, uint t, threadgroup uint* ok) {
-  if (t == 0) {
-    uint polls = 0;
-    *ok = 1u;
-    while (int(atomic_load_explicit(flag, memory_order_relaxed) - (x - 1u)) < 0) {
-      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); *ok = 0u; break; }
-    }
-    if (atomic_load_explicit(gave_up, memory_order_relaxed) != 0u) *ok = 0u;
-  }
-  threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
-  return *ok != 0u;
-}
 // This Mac's picks' outputs (Y [picks, 4096] bf16) packed in MINE order for the peer; a threadgroup a pick
 kernel void ep_pack(const device uint* Y [[buffer(0)]], const device int* MINE [[buffer(1)]],
-    const device int* COUNTS [[buffer(2)]], device uint* OUT [[buffer(3)]], device atomic_uint* flag [[buffer(4)]],
-    constant uint& x [[buffer(5)]], device atomic_uint* gave_up [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
+    const device int* COUNTS [[buffer(2)]], device uint* OUT [[buffer(3)]],
+    const device ulong* previous [[buffer(4)]], constant ulong& expected [[buffer(5)]], uint3 tg [[threadgroup_position_in_grid]],
     uint3 tpos [[thread_position_in_threadgroup]]) {
+  if (previous[0] != expected) return;
   const int i = int(tg.y);
   const uint t = tpos.x;
-  threadgroup uint ok;
-  if (!ep_slot_free(flag, x, gave_up, t, &ok)) return;
   if (i >= COUNTS[0]) return;
   const device uint* src = Y + size_t(MINE[i]) * WORDS;
   device uint* dst = OUT + size_t(i) * WORDS;
@@ -62,10 +48,9 @@ inline float ep_mul_add(float acc, float a, float b) { return a * b + acc; }
 #pragma clang fp contract(on)
 kernel void ep_rcombine(const device float* YP [[buffer(0)]], const device float* WTS [[buffer(1)]],
     constant int& rows [[buffer(2)]], device float* OUT [[buffer(3)]], device atomic_uint* CNT [[buffer(4)]],
-    device atomic_uint* flag [[buffer(5)]], constant uint& x [[buffer(6)]], device atomic_uint* gave_up [[buffer(7)]],
-    uint gid [[thread_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
-  threadgroup uint ok;
-  if (!ep_slot_free(flag, x, gave_up, t, &ok)) return;
+    const device ulong* previous [[buffer(5)]], constant ulong& expected [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]) {
+  if (previous[0] != expected) return;
   const int r = int(gid) / 4096, d = int(gid) % 4096;
   if (gid == 0) atomic_store_explicit(CNT, uint(rows * 2), memory_order_relaxed);
   if (r >= rows) return;
@@ -74,84 +59,56 @@ kernel void ep_rcombine(const device float* YP [[buffer(0)]], const device float
   for (int k = 1; k < TOPK; k++) acc = ep_mul_add(acc, WTS[r * TOPK + k], y[size_t(k) * 4096]);
   OUT[size_t(r) * 4096 + d] = acc;
 }
-// By rows: once the peer's sums land, each branch is both Macs' sums in rank order, rounded, plus the shared expert
-kernel void ep_rfinal(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
-    device atomic_uint* gave_up [[buffer(2)]], const device float* MINE [[buffer(3)]], device atomic_uint* PEER [[buffer(4)]],
+// By rows: both sums in rank order, rounded, plus the shared expert. A missing epoch keeps the receive slot unread.
+kernel void ep_rfinal(const device ulong* ready [[buffer(0)]], constant ulong& x [[buffer(1)]],
+    const device float* MINE [[buffer(3)]], const device uint* PEER [[buffer(4)]],
     constant uint& rank [[buffer(5)]], const device bfloat* YS [[buffer(6)]], device bfloat* OUT [[buffer(7)]],
     constant int& rows [[buffer(8)]], uint3 tg [[threadgroup_position_in_grid]], uint3 tpos [[thread_position_in_threadgroup]]) {
   const uint t = tpos.x;
-  if (t == 0) {
-    uint polls = 0;
-    while (int(atomic_load_explicit(flag, memory_order_relaxed) - x) < 0) {
-      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_device);
   const int i = int(tg.x) * 256 + int(t);
   if (i >= rows * 4096) return;
-  const float mine = MINE[i], peer = as_type<float>(atomic_load_explicit(&PEER[i], memory_order_relaxed));
+  const float mine = MINE[i], peer = ready[0] == x ? as_type<float>(PEER[i]) : 0.0f;
   const float total = rank == 0u ? mine + peer : peer + mine;
   OUT[i] = bfloat(total) + YS[i];
 }
-// TP: this Mac's fp32 partial rows into the send slot once it is free, and the entries the host sends (two a row)
+// TP: this Mac's fp32 partial rows into the send slot, and the entries the host sends (two a row)
 kernel void ep_rsend(const device float* PART [[buffer(0)]], constant int& rows [[buffer(1)]],
-    device float* OUT [[buffer(2)]], device atomic_uint* CNT [[buffer(3)]], device atomic_uint* flag [[buffer(4)]],
-    constant uint& x [[buffer(5)]], device atomic_uint* gave_up [[buffer(6)]],
-    uint gid [[thread_position_in_grid]], uint t [[thread_index_in_threadgroup]]) {
-  threadgroup uint ok;
-  if (!ep_slot_free(flag, x, gave_up, t, &ok)) return;
+    device float* OUT [[buffer(2)]], device atomic_uint* CNT [[buffer(3)]],
+    const device ulong* previous [[buffer(4)]], constant ulong& expected [[buffer(5)]], uint gid [[thread_position_in_grid]]) {
+  if (previous[0] != expected) return;
   if (gid == 0) atomic_store_explicit(CNT, uint(rows * 2), memory_order_relaxed);
   if (int(gid) < rows * 4096) OUT[gid] = PART[gid];
 }
-// TP: wait for the peer's partials of exchange x; each value is both Macs' partials added in rank order, rounded
-kernel void ep_rsum(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
-    device atomic_uint* gave_up [[buffer(2)]], const device float* MINE [[buffer(3)]], device atomic_uint* PEER [[buffer(4)]],
+// TP: both Macs' partials added in rank order and rounded
+kernel void ep_rsum(const device ulong* ready [[buffer(0)]], constant ulong& x [[buffer(1)]],
+    const device float* MINE [[buffer(3)]], const device uint* PEER [[buffer(4)]],
     constant uint& rank [[buffer(5)]], device bfloat* OUT [[buffer(6)]], constant int& rows [[buffer(7)]],
     uint3 tg [[threadgroup_position_in_grid]], uint3 tpos [[thread_position_in_threadgroup]]) {
   const uint t = tpos.x;
-  if (t == 0) {
-    uint polls = 0;
-    while (int(atomic_load_explicit(flag, memory_order_relaxed) - x) < 0) {
-      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_device);
   const int i = int(tg.x) * 256 + int(t);
   if (i >= rows * 4096) return;
-  const float mine = MINE[i], peer = as_type<float>(atomic_load_explicit(&PEER[i], memory_order_relaxed));
+  const float mine = MINE[i], peer = ready[0] == x ? as_type<float>(PEER[i]) : 0.0f;
   OUT[i] = bfloat(rank == 0u ? mine + peer : peer + mine);
 }
-// Exchange x packed: the host sends it once the GPU gets here
-kernel void ep_post(device atomic_uint* posted [[buffer(0)]], constant uint& x [[buffer(1)]],
-    device atomic_uint* gave_up [[buffer(2)]]) {
-  if (atomic_load_explicit(gave_up, memory_order_relaxed) == 0u) atomic_store_explicit(posted, x, memory_order_relaxed);
-}
-// Once the peer's exchange x lands (its flag follows its bytes), its entries (atomic reads) into their picks' rows of Y
-kernel void ep_unpack(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
-    device atomic_uint* gave_up [[buffer(2)]], device atomic_uint* IN [[buffer(3)]], const device int* THEIRS [[buffer(4)]],
+// Copy the peer's entries into their picks' rows of Y
+kernel void ep_unpack(const device ulong* ready [[buffer(0)]], constant ulong& x [[buffer(1)]],
+    const device uint* IN [[buffer(3)]], const device int* THEIRS [[buffer(4)]],
     const device int* COUNTS [[buffer(5)]], device uint* Y [[buffer(6)]], uint3 tg [[threadgroup_position_in_grid]],
     uint3 tpos [[thread_position_in_threadgroup]]) {
   const uint t = tpos.x;
-  if (t == 0) {
-    uint polls = 0;
-    while (int(atomic_load_explicit(flag, memory_order_relaxed) - x) < 0) {
-      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_device);
   const int i = int(tg.y);
   if (i >= COUNTS[1]) return;
-  device atomic_uint* src = IN + size_t(i) * WORDS;
+  const device uint* src = IN + size_t(i) * WORDS;
   device uint* dst = Y + size_t(THEIRS[i]) * WORDS;
-  for (uint j = t; j < uint(WORDS); j += 256) dst[j] = atomic_load_explicit(&src[j], memory_order_relaxed);
+  const bool landed = ready[0] == x;
+  for (uint j = t; j < uint(WORDS); j += 256) dst[j] = landed ? src[j] : 0u;
 }
 // TP: each row's best logit of this Mac's vocabulary rows [lo, lo + n) and its token id to send (n = 0: none)
 kernel void ep_amax_send(const device bfloat* LOGITS [[buffer(0)]], const device uint* PICKS [[buffer(1)]],
     constant uint4& arg [[buffer(2)]], device uint* OUT [[buffer(3)]], device atomic_uint* CNT [[buffer(4)]],
-    device atomic_uint* flag [[buffer(5)]], constant uint& x [[buffer(6)]], device atomic_uint* gave_up [[buffer(7)]],
+    const device ulong* previous [[buffer(5)]], constant ulong& expected [[buffer(6)]],
     uint t [[thread_index_in_threadgroup]]) {
-  threadgroup uint ok;
-  if (!ep_slot_free(flag, x, gave_up, t, &ok)) return;
+  if (previous[0] != expected) return;
   const uint rows = arg.x, n = arg.y, lo = arg.z;
   if (t == 0) atomic_store_explicit(CNT, 1u, memory_order_relaxed);
   if (t >= rows) return;
@@ -161,18 +118,15 @@ kernel void ep_amax_send(const device bfloat* LOGITS [[buffer(0)]], const device
   OUT[2 * t + 1] = has ? lo + p : 0xffffffffu;
 }
 // TP: once the peer's candidates land, each row's pick is the larger logit, the lower id on a tie (one Mac's rule)
-kernel void ep_amax_merge(device atomic_uint* flag [[buffer(0)]], constant uint& x [[buffer(1)]],
-    device atomic_uint* gave_up [[buffer(2)]], const device uint* MINE [[buffer(3)]], device atomic_uint* PEER [[buffer(4)]],
+kernel void ep_amax_merge(const device ulong* ready [[buffer(0)]], constant ulong& x [[buffer(1)]],
+    const device uint* MINE [[buffer(3)]], const device uint* PEER [[buffer(4)]],
     constant uint& rows [[buffer(5)]], device uint* PICKS [[buffer(6)]], uint t [[thread_index_in_threadgroup]]) {
-  if (t == 0) {
-    uint polls = 0;
-    while (int(atomic_load_explicit(flag, memory_order_relaxed) - x) < 0) {
-      if (++polls > 400000000u) { atomic_fetch_add_explicit(gave_up, 1u, memory_order_relaxed); break; }
-    }
-  }
-  threadgroup_barrier(mem_flags::mem_device);
   if (t >= rows) return;
-  const float a = as_type<float>(MINE[2 * t]), b = as_type<float>(atomic_load_explicit(&PEER[2 * t], memory_order_relaxed));
-  const uint ia = MINE[2 * t + 1], ib = atomic_load_explicit(&PEER[2 * t + 1], memory_order_relaxed);
+  if (ready[0] != x) {
+    PICKS[t] = 0u;
+    return;
+  }
+  const float a = as_type<float>(MINE[2 * t]), b = as_type<float>(PEER[2 * t]);
+  const uint ia = MINE[2 * t + 1], ib = PEER[2 * t + 1];
   PICKS[t] = (b > a || (b == a && ib < ia)) ? ib : ia;
 }

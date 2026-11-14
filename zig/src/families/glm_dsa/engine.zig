@@ -59,6 +59,9 @@ pub const Engine = struct {
     load_seconds: f64 = 0,
     /// The GPU's time on the last command buffer (ms), for speed work.
     gpu_ms: f64 = 0,
+    request_gate: @import("request_gate.zig").Gate = .{},
+    pick_hash: std.crypto.hash.sha2.Sha256,
+    pick_count: u64,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, settings: []const u8, layers: ?u32, mtp: bool, context: u32, streams: u32, limit: u64) !*Engine {
         const e = try gpa.create(Engine);
@@ -66,6 +69,9 @@ pub const Engine = struct {
         const t0 = std.Io.Timestamp.now(io, .awake);
         e.gpa = gpa;
         e.io = io;
+        e.pick_hash = .init(.{});
+        e.pick_count = 0;
+        e.request_gate = .{};
         e.device = try mtl.Device.init();
         e.queue = try e.device.queue();
         try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives the EXLR8 prompt kernels
@@ -94,6 +100,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        std.log.info("glm_dsa rank {d}: completed picks={d} sha256={s}", .{ e.rank(), e.pick_count, std.fmt.bytesToHex(e.pick_hash.finalResult(), .lower) });
         snap.deinit(e);
         @import("residency.zig").drop(e);
         e.pair.deinit();
@@ -133,13 +140,22 @@ pub const Engine = struct {
 
     fn finish(e: *Engine, cb: mtl.CommandBuffer) !void {
         cb.commit();
+        e.pair.submit();
         cb.wait();
         if (cb.failure()) |msg| {
+            e.pair.handoff.fail(e.pair.x, error.GpuFailure);
             std.log.err("glm_dsa: GPU command failed: {s}", .{msg});
             return error.GpuFailure;
         }
-        if (e.pair.gaveUp() != 0 or e.pair.failed.load(.acquire)) return error.PairLinkFailed;
-        e.gpu_ms = (cb.gpuEnd() - cb.gpuStart()) * 1000;
+        if (e.pair.failed.load(.acquire)) return error.PairLinkFailed;
+        e.gpu_ms = (e.pair.handoff.gpu_seconds + cb.gpuSeconds()) * 1000;
+    }
+
+    fn notePicks(e: *Engine, kind: u32, picks_: []const u32) void {
+        const frame: [2]u32 = .{ kind, @intCast(picks_.len) };
+        e.pick_hash.update(std.mem.asBytes(&frame));
+        e.pick_hash.update(std.mem.sliceAsBytes(picks_));
+        e.pick_count += picks_.len;
     }
 
     /// A fresh stream in slot `i` with its prompt.
@@ -156,6 +172,9 @@ pub const Engine = struct {
 
     /// Prompt rows [at, at + n) of slot i (a prompt window) into its caches and the head's; the first token at the end.
     pub fn chunk(e: *Engine, i: u32, at: u32, n: u32, every: bool) !?u32 {
+        e.request_gate.begin();
+        defer e.request_gate.end();
+        e.pair.handoff.gpu_seconds = 0;
         if (i >= e.slots.len) return error.ChunkOutOfStep;
         const s = &e.slots[i];
         if (!s.used or s.open > 0 or at != s.len or n == 0 or n > gpu.prompt_rows or at + n > s.prompt.items.len) return error.ChunkOutOfStep;
@@ -168,13 +187,13 @@ pub const Engine = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = e.queue.commandBuffer();
-        const enc = cb.compute(.serial);
+        var enc = cb.compute(.serial);
         const s0 = e.scratch(0);
-        try pw.backbone(&e.m, &s0, q, enc, n, at);
+        try pw.backbone(&e.m, &s0, q, &enc, n, at);
         var k: u32 = if (every) 0 else n - 1;
         while (k < n and (last or every)) : (k += R) {
             const rows = @min(R, n - k);
-            try e.m.pick(enc, .{ .buf = q.x, .off = @as(usize, k) * hid * 4 }, rows, .{ .buf = q.picks, .off = @as(usize, k) * 4 });
+            try e.m.pick(&enc, .{ .buf = q.x, .off = @as(usize, k) * hid * 4 }, rows, .{ .buf = q.picks, .off = @as(usize, k) * 4 });
         }
         if (e.hasMtp()) {
             // the head's rows: the one before this chunk (the slot's xs row), then all but the last
@@ -192,16 +211,21 @@ pub const Engine = struct {
             u32s(e.pass[3].idx, 1)[0] = n - 1;
             kn.gather(&e.m.K.k, enc, .{ .buf = q.x }, .{ .buf = e.pass[3].idx }, hid, hid, hid, .{ .buf = e.xs, .off = (2 * R + @as(usize, i)) * hid * 4 }, 1);
             enc.barrier();
-            if (mr > 0) try pw.draft(&e.m, &s0, q, enc, mr, at - carry);
+            if (mr > 0) try pw.draft(&e.m, &s0, q, &enc, mr, at - carry);
         }
+        const tail = enc.commandBuffer();
         enc.end();
-        try e.finish(cb);
+        try e.finish(tail);
+        if (every) e.notePicks(0, u32s(q.picks, n)) else if (last) e.notePicks(0, u32s(q.picks, n)[n - 1 ..]);
         s.len = at + n;
         return if (last) u32s(q.picks, n)[n - 1] else null;
     }
 
     /// One forward over every window's rows: each row's next token into `out` (rows in window order).
     pub fn window(e: *Engine, wins: []const Win, out: []u32) !void {
+        e.request_gate.begin();
+        defer e.request_gate.end();
+        e.pair.handoff.gpu_seconds = 0;
         var rows: u32 = 0;
         var top: u32 = 0;
         for (wins) |w| {
@@ -226,15 +250,17 @@ pub const Engine = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = e.queue.commandBuffer();
-        const enc = cb.compute(.serial);
+        var enc = cb.compute(.serial);
         const s0 = e.scratch(0);
-        try e.m.backbone(&s0, enc, rows, top, .{ .buf = e.pass[0].ids });
-        try e.m.pick(enc, .{ .buf = s0.x }, rows, .{ .buf = e.pass[0].picks });
+        try e.m.backbone(&s0, &enc, rows, top, .{ .buf = e.pass[0].ids });
+        try e.m.pick(&enc, .{ .buf = s0.x }, rows, .{ .buf = e.pass[0].picks });
         for (u32s(e.pass[2].idx, rows), 0..) |*x, r| x.* = @intCast(r);
         kn.gather(&e.m.K.k, enc, .{ .buf = s0.x }, .{ .buf = e.pass[2].idx }, hid, hid, hid, .{ .buf = e.xs }, rows);
+        const tail = enc.commandBuffer();
         enc.end();
-        try e.finish(cb);
+        try e.finish(tail);
         @memcpy(out[0..rows], u32s(e.pass[0].picks, rows));
+        e.notePicks(1, out[0..rows]);
     }
 
     fn settle(s: *Slot, kept: u32) void {
@@ -261,6 +287,9 @@ pub const Engine = struct {
 
     /// Each request's rows into the MTP head's caches, then its chain of drafts (held, read with `held`).
     pub fn draft(e: *Engine, reqs: []const Draft) !void {
+        e.request_gate.begin();
+        defer e.request_gate.end();
+        e.pair.handoff.gpu_seconds = 0;
         if (!e.hasMtp()) return error.NoMtpHead;
         if (reqs.len == 0 or reqs.len > R) return error.DraftOutOfStep;
         var rows: u32 = 0;
@@ -294,12 +323,12 @@ pub const Engine = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = e.queue.commandBuffer();
-        const enc = cb.compute(.serial);
+        var enc = cb.compute(.serial);
         kn.gather(&e.m.K.k, enc, .{ .buf = e.xs }, .{ .buf = e.pass[1].idx }, hid, hid, hid, .{ .buf = e.m.head.prev }, rows);
         enc.barrier();
         const s1 = e.scratch(1);
-        try e.m.draft(&s1, enc, rows, top, .{ .buf = e.pass[1].ids }, .{ .buf = e.m.head.prev });
-        if (depth > 0) try e.m.pick(enc, .{ .buf = s1.x }, rows, .{ .buf = e.pass[1].picks });
+        try e.m.draft(&s1, &enc, rows, top, .{ .buf = e.pass[1].ids }, .{ .buf = e.m.head.prev });
+        if (depth > 0) try e.m.pick(&enc, .{ .buf = s1.x }, rows, .{ .buf = e.pass[1].picks });
         var d: u32 = 2;
         while (d <= depth) : (d += 1) {
             const p = &e.pass[d];
@@ -312,11 +341,14 @@ pub const Engine = struct {
             kn.gather(&e.m.K.k, enc, .{ .buf = s1.h }, .{ .buf = p.idx }, hid, hid, hid, .{ .buf = e.m.head.prev }, nq);
             enc.barrier();
             const sd = e.scratch(d);
-            try e.m.draft(&sd, enc, nq, top + d - 1, .{ .buf = p.ids }, .{ .buf = e.m.head.prev });
-            try e.m.pick(enc, .{ .buf = sd.x }, nq, .{ .buf = p.picks });
+            try e.m.draft(&sd, &enc, nq, top + d - 1, .{ .buf = p.ids }, .{ .buf = e.m.head.prev });
+            try e.m.pick(&enc, .{ .buf = sd.x }, nq, .{ .buf = p.picks });
         }
+        const tail = enc.commandBuffer();
         enc.end();
-        try e.finish(cb);
+        try e.finish(tail);
+        if (depth > 0) e.notePicks(2, u32s(e.pass[1].picks, rows));
+        if (depth > 1) for (2..depth + 1) |j| e.notePicks(@intCast(j + 1), u32s(e.pass[j].picks, nq));
         for (reqs, 0..) |q, k| {
             const s = &e.slots[q.slot];
             s.held_n = q.depth;

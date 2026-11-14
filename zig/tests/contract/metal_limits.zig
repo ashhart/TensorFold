@@ -58,6 +58,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "metal glm ep ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.glm_ep, .pre_m5 = sources.glm_ep };
+    }
     if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
         if (!assemble) return undefined;
         const control_text = @import("masked_value_probe.zig").control_source;
@@ -265,6 +269,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         if (!assemble) return undefined;
         text = sources.core_pair_rows;
+    } else if (std.mem.startsWith(u8, d.name, "metal glm dsa pair ")) {
+        if (!assemble) return undefined;
+        text = sources.core_pair;
     } else if (has(d.name, "tile_qmm")) {
         if (!assemble) return undefined;
         text = sources.core_tile_qmm;

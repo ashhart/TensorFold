@@ -16,6 +16,7 @@ pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, sav
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
     const ep = e.ep orelse return;
     if (ep.rank != 0) return error.FollowsPeer;
+    try e.checkPair();
     try ep.ctl.sendCommand(@backingInt(kind), words);
 }
 
