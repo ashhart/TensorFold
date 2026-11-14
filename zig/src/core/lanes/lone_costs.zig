@@ -138,6 +138,7 @@ pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
     s.cost_probe_spacing = @min(carry_most, k.spacing);
 }
 
+
 pub const Trial = struct {
     rows: u32,
     expected: f64,

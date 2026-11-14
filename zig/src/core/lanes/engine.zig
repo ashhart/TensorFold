@@ -47,7 +47,7 @@ pub const Engine = struct {
     shared_rounds: u64 = 0,
     late: @import("late_draft.zig").State = .{},
     alone: bool = true, // this step has one live stream: its copies may take their ramp
-    lone_kept: [2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(null)), // the newest lone calibrations, greedy then sampled, a band each
+    lone_kept: [lone_costs.clocks][2][lone_costs.bands]?lone_costs.Kept = @splat(@splat(@splat(null))), // by clock
     steps: u64 = 0,
     grammar_round: @import("grammar_time.zig").Round = .{},
     grammar_workers: @import("grammar_parallel.zig").State = .{},
@@ -87,7 +87,7 @@ pub const Engine = struct {
         e.live.deinit(e.gpa);
         e.unread.deinit(e.gpa);
         e.rule.deinit();
-        for (&e.lone_kept) |*mode| for (mode) |*k| if (k.*) |*x| x.deinit(e.gpa);
+        for (&e.lone_kept) |*clock| for (clock) |*mode| for (mode) |*k| if (k.*) |*x| x.deinit(e.gpa);
         e.arena.deinit();
     }
 

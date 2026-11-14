@@ -560,7 +560,7 @@ pub const Lanes = struct {
         var out: [16]u32 = undefined;
         const cap = dflash2.priced(b.nodes);
         const e = if (cap != null) b.core else null;
-        defer if (e) |x| lanes.lone_costs.keep(x.gpa, lanes.lone_costs.slot(&x.lone_kept, s), s) catch {};
+        defer if (e) |x| lanes.lone_costs.retain(x, s);
         var skip = cold; // a cold drafter context makes the round after a restart no sample
         while (!s.finished) {
             if (hooks.yield(hooks.ctx)) {
