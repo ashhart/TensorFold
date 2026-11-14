@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: the DSpark drafter's head runs on an FP8 copy of the vocabulary head made at load (0.67 GB, the target keeps bf16), its propose launch encodes concurrently with barriers where steps depend, and its buffers stay in one residency set, so a pass no longer waits for macOS to make them resident again; every reply is unchanged. On an M5 Ultra the five prose prompts decode about 5% faster greedy and 6% sampled (#3296).
+
 - DeepSeek-V4.1 on Metal: decode's router matvec, route and expert plan run as one launch beside the shared expert's up projection, so the MoE takes four waves after its norm instead of six, and the one-row expert kernels decode a word of FP4 codes by shifts; every output and KV byte is unchanged. On an M5 Ultra a round of release layers is 3.4 to 4.3% faster at one row and 2.2 to 3.2% at four (#3292).
 
 - DeepSeek-V4.1 on Metal: a greedy pick finds the first maximum of a row's logits in 16-wide steps (a row holding a NaN keeps the scalar scan) and a sampled pick reuses its float64 logits and ids instead of allocating both, so every pick is the same id; on an M5 Ultra the five prose prompts decode 2.7% faster greedy and 3.7% sampled (#3288).
