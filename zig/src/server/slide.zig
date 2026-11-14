@@ -123,49 +123,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     // each fact its own lesson and block, so each keeps a gate of its own
     for (facts, ids) |fact, id| {
         if (gone.check()) break;
-        srv.slide.mark(id, .learning);
-        srv.slide.phase(id, .writing);
-        out.event("learning", .{ .id = id });
-        out.stage(id, "writing");
-        if (!(metrics_route.prepare(srv, &out, a, id, fact, recall) catch return)) continue;
-        var kept = [1]bool{false};
-        const written = now(srv);
-        // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
-        const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
-        const gave = if (document or correcting) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        var plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, gone) catch |e| {
-            missed(srv, &out, id, words(&cx, e));
-            putBack(srv, a, gave, id);
-            continue;
-        }) orelse {
-            missed(srv, &out, id, "too few clean answers to learn from");
-            putBack(srv, a, gave, id);
-            continue;
-        };
-        if (correcting) @import("slide_correction.zig").prepare(srv, &cx, &plan, gone) catch |e| {
-            missed(srv, &out, id, words(&cx, e));
-            putBack(srv, a, gave, id);
-            continue;
-        };
-        log.line("slide: fact {d}'s lesson written in {d:.1} s", .{ id, seconds(srv, written) });
-        @import("slide_correction.zig").record(srv, &cx, id, plan) catch |e| {
-            missed(srv, &out, id, words(&cx, e));
-            putBack(srv, a, gave, id);
-            continue;
-        };
-        const result = rounds(srv, a, &cx, plan, gone, id, &out);
-        const back = result.recalled.len == 1 and result.recalled[0];
-        srv.teacher.ended(back); // a lesson given up leaves the next one's checks as if it never ran
-        if (!back) putBack(srv, a, gave, id);
-        if (back) slide_teacher.refresh(srv, &cx, &srv.teacher, plan.stale, gone) catch srv.teacher.forgetAnswers(srv.io);
-        metrics_route.unmeasured(srv, id, result.why orelse "the lesson did not reach the commit checks");
-        if (result.why) |why| srv.slide.note(id, why);
-        srv.slide.mark(id, if (back) .learned else .missed);
-        if (back) talks.chainAfter(srv, id, plan);
-        if (back and document) for (plan.held) |h| if (h.subject.len > 0 and h.context.len == 0) srv.teacher.remember(h.subject, h.question, h.answer) catch {};
-        if (result.why) |why| {
-            out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
-        } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
+        @import("slide_fact.zig").learn(srv, a, &cx, &out, fact, id, source, facts, supplied, recall, correcting, gone) catch return;
     }
 }
 
@@ -411,7 +369,7 @@ pub fn saveAll(srv: *Server, a: Allocator) ?[]const u8 {
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
-fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: anytype) []const slide_graph.Fact {
+pub fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: anytype) []const slide_graph.Fact {
     const olds = replace.replaced(srv, cx, fact, id, gone) catch return &.{};
     if (olds.len == 0) return &.{};
     var neurons: std.ArrayList(api.Neuron) = .empty;
@@ -429,7 +387,7 @@ fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32
 }
 
 /// The facts fact `id` replaced, put back as they were: it was not learned, so what they said still stands.
-fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) void {
+pub fn putBack(srv: *Server, a: Allocator, olds: []const slide_graph.Fact, id: u32) void {
     if (olds.len == 0) return;
     switch (run(srv, a, &.{ .unretire = true }, 0)) {
         .failed, .refused => return,

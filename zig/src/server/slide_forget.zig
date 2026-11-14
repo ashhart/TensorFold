@@ -81,6 +81,7 @@ fn find(facts: []const Fact, id: u32) ?usize {
 
 /// Why fact `f` has nothing to delete (its neurons zero already, or none), or null.
 pub fn nothing(a: Allocator, f: Fact) ?[]const u8 {
+    if (f.pinned) return "fact is pinned: unpin it before forgetting it";
     const why: []const u8 = switch (f.state) {
         .replaced => "was replaced by a newer fact, so its neurons are zero already",
         .deleted => "was deleted already",

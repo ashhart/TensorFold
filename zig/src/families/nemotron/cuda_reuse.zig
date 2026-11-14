@@ -11,6 +11,7 @@ const marks = @import("cuda_marks.zig");
 
 /// A host state keeps both in `host` (key and value rows first); `mamba` is then an armed row's staging until `finish`.
 pub const Copy = struct {
+    usage: ?@import("lanes").pocket_usage.Masks = null,
     mamba: cuda.DeviceBuffer,
     slot: ?u32 = null, // a borrowed snapshot slot; null means an owned buffer or host-state staging
     kv: cuda.DeviceBuffer,
@@ -196,7 +197,6 @@ pub fn ready(t: *Target, budget: u64) !u64 {
 
 /// Copy the live state after `at` prompt tokens. The pass is standing there.
 pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
-    _ = owner;
     const t: *Target = @ptrCast(@alignCast(ptr));
     const e = t.e;
     // a prompt mark: no window's rows wait to replay, so raw, xc and dt hold nothing a later pass reads
@@ -212,11 +212,13 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
             e.gpa.destroy(copy);
         }
         try hostMove(t, at, copy.host.?.bytes, true, true, null);
+        copy.usage = try @import("cuda_usage.zig").saved(e, owner, at);
         return copy;
     }
     const copy = try alloc(t, at, true);
     errdefer drop(ptr, copy);
     if (try move(t, at, copy, true, true) != stateBytes(e.c, at, t.head != null)) return error.SnapshotSize;
+    copy.usage = try @import("cuda_usage.zig").saved(e, owner, at);
     return copy;
 }
 
@@ -255,6 +257,7 @@ pub fn finish(t: Target) !void {
     const e = t.e;
     for (e.armed.marks()) |m| {
         const copy: *Copy = @ptrCast(@alignCast(m.copy));
+        if (e.usage) |u| copy.usage = try u.trace.through(m.at);
         if (t.host()) {
             // the chunk wrote this row's Mamba states to staging: rows and states to the host, then staging back
             var h = cuda.HostBuffer.alloc(e.ctx.d, stateBytes(e.c, m.at, copy.head)) catch continue; // stays not whole
@@ -309,6 +312,7 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
         try hostMove(t, copy.pos, h.bytes, false, true, null);
         try e.stream.synchronize(); // the store may drop the host copy once this returns
     } else _ = try move(t, copy.pos, copy, false, true);
+    if (e.usage) |u| u.trace.restore(copy.pos, copy.usage);
     e.pos = copy.pos;
     e.parity = copy.parity;
     e.prev_keep = 0;

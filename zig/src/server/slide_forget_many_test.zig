@@ -318,3 +318,45 @@ test "multi-fact delete: failed write and failed restoration leave every selecte
     try t.expectEqual([3]graph.State{ .deleted, .deleted, .learned }, try f.remove(&.{ 0, 1 }));
     try t.expectEqual([3]bool{ true, true, false }, m.saved);
 }
+
+test "multi-fact delete: a pinned fact cannot enter even a direct delete transaction" {
+    var m: Model = .{};
+    var text: ByteText = .{};
+    const f = try Fixture.init(&text, &m, null);
+    defer f.srv.deinit();
+    try f.srv.slide.pin(f.ids[2], true);
+    try t.expectError(error.FactPinned, f.remove(&.{2}));
+    try t.expectEqual(@as(usize, 0), m.cuts);
+    try t.expectEqual([3]bool{ false, false, false }, m.cut);
+    try f.srv.slide.pin(f.ids[2], false);
+    try t.expectEqual([3]graph.State{ .learned, .learned, .deleted }, try f.remove(&.{2}));
+}
+
+test "fact usage: dispatcher pins and unpins the requested fact without touching weights" {
+    var m: Model = .{};
+    var text: ByteText = .{};
+    const f = try Fixture.init(&text, &m, null);
+    defer f.srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Capture = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            c.bytes.appendSlice(t.allocator, bytes) catch return error.Closed;
+        }
+    };
+    for ([_]bool{ true, false }) |pinned| {
+        const body = if (pinned) "{\"pinned\":true}" else "{\"pinned\":false}";
+        var capture: Capture = .{};
+        defer capture.bytes.deinit(t.allocator);
+        var headers = [_]@import("http_conn.zig").Header{.{ .name = "Content-Length", .value = try std.fmt.allocPrint(a, "{d}", .{body.len}) }};
+        var conn: Conn = .{ .fd = -1, .peer = "", .buf = try a.dupe(u8, body), .end = body.len, .gpa = a, .method = "POST", .path = "/v1/slide/facts/3/pin", .version = "HTTP/1.1", .headers = &headers, .write_hooks = .{ .ctx = &capture, .write = Capture.write } };
+        @import("routes.zig").dispatch(f.srv, &conn, a);
+        try t.expect(std.mem.indexOf(u8, capture.bytes.items, "200 OK") != null);
+        try t.expectEqual(pinned, f.srv.slide.find(3).?.pinned);
+        try t.expectEqual(@as(usize, 0), m.cuts);
+        try t.expectEqual(@as(usize, 0), m.saves);
+    }
+}

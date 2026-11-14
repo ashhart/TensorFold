@@ -2,7 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-const usage = "usage: tensorfold slide rollback FOLDER\n" ++ @import("slide_audit_cli.zig").usage;
+const usage = "usage: tensorfold slide rollback FOLDER\n" ++ @import("slide_pin_cli.zig").usage ++ @import("slide_audit_cli.zig").usage;
 
 /// Runs `slide` with the arguments after it; the process's exit status.
 pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         try std.Io.File.stdout().writeStreamingAll(io, usage);
         return 0;
     }
+    if (argv.len > 0 and (std.mem.eql(u8, argv[0], "pin") or std.mem.eql(u8, argv[0], "unpin"))) return @import("slide_pin_cli.zig").main(init, argv);
     if (argv.len != 2 or !std.mem.eql(u8, argv[0], "rollback") or argv[1].len == 0 or argv[1][0] == '-') {
         std.debug.print("{s}", .{usage});
         return 2;

@@ -114,6 +114,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         gate: std.ArrayList(f32) = .empty, // SwiGLU: [slots, neurons, D], each neuron's gate row (sharp u, or as written)
         scratch: std.ArrayList(f32) = .empty, // SwiGLU: [neurons, D], a slot's up rows (u / sharp) as handed over
         used: std.ArrayList(usize) = .empty, // [slots]: neurons in use, the first ones
+        reuse_deleted: bool = false,
         taken: std.ArrayList(Taken) = .empty, // the open fact's neurons
         against: []const Example = &.{}, // old answers of a correction, owned by the enclosing lesson
         answered: []const Example = &.{}, // the fact's answers, which its neurons' outputs are fitted on
@@ -444,8 +445,8 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
         /// Slot j's next neuron taken for the open fact on `key`, its input weights `u` as fitted (`f`, on `kinds`).
         pub fn take(p: *Self, j: usize, key: Key, u: []const f32, f: Fit, kinds: []const Kind, d: usize) !void {
             const n = p.slots();
-            const k = p.used.items[j];
-            p.used.items[j] += 1;
+            const k = @import("pocket_vacancy.zig").next(p, j) orelse return error.PocketFull;
+            p.used.items[j] = @max(p.used.items[j], k + 1);
             try p.taken.append(p.gpa, .{ .slot = j, .neuron = k, .key = key });
             @memcpy(p.neuron(p.up.items, j, k, d), u);
             p.gateFrom(j, k);
