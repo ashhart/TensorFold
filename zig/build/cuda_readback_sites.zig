@@ -34,14 +34,6 @@ pub const sites = [_]Site{
         .out = "std.mem.sliceAsBytes(dst)[0..dst.len]",
     },
     .{
-        .path = "zig/src/families/flashnext/cuda_mtp_ops.zig",
-        .source = @embedFile("../src/families/flashnext/cuda_mtp_ops.zig"),
-        .ordinal = 1,
-        .setup = "const d = &rig.d; const dst = rig.dest(u8, 83); const src = rig.src;",
-        .at = "src",
-        .out = "std.mem.sliceAsBytes(dst)[0..dst.len]",
-    },
-    .{
         .path = "zig/src/families/flashnext/cuda_prompt.zig",
         .source = @embedFile("../src/families/flashnext/cuda_prompt.zig"),
         .ordinal = 1,

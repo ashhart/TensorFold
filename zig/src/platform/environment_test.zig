@@ -1,6 +1,7 @@
 //! Startup refusals carry names, values and accepted forms; valid settings preserve defaults and clamps.
 const std = @import("std");
 const e = @import("environment.zig");
+const sys = @import("sys.zig");
 const t = std.testing;
 const a = t.allocator;
 const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true };
@@ -36,9 +37,9 @@ test "environment: every strict reader refuses bad text before opening a model, 
 
 const Case = struct { name: []const u8, raw: []const u8, n: u64 };
 const valid = [_]Case{
-    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
-    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
+    .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "\t100 ", .n = 100 },
     .{ .name = "TENSORFOLD_PRESSURE_CACHE_PERCENT", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_PREFIX_WAIT_MS", .raw = "\t4294967295 ", .n = std.math.maxInt(u32) },
@@ -51,6 +52,8 @@ const valid = [_]Case{
     .{ .name = "TF_STARTUP_RECEIPT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_DEVICE", .raw = " 3 ", .n = 3 },
     .{ .name = "TF_CUDA_DEVICE", .raw = "4294967295", .n = std.math.maxInt(u32) },
+    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_MTP_RESIDENT", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = " 1 ", .n = 1 },
     .{ .name = "TF_CUDA_SEGMENTS", .raw = "4", .n = 4 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "0", .n = 0 },
@@ -68,6 +71,37 @@ const valid = [_]Case{
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "0", .n = 0 },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_FLASHNEXT_KV_HOST", .raw = "513", .n = 513 },
+    .{ .name = "TF_FLASHNEXT_KV_FRAMES", .raw = "7", .n = 7 },
+    .{ .name = "TF_FLASHNEXT_KV_SLOTS", .raw = "3", .n = 3 },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .raw = "16384", .n = 16384 },
+    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .raw = "16384", .n = 16384 },
+    .{ .name = "TF_FLASHNEXT_CACHE_TELEMETRY", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_GRAPH", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_GRAPH", .raw = "eager", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_GRAPH", .raw = "1", .n = 2 },
+    .{ .name = "TF_FLASHNEXT_EXL3_GRAPH_ASYNC", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_UNIFORM_LINES", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_SNAP_HOST", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .raw = "unqualified", .n = 0 },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .raw = " 0.5 ", .n = @bitCast(@as(f64, 0.5)) },
+    .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .raw = "20:+1,15:-1", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .raw = "8", .n = 8 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_ROWS", .raw = "16385", .n = 16385 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", .raw = "3", .n = 3 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXPERT_RESERVE_MB", .raw = "17592186044415", .n = 17592186044415 },
+    .{ .name = "TF_FLASHNEXT_PLE_READ", .raw = "pread", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_DIR", .raw = "/var/lib/exl3 profiles", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_EXL3_ROUTED", .raw = "device", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
@@ -110,21 +144,23 @@ const valid = [_]Case{
 };
 
 test "environment: valid forms remain raw numbers before existing consumer clamps and defaults" {
-    for (valid) |c| {
-        try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
-        const why = try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, all);
-        defer if (why) |v| a.free(v);
-        try t.expect(why == null);
-    }
     for (e.rules) |r| {
         for ([_][]const u8{ "", " ", "\t \n" }) |raw| try t.expectEqual(@as(?u64, null), try e.parse(r.name, raw));
         // own scope tests: deepseek_v41/env_validate_test.zig, glm/cuda_env_test.zig, environment_flashnext_test.zig
         if (r.scope == .dsv41 or r.scope == .glm or r.scope == .flashnext) continue;
         var covered = false;
-        for (valid) |c| if (std.mem.eql(u8, r.name, c.name)) {
+        for (valid) |c| {
+            if (!std.mem.eql(u8, r.name, c.name)) continue;
             covered = true;
-        };
-        try t.expect(covered);
+            try t.expectEqual(@as(?u64, c.n), try e.parse(c.name, c.raw));
+            const why = try e.refusal(a, Env{ .name = c.name, .raw = c.raw }, all);
+            defer if (why) |v| a.free(v);
+            try t.expect(why == null);
+        }
+        if (!covered) {
+            std.debug.print("missing valid environment case: {s}\n", .{r.name});
+            return error.MissingValidEnvironmentCase;
+        }
     }
 }
 
@@ -145,6 +181,47 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
+}
+
+test "environment: Flash Next EXL3 rows keep their bounds, exact words and exact switches" {
+    for ([_][2][]const u8{
+        .{ "TF_FLASHNEXT_CHUNK", "0" },
+        .{ "TF_FLASHNEXT_CHUNK", "16385" },
+        .{ "TF_FLASHNEXT_CHUNK_SOLO", "0" },
+        .{ "TF_FLASHNEXT_CHUNK_SOLO", "16385" },
+        .{ "TF_FLASHNEXT_EXL3_STREAMS", "0" },
+        .{ "TF_FLASHNEXT_EXPERT_RESERVE_MB", "17592186044416" },
+        .{ "TF_FLASHNEXT_CACHE_TELEMETRY", "true" },
+        .{ "TF_FLASHNEXT_EXL3_PROFILE_SIZING", "yes" },
+        .{ "TF_FLASHNEXT_SNAP_HOST", "01" },
+        .{ "TF_FLASHNEXT_PLE_READ", "Pread" },
+        .{ "TF_FLASHNEXT_EXL3_ROUTED", "DEVICE" },
+        .{ "TF_FLASHNEXT_EXL3_ARCH", "1" },
+        .{ "TENSORFOLD_MEMORY_RESERVE_GIB", "-0.5" },
+    }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_EXL3_ROUTED", "host"));
+    try t.expectEqual(@as(?u64, 0), try e.parse("TF_FLASHNEXT_PLE_READ", "map"));
+}
+
+test "environment: readPath reads the process environment, blank as unset, and refuses control characters" {
+    const name = "TF_FLASHNEXT_EXL3_PROFILE_DIR";
+    const previous: ?[:0]u8 = if (sys.getenv(name)) |raw| try a.dupeSentinel(u8, raw, 0) else null;
+    defer if (previous) |raw| {
+        _ = sys.env.setenv(name, raw, 1);
+        a.free(raw);
+    } else {
+        _ = sys.env.unsetenv(name);
+    };
+    _ = sys.env.unsetenv(name);
+    try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
+    for ([_][:0]const u8{ "", "  " }) |blank| {
+        try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, blank, 1));
+        try t.expectEqual(@as(?[]const u8, null), try e.readPath(name));
+    }
+    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, " /profiles ", 1));
+    try t.expectEqualStrings(" /profiles ", (try e.readPath(name)).?);
+    try t.expectEqual(@as(c_int, 0), sys.env.setenv(name, "/pro\nfiles", 1));
+    try t.expectError(error.InvalidEnvironment, e.readPath(name));
 }
 
 test "environment: a path setting keeps its text exactly, reads blank as unset and refuses control characters" {
@@ -177,6 +254,24 @@ test "environment: explicit flags and disabled features retain their old precede
     try t.expect((try e.refusal(a, Env{ .name = "TF_SLIDE_FORGET_FAIL", .raw = "bad" }, .{})) == null);
 }
 
+test "environment: video token budgets retain the full unsigned count and refuse malformed input" {
+    const name = "TENSORFOLD_VIDEO_TOKENS";
+    try t.expectEqual(std.math.maxInt(u64), try e.value(u64, name, "18446744073709551615", 0));
+    try t.expectEqual(@as(u64, 0), try e.value(u64, name, "0", 7));
+    for ([_][]const u8{ "-1", "18446744073709551616", "32k" }) |raw|
+        try t.expectError(error.InvalidEnvironment, e.value(u64, name, raw, 7));
+}
+
+test "environment: video refusal describes the token budget without advertising a storage maximum" {
+    const why = try e.describe(a, "TENSORFOLD_VIDEO_TOKENS", "bad-value");
+    defer a.free(why);
+    try t.expectEqualStrings(
+        "TENSORFOLD_VIDEO_TOKENS=\"bad-value\": expected a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)",
+        why,
+    );
+    try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
+}
+
 const Inactive = struct {
     pub fn get(_: Inactive, name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, "TF_CUDA_CARVEOUT")) return "0";
@@ -194,16 +289,6 @@ test "environment: inactive carveout size and disabled trees are still ignored" 
     const why = (try e.refusal(a, Inactive{}, enabled)).?;
     defer a.free(why);
     try t.expect(std.mem.indexOf(u8, why, "TF_CUDA_CARVEOUT_MIB=\"bad-size\"") != null);
-}
-
-test "environment: video refusal describes the token budget without advertising a storage maximum" {
-    const why = try e.describe(a, "TENSORFOLD_VIDEO_TOKENS", "bad-value");
-    defer a.free(why);
-    try t.expectEqualStrings(
-        "TENSORFOLD_VIDEO_TOKENS=\"bad-value\": expected a nonnegative whole video-token budget (default 16384; unsigned 64-bit count)",
-        why,
-    );
-    try t.expect(std.mem.indexOf(u8, why, "18446744073709551615") == null);
 }
 
 test "environment: word switches take 0 and 1 and the word forms in any case; exact switches refuse words" {

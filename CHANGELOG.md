@@ -8,6 +8,44 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - CUDA kernels: dots.mocr's image tower gets two kernels of our own: `tf_dots_vision_rope`, the 2-D rotary over the q|k|v rows with FP32 cos and sin and q and k rounded to BF16 as Transformers does, and `tf_dots_patch_bias`, which rounds the patch bias twice (`bf16(bf16(y) + b)`) as the reference does; both have kernel contract entries, planted controls and records for five SMs, and no served path launches them yet (#2767, part of #1927). Thanks to @laudney.
 
+- Flash Next EXL3 on CUDA: `TF_FLASHNEXT_EXL3_UNIFORM_LINES=0` keeps automatic pool sizing, like unset or blank; only `1` gives each rank exactly `TF_FLASHNEXT_EXPERT_LINES` lines (#1445). Thanks to @BlivionIaG.
+
+- Tests: video budgets again cover the common valid-setting matrix and reject storage-maximum advice in refusals (#1441). Thanks to @BlivionIaG.
+
+- Flash Next EXL3 selects host planning, eager device planning or CUDA graph replay with `TF_FLASHNEXT_EXL3_GRAPH=0`, `eager` or `1`. Engine teardown clears its capture-failure history without retiring another engine's graphs or retries. Its graph qualification runner propagates prefill configuration refusals (#1445).
+
+- The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
+
+- Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership. Grouped MTP heads retain their stream's tier selection, so their progress releases completed frames across rounds and tier restores (#1522). Thanks to @BlivionIaG.
+
+- EXL3 attention and MTP caches can use the existing core K/V page pool through opt-in `TF_FLASHNEXT_KV_PAGES`; paging remains off by default. TP ranks agree their state-run size before planning the pool, so a rank without the MTP head does not underallocate pages (#1444).
+
+- EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; kept prompt states now resume at any row without a chunk-grid restriction (#1443). Thanks to @BlivionIaG.
+
+- EXL3 deep prefill uses decode-exact prompt tiles and canonical float64 partials with one final float32 rounding, including empty-sibling zero signs. One rank reuses the root kernel and branch buffer without allocating a partial-gather region; TP reduction probes run under `test-flashnext-contract-host` (#1443). Thanks to @BlivionIaG.
+
+- CUDA EXL3 Flash Next: expert-parallel TP=2 with the same tokens as TP=1, and MTP drafts (#1442). Thanks to @BlivionIaG.
+
+- CUDA tests: Flash Next's real-weight EXL3 layer oracle attaches its expert pool before executing the family pass (#1441). Thanks to @BlivionIaG.
+
+- CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds (#1441).
+
+- EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping (#1441).
+
+- Flash Next's first CUDA EXL3 slice uses float64 expert leaves, fixed-tree merges and transported partials, rounding once to float32 at the root so cancellation does not lose low-order terms and tensor parallelism preserves the one-rank result (#1441, #1442). Other formats and checkpoint BF16 state boundaries are unchanged. Thanks to @BlivionIaG.
+
+- Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
+
+- Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks (#1441).
+
+- Flash Next CUDA avoids invalid whole-pass graph capture when EXL3 expert pools need host planning; resident experts and rollback retain their graphs (#1441). Thanks to @BlivionIaG.
+
+- CUDA startup refuses a malformed Flash Next EXL3 setting (the `TF_FLASHNEXT_*` pool, profile, telemetry, placement and snapshot switches), `TF_FLASHNEXT_CHUNK`, `TF_FLASHNEXT_CHUNK_SOLO` or `TENSORFOLD_MEMORY_RESERVE_GIB`, naming the variable and its accepted forms, from the central environment table; a blank value is unset, and every documented value keeps its meaning (#1441).
+
+- The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration (#1441).
+
+- Tests: Flash Next covers host-tier media's full page-plane ABI, missing-kernel refusal and learning-format diagnostic agreement (#1522). Thanks to @BlivionIaG.
+
 - GLM-5.3-Flash on CUDA with tensor parallelism: a `prompt_logprobs` request over about 100 tokens no longer hangs every rank at TP=3. The logit gather now broadcasts one block a rank, its staging buffers are counted in the startup memory check, and replies are unchanged (#1571, fixes #1559). Thanks to @gilby.
 
 - README: Pick a model gains a GLM-5.3-Flash Jammed XSFP4 NZ5 row, the checkpoint in the `NVFP4_NZ5` form that #2894 reads, and the GLM CUDA recipe names it beside Jammed XSFP4 (#2981). Thanks to @Bizuayeu.
