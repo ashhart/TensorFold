@@ -29,7 +29,7 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
         return null;
     };
     const available = budget.counting(measured, zones);
-    const free = available.available;
+    const free = budget.boundFree(host_counts, available.available, card.free);
     const total = available.total;
     const reserve = budget.reserveBytes(Host.env("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ Host.env("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
@@ -39,7 +39,7 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
         problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{Host.env("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
         return null;
     };
-    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified, .parked = free - measured.available };
+    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified, .parked = free -| measured.available };
 }
 
 /// `F`'s weight bytes on this rank: tensors or files, a split's share, a tower beside; null if tensors are unreadable.
