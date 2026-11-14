@@ -25,12 +25,10 @@ const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// Where a chat reply goes: the client's socket, or a Responses or Messages translation of it.
 pub const Out = struct {
     ctx: *anyopaque,
     vt: *const VTable,
-
     pub const VTable = struct {
         /// 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none).
         open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void,
@@ -42,7 +40,6 @@ pub const Out = struct {
         keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
 };
-
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     const startup_at = @import("core").startup_receipt.offset();
