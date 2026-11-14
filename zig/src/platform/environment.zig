@@ -44,13 +44,40 @@ pub const rules = [_]Rule{
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
+    .{ .name = "TF_FLASHNEXT_SHARD_HEAD", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 splits the head at TP=2; TP=1 stays whole)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_MTP_RESIDENT", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 keeps the EXL3 MTP experts on device)" },
+    .{ .name = "TF_FLASHNEXT_KV_HOST", .scope = .cuda, .kind = .size, .max = std.math.maxInt(usize) / (1 << 20), .forms = "a whole MiB budget fitting a native byte size (0 disables the host tier; blank is unset)" },
+    .{ .name = "TF_FLASHNEXT_KV_FRAMES", .scope = .cuda, .kind = .size, .min = 1, .forms = "a positive whole device-frame count, or blank for the computed budget" },
+    .{ .name = "TF_FLASHNEXT_KV_SLOTS", .scope = .cuda, .kind = .size, .min = 1, .forms = "a positive whole lent-frame count per stream, or blank for the default" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_ROWS", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative row count; unset uses 8192 for general prefill and 4096 for serving, an explicit count applies to both" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative ring lookahead count (default 1)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PREFILL_OVERLAP", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1)" },
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
+    .{ .name = "TF_FLASHNEXT_CHUNK", .scope = .cuda, .kind = .size, .min = 1, .max = 16384, .forms = "a whole prompt-row count from 1 to 16384 a pass (default 1536)" },
+    .{ .name = "TF_FLASHNEXT_CHUNK_SOLO", .scope = .cuda, .kind = .size, .min = 1, .max = 16384, .forms = "a whole prompt-row count from the busy chunk (TF_FLASHNEXT_CHUNK) to 16384; an EXL3 pack refuses it" },
+    .{ .name = "TF_FLASHNEXT_CACHE_TELEMETRY", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 logs EXL3-CACHE expert-cache counters, with a sync at each boundary)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_LAYER_TELEMETRY", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 adds per-layer counters when TF_FLASHNEXT_CACHE_TELEMETRY is 1)" },
+    .{ .name = "TF_FLASHNEXT_SNAP_HOST", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (kept prompt-cache states in pinned host memory; unset: 1 above 32768 tokens of context on an EXL3 pack, else 0)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_ARCH", .scope = .cuda, .kind = .word, .words = &.{"unqualified"}, .forms = "unqualified (serves an EXL3 pack on a device that is not sm_120, without a claim)" },
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .trim = " ", .forms = "a finite GiB count of at least 0.5 (2 on unified memory) and at most the memory's size" },
+    .{ .name = "TF_FLASHNEXT_EXL3_LINE_DELTAS", .scope = .cuda, .kind = .path, .forms = "POOL:+N,POOL:-N entries without control characters that move expert lines between decoder pools, as many added as removed" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_SIZING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (1 sizes the expert pools from the stored profile)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_STREAMS", .scope = .cuda, .kind = .size, .min = 1, .forms = "a positive whole stream count the expert pools leave room for (default 1; --parallel wins)" },
+    .{ .name = "TF_FLASHNEXT_EXPERT_LINES", .scope = .cuda, .kind = .size, .forms = "a whole count of expert lines a layer keeps on the device (the pool refuses fewer than 10)" },
+    .{ .name = "TF_FLASHNEXT_EXPERT_RESERVE_MB", .scope = .cuda, .kind = .u64, .max = std.math.maxInt(u64) >> 20, .forms = "a whole MiB count from 0 to 17592186044415 left free after the expert pools" },
+    .{ .name = "TF_FLASHNEXT_PLE_READ", .scope = .cuda, .kind = .word, .words = &.{ "map", "pread" }, .forms = "map or pread (default map; pread reads the n-gram rows by positional read)" },
+    .{ .name = "TF_FLASHNEXT_EXL3_PROFILE_DIR", .scope = .cuda, .kind = .path, .forms = "a directory path without control characters where expert-use profiles persist" },
+    .{ .name = "TF_FLASHNEXT_EXL3_ROUTED", .scope = .cuda, .kind = .word, .words = &.{ "host", "device" }, .forms = "host or device (default host; device keeps every routed expert on the device)" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
@@ -326,6 +353,14 @@ pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
 pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     std.debug.assert(rule(name).kind == .path);
     _ = (try parse(name, raw)) orelse return null;
+    return std.mem.trim(u8, raw.?, rule(name).trim);
+}
+
+/// A `.path` setting from the process environment, or null when unset or blank; a refusal is logged without its text.
+pub fn readPath(name: [:0]const u8) Error!?[]const u8 {
+    std.debug.assert(rule(name).kind == .path);
+    const raw = sys.getenv(name);
+    _ = (try checked(name, raw)) orelse return null;
     return std.mem.trim(u8, raw.?, rule(name).trim);
 }
 
