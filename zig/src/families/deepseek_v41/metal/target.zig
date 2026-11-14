@@ -152,6 +152,7 @@ pub const Target = struct {
     }
 
     pub fn deinit(t: *Target) void {
+        t.tree.deinit(t);
         if (t.joined) {
             var bufs: std.ArrayList(mtl.Buffer) = .empty;
             defer bufs.deinit(t.a);
@@ -160,7 +161,6 @@ pub const Target = struct {
         }
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
-        t.tree.deinit(t.a);
         t.cache.deinit();
         t.pr.deinit();
         t.b.deinit();
@@ -309,11 +309,11 @@ pub const Target = struct {
     /// A round's windows: slots' rows share a launch (up to R rows, a slot once), each launch one forward.
     fn window(ptr: *anyopaque, segments: []const iface.Segment, choices: [][]u32) anyerror!void {
         const t = self(ptr);
+        // the tree windows (parents not one chain) run first, together: their branches on shadow slots
+        try t.tree.window(t, segments, choices);
         var from: usize = 0;
         while (from < segments.len) {
-            // a tree window (parents not one chain) runs on its own: its branches on shadow slots
             if (tree_.branched(segments[from])) {
-                try t.tree.window(t, segments[from], choices[from]);
                 from += 1;
                 continue;
             }
@@ -426,7 +426,7 @@ pub const Target = struct {
         const s = &t.slots[slot];
         if (!s.open) return error.NoWindow;
         // a tree window's path: its branch's chain, taken from its shadow slot first when not the main one
-        if (t.tree.open(slot)) try t.tree.keep(t, slot, path) else for (path, 0..) |r, i| if (r != i) return error.NotAPath;
+        if (t.tree.pending(slot)) try t.tree.keep(t, slot, path) else for (path, 0..) |r, i| if (r != i) return error.NotAPath;
         if (path.len == 0 or path.len > s.rows) return error.NotAPath;
         s.open = false;
         const m: u32 = @intCast(path.len);
