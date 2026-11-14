@@ -485,14 +485,12 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 const toGib = family_memory.toGib;
-
 /// The Info `openWith` serves: the host's fields, then what the family declares (its reasoning block).
 fn familyInfo(comptime F: type, host: api.Info) api.Info {
     var info = host;
     info.reasoning = reasoning(F);
     return info;
 }
-
 /// The family's Info.reasoning: false when it declares `pub const reasoning = false` (no reasoning block).
 fn reasoning(comptime F: type) bool {
     return if (@hasDecl(F, "reasoning")) F.reasoning else true;
