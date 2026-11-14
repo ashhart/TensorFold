@@ -4,20 +4,11 @@ const lanes = @import("lanes");
 const capacity = 128;
 const Entry = struct { key: u16, word: u16, id: u64 };
 
-fn key(word: u16) u16 {
-    if (word & 0x7fff == 0) return 0x8000;
-    return word ^ (if (word & 0x8000 == 0) @as(u16, 0x8000) else @as(u16, 0xffff));
-}
-/// Words a block: one vector compare skips 32 logits that cannot enter a full selection.
+const row_draw = lanes.sampling_row;
+const key = row_draw.key;
+/// One mask word's logits: a vector compare skips 32 that are not allowed or cannot enter a full selection.
 const block = 32;
 const Block = @Vector(block, u16);
-
-/// `key` over a block of words.
-fn keys(words: Block) Block {
-    const negative = words & @as(Block, @splat(0x8000)) != @as(Block, @splat(0));
-    const flipped = words ^ @select(u16, negative, @as(Block, @splat(0xffff)), @as(Block, @splat(0x8000)));
-    return @select(u16, words & @as(Block, @splat(0x7fff)) == @as(Block, @splat(0)), @as(Block, @splat(0x8000)), flipped);
-}
 
 /// Inserts a finite allowed word that beats the k-th key, after equal keys so ties keep id order.
 inline fn consider(selected: *[capacity]Entry, filled: *usize, k: usize, word: u16, id: usize, mask: []const u32) void {
@@ -34,15 +25,20 @@ fn value(word: u16) f64 {
     return @as(f32, @bitCast(@as(u32, word) << 16));
 }
 
-/// The k best allowed words of a finite row, ordered by key then id; a block that can't beat the k-th key is skipped.
+/// The k best allowed words of a finite row, ordered by key then id; skips blocks that allow nothing or can't win.
 fn select(logits: []const u16, k: usize, mask: []const u32, selected: *[capacity]Entry) error{NonfiniteQwenLogits}!usize {
     var filled: usize = 0;
     var at: usize = 0;
     while (at + block <= logits.len) : (at += block) {
         const row: Block = logits[at..][0..block].*;
         if (@reduce(.Or, row & @as(Block, @splat(0x7f80)) == @as(Block, @splat(0x7f80)))) return error.NonfiniteQwenLogits;
-        if (filled == k and @reduce(.Max, keys(row)) <= selected[k - 1].key) continue;
-        for (logits[at..][0..block], at..) |word, id| consider(selected, &filled, k, word, id, mask);
+        const bits = row_draw.maskWord(mask, at / block);
+        if (bits == 0) continue;
+        var ranks = row_draw.keys(block, row);
+        if (~bits != 0) ranks = @select(u16, row_draw.spread(block, bits), ranks, @as(Block, @splat(0)));
+        if (filled == k and @reduce(.Max, ranks) <= selected[k - 1].key) continue;
+        var left = bits;
+        while (left != 0) : (left &= left - 1) consider(selected, &filled, k, logits[at + @ctz(left)], at + @ctz(left), mask);
     }
     for (logits[at..], at..) |word, id| {
         if (word & 0x7f80 == 0x7f80) return error.NonfiniteQwenLogits;
@@ -64,18 +60,6 @@ pub fn draw(logits: []const u16, sampling: lanes.Sampling, position: u64, mask: 
     var words: [2 * capacity]f64 = undefined;
     var scratch = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(&words));
     return @as(u32, @intCast(try lanes.sampling.chooseOrdered(scratch.allocator(), candidates[0..filled], position, sampling)));
-}
-
-test "bounded BF16 keys preserve numeric order over every finite word and both zero encodings" {
-    for (0..65536) |bits| {
-        const a: u16 = @intCast(bits);
-        if (a & 0x7f80 == 0x7f80) continue;
-        for ([_]u16{ a ^ 0x8000, a +% 1, 0, 0x8000 }) |b| {
-            if (b & 0x7f80 == 0x7f80) continue;
-            try std.testing.expectEqual(value(a) < value(b), key(a) < key(b));
-            try std.testing.expectEqual(value(a) == value(b), key(a) == key(b));
-        }
-    }
 }
 
 /// The scalar walk `select` replaces: every word validated, then inserted after its equal keys.
@@ -107,9 +91,12 @@ test "the blocked selection equals the scalar walk over ties, zeros, masks, tail
         if (case % 3 == 0) for (0..n / 64 + 1) |_| { // big values late in the row, so early blocks are full and later skipped
             words[n - 1 - r.uintLessThan(usize, @min(n, 64))] = 0x4700;
         };
-        const masked = case % 4 == 1;
-        for (&mask) |*m| m.* = r.int(u32);
-        const m: []const u32 = if (masked) mask[0 .. (n + 31) / 32] else &.{};
+        const shape = (case / 2) % 8; // no mask, dense, mostly zero words, one id, none allowed, short, dense, no mask
+        const zero = shape == 3 or shape == 4;
+        for (&mask) |*m| m.* = if (zero or shape == 2 and r.uintLessThan(u8, 8) != 0) 0 else r.int(u32);
+        if (shape == 3) mask[r.uintLessThan(usize, n) / 32] = @as(u32, 1) << @intCast(r.uintLessThan(usize, 32));
+        const width = if (shape == 5) 1 + r.uintLessThan(usize, (n + 31) / 32) else (n + 31) / 32;
+        const m: []const u32 = if (shape == 0 or shape == 7) &.{} else mask[0..width];
         if (case % 5 == 2) words[r.uintLessThan(usize, n)] = if (case % 2 == 0) 0x7fc0 else 0xff80; // NaN or -inf
         const k = 1 + r.uintLessThan(usize, capacity);
         var a: [capacity]Entry = undefined;
