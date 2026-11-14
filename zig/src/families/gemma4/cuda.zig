@@ -50,6 +50,8 @@ test {
     _ = @import("cuda_backend.zig");
     _ = @import("cuda_cap_test.zig");
     _ = @import("cuda_solo.zig");
+    _ = @import("cuda_vonly.zig");
+    _ = @import("cuda_vonly_test.zig");
     _ = @import("cuda_shared.zig");
     _ = @import("cuda_assistant.zig");
     _ = @import("cuda_assistant_weights.zig");

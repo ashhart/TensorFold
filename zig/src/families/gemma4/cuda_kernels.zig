@@ -17,11 +17,14 @@ pub const Kernels = struct {
     act: cuda.act_rows.ActRows,
     /// gemma4_ple.cu: the E-series per-layer inputs.
     ple: @import("cuda_ple.zig").PleRows,
+    /// window_vonly.cu, loaded by cuda_native only under TF_GEMMA4_V_ONLY=1.
+    vo: ?cuda.window_vonly.VOnly = null,
 
     pub fn load(ctx: *const cuda.Context) !Kernels {
         const d = ctx.d;
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         var k: Kernels = undefined;
+        k.vo = null;
         const kk = cuda.kernels;
         const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.sample, kk.tree_round, kk.affine8, kk.affine_prefill };
         var loaded: usize = 0;
@@ -54,6 +57,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        if (k.vo) |*v| v.unload();
         k.ple.unload();
         k.act.unload();
         k.win.unload();

@@ -32,6 +32,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
+| `TF_GEMMA4_V_ONLY` | Gemma 4 31B on CUDA (global layers with `attention_k_eq_v`): `1` keeps V alone in the global pages and makes each key from its value in attention, bit for bit; `0`, unset or empty is off. Refused with an assistant or DFlash drafter, `TF_KV_SHARE`, `TENSORFOLD_GEMMA4_KV_PAGES=0`, a checkpoint whose global layers have `v_proj`, or the 12B (one global key head, where V-only is slower). Opt-in: prompts take up to about 2 % longer, because each prompt pass makes the keys again |
 | `TF_DRAMA_PREFILL_ROWS` | Drama 3 on CUDA: whole prompt rows a chunk, 1 through 1024; default 1. Checked when the checkpoint opens, with its own message |
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 | `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
