@@ -49,7 +49,7 @@ such switch, and its family declares no reasoning block.
 
 JPEG inputs require the project's pinned libjpeg-turbo 3.1.4.1. Set
 `TENSORFOLD_LIBTURBOJPEG` to that library when it is outside the normal
-loader path. See [native preview](../../ZIG-PREVIEW.md) for image libraries.
+loader path. See [native preview](../zig-preview.md) for image libraries.
 
 For an isolated GPU test, identify the physical PCI address and acquire the
 existing device lease. Shared tests must account for current users, the

@@ -4,7 +4,7 @@ This recipe covers text generation with
 [`mlx-community/gemma-4-31B-it-4bit`](https://huggingface.co/mlx-community/gemma-4-31B-it-4bit/tree/696d436c404745a59f30e4939a658162b0a9e57f),
 revision `696d436c404745a59f30e4939a658162b0a9e57f`, the dense 31B in MLX affine 4-bit, groups of 64.
 Build from `main` with Zig **0.17.0** and Xcode's Metal toolchain, as described in
-[the native preview](../../ZIG-PREVIEW.md#build).
+[the native preview](../zig-preview.md#build).
 
 ```bash
 hf download mlx-community/gemma-4-31B-it-4bit --revision 696d436c404745a59f30e4939a658162b0a9e57f \

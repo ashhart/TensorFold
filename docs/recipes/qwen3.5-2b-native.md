@@ -4,7 +4,7 @@ This recipe covers text generation with
 [`mlx-community/Qwen3.5-2B-MLX-4bit`](https://huggingface.co/mlx-community/Qwen3.5-2B-MLX-4bit/tree/93760be4f1f69842a46bc13dbdc0f19e291392a3),
 revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
 Build from `main` with Zig **0.17.0** and Xcode's Metal toolchain, as described in
-[the native preview](../../ZIG-PREVIEW.md#build). Keep weights outside the source checkout.
+[the native preview](../zig-preview.md#build). Keep weights outside the source checkout.
 
 ```bash
 hf download mlx-community/Qwen3.5-2B-MLX-4bit \

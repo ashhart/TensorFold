@@ -8,7 +8,7 @@ page uses `TENSORFOLD_MEMORY_LIMIT_GB` (in GiB); the `TF_GLM_*` variables and th
 that engine's too, except `TF_GLM_CLEAR_THINKING`, which the native server also reads ([api](../api.md)).
 The native binary serves GLM on two M5 Ultra Macs with MLX affine 4-bit/group-64 weights, and on CUDA ranks from
 NVIDIA's NVFP4 checkpoint and the EXL3/TR3 checkpoint ([GLM-5.3-Flash on CUDA](glm-5.3-flash-cuda.md)).
-For native serving, use the [qualified model table](../../README.md#pick-a-model), the
+For native serving, use the [qualified model table](../supported-models.md#pick-a-model), the
 [paired Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving) and that page.
 @chadhurley25075-png wrote the Mac family in [#9](https://github.com/ashhart/TensorFold/pull/9), with fixes from
 @kingjamez, and its prompt path in [#39](https://github.com/ashhart/TensorFold/pull/39); the native engine runs

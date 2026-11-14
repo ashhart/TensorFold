@@ -1,7 +1,7 @@
 # Installation runbook
 
 TensorFold runs from a native executable.
-Choose a qualified model and platform from [README.md](README.md#qualified-models), then keep its complete checkpoint outside the source checkout.
+Choose a qualified model and platform from [README.md](docs/supported-models.md#qualified-models), then keep its complete checkpoint outside the source checkout.
 The model directory needs configuration, tokenizer, chat template and weight files.
 An existing complete Hugging Face cache also works.
 
@@ -127,7 +127,7 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 Use `http://127.0.0.1:8080/v1` as the OpenAI client base URL.
 For streaming, add `"stream": true` to the request.
 The native server also has `/v1/responses` and Anthropic `/v1/messages` routes.
-Serve flags and request overrides are described in [README.md](README.md#serve-flags).
+Serve flags and request overrides are described in [README.md](docs/run-guide.md#serve-flags).
 
 With API authentication off, `/health` includes `live.connections`, the total active plus waiting requests,
 and `live.waiting`, the queued requests. Subtract waiting from connections to get the active count.
@@ -186,7 +186,7 @@ For source builds with `zig build native` (including `--prefix` installs): Struc
 Choose `linux-aarch64` for an arm64 host or `linux-x86_64` for an x86_64 host.
 The archives require glibc 2.28 or newer and NVIDIA driver R580 or newer (CUDA 13.0), providing `libcuda.so.1`.
 Their kernels are built with CUDA 13, so TensorFold refuses an older driver at startup; `nvidia-smi` shows the installed one.
-See [qualified models](README.md#qualified-models) for native CUDA serving by family and format.
+See [qualified models](docs/supported-models.md#qualified-models) for native CUDA serving by family and format.
 Nemotron 3.5 Lightning MLX 4-bit has been checked on GB10 (sm_121, greedy and sampled), RTX 3090 (sm_86, greedy)
 and RTX PRO 6000 Blackwell (sm_120). A receipt on one sm_86 card does not measure every card of that class.
 Flash Next MLX 4-bit has served on a GB10 ([native recipe](docs/recipes/flash-next-cuda.md)).

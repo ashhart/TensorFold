@@ -1,6 +1,6 @@
 # What's new in TensorFold
 
-Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
+Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](docs/release-notes-1.0.0.md) for the native binary's supported models and migration details.
 
 ## Unreleased
 
@@ -2629,7 +2629,7 @@ Known issues, with fixes in testing:
 - Native release archives target macOS arm64 and Linux aarch64 for the GB10, with the executable and bundled license notices. CUDA deployment still needs its qualified kernel assets and NVIDIA driver; paired Metal serving needs the documented transport setup.
 - CUDA GB10 qualification is greedy. Sampled requests do not yet honor the seed, `top_k: 0` fails on that path, and health/metrics do not yet report CUDA device and pinned-memory usage. Those fixes are planned for 1.0.1.
 - Qwen3.8-27B is excluded: drafted/plain equality passes, but its paired served decode and cold-prefill measurements remain slower than Python 0.6.6. Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 remain ports for 1.0.x, subject to their model gates.
-- Contributor credits: all 145 public contributors are listed in [RELEASE-NOTES-1.0.0.md](RELEASE-NOTES-1.0.0.md).
+- Contributor credits: all 145 public contributors are listed in [the 1.0.0 release notes](docs/release-notes-1.0.0.md).
 
 Earlier entries document the Python release line.
 

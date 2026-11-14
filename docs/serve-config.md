@@ -26,7 +26,7 @@ tensorfold serve other/model --config glm.toml     # a model on the command line
 
 ## Keys
 
-A key is a [serve flag](../README.md#serve-flags) without its `--`. `-` and `_` are the same, so
+A key is a [serve flag](run-guide.md#serve-flags) without its `--`. `-` and `_` are the same, so
 `max-tokens` and `max_tokens` both set `--max-tokens`; a file that has both is refused. `model` names the
 model, as the positional argument does. Every key is at the top level of the file.
 

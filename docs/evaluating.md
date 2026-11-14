@@ -10,7 +10,7 @@ Record four things with every result:
 - The release, from `tensorfold --version` (on Linux, `tensorfold-native --version`).
 - The checkpoint and its revision, as `REPO@revision` in `tensorfold pull`.
 - The backend: Metal on a Mac, CUDA on Linux or Windows.
-- The recipe you followed from [Pick a model](../README.md#pick-a-model), with its flags.
+- The recipe you followed from [Pick a model](supported-models.md#pick-a-model), with its flags.
 
 Releases from 1.0.0 on are the native Zig engine. The Python engine stopped at 0.6.6 and lives only at the `v0.6.6`
 tag; its tests need MLX and its results do not describe a 1.x release. `pip install .` at the root stops and says where
@@ -86,7 +86,7 @@ Linux. GPU kernel and served-model checks run on the maintainers' Macs and NVIDI
 
 Drafting must never change the output. At temperature 0, send the same request twice, once with `"draft": false`,
 and compare the text and `usage`. A request repeated against the prompt cache must equal its first run, and
-concurrent requests must each equal their solo run. [Exact decoding](../README.md#exact-decoding) states the rule
+concurrent requests must each equal their solo run. [Exact decoding](run-guide.md#exact-decoding) states the rule
 and what it fixes.
 
 ## Requests worth replaying
@@ -106,7 +106,7 @@ The [API reference](api.md) lists every field and refusal.
 Context length, `--parallel`, prompt caches and drafters need memory beyond that floor. Once a model is loaded,
 `GET /v1/memory` reports the memory in use: the process footprint on macOS and the backend's device counters
 ([memory diagnostics](memory-diagnostics.md)).
-The machines each model was checked on are in [Pick a model](../README.md#pick-a-model); where no minimum was
+The machines each model was checked on are in [Pick a model](supported-models.md#pick-a-model); where no minimum was
 measured, none is published.
 
 ## Dependencies
