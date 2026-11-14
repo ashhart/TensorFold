@@ -146,15 +146,6 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_BATCH_ATTN", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_PREFILL_INTERLEAVE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
     .{ .name = "TF_DSV41_ENGRAM_LOOKAHEAD", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_WO_CHAIN", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_QNORM", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_QROPE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_OROPE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_IQROPE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_QKV_TAIL", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_GATEUP_SWIGLU", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_SHARED_DOWN", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
-    .{ .name = "TF_DSV41_NO_FUSE_DOWN_COMBINE", .scope = .dsv41, .kind = .flag, .trim = " \t\r\n", .forms = "0 or 1" },
 };
 
 pub fn rule(name: []const u8) Rule {

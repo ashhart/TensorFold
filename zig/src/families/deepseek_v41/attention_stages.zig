@@ -537,7 +537,7 @@ pub const Stage = struct {
         const group_output = c.o_groups * c.o_lora;
         // wo_a's epilogue and wo_b's rotate_in as one dispatch (`grouped` is still written).
         const chain_wo = rows == 1 and w.wo_a_descriptors != null and dense_passes == 1 and
-            fuse.switches().wo_chain and exl3.chain.rotateOutInReady(ep) and
+            exl3.chain.rotateOutInReady(ep) and
             std.c.getenv("TF_DSV41_NO_FUSE_WO_A") == null and std.c.getenv("TF_DSV41_DOUBLE_ATTN_WOA") == null;
         // The multi-row path takes the same dispatch -- q is row-major.
         if (chain_wo or self.o_rope_deferred) {

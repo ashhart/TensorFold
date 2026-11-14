@@ -1,6 +1,5 @@
-//! The decode attention chain's fused dispatches (one row); each has a kill switch (TF_DSV41_NO_FUSE_*).
+//! The decode attention chain's fused dispatches (one row) and the shapes each one is ready for.
 const std = @import("std");
-const environment = @import("sys").environment;
 const mtl = @import("metal");
 const exl3 = @import("core").exl3_projection;
 const weights = @import("weights.zig");
@@ -12,38 +11,6 @@ const core = common.core;
 const tensor = common.tensor;
 const kv = @import("kv.zig");
 
-/// The fusion kill switches, read once: a process does not toggle them.
-pub const Switches = struct {
-    /// wo_a's epilogue and wo_b's rotate_in in one dispatch.
-    wo_chain: bool,
-    /// The query latent's RMS norm and wq_b's rotate_in in one dispatch.
-    qnorm: bool,
-    /// wq_b's epilogue and the query's RoPE in one dispatch.
-    qrope: bool,
-    /// The output's inverse RoPE and wo_a's rotate_in in one dispatch.
-    orope: bool,
-    /// The indexer's wq_b epilogue and its query RoPE in one dispatch.
-    iqrope: bool,
-    /// The merged query/key call's epilogue with the query latent's norm, wq_b's rotate_in and the key's window glue.
-    qkv_tail: bool,
-};
-
-var cached: ?Switches = null;
-
-pub fn switches() Switches {
-    if (cached) |s| return s;
-    const s: Switches = .{
-        .wo_chain = !(environment.read(bool, "TF_DSV41_NO_FUSE_WO_CHAIN", false) catch unreachable),
-        .qnorm = !(environment.read(bool, "TF_DSV41_NO_FUSE_QNORM", false) catch unreachable),
-        .qrope = !(environment.read(bool, "TF_DSV41_NO_FUSE_QROPE", false) catch unreachable),
-        .orope = !(environment.read(bool, "TF_DSV41_NO_FUSE_OROPE", false) catch unreachable),
-        .iqrope = !(environment.read(bool, "TF_DSV41_NO_FUSE_IQROPE", false) catch unreachable),
-        .qkv_tail = !(environment.read(bool, "TF_DSV41_NO_FUSE_QKV_TAIL", false) catch unreachable),
-    };
-    cached = s;
-    return s;
-}
-
 /// The rope's rotation factors for a layer of compress ratio `ratio`: the compressed layers' follow the plain ones.
 fn ropeFactors(ap: *const common.Pipelines, ratio: u32) exl3.View {
     const offset: usize = if (ratio == 0) 0 else @as(usize, ap.rotary.capacity) * ap.rotary.rotary * @sizeOf(f32);
@@ -52,7 +19,7 @@ fn ropeFactors(ap: *const common.Pipelines, ratio: u32) exl3.View {
 
 /// Whether the indexer's query epilogue and its RoPE of one decode row can run as one dispatch.
 pub fn iqRopeReady(ep: *const exl3.Pipelines, ap: *const common.Pipelines, c: config.Config, position: u32) bool {
-    return switches().iqrope and ep.chain.rotate_out_rope != null and ap.rotary.rotary == c.rope_dim and
+    return ep.chain.rotate_out_rope != null and ap.rotary.rotary == c.rope_dim and
         position < ap.rotary.capacity and c.index_dim % 128 == 0 and c.rope_dim % 32 == 0 and c.rope_dim <= 128;
 }
 
@@ -85,7 +52,7 @@ pub fn encodeWoA(ep: *const exl3.Pipelines, ap: *const common.Pipelines, e: mtl.
 
 /// Whether the output's inverse RoPE can wait for wo_a's rotate_in (`encodeWoA` with `rope`), one decode row.
 pub fn oRopeReady(ep: *const exl3.Pipelines, ap: *const common.Pipelines, w: *const weights.Attention, c: config.Config, position: u32) bool {
-    return switches().orope and w.wo_a_descriptors != null and exl3.chain.ropeRotateInReady(ep) and
+    return w.wo_a_descriptors != null and exl3.chain.ropeRotateInReady(ep) and
         ap.rotary.rotary == c.rope_dim and position < ap.rotary.capacity and c.head_dim % 128 == 0 and
         c.rope_dim % 32 == 0 and c.rope_dim <= 128 and (c.heads * c.head_dim / c.o_groups) % c.head_dim == 0 and
         std.c.getenv("TF_DSV41_NO_FUSE_WO_A") == null and std.c.getenv("TF_DSV41_DOUBLE_ATTN_WOA") == null and
@@ -99,7 +66,7 @@ pub fn encodeWoB(ep: *const exl3.Pipelines, e: mtl.ComputeEncoder, w: *const wei
 
 /// Whether one decode row's `qr` norm and wq_b's rotate_in can run as one dispatch.
 pub fn qNormReady(ep: *const exl3.Pipelines, w: *const weights.Attention, c: config.Config) bool {
-    return switches().qnorm and w.wq_b.k == c.q_lora and c.q_lora <= exl3.chain.rmsRotateInWidth(ep) and
+    return w.wq_b.k == c.q_lora and c.q_lora <= exl3.chain.rmsRotateInWidth(ep) and
         std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") == null;
 }
 
@@ -118,7 +85,7 @@ pub fn encodeQNorm(ep: *const exl3.Pipelines, e: mtl.ComputeEncoder, w: *const w
 
 /// Whether wq_b's epilogue and the query's RoPE of one decode row can run as one dispatch.
 pub fn qRopeReady(ep: *const exl3.Pipelines, ap: *const common.Pipelines, c: config.Config, position: u32) bool {
-    return switches().qrope and ep.chain.rotate_out_rope != null and ap.rotary.rotary == c.rope_dim and
+    return ep.chain.rotate_out_rope != null and ap.rotary.rotary == c.rope_dim and
         position < ap.rotary.capacity and c.head_dim % 128 == 0 and c.rope_dim % 32 == 0 and c.rope_dim <= 128 and
         std.c.getenv("TF_DSV41_DOUBLE_ROPE") == null;
 }
@@ -137,8 +104,7 @@ pub fn encodeQb(ep: *const exl3.Pipelines, ap: *const common.Pipelines, e: mtl.C
 
 /// Whether the merged call's epilogue can carry the query norm, wq_b's rotate_in and the key glue (one decode row).
 pub fn qkvTailReady(ep: *const exl3.Pipelines, ap: *const common.Pipelines, w: *const weights.Attention, c: config.Config, position: u32) bool {
-    const sw = switches();
-    return sw.qkv_tail and sw.qnorm and std.c.getenv("TF_DSV41_NO_FUSE_KVGLUE") == null and
+    return std.c.getenv("TF_DSV41_NO_FUSE_KVGLUE") == null and
         exl3.chain.qkvEpilogueReady(ep) and w.kv_norm.dtype == .bf16 and c.head_dim == 512 and c.q_lora % 128 == 0 and
         c.q_lora <= 1280 and w.wq_b.k == c.q_lora and ap.rotary.rotary == c.rope_dim and position < ap.rotary.capacity and
         c.rope_dim % 32 == 0 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") == null and

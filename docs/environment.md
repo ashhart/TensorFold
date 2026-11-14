@@ -67,8 +67,6 @@ These controls use the shared parser. Empty or whitespace-only values keep the d
 | `TF_DSV41_ENGRAM_LOOKAHEAD` | `0` or `1`; default `1`. Zero stages Engram rows inline. |
 | `TF_DSV41_CONE` | `0`, `1` or `2`; default `2`. Zero uses the full forward, one uses one replay program, two uses layer groups. |
 | `TF_DSV41_CONE_PARK` | Whole count `0` through `3`; default `3`. Other prompts' pending encoder runs retained beside the active run. |
-| `TF_DSV41_NO_FUSE_GATEUP_SWIGLU`, `TF_DSV41_NO_FUSE_SHARED_DOWN`, `TF_DSV41_NO_FUSE_DOWN_COMBINE` | `0` or `1`; default `0`. One disables the named MoE fusion. |
-| `TF_DSV41_NO_FUSE_WO_CHAIN`, `TF_DSV41_NO_FUSE_QNORM`, `TF_DSV41_NO_FUSE_QROPE`, `TF_DSV41_NO_FUSE_OROPE`, `TF_DSV41_NO_FUSE_IQROPE`, `TF_DSV41_NO_FUSE_QKV_TAIL` | `0` or `1`; default `0`. One disables the named attention fusion. |
 
 Unset `TF_DSV41_PREFILL_STEP` tries 8192 workspace rows and falls back to 4096 only on memory admission refusal.
 The admitted wide workspace uses chunks of at most 4096 rows while another stream decodes.
