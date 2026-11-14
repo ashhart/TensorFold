@@ -133,6 +133,7 @@ pub fn validateEnvironment() !void {
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     validateEnvironment() catch return 1;
+    log.setJson(args.log_json);
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);

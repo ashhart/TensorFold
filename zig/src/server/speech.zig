@@ -61,6 +61,7 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     };
     var cx: Cx = .{ .a = a };
     const id = try ids.make(a, "speech-", 32);
+    c.id = id;
     const received = clock.nowNs(srv.io);
     var metadata: Metadata = .{ .enabled = srv.config.redraw.count() > 0, .register_on = srv.config.redraw.register.on() };
     const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, metadata, e);
