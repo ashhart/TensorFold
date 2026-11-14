@@ -22,6 +22,7 @@ const extra_wordings = 12; // extra questions drawn for the router beside the or
 const probe_count = 4; // unseen wordings selected once for the lesson's fixed verify gate
 
 pub const Spec = struct {
+    reserved: @import("slide_reserved.zig").Reserved = .{},
     fact: []const u8,
     fact_index: usize,
     refs: []const teach.Held,
@@ -35,6 +36,32 @@ pub const Spec = struct {
 };
 const Span = struct { start: usize, end: usize };
 pub const Entry = struct { spec: Spec, asked: Span, unasked: Span, probes: Span, seen: []const []const u8 };
+
+fn keptSpan(xs: []const api.Example, span: Span, reserved: @import("slide_reserved.zig").Reserved) Span {
+    std.debug.assert(span.start <= span.end and span.end <= xs.len);
+    var out: Span = .{ .start = 0, .end = 0 };
+    for (xs[0..span.end], 0..) |ex, i| {
+        if (reserved.reads(ex.ids)) continue;
+        out.end += 1;
+        if (i < span.start) out.start += 1;
+    }
+    return out;
+}
+
+/// Filter every learner role and keep router spans relative to the resulting lists; fixed probes stay unchanged.
+pub fn clean(a: A, plan: teach.Plan) !teach.Plan {
+    if (plan.reserved.heads.len == 0) return plan;
+    var out = plan;
+    out.full = try plan.reserved.clean(a, plan.full);
+    const entries = try a.dupe(Entry, plan.wordings);
+    for (entries) |*entry| {
+        entry.asked = keptSpan(plan.full.asked, entry.asked, plan.reserved);
+        entry.unasked = keptSpan(plan.full.unasked, entry.unasked, plan.reserved);
+    }
+    out.wordings = entries;
+    return out;
+}
+
 const Drawn = struct {
     asked: std.ArrayList(api.Example) = .empty,
     unasked: std.ArrayList(api.Example) = .empty,
@@ -64,6 +91,7 @@ fn draw(srv: *Server, cx: *Cx, spec: Spec, round: u32, excluded: []const []const
     const wordings = try wording.questions(a, more.content, count);
     if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
     for (wordings) |q| {
+        if (try spec.reserved.question(srv, cx, q)) continue;
         if ((try seen.getOrPut(a, q)).found_existing) continue;
         const personal = !spec.document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
         const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) "is not the user asking about themselves" else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, spec.document, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, spec.siblings, fact, q, spec.document, gone)) "is another fact's" else null;
@@ -113,9 +141,11 @@ fn append(comptime T: type, a: A, list: *std.ArrayList(T), xs: []const T) !Span 
 }
 
 pub fn first(srv: *Server, cx: *Cx, parts: *teach.Parts, spec: Spec, gone: anytype) !struct { seen: std.StringHashMapUnmanaged(void), taken: usize } {
-    const d = try draw(srv, cx, spec, 0, &.{}, gone);
+    var held = spec;
+    held.reserved = parts.reserved;
+    const d = try draw(srv, cx, held, 0, &.{}, gone);
     try parts.wordings.append(cx.a, .{
-        .spec = spec,
+        .spec = held,
         .asked = try append(api.Example, cx.a, &parts.asked, d.asked.items),
         .unasked = try append(api.Example, cx.a, &parts.unasked, d.unasked.items),
         .probes = try append(teach.Held, cx.a, &parts.probes, d.probes.items),
@@ -154,7 +184,7 @@ pub fn next(srv: *Server, cx: *Cx, plan: teach.Plan, round: u32, _: u32, gone: a
     out.full.unasked = unasked.items;
     out.wordings = entries.items;
     log.line("slide: round {d}: fresh extra wordings after the refused round", .{round + 1});
-    return out;
+    return clean(a, out);
 }
 
 /// A refused draw leaves the existing wordings and ordinary continuation in place.
