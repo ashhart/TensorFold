@@ -62,6 +62,7 @@ pub fn deliverPending(h: *LaneHost) void {
     var i: usize = 0;
     while (i < h.admitted.items.len) {
         const job = h.admitted.items[i];
+        if (h.srpt.on and job.stream.finished) h.srpt.seen(&job.stream);
         if (h.deliver(job)) continue;
         i += 1;
     }
