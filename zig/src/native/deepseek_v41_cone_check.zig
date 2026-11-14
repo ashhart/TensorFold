@@ -2,7 +2,6 @@
 const std = @import("std");
 const tf = @import("tensorfold");
 const ds = tf.deepseek_v41;
-const remote = @import("deepseek_v41_remote.zig");
 
 const vocab = 129280;
 const log = std.log.scoped(.cone_check);
@@ -142,7 +141,7 @@ fn sha(picks: []const u32) [8]u8 {
     return h[0..8].*;
 }
 
-fn compare(m: *const ds.Model, n: usize, mode: u32, full: Run, cone: Run, decode_steps: usize) void {
+fn compare(m: *const ds.Model, n: usize, mode: u32, full: Run, cone: Run, decode_steps: usize) !void {
     const lg = diffFloats(full.logits, cone.logits);
     var steps_bad: usize = 0;
     var steps_worst: f32 = 0;
@@ -178,6 +177,10 @@ fn compare(m: *const ds.Model, n: usize, mode: u32, full: Run, cone: Run, decode
         @as(f64, @floatFromInt(n)) / cone.prefill_s,
         full.prefill_s / cone.prefill_s,
     });
+    if (lg[0] != 0 or steps_bad != 0 or !std.mem.eql(u32, full.picks, cone.picks) or
+        full.snap.position != cone.snap.position or full.snap.taps_row != cone.snap.taps_row or
+        full.snap.taps_n != cone.snap.taps_n or full.snap.taps_rows_last != cone.snap.taps_rows_last or
+        full.snap.taps_base != cone.snap.taps_base) return error.ConeMismatch;
 }
 
 /// Where the kept state differs: storage by owner and kind, live by ring layer, then the scratch behind the rings.
@@ -211,10 +214,19 @@ fn regions(plan: ds.kv.cache.Plan, full: *const Kept, cone: *const Kept) void {
     }
 }
 
+fn parseIds(a: std.mem.Allocator, text: []const u8) ![]u32 {
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(a);
+    var it = std.mem.tokenizeAny(u8, text, " \t\r\n,[]");
+    while (it.next()) |word| try out.append(a, try std.fmt.parseInt(u32, word, 10));
+    if (out.items.len == 0) return error.EmptyPrompt;
+    return out.toOwnedSlice(a);
+}
+
 fn tokens(a: std.mem.Allocator, io: std.Io, n: usize) ![]u32 {
     const out = try a.alloc(u32, n);
     if (envText("TF_DSV41_CONE_TOKENS")) |path| {
-        const src = try remote.parseIds(a, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)));
+        const src = try parseIds(a, try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)));
         for (out, 0..) |*t, i| t.* = src[i % src.len];
         return out;
     }
@@ -228,6 +240,8 @@ fn tokens(a: std.mem.Allocator, io: std.Io, n: usize) ![]u32 {
 
 /// Runs the check for the sizes in `spec`; a size the slot cannot hold is skipped.
 pub fn runSizes(gpa: std.mem.Allocator, io: std.Io, m: *ds.Model, spec: []const u8) !void {
+    const restore_mode = try @import("sys").environment.read(u32, "TF_DSV41_CONE", 2);
+    defer ds.forward_cone.force(m, restore_mode);
     const decode_steps: usize = if (envText("TF_DSV41_CONE_STEPS")) |s| try std.fmt.parseInt(usize, s, 10) else 128;
     var it = std.mem.tokenizeScalar(u8, spec, ',');
     // warm both paths: the first prefill pays pipeline builds and page-in
@@ -249,11 +263,12 @@ pub fn runSizes(gpa: std.mem.Allocator, io: std.Io, m: *ds.Model, spec: []const 
         const a = arena.allocator();
         const ids = try tokens(a, io, n);
         const full = try run(m, a, io, ids, decode_steps, 0);
-        for ([_]u32{ 1, 2 }) |mode| compare(m, n, mode, full, try run(m, a, io, ids, decode_steps, mode), decode_steps);
+        for ([_]u32{ 1, 2 }) |mode| try compare(m, n, mode, full, try run(m, a, io, ids, decode_steps, mode), decode_steps);
         const rb_full = try rollbackRun(m, a, io, ids, 0, 24);
         for ([_]u32{ 1, 2 }) |mode| {
             const rb = try rollbackRun(m, a, io, ids, mode, 24);
             log.info("n={d} mode {d}: rollback rounds digest full {x} cone {x} ({s}), position {d}/{d}", .{ n, mode, rb_full[0], rb[0], if (std.mem.eql(u8, &rb_full[0], &rb[0])) "equal" else "DIFFER", rb_full[1], rb[1] });
+            if (!std.mem.eql(u8, &rb_full[0], &rb[0]) or rb_full[1] != rb[1]) return error.ConeRollbackMismatch;
         }
         // the second timing of each path, state warm
         const full2 = try run(m, a, io, ids, 1, 0);
