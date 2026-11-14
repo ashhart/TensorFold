@@ -56,7 +56,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 8. Disk cache | done C[#1358] | done C[#1359] M[#519] | done M¹ open C[#1411] | yes | done C[#1413] M¹ |
 | 9. FP8 KV | done [#886] | yes | done¹ | yes | yes |
 | 10. FP4/FP8 decode | yes | yes | yes | no (affine) | yes |
-| 11. Fused proj. | done [#1783] | done¹ | done¹ | done [#1783] | done [#1783] |
+| 11. Fused proj. | done [#1783] open C[#2410] | done¹ | done¹ | done [#1783] | done [#1783] |
 | 12. Add + norm | done H[#2099] | no (bound <1 %) | yes | done¹ | done [#796] |
 | 13. MoE grouped | done [#605] | done [#1351], open M[#2784] | done [#864] | no (dense) | done [#558] |
 | 14. CUDA graphs | done¹ | done [#1786] | open [#2279] | done [#1174] | done [#615] |
@@ -336,13 +336,15 @@ below; these are estimates for planning a port, not results.
 
 11. **Projections that share an input, in one launch.** Projections that read the same input (q/k/v/gate, gate/up)
     run as one grouped launch or one fused GEMM, byte-equal to separate launches. [#1783] does this for affine-4
-    decode and verify on GB10; [#1439] runs up to four BF16 prompt projections in one grid on Qwen3.8.
+    decode and verify on GB10; [#1439] runs up to four BF16 prompt projections in one grid on Qwen3.8;
+    [#2410] fuses the dense MLP's NVFP4 prompt gate and up pair on GB10 and the RTX 5090.
 
     | Family | Gain (measured) | Where |
     | --- | --- | --- |
     | nemotron | +5.9 % (2 streams), +13.3 % (8 streams) | [#1783] |
     | qwen3_5 (27B, DFlash2) | +3.5..+5.0 % decode | [#1783] |
     | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439] |
+    | qwen3_5 (Qwen3.8, NVFP4) | level (the pair is bandwidth-bound) | [#2410] |
     | gemma4 (31B), spark25 | level | [#1783] |
 
 12. **Residual add plus norm in one launch.** The residual add and the next RMS norm run as one kernel, which saves a
@@ -608,6 +610,7 @@ below; these are estimates for planning a port, not results.
 [#2306]: https://github.com/ashhart/TensorFold/pull/2306
 [#2391]: https://github.com/ashhart/TensorFold/pull/2391
 [#2449]: https://github.com/ashhart/TensorFold/pull/2449
+[#2410]: https://github.com/ashhart/TensorFold/pull/2410
 [#2430]: https://github.com/ashhart/TensorFold/pull/2430
 
 [#2257]: https://github.com/ashhart/TensorFold/pull/2257
