@@ -44,6 +44,8 @@ pub const Model = struct {
     on_thread: ?api.LaneHost.ThreadInit = null,
     /// /metrics' device memory; null: Engine.memory reports none
     memory: ?api.MemorySource = null,
+    /// the idle ticker that keeps the weights wired between requests (null: the backend holds no residency)
+    keepalive: ?api.keepalive.Target = null,
     health: ?api.HealthSource = null,
     /// TF_DSV41_PREFILL_PIECES=1: the batcher plans the host's rounds
     rounds: ?*const fn (ptr: *anyopaque, gpa: Allocator, io: std.Io, host: *api.LaneHost) anyerror!void = null,
@@ -141,6 +143,7 @@ pub const Served = struct {
         s.host.on_thread = backend.on_thread;
         // /metrics' device memory: bytes this rank holds (weights, KV pool, staging), peak
         s.host.memory = backend.memory;
+        s.host.keepalive_target = backend.keepalive;
         s.host.health = backend.health;
         // TF_DSV41_PREFILL_PIECES=1: the batcher plans the rounds; served shape only, same setting on every rank
         if (backend.rounds) |rounds| try rounds(backend.ptr, gpa, io, &s.host);
