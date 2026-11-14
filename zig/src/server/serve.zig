@@ -210,6 +210,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .silence_guard = args.silence.enabled(),
         .cfg = args.cfg.options(),
         .prompt_seed = args.prompt_seed,
+        .cache_salt_per_key = args.cache_salt_per_key,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
         .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
@@ -248,6 +249,11 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
         return 2;
     }
+    if (args.cache_salt_per_key and !srv.info.capability(.cache_salt)) {
+        std.debug.print("tensorfold: --cache-salt-per-key is not supported by backend '{s}': its prompt cache does not key requests by salt\n", .{srv.backendName()});
+        return 2;
+    }
+    if (args.cache_salt_per_key and !store.enabled()) log.line("--cache-salt-per-key: no API keys are set, so no request is salted by one", .{});
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
     const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
     installSignals(store.enabled());

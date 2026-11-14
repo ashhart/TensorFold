@@ -54,6 +54,9 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
         p.request.images = x.images;
         p.request.cache_key = x.cache_key;
     }
+    // a salted conversation's pass keeps its states under the same salt (an engine keyed by tokens alone: no pass)
+    if (input.cache_salt != 0) p.request.cache_key = if (srv.info.cache_salt) try @import("cache_salt.zig").salted(a, p.request.cacheKey(), input.cache_salt) else return;
+    p.request.salted = input.cache_salt != 0;
     const id = srv.next_id.fetchAdd(1, .monotonic);
     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
     handed = true;

@@ -44,6 +44,8 @@ pub const Input = struct {
     logprobs: ?u8 = null,
     /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
     prompt_logprobs: ?u8 = null,
+    /// The prompt cache's salt (cache_salt.zig): a hash, 0 for none; states kept under one salt serve only that salt.
+    cache_salt: u64 = 0,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
     /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
@@ -200,6 +202,9 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .images = rendered.images,
         .cache_key = rendered.cache_key,
     };
+    const salt = if (input.cache_salt != 0) input.cache_salt else cx.cache_salt;
+    if (salt != 0) request.cache_key = try @import("cache_salt.zig").key(srv, cx, request.cacheKey(), salt);
+    request.salted = salt != 0;
     try srv.checkFeatures(cx, f, input.tools.len > 0, reasoning, rendered.ids, input.tools, &request);
     server_mod.nameStructure(input.format, &request);
     errdefer srv.release(false, request);

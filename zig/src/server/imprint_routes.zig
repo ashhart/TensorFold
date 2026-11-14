@@ -32,7 +32,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, op: api.ImprintOp) void {
     }
     var cx: errors.Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch return refuse(conn, a, &cx);
-    const input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
+    var input = openai.chatInput(srv, &cx, body) catch return refuse(conn, a, &cx);
+    input.cache_salt = @import("cache_salt.zig").ofRequest(srv, input.cache_salt, conn.key_digest); // as its turn keys it
     const p = chat.prepare(srv, &cx, input, Never{}) catch return refuse(conn, a, &cx);
     defer srv.release(p.preparing, p.request);
     const ask = make(srv, op, p.request) catch return conn.sendError(a, 500, "out of memory", null) catch {};
@@ -51,10 +52,15 @@ fn make(srv: *Server, op: api.ImprintOp, r: api.Request) !*Ask {
     const ask = try srv.gpa.create(Ask);
     ask.* = .{ .op = op };
     errdefer free(srv, ask);
-    ask.prompt = try srv.gpa.dupe(u32, r.prompt);
+    ask.prompt = try srv.gpa.dupe(u32, askKey(r));
     ask.starts = try srv.gpa.dupe(u32, r.chunks);
     ask.spans = try srv.gpa.dupe([2]u32, r.decode_spans);
     return ask;
+}
+
+/// What an ask looks up: a salted request's key (its salt's states only), else its tokens as before.
+pub fn askKey(r: api.Request) []const u32 {
+    return if (r.salted) r.cache_key else r.prompt;
 }
 
 fn free(srv: *Server, ask: *Ask) void {

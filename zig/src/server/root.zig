@@ -68,6 +68,8 @@ test {
     _ = @import("tool_required_test.zig");
     _ = @import("structure_field_test.zig");
     _ = @import("grammar.zig");
+    _ = @import("cache_salt.zig");
+    _ = @import("cache_salt_test.zig");
     _ = @import("pyrepr.zig");
     _ = @import("metrics.zig");
     _ = @import("load_metrics.zig");
