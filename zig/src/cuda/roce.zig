@@ -21,6 +21,7 @@ pub const max_world = layout.max_world;
 pub const peerIndex = layout.peerIndex;
 pub const senderOf = layout.senderOf;
 pub const firstUnreachable = layout.firstUnreachable;
+const host_wait = @import("host_wait.zig");
 
 const max_peers = max_world - 1;
 const send_depth = 256;
@@ -149,13 +150,11 @@ pub const Gather = struct {
         // every rank's queue pairs are ready to receive before any rank's probe write leaves
         var words: [max_world]u32 = undefined;
         const ready = exchange(u32, group, d, s, @intFromBool(connected), &words) catch |e| {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit(); // setup ran (every blob was ok), so g.gpa is gpa
             return e;
         };
         if (!connected or std.mem.indexOfScalar(u32, ready, 0) != null) {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             return null;
         }
         // the connect probe: a token to every peer on every HCA, our writes completed and every peer's token in
@@ -167,19 +166,16 @@ pub const Gather = struct {
             break :blk 1;
         };
         const verdicts = exchange(u32, group, d, s, reached, &words) catch |e| {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             return e;
         };
         if (std.mem.indexOfScalar(u32, verdicts, 0)) |r| { // every rank or none, as for every other failure above
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             std.log.warn("RoCE all-gather: rank {d} has no RDMA path to every other rank (its log names the peer and the HCA); NCCL carries every gather. Every rank must reach every other on the same HCA index: two on a cable, or a switch; a ring of four has none. TF_ROCE=0 keeps this quiet", .{r});
             return null;
         }
         g.startProxy() catch |e| {
-            g.teardown();
-            gpa.destroy(g);
+            g.deinit();
             return e;
         };
         std.log.info("RoCE all-gather: {d} ranks, {d} HCA(s), shards up to {d} KiB by RDMA writes", .{ g.world, g.n_hca, g.max_bytes >> 10 });
@@ -425,16 +421,18 @@ pub const Gather = struct {
     /// The proxy: spins on the doorbell and posts each sequence in order (a missed one from its slot's size).
     fn proxy(g: *Gather) void {
         const c = g.ctrl();
+        const wfe = host_wait.on();
+        const m: u64 = if (wfe) 7 else 63; // a park lasts up to 1 ms: the CQs drain every 8 parks, or every 64 polls
         var idle: u64 = 0;
         while (g.running.load(.monotonic)) {
             const seq = @atomicLoad(u32, &c[layout.c_seq], .acquire);
             if (seq == g.last_seq) {
                 idle += 1;
-                if (idle % 64 == 0) for (0..g.n_hca) |h| g.drain(h) catch {
+                if (idle & m == 0) for (0..g.n_hca) |h| g.drain(h) catch {
                     g.failed.store(true, .release);
                     return;
                 };
-                if (idle >= idle_spins) nap.pause();
+                if (wfe) host_wait.idle(&c[layout.c_seq], seq, idle) else if (idle >= idle_spins) nap.pause();
                 continue;
             }
             idle = 0;

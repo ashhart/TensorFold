@@ -83,6 +83,7 @@ pub const Engine = struct {
     bm: fw.Buffers, // the MTP head's rows
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
     pairs: cuda.DeviceBuffer, // every rank's (value, id) of a greedy draw
+    waiter: cuda.host_wait.Waiter = .{}, // TF_CUDA_HOST_WFE: the greedy picks' parked waits
     smp: sampler.Sampler,
     seqs: std.ArrayList(?*Seq) = .empty, // every stream's sequence by slot (the lane backend's), slot 0 made at init
     cur: *Seq = undefined, // the bound slot's: every step below runs on it
@@ -248,6 +249,7 @@ pub const Engine = struct {
         e.prompt_out.free();
         e.smp.deinit();
         e.pairs.free();
+        e.waiter.deinit();
         if (e.bs) |*b| b.deinit();
         e.bm.deinit();
         e.bd.deinit();

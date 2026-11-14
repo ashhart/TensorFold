@@ -57,6 +57,8 @@ const valid = [_]Case{
     .{ .name = "TF_CUDA_SEGMENTS", .raw = "4", .n = 4 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "0", .n = 0 },
     .{ .name = "TF_CUDA_CARVEOUT", .raw = "1", .n = 1 },
+    .{ .name = "TF_CUDA_HOST_WFE", .raw = "0", .n = 0 },
+    .{ .name = "TF_CUDA_HOST_WFE", .raw = "1", .n = 1 },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .raw = "1792", .n = 1792 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "0", .n = 0 },
     .{ .name = "TF_MTP_DRAFTS", .raw = "4294967295", .n = std.math.maxInt(u32) },
@@ -231,6 +233,18 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
 }
 
+test "environment: the host-wait switch is exact 0 or 1, refused by name when the CUDA backend starts" {
+    const name = "TF_CUDA_HOST_WFE";
+    for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
+        try t.expectError(error.InvalidEnvironment, e.parse(name, raw));
+        const why = (try e.refusal(a, Env{ .name = name, .raw = raw }, .{ .cuda = true })).?;
+        defer a.free(why);
+        try t.expect(std.mem.indexOf(u8, why, name) != null);
+    }
+    try t.expect(!try e.value(bool, name, null, false));
+    try t.expect(!try e.value(bool, name, "0", false));
+    try t.expect(try e.value(bool, name, "1", false));
+}
 test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {
     const name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS";
     for ([_][]const u8{ "true", "on", "yes", "01", " 1", "1 ", "2" }) |raw| {
