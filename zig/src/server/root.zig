@@ -17,6 +17,7 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("cache_flush.zig");
     _ = @import("startup_receipt.zig");
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");

@@ -101,7 +101,7 @@ pub fn answer(io: std.Io, a: Allocator, id: []const u8) !struct { status: u16, b
 /// Headers a proxy adds: a keyless server's loopback peer may be a proxy relaying anyone, so they refuse.
 const relayed = [_][]const u8{ "Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Real-IP", "Via", "CF-Connecting-IP", "True-Client-IP" };
 
-/// Who may cancel: with keys, an admin key; without, a loopback peer whose request no proxy relayed.
+/// Who may cancel or flush the prompt cache: with keys, an admin key; without, a loopback peer no proxy relayed.
 pub fn allowed(keyed: bool, conn: *const Conn) bool {
     if (keyed) return conn.key_label != null and conn.key_scopes.admin; // authenticate matched it before routing
     for (relayed) |name| if (conn.headerCount(name) > 0) return false;

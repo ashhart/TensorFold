@@ -21,6 +21,7 @@ const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
+const flush = @import("cache_flush.zig");
 const slide_forget = @import("slide_forget.zig");
 const Server = @import("server.zig").Server;
 const request_gate = @import("request_gate.zig");
@@ -120,6 +121,10 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (cancel_ids.match(route)) |rid| { // an admin action: answered at once, outside admission
         discardBody(conn, a);
         return cancel_ids.post(srv, conn, a, rid);
+    }
+    if (std.mem.eql(u8, route, flush.path)) { // an admin action outside admission: it waits for requests, holding no slot
+        discardBody(conn, a);
+        return flush.post(srv, conn, a);
     }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
