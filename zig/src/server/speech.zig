@@ -81,9 +81,10 @@ fn listed(names: []const []const u8, key: []const u8) bool {
 }
 
 /// Refuses what this route would drop: unknown fields, set modifiers, non-strings, a bad ``stream``/``stream_format``.
-fn checkFields(cx: *Cx, body: Value) errors.Refused!void {
+fn checkFields(cx: *Cx, body: Value, inline_voices: bool) errors.Refused!void {
     for (body.object.keys(), body.object.values()) |key, value| {
         if (listed(&served_fields, key)) {
+            if (value == .object and inline_voices and std.mem.eql(u8, key, "voice")) continue; // an attested voice object
             if (value != .string) return cx.fail(.request, "{s} must be a string", .{key});
         } else if (std.mem.eql(u8, key, "stream")) {
             if (value != .bool and value != .null) return cx.refuse("stream must be a boolean");
@@ -110,7 +111,7 @@ fn responseFormat(cx: *Cx, value: []const u8) errors.Refused!Format {
 /// Every check that can refuse the request, then its prompt ids, before anything reaches the engine.
 fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused!Plan {
     if (raw != .object) return cx.refuse("speech request body must be a JSON object");
-    try checkFields(cx, raw);
+    try checkFields(cx, raw, srv.config.voice.inline_voices);
     const sampling = try speech_sampling.parse(cx, raw);
     const model = raw.strField("model") orelse return cx.fail(.request, "model is required: send {s}", .{srv.config.served_name});
     if (!listed(srv.config.model_ids, model))
@@ -123,16 +124,30 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
-    const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
-    const refs = @import("drama_voice.zig").select(srv.voices, srv.config.default_voice, voice) catch {
-        const name = try pyrepr.repr(cx.a, .{ .string = voice });
-        if (srv.config.voices_dir != null)
-            return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
-        return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
-    };
+    const refs = try voiceRefs(srv, cx, raw);
     if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
     const prompt = try promptOf(srv, cx, sp, input);
     return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream };
+}
+
+/// The request's references: an attested inline voice under --request-voices, else the named catalog voice's, copied.
+fn voiceRefs(srv: *Server, cx: *Cx, raw: Value) errors.Refused![]const @import("drama_prompt").Reference {
+    if (raw.get("voice")) |value| if (value == .object) {
+        if (raw.get("speaker") != null) return cx.refuse("an inline voice object takes no speaker");
+        return @import("drama_voice.zig").parseDoc(cx.a, value) catch |e| switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.MissingAttestation => cx.refuse("an inline voice needs source.kind synthetic, self or consented and a source.note"),
+            else => cx.refuse("an inline voice is a drama3-http-voice/1 object with 1 to 4 references"),
+        };
+    };
+    const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
+    return srv.voices.select(cx.a, srv.config.voice.default, voice) catch |e| {
+        if (e == error.OutOfMemory) return error.OutOfMemory;
+        const name = try pyrepr.repr(cx.a, .{ .string = voice });
+        if (srv.config.voice.dir != null or srv.config.voice.manage)
+            return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
+        return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
+    };
 }
 
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
@@ -452,9 +467,9 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
         var cx: Cx = .{ .a = a };
         const body = (try json.parse(a, case[0])).ok;
         if (case[1].len == 0) {
-            try checkFields(&cx, body);
+            try checkFields(&cx, body, false);
         } else {
-            try std.testing.expectError(error.Refused, checkFields(&cx, body));
+            try std.testing.expectError(error.Refused, checkFields(&cx, body, false));
             try std.testing.expectEqualStrings(case[1], cx.message);
         }
     }
