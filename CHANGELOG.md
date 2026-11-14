@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- The Vulkan engine records its dispatches into one command buffer and submits when 128 are waiting, or when the next upload, download or fill needs the queue, instead of one submission and fence wait per dispatch. Each pipeline holds a ring of 256 descriptor sets. No kernel changes, so the logits are byte-identical. On a 13-inch M1 with Qwen3.5-2B 4-bit and tiled projections, a run took 56.0% less time on a 24-token prompt, 42.0% less on a 256-token document and 30.1% less on a 1,024-token document. On a 16-inch M1 Max, it took 84.1%, 82.5% and 61.8% less time on those inputs; the 256-token cell was noisy. Receipts: [docs/receipts/vulkan-submit-batch-m1](docs/receipts/vulkan-submit-batch-m1/README.md).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
@@ -149,15 +153,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Qwen3.8-27B on Metal: prompt passes no longer write the GDN tails buffer, which nothing read. Replies are unchanged; on an M5 Ultra with the MLX 4-bit checkpoint, time to first token is 0.45% to 1.16% shorter at 2K, 8K and 32K prompts, one and four streams (#2915, for #2905).
 
 - Flash Next on CUDA at `--tp 2`: a prompt pass wider than 64 rows reduce-scatters its routed experts' FP32 slots by row halves, sums each rank's rows and gathers the sums, where it all-reduced every slot; decode rounds and verify windows keep the all-reduce. Every reduced value is the same single add and the slots are summed in the writeback's order, so replies keep their tokens. Over two GB10s' RoCE link rank 0 sends 3.43 MiB a prompt token instead of 5.81, and cold prefill of 2k to 32k tokens is 26.5% to 26.8% faster there and 30.9% to 33.9% faster on two RTX PRO 6000s (an 8,192-token prompt: 7.12 to 5.62 s and 3.61 to 2.70 s) (#2977). Thanks to @swbiggart.
-- Vulkan: the native dense Qwen3.5-2B greedy engine and its operator gates, the second part of the opt-in Vulkan backend built only with `-Dvulkan=true`: checked BF16 tensor operations, the norm/MLP, attention (RoPE, causal GQA SDPA, output gate) and GatedDeltaNet gates, one GDN path for prefill and decode, prefill chunked within the context ceiling, and the kernel contract extended to every operator's SPIR-V through gates 1 to 4 with planted controls and recorded device findings (residual denormals, the preserve-add subnormal flush, the gated norm at the production per-head geometry). `zig build vulkan-kernel-contract -Dvulkan=true` runs it; default builds are unchanged (#1544). Thanks to @joshuaswarren.
-
-- The Vulkan engine reads Qwen3.5's 4-bit projection weights and activations 16 bytes at a time (`qmm_q4_vec4`) when both are 16-byte aligned, and keeps the scalar kernel otherwise. Each output keeps the same sum in the same order, so the logits are byte-identical. On a 13-inch M1 with Qwen3.5-2B 4-bit, a run (prefill, 63 decode steps and the per-step logits readback) took 34.8% to 43.0% less time than the same build with the scalar kernel selected, on three inputs: a 24-token prompt, and documents of 256 and 1,024 tokens (Linux 7.3.0-2-20261110.1-lab-ARCH; the first measurement, against #1544's head on an earlier kernel and Mesa, gave 40% to 52%). The kernel contract checks the new kernel with the same gates as `qmm_bf16`. Receipts: [docs/receipts/vulkan-qmm-vec4-m1](docs/receipts/vulkan-qmm-vec4-m1/README.md).
 
 - Tests: `tf-cuda-test flashnext-rank RANK PORT timeout` passes again on two GPUs. NCCL start-up keeps its 30 s bound and only the stalled collective gets 200 ms, and both ranks meet once their communicators are up, so `timeout` and `eof` fail the collective under test, not the start-up (#2976, fixes #2975). Thanks to @swbiggart.
-- The Vulkan engine stores each Qwen3.5 4-bit projection in tiles of 32 columns, repacked once at load, and reads them with `qmm_q4_tile`: a group of 32 lanes then loads one contiguous 512-byte run instead of 32 rows a kilobyte apart. The loop, the sums and their order are `qmm_q4_vec4`'s, so the logits are byte-identical. A projection is padded to whole tiles, and the tied output head is a second, tiled copy of the embedding table (about 320 MB more device memory). On a 13-inch M1 with Qwen3.5-2B 4-bit, a run took 10.9% less time than with `qmm_q4_vec4` on a 24-token prompt, 35.6% less on a 256-token document and 44.9% less on a 1,024-token document (Linux 7.3.0-2-20261110.1-lab-ARCH; earlier builds on an earlier kernel and Mesa gave 19%, 50% and 63%). The kernel contract checks `qmm_q4_tile` with the same gates as `qmm_bf16`. Receipts: [docs/receipts/vulkan-qmm-tile-m1](docs/receipts/vulkan-qmm-tile-m1/README.md).
 
 - Tokenizer: a split pattern is held to a work allowance per piece (2,048 instructions a byte, counted, not timed) and refused at load when too deep or too large, so a crafted tokenizer or prompt can't hang the pre-tokenizer; every split of the patterns we serve is unchanged (#3071).
-- The Vulkan engine records its dispatches into one command buffer and submits when 128 are waiting, or when the next upload, download or fill needs the queue, instead of one submission and fence wait per dispatch. Each pipeline holds a ring of 256 descriptor sets. No kernel changes, so the logits are byte-identical. On a 13-inch M1 with Qwen3.5-2B 4-bit and tiled projections, a run took 56.0% less time on a 24-token prompt, 42.0% less on a 256-token document and 30.1% less on a 1,024-token document. On a 16-inch M1 Max, it took 84.1%, 82.5% and 61.8% less time on those inputs; the 256-token cell was noisy. Receipts: [docs/receipts/vulkan-submit-batch-m1](docs/receipts/vulkan-submit-batch-m1/README.md).
 
 - Cluster pull: a pull that would leave a file held only in part is refused unless the caller allows unverified bytes (off by default); a pull that ends whole still resumes and is checked against the manifest's hash. No shipped command calls the cluster loader yet, so nothing changes for users (#3074).
 
@@ -216,8 +215,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Metal: kernels nothing launches are removed: Qwen3.8-27B's `prompt_glue.metal` and `prompt_state.metal` (six `q27_prompt_*` kernels) and core's `tf_lane_rope` with `Attention.rotate`; saved Qwen3.8-27B prompt states on Metal are recomputed once after upgrading, since their identity covers the kernel sources (#3065, part of #2251). Thanks to @jschmied.
 - Tests: main's nightly is green again. The Flash Next learn, prompt and compare tools build again on Linux (#2585 had put one file in two modules), and the dense serving and serving-identity pins take the changes #2579, #2585, #2285, #2205 and #2789 made, each named beside its pin. Serving is unchanged (#3002).
 - HIP: Qwen3.8-Flash-Next's MTP head takes a prompt chunk on the prompt tiles, not a decode window at a time, so cold prompts finish about 5% sooner at 8K and 32K on a Radeon 8060S (gfx1151). Replies are unchanged; the head's caches and drafts are not bit-identical to before (#1878). Thanks to @gilby.
-- The Vulkan engine stores each Qwen3.5 4-bit projection in tiles of 32 columns, repacked once at load, and reads them with `qmm_q4_tile`: a group of 32 lanes then loads one contiguous 512-byte run instead of 32 rows a kilobyte apart. The loop, the sums and their order are `qmm_q4_vec4`'s, so the logits are byte-identical. A projection is padded to whole tiles, and the tied output head is a second, tiled copy of the embedding table (about 320 MB more device memory). On a 13-inch M1 with Qwen3.5-2B 4-bit, a run took 19% less time than with `qmm_q4_vec4` on a 24-token prompt, 50% less on a 256-token document and 63% less on a 1,024-token document. The kernel contract checks `qmm_q4_tile` with the same gates as `qmm_bf16`. Receipts: [docs/receipts/vulkan-qmm-tile-m1](docs/receipts/vulkan-qmm-tile-m1/README.md).
-- The Vulkan engine records its dispatches into one command buffer and submits when 128 are waiting, or when the next upload, download or fill needs the queue, instead of one submission and fence wait per dispatch. Each pipeline holds a ring of 256 descriptor sets. No kernel changes, so the logits are byte-identical. On a 13-inch M1 with Qwen3.5-2B 4-bit and tiled projections, a run took 68% less time on a 24-token prompt, 49% less on a 256-token document and 30% less on a 1,024-token document. Receipts: [docs/receipts/vulkan-submit-batch-m1](docs/receipts/vulkan-submit-batch-m1/README.md).
 
 - Cortheon (`--cortheon`): DuckDuckGo results are kept, and its ads still skipped, when only the spelling differs (either quote style, a `class` attribute in any letter case, an unquoted `href`, spaces around its `=`, or a line break before it); a duplicate whose scheme or host differs only in letter case is dropped while paths and queries keep their case, and the PyPI, npm and crates.io allow-list takes the host in any case with the path exact (#2750). Thanks to @ppardus.
 
@@ -1140,9 +1137,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.2.2
 
-- The Nemotron XPU loader and the XPU safetensors reader read shard headers through core, so a malformed or oversized header is refused before anything is read (#1919). Thanks to @jschmied.
-
-
 - CUDA lanes: Gemma 4, MiniMax M3, Kolibri-1, Spark 2.5 and Dory can verify root and context copies as Nemotron does, opt-in: set `TF_GEMMA4_COPIES`, `TF_MINIMAX_COPIES`, `TF_KOLIBRI_COPIES`, `TF_SPARK_COPIES` or `TF_DORY_COPIES` to 1. Replies equal `"draft": false`, and unset is the old policy (#2022, part of #1910).
 
 - The dense Qwen3.5 Metal loader takes its shape from the checkpoint's config rather than the 27B's fixed geometry, checked against the 27B, 9B and 2B with identical tokens (#1817).
@@ -1170,6 +1164,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Docs: the cache benchmark receipts say which tool-call content they count (#1999). Thanks to @garvrao80.
 
 - `zig build test-info-config` runs info's issue-934 test again: it was built from the CUDA CLI root, which never reached it (#2006). Thanks to @jishnuvenugopal.
+
+- The Nemotron XPU loader and the XPU safetensors reader read shard headers through core, so a malformed or oversized header is refused before anything is read (#1919). Thanks to @jschmied.
 
 - Windows: a cost-cache read that lands mid-replace is counted as a miss (safe: the window is priced again), so its concurrency test no longer flakes (#2001).
 

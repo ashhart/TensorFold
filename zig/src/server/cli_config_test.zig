@@ -218,7 +218,7 @@ test "serve --config: a file parses as its flags typed by hand, and the command 
     }
     // a value the flag refuses is refused in the flag's own words, with the file's line
     try f.refused("model = \"m\"\n\nport = 99999\n", 3, "argument --port: invalid port: '99999'");
-    try f.refused("backend = \"hip\"\n", 1, "argument --backend: invalid choice: 'hip'");
+    try f.refused("backend = \"metal\"\n", 1, "argument --backend: invalid choice: 'metal'");
     try f.refused("port = 1\ntemperature = \"warm\"\n", 2, "argument --temperature: invalid float value: 'warm'");
     try f.refused("alias = [\"a\"]\nallowed-host = [\"ok.example\",\n  \"bad host:1\"]\n", 2, "argument --allowed-host: expected a hostname or bracketed IP without a port: 'bad host:1'");
     try f.refused("compact-at = 1.5\n", 1, "argument --compact-at: expected auto or a fraction in (0, 1]: '1.5'");
