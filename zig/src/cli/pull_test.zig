@@ -174,6 +174,13 @@ const FakeHub = struct {
             fake.respond(conn, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{drafter_config.len}) catch return false);
         } else if (std.mem.eql(u8, path, "/Org/DFlash/resolve/ddddddddddddddddddddddddddddddddddddddd4/config.json")) {
             fake.respond(conn, drafter_config);
+        } else if (std.mem.eql(u8, path, "/api/models/Org/Reserved/revision/main")) {
+            fake.respond(conn, "{\"sha\": \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5\"}");
+        } else if (std.mem.eql(u8, path, "/api/models/Org/Reserved/tree/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5")) {
+            // A planted name that belongs to TensorFold, not to a hub tree.
+            fake.respond(conn, std.fmt.bufPrint(&tree_buf, "[{{\"type\": \"file\", \"path\": \".tensorfold-save-pending\", \"size\": 3}}, {{\"type\": \"file\", \"path\": \"config.json\", \"size\": {d}}}]", .{config_body.len}) catch return false);
+        } else if (std.mem.eql(u8, path, "/Org/Reserved/resolve/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5/config.json")) {
+            fake.respond(conn, config_body);
         } else if (std.mem.eql(u8, path, "/api/models/Org/Flash/tree/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1") or std.mem.eql(u8, path, "/api/models/Org/Whole/tree/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2")) {
             // The hub's tree sends LFS oids as bare hex.
             const tree = std.fmt.allocPrint(std.testing.allocator, "[{{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"config.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"1111111111111111111111111111111111111111\", \"path\": \"weights.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}, {{\"type\": \"file\", \"oid\": \"{s}\", \"path\": \"flaky.json\", \"size\": {d}}}, {{\"type\": \"file\", \"oid\": \"3333333333333333333333333333333333333333\", \"path\": \"tensors/model-00001-of-00001.safetensors\", \"size\": {d}, \"lfs\": {{\"oid\": \"{s}\", \"size\": {d}}}}}]", .{ &fake.config_git_hex, fake.config.len, fake.weights.len, fake.weights_sha_hex, fake.weights.len, &fake.flaky_git_hex, flaky_body.len, fake.nested.len, fake.nested_sha_hex, fake.nested.len }) catch return false;
@@ -511,4 +518,28 @@ test "security: a shard in a folder inside the model folder lands inside the sna
     const body = try std.Io.Dir.cwd().readFileAlloc(io, link, a, .limited(1 << 20));
     try std.testing.expectEqualSlices(u8, FakeHub.nested_body, body);
     try std.Io.Dir.cwd().access(io, try std.fs.path.join(a, &.{ root, "models--Org--Flash/blobs", fake_hub.nested_sha_hex }), .{});
+}
+
+test "security: a hub tree path TensorFold reserves is refused, naming the path and why" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake_hub = FakeHub.open() catch return error.SkipZigTest;
+    fake_hub.start();
+    defer fake_hub.stopServer();
+    const root = try std.fmt.allocPrint(a, ".tf-pull-reserved-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const env = try testEnv(a, try fake_hub.endpoint(a));
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+
+    try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &out.writer, &err_out.writer, &env, root, "Org/Reserved"));
+    const text = err_out.written();
+    try std.testing.expect(std.mem.indexOf(u8, text, ".tensorfold-save-pending") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "refusing") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "reserves") != null);
+    // the planted name is not linked into the snapshot
+    const planted = try std.fs.path.join(a, &.{ root, "models--Org--Reserved/snapshots/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee5/.tensorfold-save-pending" });
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(io, planted, .{}));
 }

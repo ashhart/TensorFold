@@ -87,7 +87,13 @@ pub fn runWith(a: Allocator, io: std.Io, out: *std.Io.Writer, err_out: *std.Io.W
 
     var big: std.ArrayList(Big) = .empty;
     for (entries) |e| {
-        const blob_name = try blobName(a, e);
+        const blob_name = blobName(a, e) catch |err| switch (err) {
+            error.SnapshotPath => {
+                try err_out.print("  {s}: a hub path must stay inside the snapshot and not use a name TensorFold reserves; refusing\n", .{e.path});
+                return 1;
+            },
+            else => return err,
+        };
         const blob_path = try std.fs.path.join(a, &.{ blobs_dir, blob_name });
         if (e.sha256 != null or e.git_sha1 != null) blob_exists: {
             const size = fileStat(io, blob_path) catch break :blob_exists;
