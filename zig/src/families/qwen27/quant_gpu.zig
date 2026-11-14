@@ -90,7 +90,7 @@ pub const Kernels = struct {
         k.half_twins.deinit(k.allocator);
         if (k.fits_words) |b| b.deinit();
         var lane_it = k.lanes.valueIterator();
-        while (it.next()) |p| p.deinit();
+        while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
