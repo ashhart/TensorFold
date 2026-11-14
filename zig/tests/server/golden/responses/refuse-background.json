@@ -10,10 +10,10 @@
     ],
     [
      "Content-Length",
-     "160"
+     "191"
     ]
    ],
-   "body": "{\"error\": {\"message\": \"background responses are not supported: send the request and wait for it\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
+   "body": "{\"error\": {\"message\": \"background: true with stream: true is not supported: send stream: false and poll GET /v1/responses/{id}\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
    "interim": ""
   }
  ]

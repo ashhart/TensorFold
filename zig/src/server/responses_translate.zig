@@ -12,7 +12,6 @@ const Allocator = std.mem.Allocator;
 /// Fields a chat completion reads as they are: OpenAI's and this server's own.
 const passed = [_][]const u8{ "model", "temperature", "top_p", "top_k", "min_p", "seed", "stream", "parallel_tool_calls", "stop", "draft", "thinking_budget", "ignore_eos", "priority", "return_token_ids", "chat_template_kwargs", "grammar_budget" };
 const refused = [_][2][]const u8{
-    .{ "background", "background responses are not supported: send the request and wait for it" },
     .{ "conversation", "conversations are not supported: send previous_response_id or the items" },
     .{ "prompt", "prompt templates are not supported: send input and instructions" },
     .{ "context_management", "context management is not supported" },
@@ -24,6 +23,8 @@ pub const Request = struct {
     added: []Value,
     store: bool,
     stream: bool,
+    /// ``background: true``: the turn runs on after its POST returns, and GET polls it (responses_background.zig).
+    background: bool = false,
     /// The client's own name for the grammar field when ``text.format`` asked for a structure; null for plain text.
     format: ?[]const u8 = null,
     /// Only ``include`` asked for logprobs: an engine without rows answers without them, as before it had any.
@@ -383,8 +384,17 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "top_p", body.get("top_p") orelse .null);
     try echo.put(a, "truncation", .{ .string = "disabled" });
     try echo.put(a, "user", body.get("user") orelse .null);
-    try echo.put(a, "background", .{ .bool = false });
-    return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream"), .format = if (rf != null) "text.format" else null, .rows_if_offered = listed and !asked };
+    const background = json.truthyField(body, "background");
+    if (background) try backgroundAsked(cx, body, store);
+    try echo.put(a, "background", .{ .bool = background });
+    return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream"), .background = background, .format = if (rf != null) "text.format" else null, .rows_if_offered = listed and !asked };
+}
+
+/// What a background request needs: a boolean, a stored response to poll, and no stream on the POST.
+fn backgroundAsked(cx: *Cx, body: Value, store: bool) errors.Refused!void {
+    if (body.get("background").? != .bool) return cx.refuse("background must be a boolean");
+    if (!store) return cx.refuse("background: true needs store: true (the default): GET /v1/responses/{id} polls the stored response");
+    if (json.truthyField(body, "stream")) return cx.refuse("background: true with stream: true is not supported: send stream: false and poll GET /v1/responses/{id}");
 }
 
 test "input_file refuses remote file_url" {
