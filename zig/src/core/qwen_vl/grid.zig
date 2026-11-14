@@ -61,6 +61,9 @@ pub fn torchTaps(row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
     return tapsOf(true, row, col, gh, gw, side);
 }
 
+/// The towers' axial rotary base: the Qwen3.5 and Qwen3-VL vision configs' default.
+pub const axial_theta: f32 = 10000;
+
 /// The axial rotary's frequencies as torch makes them in fp32: 1 / theta^(2i / (head_dim / 2)), head_dim / 4 of them.
 pub fn invFreq(out: []f32, head_dim: u32, theta: f32) void {
     const half: f32 = @floatFromInt(head_dim / 2);

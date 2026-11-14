@@ -1,4 +1,4 @@
-//! A Qwen-VL tower's bf16 tensors (vision_tower.*) from a checkpoint's shards into one Metal buffer, 256-aligned.
+//! A Qwen-VL tower's bf16 tensors (vision_tower.* or a given prefix) from a checkpoint's shards into one Metal buffer.
 const std = @import("std");
 const mtl = @import("metal");
 const Config = @import("config.zig").Config;
@@ -20,6 +20,9 @@ pub const Ref = struct {
     }
 };
 
+/// A merger: LayerNorm (over the merged width for a DeepStack tap), then fc1, exact GELU and fc2, each with a bias.
+pub const Merger = struct { norm_w: Ref, norm_b: Ref, fc1_w: Ref, fc1_b: Ref, fc2_w: Ref, fc2_b: Ref };
+
 pub const Block = struct { norm1_w: Ref, norm1_b: Ref, qkv_w: Ref, qkv_b: Ref, proj_w: Ref, proj_b: Ref, norm2_w: Ref, norm2_b: Ref, fc1_w: Ref, fc1_b: Ref, fc2_w: Ref, fc2_b: Ref };
 
 pub const Weights = struct {
@@ -34,8 +37,10 @@ pub const Weights = struct {
     fc1_b: Ref = undefined,
     fc2_w: Ref = undefined, // [out_hidden, merged]
     fc2_b: Ref = undefined,
+    deep: []Merger = &.{}, // one per DeepStack tap
 
     pub fn deinit(w: *Weights, gpa: std.mem.Allocator) void {
+        gpa.free(w.deep);
         gpa.free(w.blocks);
         w.buf.deinit();
     }
@@ -57,6 +62,10 @@ fn wanted(arena: std.mem.Allocator, c: Config, w: *Weights) !std.ArrayList(Want)
     }
     const tail = .{ .{ "merger.norm.weight", &w.norm_w, &[_]usize{h} }, .{ "merger.norm.bias", &w.norm_b, &[_]usize{h} }, .{ "merger.linear_fc1.weight", &w.fc1_w, &[_]usize{ m, m } }, .{ "merger.linear_fc1.bias", &w.fc1_b, &[_]usize{m} }, .{ "merger.linear_fc2.weight", &w.fc2_w, &[_]usize{ c.out_hidden, m } }, .{ "merger.linear_fc2.bias", &w.fc2_b, &[_]usize{c.out_hidden} } };
     inline for (tail) |f| try out.append(arena, .{ .name = f[0], .shape = try arena.dupe(usize, f[2]), .ref = f[1] });
+    for (w.deep, 0..) |*d, j| {
+        const fields = .{ .{ "norm.weight", &d.norm_w, &[_]usize{m} }, .{ "norm.bias", &d.norm_b, &[_]usize{m} }, .{ "linear_fc1.weight", &d.fc1_w, &[_]usize{ m, m } }, .{ "linear_fc1.bias", &d.fc1_b, &[_]usize{m} }, .{ "linear_fc2.weight", &d.fc2_w, &[_]usize{ c.out_hidden, m } }, .{ "linear_fc2.bias", &d.fc2_b, &[_]usize{c.out_hidden} } };
+        inline for (fields) |f| try out.append(arena, .{ .name = try std.fmt.allocPrint(arena, "deepstack_merger_list.{d}.{s}", .{ j, f[0] }), .shape = try arena.dupe(usize, f[2]), .ref = f[1] });
+    }
     return out;
 }
 
@@ -72,7 +81,7 @@ pub const Memory = struct { source: usize, device: usize };
 pub fn plan(gpa: std.mem.Allocator, c: Config) !Memory {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    var w: Weights = .{ .buf = undefined, .blocks = try arena.allocator().alloc(Block, c.depth) };
+    var w: Weights = .{ .buf = undefined, .blocks = try arena.allocator().alloc(Block, c.depth), .deep = try arena.allocator().alloc(Merger, c.taps().len) };
     var out: Memory = .{ .source = 0, .device = 0 };
     for ((try wanted(arena.allocator(), c, &w)).items) |want| {
         const size = try std.math.mul(usize, 2, count(want.shape));
@@ -94,21 +103,28 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const
 }
 
 pub fn loadWith(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []const u8, c: Config) !Weights {
+    return loadAt(gpa, io, factory, dir, prefix, c);
+}
+
+/// `loadWith` for tensors named under `at` (an HF checkpoint's `model.visual.`), with each DeepStack tap's merger.
+pub fn loadAt(gpa: std.mem.Allocator, io: std.Io, factory: anytype, dir: []const u8, at_prefix: []const u8, c: Config) !Weights {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const found = try shards.headers(arena, io, dir);
+    const found = try shards.headersAt(arena, io, dir, at_prefix);
     var w: Weights = .{ .buf = undefined, .blocks = try gpa.alloc(Block, c.depth) };
     errdefer gpa.free(w.blocks);
+    w.deep = try gpa.alloc(Merger, c.taps().len);
+    errdefer gpa.free(w.deep);
     const wants = (try wanted(arena, c, &w)).items;
     if (found.count() != wants.len) {
-        std.log.err("qwen vision: the checkpoint has {d} {s}* tensors; this tower reads {d}", .{ found.count(), prefix, wants.len });
+        std.log.err("qwen vision: the checkpoint has {d} {s}* tensors; this tower reads {d}", .{ found.count(), at_prefix, wants.len });
         return error.UnexpectedVisionTensors;
     }
     const srcs = try arena.alloc(Src, wants.len);
     var total: usize = 0;
     for (wants, srcs, 0..) |want, *s, i| {
-        const name = try std.fmt.allocPrint(arena, prefix ++ "{s}", .{want.name});
+        const name = try std.fmt.allocPrint(arena, "{s}{s}", .{ at_prefix, want.name });
         s.* = found.get(name) orelse {
             std.log.err("qwen vision: the checkpoint has no tensor {s}", .{name});
             return error.MissingVisionTensor;
@@ -167,4 +183,28 @@ test "the buffer holds the 27B tower's 333 tensors in bf16" {
     try std.testing.expectEqual(@as(usize, 333), wants.items.len);
     const n = try bytes(std.testing.allocator, c);
     try std.testing.expect(n > 900_000_000 and n < 930_000_000); // about 460 million weights
+}
+
+test "DeepStack's three mergers add HF Qwen3-VL's 18 tensors and their bytes; no taps keeps the plan" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const sample = @import("config.zig");
+    const plain = (try Config.parse(a, sample.sample_config, null, null)).?;
+    const text = try std.mem.replaceOwned(u8, a, sample.sample_config, "[]", "[8, 16, 24]");
+    const deep = (try Config.parseDeepStack(a, text, null, null)).?;
+    var w: Weights = .{ .buf = undefined, .blocks = try a.alloc(Block, deep.depth), .deep = try a.alloc(Merger, 3) };
+    const wants = (try wanted(a, deep, &w)).items;
+    try std.testing.expectEqual(@as(usize, 351), wants.len); // 3 + 27 x 12 + 6, then 3 x 6
+    try std.testing.expectEqualStrings("merger.linear_fc2.bias", wants[332].name);
+    try std.testing.expectEqualStrings("deepstack_merger_list.0.norm.weight", wants[333].name);
+    try std.testing.expectEqualSlices(usize, &.{4608}, wants[333].shape);
+    try std.testing.expectEqualStrings("deepstack_merger_list.2.linear_fc2.weight", wants[349].name);
+    try std.testing.expectEqualSlices(usize, &.{ 5120, 4608 }, wants[349].shape);
+    const without = try plan(std.testing.allocator, plain);
+    const with = try plan(std.testing.allocator, deep);
+    // per merger: norm 2 x 4,608, fc1 4,608^2 + 4,608, fc2 5,120 x 4,608 + 5,120 bf16 values, every one 256-aligned
+    try std.testing.expectEqual(@as(usize, 269_073_408), with.source - without.source);
+    try std.testing.expectEqual(@as(usize, 269_073_408), with.device - without.device);
+    try std.testing.expectEqual(without, try plan(std.testing.allocator, (try Config.parseDeepStack(a, sample.sample_config, null, null)).?));
 }
