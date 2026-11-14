@@ -8,7 +8,8 @@ const model = @import("cuda_model.zig");
 const t = std.testing;
 
 fn refused(name: [:0]const u8) !void {
-    try t.expectEqual(@as(c_int, 0), env.setenv(name, "mistyped value", 1));
+    const raw: [:0]const u8 = if (sys.environment.rule(name).kind == .path) "mistyped\npath" else "mistyped value";
+    try t.expectEqual(@as(c_int, 0), env.setenv(name, raw, 1));
     defer _ = env.unsetenv(name);
     try t.expectError(error.InvalidEnvironment, model.Model.open(t.failing_allocator, t.io, "missing-checkpoint", "missing-assets", .{}));
     try t.expectError(error.InvalidEnvironment, @import("aot_needs.zig").Served.fromEnv());

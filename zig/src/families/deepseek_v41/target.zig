@@ -76,6 +76,7 @@ pub const GpuTarget = struct {
         const t = self_(p);
         if (!available(p, slot)) return error.SlotUnavailable;
         if (t.rows) |b| try b.beginPrefill(slot) else if (slot != 0) return error.Slots;
+        if (t.f.opts.trace) try @import("layer_hash_forward.zig").begin(t.f, slot, ids);
         _ = t.takeReplayed(slot);
         const keyed = try t.keyedOf(sampling);
         t.tree.clear();
@@ -148,6 +149,7 @@ pub const GpuTarget = struct {
         const t = self_(p);
         if (!available(p, slot)) return error.SlotUnavailable;
         if (!(t.own_prefill and t.prompt_tail == .verify)) return error.NoPieces;
+        if (t.f.opts.trace) try @import("layer_hash_forward.zig").begin(t.f, slot, ids);
         _ = t.takeReplayed(slot); // a batched replay of a request that never finished is not this one's
         const planned = t.admission;
         t.admission = null;
