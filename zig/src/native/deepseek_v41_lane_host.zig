@@ -172,9 +172,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     {
         const f = h.back.facts();
         const lk = if (std.c.getenv("TF_DSV41_LOOKUP_DRAFTS")) |v| std.mem.span(v) else "null";
-        const mp = if (std.c.getenv("TF_DSV41_MTP_DRAFTS")) |v| std.mem.span(v) else "null";
+        const mp = try @import("sys").environment.read(bool, "TF_DSV41_MTP_DRAFTS", false);
         const tp = if (std.c.getenv("TF_DSV41_TAPS")) |v| std.mem.span(v) else "null";
-        std.log.info("deepseek-v41: draft env raw: lookup={s} mtp={s} taps={s} facts.mtp={} facts.speculate={} facts.drafts={} exact_width={} family_mtp={} most_drafts={}", .{ lk, mp, tp, f.mtp, f.speculate, f.drafts, f.exact_width, h.cfg.family_mtp, h.cfg.most_drafts });
+        std.log.info("deepseek-v41: draft env raw: lookup={s} mtp={} taps={s} facts.mtp={} facts.speculate={} facts.drafts={} exact_width={} family_mtp={} most_drafts={}", .{ lk, mp, tp, f.mtp, f.speculate, f.drafts, f.exact_width, h.cfg.family_mtp, h.cfg.most_drafts });
     }
     errdefer h.cfg.deinit(gpa);
     var back = h.back.backend();
