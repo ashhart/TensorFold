@@ -48,13 +48,19 @@ pub const Config = struct {
         var c: Config = .{ .image_token = 0, .image_start = 0, .image_end = 0, .mean = .{ 0.48145466, 0.4578275, 0.40821073 }, .std = .{ 0.26862954, 0.26130258, 0.27577711 }, .min_tokens = 16, .max_tokens = 8000 };
         if (vc.object.get("rms_norm_eps")) |v| c.eps = @floatCast(number(v) orelse return error.VisionConfig);
         if (vc.object.get("swiglu_limit")) |v| c.limit = @floatCast(number(v) orelse return error.VisionConfig);
+        const text = doc.object.get("text_config") orelse doc; // where config.zig reads the vocabulary
+        const size = if (text == .object) text.object.get("vocab_size") else null;
+        const vocab = if (size != null and size.? == .integer) size.?.integer else return error.VisionConfig;
         inline for (.{ .{ "image_token_id", "image_token" }, .{ "image_start_token_id", "image_start" }, .{ "image_end_token_id", "image_end" } }) |kv| {
             const v = doc.object.get(kv[0]) orelse return error.VisionConfig;
-            if (v != .integer) return error.VisionConfig;
+            if (v != .integer or v.integer < 0 or v.integer >= vocab) return error.VisionConfig; // a prompt row's id
             @field(c, kv[1]) = @intCast(v.integer);
         }
         if (doc.object.get("video_start_token_id")) |s| if (doc.object.get("video_token_id")) |t| if (doc.object.get("video_end_token_id")) |e| {
-            if (s == .integer and t == .integer and e == .integer) c.video = .{ @intCast(s.integer), @intCast(t.integer), @intCast(e.integer) };
+            if (s == .integer and t == .integer and e == .integer) {
+                for ([_]i64{ s.integer, t.integer, e.integer }) |id| if (id < 0 or id >= vocab) return error.VisionConfig;
+                c.video = .{ @intCast(s.integer), @intCast(t.integer), @intCast(e.integer) };
+            }
         };
         const pj = processor_json orelse return c;
         const pdoc = try std.json.parseFromSliceLeaky(std.json.Value, arena, pj, .{});

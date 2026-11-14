@@ -468,6 +468,8 @@ pub const Drafter = struct {
     fn holdFn(ptr: *anyopaque, holds: []const dr.Hold) anyerror!void {
         const d = cast(ptr);
         if (holds.len > max_items) return error.DraftTooManyStreams;
+        // gemma_assist_input reads the target's embedding at the pending id (clamped to its last row, not refused)
+        for (holds) |h| if (h.pending >= cfg.vocab) return error.InvalidGemmaToken;
         const t0 = std.Io.Clock.awake.now(d.io);
         var items: [max_items]Item = undefined;
         var steps: u32 = 0;
@@ -545,6 +547,18 @@ test "a hold's key range and chunk counts follow the kept row's position" {
         try std.testing.expectEqual(k[2], p / sliding_chunk - lo / sliding_chunk + 1);
         try std.testing.expect(p + 1 - lo <= cfg.window);
     }
+}
+
+test "token ids: the Metal assistant refuses a pending id past the embedding before any stream's work" {
+    var d: Drafter = undefined; // the refusal reads nothing of it: no lane, cache, clock or device
+    var s: Stream = undefined;
+    const past: dr.Hold = .{ .stream = &s, .pending = cfg.vocab, .position = 2, .depth = 1 };
+    const last: dr.Hold = .{ .stream = &s, .pending = cfg.vocab - 1, .position = 2, .depth = 1 };
+    try std.testing.expectError(error.InvalidGemmaToken, d.drafter().hold(&.{past}));
+    try std.testing.expectError(error.InvalidGemmaToken, d.drafter().hold(&.{ last, past }));
+    var wide = past;
+    wide.pending = 0xffff_ffff;
+    try std.testing.expectError(error.InvalidGemmaToken, d.drafter().hold(&.{wide}));
 }
 
 test {

@@ -90,6 +90,7 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
         rows += seg.rows;
     }
     if (rows == 0 or rows > state.prompt_rows or rows != ids.len) return error.BadWindow;
+    for (ids) |id| if (id >= cfg.vocab) return error.InvalidGemmaToken; // gemma_embed reads row id unchecked
     var chunks: Chunks = undefined;
     prepare(s, segments, ids, &chunks);
     var at: usize = 0;

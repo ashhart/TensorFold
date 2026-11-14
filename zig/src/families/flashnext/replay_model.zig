@@ -158,8 +158,15 @@ pub const Model = struct {
         kvm[0], kvm[2] = .{ @intCast(m.pos), @intCast(rows) };
     }
 
+    /// Whether every token names a row of the embedding table: the kernels read row id with no bound of their own.
+    pub fn inVocab(tokens: []const u32) bool {
+        for (tokens) |t| if (t >= VOCAB) return false;
+        return true;
+    }
+
     /// One forward over `tokens` (a window of up to MAXR rows from the cache's position): each row's argmax.
     pub fn window(m: *Model, tokens: []const u32, picks: []u32) !void {
+        if (!inVocab(tokens)) return error.TokenOutsideVocabulary;
         const r = m.r;
         const t = &m.t;
         const rows = tokens.len;

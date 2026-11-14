@@ -44,6 +44,7 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
     if (prompt.len == 0) return error.EmptyPrompt;
     if (prompt.len + max_tokens + MARGIN > e.m.cap) return error.ContextFull;
     if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
+    if (!fz.Model.inVocab(prompt)) return error.TokenOutsideVocabulary; // before the other Mac hears of the prompt
     for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
     if (out.sampling != null and r.tp != null) return error.SpeedUpGreedyOnly; // each Mac holds half the logits
     var watch = try think.Watch.init(budget);

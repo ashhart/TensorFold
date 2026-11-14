@@ -91,6 +91,7 @@ test {
     _ = @import("families/flashnext/dense.zig"); // The core projection adapter keeps format, cuts and tiles.
     _ = @import("families/flashnext/marks.zig"); // a call's marks
     _ = @import("families/flashnext/think.zig"); // a thinking budget's close on the host
+    _ = @import("families/flashnext/tree.zig"); // a tree feed's guesses, which become window ids
     _ = @import("families/flashnext/backend.zig"); // shared-session family tests
     _ = @import("families/flashnext/lone_stream.zig"); // the first commit can relocate the prompt
     _ = @import("families/flashnext/slots.zig"); // sized shared sessions: the list, a stream's session, when it grows

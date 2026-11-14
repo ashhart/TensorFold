@@ -205,6 +205,7 @@ pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const 
     const n = tokens.len;
     if (n < 2 or n > 2 * PMAX) return error.ChunkSize;
     if (marks.len > MARKS or (marks.len > 0 and m.marks == null)) return error.Marks;
+    if (!Model.inVocab(tokens)) return error.TokenOutsideVocabulary; // both Macs refuse the same call: each preps half
     const k: usize = tp.rank;
     const a = m.state;
     const at = segments.start(n, 2, k);
@@ -324,6 +325,7 @@ pub fn mtpKeys(p: *Prompt, m: *Model, start: usize, nexts: []const u32, streams:
     const n = nexts.len;
     if (n == 0) return;
     if (n > PMAX) return error.ChunkSize;
+    if (!Model.inVocab(nexts)) return error.TokenOutsideVocabulary;
     @memcpy(b.mids.b.slice(u32, n), nexts);
     for (0..n) |i| b.pos.b.slice(i32, PMAX)[i] = @intCast(start + i);
     const kvm = b.kvmeta.b.slice(u32, 3);
