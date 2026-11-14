@@ -34,6 +34,8 @@ test {
     _ = kv_state;
     _ = @import("codec_map.zig");
     _ = @import("codec_schema.zig");
+    _ = @import("codec_net.zig");
+    _ = @import("codec_net_test.zig");
     _ = @import("cuda/stager.zig");
     _ = @import("cuda/reference_rows.zig");
     _ = @import("codec_pth.zig");

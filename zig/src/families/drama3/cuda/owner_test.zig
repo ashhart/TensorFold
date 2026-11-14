@@ -92,24 +92,24 @@ const Mock = struct {
         c.k = &e.k;
         c.mod = .{ .d = &e.driver, .handle = @ptrFromInt(8) };
         c.bufs = .empty;
-        c.host_layers = .empty;
+        c.w.host_layers = .empty;
         c.o = .{ .max_chunk = 1, .ring = 1 };
         const b = try cuda.DeviceBuffer.alloc(&e.driver, 256);
         root = b.ptr;
         try c.bufs.append(a, b);
-        const layers = try a.alloc(std.meta.Child(@TypeOf(c.post.layers)), 1);
-        try c.host_layers.append(a, layers);
-        for (&c.dec) |*v| {
+        const layers = try a.alloc(std.meta.Child(@TypeOf(c.w.post.layers)), 1);
+        try c.w.host_layers.append(a, layers);
+        for (&c.w.dec) |*v| {
             v.cin = 1;
             v.cout = 1;
             v.s = 1;
         }
         const empty = @as(@import("codec.zig").Stage, .{ .buf = 0, .margin = 0, .cols = 0 });
-        c.st_up = @splat(empty);
-        c.st_conv0 = empty;
-        c.st_final = empty;
-        c.st_tconv = @splat(empty);
-        c.st_ru = @splat(@splat(empty));
+        c.state.st_up = @splat(empty);
+        c.state.st_conv0 = empty;
+        c.state.st_final = empty;
+        c.state.st_tconv = @splat(empty);
+        c.state.st_ru = @splat(@splat(empty));
         const t = try a.create(Tts);
         t.* = .{ .gpa = a, .e = e, .c = c, .cs = .{ .d = &e.driver, .handle = @ptrFromInt(3) }, .audio_dev = try cuda.DeviceBuffer.alloc(&e.driver, 256), .audio_host = try a.alloc(f32, 1), .max_chunk = 1 };
         return t;
