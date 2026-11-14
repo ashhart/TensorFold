@@ -133,6 +133,7 @@ pub const Engine = struct {
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
     draw_at: Buf, // a sampled window's draw positions (sample.zig)
+    penalties: ?@import("penalties.zig").Rows = null, // shared rounds' presence and frequency entries, once asked
     rows_w: [MAXR + 1]Buf,
     mdims_w: [MAXR + 1]Buf,
     host: struct { rows: Buf, mdims: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, slots: [2 * MAXR]Slot },
@@ -277,6 +278,7 @@ pub const Engine = struct {
         e.peer_kept.deinit(gpa);
         e.snap_pool.deinit();
         e.peer_drops.deinit(gpa);
+        if (e.penalties) |*p| p.deinit(gpa);
         e.r.deinit();
         e.r.device.deinit();
         e.arena_state.deinit();

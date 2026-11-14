@@ -99,7 +99,7 @@ fn windowMs(b: anytype, s: *Session, rows: usize) !f64 {
     const cb = b.e.r.queue.commandBuffer();
     b.e.r.begin(cb, .serial);
     errdefer if (b.e.r.fsr != null) b.e.r.abort();
-    try forward.encode(b.e, &segs, rows, t.ids8, null);
+    try forward.encode(b.e, &segs, rows, t.ids8, null, null);
     try b.primary.finish(cb);
     return (mtl.clock.seconds() - t0) * 1e3;
 }

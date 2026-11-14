@@ -102,7 +102,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = fill.Callbacks(Backend).whole, .prefill_step = fill.Callbacks(Backend).one, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held, .reports_fill = true }, .penalties = true };
     }
 
     pub const facts = batch_costs.facts;
@@ -110,7 +110,7 @@ pub const Backend = struct {
     pub fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));
     }
-    fn session(b: *Backend, s: *Stream) !*Session {
+    pub fn session(b: *Backend, s: *Stream) !*Session {
         return &b.sessions[b.by.get(s) orelse return error.UnknownStream];
     }
     pub fn settle(b: *Backend) !void {
@@ -402,6 +402,7 @@ pub const Backend = struct {
             const d = (try b.session(w.stream)).m.delta;
             fz.vis_prompt.decodePositions(pos8[plan.starts[i]..][0..w.rows()], d);
         }
+        const pens = try @import("penalties.zig").round(b, windows, plan.starts[0..windows.len]); // before any encoding
         const cb = b.e.r.queue.commandBuffer();
         // The copies read the kept round's rows: encode them before outputs() repoints cs[1] at this round's.
         if (fold) batch_settle.encode(b, cb, b.fence.?);
@@ -412,7 +413,7 @@ pub const Backend = struct {
         const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
         const was = b.e.r.serial;
         if (b.overlap) b.e.r.serial = false; // every launch then ends in a barrier, as the drafts' encoders do
-        const encoded = forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
+        const encoded = forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null, pens);
         b.e.r.serial = was;
         try encoded;
         @memcpy(b.e.draw_at.b.slice(u32, fz.MAXR)[0..plan.total], plan.keys[0..plan.total]);
