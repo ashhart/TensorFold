@@ -39,7 +39,7 @@ test "drafts stay on unless serial: only serial adds --no-drafts, and a drafter 
         const parsed = try cli.parse(a, args[2..], &u);
         try std.testing.expectEqual(serial, parsed.no_drafts);
         if (drafter) |d| try std.testing.expectEqualStrings(d, parsed.drafter.?);
-        if (drafter == null) try std.testing.expect(parsed.drafter == null);
+        if (drafter == null) try std.testing.expectEqualStrings("none", parsed.drafter.?);
         var n: usize = 0;
         for (args) |x| n += @intFromBool(std.mem.eql(u8, x, "--no-drafts"));
         try std.testing.expectEqual(@as(usize, @intFromBool(serial)), n);
