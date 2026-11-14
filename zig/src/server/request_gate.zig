@@ -70,6 +70,7 @@ pub fn enter(srv: *Server, a: Allocator, key_digest: ?[32]u8, group: RouteGroup,
     if (srv.config.admission.enabled()) switch (srv.admission.acquire(srv.io, srv.config.admission, key_digest)) {
         .accepted => |lease| e.held.lease = lease,
         .rejected => |refusal| {
+            @import("refusals.zig").admitted(srv, refusal.reason); // its 429 carries the code the ledger counts
             e.refusal = .{ .overloaded = refusal };
             return e;
         },

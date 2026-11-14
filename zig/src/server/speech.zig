@@ -159,6 +159,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     var held = srv.speech_inflight.load(.acquire);
     while (true) {
         if (held >= @max(1, srv.info.lanes)) {
+            srv.load.refused(.engine_busy);
             cx.code = wait.engine_busy;
             return fail(c, cx, id, metadata.*, .capacity, "speech output capacity is full");
         }
@@ -213,11 +214,15 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         releaseLane(srv, &lane_released);
         return switch (e) {
             error.Busy => blk: {
+                srv.load.refused(.engine_busy);
                 cx.code = wait.engine_busy;
                 break :blk fail(c, cx, id, metadata.*, .capacity, "the engine is busy; retry shortly");
             },
             error.Closed => fail(c, cx, id, metadata.*, .other, "the scheduler is closed"),
-            error.InvalidRequest => fail(c, cx, id, metadata.*, .request, "the engine refused this speech request's prompt, frame limit or sampling"),
+            error.InvalidRequest => blk: {
+                srv.load.refused(.invalid_request);
+                break :blk fail(c, cx, id, metadata.*, .request, "the engine refused this speech request's prompt, frame limit or sampling");
+            },
             error.Unsupported => fail(c, cx, id, metadata.*, .request, "this model does not support speech synthesis"),
         };
     };

@@ -457,6 +457,22 @@ test "error.Busy from the engine is a 503 with Retry-After" {
     try t.expect(std.mem.indexOf(u8, reply.body, "the engine is busy") != null);
 }
 
+test "wait reason ledger: an images engine's Busy counts as an engine_busy refusal beside the same 503" {
+    var stub: Stub = .{ .inline_ = true, .submit_error = error.Busy };
+    var s: Served = undefined;
+    try s.open(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
+    defer s.deinit();
+    const head = try s.readHead();
+    try t.expect(std.mem.indexOf(u8, head, " 503 ") != null);
+    try t.expect(std.mem.indexOf(u8, try s.readRest(), "the engine is busy") != null);
+    s.join(&stub);
+    const counted = s.srv.load.read().refusals;
+    try t.expectEqual(@as(u64, 1), counted[@backingInt(api.load_ledger.reasons.Refusal.engine_busy)]);
+    var total: u64 = 0;
+    for (counted) |n| total += n;
+    try t.expectEqual(@as(u64, 1), total);
+}
+
 test "error.InvalidRequest from the engine is a 400 naming the refusal" {
     var stub: Stub = .{ .inline_ = true, .submit_error = error.InvalidRequest };
     const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");

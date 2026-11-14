@@ -184,6 +184,27 @@ test "admission HTTP: every model route refuses before its body and engine work;
     try t.expectEqual(@as(u32, 0), h.srv.generating.load(.acquire));
 }
 
+test "wait reason ledger: an admission 429 counts as a refusal under the code its reply carries" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try h.start(&engine, null, .{ .max_inflight = 1 });
+    defer h.deinit();
+    var lease = h.srv.admission.acquire(t.io, .{ .max_inflight = 1 }, null).accepted;
+    defer lease.release();
+    const reasons = api.load_ledger.reasons;
+    for (0..2) |_| {
+        const reply = try h.request(a, try requestText(a, "/v1/completions", "", completion));
+        try expectStatus(reply, "HTTP/1.1 429 Too Many Requests\r\n");
+        try t.expect(contains(reply, "\"code\": \"max_inflight_exceeded\""));
+    }
+    const refusals = h.srv.load.read().refusals;
+    for (std.enums.values(reasons.Refusal)) |r|
+        try t.expectEqual(@as(u64, if (r == .max_inflight_exceeded) 2 else 0), refusals[@backingInt(r)]);
+}
+
 test "admission HTTP: verified keys get their own reservations and a parse error releases one" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
