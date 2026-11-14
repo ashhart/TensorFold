@@ -216,18 +216,28 @@ pub const Product = struct {
         }
     }
 
-    /// Same-process A-B-A of separate lean launches against the fused launch; both arms time their output download.
-    pub fn time(self: *Product, fused: bool, reps: usize, io: std.Io) !i96 {
+    /// One round of an arm: the launches plus the output download both arms pay.
+    fn round(self: *Product, fused: bool, io: std.Io) !i96 {
         const start = gpu_check.now(io);
-        for (0..reps) |_| if (fused) {
+        if (fused) {
             try self.run();
             try self.landed();
-        } else {
-            _ = try self.replaced();
-        };
-        return @divTrunc(gpu_check.now(io) - start, @as(i96, @intCast(reps)));
+        } else _ = try self.replaced();
+        return gpu_check.now(io) - start;
     }
 };
+
+/// Median of a small sample, sorted in place so one stalled round cannot set the result.
+fn median(v: []i96) i96 {
+    var i: usize = 1;
+    while (i < v.len) : (i += 1) {
+        const x = v[i];
+        var j = i;
+        while (j > 0 and v[j - 1] > x) : (j -= 1) v[j] = v[j - 1];
+        v[j] = x;
+    }
+    return v[v.len / 2];
+}
 
 pub const Registrations = struct {
     good: Product,
@@ -292,7 +302,7 @@ pub fn run(gpu: gpu_check.Gpu) !void {
     try gpu_check.expect(tally.problems() == 0, "prompt_many contract: {d} failures", .{tally.problems()});
 }
 
-/// Kernel-level A-B-A per shape: separate prompt_lean launches against the fused grid.
+/// Interleaved kernel-level screening: one lean round and one fused round per rep, medians per shape.
 pub fn bench(gpu: gpu_check.Gpu) !void {
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
@@ -305,16 +315,21 @@ pub fn bench(gpu: gpu_check.Gpu) !void {
         .{ .rows = 4096, .n = 17408, .k = 5120 },
         .{ .rows = 8192, .n = 17408, .k = 5120 },
     };
+    const rounds = 9;
     for (cases, 0..) |shape, i| {
         _ = try product.prepare(shape, .random, 0x1540 + i);
-        const a1 = try product.time(false, 7, gpu.io);
-        const b = try product.time(true, 7, gpu.io);
-        const a2 = try product.time(false, 7, gpu.io);
-        const base: f64 = @floatFromInt(@divTrunc(a1 + a2, 2));
-        const candidate: f64 = @floatFromInt(b);
-        std.debug.print("BENCH prompt_many rows={d} parts={d}: A1={d:.3} ms B={d:.3} ms A2={d:.3} ms speedup={d:.4}x\n", .{
-            shape.rows,                     product.parts,                                    @as(f64, @floatFromInt(a1)) / std.time.ns_per_ms,
-            candidate / std.time.ns_per_ms, @as(f64, @floatFromInt(a2)) / std.time.ns_per_ms, base / candidate,
+        _ = try product.round(false, gpu.io); // warm both arms so neither pays the clock ramp alone
+        _ = try product.round(true, gpu.io);
+        var lean: [rounds]i96 = undefined;
+        var fused: [rounds]i96 = undefined;
+        for (0..rounds) |r| {
+            lean[r] = try product.round(false, gpu.io);
+            fused[r] = try product.round(true, gpu.io);
+        }
+        const a: f64 = @floatFromInt(median(&lean));
+        const b: f64 = @floatFromInt(median(&fused));
+        std.debug.print("BENCH prompt_many rows={d} parts={d}: lean={d:.3} ms fused={d:.3} ms ratio={d:.4}x median of {d}\n", .{
+            shape.rows, product.parts, a / std.time.ns_per_ms, b / std.time.ns_per_ms, a / b, rounds,
         });
     }
 }
