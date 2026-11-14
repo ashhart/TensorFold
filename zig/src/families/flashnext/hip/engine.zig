@@ -105,6 +105,7 @@ pub const Engine = struct {
 
     /// Rank `o.rank`'s share of `dir` on `o.device` and scratch for `o.chunk` rows; the caller refuses a failure.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        try @import("../mtp_weights.zig").refuse("HIP", try @import("../mtp_weights.zig").format());
         var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
         const steps = o.startup orelse &own;
         const e = try gpa.create(Engine);

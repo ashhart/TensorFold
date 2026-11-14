@@ -37,6 +37,15 @@ test "Metal and HIP stop the start on mxfp8 and keep checkpoint" {
     try std.testing.expectError(error.InvalidEnvironment, refuse("Metal", .mxfp8));
     try refuse("HIP", .checkpoint);
     // each backend's load asks before its first checkpoint or device work
-    try std.testing.expect(std.mem.indexOf(u8, @embedFile("engine_load.zig"), "try @import(\"mtp_weights.zig\").refuse(\"Metal\", try @import(\"mtp_weights.zig\").format());") != null);
-    try std.testing.expect(std.mem.indexOf(u8, @embedFile("hip/load.zig"), "try @import(\"../mtp_weights.zig\").refuse(\"HIP\", try @import(\"../mtp_weights.zig\").format());") != null);
+    try std.testing.expect(before(@embedFile("engine_load.zig"), "pub fn loadConfigured(", "try @import(\"mtp_weights.zig\").refuse(\"Metal\", try @import(\"mtp_weights.zig\").format());", "load_admission.check("));
+    try std.testing.expect(before(@embedFile("hip/engine.zig"), "pub fn load(", "try @import(\"../mtp_weights.zig\").refuse(\"HIP\", try @import(\"../mtp_weights.zig\").format());", "hip.Runtime.open()"));
+    try std.testing.expect(std.mem.indexOf(u8, @embedFile("hip/load.zig"), "mtp_weights.zig") == null);
+}
+
+/// Whether `call` sits once in `src`, inside the function opened by `entry`, ahead of that function's `first` work.
+fn before(src: []const u8, entry: []const u8, call: []const u8, first: []const u8) bool {
+    const at = std.mem.indexOf(u8, src, entry) orelse return false;
+    const c = std.mem.indexOfPos(u8, src, at, call) orelse return false;
+    const f = std.mem.indexOfPos(u8, src, at, first) orelse return false;
+    return c < f and std.mem.count(u8, src, call) == 1;
 }
