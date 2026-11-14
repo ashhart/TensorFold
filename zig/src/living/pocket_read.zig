@@ -131,7 +131,7 @@ fn tapOne(p: anytype, t: anytype, ex: Example, kind: Kind, which: u32) !void {
     defer p.gpa.free(got);
     // the rows a pass reads: all but the last token, which only a pass's target reads
     try t.tapRows(ex.ids[0 .. ex.ids.len - 1], ex.context, want.items, p.moe.items, got);
-    if (comptime @hasDecl(@TypeOf(t.*), "pass")) if (std.c.getenv("TF_SLIDE_TAP_CHECK") != null) tapCheck(p, t, ex, want.items, got);
+    if (comptime @hasDecl(@TypeOf(t.*), "pass")) if (try @import("sys").environment.read(bool, "TF_SLIDE_TAP_CHECK", false)) tapCheck(p, t, ex, want.items, got);
     var at: usize = 0;
     for (rows.items) |r| {
         while (want.items[at] != r.row) at += 1;

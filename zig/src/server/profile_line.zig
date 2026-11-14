@@ -166,6 +166,8 @@ test "profile line: new rows and every grouped member report real names and scop
         .{ .name = "TF_SLIDE_EDIT", .raw = "0", .family = "nemotron_h", .backend = "metal", .class = "experimental" },
         .{ .name = "TF_SLIDE_PROBE", .raw = "", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },
         .{ .name = "TF_SLIDE_ROUTED", .raw = "1", .family = "nemotron_h", .backend = "cuda", .class = "experimental" },
+        .{ .name = "TF_QWEN27_METAL_KV_PAGES", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
+        .{ .name = "TF_QWEN35_METAL_KV_PAGES", .raw = "1", .family = "qwen3_5", .backend = "metal", .class = "arithmetic" },
     }) |c| {
         const env: ExtraEnv = .{ .name = c.name, .value = c.raw };
         const line = try format(a, .stable, c.family, c.backend, env);
@@ -274,5 +276,14 @@ test "profile line: an empty or whitespace-only TF_KV_SHARE does not turn Dory's
     for ([_][]const u8{ " ", "\t", " \t\r\n" }) |raw| {
         const line = try format(a, .stable, "dory", "cuda", TestEnv{ .kv_share = raw });
         try std.testing.expect(std.mem.indexOf(u8, line, "TENSORFOLD_DORY_KV_PAGES") == null);
+    }
+}
+
+test "profile line: Qwen's Metal paging shows only for exact 1" {
+    const a = std.testing.allocator;
+    for ([_][2][]const u8{ .{ "TF_QWEN27_METAL_KV_PAGES", "0" }, .{ "TF_QWEN35_METAL_KV_PAGES", "0" } }) |c| {
+        const line = try format(a, .stable, "qwen3_5", "metal", ExtraEnv{ .name = c[0], .value = c[1] });
+        defer a.free(line);
+        try std.testing.expectEqualStrings("profile: stable; registered overrides: none", line);
     }
 }
