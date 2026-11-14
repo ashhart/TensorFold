@@ -75,6 +75,8 @@ pub const Generation = struct {
     lp: ?@import("logprob_parts.zig").Live = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
     recover: bool = false, // a chat request with no forced tool or structure: an unclosed think block may be the answer
+    deadline_ns: ?i96 = null, // "deadline_s": when the server ends the reply itself
+    deadline_hit: bool = false, // it did: the engine was cancelled there; what it gave before its end still lands
 
     fn eos(g: *const Generation, t: u32) bool {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
@@ -264,6 +266,11 @@ pub const Generation = struct {
                 g.srv.engine.cancel(g.id);
                 g.cancel_sent = true;
             };
+            // a client's cancel came first: the reply ends "cancelled", not at a deadline that passes afterwards
+            if (g.deadline_ns) |d| if (!g.deadline_hit and !g.cancel_sent and g.reason == null and nowNs(g.srv.io) >= d) {
+                g.deadline_hit = true;
+                g.srv.engine.cancel(g.id); // the engine ends the stream: its tokens and usage stay whole
+            };
             if (chunk == null and @hasDecl(Gone, "beat")) {
                 // queueing and a long prefill send nothing: a client that times out a silent stream would leave
                 const now = nowNs(g.srv.io);
@@ -283,13 +290,15 @@ pub const Generation = struct {
         const a = g.a;
         const m = g.box;
         if (!g.engine_done) g.drain();
-        const ended: []const u8 = g.reason orelse switch (m.reason) {
+        const natural: []const u8 = g.reason orelse switch (m.reason) {
             .stop => "stop",
             .length => "length",
             .silence => return cx.other("the text engine returned a speech-only finish reason"),
             .cancelled => "cancelled",
             .failed => return cx.other(if (m.message.len > 0) try a.dupe(u8, m.message) else "the reply failed"),
         };
+        // the server ended the reply at its deadline: a late token's EOS, stop string or cap never hides that
+        const ended = if (g.deadline_hit) "deadline" else natural;
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
