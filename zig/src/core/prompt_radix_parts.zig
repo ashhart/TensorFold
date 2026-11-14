@@ -20,6 +20,8 @@ pub const Groups = struct {
     parts: []const PartSpec = &.{},
     /// A legacy snapshot (the family's Snapshots) beside the parts.
     legacy: bool = true,
+    /// Checkpoints inside a page (C4): each keeps that page's rows as a held copy (needs copy_rows and Pages.hold).
+    tails: bool = false,
 
     /// Prefix groups: page ids a logical page on the tree's path.
     pub fn prefixCount(g: Groups) usize {
@@ -38,7 +40,7 @@ pub const Part = struct { base: u32, ids: []u32, bytes: u64 };
 /// A keep's input for one retained group: its pages from logical index `base`, the last partial if rows fall short.
 pub const Retained = struct { base: u32, ids: []const u32 };
 
-/// A copy a stream makes from a held page into one of its own: rows [0, rows) of `src` to the group's page `index`.
+/// A held page's rows [0, rows) into the stream's page `index` of `group` (parts first, then the prefix groups).
 pub const Copy = struct { group: u32, index: u32, src: u32, rows: u32 };
 
 /// What the store asks a family that declares parts: the bytes, and the device copies (each on the owner's stream).
@@ -53,7 +55,7 @@ pub const PartHooks = struct {
         copy: *const fn (ptr: *anyopaque, owner: ?*anyopaque, group: u32, at: u32, dst: Part) anyerror!void,
         /// The held pages of `src` into the owner's live `group` (the next prompt chunk starts at its position).
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, group: u32, src: Part) anyerror!void,
-        /// Rows [0, rows) of every layer of `group` from page `src` into page `dst`.
+        /// Rows [0, rows) of every layer of `group` (numbered as in Copy) from page `src` into page `dst`.
         copy_rows: *const fn (ptr: *anyopaque, owner: ?*anyopaque, group: u32, src: u32, dst: u32, rows: u32) anyerror!void,
         /// Every copy queued for `owner` has completed, on every rank that runs it.
         fence: *const fn (ptr: *anyopaque, owner: ?*anyopaque) void,
