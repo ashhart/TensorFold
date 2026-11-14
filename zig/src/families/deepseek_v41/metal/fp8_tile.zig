@@ -73,13 +73,12 @@ pub fn fits(c: Call) bool {
     return valid(c, formOf(c.k, c.n));
 }
 
-/// Rows the decode forward takes this tile from for `launches` launches of a call (above max_rows: never), by its
-/// columns: below 1024 the row kernel reads the weights faster at every count; wide K = 1280 and 2304 from 5 rows.
+/// Rows the decode forward takes this tile from for `launches` launches of a call (above max_rows: never).
 pub fn minRows(c: Call, launches: u32) u32 {
     const cols = c.n * launches;
-    if (cols < 1024) return max_rows + 1;
+    if (cols < 1024) return max_rows + 1; // the row kernel reads these weights faster at every row count
     if (cols < 2048) return 7;
-    return if (c.k % 1024 == 0) 6 else 5;
+    return if (c.k % 1024 == 0) 6 else 5; // wide K = 1280 and 2304 from 5 rows
 }
 
 /// Whether the decode forward runs a call here (by its rows and columns only); a row's bits are the same either way.
