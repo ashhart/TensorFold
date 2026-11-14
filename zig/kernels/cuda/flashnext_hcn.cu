@@ -1,6 +1,4 @@
-// Flash Next's BF16 hyper-connection read-out on prompt tiles: fn_hc_normalize2 folded into the down and the up+mix.
-// The same mma chains and rounding points as normalize, the qmmf down (fp32, K slices folded in order), reduce_act,
-// the qmmf up (bf16) and fn_hc_dense_mix; the normed rows form in shared memory (down) or in the epilogue (up+mix).
+// Flash Next's BF16 read-out on prompt tiles: the normalize folded into the down and the up+mix, the chain's bits.
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -22,7 +20,7 @@ __device__ __forceinline__ float rinv_of(const float* __restrict__ pss, long lon
     return tf_common::rms_scale(total, D, eps);
 }
 
-// down: [rows, K] normed streams x [N <= 336, K] bf16 weights -> fp32 [rows, N]; 16 MT rows, two column tiles a row tile
+// down: [rows, K] normed streams x [N <= 336, K] bf16 weights -> fp32 [rows, N]; 16 MT rows a CTA
 constexpr int DN_THREADS = 224;  // 7 warps, three n8 tiles each: columns [0, 160) and [160, 336)
 constexpr int DN_SPLIT = 20;     // n8 tiles of the first column tile
 constexpr int DN_SS = 8;         // streams at most
@@ -172,8 +170,7 @@ __device__ __forceinline__ void down_body(const __nv_bfloat16* __restrict__ H, c
         }
 }
 
-// up + mix: act [rows, K] x [4 D, K] bf16 weights, rounded to bf16, gated onto the normed streams, mixed in order.
-// A CTA: 16 MT rows by 32 dimensions of all four streams (8 warps, two to a stream, two n8 tiles each).
+// up + mix: act times [4 D, K] bf16 weights, gated onto the normed streams, mixed; a CTA 16 MT rows by 32 columns.
 template <int MT, int KG>
 struct UpShape {
     static constexpr int BM = 16 * MT;
