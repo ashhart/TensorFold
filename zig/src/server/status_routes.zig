@@ -313,7 +313,7 @@ test "model discovery distinguishes speech row and frame budgets from context" {
         .frame_length = 2048,
     } };
     for ([_][]const u8{ "served", "alias" }) |id| {
-        const value = try modelValue(a, id, info, 0, null);
+        const value = try modelValue(a, id, info, 0, null, .{});
         const speech = value.get("speech").?;
         try std.testing.expectEqual(@as(i64, 4095), speech.get("max_assembled_prompt_rows").?.int64().?);
         try std.testing.expectEqual(@as(i64, 4096), speech.get("max_generated_acoustic_frames").?.int64().?);
