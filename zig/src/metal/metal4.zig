@@ -20,6 +20,9 @@ const max_pages = 32;
 const max_events = 4;
 /// Feedback kept a slot, by commit: a reader is never more than one commit behind.
 const history = 4;
+/// How long a reader waits for a completed commit's feedback: spins, then naps of 10 us (2 s in all).
+const spins = 4096;
+const feedback_naps = 200_000;
 
 /// The Objective-C block ABI for the commit feedback handler: a global block, so nothing copies or frees it.
 const BlockDescriptor = extern struct { reserved: c_ulong, size: c_ulong, signature: [*:0]const u8 };
@@ -192,13 +195,27 @@ pub const Slot = struct {
         return .{ s.start[i], s.end[i] };
     }
 
-    /// The text of a failure the queue has not reported yet: Metal 4 reports failures apart from command buffers.
+    /// A failure the queue has not reported yet; this use's own feedback (apart from its GPU event) is awaited first.
     pub fn failure(s: *Slot, use: u32) ?[*:0]const u8 {
-        _ = use;
         const q = s.q;
+        if (use == s.use and s.value != 0 and !s.fed(s.commits, feedback_naps)) return "metal 4: a command buffer's feedback never arrived";
         if (q.failures.load(.acquire) == q.reported) return null;
         q.reported = q.failures.load(.acquire);
         return @ptrCast(&q.failure_text);
+    }
+
+    /// Waits for commit `k`'s feedback: a short spin (it follows the GPU closely), then up to `naps` naps of 10 us.
+    fn fed(s: *const Slot, k: u32, naps: u32) bool {
+        var i: u32 = 0;
+        while (s.seen.load(.acquire) < k) : (i += 1) {
+            if (i < spins) {
+                std.atomic.spinLoopHint();
+                continue;
+            }
+            if (i - spins >= naps) return false;
+            nap(10_000);
+        }
+        return true;
     }
 
     pub fn status(s: *Slot, use: u32) types.CommandBufferStatus {
@@ -491,14 +508,23 @@ pub const State = struct {
 
     /// Everything committed has run and reported; then the queue, its slots and its set go.
     pub fn close(q: *State) void {
+        _ = q.closeWithin(feedback_naps);
+    }
+
+    /// As close with at most `naps` naps for owed feedback; while one is owed the State (its handlers' storage) stays.
+    pub fn closeWithin(q: *State, naps: u32) bool {
         for (&registry) |*r| if (r.cmpxchgStrong(q, null, .acq_rel, .acquire) == null) {
             _ = registered.fetchSub(1, .acq_rel);
             break;
         };
         if (q.tick > 0) q.reach(q.tick);
+        var left = naps;
+        var owed = false;
         for (&q.slots) |*s| {
-            var tries: u32 = 0;
-            while (s.seen.load(.acquire) < s.commits and tries < 200_000) : (tries += 1) nap(10_000);
+            while (s.seen.load(.acquire) < s.commits and !owed) {
+                if (left == 0) owed = true else nap(10_000);
+                left -|= 1;
+            }
             if (s.open) objc.msg(void, s.cb, "endCommandBuffer", .{});
             for (s.pages) |p| if (p) |pg| objc.release(pg.buf);
             for ([_]Id{ s.table, s.allocator, s.cb }) |id| objc.release(id);
@@ -512,7 +538,12 @@ pub const State = struct {
         q.retired.deinit(heap);
         q.dropped.deinit(heap);
         q.table.load(.monotonic).deinit();
+        if (owed) {
+            std.log.warn("metal 4: a command buffer's feedback was still owed at close; the queue's memory is kept for it", .{});
+            return true;
+        }
         heap.destroy(q);
+        return false;
     }
 
     /// A round of named work: under TF_METAL4_TIMELINE some rounds of each name get a timestamp at every stage.

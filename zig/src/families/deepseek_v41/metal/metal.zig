@@ -17,6 +17,7 @@ pub const attn = @import("attn.zig");
 pub const indexer = @import("indexer.zig");
 pub const moe = @import("moe.zig");
 pub const forward = @import("forward.zig");
+pub const round_prof = @import("round_prof.zig");
 pub const prompt = @import("prompt.zig");
 pub const prompt_layer = @import("prompt_layer.zig");
 pub const prompt_scratch = @import("prompt_scratch.zig");
