@@ -120,6 +120,7 @@ pub const recurrent_forks = @import("core/recurrent_forks.zig");
 pub const shared_kv = @import("core/shared_kv.zig");
 
 pub const kv_pool = @import("core/kv_pool.zig");
+pub const kv_prompts = @import("core/kv_prompts.zig");
 
 pub const rope_freq = @import("core/rope_freq.zig");
 

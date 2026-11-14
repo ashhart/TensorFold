@@ -50,10 +50,14 @@ const Fake = struct {
 };
 
 fn fill(f: *Fake, s: *lanes.Stream, cap: usize, decision: ?usize) !void {
+    try fillAt(f, s, cap, decision, &.{});
+}
+
+fn fillAt(f: *Fake, s: *lanes.Stream, cap: usize, decision: ?usize, marks: []const u32) !void {
     var at: usize = 0;
     var next: usize = 0;
     while (at < s.prompt_len) {
-        const n = workflow.rows(s, at, cap, decision, &next);
+        const n = workflow.rows(s, at, cap, decision, marks, &next);
         try workflow.submit(f, s, .{ .rows = n });
         at += n;
     }
@@ -77,6 +81,24 @@ test "Nemotron prefill widths: actual requested cuts, decision row and cap land 
     }
     try t.expectEqual(@as(usize, 6), f.timing.count[0]);
     try t.expectEqual(@as(f64, 12), f.gpu_ms);
+}
+
+test "Nemotron prefill widths: a chunk ends at every TF_KV_SHARE store mark, in any order, beside the other cuts" {
+    const ids: [29]u32 = @splat(7);
+    var s = try lanes.Stream.init(a, .{ .id = "marks", .prompt = &ids, .max_new = 1, .chunks = &.{ 3, 20 } });
+    defer s.deinit(a);
+    var f: Fake = .{};
+    defer f.deinit();
+    try fillAt(&f, &s, 8, 12, &.{ 24, 16, 29, 40 });
+    try f.drain();
+    try t.expectEqualSlices(u32, &.{ 3, 8, 2, 3, 4, 4, 5 }, s.prefill_widths.items);
+    var ends: [8]u32 = undefined;
+    var end: u32 = 0;
+    for (s.prefill_widths.items, 0..) |w, i| {
+        end += w;
+        ends[i] = end;
+    }
+    for ([_]u32{ 16, 24, 29 }) |m| try t.expect(std.mem.indexOfScalar(u32, ends[0..s.prefill_widths.items.len], m) != null);
 }
 
 test "Nemotron prefill widths: one pass waits once; verify and draft buffers never count as prompt passes" {

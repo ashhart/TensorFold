@@ -77,7 +77,7 @@ pub fn probe(b: *Metal) !u64 {
                 p.failed = e;
                 return;
             };
-            p.snap = snapshot.save(p.b, c, mark) catch |e| {
+            p.snap = snapshot.save(p.b, c, mark, false) catch |e| {
                 p.failed = e;
                 return;
             };
@@ -116,7 +116,7 @@ pub fn snapRead(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!
     var buf: [1100]u8 = undefined;
     const file = try path(&buf, dir, key);
     const head = b.head != null;
-    const n = snapshot.bytes(b.m.config, at, head);
+    const n = snapshot.bytes(b.m.config, at, head, false);
     const snap = try b.gpa.create(Snap);
     errdefer b.gpa.destroy(snap);
     snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };

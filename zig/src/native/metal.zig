@@ -16,14 +16,14 @@ const learners = metal_slide.Registry(.{nemotron});
 const cache_fit = @import("cache_fit.zig");
 const metal_admit = @import("metal_admit.zig");
 const Resident = @import("resident.zig").Resident;
-const nemo_disk = @import("nemotron_disk.zig");
+const prompt_pages = @import("cuda_prompt_pages.zig"); // the family-side store adapter, over the core pool as on CUDA
 const fsr_options = @import("fsr_options.zig");
 const linkProblem = @import("metal_link.zig").problem;
 const metal_shared = @import("metal_shared.zig");
 pub const chip = metal_shared.chip;
 pub const deviceName = metal_shared.deviceName;
 const prefillStep = metal_shared.prefillStep;
-const modelContext = metal_shared.modelContext;
+const modelContext = @import("cuda_window.zig").modelContext; // the window from config.json, as CUDA reads it
 const gibBytes = metal_shared.gibBytes;
 
 pub const backends: []const []const u8 = &.{"metal"};
@@ -90,6 +90,7 @@ const Host = struct {
     host: api.LaneHost,
     cache: ?api.prompt_cache.Store = null, // kept prompt states (engine thread only); null: a zero budget
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
+    prompts: ?*prompt_pages.Adapter = null, // TF_KV_SHARE: prompts kept as the pool's pages (no `cache` then)
     round: nemotron.gpu_round.Options = .{ .depth = 8 }, // a lone greedy stream's GPU-side rounds, as the CLI runs them
     slide: ?metal_slide.Registration = null, // Sliding Weights' learner, with --slide
 
@@ -115,6 +116,7 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
         if (h.learned) |*m| m.deinit();
+        if (h.prompts) |x| x.close(); // the store's pages back before the pool goes
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         nemotron.residency.drop(h);
@@ -233,14 +235,24 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         return e;
     };
     h.host.info_.prompt_cache_plan = plan;
-    if (plan.budget_bytes > 0) {
+    const share = paged != null and try tf.kv_prompts.sharing() > 0; // TF_KV_SHARE: prompts kept as pool pages
+    if (share and o.learn_conversations) {
+        problem.* = "--learn-conversations writes the host prompt cache's states, and TF_KV_SHARE keeps prompts as pool pages instead: serve with one of the two";
+        return error.KvShareLearns;
+    }
+    h.prompts = null;
+    if (share and plan.budget_bytes > 0) {
+        h.prompts = try prompt_pages.Adapter.openOnGrid(nemotron.snapshot.Shared, gpa, h.metal, @intCast(paged.?.layout.page_tokens), @intCast(h.metal.o.chunk), a, problem);
+        h.host.info_.prompt_cache = true;
+    } else if (plan.budget_bytes > 0) {
         const S = nemotron.snapshot.Cached;
         const L = nemotron.learned_prompts;
-        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &nemo_disk.image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
+        h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = h.metal, .vtable = &.{ .bytes = S.snapBytes, .save = S.snapSave, .restore = S.snapRestore, .drop = S.snapDrop, .write = L.snapWrite, .read = L.snapRead, .forget = L.snapForget, .forget_checked = api.prompt_cache.singleForgetChecked, .reclaim = api.prompt_cache.singleReclaim, .rows = &@import("nemotron_disk.zig").image } }, .{ .lookahead = 1, .planned = true }, plan.budget_bytes);
         h.host.cache = &h.cache.?; // the lane host's store: a Sliding Weights step that moves weights clears it
         h.host.info_.prompt_cache = true;
     }
     errdefer if (h.cache) |*store| store.deinit();
+    errdefer if (h.prompts) |x| x.close();
     h.learned = null;
     if (o.learn) |root| {
         const id = @import("metal_identity.zig").learned(a, io, o.dir, h.metal) catch |e| {
