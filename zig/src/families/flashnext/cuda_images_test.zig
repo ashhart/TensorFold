@@ -79,7 +79,8 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, draf
     var s = try lanes.Stream.init(a, .{ .id = "image", .prompt = tokens, .max_new = 4, .drafts = drafting, .reuse = if (cached) |at| .{ .saved = &kept, .at = @intCast(at) } else .{}, .images = &.{.{ .pixels = pixels, .gh = side, .gw = side, .tokens = side * side / 4, .at = 2 }} });
     defer s.deinit(a);
     const l = try open(&self, &s);
-    try std.testing.expectEqual(@as(usize, 1), Fake.calls);
+    // one rank: an image a kept prefix holds whole (rows 2-5, kept at 6) skips the tower; before or inside it, it runs
+    try std.testing.expectEqual(@as(usize, if ((cached orelse 0) >= 6) 0 else 1), Fake.calls);
     const view = l.seq.view(0).media.?;
     try std.testing.expectEqual(@as(usize, side) * side / 4, l.seq.media.?.image.plan.rows);
     if (cached) |at| {
