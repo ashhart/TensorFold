@@ -128,12 +128,12 @@ pub const Pass = struct {
         if (slot < x.runs.len) x.runs[slot] = .{ .first = at, .end = at };
     }
 
-    /// The command buffer of one serial encoder: `f` encodes, then it is committed and waited for.
-    fn run(x: *const Pass, comptime F: type, f: F) !void {
+    /// The command buffer of one encoder of `kind`: `f` encodes, then it is committed and waited for.
+    fn run(x: *const Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = x.queue.commandBuffer();
-        const e = cb.compute(.serial);
+        const e = cb.compute(kind);
         f.encode(e) catch |err| {
             e.end();
             return err;
@@ -184,7 +184,7 @@ pub const Pass = struct {
                 try st.ingest(&cx, e, j.x.w, j.taps, .{ .buf = j.x.quant }, j.x.rings, j.refs.pos, j.refs.dest);
             }
         };
-        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs });
+        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial);
     }
 
     // propose ------------------------------------------------------------------------------------------------------
@@ -237,9 +237,10 @@ pub const Pass = struct {
         try st.head(&cx, e, x.top, x.w, &x.b);
     }
 
-    /// The whole launch: embed, every stage, the head.
+    /// The whole launch: embed, every stage, the head, a barrier wherever a step reads the one before (concurrent).
     pub fn encodeAll(x: *const Pass, e: mtl.ComputeEncoder, l: *const Launch) !void {
         try x.encodeEmbed(e, l);
+        e.barrier();
         for (0..x.w.stages.len) |i| try x.encodeStage(e, l, i);
         try x.encodeHead(e, l);
     }
@@ -293,7 +294,7 @@ pub const Pass = struct {
                     try j.x.encodeAll(e, j.l);
                 }
             };
-            try x.run(job, .{ .x = x, .l = &l });
+            try x.run(job, .{ .x = x, .l = &l }, .concurrent);
             try x.finish(&l, out[at..][0..m]);
         }
     }
