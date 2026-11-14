@@ -16,6 +16,8 @@ const lanes = host.lanes;
 const Config = host.config.Config;
 const Allocator = std.mem.Allocator;
 const R = pipelines.max_rows;
+/// The shortest system part kept on its own for later conversations.
+const min_shared: usize = 256;
 
 /// What the target reads and borrows: the device, kernels, RoPE tables, layer scratch, weights and Engram rows.
 pub const Env = struct {
@@ -194,20 +196,41 @@ pub const Target = struct {
         const n: u32 = @intCast(ids.len);
         const V: usize = c.vocab;
         var logits: []const f32 = undefined;
+        // states later prompts can resume from that share less than all of this one (kept as the prompt passes them)
+        const kp = t.keepPoints(ids, at);
         if (at == n) logits = hit.?.logits.? else {
-            t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids) catch |e| return t.fail(e);
+            for ([3]u32{ kp[0], kp[1], n }) |end| {
+                if (end == 0) continue;
+                t.pr.run(t.promptEnv(), &s.kv, &s.tail, ids[0..end]) catch |e| return t.fail(e);
+                const tr = t.pr.tapRows(c);
+                for (0..t.pr.taps) |i| t.ringPut(s, end - t.pr.taps + i, tr[i * tapWidth(c) ..][0..tapWidth(c)]);
+                if (end < n) t.cache.save(c, &s.kv, ids[0..end], s.ring, null) catch {};
+            }
             const all = t.pr.logits(c);
             logits = all[(t.pr.head - 1) * V ..][0..V];
-            const tr = t.pr.tapRows(c);
-            for (0..t.pr.taps) |i| t.ringPut(s, n - t.pr.taps + i, tr[i * tapWidth(c) ..][0..tapWidth(c)]);
         }
         t.promptTaps(s, n);
         const choice = try t.choose(logits, draw, smp);
         s.base = n;
         s.live = true;
         s.whole = true;
-        if (t.cache.on() and at < n) t.cache.save(c, &s.kv, ids, s.ring, logits) catch {};
+        if (t.cache.on() and at < n and kp[1] == 0) t.cache.save(c, &s.kv, ids, s.ring, logits) catch {};
         return choice;
+    }
+
+    /// Extra kept states (0: none): before the first user turn, and before a thinking prompt's closing <think>.
+    fn keepPoints(t: *const Target, ids: []const u32, at: u32) [2]u32 {
+        const c = t.env.c;
+        const n = ids.len;
+        var out: [2]u32 = .{ 0, 0 };
+        if (!t.cache.on()) return out;
+        // a fresh conversation shares the system text and tools, which end where the first user turn starts
+        if (std.mem.indexOfScalar(u32, ids, c.user)) |u| {
+            if (u >= min_shared and u > at) out[0] = @intCast(u);
+        }
+        // the next turn renders this turn's <think> as </think>, so it shares the prompt but that tag
+        if (n >= 2 and ids[n - 1] == c.think_open and ids[n - 2] == c.assistant and n - 1 > @max(at, out[0])) out[1] = @intCast(n - 1);
+        return out;
     }
 
     fn promptEnv(t: *const Target) prompt.Env {

@@ -104,6 +104,10 @@ pub const Config = struct {
     engram_table_dir: List(u8, 4096) = .{},
     bos: u32 = 0,
     eos: u32 = 1,
+    /// the release vocabulary's <｜User｜>, <｜Assistant｜> and <think> (serve/template.zig)
+    user: u32 = 128803,
+    assistant: u32 = 128804,
+    think_open: u32 = 128821,
 
     /// config.json in `dir`.
     pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
@@ -447,6 +451,9 @@ pub fn tiny() Config {
         .mtp_layers = 2,
         .dspark_block = 3,
         .dspark_noise_token = 96,
+        .user = 199,
+        .assistant = 200,
+        .think_open = 201,
         .dspark_targets = Ids.of(&.{ 5, 6, 7 }),
         .dspark_markov_rank = 8,
         .dspark_experts = 4,

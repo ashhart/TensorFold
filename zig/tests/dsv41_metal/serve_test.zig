@@ -103,6 +103,16 @@ fn ids(n: usize, s: u64) ![]u32 {
     return ff.ids(gpa, &fs.config(), n, s);
 }
 
+/// Ids with no user, assistant or think tag among them, so the tests place those themselves.
+fn untagged(n: usize, s: u64) ![]u32 {
+    const c = fs.config();
+    const xs = try ids(n, s);
+    for (xs) |*x| if (x.* == c.user or x.* == c.assistant or x.* == c.think_open) {
+        x.* = 7;
+    };
+    return xs;
+}
+
 fn say(ok: bool, comptime fmt: []const u8, args: anytype) void {
     std.debug.print("{s} dsv41 metal serve: ", .{if (ok) "PASS" else "FAIL"});
     std.debug.print(fmt ++ "\n", args);
@@ -188,6 +198,72 @@ test "dsv41 metal serve: (c) prompt-cache hits (the same prompt, a later turn) =
     try testing.expectEqual(@as(u32, 0), first_cached);
     // the later turn resumed past the first prompt: its reply's rows came from the cache too
     try testing.expect(m.t.stats.cached_rows >= 3 * p.len + 30);
+}
+
+test "dsv41 metal serve: (c2) a thinking turn keeps its state before <think>; the next turn resumes there == fresh" {
+    const c = fs.config();
+    const body = try untagged(300, 7);
+    defer gpa.free(body);
+    const p = try std.mem.concat(gpa, u32, &.{ body, &.{ c.assistant, c.think_open } });
+    defer gpa.free(p);
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    var drafted: u64 = 0;
+    var first: [1][]u32 = undefined;
+    try serve(e, &.{.{ .prompt = p, .max = 30 }}, false, &first, &drafted);
+    defer freeAll(&first);
+    // the next turn as the template renders it: the tag closed (a stand-in id), the reply, new ids, a thinking header
+    const extra = try untagged(40, 8);
+    defer gpa.free(extra);
+    const turn = try std.mem.concat(gpa, u32, &.{ p[0 .. p.len - 1], &.{c.think_open + 1}, first[0], extra, &.{ c.assistant, c.think_open } });
+    defer gpa.free(turn);
+    const hits0 = m.t.stats.hits;
+    var got: [1][]u32 = undefined;
+    try serve(e, &.{.{ .prompt = turn, .max = 30 }}, false, &got, &drafted);
+    defer freeAll(&got);
+    const resumed = cached_rows[0];
+    const asks = [_]Ask{ .{ .prompt = p, .max = 30 }, .{ .prompt = turn, .max = 30 } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const bad = same(&want, &.{ first[0], got[0] });
+    say(bad == 0 and resumed == p.len - 1, "(c2) a thinking follow-up resumed {d} rows (its turn before <think>: {d}); split prefill and follow-up vs fresh: {d} of 2 replies differ", .{ resumed, p.len - 1, bad });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(m.t.stats.hits > hits0);
+    try testing.expectEqual(@as(u32, @intCast(p.len - 1)), resumed);
+}
+
+test "dsv41 metal serve: (c3) a fresh conversation resumes after the last one's system part == fresh" {
+    const c = fs.config();
+    const system = try untagged(300, 9);
+    defer gpa.free(system);
+    var msgs: [2][]u32 = undefined;
+    for (&msgs, 0..) |*mm, i| mm.* = try untagged(20 + 5 * i, 10 + i);
+    defer for (msgs) |mm| gpa.free(mm);
+    var asks: [2]Ask = undefined;
+    var prompts: [2][]u32 = undefined;
+    for (&prompts, &asks, msgs) |*p, *k, mm| {
+        p.* = try std.mem.concat(gpa, u32, &.{ system, &.{c.user}, mm, &.{ c.assistant, c.think_open } });
+        k.* = .{ .prompt = p.*, .max = 24 };
+    }
+    defer for (prompts) |p| gpa.free(p);
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    var drafted: u64 = 0;
+    var got: [2][]u32 = undefined;
+    try serve(s.engine(), &asks, false, &got, &drafted);
+    defer freeAll(&got);
+    const resumed = cached_rows[0..2].*;
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const bad = same(&want, &got);
+    say(bad == 0 and resumed[1] == system.len, "(c3) a new conversation resumed {d} rows (the system part: {d}); vs fresh: {d} of 2 replies differ", .{ resumed[1], system.len, bad });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expectEqual([2]u32{ 0, @intCast(system.len) }, resumed);
 }
 
 test "dsv41 metal serve: (d) sampled replies are their seed's: again, drafted or not, together, serial" {

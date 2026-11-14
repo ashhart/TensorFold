@@ -16,6 +16,9 @@ pub fn config() Config {
     return .{
         .format = .release_fp8,
         .vocab = 256,
+        .user = 199,
+        .assistant = 200,
+        .think_open = 201,
         .hidden = 256,
         .layers = 5,
         .heads = 4,
