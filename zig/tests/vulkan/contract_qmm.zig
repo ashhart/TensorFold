@@ -56,6 +56,13 @@ pub const spec: c.Spec = .{
     // gate 4 keeps the harness default: fp16 and bf16 sums must miss by 100x (no claim that output rounding hides them)
 };
 
+/// The f32-activation image: x and the output are f32, so gate 3's rounding model is the f32 one.
+pub const spec_f32: c.Spec = blk: {
+    var s = spec;
+    s.out = .f32;
+    break :blk s;
+};
+
 /// The shared gate harness expects a rig object; as in HIP, it exposes bytes while the fixture owns device buffers.
 const Rig = struct {
     output: []const u8 = &.{},
@@ -101,6 +108,12 @@ pub const Fixture = struct {
     bindings: [5]dispatch.Binding = undefined,
     /// Planted control: overwrite input buffer i (x, w, scales, biases) after dispatch; gate 2 must catch it.
     corrupt: ?usize = null,
+    /// The kernel's reported name when it is not the default qmm_bf16 spec's.
+    name: ?[]const u8 = null,
+    /// Tiled image: inputs are repacked into 32-column tiles before upload; shapes that cannot be tiled are refused.
+    tiled: bool = false,
+    /// f32 activations: x is stored as f32 (the bf16 values widened exactly) and the output is f32.
+    act_f32: bool = false,
 
     pub fn init(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, pipeline: *dispatch.Pipeline) Fixture {
         return .{ .a = a, .dev = dev, .cmds = cmds, .staging = staging, .pipeline = pipeline };
@@ -108,7 +121,12 @@ pub const Fixture = struct {
     pub fn deinit(f: *Fixture) void {
         f.reset();
     }
+    fn actUnits(f: *const Fixture) usize {
+        return if (f.act_f32) 2 else 1;
+    }
     fn reset(f: *Fixture) void {
+        // A hook error after a recorded dispatch leaves the buffer open: drop those records before freeing buffers.
+        f.cmds.discard();
         while (f.made > 0) {
             f.made -= 1;
             f.buffers[f.made].deinit();
@@ -138,13 +156,29 @@ pub const Fixture = struct {
             planted.name = corrupt_names[i];
             return .{ .spec = planted, .ctx = f, .vt = &vt, .control = .repeat };
         }
-        return .{ .spec = spec, .ctx = f, .vt = &vt };
+        var named = if (f.act_f32) spec_f32 else spec;
+        if (f.name) |n| named.name = n;
+        return .{ .spec = named, .ctx = f, .vt = &vt };
     }
+
     fn allocPoison(a: std.mem.Allocator, data_len: usize) ![]u16 {
         const extra: usize = if (data_len % 2 == 0) 16 else 17;
         const p = try a.alloc(u16, data_len + extra);
         @memset(p, poison);
         return p;
+    }
+    // The tiled image reads host-repacked inputs sized for whole tiles; the float64 reference came from the row layout.
+    fn tileInputs(a: std.mem.Allocator, words: []u8, scales: []u8, biases: []u8, shape: c.Shape) !void {
+        const real_words = shape.n * shape.k / 2;
+        const real_params = shape.n * (shape.k / group) * 2;
+        const copy = try a.alloc(u8, real_words);
+        defer a.free(copy);
+        @memcpy(copy, words[0..real_words]);
+        vk.tile.tileWords(words, copy, shape.n, shape.k);
+        @memcpy(copy[0..real_params], scales[0..real_params]);
+        vk.tile.tileParams(scales, copy[0..real_params], shape.n, shape.k);
+        @memcpy(copy[0..real_params], biases[0..real_params]);
+        vk.tile.tileParams(biases, copy[0..real_params], shape.n, shape.k);
     }
     pub fn prepare(f: *Fixture, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.k % group != 0 or shape.n * shape.k > max_weights or shape.rows * shape.n > max_outputs) return false;
@@ -182,22 +216,29 @@ pub const Fixture = struct {
             .nonfinite => .nonfinite,
             .stress => .stress,
         }, seed);
-        const x = try allocPoison(f.a, shape.rows * shape.k);
+        const x = try allocPoison(f.a, shape.rows * shape.k * f.actUnits());
         errdefer f.a.free(x);
-        @memcpy(x[0..q.x.len], q.x);
+        if (f.act_f32) {
+            for (q.x, 0..) |v, i| {
+                x[2 * i] = 0;
+                x[2 * i + 1] = v;
+            }
+        } else @memcpy(x[0..q.x.len], q.x);
+        const stored: usize = if (f.tiled) vk.tile.padded(shape.n) else shape.n;
         const words_len = shape.n * shape.k / 8;
-        const w = try f.a.alloc(u32, words_len + 4);
+        const w = try f.a.alloc(u32, stored * shape.k / 8 + 4);
         errdefer f.a.free(w);
         @memset(w, 0xffff_ffff);
         q.words(w[0..words_len]);
         const nparam = shape.n * (shape.k / group);
-        const scales = try allocPoison(f.a, nparam);
+        const nstored = stored * (shape.k / group);
+        const scales = try allocPoison(f.a, nstored);
         errdefer f.a.free(scales);
         @memcpy(scales[0..nparam], q.scales);
-        const biases = try allocPoison(f.a, nparam);
+        const biases = try allocPoison(f.a, nstored);
         errdefer f.a.free(biases);
         @memcpy(biases[0..nparam], q.biases);
-        const out = try allocPoison(f.a, shape.rows * shape.n);
+        const out = try allocPoison(f.a, shape.rows * shape.n * f.actUnits());
         errdefer f.a.free(out);
         const want = try f.a.alloc(f64, shape.rows * shape.n);
         errdefer f.a.free(want);
@@ -205,6 +246,7 @@ pub const Fixture = struct {
         errdefer f.a.free(mag);
         try q.reference(want, mag);
         if (fill != .nonfinite) for (want, mag) |v, m| if (!std.math.isFinite(v) or !std.math.isFinite(m)) return error.NonFiniteReference;
+        if (f.tiled) try tileInputs(f.a, std.mem.sliceAsBytes(w[0 .. stored * shape.k / 8]), std.mem.sliceAsBytes(scales[0..nstored]), std.mem.sliceAsBytes(biases[0..nstored]), shape);
         f.x = x;
         f.w = w;
         f.scales = scales;
@@ -235,7 +277,7 @@ pub const Fixture = struct {
             try vk.orExit(vk.download(f.cmds, b.buffer.*, 0, f.staging, f.input_snapshot[at..][0..b.len], timeout_ns));
             at += b.len;
         }
-        const data_count = s.rows * s.n;
+        const data_count = s.rows * s.n * f.actUnits();
         f.rig.guards_ok = true;
         for (f.out[data_count..]) |v| if (v != poison) {
             f.rig.guards_ok = false;
@@ -254,6 +296,18 @@ pub const Fixture = struct {
         return f.affine.?.simulate(accum, order, out);
     }
 };
+
+test "a fixture name replaces the default kernel name" {
+    var f: Fixture = undefined;
+    f.corrupt = null;
+    f.act_f32 = false;
+    f.name = "vulkan qmm_q4_vec4 affine q4 g64 transposed";
+    try std.testing.expectEqualStrings(f.name.?, f.kernel().spec.name);
+    f.name = "vulkan qmm_q4_tile affine q4 g64 transposed tiled 32";
+    try std.testing.expectEqualStrings(f.name.?, f.kernel().spec.name);
+    f.name = null;
+    try std.testing.expectEqualStrings(spec.name, f.kernel().spec.name);
+}
 
 /// One source shader variant, exercised through the same hook contract as HIP's planted controls.
 pub const ControlKind = enum { qmm_fmax, atomic_sum, scribble_sum, drop_tail, fp16_accum };
@@ -311,6 +365,8 @@ pub const Control = struct {
         f.reset();
     }
     fn reset(f: *Control) void {
+        // Same rule as the fixture reset: no freed buffer may stay referenced by open records.
+        f.cmds.discard();
         if (f.x_device) |*b| b.deinit();
         if (f.w_device) |*b| b.deinit();
         if (f.y_device) |*b| b.deinit();
@@ -426,6 +482,52 @@ test "Vulkan bf16 fixture uses raw u16 storage and guards are aligned for storag
     try std.testing.expectEqual(@as(usize, 20), values.len);
     try std.testing.expectEqual(poison, values[0]);
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(u16));
+}
+
+test "a failed host allocation after a recorded dispatch is dropped before the fixture and control free their buffers" {
+    const Calls = struct {
+        var resets: usize = 0;
+        var submits: usize = 0;
+        fn reset(_: vk.c.VkCommandBuffer, _: vk.c.VkCommandBufferResetFlags) callconv(.c) vk.c.VkResult {
+            resets += 1;
+            return vk.c.VK_SUCCESS;
+        }
+        fn submit(_: vk.c.VkQueue, _: c_uint, _: [*c]const vk.c.VkSubmitInfo, _: vk.c.VkFence) callconv(.c) vk.c.VkResult {
+            submits += 1;
+            return vk.c.VK_SUCCESS;
+        }
+    };
+    var api: @TypeOf(@as(vk.Device, undefined).api) = undefined;
+    api.vkResetCommandBuffer = Calls.reset;
+    api.vkQueueSubmit = Calls.submit;
+    var dev: vk.Device = undefined;
+    dev.api = api;
+    var pipeline: dispatch.Pipeline = undefined;
+    const staging: vk.Buffer = undefined;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+
+    // Fixture.run records its dispatch, then its corrupt arm allocates a tampered copy; that allocation fails.
+    var cmds: vk.Commands = .{ .dev = &dev, .pool = undefined, .cmd = @ptrFromInt(0x1000), .fence = undefined, .recording = true, .pending = 2 };
+    var fixture = Fixture.init(failing.allocator(), &dev, &cmds, staging, &pipeline);
+    try std.testing.expectError(error.OutOfMemory, fixture.a.dupe(u8, "x"));
+    fixture.reset();
+    try std.testing.expectEqual(false, cmds.recording);
+    try std.testing.expectEqual(@as(u32, 0), cmds.pending);
+    try std.testing.expectEqual(@as(usize, 1), Calls.resets);
+    try cmds.submit(0);
+    try std.testing.expectEqual(@as(usize, 0), Calls.submits);
+
+    // A control's reset drops open records the same way; Control.run allocates nothing after its dispatch.
+    cmds.recording = true;
+    cmds.pending = 2;
+    var control = Control.init(failing.allocator(), &dev, &cmds, staging, &pipeline, .qmm_fmax);
+    try std.testing.expectError(error.OutOfMemory, control.a.dupe(u8, "x"));
+    control.reset();
+    try std.testing.expectEqual(false, cmds.recording);
+    try std.testing.expectEqual(@as(u32, 0), cmds.pending);
+    try std.testing.expectEqual(@as(usize, 2), Calls.resets);
+    try cmds.submit(0);
+    try std.testing.expectEqual(@as(usize, 0), Calls.submits);
 }
 
 // Comptime constant for the same reason as Fixture.vt: the Kernel keeps a pointer to it.
