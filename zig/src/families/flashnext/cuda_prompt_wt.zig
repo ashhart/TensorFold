@@ -524,6 +524,7 @@ pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefi
     defer if (inject) gpa.free(inj_w);
     defer if (inject) gpa.free(inj_s);
     defer if (inject) gpa.free(inj_b);
+    try @import("readout_fused.zig").refuse("CUDA with an MLX affine read-out", @import("readout_fused.zig").on());
     const k8 = wide / 8;
     if (words.len != n * k8 * 4) return error.UnexpectedTensor;
     var down_q = try uploadTiled(gpa, driver, words, scales, biases, n, k8);

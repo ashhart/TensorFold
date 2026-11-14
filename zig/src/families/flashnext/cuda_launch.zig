@@ -24,6 +24,9 @@ pub const qmm = @import("cuda_qmm.zig");
 pub const batch_state = @import("cuda_batch_state.zig");
 pub const batch_gdn_lanes = @import("cuda_batch_gdn_lanes.zig");
 pub const tile_kernels = @import("cuda_tile_kernels.zig");
+/// The prompt tiles' launches, the fused BF16 read-out's among them, which flashnext-readout-fused compares.
+pub const tiles = @import("cuda_tiles.zig");
+pub const readout_fused = @import("readout_fused.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
 pub const moe = @import("cuda_moe.zig");

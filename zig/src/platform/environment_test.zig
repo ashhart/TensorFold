@@ -40,6 +40,8 @@ const valid = [_]Case{
     .{ .name = "TF_CACHE_EVICT", .raw = "decayed_resume", .n = 1 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .raw = "1", .n = 1 },
+    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "0", .n = 0 },
+    .{ .name = "TF_FLASHNEXT_READOUT_FUSED", .raw = "1", .n = 1 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_VIDEO_TOKENS", .raw = "18446744073709551615", .n = std.math.maxInt(u64) },
     .{ .name = "TENSORFOLD_MAX_PDF_PAGES", .raw = "4294967295", .n = std.math.maxInt(u32) },

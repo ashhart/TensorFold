@@ -1,4 +1,4 @@
-//! The prompt tiles' modules (flashnext_fact, _hcf and _fexp): their instances' names, shared bytes and loading.
+//! The prompt tiles' modules (flashnext_fact, _hcf, _hcn and _fexp): their instances' names, shared bytes and loading.
 const cuda = @import("cuda");
 
 /// Prompt rows on qmm.cu's arithmetic (flashnext_fact.cu): 64 x 128 tiles, two groups a stage, the lane tile's bits.
@@ -15,6 +15,21 @@ pub const fexp_smem: u32 = 41472;
 pub const fexp_tile: usize = 64;
 pub const cubin_fact_fold: [:0]const u8 = "_ZN4fact11fact_kernelILi64ELi128ELi2ELi4ELi3ELi2ELb0ELi2ELb1ELb1ELb1EEEvPK13__nv_bfloat16PKfPKjS3_S3_PvPfiiiiiii";
 pub const fact_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4);
+/// The BF16 read-out's fused prompt tiles (flashnext_hcn.cu): the down in CTAs of 16 * mt rows, the up+mix at mt 3.
+pub const hcn_down_names = [_][:0]const u8{ "fn_hcn_down2", "fn_hcn_down3", "fn_hcn_down4" };
+pub const hcn_down_mt = [_]usize{ 2, 3, 4 };
+pub const hcn_up_name: [:0]const u8 = "fn_hcn_up3";
+pub const hcn_up_mt: usize = 3;
+
+/// hcn::DnShape's shared bytes: three stages of 16 * mt rows of 64 columns, and the rows' scales.
+pub fn hcnDownSmem(mt: usize) u32 {
+    return @intCast(3 * 16 * mt * 128 + 16 * mt * 8 * 4);
+}
+
+/// hcn::UpShape's shared bytes at K = 320: the act rows (later the terms), the streams' columns and the rows' scales.
+pub fn hcnUpSmem(mt: usize) u32 {
+    return @intCast(16 * mt * (640 + 256 + 16));
+}
 
 pub const TileKernels = struct {
     fact_mod: cuda.Module,
@@ -23,6 +38,9 @@ pub const TileKernels = struct {
     hcf_mod: cuda.Module,
     hcf_down: cuda.Function,
     hcf_up: cuda.Function,
+    hcn_mod: cuda.Module,
+    hcn_down: [hcn_down_names.len]cuda.Function,
+    hcn_up: cuda.Function,
     fexp_mod: cuda.Module,
     fexp_up: cuda.Function,
     fexp_down: cuda.Function,
@@ -47,10 +65,19 @@ pub const TileKernels = struct {
         try k.hcf_down.allowDynamicShared(hcf_down_smem);
         k.hcf_up = try k.hcf_mod.function(cubin_hcf_up);
         try k.hcf_up.allowDynamicShared(hcf_up_smem);
+        k.hcn_mod = try cuda.Module.load(d, cuda.kernels.flashnext_hcn);
+        errdefer k.hcn_mod.unload();
+        for (&k.hcn_down, hcn_down_names, hcn_down_mt) |*f, sym, mt| {
+            f.* = try k.hcn_mod.function(sym);
+            try f.allowDynamicShared(hcnDownSmem(mt));
+        }
+        k.hcn_up = try k.hcn_mod.function(hcn_up_name);
+        try k.hcn_up.allowDynamicShared(hcnUpSmem(hcn_up_mt));
         return k;
     }
 
     pub fn unload(k: *TileKernels) void {
+        k.hcn_mod.unload();
         k.hcf_mod.unload();
         k.fexp_mod.unload();
         k.fact_mod.unload();
