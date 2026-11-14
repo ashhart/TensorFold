@@ -21,6 +21,57 @@ fn rowNll(x: []const f32, t: u32) struct { nll: f64, top: bool } {
     return .{ .nll = mx + @log(sum) - @as(f64, x[t]), .top = arg == t };
 }
 
+/// Per-position paired sums of arm B against arm A: NLL of the true next token and top-1 hits.
+const Pairs = struct { n: usize = 0, nll_a: f64 = 0, nll_b: f64 = 0, top_a: usize = 0, top_b: usize = 0, dn: f64 = 0, dn2: f64 = 0, dt: f64 = 0, dt2: f64 = 0 };
+
+fn add(q: *Pairs, nll_a: f64, top_a: bool, nll_b: f64, top_b: bool) void {
+    const dn = nll_b - nll_a;
+    const dt = @as(f64, @floatFromInt(@intFromBool(top_b))) - @as(f64, @floatFromInt(@intFromBool(top_a)));
+    q.n += 1;
+    q.nll_a += nll_a;
+    q.nll_b += nll_b;
+    q.top_a += @intFromBool(top_a);
+    q.top_b += @intFromBool(top_b);
+    q.dn += dn;
+    q.dn2 += dn * dn;
+    q.dt += dt;
+    q.dt2 += dt * dt;
+}
+
+/// Quality gate 2 (fixed before any run): B's NLL no worse than A's by 2 SE of the paired difference, top-1 likewise.
+const Verdict = struct { dn: f64, se_n: f64, dt: f64, se_t: f64, ok_n: bool, ok_t: bool };
+
+fn verdict(q: Pairs) Verdict {
+    const nf: f64 = @floatFromInt(q.n);
+    const dn = q.dn / nf;
+    const se_n = @sqrt(@max(0, q.dn2 / nf - dn * dn) / (nf - 1));
+    const dt = q.dt / nf;
+    const se_t = @sqrt(@max(0, q.dt2 / nf - dt * dt) / (nf - 1));
+    return .{ .dn = dn, .se_n = se_n, .dt = dt, .se_t = se_t, .ok_n = dn <= 2 * se_n, .ok_t = dt >= -2 * se_t };
+}
+
+test "gate 2's verdict: equal arms pass, a planted-worse arm fails on NLL and on top-1" {
+    var prng = std.Random.DefaultPrng.init(2);
+    const r = prng.random();
+    var same: Pairs = .{};
+    var worse: Pairs = .{};
+    var lower: Pairs = .{};
+    for (0..4000) |_| {
+        const base = 1.0 + r.float(f64);
+        const noise = (r.float(f64) - 0.5) * 0.01;
+        const top = r.float(f64) < 0.7;
+        add(&same, base, top, base + noise, top);
+        add(&worse, base, top, base + 0.05 + noise, top);
+        add(&lower, base, top, base + noise, top and r.float(f64) < 0.95);
+    }
+    const a = verdict(same);
+    const b = verdict(worse);
+    const c = verdict(lower);
+    try std.testing.expect(a.ok_n and a.ok_t);
+    try std.testing.expect(!b.ok_n);
+    try std.testing.expect(!c.ok_t);
+}
+
 fn has(list: []const u8, name: []const u8) bool {
     var it = std.mem.splitScalar(u8, list, ',');
     while (it.next()) |w| if (std.mem.eql(u8, w, name)) return true;
@@ -75,6 +126,8 @@ test "dsv41 metal gate: each passage's last 128 rows, decode-arithmetic prompt r
     var prompt = try pr.Prompt.init(te.device, c, o, limit);
     // floor: decode arithmetic with the FP8 prompt rows' tile roots added in a chain, a pure fp32 reordering
     const only = env("TF_DSV41_GATE_ONLY") orelse "";
+    // TF_DSV41_GATE_CTL=worse: arm B's logits at half scale, a planted-worse control that must fail the gate
+    const worse = std.mem.eql(u8, env("TF_DSV41_GATE_CTL") orelse "", "worse");
     const plain = p.mma;
     const chain = if (std.mem.eql(u8, only, "floor")) blk: {
         const src = try std.Io.Dir.cwd().readFileAlloc(io, "zig/kernels/metal/deepseek_v41/fp8_mma.metal", a, .limited(1 << 22));
@@ -88,7 +141,7 @@ test "dsv41 metal gate: each passage's last 128 rows, decode-arithmetic prompt r
     var kl_max: f64 = 0;
     var rows: usize = 0;
     var agree: usize = 0;
-    var q: struct { n: usize = 0, nll_a: f64 = 0, nll_b: f64 = 0, top_a: usize = 0, top_b: usize = 0, dn: f64 = 0, dn2: f64 = 0, dt: f64 = 0, dt2: f64 = 0 } = .{};
+    var q: Pairs = .{};
     for (parsed.value, 0..) |ids, pi| {
         var out: [2][]f32 = undefined;
         for (0..2) |mode| {
@@ -102,6 +155,9 @@ test "dsv41 metal gate: each passage's last 128 rows, decode-arithmetic prompt r
             defer tail.deinit();
             try prompt.run(penv, &slot, &tail, ids);
             out[mode] = try a.dupe(f32, prompt.logits(c)[0 .. prompt.head * V]);
+            if (mode == 1 and worse) for (out[1]) |*x| {
+                x.* *= 0.5;
+            };
         }
         // gate 2: each scored row's true next token (the last row has none in the passage)
         const n = ids.len;
@@ -109,17 +165,7 @@ test "dsv41 metal gate: each passage's last 128 rows, decode-arithmetic prompt r
             const t = ids[n - prompt.head + r + 1];
             const ea = rowNll(out[0][r * V ..][0..V], t);
             const eb = rowNll(out[1][r * V ..][0..V], t);
-            const dn = eb.nll - ea.nll;
-            const dt = @as(f64, @floatFromInt(@intFromBool(eb.top))) - @as(f64, @floatFromInt(@intFromBool(ea.top)));
-            q.n += 1;
-            q.nll_a += ea.nll;
-            q.nll_b += eb.nll;
-            q.top_a += @intFromBool(ea.top);
-            q.top_b += @intFromBool(eb.top);
-            q.dn += dn;
-            q.dn2 += dn * dn;
-            q.dt += dt;
-            q.dt2 += dt * dt;
+            add(&q, ea.nll, ea.top, eb.nll, eb.top);
         }
         var pk: f64 = 0;
         var pa: usize = 0;
@@ -138,13 +184,10 @@ test "dsv41 metal gate: each passage's last 128 rows, decode-arithmetic prompt r
     const share = @as(f64, @floatFromInt(agree)) / @as(f64, @floatFromInt(rows));
     const pass = mean <= 1e-4 and share >= 0.99;
     std.debug.print("gate {s}: {d} rows, mean KL {e:.3} nats (max {e:.3}), top-1 agreement {d:.2}%\n", .{ if (pass) "PASS" else "FAIL", rows, mean, kl_max, share * 100 });
-    // quality gate 2 (fixed before any run): B's NLL of the true next token no worse than A's by 2 SE, top-1 likewise
+    const v = verdict(q);
     const nf: f64 = @floatFromInt(q.n);
-    const dn = q.dn / nf;
-    const se_n = @sqrt(@max(0, q.dn2 / nf - dn * dn) / (nf - 1));
-    const dt = q.dt / nf;
-    const se_t = @sqrt(@max(0, q.dt2 / nf - dt * dt) / (nf - 1));
-    const ok_n = dn <= 2 * se_n;
-    const ok_t = dt >= -2 * se_t;
-    std.debug.print("gate2 {s}: {d} positions; NLL A {d:.5} B {d:.5}, B-A {d:.6} (SE {d:.6}, {s}); top-1 A {d:.4} B {d:.4}, B-A {d:.5} (SE {d:.5}, {s})\n", .{ if (ok_n and ok_t) "PASS" else "FAIL", q.n, q.nll_a / nf, q.nll_b / nf, dn, se_n, if (ok_n) "ok" else "worse", @as(f64, @floatFromInt(q.top_a)) / nf, @as(f64, @floatFromInt(q.top_b)) / nf, dt, se_t, if (ok_t) "ok" else "worse" });
+    const ok = v.ok_n and v.ok_t;
+    std.debug.print("gate2 {s}{s}: {d} positions; NLL A {d:.5} B {d:.5}, B-A {d:.6} (SE {d:.6}, {s}); top-1 A {d:.4} B {d:.4}, B-A {d:.5} (SE {d:.5}, {s})\n", .{ if (ok) "PASS" else "FAIL", if (worse) " (planted-worse control)" else "", q.n, q.nll_a / nf, q.nll_b / nf, v.dn, v.se_n, if (v.ok_n) "ok" else "worse", @as(f64, @floatFromInt(q.top_a)) / nf, @as(f64, @floatFromInt(q.top_b)) / nf, v.dt, v.se_t, if (v.ok_t) "ok" else "worse" });
+    // the gate fails the step; under the planted control it must fail, and the step fails if it does not
+    try std.testing.expect(ok != worse);
 }
