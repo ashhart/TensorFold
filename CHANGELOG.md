@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- CUDA: a captured kernel whose launch `pdl` disagrees with its compiled `PDL` constant is now refused by name when its manifest loads, before any cubin is opened or module loaded; missing, non-integer or disagreeing values fail closed, while matching and legacy specs load and launch as before (#2899, fixes #2715).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
