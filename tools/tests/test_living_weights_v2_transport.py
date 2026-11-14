@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -10,7 +11,11 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/, as the other tool tests do
+from unittest import mock
+
 from living_weights_v2.transport import Client, TransportError
+
+SSE_LINE_LIMIT = 1024 * 1024  # the documented per-line bound
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -164,6 +169,100 @@ class TransportTests(unittest.TestCase):
         with self.assertRaises(TransportError):
             tuple(FakeClient(self.base, self.key).events("/learn", "POST", {"text": "x"}))
 
+
+    def test_loopback_requests_never_reach_an_ambient_proxy(self):
+        seen = []
+
+        class Proxy(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                seen.append(self.headers.get("Authorization"))
+                body = b'{"data": [{"id": "via-proxy"}]}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{proxy.server_port}"
+        ambient = {name: url for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY")}
+        ambient.update(no_proxy="", NO_PROXY="")
+        try:
+            with mock.patch.dict(os.environ, ambient):
+                self.assertEqual(Client(self.base, self.key).models(), {"local-model"})
+            self.assertEqual(seen, [], "the proxy received the loopback request and its key")
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=5)
+
+    def _stream(self, body: bytes):
+        reads = []
+
+        class Response:
+            def __init__(self):
+                self.at = 0
+
+            def readline(self, limit=-1):
+                end = body.find(b"\n", self.at)
+                end = len(body) if end < 0 else end + 1
+                if limit is not None and limit >= 0:
+                    end = min(end, self.at + limit)
+                line = body[self.at:end]
+                self.at = end
+                reads.append(len(line))
+                return line
+
+            def __iter__(self):
+                return iter(self.readline, b"")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class FakeClient(Client):
+            def _open(self, path, method="GET", payload=None):
+                return Response()
+
+        return FakeClient(self.base, self.key), reads
+
+    def test_sse_line_reads_are_bounded(self):
+        client, reads = self._stream(b"data: " + b"x" * (2 * SSE_LINE_LIMIT) + b"\n\ndata: [DONE]\n\n")
+        with self.assertRaisesRegex(TransportError, "oversized SSE line"):
+            client.teach("x")
+        self.assertLessEqual(max(reads), SSE_LINE_LIMIT + 1, "a whole oversized line was read before the size check")
+
+    def test_sse_stream_kept_by_teach_is_bounded(self):
+        client, _ = self._stream(b"event: progress\ndata: {}\n\n" * 5000 + b"data: [DONE]\n\n")
+        with self.assertRaisesRegex(TransportError, "SSE stream exceeds"):
+            client.teach("x")
+        event = b'data: {"pad": "' + b"y" * (SSE_LINE_LIMIT - 64) + b'"}\n\n'
+        client, _ = self._stream(event * 5 + b"data: [DONE]\n\n")
+        with self.assertRaisesRegex(TransportError, "SSE stream exceeds"):
+            client.teach("x")
+
+    def test_graph_states_are_checked(self):
+        for fact in ({"id": 1}, {"id": 1, "state": 2}, {"id": 1, "state": "archived"}):
+            class Graph(Handler):
+                def do_GET(self, fact=fact):
+                    self._reply({"facts": [fact]})
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), Graph)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with self.subTest(fact=fact), self.assertRaisesRegex(TransportError, "unrecognized state"):
+                    Client(f"http://127.0.0.1:{server.server_port}", self.key).graph()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
 
 if __name__ == "__main__":
     unittest.main()

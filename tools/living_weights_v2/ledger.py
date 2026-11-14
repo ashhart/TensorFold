@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import sqlite3
+import stat
 from dataclasses import asdict
 from pathlib import Path
 from typing import Iterator
@@ -15,13 +16,43 @@ class LedgerError(RuntimeError):
     pass
 
 
+def private_dir(directory: Path) -> None:
+    # Directories this tool creates are 0700; an existing one is left as it is, since it may hold other state.
+    missing = []
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
+    for item in reversed(missing):
+        try:
+            item.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+
+
+def private_journal(path: Path) -> None:
+    """The database, WAL and SHM hold fact text: refuse ones others can open, and create the database 0600."""
+    for item in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+        try:
+            mode = stat.S_IMODE(item.stat().st_mode)
+        except FileNotFoundError:
+            continue
+        if mode & 0o077:
+            raise LedgerError(f"{item} is open to other users (mode {mode:o}) and holds fact text; "
+                              "run chmod 600 on it first")
+    private_dir(path.parent)
+    try:
+        os.close(os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600))
+    except FileExistsError:
+        pass
+
+
 @contextlib.contextmanager
 def exclusive_file(path: Path) -> Iterator[None]:
     try:
         import fcntl
     except ImportError as exc:
         raise LedgerError("exclusive locking requires a POSIX host") from exc
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(path.parent)
     descriptor = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         import fcntl
@@ -36,7 +67,7 @@ def exclusive_file(path: Path) -> Iterator[None]:
 class Ledger:
     def __init__(self, path: Path):
         self.path = path
-        path.parent.mkdir(parents=True, exist_ok=True)
+        private_journal(path)  # SQLite gives the WAL and SHM the database file's mode
         self.db = sqlite3.connect(path, timeout=2)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
