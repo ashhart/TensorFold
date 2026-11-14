@@ -120,6 +120,8 @@ test "dsv41 metal: a prompt's chunks on a Metal 4 queue equal a Metal 3 queue's:
 
 test "dsv41 metal: timestamped decode rounds on Metal 4 change no bit, and their stages are summed" {
     const a = testing.allocator;
+    mtl.Pipeline.labels(true); // the timeline names stages by their pipelines' labels
+    defer mtl.Pipeline.labels(false);
     const f = try ff.Fwd.init(a, testing.io, limit, 74);
     defer f.deinit();
     if (!f.r.device.hasMetal4()) return error.SkipZigTest;
@@ -138,4 +140,50 @@ test "dsv41 metal: timestamped decode rounds on Metal 4 change no bit, and their
     std.debug.print("dsv41 metal 4 timeline: {s}: {d} stamped rounds, {d} encoders, {d} kernels, {d:.3} ms in stages a round\n", .{ r.name, r.done, r.encoders, r.kernels.count(), r.inside * 1e3 / @as(f64, @floatFromInt(r.done)) });
     try testing.expectEqual(@as(u32, 2), r.done);
     try testing.expect(r.encoders >= 1 and r.kernels.count() > 4 and r.inside > 0 and r.fits);
+}
+
+test "metal 4: a queue closed while a feedback is still owed keeps its memory; one with every feedback frees it" {
+    const a = testing.allocator;
+    const f = try ff.Fwd.init(a, testing.io, limit, 75);
+    defer f.deinit();
+    if (!f.r.device.hasMetal4()) return error.SkipZigTest;
+    // every commit reported: freed
+    const done = mtl.metal4.State.open(f.r.device.id, 0) orelse return error.SkipZigTest;
+    const q1: mtl.Queue = .{ .id = done.queue, .m4 = done };
+    const cb = q1.commandBuffer();
+    cb.blit().end();
+    cb.commit();
+    cb.wait();
+    try testing.expect(cb.failure() == null);
+    try testing.expect(!done.closeWithin(1000));
+    // a commit whose feedback has not arrived (a late handler): the State stays, so the handler writes live memory
+    const late = mtl.metal4.State.open(f.r.device.id, 0) orelse return error.SkipZigTest;
+    late.slots[0].commits += 1;
+    try testing.expect(late.closeWithin(100));
+    _ = late.slots[0].seen.fetchAdd(1, .release); // the late feedback lands on storage that is still there
+    std.debug.print("PASS metal 4 close: freed with every feedback in, kept with one owed\n", .{});
+}
+
+test "dsv41 metal: the round profiler reads and drops its pending round before the queue closes" {
+    const a = testing.allocator;
+    const f = try ff.Fwd.init(a, testing.io, limit, 76);
+    defer f.deinit();
+    if (!f.r.device.hasMetal4()) return error.SkipZigTest;
+    const m4 = try f.r.device.queue4();
+    var slot = try pkg.kv.Slot.init(a, f.r.device, &f.r.c, limit);
+    defer slot.deinit();
+    fixture.fillPast(&f.r.c, &slot, 1101, 14);
+    pkg.round_prof.force(true);
+    defer pkg.round_prof.force(false);
+    const hist = try ff.ids(a, &f.r.c, look + 1, 77);
+    defer a.free(hist);
+    try fwd.prepare(&f.b, &f.r.c, hist[look..][0..1], ff.lookbackAt(hist, look, look), f.lookup());
+    try f.r.s.writeRows(&f.r.c, 1101, 1);
+    const x = f.r.ctx(&slot, 1101, 1);
+    try fwd.run(&x, m4, f.model(), &f.b);
+    try testing.expect(pkg.round_prof.holding()); // Metal 4 reports GPU times later: the round waits to be read
+    pkg.round_prof.forget();
+    try testing.expect(!pkg.round_prof.holding());
+    m4.deinit();
+    std.debug.print("PASS dsv41 metal round profiler: nothing pending once its queue closes\n", .{});
 }
