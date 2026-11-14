@@ -25,7 +25,7 @@ const Args = extern struct { rows: u32, heads: u32, scale: f32, pad: u32 = 0 };
 const dec_names = [_][:0]const u8{ "tf_dsv41_attn_dec_f32", "tf_dsv41_attn_dec_bf16" };
 const pf_names = [_][:0]const u8{ "tf_dsv41_attn_dec_pf_f32", "tf_dsv41_attn_dec_pf_bf16" };
 /// Decode launches of at most this many rows load each step's keys a step ahead (the same math, so the same bits).
-pub const prefetch_rows = 2;
+pub const prefetch_rows = 64;
 const pre_names = [_][:0]const u8{ "tf_dsv41_attn_pre_f32", "tf_dsv41_attn_pre_bf16" };
 
 pub const Pipelines = struct {

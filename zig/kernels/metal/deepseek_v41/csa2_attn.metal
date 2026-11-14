@@ -57,8 +57,9 @@ struct TfAccN {
 };
 typedef TfAccN<TF_ATTN_HS> TfAcc;
 
-inline float tf_attn_lo(uint w) { return as_type<float>(w << 16); }
-inline float tf_attn_hi(uint w) { return as_type<float>(w & 0xFFFF0000u); }
+// The two bf16 halves of a word widened through the bfloat type (exact: a bf16 value is an fp32 value).
+inline float tf_attn_lo(uint w) { return float(as_type<bfloat2>(w).x); }
+inline float tf_attn_hi(uint w) { return float(as_type<bfloat2>(w).y); }
 
 inline void tf_attn_x16(TfKey k, thread float* x) {
   for (uint j = 0; j < 4; ++j) {
@@ -334,23 +335,12 @@ template <typename T, bool PF>
 
 // A simdgroup's heads share each key's loads; keys come from device memory, a run's indices four at a time.
 
-// A key's 16 dims widened through the bfloat type: the values tf_attn_x16 makes.
-inline void tf_attn_pwiden(TfKey k, thread float* x) {
-  for (uint j = 0; j < 4; ++j) {
-    const bfloat2 a = as_type<bfloat2>(k.a[j]), b = as_type<bfloat2>(k.b[j]);
-    x[2 * j] = float(a.x);
-    x[2 * j + 1] = float(a.y);
-    x[8 + 2 * j] = float(b.x);
-    x[8 + 2 * j + 1] = float(b.y);
-  }
-}
-
 // One key for PH heads, lane l holding head l % PH's score: a head whose max rose is rescaled, then each head adds it.
 
 // The steps and their order are tf_attn_update's, so each head's sums carry the decode kernel's bits.
 inline void tf_attn_pkey(thread TfAccN<TF_ATTN_PH>& s, thread const float (*q)[16], TfKey k, float scale, uint lane) {
   float x[16], v[TF_ATTN_PH];
-  tf_attn_pwiden(k, x);
+  tf_attn_x16(k, x);
   for (uint hh = 0; hh < TF_ATTN_PH; ++hh) {
     v[hh] = 0.0f;
     for (uint i = 0; i < 16; ++i) v[hh] = tf_attn_step(v[hh], q[hh][i], x[i]);
@@ -394,7 +384,7 @@ template <typename T>
   float q[TF_ATTN_PH][16];
   for (uint hh = 0; hh < TF_ATTN_PH; ++hh) {
     const ulong at = (ulong(r) * a.heads + h0 + min(hh, nh - 1)) * (TF_ATTN_D / 8) + 2 * lane;
-    tf_attn_pwiden(TfKey{Q[at], Q[at + 1]}, q[hh]);
+    tf_attn_x16(TfKey{Q[at], Q[at + 1]}, q[hh]);
   }
   TfAccN<TF_ATTN_PH> s;
   tf_attn_zero(s);
