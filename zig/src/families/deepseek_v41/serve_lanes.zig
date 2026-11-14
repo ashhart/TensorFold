@@ -44,6 +44,8 @@ pub const Model = struct {
     on_thread: ?api.LaneHost.ThreadInit = null,
     /// /metrics' device memory; null: Engine.memory reports none
     memory: ?api.MemorySource = null,
+    /// the idle ticker that keeps the weights wired between requests (null: the backend holds no residency)
+    keepalive: ?api.keepalive.Target = null,
     health: ?api.HealthSource = null,
     /// TF_DSV41_PREFILL_PIECES=1: the batcher plans the host's rounds
     rounds: ?*const fn (ptr: *anyopaque, gpa: Allocator, io: std.Io, host: *api.LaneHost) anyerror!void = null,
@@ -58,6 +60,8 @@ pub const Model = struct {
     vision: ?api.Vision = null,
     /// the calibration knobs (null: TF_DSV41_CALIB / _DIR / _FILE and HOME, as read at open)
     calib: ?calib_env.Knobs = null,
+    /// the draft trees' knobs (null: TF_DSV41_TREE / _DUP_MS / _ROWS, as read at open)
+    trees: ?tree.Settings = null,
 };
 
 pub const Served = struct {
@@ -120,7 +124,7 @@ pub const Served = struct {
             pass = s.tpass.pass();
         }
         // draft trees (TF_DSV41_TREE / _DUP_MS / _ROWS; off by default): first-position siblings
-        const trees = if (dspark_on) try tree.Settings.fromEnv() else tree.Settings{};
+        const trees = if (dspark_on) backend.trees orelse try tree.Settings.fromEnv() else tree.Settings{};
         s.x = try ln.Lanes.init(gpa, tgt, pass, s.costs, .{ .shape = backend.shape, .slots = backend.slots, .siblings = trees.siblings, .sib_rows = trees.sib_rows, .dup = trees.dup, .depth = try calib_env.depthSettings(&calib_env.env), .spec = if (dspark_on) try spec.Settings.fromEnv() else .{}, .plain_streams_default = 3 });
         s.arena = std.heap.ArenaAllocator.init(gpa);
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
@@ -139,6 +143,7 @@ pub const Served = struct {
         s.host.on_thread = backend.on_thread;
         // /metrics' device memory: bytes this rank holds (weights, KV pool, staging), peak
         s.host.memory = backend.memory;
+        s.host.keepalive_target = backend.keepalive;
         s.host.health = backend.health;
         // TF_DSV41_PREFILL_PIECES=1: the batcher plans the rounds; served shape only, same setting on every rank
         if (backend.rounds) |rounds| try rounds(backend.ptr, gpa, io, &s.host);
