@@ -171,6 +171,23 @@ fn promiseRows(b: *const Metal, s: *const lanes.Stream) u32 {
     return @intCast(@min(rows, b.runner.capacity));
 }
 
+/// Backend.grow: a paged slot holds the pages of every row `w` writes, its tree's included; false ends its stream.
+pub fn grow(ptr: *anyopaque, w: lanes.backend.Window) bool {
+    const b: *Metal = @ptrCast(@alignCast(ptr));
+    if (b.runner.kv == null) return true;
+    b.settle() catch return true; // verify meets the same failure and reports it as it does today
+    promoteDue(b); // as verify would: the slot the round writes
+    const slot = b.slotFor(w.stream) catch return true;
+    const from = b.runner.offsets[slot];
+    const to = from + @as(u32, @intCast(w.rows()));
+    b.runner.cover(slot, to) catch |err| {
+        b.outgrown += 1;
+        std.log.warn("qwen27: slot {d} found no KV pages for rows {d}..{d} ({s}); its stream ends with length ({d} so far)", .{ slot, from, to, @errorName(err), b.outgrown });
+        return false;
+    };
+    return true;
+}
+
 /// One chunk of `s`'s prompt pass a call (the lane host's prefill_step), the others' rounds kept first.
 pub fn prefillStep(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
     const b: *Metal = @ptrCast(@alignCast(ptr));
