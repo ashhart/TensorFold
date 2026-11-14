@@ -203,8 +203,8 @@ test "profile: arch-specific kernels take sm_<n>a from sm_120 on, others plain, 
     try std.testing.expectEqual(@as(?Profile, null), profile(plain, Target.parse("75")));
 }
 
-test "native_fp units: exactly fp8_experts, qmmf and prompt16 (without the flag native-fp only skips)" {
-    const want = [_][]const u8{ "fp8_experts", "qmmf", "prompt16" };
+test "native_fp units: exactly fp8_experts, qmmf, prompt16 and prompt_many (without the flag native-fp only skips)" {
+    const want = [_][]const u8{ "fp8_experts", "qmmf", "prompt16", "prompt_many" };
     var seen: usize = 0;
     for (kernels) |k| {
         if (!k.native_fp) continue;
