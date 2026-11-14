@@ -29,7 +29,26 @@ fn pickCtx(ctx: *anyopaque, row: []const f32, position: u64, s: api.Sampling) !u
     return pickRow(gpa.*, row, position, s);
 }
 
-fn pickRow(gpa: Allocator, row: []const f32, position: u64, s: api.Sampling) !u32 {
+/// The same draw from the card's top_k candidates (1 <= top_k <= 64), widened to f64 as pickRow's scan holds them.
+fn pickCandCtx(ctx: *anyopaque, vals: []const f32, ids: []const u32, bad: bool, position: u64, s: api.Sampling) !u32 {
+    const gpa: *const Allocator = @ptrCast(@alignCast(ctx));
+    return pickCand(gpa.*, vals, ids, bad, position, s);
+}
+
+pub fn pickCand(gpa: Allocator, vals: []const f32, ids: []const u32, bad: bool, position: u64, s: api.Sampling) !u32 {
+    if (bad) return error.NonfiniteLogits; // a value anywhere in the row, as pickRow's scan finds it
+    const k: usize = s.top_k;
+    if (s.temperature <= 0 or k == 0 or k > 64 or vals.len != k or ids.len != k) return error.BadCandidates;
+    var v64: [64]f64 = undefined;
+    var id64: [64]u64 = undefined;
+    for (vals, ids, v64[0..k], id64[0..k]) |v, id, *o, *oi| {
+        o.* = v;
+        oi.* = id;
+    }
+    return @intCast(try sampling.choose(gpa, v64[0..k], id64[0..k], position, s));
+}
+
+pub fn pickRow(gpa: Allocator, row: []const f32, position: u64, s: api.Sampling) !u32 {
     if (s.temperature <= 0 or s.top_k == 0 or s.top_k > 256) return pickAll(gpa, row, position, s);
     const k: usize = s.top_k;
     var vals: [256]f64 = undefined;
@@ -139,7 +158,7 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     gpa_box.* = gpa;
     h.gpa = gpa;
     h.cache = null; // gpa.create leaves the defaults unset
-    h.back = .{ .gpa = gpa, .runner = runner, .drafter = drafter, .pick = pickCtx, .pick_ctx = gpa_box, .slots = slots };
+    h.back = .{ .gpa = gpa, .runner = runner, .drafter = drafter, .pick = pickCtx, .pick_cand = pickCandCtx, .pick_ctx = gpa_box, .slots = slots };
     if (std.c.getenv("XPU_BLOCK")) |v| h.back.block = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8;
     if (std.c.getenv("XPU_TREE")) |v| h.back.nodes = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 15;
     if (drafter != null) {

@@ -90,3 +90,83 @@ KERNEL(256) void tf_ctl_fp16_sum(global const ushort *X, global const ushort *W,
   }
   if (lid == 0) Y[row] = (float)bv[0];
 }
+
+// Gate 3: glue_quant.cl's topk_merge with a tie going to the higher id, so equal logits come out in the wrong order.
+static void tf_best_high(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_max(*v == bv ? *i : -1);
+  if (get_sub_group_local_id() == 0) { rv[get_sub_group_id()] = bv; ri[get_sub_group_id()] = bi; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (rv[s] > bv || (rv[s] == bv && ri[s] > bi)) { bv = rv[s]; bi = ri[s]; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+KERNEL(256) void tf_ctl_topk_merge_ties(global const float *PV, global const int *PI, global const int *PF, int K, int NS,
+                                        global uint *OUT) {
+  local float rv[16];
+  local int ri[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  const int live = lid < NS;
+  int ptr = 0;
+  if (lid == 0) {
+    int f = 0;
+    for (int s = 0; s < NS; s++) f |= PF[row * 256 + s];
+    OUT[row * 132 + 128] = f;
+  }
+  for (int k = 0; k < min(K, 64); k++) {
+    float v = live && ptr < K ? PV[((long)row * 256 + lid) * 64 + ptr] : -INFINITY;
+    int i = live && ptr < K ? PI[((long)row * 256 + lid) * 64 + ptr] : -1;
+    float bv = v;
+    int bi = i;
+    tf_best_high(&bv, &bi, rv, ri);
+    if (i == bi) {
+      ptr++;
+      OUT[row * 132 + k] = as_uint(v);
+      OUT[row * 132 + 64 + k] = (uint)i;
+    }
+  }
+}
+
+static void tf_best_low(float *v, int *i, local float *rv, local int *ri) {
+  float bv = sub_group_reduce_max(*v);
+  int bi = sub_group_reduce_min(*v == bv ? *i : 0x7fffffff);
+  if (get_sub_group_local_id() == 0) { rv[get_sub_group_id()] = bv; ri[get_sub_group_id()] = bi; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  bv = rv[0];
+  bi = ri[0];
+  for (int s = 1; s < 16; s++)
+    if (rv[s] > bv || (rv[s] == bv && ri[s] < bi)) { bv = rv[s]; bi = ri[s]; }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  *v = bv;
+  *i = bi;
+}
+
+// Gate 1: glue_quant.cl's topk_merge with the not-finite flag read off the merged candidates, not the whole row.
+KERNEL(256) void tf_ctl_topk_merge_cand_flag(global const float *PV, global const int *PI, global const int *PF, int K,
+                                             int NS, global uint *OUT) {
+  local float rv[16];
+  local int ri[16];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  const int live = lid < NS;
+  int ptr = 0;
+  int seen = 0;
+  for (int k = 0; k < min(K, 64); k++) {
+    float v = live && ptr < K ? PV[((long)row * 256 + lid) * 64 + ptr] : -INFINITY;
+    int i = live && ptr < K ? PI[((long)row * 256 + lid) * 64 + ptr] : 0x7fffffff;
+    float bv = v;
+    int bi = i;
+    tf_best_low(&bv, &bi, rv, ri);
+    seen |= !isfinite(bv);
+    if (i == bi) {
+      ptr++;
+      OUT[row * 132 + k] = as_uint(v);
+      OUT[row * 132 + 64 + k] = (uint)i;
+    }
+  }
+  if (lid == 0) OUT[row * 132 + 128] = seen;
+}
