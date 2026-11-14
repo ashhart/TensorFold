@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const xq = @import("xpu_qwen27");
 const be = lanes.backend;
 const Drafter = xq.drafter.Drafter;
+const logrow = @import("xpu_logrow.zig");
 const Allocator = std.mem.Allocator;
 
 const ring = 64;
@@ -23,7 +24,8 @@ pub const Lanes = struct {
     block: u32 = 8,
     nodes: u32 = 15,
     owners: [xq.MAX_SLOTS]?*lanes.Stream = @splat(null),
-    first_logits: [xq.MAX_SLOTS]?[]f32 = @splat(null), // a sampled or structured stream's prompt-row logits, for `first`
+    first_logits: [xq.MAX_SLOTS]?[]f32 = @splat(null), // a sampled, structured or logprobs stream's prompt-row logits
+    first_pick: [xq.MAX_SLOTS]u32 = @splat(0), // the token `first` drew from them, for the logprob row
     mask_rows: [16]u32 = undefined, // a verify's greedy structured rows (argmaxMasked on the device)
     mask_bits: ?[]u32 = null, // and their grammar bits, gathered
     masked_vals: ?[]f64 = null, // a structured sampled row's allowed candidates
@@ -60,7 +62,7 @@ pub const Lanes = struct {
     }
 
     pub fn backend(b: *Lanes) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_features = prefillFeaturesFn, .features = featuresFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .prefill_features = prefillFeaturesFn, .features = featuresFn, .first = firstFn, .first_masked = firstMaskedFn, .first_row = firstRowFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn } };
     }
 
     /// What the round loop reads: chains of up to 16 rows, all streams' windows in one shared forward, DFlash2 drafts
@@ -237,7 +239,7 @@ pub const Lanes = struct {
             at = end;
             if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, @intCast(at));
         }
-        if (s.sampling != null or s.grammar != null) {
+        if (s.sampling != null or s.grammar != null or s.logprobs != null) {
             const row = try r.logits();
             const keep = b.first_logits[slot] orelse try b.gpa.alloc(f32, row.len);
             @memcpy(keep, row);
@@ -311,7 +313,16 @@ pub const Lanes = struct {
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const b = self(ptr);
         const slot = b.slotOf(s) orelse return error.UnknownStream;
-        return b.push(try b.draw(s, slot, b.first_logits[slot], position));
+        const token = try b.draw(s, slot, b.first_logits[slot], position);
+        b.first_pick[slot] = token;
+        return b.push(token);
+    }
+
+    /// The prompt's last row for a logprobs stream: the raw distribution the first token was drawn from.
+    fn firstRowFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!lanes.LogprobRow {
+        const b = self(ptr);
+        const slot = b.slotOf(s) orelse return error.UnknownStream;
+        return logrow.row(b.first_logits[slot] orelse return error.NoLogits, b.first_pick[slot], s.logprobs orelse 0);
     }
 
     /// Structured output: the stream's draw among the tokens `mask` allows, greedy (first argmax) or sampled (keyed)
@@ -350,7 +361,9 @@ pub const Lanes = struct {
     fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
         const b = self(ptr);
         const slot = b.slotOf(s) orelse return error.UnknownStream;
-        return b.push(try b.drawMasked(s, b.first_logits[slot] orelse return error.NoLogits, position, mask));
+        const token = try b.drawMasked(s, b.first_logits[slot] orelse return error.NoLogits, position, mask);
+        b.first_pick[slot] = token;
+        return b.push(token);
     }
 
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -438,6 +451,7 @@ pub const Lanes = struct {
             }
             @memcpy(o.drafts, w.tokens);
         }
+        try logrow.windowRows(r, windows, out, b.widths[0..windows.len]); // logprobs, for the streams that asked
         b.count = windows.len;
     }
 
@@ -482,7 +496,10 @@ pub const Lanes = struct {
         defer b.direct = false;
         try b.prefillSlot(s, 0);
         const pending = try b.draw(s, 0, b.first_logits[0], s.prompt_len);
-        _ = try s.commit(b.gpa, &.{pending}, &.{});
+        b.first_pick[0] = pending;
+        var first_row: [1]lanes.LogprobRow = undefined;
+        if (s.logprobs) |k| first_row[0] = logrow.row(b.first_logits[0] orelse return error.NoLogits, pending, k);
+        _ = try s.commit(b.gpa, &.{pending}, if (s.logprobs != null) &first_row else &.{});
         hooks.committed(hooks.ctx);
         handed = try b.alone(s, 0, pending, hooks);
         return handed;
@@ -525,7 +542,9 @@ pub const Lanes = struct {
             defer r.taps_on = false;
             var sampled: Sampled = .{ .b = b, .s = s.sampling orelse .{ .seed = 0 } };
             const drawer: ?xq.drafter.Draw = if (s.sampling) |sp| .{ .ctx = &sampled, .row = Sampled.row, .gumbel = Sampled.gumbel, .temperature = sp.temperature } else null;
-            const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, &out);
+            var logged: logrow.Logged = .{ .runner = b.runner, .k = s.logprobs orelse 0 };
+            const note: ?xq.drafter.Note = if (s.logprobs != null) .{ .ctx = &logged, .f = logrow.Logged.take } else null;
+            const round = try xq.drafter.treeRound(d, pending, b.block - 1, b.nodes, drawer, note, &out);
             s.rounds += 1;
             s.drafted += round.drafted;
             s.accepted += round.accepted;
@@ -533,7 +552,7 @@ pub const Lanes = struct {
             const n = round.tokens.len - 1;
             @memcpy(landed[0..n], round.tokens[1..]);
             landed[n] = round.terminal;
-            _ = try s.commit(b.gpa, landed[0 .. n + 1], &.{});
+            _ = try s.commit(b.gpa, landed[0 .. n + 1], if (s.logprobs != null) logged.rows[0 .. n + 1] else &.{});
             pending = round.terminal;
             hooks.committed(hooks.ctx);
         }

@@ -581,4 +581,5 @@ pub const Drafter = struct {
 
 pub const Draw = dtree.Draw;
 pub const Round = dtree.Round;
+pub const Note = dtree.Note;
 pub const treeRound = dtree.treeRound;

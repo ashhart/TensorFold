@@ -571,6 +571,7 @@ test "the early first token equals the late one after a complete prompt restore"
 
 test {
     _ = @import("drafted_role_test.zig");
+    _ = @import("drafted_rows_test.zig");
     _ = @import("drafted_step_test.zig");
     _ = @import("drafted_held_test.zig");
     _ = @import("drafted_adopt_test.zig");
