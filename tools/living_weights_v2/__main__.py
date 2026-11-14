@@ -11,6 +11,9 @@ from .ledger import Ledger, LedgerError, exclusive_file
 from .schema import ManifestError, load_manifest
 from .transport import Client, TransportError
 
+# The journal needs a private directory of its own (0700), so it is not the shared tensorfold state folder.
+DEFAULT_LEDGER = Path.home() / ".local/state/tensorfold/living-weights-v2/ledger.sqlite3"
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m living_weights_v2", description="External guarded learning controller for native TensorFold Living Weights")
@@ -26,11 +29,11 @@ def main(argv: list[str] | None = None) -> int:
     teach.add_argument("manifest", type=Path)
     teach.add_argument("--base-url", default="http://127.0.0.1:8080")
     teach.add_argument("--api-key-file", type=Path, required=True)
-    teach.add_argument("--ledger", type=Path, default=Path.home() / ".local/state/tensorfold/living-weights-v2.sqlite3")
+    teach.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     teach.add_argument("--allow-remote", action="store_true", help="explicitly allow an authenticated remote server")
     teach.add_argument("--timeout", type=int, default=3600)
     status = sub.add_parser("status", help="show durable audit history and pending recovery")
-    status.add_argument("--ledger", type=Path, default=Path.home() / ".local/state/tensorfold/living-weights-v2.sqlite3")
+    status.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     status.add_argument("--model")
     args = parser.parse_args(argv)
     try:

@@ -68,7 +68,7 @@ These remaining items are not implemented in this PR. Until then, the new contro
 - One controller instance per ledger/checkpoint; avoid direct concurrent `/v1/slide/learn` requests.
 - Prompts are tested at temperature 0 with a fixed token cap; reasoning-on and adversarial role/system-message tests are future native integrations.
 - Model capability remains native-authoritative. A `501` is an unsupported model, not something the controller attempts to bypass.
-- SQLite receipts can contain personal fact text and model answers. Keep the ledger private, rotate it under a managed retention policy, and do not commit it to source control.
+- SQLite receipts can contain personal fact text and model answers. The ledger lives in a directory of its own (by default `~/.local/state/tensorfold/living-weights-v2/`), which must be yours with mode 700; its database, WAL and SHM are 600, and the controller refuses to open a journal where either is not so. Rotate it under a managed retention policy, and do not commit it to source control.
 - No cross-device numerical or performance qualification was performed in this environment.
 
 ## Recommended follow-on PR sequencing
