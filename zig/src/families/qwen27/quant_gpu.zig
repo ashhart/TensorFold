@@ -264,7 +264,7 @@ pub const Kernels = struct {
         const on_reg = reg and (!p.plain or p.reg_copy != null);
         const words = if (p.plain) p.reg_copy orelse p.words else p.words;
         // Row-block prompt passes at every non-reg width on every tensor-unit chip; Ultras keep their long keys.
-        // reg rows take the long key past 128 rows; 8-bit matrices past 16 as whole-prompt row blocks; cooperative never
+        // long key: reg rows past 128; 8-bit past 16 as whole-prompt row blocks; cooperative never
         const long = if (on_reg) longKey(k.long_prompt, k.prompt, rows) else !reg and k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
         const sums: ?Sums = if (on_reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long, reg and !on_reg);
