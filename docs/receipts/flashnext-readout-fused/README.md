@@ -7,8 +7,9 @@ Unset or blank is main's chain.
 
 ## Source and environment
 
-- Main: `d6c4cce602eef4aff235625a5325bb617a9674ff`. Branch: this pull request's first commit on that main (the second
-  changes comments and the test command's dispatch line only).
+- Main: `d6c4cce602eef4aff235625a5325bb617a9674ff`. Branch: this pull request's first commit on that main. The later
+  commits add the kernel contract's entries and controls, tests, docs and pins, and merge main `2ba55ec7d3`, whose 17
+  commits touch no Flash Next, qmmf, kernel-contract or kernel-list file; the arms below were not rerun on it.
 - One NVIDIA GB10 (sm_121), Zig 0.17.0, CUDA 13.3.
 - Checkpoint `nvidia/Qwen3.8-Flash-Next-FP4-Local`, revision `b9ce18a6887e18c089fdea8509a33e63429a3300`, every arm.
   Its read-out weights are BF16 (`input_mix_weight_down` [320, 10240], `input_mix_weight_up` [10240, 320]).
@@ -98,5 +99,5 @@ with prompt passes of 768 and 3,072 rows. Every equality holds in every arm, and
 ## Not established
 
 GB10 and this checkpoint only. Metal and HIP refusing the setting, and a CUDA checkpoint whose read-out is MLX affine
-refusing it, are covered by a host test, not run on that hardware or on such a checkpoint. The two new kernels are not
-yet registered with the kernel contract.
+refusing it, are covered by a host test, not run on that hardware or on such a checkpoint. The kernel contract's
+records for the four kernels are nvcc 13.3's for sm_80 to sm_121; nvcc 13.0 and 13.2 were not available to compile them.
