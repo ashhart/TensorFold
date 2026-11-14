@@ -112,10 +112,9 @@ pub const Engine = struct {
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
     arena_at: usize = 0,
-    /// Rows a verify forward takes at most, and a window's rows at most.
+    /// Rows at most of a verify forward, a window, and a prompt forward (grid_rows or TF_QWEN35_CHUNK_SOLO's).
     verify_rows: usize,
     window_rows: usize,
-    /// A prompt forward's rows at most (grid_rows, or TF_QWEN35_CHUNK_SOLO's): the scratch rows and the tap rings.
     prompt_rows: usize,
     // weights
     embed_w: u64,
