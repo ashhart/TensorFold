@@ -336,7 +336,6 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     out.api_key = repeated.keys.items;
     out.allowed_host = repeated.hosts.items;
     out.allowed_origin = repeated.origins.items;
-    if (repeated.cors.items.len > 64) return fail(u, a, "at most 64 --cors-origin entries are allowed", .{});
     out.cors_origin = repeated.cors.items;
     if (out.slide_drift_gate and !out.slide) return fail(u, a, "--slide-drift-gate needs --slide", .{});
     var env_buf: [192]u8 = undefined; // a prefill variable the lane host would misread: refused here, by name
