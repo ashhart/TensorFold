@@ -7,7 +7,11 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 
 | Family | Recipe |
 | --- | --- |
+| dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
+| dots.mocr | [Native CUDA text decoder, BF16, one GPU](dots-mocr-cuda.md) |
+| Kimi K3 / K3.1 | [Native Metal bring-up, synthetic only, resident budget refusal](kimi-k3-metal.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
+| Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
@@ -26,20 +30,26 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | LFM2.5-24B-A2B | [Native Metal, MLX 4-bit, shared rounds](lfm2.5-24b-a2b.md) |
 | Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |
 | MiMo-V2.6-Flash | [EXL3 on CUDA, two-rank DGX Spark, DFlash drafts](mimo-v2.6-flash.md) |
+| Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
+| Recursive Flint | [Native Metal, the publisher's affine 4-bit export, reasoning and tool calls](flint.md) |
+
+[Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 
 ## Capability floor
 
-The native binary's CUDA build runs Nemotron 3.5 Lightning on GB10 and on Ampere cards with compute capability 8.0 (the
-A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40). On a Mac, `tensorfold info REPO` prints a
-checkpoint's memory floor: its weights plus a 2 GiB runtime margin. The table below is the Python 0.6.6 engine's, quoted
-from its family pages, not measured per card.
+The native release includes CUDA kernels for sm_80, sm_86, sm_120 and sm_121. This is a build target list, not
+per-card model qualification. Nemotron MLX 4-bit has been checked on GB10, RTX 3090 and RTX PRO 6000.
+The A100 (sm_80) has [kernel-check evidence](../../CHANGELOG.md#1012) from #846, but no served checkpoint on record;
+it is not model-qualified. See [qualified models](../../README.md#qualified-models) for the measured scope.
+`tensorfold info REPO` prints a checkpoint's memory floor: its weights plus a 2 GiB runtime margin. On macOS, a
+Flash Next (`qwen4_exp`) checkpoint instead prints its startup and cold pack budgets.
 
 | Engine | Floor |
 | --- | --- |
-| CUDA, other families | Compute capability 8.9 or newer: Ada RTX 40, Hopper, and Blackwell cards (RTX 50, RTX PRO 6000, DGX Spark GB10). RTX 30 (8.6) is not supported yet. |
-| Flash Next, CUDA | sm_120 and sm_121 only: DGX Spark GB10, RTX 50, RTX PRO 6000. A card below sm_120 refuses Flash Next at startup. |
+| Native CUDA, NVFP4 / FP8 | Nemotron and dense Qwen have non-cluster fallback code for sm_80 to sm_89 (#901, #1470). No NVFP4/FP8 model run on sm_80 to sm_89 is recorded; no A100 model qualification is claimed. Other families keep their own gates. |
+| Flash Next, native CUDA | MLX 4-bit served on a GB10; the ModelOpt/two-local-rank path is experimental. Drafting at multiple ranks requires the prompt cache off. No qualification on every release SM is implied. |
 | Intel GPU (XPU), Nemotron | Experimental. Weights need 17.3 GiB of device memory (18 to 19.4 GB in use from 4k to 128k context); measured on an Arc Pro B70 (32 GB). Cards below 24 GB are untested and a 16 GB card cannot hold the weights. |
-| MLX, Apple Silicon | GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
+| Python 0.6.6 MLX, Apple Silicon | Historical family-page scopes, not measured minimums: GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
 
 New families go on the Zig engine: [adding a Zig family](adding-a-zig-family.md) has the steps in order, what each
 one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the contributor guides cover
@@ -69,6 +79,8 @@ previous start and otherwise end at the first eligible point or after 2,048 toke
 markers, chunks use the 2,048-token grid. Rewriting earlier template text can invalidate reuse.
 The chunk scheme and kernel/runtime identity must match before a stored prefix can be reused.
 
+For CUDA checkpoint loading, see [load-time prefetch](cuda-load-prefetch.md).
+
 ## Measurements
 
 `tools/bench_openai.py` contains public fixtures: a raw Fibonacci-function prompt and a chat prompt asking
@@ -96,6 +108,8 @@ All 0.3.5 decode, prefill, concurrency and peak-memory results are TBD [release-
 results in the CUDA family pages are historical measurements, not release qualification.
 
 ## Kernel checks
+
+For CUDA refactors that promise unchanged machine code, use the [five-SM SASS identity runner](cuda-sass-identity.md).
 
 Use exact equality for serial versus multi-row kernels and committed caches. Use a separate trusted
 forward for model-quality checks; agreement with one's own serial implementation does not establish

@@ -444,6 +444,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 /// The native family entry: GB10s as two TF_TP_* ranks (rank 0 serves; `tf-mimo follow` on rank 1); its own kernels.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, _: ?[]const u8, o: Options) !Loaded {
+    if (comptime @import("builtin").os.tag != .linux) return error.MimoV2RequiresLinux; // fabric/tp sockets and verbs
     if (try ctx.capability() != 121) return error.MimoV2RequiresSm121;
     if (o.lanes == 0 or o.lanes > 16) return error.Slots;
     const su: engine.Setup = .{ .context = o.context, .slots = o.lanes, .drafts = o.drafts };
@@ -526,6 +527,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.NoFreeSlot => "every stream slot is busy: retry once another request ends",
         error.BadSetting => "a TF_TP_* setting is out of range (TF_TP_WORLD 1 to 64, TF_TP_RANK below it, TF_TP_PORT): fix it",
+        error.MimoV2RequiresLinux => "MiMo-V2 requires Linux: its two-rank fabric/tp sockets and verbs are Linux-only",
         error.MimoV2RequiresSm121 => "MiMo-V2 is validated on GB10 (sm_121) only: its kernels' launch records and every receipt are GB10's",
         error.MimoV2RequiresTwoRanks => "MiMo-V2 is validated on two ranks only: set TF_TP_WORLD=2 and run `tf-mimo follow` on rank 1",
         else => null,
@@ -534,17 +536,17 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
-    if (own.session) |ss| {
+    if (comptime @import("builtin").os.tag == .linux) if (own.session) |ss| {
         ss.plan.send(&.{ @backingInt(engine.Op.stop), 0 }) catch {};
-    }
+    };
     own.l.lanes.deinit(own.gpa);
     if (own.l.pins) |*x| x.deinit();
     own.e.deinit();
-    if (own.session) |ss| {
+    if (comptime @import("builtin").os.tag == .linux) if (own.session) |ss| {
         ss.announceStop();
         ss.close();
         own.gpa.destroy(ss);
-    }
+    };
     own.gpa.destroy(own);
 }
 

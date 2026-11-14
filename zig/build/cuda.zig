@@ -292,6 +292,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-nemotron-grants-host", "Nemotron shared head-cost and copy grants without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"Nemotron shared prices:"} })).step);
     @import("rows_host.zig").tests(b, native_modules.api, step);
     const native = native_modules.engines;
+    const registration = b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{ "every registered family", "keep others:" } }));
+    b.step("test-cuda-registration-host", "CUDA capability order and exact host-cache profile membership").dependOn(&registration.step);
     b.step("test-cuda-cache-budget-host", "CUDA cache defaults after stream sizing without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"CUDA cache default"} })).step);
     b.step("test-draft-cuda-host", "CUDA draft source metadata without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"draft sources:"} })).step);
     @import("cuda_family_host.zig").registerCopyFamilies(b, native, step);

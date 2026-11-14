@@ -47,6 +47,7 @@ pub const Engine = struct {
 
     /// Load everything on this rank. `session`: the open TP session (world > 1), null on one GPU.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []const u8, su: Setup, session: ?*tp.Session) !*Engine {
+        if (comptime @import("builtin").os.tag != .linux) return error.MimoV2RequiresLinux;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.* = .{ .gpa = gpa, .d = d, .w = undefined, .k3 = undefined, .ops = undefined, .model = undefined, .s = undefined, .logits = &.{}, .session = session };
@@ -95,6 +96,7 @@ pub const Engine = struct {
     }
 
     fn send(e: *Engine, words: []const i64) !void {
+        if (comptime @import("builtin").os.tag != .linux) return error.MimoV2RequiresLinux;
         if (e.session) |ss| try ss.plan.send(words);
     }
 
@@ -192,4 +194,10 @@ test "the hello carries the setup" {
     const su: Setup = .{ .context = 608256, .slots = 4, .drafts = true };
     try std.testing.expectEqual(su, try setupOf(&hello(su)));
     try std.testing.expectError(error.NoHello, setupOf(&.{ 3, 0 }));
+}
+
+test "MiMo-V2 refuses non-Linux TP sends before touching a session" {
+    if (comptime @import("builtin").os.tag == .linux) return error.SkipZigTest;
+    var e: Engine = undefined;
+    try std.testing.expectError(error.MimoV2RequiresLinux, e.send(&.{}));
 }

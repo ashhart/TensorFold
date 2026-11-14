@@ -197,7 +197,7 @@ pub const Prompt = struct {
                     const k = @min(pr.ps.sc.rows, n - w0);
                     const wts = pr.wts + w0 * cfg.top_k * 4;
                     try m.k3.prompted(s, e, pr.x + w0 * D * 2, D, pr.pick + w0 * cfg.top_k * 4, k, pr.ps);
-                    try m.ops.wsum(s, pr.ps.sc.y, wts, pr.part + w0 * D * 4, k, cfg.top_k, D);
+                    try m.ops.wsum(s, pr.ps.y, wts, pr.part + w0 * D * 4, k, cfg.top_k, D);
                 }
             } else {
                 try pr.proj(s, L.gate.?, pr.x, pr.g, false, n);

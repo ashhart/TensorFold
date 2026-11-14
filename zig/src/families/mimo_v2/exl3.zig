@@ -77,7 +77,7 @@ pub fn uniform(k2s: []const i32) u32 {
 }
 
 /// The prompt kernels' buffers for `rows` rows: the shared prompt scratch and the grouping plan.
-pub const PromptScratch = struct { sc: sx.prompt.Scratch, plan: cuda.grouped.Plan };
+pub const PromptScratch = struct { sc: sx.prompt.Scratch, plan: cuda.grouped.Plan, y: u64 };
 
 pub fn promptScratch(ar: anytype, e: Experts, rows: usize, slots: usize) !PromptScratch {
     const l = e.layer();
@@ -91,7 +91,7 @@ pub fn promptScratch(ar: anytype, e: Experts, rows: usize, slots: usize) !Prompt
         .rank = try ar.zeros((if (wide) pairs else 1) * 4),
         .hist = try ar.zeros((if (wide) (pairs + 1023) / 1024 * e.count else 1) * 4),
     };
-    return .{ .sc = try sx.prompt.scratch(try ar.zeros(try sx.prompt.bytes(l, rows, slots)), l, rows, slots), .plan = groups };
+    return .{ .sc = try sx.prompt.scratch(try ar.zeros(try sx.prompt.bytes(l, rows, slots)), l, rows, slots), .plan = groups, .y = try ar.zeros(pairs * e.dims * 4) };
 }
 
 /// The scratch parts' bytes for `rows` rows of `slots` slots (the shared scratch's, without its alignment).
@@ -158,9 +158,9 @@ pub const Kernels = struct {
         try k.ex.run(s, e.layer(), x, x_stride, .f16, pick, wts, n, out, sc);
     }
 
-    /// Prompt rows' routed experts (x fp16) on the shared prompt kernels: each pair's fp32 output into ps.sc.y.
+    /// Prompt rows' routed experts (x fp16) on the shared prompt kernels: each pair's fp32 output into ps.y.
     pub fn prompted(k: *const Kernels, s: Stream, e: Experts, x: u64, x_stride: usize, pick: u64, n: usize, ps: PromptScratch) !void {
-        try k.ex.prompt.run(&k.ex, k.router, s, e.layer(), x, .f16, x_stride, pick, n, ps.sc, ps.plan);
+        try k.ex.prompt.run(&k.ex, k.router, s, e.layer(), x, .f16, x_stride, pick, n, ps.sc, ps.plan, ps.y, null);
     }
 };
 
