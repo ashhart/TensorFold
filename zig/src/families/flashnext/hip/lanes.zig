@@ -7,6 +7,7 @@ const Engine = @import("engine.zig").Engine;
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
 const head_mod = @import("head.zig");
+const draft_batch = @import("draft_batch.zig");
 const load = @import("load.zig");
 const worker = @import("worker.zig");
 const snapshot = @import("snapshot.zig");
@@ -16,7 +17,7 @@ const be = lanes.backend;
 const draw = serve.draw;
 
 /// Drawn tokens a handle names, newest last.
-const ring = 1024;
+pub const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
 
@@ -70,7 +71,7 @@ pub const Fx = struct {
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
         errdefer gpa.destroy(f);
-        const n = @max(e.o.chunk, cache.max_window) * e.cfg.hc_count;
+        const n = @max(e.o.chunk, cache.max_window * streams) * e.cfg.hc_count;
         const one: u16 = if (e.act == .f16) 0x3c00 else 0x3f80;
         const host = try gpa.alloc(u16, n);
         defer gpa.free(host);
@@ -216,7 +217,7 @@ pub const Fx = struct {
             .hidden_rows = true,
             .batch_rows = @intCast(cache.max_window * f.streams),
             .max_streams = @intCast(f.streams),
-            .draft_streams = false,
+            .draft_streams = drafting,
         };
     }
 
@@ -250,7 +251,7 @@ pub const Fx = struct {
     }
 
     /// The pending window's first `rows` rows kept; the other ranks keep the same.
-    fn mark(f: *Fx, lane: *Lane, rows: usize) !void {
+    pub fn mark(f: *Fx, lane: *Lane, rows: usize) !void {
         const p = lane.pending orelse return;
         if (f.link != null) try f.send(&.{ @backingInt(worker.Op.keep), lane.id, @intCast(rows), @intCast(p.rows) });
         try f.e.keepWindow(&lane.caches, p.tokens[0..p.rows], rows);
@@ -355,17 +356,10 @@ pub const Fx = struct {
         if (lane.head) |*hc| {
             // the head's keys for every prompt row with a next token (the last waits for the first draw)
             const n = if (last) rows - 1 else rows;
-            if (n > 0) _ = try head_mod.run(
-                e.ops(&e.arena),
-                true,
-                m,
-                &e.host,
-                hc,
-                out.streams,
-                prompt[at + 1 ..][0..n],
-                at,
-                f.ones,
-            );
+            if (n > 0) {
+                const seg = [_]forward.Seg{.{ .c = hc, .tokens = prompt[at + 1 ..][0..n], .pos = at }};
+                _ = try head_mod.run(e.ops(&e.arena), true, m, &e.host, &seg, out.streams, f.ones);
+            }
         }
         fill.at = to;
         if (fill.next < fill.count and to == fill.stops[fill.next]) {
@@ -513,73 +507,7 @@ pub const Fx = struct {
 
     /// The head absorbs each stream's kept rows (residual streams and the token after each), then chains its drafts.
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
-        const f = of(ptr);
-        const e = f.e;
-        const m = &e.weights.model;
-        const row_bytes = m.dims.wide() * m.act.size();
-        for (requests) |r| {
-            const lane = f.lanes.get(r.stream) orelse return error.UnknownStream;
-            if (lane.pending) |p| try f.mark(lane, if (r.rows) |kept| kept.len else p.rows);
-            lane.held_n = 0;
-            if (r.position != lane.caches.len + 1) return error.PositionMismatch;
-            const hc = if (lane.head) |*h| h else continue;
-            const token: u32 = if (r.rows != null)
-                r.follow[r.follow.len - 1]
-            else switch (r.first orelse return error.NoFirstToken) {
-                .handle => |at| f.drawn[at % ring],
-                .value => |v| v,
-            };
-            var follow_buf: [cache.max_window]u32 = undefined;
-            const follow: []const u32 = if (r.rows != null) r.follow else blk: {
-                follow_buf[0] = token;
-                break :blk follow_buf[0..1];
-            };
-            const start = lane.caches.len - follow.len;
-            try e.stream.synchronize();
-            e.host.used = 0;
-            e.arena.reset();
-            const o = e.ops(&e.arena);
-            var out = try head_mod.run(
-                o,
-                false,
-                m,
-                &e.host,
-                hc,
-                .{ .ptr = lane.streams.base(), .kind = m.act },
-                follow,
-                start,
-                f.ones,
-            );
-            var mixed = forward.at(out.mixed, (follow.len - 1) * m.dims.hidden);
-            var streams = out.streams.ptr + (follow.len - 1) * row_bytes;
-            const depth = @min(r.depth, max_depth);
-            // a chain past the first round ends after a draft the head gives under the confidence (--mtp-confidence)
-            const stop_under: f32 = if (r.rows != null) @floatCast(e.o.policy.mtp.confidence) else 0.0;
-            var d: usize = 0;
-            var chained: usize = 0;
-            while (d < depth) : (d += 1) {
-                var tok: [1]u32 = undefined;
-                var prob: [1]f32 = undefined;
-                try head_mod.draws(o, m, &e.host, e.stream, mixed, 1, f.draft_ids, &tok, &prob);
-                lane.held[d] = tok[0];
-                chained = d + 1;
-                if (d + 1 == depth or prob[0] < stop_under) break;
-                out = try head_mod.run(
-                    o,
-                    false,
-                    m,
-                    &e.host,
-                    hc,
-                    .{ .ptr = streams, .kind = m.act },
-                    &tok,
-                    lane.caches.len + d,
-                    f.ones,
-                );
-                mixed = out.mixed;
-                streams = out.streams.ptr;
-            }
-            lane.held_n = chained;
-        }
+        try draft_batch.draft(of(ptr), requests);
     }
 
     fn heldFn(ptr: *anyopaque, s: *lanes.Stream, _: std.mem.Allocator) anyerror!?lanes.stream.Held {

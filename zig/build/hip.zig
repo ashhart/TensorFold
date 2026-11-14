@@ -222,6 +222,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     qwen3_run.has_side_effects = true; // the checkpoints and oracle files named by TF_QWEN3_* are not cached inputs
     b.step("qwen3-hip-gpu-build", "Compile the Qwen3 dense GPU checks without running them").dependOn(&qwen3_gpu.step);
     b.step("qwen3-hip-gpu-test", "Qwen3 lastRows on the GPU against transformers (TF_QWEN3_EMBED_*, TF_QWEN3_RERANK_*)").dependOn(&qwen3_run.step);
+    @import("flashnext_gpu.zig").draftBatch(b, target, optimize, gpu);
     const parse_object = compile(b, .{ .name = hipcc, .resolved = hipcc_resolved, .device_lib = device_lib }, hip_arch, b.path("zig/kernels/hip/ops/vision.hip"), "parse-vision.hsaco");
     @import("nemotron_parse_gpu.zig").gpuTests(b, target, host.hip, parse_object);
     @import("nemotron_parse_gpu.zig").modelTests(b, target, optimize, gpu.hip);
