@@ -320,3 +320,51 @@ test "dsv41 metal serve: (g) draft trees (first-position siblings) reply in full
         try testing.expect(pol.trees > 0 and drafted > 0);
     }
 }
+
+test "dsv41 metal serve: (h) two streams with draft trees on two slots, overlapping: each == draft:false == serial" {
+    const p1 = try ids(240, 31);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 4321, .temperature = 0.8, .top_k = 0, .top_p = 1.0 };
+    // one request on both slots: the first stops soon after the second starts, which then decodes mostly alone
+    const asks = [_]Ask{ .{ .prompt = p1, .max = 72, .sampling = hot }, .{ .prompt = p1, .max = 128, .sampling = hot } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const m = try fs.open(gpa, io, seed, .{ .slots = 2 });
+    var md = m.model();
+    md.trees = .{ .siblings = 1, .sib_rows = 4, .dup = .{ .ms = 0.0, .rows = true } };
+    const s = try Served.open(gpa, io, md, ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    // the second request arrives once the first has 64 tokens: each stream decodes alone and beside the other
+    var boxes = [2]Box{ .{}, .{} };
+    defer for (&boxes) |*b| b.deinit();
+    var reqs: [2]api.Request = undefined;
+    for (&reqs, asks) |*r, k| r.* = .{ .prompt = k.prompt, .max_tokens = k.max, .sampling = k.sampling };
+    try e.submit(900, &reqs[0], .{ .ctx = &boxes[0], .event = Box.event });
+    for (0..600_000) |_| {
+        boxes[0].mutex.lockUncancelable(io);
+        const n = boxes[0].out.items.len;
+        boxes[0].mutex.unlock(io);
+        if (n >= 64) break;
+        std.Io.sleep(io, .fromMilliseconds(1), .awake) catch {};
+    }
+    try e.submit(901, &reqs[1], .{ .ctx = &boxes[1], .event = Box.event });
+    for (&boxes) |*b| try b.wait();
+    var plain_drafted: u64 = 0;
+    var plain: [2][]u32 = undefined;
+    try serve(e, &.{ .{ .prompt = p1, .max = 72, .sampling = hot, .drafts = false }, .{ .prompt = p1, .max = 128, .sampling = hot, .drafts = false } }, true, &plain, &plain_drafted);
+    defer freeAll(&plain);
+    var bad: usize = 0;
+    for (boxes, want, plain, asks) |b, w, p, k| {
+        try testing.expectEqual(api.Reason.length, b.reason.?);
+        try testing.expectEqual(@as(usize, k.max), b.out.items.len);
+        bad += @intFromBool(!std.mem.eql(u32, w, b.out.items)) + @intFromBool(!std.mem.eql(u32, w, p));
+    }
+    const pol = s.x.policy;
+    const st = m.t.tree.stats;
+    const each = st.by_slot[0] > 0 and st.by_slot[1] > 0;
+    say(bad == 0 and each, "(h) two streams, trees on: {d} of 4 replies differ from serial; {d} + {d} tree windows by slot, {d} sibling wins, {d} adopted, {d} drafted rows", .{ bad, st.by_slot[0], st.by_slot[1], pol.sib_wins, st.adopted, boxes[0].drafted + boxes[1].drafted });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expect(each and boxes[0].drafted > 0 and boxes[1].drafted > 0);
+}
