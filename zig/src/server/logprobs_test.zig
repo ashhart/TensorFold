@@ -470,3 +470,125 @@ test "logprobs capability: unsupported chat and completions return 400 before su
         }
     }
 }
+
+const kept_base = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":32,\"logprobs\":true,\"top_logprobs\":2,\"temperature\":1,\"top_p\":0.95,\"seed\":7";
+const kept_chat = kept_base ++ ",\"top_k\":5";
+const kept_text = "{\"model\":\"test-model\",\"prompt\":\"x\",\"max_tokens\":32,\"logprobs\":2,\"temperature\":1,\"top_k\":5,\"top_p\":0.95,\"seed\":7";
+
+/// A reply's JSON with ids, clocks and runtime figures fixed and every `kept_probs` member dropped.
+fn withoutKept(a: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var v = (try json.parse(a, text)).ok;
+    steadied(&v);
+    return json.stringify(a, v, .{ .ascii = false });
+}
+
+fn steadied(v: *json.Value) void {
+    switch (v.*) {
+        .object => |o| {
+            _ = o.orderedRemove("kept_probs");
+            for (o.keys(), o.values()) |k, *x| {
+                if (std.mem.eql(u8, k, "id")) x.* = .{ .string = "id" } else if (std.mem.eql(u8, k, "created")) x.* = .{ .int = "0" } else if (std.mem.eql(u8, k, "tensorfold")) x.* = .null else steadied(x);
+            }
+        },
+        .array => |l| for (l) |*x| steadied(x),
+        else => {},
+    }
+}
+
+/// The kept sets a whole reply or a stream's chunks carry, in token order: chat's in each entry, completions' list.
+fn keptSets(a: std.mem.Allocator, route: Route, payloads: []const []const u8) ![]json.Value {
+    var out: std.ArrayList(json.Value) = .empty;
+    for (payloads) |p| {
+        const v = (try json.parse(a, p)).ok;
+        const choices = v.get("choices") orelse continue;
+        if (choices.array.len == 0) continue;
+        const lp = choices.array[0].get("logprobs") orelse continue;
+        if (lp == .null) continue;
+        if (route == .completions) {
+            try out.appendSlice(a, (lp.get("kept_probs") orelse return error.NoKeptProbs).array);
+            continue;
+        }
+        for (lp.get("content").?.array) |r| {
+            try std.testing.expectEqual(@as(usize, 2), r.get("top_logprobs").?.array.len);
+            try out.append(a, r.get("kept_probs") orelse return error.NoKeptProbs);
+        }
+    }
+    return out.items;
+}
+
+test "kept_probs: each entry gives the kept set after top_k, top_p and min_p; the reply is otherwise byte-identical" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = tokensOf("Hi!") ++ [_]u32{eos};
+    // each row is lp, lp - 1, lp - 2, ...: at T 1, top_k 5 and top_p 0.95 the cumulative sums are 0.637, 0.871, 0.957
+    const total = 1 + @exp(@as(f64, -1)) + @exp(@as(f64, -2));
+    const want = [_]f64{ 1 / total, @exp(@as(f64, -1)) / total, @exp(@as(f64, -2)) / total };
+    for ([_]Route{ .chat, .completions }) |route| {
+        var whole: []const u8 = "";
+        for ([_][]const u8{ "}", ",\"stream\":true}" }) |tail| {
+            const base = if (route == .chat) kept_chat else kept_text;
+            var off = try send(&reply, false, route, try std.mem.concat(a, u8, &.{ base, tail }));
+            defer off.deinit();
+            var on = try send(&reply, false, route, try std.mem.concat(a, u8, &.{ base, ",\"kept_probs\":true", tail }));
+            defer on.deinit();
+            const streamed = tail.len > 1;
+            try std.testing.expectEqual(@as(u16, if (streamed) 0 else 200), on.status);
+            try std.testing.expectEqual(off.status, on.status);
+            try std.testing.expectEqual(off.body.len == 0, on.body.len == 0);
+            if (off.body.len > 0) try std.testing.expectEqualStrings(try withoutKept(a, off.body), try withoutKept(a, on.body));
+            try std.testing.expectEqual(off.events.items.len, on.events.items.len);
+            for (off.events.items, on.events.items) |x, y| try std.testing.expectEqualStrings(try withoutKept(a, x), try withoutKept(a, y));
+            const payloads: []const []const u8 = if (streamed) on.events.items else &.{on.body};
+            // three tokens each, the row's own first, though only two alternatives are shown (top_k 5 needs 20 rows)
+            const sets = try keptSets(a, route, payloads);
+            try std.testing.expectEqual(@as(usize, 3), sets.len);
+            for (sets, "Hi!") |set, c| {
+                try std.testing.expectEqual(@as(usize, 3), set.array.len);
+                try std.testing.expectEqualStrings(&.{c}, set.array[0].strField("token").?);
+                try std.testing.expectEqualStrings("z", set.array[2].strField("token").?);
+                for (set.array, want) |kp, p| try std.testing.expectApproxEqAbs(p, kp.get("prob").?.float64().?, 1e-12);
+            }
+            // a stream's kept sets, joined over its chunks, are the whole reply's
+            const text = try json.stringify(a, .{ .array = sets }, .{ .ascii = false });
+            if (streamed) try std.testing.expectEqualStrings(whole, text) else whole = text;
+        }
+    }
+}
+
+test "kept_probs: greedy keeps the best token at probability 1; a top_k the rows can't hold is refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const reply = tokensOf("Hi");
+    var greedy = try send(&reply, false, .chat, ask ++ ",\"temperature\":0,\"kept_probs\":true}");
+    defer greedy.deinit();
+    const rows = (try json.parse(a, greedy.body)).ok.get("choices").?.array[0].get("logprobs").?.get("content").?.array;
+    try std.testing.expectEqual(@as(usize, 2), rows.len);
+    for (rows, "Hi") |r, c| {
+        const set = (r.get("kept_probs") orelse return error.NoKeptProbs).array;
+        try std.testing.expectEqual(@as(usize, 1), set.len);
+        try std.testing.expectEqualStrings(&.{c}, set[0].strField("token").?);
+        try std.testing.expectEqual(@as(f64, 1), set[0].get("prob").?.float64().?);
+    }
+    // a completion with no tokens still names the field: an empty list
+    var empty = try send(&[_]u32{eos}, false, .completions, kept_text ++ ",\"kept_probs\":true}");
+    defer empty.deinit();
+    const lp = (try json.parse(a, empty.body)).ok.get("choices").?.array[0].get("logprobs").?;
+    try std.testing.expectEqual(@as(usize, 0), (lp.get("kept_probs") orelse return error.NoKeptProbs).array.len);
+    const completion = "{\"model\":\"test-model\",\"prompt\":\"x\"";
+    const refused = [_]struct { route: Route = .chat, body: []const u8, says: []const u8 }{
+        .{ .body = kept_base ++ ",\"top_k\":0,\"kept_probs\":true}", .says = "top_k from 1 to 20" },
+        .{ .body = kept_base ++ ",\"top_k\":21,\"kept_probs\":true}", .says = "top_k is 21" },
+        .{ .route = .completions, .body = completion ++ ",\"logprobs\":2,\"temperature\":1,\"kept_probs\":true}", .says = "top_k is 0 (no limit)" },
+        .{ .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"kept_probs\":true}", .says = "requires logprobs" },
+        .{ .route = .completions, .body = completion ++ ",\"kept_probs\":true}", .says = "requires logprobs" },
+        .{ .body = ask ++ ",\"kept_probs\":\"yes\"}", .says = "must be a boolean" },
+    };
+    for (refused) |c| {
+        var got = try send(&reply, false, c.route, c.body);
+        defer got.deinit();
+        try std.testing.expectEqual(@as(u16, 400), got.status);
+        try std.testing.expect(std.mem.indexOf(u8, got.body, c.says) != null);
+    }
+}

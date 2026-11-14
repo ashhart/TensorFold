@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const rt = @import("reply_text.zig");
 const lp = @import("logprobs.zig");
+const Options = @import("kept_probs.zig").Opts;
 const tp = @import("tool_parse.zig");
 const mm = @import("tool_minimax.zig");
 const errors = @import("errors.zig");
@@ -17,7 +18,7 @@ const Error = error{ Failed, OutOfMemory };
 pub const Sent = struct { content: usize = 0, reasoning: usize = 0 };
 
 /// A finished reply's tokens and rows, projected once its text and calls are final; `closer` ends a call EOS cut.
-pub const Capture = struct { tokens: []const u32, rows: []const api.LogprobRow, thinking: bool, stops: rt.Stops, closer: []const u8 = "", sent: Sent = .{} };
+pub const Capture = struct { tokens: []const u32, rows: []const api.LogprobRow, thinking: bool, stops: rt.Stops, closer: []const u8 = "", sent: Sent = .{}, opts: Options = .{} };
 
 const Channel = enum { content, reasoning, tool, dropped };
 /// Visible bytes of one channel; an open range may still grow while the reply streams.
@@ -49,6 +50,7 @@ pub const Live = struct {
     rows: std.ArrayList(api.LogprobRow) = .empty, // copied with each round's tokens
     spelled: Spelled = .{},
     sent: Sent = .{},
+    opts: Options = .{},
 
     pub fn add(l: *Live, srv: *Server, a: A, tokens: []const u32) Error!void {
         return l.spelled.add(srv, a, tokens);
@@ -58,8 +60,8 @@ pub const Live = struct {
     pub fn settle(l: *Live, srv: *Server, a: A, tokens: []const u32, thinking: bool, stops: rt.Stops, content: []const u8, reasoning: []const u8) Error!?V {
         const visible = stops.visible(l.spelled.raw.items, false);
         const ranges = try layout(srv, a, visible, tokens, thinking, false, .{ .content = content, .reasoning = reasoning });
-        const prose = try fresh(srv, a, &l.spelled, tokens, l.rows.items, ranges, .content, &l.sent.content);
-        const thought = try fresh(srv, a, &l.spelled, tokens, l.rows.items, ranges, .reasoning, &l.sent.reasoning);
+        const prose = try fresh(srv, a, &l.spelled, tokens, l.rows.items, ranges, .content, &l.sent.content, l.opts);
+        const thought = try fresh(srv, a, &l.spelled, tokens, l.rows.items, ranges, .reasoning, &l.sent.reasoning, l.opts);
         if (prose.len == 0 and thought.len == 0) return null;
         const out = try json.newObject(a);
         try out.put(a, "content", .{ .array = prose });
@@ -69,12 +71,12 @@ pub const Live = struct {
 };
 
 /// The newly settled entries of one channel past `sent`, which grows by their count.
-fn fresh(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, ranges: []const Range, channel: Channel, sent: *usize) Error![]V {
+fn fresh(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, ranges: []const Range, channel: Channel, sent: *usize, opts: Options) Error![]V {
     const all = try pieces(a, s, ranges, channel, 0);
     var end = sent.*;
     while (end < all.len and all[end].settled) end += 1;
     if (end <= sent.*) return &.{};
-    const out = try values(srv, a, s, tokens, rows, all[sent.*..end]);
+    const out = try values(srv, a, s, tokens, rows, all[sent.*..end], opts);
     sent.* = end;
     return out;
 }
@@ -97,14 +99,14 @@ fn whole(srv: *Server, a: A, c: Capture, shown: Shown) Error!V {
     const text = if (c.closer.len > 0) try std.mem.concat(a, u8, &.{ visible, c.closer }) else visible;
     const ranges = try layout(srv, a, text, c.tokens, c.thinking, true, shown);
     const out = try json.newObject(a);
-    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0)) });
-    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0)) });
+    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0), c.opts) });
+    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0), c.opts) });
     const count = shown.calls orelse return .{ .object = out };
     const groups = try a.alloc(V, count);
     for (groups, 0..) |*slot, i| {
         const o = try json.newObject(a);
         try o.put(a, "index", try json.intValue(a, i));
-        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i)) });
+        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i), c.opts) });
         slot.* = .{ .object = o };
     }
     try out.put(a, "tool_calls", .{ .array = groups });
@@ -128,11 +130,11 @@ pub fn rest(a: A, rows: V, sent: Sent) A.Error!?V {
     return if (left) .{ .object = out } else null;
 }
 
-fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, list: []const Piece) Error![]V {
+fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, list: []const Piece, opts: Options) Error![]V {
     const out = try a.alloc(V, list.len);
     for (list, out) |p, *slot| {
         const cropped = p.lo != s.from(p.token) or p.hi != s.ends.items[p.token];
-        slot.* = try lp.rowValue(srv, a, tokens[p.token], rows[p.token], s.raw.items[p.lo..p.hi], cropped);
+        slot.* = try lp.rowValue(srv, a, tokens[p.token], rows[p.token], s.raw.items[p.lo..p.hi], cropped, opts);
     }
     return out;
 }
