@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- GLM-5.3-Flash on CUDA: with `TF_GLM_COPIES=1`, `TF_GLM_COPY_SHARE=1` lets copies in shared rounds grow on the lone ramp up to their stream's share of the round's rows (15 tokens at two streams, 7 at four), where every shared copy stayed three tokens wide. Default off, and refused without `TF_GLM_COPIES=1`; replies are unchanged (#N).
+- GLM-5.3-Flash on CUDA: with `TF_GLM_COPIES=1`, `TF_GLM_COPY_SHARE=1` lets copies in shared rounds grow on the lone ramp up to their stream's share of the round's rows (15 tokens at two streams, 7 at four), where every shared copy stayed three tokens wide. Default off, and refused without `TF_GLM_COPIES=1`; replies are unchanged (#3333).
 
 - Internal: the Qwen3.8-27B shared-prefix attention test expects the 2,048-row chain it checks, and the host checks compile the attention tests; no runtime change (#5129).
 
