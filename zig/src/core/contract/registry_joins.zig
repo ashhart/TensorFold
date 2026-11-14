@@ -77,6 +77,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("minimax_records.zig").records ++
     @import("ling_route_records.zig").records ++
     @import("qwen27_moe_records.zig").records ++
+    @import("qwen27_prompt_records.zig").records ++
     @import("affine_gather_records.zig").records ++
     @import("flint_records.zig").records;
 pub const landed_cuda = registry.cuda ++
