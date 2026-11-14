@@ -41,8 +41,13 @@ the repository's pinned libjpeg-turbo 3.1.4.1. Use
 `TENSORFOLD_LIBTURBOJPEG` to select a separate local library file.
 
 `tools/zig/dots_mocr_reference.py oracle` runs the pinned Hugging Face
-example on one HIP GPU with Transformers 4.57.6 and qwen-vl-utils 0.0.10;
-`compare` checks a native greedy trace against its output:
+example on one GPU with Transformers 4.57.6, Pillow 12.2.0 and
+qwen-vl-utils 0.0.10 (Pillow 13 resizes the demo image to other pixels);
+`compare` checks a native greedy trace against its output. The decoder
+and the tower take `--attention`. Without flash-attn installed (no aarch64
+wheel, as on the GB10) the tower falls back to SDPA and the decoder needs
+`--attention sdpa`; `--sdpa-backend math` keeps SDPA on its math kernel.
+On HIP with flash-attn:
 
 ```sh
 FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
@@ -51,11 +56,30 @@ FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
 python tools/zig/dots_mocr_reference.py compare OUTPUT_DIR NATIVE_PREFIX
 ```
 
+On CUDA without flash-attn:
+
+```sh
+python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR DEMO_IMAGE \
+  OUTPUT_DIR --pci PCI_ID --attention sdpa --max-new-tokens 64
+```
+
 `rope_inv_freq.txt` holds the 64 float32 bit patterns of the checkpoint's
 rotary `inv_freq` as Transformers 4.57.6 computes them on the CPU (theta 1e6,
 head dim 128), dumped by the oracle's `text` mode (`rope-inv_freq.npy`). The
 CUDA recipe uploads them as they are, because Torch's CPU `powf` is not
 correctly rounded: entry 37 is one ulp from the correctly rounded value.
+
+`vision_inv_freq.txt` holds the 32 float32 bit patterns of the tower's
+rotary `inv_freq` (theta 10,000, dim 64) as the checkpoint's Transformers
+model holds them on the GB10, dumped by the oracle as
+`vision-rope-inv_freq.npy`. They equal the correctly rounded table, which
+the host test checks bit for bit.
+
+`own-prompts.json` holds three prompts of our own as token ids
+(`short`, `page` and `chunks`: 18, 578 and 2,537 ids), the GB10 runner's
+`dots-text` input. Their text is our own `ownprompts.py` (in #2673's
+description), each rendered as one user turn with the checkpoint's chat
+template and tokenized by the pinned oracle (Transformers 4.57.6).
 
 ## OCR reader fixtures
 
