@@ -473,6 +473,7 @@ fn fixture(gpa: std.mem.Allocator, tmp: *std.testing.TmpDir) ![:0]u8 {
 }
 
 test "load: linears staged once, row-path prompt views alias the pack's bytes, and a freed linear is refused by name" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a recording Metal stand-in has no device
     const log_level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = log_level;
