@@ -542,6 +542,7 @@ pub fn close(ptr: *anyopaque) void {
 
 test {
     _ = @import("qwen27_share_fit.zig");
+    _ = @import("qwen27_outgrown_test.zig");
 }
 
 test "Qwen27 interior state uses a guaranteed cold request cut" {

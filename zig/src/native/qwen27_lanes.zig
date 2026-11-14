@@ -83,6 +83,7 @@ pub const Metal = struct {
     prefetched_count: usize = 0,
     prefetch_encoded: bool = false,
     prepared_keep: ?mtl.CommandBuffer = null, // encoded during verify, committed only after the core chooses its path
+    outgrown: u64 = 0, // streams ended because their slot found no KV page for a round's rows (Backend.grow)
     sampled: [max_rows]u32 = undefined, // the last lone window's draws
     landing: Landing = .{}, // drafted nodes offered with their parent kept, and landed, by own log-probability
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
@@ -157,7 +158,7 @@ pub const Metal = struct {
     pub const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .grow = slots.grow, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.

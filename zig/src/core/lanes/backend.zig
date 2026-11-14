@@ -108,6 +108,8 @@ pub const Backend = struct {
         read: *const fn (ptr: *anyopaque, handle: u64) anyerror!u32,
         /// One forward over every window, each row drawn with its stream's sampling at its position.
         verify: *const fn (ptr: *anyopaque, windows: []const Window, out: []Verified) anyerror!void,
+        /// Before a verify: false when the stream's caches find no memory for `w`'s rows; it ends with `length`.
+        grow: ?*const fn (ptr: *anyopaque, w: Window) bool = null,
         /// Roll each stream's caches back to its kept rows (a prefix count, or a tree's path).
         keep: *const fn (ptr: *anyopaque, windows: []const Window, paths: []const []const u32) anyerror!void,
         /// Absorb kept rows and hold drafts for the next round (one batch for a shared round).

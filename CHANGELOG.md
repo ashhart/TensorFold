@@ -27,6 +27,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Living Weights: a fact graph write the OS refuses names its cause, for example "ShardWrite (ISDIR)" (#3126).
 
+- Lanes: a backend may say before a verify that a stream's next rows find no memory (`Backend.grow`); that stream ends with `length` and a message, and the round's other streams run on instead of the whole round failing. Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1` says so when a slot's next rows find no KV page (#3378, part of #1293).
+
 - Pull: a hub file path refused for a reserved name or a path escape now names the path and the reason, and the pull exits 1 (#3097).
 
 - Server: a fact graph save whose final rename fails no longer leaves its temporary file behind (#3096).
