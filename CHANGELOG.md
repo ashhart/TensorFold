@@ -5,6 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Tests: two host tests in `test-server-cpu` pin the server's incremental reply text: a character split across tokens streams only once it is whole, and each chunk decodes only the previous chunk and its new tokens, never the whole reply (#3022).
+- GLM-5.3-Flash on CUDA: with `TF_GLM_INDEX_CUDA` unset, prompt chunks take #1449's two indexer kernels, with the same tokens; `0` keeps `tf_glm_scores`, `scores` still takes the scores kernel alone to bisect, and decode rows keep `tf_glm_select_rows_wide` (#3159).
+
+- HIP on gfx1151: the routed prompt tile runs an expert of at most 8 rows in K-parallel passes inside the same launch, with the matrix path's bytes; with Qwen3.6-35B-A3B on a Radeon 8060S, served cold prompts of 64 to 256 tokens are 11% to 22% faster (1.5% at 1,024), and logits and served tokens equal main's. Other cards' tables leave it off (#2878, fixes #2795). Thanks to @AbrahamCete.
 
 - Drama 3: an explicit `--max-frames` is now the reply's cap exactly, or it is refused. `--context - 2`, which used to be trimmed silently to `--context - 3`, is now refused, and the message says what fits. An overlong prompt's 400 names the assembled rows, the request text's own rows and the reference frames separately, and `/v1/models` lists a loaded speech engine's budgets under `speech`. Context and prompt limits are unchanged (#2143, for #2002). Thanks to @akol1.
 
