@@ -110,12 +110,16 @@ bits. MTP also times windows of 1, 2, 3, 4, 6, 8, 12, 16, 24 and 32 rows, with s
 chained draft step. Its startup line reports `glm: windows (timed)` and the expert form. DFlash2 keeps the existing
 seed forward and step prices in lone and shared rounds; it times only the target expert-form race and reports
 `glm: expert form (timed)`. No unused DFlash2 window or draft-step table is measured or published to the lane core.
+`TF_GLM_EXPERT_FORM=classic` or `factored` names the form instead and skips the race, so launches compare at one
+form, and a load that times nothing still runs it (`glm: expert form (untimed)`); a named form's startup line puts
+`(TF_GLM_EXPERT_FORM)` after the form's word.
 
 The measurements stay in `~/.cache/tensorfold/window-costs`, keyed by the build, GPU/driver, full checkpoint and drafter
 identity, drafter precision, rank count, layer limit, L2-prefetch options, loaded NVFP4 decode warps, KDA and matmul
-modes, dense/head bits, KV placement and the recorded NCCL channel/P2P settings. The DFlash2 form-only records have
-separate keys from window tables. An identity too long for its buffer skips both price caches with a log line and
-still measures the required work; it never truncates an identity or refuses the model for that reason.
+modes, dense/head bits, KV placement, the recorded NCCL channel/P2P settings and a form `TF_GLM_EXPERT_FORM` names, so
+a named form never reads the race's record. The DFlash2 form-only records have separate keys from window tables. An
+identity too long for its buffer skips both price caches with a log line and still measures the required work; it
+never truncates an identity or refuses the model for that reason.
 
 An older TP=2 GB10 receipt, before the unused DFlash2 timing was removed, had one empty-price-cache load of 85.2 s
 and other loads of 70-75 s. Its drafter mode is not recorded. That single sample does not estimate this startup path.

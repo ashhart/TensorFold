@@ -20,6 +20,7 @@ const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
+const words = [_][:0]const u8{"TF_GLM_EXPERT_FORM"};
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -57,12 +58,23 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+    for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len, n);
+}
+
+test "GLM strict env: the expert form takes classic or factored, leaves blank to the race, and refuses the rest by name" {
+    for ([_]?[]const u8{ null, "", " ", " \t\r\n" }) |raw| {
+        try t.expectEqual(@as(?u64, null), try e.value(?u64, words[0], raw, null));
+        if (raw) |v| try check(words[0], v, true);
+    }
+    try t.expectEqual(@as(?u64, 0), try e.value(?u64, words[0], "classic", null));
+    try t.expectEqual(@as(?u64, 1), try e.value(?u64, words[0], "factored", null));
+    for ([_][]const u8{ "Classic", "FACTORED", "0", "1", "race", "auto", " classic", "factored " }) |raw| try check(words[0], raw, false);
 }
 
 test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
