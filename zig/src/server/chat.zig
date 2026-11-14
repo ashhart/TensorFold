@@ -143,6 +143,7 @@ pub const Prepared = struct {
     stops: fields_mod.Stops,
     preparing: bool,
     frames: []const ?api.Size = &.{}, // each image part's tower input size, in part order (prompt.Rendered.frames)
+    deadline_ns: ?i96 = null, // "deadline_s": the server ends the reply there itself (finish_reason "deadline")
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
@@ -231,8 +232,13 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     request.logprobs = input.logprobs;
     request.prompt_logprobs = input.prompt_logprobs;
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
+    const deadline: ?i96 = if (f.get("deadline_s")) |v| blk: {
+        const s = (if (v == .bool) null else v.float64()) orelse return cx.refuse("deadline_s must be a number of seconds");
+        if (!(s > 0 and s <= 1e6)) return cx.refuse("deadline_s must be more than 0 and at most 1000000 seconds");
+        break :blk received + @as(i96, @intFromFloat(s * std.time.ns_per_s));
+    } else null;
     if (input.trace) |trace| trace.prepared(&request, thinking, effort);
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames, .deadline_ns = deadline };
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -275,7 +281,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false, .recover = input.prompt == null and request.structure == null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false, .recover = input.prompt == null and request.structure == null, .deadline_ns = prepared.deadline_ns };
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
