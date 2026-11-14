@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on Metal: the dense FP8 prompt projections take 14 to 19% less time on an M5 Ultra, and every output bit is unchanged. Each threadgroup now stages two K groups between barriers, keeps the first three levels of the group sum tree in registers, and skips the zero groups that pad K to a power of two. A 4096-row prompt chunk of release layer 2 drops from 185 to 175 ms.
+- DeepSeek-V4.1 on Metal: the dense FP8 prompt projections take 14 to 19% less time on an M5 Ultra, and every output bit is unchanged. Each threadgroup now stages two K groups between barriers, keeps the first three levels of the group sum tree in registers, and skips the zero groups that pad K to a power of two. A 4096-row prompt chunk of release layer 2 drops from 185 to 175 ms (#3322).
 
 - Tests: the cluster bring-up test of a stopped peer checks the membership's real promise instead of a two-second wall bound that failed on busy CI runners (#3310).
 
