@@ -78,8 +78,8 @@ pub const Metal = struct {
             .memory = .{ .ctx = m, .read = memory },
             .health = .{ .ctx = m, .read = healthy },
             .close = close,
-            // the default cost table: TF_DSV41_CALIB has nothing to time on Metal
-            .calib = .{ .mode = "default" },
+            // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
+            .calib = if (host.calib_env.Knobs.fromEnv().file) |f| .{ .file = f } else .{ .mode = "default" },
         };
     }
 

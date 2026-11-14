@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: `TF_DSV41_CALIB_FILE` now prices draft depth from a cost table measured on the serving machine (before, Metal always used the built-in table, which on an M5 Ultra prices a one-row round at 42 ms against 19.6 measured and a drafter pass at 5.6 ms against 3.1). Tokens are unchanged. On an M5 Ultra with a measured table, prose decode rose about 1% greedy and 2.4% sampled.
+
 - Flash Next on CUDA: sampled draws take one launch and one wait a step, with the same tokens (#2927, #2753).
 
 - Qwen 3.5 on CUDA: prompts from 2,048 rows run the a and b projections in one launch, with the same tokens (#2925, #2911).
