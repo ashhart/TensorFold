@@ -301,6 +301,7 @@ pub const LaneHost = struct {
     }
 
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
+        if (reason == .cancelled) load.progress(h, job);
         h.lock();
         h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
         ledger.release(h, job); // its stream's caches are already freed (reaped, discarded or released)
