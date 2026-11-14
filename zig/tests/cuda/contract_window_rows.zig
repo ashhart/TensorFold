@@ -33,6 +33,9 @@ pub const Cfg = struct {
     ctl: Ctl = .none,
     /// Positions a page, when the caches are pages (tf_wrows_*_pg after tf_wrows_put placed them in a shuffled arena).
     pages: usize = 0,
+    /// The rows at these positions (stream 0), and bytes equal to the merge over every chunk's (Fault ALL).
+    positions: []const usize = &.{},
+    equal: bool = false,
     served: []const c.Shape,
 };
 
@@ -68,7 +71,32 @@ pub const cfgs = [_]Cfg{
 } ++ ratio(12, 4) ++ ratio(20, 4) ++ ratio(32, 4) ++ ratio(32, 2) ++ [_]Cfg{
     .{ .name = "control: decode merge without each chunk's exp(m_c - M), 20/4 heads (GQA 5)", .h = 20, .hk = 4, .ctl = .rescale, .served = decodeAt(20) },
     .{ .name = "control: P32 prompt rows whose window starts a key early, 20/4 heads (GQA 5)", .h = 20, .hk = 4, .prompt = true, .p32 = true, .ctl = .prompt_edge, .served = promptAt(20) },
-} ++ @import("window_rows_shapes.zig").cases(Cfg) ++ paged;
+} ++ @import("window_rows_shapes.zig").cases(Cfg) ++ paged ++ equality;
+
+/// Rows from the first key to a 32K context's last; the longest and the chunk edges first (gate 4 takes four).
+const bounded_at = [_]usize{ 32767, 255, 256, 0, 1000 };
+
+fn boundedAt(comptime h: usize, comptime context: usize) []const c.Shape {
+    return &[_]c.Shape{.{ .rows = bounded_at.len, .n = h, .k = context }};
+}
+
+/// The merge bounded to a row's chunks against the merge over every chunk, bit for bit, at 32K and 128K contexts.
+const equality = [_]Cfg{
+    .{ .name = "cuda window_rows decode, bounded merge equals every chunk's: tf_wrows_merge_512, 16/1 heads, no window, context 32768", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 1, .positions = &bounded_at, .equal = true, .served = boundedAt(16, 32768) },
+    .{ .name = "cuda window_rows decode, bounded merge equals every chunk's: tf_wrows_merge_512, 16/1 heads, no window, context 131072", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 131072, .streams = 1, .positions = &bounded_at, .equal = true, .served = boundedAt(16, 131072) },
+    .{ .name = "cuda window_rows decode, bounded merge equals every chunk's: tf_wrows_merge_256, 16/4 heads, no window, context 32768", .h = 16, .hk = 4, .win = 0, .ring = 32768, .streams = 1, .positions = &bounded_at, .equal = true, .served = boundedAt(16, 32768) },
+    .{ .name = "cuda window_rows decode, bounded merge equals every chunk's: tf_wrows_merge_256, 16/4 heads, no window, context 131072", .h = 16, .hk = 4, .win = 0, .ring = 131072, .streams = 1, .positions = &bounded_at, .equal = true, .served = boundedAt(16, 131072) },
+};
+
+/// The equality registrations' baseline merge in contract_wrows_controls.cuh: every chunk, empty or not.
+pub fn baselineMerge(d: usize) [:0]const u8 {
+    return if (d == 512) "tf_ctl_wrows_merge_all_512" else "tf_ctl_wrows_merge_all_256";
+}
+
+/// Its baseline partials: every chunk written, empty ones as m = -inf, as one block a chunk wrote them.
+pub fn baselinePart(d: usize) [:0]const u8 {
+    return if (d == 512) "tf_ctl_wrows_part_all_512" else "tf_ctl_wrows_part_all_256";
+}
 
 const paged_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 257 } };
 const paged_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
@@ -154,6 +182,7 @@ pub const Rows = struct {
     placed: ?[]const u8 = null, // paged: what tf_wrows_put got wrong, if anything
     scratch: u64 = 0,
     out: u64 = 0,
+    before: u64 = 0, // equal: the baseline merge's output
     half: []f64 = &.{},
     msg: [240]u8 = undefined,
 
@@ -238,6 +267,7 @@ pub const Rows = struct {
         _ = self.arena.reset(.retain_capacity);
         const f = self.f;
         if (shape.n != f.h or shape.rows == 0 or (!f.prompt and shape.k == 0)) return false;
+        if (f.positions.len > 0 and (shape.rows > f.positions.len or shape.k != f.ring)) return false; // its first rows
         if (f.prompt and f.ring > 0 and shape.rows + f.win > f.ring) return false; // chunk + window fit the ring
         const a = self.arena.allocator();
         var prng = std.Random.DefaultPrng.init(seed);
@@ -254,8 +284,8 @@ pub const Rows = struct {
         const slot = try a.alloc(i32, n);
         const hi = try a.alloc(i32, n);
         for (pos, slot, hi, 0..) |*p, *sl, *x, i| {
-            p.* = @intCast(position(f.prompt, fill == .stress, shape.k, at, n, i));
-            sl.* = @intCast(if (fill == .stress) 0 else i % f.streams);
+            p.* = @intCast(if (f.positions.len > 0) f.positions[i] else position(f.prompt, fill == .stress, shape.k, at, n, i));
+            sl.* = @intCast(if (fill == .stress or f.positions.len > 0) 0 else i % f.streams);
             x.* = @intCast(at + i);
         }
         if (f.image and fill != .stress and n > 8) { // an image: rows n/8 .. n/2 see each other
@@ -280,6 +310,7 @@ pub const Rows = struct {
         if (f.pages > 0) try self.place(a, rng, kc, vc);
         self.scratch = if (f.prompt) 0 else try self.rig.scratch(WA.scratchBytes(self.win(), n));
         self.out = try self.rig.output(n * f.h * f.d * 2);
+        self.before = if (f.equal) try self.rig.scratch(n * f.h * f.d * 2) else 0;
         self.fns = try self.kernels();
         self.half = try a.alloc(f64, self.count());
         return true;
@@ -356,8 +387,22 @@ pub const Rows = struct {
         @memcpy(std.mem.sliceAsBytes(out), try self.rig.outputBytes());
         var st: ar.Stats = .{};
         if (try wc.verify(self.rig.gpu.gpa, self.call, out, &st, &self.msg)) |why_| return why_;
+        if (self.f.equal) if (try self.baseline(std.mem.sliceAsBytes(out))) |why_| return why_;
         if (at == .nonfinite and (st.nonfinite == 0 or st.nonfinite == out.len)) return try std.fmt.bufPrint(&self.msg, "the planted values make {d} of {d} reference outputs non-finite: no proof", .{ st.nonfinite, out.len });
         return null;
+    }
+
+    /// The same rows through the partials and merge of every chunk (Fault ALL): its bytes must be the bounded ones'.
+    fn baseline(self: *Rows, got: []const u8) !?[]const u8 {
+        var k = self.fns;
+        k.merge = try self.ctl.?.function(baselineMerge(self.f.d));
+        k.part = try self.ctl.?.function(baselinePart(self.f.d));
+        if (self.f.d == 512) try k.part.allowDynamicShared(wa.staged_smem);
+        try WA.decodeWith(&k, self.rig.s, self.dev[0], self.dev[1], self.dev[2], self.before, self.dev[3], self.dev[4], self.win(), self.scratch, self.call.rows);
+        try self.rig.s.synchronize();
+        const want = try self.rig.bytes(self.before, got.len);
+        const at = std.mem.indexOfDiff(u8, got, want) orelse return null;
+        return try std.fmt.bufPrint(&self.msg, "the bounded partials and merge differ from every chunk's from byte {d} (row {d})", .{ at, at / (self.f.h * self.f.d * 2) });
     }
 
     pub fn reference(self: *Rows, want: []f64, mag: []f64) !void {
@@ -443,4 +488,21 @@ test "window_rows fixture positions: prompts with an empty or a long prefix, dec
     try std.testing.expectEqual(@as(usize, 4), position(false, false, 300, 300, 8, 4));
     try std.testing.expectEqual((5 * 7919) % 300, position(false, false, 300, 300, 8, 5));
     try std.testing.expectEqual(@as(usize, 299), position(false, true, 300, 300, 8, 2));
+}
+
+test "the bounded merge's registrations: contexts 32768 and 131072, positions 0 to 32767, both head dims, no window" {
+    var seen: usize = 0;
+    for (cfgs) |f| if (f.equal) {
+        seen += 1;
+        try std.testing.expect(f.win == 0 and f.ctl == .none and !f.prompt and f.streams == 1);
+        try std.testing.expect(f.ring == 32768 or f.ring == 131072);
+        try std.testing.expectEqualSlices(usize, &.{ 32767, 255, 256, 0, 1000 }, f.positions);
+        try std.testing.expectEqual(f.positions.len, f.served[0].rows);
+        // gates 1-3 take all five rows; gate 4 (gates.zig's sums) the first four: the longest row and both chunk edges
+        for ([_]usize{ 32767, 255, 256 }) |x| try std.testing.expect(std.mem.indexOfScalar(usize, f.positions[0..4], x) != null);
+        for (f.positions) |p| try std.testing.expect(p < f.ring);
+    };
+    try std.testing.expectEqual(@as(usize, 4), seen);
+    try std.testing.expectEqualStrings("tf_ctl_wrows_merge_all_512", baselineMerge(512));
+    try std.testing.expectEqualStrings("tf_ctl_wrows_part_all_256", baselinePart(256));
 }

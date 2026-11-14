@@ -52,7 +52,9 @@ fn wideShape(w: Window) bool {
 /// window_rows.cu's decode chunk: keys [c * chunk_keys, (c + 1) * chunk_keys), merged in chunk order.
 pub const chunk_keys = 256;
 /// The head dim 512 decode partials' staged K and V tiles: two of 32 keys.
-const staged_smem: u32 = 2 * 32 * 512 * 2;
+pub const staged_smem: u32 = 2 * 32 * 512 * 2;
+/// The partial blocks a decode launch aims for (rows x key heads x grid z): every SM a few blocks.
+const part_target = 1024;
 /// Prompt rows' dynamic shared bytes at 256 and 512: 4 or 2 slots of 32 keys, then the warps' partial scores.
 const rows_smem = [_]u32{ 4 * 32 * 32 * 16 + 8 * 16 * 32 * 4, 2 * 32 * 64 * 16 + 8 * 16 * 32 * 4 };
 
@@ -143,6 +145,16 @@ pub const WindowAttention = struct {
         return if (w.win > 0) (w.win + chunk_keys - 2) / chunk_keys + 1 else (w.ring + chunk_keys - 1) / chunk_keys;
     }
 
+    /// Chunks a row at `p` has partials in (window_rows_fault.cuh's liveChunks): no window, up to its own; else all.
+    pub fn liveChunks(w: Window, p: usize) usize {
+        return if (w.win > 0) chunks(w) else @min(chunks(w), p / chunk_keys + 1);
+    }
+
+    /// Grid z of a decode's partials: from the rows alone, so a graph keeps its launch (window_rows_part.cuh's stride).
+    pub fn partBlocks(rows: usize, groups: usize, all: usize) usize {
+        return std.math.clamp((part_target + rows * groups - 1) / (rows * groups), 1, all);
+    }
+
     /// Key tiles a decode row's window can touch (its partials a key head).
     pub fn tiles(w: Window) usize {
         return if (w.win > 0) (w.win + 62) / 64 + 1 else (w.ring + 63) / 64 + 1;
@@ -215,9 +227,11 @@ pub const WindowAttention = struct {
         a.add(@as(i32, @intCast(w.win)));
         a.add(@as(i64, @intCast(w.ring)));
         a.add(w.scale);
+        a.add(@as(i32, @intCast(t))); // the partials' chunks a row: grid z no longer counts them
         if (w.pg) |p| addPages(&a, p, true);
         const pairs = if (w.d == 512) (w.h / w.hk + 3) / 4 else 1; // head dim 512: a block 4 query heads
-        try launch_.launch(if (pf) |x| x.part else f.part, .{ .grid = .{ .x = @intCast(n), .y = @intCast(w.hk * pairs), .z = @intCast(t) }, .block = .{ .x = 256 }, .shared = if (w.d == 512) staged_smem else 0 }, s, &a);
+        const z = partBlocks(n, w.hk * pairs, t);
+        try launch_.launch(if (pf) |x| x.part else f.part, .{ .grid = .{ .x = @intCast(n), .y = @intCast(w.hk * pairs), .z = @intCast(z) }, .block = .{ .x = 256 }, .shared = if (w.d == 512) staged_smem else 0 }, s, &a);
         var b: launch_.Args = .{};
         for ([_]u64{ po, pm, pl, out }) |v| b.add(v);
         b.add(@as(i32, @intCast(w.h)));
@@ -348,4 +362,26 @@ test "wide geometry rejects empty heads and preserves all sixteen GQA ratios" {
     w.hk = 1;
     w.d = 0;
     try std.testing.expect(!wideShape(w));
+}
+
+test "a row's live chunks: no window, only its own position's (positions 0, 255, 256, 1000, 32767); a window, every one" {
+    const WA = WindowAttention;
+    for ([_]usize{ 32768, 131072 }) |context| {
+        const w: Window = .{ .h = 16, .hk = 1, .d = 512, .win = 0, .ring = context, .scale = 1 };
+        try std.testing.expectEqual(context / chunk_keys, WA.chunks(w)); // 128 or 512 chunks a row's merge looped over
+        for ([_]usize{ 0, 255, 256, 1000, 32767 }, [_]usize{ 1, 1, 2, 4, 128 }) |p, live| try std.testing.expectEqual(live, WA.liveChunks(w, p));
+    }
+    const windowed: Window = .{ .h = 16, .hk = 8, .d = 256, .win = 1024, .ring = 1536, .scale = 1 };
+    try std.testing.expectEqual(WA.chunks(windowed), WA.liveChunks(windowed, 0));
+    try std.testing.expectEqual(WA.chunks(windowed), WA.liveChunks(windowed, 100000));
+}
+
+test "a decode launch's partial blocks: from the row count alone, never past the chunks or below one" {
+    const WA = WindowAttention;
+    try std.testing.expectEqual(@as(usize, 128), WA.partBlocks(1, 1, 128)); // one row: every chunk its own block
+    try std.testing.expectEqual(@as(usize, 16), WA.partBlocks(16, 4, 128));
+    try std.testing.expectEqual(@as(usize, 4), WA.partBlocks(64, 4, 128));
+    try std.testing.expectEqual(@as(usize, 256), WA.partBlocks(4, 1, 512));
+    try std.testing.expectEqual(@as(usize, 1), WA.partBlocks(2048, 8, 128));
+    try std.testing.expectEqual(@as(usize, 6), WA.partBlocks(1, 8, 6)); // a window's few chunks: all of them
 }
