@@ -106,7 +106,7 @@ pub fn weights(t: *Trainer, io: std.Io) !void {
                 };
                 const in_proj = try r.stack(&names, &.{ g.convDim(), g.vInner(), g.linear_v_heads, g.linear_v_heads }, g.hidden);
                 const out = try r.q4(try std.fmt.bufPrint(&nb, "model.layers.{d}.linear_attn.out_proj", .{l}), g.hidden, g.vInner());
-                lw.gdn = .{ .nk = g.linear_k_heads, .nv = g.linear_v_heads, .hidden = g.hidden, .eps = c.eps, .conv_w = d.conv, .a_log = d.a_log, .dt_bias = try widen(t, d.dt_bias, g.linear_v_heads), .norm_w = d.norm, .in_proj = gq(in_proj), .out_proj = gq(out) };
+                lw.gdn = .{ .gate = .silu, .nk = g.linear_k_heads, .nv = g.linear_v_heads, .hidden = g.hidden, .eps = c.eps, .conv_w = d.conv, .a_log = d.a_log, .dt_bias = try widen(t, d.dt_bias, g.linear_v_heads), .norm_w = d.norm, .in_proj = gq(in_proj), .out_proj = gq(out) };
             },
             .attention => |a| {
                 lw.attn = .{
