@@ -96,6 +96,7 @@ import {
   computeCommandStatusSummary,
   disclosureDefaultOpen,
   summaryDefaultExpanded,
+  ticketReviewThreadId,
   worstTone,
   type ApprovalRow,
   type AttentionRow,
@@ -550,6 +551,10 @@ export function CommandCentre() {
       }
     }
     for (const ticket of tickets.filter((t) => t.status === 'review' || t.status === 'needs_clarification')) {
+      // [Open] only when the ticket's thread is actually loaded: a ticket keeps
+      // its threadId after its thread is archived or deleted, and opening the
+      // bare id renders a blank Thread view (#3387).
+      const openableThreadId = ticketReviewThreadId(ticket, threads)
       rows.push({
         id: `ticket-review:${ticket.id}`,
         icon: ticket.status === 'review' ? 'check' : 'warning',
@@ -560,9 +565,9 @@ export function CommandCentre() {
         tone: ticket.status === 'needs_clarification' ? 'high' : 'good',
         createdAt: ticket.updatedAt,
         primaryLabel: ticket.status === 'review' ? 'Complete' : 'Mark ready',
-        secondaryLabel: ticket.threadId ? 'Open' : undefined,
+        secondaryLabel: openableThreadId ? 'Open' : undefined,
         onPrimary: () => void updateTicket(ticket.id, { status: ticket.status === 'review' ? 'completed' : 'ready' }),
-        onSecondary: ticket.threadId ? () => openThread(ticket.threadId!) : undefined,
+        onSecondary: openableThreadId ? () => openThread(openableThreadId) : undefined,
       })
     }
     return rows.sort(sortRows).slice(0, 8)
