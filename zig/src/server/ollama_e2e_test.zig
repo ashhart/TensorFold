@@ -62,6 +62,7 @@ const Engine = struct {
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{ 2, 7, 1 } });
         if (e.fail_after_tokens) return error.Closed;
+        sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
     fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
@@ -408,11 +409,16 @@ test "ollama HTTP: format, tools and images are mapped or refused by name" {
     try t.expect(statusIs(try h.ask(a, "/api/chat", null, schema), 200));
     const tools = try std.fmt.allocPrint(a, "{s},\"tools\":[{{\"type\":\"function\",\"function\":{{\"name\":\"lookup\",\"description\":\"d\",\"parameters\":{{\"type\":\"object\",\"properties\":{{}}}}}}}}]}}", .{prefix});
     try t.expect(statusIs(try h.ask(a, "/api/chat", null, tools), 200));
-    for ([_][]const u8{ "format\":\"xml", "tools\":{}", "images\":[\"AQ==\"" }) |field| {
-        const bad = try std.fmt.allocPrint(a, "{s},{s}}}", .{ prefix, field });
+    const refused = [_]struct { name: []const u8, field: []const u8 }{
+        .{ .name = "format", .field = "\"format\":\"xml\"" },
+        .{ .name = "tools", .field = "\"tools\":{}" },
+        .{ .name = "images", .field = "\"images\":[\"AQ==\"]" },
+    };
+    for (refused) |r| {
+        const bad = try std.fmt.allocPrint(a, "{s},{s}}}", .{ prefix, r.field });
         const reply = try h.ask(a, "/api/chat", null, bad);
         try t.expect(statusIs(reply, 400));
-        try t.expect(std.mem.indexOf(u8, bodyOf(reply), field[0..std.mem.indexOfScalar(u8, field, '\"').?]) != null);
+        try t.expect(std.mem.indexOf(u8, bodyOf(reply), r.name) != null);
     }
 }
 
