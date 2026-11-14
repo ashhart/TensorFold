@@ -41,6 +41,8 @@ test {
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");
+    _ = @import("request_deadline_test.zig");
+    _ = @import("request_deadline_http_test.zig");
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
