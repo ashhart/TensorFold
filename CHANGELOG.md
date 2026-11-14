@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: a greedy pick finds the first maximum of a row's logits in 16-wide steps (a row holding a NaN keeps the scalar scan) and a sampled pick reuses its float64 logits and ids instead of allocating both, so every pick is the same id; on an M5 Ultra the five prose prompts decode 2.7% faster greedy and 3.7% sampled (#3288).
+
 - DeepSeek-V4.1 on Metal: decode's FP8 projections of 1 to 5 rows issue every weight load before their chains and meet each output's tile roots in one simdgroup, and projections with K in whole 1024s take one column a simdgroup; every output bit is unchanged. On an M5 Ultra a layer's FP8 launches at one row take 214.8 us instead of 247.4 (675 to 778 GB/s) and at four rows 281.4 instead of 325.5 (#3287).
 
 - DeepSeek-V4.1 on Metal: in decode launches of 2 to 16 rows, the routed experts read and decode an expert's MXFP4 weights once for all of the rows it takes (passes of 2, 4, 6 or 8 rows for gate/up and 2 or 4 for down) instead of padding every expert's rows to passes of four, so each row's bits equal the one-row kernel's one row a launch whatever other rows share the launch or their experts. On the release weights, with #2973 under it, decode is 6 to 17% faster at one and two streams and 2 to 3% faster at three and four on an M5 Ultra, and 5 to 17% and 2 to 5% faster on an M3 Ultra, with every token unchanged (#2983, part of #2984).
