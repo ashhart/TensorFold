@@ -360,29 +360,36 @@ do not replace the failed full-history residency result. Post-repair serving als
 two real idle unload/reloads and trained-only lookup0 with 367 actual proposals; both servers exit0. These runs were under filesystem
 tracing, not controlled performance measurements. The fused boundary's contract registration and the final tree's results follow.
 
-### Final qualification of source `efdf7a464e`
+### Final qualification
 
-Every command below ran on that exact tree, synced from the commit, on an M5 Ultra (M4 Pro where stated).
+Environment: M5 Ultra (64 GPU cores, 256 GiB), macOS 27.0 (26A428), Xcode 27.1, Metal compiler 32023.921, Zig 0.17.0,
+checkpoint `deepseek-ai/DeepSeek-V4.1-Flash-1017` at `1bae0e1088993b9b82de08f59de5be5a34e42170` as an EAQ v1 EXL3 2.9 bpw pack with the
+original Engram shards; the M4 Pro (48 GiB) ran only the kernel contract. Two source trees are named. `efdf7a464e` is the tree
+the kernel contract, the parent comparison and the cold and decode receipts ran on. `e9e06ee0b1` differs from it by one diagnostic
+log line that now reads the registered drafter switch through the registry; build, profiles, the 128-token comparison and served
+checks were repeated on it. Both were synced from the commit.
 
-- Build and test corpus, reported counts: **977/977 steps; 4760 of 4845 tests passed, 85 skipped**. The device-free CUDA host
-  subset passes **345/345 steps, 131 tests**.
-- Kernel contract on the M5 Ultra: `--only dsv41` **102 kernels pass gates 1-4**, 237 controls red as planted, 0 missed;
+- Build and test corpus on `e9e06ee0b1` (reported counts exclude cached work): **977/977 steps; 3631 of 3691 tests passed, 60 skipped**.
+  On `efdf7a464e` the same command reported 977/977 steps and 4760 of 4845 tests, 85 skipped. The device-free CUDA host
+  subset passes **345/345 steps, 131 tests** on both.
+- Kernel contract on `efdf7a464e`, M5 Ultra: `--only dsv41` **102 kernels pass gates 1-4**, 237 controls red as planted, 0 missed;
   `--only exl3` **296 kernels pass**, 1186 controls red as planted, 0 limit problems. On the M4 Pro: dsv41 94 and exl3 35 pass.
   The six dsv41 offline M1/M2 limit problems (`xp_quant`, `fp4pack`, `fp4rt`, `hcmix`, `hcpost`, `joinpost`) are identical at the
   parent `bec140d545` (89 kernels pass there), so this delta does not introduce them. The unfiltered contract aborts in
   `metal_lfm3_attention_sums.zig:39` (integer overflow in `valuesDepth`), a file this delta does not touch, so it was not completed.
   The exhaustive rotary sweep covers 302,008,320 cases.
-- Strict one-, two- and four-row profiles return identical grouped and ungrouped logits. The first run, after the build had
-  evicted the file cache, read 7,700,480 / 7,782,400 / 15,450,112 bytes (96 / 97 / 193 page-ins) and failed the residency gate.
-  Two consecutive reruns pass for all three, with 0 bytes and 0 page-ins. The gate therefore measures cache temperature at
-  execution time; a warm pass does not prove that every Engram table page is resident.
-- The unchanged full 128-token comparison: band ratio **0.967305** (clear at 1.05), mean KL 0.042165, worst-row KL 0.832581,
-  five teacher argmax differences; execution residency passes with 0 bytes and 0 page-ins in that warm run.
-- Served checks on this tree, as above: 41 full-hash replies, cancellation, two idle unload/reload cycles (loaded
-  226,963,086,272 / 222,898,212,784 bytes, parked 749,290,720 / 151,176,440), trained-only lookup0 with 367 proposals.
-- Parent against this tree, same machine, 4096 workspace rows and prefill step 4096 in both arms, 64 tokens, three repetitions.
-  Solo, serial and concurrent hashes are equal inside each build. Tokens differ between the builds because the arithmetic
-  changed, so `tools/bench_exl3_compare.py` refuses the pair and this is an observation, not a no-slowdown qualification:
+- Strict one-, two- and four-row profiles return identical grouped and ungrouped logits. On `efdf7a464e` the first run, after the
+  build had evicted the file cache, read 7,700,480 / 7,782,400 / 15,450,112 bytes (96 / 97 / 193 page-ins) and failed the residency
+  gate; two reruns pass. On `e9e06ee0b1` the first run and two reruns all pass with 0 bytes and 0 page-ins. The gate measures
+  cache temperature at execution time; a warm pass does not prove that every Engram table page is resident.
+- The unchanged full 128-token comparison, on both trees: band ratio **0.967305** (clear at 1.05), mean KL 0.042165,
+  worst-row KL 0.832581, five teacher argmax differences; execution residency passes with 0 bytes and 0 page-ins in these warm runs.
+- Served checks on `e9e06ee0b1`: 41 full-hash replies, cancellation, two idle unload/reload cycles (loaded
+  226,961,267,936 / 222,896,394,376 bytes, parked 145,507,672 / 149,276,040), trained-only lookup0 with 367 proposals.
+- Parent against `efdf7a464e`, same machine, 4096 workspace rows and prefill step 4096 in both arms, 64 tokens, three repetitions.
+  Solo, serial and concurrent hashes are equal inside each build. Tokens differ between the builds in long greedy decodes because
+  the arithmetic changed (the parent fails the band at 1.855), so `tools/bench_exl3_compare.py` refuses the pair and this is an
+  observation, not a no-slowdown qualification:
 
 | Cell | Parent tok/s | This tree tok/s |
 |---|---|---|
@@ -392,8 +399,23 @@ Every command below ran on that exact tree, synced from the commit, on an M5 Ult
 | long, 4 streams, aggregate / steady | 6.1 / 58.1 | 11.1 / 88.4 |
 | long TTFT max, 1 / 4 streams | 12.34 s / 48.87 s | 6.53 s / 26.47 s |
 
+- Cold prompt speed and decode, `bench_cache.py --require-cold` and `bench_openai.py`, context 70000, one lane, `--prompt-cache-gib 0`,
+  prefill step 4096 in both arms, one request per size with 16 reply tokens. The 16-token replies are token-equal between the builds
+  at every size; 256-token greedy decodes are not (both public prompts differ):
+
+| Cold prompt tokens | Parent TTFT | This tree TTFT |
+|---|---|---|
+| 2048 | 1.98 s | 1.81 s |
+| 8192 | 6.86 s | 3.95 s |
+| 32768 | 28.06 s | 13.79 s |
+| 65536 | 57.39 s | 27.14 s |
+
+  Greedy decode over 256 tokens, median of three: 40.23 / 40.22 tok/s for the parent against 52.02 / 51.98 for this tree
+  (code and chat prompts).
+
 Still open: the parent's review gates (code provenance and copy rule, integration), ATC coverage (the board is incomplete),
-runtime on M1, M2 and M3 chips, and a source-matched no-slowdown comparator against the parent.
+runtime on M1, M2 and M3 chips, 128k and the native window, a comparison against `mlx_lm`, and a source-matched no-slowdown
+comparator against the parent.
 
 
 
