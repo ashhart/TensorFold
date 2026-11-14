@@ -2,7 +2,7 @@
 const std = @import("std");
 const s = @import("schedule.zig");
 const m = @import("modulation_shape.zig");
-const st = @import("safetensors");
+const st = @import("core").safetensors;
 const t = std.testing;
 
 fn entry(shape: []const usize) st.Entry {
