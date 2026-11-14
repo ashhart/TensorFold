@@ -1,5 +1,4 @@
-//! window_vonly.cu under the contract (TF_GEMMA4_V_ONLY): keys from values bit-equal to qk_round's, V-only decode
-//! bit-equal to the K+V paged kernels, tf_wrows_put_v's pages equal tf_wrows_put's V; each with a planted control.
+//! window_vonly.cu under the contract: each kernel bit-equal to its K+V counterpart, each with a planted control.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -21,8 +20,7 @@ const Kv = struct { k: u64, v: u64 };
 
 /// keys: shape rows = keys, k = the first key's position; decode: rows, n = query heads, k = each stream's keys.
 pub const Kind = enum { keys, decode };
-/// flip: one bit of one made key flipped after the run; unrounded: contract_controls' tf_ctl_vonly_keys_unrounded;
-/// norm: decode whose keys take another k norm's weight.
+/// Planted controls: flip a made key's bit, keys without bf16 rounding, or decode with another k norm.
 pub const Ctl = enum { none, flip, unrounded, norm };
 
 pub const Entry = struct {

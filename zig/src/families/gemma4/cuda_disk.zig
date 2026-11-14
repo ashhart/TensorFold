@@ -83,6 +83,7 @@ fn model(m: *fwd.Model, k: []u64, v: []u64) void {
     m.layers = 6; // layer 5 is global
     m.context = 4096;
     m.paged = false;
+    m.v_only = false;
     m.kc = k;
     m.vc = v;
 }

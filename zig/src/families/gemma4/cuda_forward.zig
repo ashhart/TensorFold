@@ -7,6 +7,7 @@ const cfg = @import("cuda_config.zig");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
 const solo = @import("cuda_solo.zig");
+const vonly = @import("cuda_vonly.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
 const Window = cuda.window_attention.Window;
@@ -51,6 +52,9 @@ pub const Model = struct {
     kc: []u64, // per layer: keys [slots, len, kv heads, head dim] bf16 (len: the ring, or the context if global)
     vc: []u64,
     paged: bool = false,
+    /// TF_GEMMA4_V_ONLY: global pages hold V alone; k_scratch: a prompt layer's keys in their layout (cuda_vonly)
+    v_only: bool = false,
+    k_scratch: u64 = 0,
     pages: usize = 0,
     table: u64 = 0,
     ids: []u32 = &.{},
@@ -123,12 +127,22 @@ pub const Model = struct {
     }
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !Model {
-        return initPaged(gpa, d, s, w, context, slots, false);
+        return initPaged(gpa, d, s, w, context, slots, false, false);
     }
 
-    pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !Model {
+    pub fn initPaged(
+        gpa: std.mem.Allocator,
+        d: *const cuda.Driver,
+        s: cuda.Stream,
+        w: *const wts.Weights,
+        context: usize,
+        slots: usize,
+        paged: bool,
+        v_only: bool,
+    ) !Model {
         var m = blank(gpa, d, w, context, if (paged) 1 else slots);
         m.paged = paged;
+        m.v_only = v_only;
         m.prompt_most = try solo.rows(); // refused before anything allocates
         errdefer m.deinit();
         try m.build(s);
@@ -137,12 +151,22 @@ pub const Model = struct {
 
     /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
     pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize) !usize {
-        return openPagedBytes(gpa, d, s, w, context, slots, false);
+        return openPagedBytes(gpa, d, s, w, context, slots, false, false);
     }
 
-    pub fn openPagedBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !usize {
+    pub fn openPagedBytes(
+        gpa: std.mem.Allocator,
+        d: *const cuda.Driver,
+        s: cuda.Stream,
+        w: *const wts.Weights,
+        context: usize,
+        slots: usize,
+        paged: bool,
+        v_only: bool,
+    ) !usize {
         var m = blank(gpa, d, w, context, if (paged) 1 else slots);
         m.paged = paged;
+        m.v_only = v_only;
         m.prompt_most = try solo.rows();
         defer m.deinit();
         m.planned = 0;
@@ -409,9 +433,14 @@ pub const Model = struct {
         const out: cuda.qk_rows.Out = .{ .q = x.qr, .k = x.kr, .v = x.vr, .kc = if (direct) m.kc[i] else null, .vc = if (direct) m.vc[i] else null, .len = len };
         try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = if (own) kvh else 0, .dim = dh }, shape, x.pos, x.slot, out, rows);
         const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else geo.sliding_window, .ring = len, .scale = 1, .p32 = true, .pg = pg };
-        if (own and pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
+        const vo = global and m.v_only; // TF_GEMMA4_V_ONLY: V alone in the pages, keys from values (cuda_vonly)
+        if (own and pg != null and vo) {
+            try vonly.put(m, k, s, x, i, w, rows);
+        } else if (own and pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
         if (unread) return;
-        if (prompt) {
+        if (vo) {
+            try vonly.attend(m, k, s, x, i, w, chains[0], rows, prompt, attend_rows);
+        } else if (prompt) {
             const c = chains[0];
             const off = if (pg != null) 0 else c.slot * len * kw * 2;
             const hi: ?u64 = if (!global and c.images.len > 0) x.hi else null;
