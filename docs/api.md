@@ -526,14 +526,15 @@ the next one: a short request starts at the next chunk, and a long prompt still 
 between chunks for `--decode-share` of each chunk's time (0.25 is the Python engine's default). On a native server
 the flag is the reply's share, and the prompt owes its complement: it also offers a 512-row cap on a filling
 prompt's chunks to families that declare chunk-independent prompt arithmetic. That offer is gated per family
-behind device token-hash qualification; every native family is gated out today, so no native server caps chunk
-rows yet. Absent the flag the engines keep their own cuts and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
+behind device token-hash qualification; LFM3 on Metal declares it (cut-invariance by `tf-lfm3-nax-exact`, served
+token equality under the flag), and no other native family does yet. Absent the flag the engines keep their own cuts
+and `TENSORFOLD_PREFILL_SHARE` keeps its old meaning:
 the prompt's share of a fill step's wall time, time only, never smaller chunks. Flash Next's shared sessions on a Mac
 are the exception: absent both, replies take 0.8 of that time and a filling prompt's steps grow
 from 32 to 512 rows after eight, while `--decode-share 0` keeps the 32-row steps with the prompt first. `TENSORFOLD_PREFILL_ORDER=srpt`
 lets a running reply that would end within a quarter of a filling long prompt's estimated time left take rounds first,
 the prompt keeping at least 10% of the time and lending at most a quarter of its own. It's the default for Qwen3.8-27B
-on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal and
+on Metal when neither `--decode-share` nor `TENSORFOLD_PREFILL_SHARE` is set; any other value of the variable turns it off. With `--decode-share` it keeps that share when the prompt goes first and takes at most 10% when a reply does, and `--decode-share 0` still prefills each prompt whole. The CUDA, qwen27 Metal, LFM3 Metal and
 hip_serve servers pass the flag to their lane host and take its time share; the DeepSeek, Spark-X on Metal, Qwen4
 and XPU servers do not parse or apply the flag. `--decode-share 0` prefills each prompt
 whole

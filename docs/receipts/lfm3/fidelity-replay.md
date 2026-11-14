@@ -78,14 +78,24 @@ the 4-bit decoder has one lowest-index difference with overlapping maximum sets.
 all 16 suffix top tokens; 8-bit matches 14/16. Those different-input results are retained and are not an accepted end-to-end pass.
 This is one real-image fixture, not a broad real-image benchmark.
 
-The download URL can change its bytes; reproduce this receipt only with the recorded hashes.
-The image itself is not redistributed here. The token fixture is the `tokens` array in `real-image-fp64.json`:
+The download URL can change its bytes. The photograph's licence is unrecorded, so it is no longer in the tree; its receipts are kept as
+historical records (`synthetic-image-fixture.json` lists every one) and cannot be replayed from this checkout. The token fixture below is the `tokens` array in `real-image-fp64.json`:
 
 ```sh
 python3 -c "import json,numpy as np; np.save('image-tokens.npy',np.asarray(json.load(open('docs/receipts/lfm3/real-image-fp64.json'))['tokens'],dtype='<u4'))"
 python3 -c "import numpy as np; x=np.fromfile('fp64-image.bf16',dtype='<u2'); np.save('projected.npy',(x.astype('u4')<<16).view('f4').reshape(-1,2048))"
 ./zig-out/bin/tf-lfm3-forward MODEL_DIR image-tokens.npy native-on-fp64-rows.bf16 images fp64-image.bf16 4
 python3 tools/lfm3/fp64_reference.py --model-dir MODEL_DIR --tokens image-tokens.npy --image-rows projected.npy --image-start 4 --output fp64-image-text.bf16
+```
+
+The generated image that replaces the photograph needs none of those files. `tools/lfm3/synthetic_image.py` writes the committed
+`synthetic-image-input.png` and builds its token fixture from a checkpoint's own tokenizer, both against pins in `synthetic-image-fixture.json`.
+`tools/lfm3/synthetic_image_receipt.py` runs the vision and decoder comparisons above (and, with `--stages fp32 rounded`, the FP32-graph and
+rounding-replay ones) at 4/6/8 bits and writes a new receipt from the measured files only; it never reads a photograph receipt's values:
+
+```sh
+python3 tools/lfm3/synthetic_image.py image && python3 tools/lfm3/synthetic_image.py tokens --model-dir MODEL_DIR
+python3 tools/lfm3/synthetic_image_receipt.py --model-root MODELS --work /tmp/synthetic --output docs/receipts/lfm3/synthetic-image-fp64.json
 ```
 
 The affine-only replay still had one disjoint VL6 reasoning position repeated at three fixture lengths.
@@ -99,3 +109,21 @@ All intermediate BF16 arrays in the first two convolutional layers then match na
 The three repeated histories have zero disjoint maximum sets; 19 lowest-index differences remain across the combined 5,581-row view,
 all with overlapping maximum sets. Each cell names its rounding sites. This does not apply a new tie rule or erase ideal-FP64 differences.
 `earliest-stage-rounding.json` records both actual first-divergence fixtures, shared-helper raw captures and unchanged derived bounds.
+
+### Real-image rounding causality
+
+The ideal FP64 comparison remains in `real-image-fp64.json`, including the two disjoint 8-bit suffix rows and both margins. `real-image-rounding-reproduction.json` records a separate diagnostic: independently implemented CPU arithmetic with explicit production FP32 boundaries and Metal scalar elementary functions. It reproduces all 14 vision layers, projected image rows, 24 text layers, and all logits byte for byte. This is rounding causality evidence, not a new tolerance or an independent FP64 fidelity pass.
+
+The optional Metal elementary backend reuses Apple `exp`, `exp2`, `cos`, `sin`, and `rsqrt` functions only. Matrix products, reductions, geometry, and online attention are replayed by the CPU reference. NumPy elementary functions remain separately selectable. Decoder attention replay currently rejects prompts above 1024 rows rather than approximating additional partitions.
+
+```sh
+# Build row-replay.so with the C accelerator command above, then use the frozen photo patches/tokens.
+LFM3_ROW_REPLAY_LIBRARY="$PWD/row-replay.so" python3 tools/lfm3/vision_fp64_reference.py --model-dir MODEL_DIR --patches patches.npy --grid-h 14 --grid-w 20 --output rounded-image.bf16 --trace-dir rounded-vision --dense-rounding metal-row --operator-rounding metal-fp32 --elementary-backend metal
+python3 -c "import numpy as np; x=np.fromfile('rounded-image.bf16',dtype='<u2'); np.save('rounded-image.npy',(x.astype(np.uint32)<<16).view(np.float32).reshape(70,2048))"
+LFM3_ROW_REPLAY_LIBRARY="$PWD/row-replay.so" python3 tools/lfm3/fp64_reference.py --model-dir MODEL_DIR --tokens image-tokens.npy --image-rows rounded-image.npy --image-start 4 --output rounded-image-text.bf16 --trace-dir rounded-text --projection-rounding metal-row --norm-conv-rounding metal --attention-rounding metal-fp32 --elementary-backend metal
+# Native vision tracing includes first_attention_q/k/v/context at the first attention layer.
+./zig-out/bin/tf-lfm3-vision MODEL_DIR --image canonical.png native-image.bf16 native-vision
+python3 tools/lfm3/vision_attention_rounding.py --native-trace native-vision --output-dir attention-rounding --rows 280 --capture
+```
+
+The last diagnostic evaluates the existing production attention helper at fixed native Q/K/V, then independently replays its FP32 score reduction and accumulator using captured elementary-function outputs. On this fixture all 1,254,400 scores and 291,200 raw accumulator values match exactly. Metal precise `exp` differs from FP64-rounded exp at 463,691 of 2,508,800 calls, each by one FP32 ULP. This primitive capture is explicitly scoped; it is not an independent reference for the full attention equation.

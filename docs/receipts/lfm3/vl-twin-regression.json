@@ -1,0 +1,11 @@
+{
+  "scope": "Canonical default-OFF production source rebuild, including trace-only vision snapshots. No device/model pass is asserted for this rebuilt binary.",
+  "source_commit": "6101b94bf6e8e8e29a6cde588f88b7b5020d5e8c",
+  "command": "zig build native dev-tools test test-golden -Dcpu=apple_m1 --summary all",
+  "summary": "Build Summary: 726/726 steps succeeded; 982/1000 tests passed (18 skipped)",
+  "cached_steps": "Other steps reused cached checks; counts are those newly reported by Zig.",
+  "native_binary_sha256": "44220f39df174b2364172eac4b8705dbd5f5f47f3175c7ed300a6d47ae3bbcbc",
+  "log_sha256": "fe4dd4500935a9a64ad0af0e85e090a55dca18e8127889fe9b410617f146f156",
+  "host": "Apple M4 Pro, macOS 26.5.1",
+  "compiler": "Zig 0.17.0"
+}

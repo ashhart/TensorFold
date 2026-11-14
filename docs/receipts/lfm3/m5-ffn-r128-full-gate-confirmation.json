@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "scope": "Five balanced rounds confirm a private fullwidth R128 FFN gate operator improvement; not model or serving qualification",
+  "production_default_changed": false,
+  "candidate_source_published": false,
+  "previous_exploratory_receipt": "m5-ffn-r128-full-gate-exploratory.json",
+  "shape": {
+    "rows": 128,
+    "n": 7680,
+    "k": 2048,
+    "group": 64,
+    "bits": 4
+  },
+  "numerical_evidence": "Same unchanged kernel/fixtures as exploratory receipt: all983040outputs match roundedFP64; no worse column; captured publicgate identity; eight controls rejected. Conditional MPP device proof remains open.",
+  "protocol": {
+    "rounds": 5,
+    "seed": 20261030,
+    "order": [
+      "BAAB",
+      "ABBA",
+      "BAAB",
+      "ABBA",
+      "BAAB"
+    ],
+    "common_repetitions": 64,
+    "calibration_min_seconds": 0.025,
+    "sample_min_seconds": 0.02,
+    "sample_max_seconds": 1,
+    "warmup_min_seconds": 0.03,
+    "baseline_drift_limit": 0.05,
+    "within_round_spread_limit": 0.05,
+    "five_complete_graph_identity_checks": true
+  },
+  "measurements": {
+    "public_median_us": 478.0979834322352,
+    "candidate_median_us": 448.58496403321624,
+    "latency_reduction_fraction": 0.06173006459292474,
+    "throughput_ratio": 1.0657913701200952,
+    "baseline_first_last_drift_fraction": 4.631285169915659e-05,
+    "within_round_spread_fractions": [
+      2.859697800255466e-05,
+      9.576890201813259e-05,
+      5.311136172707313e-05,
+      0.00025536887435493796,
+      6.53614877954694e-05,
+      0.0013203176020051394,
+      1.906802421766906e-05,
+      0.0005197275782504725,
+      8.44372820552071e-05,
+      0.0003338785731539611
+    ],
+    "all_stability_gates_passed": true,
+    "selected_global53_repairs": 1068,
+    "serial_fallback": 0,
+    "raw_records": [
+      {
+        "round": 0,
+        "leg": 0,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028715624939650297,
+        "warm_gpu_seconds": 0.05741754174232483
+      },
+      {
+        "round": 0,
+        "leg": 1,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.03059641644358635,
+        "warm_gpu_seconds": 0.030598874669522047
+      },
+      {
+        "round": 0,
+        "leg": 2,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.0305972914211452,
+        "warm_gpu_seconds": 0.030608208384364843
+      },
+      {
+        "round": 0,
+        "leg": 3,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028718375135213137,
+        "warm_gpu_seconds": 0.05742962518706918
+      },
+      {
+        "round": 1,
+        "leg": 0,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.03059987537562847,
+        "warm_gpu_seconds": 0.030622000340372324
+      },
+      {
+        "round": 1,
+        "leg": 1,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028718083165585995,
+        "warm_gpu_seconds": 0.05741345835849643
+      },
+      {
+        "round": 1,
+        "leg": 2,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.02871075039729476,
+        "warm_gpu_seconds": 0.05741658341139555
+      },
+      {
+        "round": 1,
+        "leg": 3,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030598250217735767,
+        "warm_gpu_seconds": 0.030600249767303467
+      },
+      {
+        "round": 2,
+        "leg": 0,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028737000189721584,
+        "warm_gpu_seconds": 0.05747545836493373
+      },
+      {
+        "round": 2,
+        "leg": 1,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030600291676819324,
+        "warm_gpu_seconds": 0.030598000157624483
+      },
+      {
+        "round": 2,
+        "leg": 2,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030598291661590338,
+        "warm_gpu_seconds": 0.030605874955654144
+      },
+      {
+        "round": 2,
+        "leg": 3,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028699083253741264,
+        "warm_gpu_seconds": 0.0574368336237967
+      },
+      {
+        "round": 3,
+        "leg": 0,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030599874909967184,
+        "warm_gpu_seconds": 0.03059862507507205
+      },
+      {
+        "round": 3,
+        "leg": 1,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.02870812499895692,
+        "warm_gpu_seconds": 0.05741104204207659
+      },
+      {
+        "round": 3,
+        "leg": 2,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.02869320847094059,
+        "warm_gpu_seconds": 0.05738841649144888
+      },
+      {
+        "round": 3,
+        "leg": 3,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030599291436374187,
+        "warm_gpu_seconds": 0.030598416924476624
+      },
+      {
+        "round": 4,
+        "leg": 0,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.028696791734546423,
+        "warm_gpu_seconds": 0.057453916408121586
+      },
+      {
+        "round": 4,
+        "leg": 1,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030595249962061644,
+        "warm_gpu_seconds": 0.030596999917179346
+      },
+      {
+        "round": 4,
+        "leg": 2,
+        "variant": 0,
+        "repeats": 64,
+        "gpu_seconds": 0.030597833450883627,
+        "warm_gpu_seconds": 0.030606666579842567
+      },
+      {
+        "round": 4,
+        "leg": 3,
+        "variant": 1,
+        "repeats": 64,
+        "gpu_seconds": 0.02870637457817793,
+        "warm_gpu_seconds": 0.05742625007405877
+      }
+    ]
+  },
+  "limits": [
+    "Native public row-pair baseline, not MLX.",
+    "Gate operator only; no inference TTFT or end-to-end improvement established.",
+    "Other projections, checkpoints, widths, images and prompt lengths remain unqualified.",
+    "Persistent partialscratch60MiB; practical integration memory admission remains mandatory."
+  ],
+  "evidence_sha256": {
+    "raw_cost": "d42183d36e52b5ae07f380c5fb62c0e553ebf6bb0d3582d5e26701e92f22763b",
+    "analysis": "a09b0994f40b2247c3f673799f76fec194ff414a56e80f13c8ebd38e3f5e6b96"
+  }
+}

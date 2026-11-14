@@ -6,7 +6,7 @@ const ct = @import("contract");
 const c = ct.spec;
 const g = ct.gates;
 const rig_ = @import("rig.zig");
-pub const Kind = enum { norm, qk };
+pub const Kind = enum { norm, qk, vision_rms, vision_qk };
 
 pub fn name(kind: Kind, bad: bool) []const u8 {
     return switch (kind) {
@@ -17,10 +17,12 @@ fn width(kind: Kind) usize {
     return switch (kind) {
         .norm => 2048,
         .qk => 128,
+        .vision_rms => 1024,
+        .vision_qk => 64,
     };
 }
 fn threads(kind: Kind) usize {
-    return if (kind == .norm) 256 else 32;
+    return if (kind == .norm or kind == .vision_rms) 256 else 32;
 }
 fn depth(_: c.Shape) usize {
     return 32;
@@ -40,12 +42,14 @@ pub const Probe = struct {
     const vt = g.hooks(Probe);
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kind: Kind, bad: bool) !Probe {
-        const body = sources.lfm3;
+        const body = if (kind == .norm or kind == .qk) sources.lfm3 else sources.lfm3_vision;
         const source = try std.mem.concat(a, u8, &.{ if (bad) "#define L3_SQUARE_ACC half\n" else "", body });
         defer a.free(source);
         const symbol = switch (kind) {
             .norm => "lfm3_norm_sums",
             .qk => "lfm3_qk_sums",
+            .vision_rms => "l3v_rms_sums",
+            .vision_qk => "l3v_qk_sums",
         };
         return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .kind = kind, .bad = bad, .pipeline = try rig_.pipeline(device, source, symbol), .served = .{ .{ .rows = 4, .n = 1, .k = width(kind) }, .{ .rows = 17, .n = 1, .k = width(kind) } } };
     }

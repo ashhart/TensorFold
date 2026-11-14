@@ -1,0 +1,277 @@
+{
+  "scope": "Private M5 TEXT4 layer-0 gate candidate integration observation. This is not full-model FP64 fidelity qualification, public-word identity, or a serving-performance result. No production source or default change.",
+  "checkpoint": "LiquidAI/LFM3-1.7B-MLX-4bit",
+  "candidate_scope": "Exact checkpoint/config/header digest allowlist; single segment,128 rows, last head, layer0 gate only; no trace/profile/images; four-split strict-MPP candidate plus repair-failure scan.",
+  "fixture": "Pinned VL-rendered text-only token arrays executed against TEXT4; no image or repeated activation rows.",
+  "implementation_checks": [
+    "Nonvacuous encoded/completed route counts",
+    "Short and deferred-head forwards have zero candidate hits",
+    "Atomic execute exclusion protects shared scratch; no claim of general backend thread safety",
+    "Actual failure scan tested on clean buffer and nonzero last element",
+    "Forced unresolved status after GPU work prevents cache length/logit publication and poisons subsequent forward, cache allocation, first-token and read calls"
+  ],
+  "cases": [
+    {
+      "prompt_tokens": 128,
+      "candidate_completed": 1,
+      "ineligible_hits": 0,
+      "scan_checks": true,
+      "poison_checks": true,
+      "serialization_check": true,
+      "greedy16_token_ids_equal": true,
+      "baseline_tokens": [
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018
+      ],
+      "candidate_tokens": [
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018,
+        23018
+      ],
+      "downstream_buffers": {
+        "state": {
+          "words": 1601536,
+          "different_words": 1316124,
+          "rms_difference": 0.011154250803192524,
+          "max_abs_difference": 0.359375,
+          "baseline_sha256": "203d561363fca5dd17ff1b1febda88b21a9641620ded5af9b27193c09526a10b",
+          "candidate_sha256": "9dded8e6500567c77319d04ab492a491b10acec8d6b9c3bf5d67fd9164850543"
+        },
+        "logits": {
+          "words": 128000,
+          "different_words": 97551,
+          "rms_difference": 0.03399319135647476,
+          "max_abs_difference": 0.21875,
+          "baseline_sha256": "0a4eb9bdec658d09c27da35983f67b796b9ec488f53e718e1f0ce080ce76497e",
+          "candidate_sha256": "d51fdbe0ca74e46c03693a8722153ce00e2e5d5c2a9b7e9900eeb144ad73c335"
+        }
+      },
+      "observation_sha256": "bb37c67a204a6e400ef264ec85af7b4b7d1bd98ad1ce5e670692234e2d7c11f2",
+      "analysis_sha256": "490f7215404a5f3982e350836215524b4af894c2d599579048ea58cd4ef3fc4f"
+    },
+    {
+      "prompt_tokens": 2048,
+      "candidate_completed": 16,
+      "ineligible_hits": 0,
+      "scan_checks": true,
+      "poison_checks": true,
+      "serialization_check": true,
+      "greedy16_token_ids_equal": true,
+      "baseline_tokens": [
+        597,
+        8055,
+        509,
+        4116,
+        9543,
+        11004,
+        302,
+        278,
+        2936,
+        2837,
+        496,
+        73,
+        10,
+        10601,
+        890,
+        309
+      ],
+      "candidate_tokens": [
+        597,
+        8055,
+        509,
+        4116,
+        9543,
+        11004,
+        302,
+        278,
+        2936,
+        2837,
+        496,
+        73,
+        10,
+        10601,
+        890,
+        309
+      ],
+      "downstream_buffers": {
+        "state": {
+          "words": 23228416,
+          "different_words": 19721412,
+          "rms_difference": 0.0153449730062706,
+          "max_abs_difference": 0.8515625,
+          "baseline_sha256": "7f7e23060107d5252391778f46727022f8ee157fa34eb1753c424cac2f3f771f",
+          "candidate_sha256": "010f1179e2a804b31e5512704a8d1ea7a0e6c3d2f0aec5d7b6159ad43dd8c999"
+        },
+        "logits": {
+          "words": 128000,
+          "different_words": 120104,
+          "rms_difference": 0.09752749988979859,
+          "max_abs_difference": 0.484375,
+          "baseline_sha256": "8700e9a12456dce4f744caa329ad2013f44df7f2704e58e245e52aa0e9e9ddc5",
+          "candidate_sha256": "71baf564b7417fc42db80191a90390fc6294ca87baf233cd8139c55cc8b7a745"
+        }
+      },
+      "observation_sha256": "6a680ccd17f51cb2ea56ecb87d7ef15a938651e702c672f3dda64e242c41f9e8",
+      "analysis_sha256": "aff780ef0decf788b34e775e0017c9903f92f2fb29b32d875d5a6219ebad681a"
+    },
+    {
+      "prompt_tokens": 8192,
+      "candidate_completed": 64,
+      "ineligible_hits": 0,
+      "scan_checks": true,
+      "poison_checks": true,
+      "serialization_check": true,
+      "greedy16_token_ids_equal": true,
+      "baseline_tokens": [
+        597,
+        4695,
+        4116,
+        267,
+        1442,
+        1286,
+        4160,
+        302,
+        10601,
+        496,
+        73,
+        10,
+        8426,
+        20,
+        643,
+        7204
+      ],
+      "candidate_tokens": [
+        597,
+        4695,
+        4116,
+        267,
+        1442,
+        1286,
+        4160,
+        302,
+        10601,
+        496,
+        73,
+        10,
+        8426,
+        20,
+        643,
+        7204
+      ],
+      "downstream_buffers": {
+        "state": {
+          "words": 92434432,
+          "different_words": 78320197,
+          "rms_difference": 0.015190919206897453,
+          "max_abs_difference": 0.8515625,
+          "baseline_sha256": "5524361e72b466c99d75fbf958f1faa0c715920b3456f01532907c47a76cb27b",
+          "candidate_sha256": "3a03bef9484008ce8ac3aaabd855287db2532d6a711b7ae27e777634a4c3d2f7"
+        },
+        "logits": {
+          "words": 128000,
+          "different_words": 124217,
+          "rms_difference": 0.13458813193510316,
+          "max_abs_difference": 0.66796875,
+          "baseline_sha256": "19a2f9b7b0794ef2f2be0edb7d16564e24d33f02e0d01972780ae28d09010bf5",
+          "candidate_sha256": "db2dc7710b7413cdd5cdd11cd3ae493e24dbb25bf13d0a2b43f0ddb2d56f9ed1"
+        }
+      },
+      "observation_sha256": "3f979d1cb5d08f59b7398e481b1ddff4dc8432b22fd86c7ecd505654f52d5276",
+      "analysis_sha256": "95642ce696cc5cae23e1f42118f7414c0372a7680f2cd404454e9e6053dd44ff"
+    }
+  ],
+  "limitations": [
+    "Many downstream BF16 words differ despite matching sixteen greedy tokens; these differences are not shown no-worse against a full-model FP64 reference.",
+    "Initial128-token smoke generates the same repeated token; longer prompts yield meaningful matching token sequences.",
+    "First integrated gate now matches the genuine input and standalone primary-qualified output exactly. This excludes an initial adapter binding/input mismatch; downstream differences are consistent with propagation of changed BF16 values but have not been shown no-worse against a full-model reference or for all later candidate-propagated inputs.",
+    "Extra scan and loss of dual gate/up batching must be included in future serving measurement."
+  ],
+  "raw_receipts": {
+    "smoke": {
+      "receipt_sha256": "38f67c0f703c5ec5a48ce5392cd7097e78e2200858e73b97af06b8679b9582d2",
+      "events_sha256": "6073e4081e89467e99119378cfee40ab7b28f20352a9f1277e32cf72dcc495cc",
+      "children_exit_zero": true,
+      "log_hashes_independently_verified": true,
+      "lock_released": true
+    },
+    "positive": {
+      "receipt_sha256": "dc41777745e5142ecf6812297acf5553793632b0981ff407173b0313ed0e477f",
+      "events_sha256": "cde249b856b27b09cf22b3407805fbd56060eee5cba097f28729ee201dd7633c",
+      "children_exit_zero": true,
+      "log_hashes_independently_verified": true,
+      "lock_released": true
+    }
+  },
+  "first_integrated_gate_binding": {
+    "result": {
+      "scope": "integrated first gate binding/primary validation only; diagnostic command boundaries; no full-model fidelity or timing claim",
+      "checks": {
+        "baseline_norm_matches_genuine128": true,
+        "baseline_gate_matches_standalone": true,
+        "candidate_norm_matches_genuine128": true,
+        "candidate_gate_matches_standalone": true
+      },
+      "baseline": {
+        "rms": 0.0006554460990912766,
+        "max_abs": 0.007761517306789756,
+        "worst_column_rms": 0.007279313909585347
+      },
+      "candidate": {
+        "rms": 0.0006554460950282121,
+        "max_abs": 0.007761517306789756,
+        "worst_column_rms": 0.007279313909585347
+      },
+      "primary_per_column_no_worse": true,
+      "public_words_corrected": 125,
+      "candidate_matches_frozen_primary_qualified_words": true
+    },
+    "candidate_completed": 1,
+    "diagnostic_command_boundaries": true,
+    "receipt_sha256": "72635da8f181a33cf89a5bc620855daca4976d79b841577626e6e72185021518",
+    "analysis_sha256": "286c1504e8a2b2b9c074e209dbd8fd4c278d53420c1602967cade410e9ad4d5a",
+    "capture_log_sha256": "e99c327f90777d4f4abd0ba45cc55be59ffe96627297a7f1fddf230fc1831ccc",
+    "logs_exits_and_lease_release_independently_verified": true
+  },
+  "inline_error_substitution": {
+    "scope": "Removed separate error scan dispatch; repeat model observation with fusedfinalflagatomic. No arithmetic change.",
+    "prompt_lengths": [
+      128,
+      2048,
+      8192
+    ],
+    "prior_baseline_and_candidate_full_state_logits_hashes_identical": true,
+    "original_scan_poison_publication_and_nonvacuous_hit_checks_repeated": true,
+    "receipt_sha256": {
+      "smoke": "c7f500948b37a26f4573cb7c4c55a705826456f17f71a48808cfe6d1cbd7f900",
+      "positive": "984f406761505af5c5e5698cad9066c58ebbd6b1ed7897e1beee859ab3f47887"
+    },
+    "all_children_exit_zero_logs_hash_verified_and_leases_released": true
+  }
+}

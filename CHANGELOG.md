@@ -202,6 +202,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the images route test fixture can no longer hang a test run on macOS. Its route closes its end of the socket on every exit and the client's writes are bounded, so a route that answers before reading a large body ends the write at once (#3010).
 
+- LFM3-VL-2B on Metal: images. The native engine serves the official MLX 4-, 6- and 8-bit LFM3-VL-2B checkpoints with their own image tower, up to four images and 256 image tokens a request by default, and an LFM3 prompt fills in steps under `--decode-share` so replies keep decoding beside it. Tensor-unit prompt projection and tiled attention are development build options, off by default and refused by release builds (#1502, part of #1491). Thanks to @BlivionIaG.
+
 - CUDA EXL3 grouped experts launch and size their storage at the caller's tile and pair count, so decode no longer launches three quarters of its grid empty, and Qwen3.6-35B-A3B EXL3 sizes its grouped storage for 36,864 pair rows instead of 163,904 (about 3 GB less); outputs are bit-equal (#2843, for #2823).
 
 - CUDA: dots.mocr's text decoder serves text prompts on a GB10 from the publisher's BF16 weights, on a new shared engine for dense GQA decoders (`zig/src/cuda_dense/`); `--vision`, prompt caching and fp8 caches are refused by name, and served CUDA checkpoints are unchanged (#2673, part of #1927). Thanks to @laudney.

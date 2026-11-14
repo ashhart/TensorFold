@@ -2,9 +2,16 @@
 
 Tracking issue: [#1491](https://github.com/ashhart/TensorFold/issues/1491).
 
-This slice implements native LFM3-1.7B text generation. LFM3-VL execution is in the dependent vision slice.
+The native Metal engine implements LFM3-1.7B text generation and LFM3-VL-2B image-to-text generation.
 Both read the official MLX affine 4-, 6-, and 8-bit checkpoints without converting stored weights.
 This is an experimental family port. Device and model checks cover an M4 Pro and an M5 Ultra; they do not qualify other Apple GPUs.
+
+## Weight licence
+
+The official text and VL MLX exports retain the **LFM Open License v1.0**, rather than TensorFold’s Apache-2.0 code licence.
+See the [text weights licence](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE) and
+[VL weights licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
+The checked Macs are an M4 Pro with 48 GB RAM and an M5 Ultra with 256 GiB RAM.
 
 ## Run the models
 
@@ -13,11 +20,15 @@ Build the native engine with the Zig version in `.zig-version` and Xcode's Metal
 ```sh
 zig build native -Dcpu=apple_m1
 ./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-1.7B-MLX-4bit --context 8192
+./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-VL-2B-MLX-4bit --context 8192
 ```
 
 Replace `4bit` with `6bit` or `8bit` for those exports. A complete local checkpoint folder also works.
-This slice refuses VL checkpoints until the vision contribution is applied.
-Image budgets and decoder libraries are described by the stacked VL contribution.
+The VL checkpoint loads its own image tower. Send images through OpenAI `image_url` content parts.
+The default image budget is 256 tokens per request, with at most four images.
+Budgets outside 64–4096 tokens are refused. Each prepared image must cover at least 65,536 pixels (64 merged tokens).
+Smaller nonempty raw images are resized up to that floor; an undersized prepared grid is refused before vision execution.
+Video input is not implemented. JPEG and WebP decoding require the matching shared decoder libraries.
 
 The shared lane engine handles target verification, sampling and concurrent streams.
 Convolution history and KV state are kept per stream; partial acceptance restores the accepted row's state.
@@ -62,6 +73,12 @@ The native checker reads the saved metadata, validates shard header geometry, an
 required names, dtypes, shapes, and byte counts. It performs no projection, GPU allocation, or model inference.
 For VL, it checks the text decoder only. A passing result does not validate vision weights or image processing.
 
+For the focused format/launch-record and vision-residency host checks, without device execution:
+
+```sh
+zig build test-lfm3-nax-format-host test-lfm3-vision-residency-host
+```
+
 The config reader preserves full-attention versus sliding-attention layers, distinct rotary settings, sandwich norms,
 and each module's affine width and group size. Unsupported geometry and conflicting quantization declarations fail.
 
@@ -86,6 +103,8 @@ The header inspections used these revisions:
 ## Qualification and remaining gate
 
 Detailed counts, hashes, numerical evidence and reproducible requests are in the [receipts](../receipts/lfm3/README.md).
+
+Recorded receipts do not qualify a different source revision; each candidate needs its own exact-head gate.
 
 All six checkpoints passed 303 greedy/seeded-sampling, cache, concurrency and cancellation checks on one optimized M4 binary.
 The final source build also passed 303/303 on an M5. Text4 and VL4 additionally passed real grammar, thinking, tool,
@@ -145,10 +164,49 @@ files are on main.
 | Default text/reference performance, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/m5-text-slice-vs-mlx.json) | text4/6/8 on M5 Ultra, default route without NAX/tiled/split/stepped, cache off, greedy max 128, context 70000, three timed runs after warm-up; measured commit and environment not recorded in the artifact | At 2k/8k, text4 client TTFT 0.85/4.61 s versus 0.095/0.350 s for mlx-vlm; contextual decode 169/165 versus 334/317 tok/s. The default route stays slower; the gap remains documented. |
 | CUDA lanes, [#1508](https://github.com/ashhart/TensorFold/pull/1508), [#1634](https://github.com/ashhart/TensorFold/pull/1634) | separate owner-maintained backend/hardware cells | Kept out of this Metal ledger; no CUDA verdict is inferred from Metal results. |
 
-## Weight licence
+## Opt-in tensor-unit routes
 
-The official text and VL MLX exports retain the LFM Open License v1.0.
-See the [text licence](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE) and
-[VL licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
-TensorFold code remains Apache-2.0. The measured Macs are M4 Pro 48 GB and M5 Ultra 256 GiB.
-Receipts that include VL describe the combined chain, not a capability enabled in this text-only slice.
+`lfm3-nax-prompt`, `lfm3-tiled-attention` and 2048 prompt rows are off in every build, so a source build and a release
+serve a checkpoint with the same arithmetic. Enabling them is a development option on tensor-unit devices; release-version
+builds reject it. These remain draft routes; model
+fidelity is judged against an independent FP32 forward and the official MLX BF16 run, as agreed on
+[#1491](https://github.com/ashhart/TensorFold/issues/1491#issuecomment-6537143418), not against float64.
+
+```sh
+zig build native -Dcpu=apple_m1 -Dlfm3-nax-prompt=true -Dlfm3-tiled-attention=true -Dlfm3-prompt-rows=2048
+```
+
+`lfm3-nax-prompt` sends every dense prompt projection (attention q/k/v/out, convolution in/out, FFN gate/up/down)
+through `tf_qmmw_t_nax_win`, Flash Next's `tf_qmmw_t_nax` tile with scales and biases loaded eight groups at a time.
+It dequantizes each weight to BF16 as MLX does and accumulates in FP32, with the same bytes as `tf_qmmw_t_nax`. 4, 6
+and 8 bits with groups of 32 or 64 are covered, `n` divisible by 64 and `k` by eight groups; other shapes keep the row
+kernels. The LM head and decode keep their own kernels.
+`lfm3-tiled-attention` adds two attention kernels. Prompt rows use 64-query/32-key tiles with FP32 online softmax and
+the probabilities rounded once to BF16 for PV, as MLX does. A prompt segment of up to 2048 rows is one launch, so
+where a prompt is cut does not change its state. Decode, verification windows of any width and shared decode rows use a
+key-parallel kernel, so a window equals the same rows decoded one at a time: each query's keys split
+into at most 64 contiguous parts of at least 128 keys, merged in FP32. Both kernels replay a row through the exact
+attention path when its result is nonfinite, so nonfinite classes follow float64. Underflow and overflow of the FP32
+softmax follow MLX, not the earlier extended-range repair.
+Without them the build keeps the row kernels, decode attention and 128-row chunks.
+`tf-lfm3-nax-exact MODEL_DIR` checks these routes on real weights: prompts cut at many offsets, resumed from a saved
+prefix, and verification windows of 2 to 32 rows must equal their reference byte for byte.
+
+`-Dlfm3-prompt-rows=128`, `256`, or `2048` selects the development prompt batch; it is 2048 when both options above
+are enabled and 128 otherwise. Both options are required for a larger batch, and release-version builds reject them.
+Cache marks retain their existing 128-row policy and can split a larger batch. Cancellation and background yield
+are checked at chunk boundaries; a 2048-row chunk remains one atomic forward pass.
+The server fills prompts one chunk at a time (`prefill_step`), so the lane host runs the shortest remaining prompt next
+and decodes live streams between chunks instead of finishing every queued prompt first. Where a prompt is cut does
+not change its state (`tf-lfm3-nax-exact`), so the backend declares `chunk_invariant` and `--decode-share S` may cap
+chunks at 512 rows while replies decode: that lowers inter-token latency and raises aggregate decode at the cost of
+prompt throughput (`m5-nax-decode-share.json`). Without the flag the server keeps its own cuts.
+
+Kernel-contract probes: `metal LFM3 NAX prompt q{4,6,8}g{32,64}` and `metal LFM3 split structural full|sliding`,
+each with planted controls (`zig build tf-kernel-contract`, `--only "LFM3 NAX prompt"`).
+Developer harnesses (`tf-lfm3-forward ... --nax-prompt`, `tf-lfm3-profile` with `TF_LFM3_NAX_PROMPT=1` and
+`TF_LFM3_DECODE_STEPS=N`) enable the same kernels explicitly.
+
+These are work-in-progress arithmetic changes, not release-qualified replacements. Other Apple GPU generations and the
+weights' licence statement remain open. Licence: the LiquidAI LFM3 model cards declare `license: other` with
+`license_name: lfm1.0` and a LICENSE file in each repo. Macs checked: an M5 Ultra only.

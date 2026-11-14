@@ -1,0 +1,249 @@
+{
+  "scope": "Provisional M5 TEXT4 combined-enabled 128-row versus2048-row prompt batching with explicit prompt-only small-tail routes; not a new FP32/model-fidelity qualification.",
+  "cases": [
+    {
+      "prompt_tokens": 2048,
+      "baseline_ttft_s": [
+        0.5582766253501177,
+        0.5579384174197912
+      ],
+      "candidate_ttft_s": [
+        0.4746196251362562,
+        0.4739405419677496
+      ],
+      "baseline_median_s": 0.5581075213849545,
+      "candidate_median_s": 0.4742800835520029,
+      "baseline_over_candidate": 1.1767466961824473,
+      "baseline_first_last_drift": -0.0006058070765803114,
+      "candidate_relative_spread": 0.0014328446468983014,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "Not emitted; served text digests equal. Separate teacher-forced full-logit identity recorded.",
+      "prompt_ids": "both routes /tokenize exact pinned arrays"
+    },
+    {
+      "prompt_tokens": 8192,
+      "baseline_ttft_s": [
+        2.4393980419263244,
+        2.438312124926597
+      ],
+      "candidate_ttft_s": [
+        2.049930708948523,
+        2.0491615422070026
+      ],
+      "baseline_median_s": 2.4388550834264606,
+      "candidate_median_s": 2.0495461255777627,
+      "baseline_over_candidate": 1.1899488637948816,
+      "baseline_first_last_drift": -0.0004451577729683853,
+      "candidate_relative_spread": 0.0003753568109090555,
+      "stable_at_5percent": true,
+      "output_text_sha256_equal": true,
+      "output_token_id_equality": "Not emitted; served text digests equal. Separate teacher-forced full-logit identity recorded.",
+      "prompt_ids": "both routes /tokenize exact pinned arrays"
+    }
+  ],
+  "predeclared_max_baseline_drift": 0.05,
+  "no_timing_retries": true,
+  "default_off": true,
+  "raw_sha256": {
+    "text-4-0-public.cold-2048.json": "a104164b27d9d2e5ad7a71c16d95650fccd905b164dd048960ccc22879c6f14c",
+    "text-4-1-candidate.cold-8192.client.log": "14593271e6d541a22d372c6be0d9fdb98f7260b40cc807c4e047aa5df16fb989",
+    "text-4-1-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-0-public.after.metrics": "1db24ac66ad401b20a1e1228f1ec19555fa377e1183746ff85cac1f7e662f3af",
+    "text-4-3-public.cold-8192.client.log": "e0be9d6e69617f2fc5728be9385e5a424acc55001b5b49f11f80d7238e87d755",
+    "text-4-3-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-1-candidate.after.metrics": "5bb0e92aaa6b9434f460e060d2348c335f5299dedc84229638614de51feaff22",
+    "text-4-0-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-1-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.before.metrics": "43f025ab8ac84832a00b0959bf5d9456768008ee26706d5aec2d0a0a85cf6852",
+    "text-4-0-public.cold-8192.json": "9b1096973cb60264acb2c5cafd7a8fcd6db2b3b6bc953e838edcafb822b7d144",
+    "events.json": "b3ce9b494a753e5910df2d0938b44fce0611e8880404e97f2a1dad658e1138e6",
+    "text-4-3-public.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-0-public.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-1-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-0-public.cold-2048.client.log": "34c9c4bcfc16ed7804bd41dc9621f121e11c49a006713de838f44f2e06b3a31c",
+    "text-4-1-candidate.cold-2048.json": "4227598bcd7b46673406e7c1b73a4eaba6861155f8017fc822b1a5a246376968",
+    "text-4-2-candidate.after.metrics": "147cf942fd31acc92c10afebe413be08e66e61acc8868ad47af5301abe736add",
+    "text-4-2-candidate.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-2-candidate.cold-2048.tokenize.response.json": "7f59448440e4d3f003e40ef5773b12b7ef17c6808bc21ea16cb1bf3807ad06f6",
+    "text-4-3-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-public.before.metrics": "6d9dc7af656235d2fc964d5f97c4e6a6cddb71b694969ffedadb09ba3e1b471b",
+    "text-4-1-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-2-candidate.server.log": "d3b219e218fbcd4dbc5ccaf7b808163d3845a2b76b68e1cc8d58f652734883f7",
+    "text-4-2-candidate.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-2-candidate.cold-2048.client.log": "4cfa76cd2746e661ff22a88fb913162cefdcd9b6979aebe293ad28eba73bbd58",
+    "text-4-1-candidate.cold-8192.json": "26ed4735844d414887827df22a5d9cabaf5982d9c77f48ff35020e47dd665777",
+    "text-4-0-public.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd",
+    "text-4-0-public.after.health": "1a1b548b32e4b10f92f034af719cfd34450f88f589671e59ca4931557add078b",
+    "text-4-1-candidate.after.health": "61ce7238803a0dddc5c45f53a75e3acc31b93a4040f73bea155268931ad964b1",
+    "text-4-0-public.server.log": "5f81c71623bed833af90594f6dbfd3e348b90fa966d3f34ab593d85411a8322c",
+    "text-4-3-public.cold-8192.json": "ccd96a59d52a7567b4ee5929fc2723681194e056006aed34b9ea6271bff82228",
+    "text-4-0-public.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-1-candidate.server.log": "8d52f6623f69793d9a3f5b35c4a1a84f4da17ee4bd54c588450e1a2df1ff2b05",
+    "text-4-3-public.after.health": "27bda87cd574fb51c3027075ec6e3c7ac42471271c53b12af2a7f255abca1258",
+    "text-4-2-candidate.before.metrics": "a23c30c3e0da576af669496c053cb48fdeac4b45421b5d63296d1a8de54365fd",
+    "text-4-2-candidate.cold-8192.tokenize.request.json": "c196be253a6a7f7928e3f427e0faad10300dc3216279a3ae8a80a9cd46f77dab",
+    "text-4-1-candidate.cold-2048.client.log": "aa8efcd5a34de5d941367ebe01892e8cb2fc5397308f7269f82eceeba2ad29f0",
+    "manifest.json": "d904dd1ab411e53e9bb18344f982a64d86cb83be1ecc96da97597604c8c305c8",
+    "text-4-2-candidate.after.health": "71fbdf122b42a60d0c69d8ef91e2c0a1cda87b09c4d95afb389a4381592f7467",
+    "text-4-3-public.cold-2048.client.log": "d714a40c70faf4edf5f0484b80ec5c4406fa545b469f670056a79ae41e0dba34",
+    "text-4-2-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-3-public.cold-2048.json": "d67e864d18e53f789b1a990a08ec56754d74598588c93e690766ee2f76870576",
+    "records.json": "7e1bf2858da5e043828d8a536386f7a3f70554fedd3f92de87280044e4c05be2",
+    "text-4-2-candidate.cold-8192.json": "f183d60421549194a89342b89781d30c9ce60324f834d99b3594bcabfce3f81e",
+    "text-4-2-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-1-candidate.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-2-candidate.cold-8192.client.log": "75285506e321ce1ab084bad02f6ecffbf130d321000ef99c89a22c70fbeebe72",
+    "text-4-3-public.before.metrics": "be0914cb7b9c74285341629e436f7e3ee97ff5b89bad97ae31595a5999c7be8a",
+    "text-4-0-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-0-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-0-public.cold-8192.client.log": "66080cccaa55379b344ac9fd0d3536d1d3dda8037ab6755390c8d781462d9b00",
+    "text-4-3-public.server.log": "0ebf2304fa0c26766d6c2ff377eb5fe1749adc3c52ec9e80e5f91c07dc51c3e4",
+    "text-4-1-candidate.after.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.before.v1-settings.unavailable": "6e3c5ec0e30e80a389805137574a443680f3f648a64e35bc4bff31e642f53da5",
+    "text-4-3-public.before.health": "e41f1fa5fa63b41398632c5ab9622e881079971c2bec31b6d54da709ab256599",
+    "text-4-3-public.after.metrics": "c6c86ac4d5961c333a49b2ad55d15b7ddc137030ee0e5997e433b0c8b9808d2b",
+    "text-4-2-candidate.cold-2048.json": "102a1e3668892e08908f7bd5e6ccc3fddeb07aa2db0ddc2a88fe997353c77668",
+    "text-4-3-public.cold-8192.tokenize.response.json": "1e924ba32cf41b050291eaf02707b996b9f656171f816c15c24c7045a92600ee",
+    "text-4-2-candidate.cold-2048.tokenize.request.json": "f69a5dcb97950c19f12fd93b89b288ec0dd214a89ed83fbe5fb1e60270f6dabd"
+  },
+  "binary_sha256": "cc3a6b56010b1a501a5e340c149bc2cf9c1a990af2837066b92df34b03669f1d",
+  "packet_pins_sha256": "0742adf0d42c67437be9903561a3fe61e3e7a2c7bf78bf68296bd3ae8c36b2c0",
+  "settings": {
+    "baseline_prompt_rows": 128,
+    "candidate_prompt_rows": 2048,
+    "tail_mode_baseline": 0,
+    "tail_mode_candidate": 3,
+    "order": [
+      "baseline",
+      "candidate",
+      "candidate",
+      "baseline"
+    ],
+    "cache_gib": 0,
+    "output_tokens": 16,
+    "thinking": false,
+    "temperature": 0,
+    "same_binary": true,
+    "cache_mark_policy_rows": 128
+  },
+  "numerical_ablation": {
+    "uniform128": {
+      "sha256": "1deb25778922c5e40d5febc80f26669b20b4f7bc2de2f42da3a780efd7ce81b8",
+      "different_bf16_words": 0,
+      "prompt_state_equal": true,
+      "final_state_equal": true,
+      "routes": {
+        "chunk": 128,
+        "prompt": 8192,
+        "cache_len": 8208,
+        "prompt_state": "423af58169410fdb9206158e613cb4beba40d09274bee3f564f7840e8e5f62fe",
+        "final_state": "1158d77bcfe9a4f51fa60599fb7d09c7ff61785d775a7aeff619dff640de28d5",
+        "ffn_calls": 4608,
+        "ffn_rows": 589824,
+        "attention_calls": 1408
+      }
+    },
+    "seam0": {
+      "sha256": "9cdf28725190dd55fc386045b6a132ec9a87fededcb7ad3c8cdcf0dfe85a9b3c",
+      "different_bf16_words": 1875952,
+      "prompt_state_equal": false,
+      "final_state_equal": false,
+      "routes": {
+        "chunk": 2048,
+        "prompt": 8192,
+        "cache_len": 8208,
+        "prompt_state": "b3f8efab9bea583cade58cf2f4aaf8b179a65c61b17552af5f5af615816753d8",
+        "final_state": "1a861a4c172305604808793f95daa638e6890fb74bf23a232c7cd9911460a107",
+        "ffn_calls": 288,
+        "ffn_rows": 589464,
+        "attention_calls": 1408
+      }
+    },
+    "seam1": {
+      "sha256": "b911b76ea5e02437761547ed2c394d75ad29e2d90234baeddd556de11b50a12f",
+      "different_bf16_words": 1887147,
+      "prompt_state_equal": false,
+      "final_state_equal": false,
+      "routes": {
+        "chunk": 2048,
+        "prompt": 8192,
+        "cache_len": 8208,
+        "prompt_state": "63cd14f44573ae6d6eee405de8278ce1823946ff404f18e52a8eb315d755e3e7",
+        "final_state": "efe57c1d96595b01350c795dc162ecbfeafcbd2bef6f245d8a5f0488bf1aaeef",
+        "ffn_calls": 360,
+        "ffn_rows": 589824,
+        "attention_calls": 1408
+      }
+    },
+    "seam2": {
+      "sha256": "67dc5125e4d065dfa6164f3656b8865a5bf7685e4af76f3a66a016c561136a76",
+      "different_bf16_words": 1855282,
+      "prompt_state_equal": false,
+      "final_state_equal": false,
+      "routes": {
+        "chunk": 2048,
+        "prompt": 8192,
+        "cache_len": 8208,
+        "prompt_state": "07036428b54479bd4984c1608dab8d2bb43c975bb529657fd2ee0d62b7d7cd3a",
+        "final_state": "4290d9607782a2803197be4d924fa94358835e4f9fba20dbbe6e48a82eaa0828",
+        "ffn_calls": 288,
+        "ffn_rows": 589464,
+        "attention_calls": 1419
+      }
+    },
+    "seam3": {
+      "sha256": "1deb25778922c5e40d5febc80f26669b20b4f7bc2de2f42da3a780efd7ce81b8",
+      "different_bf16_words": 0,
+      "prompt_state_equal": true,
+      "final_state_equal": true,
+      "routes": {
+        "chunk": 2048,
+        "prompt": 8192,
+        "cache_len": 8208,
+        "prompt_state": "423af58169410fdb9206158e613cb4beba40d09274bee3f564f7840e8e5f62fe",
+        "final_state": "1158d77bcfe9a4f51fa60599fb7d09c7ff61785d775a7aeff619dff640de28d5",
+        "ffn_calls": 360,
+        "ffn_rows": 589824,
+        "attention_calls": 1419
+      }
+    },
+    "seam3repeat": {
+      "sha256": "1deb25778922c5e40d5febc80f26669b20b4f7bc2de2f42da3a780efd7ce81b8",
+      "different_bf16_words": 0,
+      "prompt_state_equal": true,
+      "final_state_equal": true,
+      "routes": {
+        "chunk": 2048,
+        "prompt": 8192,
+        "cache_len": 8208,
+        "prompt_state": "423af58169410fdb9206158e613cb4beba40d09274bee3f564f7840e8e5f62fe",
+        "final_state": "1158d77bcfe9a4f51fa60599fb7d09c7ff61785d775a7aeff619dff640de28d5",
+        "ffn_calls": 360,
+        "ffn_rows": 589824,
+        "attention_calls": 1419
+      }
+    }
+  },
+  "numerical_scope": "Same8192prompt+fixed16continuation; all17fullvocabularyBF16outputs and fullactiveKV/convolutionstate. Bothprompttailroutesrestoreuniform128 bytes; eachcomponentalonefails. Repeatbothbytesidentical. Not an independentFP32claim.",
+  "actual_route_checks": {
+    "candidate_ffn_tail_calls_per_request": 72,
+    "candidate_attention_tail_calls_per_request": 11,
+    "baseline_tail_calls": 0,
+    "cancel_callback_installed": true,
+    "eight_clients_exit_zero": true,
+    "four_servers_exit_zero": true,
+    "lock_released": true
+  },
+  "limitations": [
+    "Private experiment; public artifact validation separate.",
+    "Broad small-row NF/guard/FP32-envelope qualification remains pending; prior small-query numerical failure is not waived.",
+    "No warm-cache, concurrency, image, other quantization/backend or long-context qualification.",
+    "Generated text digests match; served output token arrays were not emitted. Teacher-forced full-logit identity is a separate direct model test.",
+    "No cancellation-latency claim for this new tail-routing binary.",
+    "Earlier uncorrected2048 run changed8k text; that failure remains preserved."
+  ]
+}

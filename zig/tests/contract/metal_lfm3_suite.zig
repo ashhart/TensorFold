@@ -13,6 +13,12 @@ const lfm3_alpha = @import("metal_lfm3_alpha.zig");
 const lfm3_conv_segments = @import("metal_lfm3_conv_segments.zig");
 const binned_projection = @import("metal_binned_projection.zig");
 const lfm3_projection = @import("metal_lfm3_projection.zig");
+const lfm3_nax = @import("metal_lfm3_nax.zig");
+const lfm3_tiled = @import("metal_lfm3_tiled.zig");
+const lfm3_split = @import("metal_lfm3_split.zig");
+const lfm3_vision = @import("metal_lfm3_vision.zig");
+const lfm3_vision_controls = @import("metal_lfm3_vision_controls.zig");
+const lfm3_risk_fast = @import("metal_lfm3_risk_fast.zig");
 const g = contract.gates;
 
 fn wanted(only: ?[]const u8, name: []const u8) bool {
@@ -24,6 +30,19 @@ pub const Suite = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     kernels: *std.ArrayList(g.Kernel),
+    tensor: bool,
+    nax_probes: [lfm3_nax.formats.len + 2]lfm3_nax.Probe = undefined,
+    nax_count: usize = 0,
+    tiled_probes: [4]lfm3_tiled.Probe = undefined,
+    tiled_count: usize = 0,
+    split_probes: [4]lfm3_split.Probe = undefined,
+    split_count: usize = 0,
+    lfm3_risk_probes: [2]lfm3_risk_fast.Probe = undefined,
+    lfm3_risk_count: usize = 0,
+    lfm3_image_probes: [std.enums.values(lfm3_vision.Kind).len]lfm3_vision.Probe = undefined,
+    lfm3_image_count: usize = 0,
+    lfm3_image_controls: [std.enums.values(lfm3_vision.Kind).len]lfm3_vision_controls.Probe = undefined,
+    lfm3_image_control_count: usize = 0,
     lfm3_probes: [std.enums.values(lfm3.Kind).len]lfm3.Probe = undefined,
     lfm3_control_probes: [std.enums.values(lfm3.Kind).len]lfm3.Probe = undefined,
     lfm3_control_count: usize = 0,
@@ -125,13 +144,13 @@ pub const Suite = struct {
             s.lfm3_conv_count += 1;
         }
         for (s.lfm3_conv_probes[0..s.lfm3_conv_count]) |*probe| try kernels.append(a, probe.kernel());
-        for ([_]lfm3_sums.Kind{ .norm, .qk }) |kind| for ([_]bool{ false, true }) |bad| {
+        for (std.enums.values(lfm3_sums.Kind)) |kind| for ([_]bool{ false, true }) |bad| {
             if (!wanted(only, lfm3_sums.name(kind, bad))) continue;
             s.lfm3_sum_probes[s.lfm3_sum_count] = try lfm3_sums.Probe.init(a, device, queue, kind, bad);
             s.lfm3_sum_count += 1;
         };
         for (s.lfm3_sum_probes[0..s.lfm3_sum_count]) |*probe| try kernels.append(a, probe.kernel());
-        for ([_]lfm3_attention_sums.Kind{ .dot, .full_values, .sliding_values, .full_merge, .sliding_merge }) |kind| for ([_]bool{ false, true }) |bad| {
+        for (std.enums.values(lfm3_attention_sums.Kind)) |kind| for ([_]bool{ false, true }) |bad| {
             if (!wanted(only, lfm3_attention_sums.name(kind, bad))) continue;
             s.lfm3_attention_probes[s.lfm3_attention_count] = try lfm3_attention_sums.Probe.init(a, device, queue, kind, bad);
             s.lfm3_attention_count += 1;
@@ -168,9 +187,56 @@ pub const Suite = struct {
             s.lfm3_projection_count += 1;
         }
         for (s.lfm3_projection_probes[0..s.lfm3_projection_count]) |*probe| try kernels.append(a, probe.kernel());
+        if (s.tensor) for (lfm3_nax.formats, 0..) |f, i| for (std.enums.values(lfm3_nax.Fault)) |fault| {
+            if (fault != .none and i != 0) continue;
+            if (!wanted(only, try lfm3_nax.name(a, f.bits, f.group, fault))) continue;
+            s.nax_probes[s.nax_count] = try lfm3_nax.Probe.init(a, device, queue, f.bits, f.group, fault);
+            s.nax_count += 1;
+        };
+        for (s.nax_probes[0..s.nax_count]) |*probe| try kernels.append(a, probe.kernel());
+        for ([_]bool{ false, true }) |sliding| for (std.enums.values(lfm3_tiled.Fault)) |fault| {
+            if (sliding and fault != .none or !wanted(only, lfm3_tiled.name(sliding, fault))) continue;
+            if (!s.tensor) {
+                std.debug.print("SKIP {s}: requires tensor units\n", .{lfm3_tiled.name(sliding, fault)});
+                continue;
+            }
+            s.tiled_probes[s.tiled_count] = try lfm3_tiled.Probe.init(a, device, queue, sliding, fault);
+            s.tiled_count += 1;
+        };
+        for (s.tiled_probes[0..s.tiled_count]) |*probe| try kernels.append(a, probe.kernel());
+        for ([_]bool{ false, true }) |sliding| for (std.enums.values(lfm3_split.Fault)) |fault| {
+            if (sliding and fault != .none or !wanted(only, lfm3_split.name(sliding, fault))) continue;
+            s.split_probes[s.split_count] = try lfm3_split.Probe.init(a, device, queue, sliding, fault);
+            s.split_count += 1;
+        };
+        for (s.split_probes[0..s.split_count]) |*probe| try kernels.append(a, probe.kernel());
+        for ([_]bool{ false, true }) |sliding| {
+            if (!wanted(only, lfm3_risk_fast.name(sliding))) continue;
+            s.lfm3_risk_probes[s.lfm3_risk_count] = try lfm3_risk_fast.Probe.init(a, device, queue, sliding);
+            s.lfm3_risk_count += 1;
+        }
+        for (s.lfm3_risk_probes[0..s.lfm3_risk_count]) |*probe| try kernels.append(a, probe.kernel());
+        for (std.enums.values(lfm3_vision.Kind)) |kind| {
+            if (!wanted(only, lfm3_vision.name(kind))) continue;
+            s.lfm3_image_probes[s.lfm3_image_count] = try lfm3_vision.Probe.init(a, device, queue, kind);
+            s.lfm3_image_count += 1;
+        }
+        for (s.lfm3_image_probes[0..s.lfm3_image_count]) |*probe| try kernels.append(a, probe.kernel());
+        for (std.enums.values(lfm3_vision.Kind)) |kind| {
+            if (!wanted(only, lfm3_vision_controls.name(kind))) continue;
+            s.lfm3_image_controls[s.lfm3_image_control_count] = try lfm3_vision_controls.Probe.init(a, device, queue, kind);
+            s.lfm3_image_control_count += 1;
+        }
+        for (s.lfm3_image_controls[0..s.lfm3_image_control_count]) |*probe| try kernels.append(a, probe.kernel());
     }
 
     pub fn deinit(s: *Suite) void {
+        for (s.nax_probes[0..s.nax_count]) |*probe| probe.deinit();
+        for (s.tiled_probes[0..s.tiled_count]) |*probe| probe.deinit();
+        for (s.split_probes[0..s.split_count]) |*probe| probe.deinit();
+        for (s.lfm3_risk_probes[0..s.lfm3_risk_count]) |*probe| probe.deinit();
+        for (s.lfm3_image_probes[0..s.lfm3_image_count]) |*probe| probe.deinit();
+        for (s.lfm3_image_controls[0..s.lfm3_image_control_count]) |*probe| probe.deinit();
         for (s.lfm3_probes[0..s.lfm3_count]) |*probe| probe.deinit();
         for (s.lfm3_control_probes[0..s.lfm3_control_count]) |*probe| probe.deinit();
         for (s.lfm3_dual_probes[0..s.lfm3_dual_count]) |*probe| probe.deinit();
