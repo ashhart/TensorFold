@@ -8,8 +8,16 @@ const att_rows = @import("cuda_batch_state.zig").att_rows;
 /// head_local's rows on one GPU: the draft head's lanes (<= 16) times its ids; a split head needs a pass's rows.
 pub const head_rows_one: usize = 32;
 
-/// head_local's rows, and whether the lane reduces K slices through native_part (with clusters it never does).
-pub const Sizes = struct { head_rows: usize = head_rows_one, lane_reduce: bool = true };
+/// part's rows: an EXL3 decoder's lane zero-fills every slice it is asked for, so it keeps out_sk whole slices.
+pub fn partRowsFor(z: Sizes, cap: usize) usize {
+    return if (z.format == .exl3 or z.exl3_lanes) out_sk * cap else partRows(cap);
+}
+
+/// EXL3 omits classic expert planning/shared-expert work and classic rank/head staging handled by its own kernels.
+pub const ScratchFormat = enum { classic, exl3 };
+
+/// head_local's rows, whether the lane reduces through native_part, the format, whether the decoder's lanes are EXL3's.
+pub const Sizes = struct { head_rows: usize = head_rows_one, lane_reduce: bool = true, format: ScratchFormat = .classic, exl3_lanes: bool = false };
 
 /// hc_part's rows of (low + 4) floats: hc_sk slices below 64 rows (legacy kernel), <= 8 below 256 (lane), one beyond.
 pub fn hcPartRows(cap: usize) usize {
