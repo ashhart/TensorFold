@@ -234,6 +234,11 @@ pub const Head = struct {
         errdefer h.norm_e.free();
         h.norm_h = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(nh));
         errdefer h.norm_h.free();
+        // the drafter's own weights only: TF_FLASHNEXT_MTP_WEIGHTS names how its BF16 linears are held
+        const weights = try @import("mtp_weights.zig").format();
+        @import("cuda_projection.zig").recode = weights;
+        @import("cuda_projection.zig").recoded = 0;
+        defer @import("cuda_projection.zig").recode = .checkpoint;
         h.fc_e = try fc(gpa, driver, &store, &buf, "language_model.mtp.fc_embedding");
         errdefer h.fc_e.free();
         h.fc_h = try fc(gpa, driver, &store, &buf, "language_model.mtp.fc_hidden");
@@ -247,6 +252,9 @@ pub const Head = struct {
             h.layer = try load.loadLayerAt(gpa, driver, stream, &store, pack_fn, "language_model.mtp.layers.0", false, false);
         }
         store.dropStaging(); // the head's experts are on the device
+        // the proposal head carries the checkpoint's own rows through its artifact, so it loads outside the window
+        @import("cuda_projection.zig").recode = .checkpoint;
+        if (weights != .checkpoint) std.log.info("flashnext: TF_FLASHNEXT_MTP_WEIGHTS={s} re-coded {d} MiB of the drafter's BF16 linears", .{ @tagName(weights), @import("cuda_projection.zig").recoded >> 20 });
         errdefer h.layer.free(gpa);
         const ids = try draftIds(gpa);
         defer gpa.free(ids);

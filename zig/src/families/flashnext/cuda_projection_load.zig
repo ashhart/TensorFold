@@ -73,6 +73,7 @@ fn uploadMicro(a: std.mem.Allocator, d: *const cuda.Driver, value: Micro) !wt.Q4
 pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []const u8, n: usize, k: usize) !wt.Q4 {
     var buf: [512]u8 = undefined;
     const t = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.weight", .{prefix}));
+    try projection.recodable(prefix, t.dtype);
     switch (t.dtype) {
         .bf16 => {
             if (!t.is(.bf16, &.{ n, k })) return error.UnexpectedTensor;
@@ -100,6 +101,7 @@ pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, pre
     if (names.len == 0) return error.UnexpectedTensor;
     var buf: [512]u8 = undefined;
     const first = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, names[0] }));
+    try projection.recodable(prefix, first.dtype);
     if (first.dtype == .f8_e4m3) {
         var value = try readStitched(a, store, prefix, names);
         defer value.deinit(a);

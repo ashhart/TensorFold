@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Flash Next on CUDA: `TF_FLASHNEXT_MTP_WEIGHTS=mxfp8` (opt-in) re-codes the MTP drafter's BF16 linears to MXFP8 as they load (E4M3 codes and one power-of-two scale a row's 32 inputs), 170 MiB on the NVFP4 checkpoint, so a draft pass reads about half their bytes; unset or blank keeps `checkpoint`, main's load, and on Metal or HIP, or where a drafter linear is not stored as BF16, `mxfp8` stops the start naming the setting. On a GB10 against main, greedy decode is 2.7 to 3.9% faster at 1, 2 and 4 streams with main's tokens a round on code, except chat at one stream (level), and sampled decode is 1.4 to 5.3% faster in 17 of 20 cells, but chat at one stream with seed 1234 is 1.7% slower on its rerun, where the drafter's proposals are accepted less often; replies are unchanged (#3218, for #3162).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).

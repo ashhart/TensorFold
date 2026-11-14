@@ -23,6 +23,18 @@ pub const Projection = struct {
     }
 };
 
+/// Set while the drafter's weights load (TF_FLASHNEXT_MTP_WEIGHTS): a BF16 projection is re-coded, not repacked.
+pub var recode: @import("mtp_weights.zig").Format = .checkpoint;
+/// The BF16 bytes the open window re-coded, for the drafter's startup line.
+pub var recoded: usize = 0;
+
+/// Under mxfp8 a drafter linear stored as anything but BF16 stops the load by name rather than loading as stored.
+pub fn recodable(prefix: []const u8, dtype: core.safetensors.DType) !void {
+    if (recode == .checkpoint or dtype == .bf16) return;
+    if (!@import("builtin").is_test) std.log.err("TF_FLASHNEXT_MTP_WEIGHTS=mxfp8: {s} is stored as {s}, and mxfp8 re-codes BF16 linears only; unset it or set checkpoint", .{ prefix, @tagName(dtype) });
+    return error.InvalidEnvironment;
+}
+
 /// Repack the checkpoint's BF16 bits without rounding or widening the resident weight.
 pub fn dense(gpa: std.mem.Allocator, driver: *const cuda.Driver, t: core.safetensors.Tensor) !Projection {
     if (t.rank != 2 or t.dtype != .bf16 or t.dim(0) == 0 or t.dim(1) == 0 or t.dim(1) % 64 != 0)
@@ -31,6 +43,13 @@ pub fn dense(gpa: std.mem.Allocator, driver: *const cuda.Driver, t: core.safeten
     const k = t.dim(1);
     const count = try std.math.mul(usize, n, k);
     if (t.bytes.len != try std.math.mul(usize, count, 2)) return error.UnexpectedTensor;
+    switch (recode) {
+        .checkpoint => {},
+        .mxfp8 => {
+            recoded += t.bytes.len;
+            return @import("cuda_mtp_mxfp8.zig").project(gpa, driver, t.bytes, n, k);
+        },
+    }
     const input = try gpa.alloc(u16, count);
     defer gpa.free(input);
     for (input, 0..) |*v, i| v.* = std.mem.readInt(u16, t.bytes[i * 2 ..][0..2], .little);

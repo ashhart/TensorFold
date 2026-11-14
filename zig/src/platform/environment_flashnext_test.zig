@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 29 settings: 20 switches, 7 integers, 1 real, 1 structured" {
+test "Flash Next strict env: the table holds all 30 settings: 20 switches, 7 integers, 1 real, 2 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 20, 7, 1, 1 }, counts);
+    try t.expectEqual([4]usize{ 20, 7, 1, 2 }, counts);
 }
 
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
@@ -101,6 +101,17 @@ test "Flash Next strict env: the prompt word keeps rows as a present index and r
     // rows is the only word, so it decodes to index 0: present, which the reader reads as the rows path
     try t.expect((try e.value(?u64, name, "rows", null)) != null);
     try t.expect((try e.value(?u64, name, null, null)) == null);
+}
+
+test "Flash Next strict env: the drafter's weights keep checkpoint and mxfp8, read blank as checkpoint, refuse other text" {
+    const name = "TF_FLASHNEXT_MTP_WEIGHTS";
+    try check(name, "checkpoint", true);
+    try check(name, "mxfp8", true);
+    // the words' order is the reader's: checkpoint is 0, its default, and mxfp8 is 1
+    try t.expectEqual(@as(u1, 0), try e.value(u1, name, "checkpoint", 1));
+    try t.expectEqual(@as(u1, 1), try e.value(u1, name, "mxfp8", 0));
+    for ([_]?[]const u8{ null, "", " ", "\t", " \t\r\n" }) |raw| try t.expectEqual(@as(u1, 0), try e.value(u1, name, raw, 0));
+    for ([_][]const u8{ "MXFP8", "fp8", "1", "mxfp8 ", "bf16", "checkpoints" }) |raw| try check(name, raw, false);
 }
 
 test "Flash Next strict env: the late keep reads unset and blank as null, and 0 and 1 as false and true" {
