@@ -24,20 +24,22 @@ pub const Device = struct {
     plans: u64 = 0,
     hit_picks: u64 = 0,
     miss_picks: u64 = 0,
+    /// Misses admitted to a pool line (resident).
     copies: u64 = 0,
     evictions: u64 = 0,
-    inplace_experts: u64 = 0,
+    /// Misses with no free line, copied to the planner's shared scratch for one round and never resident.
+    staged_experts: u64 = 0,
     overflow_plans: u64 = 0,
 
     pub fn pending(current: anytype, seen: @TypeOf(current)) Device {
-        return .{ .plans = current.rounds -% seen.rounds, .hit_picks = current.hit_slots -% seen.hit_slots, .miss_picks = current.miss_slots -% seen.miss_slots, .copies = current.copies -% seen.copies, .evictions = current.evictions -% seen.evictions, .inplace_experts = current.inplace -% seen.inplace, .overflow_plans = current.overflow -% seen.overflow };
+        return .{ .plans = current.rounds -% seen.rounds, .hit_picks = current.hit_slots -% seen.hit_slots, .miss_picks = current.miss_slots -% seen.miss_slots, .copies = current.copies -% seen.copies, .evictions = current.evictions -% seen.evictions, .staged_experts = current.staged -% seen.staged, .overflow_plans = current.overflow -% seen.overflow };
     }
 
     pub fn pendingBounded(current: anytype, seen: @TypeOf(current), max_picks: u64) !Device {
         const delta = pending(current, seen);
         const bound = try std.math.mul(u64, delta.plans, max_picks);
         if (max_picks == 0 or bound >= @as(u64, 1) << 32) return error.TelemetryExpertIntervalTooLong;
-        if (try std.math.add(u64, delta.hit_picks, delta.miss_picks) > bound or try std.math.add(u64, delta.copies, delta.inplace_experts) > bound or delta.overflow_plans > delta.plans) return error.TelemetryInconsistentCounters;
+        if (try std.math.add(u64, delta.hit_picks, delta.miss_picks) > bound or try std.math.add(u64, delta.copies, delta.staged_experts) > bound or delta.overflow_plans > delta.plans) return error.TelemetryInconsistentCounters;
         return delta;
     }
 
@@ -79,9 +81,12 @@ pub const Experts = struct {
     device_plans: u64 = 0,
     device_hit_picks: u64 = 0,
     device_miss_picks: u64 = 0,
+    /// Resident admissions of the device planner.
     device_copies: u64 = 0,
-    device_inplace_experts: u64 = 0,
+    /// Staged experts of the device planner (one round's scratch, never resident).
+    device_staged_experts: u64 = 0,
     device_overflow_plans: u64 = 0,
+    /// Logical host-to-device payload of device-planned copies: resident admissions plus staged experts.
     mapped_copy_payload_min_bytes: u64 = 0,
     mapped_copy_payload_max_bytes: u64 = 0,
     ring_dma_copies: u64 = 0,
@@ -131,7 +136,7 @@ pub const LayerCounts = struct {
     device_hit_picks: u64 = 0,
     device_miss_picks: u64 = 0,
     device_copies: u64 = 0,
-    device_inplace_experts: u64 = 0,
+    device_staged_experts: u64 = 0,
     device_overflow_plans: u64 = 0,
     mapped_copy_payload_min_bytes: u64 = 0,
     mapped_copy_payload_max_bytes: u64 = 0,
@@ -220,7 +225,7 @@ pub const Report = struct {
     }
 
     fn header(report: Report, writer: *std.Io.Writer, cache: []const u8) !void {
-        try writer.print("EXL3-CACHE v=1 rank={d} world={d} phase={s} rows={d} steps={d} expert_pools={d} cache={s}", .{ report.rank.rank, report.rank.world, @tagName(report.interval.phase), report.interval.model_rows, report.interval.steps, report.expert_pools, cache });
+        try writer.print("EXL3-CACHE v=2 rank={d} world={d} phase={s} rows={d} steps={d} expert_pools={d} cache={s}", .{ report.rank.rank, report.rank.world, @tagName(report.interval.phase), report.interval.model_rows, report.interval.steps, report.expert_pools, cache });
     }
 
     pub fn formatAlloc(report: Report, allocator: std.mem.Allocator) ![]u8 {

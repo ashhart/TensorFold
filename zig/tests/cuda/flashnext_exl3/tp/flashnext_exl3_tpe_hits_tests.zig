@@ -145,10 +145,10 @@ pub fn policyMode(gpu: Gpu, files: []const [:0]const u8) !void {
         const admission = result.decayed_admission;
         std.debug.print("POLICY {s} pool={d} layer={d} lines={d} rounds={d} drops={d}\n", .{ path, view.words[2], view.words[3], first.lines, view.recorded(), view.dropped() });
         if (view.checkpoints() != 0) std.debug.print("  {d} ownership checkpoints: each device segment starts from its recorded state; host intervals excluded\n", .{view.checkpoints()});
-        std.debug.print("  lifetime picks miss={d} copies={d} evictions={d} mapped={d}\n", .{ lifetime.miss_picks, lifetime.copies, lifetime.evictions, lifetime.mapped_experts });
-        std.debug.print("  lru      picks miss={d} copies={d} evictions={d} mapped={d}\n", .{ lru.miss_picks, lru.copies, lru.evictions, lru.mapped_experts });
-        std.debug.print("  decayed  picks miss={d} copies={d} evictions={d} mapped={d}\n", .{ decayed.miss_picks, decayed.copies, decayed.evictions, decayed.mapped_experts });
-        std.debug.print("  guarded  picks miss={d} copies={d} evictions={d} mapped={d} mapped_picks={d}\n", .{ admission.miss_picks, admission.copies, admission.evictions, admission.mapped_experts, admission.mapped_picks });
+        std.debug.print("  lifetime picks miss={d} copies={d} evictions={d} staged={d}\n", .{ lifetime.miss_picks, lifetime.copies, lifetime.evictions, lifetime.staged_experts });
+        std.debug.print("  lru      picks miss={d} copies={d} evictions={d} staged={d}\n", .{ lru.miss_picks, lru.copies, lru.evictions, lru.staged_experts });
+        std.debug.print("  decayed  picks miss={d} copies={d} evictions={d} staged={d}\n", .{ decayed.miss_picks, decayed.copies, decayed.evictions, decayed.staged_experts });
+        std.debug.print("  guarded  picks miss={d} copies={d} evictions={d} staged={d} staged_picks={d}\n", .{ admission.miss_picks, admission.copies, admission.evictions, admission.staged_experts, admission.staged_picks });
         std.debug.print("  Belady unique-miss lower bound={d} (not copy/time bound)\n", .{result.belady_unique_misses_lower_bound});
     }
 }

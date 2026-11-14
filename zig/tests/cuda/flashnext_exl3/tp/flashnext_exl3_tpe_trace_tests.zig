@@ -132,7 +132,7 @@ pub fn traceMode(gpu: Gpu, rank: usize, world: usize, port: u16, dir: []const u8
             const path = try std.fmt.allocPrintSentinel(a, "{s}.rank-{d}.pool-{d}.exdpt", .{ prefix, rank, index }, 0);
             defer a.free(path);
             try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = path, .data = bytes });
-            std.debug.print("TRACE v{d} rank {d} pool {d} layer {d}: rounds={d}/{d}, checkpoints={d}, verified transitions={d}, picks hit/miss={d}/{d}, copies={d}, evictions={d}, in-place experts/picks={d}/{d}, bytes={d}, output={x}\n", .{ X.dplan.demand_trace.version, rank, index, pool.opt.layer, view.recorded(), view.words[8], view.checkpoints(), replay.matched_transitions, replay.delta.hit_picks, replay.delta.miss_picks, replay.delta.copies, replay.delta.evictions, replay.delta.inplace, replay.delta.mapped_picks, bytes.len, output_hash });
+            std.debug.print("TRACE v{d} rank {d} pool {d} layer {d}: rounds={d}/{d}, checkpoints={d}, verified transitions={d}, picks hit/miss={d}/{d}, copies={d}, evictions={d}, staged experts/picks={d}/{d}, bytes={d}, output={x}\n", .{ X.dplan.demand_trace.version, rank, index, pool.opt.layer, view.recorded(), view.words[8], view.checkpoints(), replay.matched_transitions, replay.delta.hit_picks, replay.delta.miss_picks, replay.delta.copies, replay.delta.evictions, replay.delta.staged, replay.delta.staged_picks, bytes.len, output_hash });
         }
         if (decoder_pools != 48) return error.TraceDecoderPoolCount;
     } else return error.TracePlannerMissing;

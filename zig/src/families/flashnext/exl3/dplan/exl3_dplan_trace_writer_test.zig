@@ -10,7 +10,8 @@ test "exl3: CUDA writer bytes replay all 1200 rounds and terminal words exactly 
     try std.testing.expectEqual(@as(usize, 1200), result.rounds);
     try std.testing.expectEqual(@as(usize, 1200), result.matched_transitions);
     try std.testing.expectEqual(@as(u64, 0), result.delta.overflow);
-    try std.testing.expect(result.delta.mapped_picks > 0);
+    try std.testing.expect(result.delta.staged > 0);
+    try std.testing.expect(result.delta.staged_picks >= result.delta.staged);
     try std.testing.expect(result.delta.copies > 0);
     try std.testing.expect(result.delta.evictions > 0);
 }

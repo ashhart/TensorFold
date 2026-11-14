@@ -42,11 +42,13 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
             minimum = @min(minimum, bytes);
             maximum = @max(maximum, bytes);
         }
+        // every resident copy and every staged expert moves one expert's bytes from the mapped bank
+        const copied_experts = try std.math.add(u64, device.copies, device.staged_experts);
         if (minimum == std.math.maxInt(u64)) {
-            if (device.copies != 0) return error.TelemetryInconsistentCounters;
+            if (copied_experts != 0) return error.TelemetryInconsistentCounters;
             minimum = 0;
         }
-        const host = try counters.difference(counters.Device, resident.telemetry_device, .{ .plans = resident.stats.rounds, .hit_picks = resident.stats.hit_slots, .miss_picks = resident.stats.miss_slots, .copies = resident.stats.misses, .evictions = resident.stats.evictions, .inplace_experts = resident.telemetry_device.inplace_experts, .overflow_plans = resident.telemetry_device.overflow_plans });
+        const host = try counters.difference(counters.Device, resident.telemetry_device, .{ .plans = resident.stats.rounds, .hit_picks = resident.stats.hit_slots, .miss_picks = resident.stats.miss_slots, .copies = resident.stats.misses, .evictions = resident.stats.evictions, .staged_experts = resident.telemetry_device.staged_experts, .overflow_plans = resident.telemetry_device.overflow_plans });
         const contribution: counters.Experts = .{
             .host_plans = host.plans,
             .host_hit_picks = host.hit_picks,
@@ -59,10 +61,10 @@ pub fn sampleAfterConsumers(allocator: std.mem.Allocator, engine: *prompt.Engine
             .device_hit_picks = device.hit_picks,
             .device_miss_picks = device.miss_picks,
             .device_copies = device.copies,
-            .device_inplace_experts = device.inplace_experts,
+            .device_staged_experts = device.staged_experts,
             .device_overflow_plans = device.overflow_plans,
-            .mapped_copy_payload_min_bytes = try std.math.mul(u64, device.copies, minimum),
-            .mapped_copy_payload_max_bytes = try std.math.mul(u64, device.copies, maximum),
+            .mapped_copy_payload_min_bytes = try std.math.mul(u64, copied_experts, minimum),
+            .mapped_copy_payload_max_bytes = try std.math.mul(u64, copied_experts, maximum),
         };
         try counters.add(counters.Experts, &totals, contribution);
         if (engine.telemetry.layers_enabled) {

@@ -22,6 +22,7 @@ pub const Options = struct {
     decay_shift: u5 = 1,
 };
 
+/// Copies admit residents; staged experts are used for one round without taking a pool line.
 pub const Metrics = struct {
     rounds: u64 = 0,
     hit_picks: u64 = 0,
@@ -31,8 +32,8 @@ pub const Metrics = struct {
     admissions: u64 = 0,
     copies: u64 = 0,
     evictions: u64 = 0,
-    mapped_experts: u64 = 0,
-    mapped_picks: u64 = 0,
+    staged_experts: u64 = 0,
+    staged_picks: u64 = 0,
 
     fn plus(self: Metrics, other: Metrics) !Metrics {
         var result: Metrics = undefined;
@@ -160,8 +161,8 @@ pub const State = struct {
         for (misses[0..miss_count]) |expert| {
             if (self.victim(&demand)) |line| {
                 if (self.policy == .decayed_admission and self.line_ids[line] >= 0 and self.scores[expert] < self.scores[@intCast(self.line_ids[line])]) {
-                    delta.mapped_experts += 1;
-                    delta.mapped_picks += demand.counts[expert];
+                    delta.staged_experts += 1;
+                    delta.staged_picks += demand.counts[expert];
                     continue;
                 }
                 if (self.line_ids[line] >= 0) delta.evictions += 1;
@@ -170,8 +171,8 @@ pub const State = struct {
                 delta.admissions += 1;
                 delta.copies += 1;
             } else {
-                delta.mapped_experts += 1;
-                delta.mapped_picks += demand.counts[expert];
+                delta.staged_experts += 1;
+                delta.staged_picks += demand.counts[expert];
             }
         }
         self.total = try self.total.plus(delta);
@@ -270,8 +271,8 @@ pub fn evaluateTrace(allocator: std.mem.Allocator, view: trace.View) !Comparison
         baseline.miss_picks != exact.miss_picks or
         baseline.copies != exact.copies or
         baseline.evictions != exact.evictions or
-        baseline.mapped_experts != exact.inplace or
-        baseline.mapped_picks != exact.mapped_picks)
+        baseline.staged_experts != exact.staged or
+        baseline.staged_picks != exact.staged_picks)
         return error.PolicyBaselineMismatch;
     return total;
 }

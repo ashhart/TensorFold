@@ -46,7 +46,7 @@ const Synthetic = struct {
     }
 };
 
-test "exl3: policy evaluation pins round hits and admissions and separates mapped misses" {
+test "exl3: policy evaluation pins round hits and admissions and separates staged misses" {
     var fixture = try Synthetic.init(&.{ 0, 2, 2, 2, 3, 512, -1, 999, -9 });
     defer fixture.deinit();
     var state = try State.init(std.testing.allocator, .lifetime, .{
@@ -55,7 +55,7 @@ test "exl3: policy evaluation pins round hits and admissions and separates mappe
     });
     defer state.deinit();
     const result = try state.observe(fixture.round());
-    try std.testing.expectEqual(Metrics{ .rounds = 1, .hit_picks = 1, .miss_picks = 4, .hit_experts = 1, .miss_experts = 2, .admissions = 1, .copies = 1, .evictions = 1, .mapped_experts = 1, .mapped_picks = 1 }, result);
+    try std.testing.expectEqual(Metrics{ .rounds = 1, .hit_picks = 1, .miss_picks = 4, .hit_experts = 1, .miss_experts = 2, .admissions = 1, .copies = 1, .evictions = 1, .staged_experts = 1, .staged_picks = 1 }, result);
     try std.testing.expectEqualSlices(i32, &.{ 0, 2 }, state.line_ids);
 }
 
@@ -185,7 +185,7 @@ test "exl3: frequency admission bypasses a colder newcomer and later admits it w
     defer state.deinit();
     const cold = try state.observe(warm.round());
     try std.testing.expectEqual(@as(u64, 0), cold.copies);
-    try std.testing.expectEqual(@as(u64, 1), cold.mapped_experts);
+    try std.testing.expectEqual(@as(u64, 1), cold.staged_experts);
     try std.testing.expectEqualSlices(i32, &.{0}, state.line_ids);
     const now_hot = try state.observe(hot.round());
     try std.testing.expectEqual(@as(u64, 1), now_hot.copies);
@@ -206,9 +206,9 @@ test "exl3: comparison evolves independently from the initial seed and supports 
     try std.testing.expectEqual(result.lifetime, result.decayed_admission);
     try std.testing.expectEqual(@as(u64, 1), result.belady_unique_misses_lower_bound);
     const zero = try evaluate(std.testing.allocator, &rounds, .{ .capacity = 0 });
-    try std.testing.expectEqual(@as(u64, 4), zero.lifetime.mapped_picks);
+    try std.testing.expectEqual(@as(u64, 4), zero.lifetime.staged_picks);
     try std.testing.expectEqual(@as(u64, 0), zero.lifetime.copies);
-    try std.testing.expectEqual(@as(u64, 4), zero.decayed_admission.mapped_picks);
+    try std.testing.expectEqual(@as(u64, 4), zero.decayed_admission.staged_picks);
     try std.testing.expectEqual(@as(u64, 0), zero.decayed_admission.copies);
     try std.testing.expectEqual(@as(u64, 2), zero.belady_unique_misses_lower_bound);
     const none = try evaluate(std.testing.allocator, &.{}, .{ .capacity = 2 });

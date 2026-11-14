@@ -28,12 +28,17 @@ static void cudaGraphSetConditional(cudaGraphConditionalHandle, unsigned) {}
 static constexpr unsigned pool_words = 1024 * 1024 / 4;
 static constexpr unsigned sentinel = 0xfeedface;
 
+// The planner's line geometry: three segments a line at these offsets, lines from test_line_base, and the shared scratch
+// (one line-sized slot for each staged expert of a round) from test_scratch_base.
+static constexpr unsigned long long test_line_base = 1024, test_line_bytes = 1024, test_scratch_base = 1ull << 20;
+static constexpr unsigned long long test_offsets[3] = {0, 256, 512};
+
 static std::vector<unsigned> make_trace(unsigned lines, unsigned rows) {
     std::vector<unsigned> trace(pool_words + 1, 0);
     const unsigned seed_words = 2 * lines + 3 * DP_EXPERTS + DP_RECENT_WORDS + 10;
     const unsigned stride = 15 + rows * 11;
     auto* header = reinterpret_cast<DpTraceHeader*>(trace.data());
-    *header = {0x44505431, 4, 0, 0, lines, rows, seed_words, stride,
+    *header = {0x44505431, 5, 0, 0, lines, rows, seed_words, stride,
                (pool_words - 16 - 2 * seed_words) / stride, 0, 0, 0, 0, 0, 0, 0};
     trace[pool_words] = sentinel;
     return trace;
@@ -50,7 +55,7 @@ struct PlanOutput {
     long long tabs[3][513]{};
     int widths[3][513]{};
     long long work[512 * 9]{};
-    int work_n = 0, overflow[512]{}, overflow_n = 0;
+    int work_n = 0, staged[512]{}, staged_n = 0;
 };
 
 static void run_plan(std::vector<unsigned>& state, unsigned lines, const std::vector<int>& picks,
@@ -65,16 +70,16 @@ static void run_plan(std::vector<unsigned>& state, unsigned lines, const std::ve
     fn_exl3_dplan(picks.data(), static_cast<int>(picks.size()), state.data(), lines, recent,
         output.tabs[0], output.tabs[1], output.tabs[2],
         output.widths[0], output.widths[1], output.widths[2],
-        src, lens, widths, 1024, 1024, 0, 256, 512,
-        output.work, &output.work_n, nullptr, nullptr, output.overflow, &output.overflow_n, trace);
+        src, lens, widths, test_line_base, test_line_bytes, test_offsets[0], test_offsets[1], test_offsets[2], test_scratch_base,
+        output.work, &output.work_n, nullptr, nullptr, output.staged, &output.staged_n, trace);
 }
 
 static void assert_same(const PlanOutput& first, const PlanOutput& second) {
     assert(std::memcmp(first.tabs, second.tabs, sizeof(first.tabs)) == 0);
     assert(std::memcmp(first.widths, second.widths, sizeof(first.widths)) == 0);
     assert(std::memcmp(first.work, second.work, sizeof(first.work)) == 0);
-    assert(std::memcmp(first.overflow, second.overflow, sizeof(first.overflow)) == 0);
-    assert(first.work_n == second.work_n && first.overflow_n == second.overflow_n);
+    assert(std::memcmp(first.staged, second.staged, sizeof(first.staged)) == 0);
+    assert(first.work_n == second.work_n && first.staged_n == second.staged_n);
 }
 
 static void test_bounds_and_flags() {
@@ -92,6 +97,7 @@ static void test_bounds_and_flags() {
     const unsigned* round = trace.data() + offset;
     assert(round[0] == 47 && round[1] == 513 && round[2] == 512 && round[3] == 1);
     assert(round[10] == 1 && round[8] == 0 && round[14] == 0);
+    assert(output.work_n == 0 && output.staged_n == 0);
     assert(std::memcmp(trace.data() + 16, seed.data(), seed.size() * 4) == 0);
     assert(std::memcmp(round + 15, picks.data(), picks.size() * 4) == 0);
     assert(std::memcmp(trace.data() + 16 + seed.size(), state.data(), state.size() * 4) == 0);
@@ -216,6 +222,8 @@ static std::vector<unsigned> test_long_capture() {
             }
         }
         const int recent = index % 3 != 0;
+        DpMisc before;
+        std::memcpy(&before, state.data() + misc_at, sizeof(before));
         run_plan(state, lines, picks, trace.data(), recent, captured);
         run_plan(untraced, lines, picks, nullptr, recent, disabled);
         assert(state == untraced);
@@ -223,11 +231,36 @@ static std::vector<unsigned> test_long_capture() {
         assert(header->recorded == static_cast<unsigned>(index + 1));
         const unsigned* round = trace.data() + 16 + 2 * header->seed_words + index * header->record_words;
         assert(std::memcmp(round + 4, state.data() + misc_at, sizeof(DpMisc)) == 0);
-        unsigned mapped = 0;
+        DpMisc after;
+        std::memcpy(&after, state.data() + misc_at, sizeof(after));
+        // misses with no free line are staged (counted apart from the resident copies) and copied with them
+        const unsigned copied = after.copies - before.copies, staged = after.staged - before.staged;
+        assert(captured.staged_n == static_cast<int>(staged));
+        assert(captured.work_n == static_cast<int>(copied + staged));
+        unsigned staged_picks = 0;
         for (int pick : picks)
-            for (int overflow = 0; overflow < captured.overflow_n; ++overflow)
-                if (pick == captured.overflow[overflow]) ++mapped;
-        assert(round[14] == mapped);
+            for (int slot = 0; slot < captured.staged_n; ++slot)
+                if (pick == captured.staged[slot]) ++staged_picks;
+        assert(round[14] == staged_picks);
+        for (int slot = 0; slot < captured.staged_n; ++slot) {
+            const int expert = captured.staged[slot];
+            for (int part = 0; part < 3; ++part) {
+                const long long scratch = static_cast<long long>(test_scratch_base + slot * test_line_bytes + test_offsets[part]);
+                assert(captured.tabs[part][expert] == scratch && captured.widths[part][expert] == 3);
+            }
+        }
+        int scratch_segments = 0;
+        for (int segment = 0; segment < captured.work_n * 3; ++segment) {
+            const unsigned long long destination = static_cast<unsigned long long>(captured.work[segment * 3 + 1]);
+            if (destination >= test_scratch_base) {
+                assert(destination < test_scratch_base + staged * test_line_bytes);
+                ++scratch_segments;
+            } else {
+                assert(destination >= test_line_base && destination < test_line_base + lines * test_line_bytes);
+            }
+        }
+        assert(scratch_segments == captured.staged_n * 3);
+        assert(staged > 0 && copied <= lines);
         assert(std::memcmp(round + 15, picks.data(), picks.size() * 4) == 0);
     }
     assert(header->discontinuity == 0 && header->invalid_launch == 0);

@@ -13,7 +13,7 @@ test "exl3: replay device sampling reads executed counters without pulling owner
     resident.telemetry_valid = true;
     var pools = [_]*pool.Pool{&resident};
     var state: [planner.stateWords(1)]u32 = @splat(0);
-    const executed: planner.Misc = .{ .now = 104, .rounds = 4, .hit_slots = 30, .miss_slots = 10, .copies = 8, .evictions = 2, .overflow = 0, .inplace = 1, .recent_cursor = 9, .recent_filled = 8 };
+    const executed: planner.Misc = .{ .now = 104, .rounds = 4, .hit_slots = 30, .miss_slots = 10, .copies = 8, .evictions = 2, .overflow = 0, .staged = 1, .recent_cursor = 9, .recent_filled = 8 };
     const offset = planner.miscOffset(1) * 4;
     @memcpy(std.mem.sliceAsBytes(&state)[offset..][0..@sizeOf(planner.Misc)], std.mem.asBytes(&executed));
     var seen = [_]planner.Misc{std.mem.zeroes(planner.Misc)};
@@ -32,7 +32,7 @@ test "exl3: replay device sampling reads executed counters without pulling owner
     try std.testing.expectEqual(@as(u64, 9), first.plans);
     try std.testing.expectEqual(@as(u64, 50), first.hit_picks);
     try std.testing.expectEqual(@as(u64, 11), first.copies);
-    try std.testing.expectEqual(@as(u64, 1), first.inplace_experts);
+    try std.testing.expectEqual(@as(u64, 1), first.staged_experts);
     try std.testing.expectEqual(planner.Owner.device, device.owner);
     try std.testing.expectEqual(@as(u32, 0), seen[0].copies);
     try std.testing.expectEqual(syncs, Fake.sync_calls);
@@ -131,7 +131,7 @@ test "exl3: aggregate telemetry finds attached pools deduplicates MTP aliases an
     resident.lines.pinned_bank = null;
     resident.telemetry_id = 991;
     resident.telemetry_valid = true;
-    resident.telemetry_device = .{ .plans = 5, .hit_picks = 20, .miss_picks = 10, .copies = 3, .inplace_experts = 1 };
+    resident.telemetry_device = .{ .plans = 5, .hit_picks = 20, .miss_picks = 10, .copies = 3, .staged_experts = 1 };
     resident.stats = .{ .rounds = 7, .hit_slots = 25, .miss_slots = 13, .misses = 5 };
     resident.lines.stats = .{ .copies = 2, .bytes = 96 };
     const payload: [16]u8 = @splat(0);
@@ -157,8 +157,10 @@ test "exl3: aggregate telemetry finds attached pools deduplicates MTP aliases an
     try std.testing.expectEqual(@as(u64, 3), snapshot.experts.host_miss_picks);
     try std.testing.expectEqual(@as(u64, 2), snapshot.experts.host_mandatory_copies);
     try std.testing.expectEqual(@as(u64, 5), snapshot.experts.device_plans);
-    try std.testing.expectEqual(@as(u64, 1), snapshot.experts.device_inplace_experts);
-    try std.testing.expectEqual(@as(u64, 144), snapshot.experts.mapped_copy_payload_min_bytes);
-    try std.testing.expectEqual(@as(u64, 144), snapshot.experts.mapped_copy_payload_max_bytes);
+    try std.testing.expectEqual(@as(u64, 3), snapshot.experts.device_copies);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.experts.device_staged_experts);
+    // 3 resident copies and 1 staged expert each move the 48 payload bytes of one expert
+    try std.testing.expectEqual(@as(u64, 192), snapshot.experts.mapped_copy_payload_min_bytes);
+    try std.testing.expectEqual(@as(u64, 192), snapshot.experts.mapped_copy_payload_max_bytes);
     try std.testing.expectEqual(@as(u64, 96), snapshot.experts.pool_dma_requested_bytes);
 }

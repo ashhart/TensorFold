@@ -13,7 +13,7 @@ pub const State = struct {
         const enabled = try enabledFromEnv();
         const layers = try layersEnabledFromEnv();
         const state: State = .{ .enabled = enabled, .layers_enabled = enabled and layers, .rank = .{ .rank = rank, .world = world } };
-        if (state.enabled) std.log.warn("EXL3-CACHE-SAMPLING v=1 rank={d} world={d} optin_boundary_sync=1 bytes=logical_payload_not_pcie", .{ rank, world });
+        if (state.enabled) std.log.warn("EXL3-CACHE-SAMPLING v=2 rank={d} world={d} optin_boundary_sync=1 bytes=logical_payload_not_pcie", .{ rank, world });
         return state;
     }
 
@@ -99,7 +99,7 @@ pub fn layersEnabledFromEnv() !bool {
 }
 
 pub fn failed(engine: anytype, phase: counters.Phase, failure: anyerror) void {
-    std.log.warn("EXL3-CACHE-INVALID v=1 rank={d} world={d} phase={s} reason={s}", .{ engine.telemetry.rank.rank, engine.telemetry.rank.world, @tagName(phase), @errorName(failure) });
+    std.log.warn("EXL3-CACHE-INVALID v=2 rank={d} world={d} phase={s} reason={s}", .{ engine.telemetry.rank.rank, engine.telemetry.rank.world, @tagName(phase), @errorName(failure) });
 }
 
 pub fn begin(engine: anytype, sequences: anytype, phase: counters.Phase, comptime complete: anytype) !?counters.Snapshot {

@@ -274,7 +274,8 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
         fixed = try std.math.add(u64, fixed, try std.math.add(u64, cuda.exl3_pool.Tables.init(wt.experts_n + 1).bytes + (64 << 10), picks_bytes));
     }
     var future = try std.math.add(u64, b.other, b.graph_reservation);
-    const planner_fixed = if (b.planner_rows) |planner_rows| try memory.plannerBytes(n, 0, planner_rows) else 0;
+    // Fixed and after-pool estimates describe the same planner allocation, including staging scratch.
+    const planner_fixed = if (b.planner_rows) |planner_rows| try memory.plannerBytes(n, 0, planner_rows, out.line_bytes) else 0;
     const line_cost = try std.math.add(u64, out.line_bytes, if (b.planner_rows != null) 8 else 0);
     const all_fixed = try std.math.add(u64, fixed, planner_fixed);
     const prefill = @import("../prefill/cuda_exl3_prefill.zig");
@@ -306,7 +307,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
     if (lines < pool_.min_lines) return error.PoolTooSmall;
     const startup_bytes = try memory.poolBytes(lines, line_cost, n, all_fixed);
     if (startup_bytes > pool_room) return error.InsufficientStartupMemory;
-    out.after_pool_bytes = if (b.planner_rows) |planner_rows| try memory.plannerBytes(n, lines, planner_rows) else 0;
+    out.after_pool_bytes = if (b.planner_rows) |planner_rows| try memory.plannerBytes(n, lines, planner_rows, out.line_bytes) else 0;
     out.lines = lines;
     var pool_lines: [wt.layers_n + 1]usize = @splat(lines);
     var line_bytes: [wt.layers_n + 1]usize = undefined;
@@ -364,7 +365,7 @@ pub fn attach(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, st: cud
                     @memset(pool_lines[0..n], lines);
                     std.log.info("flashnext exl3: profile candidate changed total variable CUDA bytes; retaining uniform decoder pools", .{});
                 } else {
-                    out.after_pool_bytes = if (b.planner_rows) |planner_rows| try memory.plannerBytesForPools(pool_lines[0..n], planner_rows) else 0;
+                    out.after_pool_bytes = if (b.planner_rows) |planner_rows| try memory.plannerBytesForPools(pool_lines[0..n], planner_rows, out.line_bytes) else 0;
                     profile_sized = true;
                 }
                 std.log.info("flashnext exl3: profile-weighted decoder allocation used {d}/{d} variable CUDA bytes (expert lines, per-line planner state and device picks); saved lifetime picks are a proxy, not latency; MTP remains uniform", .{ plan.allocated_bytes, plan.baseline_bytes });

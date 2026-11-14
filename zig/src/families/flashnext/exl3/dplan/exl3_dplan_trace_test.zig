@@ -18,7 +18,7 @@ pub fn make(allocator: std.mem.Allocator, lines: usize, rows: usize) ![]u32 {
     return words;
 }
 
-pub fn append(words: []u32, before: []const u32, after: []const u32, picks: []const i32, recent: bool, mapped: u32) void {
+pub fn append(words: []u32, before: []const u32, after: []const u32, picks: []const i32, recent: bool, staged_picks: u32) void {
     const records_end = trace.header_words + 2 * words[6] + words[9] * words[7];
     const checkpoints_start = trace.pool_words - words[14] * trace.checkpointWords(words[6]);
     if (checkpoints_start - records_end < words[7] or words[15] != 0) {
@@ -40,7 +40,7 @@ pub fn append(words: []u32, before: []const u32, after: []const u32, picks: []co
     record[0] = @intCast(picks.len / 11);
     record[3] = @intFromBool(recent);
     @memcpy(record[4..][0..layout.misc_words], after[layout.miscOffset(words[4])..]);
-    record[14] = mapped;
+    record[14] = staged_picks;
     var seen: [layout.experts_n]bool = @splat(false);
     for (picks, 0..) |expert, index| {
         record[trace.record_header_words + index] = @bitCast(expert);
@@ -137,7 +137,7 @@ test "exl3: checkpoint exhaustion saturates without overwriting retained records
     try std.testing.expectEqual(@as(u64, 1), (try trace.View.init(words)).dropped());
 }
 
-test "exl3: v4 trace preserves raw row order seed checkpoint and post counters" {
+test "exl3: v5 trace preserves raw row order seed checkpoint and post counters" {
     const allocator = std.testing.allocator;
     const words = try make(allocator, 2, 2);
     defer allocator.free(words);
@@ -157,17 +157,18 @@ test "exl3: v4 trace preserves raw row order seed checkpoint and post counters" 
     try std.testing.expectEqual(@as(u32, 16), record.validPicks());
     try std.testing.expectEqual(@as(usize, 5), record.uniqueCount());
     try std.testing.expect(record.recentEnabled());
-    try std.testing.expectEqual(@as(u32, 3), record.mappedPicks());
+    try std.testing.expectEqual(@as(u32, 3), record.stagedPicks());
     try std.testing.expectEqualSlices(u32, seed, restored.initialSeed());
     try std.testing.expectEqualSlices(u32, seed, restored.terminalSeed());
     try std.testing.expectEqual(@as(u32, 0xfffffffe), record.misc()[0]);
     for (picks, record.picks()) |expert, bits| try std.testing.expectEqual(expert, @as(i32, @bitCast(bits)));
     try std.testing.expectEqual(trace.magic, std.mem.readInt(u32, bytes[0..4], .little));
+    try std.testing.expectEqual(@as(u32, 5), std.mem.readInt(u32, bytes[4..8], .little));
     try std.testing.expectEqual((trace.header_words + 2 * seed.len + words[7]) * 4, bytes.len);
     try std.testing.expectError(error.TraceRoundOutOfRange, view.round(1));
 }
 
-test "exl3: v4 capacity exceeds 1000 with full 16-row records before ownership checkpoints" {
+test "exl3: v5 capacity exceeds 1000 with full 16-row records before ownership checkpoints" {
     for ([_]usize{ 1, 10, 73, 256, 512 }) |lines| {
         const shape = try trace.header(0, 0, lines, 16);
         try std.testing.expect(shape[8] >= 1000);
@@ -185,7 +186,7 @@ test "exl3: v4 capacity exceeds 1000 with full 16-row records before ownership c
     try std.testing.expect(trace.enabledValue("1"));
 }
 
-test "exl3: v4 keeps initial seed detects discontinuity and saturates bounded drops" {
+test "exl3: v5 keeps initial seed detects discontinuity and saturates bounded drops" {
     const allocator = std.testing.allocator;
     const words = try make(allocator, 2, 16);
     defer allocator.free(words);
@@ -212,7 +213,7 @@ test "exl3: v4 keeps initial seed detects discontinuity and saturates bounded dr
     try std.testing.expectEqual(std.math.maxInt(u64), view.dropped());
 }
 
-test "exl3: v4 rejects metadata corruption truncation old versions and false pick counts" {
+test "exl3: v5 rejects metadata corruption truncation old versions and false pick counts" {
     const allocator = std.testing.allocator;
     const words = try make(allocator, 2, 1);
     defer allocator.free(words);
@@ -241,12 +242,16 @@ test "exl3: v4 rejects metadata corruption truncation old versions and false pic
     try std.testing.expectError(error.InvalidTrace, trace.View.init(words));
     words[1] = 3;
     try std.testing.expectError(error.InvalidTrace, trace.View.init(words));
+    words[1] = 4;
+    try std.testing.expectError(error.InvalidTrace, trace.View.init(words));
+    words[1] = trace.version + 1;
+    try std.testing.expectError(error.InvalidTrace, trace.View.init(words));
     words[1] = trace.version;
     words[10] = 1;
     try std.testing.expectError(error.InvalidTrace, trace.View.init(words));
 }
 
-test "exl3: v4 raw picks cover all 512 experts beyond the planner unique bound" {
+test "exl3: v5 raw picks cover all 512 experts beyond the planner unique bound" {
     const allocator = std.testing.allocator;
     const words = try make(allocator, 2, 47);
     defer allocator.free(words);

@@ -10,7 +10,7 @@
 #define DP_RECENT_WORDS (DP_RECENT_WINDOW * DP_RECENT_WORDS_PER_ROW)
 
 struct DpMisc {
-    unsigned now, rounds, hit_slots, miss_slots, copies, evictions, overflow, inplace, recent_cursor, recent_filled;
+    unsigned now, rounds, hit_slots, miss_slots, copies, evictions, overflow, staged, recent_cursor, recent_filled;
 };
 
 struct DpTraceHeader {
@@ -28,7 +28,7 @@ __device__ __forceinline__ bool dp_trace_valid(DpTraceHeader* header, int lines)
     const unsigned long long record_words = 15ull + 11ull * header->max_rows;
     const unsigned long long base = 16 + 2 * state_words;
     const unsigned long long checkpoint_words = 4 + 2 * state_words;
-    if (lines <= 0 || header->magic != 0x44505431 || header->version != 4 ||
+    if (lines <= 0 || header->magic != 0x44505431 || header->version != 5 ||
         header->lines != static_cast<unsigned>(lines) || header->max_rows == 0 ||
         base >= DP_TRACE_WORDS || record_words > DP_TRACE_WORDS - base ||
         header->seed_words != state_words || header->record_words != record_words ||
@@ -131,18 +131,18 @@ __device__ __forceinline__ void dp_trace_end(unsigned* trace, unsigned* round, c
     DpTraceHeader* header = reinterpret_cast<DpTraceHeader*>(trace);
     const unsigned* counters = reinterpret_cast<const unsigned*>(misc);
     for (unsigned index = 0; index < 10; ++index) round[4 + index] = counters[index];
-    unsigned mapped_experts[DP_EXPERTS / 32] = {};
-    for (int mapped = 0; mapped < n_ovf; ++mapped) {
-        const int expert = ovf[mapped];
-        mapped_experts[expert >> 5] |= 1u << (expert & 31);
+    unsigned staged_experts[DP_EXPERTS / 32] = {};
+    for (int staged = 0; staged < n_ovf; ++staged) {
+        const int expert = ovf[staged];
+        staged_experts[expert >> 5] |= 1u << (expert & 31);
     }
-    unsigned mapped_picks = 0;
+    unsigned staged_picks = 0;
     for (int pick = 0; pick < n; ++pick) {
         const int expert = picks[pick];
-        if (expert >= 0 && expert < DP_SHARED && (mapped_experts[expert >> 5] & (1u << (expert & 31))))
-            ++mapped_picks;
+        if (expert >= 0 && expert < DP_SHARED && (staged_experts[expert >> 5] & (1u << (expert & 31))))
+            ++staged_picks;
     }
-    round[14] = mapped_picks;
+    round[14] = staged_picks;
     unsigned* terminal = trace + 16 + header->seed_words;
     for (unsigned index = 0; index < header->seed_words; ++index) terminal[index] = st[index];
     header->recorded += 1;
@@ -160,7 +160,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_exl3_dplan(
     long long* __restrict__ tab1, long long* __restrict__ tab2, int* __restrict__ k2t0, int* __restrict__ k2t1,
     int* __restrict__ k2t2, const long long* __restrict__ src, const long long* __restrict__ lens,
     const int* __restrict__ k2, unsigned long long line_base, unsigned long long line_bytes, unsigned long long off0,
-    unsigned long long off1, unsigned long long off2, long long* __restrict__ work, int* __restrict__ work_n,
+    unsigned long long off1, unsigned long long off2, unsigned long long overflow_base, long long* __restrict__ work, int* __restrict__ work_n,
     int* __restrict__ hit_picks, int* __restrict__ miss_picks, int* __restrict__ ovf, int* __restrict__ ovf_n,
     unsigned* __restrict__ trace) {
     int* line_id = reinterpret_cast<int*>(st);
@@ -350,14 +350,20 @@ extern "C" __global__ void __launch_bounds__(256) fn_exl3_dplan(
                 n_copy += 1;
                 misc->copies += 1;
             } else {
-                // no line is free of this round's experts: the expert is read in place from the mapped host bank.
+                // No resident line is free of this round's experts. Stage the miss into reusable device scratch.
+                const unsigned long long base = overflow_base + static_cast<unsigned long long>(n_ovf) * line_bytes;
+                long long* wk = work + static_cast<long long>(n_copy) * 9;
                 for (int w = 0; w < 3; ++w) {
-                    tabs[w][id] = src[id * 3 + w];
+                    tabs[w][id] = static_cast<long long>(base + offs[w]);
                     k2s[w][id] = k2[id * 3 + w];
+                    wk[w * 3 + 0] = src[id * 3 + w];
+                    wk[w * 3 + 1] = static_cast<long long>(base + offs[w]);
+                    wk[w * 3 + 2] = lens[id * 3 + w];
                 }
+                n_copy += 1;
                 ovf[n_ovf] = id;
                 n_ovf += 1;
-                misc->inplace += 1;
+                misc->staged += 1;
             }
         }
         __syncthreads();
@@ -369,7 +375,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_exl3_dplan(
     }
 }
 
-// After the round's experts: the in-place (host-bank) experts' table entries cleared again (they hold no line).
+// After the round's experts: clear staged table entries (they hold no resident line).
 extern "C" __global__ void fn_exl3_drestore(const int* __restrict__ ovf, const int* __restrict__ ovf_n,
                                            long long* __restrict__ tab0, long long* __restrict__ tab1,
                                            long long* __restrict__ tab2, int* __restrict__ k2t0, int* __restrict__ k2t1,
