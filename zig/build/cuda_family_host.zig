@@ -20,8 +20,8 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"one-row and 2-8-row"} })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
-    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:" } }));
-    b.step("test-qwen35-prefill-host", "Stepped, whole and opening prompt lifecycle without devices").dependOn(&prefill.step);
+    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:", "a yielded pass keeps its completed prefix" } }));
+    b.step("test-qwen35-prefill-host", "Stepped, whole, opening and interrupted prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
     const draft_config = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen DFlash2 config:"} }));
     b.step("test-qwen35-draft-config-host", "DFlash2 attention declarations agree with the CUDA kernels before loading").dependOn(&draft_config.step);
