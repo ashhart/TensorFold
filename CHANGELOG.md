@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
+
 - HIP: the TCP fabric Kind gains its device side for two hosts over a network link: staged copies through mapped host memory, a stream that waits on a peer's counter, a 30 s limit on each proxy copy, and every rank refusing a bad part size together. Nothing selects the Kind yet (#2961). Thanks to @Shoestring-dev.
 
 - GLM-5.3-Flash on CUDA: a decode window's DSA select spreads each row over many blocks (`TF_GLM_DSEL`, default on; `TF_GLM_DSEL=0` keeps one block a row) and picks `tf_glm_select_rows`' pools. At TP=4 on four GB10s, the decode round after a 1,040,384-token prompt is 5.05%, 9.36% and 11.36% shorter at 1, 4 and 8 streams, with every reply unchanged (#2722). Ported from patch 0067 of Mia's AI Lab's GLM-5.3-Flash stack. Thanks to Mia's AI Lab (@MiaAI-Lab).

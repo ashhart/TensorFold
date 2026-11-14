@@ -80,6 +80,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
+    // slot 0's hand-off rules (#1594 step 2b) in zig build test on every OS: the Metal fixture's tests need macOS
+    const handoff_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume_remote_test.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = handoff_rules })).step);
 }
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module) void {
@@ -91,7 +94,7 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
-    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"qwen27 reply cache:"} })).step);
+    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{ "qwen27 reply cache:", "qwen27 hand-off:" } })).step);
     const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });
     const startup_step = b.step("test-qwen27-startup-host", "Startup draft stream counts and suffixes without a GPU");
     for ([_]?[]const u8{ null, "1" }) |value| {

@@ -409,3 +409,15 @@ test "spill I/O: shutdown keeps a completed job's own filesystem error" {
     try std.testing.expectEqual(@as(u64, 1), x.r.counts.failed);
     try std.testing.expectEqual(@as(u64, 0), x.r.admission.reserved);
 }
+
+test "write-behind: a kept remote state never reaches the disk's queue, and the engine's own copy at its tokens does" {
+    const x = try Fixture.open("remote", .off, true, 1 << 20);
+    defer x.close();
+    const tokens = fixture.prompt(5);
+    x.s.keep_remote = true; // #1594 step 2b: a state built on another machine's prefix
+    try x.keep(&tokens, 600);
+    x.s.keep_remote = false;
+    try std.testing.expectEqual(@as(usize, 0), x.r.queue.items.len); // synchronous writes: the queue is all the disk sees
+    try x.keep(&tokens, 600); // the engine's own copy, which hides the remote one
+    try std.testing.expectEqual(@as(usize, 1), x.r.queue.items.len);
+}

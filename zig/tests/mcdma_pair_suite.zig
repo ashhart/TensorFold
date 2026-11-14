@@ -86,9 +86,13 @@ pub fn run(r: *Rank, t: Phase, tx: *Tx) !void {
             try r.step(t, 0);
             for (r.big, 0..) |*b, i| b.* = pattern(rs, r.rank, 77, i);
             const done = tag(r.inv, 1);
+            const t0 = words.nowNs(); // the wire alone: this rank's writes landing, and the peer's into this window
             try collective.bulk(rd, r.peer, l.bulk_at, r.big, 2 * mib, l.flags_at + 8, done);
             try r.step(t, 1);
             try waitFor(r, l.flags_at + 8, done);
+            const ns = words.nowNs() - t0;
+            const gbit = @as(f64, @floatFromInt(l.bulk_len)) * 8 / @as(f64, @floatFromInt(@max(ns, 1)));
+            r.out.line("WIRE test=bulk round={d} bytes_each_way={d} s={d:.4} gbit_each_way={d:.2}", .{ r.round, l.bulk_len, @as(f64, @floatFromInt(ns)) / 1e9, gbit });
             for (r.big_want, 0..) |*b, i| b.* = pattern(rs, r.peer, 77, i);
             try tx.both("bulk", .{}, r.big, r.big, rd.window()[l.bulk_at..][0..l.bulk_len], r.big_want);
         },

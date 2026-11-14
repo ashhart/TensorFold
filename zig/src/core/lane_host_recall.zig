@@ -37,7 +37,7 @@ fn writes(job: *const Job) bool {
 /// The prompt pass ended: what came before its resume point an earlier request read already.
 pub fn prompted(h: *LaneHost, job: *Job) void {
     const store = h.recall orelse return;
-    if (writes(job)) store.readPrompt(job.request.prompt, job.stream.cached);
+    if (writes(job)) store.readPrompt(job.request.prompt, @import("lane_remote.zig").cachedOwn(job)); // a remote prefix: unread
 }
 
 /// The stream ended: its reply goes in after its prompt's tail; `stats` with its reader's counters for the reply.

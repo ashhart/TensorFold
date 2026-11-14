@@ -26,7 +26,7 @@ pub fn replyBorn(keepEnd: anytype, snapshots: pc.Snapshots, live: *usize) !void 
         var s = try lanes.Stream.init(a, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
         defer s.deinit(a);
         try s.context.appendSlice(a, tokens[at + 7 ..]);
-        keepEnd(&store, a, &s, tokens.len);
+        keepEnd(&store, false, a, &s, tokens.len);
         const newest_other = store.find(&other, &.{}, &.{}) orelse return error.NewestConversationEvicted;
         try t.expectEqual(at, newest_other.at);
         const reply = store.entries.items[store.entries.items.len - 1];
@@ -147,7 +147,7 @@ fn turns(keepEnd: anytype, opening: anytype, kept: bool, budget: u64) !void {
         stream.history_len = history;
         stream.decode_spans = spans;
         try stream.context.appendSlice(a, context[n..]);
-        keepEnd(&store, a, &stream, at);
+        keepEnd(&store, false, a, &stream, at);
         standing.rewind_at = if (rewind) history else 0;
         standing.leave(a, .{ .at = at, .prompt_len = @intCast(n), .context_len = @intCast(context.len), .fill_at = @intCast(n), .ended = true }, context, spans);
         try t.expect(store.held <= budget);
@@ -214,7 +214,7 @@ fn priority(keepEnd: anytype, budget: u64, most: usize, both: bool) !void {
     stream.history_len = 34078;
     try stream.context.appendSlice(a, tokens[34083..]);
     f.advance(&tokens, 34338, null, &.{}, &.{});
-    keepEnd(&store, a, &stream, 34338);
+    keepEnd(&store, false, a, &stream, 34338);
     const e = store.find(&tokens, &.{}, &.{.{ 34083, 34338 }}) orelse return error.ReplyEndMissing;
     try t.expectEqual(@as(u32, 34338), e.at);
     try t.expectEqual(both, store.find(prompt, &.{}, &.{}) != null);
@@ -270,7 +270,7 @@ fn shallow(keepEnd: anytype, cut: u32, borrow: bool, most: usize) !void {
     try stream.context.appendSlice(a, tokens[34083..]);
     f = .{};
     f.advance(&tokens, 34338, null, &.{}, &.{});
-    keepEnd(&store, a, &stream, 34338);
+    keepEnd(&store, false, a, &stream, 34338);
     const e = store.find(&tokens, &.{}, &.{.{ 34083, 34338 }}) orelse return error.ReplyEndMissing;
     try t.expectEqual(@as(u32, 34338), e.at);
     if (borrow) try t.expectEqual(@as(u32, 1), borrowed.borrowers);
@@ -292,4 +292,51 @@ pub fn exercise(keepEnd: anytype, opening: anytype) !void {
     const bank = try tf.qwen27.prompt_marks.select(33792, @intCast(end), &.{34078});
     try t.expectEqual(@as(u32, 34078), bank.end);
     try t.expectEqual(@as(usize, 0), bank.count);
+}
+
+/// Kept states of a fake family whose bytes grow as the 27B's K/V rows (64 KiB a token); `saved` is never read.
+const FakeStates = struct {
+    live: usize = 0,
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return @as(u64, at) << 16;
+    }
+    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live += 1;
+        return @ptrFromInt(@as(usize, at) << 4);
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {}
+    fn drop(ptr: *anyopaque, _: pc.Saved) void {
+        const f: *FakeStates = @ptrCast(@alignCast(ptr));
+        f.live -= 1;
+    }
+};
+
+/// A reply's end, born with its prompt (its history mark outlives it); on a pulled prefix, only with TF_PREFILL_KEEP.
+pub fn born(keepEnd: anytype) !void {
+    const gpa = t.allocator;
+    const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
+    var fake: FakeStates = .{};
+    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
+    defer store.deinit();
+    var other: [at + 7]u32 = undefined; // another conversation's prompt, its history kept first
+    for (&other, 0..) |*x, i| x.* = @intCast(i);
+    try t.expect(store.keep(&other, at, null, &.{}, &.{}));
+    var tokens: [at + 107]u32 = undefined;
+    for (&tokens, 0..) |*x, i| x.* = @intCast(1_000_000 + i);
+    const prompt = tokens[0 .. at + 7];
+    try t.expect(store.keep(prompt, at, null, &.{}, &.{}));
+    var s = try lanes.Stream.init(gpa, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
+    defer s.deinit(gpa);
+    try s.context.appendSlice(gpa, tokens[at + 7 ..]);
+    keepEnd(&store, false, gpa, &s, tokens.len); // keep main's reply priority: the older history goes when both do not fit
+    try t.expect(store.find(&other, &.{}, &.{}) != null);
+    try t.expect(store.find(prompt, &.{}, &.{}) == null);
+    try t.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
+    try t.expectEqual(@as(usize, 2), fake.live);
+    s.reuse.remote = true; // a reply on a pulled prefix (#1594 step 2b): with TF_PREFILL_KEEP off, never kept
+    keepEnd(&store, false, gpa, &s, tokens.len - 1);
+    try t.expectEqual(@as(u64, 3), store.counts.kept);
+    keepEnd(&store, true, gpa, &s, tokens.len - 1); // with it on, kept and marked remote
+    try t.expect(store.entries.items[store.entries.items.len - 1].remote and !store.keep_remote);
 }

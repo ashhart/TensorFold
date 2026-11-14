@@ -16,6 +16,7 @@ const lb = @import("qwen27_lanes.zig");
 pub const lanes_backend = lb;
 const startup = @import("qwen27_startup.zig");
 const StartupLine = startup.StartupLine;
+pub const remote = @import("qwen27_remote.zig"); // #1594 step 2b: prompt prefixes the GB10 prefills
 const disk = @import("qwen27_disk.zig");
 const images = @import("qwen27_images.zig");
 const Allocator = std.mem.Allocator;
@@ -33,6 +34,8 @@ pub const Options = struct {
     learn: ?disk.Learn = null, // --learn-conversations: kept states written behind to disk and read back
     vision: ?api.VisionOpen = null, // --vision: open loads the image tower, and requests may hold images
     images: ?*images.Vision = null, // the loaded tower attach serves (and the host then owns)
+    remote: api.LaneHost.Remote.Flags = .{}, // --prefill-from and --mcdma-link: the GB10 prefills long prompts (#1594 step 2b)
+    remote_id: []const u8 = "", // the checkpoint's name both ends give the hand-off (lane_remote.checkpointId)
 };
 
 pub const Host = struct {
@@ -54,15 +57,14 @@ pub const Host = struct {
     disk_stage: ?mtl.Buffer = null, // copies out of private kept states for the disk (qwen27_disk.zig)
     vision: ?*images.Vision = null, // --vision's tower and image rows
     spares: q.snapshot.Spares = .{}, // dropped kept states' buffers, for the next saves
+    link: ?*remote.Link = null, // --prefill-from's link to the GB10
 
     pub fn engine(h: *Host) api.Engine {
         return h.host.engine();
     }
-
     fn of(ptr: *anyopaque) *Host {
         return @ptrCast(@alignCast(ptr));
     }
-
     fn lone(ptr: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         return of(ptr).back.lone(s, hooks);
     }
@@ -83,7 +85,7 @@ pub const Host = struct {
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
-        if (h.cache) |*store| keepEnd(store, h.gpa, s, h.runner.offsets[slot]);
+        if (h.cache) |*store| keepEnd(store, h.host.keep_remote, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.
@@ -102,8 +104,9 @@ pub const Host = struct {
     }
 };
 
-/// The reply-end snapshot, retaining a matching pre-reply cache state too when both fit.
-fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+/// The reply's state at `stands` (its end or one short), born with its prompt; its history pinned too when both fit.
+fn keepEnd(store: *pc.Store, keep_remote: bool, gpa: Allocator, s: *lanes.Stream, stands: u32) void {
+    if (s.reuse.remote and !s.reuse_failed and !keep_remote) return; // on another machine's prefix: only with TF_PREFILL_KEEP
     const prompt: u32 = @intCast(s.prompt_len);
     const tokens = s.context.items;
     if (tokens.len == prompt or stands + 1 < tokens.len or stands > tokens.len) return;
@@ -113,6 +116,8 @@ fn keepEnd(store: *pc.Store, gpa: Allocator, s: *lanes.Stream, stands: u32) void
     const keyed = if (s.key.len == prompt) gpa.dupe(u32, tokens) catch return else tokens;
     defer if (keyed.ptr != tokens.ptr) gpa.free(keyed);
     if (keyed.ptr != tokens.ptr) @memcpy(keyed[0..prompt], s.key);
+    store.keep_remote = s.reuse.remote and !s.reuse_failed; // a turn resuming it is remote too (#1594 step 2b)
+    defer store.keep_remote = false;
     // Keep the history too when both copies fit; otherwise the reply end keeps its ordinary priority.
     const history = if (s.history_len > 0) store.find(keyed[0..@min(keyed.len, @as(usize, s.history_len) + 1)], s.chunks, spans) else null;
     const pin = if (history) |e| if (@import("qwen27_resume.zig").pinReplyHistory(store, e, s.history_len, stands)) e else null else null;
@@ -271,6 +276,10 @@ test "a reply's end keeps its prompt's born: newest conversations precede redund
     try @import("qwen27_reply_cache_test.zig").replyBorn(keepEnd, snapshots, &fake.live);
 }
 
+test "a reply on a pulled prefix keeps main priority and is kept only with TF_PREFILL_KEEP, marked remote" {
+    try @import("qwen27_reply_cache_test.zig").born(keepEnd);
+}
+
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
 fn laterBytes(h: *const Host) u64 {
     const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
@@ -367,6 +376,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     h.owns_model = false;
     h.draft = null;
     h.cache = null;
+    h.link = null; // gpa.create leaves fields undefined: a default never applies here
     h.resident = null;
     h.disk_stage = null;
     h.vision = o.images; // closed with the host; a failed attach leaves it to the caller
@@ -430,6 +440,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     // a wide prompt pass commits its buffers at once: the probe keeps the sets in use while it runs
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy };
+    try remote.attach(h, io, a, o.remote, o.remote_id, .{ .ctx = h.back, .at = slot_state.resumeAt }, why); // --prefill-from
+    errdefer if (h.link) |l| l.stop(h.gpa);
     if (h.trace) |*t| t.enabled = true; // serving rounds count from here: measure() timed whole, unsplit buffers
     try h.host.start();
     tf.startup_receipt.span(.model_ready).end();
@@ -528,6 +540,7 @@ const holdResident = q.residency.hold;
 pub fn close(ptr: *anyopaque) void {
     const h = Host.of(ptr);
     h.host.stop();
+    if (h.link) |l| l.stop(h.gpa);
     const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit(); // its states leave the set as they go
     h.spares.deinit();
@@ -573,4 +586,8 @@ test "Qwen27 interior state uses a guaranteed cold request cut" {
 
 test "qwen27 reply cache: warm work preserves both client histories within rounded budgets" {
     try @import("qwen27_reply_cache_test.zig").exercise(keepEnd, slot_state.opening);
+}
+
+test {
+    _ = @import("qwen27_handoff_test.zig"); // "qwen27 hand-off:", run by test-qwen27-reply-cache-host
 }

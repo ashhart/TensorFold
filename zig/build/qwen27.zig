@@ -134,6 +134,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-streams", "Build the real-weight check that shared rounds keep each stream's logits alone", "zig/tests/qwen27/streams.zig", target, false, served);
     _ = program(b, "tf-qwen27-reuse", "Qwen27 prompt reuse through the served host against fresh prompt passes: states and replies", "zig/tests/qwen27/reuse.zig", target, false, served);
     _ = program(b, "tf-qwen27-marks", "Build native marked-prefix state and continuation checks on real weights", "zig/tests/qwen27/marks.zig", target, false, served);
+    const fabric = engine.import_table.get("fabric").?; // hybrid_state is a fabric file: one module owns it
+    const import_imports: []const std.Build.Module.Import = &.{ served[0], served[1], served[2], served[3], .{ .name = "fabric", .module = fabric } };
+    _ = program(b, "tf-qwen27-import", "Build #1594 step 2b's Mac half: a state in the hybrid order restored, its logits checked", "zig/tests/qwen27/import.zig", target, false, import_imports);
     _ = program(b, "tf-qwen27-runtime", "Compile native Qwen interfaces without running a GPU", "zig/tests/qwen27/runtime.zig", target, false, &.{.{ .name = "qwen27", .module = qwen27 }});
     _ = program(b, "tf-qwen27-weights", "Build CPU-only Qwen checkpoint metadata validator", "zig/tests/qwen27/weights.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core } });
     _ = program(b, "tf-qwen27-dflash-inspect", "Build CPU-only target/drafter graph validator", "zig/tests/qwen27/dflash_weights.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core } });
