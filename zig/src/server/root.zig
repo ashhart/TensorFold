@@ -212,6 +212,8 @@ test {
     _ = @import("slide_questions_test.zig");
     _ = @import("slide_teacher_test.zig");
     _ = @import("slide_learn_path_test.zig");
+    _ = @import("slide_redraw_test.zig");
+    _ = @import("slide_redraw_reserved_test.zig");
     _ = @import("slide_metrics_test.zig");
     _ = @import("slide_metrics_off_test.zig");
     _ = @import("cli_slide_drift_test.zig");

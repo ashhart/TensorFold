@@ -80,7 +80,7 @@ pub fn Hooks(comptime H: type) type {
     };
 }
 
-fn hooks(l: anytype) Hooks(@TypeOf(l.*).Host) {
+pub fn hooks(l: anytype) Hooks(@TypeOf(l.*).Host) {
     return .{ .b = l.b, .gpa = l.gpa, .io = l.io };
 }
 
@@ -116,7 +116,7 @@ pub fn more(l: anytype) !void {
     switch (l.method) {
         .pocket => {
             if (!l.pocketed) return error.NothingToContinue;
-            l.pockets.more();
+            if (l.lesson.refresh_wordings) try @import("pocket_refresh.zig").begin(l) else l.pockets.more();
             l.phase = .pocket;
         },
         else => {
@@ -165,20 +165,23 @@ pub fn probeOnce(l: anytype) !@import("learner.zig").Step {
     return .{ .done = true, .report = .{ .failed = "a probe: nothing was learned" } };
 }
 
-/// An answer the checks found moved: the lesson again from its own copy, that answer among what it keeps.
+/// Refit the open lesson, refreshing supplied router rows and keeping answers the checks found moved.
 pub fn reroute(l: anytype) !@import("learner.zig").Step {
+    var fresh: ?examples.Wordings = if (l.lesson.train.len > 0) try examples.Wordings.init(l.gpa, l.lesson) else null;
+    defer if (fresh) |*w| w.deinit(l.gpa);
     for (l.lesson.kept) |ex| try l.extra.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide, .subject = ex.subject, .value = ex.value, .context = ex.context });
-    l.lesson = l.owned; // the reroute's request holds only the moved answer
     switch (l.method) {
-        .pocket => {
-            try l.pockets.undo(l.trainer.?, hooks(l));
-            try startPocket(l);
-        },
+        .pocket => try l.pockets.undo(l.trainer.?, hooks(l)),
         else => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             l.trainer.?.sites.restore();
             try @TypeOf(l.*).Host.attach(l.b, l.trainer.?);
-            try startEdit(l);
         },
+    }
+    if (fresh) |*w| w.install(l.gpa, &l.owned);
+    l.lesson = l.owned;
+    switch (l.method) {
+        .pocket => try startPocket(l),
+        else => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else try startEdit(l),
     }
     return .{ .done = false };
 }

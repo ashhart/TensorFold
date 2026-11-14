@@ -9,11 +9,11 @@
     "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":true,\"steps\":1}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
   },
   {
-    "calls": 402,
+    "calls": 406,
     "learns": 9,
     "writes": 4,
-    "requests_sha256": "9e1b91bc30482c8f1a076b4d76f8975a5d7eaf97c4e085f043960f65d7ef7ef4",
-    "replies_sha256": "cb8a0c5f07437b9fc0637e4a963dbb8a25d9875f5b65e1284baf566ef2b8a3c6",
+    "requests_sha256": "4e2d8805f4465e81d1303ae164679d8f0471c3528e5ad63d9ad89622bf7c25fb",
+    "replies_sha256": "a4c693f4785f9cf9fb0e99e849d5b25f3e9c09701b9e1a2714b01a1848254c79",
     "graph": "{\"next\":2,\"facts\":[{\"id\":1,\"text\":\"I like blue.\",\"source\":\"chat\",\"at\":0,\"state\":\"missed\",\"links\":[],\"round\":5,\"questions\":[\"Which colour do I like?\",\"What colour did I say I like?\"],\"answers\":[{\"question\":\"Which colour do I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"},{\"question\":\"What colour did I say I like?\",\"answer\":\"You like blue.\",\"short\":\"blue\"}]}]}",
     "events": "fact\n{\"id\":1,\"text\":\"I like blue.\"}\nlearning\n{\"id\":1}\nprogress\n{\"id\":1,\"phase\":\"writing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"initializing\",\"at\":0,\"of\":0}\nprogress\n{\"id\":1,\"phase\":\"checking\",\"at\":0,\"of\":0}\nlearned\n{\"id\":1,\"recalled\":false,\"steps\":5}\nprogress\n{\"id\":0,\"phase\":\"saving\",\"at\":0,\"of\":0}\nsaved\n{\"saved\":true}\n[DONE]\n"
   },

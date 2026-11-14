@@ -40,8 +40,6 @@ const slide_take = @import("slide_take.zig");
 const side = @import("slide_side.zig");
 const Got = slide_take.Got;
 const take = slide_take.take;
-const shortAnswer = slide_take.shortAnswer;
-const judged = slide_take.judged;
 const siblingAnswers = slide_take.siblingAnswers;
 const answeredByAny = slide_take.answeredByAny;
 const subjectRow = slide_subject.subjectRow;
@@ -57,17 +55,13 @@ const thinks = slide_teacher.thinks;
 const turnEnd = slide_teacher.turnEnd;
 const slide_pick = @import("slide_pick.zig");
 const talks = @import("slide_context.zig");
-const Unseen = slide_pick.Unseen;
 const heldPair = slide_pick.heldPair;
-const dice = slide_pick.dice;
 
 const swapped = 2; // a fact's questions whose subject is swapped for others of its kind, kept as the model answers them
 const others = [_][]const u8{ "sister", "brother", "mother", "friend" }; // whom a fact's questions are also asked about
 
 const probes = 12;
-const extra_wordings = 12; // more of a fact's questions asked for, read by its router only (each judged first)
-const probe_count = 4; // of those, asked after each round to see the lesson answers wordings it never learned
-const wording_temperature = 0.9; // the extra wordings are sampled, so they differ from the greedy first list
+pub const wording_temperature = 0.9; // the extra wordings are sampled, so they differ from the greedy first list
 const max_others = 96; // its questions asked about others, read by its router only
 const besides = 6; // questions about the fact's subject that it leaves unanswered, kept as the model answers them
 const other_values = 4; // yes-or-no questions naming another value than a told fact's, learned with its answers
@@ -89,12 +83,13 @@ pub const Check = struct { question: []const u8, before: []const u8, thinking: [
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "", context: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it; context: the conversation it is asked after
 
 /// A lesson for the learner, its facts, and what to ask after it; `probes` are wordings it never trains on.
-pub const Plan = struct { questions: []const Held = &.{}, corrections: []const @import("slide_correction.zig").Entry = &.{}, full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{} };
+pub const Plan = struct { reserved: @import("slide_reserved.zig").Reserved = .{}, questions: []const Held = &.{}, corrections: []const @import("slide_correction.zig").Entry = &.{}, full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{}, wordings: []const @import("slide_redraw.zig").Entry = &.{} };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
 pub const max_round_steps = 400;
 pub const rounds = 6;
+pub const give_up = 5; // rounds without any recall before the lesson is taken out
 pub const min_rounds = 1; // a first round ends the lesson only when its held-out answers came back token for token
 pub const reroutes = 3; // questions about something else a lesson's router is fitted away from before it is taken out
 
@@ -204,7 +199,7 @@ pub fn withRecall(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []cons
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .questions = parts.all.items, .full = try reserved.clean(a, full), .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
+    return try @import("slide_redraw.zig").clean(a, .{ .reserved = reserved, .questions = parts.all.items, .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items }, .wordings = parts.wordings.items });
 }
 
 pub const Parts = @import("slide_lesson_parts.zig").Parts;
@@ -456,52 +451,9 @@ pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usi
 /// More of the fact's questions (judged as `take` judges them) and its questions asked about others, prompts only.
 fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, refs: []const Held, subjects: []const ?[]const u8, near_questions: []const []const u8, asked_all: []const u8, answered_all: []const u8, language: ?[]const u8, gone: anytype) !void {
     const a = cx.a;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    for (refs) |r| try seen.put(a, r.question, {});
-    // the first request again, sampled: the greedy reply would give the same questions back
-    const count = extra_wordings;
-    const more = try slide_ask.askBaseAt(srv, cx, null, try questionsFor(a, parts.document, fact, count, language), 32 * count, wording_temperature, gone);
-    var taken: usize = 0;
-    var unseen: std.ArrayList(Unseen) = .empty; // wordings never learned, the most typical of them checked after a round
-    const wordings = try wording.questions(a, more.content, count);
-    if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
-    for (wordings) |q| {
-        if (try parts.reserved.question(srv, cx, q)) continue;
-        if ((try seen.getOrPut(a, q)).found_existing) continue;
-        const personal = !parts.document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
-        const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) "is not the user asking about themselves" else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, parts.document, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, parts.siblings, fact, q, parts.document, gone)) "is another fact's" else null;
-        if (why) |w| {
-            // a wording about the model or someone else is still one the lesson must not take
-            const other = !parts.document and !wording.firstPerson(q) and units.sameScript(fact, q) and !wording.gives(fact, asked_all, answered_all, q);
-            if (other) try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
-            log.line("slide: \"{s}\" {s}, so its router {s}", .{ q, w, if (other) "reads it as one it must not take" else "does not read it" });
-            continue;
-        }
-        const word = slide_subject.keyWord(parts.words, parts.named, q);
-        if (parts.words.len > 0 and (word.len == 0 or !slide_subject.names(parts.named, parts.words, q))) {
-            // a wording that never names the subject ("my sibling", "the team") is another question, not this one's
-            log.line("slide: \"{s}\" does not name the fact's subject, so the lesson leaves it", .{q});
-            continue;
-        }
-        var asked = try slide_ask.promptOnly(srv, cx, a, null, q);
-        asked.subject = try subjectRow(srv, cx, asked, word);
-        try parts.asked.append(a, asked);
-        var score: f32 = 0;
-        for (refs) |r| score += dice(q, r.question);
-        try unseen.append(a, .{ .q = q, .word = word, .score = score });
-        taken += 1;
-    }
-    // the most typical of them check the fact after each round, so a vague one never decides
-    std.mem.sort(Unseen, unseen.items, {}, Unseen.more);
-    const note = if (parts.document) try std.fmt.allocPrint(a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(a, prompts.told_note, .{fact});
-    var probed: usize = 0;
-    for (unseen.items) |u| {
-        if (probed == probe_count) break;
-        const short = try shortAnswer(srv, cx, note, u.q, gone);
-        if (short.len > 0 and std.ascii.findIgnoreCase(u.q, short) != null) continue; // it says its own answer: nothing to recall
-        try parts.probes.append(a, .{ .question = u.q, .answer = fact, .fact = f, .subject = u.word, .short = short });
-        probed += 1;
-    }
+    const drawn = try @import("slide_redraw.zig").first(srv, cx, parts, .{ .fact = fact, .fact_index = f, .refs = refs, .document = parts.document, .siblings = parts.siblings, .words = parts.words, .named = parts.named, .language = language, .asked_all = asked_all, .answered_all = answered_all }, gone);
+    var seen = drawn.seen;
+    const taken = drawn.taken;
     // each question again under client system messages: its neurons must act there too, and still leave the near misses
     for (prompts.systems) |sys| {
         for (refs) |r| {
@@ -555,7 +507,7 @@ pub fn heldBack(lessons: usize, i: usize) bool {
 }
 
 /// The request for a fact's questions: as its teller would ask, or for a document's fact as a colleague would.
-fn questionsFor(a: Allocator, document: bool, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
+pub fn questionsFor(a: Allocator, document: bool, fact: []const u8, count: usize, language: ?[]const u8) ![]const u8 {
     if (document) return prompted(a, prompts.doc_questions_prompt, slide_language.doc_questions_other, .{ fact, count, count }, language);
     return prompted(a, prompts.questions_prompt, questions_other, .{ fact, count, count }, language);
 }
