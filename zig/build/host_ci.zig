@@ -264,6 +264,7 @@ const macos_adapters = [_][]const u8{
     "compile-gemma4-contract-host",
     "compile-gemma4-host",
     "compile-h3-host",
+    "compile-h3-image-decoder-host",
     "compile-http-limits-windows-host",
     "compile-metal-residency-host",
     "compile-moss-teacher-metal",

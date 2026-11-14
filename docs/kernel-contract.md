@@ -433,6 +433,22 @@ CUDA also checks MOSS-Image's glue (`moss_image.cu`: the norm, plain and modulat
 rows; situ; the gated add), each output within float64's range at its torch bf16 points (five controls, each dropping
 one point), and `vision_kernel` at head dim 128 against `contract_attn.zig`'s float64 reference (`moss-contract`).
 
+Metal also checks MiniMax-H3-Image's kernels, each compiled at load with the options its tool uses:
+- The edit encoder (`h3_image_encoder.metal`, fp32 with precise functions): its convolution at every layer geometry of
+  the released encoder (3x3, 3x3 adding its residual in place, 3x3 downsampling, 1x1), GroupNorm's partial sums (plain
+  and centred) and their finish, and the norm's SiLU, each within float64's range through its fp32 steps (nine
+  controls).
+- The prompt path (`h3_prompt.metal`): the bf16 product at every projection of Qwen3-VL to layer 50 and of the token
+  refiner, with and without a bias; both norms and both head layouts in the Qwen and H3 rounding orders; causal and full
+  attention within `attention_range`'s bound, with entries that plant an infinite value at a padded row's last key;
+  both gates, the residual add and the vision rows' scatter (fifteen controls).
+- The image decoder (`image_decoder.metal`, bf16): post_quant, the embedding with its registers, both norms, the
+  product plain and with LayerScale in place, the heads with their half-width rotary, attention over a 261-token tile
+  and a batch of 16 tiles, and SwiGLU, each at its bf16 points (ten controls).
+
+Every launch reserves its group size in its source. `zig build h3-image-contract` (`tf-h3-image-contract [--only TEXT]`)
+runs these kernels, their controls and their records' limits on any Mac, with no Metal compiler.
+
 CPU: Qwen3.5-2B's affine projection (4 bits, groups of 64, `cpu_kernels.zig`) at the widths the 2B calls it, one row
 to a 128-row prompt chunk, registered once for each chain count of its projection classes (16; 32 for the delta rule's
 a and b; 8 for the head), and its RMS norm over 2048-wide rows; each registration's runs take 1 to 8 threads in turn,

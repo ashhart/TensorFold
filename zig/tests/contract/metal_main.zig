@@ -515,6 +515,12 @@ pub fn main(init: std.process.Init) !u8 {
     defer moss_image.destroy();
     const moss_image_decoder = try @import("metal_moss_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
     defer moss_image_decoder.destroy();
+    const h3_image_encoder = try @import("metal_h3_image_encoder.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer h3_image_encoder.destroy();
+    const h3_image_prompt = try @import("metal_h3_image_prompt.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer h3_image_prompt.destroy();
+    const h3_image_decoder = try @import("metal_h3_image_decoder.zig").Suite.create(a, device, queue, &kernels, o.only);
+    defer h3_image_decoder.destroy();
     var dsv41_suites = try @import("metal_dsv41_main.zig").Suites.create(a, device, queue, &kernels, o.only);
     defer dsv41_suites.destroy();
     var t: g.Tally = .{};
