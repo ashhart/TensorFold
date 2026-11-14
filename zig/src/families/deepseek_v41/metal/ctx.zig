@@ -65,8 +65,11 @@ pub const Ctx = struct {
         try x.projBatch(e, in, w, out, f32_out, .{});
     }
 
-    /// `proj` over a batch of same-shape launches in one dispatch (fp8.Batch strides from the first one).
+    /// `proj` over a batch of same-shape launches in one dispatch; the kernel by row count, a row's bits the same.
     pub fn projBatch(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, f32_out: bool, b: fp8.Batch) !void {
+        const t = pipelines.fp8_tile;
+        const tc: t.Call = .{ .k = w.k, .n = w.n, .rows = x.rows, .out = if (f32_out) .f32 else .bf16 };
+        if (t.takes(tc)) return t.encode(&x.p.tile, e, cv(t.Ref, in), cv(t.Ref, w.w), cv(t.Ref, w.s), cv(t.Ref, out), tc, .{ .n = b.n, .xs = b.xs, .ws = b.ws, .ss = b.ss, .ys = b.ys });
         const call: fp8.Call = .{ .k = w.k, .n = w.n, .rows = x.rows, .split = fp8.splitOf(w.k), .out = if (f32_out) .f32 else .bf16 };
         try fp8.encodeWhole(&x.p.fp8, e, cv(fp8.Ref, in), cv(fp8.Ref, w.w), cv(fp8.Ref, w.s), cv(fp8.Ref, out), call, b);
     }
