@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Docs: the Qwen3.8-27B recipe says to serve with `--thinking-budget 4096` when thinking is on, and gives its GPQA Diamond result on TensorFold 1.2.7 and one GB10: replies cut at the limit from 78 of 198 to 0, and correct from 58.1% to 82.8% (#3373, fixes #3323).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
