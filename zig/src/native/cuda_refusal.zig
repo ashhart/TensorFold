@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const nemotron = @import("nemotron");
+const qwen35 = @import("qwen35");
 pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 const glm_model_type = "glm5_next"; // GLM-5.3-Flash's (glm.cuda_native.model_type): its Options take mtp_confidence
 
@@ -49,6 +50,7 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    if (qwen35Tp(F, o)) |why| return why; // ahead of every flag's own refusal: no rank of this family serves yet
     if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
         return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
@@ -69,6 +71,17 @@ pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
 }
 
 pub const no_prompts = "--prompt-cache-gib: this CUDA family keeps no prompt states; serve without it";
+pub const qwen35_plan_only = "--tp: the dense Qwen3.5 CUDA family plans its tensor-parallel shards but serves no rank yet: serve without --tp";
+pub const qwen35_moe_no_ranks = "--tp: qwen3_5_moe has no tensor-parallel plan and no ranks: serve without --tp";
+pub const qwen35_learn_ranks = "--learn-conversations: the Qwen3.5 CUDA family keeps no per-rank states yet: serve without --tp or without --learn-conversations";
+
+/// --tp on the Qwen3.5 CUDA families: the dense one has a shard plan, no rank serves yet; the MoE shares its options.
+fn qwen35Tp(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.tp == 1) return null;
+    if (F == qwen35.native_moe) return qwen35_moe_no_ranks;
+    if (F != qwen35.native) return null;
+    return if (o.learn_conversations) qwen35_learn_ranks else qwen35_plan_only;
+}
 
 test "a family must consume rank options before tensor parallelism is admitted" {
     const Single = struct {
@@ -96,6 +109,51 @@ test "the CUDA server serves --tp, and Flash Next's two ranks pass family admiss
     } else false);
     const flashnext = @import("flashnext").native;
     try std.testing.expect(family(flashnext, .{ .dir = "d", .model_type = flashnext.model_type, .tp = 2 }) == null); // kept prompt states and drafts together
+}
+
+test "the dense Qwen3.5 family has its shard plan and serves no rank: --tp is refused by name, one rank opens as before" {
+    const dense = qwen35.native;
+    const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .tp = 2 };
+    try std.testing.expectEqualStrings(qwen35_plan_only, family(dense, two).?);
+    try std.testing.expect(!std.mem.eql(u8, no_ranks, family(dense, two).?));
+    try std.testing.expect(family(dense, .{ .dir = "d", .model_type = "qwen3_5" }) == null);
+    try std.testing.expect(family(dense, .{ .dir = "d", .model_type = "qwen3_5", .tp = 1, .rank = 0 }) == null);
+    // the plan's stop comes before each flag's own check, so none of these reaches its own refusal at two ranks
+    const flags = [_]api.Open{
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .drafter = "x" },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .kv8 = true },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .prompt_int8 = true },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .vision = .{} },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .slide = true },
+        .{ .dir = "d", .model_type = "qwen3_5", .tp = 2, .spill = .evicted },
+    };
+    for (flags) |o| try std.testing.expectEqualStrings(qwen35_plan_only, family(dense, o).?);
+    for (flags) |o| {
+        var one = o;
+        one.tp = 1;
+        try std.testing.expect(family(dense, one) == null);
+    }
+}
+
+test "the MoE family shares the dense options' rank fields and is still refused --tp by name" {
+    const moe = qwen35.native_moe;
+    try std.testing.expect(@hasField(moe.Options, "rank"));
+    const two: api.Open = .{ .dir = "d", .model_type = "qwen3_5_moe", .tp = 2 };
+    try std.testing.expectEqualStrings(qwen35_moe_no_ranks, family(moe, two).?);
+    var learn = two;
+    learn.learn_conversations = true;
+    try std.testing.expectEqualStrings(qwen35_moe_no_ranks, family(moe, learn).?);
+    try std.testing.expect(family(moe, .{ .dir = "d", .model_type = "qwen3_5_moe" }) == null);
+}
+
+test "--learn-conversations at --tp names the Qwen3.5 family's states, and without --tp opens as before" {
+    const learn: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .learn = "/s", .learn_conversations = true };
+    try std.testing.expect(family(qwen35.native, learn) == null);
+    var two = learn;
+    two.tp = 2;
+    try std.testing.expectEqualStrings(qwen35_learn_ranks, family(qwen35.native, two).?);
+    two.drafter = "x"; // the flag's own sentence wins over the plan's stop, as it will when the stop is lifted
+    try std.testing.expectEqualStrings(qwen35_learn_ranks, family(qwen35.native, two).?);
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
