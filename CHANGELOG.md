@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
+
 - Tests: a host test drives 200 refused, cancelled and failed requests down every lane-host path and checks none strands a lane, page or slot (#3015, for #2135).
 
 - Nemotron Omni on CUDA: when an image request's setup fails (more image rows than the budget, or an encoder error), its image rows are now cleared. Before, the next text-only request on the same engine spliced them into its prompt and gave a wrong reply with no error (#2985, for #2943). Thanks to @jishnuvenugopal.
