@@ -11,13 +11,15 @@ const serve = @import("hip_serve");
 const glm_ocr = @import("glm_ocr");
 const qwen3 = @import("qwen3");
 const dots = @import("dots_mocr");
+const parse = @import("nemotron_parse");
+const lighton = @import("lighton_ocr");
 const fam = @import("hip_families.zig");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native, glm_ocr.native, qwen3.native, dots.native, parse, lighton.native };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -38,6 +40,11 @@ const Refused = error{Refused};
 fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) Refused {
     problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
     return error.Refused;
+}
+
+/// Whether the run is one RDNA 3.5 GPU serving alone, where a family's measured draft defaults apply.
+pub fn rdna3_5Alone(caps: hip.Caps, ranks: u32) bool {
+    return caps.generation == .rdna3_5 and ranks == 1;
 }
 
 /// Why `matrix=on` cannot run on a GPU of `caps`, or null when its matrix-core tiles exist (gfx11's WMMA).
@@ -114,7 +121,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
         s,
     });
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
-    if (o.mtp_confidence) |c| policy.mtp.confidence = c;
+    policy.mtp.confidence = fam.confidenceFloor(F, o, rdna3_5Alone(caps, o.tp), policy.mtp.confidence);
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(F, policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;
@@ -319,6 +326,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .penalties = loaded.backend.penalties,
         .reasoning = reasoning(F),
         .vision = offer.vision,
+        .ocr = offer.ocr,
         .prompt_cache = offer.cache != null,
         .prompt_cache_capacity = offer.cache_capacity,
         .warm_turns = offer.warm_turns,
@@ -370,7 +378,7 @@ test "a HIP family declares replies without reasoning with `pub const reasoning 
     }));
 }
 
-test "the text families carry no offer, so the host gives them the empty one; GLM-OCR, Qwen3, Qwen3.5 and dots.mocr offer through their Loaded" {
+test "the text families carry no offer, so the host gives them the empty one; GLM-OCR, Qwen3, Qwen3.5, dots.mocr and Parse offer through their Loaded" {
     inline for (.{ flashnext.native, nemotron.native }) |F| {
         const Loaded = @typeInfo(@typeInfo(@TypeOf(F.open)).@"fn".return_type.?).error_union.payload;
         try std.testing.expect(!@hasField(Loaded, "offer"));
@@ -383,6 +391,8 @@ test "the text families carry no offer, so the host gives them the empty one; GL
     try std.testing.expect(@FieldType(qwen35.native_engine.Loaded, "offer") == serve.Offer and !@hasField(qwen35.native_engine.Loaded, "readouts"));
     try std.testing.expect(@FieldType(dots.native.Loaded, "offer") == serve.Offer);
     try std.testing.expect(!@hasDecl(dots.native, "attach") and !@hasDecl(dots.native, "openVision"));
+    try std.testing.expect(@FieldType(parse.Loaded, "offer") == serve.Offer and !@hasField(parse.Loaded, "vision") and !@hasField(parse.Loaded, "cache"));
+    try std.testing.expect(@hasDecl(parse, "refusal") and !@hasDecl(parse, "flagRefused"));
 }
 
 test {
@@ -390,7 +400,7 @@ test {
 }
 
 test "every registered family is listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len), families.len);
+    try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
     try std.testing.expectEqualStrings("qwen3_5", families[0].model_type);
     try std.testing.expectEqualStrings("qwen3_5_moe", families[1].model_type);
     try std.testing.expectEqualStrings("qwen4_exp", families[2].model_type);
@@ -398,6 +408,13 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("glm_ocr", families[4].model_type);
     try std.testing.expectEqualStrings("qwen3", families[5].model_type);
     try std.testing.expectEqualStrings("dots_ocr", families[6].model_type);
+    try std.testing.expectEqualStrings("nemotron_parse", families[7].model_type);
+    try std.testing.expect(!families[7].raw_text);
+    try std.testing.expectEqualStrings("mistral3", families[8].model_type);
+    try std.testing.expectEqualStrings("lighton_ocr", families[9].model_type);
+    try std.testing.expect(fam.reads(lighton.native, "lighton_ocr") and !fam.reads(lighton.native, "mistral"));
+    try std.testing.expect(!reasoning(lighton.native)); // LightOnOCR-3 1B replies carry no reasoning block
+    try std.testing.expect(reasoning(qwen35.native)); // the 0.8B and 4B share Qwen3.5, which can reason
 }
 
 test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy drafts remain" {
@@ -406,6 +423,10 @@ test "GLM-OCR native flags: MTP and tensor ranks refuse before readiness; copy d
     try std.testing.expectEqualStrings(F.mtp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 1 }).?);
     try std.testing.expectEqualStrings(F.tp_refusal, flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .tp = 2 }).?);
     try std.testing.expect(flagRefused(F, .{ .dir = "missing", .model_type = F.model_type, .mtp_drafts = 0 }) == null);
+}
+
+test "Nemotron Parse declares no reasoning block, so its OCR text stays answer content" {
+    try std.testing.expect(!reasoning(parse));
 }
 
 test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and keeps a cap" {
@@ -540,6 +561,7 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
 
 test {
     _ = @import("draft_sources_hip_test.zig");
+    _ = @import("hip_confidence_test.zig");
 }
 
 test "slide admission: hip refuses before checkpoint or device access" {

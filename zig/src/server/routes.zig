@@ -1,5 +1,6 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
 const speech = @import("speech.zig");
+const images = @import("images_generations.zig");
 const embeddings = @import("embeddings.zig");
 const std = @import("std");
 const api = @import("engine_api");
@@ -8,6 +9,7 @@ const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
 const auth_scope = @import("auth_scope.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
@@ -21,7 +23,7 @@ const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
 const slide_forget = @import("slide_forget.zig");
 const Server = @import("server.zig").Server;
-const idle_unload = @import("idle_unload.zig");
+const request_gate = @import("request_gate.zig");
 const admission = @import("request_admission.zig");
 const log = @import("log.zig");
 const wait = @import("wait_reason.zig");
@@ -55,7 +57,7 @@ pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
 }
 
 fn consumeBody(conn: *Conn, a: Allocator) bool {
-    const body = http_body.read(conn, a, http_body.limit) catch {
+    const body = http_body.read(conn, a, http_body.unread_limit) catch {
         conn.close = true;
         conn.sendError(a, 500, "out of memory", null) catch {};
         return false;
@@ -90,7 +92,10 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     }
     if (std.mem.eql(u8, route, "/memory") or std.mem.eql(u8, route, "/v1/memory"))
         return memory.get(srv, conn, a) catch {};
-    if (responses.route(route)) |rid| if (rid.len > 0) return responses.get(srv, conn, a, rid);
+    if (responses.route(route)) |rid| {
+        if (rid.len > 0) return responses.get(srv, conn, a, rid);
+        if (@import("ws_upgrade.zig").requested(conn)) return @import("responses_ws.zig").serve(srv, conn, a);
+    }
     if (std.mem.eql(u8, route, "/metrics") or std.mem.eql(u8, route, "/v1/metrics")) return status.metrics(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/load")) return @import("load_metrics.zig").get(srv, conn, a);
     if (std.mem.eql(u8, route, "/dashboard")) return status.dashboard(srv, conn, a);
@@ -112,8 +117,13 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (cancel_ids.match(route)) |rid| { // an admin action: answered at once, outside admission
+        discardBody(conn, a);
+        return cancel_ids.post(srv, conn, a, rid);
+    }
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
     const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
+    const is_images = std.mem.eql(u8, route, "/v1/images/generations");
     const is_embedding = std.mem.eql(u8, route, "/v1/embeddings");
     const is_anthropic = anthropic.route(conn.path);
     const is_responses = if (responses.route(route)) |rid| rid.len == 0 else false;
@@ -123,62 +133,19 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
     const is_rerank = std.mem.eql(u8, route, "/v1/rerank") or std.mem.eql(u8, route, "/rerank");
-    if (!is_rerank and !is_embedding and !is_speech and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    const is_ocr = std.mem.eql(u8, route, "/v1/ocr");
+    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
-    // counted before the drain flag is read: a stop that sees no request in progress sees every later one refused
-    _ = srv.generating.fetchAdd(1, .seq_cst);
-    defer _ = srv.generating.fetchSub(1, .seq_cst);
     const group: api.load_ledger.RouteGroup = if (is_chat) .chat_completions else if (is_responses) .responses else if (is_anthropic) .messages else if (is_embedding) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
-    srv.load.enter(group);
-    defer srv.load.leave(group);
-    if (srv.idle_manager) |m| m.begin(); // engine work starts: the idle window restarts at this route's end
-    defer if (srv.idle_manager) |m| m.end();
-    if (@import("builtin").is_test) if (counted_hook) |h| h();
-    if (srv.draining.load(.seq_cst)) {
-        discardBody(conn, a);
-        return draining(conn, is_anthropic);
-    }
-    // --max-inflight and the rest, when set: a reservation for the whole reply, taken before the body is read
-    var lease: ?admission.Lease = null;
-    if (srv.config.admission.enabled()) switch (srv.admission.acquire(srv.io, srv.config.admission, conn.key_digest)) {
-        .accepted => |held| lease = held,
-        .rejected => |refusal| return overloaded(conn, is_anthropic, refusal),
-    };
-    defer if (lease) |*held| held.release();
-    const is_text = is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
-    if (srv.info.embeddings != null and (is_text or is_rerank)) {
-        discardBody(conn, a);
-        conn.sendJson(400, "{\"error\":{\"message\":\"this model produces embeddings; use POST /v1/embeddings\",\"type\":\"invalid_request_error\"}}");
-        return;
-    }
-    // a reranker's template reads query and document roles only: every other route would score or write nonsense
-    if (srv.info.rerank != null and (is_text or is_embedding)) {
-        discardBody(conn, a);
-        conn.sendJson(400, "{\"error\":{\"message\":\"this model is a reranker: use POST /v1/rerank\",\"type\":\"invalid_request_error\"}}");
-        return;
-    }
-    if (srv.info.readouts != null and !is_systemone) { // a readout engine answers System One decisions and nothing else
-        discardBody(conn, a);
-        conn.sendJson(400, "{\"error\":{\"message\":\"this model answers decisions only; use POST /v1/systemone\",\"type\":\"invalid_request_error\"}}");
-        return;
-    }
-    // The wake for every engine-using route: a parked server reloads under the `active` count this begin raised.
-    if (srv.idle_manager) |m| {
-        if (idle_unload.wakeReload(m, srv, a)) |wake_problem| {
-            if (wake_problem.len > 0) {
-                discardBody(conn, a);
-                log.line("idle reload failed: {s}", .{wake_problem});
-                return waiting(conn, is_anthropic, wait.reloadReason(wake_problem));
-            }
-        } else |e| {
-            discardBody(conn, a);
-            log.line("idle reload failed: {s}", .{@errorName(e)});
-            return waiting(conn, is_anthropic, wait.reload_failed);
-        }
-    }
+    const is_text = is_ocr or is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or std.mem.endsWith(u8, route, "/completions");
+    const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding, .rerank = is_rerank, .systemone = is_systemone };
+    var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
+    defer entered.held.release();
+    if (entered.refusal) |refusal| return refuse(conn, a, is_anthropic, refusal);
     if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
+    if (is_images) return images.post(srv, conn, a) catch {};
     if (is_embedding) return embeddings.post(srv, conn, a);
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
@@ -187,7 +154,22 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
     if (is_responses) return responses.post(srv, conn, a);
+    if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a);
     openai.post(srv, conn, a, is_chat);
+}
+
+/// A gate refusal's reply, as each check sent it inline: only admission's 429 leaves the body unread.
+fn refuse(conn: *Conn, a: Allocator, anthropic_shape: bool, refusal: request_gate.Refusal) void {
+    if (refusal != .overloaded) discardBody(conn, a);
+    switch (refusal) {
+        .draining => draining(conn, anthropic_shape),
+        .overloaded => |r| overloaded(conn, anthropic_shape, r),
+        .model_kind => |body| conn.sendJson(400, body),
+        .waiting => |w| {
+            log.line("idle reload failed: {s}", .{w.problem});
+            waiting(conn, anthropic_shape, w.wait);
+        },
+    }
 }
 
 /// 429 with Retry-After in the API's own error shape; the unread body is left behind with the connection.

@@ -30,7 +30,17 @@ pub fn windows(self: anytype, wins: []const be.Window, out: []be.Verified, draft
         } else if (self.ranks) |r| {
             try r.verifyMany(@TypeOf(self.tri()), self.tri(), seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
         } else try self.ops().verifyMany(seqs[0..n], ds[0..n], idss[0..n], self.logits.ptr);
-        for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, wins[wi].masks, out[wi].sampled[0..wins[wi].rows()]);
+        if (n > 1 and cap > 1 and self.ranks == null) {
+            var sms: [round_streams]?mtp.Sampling = undefined;
+            var masks: [round_streams][]const u32 = undefined;
+            var outputs: [round_streams][]u32 = undefined;
+            for (drafted[at..][0..n], 0..) |wi, i| {
+                sms[i] = wins[wi].stream.sampling;
+                masks[i] = wins[wi].masks;
+                outputs[i] = out[wi].sampled[0..wins[wi].rows()];
+            }
+            try self.ops().drawsMany(self.logits.ptr, ds[0..n], sms[0..n], masks[0..n], outputs[0..n]);
+        } else for (drafted[at..][0..n], ds[0..n]) |wi, d| try self.ops().draws(d, wins[wi].stream.sampling, wins[wi].masks, out[wi].sampled[0..wins[wi].rows()]);
         at += n;
     }
 }

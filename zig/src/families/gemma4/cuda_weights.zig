@@ -237,15 +237,21 @@ fn loadConfig(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda
     w.layers = try gpa.alloc(Layer, n);
     var buf: [192]u8 = undefined;
     const readers = try core.checkpoint.loadReaders();
+    // each layer read past the page cache, the next one while it packs (TF_LOAD_DIRECT=0: #1928's read-ahead)
+    var direct = core.checkpoint.direct.Layers.init(gpa, x.ck, readers);
+    defer direct.deinit();
     for (w.layers, 0..) |*l, i| {
         const dh = cfg.headDim(i);
         const kvh = geo.kvHeads(i);
         const q_out = geo.query_heads * dh;
         const kv_out = kvh * dh;
-        const p = try std.fmt.allocPrint(gpa, lm ++ "layers.{d}.", .{i});
-        defer gpa.free(p);
-        defer if (readers > 0) x.ck.release(); // a read-ahead layer is on the device: its pages leave the cache (none read ahead: main's one release at close)
-        var reading = x.ck.prefetch(p, readers); // read ahead by threads of their own while the layer packs
+        var pb: [2][64]u8 = undefined;
+        const p = try std.fmt.bufPrint(&pb[0], lm ++ "layers.{d}.", .{i});
+        try direct.enter(p, if (i + 1 < n) try std.fmt.bufPrint(&pb[1], lm ++ "layers.{d}.", .{i + 1}) else null);
+        // a read-ahead layer is on the device: its pages leave the cache (none: main's one release at close)
+        defer if (readers > 0 and !direct.on()) x.ck.release();
+        // read ahead by threads of their own while the layer packs
+        var reading: core.checkpoint.Ahead = if (direct.on()) .{} else x.ck.prefetch(p, readers);
         defer _ = reading.join();
         const name = struct {
             fn of(b: []u8, pre: []const u8, suffix: []const u8) ![]const u8 {

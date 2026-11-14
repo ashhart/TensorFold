@@ -52,3 +52,9 @@ pub fn drop() void {
 pub fn forget() void {
     device = null;
 }
+
+/// Releases this driver's current-thread bounce and cached device reading before its library closes.
+pub fn closeDriver(d: *const Driver) void {
+    if (held) |h| if (h.d == d) drop();
+    if (device) |one| if (one.d == d) forget();
+}

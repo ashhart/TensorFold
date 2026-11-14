@@ -19,6 +19,11 @@ pub fn glmClearThinking(value: ?[]const u8) ?bool {
     return if (std.mem.eql(u8, v, "1")) true else null;
 }
 
+/// ``TF_DSV41_SCHEMA_PROMPT``: named on/off forms; unset keeps the published engine's schema inclusion.
+pub fn schemaPrompt(value: ?[]const u8) !bool {
+    return @import("sys").environment.value(bool, "TF_DSV41_SCHEMA_PROMPT", value, true);
+}
+
 pub const HfText = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
@@ -26,6 +31,9 @@ pub const HfText = struct {
     native_kimi: ?*KimiText = null,
     source: []const u8 = "",
     native_deepseek: bool = false,
+    schema_prompt: bool = true, // TF_DSV41_SCHEMA_PROMPT: response_format's schema as the encoder's ``## Response Format``
+    overridden: bool = false, // the chat template is --chat-template's file
+    unread_template: bool = false, // a native DeepSeek checkpoint's own Jinja, which its encoder replaces
     clear_thinking: ?bool = null, // GLM-5.3's, given to its template on every render (``glmClearThinking``)
     tool_source: []const u8 = "",
     compiled: ?template.Compiled = null,
@@ -35,7 +43,7 @@ pub const HfText = struct {
     prefix: []const u32 = &.{}, // the post-processor's tokens before a text (add_special_tokens)
     suffix: []const u32 = &.{},
 
-    /// Loads ``dir``'s tokenizer.json, chat template, special tokens and end-of-sequence ids; a failure's reason in `problem` (from `pa`).
+    /// Loads ``dir``'s tokenizer.json, chat template, special tokens, eos ids; failure reason in `problem` (from `pa`).
     pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, template_override: ?[]const u8, pa: Allocator, problem: *[]const u8) !*HfText {
         const t = try gpa.create(HfText);
         errdefer gpa.destroy(t);
@@ -65,6 +73,18 @@ pub const HfText = struct {
         // each request renders its chat up to three times, and a chat's earlier messages come back every turn
         t.tok.memo = try tokenizer.Memo.create(gpa, 64 << 20);
         const config = readJson(io, a, dir, "tokenizer_config.json");
+        // a Clef checkpoint's tokenizer splits words with the regex this field publishes, not tokenizer.json's
+        const clef = if (std.fs.path.join(a, &.{ dir, "joint_head_config.json" })) |head| if (std.Io.Dir.cwd().access(io, head, .{})) |_| true else |_| false else |_| false;
+        if (clef and config == .object) if (config.object.get("pretokenize_regex")) |re| {
+            if (re != .string or re.string.len == 0) {
+                problem.* = "tokenizer_config.json pretokenize_regex is not a non-empty string";
+                return error.Load;
+            }
+            t.tok.overrideSplit(re.string) catch |e| {
+                problem.* = try std.fmt.allocPrint(pa, "tokenizer_config.json pretokenize_regex cannot replace the Split pattern ({s})", .{@errorName(e)});
+                return error.Load;
+            };
+        };
         const model_config = readEosJson(io, a, dir, "config.json", 64 << 20) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read config.json EOS ({s})", .{@errorName(e)});
             return error.Load;
@@ -89,7 +109,16 @@ pub const HfText = struct {
                 problem.* = try std.fmt.allocPrint(pa, "cannot read chat template override ({s})", .{@errorName(e)});
                 return error.Load;
             };
+            t.overridden = true;
         } else try t.readTemplates(io, a, dir, config);
+        if (template_override == null) t.source = @import("hf_text_parse.zig").template(model_config) orelse t.source;
+        // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
+        if (t.native_deepseek) {
+            t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
+            t.source = "";
+            t.tool_source = "";
+            t.schema_prompt = try schemaPrompt(if (std.c.getenv("TF_DSV41_SCHEMA_PROMPT")) |v| std.mem.span(v) else null);
+        }
         t.specials = try specialsOf(a, config);
         t.eos = t.eosIds(a, model_config, generation, config, t.tok.id_to_token.tokens.items.len) catch |e| {
             if (e == error.OutOfMemory) return e;
@@ -258,7 +287,7 @@ pub const HfText = struct {
 
     pub fn text(t: *HfText) model_text.Text {
         if (t.native_kimi) |kimi| return kimi.text();
-        return .{ .ctx = t, .vtable = &.{
+        return .{ .native_deepseek = t.native_deepseek and t.compiled == null, .ctx = t, .vtable = &.{
             .encode = encodeFn,
             .decode = decodeFn,
             .token_id = tokenIdFn,
@@ -307,12 +336,12 @@ pub const HfText = struct {
     fn encodeMaskedFn(ctx: *anyopaque, a: Allocator, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error![]u32 {
         return self(ctx).tok.encodeMasked(a, s, spans) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
-                "normalized added tokens cannot be matched safely through this normalizer with request text"
-            else if (err == error.UnsafeAddedTokenMask)
-                "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely"
-            else
-                "the tokenizer cannot encode this prompt with request byte provenance";
+            problem.* = switch (err) {
+                error.UnsafeNormalizedAddedTokenMask => "normalized added tokens cannot be matched safely through this normalizer with request text",
+                error.UnsafeAddedTokenMask => "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely",
+                error.RegexBudget => "the tokenizer's split pattern needs more work on this prompt than a prompt of its length is allowed",
+                else => "the tokenizer cannot encode this prompt with request byte provenance",
+            };
             return error.Template;
         };
     }
@@ -348,8 +377,19 @@ pub const HfText = struct {
         return if (t.tool_source.len > 0) std.mem.concat(t.arena.allocator(), u8, &.{ source, " ", t.tool_source }) catch source else source;
     }
 
-    fn renderDeepseek(_: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
+    /// What renders chat, for the start-up line: an operator sees when a checkpoint's own Jinja goes unused.
+    pub fn renderer(t: *const HfText) []const u8 {
+        if (t.native_deepseek) return if (t.unread_template) "the DeepSeek-V4.x encoder (encoding.py); the checkpoint's own chat template is not used, --chat-template FILE uses it" else "the DeepSeek-V4.x encoder (encoding.py)";
+        if (t.overridden) return "the --chat-template file";
+        return if (t.source.len > 0 or t.tool_source.len > 0) "the checkpoint's" else "none: chat requests are refused, completion prompts are served";
+    }
+
+    fn renderDeepseek(t: *HfText, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
         var opts: dsv41.Options = .{ .thinking = options.enable_thinking, .add_generation_prompt = options.add_generation_prompt };
+        if (options.images) opts.image = .{ .text = imageMarker }; // the image token, expanded by images.zig
+        if (t.schema_prompt) if (options.response_format) |rf| {
+            opts.response_format = try @import("deepseek_schema.zig").schemaFor(a, rf);
+        };
         if (options.tools) |tools| {
             if (tools != .array) {
                 problem.* = "tools must be a list";
@@ -372,6 +412,10 @@ pub const HfText = struct {
             return error.Template;
         };
         return .{ .text = out.text, .spans = out.spans };
+    }
+
+    fn imageMarker(_: ?*anyopaque, _: Value) []const u8 {
+        return dsv41.IMAGE;
     }
 
     fn renderFn(ctx: *anyopaque, a: Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error!model_text.Rendered {
@@ -550,6 +594,7 @@ test "chat_template_kwargs.clear_thinking: a bool, null as unset, anything else 
 
 test {
     _ = @import("hf_eos_test.zig");
+    _ = @import("hf_text_regex_test.zig");
     _ = @import("dory_chat_test.zig");
     _ = @import("deepseek_chat_test.zig");
 }

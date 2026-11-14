@@ -36,6 +36,7 @@ pub const Map = struct {
 const Names = struct {
     ck: *Checkpoint,
     quant: config.Quant,
+    why: ?*core.modelopt.Why = null, // a part's refusal kept here instead of the log (tests)
     buf: [160]u8 = undefined,
 
     fn name(self: *Names, comptime fmt: []const u8, args: anytype) ![]const u8 {
@@ -47,29 +48,31 @@ const Names = struct {
     }
 
     fn proj(self: *Names, n: usize, k: usize, comptime fmt: []const u8, args: anytype) !Proj {
-        if (self.quant == .bf16) return .{ .w = try self.bf16(&.{ n, k }, fmt ++ ".weight", args), .n = n, .k = k };
         if (self.quant == .mxfp8) {
             const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .f8_e4m3, &.{ n, k });
             const b = try self.ck.expect(try self.name(fmt ++ ".weight_scale", args), .u8, &.{ n, k / 32 });
             return .{ .w = w, .blocks = b, .n = n, .k = k };
         }
-        const w = try self.ck.expect(try self.name(fmt ++ ".weight", args), .u8, &.{ n, k / 2 });
-        const b = try self.ck.expect(try self.name(fmt ++ ".weight_scale", args), .f8_e4m3, &.{ n, k / 16 });
-        const s = try self.ck.expect(try self.name(fmt ++ ".weight_scale_2", args), .f32, &.{});
-        const v: f32 = @bitCast(std.mem.readInt(u32, s.bytes[0..4], .little));
-        if (!(v > 0) or !std.math.isFinite(v)) {
-            std.log.err("{s}: weight_scale_2 {e} is not a positive finite scale", .{ try self.name(fmt, args), v });
-            return error.UnexpectedTensor;
-        }
-        return .{ .w = w, .blocks = b, .scale = v, .n = n, .k = k };
+        // NVFP4 (W4A16: no input_scale, an unused one refuses the map) or bf16: core's ModelOpt part reader
+        const kind: core.modelopt.part.Kind = if (self.quant == .bf16) .bf16 else .nvfp4;
+        // Dory's own rules: weight_scale_2 positive and of shape [] only, input_scale left to the unused check
+        const want: core.modelopt.part.Want = .{ .kind = kind, .n = n, .k = k, .act = .skip, .positive = true, .scalars = .rank0 };
+        const module = try self.name(fmt, args);
+        const p = if (self.why) |w| try core.modelopt.part.readWhy(self.ck, module, want, w) else try core.modelopt.part.read(self.ck, module, want);
+        return .{ .w = p.weight, .blocks = p.blocks, .scale = p.scale, .n = n, .k = k };
     }
 };
 
 /// Every tensor the loader reads, sublayer by sublayer; a missing, mistyped or leftover tensor refuses the checkpoint.
 pub fn map(gpa: std.mem.Allocator, ck: *Checkpoint, c: Config) !Map {
+    return mapWhy(gpa, ck, c, null);
+}
+
+/// `map`, a part's refusal or the first leftover tensor kept in `why` instead of the log (tests read it).
+fn mapWhy(gpa: std.mem.Allocator, ck: *Checkpoint, c: Config, why: ?*core.modelopt.Why) !Map {
     const g = if (c.quant == .mxfp8) @as(usize, 32) else 16;
     if (c.hidden % g != 0 or c.intermediate % g != 0 or c.qDim() % g != 0) return error.UnsupportedShapes;
-    var nm: Names = .{ .ck = ck, .quant = c.quant };
+    var nm: Names = .{ .ck = ck, .quant = c.quant, .why = why };
     const d = c.hidden;
     const f = c.intermediate;
     const q = c.qDim();
@@ -99,6 +102,10 @@ pub fn map(gpa: std.mem.Allocator, ck: *Checkpoint, c: Config) !Map {
     }
     m.head = try nm.bf16(&.{ c.vocab, d }, "lm_head.weight", .{});
     m.logit_scale = try nm.bf16(&.{c.vocab}, "lm_head.logit_scale", .{});
+    if (why) |w| for (ck.files.items) |*file| for (file.names.keys()) |key| if (!ck.used.contains(key)) {
+        w.set("unused checkpoint tensor {s}", .{key});
+        return error.UnusedTensors;
+    };
     if (ck.unused() != 0) return error.UnusedTensors;
     return m;
 }
@@ -115,13 +122,20 @@ pub const tiny: Config = blk: {
 
 /// A safetensors file with each tensor `c` names, zero-filled, every NVFP4 scale 1.
 pub fn writeFile(a: std.mem.Allocator, dir: std.Io.Dir, c: Config) !void {
+    return writeFaulty(a, dir, c, .{});
+}
+
+/// What a test plants in an NVFP4 file: every weight_scale_2's value and shape, an input_scale beside each.
+const Fault = struct { scale_2: f32 = 1, scale_2_shape: []const usize = &.{}, input_scale: bool = false };
+
+fn writeFaulty(a: std.mem.Allocator, dir: std.Io.Dir, c: Config, fault: Fault) !void {
     const E = struct { name: []const u8, dtype: []const u8, shape: []const usize };
     var entries: std.ArrayList(E) = .empty;
     const Add = struct {
         fn bf(list: *std.ArrayList(E), al: std.mem.Allocator, nm: []const u8, shape: []const usize) !void {
             try list.append(al, .{ .name = nm, .dtype = "BF16", .shape = try al.dupe(usize, shape) });
         }
-        fn proj(list: *std.ArrayList(E), al: std.mem.Allocator, cc: Config, pre: []const u8, n: usize, k: usize) !void {
+        fn proj(list: *std.ArrayList(E), al: std.mem.Allocator, cc: Config, plant: Fault, pre: []const u8, n: usize, k: usize) !void {
             if (cc.quant == .bf16) return bf(list, al, try std.fmt.allocPrint(al, "{s}.weight", .{pre}), &.{ n, k });
             if (cc.quant == .mxfp8) {
                 try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight", .{pre}), .dtype = "F8_E4M3", .shape = try al.dupe(usize, &.{ n, k }) });
@@ -129,7 +143,8 @@ pub fn writeFile(a: std.mem.Allocator, dir: std.Io.Dir, c: Config) !void {
             }
             try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight", .{pre}), .dtype = "U8", .shape = try al.dupe(usize, &.{ n, k / 2 }) });
             try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale", .{pre}), .dtype = "F8_E4M3", .shape = try al.dupe(usize, &.{ n, k / 16 }) });
-            try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale_2", .{pre}), .dtype = "F32", .shape = &.{} });
+            try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.weight_scale_2", .{pre}), .dtype = "F32", .shape = plant.scale_2_shape });
+            if (plant.input_scale) try list.append(al, .{ .name = try std.fmt.allocPrint(al, "{s}.input_scale", .{pre}), .dtype = "F32", .shape = &.{} });
         }
     };
     const d = c.hidden;
@@ -140,14 +155,14 @@ pub fn writeFile(a: std.mem.Allocator, dir: std.Io.Dir, c: Config) !void {
         const p = try std.fmt.allocPrint(a, "backbone.layers.{d}.", .{i});
         if (c.kinds[i] == .mlp) {
             try Add.bf(&entries, a, try std.fmt.allocPrint(a, "{s}mlp_alpha", .{p}), &.{d});
-            for ([_][]const u8{ "gate_proj", "up_proj" }) |n| try Add.proj(&entries, a, c, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), c.intermediate, d);
-            try Add.proj(&entries, a, c, try std.fmt.allocPrint(a, "{s}mixer.down_proj", .{p}), d, c.intermediate);
+            for ([_][]const u8{ "gate_proj", "up_proj" }) |n| try Add.proj(&entries, a, c, fault, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), c.intermediate, d);
+            try Add.proj(&entries, a, c, fault, try std.fmt.allocPrint(a, "{s}mixer.down_proj", .{p}), d, c.intermediate);
             for ([_][]const u8{ "suv_gate", "suv_up" }) |n| try Add.bf(&entries, a, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), &.{c.intermediate});
         } else {
             try Add.bf(&entries, a, try std.fmt.allocPrint(a, "{s}attn_alpha", .{p}), &.{d});
-            for ([_][]const u8{ "q_proj", "g_proj" }) |n| try Add.proj(&entries, a, c, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), c.qDim(), d);
-            for ([_][]const u8{ "k_proj", "v_proj" }) |n| try Add.proj(&entries, a, c, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), c.kvDim(), d);
-            try Add.proj(&entries, a, c, try std.fmt.allocPrint(a, "{s}mixer.o_proj", .{p}), d, c.qDim());
+            for ([_][]const u8{ "q_proj", "g_proj" }) |n| try Add.proj(&entries, a, c, fault, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), c.qDim(), d);
+            for ([_][]const u8{ "k_proj", "v_proj" }) |n| try Add.proj(&entries, a, c, fault, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), c.kvDim(), d);
+            try Add.proj(&entries, a, c, fault, try std.fmt.allocPrint(a, "{s}mixer.o_proj", .{p}), d, c.qDim());
             for ([_][]const u8{ "sqk", "s_gate" }) |n| try Add.bf(&entries, a, try std.fmt.allocPrint(a, "{s}mixer.{s}", .{ p, n }), &.{c.qDim()});
         }
     }
@@ -168,12 +183,12 @@ pub fn writeFile(a: std.mem.Allocator, dir: std.Io.Dir, c: Config) !void {
     @memset(file, 0);
     std.mem.writeInt(u64, file[0..8], h.len, .little);
     @memcpy(file[8..][0..h.len], h);
-    // every weight_scale_2 one: the map refuses a zero scale
+    // every weight_scale_2 `fault.scale_2` (one unless planted): the map refuses a zero scale
     var off: usize = 0;
     for (entries.items) |e| {
         var n: usize = if (e.dtype[0] == 'B') 2 else if (e.dtype[1] == '3') 4 else 1;
         for (e.shape) |x| n *= x;
-        if (std.mem.endsWith(u8, e.name, "weight_scale_2")) std.mem.writeInt(u32, file[8 + h.len + off ..][0..4], @bitCast(@as(f32, 1)), .little);
+        if (std.mem.endsWith(u8, e.name, "weight_scale_2")) std.mem.writeInt(u32, file[8 + h.len + off ..][0..4], @bitCast(fault.scale_2), .little);
         off += n;
     }
     try dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = file });
@@ -230,4 +245,31 @@ test "the pinned MXFP8 checkpoint (TF_DORY_MXFP8_DIR): 795 tensors, none left ov
 
 test "the pinned BF16 checkpoint (TF_DORY_BF16_DIR): 507 tensors, none left over" {
     try pinnedMaps("TF_DORY_BF16_DIR");
+}
+
+/// The tiny NVFP4 checkpoint with `fault` planted refuses with `err`, the reason from `head` to `tail`.
+fn refuses(fault: Fault, err: anyerror, head: []const u8, tail: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFaulty(arena.allocator(), tmp.dir, tiny, fault);
+    var ck = try Checkpoint.openModel(testing.allocator, io, try tmpPath(arena.allocator(), tmp));
+    defer ck.close();
+    var why: core.modelopt.Why = .{};
+    try testing.expectError(err, mapWhy(testing.allocator, &ck, tiny, &why));
+    try testing.expect(std.mem.startsWith(u8, why.text(), head));
+    try testing.expect(std.mem.endsWith(u8, why.text(), tail));
+}
+
+test "Dory map: a zero, negative or NaN weight_scale_2 is refused by name" {
+    for ([_]f32{ 0, -1, std.math.nan(f32) }) |v| try refuses(.{ .scale_2 = v }, error.UnexpectedTensor, "backbone.layers.0.mixer.q_proj.weight_scale_2: ", " is not a positive finite scale");
+}
+
+test "Dory map: a weight_scale_2 of shape [1] or [1, 1] is refused by name, as before the shared reader" {
+    for ([_][]const usize{ &.{1}, &.{ 1, 1 } }) |shape| try refuses(.{ .scale_2_shape = shape }, error.UnexpectedTensor, "backbone.layers.0.mixer.q_proj.weight_scale_2: f32 ", "expected an F32 scalar of shape []");
+}
+
+test "Dory map: an NVFP4 checkpoint with an input_scale left over is refused (W4A16 reads none)" {
+    try refuses(.{ .input_scale = true }, error.UnusedTensors, "unused checkpoint tensor backbone.layers.", ".input_scale");
 }

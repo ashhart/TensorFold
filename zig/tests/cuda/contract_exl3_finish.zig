@@ -1,4 +1,4 @@
-//! tf_exl3_plan_finish under the contract: modes 0 and 1 and the downs bit-equal to main's, SwiGLU-OAI against float64.
+//! tf_exl3_plan_finish(_after) under the contract: modes 0 and 1 and the downs as main's, the rest against float64.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -21,6 +21,7 @@ pub const Mode = struct {
     epi: i32,
     act: i32 = 0,
     limit: f32 = 0,
+    after: bool = false, // tf_exl3_plan_finish_after's order: min(silu(g), L) * clip(u, -L, L)
     name: []const u8,
 };
 
@@ -32,8 +33,16 @@ pub const modes = [_]Mode{
     .{ .epi = 2, .act = 2, .limit = oai_limit, .name = "exl3_experts tf_exl3_plan_finish gate-up, SwiGLU-OAI (act_mode 2)" },
 };
 
-/// The served kernel, or a control: the SwiGLU-OAI without the up's + 1, or with alpha 1 (exl3_plan.cuh's faults).
-pub const Fault = enum { none, no_plus_one, alpha_one };
+/// tf_exl3_plan_finish_after: Ling-3.1-flash's routed experts (fp32, limit 10), limit 2 where the two orders part.
+pub const after_modes = [_]Mode{
+    .{ .epi = 2, .act = 1, .limit = 10, .after = true, .name = "exl3_experts tf_exl3_plan_finish_after gate-up, fp32 SwiGLU, limit 10 on silu's output" },
+    .{ .epi = 2, .act = 1, .limit = 2, .after = true, .name = "exl3_experts tf_exl3_plan_finish_after gate-up, fp32 SwiGLU, limit 2 on silu's output" },
+    .{ .epi = 2, .act = 1, .after = true, .name = "exl3_experts tf_exl3_plan_finish_after gate-up, fp32 SwiGLU, no limit" },
+    .{ .epi = 0, .after = true, .name = "exl3_experts tf_exl3_plan_finish_after fp32 down" },
+};
+
+/// The served kernel, or a control: SwiGLU-OAI without the + 1 or with alpha 1, or the clamp-before kernel as after.
+pub const Fault = enum { none, no_plus_one, alpha_one, before };
 
 const clamp_nan = "torch.clamp's bounds: a NaN gate or up stays NaN, +Inf reads as the limit and a -Inf up as -limit";
 
@@ -41,13 +50,18 @@ const clamp_nan = "torch.clamp's bounds: a NaN gate or up stays NaN, +Inf reads 
 fn spec(m: Mode, fault: Fault) c.Spec {
     const up = &[_]c.Shape{ .{ .rows = 16, .n = 1536, .k = 4 }, .{ .rows = 64, .n = 1536, .k = 4 }, .{ .rows = 1, .n = 1536, .k = 4 }, .{ .rows = 64, .n = 1024, .k = 4 } };
     const down = &[_]c.Shape{ .{ .rows = 16, .n = 6144, .k = 1 }, .{ .rows = 64, .n = 6144, .k = 1 }, .{ .rows = 64, .n = 3072, .k = 1 } };
-    var s: c.Spec = .{ .name = m.name, .accum = .f32, .depth = depth, .out = if (m.epi == 0) .f32 else .bf16, .tiles = .{ .{}, .{ .size = 128, .step = 128, .min = 128 }, .{} }, .served = if (m.epi == 2) up else down };
-    if (m.act != 2) s.replaces = "main's tf_exl3_plan_finish (contract_controls tf_ctl_exl3_plan_finish_old)";
+    // the after kernel's: Ling-3.1-flash at TP=1 and TP=2 (1,280 and 640 / 4,096)
+    const ling_up = &[_]c.Shape{ .{ .rows = 8, .n = 1280, .k = 4 }, .{ .rows = 64, .n = 640, .k = 4 }, .{ .rows = 1, .n = 1280, .k = 4 } };
+    const ling_down = &[_]c.Shape{ .{ .rows = 8, .n = 4096, .k = 1 }, .{ .rows = 64, .n = 4096, .k = 1 } };
+    const served = if (m.after) (if (m.epi == 2) ling_up else ling_down) else if (m.epi == 2) up else down;
+    var s: c.Spec = .{ .name = m.name, .accum = .f32, .depth = depth, .out = if (m.epi == 0) .f32 else .bf16, .tiles = .{ .{}, .{ .size = 128, .step = 128, .min = 128 }, .{} }, .served = served };
+    if (m.act != 2 and !m.after) s.replaces = "main's tf_exl3_plan_finish (contract_controls tf_ctl_exl3_plan_finish_old)";
     if (m.limit > 0) s.nan = .{ .stated = clamp_nan };
     switch (fault) {
         .none => {},
         .no_plus_one => s.name = "control: tf_exl3_plan_finish SwiGLU-OAI without the up's + 1",
         .alpha_one => s.name = "control: tf_exl3_plan_finish SwiGLU-OAI with alpha 1",
+        .before => s.name = "control: tf_exl3_plan_finish (the clamp on silu's input) against the after order at limit 2",
     }
     return s;
 }
@@ -213,12 +227,16 @@ pub const Finish = struct {
                         v = v.bf();
                         up = up.bf();
                     }
-                    if (m.limit > 0) {
+                    if (m.limit > 0 and !m.after) {
                         v = v.atMost(lim);
                         up = up.atMost(lim).atLeast(-lim);
                     }
                     v = v.div(Iv.of(1).add(v.neg().exp()));
                     if (m.act == 0) v = v.bf();
+                    if (m.limit > 0 and m.after) {
+                        v = v.atMost(lim);
+                        up = up.atMost(lim).atLeast(-lim);
+                    }
                     v = v.mul(up);
                 }
             }
@@ -264,11 +282,11 @@ pub const Finish = struct {
     }
 };
 
-/// The five modes on the served kernel, then the two SwiGLU-OAI controls.
+/// The five modes on the served kernel, the four on the after kernel, then two SwiGLU-OAI controls and the order's.
 pub const Group = struct {
     a: std.mem.Allocator,
     mod: cuda.Module,
-    entries: [modes.len + 2]Finish,
+    entries: [modes.len + after_modes.len + 3]Finish,
 
     pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, controls: cuda.Module, kernels: *std.ArrayList(g.Kernel)) !*Group {
         const self = try a.create(Group);
@@ -277,16 +295,19 @@ pub const Group = struct {
         self.mod = try cuda.Module.load(gpu.d, cuda.kernels.exl3_experts);
         errdefer self.mod.unload();
         const served = try self.mod.function("tf_exl3_plan_finish");
+        const after = try self.mod.function("tf_exl3_plan_finish_after");
         const old = try controls.function("tf_ctl_exl3_plan_finish_old");
+        const kept = modes.len + after_modes.len;
         for (&self.entries, 0..) |*x, i| {
-            const fault: Fault = if (i < modes.len) .none else if (i == modes.len) .no_plus_one else .alpha_one;
-            const m = if (i < modes.len) modes[i] else modes[modes.len - 1];
+            const fault: Fault = if (i < kept) .none else ([_]Fault{ .no_plus_one, .alpha_one, .before })[i - kept];
+            const m = if (i < modes.len) modes[i] else if (i < kept) after_modes[i - modes.len] else if (fault == .before) after_modes[1] else modes[modes.len - 1];
             const f = switch (fault) {
-                .none => served,
+                .none => if (m.after) after else served,
                 .no_plus_one => try controls.function("tf_ctl_exl3_plan_finish_no_plus_one"),
                 .alpha_one => try controls.function("tf_ctl_exl3_plan_finish_alpha_one"),
+                .before => served,
             };
-            x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = m, .fault = fault, .f = f, .old = if (m.act != 2) old else null };
+            x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .mode = m, .fault = fault, .f = f, .old = if (m.act != 2 and !m.after) old else null };
         }
         errdefer for (&self.entries) |*x| x.deinit();
         for (&self.entries) |*x| try kernels.append(a, x.kernel());

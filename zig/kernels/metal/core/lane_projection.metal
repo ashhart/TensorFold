@@ -12,6 +12,9 @@ using namespace mpp::tensor_ops;
 #ifndef TF_PRECOMPUTE_SUMS
 #define TF_PRECOMPUTE_SUMS 0
 #endif
+#ifndef TF_ROW_BLOCKS
+#define TF_ROW_BLOCKS 0
+#endif
 #ifndef TF_YS
 #define TF_YS TF_N
 #endif
@@ -34,7 +37,7 @@ inline tf_raw tf_lane_fetch(const device uint* W, const device uint4* SB, int ti
   const device uint2* src = (const device uint2*)(W + (((size_t)tile * KG + (ok ? g : 0)) * NT + lane) * WP);
 #if TF_ODD_WORDS
   for (int i = 0; i < WP; i++) raw.w[i] = ok && n0 + lane < TF_N ? ((const device uint*)src)[i] : 0u;
-#elif TF_BITS != 4
+#elif TF_BITS != 4 && TF_BITS != 8
   for (int i = 0; i < WP / 2; i++) raw.w[i] = ok && n0 + lane < TF_N ? src[i] : uint2(0);
 #else
   for (int i = 0; i < WP / 2; i++) raw.w[i] = uint2(0);
@@ -64,12 +67,20 @@ inline float tf_lane_xsum(const device bfloat* X, int m, int g, int M) {
   return acc;
 }
 
-// Codes: 4-bit straight to the uint4 op; 2/3-bit widened to nibbles for it, 5/6/8-bit to bytes for the uint8 op.
+// Codes: 4/8-bit device views; 2/3-bit widened to nibbles, 5/6-bit to bytes.
 #if TF_BITS == 4
 #define TF_STAGE_CODES(raw)
 #define TF_GROUP_PRODUCT(g) \
     tensor<device uint4b_format, dextents<int32_t, 2>, tensor_inline> b( \
       (device uchar*)W + ((size_t)tile * KG + (g)) * (NT * GS / 2), dextents<int32_t, 2>(GS, NT)); \
+    auto a = tA.slice((g) * GS, 0); \
+    auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>(); \
+    op.run(a, b, P);
+#elif TF_BITS == 8
+#define TF_STAGE_CODES(raw)
+#define TF_GROUP_PRODUCT(g) \
+    tensor<device uint8_t, dextents<int32_t, 2>, tensor_inline> b( \
+      (device uint8_t*)W + ((size_t)tile * KG + (g)) * (NT * GS), dextents<int32_t, 2>(GS, NT)); \
     auto a = tA.slice((g) * GS, 0); \
     auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>(); \
     op.run(a, b, P);
@@ -133,7 +144,7 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
 #endif
 
 #if TF_PRECOMPUTE_SUMS
-#define TF_SUM_VALUE(row, g) XS[(g) * 16 + (row)]
+#define TF_SUM_VALUE(row, g) ((row) < M ? XS[(g) * mdims[1] + (row)] : 0.0f)
 #else
 #define TF_SUM_VALUE(row, g) tf_lane_xsum(X, row, g, M)
 #endif
@@ -166,7 +177,21 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
     const device float* XS [[buffer(5)]],
 #endif
     uint sgi [[simdgroup_index_in_threadgroup]], uint lanei [[thread_index_in_simdgroup]],
-    uint tgx [[threadgroup_position_in_grid]]) {
+#if TF_ROW_BLOCKS
+    uint2 tg [[threadgroup_position_in_grid]]
+#else
+    uint tgx [[threadgroup_position_in_grid]]
+#endif
+) {
+#if TF_ROW_BLOCKS
+  const int row0 = int(tg.y) * 16, rows = mdims[0] - row0;
+  if (rows <= 0) return;
+  X += (size_t)row0 * TF_K;
+  Y += (size_t)row0 * TF_YS;
+#if TF_PRECOMPUTE_SUMS
+  XS += row0;
+#endif
+#endif
   const int lane = int(lanei), sg = int(sgi);
   const short qid = short(lane) >> 2;
   const short fm = (qid & 4) | ((short(lane) >> 1) & 3);
@@ -175,8 +200,13 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
 #else
   const short fn = ((qid & 2) | (short(lane) & 1)) * 4;
 #endif
+#if TF_ROW_BLOCKS
+  const int M = min(rows, 16);
+  const int tile = tf_tile(int(tg.x));
+#else
   const int M = mdims[0];
   const int tile = tf_tile(int(tgx));
+#endif
   const int n0 = tile * NT;
   const int g_begin = TF_G0 + (sg * TF_GN) / TF_SK, g_end = TF_G0 + ((sg + 1) * TF_GN) / TF_SK;
   constexpr auto desc = matmul2d_descriptor(16, NT, GS, false, true, false, matmul2d_descriptor::mode::multiply);
@@ -186,7 +216,7 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
   threadgroup uint stage_all[TF_SK * NT * (GS / 8)];
   threadgroup uint* stage = stage_all + sg * NT * (GS / 8);
   tensor<threadgroup uint4b_format, dextents<int32_t, 2>, tensor_inline> b((threadgroup uchar*)stage, dextents<int32_t, 2>(GS, NT));
-#elif TF_BITS != 4
+#elif TF_BITS != 4 && TF_BITS != 8
   threadgroup uint stage_all[TF_SK * NT * (GS / 4)];
   threadgroup uint* stage = stage_all + sg * NT * (GS / 4);
   tensor<threadgroup uint8_t, dextents<int32_t, 2>, tensor_inline> b((threadgroup uint8_t*)stage, dextents<int32_t, 2>(GS, NT));

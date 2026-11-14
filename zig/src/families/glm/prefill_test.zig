@@ -102,6 +102,10 @@ fn run(drafts: bool, concurrent: bool) !Box {
     try std.testing.expectEqual(@as(usize, 32), box.tokens[1].items.len);
     try std.testing.expectEqual(@as(usize, 2), fake.begins);
     try std.testing.expectEqual(@as(usize, 2), fake.ends);
+    try std.testing.expectEqualSlices(u32, &.{4}, box.widths[0].items);
+    var prompt_total: usize = 0;
+    for (box.widths[1].items) |width| prompt_total += width;
+    try std.testing.expectEqual(@as(usize, 102400), prompt_total);
     if (concurrent) {
         try std.testing.expect(fake.chunks >= 102400 / fill.decode_rows);
         try std.testing.expect(fake.max_rows <= fill.decode_rows);
@@ -248,13 +252,13 @@ test "glm prefill: an image handoff failure invalidates the old owner before cha
     second.images = &images;
     var io: Images = .{ .image_owner = &first };
     const input = @import("prompt_images.zig");
-    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1));
+    try std.testing.expectError(error.GpuFailed, input.prepare(&io, &second, 1, second.cached));
     try std.testing.expect(io.image_owner == null and !io.inject);
     io.fail = false;
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expect(io.image_owner == &first and io.inject);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
-    try input.prepare(&io, &first, 0);
+    try input.prepare(&io, &first, 0, first.cached);
     try std.testing.expectEqual(@as(usize, 2), io.writes);
 }
 test "glm prefill: a resumed image prompt sends the tower only the images its restored state does not hold" {
@@ -279,7 +283,7 @@ test "glm prefill: a resumed image prompt sends the tower only the images its re
     for ([_]u32{ 0, 3, 5 }, [_]usize{ 2, 1, 1 }) |cached, n| {
         var io: Images = .{};
         s.cached = cached;
-        try input.prepare(&io, &s, 0);
+        try input.prepare(&io, &s, 0, s.cached);
         try std.testing.expectEqual(@as(usize, 1), io.writes);
         try std.testing.expectEqual(n, io.sent.len);
         try std.testing.expectEqual(images[2 - n].at, io.sent[0].at);
@@ -288,7 +292,7 @@ test "glm prefill: a resumed image prompt sends the tower only the images its re
     // kept past every image: no tower run, and another prompt's rows stay its own
     var io: Images = .{ .image_owner = &other };
     s.cached = 7;
-    try input.prepare(&io, &s, 0);
+    try input.prepare(&io, &s, 0, s.cached);
     try std.testing.expectEqual(@as(usize, 0), io.writes);
     try std.testing.expect(io.image_owner == &other);
 }
@@ -514,4 +518,33 @@ test "glm prefill: a family that opts into chunk invariance gets the cap, and GL
     try std.testing.expect(!try fill.step(&f, &s, hint));
     try std.testing.expect(try fill.step(&f, &s, hint)); // ...so the prompt ends on the cold plan's cuts
     try std.testing.expectEqualSlices(u32, &.{ 0, 2048, 4096 }, f.starts.items); // every start on 2048: no BadChunk
+}
+
+test "glm prefill: widths report actual planned cuts and a single pass" {
+    for ([_]bool{ false, true }) |chunked| {
+        var f: Fake = .{};
+        defer f.deinit();
+        const tokens: [23]u32 = @splat(7);
+        var s = try Stream.init(a, .{ .id = "widths", .prompt = &tokens, .max_new = 4, .chunks = if (chunked) &.{ 5, 18 } else &.{} });
+        defer s.deinit(a);
+        while (!try fill.step(&f, &s, 0)) {}
+        const expected: []const u32 = if (chunked) &.{ 5, 13, 5 } else &.{23};
+        try std.testing.expectEqualSlices(u32, expected, s.prefill_widths.items);
+        try std.testing.expectEqualSlices(u32, &tokens, f.target.lanes.get(&s).?.history.items);
+        f.abortPrompt(&s);
+    }
+}
+
+test "glm prefill: widths exclude a restored prefix and failed target chunks" {
+    var f: Fake = .{ .restored_at = 3 };
+    defer f.deinit();
+    const tokens: [23]u32 = @splat(7);
+    var s = try Stream.init(a, .{ .id = "resumed-widths", .prompt = &tokens, .max_new = 4, .chunks = &.{ 5, 18 } });
+    defer s.deinit(a);
+    try std.testing.expect(!try fill.step(&f, &s, 0));
+    try std.testing.expectEqualSlices(u32, &.{2}, s.prefill_widths.items);
+    f.fail_chunk = true;
+    try std.testing.expectError(error.GpuFailed, fill.step(&f, &s, 0));
+    try std.testing.expectEqualSlices(u32, &.{2}, s.prefill_widths.items);
+    try std.testing.expectEqual(@as(usize, 0), f.filling.count());
 }

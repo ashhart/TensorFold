@@ -67,16 +67,16 @@ pub const Rows = struct {
             if (t.h.layer != l) return error.BadEngramShard;
         }
         // TF_DSV41_ENGRAM_URING=0: the reader threads even where io_uring works (a container that allows it, A/B)
-        const uring_off = if (std.c.getenv("TF_DSV41_ENGRAM_URING")) |v| std.mem.eql(u8, std.mem.span(v), "0") else false;
+        const uring_off = !try @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_URING", true);
         r.ring = (if (uring_off) error.PermissionDenied else linux.IoUring.init(256, 0)) catch |e| blk: {
-            if (aioEnv()) {
+            if ((try aioEnv())) {
                 if (Aio.init()) |a| {
                     r.aio = a;
                     std.log.scoped(.dsv41).info("engram: no io_uring ({t}); rows read by native AIO (TF_DSV41_ENGRAM_AIO, {d} in flight), waits {s}", .{ e, Aio.depth, if (a.poll) "polled (TF_DSV41_ENGRAM_POLL)" else "asleep in the kernel" });
                     break :blk null;
                 } else |ae| if (!quiet) std.log.scoped(.dsv41).warn("engram: TF_DSV41_ENGRAM_AIO=1 but io_setup failed ({t}): the reader threads", .{ae});
             }
-            const n = poolThreads();
+            const n = (try poolThreads());
             if (n > 0) {
                 try r.startPool(n);
                 std.log.scoped(.dsv41).info("engram: no io_uring ({t}); rows read by {d} threads (TF_DSV41_ENGRAM_QD)", .{ e, n });

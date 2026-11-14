@@ -12,6 +12,8 @@ pub const Row = struct {
     items: u32 = 0,
     /// The most pairs a routed plan holds per item: more than `pairs_per_item * items` is refused (0: any).
     pairs_per_item: f32 = 0,
+    /// A routed prompt item of at most this many rows takes its kernel's K-parallel passes (0: none does).
+    few_rows: u32 = 0,
     plain: bool = true,
     routed: bool = true,
 };
@@ -21,6 +23,8 @@ pub const Table = struct { gfx: []const u8, rows: []const Row };
 /// The table a .zon document of `gfx` and `entries` describes.
 pub fn build(comptime zon: anytype) Table {
     const rows = comptime blk: {
+        // each row compares every field's name: the default quota stops near 30 rows
+        @setEvalBranchQuota(1000 + 100 * zon.entries.len * @typeInfo(Row).@"struct".field_names.len);
         var out: [zon.entries.len]Row = undefined;
         for (zon.entries, 0..) |e, i| {
             var row: Row = .{ .id = e.id, .cost = e.cost };

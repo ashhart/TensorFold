@@ -146,7 +146,13 @@ const Builder = struct {
         inline for (.{ "trellis", "suh", "svh" }) |part| try b.mark(try std.fmt.bufPrint(&b.buf, "{s}." ++ part, .{prefix}));
         const marker = try b.pack.marker(prefix, &b.buf);
         if (marker) |m| try b.mark(m);
-        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try partition.group(g, split, b.o.rank, b.o.world), .marker = if (marker) |m| try b.dupe(m) else null };
+        return .{ .proj = proj, .prefix = try b.dupe(prefix), .split = split, .full = g, .part = try b.partOf(proj, g, split), .marker = if (marker) |m| try b.dupe(m) else null };
+    }
+
+    /// The rank's part of a group: `wq_b` and `wo_b` follow the output groups, everything else whole blocks.
+    fn partOf(b: *const Builder, proj: names.Proj, g: exl3.Group, split: exl3.Split) !exl3.Part {
+        if (proj == .wq_b or proj == .wo_b) return partition.outputGroup(g, split, b.c.o_groups, b.o.rank, b.o.world);
+        return partition.group(g, split, b.o.rank, b.o.world);
     }
 
     fn native(b: *Builder, name: []const u8, spec: names.NativeSpec) !NativePlan {
@@ -165,8 +171,8 @@ const Builder = struct {
             .whole => info.nbytes,
             .vocab_rows => info.nbytes / info.shape[0] * (try partition.share(@intCast(info.shape[0]), b.o.rank, b.o.world)).len,
             .heads => blk: {
-                if (info.shape[0] % b.o.world != 0) return error.SplitNotEven;
-                break :blk info.nbytes / b.o.world;
+                const s = partition.outputShare(@intCast(info.shape[0]), b.c.o_groups, b.o.rank, b.o.world) catch return error.SplitNotEven;
+                break :blk info.nbytes / info.shape[0] * s.len;
             },
         };
         return .{ .name = try b.dupe(name), .info = info, .slice = spec.slice, .bytes = bytes };
@@ -266,9 +272,11 @@ const Builder = struct {
     }
 };
 
-/// Heads and groups split evenly; expert and vocabulary slices retain whole 128-column blocks.
+/// Heads split by whole output groups; expert and vocabulary slices keep whole 128-column blocks.
 pub fn build(gpa: std.mem.Allocator, c: *const Config, pack: *const Pack, o: Options) !Plan {
-    if (o.world == 0 or o.rank >= o.world or c.heads % o.world != 0 or c.o_groups % o.world != 0) return error.BadWorld;
+    if (o.world == 0 or o.rank >= o.world) return error.BadWorld;
+    if (o.world != 3 and (c.heads % o.world != 0 or c.o_groups % o.world != 0)) return error.BadWorld;
+    _ = partition.outputGroups(c.o_groups, o.rank, o.world) catch return error.BadWorld;
     _ = partition.share(c.vocab, o.rank, o.world) catch return error.BadWorld;
     _ = partition.share(c.expert_width, o.rank, o.world) catch return error.BadWorld;
     var arena = std.heap.ArenaAllocator.init(gpa);

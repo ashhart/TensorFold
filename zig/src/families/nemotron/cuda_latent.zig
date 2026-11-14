@@ -339,8 +339,8 @@ fn routed(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, rows: usize,
     const g = o.grouped();
     try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
     const items = kern.maxItems(pairs, t.routed.experts, 16);
-    try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, -1);
+    try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, pairs, 16, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, pairs, 16, -1);
 }
 
 /// The shared expert's (row, share) pairs into `out` (partials' second region), on `s`'s fixed plan where it has one.
@@ -350,8 +350,8 @@ fn sharedRows(o: kern.Ops, t: Tables, s: Scratch, hidden: u64, rows: usize, own:
     const sp = s.shared_plan orelse s.plan;
     if (s.shared_plan == null) try o.plan(s.sids, rows * own, own, 16, sp);
     const sh_items = kern.maxItems(rows * own, own, 16);
-    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out, sh_items, -1);
+    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, rows * own, 16, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out, sh_items, rows * own, 16, -1);
 }
 
 /// The MoE block's delta into b.delta: the other ranks' shares asked for, ours run, all summed in share order.

@@ -90,6 +90,8 @@ pub const Setup = struct {
     reopen: ?idle_unload.Reopen = null,
     /// Sampling defaults from generation_config.json and the flags, as a JSON object; null: greedy.
     sampling: ?json.Value = null,
+    /// --instruct-sampling's set for sampled chats with thinking off (family_sampling.resolveInstruct); null: none.
+    instruct: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
     started: i96 = 0,
     /// The release, backend and GPU the open /health names.
@@ -102,6 +104,8 @@ pub const Setup = struct {
     recall: ?*api.recall_store.Store = null,
     /// Run by `run` so the engine stops before the server is freed; null: the caller closes it after `run`.
     stop: ?EngineStop = null,
+    /// TENSORFOLD_TOOL_ID_KEY_FILE's key, read by `main` before the model, for the server to take; null: its own.
+    tool_id_key: ?*@import("ids.zig").Key = null,
 };
 
 /// `halt` (optional) ends the rounds at a boundary at the drain's deadline, so `close` never meets a running round.
@@ -122,8 +126,13 @@ const ProfileEnvironment = struct {
     }
 };
 
+pub fn validateEnvironment() !void {
+    _ = try @import("tool_grammar.zig").autoAllEnv();
+}
+
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+    validateEnvironment() catch return 1;
     stop_requested.store(false, .release);
     stop_count.store(0, .release);
     stop_signal.store(0, .release);
@@ -189,7 +198,10 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .keep_warm_s = args.keep_warm,
         .idle_unload_s = args.idle_unload,
         .admission = args.admission,
+        .max_connections = args.connections.max,
+        .peering = args.connections.peering,
         .default_sampling = s.sampling,
+        .instruct_sampling = s.instruct,
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
         .vision_pdf = args.vision_pdf,
@@ -200,18 +212,21 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .prompt_seed = args.prompt_seed,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
+        .phase_metrics = if (env(s, "TENSORFOLD_PHASE_METRICS")) |v| std.mem.eql(u8, v, "1") else false,
         .spark_stats = spark_stats,
         .dashboard = args.dashboard,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
+        .slide_drift_gate = args.slide_drift_gate,
         .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
         .saved_conversations = args.learn_conversations,
         .identity = s.identity,
         .environ = s.environ,
+        .tool_id_key = s.tool_id_key,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch |err| {
         if (err == error.InvalidVisionMarkers)
@@ -229,19 +244,12 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .out_of_memory => log.line("out of memory: idle unload stays off", .{}),
     }
     defer idle_unload.stopServer(srv);
-    if (srv.config.loop_guard and !srv.info.loop_guard) {
+    if (srv.config.loop_guard and !srv.info.capability(.loop_guard)) {
         std.debug.print("tensorfold: {s} is not supported by this native engine\n", .{if (args.loop_guard_stop) "--loop-guard-stop" else "--loop-guard"});
         return 2;
     }
     if (raiseOpenFileLimit()) |r| log.line("open-file limit raised: soft {d} -> {d}", .{ r[0], r[1] });
-    const address = resolve(io, args.host, args.port) orelse {
-        std.debug.print("tensorfold: cannot resolve --host {s}\n", .{args.host});
-        return 1;
-    };
-    const lis = listener_mod.Listener.open(address) catch |e| {
-        std.debug.print("tensorfold: cannot listen on {s}:{d} ({s})\n", .{ args.host, args.port, @errorName(e) });
-        return 1;
-    };
+    const lis = (if (args.unix_socket) |path| openUnix(a, path) else openTcp(io, args)) orelse return 1;
     installSignals(store.enabled());
     const port = lis.port();
     platform.optional_libraries.warnMissing(.grammar, a, io, platform);
@@ -259,13 +267,19 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     const profile_line = @import("profile_line.zig").format(a, args.profile, s.model_type, s.identity.backend, ProfileEnvironment{}) catch
         "profile: stable; registered overrides: unavailable (out of memory)";
     log.line("{s}", .{profile_line});
-    log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{
-        s.served,                                                  args.host,                                                                                   port,   shownSampling(a, s.sampling),
-        @import("draft_line.zig").shown(args.no_drafts, srv.info), if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited", loaded,
-    });
-    const reserved = args.thinking_reserve > 0 and srv.info.answer_limit;
-    if (args.thinking_reserve > 0 and !srv.info.answer_limit) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
-    if (args.thinking and srv.info.reasoning and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
+    const sampling = shownSampling(a, s.sampling);
+    const instruct = shownInstruct(a, s.instruct);
+    const drafts = @import("draft_line.zig").shown(args.no_drafts, srv.info);
+    const context = if (window > 0) std.fmt.bufPrint(&window_text, "{d}", .{window}) catch "?" else "unlimited";
+    // the TCP line keeps its exact form: the benchmark server reads the port from it (benchmark_server_test.zig)
+    if (lis.unix_path) |path| {
+        log.line("serving {s} on Unix socket {s}, /v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, path, sampling, instruct, drafts, context, loaded });
+    } else {
+        log.line("serving {s} at http://{s}:{d}/v1 (sampling: {s}{s}; drafts: {f}; context: {s}; loaded in {d:.1}s)", .{ s.served, args.host, port, sampling, instruct, drafts, context, loaded });
+    }
+    const reserved = args.thinking_reserve > 0 and srv.info.capability(.answer_limit);
+    if (args.thinking_reserve > 0 and !srv.info.capability(.answer_limit)) log.line("--thinking-reserve is not applied: this engine cannot limit the answer apart from the reasoning", .{});
+    if (args.thinking and srv.info.capability(.reasoning) and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens {s}. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{if (reserved) "limits the answer, the reasoning taking up to --thinking-reserve tokens more" else "counts both"});
     if (s.recall) |r| recall_routes.line(r);
     if (srv.idle_manager != null) log.line("idle unload on: the engine closes after {d} s idle and the next request reloads it (a full model load)", .{args.idle_unload});
@@ -277,6 +291,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     // the listener stays open through the drain: new requests get 503 + Retry-After, /health "draining"
     var accept_stop: std.atomic.Value(bool) = .init(false);
     const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
+    @import("startup_receipt.zig").ready(port);
     while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
     drain(srv, io, s.stop, drain_s);
     accept_stop.store(true, .release);
@@ -293,6 +308,29 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     }
     log.line("shutting down: stopped", .{});
     return 0;
+}
+
+fn openTcp(io: std.Io, args: anytype) ?listener_mod.Listener {
+    const address = resolve(io, args.host, args.port) orelse {
+        std.debug.print("tensorfold: cannot resolve --host {s}\n", .{args.host});
+        return null;
+    };
+    return listener_mod.Listener.open(address) catch |e| {
+        std.debug.print("tensorfold: cannot listen on {s}:{d} ({s})\n", .{ args.host, args.port, @errorName(e) });
+        return null;
+    };
+}
+
+fn openUnix(a: std.mem.Allocator, path: []const u8) ?listener_mod.Listener {
+    const owned = a.dupeSentinel(u8, path, 0) catch return null;
+    return listener_mod.Listener.openUnix(owned) catch |e| {
+        switch (e) {
+            error.PathExists => std.debug.print("tensorfold: --unix-socket {s} already exists; if no server is using it, remove it\n", .{path}),
+            error.ParentWritableByOthers => std.debug.print("tensorfold: --unix-socket {s}: other users can write to its directory; choose one only you can write to\n", .{path}),
+            else => std.debug.print("tensorfold: cannot listen on --unix-socket {s} ({s})\n", .{ path, @errorName(e) }),
+        }
+        return null;
+    };
 }
 
 /// Work in progress gets `drain_s` to finish (new work 503s) before the rest is halted; a second signal cuts it short.
@@ -333,6 +371,12 @@ fn resolve(io: std.Io, host: []const u8, port: u16) ?std.Io.net.IpAddress {
     if (std.Io.net.IpAddress.parse(host, port)) |ip| return ip else |_| {}
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return .{ .ip4 = .loopback(port) };
     return std.Io.net.IpAddress.resolve(io, host, port) catch null;
+}
+
+/// The serving line's thinking-off defaults when they differ from the sampling defaults: ``; thinking off: ...``.
+fn shownInstruct(a: Allocator, instruct: ?json.Value) []const u8 {
+    const v = instruct orelse return "";
+    return std.fmt.allocPrint(a, "; thinking off: {s}", .{shownSampling(a, v)}) catch "";
 }
 
 /// The serving line's sampling: greedy, or each default as ``name value``.

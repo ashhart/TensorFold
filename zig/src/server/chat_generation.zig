@@ -22,12 +22,22 @@ const nowNs = clock.nowNs;
 const seconds = clock.seconds;
 const deltaOf = reply_text.deltaOf;
 
+/// One chunk's logprobs: ``content`` always, as OpenAI clients read it, and ``key``'s entries.
+fn rowsOf(a: Allocator, key: []const u8, entries: Value) Allocator.Error!Value {
+    const o = try json.newObject(a);
+    try o.put(a, "content", .{ .array = &.{} });
+    try o.put(a, key, entries);
+    return .{ .object = o };
+}
+
 pub const Generation = struct {
     srv: *Server,
     a: Allocator,
     box: *Mailbox,
     id: api.Id,
     reply_id: []const u8, // the id the client gets, which the done line prints
+    asked: ?*const std.atomic.Value(bool) = null, // POST /v1/requests/{id}/cancel's ask (cancel_ids.zig)
+    cancel_sent: bool = false, // the ask went to the engine once; the loop then reads until the engine finishes
     seed: ?u64 = null,
     sink: ?Sink,
     thinking: bool,
@@ -41,6 +51,7 @@ pub const Generation = struct {
     calls: ?tool_stream.Streamer = null,
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
+    kimi: ?@import("kimi_reply.zig").Stream = null,
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
     streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
     streamed_reasoning: reply_text.Shown = .{},
@@ -52,7 +63,7 @@ pub const Generation = struct {
     engine_done: bool = false,
     consumed: usize = 0,
     chunk_index: usize = 0,
-    lp: ?@import("logprobs.zig").Stream = null, // the request asked for logprobs: its rows, copied with each round
+    lp: ?@import("logprob_parts.zig").Live = null, // the request asked for logprobs: its rows, copied with each round
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
 
     fn eos(g: *const Generation, t: u32) bool {
@@ -104,35 +115,54 @@ pub const Generation = struct {
             }
             try fresh.append(g.a, t);
         }
+        const live = g.liveRows();
+        if (live) |l| try l.add(g.srv, g.a, fresh.items);
         const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
-        const text = try @import("tool_minimax.zig").dsml(g.a, g.stops.visible(all, true), g.tools); // MiniMax-M3's calls as DSML
+        const raw_visible = g.stops.visible(all, true);
+        const text = try @import("tool_minimax.zig").dsml(g.a, raw_visible, g.tools); // MiniMax-M3's calls as DSML
         var answer = text;
+        var thought: []const u8 = "";
         if (g.thinking) {
-            const close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
+            const original_close = try g.visible.closeOf(g.a, reply_text.decodeText, g.srv.text, g.srv.close_id);
+            const close = try @import("tool_minimax.zig").closeAfterRewrite(g.a, raw_visible, g.tools, original_close);
             const split = try reply_text.splitThinkingAt(g.a, text, false, g.srv.markers, close);
-            const piece = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
-            if (piece.len > 0) {
-                try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), piece);
-                try g.emit(sink, try deltaOf(g.a, "reasoning_content", piece));
-            }
+            thought = g.streamed_reasoning.after(reply_text.pyStrip(split.reasoning), true); // the whole reply strips it
+            if (thought.len > 0) try g.streamed_reasoning.set(g.a, reply_text.pyStrip(split.reasoning), thought);
             answer = split.answer;
         }
         answer = try tool_lfm2.dsml(g.a, answer, g.tools, false); // the answer only, so a call the reasoning mentions is not made
         const shown = if (g.calls != null) try reply_text.hideInto(g.a, &g.hidden, answer, false, true, reply_text.openersOf(g.srv.markers)) else answer;
-        const vis = reply_text.heldBack(if (g.srv.info.reasoning) reply_text.streamingVisible(shown) else shown, g.calls != null);
+        const vis = reply_text.heldBack(if (g.srv.info.capability(.reasoning)) reply_text.streamingVisible(shown) else shown, g.calls != null);
         const copied = @intFromPtr(vis.ptr) >= @intFromPtr(g.hidden.items.ptr) and @intFromPtr(vis.ptr) <= @intFromPtr(g.hidden.items.ptr) + g.hidden.items.len;
         const delta = g.streamed.after(vis, !copied);
-        if (delta.len > 0) {
-            try g.streamed.set(g.a, vis, delta);
-            try g.emit(sink, if (g.lp) |*l| (try l.delta(g.srv, g.a, g.thinking, g.ignore_eos, g.collected.items, delta, g.streamed.text.items.len, false)).? else .{ .string = delta });
+        if (delta.len > 0) try g.streamed.set(g.a, vis, delta);
+        // each chunk carries the entries its text settles: reasoning ones before the answer's first text
+        const rows = if (live) |l| try l.settle(g.srv, g.a, g.collected.items[0..l.spelled.ends.items.len], g.thinking, g.stops, g.streamed.text.items, g.streamed_reasoning.text.items) else null;
+        const thought_rows = if (rows) |r| r.get("reasoning_content") else null;
+        if (thought.len > 0 or thought_rows != null) {
+            const d: Value = if (thought.len > 0) try deltaOf(g.a, "reasoning_content", thought) else .{ .object = try json.newObject(g.a) };
+            if (thought_rows) |t| try d.object.put(g.a, "logprobs", try rowsOf(g.a, "reasoning_content", t));
+            try g.emit(sink, d);
+        }
+        const prose_rows: []Value = if (rows) |r| r.get("content").?.array else &.{};
+        if (delta.len > 0 or prose_rows.len > 0) {
+            const d: Value = if (prose_rows.len > 0) try deltaOf(g.a, "content", delta) else .{ .string = delta };
+            if (prose_rows.len > 0) try d.object.put(g.a, "logprobs", try rowsOf(g.a, "content", .{ .array = prose_rows }));
+            try g.emit(sink, d);
         }
         if (g.calls) |*c| {
             var out: std.ArrayList(Value) = .empty;
             try c.feed(answer, &out); // never the reasoning: a call it mentions is not made
             for (out.items) |d| try g.emit(sink, d);
         }
+    }
+
+    /// Logprob state when chunks carry their own entries: without tools, no call can claim streamed text.
+    fn liveRows(g: *Generation) ?*@import("logprob_parts.zig").Live {
+        if (g.tools.len > 0) return null;
+        return if (g.lp) |*l| l else null;
     }
 
     pub fn emit(g: *Generation, sink: Sink, delta: Value) Failure!void {
@@ -197,6 +227,11 @@ pub const Generation = struct {
                 g.cancel();
                 return error.Cancelled;
             }
+            // the cancel route: the engine's cancel, as a disconnect sends it; the reply then ends "cancelled"
+            if (g.asked) |x| if (!g.cancel_sent and g.reason == null and x.load(.acquire)) {
+                g.srv.engine.cancel(g.id);
+                g.cancel_sent = true;
+            };
             if (chunk == null and @hasDecl(Gone, "beat")) {
                 // queueing and a long prefill send nothing: a client that times out a silent stream would leave
                 const now = nowNs(g.srv.io);
@@ -229,7 +264,8 @@ pub const Generation = struct {
         const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
-        const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, g.stops.visible(raw, false), g.tools);
+        const raw_visible = g.stops.visible(raw, false);
+        const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, raw_visible, g.tools);
         // closed before the think split, so a call ending an unclosed think block is the answer
         const close = if (native != null) "" else try g.closeCall(visible);
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
@@ -239,11 +275,13 @@ pub const Generation = struct {
             const r = reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
         } else if (g.thinking) {
-            const split = try reply_text.splitThinkingTokens(a, reply_text.decodeText, g.srv.text, text, true, g.srv.markers, content_tokens, g.srv.close_id);
+            const original_close = try reply_text.closeWhere(a, reply_text.decodeText, g.srv.text, content_tokens, g.srv.close_id);
+            const close_at = try @import("tool_minimax.zig").closeAfterRewrite(a, raw_visible, g.tools, original_close);
+            const split = try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;
-        } else if (g.srv.info.reasoning) {
+        } else if (g.srv.info.capability(.reasoning)) {
             const h = reply_text.parseHarmony(text);
             content = h.content;
             reasoning = h.reasoning;
@@ -256,7 +294,7 @@ pub const Generation = struct {
             const shown = if (g.calls != null) try tool_stream.endProse(a, content, if (g.thinking) content else text, g.tools, reason, g.single) else content;
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
-            if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
+            if (rest.len > 0) try g.emit(sink, .{ .string = rest });
             if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
@@ -269,7 +307,8 @@ pub const Generation = struct {
         const decode_tokens = g.collected.items.len -| 1;
         const runtime = try json.newObject(a);
         try runtime.put(a, "enable_thinking", .{ .bool = thinking });
-        try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = "none" } else if (effort) |e| .{ .string = e } else .null);
+        // the effort the template heard: with thinking off, only one the request named
+        try runtime.put(a, "reasoning_effort", if (!thinking) .{ .string = cx.named_effort orelse "none" } else if (effort) |e| .{ .string = e } else .null);
         try runtime.put(a, "engine", .{ .string = g.srv.info.name });
         try runtime.put(a, "tokens_per_second", .{ .float = if (decode_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_s else 0 });
         try runtime.put(a, "seconds", .{ .float = @max(0, decode_s) }); // the reply's decode seconds, as tokens_per_second divides them
@@ -331,7 +370,7 @@ pub const Generation = struct {
             .speculative = .{ .object = spec },
             .thinking = thinking,
             .effort = effort,
-            .logprobs = if (g.lp) |l| try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items) else null,
+            .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent } else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .loop_stop = stopped,
         };

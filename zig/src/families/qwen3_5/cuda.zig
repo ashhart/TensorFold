@@ -5,6 +5,7 @@ pub const round = @import("cuda_round.zig");
 pub const prompt_int8 = @import("cuda_prompt_int8.zig");
 pub const modelopt = @import("cuda_modelopt.zig");
 pub const engine = @import("cuda_engine.zig");
+pub const prefill = @import("cuda_prefill.zig");
 pub const cache = @import("cuda_cache.zig");
 pub const signatures = @import("cuda_signatures.zig");
 pub const native = @import("cuda_native.zig");
@@ -14,10 +15,16 @@ pub const mtp_check = @import("cuda_mtp_check.zig");
 pub const draft = @import("cuda_draft.zig");
 pub const vision = @import("cuda_vision.zig");
 pub const reuse = @import("cuda_reuse.zig");
+pub const joint = @import("cuda_joint_readout.zig");
+/// The joint schema head on the device (cuda/joint_schema), for the runners.
+pub const joint_schema = @import("cuda_joint_schema");
+pub const stage = @import("cuda_stage.zig");
 
 test {
+    _ = @import("cuda_projection_many.zig");
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
+    _ = @import("cuda_prompt_tail.zig");
     _ = @import("cuda_forward.zig");
     _ = engine;
     _ = @import("cuda_modelopt.zig");
@@ -46,6 +53,7 @@ test {
     _ = @import("cuda_prefix.zig");
     _ = @import("cuda_prefix_fault_test.zig");
     _ = @import("cuda_pend_test.zig");
+    _ = @import("cuda_reuse_pages_test.zig");
 }
 
 pub const slide = @import("cuda_slide.zig");
@@ -57,6 +65,10 @@ test {
 
 test {
     _ = @import("cuda_wide.zig");
+    _ = @import("cuda_weights.zig");
+    _ = @import("cuda_mt2.zig");
+    _ = @import("cuda_stage_forward.zig");
+    _ = @import("cuda_shapes.zig");
 }
 
 pub const train_ops = @import("cuda_train_ops.zig");
@@ -70,4 +82,12 @@ test {
 test {
     _ = train;
     _ = @import("cuda_read_cost_test.zig");
+}
+
+test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
+    try @import("cuda_admit_test.zig").refusals();
+}
+
+test {
+    _ = @import("cuda_request_starts_test.zig");
 }

@@ -1,0 +1,150 @@
+{
+ "label": "main",
+ "md5": "651968f9570a676045f2b797aadaec1e",
+ "cold": {
+  "2k": [
+   {
+    "prompt": 2045,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "1b28b05b0809",
+    "accepted": 49,
+    "drafted": 170,
+    "ttft": 2.337,
+    "decode": 1.9,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (harbor, copper, river, orbit, garden, candle, signal, meadow, lamp, ledger, winter, stone) each followed by a number.\n    *   Task: Summarize the document.\n\n    *   The document consists of repeated"
+    }
+   },
+   {
+    "prompt": 2068,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "aebe26a7c718",
+    "accepted": 48,
+    "drafted": 97,
+    "ttft": 2.542,
+    "decode": 1.721,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words combined with numbers (e.g., `ledger743`, `harbor90`, `meadow231`).\n    *   Task: \"Summarize\".\n\n    *   The input is a sequence of \"word-number\""
+    }
+   },
+   {
+    "prompt": 2041,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "6befc70d6fa8",
+    "accepted": 44,
+    "drafted": 181,
+    "ttft": 2.361,
+    "decode": 2.395,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 3520\".\nThe document is a long list of words (lamp, orbit, river, copper, harbor, signal, stone, garden, meadow, ledger, candle, winter) each followed by a number.\n\n    *   lamp:"
+    }
+   }
+  ],
+  "16k": [
+   {
+    "prompt": 15965,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "fd12e8fdcb33",
+    "accepted": 42,
+    "drafted": 192,
+    "ttft": 20.629,
+    "decode": 3.143,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of the provided text, which is a long list of words (ledger, copper, garden, meadow, harbor, winter, river, orbit, lamp, candle, stone, signal) followed by numbers.\n\n    *   The text consists of repeated words: `ledger`, `"
+    }
+   },
+   {
+    "prompt": 15974,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "27806c28c8a5",
+    "accepted": 45,
+    "drafted": 173,
+    "ttft": 19.811,
+    "decode": 2.73,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of the provided text, which is a long list of words (mostly nouns like \"harbor\", \"stone\", \"river\", \"copper\", \"candle\", \"garden\", \"meadow\", \"ledger\", \"signal\", \"lamp\", \"orbit\", \"winter\") followed by"
+    }
+   },
+   {
+    "prompt": 15944,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "09ade4cf42aa",
+    "accepted": 48,
+    "drafted": 150,
+    "ttft": 19.821,
+    "decode": 2.401,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (mostly nouns like \"harbor\", \"meadow\", \"stone\", \"winter\", \"signal\", \"lamp\", \"copper\", \"orbit\", \"river\", \"ledger\", \"garden\", \"candle\") followed by numbers.\n    *   Task:"
+    }
+   }
+  ],
+  "32k": [
+   {
+    "prompt": 31902,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "684614dd561e",
+    "accepted": 48,
+    "drafted": 130,
+    "ttft": 46.209,
+    "decode": 2.755,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "*   Input: A long list of words (mostly nouns like \"winter\", \"stone\", \"orbit\", \"garden\", \"meadow\", \"copper\", \"lamp\", \"harbor\", \"ledger\", \"signal\", \"river\", \"candle\") followed by numbers.\n    *   Task:"
+    }
+   },
+   {
+    "prompt": 31905,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "dd928c24823b",
+    "accepted": 40,
+    "drafted": 166,
+    "ttft": 46.214,
+    "decode": 3.983,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 10200\".\nLooking at the document, it's a long list of words (signal, garden, winter, lamp, stone, river, harbor, candle, orbit, copper, meadow, ledger) followed by numbers.\n\n    *"
+    }
+   },
+   {
+    "prompt": 31826,
+    "cached": 0,
+    "tokens": 64,
+    "sha": "ba413c62f83d",
+    "accepted": 41,
+    "drafted": 120,
+    "ttft": 45.996,
+    "decode": 3.5,
+    "msg": {
+     "role": "assistant",
+     "content": "",
+     "reasoning_content": "The user wants a summary of \"Document 11200\".\nLooking at the document, it's a long list of words (garden, harbor, signal, winter, candle, orbit, copper, meadow, lamp, ledger, stone, river) followed by numbers.\n\n    *"
+    }
+   }
+  ]
+ },
+ "serving": [
+  "[tensorfold] serving m at http://127.0.0.1:18409/v1 (sampling: temperature 1.0, top_k 64, top_p 0.95; drafts: DFlash (z-lab/gemma-4-31B-it-DFlash) + copies; context: 40960; loaded in 19.6s)"
+ ]
+}

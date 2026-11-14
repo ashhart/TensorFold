@@ -295,6 +295,7 @@ test "a rocm receipt on linux saves but never publishes; rocm on macos fails bot
 }
 
 test "a receipt path is checked before a run: a directory name is refused, its directory is made, a file fits, nothing is left" {
+    try @import("test_permissions.zig").skipIfRoot();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -323,7 +324,6 @@ test "a receipt path is checked before a run: a directory name is refused, its d
         try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "Could not save the benchmark receipt to {s}", .{named}), problem);
     }
     try std.testing.expectError(error.FileNotFound, cwd.statFile(io, try std.fs.path.join(a, &.{ root, "unmade" }), .{}));
-    if (std.c.geteuid() == 0) return;
     const locked = try std.fs.path.join(a, &.{ root, "locked" });
     try cwd.createDirPath(io, locked);
     try cwd.setFilePermissions(io, locked, .fromMode(0o500), .{});
@@ -387,4 +387,17 @@ test "the receipt names the cache format a managed run used and leaves an attach
     try set(a, managed, &.{ "settings", "kv_cache" }, "\"fp4\"");
     try std.testing.expect(!check.receipt(managed, .save, now_ms, &why));
     try std.testing.expect(std.mem.startsWith(u8, why, "settings.kv_cache"));
+}
+
+test "thinking benchmark: server-default samples save locally and cannot publish" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const value = try valid(a);
+    try value.get("settings").?.object.put(a, "thinking_mode", .{ .string = "server_default" });
+    var why: []const u8 = "";
+    try std.testing.expect(check.receipt(value, .save, now_ms, &why));
+    try std.testing.expect(!check.receipt(value, .publish, now_ms, &why));
+    try std.testing.expectEqualStrings(check.thinking_local, why);
+    for (try suite.receiptCells(a, value)) |cell| try std.testing.expect(!cell.protocol_complete);
 }

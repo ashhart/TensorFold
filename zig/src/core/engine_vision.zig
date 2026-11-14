@@ -8,10 +8,17 @@ pub const PreparedImage = struct {
     gh: u32,
     gw: u32,
     tokens: u32,
+    /// Visible pixel height and width before padding, for towers with content-normalized positions.
+    content_size: ?[2]u32 = null,
     hash: u64,
     /// The image as tower inputs in order, each image tokens between `before` and `after`; empty: `pixels` alone.
     pieces: []const Piece = &.{},
+    /// Pixel size of the tower input the image was resized to; set by every family with an OCR reader.
+    frame: ?Size = null,
 };
+
+/// An image's pixel size.
+pub const Size = struct { width: u32, height: u32 };
 
 /// One tower input of an image, and the tokens the placeholder expands to around its rows.
 pub const Piece = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, before: []const u32 = &.{}, after: []const u32 = &.{} };

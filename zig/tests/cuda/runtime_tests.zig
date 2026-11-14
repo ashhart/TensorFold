@@ -283,7 +283,7 @@ fn expectAxpy(gpu: Gpu, y: cuda.DeviceBuffer, base: f32, a: f32, n: u32) !void {
     }
 }
 
-/// cuLaunchKernelEx: cluster dimensions (plain and spread), a cooperative grid, and a PDL chain on a stream and in a graph.
+/// cuLaunchKernelEx: cluster dims (plain, spread), a cooperative grid, and a PDL chain on a stream and in a graph.
 pub fn launchEx(gpu: Gpu) !void {
     const d = gpu.d;
     var probe = try cuda.Module.load(d, cuda.kernels.probe);

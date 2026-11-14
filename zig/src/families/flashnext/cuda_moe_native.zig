@@ -5,6 +5,7 @@ const mixed = @import("cuda_mixed_experts.zig");
 const nvfp4_tile = @import("cuda_nvfp4_tile.zig");
 const zs = @import("cuda_zero_slice.zig");
 const shared = @import("cuda_batch_side.zig");
+const exchange = @import("cuda_moe_exchange.zig");
 const Kernels = @import("cuda_batch_kernels.zig").Kernels;
 
 const dims = wt.dims;
@@ -19,11 +20,12 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     const e = owned.count + 1;
     const skip: i32 = @intCast(owned.count);
     const picks = if (native.world == 1) s.picks else try ownPicks(self, s.picks, s.picks_ep, pairs, owned.first, owned.count);
-    if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
+    const y_bytes = exchange.clearedRows(native.world, n) * slots * dims * 4;
+    if (zs.clearsY(native.world, native.rank)) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, y_bytes, self.stream.handle), "cuMemsetD8Async");
     const side = try shared.fork(self, native, n);
     switch (owned.format) {
         .nvfp4 => {
-            const pt = nvfp4_tile.size(n);
+            const pt = nvfp4_tile.size(self.k, n);
             try self.k.router.route(self.stream, picks, pairs, e, pt, plan);
             const items = cuda.grouped.maxItems(pairs, e, pt);
             try nvfp4_tile.run(self.k, pt, self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, skip);
@@ -35,6 +37,7 @@ pub fn run(self: anytype, native: *const mixed.Owned, n: usize, pairs: usize, pl
     if (side != null) try shared.join(self, side, native, n) else try @import("cuda_shared_split.zig").run(self, native, n);
     if (native.world != 1) {
         const collective = self.m.collective orelse return error.TensorParallelUnavailable;
+        if (exchange.rowSplit(native.world, n)) return exchange.run(self, collective, n);
         try collective.sum(self.stream, s.y, pairs * dims);
     }
 }
@@ -53,7 +56,7 @@ fn ownPicks(self: anytype, picks: u64, out: u64, pairs: usize, first: usize, cou
 pub fn fp8(k: *const Kernels, stream: cuda.Stream, picks: u64, x: u64, layer: cuda.experts.Layer, plan: cuda.grouped.Plan, pairs: usize, n: usize, out: u64, act: u64) !void {
     if (layer.format != .fp8g) return error.UnsupportedQuantization;
     const e = experts_n + 1;
-    const prompt = nvfp4_tile.size(n) != 16;
+    const prompt = nvfp4_tile.size(k, n) != 16;
     const tile: usize = if (prompt) cuda.experts.promptTile(.fp8g) else 16;
     try k.router.route(stream, picks, pairs, e, tile, plan);
     const items = cuda.grouped.maxItems(pairs, e, tile);

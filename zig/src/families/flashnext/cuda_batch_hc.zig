@@ -13,14 +13,14 @@ const pss_n = (dims / 256) * streams;
 
 /// On by default (the same bits either way); TF_FLASHNEXT_HC_FUSE=0: the writeback and the normalize as two launches.
 pub fn on() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_HC_FUSE") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_HC_FUSE", true) catch true;
 }
 
 /// Whether hc_w's read-out takes its normed rows from the writeback: native, nothing kept, 64 rows or more, our glue.
 pub fn fuses(pass: anytype, hc_w: wt.HcW, n: usize, keep: parts.HcKeep) bool {
     return n >= 64 and hc_w.down.native != null and std.meta.eql(keep, parts.HcKeep{}) and dims == 2560 and
-        streams == 4 and pass.tri.writebackOwned() and on();
+        streams == 4 and pass.tri.writebackOwned() and pass.k.forms.hc_fuse;
 }
 
 /// The pass's pending writeback with hc_w's normalize in the same launch: the normed rows readoutNative reads.

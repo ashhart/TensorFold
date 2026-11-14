@@ -37,7 +37,7 @@ pub fn drawOf(s: *const @import("lanes").Stream, position: u64) Draw {
 /// Where a segment's Mamba state goes: after all its rows (prompts, steps), its replayed rows (windows), or each row.
 pub const Store = enum { full, lag, all };
 
-/// One stream's rows in a forward: its cache (its replayed rows run first), the state slot it stores (-1: none), its draw.
+/// One stream's rows in a forward: its cache (replayed rows run first), the state slot it stores (-1: none), its draw.
 pub const Seg = struct {
     rows: usize,
     cache: *st.Cache,
@@ -439,8 +439,8 @@ fn splits(comptime key: []const u8) bool {
 
 var split_mode: enum(u8) { unread, on, off } = .unread;
 
-/// TF_COOP_SPLIT=0 keeps one threadgroup a column tile, as the Python engine dispatches.
-fn splitOn() bool {
+/// TF_COOP_SPLIT=0 keeps one threadgroup a column tile, as the Python engine dispatches (read once a process).
+pub fn splitOn() bool {
     if (split_mode == .unread) {
         const v = platform.c.getenv("TF_COOP_SPLIT");
         split_mode = if (v != null and v.?[0] == '0') .off else .on;

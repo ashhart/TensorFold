@@ -1,5 +1,6 @@
 //! One bounded checkpoint-config reader for info, serve and benchmark metadata.
 const std = @import("std");
+pub const index = @import("checkpoint_names.zig");
 pub const limit: usize = 64 << 20;
 
 /// Missing is distinct from a failed read; diagnostics never replace an I/O error with a missing checkpoint.

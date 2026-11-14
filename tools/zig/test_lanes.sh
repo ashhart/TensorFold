@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The lane core's tests, plus record_lanes.py's vectors and traces where TF_LANES_FIXTURES names them; ZIG picks the compiler.
+# Lane core tests, plus record_lanes.py's vectors and traces where TF_LANES_FIXTURES names them; ZIG picks the compiler.
 set -euo pipefail
 zig="${ZIG:-zig}"
 root="$(cd "$(dirname "$0")/../.." && pwd)"

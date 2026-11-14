@@ -1,0 +1,14 @@
+{%- if messages|length != 1 or messages[0]['role'] != 'user' -%}
+{{- raise_exception('Nemotron Parse requires one user message with one image') -}}
+{%- endif -%}
+{%- set content = messages[0]['content'] -%}
+{%- if content is string -%}
+{{- raise_exception('Nemotron Parse requires image content parts') -}}
+{%- endif -%}
+{%- for part in content -%}
+{%- if part['type'] == 'image_url' -%}{{ '<pad>' }}{%- endif -%}
+{%- endfor -%}
+{{- '</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>' -}}
+{%- for part in content -%}
+{%- if part['type'] == 'text' -%}{{ part['text'] }}{%- endif -%}
+{%- endfor -%}

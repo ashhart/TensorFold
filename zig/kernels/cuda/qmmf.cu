@@ -45,7 +45,8 @@ struct Tile {
     static constexpr int S = MODE == FP4 || MODE == FP8G ? BN * 4 : MODE == MXFP8 ? BN * 2 : 0;
     static constexpr int STAGE = (X + W + S + 127) / 128 * 128;
     static constexpr int PARTIALS = MT * NT * 4 * THREADS * 4;
-    static constexpr int SMEM = STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS;
+    static constexpr int BARRIERS = MODE == BF16 && BN > 64 ? 128 : 0;
+    static constexpr int SMEM = (STAGES * STAGE > PARTIALS ? STAGES * STAGE : PARTIALS) + BARRIERS;
 };
 
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
@@ -53,15 +54,17 @@ __device__ __forceinline__ void qmmf_body(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group, int ldy) {
+#define TF_QMMF_STRIDED
 #include "qmmf_body.cuh"
+#undef TF_QMMF_STRIDED
 }
+
 
 template <int MODE, int BM, int BN, int WM, int WN, int STAGES, bool F32, bool CLUSTER, bool FUSE = false>
 __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group) {
-    const int ldy = N;
 #include "qmmf_body.cuh"
 }
 
@@ -195,7 +198,91 @@ template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, true, false>(c
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+// Prompt tiles retain the same m16n8k16 chains and fused slice boundaries as the 64x64 instances.
+#define BF16_PROMPT(F32, FUSE) \
+    template __global__ void qmmf_kernel<BF16, 128, 128, 2, 4, 3, F32, false, FUSE>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+BF16_PROMPT(false, false)
+BF16_PROMPT(false, true)
+BF16_PROMPT(true, false)
+BF16_PROMPT(true, true)
+#undef BF16_PROMPT
+
+// Unsplit K32 needs no inter-slice partial buffer or bulk-copy barrier storage.
+struct PromptK32Tile {
+    static constexpr int THREADS = 256, MT = 4, NT = 4;
+    static constexpr int ROW = 64, CHUNKS = ROW / 16;
+    static constexpr int X = 128 * ROW, W = 128 * 32 * 2, S = 0;
+    static constexpr int STAGE = (X + W + 127) / 128 * 128;
+    static constexpr int BARRIERS = 0, SMEM = 3 * STAGE;
+};
+
+// Unsplit K32 staging keeps the parent's packed weights, K16 MMA chain and final output rounding.
+static_assert(PromptK32Tile::SMEM == 49152, "K32 128x128 shared bytes");
+
+template <bool F32>
+__global__ void __launch_bounds__(256, 2) qmmf_prompt_k32_kernel(
+        const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
+        float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
+        int group) {
+    constexpr int MODE = BF16, BM = 128, BN = 128, WM = 2, WN = 4, STAGES = 3, BK = 32;
+    constexpr bool CLUSTER = false, FUSE = false;
+#define TF_QMMF_K32
+#include "qmmf_body.cuh"
+#undef TF_QMMF_K32
+}
+#define BF16_K32(F32) \
+    template __global__ void qmmf_prompt_k32_kernel<F32>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+BF16_K32(false)
+BF16_K32(true)
+#undef BF16_K32
+
 template __global__ void reduce_kernel<true>(const float* __restrict__, void* __restrict__, long long, int, float);
 template __global__ void reduce_kernel<false>(const float* __restrict__, void* __restrict__, long long, int, float);
 
 }
+
+#if defined(TF_NATIVE_FP_DECODE)
+// tf-cuda-test native-fp: e2m1_pairs == fp4pair on all words, codes x e4m3 scales; out: misses, first, checks
+extern "C" __global__ void tf_qmmf_native_fp4_check(unsigned long long* __restrict__ out) {
+#if TF_FP_NATIVE
+    const unsigned long long n = 1ull << 33, step = 1ull * gridDim.x * blockDim.x;
+    unsigned long long bad = 0, first = ~0ull, seen = 0;
+    for (unsigned long long i = 1ull * blockIdx.x * blockDim.x + threadIdx.x; i < n; i += step) {
+        const uint32_t w = static_cast<uint32_t>(i >> 1);
+        const int q = static_cast<int>(i & 1);
+        uint32_t b0, b1;
+        tf_common::e2m1_pairs(w, q, b0, b1);
+        ++seen;
+        if (b0 != tf_common::fp4pair(w, 8 * q) || b1 != tf_common::fp4pair(w, 8 * q + 4)) {
+            ++bad;
+            first = i < first ? i : first;
+        }
+    }
+    const unsigned long long t = 1ull * blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < 16 * 256) {
+        const uint32_t c = static_cast<uint32_t>(t >> 8), s = static_cast<uint32_t>(t & 255);
+        const uint32_t hw = tf_common::e2m1x2(c | (c << 4)), sw = tf_common::fp4pair(c | (c << 16), 0);
+        const float sf = tf_common::e4m3f(s);
+        const uint32_t sp = tf_common::fp8pair_unit(s | (s << 8), 0x7B807B80u);
+        const float h = __uint_as_float(hw << 16) * sf, g = __uint_as_float(sw << 16) * sf;
+        ++seen;
+        // fp32 products compare as bits (NaN scale included); so do the bf16x2 products by the e4m3 scale pair
+        if (__float_as_uint(h) != __float_as_uint(g) || tf_common::mul2(hw, sp) != tf_common::mul2(sw, sp)) {
+            ++bad;
+            first = ((1ull << 40) + t) < first ? (1ull << 40) + t : first;
+        }
+    }
+    if (bad) {
+        atomicAdd(&out[0], bad);
+        atomicMin(&out[1], first);
+    }
+    atomicAdd(&out[2], seen);
+#else
+    if (blockIdx.x == 0 && threadIdx.x < 3) out[threadIdx.x] = ~0ull;
+#endif
+}
+#endif

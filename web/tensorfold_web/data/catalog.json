@@ -1,0 +1,199 @@
+{
+  "updated": "2026-11-07",
+  "note": "Native checkpoints from README Pick a model. Discover refreshes Hugging Face sizes on request. Memory and context verdicts are estimates until native admission; mixed-width Qwen checkpoints require native_from. Device qualification still depends on the installed release, checkpoint and backend.",
+  "models": [
+    {
+      "id": "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit",
+      "family": "nemotron_h",
+      "name": "Nemotron 3.5 Lightning 30B-A3B",
+      "vendor": "NVIDIA",
+      "license": "Open Model License",
+      "description": "A fast coding model with its own draft head.",
+      "tags": [
+        "code",
+        "tools",
+        "fast"
+      ],
+      "backends": [
+        "mlx",
+        "cuda"
+      ],
+      "drafter": null,
+      "drafter_optional": null,
+      "max_context": 262144,
+      "bytes_per_token": 13500,
+      "size_bytes": null,
+      "speed_hint": "fastest",
+      "workspace_bytes": 2684354560,
+      "native": true,
+      "native_overhead_bytes": 4509715660,
+      "format": "mlx-q4g64"
+    },
+    {
+      "id": "TensorFold/Qwen3.8-27B-MLX-4bit",
+      "family": "qwen3_5",
+      "name": "Qwen3.8-27B",
+      "vendor": "Alibaba",
+      "license": "Apache-2.0",
+      "description": "A 27B vision model with a separate drafter, sized for a 32 GB Mac.",
+      "tags": [
+        "chat",
+        "code",
+        "vision",
+        "tools"
+      ],
+      "backends": [
+        "mlx",
+        "cuda"
+      ],
+      "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+      "drafter_size_bytes": 3849125888,
+      "drafter_optional": null,
+      "max_context": 262144,
+      "bytes_per_token": 64000,
+      "size_bytes": null,
+      "speed_hint": "medium",
+      "workspace_bytes": 6442450944,
+      "drafter_fraction": 0.3,
+      "format": "mlx-q4g64",
+      "native": true
+    },
+    {
+      "id": "TensorFold/Qwen3.8-27B-oQ4",
+      "family": "qwen3_5",
+      "name": "Qwen3.8-27B",
+      "vendor": "Alibaba",
+      "license": "Apache-2.0",
+      "description": "Mixed 4- to 6-bit Qwen3.8-27B with a DFlash2 drafter, native on Metal from TensorFold 1.0.10.",
+      "tags": [
+        "chat",
+        "code",
+        "tools"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+      "drafter_size_bytes": 3849125888,
+      "drafter_optional": null,
+      "max_context": 262144,
+      "bytes_per_token": 64000,
+      "size_bytes": null,
+      "speed_hint": "medium",
+      "workspace_bytes": 6442450944,
+      "drafter_fraction": 0.3,
+      "format": null,
+      "native_from": "1.0.10",
+      "native": true
+    },
+    {
+      "id": "TensorFold/Qwen3.8-27B-oQ2",
+      "family": "qwen3_5",
+      "name": "Qwen3.8-27B",
+      "vendor": "Alibaba",
+      "license": "Apache-2.0",
+      "description": "An 11 GB mixed 2- to 8-bit Qwen3.8-27B with a DFlash2 drafter, trading quality for context space.",
+      "tags": [
+        "chat",
+        "code",
+        "tools"
+      ],
+      "backends": [
+        "mlx"
+      ],
+      "drafter": "z-lab/Qwen3.8-27B-DFlash2",
+      "drafter_size_bytes": 3849125888,
+      "drafter_optional": null,
+      "max_context": 262144,
+      "bytes_per_token": 64000,
+      "size_bytes": null,
+      "speed_hint": "fast",
+      "workspace_bytes": 6442450944,
+      "drafter_fraction": 0.3,
+      "format": null,
+      "native_from": "1.0.10",
+      "native": true
+    },
+    {
+      "id": "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP",
+      "family": "qwen3_5_moe",
+      "name": "Qwen3.6-35B-A3B",
+      "vendor": "Alibaba",
+      "license": "Apache-2.0",
+      "description": "A fast mixture of experts with its own draft head.",
+      "tags": [
+        "chat",
+        "code",
+        "fast"
+      ],
+      "backends": [
+        "mlx",
+        "cuda"
+      ],
+      "drafter": null,
+      "drafter_optional": "z-lab/Qwen3.6-35B-A3B-DFlash",
+      "max_context": 262144,
+      "bytes_per_token": 40000,
+      "size_bytes": null,
+      "speed_hint": "fast",
+      "workspace_bytes": 2684354560,
+      "format": "mlx-q4g64",
+      "native": true
+    },
+    {
+      "id": "TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+      "family": "qwen4_exp",
+      "name": "Qwen3.8 Flash Next",
+      "vendor": "Alibaba",
+      "license": "Qwen Community",
+      "description": "A 125B vision model with 6B active parameters and 1M context, sized for 128 GB machines.",
+      "tags": [
+        "agents",
+        "code",
+        "vision",
+        "long context"
+      ],
+      "backends": [
+        "mlx",
+        "cuda"
+      ],
+      "drafter": null,
+      "drafter_optional": null,
+      "max_context": 262144,
+      "bytes_per_token": 30784,
+      "size_bytes": null,
+      "speed_hint": "medium",
+      "workspace_bytes": 6442450944,
+      "format": "mlx-q4g64",
+      "native": true
+    },
+    {
+      "id": "TensorFold/GLM-5.3-Flash-MLX-4bit-MTP",
+      "family": "glm5_next",
+      "name": "GLM-5.3-Flash",
+      "vendor": "Z.ai",
+      "license": "MIT",
+      "description": "A 320B vision model with 18B active parameters and 1M context, sized for a 256 GB Mac or two GB10s.",
+      "tags": [
+        "agents",
+        "reasoning",
+        "vision",
+        "long context"
+      ],
+      "backends": [
+        "mlx",
+        "cuda"
+      ],
+      "drafter": null,
+      "drafter_optional": "incoai/GLM-5.3-Flash-DFlash2",
+      "max_context": 1048576,
+      "bytes_per_token": 14000,
+      "size_bytes": null,
+      "speed_hint": "medium",
+      "fraction": 0.85,
+      "workspace_bytes": 8589934592,
+      "format": "mlx-q4g64",
+      "native": true
+    }
+  ]
+}

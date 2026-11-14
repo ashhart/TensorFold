@@ -7,7 +7,7 @@ const json = @import("json");
 const serve = @import("dsv41_serve");
 const pipe = @import("sampling_pipe.zig");
 
-test "world four: uneven candidate and whole-row sampling match one rank" {
+test "two, three and four ranks: uneven candidate and whole-row sampling match one rank" {
     const vocab = 1280;
     const n = 4;
     const a = testing.allocator;
@@ -29,7 +29,7 @@ test "world four: uneven candidate and whole-row sampling match one rank" {
         var expected_whole: [1]usize = undefined;
         var one: Case = .{ .logits = logits, .world = 1, .uneven = true, .rows = n, .sampling = sampling, .nucleus = 64, .positions = &positions, .got = &expected, .whole = &expected_whole };
         try run(&one);
-        for ([_]u32{ 2, 4 }) |world| {
+        for ([_]u32{ 2, 3, 4 }) |world| {
             var got: [n]u32 = undefined;
             var whole: [1]usize = undefined;
             var split: Case = .{ .logits = logits, .world = world, .uneven = true, .rows = n, .sampling = sampling, .nucleus = 64, .positions = &positions, .got = &got, .whole = &whole };
@@ -266,7 +266,7 @@ test "vs_choose's mirror == the pipeline's picks over top_k x top_p x min_p x te
 
 const SegSpec = struct { row0: u32, n: u32, s: pipe.Sampling, positions: []const u64 };
 
-test "world four: batched uneven sampling keeps segment offsets and global ids" {
+test "two, three and four ranks: batched uneven sampling keeps segment offsets and global ids" {
     const vocab = 1280;
     const rows = 4;
     const a = testing.allocator;
@@ -281,7 +281,7 @@ test "world four: batched uneven sampling keeps segment offsets and global ids" 
     var expected: [rows]u32 = undefined;
     var one: Multi = .{ .logits = logits, .world = 1, .uneven = true, .rows = rows, .segs = &segs, .batched = false, .got = &expected };
     try tp.host.run(1, &one, multiBody);
-    for ([_]u32{ 2, 4 }) |world| {
+    for ([_]u32{ 2, 3, 4 }) |world| {
         var got: [rows]u32 = undefined;
         var mirror: [rows]i64 = @splat(-2);
         var split: Multi = .{ .logits = logits, .world = world, .uneven = true, .rows = rows, .segs = &segs, .batched = true, .got = &got, .mirror = &mirror };

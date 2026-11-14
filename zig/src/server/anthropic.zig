@@ -12,7 +12,7 @@ const sse = @import("sse.zig");
 const tool_specs = @import("tool_specs.zig");
 const ids = @import("ids.zig");
 const auth = @import("auth.zig");
-const translate = @import("anthropic_translate.zig").translate;
+const translate_mod = @import("anthropic_translate.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -47,13 +47,15 @@ fn sendError(conn: *Conn, a: Allocator, message: []const u8, status: u16) void {
 }
 
 /// Rendered like the chat route renders, without generating: the prompt's token count.
-fn countTokens(srv: *Server, cx: *Cx, chat: Value) errors.Refused!usize {
+fn countTokens(srv: *Server, cx: *Cx, chat: Value, client_thinking: bool) errors.Refused!usize {
     const thinking = try fields.thinkingFields(cx, chat, srv.effort_levels);
     const on = thinking.enable orelse srv.config.enable_thinking;
     cx.clear_thinking = thinking.clear;
+    cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels); // as the chat route sets it
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
     const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
-    const ids_ = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true) catch |e| switch (e) {
+    const explicit_off = client_thinking and !(thinking.enable orelse true);
+    const ids_ = prompt.renderRequest(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true, explicit_off) catch |e| switch (e) {
         error.Refused => return cx.other(cx.message),
         else => |x| return x,
     };
@@ -72,9 +74,9 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
             .ok => |v| v,
             .err => |m| return sendError(conn, a, m, 400),
         };
-        const chat = translate(&cx, body, count) catch return sendError(conn, a, cx.message, cx.status());
+        const chat = translate_mod.translate(&cx, body, count) catch return sendError(conn, a, cx.message, cx.status());
         if (count) {
-            const n = countTokens(srv, &cx, chat) catch return sendError(conn, a, cx.message, cx.status());
+            const n = countTokens(srv, &cx, chat, translate_mod.thinkingSent(body)) catch return sendError(conn, a, cx.message, cx.status());
             const o = json.newObject(a) catch return;
             o.put(a, "input_tokens", json.intValue(a, n) catch return) catch return;
             return routes.sendValue(conn, a, 200, .{ .object = o });
@@ -84,7 +86,8 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     var reply: Reply = .{ .a = a, .conn = conn, .model = openai.replyModel(srv, prepared[1]) };
     reply.init() catch return;
     var wire: Wire = .{ .reply = &reply };
-    openai.run(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0]);
+    const format_name = translate_mod.formatName(prepared[1]);
+    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0], format_name, translate_mod.thinkingSent(prepared[1]));
     if (wire.opened or wire.status == null or conn.broken) return;
     const payload = wire.payload;
     if (wire.status.? != 200) {
@@ -355,12 +358,14 @@ const Reply = struct {
             try b.put(a, "text", t);
             try content.append(a, .{ .object = b });
         };
-        if (message.get("tool_calls")) |calls| if (calls == .array) for (calls.array) |call| {
+        const cut = std.mem.eql(u8, json.strOr(choice.get("finish_reason")), "length");
+        if (message.get("tool_calls")) |calls| if (calls == .array) for (calls.array, 0..) |call, i| {
             const function = call.get("function").?;
             const raw = function.get("arguments").?;
             const args = if (raw == .string) switch (try json.parseText(a, raw.string)) {
                 .ok => |v| v,
-                .err => |m| {
+                .err => |m| blk: { // max_tokens cut the last call: its input closed as far as written, as the stream's
+                    if (cut and i + 1 == calls.array.len) if (try @import("tool_args_close.zig").close(a, raw.string)) |v| break :blk v;
                     r.problem = m;
                     return error.InvalidResponse;
                 },

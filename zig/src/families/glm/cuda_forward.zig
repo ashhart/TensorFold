@@ -5,7 +5,7 @@ const cuda = @import("cuda");
 const cfg = @import("config.zig");
 const weights = @import("cuda_weights.zig");
 const glue = @import("cuda_glue.zig");
-const kda = @import("cuda_kda.zig");
+const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
 const latent = @import("cuda_latent.zig");
@@ -25,6 +25,8 @@ const images_mod = @import("cuda_images.zig");
 const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
+const l2pf_mod = @import("cuda_l2pf.zig");
+const pieces_mod = @import("cuda_forward_pieces.zig");
 
 pub const prefill_rows = state.prefill_rows;
 pub const solo_rows = state.solo_rows;
@@ -43,6 +45,7 @@ pub const Modules = struct {
     exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
     mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
     index: ?index_mod.Kernels, // TF_GLM_INDEX_CUDA: a prompt chunk's indexer scores and pools (glm_index)
+    dsel: bool, // TF_GLM_DSEL (default on): a decode window's DSA select on many CTAs (cuda_sparse.decodeSelect)
     tiled: bool = false, // eligible bf16 linears are tiled; KDA inputs with uneven strides retain their row-major path
     packs: ?*const mm_mod.Packed = null, // the linears packed to 4, 6 or 8 bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     copy_rows: cuda.Function,
@@ -81,9 +84,11 @@ pub const Modules = struct {
         errdefer if (m.index) |*x| x.unload();
         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
         if (mode != .off) m.index = index_mod.Kernels.load(d, k.glm_index, mode) catch |err| blk: {
-            std.log.warn("TF_GLM_INDEX_CUDA: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores", .{err});
+            std.log.warn("glm: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores, as with TF_GLM_INDEX_CUDA=0", .{err});
             break :blk null;
         };
+        m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);
+        if (!m.dsel) std.log.warn("TF_GLM_DSEL=0: a decode window's DSA select keeps one 1,024-thread CTA a row", .{});
         m.tiled = false;
         m.packs = null; // `m` starts undefined: the field default does not apply
         return m;
@@ -109,61 +114,16 @@ pub const Modules = struct {
     }
 };
 
-/// overlap.ROW_STEP and PIECES_MAX: piece boundaries on the BF16 prompt matmul's 128-row blocks, at most 16 pieces.
-pub const row_step = 128;
-pub const max_pieces = 16;
-
-/// overlap.ranges: [lo, hi) row pieces of a chunk of `rows`, about equal on row_step boundaries (fewer when short).
-pub fn ranges(rows: usize, pieces: usize, out: *[max_pieces][2]usize) usize {
-    const per = (rows + pieces - 1) / pieces;
-    const size = (per + row_step - 1) / row_step * row_step;
-    var n: usize = 0;
-    var lo: usize = 0;
-    while (lo < rows) : (lo += size) {
-        out[n] = .{ lo, @min(rows, lo + size) };
-        n += 1;
-    }
-    return n;
-}
-
-/// A prompt chunk's pieced exchanges (overlap.Overlap): second stream and events; `count`: TF_GLM_OVERLAP_PIECES (3).
-pub const Pieces = struct {
-    count: usize = 4,
-    side: cuda.Stream,
-    filled: [max_pieces]cuda.Event,
-    gathered: [max_pieces]cuda.Event,
-    glues: [max_pieces]cuda.Event, // split: a piece's own rows glued
-    shared: [max_pieces]cuda.Event, // split: every rank's glued rows of a piece in
-
-    pub fn init(d: *const cuda.Driver, count: usize) !Pieces {
-        if (count == 0 or count > max_pieces) return error.BadPieces;
-        var p: Pieces = .{ .count = count, .side = try cuda.Stream.init(d, false), .filled = undefined, .gathered = undefined, .glues = undefined, .shared = undefined };
-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
-            a.* = try cuda.Event.init(d, false);
-            b.* = try cuda.Event.init(d, false);
-            g.* = try cuda.Event.init(d, false);
-            s.* = try cuda.Event.init(d, false);
-        }
-        return p;
-    }
-
-    pub fn deinit(p: *Pieces) void {
-        for (&p.filled, &p.gathered, &p.glues, &p.shared) |*a, *b, *g, *s| {
-            a.deinit();
-            b.deinit();
-            g.deinit();
-            s.deinit();
-        }
-        p.side.deinit();
-        p.* = undefined;
-    }
-};
+pub const row_step = pieces_mod.row_step;
+pub const max_pieces = pieces_mod.max_pieces;
+pub const ranges = pieces_mod.ranges;
+pub const Pieces = pieces_mod.Pieces;
 
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
     local,
-    // group: the main stream's all-gathers through it (RoCE writes for small ones on two ranks); side streams stay raw
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
+    // collective: the boundary's gathers through it (the group's RoCE route once installed); side streams stay raw
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, collective: ?@import("tp").Collective = null },
 };
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
@@ -195,30 +155,20 @@ pub const Forward = struct {
     prof: ?*prof_mod.Prof = null, // TF_GLM_PROF=1: events between the sections
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
+    l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
 
-    pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows };
+    /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
+    pub fn prefetch(f: *const Forward) ?*const l2pf_mod.L2pf {
+        return if (f.ranks.len == 1 and !f.ranks[0].b.prefill) f.l2pf else null;
     }
 
-    /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
-    fn gather(f: *const Forward, rows: usize) !void {
-        const stamp = prof_mod.span(f.prof, f.stream, .all_gather);
-        defer stamp.end();
-        const c = &f.ranks[0].w.config;
-        const bytes = rows * c.hidden * 4;
-        switch (f.exchange) {
-            .local => for (f.ranks) |to| for (f.ranks) |from| {
-                if (to.w.share.rank == from.w.share.rank) continue;
-                const off = from.w.share.rank * bytes;
-                try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(to.b.gathered + off, from.b.gathered + off, bytes, f.stream.handle), "cuMemcpyDtoDAsync");
-            },
-            .nccl => |n| {
-                const r = f.ranks[0];
-                if (n.group) |g| return g.allGather(f.stream, r.b.gathered + r.w.share.rank * bytes, r.b.gathered, bytes);
-                const count = rows * c.hidden;
-                try n.lib.check(n.lib.api.ncclAllGather(r.b.gathered + r.w.share.rank * bytes, r.b.gathered, count, .f32, n.comm, f.stream.handle), "ncclAllGather");
-            },
-        }
+    pub fn set(f: *const Forward) glue.Set {
+        return .{ .glue = &f.m.glue, .index = if (f.m.index) |*x| x else null, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill, .linear = .{ .lane = &f.m.lane }, .copy_rows = f.m.copy_rows, .dsel = f.m.dsel };
+    }
+
+    /// The layer sums' boundary (cuda_boundary.zig): every rank's fp32 partial into every gathered buffer.
+    pub fn resolve(f: *const Forward, rows: usize) !void {
+        return @import("cuda_boundary.zig").resolve(f, rows);
     }
 
     fn slot(r: Rank, rows: usize) u64 {
@@ -226,7 +176,7 @@ pub const Forward = struct {
     }
 
     /// forward._pre: hc_pre of every row at a site into b.normed, xs, post and comb.
-    fn pre(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, rows: usize) !void {
+    pub fn pre(f: *const Forward, r: Rank, hc: weights.Hc, norm: glue.Norm, rows: usize) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .glue);
         defer stamp.end();
         const c = &r.w.config;
@@ -242,7 +192,7 @@ pub const Forward = struct {
     }
 
     /// forward._mixer: the layer's KDA or DSA block on b.normed; `li`/`di`: its index among loaded KDA / DSA layers.
-    fn mixer(f: *const Forward, r: Rank, l: weights.Layer, li: usize, di: usize, rows: usize, nch: usize, out: ?u64) !void {
+    pub fn mixer(f: *const Forward, r: Rank, l: weights.Layer, li: usize, di: usize, rows: usize, nch: usize, out: ?u64) !void {
         const c = &r.w.config;
         const b = r.b;
         const st = r.st;
@@ -260,7 +210,7 @@ pub const Forward = struct {
                     s.saves.b = st.save_b + li * window_rows * st.heads * 4;
                 }
                 const conv = st.conv + li * 3 * st.conv_c * 2;
-                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof);
+                try kda_block.bodyProfile(f.set(), &f.m.kda, f.stream, k, s, b.normed, c.hidden, rows, conv, st.recAt(cur, li), !b.prefill and f.kda_wide, b.prefill, f.prof, if (f.prefetch()) |p| .{ .l2 = p, .layer = l.index } else null);
                 if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
@@ -281,7 +231,7 @@ pub const Forward = struct {
     }
 
     /// forward._ffn: the dense MLP or MoE block on b.normed into this rank's slot.
-    fn ffn(f: *const Forward, r: Rank, l: weights.Layer, rows: usize, out: ?u64) !void {
+    pub fn ffn(f: *const Forward, r: Rank, l: weights.Layer, rows: usize, out: ?u64) !void {
         const stamp = prof_mod.span(f.prof, f.stream, .ffn);
         defer stamp.end();
         const c = &r.w.config;
@@ -406,6 +356,8 @@ pub const Forward = struct {
         if (f.taps) |t| try f.shareTaps(t, cut);
     }
 
+    pub const pairBody = @import("cuda_forward_pair.zig").pairBody;
+
     /// forward.forward of `ids`: logits in b.logits; a prompt chunk's KDA layers committed, a window's at `commit`.
     pub fn run(f: *const Forward, ids: []const i32) !void {
         const R = ids.len;
@@ -435,6 +387,7 @@ pub const Forward = struct {
     /// The unpieced loop over the layers (and the stream mean): each site's partials whole, then the glue.
     fn whole(f: *const Forward, R: usize) !void {
         const c = &f.ranks[0].w.config;
+        const pf = f.prefetch();
         var li: usize = 0;
         var di: usize = 0;
         for (f.ranks[0].w.layers, 0..) |_, j| {
@@ -445,7 +398,8 @@ pub const Forward = struct {
                 if (r.segs.len > 0) try shared.mixer(f, r, l, li, di, R, slot(r, R)) else try f.mixer(r, l, li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), slot(r, R));
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
-            try f.gather(R);
+            if (pf) |p| try p.fork(f.stream, j, .f);
+            try f.resolve(R);
             if (f.prof) |p| p.mark(f.stream, .gather_a);
             prof_mod.context(f.prof, j, null, .ffn);
             for (f.ranks) |r| {
@@ -455,7 +409,8 @@ pub const Forward = struct {
                 try f.ffn(r, l, R, slot(r, R));
             }
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
-            try f.gather(R);
+            if (pf) |p| try p.fork(f.stream, j, .n);
+            try f.resolve(R);
             for (f.ranks) |r| try f.post(r, R);
             if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, 0, R);
             if (f.prof) |p| p.mark(f.stream, .gather_b);
@@ -465,10 +420,11 @@ pub const Forward = struct {
             }
         }
         for (f.ranks) |r| try glue.streamMean(f.set(), f.stream, r.b.x, r.b.hidden, R, c.hidden, c.hc);
+        if (pf) |p| try p.join(f.stream);
     }
 
     /// The final norm and this rank's rows of the head (a prompt buffer's last row only).
-    fn finish(f: *const Forward, R: usize) !void {
+    pub fn finish(f: *const Forward, R: usize) !void {
         prof_mod.context(f.prof, null, null, .chunk);
         const stamp = prof_mod.span(f.prof, f.stream, .head);
         defer stamp.end();
@@ -526,7 +482,7 @@ pub const Forward = struct {
             }
         }
         if (!propose) return;
-        try f.gather(rows);
+        try f.resolve(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
@@ -534,7 +490,7 @@ pub const Forward = struct {
             try glue.rmsnormBy(f.set(), f.stream, b.mx + tail, D, m.layer.post_norm, b.normed, D, b.xs, c.eps, rows, D);
             try f.ffn(r, m.layer, rows, slot(r, rows));
         }
-        try f.gather(rows);
+        try f.resolve(rows);
         for (f.ranks) |r| {
             const m = r.w.mtp.?;
             const b = r.b;
@@ -554,16 +510,17 @@ pub const Forward = struct {
                 for (st.cur) |x| if (x != cur) return error.KdaLayersOutOfStep;
                 if (keep < st.pending) {
                     const h = st.heads;
-                    var a: cuda.Args = .{};
-                    a.add(@as(c_int, @intCast(h)));
-                    a.add(st.recAt(cur, 0));
-                    a.add(@as(usize, st.rec_layer / 4));
-                    for ([_]u64{ st.save_k, st.save_v, st.save_g, st.save_b }) |x| a.add(x);
-                    a.add(@as(usize, window_rows * h * kda.dk));
-                    a.add(@as(usize, window_rows * h));
-                    a.add(@as(c_int, @intCast(keep)));
-                    a.add(st.recAt(1 - cur, 0));
-                    try cuda.launch.launch(f.m.kda.replay_layers, .{ .grid = .{ .x = @intCast(st.kda_layers * h) }, .block = .{ .x = 1024 } }, f.stream, &a);
+                    try kda.replayLayers(&f.m.kda, f.stream, .{
+                        .state_in = st.recAt(cur, 0),
+                        .state_stride = st.rec_layer / 4,
+                        .k = st.save_k,
+                        .v = st.save_v,
+                        .g = st.save_g,
+                        .b = st.save_b,
+                        .kv_stride = window_rows * h * kda.dk,
+                        .b_stride = window_rows * h,
+                        .state_out = st.recAt(1 - cur, 0),
+                    }, keep, h, st.kda_layers);
                 }
                 for (st.cur) |*x| x.* = 1 - x.*;
                 if (st.kda_layers > 0) try glue.convShift(f.set(), f.stream, st.conv, st.proj, keep, st.proj_layer, st.proj_row, st.kda_layers, st.conv_c);

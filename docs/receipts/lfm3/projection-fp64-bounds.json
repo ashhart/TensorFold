@@ -1,0 +1,13 @@
+{
+  "cells": 66,
+  "outputs": 60954624,
+  "raw_tap_matches_all_native": true,
+  "one_row_tap_matches_all_native_first_rows": true,
+  "raw_FP32_bound_exceedances": 0,
+  "BF16_bound_exceedances": 0,
+  "max_raw_FP32_bound_fraction": 0.01465208540032716,
+  "max_BF16_bound_fraction": 0.9807553251550621,
+  "max_raw_abs_error": 2.555781975388527e-06,
+  "max_worst_column_raw_rms": 7.7385387436973e-07,
+  "model_acceptance_threshold": null
+}

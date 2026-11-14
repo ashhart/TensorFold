@@ -12,9 +12,7 @@ pub const Gathers = struct { bits: u8, group: u16, tiles: [3]mtl.Pipeline };
 pub fn compile(gpa: std.mem.Allocator, device: mtl.Device, bits: u8, group: u16) !Gathers {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const head = try std.fmt.allocPrint(gpa, "#define WB {d}\n#define WG {d}\n", .{ bits, group });
-    defer gpa.free(head);
-    const body = try std.mem.concat(gpa, u8, &.{ head, sources.flashnext_qmmw });
+    const body = try @import("../../core/qmmw_source.zig").source(gpa, sources.flashnext_qmmw, bits, group);
     defer gpa.free(body);
     const text = try frags.source(device, gpa, body);
     defer gpa.free(text);

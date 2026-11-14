@@ -4,21 +4,7 @@ const Allocator = std.mem.Allocator;
 const Table = @import("table.zig").Table;
 const alloc = @import("allocate.zig");
 pub const pricedBatched = alloc.pricedBatched;
-
-pub const Constants = struct {
-    depth_rate: f64 = 0.15, // weight of the newest round in a depth's acceptance
-    learn_rows: bool = false, // shared_costs came from another machine: learn what a row costs here
-    depth_probe_every: u64 = 8, // rounds between probes one depth deeper
-    cost_rate: f64 = 0.2, // weight of the newest round in a depth's measured time
-    plain_margin: f64 = 1.05, // a drafted depth must beat plain rounds' tokens a ms by this much
-    plain_wait_most: u64 = 128, // plain rounds between probes at most
-    draft_slack: i64 = 2, // drafts a stream offers past what its last shared round granted it
-    grant_slack: i64 = 1, // granted depths: drafts past a grant that verified every draft the stream held
-    short_slack: i64 = 0, // granted depths: drafts past a grant that left some of them unverified
-    copy_first: bool = false, // a copy ahead takes the next round whole: the head drafts none for it (else one)
-    hold_costs: []const HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: granted holds must pay for it
-};
-
+pub const Constants = @import("depth_constants.zig").Constants;
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
 
@@ -71,8 +57,9 @@ pub const Rule = struct {
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
+    plain_streams: u32 = 0, // a shared round with this many streams or more drafts none (0: off; a family's switch)
     batch_rows: u32,
-    batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
+    batched_heads: bool = false, // one batch drafts every stream of a shared round (steps: the deepest stream's)
     row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
@@ -160,7 +147,7 @@ pub const Rule = struct {
     pub fn depth(r: *Rule, who: Who) !i64 {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         if (most <= 0) return 0;
-        if (r.confidence_floor != null and !who.sampled) return most;
+        if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
@@ -229,7 +216,7 @@ pub const Rule = struct {
     pub fn headDepth(r: *Rule, who: *const Who, budget: ?i64, probe: Probe) !i64 {
         const d: i64 = if (who.finished) 0 else if (budget) |b| b else if (r.granted_depth)
             try r.grantDepth(who.*)
-        else if (r.node_probabilities and !(who.sampled and r.confidence_floor != null))
+        else if (r.node_probabilities and !((who.sampled or r.k.floor_rates) and r.confidence_floor != null))
             @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1))
         else
             try r.depth(who.*);
@@ -288,7 +275,8 @@ pub const Rule = struct {
             tokens += try r.gainOf(whos[i]);
             deepest = @max(deepest, out[i]);
             const verify = r.shared_costs.get(@intFromFloat(@ceil(rows))) orelse break;
-            const now = tokens / (verify + r.row_cost.extraMs(whos.len, sampled) * (rows - @as(f64, @floatFromInt(whos.len))) + fixed + holdMs(r.k.hold_costs, k + probes, deepest));
+            const extra = r.row_cost.extraMs(whos.len, sampled) * (rows - @as(f64, @floatFromInt(whos.len)));
+            const now = tokens / (verify + (if (extra < 0) @max(extra, plain - verify) else extra) + fixed + holdMs(r.k.hold_costs, k + probes, deepest));
             if (now > best) {
                 best = now;
                 keep = k;
@@ -309,6 +297,8 @@ pub const Rule = struct {
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
+        // drafts lose here: none asked, no head pass
+        if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
         if (r.confidence_floor != null) {
             for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
             return;
@@ -337,9 +327,9 @@ pub const Rule = struct {
         const ones = try r.gpa.alloc(u32, whos.len);
         defer r.gpa.free(ones);
         @memset(ones, 1);
-        const head: alloc.HeadCost = .{ .step_ms = r.mtp_step_ms, .batched = r.batched_heads, .row_ms = r.row_cost.extraMs(whos.len, sampled) };
+        const head: alloc.HeadCost = .{ .step_ms = r.sharedStepMs(), .batched = r.batched_heads, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = r.row_cost.leastRows(whos.len, sampled) };
         const counts = if (r.draft_step_ms != 0)
-            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .row_ms = r.row_cost.extraMs(whos.len, sampled) })
+            try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.overheadMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), .{ .step_ms = r.draft_step_ms, .batched = r.batched_heads and pricedBatched(), .free_first = true, .row_ms = r.row_cost.extraMs(whos.len, sampled), .least_rows = head.least_rows })
         else
             try alloc.allocateDrafts(r.gpa, ones, probs, r.shared_costs, r.fixedMs(whos.len, sampled), r.row_cost.capRows(whos.len, sampled, @max(whos.len, r.batch_rows)), head);
         defer r.gpa.free(counts);
@@ -399,11 +389,16 @@ pub const Rule = struct {
         return best;
     }
 
+    /// Shared pricing can retain a family policy while lone rounds use a measured head step.
+    pub fn sharedStepMs(r: *const Rule) f64 {
+        return r.k.shared_step_ms orelse r.mtp_step_ms;
+    }
+
     /// The modeled time of a shared round's head steps for the depths it drafted.
     pub fn headMs(r: *const Rule, depths: []const i64) f64 {
         var steps: i64 = 0;
         for (depths) |d| steps = if (r.batched_heads) @max(steps, d) else steps + d;
-        return r.mtp_step_ms * @as(f64, @floatFromInt(steps));
+        return r.sharedStepMs() * @as(f64, @floatFromInt(steps));
     }
 
     /// `sampled`: the round drew keyed samples, so it counts for sampled streams' overhead alone; `head_ms` its drafts.
@@ -414,7 +409,7 @@ pub const Rule = struct {
         const row_ms = r.row_cost.extraMs(streams, sampled);
         // no fit yet: a wide round's excess may be its rows, and adding it to the overhead draws the next round wider
         if (r.k.learn_rows and streams > 1 and row_ms == 0 and rows > streams) return;
-        const paid = row_ms * @as(f64, @floatFromInt(rows -| streams));
+        const paid = alloc.rowTerm(r.shared_costs, true, .{ .row_ms = row_ms }, rows, streams);
         const extra = if (ms - forward - paid > 0.0) ms - forward - paid else 0.0;
         const fixed = if (extra - head_ms > 0.0) extra - head_ms else 0.0;
         try r.addOverhead(&r.overhead, streams, fixed, extra - fixed);
@@ -597,4 +592,8 @@ test "a granted hold stays only while its stream's expected drafts pay for the v
     out = .{ 4, 4, 2, 3 };
     try rule.payHolds(&whos, false, &out);
     try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 0 }, &out); // a probe after a grant of none keeps its hold
+}
+
+test {
+    _ = @import("shared_step_test.zig");
 }

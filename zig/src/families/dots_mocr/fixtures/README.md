@@ -50,3 +50,53 @@ FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
   OUTPUT_DIR --pci PCI_ID --max-new-tokens 64
 python tools/zig/dots_mocr_reference.py compare OUTPUT_DIR NATIVE_PREFIX
 ```
+
+`rope_inv_freq.txt` holds the 64 float32 bit patterns of the checkpoint's
+rotary `inv_freq` as Transformers 4.57.6 computes them on the CPU (theta 1e6,
+head dim 128), dumped by the oracle's `text` mode (`rope-inv_freq.npy`). The
+CUDA recipe uploads them as they are, because Torch's CPU `powf` is not
+correctly rounded: entry 37 is one ulp from the correctly rounded value.
+
+## OCR reader fixtures
+
+The reader's prompt (`../prompt.txt`) and both test pages are written
+for TensorFold. The `ocr-*.json` files record greedy `oracle` runs with
+that prompt on those pages, and hold no model text: `source` and
+`image_sha256` (the page), `original` (its width and height), `frame`
+(the oracle's `prepared_images` size, the tower input the boxes are in),
+`prompt_sha256`, `max_new_tokens`, `eos_reached`, `output_tokens`,
+`output_ids_sha256` (SHA-256 over the output ids as little-endian
+`u32`) and `text_sha256` (SHA-256 of the oracle's `text` field).
+
+| Fixture | Page | `--max-new-tokens` | Result |
+| --- | --- | --- | --- |
+| `ocr-page.json` | `page.png` | 4096 | the whole page, ended by EOS |
+| `ocr-page-cut.json` | `page.png` | 128 | JSON cut by the limit |
+| `ocr-one-line.json` | `one-line.png` | 4096 | one text block |
+
+`ocr_test.zig` reads written block lists in the model's form. Set
+`TF_DOTS_OCR_DIR` to a directory that holds the three runs as `page`,
+`page-cut` and `one-line` to check each run's page, prompt, token ids
+and text against its fixture, and to read its text with the reader.
+
+`pages` draws both pages with Pillow 12.2.0 in Liberation Sans Regular,
+Liberation Sans Bold and Liberation Serif Regular 2.1.5 (font SHA-256
+`baccc64becc3eb7d104b7c84d99f5314a0a1f896e2b3ea6c2f22fc08d2003bee`,
+`769673c4355020b1e28a14c366a152da410ab6b16239fe883ebc35b73624835b` and
+`86b9ea1c2f41bed9d7c09ccad4abc2894b33df5de60e5bbbece5d48610911870`):
+`page.png` is 1240x1754 with headers, a title, text, a caption, a table
+with a spanned header cell, a list and a page number; `one-line.png` is
+960x96 with `TensorFold reads one line of text.` `record` writes a
+fixture from a run. The runs used one gfx1201 GPU, ROCm 10.1 Torch,
+Transformers 4.57.6, qwen-vl-utils 0.0.10, Pillow 12.2.0 and flash-attn
+2.8.3.post1 with `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`:
+
+```sh
+python tools/zig/dots_mocr_reference.py pages PAGES_DIR
+HIP_VISIBLE_DEVICES=N FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+  python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR \
+  PAGES_DIR/page.png RUNS_DIR/page --pci PCI_ID --max-new-tokens 4096 \
+  --prompt zig/src/families/dots_mocr/prompt.txt
+python tools/zig/dots_mocr_reference.py record RUNS_DIR/page \
+  PAGES_DIR/page.png zig/src/families/dots_mocr/fixtures/ocr-page.json
+```

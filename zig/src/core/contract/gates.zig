@@ -49,7 +49,7 @@ pub const VTable = struct {
     check: ?*const fn (*anyopaque, Gate) anyerror!?[]const u8 = null,
     /// A replacement's baseline: the replaced kernel's bytes on the prepared inputs.
     replaced: ?*const fn (*anyopaque) anyerror![]const u8 = null,
-    /// Frees the device buffers the last `prepare` left; called once a kernel's gates are done.
+    /// Frees the device buffers and host copies the last `prepare` left; called once a kernel's gates are done.
     release: ?*const fn (*anyopaque) void = null,
 };
 
@@ -103,7 +103,7 @@ pub fn hooks(comptime T: type) VTable {
             return of(ctx).replaced();
         }
         fn release(ctx: *anyopaque) void {
-            of(ctx).rig.reset();
+            if (@hasDecl(Rig, "finishGates")) of(ctx).rig.finishGates() else of(ctx).rig.reset();
         }
     };
     return .{
@@ -320,7 +320,7 @@ pub fn sums(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
     const q = misses(got, want, allow);
     if (!(q <= 1)) return say(.fail, .sums, s.name, "{d:.1}x over its exact-sum bound at k {d}: not fp32 sums (fp16 would miss {d:.0}x, bf16 {d:.0}x)", .{ q, shape.k, margin[0], margin[1] });
     if (need[1] == 0 or need[0] == 0) return say(.pass, .sums, s.name, "within its bound at k {d}; fp16 sums would miss {d:.0}x, bf16 {d:.1}x ({s})", .{ shape.k, margin[0], margin[1], s.sums.why });
-    return say(.pass, .sums, s.name, "exact sums at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ shape.k, margin[0], margin[1] });
+    return say(.pass, .sums, s.name, "{s} at k {d}, where fp16 sums would miss by {d:.0}x and bf16 by {d:.0}x", .{ if (s.sums.exact) "exact sums" else "FP32 sums within their derived bound", shape.k, margin[0], margin[1] });
 }
 
 /// A kernel's or control's gates 1-4; a control must fail its own gate and passes when it does.

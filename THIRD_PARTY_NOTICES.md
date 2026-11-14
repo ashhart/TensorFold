@@ -35,6 +35,32 @@ The native engine installs and links neither. It reads checkpoints in their form
 `zig/kernels/metal/` repeat the arithmetic of MLX's kernels and mlx-lm's model math, many of them bit for bit.
 The Python engine, frozen at 0.6.6, installs MLX and mlx-lm as dependencies.
 
+## Nemotron 3.5 Parse on HIP
+
+The reference tool `tools/zig/nemotron_parse_reference.py` adapts `run_transformers_inference.py` from NVIDIA's
+[nvidia/Nemotron-3.5-Parse](https://huggingface.co/nvidia/Nemotron-3.5-Parse) at revision
+`4035ffb1d8f8bafcdb867dfaf6f7514f101464f9`, and keeps that file's SPDX header. The native family follows the same
+release's code for its math, rounding and resizing; each file is written for TensorFold, and the file named is the
+reference:
+
+- `zig/src/families/nemotron_parse/processor.zig`: `NemotronParseImageProcessor` in `hf_nemotron_parse_processor.py`
+  (the aspect-preserving resize, the NaViT white padding, the normalization and the patch order).
+- `zig/src/families/nemotron_parse/tower.zig` and `decoder.zig`: `RadioWithNeck`, `_VisionTransformer`,
+  `NemotronParseDecoder`, `_DecoderLayer`, `_GQAAttention` and `_ScaledEmbedding` in `hf_nemotron_parse_modeling.py`.
+- `zig/kernels/hip/ops/vl_position.hpp`: `_normalized_2d_position_pages` in `hf_prefix_geometry.py`.
+
+These release files are Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES, under the NVIDIA OpenMDW License 1.1; see
+[the license text](LICENSES/NVIDIA-OpenMDW-1.1.txt).
+
+## LightOnOCR-3 release fixtures
+
+The configuration fixtures for LightOnOCR-3 are LightOn's release files, unchanged, under the Apache License 2.0; see
+[the license text](LICENSES/Apache-2.0.txt). `zig/src/families/lighton_ocr/fixtures/config.json` and
+`processor_config.json` come from `lightonai/LightOnOCR-3-1B` at revision `23d544085c886bbdace647bcfab91203299417e2`.
+`zig/src/families/qwen3_5/fixtures/lighton-ocr-0.8b.json` is the `config.json` of `lightonai/LightOnOCR-3-0.8B` at
+revision `36d8636925327c671bd8e479c517a004f7566bd9`, and `lighton-ocr-4b.json` the `config.json` of
+`lightonai/LightOnOCR-3-4B` at revision `b71010f095dc3735de7ee6b9969bff8f8f50b39a`.
+
 ## MLX and mlx-lm adaptations
 
 In the Python engine, frozen at 0.6.6, the DeltaNet implementations in
@@ -230,6 +256,21 @@ The Zig tensor-parallel fabric's RoCE path (`zig/src/fabric/tp/mailbox.cu`, `roc
 the same one-shot all-gather protocol of b12x's RoCEnante (`b12x/comm/roce/`, PRs #295 and #315) for any family that
 runs tensor parallelism over it, under the same copyright and Apache License 2.0 terms.
 
+## Cloudflare Clef
+
+`zig/src/server/clef_encode.zig` and `clef_answer.zig`, the host head in `zig/src/core/joint_schema/`
+(`reference.zig`, `reference_attn.zig`), the device heads in `zig/src/hip/joint_schema/` and
+`zig/src/cuda/joint_schema/` with their kernels in `zig/kernels/hip/joint_schema/joint_schema.hip` and
+`zig/kernels/cuda/joint_schema.cu` port Cloudflare's Clef release code, `joint_schema_model.py` in
+[Cloudflare/clef](https://huggingface.co/Cloudflare/clef) and
+[Cloudflare/clef-flash](https://huggingface.co/Cloudflare/clef-flash): the record rendering and encoding
+(`render`, `question_options`, `encode_record`), the verbatim system prompt, the joint schema head
+(`JointSchemaHead`, `EvidenceRoutingLayer`) and the SystemOne answer shape (`systemone_answer`). The encoder's first
+port is gilby's. Copyright Cloudflare, Inc., Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+`tools/clef_head_golden.py`, `tools/clef_tokens.py` and `tools/clef_head_gate.py` run that file:
+`zig/src/core/joint_schema/fixtures/clef_tiny.json` holds a generated head's outputs (no Cloudflare weights), and
+`zig/src/server/fixtures/clef_tokens.json` the Clef-Flash tokenizer's ids for synthetic records.
+
 ## Vendored code and weights
 
 In the Python engine, frozen at 0.6.6, `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified
@@ -251,8 +292,7 @@ below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0
 Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) are TensorFold's own.
 
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
-The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
-without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model card states Apache-2.0 too. Each checkpoint keeps its own license.
 
 ## Structured output: libtfgrammar
 
@@ -293,10 +333,20 @@ These follow a model's release code or a library's model code for their math, ro
 - `tools/lfm3/ref64.py` and `zig/kernels/xpu/lfm3.cl`: `modeling_lfm3.py` in [LiquidAI/LFM3-1.7B](https://huggingface.co/LiquidAI/LFM3-1.7B). Copyright Liquid AI, LFM Open License v1.0; see [the license text](LICENSES/LFM-Open-1.0.txt).
 - `zig/kernels/metal/minimax_m3/glue.metal`: the rounding points of `modeling_minimax_m3_vl.py` in [transformers](https://github.com/huggingface/transformers).
 - `zig/src/vision/qwen_cuda.zig`: `Qwen3_5VisionModel` in transformers.
-- `zig/src/core/picture/patches.zig`: `smart_resize`, `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; `patches_test.zig` checks it against them.
+- `zig/src/core/picture/patches_test.zig`: recorded image-processor output data from `Lfm3VlImageProcessor` and `Qwen2VLImageProcessor` in transformers; the processing implementation is described below.
 - `zig/src/families/flashnext/rotary_config.zig`: `_compute_yarn_parameters` in transformers, for the 64 rotary dims.
 
 transformers is Copyright The HuggingFace Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
+## Image patch preparation
+
+`zig/src/core/picture/patches.zig` implements the image budgets and geometry described by the
+[Qwen2-VL model card](https://huggingface.co/Qwen/Qwen2-VL-7B-Instruct),
+[Qwen2.5-VL model card](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) and
+[LFM2-VL model card](https://huggingface.co/LiquidAI/LFM2-VL-450M).
+Its discrete sizing, patch ordering, normalization and cache identities are pinned by TensorFold's own tests and
+black-box processing outputs. The implementation was rewritten from those behavior sources; the recorded comparison
+data in `patches_test.zig` retains its provenance above.
 
 ## MIT License text
 
@@ -423,3 +473,29 @@ seeded CPU generator, so that it makes the same latents bit for bit:
 - `log256_ps` and `sincos256_ps` from `avx_mathfun.h`, which PyTorch includes (zlib license, Copyright (C) 2012 Giovanni
   Garberoglio, based on Julien Pommier's `sse_mathfun.h`, Copyright (C) 2007; the license is in
   `LICENSES/avx_mathfun-zlib.txt`).
+
+## DeepSeek chat encoder output fixture
+
+`zig/src/server/fixtures/deepseek_v41_encoder/cases.jsonl.gz` contains 328
+request/output cases supplied from DeepSeek's encoder, under the MIT license,
+Copyright (c) 2026 DeepSeek. The unmodified license is beside the fixture as
+[`LICENSE`](zig/src/server/fixtures/deepseek_v41_encoder/LICENSE).
+This is test data, not an encoder implementation. TensorFold's renderer was
+written from these outputs and its existing code without consulting the encoder's source.
+
+## Thinking-off checkpoint template fixtures
+
+The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files, used only as host-test inputs:
+- `glm53.jinja` and `glm53-tokenizer_config.json` come from
+  [nvidia/GLM-5.3-Flash-NVFP4](https://huggingface.co/nvidia/GLM-5.3-Flash-NVFP4) at revision `da920bb0b9f4`
+  (NVIDIA's quantization of zai-org's GLM-5.3-Flash), under the MIT license its model card states. See
+  [`LICENSES/MIT.txt`](LICENSES/MIT.txt).
+- `lfm2.jinja` and `lfm2-tokenizer_config.json` come from
+  [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
+  `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
+  [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).
+- `qwen38.jinja` and `qwen38-tokenizer_config.json` come from
+  [TensorFold/Qwen3.8-27B-MLX-4bit](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) at revision
+  `70ae7fac63274ff2eac54152031433374cb80f2f` (an MLX conversion of
+  [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), whose template it carries), under the Apache License 2.0.
+  See [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).

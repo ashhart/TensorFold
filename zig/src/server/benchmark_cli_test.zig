@@ -103,9 +103,10 @@ test "an attached run saves an unranked receipt that publishes with explicit con
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try runArgs(&r, try f.url(a, ""), out)));
     try std.testing.expect(r.has("unranked") and r.has("Receipt saved") and r.has("code T=0 repeat 1/1: ok"));
-    try std.testing.expectEqual(@as(usize, 5), f.count()); // the manifest it asked for first, then the four replies
+    try std.testing.expectEqual(@as(usize, 6), f.count()); // Manifest, thinking discovery, then four streamed replies.
     try std.testing.expectEqualStrings("/v1/benchmark/manifest", f.request(0).path);
-    for (0..5) |i| try std.testing.expect(std.mem.startsWith(u8, f.request(i).path, "/v1/"));
+    try std.testing.expectEqualStrings("/v1/models", f.request(1).path);
+    for (0..6) |i| try std.testing.expect(std.mem.startsWith(u8, f.request(i).path, "/v1/"));
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     try std.testing.expect(v.get("samples").?.array.len == 2 and !v.get("settings").?.get("managed").?.bool and v.get("settings").?.get("rank_count").? == .null);
@@ -212,11 +213,15 @@ test "a cancelled local run saves its receipt, exits 130 and never publishes" {
     stop.request(.INT);
     const argv = try runArgs(&r, try f.url(a, ""), out);
     try std.testing.expectEqual(@as(u8, 130), try r.command(argv));
-    try std.testing.expect(f.count() == 0 and !r.has("Public upload preview"));
+    // The manifest and thinking fetches race the stop, so their count is not progress-independent.
+    try std.testing.expectEqual(@as(usize, 0), posts(f, "/submissions"));
+    try std.testing.expect(!r.has("Public upload preview"));
     stop.reset();
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
-    try std.testing.expectEqualStrings("cancelled", v.get("samples").?.array[0].get("error_code").?.string);
+    const samples = v.get("samples").?.array;
+    try std.testing.expectEqual(@as(usize, 1), samples.len);
+    try std.testing.expectEqualStrings("cancelled", samples[0].get("error_code").?.string);
 }
 
 test "attach and managed checks refuse before any request, and parse errors exit 2" {
@@ -435,7 +440,7 @@ test "an attached rocm run saves a local receipt that inspect accepts and publis
     try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try backendArgs(&r, "rocm", try f.url(a, ""), out)));
-    try std.testing.expect(r.has("| rocm |") and r.has("Receipt saved") and r.has("rocm receipt is saved locally") and f.count() == 5);
+    try std.testing.expect(r.has("| rocm |") and r.has("Receipt saved") and r.has("rocm receipt is saved locally") and f.count() == 6);
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     try std.testing.expectEqualStrings("rocm", v.get("runtime").?.get("backend").?.string);

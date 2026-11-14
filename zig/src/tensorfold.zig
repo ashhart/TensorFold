@@ -1,6 +1,7 @@
 //! The native engine: model loading, families and the lane core, over our Metal runtime.
 const std = @import("std");
 
+pub const startup_receipt = @import("profile").startup_receipt;
 pub const benchmark_group = @import("core/benchmark_group.zig");
 pub const safetensors = @import("core/safetensors.zig");
 pub const gguf = @import("core/gguf.zig");
@@ -26,6 +27,7 @@ pub const segments = @import("core/segments.zig");
 pub const row_projection = @import("core/row_projection.zig");
 pub const frags = @import("core/frags.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
+pub const moe_route = @import("core/moe_route.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
 pub const exl3_format = @import("core/exl3_format.zig");
@@ -43,6 +45,8 @@ pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_vision_contract = @import("families/flashnext/vision_contract.zig");
 pub const flashnext_fsr_fixture = @import("families/flashnext/fsr_gpu_fixture.zig");
 pub const flashnext_fsr_contract = @import("families/flashnext/fsr_contract_source.zig");
+pub const flashnext_scale_index_fixture = @import("families/flashnext/scale_index_fixture.zig");
+pub const flashnext_grouped_fixture = @import("families/flashnext/grouped_fixture.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_sample = @import("families/flashnext/host_sample.zig");
@@ -64,12 +68,17 @@ pub const step5 = @import("families/step5/step5.zig");
 pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
 pub const llama = @import("families/llama/llama.zig");
+pub const flint = @import("families/flint/flint.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
+pub const lfm3 = @import("families/lfm3/lfm3.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = lora_merge;
+    _ = @import("families/lfm3/backend.zig");
+    _ = @import("families/lfm3/state.zig");
+    _ = @import("families/lfm3/snapshot.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
@@ -96,6 +105,7 @@ test {
     _ = @import("families/spark25/metal.zig");
     _ = @import("families/minimax_m3/minimax_m3.zig");
     _ = @import("families/llama/llama.zig");
+    _ = @import("families/flint/flint.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
@@ -118,6 +128,8 @@ pub const shared_attention = @import("core/shared_attention.zig");
 pub const tile_qmm = @import("core/tile_qmm.zig");
 
 pub const gpu_profile = @import("core/gpu_profile.zig");
+/// The core KV pool on Metal: one arena of pages and each stream's table (qwen27's TF_QWEN27_METAL_KV_PAGES).
+pub const metal_kv_pages = @import("core/metal_kv_pages.zig");
 
 pub const draft_ops = @import("draft_ops");
 

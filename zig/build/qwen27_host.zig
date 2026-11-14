@@ -23,6 +23,11 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-prompt-rows-host", "Device-aware prompt rows beside owned decoding streams without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = rows, .filters = &.{"qwen27 rows:"} })).step);
     const ane_policy = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/ane_policy.zig"), .target = b.graph.host });
     b.step("test-qwen27-ane-policy-host", "Neural Engine opt-in and tensor-unit chip policy without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ane_policy })).step);
+    const draws_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host });
+    const draws = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_draws_test.zig"), .target = b.graph.host, .imports = &.{.{ .name = "lanes", .module = draws_lanes }} });
+    const draws_run = b.addRunArtifact(b.addTest(.{ .root_module = draws, .filters = &.{"qwen27 draws:"} }));
+    test_step.dependOn(&draws_run.step);
+    b.step("test-qwen27-draws-host", "A sampled window's rows drawn on host threads equal the walk's tokens and first error").dependOn(&draws_run.step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
     const root = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_speed_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "metal", .module = metal }} });
     const run = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"qwen27 speed:"} }));
@@ -33,7 +38,9 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     const pass = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_pass_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
     b.step("test-qwen27-pass-host", "Count actual draft scratch allocations without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = pass, .filters = &.{"qwen27 pass:"} })).step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_memory_test.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "core", .module = core } } });
-    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} })).step);
+    const memory_run = b.addRunArtifact(b.addTest(.{ .root_module = memory, .filters = &.{"qwen27 memory:"} }));
+    test_step.dependOn(&memory_run.step);
+    b.step("test-qwen27-memory-host", "Prompt scratch and working-set fit without a GPU").dependOn(&memory_run.step);
     const sources = b.createModule(.{ .root_source_file = b.addWriteFiles().add("qwen27-fake-source.zig", "pub const core_deltanet = \"\";\n"), .target = b.graph.host });
     const delta = b.createModule(.{ .root_source_file = b.path("zig/src/core/deltanet_kernels.zig"), .target = b.graph.host, .imports = &.{.{ .name = "metal", .module = fake }} });
     delta.addImport("kernel_sources", sources);
@@ -66,6 +73,11 @@ pub fn tests(b: *std.Build, test_step: *std.Build.Step) void {
     b.step("test-qwen27-equality-host", "Shared lanes drafted, resumed and concurrent equality on the fake target").dependOn(&equal.step);
     const resume_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const resume_api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = resume_lanes }} });
+    const prompt_stats = b.createModule(.{ .root_source_file = b.path("zig/src/qwen27_prefill_stats_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = resume_lanes }, .{ .name = "engine_api", .module = resume_api } } });
+    const prompt_stats_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_stats, .filters = &.{"qwen27 prefill stats:"} }));
+    prompt_stats_run.has_side_effects = true;
+    test_step.dependOn(&prompt_stats_run.step);
+    b.step("test-qwen27-prefill-stats-host", "Completed prompt passes through the lane host and server mailbox without a GPU").dependOn(&prompt_stats_run.step);
     const resume_rules = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_resume.zig"), .target = b.graph.host, .optimize = .debug, .imports = &.{.{ .name = "engine_api", .module = resume_api }} });
     b.step("test-qwen27-resume-host", "Slot 0's in-place resume and rewind point: the cache's rule, with no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = resume_rules, .filters = &.{"qwen27 resume:"} })).step);
 }
@@ -79,6 +91,26 @@ pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.M
     b.step("test-qwen-dense-geometry-host", "Dense config and full-size packed headers without shaders or a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = dense_names.items })).step);
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
+    b.step("test-qwen27-reply-cache-host", "Served reply keeps retain a reusable history within the cache caps").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host, .filters = &.{"qwen27 reply cache:"} })).step);
+    const startup_test = b.addTest(.{ .root_module = host, .filters = &.{"qwen27 startup:"} });
+    const startup_step = b.step("test-qwen27-startup-host", "Startup draft stream counts and suffixes without a GPU");
+    for ([_]?[]const u8{ null, "1" }) |value| {
+        const run = b.addRunArtifact(startup_test);
+        if (value) |v| run.setEnvironmentVariable("TF_Q27_DRAFT_SLOTS", v) else run.removeEnvironmentVariable("TF_Q27_DRAFT_SLOTS");
+        run.has_side_effects = true;
+        startup_step.dependOn(&run.step);
+    }
+    const floor_logs = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_logs.zig"), .target = b.graph.host });
+    const floor_root = b.createModule(.{ .root_source_file = b.path("zig/qwen27_floor_entry_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "qwen27_served", .module = host }, .{ .name = "tensorfold", .module = engine }, .{ .name = "qwen_weights_diagnostics", .module = floor_logs } } });
+    if (b.graph.host.result.os.tag == .macos) floor_root.linkSystemLibrary("objc", .{});
+    const floor_test = b.addTest(.{ .root_module = floor_root, .test_runner = .{ .path = b.path("zig/qwen_vision_weights_runner.zig"), .mode = .simple } });
+    const floor_step = b.step("test-qwen27-prompt-floor-host", "Actual startup and lane constructor floor diagnostics without devices");
+    for ([_][]const u8{ "16", "128" }) |value| {
+        const run = b.addRunArtifact(floor_test);
+        run.setEnvironmentVariable("TF_PROMPT_ROWS", value);
+        run.has_side_effects = true;
+        floor_step.dependOn(&run.step);
+    }
     const minimax = b.createModule(.{ .root_source_file = b.path("zig/src/native/minimax_m3.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "engine_api", .module = api } } });
     b.step("test-minimax-info-host", "MiniMax logprob offers against its actual wrapped backend without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = minimax, .filters = &.{"MiniMax capabilities:"} })).step);
     const boundary = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen27_bank_boundary_host.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } } }), .filters = &.{"qwen27 bank boundary:"} });

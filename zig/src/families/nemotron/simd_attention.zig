@@ -1,8 +1,8 @@
-//! The decode attention before M5: generated kernels rewritten to read the simdgroup-matrix result layout, checked first.
+//! Decode attention before M5: generated kernels rewritten to read the simdgroup-matrix result layout, checked first.
 const std = @import("std");
 const mtl = @import("metal");
 
-/// A lane's results of a 16 x N op: rows fm and fm + 8 take the two halves, columns fn + (i & 1) + 8 ((i >> 1) % (N / 8)).
+/// A lane's results of a 16 x N op: rows fm and fm + 8 take the halves, columns fn + (i & 1) + 8 ((i >> 1) % (N / 8)).
 const rewrites = [_][2][]const u8{
     .{ "  const short fn = ((qid & 2) | (lane & 1)) * 4;\n", "  const short fn = ((lane & 8) >> 1) | ((lane & 1) << 1);\n" },
     .{
@@ -60,7 +60,7 @@ pub fn unroll(a: std.mem.Allocator, source: []const u8) ![]u8 {
 }
 
 /// The attention's score (16 x 64) and output (16 x 128) results, and the tree tail's (16 x 32, threadgroup operands).
-const check_source =
+pub const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
     \\using namespace metal;
@@ -109,7 +109,7 @@ const check_source =
     \\}
 ;
 
-/// The layout the rewrite reads, checked on this GPU: error.AttentionLayout when its tensor ops lay results out otherwise.
+/// Layout the rewrite reads, checked on this GPU: error.AttentionLayout if its tensor ops lay results out otherwise.
 pub fn check(device: mtl.Device, queue: mtl.Queue) !void {
     const lib = try mtl.Library.fromSource(device, check_source, mtl.CompileOptions.mlx());
     defer lib.deinit();

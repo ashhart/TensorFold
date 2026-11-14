@@ -14,4 +14,6 @@ test {
     _ = @import("prompt_imprint.zig");
     _ = @import("keepalive.zig");
     _ = @import("originals_test.zig");
+    _ = @import("image_api_test.zig");
+    _ = @import("engine_ocr.zig");
 }

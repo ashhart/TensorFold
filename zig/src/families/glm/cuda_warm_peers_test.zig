@@ -6,8 +6,8 @@ const ranks = @import("cuda_ranks.zig");
 const t = std.testing;
 
 const Fake = struct {
-    const Kind = enum { start, end, send, recv };
-    const Call = struct { kind: Kind, peer: usize = 0, pointer: u64 = 0, bytes: usize = 0 };
+    const Kind = enum { start, end, send, recv, gather };
+    const Call = struct { kind: Kind, peer: usize = 0, pointer: u64 = 0, bytes: usize = 0, to: u64 = 0 };
     var calls: [64]Call = undefined;
     var count: usize = 0;
     var fail: ?usize = null;
@@ -31,12 +31,16 @@ const Fake = struct {
     fn recv(ptr: u64, n: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
         return note(.{ .kind = .recv, .peer = @intCast(peer), .pointer = ptr, .bytes = n });
     }
+    fn allGather(mine: u64, all: u64, n: usize, _: cuda.nccl.DataType, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+        return note(.{ .kind = .gather, .pointer = mine, .bytes = n, .to = all });
+    }
     fn group(rank: usize, world: usize) cuda.tp_group.Group {
         var api: cuda.nccl.Api = undefined;
         api.ncclGroupStart = start;
         api.ncclGroupEnd = end;
         api.ncclSend = send;
         api.ncclRecv = recv;
+        api.ncclAllGather = allGather;
         return .{ .rank = rank, .world = world, .comm = null, .lib = .{ .lib = undefined, .api = api } };
     }
     fn reset() void {
@@ -47,21 +51,24 @@ const Fake = struct {
     fn get(name: [:0]const u8) ?[]const u8 {
         return if (std.mem.eql(u8, name, "TF_GLM_PREFILL_REDUCE")) mode else null;
     }
-    fn run(g: *const cuda.tp_group.Group, ring: bool) !void {
-        try warm.post(g, .{ .d = undefined, .handle = null }, 0x4000, ring);
+    fn run(g: *const cuda.tp_group.Group, peers: warm.Peers) !void {
+        try warm.post(g, .{ .d = undefined, .handle = null }, 0x4000, peers);
     }
 };
 
+const posting = [_]warm.Peers{ .every, .neighbours };
+
 test "GLM warm peers: ring has only neighbours, direct has every peer, all postings match and buffers stay distinct" {
-    for (2..9) |world| for ([_]bool{ false, true }) |ring| {
+    for (2..9) |world| for (posting) |peers| {
+        const ring = peers == .neighbours;
         var sends: [8][8]u8 = @splat(@splat(0));
         var recvs: [8][8]u8 = @splat(@splat(0));
         for (0..world) |rank| {
             const g = Fake.group(rank, world);
             Fake.reset();
-            try Fake.run(&g, ring);
-            const peers = if (ring) @min(world - 1, 2) else world - 1;
-            try t.expectEqual(2 + 2 * peers, Fake.count);
+            try Fake.run(&g, peers);
+            const n = if (ring) @min(world - 1, 2) else world - 1;
+            try t.expectEqual(2 + 2 * n, Fake.count);
             try t.expectEqual(Fake.Kind.start, Fake.calls[0].kind);
             try t.expectEqual(Fake.Kind.end, Fake.calls[Fake.count - 1].kind);
             for (Fake.calls[1 .. Fake.count - 1]) |c| {
@@ -90,55 +97,98 @@ test "GLM warm peers: ring has only neighbours, direct has every peer, all posti
     };
 }
 
-test "GLM warm peers: failure at every posting closes only an opened group and sends nothing after the failure" {
-    for (2..9) |world| for (0..world) |rank| for ([_]bool{ false, true }) |ring| {
+test "GLM warm peers: gather posts no send or receive, one all-gather of every rank's 4 MiB into the buffer's head" {
+    for (2..9) |world| for (0..world) |rank| {
         const g = Fake.group(rank, world);
         Fake.reset();
-        try Fake.run(&g, ring);
+        try Fake.run(&g, .gather);
+        try t.expectEqual(@as(usize, 1), Fake.count);
+        const c = Fake.calls[0];
+        try t.expectEqual(Fake.Kind.gather, c.kind);
+        try t.expectEqual(@as(usize, warm.bytes), c.bytes);
+        try t.expectEqual(@as(u64, 0x4000 + rank * warm.bytes), c.pointer);
+        try t.expectEqual(@as(u64, 0x4000), c.to);
+        Fake.reset();
+        Fake.fail = 0;
+        try t.expectError(error.NcclFailed, Fake.run(&g, .gather));
+        try t.expectEqual(@as(usize, 1), Fake.count);
+    };
+}
+
+test "GLM warm peers: failure at every posting closes only an opened group and sends nothing after the failure" {
+    for (2..9) |world| for (0..world) |rank| for (posting) |peers| {
+        const g = Fake.group(rank, world);
+        Fake.reset();
+        try Fake.run(&g, peers);
         const total = Fake.count;
         const clean = Fake.calls;
         for (0..total) |fail| {
             Fake.reset();
             Fake.fail = fail;
-            try t.expectError(error.NcclFailed, Fake.run(&g, ring));
-            const posting = clean[fail].kind == .send or clean[fail].kind == .recv;
-            try t.expectEqual(fail + 1 + @intFromBool(posting), Fake.count);
+            try t.expectError(error.NcclFailed, Fake.run(&g, peers));
+            const posted = clean[fail].kind == .send or clean[fail].kind == .recv;
+            try t.expectEqual(fail + 1 + @intFromBool(posted), Fake.count);
             for (Fake.calls[0 .. fail + 1], clean[0 .. fail + 1]) |got, wanted| try t.expectEqualDeep(wanted, got);
-            if (posting) try t.expectEqual(Fake.Kind.end, Fake.calls[Fake.count - 1].kind);
+            if (posted) try t.expectEqual(Fake.Kind.end, Fake.calls[Fake.count - 1].kind);
         }
         Fake.reset();
         Fake.fail = 1;
         Fake.end_fails = true;
-        try t.expectError(error.NcclFailed, Fake.run(&g, ring));
+        try t.expectError(error.NcclFailed, Fake.run(&g, peers));
         try t.expectEqual(@as(usize, 3), Fake.count);
     };
+}
+
+test "GLM warm peers: a split warm-up of four ranks or more that NCCL fails at its group's end refuses split by name first; fewer ranks, ring and gather do not" {
+    for (2..9) |world| for (0..world) |rank| for ([_]warm.Peers{ .every, .neighbours, .gather }) |peers| {
+        const g = Fake.group(rank, world);
+        Fake.reset();
+        warm.refused_rank = null;
+        try Fake.run(&g, peers);
+        try t.expectEqual(@as(?usize, null), warm.refused_rank);
+        Fake.reset();
+        if (peers == .gather) Fake.fail = 0 else Fake.end_fails = true;
+        try t.expectError(error.NcclFailed, Fake.run(&g, peers));
+        try t.expectEqual(if (peers == .every and world >= 4) @as(?usize, rank) else null, warm.refused_rank);
+    };
+    warm.refused_rank = null;
 }
 
 test "GLM warm peers: one rank does nothing and malformed placement refuses before NCCL" {
     Fake.reset();
     var g = Fake.group(0, 1);
-    try Fake.run(&g, true);
-    try Fake.run(&g, false);
+    for ([_]warm.Peers{ .every, .neighbours, .gather }) |peers| try Fake.run(&g, peers);
     try t.expectEqual(@as(usize, 0), Fake.count);
     g.world = 0;
-    try t.expectError(error.BadWorld, Fake.run(&g, true));
+    try t.expectError(error.BadWorld, Fake.run(&g, .neighbours));
+    try t.expectError(error.BadWorld, Fake.run(&g, .gather));
     g.world = 2;
     g.rank = 2;
-    try t.expectError(error.BadWorld, Fake.run(&g, false));
+    try t.expectError(error.BadWorld, Fake.run(&g, .every));
+    try t.expectError(error.BadWorld, Fake.run(&g, .gather));
     try t.expectEqual(@as(usize, 0), Fake.count);
 }
 
-test "GLM warm peers: existing ring selector alone restricts warm-up, gather and default split keep every peer" {
+test "GLM warm peers: the prefill selector picks the warm-up, ring its neighbours, gather its all-gather, split every peer" {
     for ([_]?[]const u8{ null, "split", "gather", "ring" }) |mode| {
         Fake.mode = mode;
         var why: []const u8 = "";
         const settings = try ranks.Settings.read(Fake.get, &why);
-        const ring = if (mode) |v| std.mem.eql(u8, v, "ring") else false;
-        try t.expectEqual(ring, settings.ring);
+        const want: warm.Peers = if (mode == null or std.mem.eql(u8, mode.?, "split")) .every else if (std.mem.eql(u8, mode.?, "ring")) .neighbours else .gather;
+        const peers = warm.Peers.of(settings.split, settings.ring);
+        try t.expectEqual(want, peers);
         const g = Fake.group(0, 4);
         Fake.reset();
-        try Fake.run(&g, settings.ring);
-        try t.expectEqual(@as(usize, if (ring) 6 else 8), Fake.count);
+        try Fake.run(&g, peers);
+        try t.expectEqual(@as(usize, switch (want) {
+            .every => 8,
+            .neighbours => 6,
+            .gather => 1,
+        }), Fake.count);
     }
     Fake.mode = null;
+}
+
+test {
+    _ = @import("cuda_warm_timeout_test.zig");
 }

@@ -62,24 +62,32 @@ fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.B
 pub fn build(b: *std.Build) void {
     @import("zig/build/fixed_cpu.zig").apply(b); // first: everything below compiles for the host it sets
     // -Dgpu: one server for one GPU, nothing else (zig/build/product.zig)
-    if (@import("zig/build/product.zig").requested(b)) |gpu| return @import("zig/build/product.zig").build(b, gpu);
+    if (@import("zig/build/product.zig").requested(b)) |gpu| {
+        @import("zig/build/product.zig").build(b, gpu);
+        return @import("zig/build/profile.zig").walk(b); // the one server's modules import the registry too
+    }
     @import("zig/build/qwen35_cache_host.zig").tests(b);
     @import("zig/build/residency_host.zig").steps(b);
+    @import("zig/build/cluster_host.zig").steps(b);
     @import("zig/build/lane_halt_host.zig").steps(b);
+    @import("zig/build/cache_replay.zig").steps(b);
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);
     @import("zig/build/dsv41_state.zig").steps(b);
     @import("zig/build/dsv41_draft.zig").steps(b);
     @import("zig/build/dsv41_assets.zig").steps(b);
     const target = b.standardTargetOptions(.{});
+    defer @import("zig/build/host_tests.zig").wire(b, target);
     @import("zig/build/copy_source.zig").steps(b);
     @import("zig/build/checkpoint_io_host.zig").steps(b, target);
+    if (target.result.os.tag == .macos) @import("zig/build/masked_values.zig").steps(b, target, .ReleaseSafe);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
     if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be exactly MAJOR.MINOR.PATCH");
     const build_options = b.addOptions();
     // Keep the existing manifest version for developer builds; releases require an explicit override.
     const manifest = @import("build.zig.zon");
     build_options.addOption([]const u8, "version", release_version orelse manifest.version);
+    build_options.addOption(bool, "is_release", release_version != null);
     const slide_test_hooks = b.option(bool, "slide-test-hooks", "Living Weights test hooks, such as TF_SLIDE_FORGET_FAIL (never in a release)") orelse false;
     if (slide_test_hooks and release_version != null) @panic("-Dslide-test-hooks is for test builds: a -Dversion release never carries it");
     build_options.addOption(bool, "slide_test_hooks", slide_test_hooks);
@@ -92,6 +100,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/gguf_host.zig").steps(b, test_step);
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
+    server_build.webHostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);
@@ -115,20 +124,24 @@ pub fn build(b: *std.Build) void {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");
         budget_mods.sources.addImport("nemotron_packed_metallib", embedded(b, budget_empty, "nemotron_packed.metallib"));
+        @import("zig/build/metal_prompt_sources.zig").steps(b, budget_mods.metal, budget_mods.engine, test_step);
         @import("zig/build/fsr.zig").deviceSteps(b, budget_mods.metal, budget_mods.engine, budget_mods.sources);
         b.step("test-shared-head-cost-metal-host", "Metal family head-cost grants without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = budget_mods.engine, .filters = &.{"shared head costs:"} })).step);
         @import("zig/build/flashnext_budget.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/residency_host.zig").compileHost(b, budget_mods.metal, budget_mods.engine, budget_mods.lanes);
         @import("zig/build/dsv41_metal.zig").steps(b, budget_mods.metal, budget_mods.sources, test_step);
         @import("zig/build/slide_host.zig").metal(b, budget_mods);
+        @import("zig/build/moss_image_teacher_host.zig").compileMetal(b, budget_mods.metal, budget_mods.engine);
     }
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
     names_run.setCwd(b.path("."));
+    names_run.has_side_effects = true; // it lists the tracked trees, and a reused pass can't see a name added since
     test_step.dependOn(&names_run.step);
     // the XPU server's stream admission, a pure function of the card's memory
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu_admit.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/limits.zig"), .target = target }) })).step);
+    @import("zig/build/moss_image_teacher_host.zig").steps(b, test_step);
     // MOSS-Image's seeded starting latents and its schedule against torch's, host computations on every platform
     for ([_][]const u8{ "noise", "schedule" }) |name| {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/families/moss_image/{s}.zig", .{name})), .target = target }) })).step);
@@ -156,6 +169,9 @@ pub fn build(b: *std.Build) void {
     _ = server_build.addTo(b, voice_tool, target, optimize);
     const voice_exe = b.addExecutable(.{ .name = "drama3-voice", .root_module = voice_tool });
     b.step("drama3-voice", "Attested Drama voice files from reference WAVs, coded by drama3-generate --encode").dependOn(&b.addInstallArtifact(voice_exe, .{}).step);
+    // the dashboard page is text, so its test runs on every OS and Linux CI sees it (it ran only in the macOS suite)
+    const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     // the backend options are declared for every target, so one build script may pass the same flags on every OS
     const cuda_options = @import("zig/build/options.zig").cuda(b);
     const tp_options = @import("zig/build/options.zig").tp(b);
@@ -174,16 +190,23 @@ pub fn build(b: *std.Build) void {
         gemma4_host_mods.sources.addImport("nemotron_packed_metallib", embedded(b, b.addWriteFiles().add("gemma4-compile-empty.metallib", ""), "nemotron_packed.metallib"));
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
         @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/prefill_widths_metal.zig").compileHost(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/prefill_widths_metal.zig").rest(b, gemma4_host_mods.engine, gemma4_host_mods.lanes);
     }
     @import("zig/build/qwen27_host.zig").tests(b, test_step);
+    @import("zig/build/prefill_widths_metal.zig").tests(b, test_step);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/release_paths_step.zig").tests(b, test_step);
     @import("zig/build/sessions.zig").add(b, test_step);
+    @import("zig/build/sessions_writes.zig").steps(b);
     @import("zig/build/tp.zig").add(b, target, optimize, test_step, tp_options);
+    @import("zig/build/tp_check.zig").add(b, target, test_step);
     @import("zig/build/gradient_host.zig").add(b);
     @import("zig/build/living_tools_host.zig").steps(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
+    @import("zig/build/env_defaults.zig").steps(b, draft_ids, test_step);
+    if (target.result.os.tag != .macos) @import("zig/build/qwen3_cuda.zig").steps(b, target, optimize, cuda_options, test_step);
     xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
@@ -195,6 +218,7 @@ pub fn build(b: *std.Build) void {
     const with_hip = b.option(bool, "hip", "Enable the opt-in HIP backend and its host/device targets") orelse false;
     const hip_options = hip_build.options(b); // declared on every target (#1165), used only with -Dhip=true
     hip_build.loaderTests(b, test_step);
+    @import("zig/build/nemotron_parse.zig").hostTests(b, test_step);
     if (with_hip) hip_build.steps(b, target, optimize, build_options, test_step, hip_options);
     const with_vulkan = b.option(bool, "vulkan", "Enable the opt-in Vulkan backend and its host/device targets") orelse false;
     const vulkan_options = vulkan_build.options(b); // declared on every target, used only with -Dvulkan=true
@@ -228,17 +252,24 @@ pub fn build(b: *std.Build) void {
     grammar_build.steps(b, target, xgrammar, lanes_cpu);
     grammar_build.hostTests(b, test_step);
     contract_build.hostTests(b, gemma4_contract_host);
+    @import("zig/build/startup_states_timing.zig").step(b);
     // the CPU-only fake server and engine-less CLI (zig build server-cpu), behind zig/tests/server/build.sh
     @import("zig/build/server.zig").cpuArtefacts(b, b.graph.host, optimize, build_options);
     @import("zig/build/mcdma_pair.zig").add(b, target);
+    @import("zig/build/cache_index_timing.zig").step(b);
+    // the chat template's nesting, step, stack and memory limits (zig/src/core/template/limits_test.zig), on every host
+    const template_limits = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = b.graph.host, .optimize = .Debug, .link_libc = true });
+    b.step("test-template-limits-host", "Chat template nesting, render steps, stack and memory limits without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = template_limits, .filters = &.{"security:"} })).step);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").tests(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
     @import("zig/build/save_guard.zig").wire(b);
+    @import("zig/build/cpu_contract.zig").steps(b, test_step);
     @import("zig/build/bf16_round.zig").wire(b, test_step);
     @import("zig/build/qwen35_layers.zig").wire(b, test_step);
     @import("zig/build/dev_tools.zig").wire(b, target);
     @import("zig/build/profile.zig").wire(b, test_step);
+    @import("zig/build/host_ci.zig").steps(b);
     @import("zig/build/test_reads.zig").wire(b); // last: it adds to the steps everything above declared
 }
 

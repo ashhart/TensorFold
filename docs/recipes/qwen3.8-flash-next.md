@@ -58,6 +58,18 @@ the lane matmul; M1 through M4 use the per-row projection and hyper-connection k
 restore recurrent state, n-gram history and attention state, including incomplete pooled blocks.
 The load-time row check disables drafting when windows do not reproduce serial steps.
 
+`TF_FLASHNEXT_SCALE_INDEX=1` (off by default; M1 through M4, 4-bit experts in groups of 32) has the expert kernels read
+each group's scale and bias through a 16-bit index into its tensor's table of distinct pairs, built at load. The
+kernels get the same two values from 10% fewer weight bytes, so every reply keeps its tokens. Prompt passes still read
+the stored scales and biases, so the index is held beside them. The setting does nothing with tensor units,
+`--ssd-experts` or speed-up mode, and a tensor with more than 65,536 distinct pairs turns it off with a warning.
+
+On M1 through M4, a decode window of five rows or more runs its 4-bit experts grouped by expert: rows that picked
+the same expert share its launch, so a copy or repeat stretch reads each expert's weights once instead of once a
+row. Every (row, expert) pair keeps the per-row kernels' sums, so replies keep their tokens. Windows of four rows
+or fewer, which is every prose round, are untouched. `TF_FLASHNEXT_GROUPED_ROWS` sets the first grouped width
+(`1` through `32`; `0` turns grouping off); it does nothing with tensor units, `--ssd-experts` or speed-up mode.
+
 The prefill path uses sparse selected-key attention, fused hyper-connections and n-gram lookups,
 stacked DeltaNet projections and sorted expert rows. It submits bounded groups of layers to limit live
 workspace. Compatible prefill matmul kernels check against MLX; unsupported paths use MLX's kernels.
@@ -352,7 +364,7 @@ checks the following against the pack that
 Through `tensorfold serve` on the full packs, each reply was requested with `"draft": false` and again with
 drafts. The prompts were the benchmark's two, the raw prompt as chat, and two 256-token chats, each greedy and
 with seeds 1234 to 1238. On both packs, 30 of 30 replies had identical token-id SHA-256s. A drafted round
-emitted 2.93 tokens on average on SAGE and 3.16 on 3.05.
+emitted 2.93 tokens on average on SAGE and 3.16 on 3.05. From a [v0.6.6](https://github.com/ashhart/TensorFold/tree/v0.6.6) checkout:
 
 ```bash
 TENSORFOLD_EXL3_FLASHNEXT=flashnext-exl3-3.05bpw pytest -q tests/cuda/test_qwen4_exp_exl3.py
@@ -477,7 +489,9 @@ A quantized cache changes the output, so its replies differ from bf16's. Drafted
 families refuse `--kv-dtype` before any download.
 
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
-default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+default is 0.70, for one stream and for concurrent rounds. The native HIP engine defaults to 0.80 for Flash Next on one
+RDNA 3.5 GPU (the Strix Halo and other gfx115x iGPUs) and to 0.3 on other cards, across several GPUs, and for Qwen 3.5,
+3.6 and 3.8. The MLX path refuses it.
 
 ## Native HIP on a Strix Halo iGPU
 
@@ -511,6 +525,10 @@ taken after removing that offset. Task scores come from the HIP server: greedy, 
 match, HumanEval 164 pass@1, MMLU-Pro 700 (50 a category, a letter within 16 tokens; replies without one count as wrong,
 159 of them for the uniform 4-bit checkpoint, 14 for oQ4e-mix5 and 4 for oQ4e).
 
+On this iGPU serving alone, draft chains stop at a 0.80 confidence floor by default (other cards and the other HIP
+families stay at 0.3);
+`--mtp-confidence P` overrides it, and `--mtp-drafts N` caps the chain depth at N drafts.
+
 ```bash
 zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Doptimize=ReleaseFast
 ./zig-out/native-hip/bin/tensorfold-native serve ./Qwen3.8-Flash-Next-oQ4e-mix5-HIP \
@@ -532,7 +550,7 @@ The target sampler still reads the full vocabulary, so the list affects proposal
 
 The corpus is Homebrew CPython 3.14.5's standard-library `*.py` files, excluding `site-packages` and
 `__pycache__`. It contains no repository or PyPI package text. Use `tokenizers==0.22.2` and
-`tools/draft_vocab.py` with SHA-256
+`tools/draft_vocab.py` as of the v0.6.6 tag (`git show v0.6.6:tools/draft_vocab.py`), SHA-256
 `1baf0dd08669355cf9cf6e32998e5436ce8712c3ab1bffe38d369f3fa3a86b56`.
 The tokenizer JSON SHA-256 is:
 
@@ -542,10 +560,10 @@ The tokenizer JSON SHA-256 is:
 
 Place that tokenizer at `tokenizer.json` and copy the clean stdlib into an empty `cpython` directory,
 preserving relative paths. The [Nemotron corpus-copy example](nemotron-3.5.md#draft-vocabulary-provenance)
-shows the file-selection rules; change its destination to `cpython`. Then run from the repository root:
+shows the file-selection rules; change its destination to `cpython`. Then run it from a v0.6.6 checkout's root:
 
 ```bash
-TOKENIZERS_PARALLELISM=false python3 -B tools/draft_vocab.py tokenizer.json draft_vocab.txt --size 79591 --keep-below 65536 --min-count 1 --added-tokens 'cpython/**/*.py'
+TOKENIZERS_PARALLELISM=false python3 -B tools/draft_vocab.py tokenizer.json draft_vocab.txt 'cpython/**/*.py' --size 79591 --keep-below 65536 --min-count 1 --added-tokens
 ```
 
 The generator retains all IDs below 65,536 and tokenizer-added IDs, then adds corpus IDs by frequency

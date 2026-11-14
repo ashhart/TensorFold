@@ -21,6 +21,23 @@ const sched_host = @import("sched_host.zig");
 const serve_line = @import("serve_line.zig");
 const round_graph = @import("round_graph.zig");
 
+/// The accepted settings of this rank; logging does not change the model or session.
+pub fn logStartup(m: *model.Model, pieces_floor: bool) void {
+    const comm: serve_line.Comm = if (m.session.roce != null or m.session.roce_multi != null)
+        .roce
+    else if (m.session.mail != null) .mailbox else .nccl;
+    const graphs = if (round_graph.current()) |rg| rg.split or rg.gate else |_| false;
+    serve_line.print(serve_line.resolved(pieces_floor, comm, graphs, m.f.opts.branches, startupEnv), startupLine);
+}
+
+fn startupEnv(name: [:0]const u8) ?[]const u8 {
+    return @import("sys").environment.Process.get(.{}, name);
+}
+
+fn startupLine(text: []const u8) void {
+    std.log.info("{s}", .{text});
+}
+
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false }};
 
@@ -77,7 +94,7 @@ pub const Served = struct {
 
     /// Rank 0's engine over a loaded model (`drafts`: DSpark's pass, else serial windows through the same lanes).
     pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, assets: []const u8, drafts: bool, context: ?i64, prompt_cache_gib: ?f64) !*Served {
-        const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = model.ownPrefillEnv(), .layers = try model.layersEnv(gpa), .prompt_cache_gib = prompt_cache_gib });
+        const m = try model.Model.open(gpa, io, dir, assets, .{ .drafts = drafts, .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa), .prompt_cache_gib = prompt_cache_gib });
         errdefer m.close();
         if (m.rank() != 0) return error.NotRankZero; // the other ranks run `tf-dsv41 follow`
         const s = try gpa.create(Served);
@@ -121,7 +138,7 @@ pub const Served = struct {
         s.cfg = try lanes.Config.init(gpa, try s.x.model(s.arena.allocator(), 64), 16, 15);
         s.x.policy.depth.forward_rows = if (m.rows) |b| b.cap else 16;
         // drafts sized from cost tables, not the wall clock, so HTTP == CLI replay (TF_DSV41_DRAFT_TIMED=1: measured)
-        s.cfg.timed = if (std.c.getenv("TF_DSV41_DRAFT_TIMED")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
+        s.cfg.timed = try @import("sys").environment.read(bool, "TF_DSV41_DRAFT_TIMED", false);
         // the depth policy as booted (the reference's "DSpark on (depth ...)"): what a check reads from the log
         const dset = s.x.policy.depth.set;
         std.log.info("dsv41 depth: {t}, cap {d}, skip {s}, joint {d}, drafts priced {s}", .{ dset.mode, dset.cap, if (dset.skip) "on" else "off", dset.joint, if (s.cfg.timed) "by the wall clock" else "from the cost tables" });
@@ -139,7 +156,7 @@ pub const Served = struct {
         @import("model_health.zig").attach(m, &s.host);
         // TF_DSV41_PREFILL_PIECES=1: the batcher plans the rounds; served shape only, same setting on every rank
         s.sched = null;
-        if (model.Model.piecesEnv()) {
+        if ((try model.Model.piecesEnv())) {
             if (!(m.gt.own_prefill and m.gt.prompt_tail == .verify)) {
                 if (!quiet) std.log.warn("TF_DSV41_PREFILL_PIECES=1 needs TF_DSV41_OWN_PREFILL=1 and TF_DSV41_PROMPT_TAIL=verify (the served shape); prompts run whole", .{});
             } else {
@@ -152,19 +169,7 @@ pub const Served = struct {
                 std.log.info("dsv41 rounds: {s}", .{sh.describe(&buf)});
             }
         } else std.log.info("dsv41 rounds: whole prompts at admission (TF_DSV41_PREFILL_PIECES=1: the reference server's pieces between decode rounds)", .{});
-        // The settings a repeated-prompt A/B compares, resolved once; printing them changes nothing.
-        const serve_settings = serve_line.resolved(
-            if (s.sched) |sh| sh.p.s.floor != null else false,
-            std.c.getenv("TF_DSV41_PIECES_FLOOR") != null,
-            m.session.roce != null or m.session.roce_multi != null,
-            std.c.getenv("TF_ROCE") != null,
-            if (round_graph.current()) |rg| rg.split or rg.gate else |_| false,
-            std.c.getenv("TF_DSV41_ROUND_GRAPH") != null,
-            m.f.opts.branches,
-            std.c.getenv("TF_DSV41_BRANCHES") != null,
-        );
-        var serve_buf: [160]u8 = undefined;
-        std.log.info("{s}", .{serve_line.line(&serve_buf, serve_settings)});
+        logStartup(m, if (s.sched) |sh| sh.p.s.floor != null else false);
         s.lookup = null;
         const ls = try lookup.Settings.fromEnv();
         if (ls.plan) {

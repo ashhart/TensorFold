@@ -5,6 +5,7 @@ pub const index = @import("index.zig");
 pub const Spec = @import("spec.zig").Spec;
 pub const plan = @import("hip/plan.zig");
 pub const ngram = @import("hip/ngram.zig");
+pub const host_pages = @import("host_pages.zig");
 pub const model = @import("hip/model.zig");
 pub const load = @import("hip/load.zig");
 pub const cache = @import("hip/cache.zig");
@@ -24,6 +25,7 @@ test {
     _ = index;
     _ = plan;
     _ = ngram;
+    _ = host_pages;
     _ = model;
     _ = cache;
     @import("std").testing.refAllDecls(engine.Engine);
@@ -37,4 +39,5 @@ test {
     @import("std").testing.refAllDecls(snapshot);
     _ = native;
     _ = @import("hip/state_test.zig");
+    _ = @import("hip/fused_prep_test.zig");
 }

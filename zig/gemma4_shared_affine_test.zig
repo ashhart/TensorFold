@@ -103,12 +103,14 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
-        try std.testing.expectEqualStrings("d8f47cbbddf24502ca2c16cfdef0672731cc2dbe59ad027f47a3e662bcf8f627", &std.fmt.bytesToHex(hash, .lower));
+        // dda89ef49's bytes: 47afc1620..dda89ef49 reworded comments only, after cf10a6b7d's pinned edit
+        try std.testing.expectEqualStrings("c959eb1f5ac8a57049c09b3aad5d20f26b64f2e47d8b082c47ebbfae90d97a8b", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_lane_projection, &hash, .{});
-        try std.testing.expectEqualStrings("d96f3c86926177d9fe6df6c82beea7e4f379b16654aa835200d50afe182f3c99", &std.fmt.bytesToHex(hash, .lower));
+        // Packed affine lanes with producer sums and independent prompt row blocks.
+        try std.testing.expectEqualStrings("7befe2028dae5036541f311f230a02d5652e634450ef16dc66dce6e15e935277", &std.fmt.bytesToHex(hash, .lower));
     }
 }
 test "released lane parameters and conservative scratch size" {

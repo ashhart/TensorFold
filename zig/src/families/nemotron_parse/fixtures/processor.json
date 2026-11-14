@@ -1,0 +1,85 @@
+{
+  "source_revision": "4035ffb1d8f8bafcdb867dfaf6f7514f101464f9",
+  "cases": [
+    {
+      "height": 1,
+      "width": 1,
+      "content_h": 1,
+      "content_w": 1,
+      "padded_h": 16,
+      "padded_w": 64,
+      "tokens": 2,
+      "sha256": "a4588849fb862743ef48b8b385d9525d8fefe3cd533d910e63a23eb28fb28566"
+    },
+    {
+      "height": 17,
+      "width": 65,
+      "content_h": 17,
+      "content_w": 65,
+      "padded_h": 32,
+      "padded_w": 128,
+      "tokens": 5,
+      "sha256": "2f10fad8a77696095ffe16ff7ab61a20f262e3290e7f784cf4d0a4b2c3dcf7b9"
+    },
+    {
+      "height": 31,
+      "width": 129,
+      "content_h": 31,
+      "content_w": 129,
+      "padded_h": 32,
+      "padded_w": 192,
+      "tokens": 7,
+      "sha256": "ade4e732a116c088a16248142c22f9876182d6bdb1c5f4756b7b3aa673692a49"
+    },
+    {
+      "height": 113,
+      "width": 97,
+      "content_h": 113,
+      "content_w": 97,
+      "padded_h": 128,
+      "padded_w": 128,
+      "tokens": 17,
+      "sha256": "e7f0adc4fa13b6d738c3294471c6ab762d560c9b3b10bd173b82e184a8da6e39"
+    },
+    {
+      "height": 2049,
+      "width": 101,
+      "content_h": 2048,
+      "content_w": 100,
+      "padded_h": 2048,
+      "padded_w": 128,
+      "tokens": 257,
+      "sha256": "e025eca32b2f9c8f362a0de9838a5ba91a7abb203af00105655d1413094c968d"
+    },
+    {
+      "height": 99,
+      "width": 2001,
+      "content_h": 82,
+      "content_w": 1664,
+      "padded_h": 96,
+      "padded_w": 1664,
+      "tokens": 157,
+      "sha256": "48c2d9cc6b2c59372ae95e634ed6341547372f1dd3409dbac9bbba1f88b425bf"
+    },
+    {
+      "height": 2201,
+      "width": 1777,
+      "content_h": 2048,
+      "content_w": 1653,
+      "padded_h": 2048,
+      "padded_w": 1664,
+      "tokens": 3329,
+      "sha256": "a1884e9025579569bb00835e7db1f94603646fef0b8b1dbb11752ceabd8b4bf4"
+    },
+    {
+      "height": 2048,
+      "width": 1664,
+      "content_h": 2048,
+      "content_w": 1664,
+      "padded_h": 2048,
+      "padded_w": 1664,
+      "tokens": 3329,
+      "sha256": "d3fe3629bc22f8ee2f75ccbc16236777e1dad2406f118db0f2515be42af33c7d"
+    }
+  ]
+}

@@ -14,8 +14,8 @@ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// Whether the streams' keys and values live in pages of the core pool (off by default).
 pub fn on() bool {
-    const v = std.c.getenv("TF_NEMOTRON_METAL_KV_PAGES") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+    const v = @import("profile").get(.TF_NEMOTRON_METAL_KV_PAGES) orelse return false;
+    return std.mem.eql(u8, v, "1");
 }
 
 /// Backend `b` gets `pages` pages over its `o.streams` lanes for streams of at most `most` rows, and the twins.

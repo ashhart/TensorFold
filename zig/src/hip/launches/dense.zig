@@ -19,15 +19,21 @@ pub const Tile = enum { dot2, wmma12 };
 /// The launched kernels: dot2, and the WMMA tile's two block geometries (W12Small, W12Big), with equal bytes.
 pub const Shape = enum { dot2, w12_small, w12_big };
 
-/// Rows the small WMMA geometry takes, more for narrow outputs (hip-dense-tune on an R9700, weights cold).
-pub const small_rows = 96;
-pub const narrow_rows = 384;
-pub const narrow_cols = 1024;
+/// Rows the small WMMA block takes (hip-dense-tune, R9700): any product; weights the cache holds; narrow outputs.
+pub const small_rows = 64;
+pub const cached_rows = 96;
+pub const narrow_rows = 256;
+pub const narrow_cols = 1152; // nine big-block columns: 2,048 columns already take the big block from 160 rows
+/// Weight bytes past which re-reading them from DRAM costs the small block more than the big block's emptier grid.
+pub const cache_bytes = 64 << 20;
 
-/// The kernel `tile` runs an `m` x `n` product on: few rows or narrow outputs fill the GPU with the small block.
-pub fn shapeOf(tile: Tile, m: c_int, n: c_int) Shape {
+/// The kernel `tile` runs an `m` x `n` x `k` product on: few rows or narrow outputs fill the GPU with the small block.
+pub fn shapeOf(tile: Tile, m: c_int, n: c_int, kk: c_int) Shape {
     if (tile == .dot2) return .dot2;
-    return if (m <= small_rows or (n <= narrow_cols and m <= narrow_rows)) .w12_small else .w12_big;
+    if (m <= small_rows) return .w12_small;
+    if (n <= narrow_cols) return if (m <= narrow_rows) .w12_small else .w12_big;
+    const weights = @as(i64, n) * kk * 2; // signed: a bad k is refused later, never trapped here
+    return if (weights <= cache_bytes and m <= cached_rows) .w12_small else .w12_big;
 }
 
 /// Each kernel's rows and columns a block and threads a block (tiles/gemm.hpp, tiles/wmma12_gemm.hpp).
@@ -40,14 +46,36 @@ fn geometry(shape: Shape) Geometry {
     };
 }
 
+/// The packed gate/up product (silu x up in its epilogue): a 2-wave pair block for few rows, the big block past.
+pub const PairShape = enum { pair, big };
+
+/// The pair block takes the rows the small block would.
+pub fn pairShapeOf(m: c_int) PairShape {
+    return if (m <= small_rows) .pair else .big;
+}
+
+fn pairGeometry(shape: PairShape) Geometry {
+    return switch (shape) {
+        .pair => .{ .rows = 16, .cols = 64, .threads = 64 },
+        .big => .{ .rows = 128, .cols = 128, .threads = 256 },
+    };
+}
+
+const silu_symbols = [_][:0]const u8{
+    "_ZN2tf4rocm22dense_wmma12_gemm_siluINS0_7DotBF16ENS0_6W12GeoILi16ELi64ELi64ELi1ELi2EEEEEvNS0_6AffineE",
+    "_ZN2tf4rocm22dense_wmma12_gemm_siluINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi64ELi2ELi4EEEEEvNS0_6AffineE",
+};
+
 const symbols = [_][:0]const u8{
     "_ZN2tf4rocm16dense_gemm_blockINS0_7DotBF16ELi8EEEvNS0_6AffineE",
     "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi16ELi64ELi64ELi1ELi4EEEEEvNS0_6AffineE",
-    "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi32ELi2ELi4EEEEEvNS0_6AffineE",
+    "_ZN2tf4rocm17dense_wmma12_gemmINS0_7DotBF16ENS0_6W12GeoILi128ELi128ELi64ELi2ELi4EEEEEvNS0_6AffineE",
 };
 
 pub const Kernels = struct {
     fns: [symbols.len]Function,
+    /// The packed gate/up products, by PairShape.
+    silu: [silu_symbols.len]Function,
     /// The build's activations are BF16 (the tile's dot2); on an FP16 build the symbols only trap.
     bf16: bool,
     /// The chip has gfx12's WMMA; elsewhere the WMMA symbol only traps.
@@ -59,7 +87,9 @@ pub const Kernels = struct {
     pub fn load(tiles: Module, bf16: bool, wmma12: bool, matrix: affine.Matrix) Error!Kernels {
         var fns: [symbols.len]Function = undefined;
         for (&fns, symbols) |*f, name| f.* = try tiles.function(name);
-        return .{ .fns = fns, .bf16 = bf16, .wmma12 = wmma12, .serve = serving(bf16, wmma12, matrix) };
+        var silu: [silu_symbols.len]Function = undefined;
+        for (&silu, silu_symbols) |*f, name| f.* = try tiles.function(name);
+        return .{ .fns = fns, .silu = silu, .bf16 = bf16, .wmma12 = wmma12, .serve = serving(bf16, wmma12, matrix) };
     }
 
     /// Only matrix=on serves gfx12's WMMA tile (its fp32 sums are less exact); every other choice keeps dot2's bits.
@@ -79,7 +109,39 @@ pub const Kernels = struct {
 
     /// y = x . W^T for `m` BF16 rows of x and the [n, k] BF16 weights on `tile`: fp32 into `out`, or BF16 into `out16`.
     pub fn gemm(k: *const Kernels, r: *const runtime.Runtime, tile: Tile, x: u64, w: u64, out: u64, out16: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
-        return k.gemmOn(r, tile, shapeOf(tile, m, n), x, w, out, out16, m, n, kk, s);
+        return k.gemmOn(r, tile, shapeOf(tile, m, n, kk), x, w, out, out16, m, n, kk, s);
+    }
+
+    /// act (m, n / 2) = silu(gate) x up of a packed gate/up weight (n, k): the plain product then tf_silu_mul's bytes.
+    pub fn gemmSilu(k: *const Kernels, r: *const runtime.Runtime, x: u64, w: u64, act: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
+        return k.gemmSiluOn(r, pairShapeOf(m), x, w, act, m, n, kk, s);
+    }
+
+    /// The packed product's refusal, or null: `refusal`'s on the WMMA tile, whole gate/up groups of 32 columns, an act.
+    pub fn siluRefusal(k: *const Kernels, x: u64, w: u64, act: u64, m: c_int, n: c_int, kk: c_int) ?[]const u8 {
+        if (k.refusal(.wmma12, x, w, m, n, kk)) |why| return why;
+        if (@rem(n, 32) != 0) return "n is not whole gate/up groups of 32 columns";
+        if (act == 0) return "no act";
+        return null;
+    }
+
+    /// `gemmSilu` on one named geometry (the kernel tests and the contract force each).
+    pub fn gemmSiluOn(k: *const Kernels, r: *const runtime.Runtime, shape: PairShape, x: u64, w: u64, act: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
+        return k.gemmSiluWith(r, k.silu[@backingInt(shape)], shape, x, w, act, m, n, kk, s);
+    }
+
+    /// `gemmSiluOn` through `f`, a kernel of `shape`'s geometry and arguments (the contract's control is one).
+    pub fn gemmSiluWith(k: *const Kernels, r: *const runtime.Runtime, f: Function, shape: PairShape, x: u64, w: u64, act: u64, m: c_int, n: c_int, kk: c_int, s: abi.Stream) Error!void {
+        if (k.siluRefusal(x, w, act, m, n, kk)) |why| {
+            std.log.err("dense gemm silu: {s} (m {d}, n {d}, k {d})", .{ why, m, n, kk });
+            return error.Invalid;
+        }
+        const a: affine.Arg = .{ .x = x, .words = w, .scale = .{ .p = 0, .kind = 0 }, .bias = .{ .p = 0, .kind = 0 }, .out = 0, .m = m, .n = n, .k = kk, .bits = 16, .group = group, .fp16 = 0, .out16 = act };
+        if (s == util.counting) return;
+        var args: hl.Args = .{};
+        try args.add(a);
+        const g = pairGeometry(shape);
+        try hl.launch(f, .{ .grid = .{ .x = cdiv(n, g.cols), .y = cdiv(m, g.rows) }, .block = .{ .x = g.threads } }, .{ .r = r, .handle = s }, &args);
     }
 
     /// `gemm` on one named kernel of `tile` (hip-dense-tune times each geometry); the shape must belong to the tile.
@@ -136,7 +198,7 @@ pub const Kernels = struct {
 };
 
 test "the dense GEMM refuses what its tile does not take" {
-    const k: Kernels = .{ .fns = undefined, .bf16 = true, .wmma12 = true };
+    const k: Kernels = .{ .fns = undefined, .silu = undefined, .bf16 = true, .wmma12 = true };
     for ([_]Tile{ .dot2, .wmma12 }) |t| {
         try std.testing.expect(k.refusal(t, 0, 0, 3, 5, 256) == null);
         try std.testing.expect(k.refusal(t, 0, 0, 3, 5, 200) != null);
@@ -144,21 +206,45 @@ test "the dense GEMM refuses what its tile does not take" {
         try std.testing.expect(k.refusal(t, 0, 8, 3, 5, 256) != null);
         try std.testing.expect(k.refusal(t, 0, 0, 0, 5, 256) != null);
     }
-    const half: Kernels = .{ .fns = undefined, .bf16 = false, .wmma12 = false };
+    const half: Kernels = .{ .fns = undefined, .silu = undefined, .bf16 = false, .wmma12 = false };
     try std.testing.expect(half.refusal(.dot2, 0, 0, 3, 5, 256) != null);
-    const gfx11: Kernels = .{ .fns = undefined, .bf16 = true, .wmma12 = false };
+    const gfx11: Kernels = .{ .fns = undefined, .silu = undefined, .bf16 = true, .wmma12 = false };
     try std.testing.expect(gfx11.refusal(.dot2, 0, 0, 3, 5, 256) == null);
     try std.testing.expect(gfx11.refusal(.wmma12, 0, 0, 3, 5, 256) != null);
 }
 
+test "the packed silu product takes the pair block for few rows and refuses a width of broken gate/up pairs" {
+    try std.testing.expectEqual(PairShape.pair, pairShapeOf(1));
+    try std.testing.expectEqual(PairShape.pair, pairShapeOf(small_rows));
+    try std.testing.expectEqual(PairShape.big, pairShapeOf(small_rows + 1));
+    const k: Kernels = .{ .fns = undefined, .silu = undefined, .bf16 = true, .wmma12 = true };
+    try std.testing.expect(k.siluRefusal(16, 16, 16, 1, 32, 128) == null);
+    try std.testing.expect(k.siluRefusal(16, 16, 16, 300, 24576, 4096) == null);
+    for ([_]c_int{ 16, 48, 24560 }) |n| try std.testing.expect(k.siluRefusal(16, 16, 16, 1, n, 128) != null);
+    try std.testing.expect(k.siluRefusal(16, 16, 0, 1, 32, 128) != null);
+    try std.testing.expect(k.siluRefusal(16, 16, 16, 1, 32, 100) != null); // K not whole groups of 128
+}
+
 test "WMMA products take their geometry by size; dot2 has one" {
-    try std.testing.expectEqual(Shape.dot2, shapeOf(.dot2, 1, 4096));
-    try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, 1, 4096));
-    try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, small_rows, 12288));
-    try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, small_rows + 1, 4096));
-    try std.testing.expectEqual(Shape.w12_small, shapeOf(.wmma12, narrow_rows, narrow_cols));
-    try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, narrow_rows + 1, narrow_cols));
-    try std.testing.expectEqual(Shape.w12_big, shapeOf(.wmma12, small_rows + 1, narrow_cols + 1));
+    const small = Shape.w12_small;
+    const big = Shape.w12_big;
+    try std.testing.expectEqual(Shape.dot2, shapeOf(.dot2, 1, 4096, 4096));
+    // any product up to small_rows: gate/up's 96 MiB of weights too
+    try std.testing.expectEqual(small, shapeOf(.wmma12, 1, 12288, 4096));
+    try std.testing.expectEqual(small, shapeOf(.wmma12, small_rows, 12288, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, small_rows + 1, 12288, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, small_rows + 1, 4096, 12288)); // down: 96 MiB
+    // weights the cache holds (q/o: 32 MiB) up to cached_rows
+    try std.testing.expectEqual(small, shapeOf(.wmma12, cached_rows, 4096, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, cached_rows + 1, 4096, 4096));
+    // narrow outputs (k/v) up to narrow_rows
+    try std.testing.expectEqual(small, shapeOf(.wmma12, narrow_rows, 1024, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, narrow_rows + 1, 1024, 4096));
+    try std.testing.expectEqual(small, shapeOf(.wmma12, narrow_rows, narrow_cols, 4096));
+    try std.testing.expectEqual(big, shapeOf(.wmma12, cached_rows + 1, 2048, 4096));
+    try std.testing.expectEqual(small, shapeOf(.wmma12, cached_rows, narrow_cols + 1, 4096));
+    // a negative k picks a block without trapping; gemmWith refuses the product
+    try std.testing.expectEqual(small, shapeOf(.wmma12, small_rows + 1, 4096, -128));
 }
 
 test "gfx12 serves the WMMA tile only under matrix=on; other chips keep dot2" {

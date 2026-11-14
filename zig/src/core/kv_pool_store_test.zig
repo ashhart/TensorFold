@@ -79,7 +79,7 @@ const World = struct {
     fn admit(w: *World, a: Allocator, prompt: []const u32, history: u32, max_new: u32) !void {
         var adopt: std.ArrayList(u32) = .empty;
         defer adopt.deinit(w.gpa);
-        const plan = try w.store.begin(a, prompt, history, &.{}, null, &adopt);
+        const plan = try w.store.begin(a, .of(prompt), history, &.{}, null, &adopt);
         var l: Lease = .{};
         errdefer w.pool.finish(&l);
         try w.pool.adopt(&l, adopt.items);
@@ -89,7 +89,7 @@ const World = struct {
         for (plan.marks) |m| {
             var path: [64]u32 = undefined;
             const n = m / page;
-            const kept = w.store.keep(prompt, m, null, l.ids.items[0..n], path[0..n]);
+            const kept = w.store.keep(.of(prompt), m, null, l.ids.items[0..n], path[0..n]);
             for (path[0..kept.shared], 0..) |id, i| w.pool.share(&l, i, id);
         }
         try w.streams.append(w.gpa, l);
@@ -156,7 +156,7 @@ fn run(w: *World, seed: u64, pages: usize) !void {
     w.* = .{ .gpa = gpa, .pool = try Pool.init(gpa, pages, layout.pageBytes()), .store = undefined, .family = family };
     w.store = try radix.Store.init(gpa, family.snapshots(), radix.pagesOf(Pool, &w.pool, w.pool.page_bytes), .{ .page = page, .min_gap = 8, .min_prompt = 0, .tail = true });
     w.store.limit(.{ .pages = pages / 2, .snaps = 4 });
-    w.pool.reclaim = .{ .ctx = &w.store, .call = World.reclaim };
+    try w.pool.joinReclaim(.{ .ctx = &w.store, .call = World.reclaim });
     var convs: [4][64]u32 = undefined;
     var lens: [4]u32 = @splat(0);
     for (&convs, 0..) |*c, k| for (c, 0..) |*t, i| {
@@ -211,4 +211,78 @@ test "page accounting: random admits, keeps, resumes, finishes, cancels and fail
         w.gpa.destroy(w.family);
     }
     try expect(refused > 0 and failed > 0 and adopted > 0); // the runs met full pools, failed uploads and resumes
+}
+
+/// A legacy family whose save holds pool pages for its copy (as the CUDA ring families' blobs do), one more than free.
+const HoldingFamily = struct {
+    pool: *Pool,
+    fail: bool = false,
+    live: usize = 0,
+
+    const State = struct { ids: [8]u32, n: usize };
+
+    fn of(ptr: *anyopaque) *HoldingFamily {
+        return @ptrCast(@alignCast(ptr));
+    }
+    fn snapshots(f: *HoldingFamily) radix.Snapshots {
+        return .{ .ptr = f, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } };
+    }
+    fn bytes(_: *anyopaque, _: u32) u64 {
+        return 1;
+    }
+    fn save(ptr: *anyopaque, _: ?*anyopaque, _: u32) anyerror!radix.Saved {
+        const f = of(ptr);
+        if (f.fail) return error.CopyFailed;
+        const st = try std.testing.allocator.create(State);
+        st.n = f.pool.available() + 1; // the pool must reclaim from the store to give them
+        if (!f.pool.hold(st.ids[0..st.n])) {
+            std.testing.allocator.destroy(st);
+            return error.NoCachePages;
+        }
+        f.live += 1;
+        return st;
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: radix.Saved) anyerror!void {}
+    fn drop(ptr: *anyopaque, saved: radix.Saved) void {
+        const f = of(ptr);
+        const st: *State = @ptrCast(@alignCast(saved));
+        for (st.ids[0..st.n]) |id| f.pool.release(id);
+        std.testing.allocator.destroy(st);
+        f.live -= 1;
+    }
+};
+
+fn reclaimStore(ctx: *anyopaque, want: usize) bool {
+    const s: *radix.Store = @ptrCast(@alignCast(ctx));
+    return s.reclaim(want);
+}
+
+test "a legacy save that reclaims pool pages while keeping onto a leaf with no entry never prunes that leaf" {
+    var pool = try Pool.init(std.testing.allocator, 6, 1);
+    defer pool.deinit();
+    var f: HoldingFamily = .{ .pool = &pool };
+    var store = try radix.Store.init(std.testing.allocator, f.snapshots(), radix.pagesOf(Pool, &pool, 1), .{ .page = page, .min_gap = 1, .min_prompt = 0 });
+    store.limit(.{ .pages = 6, .snaps = 4 });
+    try pool.joinReclaim(.{ .ctx = &store, .call = reclaimStore });
+    const prompt = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    var path: [2]u32 = undefined;
+    var first: Lease = .{};
+    try pool.promise(&first, 2);
+    try pool.cover(&first, 2, null);
+    f.fail = true; // a failed save leaves the path in the tree, a leaf with no entry
+    try expect(!store.keep(.of(&prompt), 8, null, first.ids.items, &path).held);
+    pool.finish(&first); // the leaf's pages are the store's alone: the only ones reclaim could free
+    try expectEqual(@as(usize, 2), store.tree.heldPages());
+    var second: Lease = .{};
+    try pool.promise(&second, 2);
+    try pool.cover(&second, 2, null);
+    f.fail = false;
+    const kept = store.keep(.of(&prompt), 8, null, second.ids.items, &path); // onto that leaf; its save reclaims
+    try expect(!kept.held); // the pinned leaf could not be taken, so the save found no page
+    try expectEqual(@as(usize, 2), store.tree.heldPages()); // the leaf survived the keep that was writing to it
+    try expectEqual(@as(usize, 0), f.live);
+    pool.finish(&second);
+    pool.leaveReclaim(&store);
+    store.deinit();
+    try expect(pool.idle() and pool.available() == pool.total());
 }

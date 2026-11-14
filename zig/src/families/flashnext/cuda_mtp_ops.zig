@@ -4,6 +4,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const batch = @import("cuda_batch.zig");
+const parts = @import("cuda_batch_state.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
 const mtp = @import("cuda_mtp.zig");
@@ -11,6 +12,7 @@ const plan = @import("cuda_mtp_plan.zig");
 const roll = @import("cuda_mtp_roll.zig");
 const pieces = @import("cuda_mtp_pieces.zig");
 const draw = @import("cuda_mtp_draw.zig");
+const module = @This();
 
 /// One group of lanes in the batched head's pass: the lanes' drafts, their rows and whether the head scores.
 const Group = struct {
@@ -54,6 +56,11 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
+/// A lane of the head's grouped pass: its draft's cache and pages at its length, as the lone head's pass reads them.
+fn headLane(d: *Draft, rows: usize, score_rows: u64) batch.Lane {
+    return .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .pg = d.pg, .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = rows };
+}
+
 fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
     if (n == 0) return;
     const d = stream.d;
@@ -63,7 +70,7 @@ fn copyAsync(stream: cuda.Stream, dst: u64, src: u64, n: usize) !void {
 fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
     const d = stream.d;
     try stream.synchronize();
-    try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
+    try cuda.memory.download(d, src, std.mem.sliceAsBytes(dst)[0..dst.len]);
 }
 
 /// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
@@ -93,13 +100,13 @@ pub fn Ops(comptime Tri: type) type {
             return o.e.stream.*;
         }
 
-        /// Prompt rows [at, stop): the pass with its streams kept, then the head over each row with a known next token.
-        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
+        /// Prompt rows [at, stop): the pass (keeping `marks` on its way) and its streams, then the head over the rows.
+        pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize, marks: [parts.max_marks]parts.Mark) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0 or d.pending != 0) return error.PositionMismatch;
             d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
-            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true });
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr, .prompt = true, .marks = marks });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
@@ -111,7 +118,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             while (at < ids.len) {
                 const stop = @min(ids.len, at + @min(o.e.chunk, d.rows_cap));
-                try o.prefillChunk(seq, d, ids, at, stop);
+                try o.prefillChunk(seq, d, ids, at, stop, .{ .{}, .{} });
                 at = stop;
             }
         }
@@ -123,7 +130,7 @@ pub fn Ops(comptime Tri: type) type {
             const h = o.h;
             if (next.len == 0) return;
             if (d.len + next.len > d.cap) return error.PromptTooLong;
-            const want = @max(@as(usize, 32), 2 * @min(next.len, piece_rows));
+            const want = plan.reserveRows(next.len);
             const s = try e.reserve(want);
             const piece = @max(@as(usize, 1), @min(piece_rows, s.cap / 2));
             // the engine's block scores (the passes share one stream), for rows past 2,048 keys of the head's cache
@@ -163,22 +170,12 @@ pub fn Ops(comptime Tri: type) type {
 
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
-            const h = o.h;
-            const view_ = h.view();
-            const n = view_.logical;
-            try h.best(o.stream(), d.dlogits.ptr, n, n, 1, d.best.ptr);
-            try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0..4]), d.best.ptr);
-            const top = d.best_host[0];
-            const lse = d.best_host[1];
-            const greedy = if (sm) |s| s.temperature <= 0 else true;
-            if (greedy) {
-                const col: usize = @intCast(@as(i32, @bitCast(d.best_host[2])));
-                return .{ .token = try view_.global(@intCast(col)), .prob = @exp(@as(f64, top) - @as(f64, lse)) };
-            }
-            if (sm) |x| if (draw.usable(x)) return draw.pickHead(h, o.stream(), o.e.gpa, d, lse, position, x);
-            const row = d.host[0..n];
-            try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);
-            return mtp.drawPick(o.e.gpa, row, h.ids, lse, position, sm);
+            return @import("cuda_draft_draw.zig").single(o.h, o.stream(), o.e.gpa, d, position, sm, o.h.draw_batch.on and o.main == null);
+        }
+
+        /// One shared verify group completes its reductions before drawing in stream order.
+        pub fn drawsMany(o: Self, scores: u64, ds: []const *Draft, sms: []const ?Sampling, masks: []const []const u32, outs: []const []u32) !void {
+            return @import("cuda_draw_batch.zig").drawsMany(o.h, o.stream(), o.e.gpa, scores, ds, sms, masks, outs);
         }
 
         /// Python decode.draft: absorb the kept rows, then chain up to `count` drafts under mtp.Stop, the first kept.
@@ -247,7 +244,7 @@ pub fn Ops(comptime Tri: type) type {
             var at: usize = 0;
             for (ds, nexts, 0..) |d, nx, i| {
                 total += nx.len;
-                lane_buf[i] = .{ .seq = .{ .media = null, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows }, .pos = d.len, .rows = nx.len };
+                lane_buf[i] = headLane(d, nx.len, score_rows);
                 @memcpy(ids_buf[at..][0..nx.len], nx);
                 at += nx.len;
             }
@@ -272,73 +269,9 @@ pub fn Ops(comptime Tri: type) type {
             for (ds, nexts) |d, nx| d.len += nx.len;
         }
 
-        /// draft over several drafts, greedy or sampled: kept rows in one pass, then one a step, each as it would alone
+        /// Draft several lanes through the shared operator loop.
         pub fn draftMany(o: Self, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidences: []const f64, outs: []const *Chain) !void {
-            const h = o.h;
-            const n_l = ds.len;
-            for (ds, outs) |d, out| {
-                out.n = 0;
-                if (d.drafted > 0) {
-                    d.len -= d.drafted;
-                    d.drafted = 0;
-                }
-            }
-            try o.forwardHeadMany(ds, nexts, rows, true);
-            var act: [max_lanes]usize = undefined;
-            var n_act: usize = 0;
-            for (counts, 0..) |c, i| if (c > 0) {
-                act[n_act] = i;
-                n_act += 1;
-            };
-            var stops: [max_lanes]mtp.Stop = undefined;
-            for (stops[0..ds.len], confidences) |*st, c| st.* = .{ .c = c };
-            var j: usize = 0;
-            var best_host: [max_lanes * 4]f32 = undefined;
-            var step_ds: [max_lanes]*Draft = undefined;
-            var step_next: [max_lanes][1]u32 = undefined;
-            var step_nexts: [max_lanes][]const u32 = undefined;
-            var step_rows: [max_lanes]u64 = undefined;
-            while (n_act > 0 and j < max_chain) : (j += 1) {
-                // every active lane's best draft (fn_row_best on its own scores), then one download of all of them
-                for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
-                try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
-                var next_act: usize = 0;
-                var n_step: usize = 0;
-                for (act[0..n_act], 0..) |i, r| {
-                    const top = best_host[r * 4];
-                    const lse = best_host[r * 4 + 1];
-                    const col: usize = @intCast(@as(i32, @bitCast(best_host[r * 4 + 2])));
-                    // a sampled lane draws from its own row, as its lone pick does; a greedy one takes its best column
-                    const got: Pick = if (mtp.isSampled(sms[i])) sampled: {
-                        if (draw.usable(sms[i].?)) break :sampled try draw.pickHead(h, o.stream(), o.e.gpa, ds[i], lse, positions[i] + j, sms[i].?);
-                        const row = ds[i].host[0..h.view().logical];
-                        try download(o.stream(), std.mem.sliceAsBytes(row), ds[i].dlogits.ptr);
-                        break :sampled try mtp.drawPick(o.e.gpa, row, h.ids, lse, positions[i] + j, sms[i]);
-                    } else .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
-                    const out = outs[i];
-                    const t = stops[i].take(j, got.prob);
-                    if (!t.propose) continue;
-                    out.tokens[out.n] = got.token;
-                    out.probs[out.n] = got.prob;
-                    out.n += 1;
-                    if (!t.more) continue;
-                    if (j + 1 < @min(counts[i], max_chain)) {
-                        step_ds[n_step] = ds[i];
-                        step_next[n_step] = .{got.token};
-                        step_nexts[n_step] = &step_next[n_step];
-                        step_rows[n_step] = ds[i].out.ptr;
-                        n_step += 1;
-                        act[next_act] = i;
-                        next_act += 1;
-                    }
-                }
-                if (n_step > 0) {
-                    try o.forwardHeadMany(step_ds[0..n_step], step_nexts[0..n_step], step_rows[0..n_step], true);
-                    for (step_ds[0..n_step]) |d| d.drafted += 1;
-                }
-                n_act = next_act;
-            }
-            _ = n_l;
+            return module.draftMany(o, ds, nexts, rows, counts, positions, sms, confidences, outs);
         }
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
@@ -474,4 +407,82 @@ pub fn Ops(comptime Tri: type) type {
             d.open = false;
         }
     };
+}
+
+test "a grouped head's lane carries its draft's page table" {
+    var d: Draft = undefined;
+    d.pg = .{ .pt = 0x7000, .ps = 4096, .ptok = 256 };
+    d.len = 300;
+    d.cap = 1024;
+    const l = headLane(&d, 3, 0);
+    try std.testing.expectEqual(d.pg, l.seq.pg);
+    try std.testing.expectEqual(@as(usize, 300), l.pos);
+    try std.testing.expectEqual(@as(usize, 3), l.rows);
+}
+
+/// One shared head loop over its operator boundary: forward work, reductions, guarded picks and stop policy.
+pub fn draftMany(o: anytype, ds: []const *Draft, nexts: []const []const u32, rows: []const u64, counts: []const usize, positions: []const u64, sms: []const ?Sampling, confidences: []const f64, outs: []const *Chain) !void {
+    const h = o.h;
+    const n_l = ds.len;
+    for (ds, outs) |d, out| {
+        out.n = 0;
+        if (d.drafted > 0) {
+            d.len -= d.drafted;
+            d.drafted = 0;
+        }
+    }
+    try o.forwardHeadMany(ds, nexts, rows, true);
+    var act: [max_lanes]usize = undefined;
+    var n_act: usize = 0;
+    for (counts, 0..) |c, i| if (c > 0) {
+        act[n_act] = i;
+        n_act += 1;
+    };
+    var stops: [max_lanes]mtp.Stop = undefined;
+    for (stops[0..ds.len], confidences) |*st, c| st.* = .{ .c = c };
+    var j: usize = 0;
+    var best_host: [max_lanes * 4]f32 = undefined;
+    var step_ds: [max_lanes]*Draft = undefined;
+    var step_next: [max_lanes][1]u32 = undefined;
+    var step_nexts: [max_lanes][]const u32 = undefined;
+    var step_rows: [max_lanes]u64 = undefined;
+    while (n_act > 0 and j < max_chain) : (j += 1) {
+        var ready: ?@import("cuda_draft_draw.zig").Ready = null;
+        if (h.draw_batch.on and !(if (@hasField(@TypeOf(o), "main")) o.main != null else false)) {
+            ready = try @import("cuda_draft_draw.zig").gather(h, o.stream(), ds, act[0..n_act], sms);
+        } else {
+            for (act[0..n_act], 0..) |i, r| try h.best(o.stream(), ds[i].dlogits.ptr, h.ids.len, h.ids.len, 1, ds[0].best.ptr + r * 16);
+            try download(o.stream(), std.mem.sliceAsBytes(best_host[0 .. n_act * 4]), ds[0].best.ptr);
+        }
+        var next_act: usize = 0;
+        var n_step: usize = 0;
+        for (act[0..n_act], 0..) |i, r| {
+            const got = if (ready) |*rd|
+                try rd.pick(h, o.stream(), o.e.gpa, ds[i], r, positions[i] + j, sms[i], true)
+            else
+                try draw.pick(h, o.stream(), o.e.gpa, ds[i], best_host[r * 4 ..][0..4].*, positions[i] + j, sms[i], true);
+            const out = outs[i];
+            const t = stops[i].take(j, got.prob);
+            if (!t.propose) continue;
+            out.tokens[out.n] = got.token;
+            out.probs[out.n] = got.prob;
+            out.n += 1;
+            if (!t.more) continue;
+            if (j + 1 < @min(counts[i], max_chain)) {
+                step_ds[n_step] = ds[i];
+                step_next[n_step] = .{got.token};
+                step_nexts[n_step] = &step_next[n_step];
+                step_rows[n_step] = ds[i].out.ptr;
+                n_step += 1;
+                act[next_act] = i;
+                next_act += 1;
+            }
+        }
+        if (n_step > 0) {
+            try o.forwardHeadMany(step_ds[0..n_step], step_nexts[0..n_step], step_rows[0..n_step], true);
+            for (step_ds[0..n_step]) |d| d.drafted += 1;
+        }
+        n_act = next_act;
+    }
+    _ = n_l;
 }

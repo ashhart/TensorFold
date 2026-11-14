@@ -7,9 +7,8 @@ extern "C" __global__ void fn_hc_normalize(const __nv_bfloat16* H, const float* 
     __shared__ float rinv;
     const int r = blockIdx.x, stream = blockIdx.y, nc = D / 256;
     if (threadIdx.x == 0) {
-        float total = 0.0f;
-        for (int c = 0; c < nc; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * nc + c) * SS + stream]);
-        rinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+        const float total = tf_common::sum_rn(nc, [&](int c) { return PSS[(static_cast<long long>(r) * nc + c) * SS + stream]; });
+        rinv = tf_common::rms_scale(total, D, eps);
     }
     __syncthreads();
     for (int d = threadIdx.x; d < D; d += blockDim.x) {
@@ -25,9 +24,8 @@ extern "C" __global__ void __launch_bounds__(256) fn_hc_normalize_cols(const __n
     __shared__ float rinv;
     const int r = blockIdx.x, stream = blockIdx.y, nc = D / 256;
     if (threadIdx.x == 0) {
-        float total = 0.0f;
-        for (int c = 0; c < nc; ++c) total = __fadd_rn(total, PSS[(static_cast<long long>(r) * nc + c) * SS + stream]);
-        rinv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(total, static_cast<float>(D)), eps)));
+        const float total = tf_common::sum_rn(nc, [&](int c) { return PSS[(static_cast<long long>(r) * nc + c) * SS + stream]; });
+        rinv = tf_common::rms_scale(total, D, eps);
     }
     __syncthreads();
     const int d = blockIdx.z * 256 + threadIdx.x;

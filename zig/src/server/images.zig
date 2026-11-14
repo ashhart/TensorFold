@@ -17,12 +17,32 @@ pub const max_image_bytes = 10 << 20;
 pub const max_request_bytes = 20 << 20;
 const low_detail_tokens = 256;
 
+/// A request's encoded image bytes: each image's and all of them together; the defaults are chat's.
+pub const ByteLimits = struct {
+    each: usize = max_image_bytes,
+    total: usize = max_request_bytes,
+
+    /// Chat's own limits, whose refusals keep images.py's words; a route with its own limits gets refusals naming them.
+    pub fn isChat(l: ByteLimits) bool {
+        return l.each == max_image_bytes and l.total == max_request_bytes;
+    }
+};
+
 pub const Expanded = struct {
     ids: []const u32,
     history_len: usize,
     images: []const api.Image,
     cache_key: []const u32, // one compact word per model row; the core also checks exact Image metadata
+    frames: []const ?api.Size = &.{}, // one per image part, in part order: the size its tower input was resized to
 };
+
+/// `bytes` as the refusals name it: "10 MB", "10.5 MB" for a part of one, or "2 bytes" below a tenth of one.
+fn megabytes(a: std.mem.Allocator, bytes: usize) error{OutOfMemory}![]const u8 {
+    const mb = 1 << 20;
+    if (bytes % mb == 0) return std.fmt.allocPrint(a, "{d} MB", .{bytes / mb});
+    if (bytes < mb / 10) return std.fmt.allocPrint(a, "{d} bytes", .{bytes});
+    return std.fmt.allocPrint(a, "{d:.1} MB", .{@as(f64, @floatFromInt(bytes)) / mb});
+}
 
 const Part = struct { video: bool = false, url: []const u8, low: bool = false };
 
@@ -64,12 +84,20 @@ pub const Fetch = struct {
     }
 };
 
-/// An image part's bytes, at most `limit`: a data URL's, or with --vision-urls a public HTTPS URL's before `deadline`.
-pub fn sourceBytes(cx: *Cx, fetch: ?Fetch, url: []const u8, limit: usize, deadline: std.Io.Timestamp) errors.Refused![]const u8 {
+/// An image part's bytes within `limits`, `used` already taken: a data URL's, or with --vision-urls an HTTPS URL's.
+pub fn sourceBytes(cx: *Cx, fetch: ?Fetch, url: []const u8, limits: ByteLimits, used: usize, deadline: std.Io.Timestamp) errors.Refused![]const u8 {
+    const limit = @min(limits.each, limits.total - used);
     if (std.ascii.startsWithIgnoreCase(url, "data:")) {
-        const bytes = try dataBytes(cx, url);
-        if (bytes.len > limit) return cx.refuse("the request's images exceed 20 MB encoded");
-        return bytes;
+        if (limits.isChat()) { // images.py's words: the image's own cap, then the request's 20 MB
+            const bytes = try dataBytes(cx, url);
+            if (bytes.len > limit) return cx.refuse("the request's images exceed 20 MB encoded");
+            return bytes;
+        }
+        return dataBytesOf(cx, url, limit, "image") catch |e| {
+            // a size refusal names the limit in use
+            if (e != error.Refused or !std.mem.endsWith(u8, cx.message, "the encoded byte limit")) return e;
+            return cx.refuse(try std.fmt.allocPrint(cx.a, "{s} of {s}", .{ cx.message, try megabytes(cx.a, limit) }));
+        };
     }
     if (!std.mem.startsWith(u8, url, "https://")) return cx.refuse("images require data URLs or public HTTPS URLs");
     const f = fetch orelse return cx.refuse("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls");
@@ -133,11 +161,11 @@ pub fn sniff(bytes: []const u8) Format {
     return .other;
 }
 
-fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
+fn refusal(cx: *Cx, v: api.Vision, i: usize, each: usize, err: anyerror) errors.Refused {
     if (v.explain) |words| if (words(err)) |w| return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: {s}", .{ i + 1, w }));
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.Oversized => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: 10 MB encoded, 8192 pixels a side, 16 megapixels", .{i + 1})),
+        error.Oversized => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: {s} encoded, 8192 pixels a side, 16 megapixels", .{ i + 1, try megabytes(cx.a, each) })),
         error.Animated => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: animated and multipage images are unsupported; send a single frame", .{i + 1})),
         error.ImageTooSmall => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the visual-token budget is too small for an image", .{i + 1})),
         else => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} could not be decoded; send PNG, JPEG or WebP", .{i + 1})),
@@ -146,6 +174,11 @@ fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
 
 /// The prompt with image placeholders expanded to tokens and video ones to frame groups, its images and cache ids.
 pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
+    return expandWith(vision, fetch, text, cx, messages, ids, history_len, .{});
+}
+
+/// `expand` with the request's own encoded-byte limits in place of chat's.
+pub fn expandWith(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx, messages: Value, ids: []const u32, history_len: usize, limits: ByteLimits) errors.Refused!?Expanded {
     const v = vision orelse return null;
     const ps = try parts(cx, messages, v.part_type);
     var n_images: usize = 0;
@@ -169,6 +202,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     const budget: u32 = if (n_images > 0) v.image_tokens / @as(u32, @intCast(n_images)) else 0;
     if (n_images > 0 and budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
     const prepared = try cx.a.alloc(api.PreparedImage, n_images);
+    const frames = try cx.a.alloc(?api.Size, n_images);
     const clips = try cx.a.alloc(api.PreparedVideo, n_videos);
     var bytes_total: usize = 0;
     // every URL's download inside one request's seconds (images.py total_timeout_seconds, videos.py's)
@@ -185,15 +219,16 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         }
         const i = ii;
         ii += 1;
-        const bytes = try sourceBytes(cx, fetch, p.url, @min(max_image_bytes, max_request_bytes - bytes_total), deadline);
+        const bytes = try sourceBytes(cx, fetch, p.url, limits, bytes_total, deadline);
         bytes_total += bytes.len;
         switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP)
             .png, .jpeg, .webp => {},
             .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG, JPEG or WebP; send one of those", .{i + 1})),
         }
         const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
-        prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, e);
+        prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, limits.each, e);
         if (prepared[i].tokens == 0 or prepared[i].tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
+        frames[i] = prepared[i].frame;
     }
     var out_ids: std.ArrayList(u32) = .empty;
     var key: std.ArrayList(u32) = .empty;
@@ -243,7 +278,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         }
         if (src < history_len) hist += out_ids.items.len - before - 1;
     }
-    return .{ .ids = out_ids.items, .history_len = hist, .images = imgs.items, .cache_key = key.items };
+    return .{ .ids = out_ids.items, .history_len = hist, .images = imgs.items, .cache_key = key.items, .frames = frames };
 }
 
 /// A video group's time as text at the end of `ids`; Qwen's "<X.Y seconds>" when `angle`.
@@ -266,7 +301,7 @@ pub fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(
 /// Appends one image's rows, its engine entry and its cache words; `named`: the word before them is its marker's.
 fn placeImage(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage, named: bool) !void {
     if (named) key.items[key.items.len - 1] = image_key.open(img.hash);
-    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens, .hash = img.hash });
+    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens, .content_size = img.content_size, .hash = img.hash });
     for (0..img.tokens) |j| {
         try ids.append(a, token);
         try key.append(a, image_key.row(img.hash, j));
@@ -282,20 +317,25 @@ test "data URLs decode; remote URLs are refused" {
     try std.testing.expectError(error.Refused, dataBytes(&cx, "data:image/png;base64,***"));
     // without --vision-urls an https URL is refused with the flag's name; other schemes always
     const never: std.Io.Timestamp = .{ .nanoseconds = 0 };
-    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "https://example.com/x.png", max_image_bytes, never));
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "https://example.com/x.png", .{}, 0, never));
     try std.testing.expectEqualStrings("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls", cx.message);
     for ([_][]const u8{ "http://example.com/x.png", "ftp://example.com/x.png", "HTTPS://example.com/x.png", "file:///etc/passwd" }) |u| {
-        try std.testing.expectError(error.Refused, sourceBytes(&cx, null, u, max_image_bytes, never));
+        try std.testing.expectError(error.Refused, sourceBytes(&cx, null, u, .{}, 0, never));
         try std.testing.expectEqualStrings("images require data URLs or public HTTPS URLs", cx.message);
     }
-    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "data:,abc", 2, never));
+    // chat's limits keep images.py's words: 3 bytes past the 2 left of the request's 20 MB
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "data:,abc", .{}, max_request_bytes - 2, never));
+    try std.testing.expectEqualStrings("the request's images exceed 20 MB encoded", cx.message);
+    // a route with its own limits is told which limit it crossed
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "data:,abc", .{ .each = 2, .total = 32 << 20 }, 0, never));
+    try std.testing.expectEqualStrings("image is empty or exceeds the encoded byte limit of 2 bytes", cx.message);
 }
 
 fn fakePrepare(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     _ = ctx;
     _ = max_tokens;
     const tokens: u32 = @intCast(bytes.len - 3); // the test's images: a JPEG's first bytes, then one token a byte
-    return .{ .pixels = try a.alloc(f32, 0), .gh = 2, .gw = 2 * tokens, .tokens = tokens, .hash = bytes[3] };
+    return .{ .pixels = try a.alloc(f32, 0), .gh = 2, .gw = 2 * tokens, .tokens = tokens, .content_size = .{ 16, 16 }, .hash = bytes[3] };
 }
 
 test "placeholders expand to each image's tokens, the history and cache key with them" {
@@ -320,6 +360,8 @@ test "placeholders expand to each image's tokens, the history and cache key with
     try std.testing.expectEqual(@as(usize, 5), x.history_len); // the first image is in the history, the second not
     try std.testing.expectEqual(@as(u32, 1), x.images[0].at);
     try std.testing.expectEqual(@as(u32, 5), x.images[1].at);
+    try std.testing.expectEqualDeep(@as(?[2]u32, .{ 16, 16 }), x.images[0].content_size);
+    try std.testing.expectEqualDeep(@as(?[2]u32, .{ 16, 16 }), x.images[1].content_size);
     try std.testing.expect(x.cache_key[1] >= 0x8000_0000 and x.cache_key[1] != x.cache_key[2]);
     try std.testing.expectEqual(@as(u32, 2), x.cache_key[3]);
     // a placeholder the images do not account for is refused

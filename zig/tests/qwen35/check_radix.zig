@@ -119,9 +119,11 @@ fn stress(c: *Ctx) void {
     const every = std.mem.concat(c.arena, Prompt, &.{ first, second }) catch |err| return c.report.broke(name, err);
     // all of them again at once, on the warm tree
     const together = c.session.run(c.arena, .{ .prompts = every, .max_new = c.tokens }) catch |err| return c.report.broke(name, err);
+    h.keepPrompts(0, 0); // evicts every kept prompt, so the fresh run resumes from nothing
     const fresh = c.session.run(c.arena, .{ .prompts = every, .max_new = c.tokens, .solo = true, .drafts = false }) catch |err| return c.report.broke(name, err);
     var buf: [128]u8 = undefined;
     const label = std.fmt.allocPrint(c.arena, "radix: {d} requests, resumed == fresh", .{every.len}) catch return;
+    for (fresh.replies) |r| if (r.cached != 0) return c.report.fail(label, "the fresh run of {s} resumed {d} tokens", .{ r.name, r.cached });
     if (sameReplies(alone, .{ .replies = fresh.replies[0..first.len], .seconds = 0, .rounds = 0, .replayed = 0, .submit_ns = 0, .spent = fresh.spent, .calls = fresh.calls }, 0, &buf)) |why| return c.report.fail(label, "{s}", .{why});
     if (sameReplies(more, .{ .replies = fresh.replies[first.len..], .seconds = 0, .rounds = 0, .replayed = 0, .submit_ns = 0, .spent = fresh.spent, .calls = fresh.calls }, 0, &buf)) |why| return c.report.fail(label, "{s}", .{why});
     var resumed: usize = 0;
@@ -159,11 +161,11 @@ fn memoryLine(c: *Ctx) void {
     const done = c.session.run(c.arena, .{ .prompts = set, .max_new = 1, .solo = true }) catch |err| return c.report.broke(name, err);
     const tree = &h.prefix.store.tree;
     const copied = copiedBytes(c, set, done.replies);
-    const unique = pagesBytes(c, tree.held_pages);
+    const unique = pagesBytes(c, tree.heldPages());
     const states = tree.held() - unique;
     var cached: usize = 0;
     for (done.replies) |r| cached += r.cached;
-    c.report.pass(name, "{d} requests sharing {d} system tokens, {d} tokens each: the tree holds {d:.1} MiB ({d} pages {d:.1} MiB, {d} snapshots {d:.1} MiB); copies of the caches at each cut held {d:.1} MiB; {d} prompt tokens came from the tree", .{ set.len, system_len, set[0].ids.len, mib(tree.held()), tree.held_pages, mib(unique), tree.snaps, mib(states), mib(copied), cached });
+    c.report.pass(name, "{d} requests sharing {d} system tokens, {d} tokens each: the tree holds {d:.1} MiB ({d} pages {d:.1} MiB, {d} snapshots {d:.1} MiB); copies of the caches at each cut held {d:.1} MiB; {d} prompt tokens came from the tree", .{ set.len, system_len, set[0].ids.len, mib(tree.held()), tree.heldPages(), mib(unique), tree.snaps, mib(states), mib(copied), cached });
 }
 
 fn pagesBytes(c: *Ctx, n: usize) u64 {

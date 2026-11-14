@@ -35,6 +35,8 @@ const Question = struct {
 const Code = struct { text: []const u8, id: u32 };
 
 pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
+    // a readout engine (Clef's joint schema head) answers through its head, not through option tokens
+    if (srv.info.readouts != null) return @import("clef_systemone.zig").post(srv, conn, a);
     if (srv.engine.vtable.score == null) { // an engine that does not decide serves no such path
         _ = http_body.read(conn, a, http_body.limit) catch {};
         return routes.unknown(conn, a);

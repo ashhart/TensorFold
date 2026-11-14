@@ -29,11 +29,16 @@ pub const Model = struct {
     depth_rate: f64 = 0, // the newest round's weight in a depth's acceptance estimate (0: the core's)
     plain_guard: bool = false, // plain rounds compete with drafted depths
     draft_confidence: ?f64 = null,
+    floor_rates: bool = false, // Constants.floor_rates: a head whose steps cost more than the floor's cut saves
     drafts: u32 = 1, // head drafts a round at most
     window_costs: []const Cost = &.{}, // forward ms by exact window width (timed at load)
+    window_costs_lone: bool = false, // window_costs price a lone stream only; shared forwards use shared_costs
+    shared_drafts: u32 = 0, // allocate_shared_drafts: a shared round's most head drafts a stream (0: drafts)
     mtp_step_ms: f64 = 0.0, // one chained head step (timed at load)
+    shared_step_ms: ?f64 = null, // a separate shared head step; null keeps mtp_step_ms
     draft_step_ms: f64 = 0.0, // a shared round's draft past a stream's first, as the backend's head runs it (0: priced free)
     streams_exact: bool = true, // shared forwards keep each stream's bits
+    plain_share: bool = false, // width-one streams may share a forward without a wider per-stream window
     hidden_rows: bool = false, // the backend runs several streams' windows in one forward
     batch_rows: u32 = 0, // a shared forward's rows at most (0: 32)
     max_streams: u32 = 0, // a shared forward's streams at most (0: 32)
@@ -42,6 +47,7 @@ pub const Model = struct {
     granted_depth: bool = false, // with draft_probabilities: every stream drafts its last grant plus a slack
     draft_slack: u32 = 0, // drafts past a stream's last grant, short or not (0: the Constants' own)
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
+    plain_streams: u32 = 0, // a shared round with this many streams or more drafts none (0: off)
     copy_first: bool = false, // a copy ahead takes the round: the head holds no drafts for it (a drafter's own pass)
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass, timed at load
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
@@ -76,6 +82,7 @@ pub const Config = struct {
     batch_streams: u32,
     node_probabilities: bool,
     granted_depth: bool = false, // Model.granted_depth
+    plain_streams: u32 = 0, // Model.plain_streams
     fill_lanes: u32 = 0, // rows a window may grow to with suffix-match branches (0: off; lanes/fill.zig)
     fill_match: u32 = 8, // context tokens a suffix-match branch must match (shorter ones are coincidental phrases)
     fill_floor: f64 = 0.35, // the share of grafted rows a stream must keep to go on reading its chain back every round
@@ -99,6 +106,7 @@ pub const Config = struct {
     lane_costs: Table, // window ms by rows to 64 (lanes/plan_lanes.zig)
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // Model.draft_step_ms
+    shared_drafts: u32 = 0, // Model.shared_drafts
     lone_cost_tile: u32 = 0, // Model.lone_cost_tile
     context_copies: bool = false, // Model.context_copies, within the existing verification width
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
@@ -115,7 +123,7 @@ pub const Config = struct {
         const first_rows: i64 = if (m.first_copy_rows != 0) m.first_copy_rows else width;
         const first_copy: u32 = @intCast(@max(1, @min(@as(i64, max_copy), first_rows - 1)));
         const prior = if (m.draft_prior.len > 0) m.draft_prior else &default_prior;
-        const streams = width >= 2 and m.streams_exact and m.hidden_rows;
+        const streams = (width >= 2 or m.plain_share) and m.streams_exact and m.hidden_rows;
         const batch_rows: u32 = if (m.batch_rows != 0) m.batch_rows else 32;
         var family_costs: Table = .{};
         errdefer family_costs.deinit(gpa);
@@ -125,7 +133,7 @@ pub const Config = struct {
         // shared forwards: window costs then timed shared rows (a later table overrides), extended to batch_rows
         var timed: std.ArrayList(Cost) = .empty;
         defer timed.deinit(gpa);
-        for ([_][]const Cost{ m.window_costs, m.shared_costs }) |table| {
+        for ([_][]const Cost{ if (m.window_costs_lone) &.{} else m.window_costs, m.shared_costs }) |table| {
             for (table) |c| {
                 if (c.width < 1 or c.width > batch_rows) continue;
                 for (timed.items) |*t| {
@@ -162,6 +170,7 @@ pub const Config = struct {
             .batch_streams = if (streams) (if (m.max_streams != 0) m.max_streams else 32) else 1,
             .node_probabilities = m.draft_probabilities or m.draft_confidence != null,
             .granted_depth = m.granted_depth and m.draft_probabilities,
+            .plain_streams = m.plain_streams,
             .draft_streams = m.draft_streams,
             .head_trees = m.head_trees,
             .join_tail = m.join_tail,
@@ -174,15 +183,18 @@ pub const Config = struct {
             .lane_costs = try alloc.extendCosts(gpa, m.lane_costs, 64),
             .mtp_step_ms = m.mtp_step_ms,
             .k = .{
+                .shared_step_ms = m.shared_step_ms,
                 .depth_rate = if (m.depth_rate > 0) m.depth_rate else (Constants{}).depth_rate,
                 .learn_rows = m.learn_row_costs,
                 .draft_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).draft_slack,
                 .grant_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).grant_slack,
                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
                 .copy_first = m.copy_first and !m.context_copies,
+                .floor_rates = m.floor_rates,
                 .hold_costs = m.hold_costs,
             },
             .draft_step_ms = m.draft_step_ms,
+            .shared_drafts = m.shared_drafts,
         };
     }
 
@@ -206,4 +218,19 @@ test "setup derives widths like Python" {
     var steady = try Config.init(gpa, .{ .exact_width = 16, .mtp = true, .speculate = true, .drafts = 4, .depth_rate = 0.08 }, 16, 15);
     defer steady.deinit(gpa);
     try std.testing.expectEqual(@as(f64, 0.08), steady.k.depth_rate);
+}
+
+test "shared cost consumer: lone measured windows stay out of shared MTP prices" {
+    const a = std.testing.allocator;
+    const own = [_]Cost{ .{ .width = 1, .ms = 10 }, .{ .width = 32, .ms = 25 } };
+    const shared = [_]Cost{ .{ .width = 1, .ms = 2 }, .{ .width = 32, .ms = 4 } };
+    for ([_]bool{ false, true }) |lone| {
+        var c = try Config.init(a, .{ .exact_width = 32, .mtp = true, .speculate = true, .window_costs = &own, .window_costs_lone = lone }, 32, 15);
+        defer c.deinit(a);
+        try std.testing.expectEqual(@as(?f64, 25), c.family_costs.get(32));
+        try std.testing.expectEqual(lone, c.shared_costs.empty());
+        var explicit = try Config.init(a, .{ .exact_width = 32, .mtp = true, .speculate = true, .window_costs = &own, .window_costs_lone = lone, .shared_costs = &shared }, 32, 15);
+        defer explicit.deinit(a);
+        for (shared) |cost| try std.testing.expectEqual(@as(?f64, cost.ms), explicit.shared_costs.get(cost.width));
+    }
 }

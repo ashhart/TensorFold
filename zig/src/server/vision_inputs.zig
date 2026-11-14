@@ -298,7 +298,9 @@ fn sizeForGlm(ctx: ?*anyopaque, frames: c_int, height: c_int, width: c_int, oh: 
 fn videoGlm(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.glm.Video {
     const l = library(srv.io) orelse return cx.refuse(@import("sys").optional_libraries.spec(.video).message);
     var gs: GlmSize = .{ .budget = 16384 };
-    if (std.c.getenv("TENSORFOLD_VIDEO_TOKENS")) |v| gs.budget = std.fmt.parseInt(u64, std.mem.span(v), 10) catch gs.budget;
+    gs.budget = @import("sys").environment.read(u64, "TENSORFOLD_VIDEO_TOKENS", gs.budget) catch {
+        return cx.refuse(try @import("sys").environment.describe(cx.a, "TENSORFOLD_VIDEO_TOKENS", @import("sys").getenv("TENSORFOLD_VIDEO_TOKENS").?));
+    };
     var v: TfVideo = undefined;
     const rc = l.decode(bytes.ptr, bytes.len, 2.0, 2, 256, 3600.0, 8192, sizeForGlm, @ptrCast(&gs), &v);
     if (rc != 0) return cx.refuse(switch (rc) {
@@ -325,7 +327,9 @@ fn videoGlm(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.glm.Vide
 fn video(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.Video {
     const l = library(srv.io) orelse return cx.refuse(@import("sys").optional_libraries.spec(.video).message);
     var budget: u64 = 16384;
-    if (std.c.getenv("TENSORFOLD_VIDEO_TOKENS")) |v| budget = std.fmt.parseInt(u64, std.mem.span(v), 10) catch budget;
+    budget = @import("sys").environment.read(u64, "TENSORFOLD_VIDEO_TOKENS", budget) catch {
+        return cx.refuse(try @import("sys").environment.describe(cx.a, "TENSORFOLD_VIDEO_TOKENS", @import("sys").getenv("TENSORFOLD_VIDEO_TOKENS").?));
+    };
     var v: TfVideo = undefined;
     const rc = l.decode(bytes.ptr, bytes.len, 2.0, 4, 256, 3600.0, 8192, sizeFor, @ptrCast(&budget), &v);
     if (rc != 0) return cx.refuse(switch (rc) {

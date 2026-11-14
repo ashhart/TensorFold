@@ -262,6 +262,7 @@ extern "C" __global__ void tf_exl3_plan_rotate(const PlanStage a) {
 }
 
 extern "C" __global__ void tf_exl3_plan_finish(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_SERVED>(a); }
+extern "C" __global__ void tf_exl3_plan_finish_after(const PlanStage a) { tf_exl3::plan_finish<tf_exl3::FINISH_SERVED, true>(a); }
 
 // Transposed fp32 prompt accumulators in the shared EXL3 module; decode kernels above stay unchanged.
 #include "exl3_prompt.cuh"
@@ -284,7 +285,12 @@ extern "C" __global__ void tf_exl3_prompt_rotate(const __nv_bfloat16* __restrict
 extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu(const half* __restrict__ Xg, const half* __restrict__ Xu,
         const uint64_t* __restrict__ Tg, const uint64_t* __restrict__ Tu, const int* __restrict__ items, const int* __restrict__ counts,
         const int* __restrict__ members, const half* __restrict__ svh_g, const half* __restrict__ svh_u, const half* __restrict__ suh_d,
-        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode) {
+        half* __restrict__ xd, int K, int N, int xdiv, float limit, int act_mode, int skip) {
+
+    const int item = blockIdx.y;
+    if (item >= counts[0]) return;
+    const int e = items[3 * item];
+    if (e == skip) return;
 
     __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];   // one buffer for either instantiation
     __shared__ int rows_sh[TPM];
@@ -295,13 +301,15 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_gu(const hal
 // Block (256 model-width columns, item): y[row][slot][:] = the down epilogue of the item's pairs (this rank's share).
 extern "C" __global__ void __launch_bounds__(256, 2) tf_exl3_prompt_down(const half* __restrict__ Xd, const uint64_t* __restrict__ Td,
         const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members, const half* __restrict__ svh_d,
-        float* __restrict__ y, int K, int D, int ys) {
+        float* __restrict__ y, int K, int D, int skip) {
 
     __shared__ __align__(16) unsigned char smem_raw[tsmem_bytes()];
     __shared__ int rows_sh[TPM];
     const int cb = blockIdx.x, item = blockIdx.y;
     if (item >= counts[0]) return;
-    const int e = items[3 * item], first = items[3 * item + 1], cnt = items[3 * item + 2];
+    const int e = items[3 * item];
+    if (e == skip) return;
+    const int first = items[3 * item + 1], cnt = items[3 * item + 2];
     if (threadIdx.x < TPM) rows_sh[threadIdx.x] = (int)threadIdx.x < cnt ? members[first + threadIdx.x] : -1;
     __syncthreads();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;

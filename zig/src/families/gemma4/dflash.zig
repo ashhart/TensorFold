@@ -86,7 +86,7 @@ pub const Drafter = struct {
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, target: *Model, dir: []const u8, options: Options) !*Drafter {
         // the draft's own weights are the lane layout: M5 only. The target's row path does not serve them.
-        if (!target.device.tensorUnits()) return error.GemmaDraftNeedsTensorUnits;
+        if (!@import("kernels.zig").draftAvailable(target.device)) return error.GemmaDraftNeedsTensorUnits;
         const d = try gpa.create(Drafter);
         errdefer gpa.destroy(d);
         d.* = undefined;
@@ -109,7 +109,7 @@ pub const Drafter = struct {
         d.ops = try ops.Ops.init(target.device);
         errdefer d.ops.deinit();
         const keys_max = @max(options.capacity + block_rows, c.window - 1 + block_rows);
-        d.attention = try attention.Attention.init(gpa, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .rotary_dim = c.head_dim, .capacity = keys_max, .output = .bf16 });
+        d.attention = try attention.Attention.init(gpa, target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .capacity = keys_max, .output = .bf16 });
         errdefer d.attention.deinit();
         d.picks = try round.Ops.init(target.device);
         errdefer d.picks.deinit();

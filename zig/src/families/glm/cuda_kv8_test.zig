@@ -245,7 +245,7 @@ test "GLM KV host: a prompt MTP chunk's pooled keys take their own page stride, 
     for ([_]u64{ pks, 0 }) |own| { // TF_GLM_KV_HOST's MTP cache (the second), then pooled keys inside the pages
         const c: dsa.Caches = .{ .lc = 0x10000000 + ps / 2, .ik = 800, .ig = 900, .pk = 0x20000000 + pks / 2, .pk_rows = 16386, .pt = 700, .ps = ps, .pks = own };
         Launch.n = 0;
-        try dsa.blockLastRow(k, stream, l, c, std.mem.zeroes(dsa.Scratch), 100, 4096, 2048, 300, 4096, 1, 600);
+        try dsa.blockLastRow(k, stream, l, c, std.mem.zeroes(dsa.Scratch), 112, 4096, 2048, 300, 4096, 1, 600); // rows on 16 bytes, as glue.router needs
         var seen: [3]usize = @splat(0);
         for (Launch.ids[0..Launch.n], Launch.strides[0..Launch.n]) |id, stride| if (id == 1 or id == 8 or id == 9) {
             seen[if (id == 1) 0 else id - 7] += 1;
@@ -291,10 +291,10 @@ test "GLM FP8 KV: canonical per-rank state bytes at configured long windows are 
     try t.expectEqual(@as(usize, 11), mla);
     const contexts = [_]usize{ 8192, 65536, 199307, 245760 };
     const bytes = [_][3]usize{
-        .{ 8256, 296101376, 245772800 },
-        .{ 65600, 1044784640, 644887040 },
-        .{ 199360, 2791155200, 1575856640 },
-        .{ 245824, 3397789184, 1899246080 },
+        .{ 8256, 350153216, 299824640 },
+        .{ 65600, 1098836480, 698938880 },
+        .{ 199360, 2845207040, 1629908480 },
+        .{ 245824, 3451841024, 1953297920 },
     };
     for (contexts, bytes) |context, want| {
         const capacity = @import("cuda_native.zig").capacity(context);
@@ -305,4 +305,53 @@ test "GLM FP8 KV: canonical per-rank state bytes at configured long windows are 
         try t.expectEqual((mla + 1) * capacity * 508, bf.arena.buf.len - fp.arena.buf.len);
         try t.expectEqual(want, [3]usize{ capacity, bf.arena.buf.len, fp.arena.buf.len });
     }
+}
+
+test "GLM FP8 KV: unset, empty or whitespace-only TF_KV_PAGES is auto at every rank count, fp8 or not; other text reaches the start" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const start = @import("cuda_start.zig");
+    const sys_env = @import("sys").env;
+    const name = "TF_KV_PAGES";
+    const before = if (std.c.getenv(name)) |v| try t.allocator.dupeSentinel(u8, std.mem.span(v), 0) else null;
+    defer {
+        if (before) |v| {
+            _ = sys_env.setenv(name, v, 1);
+            t.allocator.free(v);
+        } else _ = sys_env.unsetenv(name);
+    }
+    _ = sys_env.unsetenv(name);
+    try t.expect(start.pagesText() == null);
+    for ([_][:0]const u8{ "", " ", "\t", " \t\r\n" }) |v| {
+        try t.expectEqual(@as(c_int, 0), sys_env.setenv(name, v, 1));
+        for ([_]usize{ 1, 2, 3 }) |w| {
+            for ([_]bool{ false, true }) |kv8| try t.expectEqual(try start.paging(null, w, kv8), try start.paging(start.pagesText(), w, kv8));
+        }
+    }
+    for ([_][:0]const u8{ "auto", "on", "off", "0", "1", "all", " on" }) |v| {
+        try t.expectEqual(@as(c_int, 0), sys_env.setenv(name, v, 1));
+        try t.expectEqualStrings(v, start.pagesText().?);
+    }
+}
+
+test "GLM shared window: its KDA projection rows have their own room, even when one stream may take every row" {
+    var d = Fake.driver();
+    var layers: [45]weights.Layer = undefined;
+    var w: weights.Weights = undefined;
+    w.config = .{};
+    w.share = try shard.Share.of(&w.config, 0, 4);
+    for (&layers, 0..) |*l, i| if (w.config.kind(@intCast(i)) == .mla) {
+        l.mixer = .{ .mla = undefined };
+    } else {
+        l.mixer = .{ .kda = undefined };
+    };
+    w.layers = &layers;
+    const rows = @import("cuda_engine.zig").shared_rows;
+    try t.expectEqual(rows, state.window_rows);
+    const row_bytes = @import("cuda_kda_block.zig").rowWidth(w.share.kda.len()) * 2;
+    var shared = try state.Buffers.initShared(&d, &w, rows, 8256);
+    defer shared.deinit();
+    try t.expect(shared.kda.ka - shared.kproj >= rows * row_bytes);
+    var window = try state.Buffers.init(&d, &w, rows, false, 8256);
+    defer window.deinit();
+    try t.expect(window.kda.ka - window.kproj < rows * row_bytes); // a lone window's rows stay in the state
 }

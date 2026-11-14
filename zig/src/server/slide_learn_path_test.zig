@@ -12,8 +12,8 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 /// Renders every message as ROLE:CONTENT| and the reply's head as A:, bytes as tokens.
-const Text = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const Text = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource, .encode_masked = encodeMasked } };
     }
     fn encode(_: *anyopaque, a: Allocator, input: []const u8, _: bool) model_text.Error![]u32 {
@@ -91,7 +91,7 @@ fn has(text: []const u8, word: []const u8) bool {
 }
 
 /// The scripted model: answers the lesson writer's prompts, and the taught model answers the facts it holds.
-const Model = struct {
+pub const Model = struct {
     gives_up: []const u8 = "", // a fact whose lessons never bring it back
     took_leak: bool = false, // the taught model answers a question about something else with the fact
     live: [topics.len]bool = @splat(false), // the facts the pocket holds now
@@ -104,13 +104,14 @@ const Model = struct {
     failures: usize = 0,
     saves: usize = 0,
     drops: usize = 0,
+    retires: usize = 0,
     draft_index: ?usize = null,
     gpa: Allocator = testing.allocator,
 
-    fn engine(m: *Model) api.Engine {
+    pub fn engine(m: *Model) api.Engine {
         return .{ .ctx = m, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .learn = learn } };
     }
-    fn deinit(m: *Model) void {
+    pub fn deinit(m: *Model) void {
         for (m.trained.items) |t| m.gpa.free(t);
         m.trained.deinit(m.gpa);
         m.pending.deinit(m.gpa);
@@ -204,6 +205,8 @@ const Model = struct {
         return null;
     }
     fn learn(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) api.LearnError!void {
+        const state: *Model = @ptrCast(@alignCast(ctx));
+        if (request.retire.len > 0) state.retires += 1;
         if (request.train.len == 0 and !request.drop and !request.undo and !request.save and !request.reroute) {
             return sink.event(sink.ctx, &.{ .done = .{} });
         }
@@ -258,7 +261,34 @@ const drain_slice_ms = 50;
 const drain_idle_ms = 10_000;
 
 /// One POST /v1/slide/learn through the router, its whole event stream read.
-fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
+pub fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const body = try std.fmt.allocPrint(arena.allocator(), "{{\"text\": \"{s}\"}}", .{text});
+    return learnBody(srv, body, failure);
+}
+
+pub fn learnBody(srv: *Server, body: []const u8, failure: ?[]const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const wire = try learnWire(arena.allocator(), srv, body);
+    if (failure) |words| {
+        try testing.expect(std.mem.indexOf(u8, wire, words) != null);
+        try testing.expect(std.mem.indexOf(u8, wire, "LayerRoundsAgain") == null);
+        try testing.expect(std.mem.indexOf(u8, wire, "the delete") == null);
+    }
+}
+
+fn learnCase(srv: *Server, text: []const u8, failure: ?[]const u8, correcting: bool) !void {
+    if (!correcting) return learnOne(srv, text, failure);
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const body = try std.fmt.allocPrint(arena.allocator(), "{{\"text\": \"{s}\",\"correction\":true}}", .{text});
+    return learnBody(srv, body, failure);
+}
+
+/// Capture the same routed lesson's complete response for protocol and persistence regression checks.
+pub fn learnWire(wire_a: Allocator, srv: *Server, body: []const u8) ![]u8 {
     var pair: [2]platform.posix.socket_t = undefined;
     if (platform.windows) {
         try platform.posix.socketpair(&pair);
@@ -268,7 +298,6 @@ fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const body = try std.fmt.allocPrint(a, "{{\"text\": \"{s}\"}}", .{text});
     const head = try std.fmt.allocPrint(a, "POST /v1/slide/learn HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
     var sent: usize = 0;
     while (sent < head.len) {
@@ -328,12 +357,7 @@ fn learnOne(srv: *Server, text: []const u8, failure: ?[]const u8) !void {
     try testing.expect(!drained.bad);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "200 OK") != null);
     try testing.expect(std.mem.indexOf(u8, drained.wire[0..drained.used], "data: [DONE]") != null);
-    if (failure) |words| {
-        const wire = drained.wire[0..drained.used];
-        try testing.expect(std.mem.indexOf(u8, wire, words) != null);
-        try testing.expect(std.mem.indexOf(u8, wire, "LayerRoundsAgain") == null);
-        try testing.expect(std.mem.indexOf(u8, wire, "the delete") == null);
-    }
+    return wire_a.dupe(u8, drained.wire[0..drained.used]);
 }
 
 /// The personal prompts each kept lesson trained to keep, after teaching `facts` in turn (one gives up when told).
@@ -509,4 +533,35 @@ test "lesson refusal: a taken-out round names the took sub-check" {
     const srv = try Server.init(testing.allocator, testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
     defer srv.deinit();
     try learnOne(srv, "I like blue.", "sub-check took");
+}
+
+pub const Stays = struct {
+    pub fn check(_: @This()) bool {
+        return false;
+    }
+};
+
+test "Learning persistence: a correction cannot retire its earlier personal fact before the dependency guard" {
+    var text: Text = .{};
+    var m: Model = .{};
+    defer m.deinit();
+    m.live[0] = true;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const defaults = (try json.parse(arena.allocator(), "{\"temperature\":0.7}")).ok;
+    const srv = try Server.init(testing.allocator, testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .default_sampling = defaults }, null);
+    defer srv.deinit();
+    const id = srv.slide.add(topics[0].fact, "chat", 1);
+    srv.slide.mark(id, .learned);
+    srv.slide.placed(id, &.{.{ .layer = 1, .neuron = 0, .key = .subject }});
+    srv.slide.asked(id, &.{.{ .question = "What colour do I like?", .answer = "You like blue.", .short = "blue" }});
+    try learnCase(srv, topics[0].fact, "correction refused", true);
+    try testing.expectEqual(@as(usize, 0), m.retires);
+    try testing.expectEqual(@as(usize, 0), m.drops);
+    try testing.expect(m.live[0]);
+    try testing.expectEqual(.learned, srv.slide.find(id).?.state);
+    try testing.expectEqual(@as(usize, 0), m.trained.items.len);
+    const refused = srv.slide.find(id + 1).?;
+    try testing.expectEqual(.missed, refused.state);
+    try testing.expect(has(refused.message, "fact 1") and has(refused.message, topics[0].fact));
 }

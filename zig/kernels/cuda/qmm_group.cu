@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/kernels/qmm_group.cu (lines 1-348, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// Device code of src/tensorfold/cuda/kernels/qmm_group.cu (lines 1-348, comments and ATen includes dropped).
 
 #include <algorithm>
 #include <cooperative_groups.h>

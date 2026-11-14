@@ -1,4 +1,4 @@
-//! Who is in the cluster: hellos and heartbeats over the RDMA links, gossip for nodes further away, one leader, agreed views.
+//! Who is in the cluster: hellos and heartbeats over RDMA links, gossip for distant nodes, one leader, agreed views.
 const std = @import("std");
 const node = @import("node.zig");
 const wire = @import("wire.zig");
@@ -65,6 +65,9 @@ pub const Member = struct {
     asked: u64 = 0,
 };
 
+/// A node that said hello on a link the roster gives another: a wrong `via`, or a node of another cluster file.
+pub const Stranger = struct { link: LinkId, name: node.Name };
+
 pub const Event = union(enum) { joined: NodeId, suspect: NodeId, dead: NodeId, left: NodeId, leader: NodeId, view: u64 };
 
 /// A message the membership does not handle (pulls, chunks), addressed to this node.
@@ -79,6 +82,10 @@ pub const Membership = struct {
     me: Entry,
     inv: node.Inventory,
     members: std.ArrayList(Member) = .empty,
+    /// When the cluster file names every node (real hosts): the node at the far end of each link. Null takes any node.
+    roster: ?[max_links]?NodeId = null,
+    /// The first node that said hello where the roster puts another.
+    stranger: ?Stranger = null,
     peer: [max_links]?NodeId = @splat(null),
     peer_inc: [max_links]u64 = @splat(0),
     greeted: [max_links]bool = @splat(false),
@@ -161,13 +168,23 @@ pub const Membership = struct {
         const msg = wire.open(raw) catch return;
         const h = msg.header;
         if (h.from == m.me.id) return;
+        // a closed cluster hears each node on its own link and relays nothing: every pair of its nodes has a link
+        if (m.roster) |at| {
+            if (link >= max_links or at[link] != h.from) return m.refuse(link, h, msg.body);
+            if (h.to != 0 and h.to != m.me.id) return;
+        }
         if (h.to != 0 and h.to != m.me.id) return m.relay(t, h, raw);
         var in: wire.In = .{ .buf = msg.body };
         switch (h.kind) {
             .hello => try m.onHello(now, t, link, h.from, &in),
             .beat => {
                 const n = try in.int(u16);
-                for (0..n) |_| try m.merge(try Entry.get(&in), link, now);
+                for (0..n) |_| {
+                    const e = try Entry.get(&in);
+                    // a closed cluster takes a node's word about itself and about this node, never about a third
+                    if (m.roster != null and e.id != h.from and e.id != m.me.id) continue;
+                    try m.merge(e, link, now);
+                }
             },
             .leave => if (m.find(h.from)) |x| {
                 if (try in.int(u64) >= x.entry.incarnation and x.entry.state != .left) {
@@ -178,13 +195,23 @@ pub const Membership = struct {
             .want => try m.sendInventory(t, h.from),
             .inventory => {
                 const inv = try wire.getInventory(&in);
-                if (m.find(inv.id)) |x| {
+                // an inventory is its sender's own
+                if (inv.id == h.from) if (m.find(inv.id)) |x| {
                     x.inv = inv;
                     x.known = true;
-                }
+                };
             },
             else => if (sink) |s| s.handle(s.ctx, link, h, msg.body),
         }
+    }
+
+    /// A message from a node the roster puts elsewhere is dropped; the first such node to say hello is kept by name.
+    fn refuse(m: *Membership, link: LinkId, h: wire.Header, body: []const u8) void {
+        if (h.kind != .hello or m.stranger != null) return;
+        var in: wire.In = .{ .buf = body };
+        _ = in.int(u64) catch return;
+        const inv = wire.getInventory(&in) catch return;
+        m.stranger = .{ .link = link, .name = inv.name };
     }
 
     fn relay(m: *Membership, t: Transport, h: wire.Header, raw: []u8) void {
@@ -198,6 +225,7 @@ pub const Membership = struct {
     fn onHello(m: *Membership, now: u64, t: Transport, link: LinkId, from: NodeId, in: *wire.In) !void {
         const inc = try in.int(u64);
         const inv = try wire.getInventory(in);
+        if (inv.id != from) return; // a hello introduces its sender and no one else
         if (m.find(from)) |x| {
             if (inc > x.entry.incarnation) {
                 if (x.entry.state != .alive and x.entry.state != .suspect) m.note(.{ .joined = from });
@@ -229,7 +257,7 @@ pub const Membership = struct {
 
     fn merge(m: *Membership, e: Entry, link: LinkId, now: u64) !void {
         if (e.id == m.me.id) {
-            if ((e.state == .suspect or e.state == .dead) and e.incarnation >= m.me.incarnation) m.me.incarnation = e.incarnation + 1;
+            if ((e.state == .suspect or e.state == .dead) and e.incarnation >= m.me.incarnation) m.me.incarnation = e.incarnation +| 1;
             return;
         }
         const x = m.find(e.id) orelse {
@@ -339,7 +367,7 @@ pub const Membership = struct {
         }
         if (leader == m.me.id) {
             if (digest != m.me.digest) {
-                m.me.epoch = highest + 1;
+                m.me.epoch = highest +| 1;
                 m.me.digest = digest;
                 m.note(.{ .view = m.me.epoch });
             }

@@ -17,7 +17,7 @@ fn routeTile(comptime name: []const u8, comptime symbol: []const u8) Record {
 }
 
 /// The same launch in bf16, whose weights are the wider activation's rows.
-pub const records = [_]Record{
+pub const records = [2]Record{
     routeTile("router tf_router_bf16_f16", "tf_router_bf16_f16"),
     .{
         .launch = .{ .name = "router tf_router_bf16", .symbol = "tf_router_bf16", .image = "decode", .threads = 128 },

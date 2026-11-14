@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.2.3
+V=1.2.8
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -136,10 +136,10 @@ When API authentication is enabled, `/health` returns only status.
 
 ## Prompt prefill share, budget and admission policy
 
-The native server reads four environment variables when it opens its lane host.
+The native server reads four environment variables when it opens its lane host, and `serve` checks them before it loads the model.
 All are optional. Set them before starting the server.
 `TENSORFOLD_PREFILL_SHARE` takes a number from 0.01 to 1.
-The default is 1. Any other text gives the default.
+The default is 1, and empty text gives the default. `serve` refuses any other value at start, naming the variable.
 It is the share of wall time long prompt steps get while other streams are decoding.
 A step of length t at share p owes the decoders t (1 - p) / p of decode time.
 The debt grows after each step and falls after each decode round.
@@ -152,7 +152,7 @@ The check compares the prompt's length with the cached state, not how far the fi
 
 `TENSORFOLD_PREFILL_BUDGET` takes a whole number of prompt rows from 1 to 4,294,967,295.
 The default is 0, which means none.
-Empty text, 0, a negative number, a fractional form, a value above the range or any other text gives 0, which removes the cap.
+Empty text or 0 gives 0, which removes the cap. `serve` refuses a negative number, a fractional form, a value above the range or any other text at start.
 It caps the prompt rows filled in one pass while a stream is ready to decode.
 The cap counts only rows filled while such a stream waits.
 A call that reports no progress spends the allowance anyway and yields, so unknown or stale progress never holds the cap open.
@@ -167,13 +167,13 @@ That costs more passes to finish the prompts.
 With the default 0 no cap applies: short prompts run as one burst beside decoders, bounded at a lane's worth of newly begun prompts while other work waits.
 
 `TENSORFOLD_PREFILL_POLICY` takes `fcfs`.
-Unset, or any other text, keeps the default order described above.
+Unset or empty keeps the default order described above. `serve` refuses any other text at start.
 Under `fcfs` the host fills only the oldest long prompt (more than 512 uncached rows) on each visit, in chunks of `TENSORFOLD_PREFILL_TOKENS` rows, and the decoding streams take one round after each chunk.
 A long prompt with no stream decoding beside it takes the engine's own cut, so a lone request runs exactly as without the policy.
 Short prompts run as they do without the policy. `TENSORFOLD_PREFILL_BUDGET` does not apply under a policy; `TENSORFOLD_PREFILL_SHARE` is checked once per visit.
 
 `TENSORFOLD_PREFILL_TOKENS` takes a whole number of prompt rows from 64 to 16384. Values outside the range are clamped.
-The default is 2048. Empty text, 0, or text that is not a whole number gives the default.
+The default is 2048, and empty text or 0 gives the default. `serve` refuses text that is not a whole number at start.
 It only matters when `TENSORFOLD_PREFILL_POLICY` is set.
 Smaller chunks shorten each pause the decoding streams see while a prompt fills; larger chunks let later prompts start sooner.
 On flashnext Metal with eight 14336-row prompts arriving together, `fcfs` at 2048 paused decoders about 1.7 s per chunk with the last first token at about 94 s;
@@ -210,7 +210,7 @@ Qwen4 has synthetic gates only.
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.2.3
+V=1.2.8
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -233,8 +233,11 @@ pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
 A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
-request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
-them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
+request with the cache off. `--prompt-cache-gib` sizes kept states. The default takes half the room after streams,
+with a 16 GiB floor on Metal and CUDA device memory, or 8 GiB for unified CUDA host snapshots, clipped to the room.
+Discrete CUDA host snapshots default to 8 GiB. Flash Next's batch host keeps a 16 GiB ceiling before sizing sessions.
+An explicit value overrides it, and 0 turns them off. A state kept inside a prompt chunk costs no extra prompt call.
+A Nemotron 3.5 Lightning state takes 48 MiB plus
 7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
 budget free for the next states.
 Prompts fill a chunk at a time between decode rounds, so requests that arrive together on a new system prompt would each
@@ -397,7 +400,38 @@ Under pressure only admission and kept states change: every request served retur
 
 `TENSORFOLD_PRESSURE_CACHE_PERCENT=N` sets the soft watermark to N% of the prompt cache budget (default 50; 0 sheds every state not being restored).
 `TENSORFOLD_MEMORY_PRESSURE=0` (or `off`) disables the governor.
-Flash Next's single-reply driver (`--parallel 1` or `auto`) does not read pressure yet, and Linux and Windows builds never do.
+Flash Next's single-reply driver (`--parallel 1` or `auto`) does not read pressure yet, and Windows builds do not.
+
+### Experimental Linux memory pressure
+
+On Linux, `TENSORFOLD_MEMORY_PRESSURE=1` (or `on`) opts the shared lane host into the same governor and cache
+watermark. Unset keeps it off until device qualification. The reader samples `/proc/pressure/memory` and
+`/proc/meminfo` without allocating; both must be available and valid at startup. It reads at most four times a
+second, raises the level immediately and waits five seconds of lower readings before easing it.
+Inside a container or cgroup, these proc files describe the whole host, not the container's memory limit.
+The opt-in therefore follows host pressure and does not provide container-local pressure or admission limits.
+
+The proposed thresholds use PSI's `avg10` stall percentages:
+
+| Level | Any of these readings |
+| --- | --- |
+| Warning | PSI some at least 10%; PSI full at least 1% |
+| Critical | PSI full at least 10% |
+
+Critical takes precedence. MemAvailable is diagnostic and does not set the level. A normally budgeted unified-memory
+server can have a small available margin without reclaim stalls. The OS reader has no engine-specific planned margin,
+so it uses PSI rather than guessing a floor from total RAM. MemFree and file-cache size do not set the level either. Unknown or malformed data follows the existing source contract: no reading,
+counted as normal by the governor. Windows is unchanged. The 503 message refers to the system on every platform.
+
+Only optional states managed by the shared lane host are shed. Borrowed states remain protected. Family-owned
+caches and a backend's independent driver need their own qualification; this does not coordinate pressure across
+TP hosts or replace the pre-load page-cache release/admission checks used on GB10 (#1857, #1868).
+
+`zig build test-memory-pressure-host` checks planted proc files, thresholds, invalid/oversized input, the existing
+hysteresis, protected state, cache shedding, admission and resumed/fresh equality on an instrumented target.
+No Linux device, memory-hog or whole-checkpoint receipt is claimed. Keep the Linux opt-in off until a GB10 run
+shows shedding, recovery without oscillation and exact drafted/plain, resumed/fresh and concurrent/solo replies
+at unchanged checkpoint precision (#2129).
 
 
 ## Access, context and updates
@@ -406,10 +440,19 @@ To accept remote clients, choose `--host 0.0.0.0` and configure `--api-key-file`
 Clients send `Authorization: Bearer KEY`.
 The default loopback server accepts local clients without a key.
 
-The server admits at most 128 open connections, including idle keep-alive connections and active replies.
+The server admits at most 128 open connections (`--max-connections N`, 1 to 1024), including idle keep-alive connections and active replies.
 Extra connections receive `503 Service Unavailable` with `Retry-After: 1`, then close.
 The reply is best effort if the peer cannot receive it; no extra connection thread is created.
 This cap is independent of the process file limit.
+
+From three quarters of that limit open (96 of 128), one remote address may hold at most a quarter of it (32 of 128); its next connection gets the same 503.
+Below that, one address may hold any number, so clients behind one address are not throttled on a quiet server.
+`--max-connections-per-address N` sets that share (0 turns it off).
+IPv4 peers are counted by address, IPv6 peers by their /64.
+Loopback clients are never counted, nor the exact addresses given with `--trusted-proxy ADDRESS` (repeat it, up to 64).
+Name a reverse proxy, a load balancer, or Docker's bridge gateway there (often `172.17.0.1` with `-p 8080:8080`), since every client behind it shares its address.
+With every slot taken, a connection waiting for its next request gives its slot up after 5 seconds.
+Below the limit, an idle keep-alive connection is never closed for it, and a request in progress never is.
 
 A new connection has 30 seconds to send its request line and all headers.
 A kept connection may wait idle for 900 seconds; its next request's first bytes start a fresh 30-second head budget.

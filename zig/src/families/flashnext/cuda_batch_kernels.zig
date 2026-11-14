@@ -34,7 +34,27 @@ pub const Gdn = struct {
     }
 };
 
+/// The prompt pass's kernel forms, each switch read once at load: the pass and the disk key read these.
+pub const Forms = struct {
+    gdn_fused: bool = true, // TF_FLASHNEXT_GDN_FUSED
+    hc_fuse: bool = true, // TF_FLASHNEXT_HC_FUSE
+    in_pass: bool = true, // TF_FLASHNEXT_KEEP_INPASS
+    readout_rows: usize = 64, // TF_FLASHNEXT_READOUT_ROWS (maxInt: never)
+    fact_rows: usize = 64, // TF_FLASHNEXT_FACT_ROWS (maxInt: never)
+
+    pub fn resolve() Forms {
+        return .{
+            .gdn_fused = @import("cuda_gdn_fused.zig").on(),
+            .hc_fuse = @import("cuda_batch_hc.zig").on(),
+            .in_pass = @import("cuda_lanes_snap.zig").keepInPass(),
+            .readout_rows = @import("cuda_chunk.zig").readoutTileRows(),
+            .fact_rows = @import("cuda_nvfp4_tile.zig").factRows(),
+        };
+    }
+};
+
 pub const Kernels = struct {
+    forms: Forms = .{},
     qmm: cuda.Module,
     experts: cuda.Module,
     rows: cuda.Module,
@@ -45,10 +65,8 @@ pub const Kernels = struct {
     lane: cuda.Function,
     /// The prompt tiles that keep #952's bits (cuda_tile_kernels.zig).
     tiles: tk.TileKernels,
+    /// qmmf's lane, BF16 projections from qmmf.prompt_rows rows on its 128-row tile (TF_FLASHNEXT_PROMPT_BF16=0: off).
     native_lane: cuda.qmmf.Lane,
-    /// BF16 weights from prompt_rows rows on prompt16.cu's tile, the lane's bits (TF_FLASHNEXT_PROMPT_BF16=0: lane).
-    prompt: ?cuda.nvfp4.Prompt,
-    prompt_rows: usize,
     nvfp4: cuda.experts.Nvfp4Experts,
     /// Block-FP8 routed experts (the MTP head of NVIDIA's NVFP4 checkpoint; cuda_moe_native.zig).
     fp8: cuda.experts.Fp8Experts,
@@ -59,6 +77,11 @@ pub const Kernels = struct {
     /// TF_FLASHNEXT_KEEP_LATE (whole heads only): the front into a stream's pending-row log, the chain with them.
     front_log: cuda.Function,
     chain_late: cuda.Function,
+    /// A shared pass's lanes in one launch a DeltaNet step (TF_FLASHNEXT_GDN_LANES).
+    lanes_keep: cuda.Function,
+    lanes_front: cuda.Function,
+    lanes_chain: cuda.Function,
+    lanes_shift: cuda.Function,
     /// A rolled-back lane's conv windows and n-gram tail in one launch (pending rows).
     late_roll: cuda.Function,
     sum: cuda.Function,
@@ -74,6 +97,7 @@ pub const Kernels = struct {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const tile_mode = try cuda.experts_tile.mode(if (std.c.getenv("TF_FLASHNEXT_PROMPT_EXPERT_TILE")) |v| std.mem.span(v) else null);
         var k: Kernels = undefined;
+        k.forms = Forms.resolve();
         k.expert_tile = null;
         k.qmm = try cuda.Module.load(d, cuda.kernels.qmm);
         errdefer k.qmm.unload();
@@ -89,11 +113,10 @@ pub const Kernels = struct {
         errdefer k.tiles.unload();
         k.router = try cuda.grouped.Router.resolve(k.experts);
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
-        k.native_lane = try cuda.qmmf.Lane.load(d, (try d.capability(0)) / 10);
+        k.native_lane = try cuda.qmmf.Lane.load(d, (try d.currentCapability()) / 10); // the current device: its tiles
         errdefer k.native_lane.unload();
-        k.prompt_rows = envRows("TF_FLASHNEXT_PROMPT_ROWS", 1024);
-        k.prompt = if (envOn("TF_FLASHNEXT_PROMPT_BF16")) try cuda.nvfp4.Prompt.load(d) else null;
-        errdefer if (k.prompt) |*p| p.unload();
+        const bf16 = try @import("sys").environment.read(bool, "TF_FLASHNEXT_PROMPT_BF16", true);
+        if (bf16) try k.native_lane.loadPrompt(d); // the shapes qmmf-prompt-bench times
         var device: c_int = 0;
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGet(&device, 0), "cuDeviceGet");
@@ -115,14 +138,23 @@ pub const Kernels = struct {
         k.gdn_h8 = try Gdn.load(k.batch, "_h8");
         k.front_log = try k.batch.function("fn_gdn_front_log");
         k.chain_late = try k.batch.function("fn_gdn_rows_late");
+        k.lanes_keep = try k.batch.function("fn_gdn_lanes_keep");
+        k.lanes_front = try k.batch.function("fn_gdn_lanes_front");
+        k.lanes_chain = try k.batch.function("fn_gdn_lanes_chain");
+        k.lanes_shift = try k.batch.function("fn_gdn_lanes_shift");
         k.late_roll = try k.batch.function("fn_late_roll");
         return k;
     }
 
-    /// A native projection over m rows: a BF16 weight takes the prompt tile from prompt_rows rows, the rest the lane.
+    /// A native projection over m rows on the lane (its 128-row tile for BF16 from qmmf.prompt_rows rows).
     pub fn nativeMatmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, m: usize, w: cuda.qmmf.Weight, y: u64, part: u64, out: cuda.qmmf.Out) !void {
-        if (k.prompt) |p| if (m >= k.prompt_rows and w.mode == .bf16) return p.matmulOut(s, x, ldx, m, w, y, out);
         return k.native_lane.matmulOut(s, x, ldx, m, w, y, out, part);
+    }
+
+    /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
+    pub fn profile() bool {
+        // the startup check refused every malformed value already, so a plain default stands here
+        return @import("sys").environment.read(bool, "TF_FLASHNEXT_PROFILE", false) catch false;
     }
 
     /// The DeltaNet kernels for a layer's heads `h`: the full set, or the `_h8` twins for half; any other is refused.
@@ -136,7 +168,6 @@ pub const Kernels = struct {
         if (k.expert_tile) |*tile| tile.unload();
         k.fp8.unload();
         k.nvfp4.unload();
-        if (k.prompt) |*p| p.unload();
         k.native_lane.unload();
         k.batch.unload();
         k.rows.unload();
@@ -145,18 +176,6 @@ pub const Kernels = struct {
         k.qmm.unload();
     }
 };
-
-/// A switch on unless its variable is "0".
-fn envOn(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
-}
-
-/// A row count from the environment, or `default`.
-fn envRows(name: [*:0]const u8, default: usize) usize {
-    const v = std.c.getenv(name) orelse return default;
-    return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
-}
 
 test "a split layer's DeltaNet launches, the rollback replay's front and chain too, take the _h8 twins; a whole one today's" {
     const want = [_][:0]const u8{ "fn_gdn_front_h8", "fn_gdn_rows_h8", "fn_gdn_rows_to_h8", "fn_gdn_chain_tpr_h8", "fn_gdn_fused_h8", "fn_gdn_norm_h8" };

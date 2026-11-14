@@ -75,7 +75,28 @@ pub const Mtp = struct {
 /// normalize_qk's constant norm weights (key_dim ** -0.5 squared for q, once for k) and its eps.
 pub const QkNorm = struct { q_weight: u64, k_weight: u64, eps: f32 };
 
+pub const ImageRun = struct {
+    at: usize,
+    rows: usize,
+    features: u64,
+    pub const Clip = struct { first: usize, rows: usize, features: u64 };
+    pub fn clip(run: ImageRun, first: usize, rows: usize, hidden: usize) ?Clip {
+        const lo = @max(run.at, first);
+        const hi = @min(run.at + run.rows, first + rows);
+        if (lo >= hi) return null;
+        return .{ .first = lo - first, .rows = hi - lo, .features = run.features + (lo - run.at) * hidden * 2 };
+    }
+};
+pub const ImageFrame = struct { positions: u64, runs: []const ImageRun };
+
 pub const Model = struct {
+    /// Torch's interleaved M-RoPE operator, engine-owned: HF BF16 text, and image prompts' rows.
+    rope: ?*const @import("qwen_hip_vision").Kernels = null,
+    /// Every text row rotates with `rope` (an HF BF16 checkpoint), with or without --vision.
+    torch_text: bool = false,
+    /// [p, p, p] for each position: a text-only prompt's rows under `torch_text`.
+    positions: u64 = 0,
+    frame: ?ImageFrame = null,
     /// What this rank sees: under tp its heads and value heads.
     spec: Spec,
     /// The tensor-parallel communicator; null on one rank.
@@ -87,6 +108,26 @@ pub const Model = struct {
     head: Projection,
     qk: QkNorm,
     mtp: ?Mtp = null,
+    /// A drafter's tapped layers: after each, every row's residual lands in its stream's tap ring.
+    taps: Taps = .{},
+};
+
+/// The layers a drafter taps and the rows a stream's ring keeps (`Caches.tap`, row = position % rows).
+pub const Taps = struct {
+    layers: [8]u32 = undefined,
+    n: usize = 0,
+    rows: usize = 0,
+
+    /// The tap index of layer `layer`, or null when it is not tapped.
+    pub fn of(t: *const Taps, layer: usize) ?usize {
+        for (t.layers[0..t.n], 0..) |l, i| if (l == layer) return i;
+        return null;
+    }
+
+    /// Bytes of one stream's ring: `rows` rows of every tapped layer's `hidden` 16-bit values.
+    pub fn ringBytes(t: *const Taps, hidden: usize) usize {
+        return t.rows * t.n * hidden * 2;
+    }
 };
 
 /// q and k's normalize_qk weights and eps exactly as Python makes them: double arithmetic, then fp32.
@@ -99,4 +140,13 @@ test "normalize_qk constants for a 128-wide key" {
     const c = qkConstants(128, 1e-6);
     try std.testing.expectEqual(@as(f32, 0.0078125), c.q);
     try std.testing.expect(@abs(c.k - 0.08838834764) < 1e-8);
+}
+
+test "Qwen HIP image features splice correctly across prompt chunks" {
+    const run: ImageRun = .{ .at = 100, .rows = 300, .features = 0x10000 };
+    try std.testing.expectEqual(ImageRun.Clip{ .first = 36, .rows = 28, .features = 0x10000 }, run.clip(64, 64, 1024).?);
+    try std.testing.expectEqual(ImageRun.Clip{ .first = 0, .rows = 128, .features = 0x10000 + 28 * 2048 }, run.clip(128, 128, 1024).?);
+    try std.testing.expectEqual(ImageRun.Clip{ .first = 0, .rows = 16, .features = 0x10000 + 284 * 2048 }, run.clip(384, 128, 1024).?);
+    try std.testing.expect(run.clip(0, 100, 1024) == null);
+    try std.testing.expect(run.clip(400, 100, 1024) == null);
 }

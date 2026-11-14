@@ -12,6 +12,7 @@ const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
 const reply_text = @import("reply_text.zig");
 const http_conn = @import("http_conn.zig");
+const admission = @import("http_admission.zig");
 const listener_mod = @import("listener.zig");
 const routes = @import("routes.zig");
 const responses = @import("responses.zig");
@@ -66,6 +67,8 @@ pub const Config = struct {
     dashboard: bool = false,
     /// Sampling when a request names none (generation_config.json and the serve flags), or null for greedy.
     default_sampling: ?Value = null,
+    /// --instruct-sampling's set, for a sampled chat request with thinking off (family_sampling.resolveInstruct).
+    instruct_sampling: ?Value = null,
     use_drafts: bool = true,
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
@@ -79,6 +82,8 @@ pub const Config = struct {
     prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
+    /// TENSORFOLD_PHASE_METRICS=1: /metrics adds the queue phase's histogram; unset, its families are as before.
+    phase_metrics: bool = false,
     /// The Spark server's keys in each reply's ``tensorfold`` block (spark_wire.zig): DeepSeek-V4, or TENSORFOLD_WIRE.
     spark_stats: bool = false,
     /// Null keeps every reply identical to a server that has no compaction.
@@ -89,6 +94,7 @@ pub const Config = struct {
     compact_memory: ?[]const u8 = null,
     /// --slide-graph: the file holding the Sliding Weights fact graph; null keeps the graph in memory.
     slide_graph: ?[]const u8 = null,
+    slide_drift_gate: bool = false,
     /// A fact whose check a delete fails, to test its put-back (0: none); only -Dslide-test-hooks builds set it.
     slide_forget_fail: u32 = 0,
     /// --cortheon: Cortheon's program and server-run web research for chat requests; off changes no reply.
@@ -99,12 +105,16 @@ pub const Config = struct {
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
     max_connections: u32 = @import("http_admission.zig").default_limit,
+    /// --max-connections-per-address, --trusted-proxy: one address's share from three quarters full.
+    peering: @import("http_admission.zig").Peering = .{},
     /// --max-inflight, --max-inflight-per-key, --requests-per-second, --request-burst; all zero: no admission.
     admission: @import("request_admission.zig").Limits = .{},
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (revision and the hardware probe); null: none.
     environ: ?*const std.process.Environ.Map = null,
+    /// TENSORFOLD_TOOL_ID_KEY_FILE's key (tool_id_key.zig), which `Server.init` takes and zeroes; null: a random key.
+    tool_id_key: ?*@import("ids.zig").Key = null,
 };
 
 /// --name-priority: background by default when the id the request names is configured (openai.replyModel parity).
@@ -115,6 +125,12 @@ pub fn namedBackground(config: Config, f: Value) bool {
     };
     for (config.background_ids) |id| if (std.mem.eql(u8, id, asked)) return true;
     return false;
+}
+
+/// Name the compiled structure with the client's own field when its route carried one (a borrowed static literal).
+pub fn nameStructure(format: ?[]const u8, request: *api.Request) void {
+    const name = format orelse return;
+    if (request.structure) |*st| st.field = name;
 }
 
 pub const Server = struct {
@@ -133,6 +149,7 @@ pub const Server = struct {
     chunks: chunk_plan.Plan = .{},
     effort_levels: []const []const u8 = &.{},
     thinking_switch: bool = false,
+    video_decoder: bool = false, // libtfvideo loaded in `init`: with the video offer it decides video input (#3004)
     eos: []const u32 = &.{},
     think_close: []const u32 = &.{},
     think_close_end: ?u32 = null,
@@ -140,11 +157,15 @@ pub const Server = struct {
     /// Scheduler load the engine publishes as it works, and this server's identity and activity (load_ledger.zig).
     load: api.load_ledger.Ledger,
     store: responses.Store,
+    /// Bytes that every Responses socket's connection cache holds now (ws_cache.zig).
+    ws_cache_bytes: std.atomic.Value(usize) = .init(0),
+    tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    /// Open connections by remote address, for the per-address share of the slots.
+    peers: admission.Peers = .{},
     draining: std.atomic.Value(bool) = .init(false),
-    penalties_logged: std.atomic.Value(bool) = .init(false), // an engine without them was sent penalties: said once
     generating: std.atomic.Value(u32) = .init(0),
     /// Model requests holding a reservation, when config.admission is on.
     admission: @import("request_admission.zig").Controller = .{},
@@ -171,25 +192,28 @@ pub const Server = struct {
 
     /// Reads what the template and tokenizer decide once: late system role, think markers, efforts, the forced close.
     pub fn media(srv: *const Server) @import("messages.zig").Media {
-        return .ofVision(srv.info.vision, srv.config.vision_pdf);
+        return @import("input_types.zig").media(srv);
     }
 
     pub fn init(gpa: Allocator, io: std.Io, engine: api.Engine, text: model_text.Text, config: Config, keys: ?*auth.Store) !*Server {
+        const tool_ids = if (config.tool_id_key) |key| key.take() else try @import("ids.zig").Key.random(io);
         const srv = try gpa.create(Server);
-        srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.* = .{ .tool_ids = tool_ids, .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa, .phases = config.phase_metrics }, .load = .init(io), .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
+        srv.config.tool_id_key = null; // its key is zeroed: `tool_ids` is the one copy
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
-        if (srv.info.embeddings != null and srv.info.text_generation) return error.InvalidEmbeddingCapabilities;
-        if (srv.info.readouts != null and (srv.info.text_generation or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
+        if (srv.info.embeddings != null and srv.info.capability(.text_generation)) return error.InvalidEmbeddingCapabilities;
+        if (srv.info.readouts != null and (srv.info.capability(.text_generation) or srv.info.embeddings != null)) return error.InvalidReadoutCapabilities;
         if (srv.info.vision) |vision| if (@import("vision_markers.zig").firstUnsafe(text, vision)) |id| {
             log.line("--vision: marker token {d} is not an added token in this tokenizer; image and video input cannot be served safely", .{id});
             return error.InvalidVisionMarkers;
         };
+        srv.video_decoder = @import("input_types.zig").decodes(srv.info.vision); // no decoder: video parts are a 400, never a 500
         if (config.voices_dir) |dir| {
             if (srv.info.speech == null) return error.VoicesRequireSpeech;
             srv.voices = try @import("drama_voice.zig").load(srv.arena.allocator(), io, dir);
         }
         _ = try @import("drama_voice.zig").select(srv.voices, config.default_voice, "default");
-        if (!srv.info.text_generation) {
+        if (!srv.info.capability(.text_generation)) {
             if (config.cortheon) return error.CortheonRequiresTextGeneration;
             return srv;
         }
@@ -223,8 +247,11 @@ pub const Server = struct {
             srv.think_close = try std.mem.concat(a, u32, &.{ lead, &.{end}, trail });
             srv.think_close_end = end;
         }
+        srv.info.thinking_applicable = srv.close_id != null;
+        srv.info.thinking_switch = try @import("prompt.zig").thinkingSwitch(srv);
         if (srv.info.prefill_step > 0) {
             srv.chunks = try chunk_plan.markers(srv, a, srv.info.prefill_step);
+            srv.chunks.min_chunk = srv.info.prefill_min_chunk;
             var step: [32]u8 = undefined;
             log.line("prompt chunks of up to {s} tokens, cut at replies {d}+ tokens apart", .{ live.commas(&step, srv.info.prefill_step), srv.chunks.min_chunk });
         }
@@ -255,17 +282,28 @@ pub const Server = struct {
         return fields.coerceEffort(e, srv.effort_levels);
     }
 
+    /// The defaults a request starts from: --instruct-sampling's set for a thinking-off chat that samples under it.
+    pub fn samplingDefaults(srv: *const Server, instruct: bool, f: Value) ?Value {
+        const defaults = srv.config.default_sampling;
+        if (instruct) if (srv.config.instruct_sampling) |set| {
+            const t = number(f.get("temperature")) orelse number(set.get("temperature")) orelse
+                (if (defaults) |d| number(d.get("temperature")) else null) orelse 0;
+            if (t > 0) return set;
+        };
+        return defaults;
+    }
+
     /// Request seeds override configured keys; otherwise use prompt keying or fresh entropy.
-    pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32) errors.Refused!?api.Sampling {
+    pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32, instruct: bool) errors.Refused!?api.Sampling {
         _ = temperature; // the request's own temperature field decides, as in the Python server
         const options = try json.newObject(cx.a);
-        const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
+        const defaults = if (srv.samplingDefaults(instruct, f)) |d| try fields.parseNumbers(cx, d) else null;
         if (defaults) |d| try merge(options, cx, d);
         const supplied = try fields.parseNumbers(cx, f);
         try merge(options, cx, supplied);
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
-        if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
+        if (srv.info.capability(.greedy_only)) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
             "this engine decodes greedily only and this server samples by default: send temperature 0, or serve with --temperature 0"
         else
             "this engine decodes greedily only: send temperature 0 or leave it out");
@@ -286,18 +324,16 @@ pub const Server = struct {
         };
     }
 
-    /// The request's penalties over the configured defaults; none, and a log line once, where the engine ignores them.
-    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value) errors.Refused!api.Penalties {
+    /// The request's penalties over configured defaults; unsupported non-default values are refused by name.
+    pub fn resolvePenalties(srv: *Server, cx: *Cx, f: Value, instruct: bool) errors.Refused!api.Penalties {
         const options = try json.newObject(cx.a);
-        if (srv.config.default_sampling) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
+        if (srv.samplingDefaults(instruct, f)) |d| try merge(options, cx, try fields.parseNumbers(cx, d));
         try merge(options, cx, try fields.parseNumbers(cx, f));
-        const p: api.Penalties = .{
-            .presence = @floatCast(number(options.get("presence_penalty")) orelse 0),
-            .frequency = @floatCast(number(options.get("frequency_penalty")) orelse 0),
-        };
-        if (!p.active() or srv.info.penalties) return p;
-        if (!srv.penalties_logged.swap(true, .monotonic)) log.line("presence_penalty and frequency_penalty are ignored: {s} does not apply them", .{srv.backendName()});
-        return .{};
+        const presence = number(options.get("presence_penalty")) orelse 0;
+        const frequency = number(options.get("frequency_penalty")) orelse 0;
+        if (!srv.info.capability(.penalties) and (presence != 0 or frequency != 0))
+            return cx.fail(.request, "presence_penalty and frequency_penalty are not supported by backend '{s}': send 0 or leave them out", .{srv.backendName()});
+        return .{ .presence = @floatCast(presence), .frequency = @floatCast(frequency) };
     }
 
     /// A specific engine name, or the server's backend identity when the shared host uses its default name.
@@ -311,16 +347,16 @@ pub const Server = struct {
         errdefer srv.release(false, request.*); // a refused request frees what it compiled here
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
         const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
-        const all = has_tools and !required and tool_grammar.autoAllEnv();
+        const all = has_tools and !required and (tool_grammar.autoAllEnv() catch return cx.fail(.server, "invalid TF_DSV41_TOOL_GRAMMAR: expected 0 or 1", .{}));
         if (has_tools and required) {
-            if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
+            if (!srv.info.capability(.structures)) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
-        } else if (has_tools and srv.info.structures and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
+        } else if (has_tools and srv.info.capability(.structures) and tool_grammar.autoWanted(tools, all) and srv.grammarCompiler() != null) {
             // auto with a strict tool (any, TENSORFOLD_TOOL_GRAMMAR=1): text or calls; no grammar library, no grammar
             request.structure = try tool_grammar.optionalStructure(srv, cx, tools, all, !one_call, thinking);
         }
         if (try grammar.spec(cx, f)) |s| {
-            if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
+            if (!srv.info.capability(.structures)) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
             const st = try srv.compiledStructure(cx, s.kind, s.text, s.field, thinking);
             if (request.structure) |tool| tool.free();
             request.structure = st;
@@ -340,7 +376,7 @@ pub const Server = struct {
         var err: [512]u8 = undefined;
         const compiled = c.compile(srv.io, @fromBackingInt(@intCast(@backingInt(kind))), text, &err) catch
             return cx.fail(.request, "{s}: the grammar cannot be enforced: {s}", .{ field, std.mem.sliceTo(&err, 0) });
-        return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c, .compiled = compiled };
+        return .{ .kind = kind, .field = field, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c, .compiled = compiled };
     }
 
     /// grammar_budget: a boolean; true keeps a grammar's reply completable within max_tokens (none without a grammar).
@@ -351,8 +387,9 @@ pub const Server = struct {
         const st = if (request.structure) |*s| s else return;
         const g = st.compiled orelse return cx.refuse("grammar_budget: the grammar was not compiled here");
         if (g.f.budget_ready == null) return cx.refuse("grammar_budget needs a libtfgrammar built with it: rebuild with zig build grammar or use a release archive's lib/");
-        const ready = g.budgetReady() catch false;
-        if (!ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
+        const ready = g.budgetReadiness() catch .uncovered;
+        if (ready == .over_work) return cx.refuse("grammar_budget cannot be kept for this grammar: exploring its parser states passes the fixed work limit, a step count that is the same on every machine; send it without grammar_budget");
+        if (ready != .ready) return cx.refuse("grammar_budget cannot be kept for this grammar: it uses token-level, budgeted, captured or left-recursive rules");
         st.budget = true;
     }
 
@@ -386,10 +423,11 @@ pub const Server = struct {
     }
 
     /// Counts one finished request for /metrics.
-    pub fn noteRequest(srv: *Server, prompt_len: usize, cached: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64) void {
+    pub fn noteRequest(srv: *Server, prompt_len: usize, cached: usize, generated: usize, drafted: u64, accepted: u64, rounds: u64, received: i96, first: ?i96, last: ?i96, prefill: ?f64, queued: ?f64) void {
         const now = clock.nowNs(srv.io);
         const tpot = srv.metrics.tpotValue(first, last, generated);
         srv.metrics.note(srv.io, prompt_len, cached, generated, drafted, accepted, rounds, @max(0, clock.seconds(now - received)), if (first) |f| clock.seconds(f - received) else null, if (first) |f| @max(0, clock.seconds(now - f)) else null, prefill, tpot);
+        if (queued) |q| srv.metrics.noteQueue(srv.io, q);
     }
 
     /// Accepts connections until ``stop`` is set, each on its own thread.
@@ -398,8 +436,9 @@ pub const Server = struct {
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
             if (!srv.admitConnection(c.fd)) continue;
-            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind }) catch {
-                _ = srv.open_connections.fetchSub(1, .acq_rel);
+            const slot = admission.peerSlot(&srv.peers, srv.io, &srv.open_connections, srv.config.max_connections, srv.config.peering, c.fd, c.peer) orelse continue;
+            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind, slot }) catch {
+                admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
                 _ = platform.posix.system.close(c.fd);
                 continue;
             };
@@ -408,20 +447,20 @@ pub const Server = struct {
     }
 
     pub fn admitConnection(srv: *Server, fd: platform.posix.socket_t) bool {
-        const admission = @import("http_admission.zig");
         if (admission.acquire(&srv.open_connections, srv.config.max_connections)) return true;
         admission.reject(fd);
         return false;
     }
 
-    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool) void {
-        defer _ = srv.open_connections.fetchSub(1, .acq_rel);
+    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool, slot: u16) void {
+        defer admission.release(&srv.peers, srv.io, &srv.open_connections, slot);
         defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
         const peer = listener_mod.peerText(&peer_buf, accepted.peer);
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;
         defer conn.deinit();
         conn.timeouts = srv.config.timeouts;
+        conn.shed = .{ .open = &srv.open_connections, .limit = srv.config.max_connections };
         var browser = srv.config.browser;
         browser.loopback_bind = loopback_bind;
         conn.auth_enabled = srv.keys != null and srv.keys.?.enabled();
@@ -468,8 +507,10 @@ pub const Server = struct {
             conn.key_scopes = m.scopes;
         }
         if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open)) return true;
-        if (matched != null and scope.allows(conn.key_scopes, conn.method, conn.path)) return true;
         const path = auth.routePath(conn.path);
+        // a Responses WebSocket upgrade opens with an inference key; the socket checks each response.create again
+        const upgrade = @import("ws_upgrade.zig").requested(conn) and std.mem.eql(u8, responses.route(path) orelse "-", "");
+        if (matched != null and (scope.allows(conn.key_scopes, conn.method, conn.path) or (upgrade and scope.allowsUpgrade(conn.key_scopes)))) return true;
         const messages = for ([_][]const u8{ "/v1/messages", "/v1/messages/count_tokens", "/messages", "/messages/count_tokens" }) |p| {
             if (std.mem.eql(u8, path, p)) break true;
         } else false;
@@ -540,4 +581,20 @@ fn templateImages(srv: *Server) bool {
 /// Templates requiring a user query gain a user turn after trailing tool results replace their last user turn.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
+}
+
+test "queue phase: server notes measured waits only when explicitly enabled" {
+    const defaults: Config = .{ .served_name = "test", .model_ids = &.{"test"} };
+    try std.testing.expect(!defaults.phase_metrics);
+    for ([_]bool{ false, true }) |enabled| {
+        var srv: Server = undefined;
+        srv.io = std.testing.io;
+        srv.metrics = .{ .gpa = std.testing.allocator, .phases = enabled };
+        defer srv.metrics.deinit();
+        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, 0.25, 0.3);
+        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
+        srv.noteRequest(10, 0, 3, 0, 0, 2, clock.nowNs(srv.io), null, null, null, null);
+        try std.testing.expectEqual(@as(u64, if (enabled) 1 else 0), srv.metrics.queue.n);
+        try std.testing.expectEqual(@as(u64, 6), srv.metrics.generation);
+    }
 }

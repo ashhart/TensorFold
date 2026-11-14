@@ -9,8 +9,10 @@ const loader = @import("load.zig");
 const tables = @import("tables.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
+const head_mod = @import("head.zig");
 const mixers = @import("mixers.zig");
 const index = @import("../index.zig");
+const gdn = @import("gdn_replay.zig");
 
 pub const Options = struct {
     device: c_int = 0,
@@ -87,6 +89,8 @@ pub const Engine = struct {
     stopped: bool,
     /// The chunk the options asked for when the engine took their fallback (null: it took what they asked).
     narrowed: ?usize = null,
+    /// The cache slots' DeltaNet plans (null: a window keeps its state a row, from the snapshots).
+    gdn: ?*gdn.Slots = null,
 
     /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -138,7 +142,9 @@ pub const Engine = struct {
         errdefer e.weights.deinit();
         e.weights.model.tp = e.comm;
         const spelling = index.ngramSpelling(map);
-        e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, &e.cfg, e.weights.model.ple.layer, spelling);
+        e.tables = try tables.Tables.init(e.keep.allocator(), &e.ck, io, &e.cfg, e.weights.model.ple.layer, spelling);
+        // 1: the gather's threads must be gone before anything they read is freed (deinit runs last to first)
+        errdefer e.tables.deinit(e.keep.allocator());
         const c = mixers.qkConstants(e.cfg.key_dim);
         var w: [2]hip.DeviceBuffer = undefined;
         for (&w, [_]f32{ c.q, c.k }) |*b, v| {
@@ -178,6 +184,20 @@ pub const Engine = struct {
         e.graphs = Graphs.init(gpa);
         e.chosen = null;
         e.pool = .{};
+        // a window runs from the plan where its shapes are the plan kernels': else a snapshot a row stays
+        e.gdn = null;
+        if (gdn.supported(e.weights.model.dims, e.cfg.layers)) {
+            const slots = try gpa.create(gdn.Slots);
+            errdefer gpa.destroy(slots);
+            slots.* = try gdn.Slots.init(gpa, &e.driver, e.weights.model.dims, @max(o.want, 1));
+            e.gdn = slots;
+            e.weights.model.gdn = slots;
+        }
+        errdefer if (e.gdn) |p| {
+            p.deinit();
+            gpa.destroy(p);
+            e.weights.model.gdn = null;
+        };
         _ = try steps.done(.{ 0, 0 }, .first);
         return e;
     }
@@ -194,11 +214,17 @@ pub const Engine = struct {
             },
         );
         e.graphs.deinit();
+        if (e.gdn) |p| {
+            p.deinit();
+            e.gpa.destroy(p);
+            e.weights.model.gdn = null;
+        }
         e.pool.deinit(e.gpa);
         if (e.votes) |*v| v.deinit();
         e.drawer.deinit();
         e.arena.deinit();
         e.host.staging.free();
+        e.tables.deinit(e.keep.allocator());
         for (&e.qk) |*b| b.free();
         e.weights.deinit();
         e.keep.deinit();
@@ -234,6 +260,7 @@ pub const Engine = struct {
 
     /// Device bytes a stream takes at `cap` positions: its caches, window snapshots, the head's caches and its rows.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
+        // a stream's plan is made for its slot when the engine opens, before any room is measured
         var buf: [config.max_layers]bool = undefined;
         const ks = e.kinds(&buf) catch return std.math.maxInt(usize);
         const l = cache.Layout.of(e.weights.model.dims, ks, cap, e.act);
@@ -264,29 +291,47 @@ pub const Engine = struct {
         return smaller;
     }
 
-    /// The scratch the largest forward takes: a prompt chunk at the capacity's end, counted on a dry run.
+    /// The largest forward's scratch: a dry run at the capacity's end, where the indexer's scores are longest.
     fn scratchBytes(e: *Engine) !usize {
+        return e.scratchAt(e.o.capacity -| @max(e.o.chunk, forward.max_segs * cache.max_window));
+    }
+
+    /// A prompt forward at `pos` over a round's most rows (chunk or verify round), the MTP head and the round's logits.
+    fn scratchAt(e: *Engine, pos: usize) !usize {
+        const verify_rows = forward.max_segs * cache.max_window;
+        const rows = @max(e.o.chunk, verify_rows);
         var counting = hip.Arena.counting();
         var o = e.ops(&counting);
         o.stream = hip.counting;
-        var c = try e.caches(@max(e.o.capacity, e.o.chunk) + cache.max_window);
-        defer c.deinit(e.gpa);
-        const tokens = try e.gpa.alloc(u32, e.o.chunk);
+        const tokens = try e.gpa.alloc(u32, rows);
         defer e.gpa.free(tokens);
         @memset(tokens, 0);
         const before = e.host.used;
         defer e.host.used = before;
-        const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = e.o.capacity -| e.o.chunk }};
-        const out = try forward.run(
-            o,
-            &e.weights.model,
-            &e.host,
-            &segs,
-            false,
-            try forward.stage(&e.weights.model, &e.host, &segs, false),
-        );
-        _ = try e.logits(o, out.mixed, e.o.chunk);
-        return counting.used + (16 << 20);
+        const out = out: {
+            // freed before the head's caches, so the dry run never holds both on the device
+            var c = try e.caches(@max(e.o.capacity, rows) + cache.max_window);
+            defer c.deinit(e.gpa);
+            const segs = [_]forward.Seg{.{ .c = &c, .tokens = tokens, .pos = pos }};
+            break :out try forward.run(
+                o,
+                &e.weights.model,
+                &e.host,
+                &segs,
+                false,
+                try forward.stage(&e.weights.model, &e.host, &segs, false),
+            );
+        };
+        if (e.weights.model.mtp) |*h| {
+            var hc = try head_mod.caches(e.gpa, &e.driver, h, @max(e.o.capacity, rows) + cache.max_window, e.act, e.eos);
+            defer hc.deinit(e.gpa);
+            var ones = try hip.DeviceBuffer.alloc(&e.driver, rows * e.cfg.hc_count * e.act.size());
+            defer ones.free();
+            _ = try head_mod.run(o, true, &e.weights.model, &e.host, &hc, out.streams, tokens, pos, ones);
+        }
+        _ = try e.logits(o, out.mixed, verify_rows);
+        // the peak, not what is left at the end: each layer hands its scratch back when it is done
+        return counting.peak + (16 << 20);
     }
 
     /// The output head over `rows` final rows: whole logits rows (act dtype), joined across ranks in rank order.
@@ -313,23 +358,29 @@ pub const Engine = struct {
         if (kept == 0 or kept > tokens.len) return error.BadKeep;
         const l = c.layout;
         const s = e.stream.handle;
-        if (kept < tokens.len) for (c.linear, 0..) |linear, i| {
-            if (!linear) continue;
-            const from = c.snapshot(i, kept - 1);
-            const to = c.linearAt(i);
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.conv),
-                @ptrFromInt(from.conv),
-                l.conv_bytes,
-                s,
-            ));
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to.state),
-                @ptrFromInt(from.state),
-                l.state_bytes,
-                s,
-            ));
-        };
+        const plan = if (e.weights.model.gdn) |p| p.planFor(c.id) else null;
+        // a plan leaves the state where its window began, so a keep always runs; a one-row window wrote it back
+        if (plan) |p| {
+            try p.keep(e.ops(&e.arena), kept);
+        } else if (kept < tokens.len) {
+            for (c.linear, 0..) |linear, i| {
+                if (!linear) continue;
+                const from = c.snapshot(i, kept - 1);
+                const to = c.linearAt(i);
+                try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+                    @ptrFromInt(to.conv),
+                    @ptrFromInt(from.conv),
+                    l.conv_bytes,
+                    s,
+                ));
+                try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
+                    @ptrFromInt(to.state),
+                    @ptrFromInt(from.state),
+                    l.state_bytes,
+                    s,
+                ));
+            }
+        }
         const row = l.tail_bytes / l.tail_rows;
         try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
             @ptrFromInt(c.tail()),
@@ -382,6 +433,11 @@ pub const Engine = struct {
         e.host.used = 0;
         e.arena.reset();
         const staged = try forward.stage(&e.weights.model, &e.host, segs, true);
+        // a window's plan words are written here, outside the graph its round may replay, which copies them up
+        if (e.weights.model.gdn) |s| for (segs) |g| {
+            const p = s.planFor(g.c.id) orelse return error.CachesNotPlanned;
+            try p.fill(g.c, g.tokens.len);
+        };
         const began = nowNs(e.io);
         defer e.graphs.submit_ns += @intCast(nowNs(e.io) - began);
         e.graphs.rounds += 1;

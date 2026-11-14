@@ -204,6 +204,7 @@ pub const Metal = struct {
                 try k.take(k.ptr, stream, f, at);
                 if (end == ids.len) try self.keepLastTap(cache, end - 1 - at, end - 1);
             }
+            lanes.prefill_widths.completed(self.gpa, stream, end - at);
             at = end;
             if (stream.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(at)) != null)
                 hk.at(hk.ptr, stream, @intCast(at));

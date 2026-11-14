@@ -60,7 +60,7 @@ Served, one stream decodes at 140-248 tokens a second with it (prose 140, code 2
 | --- | --- |
 | The converted 12B, M5 Ultra, macOS 27 | Greedy and sampled decode, prompts to 252k, shared rounds, MTP drafts, structured output, prompt reuse, the server, below. |
 | `google/gemma-4-12B-it-assistant` `46d4c6f1` | The one MTP assistant admitted for the 12B. |
-| M1 to M4 | Refused: the lane projection needs M5 tensor units. |
+| M1 to M4 | Served through the row path (the fused lane projection needs M5 tensor units); the drafters refuse. |
 | Images | `--vision`: PNG and JPEG, 256 to 280 tokens an image, [below](#images). |
 | Audio | Not read: the converter drops the audio input, and the server takes no audio. |
 | Other widths | MLX affine 2-6 or 8 bits in groups of 64, uniform or per module: [other widths](#other-widths). |

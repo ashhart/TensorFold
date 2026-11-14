@@ -157,14 +157,15 @@ test "startup warms shared shapes once but measures all live widths independentl
     try q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen);
     var calls: usize = 0;
     for (probe.calls) |n| calls += n;
-    try std.testing.expectEqual(@as(usize, 10 + 64 * reps), calls);
+    // seven distinct buckets (1, 4, 8, 16, 32, 48, 64) warm twice each
+    try std.testing.expectEqual(@as(usize, 14 + 64 * reps), calls);
     try std.testing.expectEqual(@as(usize, 2 + reps), probe.calls[1]);
     try std.testing.expectEqual(@as(usize, 2 + reps), probe.calls[2]);
     try std.testing.expectEqual(@as(usize, reps), probe.calls[3]);
     for (probe.costs) |measured| try std.testing.expect(measured);
     // The injected clock gives every measured window one tick, so none of them can be zero.
     for (probe.ms) |m| try std.testing.expectEqual(@as(f64, 1.0), m);
-    try std.testing.expectEqual(@as(usize, 5), seen.len);
+    try std.testing.expectEqual(@as(usize, 7), seen.len);
     for (1..65) |rows| try std.testing.expect(seen.contains(Shape.init(rows, 1, true, true, 1)));
     var again: usize = 0;
     for (1..129) |segments| {
@@ -189,7 +190,8 @@ test "shared warmups count actual passes without replacing any width measurement
     try q.native.warm.time(fakeIo(), &probe, &probe, &cache, &seen);
     var calls: usize = 0;
     for (probe.calls) |n| calls += n;
-    try std.testing.expectEqual(@as(usize, 9 + 64 * reps), calls);
+    // the pre-marked bucket 1 shape needs one more pass; the other six buckets two each
+    try std.testing.expectEqual(@as(usize, 13 + 64 * reps), calls);
     try std.testing.expectEqual(@as(usize, 1 + reps), probe.calls[1]);
     try std.testing.expect(!cache.advanced);
     for (probe.costs) |measured| try std.testing.expect(measured);
@@ -231,6 +233,7 @@ test "served scratch: one drafter frame does not allocate 128 streams of logits 
     d.target_taps = 111411200;
     d.step_ms = 1;
     d.n_costs = 0;
+    d.tree_nodes = try q.draft.tree.nodes(); // as Draft.init reads it
     try std.testing.expectEqual(d.c.ringBytes() + d.target_taps + d.scratch_one, d.drafter().facts().stream_bytes);
     const one = try d.layout(false);
     try std.testing.expectEqual(@as(usize, 23667968), one);

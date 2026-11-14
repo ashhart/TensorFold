@@ -1,4 +1,4 @@
-"""Compares cuobjdump -sass of two images kernel by kernel (keyed by name and template arguments, namespaces ignored)."""
+"""Compares cuobjdump -sass of two images kernel by kernel (keyed by name and template args, namespaces ignored)."""
 
 from __future__ import annotations
 

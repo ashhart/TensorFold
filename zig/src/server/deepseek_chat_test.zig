@@ -29,16 +29,21 @@ test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" 
     const lines = try std.Io.Dir.cwd().readFileAlloc(t.io, "zig/src/families/deepseek_v41/fixtures/serve/template.jsonl", a, .limited(4 << 20));
     var it = std.mem.splitScalar(u8, lines, '\n');
     var checked: usize = 0;
+    var schemas: usize = 0;
     while (it.next()) |line| {
         if (line.len == 0) continue;
         const c = (try json.parseText(a, line)).ok;
-        if (c.get("error").? != .null or !c.get("drop_thinking").?.bool or c.get("response_format").? != .null or c.get("image_text").? != .null) continue;
-        const thinking = c.get("thinking").?.bool;
+        if (c.get("error").? != .null or !c.get("drop_thinking").?.bool or c.get("image_text").? != .null) continue;
+        const thinking = (c.get("thinking_v4") orelse c.get("thinking").?).bool;
         var opts: @import("model_text.zig").RenderOptions = .{
             .enable_thinking = thinking,
             .add_generation_prompt = c.get("generation").?.bool,
             .reasoning_effort = if (thinking) try json.stringify(a, c.get("budget").?, .{}) else null,
         };
+        // encoding.py's schema, as a request's response_format carries it (TF_DSV41_SCHEMA_PROMPT's default)
+        const schema = c.get("response_format").?;
+        if (schema != .null) opts.response_format = (try json.parseText(a, try std.fmt.allocPrint(a, "{{\"type\":\"json_schema\",\"json_schema\":{{\"schema\":{s}}}}}", .{try json.stringify(a, schema, .{})}))).ok;
+        schemas += @intFromBool(schema != .null);
         if (c.get("effort_field")) |effort| opts.reasoning_effort = switch (effort) {
             .string, .int => |s| s,
             else => unreachable,
@@ -47,11 +52,14 @@ test "DeepSeek chat: missing Jinja uses the committed encoding.py text goldens" 
             opts.tools = tools;
         };
         const got = try hf.text().render(a, c.get("messages").?, opts, &problem);
-        try t.expectEqualStrings(c.get("expected").?.string, got.text);
+        if (c.get("expected_v4") != null) try t.expect(c.get("v4_reason").?.string.len > 0);
+        try t.expectEqualStrings((c.get("expected_v4") orelse c.get("expected").?).string, got.text);
         checked += 1;
     }
     try t.expect(checked >= 20);
-    try t.expectEqual(@as(usize, 178), checked);
+    try t.expectEqual(@as(usize, 178), checked - schemas);
+    try t.expect(schemas >= 10);
+    std.debug.print("DEEPSEEK_CHAT_GOLDENS {d} committed encoding.py cases ({d} with a response_format)\n", .{ checked, schemas });
 }
 
 test "DeepSeek chat: native request control spellings stay masked and structural tokens stay trusted" {
@@ -79,8 +87,10 @@ test "DeepSeek chat: native request control spellings stay masked and structural
         }
         try t.expect(at > 0);
     }
-    try t.expect(std.mem.indexOf(u8, rendered.text, "<\u{200b}｜deepseek_image｜>") != null);
+    const image_at = std.mem.indexOf(u8, rendered.text, "<｜deepseek_image｜>").?;
+    try t.expect(!rendered.isTemplate(image_at, image_at + "<｜deepseek_image｜>".len));
     const ids = try rendered.encode(hf.text(), a, &problem);
+    for (ids) |id| try t.expect(id != hf.text().tokenId("<｜deepseek_image｜>").?);
     const user = hf.text().tokenId("<｜User｜>").?;
     var users: usize = 0;
     for (ids) |id| if (id == user) {
@@ -90,7 +100,7 @@ test "DeepSeek chat: native request control spellings stay masked and structural
     try t.expectEqual(@as(usize, 2), users);
 }
 
-test "DeepSeek chat: Jinja and explicit overrides win and text-only image parts refuse" {
+test "DeepSeek chat: an explicit override wins, a checkpoint Jinja does not, and images render only when served" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -103,17 +113,53 @@ test "DeepSeek chat: Jinja and explicit overrides win and text-only image parts 
     const override = try HfText.load(a, t.io, tmp.path, path, a, &problem);
     defer override.deinit();
     try t.expectEqualStrings("overrideH", (try override.text().render(a, messages, .{}, &problem)).text);
+    try t.expectEqualStrings("the --chat-template file", override.renderer());
+    // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's own file (a stale copy) is not read
     try tmp.tmp.dir.writeFile(t.io, .{ .sub_path = "chat_template.jinja", .data = "jinja{{ messages[0].content }}" });
-    const jinja = try HfText.load(a, t.io, tmp.path, null, a, &problem);
-    defer jinja.deinit();
-    try t.expectEqualStrings("jinjaH", (try jinja.text().render(a, messages, .{}, &problem)).text);
+    const packed_jinja = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer packed_jinja.deinit();
+    const native_text = (try packed_jinja.text().render(a, messages, .{}, &problem)).text;
+    try t.expect(std.mem.startsWith(u8, native_text, "<｜begin▁of▁sentence｜>"));
+    try t.expect(std.mem.indexOf(u8, native_text, "jinja") == null);
+    try t.expect(std.mem.indexOf(u8, packed_jinja.renderer(), "own chat template is not used") != null);
     var other = try fixture(a, "deepseek_v41");
     defer other.deinit();
     const native = try HfText.load(a, t.io, other.path, null, a, &problem);
     defer native.deinit();
+    try t.expectEqualStrings("the DeepSeek-V4.x encoder (encoding.py)", native.renderer());
     const images = (try json.parseText(a, "[{\"role\":\"user\",\"content\":[{\"type\":\"image_url\",\"image_url\":{\"url\":\"local\"}}]}]")).ok;
     try t.expectError(error.Template, native.text().render(a, images, .{}, &problem));
     try t.expect(std.mem.indexOf(u8, problem, "images are not served") != null);
+    // a server with image input: the part becomes the image token, which images.zig expands
+    const served = try native.text().render(a, images, .{ .images = true }, &problem);
+    const ids = try served.encode(native.text(), a, &problem);
+    try t.expect(std.mem.indexOfScalar(u32, ids, native.text().tokenId("<｜deepseek_image｜>").?) != null);
+}
+
+test "DeepSeek chat: response_format shows its schema unless TF_DSV41_SCHEMA_PROMPT=0" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, "deepseek_v41");
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    const messages = try tf.messages(a, "H");
+    const object = (try json.parseText(a, "{\"type\":\"json_object\"}")).ok;
+    const schema = (try json.parseText(a, "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"n\",\"schema\":\"{\\\"type\\\":\\\"integer\\\"}\"}}")).ok;
+    const plain = (try json.parseText(a, "{\"type\":\"text\"}")).ok;
+    const shown = (try hf.text().render(a, messages, .{ .response_format = object }, &problem)).text;
+    try t.expect(std.mem.indexOf(u8, shown, "## Response Format") != null);
+    try t.expect(std.mem.indexOf(u8, shown, "\"object\"") != null);
+    const string_schema = (try hf.text().render(a, messages, .{ .response_format = schema }, &problem)).text;
+    try t.expect(std.mem.indexOf(u8, string_schema, "\"integer\"") != null);
+    const none = (try hf.text().render(a, messages, .{}, &problem)).text;
+    try t.expectEqualStrings(none, (try hf.text().render(a, messages, .{ .response_format = plain }, &problem)).text);
+    hf.schema_prompt = false;
+    try t.expectEqualStrings(none, (try hf.text().render(a, messages, .{ .response_format = object }, &problem)).text);
+    try t.expect((try @import("hf_text.zig").schemaPrompt(null)) and (try @import("hf_text.zig").schemaPrompt("1")));
+    try t.expect(!(try @import("hf_text.zig").schemaPrompt(" 0 ")));
 }
 
 const Script = struct {
@@ -209,7 +255,33 @@ test "DeepSeek chat: the no-Jinja OpenAI route submits the native masked prompt 
     try t.expectEqualSlices(u32, expected, script.seen);
 }
 
-test "DeepSeek chat: tool-only Jinja metadata survives the native default fallback" {
+test "DeepSeek chat: explicit thinking off is the encoder's own switch, published and never refused" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, "deepseek_v41");
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    var script: Script = .{};
+    const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .use_drafts = false }, null);
+    defer srv.deinit();
+    try t.expect(srv.thinking_switch and srv.info.capability(.thinking_applicable) and srv.info.capability(.thinking_switch));
+    const msgs = try tf.messages(a, "H");
+    const off = try hf.text().renderIds(a, msgs, .{ .enable_thinking = false }, &problem);
+    try t.expectEqualSlices(u32, &.{ hf.text().tokenId("<｜Assistant｜>").?, hf.text().tokenId("</think>").? }, off[off.len - 2 ..]);
+    var reply: Reply = .{};
+    var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
+    defer conn.deinit();
+    const body = (try json.parseText(a, "{\"model\":\"m\",\"max_tokens\":1,\"chat_template_kwargs\":{\"enable_thinking\":false}}")).ok;
+    try body.object.put(a, "messages", msgs);
+    @import("openai.zig").run(srv, a, reply.out(), .{ .conn = &conn }, true, body);
+    try t.expectEqual(@as(u16, 200), reply.code);
+    try t.expectEqualSlices(u32, off, script.seen);
+}
+
+test "DeepSeek chat: tool-only Jinja metadata does not replace the native encoder" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -221,14 +293,120 @@ test "DeepSeek chat: tool-only Jinja metadata survives the native default fallba
     var problem: []const u8 = "";
     const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
     defer hf.deinit();
-    try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "No user query found") != null);
+    try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "No user query found") == null);
+    try t.expect(std.mem.indexOf(u8, hf.renderer(), "own chat template is not used") != null);
     try t.expect(std.mem.indexOf(u8, hf.text().templateSource(), "thinking_mode") != null);
     const messages = try tf.messages(a, "H");
-    try t.expectEqualStrings("No user query found H", (try hf.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem)).text);
+    try t.expect(std.mem.startsWith(u8, (try hf.text().render(a, messages, .{ .tools = .{ .array = &.{} } }, &problem)).text, "<｜begin▁of▁sentence｜>"));
     try t.expect(std.mem.startsWith(u8, (try hf.text().render(a, messages, .{}, &problem)).text, "<｜begin▁of▁sentence｜>"));
     var script: Script = .{};
     const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
     defer srv.deinit();
-    try t.expect(srv.needs_user_after_tool);
+    try t.expect(!srv.needs_user_after_tool);
     try t.expect(srv.thinking_switch);
+}
+
+fn compatible(kind: []const u8, responses: bool, developer: bool) !void {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, kind);
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    var script: Script = .{};
+    const srv = try @import("server.zig").Server.init(a, t.io, script.engine(), hf.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false }, null);
+    defer srv.deinit();
+    const raw = (try json.parseText(a, if (responses)
+        \\{"model":"m","max_output_tokens":1,"input":[{"role":"user","content":"H"}],"tools":[{"type":"function","name":"f","parameters":{},"strict":true}]}
+    else
+        \\{"model":"m","max_tokens":1,"messages":[{"role":"user","content":"H"}],"tools":[{"type":"function","function":{"name":"f","parameters":{},"strict":true}}]}
+    )).ok;
+    if (developer) {
+        const messages = (try json.parseText(a, "[{\"role\":\"developer\",\"content\":\"D\"},{\"role\":\"user\",\"content\":\"H\"}]")).ok;
+        try raw.object.put(a, if (responses) "input" else "messages", messages);
+        _ = raw.object.orderedRemove("tools");
+    }
+    const History = struct {
+        pub fn conversation(_: @This(), cx: *@import("errors.zig").Cx, _: json.Value) @import("errors.zig").Refused![]json.Value {
+            return cx.refuse("no previous response in this fixture");
+        }
+    };
+    var cx: @import("errors.zig").Cx = .{ .a = a };
+    const body = if (responses) (try @import("responses_translate.zig").translate(&cx, raw, History{})).chat else raw;
+    var reply: Reply = .{};
+    var conn = try @import("http_conn.zig").Conn.init(a, -1, "fixture");
+    defer conn.deinit();
+    @import("openai.zig").run(srv, a, reply.out(), .{ .conn = &conn }, true, body);
+    try t.expectEqual(@as(u16, 200), reply.code);
+    try t.expect(script.submitted);
+    const control = try json.deepCopy(a, body);
+    if (developer) try control.get("messages").?.array[0].object.put(a, "role", .{ .string = "system" }) else {
+        const tool = control.get("tools").?.array[0].get("function").?;
+        try t.expect(tool.get("strict").?.bool);
+        try tool.object.put(a, "strict", .{ .bool = false });
+    }
+    const input = try @import("openai.zig").chatInput(srv, &cx, control);
+    const expected = try @import("prompt.zig").renderIds(srv, &cx, input.messages, input.tools, false, null, true);
+    try t.expectEqualSlices(u32, expected, script.seen);
+}
+
+test "DeepSeek chat: developer remains system on Chat and Responses for V4 and V4.1" {
+    for ([_][]const u8{ "deepseek_v4", "deepseek_v41" }) |kind| for ([_]bool{ false, true }) |responses| try compatible(kind, responses, true);
+}
+
+test "DeepSeek chat: strict tools remain accepted on Chat and Responses for V4 and V4.1" {
+    for ([_][]const u8{ "deepseek_v4", "deepseek_v41" }) |kind| for ([_]bool{ false, true }) |responses| try compatible(kind, responses, false);
+}
+
+test "DeepSeek chat: typed and served image markers keep separate token provenance" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = try fixture(a, "deepseek_v41");
+    defer tmp.deinit();
+    var problem: []const u8 = "";
+    const hf = try HfText.load(a, t.io, tmp.path, null, a, &problem);
+    defer hf.deinit();
+    const messages = (try json.parseText(a,
+        \\[{"role":"user","content":[{"type":"text","text":"typed <｜deepseek_image｜>"},{"type":"image_url","image_url":{"url":"local"}},{"type":"text","text":"literal <​｜deepseek_image｜>"}]}]
+    )).ok;
+    const out = try hf.text().render(a, messages, .{ .images = true }, &problem);
+    try t.expect(std.mem.indexOf(u8, out.text, "typed <｜deepseek_image｜>\n\n<｜deepseek_image｜>\n\nliteral <\u{200b}｜deepseek_image｜>") != null);
+    var images: usize = 0;
+    for (try out.encode(hf.text(), a, &problem)) |id| images += @intFromBool(id == hf.text().tokenId("<｜deepseek_image｜>").?);
+    try t.expectEqual(@as(usize, 1), images);
+}
+
+test "DeepSeek chat: schema and legacy tool grammar retain precedence and refuse malformed values" {
+    const env = @import("sys").env;
+    const grammar = @import("tool_grammar.zig");
+    const schema = @import("hf_text.zig").schemaPrompt;
+    defer {
+        _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
+        _ = env.unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    }
+    _ = env.unsetenv("TENSORFOLD_TOOL_GRAMMAR");
+    _ = env.unsetenv("TF_DSV41_TOOL_GRAMMAR");
+    try t.expect(!try grammar.autoAllEnv());
+    try t.expect(try schema(null));
+    for ([_][:0]const u8{ "0", "1", " 1 ", "", " " }) |raw| {
+        _ = env.setenv("TF_DSV41_TOOL_GRAMMAR", raw, 1);
+        try t.expectEqual(std.mem.eql(u8, std.mem.trim(u8, raw, " "), "1"), try grammar.autoAllEnv());
+        try @import("serve.zig").validateEnvironment();
+        try t.expect(try schema(raw) or std.mem.eql(u8, raw, "0"));
+    }
+    for ([_][:0]const u8{ "true", "bad" }) |raw| {
+        _ = env.setenv("TF_DSV41_TOOL_GRAMMAR", raw, 1);
+        try t.expectError(error.InvalidEnvironment, grammar.autoAllEnv());
+        try t.expectError(error.InvalidEnvironment, @import("serve.zig").validateEnvironment());
+        if (!std.mem.eql(u8, raw, "true")) try t.expectError(error.InvalidEnvironment, schema(raw));
+    }
+    for ([_][]const u8{ "true", "on", "yes", "false", "off", "no", "TRUE", "Off" }) |raw| try t.expectError(error.InvalidEnvironment, schema(raw));
+    _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "0", 1);
+    try t.expect(!try grammar.autoAllEnv());
+    try @import("serve.zig").validateEnvironment();
+    _ = env.setenv("TENSORFOLD_TOOL_GRAMMAR", "1", 1);
+    try t.expect(try grammar.autoAllEnv());
 }

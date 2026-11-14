@@ -24,6 +24,10 @@ pub const Request = struct {
     added: []Value,
     store: bool,
     stream: bool,
+    /// The client's own name for the grammar field when ``text.format`` asked for a structure; null for plain text.
+    format: ?[]const u8 = null,
+    /// Only ``include`` asked for logprobs: an engine without rows answers without them, as before it had any.
+    rows_if_offered: bool = false,
 };
 
 fn kindOf(v: Value) ?Value {
@@ -271,10 +275,10 @@ fn format(cx: *Cx, text: ?Value) errors.Refused!?Value {
     return cx.refuse("text.format must be text, json_object or json_schema");
 }
 
-/// OpenAI's include values, sorted: each asks for output this server has none of (plain reasoning, no tools here).
+/// OpenAI's include values, sorted: only ``message.output_text.logprobs`` adds output, where the engine has rows.
 const include_values = [_][]const u8{ "code_interpreter_call.outputs", "computer_call_output.output.image_url", "file_search_call.results", "message.input_image.image_url", "message.output_text.logprobs", "reasoning.encrypted_content", "web_search_call.action.sources", "web_search_call.results" };
 
-/// ``include`` of OpenAI's values accepted and ignored (clients send some by habit), others refused by name.
+/// ``include`` of OpenAI's values accepted (clients send some by habit), others refused by name.
 pub fn include(cx: *Cx, given: Value) errors.Refused!void {
     if (given == .null) return;
     if (given != .array) return cx.refuse("include must be a list of strings");
@@ -292,11 +296,9 @@ pub fn include(cx: *Cx, given: Value) errors.Refused!void {
 pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request {
     const a = cx.a;
     if (body != .object) return cx.refuse("the request body must be a JSON object");
-    _ = try fields.probabilityOptions(cx, body, false); // logprobs come on /v1/chat/completions only
     for (refused) |r| if (json.truthyField(body, r[0])) return cx.refuse(r[1]);
     if (body.get("include")) |inc| try include(cx, inc);
     if (body.field("truncation")) |t| if (!(t == .string and std.mem.eql(u8, t.string, "disabled"))) return cx.refuse("truncation must be \"disabled\": a prompt too long for the context is refused");
-    if (json.truthyField(body, "top_logprobs")) return cx.refuse("top_logprobs is not supported");
     const meta_raw = body.get("metadata");
     const metadata: Value = if (meta_raw != null and meta_raw.?.truthy()) meta_raw.? else .{ .object = try json.newObject(a) };
     const meta_ok = metadata == .object and metadata.object.count() <= 16 and for (metadata.object.keys(), metadata.object.values()) |k, v| {
@@ -321,6 +323,16 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     const offered = try tools(cx, body.get("tools"));
     const choice = try toolChoice(cx, body.get("tool_choice"), offered);
     const chat = try json.newObject(a);
+    // rows come with top_logprobs or logprobs; the include name alone asks for them only where the engine has them
+    const listed = if (body.get("include")) |inc| inc == .array and for (inc.array) |v| {
+        if (std.mem.eql(u8, v.string, "message.output_text.logprobs")) break true;
+    } else false else false;
+    const rows = try json.newObject(a);
+    for ([_][]const u8{ "n", "logprobs", "top_logprobs" }) |k| if (body.get(k)) |v| try rows.put(a, k, v);
+    const asked = body.field("top_logprobs") != null or json.truthyField(body, "logprobs");
+    if (listed or asked) try rows.put(a, "logprobs", .{ .bool = true });
+    _ = try fields.probabilityOptions(cx, .{ .object = rows }, true);
+    for ([_][]const u8{ "logprobs", "top_logprobs" }) |k| if (rows.get(k)) |v| try chat.put(a, k, v);
     for (passed) |k| if (body.get(k)) |v| try chat.put(a, k, v);
     var msgs: std.ArrayList(Value) = .empty;
     if (instructions != null and instructions.?.string.len > 0) {
@@ -339,7 +351,8 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     const reasoning: Value = if (reasoning_raw != null and reasoning_raw.?.truthy()) reasoning_raw.? else .{ .object = try json.newObject(a) };
     if (reasoning != .object) return cx.refuse("reasoning must be an object");
     if (reasoning.field("effort")) |e| try chat.put(a, "reasoning_effort", e);
-    if (try format(cx, body.get("text"))) |f| try chat.put(a, "response_format", f);
+    const rf = try format(cx, body.get("text"));
+    if (rf) |f| try chat.put(a, "response_format", f);
     const echo = try json.newObject(a);
     try echo.put(a, "instructions", instructions orelse .null);
     try echo.put(a, "max_output_tokens", body.get("max_output_tokens") orelse .null);
@@ -371,7 +384,7 @@ pub fn translate(cx: *Cx, body: Value, history: anytype) errors.Refused!Request 
     try echo.put(a, "truncation", .{ .string = "disabled" });
     try echo.put(a, "user", body.get("user") orelse .null);
     try echo.put(a, "background", .{ .bool = false });
-    return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream") };
+    return .{ .chat = .{ .object = chat }, .echo = echo, .added = added, .store = store, .stream = json.truthyField(body, "stream"), .format = if (rf != null) "text.format" else null, .rows_if_offered = listed and !asked };
 }
 
 test "input_file refuses remote file_url" {

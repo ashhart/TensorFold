@@ -22,7 +22,7 @@ pub fn open(s: anytype, d: *const cuda.Driver, b: *Bootstrap, image: []const u8)
     var pick_buf: [bootstrap.max_ranks]u8 = undefined;
     for (try b.allGather(&.{@intFromBool(picked)}, &pick_buf, &pick_blobs)) |x|
         if (x.len != 1 or x[0] != 1) return fallback(s, error.RoceHcaSelectionFailed);
-    const r = roce.Roce.init(d, b, image, .{ .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks }) catch |e| return fallback(s, e);
+    const r = roce.Roce.init(d, b, image, .{ .relay = cfg.roce_relay, .relay_max_bytes = cfg.roce_relay_max_bytes, .wire = if (cfg.roce_wire == .shm) .shm else .verbs, .hcas = specs[0..n], .traffic_class = cfg.roce_tc, .cpu = cfg.roce_cpu, .max_bytes = cfg.mailbox_max_bytes, .timeout_ns = cfg.mailbox_timeout_ns, .fast = cfg.roce_fast, .blocks = cfg.roce_blocks }) catch |e| return fallback(s, e);
     s.roce_multi = r;
     if (cfg.roce_chunked_bytes > 0 and !r.chunk_abi) {
         r.deinit();
@@ -37,11 +37,29 @@ pub fn open(s: anytype, d: *const cuda.Driver, b: *Bootstrap, image: []const u8)
 fn keepIfAll(s: anytype, b: *Bootstrap, r: *roce.Roce, good: bool) !void {
     var blobs: [bootstrap.max_ranks][]const u8 = undefined;
     var buf: [bootstrap.max_ranks]u8 = undefined;
-    for (try b.allGather(&.{@intFromBool(good)}, &buf, &blobs)) |x| if (x.len != 1 or x[0] != 1) {
+    if (!allProbeMatches(try b.allGather(&.{@intFromBool(good)}, &buf, &blobs))) {
         r.deinit();
         s.roce_multi = null;
         return fallback(s, error.ProbeMismatch);
-    };
+    }
+}
+fn allProbeMatches(blobs: []const []const u8) bool {
+    for (blobs) |x| if (x.len != 1 or x[0] != 1) return false;
+    return blobs.len > 0;
+}
+test "relay probe vote: every one of four ranks must match, malformed or absent receipts refuse" {
+    for (0..16) |mask| {
+        var votes: [4][1]u8 = undefined;
+        var blobs: [4][]const u8 = undefined;
+        for (&votes, &blobs, 0..) |*v, *b, rank| {
+            v.* = .{@intFromBool(mask & (@as(usize, 1) << @intCast(rank)) != 0)};
+            b.* = v;
+        }
+        try std.testing.expectEqual(mask == 15, allProbeMatches(&blobs));
+    }
+    try std.testing.expect(!allProbeMatches(&.{}));
+    try std.testing.expect(!allProbeMatches(&.{ &.{1}, &.{1}, &.{1}, &.{} }));
+    try std.testing.expect(!allProbeMatches(&.{ &.{1}, &.{1}, &.{1}, &.{ 1, 1 } }));
 }
 
 fn fallback(s: anytype, e: anyerror) !void {
@@ -107,9 +125,16 @@ test "multirank probe: one rank's mismatch leaves every rank without the wire; m
         defer sock.close(l.fd);
         var v: Vote = .{ .port = l.port, .lfd = l.fd, .odd = odd };
         var t: [2]std.Thread = undefined;
-        for (&t, 1..) |*x, me| x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
+        var started: usize = 0;
+        // the ranks use this frame's vote: a failed spawn first joins the started ones (their deadlines bound it)
+        defer for (t[0..started]) |x| x.join();
+        for (&t, 1..) |*x, me| {
+            x.* = try std.Thread.spawn(.{}, Vote.rank, .{ &v, @as(u32, @intCast(me)) });
+            started = me;
+        }
         v.rank(0);
         for (t) |x| x.join();
+        started = 0; // joined above, so a failed check below does not join them again
         for (v.errs) |e| try std.testing.expectEqual(@as(?anyerror, null), e);
         for (v.kept) |k| try std.testing.expectEqual(odd == null, k);
     }

@@ -21,6 +21,9 @@ const Select = fz.Select;
 const GSelect = fz.GSelect;
 const Lane = fz.Lane;
 
+/// A command buffer the host commits on the engine's queue; core/segments.zig waits for it before segments commit.
+pub const WarmProbe = struct { ctx: *const anyopaque, run: *const fn (ctx: *const anyopaque) mtl.CommandBuffer };
+
 pub const Run = struct {
     window: WindowSettings = .{},
     arena: std.mem.Allocator,
@@ -32,6 +35,7 @@ pub const Run = struct {
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
     held: std.ArrayList(mtl.Buffer) = .empty, // what buffer, load and group made: a host's residency set holds them
     follow: ?mtl.ResidencySet.Follow = null, // set once the host's set is built: later buffers join it
+    warm_probe: ?WarmProbe = null, // the host's idle keepalive command buffer, run before staggered segments commit
     loaded: usize = 0,
     rows: usize = 1,
     fused_xsum: bool = false,
@@ -69,6 +73,9 @@ pub const Run = struct {
     dense: bool = false,
     dense_target: bool = false,
     skip: u32 = 0,
+    sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: the 4/32 expert kernels read scales and biases through scale_index's tables
+    sbix: std.AutoHashMapUnmanaged(@import("scale_index.zig").Key, [2]Buf) = .empty,
+    sb_pairs: usize = 0, // the most distinct pairs any indexed tensor has
     hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)
     hc_up: bool = false, // fz_hc_up for the hyper-connection's up projection at 3-8 rows (the recorded kernels' bits)
     hc_up_pipe: mtl.Pipeline = undefined,
@@ -113,7 +120,7 @@ pub const Run = struct {
     limit: ?Buf = null, // a GPU-gated window's or head step's row count for the 4-bit row kernels (gate.zig)
     head_md1: ?Buf = null, // a gated head step's one-row dims, in place of the head's own
     head_draw: ?@import("sample.zig").HeadDraw = null, // a sampled reply's head step drafts by its keyed rule
-    gx: ?*@import("gx.zig").Gx = null, // FZ_GX=rows: windows from that many rows on the grouped experts (gx.zig)
+    gx: ?*@import("gx.zig").Gx = null, // windows from its min_rows on the grouped experts (TF_FLASHNEXT_GROUPED_ROWS)
     xnew_header: []const u8 = "",
     tp: ?*Tp2 = null, // TP=2 across two Macs (tp.zig): the target layers' experts split by id, outputs exchanged
     tp_layer: bool = false, // the experts being encoded are a target layer's (the MTP head keeps all of its own)

@@ -113,7 +113,7 @@ pub const Archive = struct {
         const key = try std.fmt.allocPrint(gpa, "{s}data/{s}", .{ self.prefix, t.storage });
         defer gpa.free(key);
         const m = self.members.get(key) orelse return error.MissingStorage;
-        if (m.size != t.storage_numel * 4) return error.BadArchive;
+        if (m.size != std.math.mul(u64, t.storage_numel, 4) catch return error.BadArchive) return error.BadArchive;
         const all = try gpa.alloc(f32, @intCast(t.storage_numel));
         errdefer gpa.free(all);
         try readMember(self.io, self.file, m, std.mem.sliceAsBytes(all));
@@ -550,4 +550,24 @@ test "the state-dict VM refuses globals outside the allow-list" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.ForbiddenGlobal, unpickle(arena.allocator(), evil));
+}
+
+/// A float32 storage of 2^62 + 1 elements (an 8-byte LONG1 count): `numel * 4` wraps to the 4 bytes its member holds.
+fn readWrapped() !void {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "codec.pth", .data = "" });
+    var arc: Archive = .{ .arena = .init(gpa), .io = io, .file = try tmp.dir.openFile(io, "codec.pth", .{}), .members = .empty, .tensors = .empty, .prefix = "codec/" };
+    defer arc.close();
+    const a = arc.arena.allocator();
+    try arc.members.put(a, "codec/data/0", .{ .local = 0, .size = 4, .crc = 0 });
+    try arc.tensors.put(a, "w", .{ .dtype = .f32, .storage = "0", .storage_numel = (1 << 62) + 1, .offset = 0, .shape = &.{1}, .stride = &.{1} });
+    try std.testing.expectError(error.BadArchive, arc.readF32(gpa, "w", &.{1}));
+}
+
+// In a child: if readF32's `t.storage_numel * 4` is unchecked, a safe build panics and only this test fails
+test "a storage whose byte count wraps past 2^64 is refused, not sized by the wrapped count" {
+    try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(readWrapped, .{}));
 }

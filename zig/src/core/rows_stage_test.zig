@@ -146,6 +146,31 @@ test "rows stage: a save larger than the permit alone is skipped, not held" {
     try t.expectEqual(@as(usize, 1), x.r.states.items.len);
 }
 
+test "rows stage: a permit sized to the longest state writes a cold save the fixed permit skips" {
+    for ([_]u32{ 0, 1100 }) |longest| {
+        const x = try Fixture.sized("stage-longest", .finish, false, 4 << 10, longest);
+        defer x.close();
+        const cold = try rows.write.coldCharge(x.r, longest);
+        try t.expectEqual(@max(4 << 10, @min(cold, x.s.budget)), x.r.staging_bytes);
+        var hold: Hold = .{};
+        defer hold.release.store(true, .release);
+        x.r.file_io = hold.io();
+        const p = fixture.prompt(29);
+        try x.keep(&p, 1000);
+        if (longest == 0) {
+            try t.expectEqual(@as(u64, 1), x.r.counts.skipped);
+            try t.expectEqual(error.StagingFull, x.r.failures.records[0].?.err);
+            continue;
+        }
+        try Hold.wait(&hold.entered);
+        try t.expect(x.r.worker.?.bytes() <= try rows.write.coldCharge(x.r, 1000)); // the bound holds the real charge
+        hold.release.store(true, .release);
+        try x.settle();
+        try t.expectEqual(@as(u64, 0), x.r.counts.skipped);
+        try t.expectEqual(@as(usize, 1), x.r.states.items.len);
+    }
+}
+
 test "rows stage: an eviction cannot wait, so a full permit skips the copy" {
     const x = try Fixture.open("stage-evict", .evicted, false, 1 << 20);
     defer x.close();

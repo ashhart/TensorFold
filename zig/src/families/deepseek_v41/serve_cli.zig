@@ -5,22 +5,35 @@ const api = @import("engine_api");
 const model = @import("cuda_model.zig");
 const se = @import("serve_engine.zig");
 
-fn drafts() bool {
-    const v = std.c.getenv("TF_DSV41_DRAFTS") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+fn drafts() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_DRAFTS", true);
 }
 
 pub fn follow(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []const u8) !u8 {
-    const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = drafts(), .own_prefill = model.ownPrefillEnv(), .layers = try model.layersEnv(gpa) });
+    const m = try model.Model.open(gpa, io, pack, assets, .{ .drafts = try drafts(), .own_prefill = (try model.ownPrefillEnv()), .layers = try model.layersEnv(gpa) });
     defer m.close();
-    if (m.rank() == 0) return error.RankZeroServes;
-    std.debug.print("rank {d}: loaded, following rank 0\n", .{m.rank()});
-    m.f.follow() catch |err| {
-        std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
+    return followLoaded(m, followStartup) catch |err| {
+        if (m.rank() != 0) std.log.err("rank {d}: following rank 0 failed: {s}", .{ m.rank(), @errorName(err) });
         return err;
     };
+}
+
+fn followLoaded(m: anytype, startup: anytype) !u8 {
+    if (m.rank() == 0) return error.RankZeroServes;
+    startup(m);
+    std.debug.print("rank {d}: loaded, following rank 0\n", .{m.rank()});
+    try m.f.follow();
     std.debug.print("rank {d}: rank 0 stopped\n", .{m.rank()});
     return 0;
+}
+
+fn followStartup(m: *model.Model) void {
+    // The follower has no planner; resolve its eligible floor with the planner's settings without allocating one.
+    const floor = if ((model.Model.piecesEnv() catch false) and m.gt.own_prefill and m.gt.prompt_tail == .verify) blk: {
+        const settings = @import("sched_host.zig").SchedHost.settings(&m.gt) catch break :blk false;
+        break :blk settings.floor != null;
+    } else false;
+    se.logStartup(m, floor);
 }
 
 const Box = struct {
@@ -63,7 +76,7 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []
     defer arena.deinit();
     const a = arena.allocator();
     const text = try std.Io.Dir.cwd().readFileAlloc(io, trace, a, .limited(1 << 30));
-    const s = try se.Served.open(gpa, io, pack, assets, drafts(), null, null);
+    const s = try se.Served.open(gpa, io, pack, assets, try drafts(), null, null);
     defer se.Served.close(s);
     const eng = s.engine();
     const Keyed = struct { seed: u64, temperature: f64, top_k: u32, top_p: f64, min_p: f64 = 0 };
@@ -74,7 +87,7 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     while (lines.next()) |line| try recs.append(a, try std.json.parseFromSliceLeaky(Line, a, line, .{ .ignore_unknown_fields = true }));
     // TF_DSV41_GEN_STREAMS=N: N requests in flight at once (the lanes batch them over the live slots); 1: one by one
-    const streams: usize = if (std.c.getenv("TF_DSV41_GEN_STREAMS")) |v| @max(1, std.fmt.parseInt(usize, std.mem.span(v), 10) catch 1) else 1;
+    const streams = try @import("sys").environment.read(usize, "TF_DSV41_GEN_STREAMS", 1);
     const boxes = try a.alloc(Box, recs.items.len);
     const reqs = try a.alloc(api.Request, recs.items.len);
     var n: usize = 0;
@@ -88,7 +101,7 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []
             const rec = recs.items[i];
             boxes[i] = .{ .io = io, .gpa = gpa };
             const smp: ?api.Sampling = if (rec.sampling) |k| .{ .seed = k.seed, .temperature = k.temperature, .top_k = k.top_k, .top_p = k.top_p, .min_p = k.min_p } else null;
-            reqs[i] = .{ .prompt = rec.prompt, .max_tokens = @intCast(rec.tokens.len), .drafts = drafts(), .sampling = smp };
+            reqs[i] = .{ .prompt = rec.prompt, .max_tokens = @intCast(rec.tokens.len), .drafts = try drafts(), .sampling = smp };
             if (rec.structure) |st| reqs[i].structure = .{ .kind = std.meta.stringToEnum(@FieldType(api.Structure, "kind"), st.kind) orelse return error.BadStructure, .text = st.text };
             try eng.submit(@intCast(i + 1), &reqs[i], .{ .ctx = &boxes[i], .event = Box.event });
         }
@@ -113,4 +126,41 @@ pub fn generate(gpa: std.mem.Allocator, io: std.Io, pack: []const u8, assets: []
     const rate: f64 = if (drafted > 0) @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(drafted)) else 0;
     std.debug.print("DSpark: {d} drafted, {d} accepted ({d:.3})\n", .{ drafted, accepted, rate });
     return if (ok) 0 else 1;
+}
+
+test "loaded follower reports startup once before following; rank zero refuses and errors propagate" {
+    const Fake = struct {
+        me: u32 = 1,
+        f: *@This(),
+        logged: u32 = 0,
+        followed: u32 = 0,
+        fail: bool = false,
+        fn rank(m: *@This()) u32 {
+            return m.me;
+        }
+        fn startup(m: *@This()) void {
+            m.logged += 1;
+        }
+        fn follow(m: *@This()) !void {
+            try std.testing.expectEqual(@as(u32, 1), m.logged);
+            m.followed += 1;
+            if (m.fail) return error.FollowFailed;
+        }
+    };
+    var m: Fake = .{ .f = undefined };
+    m.f = &m;
+    try std.testing.expectEqual(@as(u8, 0), try followLoaded(&m, Fake.startup));
+    try std.testing.expectEqual(@as(u32, 1), m.logged);
+    try std.testing.expectEqual(@as(u32, 1), m.followed);
+    m.logged = 0;
+    m.followed = 0;
+    m.me = 0;
+    try std.testing.expectError(error.RankZeroServes, followLoaded(&m, Fake.startup));
+    try std.testing.expectEqual(@as(u32, 0), m.logged);
+    try std.testing.expectEqual(@as(u32, 0), m.followed);
+    m.me = 1;
+    m.fail = true;
+    try std.testing.expectError(error.FollowFailed, followLoaded(&m, Fake.startup));
+    try std.testing.expectEqual(@as(u32, 1), m.logged);
+    try std.testing.expectEqual(@as(u32, 1), m.followed);
 }

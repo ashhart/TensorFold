@@ -10,11 +10,18 @@ fn initial(h: anytype, list: *std.ArrayList(mtl.Buffer)) !void {
     if (h.vis) |v| try list.appendSlice(h.gpa, &v.buffers());
 }
 
+/// The idle keepalive's command buffer without its flush, for the engine's staggered segments to wait for.
+fn probeWarm(ctx: *const anyopaque) mtl.CommandBuffer {
+    const t: *const mtl.keepalive.Target = @ptrCast(@alignCast(ctx));
+    return t.probe();
+}
+
 fn attach(h: anytype, io: std.Io, buffers: []const mtl.Buffer, label: []const u8) !void {
     h.resident = try Resident.holdUnder(h.gpa, io, h.eng.r.device, h.eng.r.queue, buffers, label, if (h.load_limit > 0) h.load_limit else null);
     if (h.resident) |*r| {
         h.warm = r.target();
         h.eng.r.follow = r.follow();
+        h.eng.r.warm_probe = .{ .ctx = &h.warm, .run = probeWarm };
         h.eng.snap_pool.follow = r.follow();
     }
 }
@@ -28,6 +35,7 @@ pub fn hold(h: anytype) !void {
 
 pub fn drop(h: anytype) void {
     h.eng.r.follow = null;
+    h.eng.r.warm_probe = null;
     h.eng.snap_pool.follow = null;
     if (h.resident) |*r| r.deinit();
     h.resident = null;

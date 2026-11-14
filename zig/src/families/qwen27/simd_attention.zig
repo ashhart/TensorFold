@@ -32,7 +32,24 @@ const rewrites = [_][2][]const u8{
 
 /// The attention kernels as this chip builds them (before M5: the tail rewritten, the prompt kernels if `prompt`).
 pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
-    const source = @import("qwen_runtime_sources");
+    return compose(a, units, prompt, @import("qwen_runtime_sources"));
+}
+
+/// As `library`, its K/V kernels reading pages of the core pool (TF_QWEN27_METAL_KV_PAGES), under main's names.
+pub fn pagedLibrary(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
+    return compose(a, units, prompt, Paged);
+}
+
+const Paged = struct {
+    const twins = @import("kernel_sources").qwen27_paged;
+    pub const glue = @import("qwen_runtime_sources").glue;
+    pub const attention_mpp = twins.attention_mpp;
+    pub const attention_io = twins.attention_io;
+    pub const attention_prompt = twins.attention_prompt;
+    pub const attention_prompt_sg = twins.attention_prompt_sg;
+};
+
+fn compose(a: std.mem.Allocator, units: bool, prompt: bool, comptime source: type) ![]u8 {
     if (units) return a.dupe(u8, source.glue ++ source.attention_mpp ++ source.attention_io ++ source.attention_prompt);
     const tail = try rewrite(a, source.glue ++ source.attention_mpp ++ source.attention_io);
     if (!prompt) return tail;
@@ -40,9 +57,9 @@ pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
     return std.mem.concat(a, u8, &.{ tail, source.attention_prompt, source.attention_prompt_sg });
 }
 
-/// `library` behind the KV-group defines attention_mpp.metal reads: Q27_G query heads over each of Q27_KVH heads.
-pub fn grouped(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_heads: u32) ![]u8 {
-    const body = try library(a, units, prompt);
+/// `library`, or `pagedLibrary`, behind the KV-group defines attention_mpp.metal reads: Q27_G over each of Q27_KVH.
+pub fn grouped(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_heads: u32, paged: bool) ![]u8 {
+    const body = try if (paged) pagedLibrary(a, units, prompt) else library(a, units, prompt);
     defer a.free(body);
     var defines: [64]u8 = undefined;
     return std.mem.concat(a, u8, &.{ try std.fmt.bufPrint(&defines, "#define Q27_G {d}\n#define Q27_KVH {d}\n", .{ group, kv_heads }), body });
@@ -64,7 +81,7 @@ pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
 }
 
 /// The tail kernel's ops (scores 16x32 over 256, outputs 16x128 over 64), each element where it is read.
-const check_source =
+pub const check_source =
     \\#include <metal_stdlib>
     \\#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
     \\using namespace metal;
@@ -144,7 +161,7 @@ test "both attention builds, with and without the prompt kernels, open with the 
     const a = std.testing.allocator;
     const defines = "#define Q27_G 4\n#define Q27_KVH 4\n";
     for ([_]bool{ false, true }) |units| for ([_]bool{ false, true }) |prompt| {
-        const text = try grouped(a, units, prompt, 4, 4);
+        const text = try grouped(a, units, prompt, 4, 4, false);
         defer a.free(text);
         const body = try library(a, units, prompt);
         defer a.free(body);

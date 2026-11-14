@@ -1,23 +1,85 @@
+// Strided stores are instantiated only by the shared-slot entries.
+#ifdef TF_QMMF_K32
+    using T = PromptK32Tile;
+    static_assert(BK == 32 && MODE == BF16 && !CLUSTER && !FUSE && BN == 128, "unsplit BF16 K32");
+#else
     using T = Tile<MODE, BM, BN, WM, WN, STAGES>;
+#endif
+#ifdef TF_QMMF_STRIDED
     static_assert(BN == 64 || BN == 32, "a block reads one 64-column tile of words and scales, or its half");
+#else
+    static_assert(BN == 64 || BN == 32 || (MODE == BF16 && BN == 128), "packed column tiles");
+#endif
     extern __shared__ __align__(128) unsigned char buf[];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
     const int wm = warp / WN, wn = warp % WN;
+#ifdef TF_QMMF_K32
+    const int KG = K / GS, steps = K / BK, slice_groups = steps / SK, per = FUSE ? steps : slice_groups;
+#else
     const int KG = K / GS, slice_groups = KG / SK, per = FUSE ? KG : slice_groups;
+#endif
     const int2 at = tile_of(blockIdx.x, M, N, BM, BN, group);
     const int m0 = at.x, n0 = at.y, slice = FUSE ? 0 : blockIdx.z, g0 = slice * per;
 
+#ifndef TF_QMMF_STRIDED
+    [[maybe_unused]] uint64_t* ready = reinterpret_cast<uint64_t*>(buf + STAGES * T::STAGE); // K32 has no barriers
+#if __CUDA_ARCH__ >= 1200
+    if constexpr (T::BARRIERS > 0) {
+        if (tid == 0) {
+#pragma unroll
+            for (int s = 0; s < STAGES; ++s)
+                asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "r"(smem(ready + s)) : "memory");
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+        }
+        __syncthreads();
+    }
+#endif
+#endif
     auto stage = [&](int s) { return buf + s * T::STAGE; };
     auto load = [&](int s, int g) {
         unsigned char* p = stage(s);
         for (int c = tid; c < BM * T::CHUNKS; c += T::THREADS) {
             const int r = c / T::CHUNKS, ch = c % T::CHUNKS;
             const int row = min(m0 + r, M - 1);
+#ifdef TF_QMMF_K32
+            cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16, x + static_cast<size_t>(row) * ldx + g * BK + ch * 8,
+                  m0 + r < M);
+#else
             cp16z(p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16, x + static_cast<size_t>(row) * ldx + g * GS + ch * 8,
                   m0 + r < M);
+#endif
         }
         unsigned char* pw = p + T::X;
         constexpr int TILE_BYTES = MODE == FP4 ? 64 * GS / 2 : MODE == BF16 ? 64 * GS * 2 : 64 * GS;
+#if __CUDA_ARCH__ >= 1200 && !defined(TF_QMMF_STRIDED)
+        if constexpr (T::BARRIERS > 0) {
+            if (tid == 0) {
+                const uint32_t bar = smem(ready + s);
+                // the stage's last ldmatrix reads (generic proxy, ordered by the CTA barrier) before the bulk writes
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;"
+                             :: "r"(bar), "r"(T::W) : "memory");
+#pragma unroll
+                for (int t = 0; t < BN / 64; ++t) {
+                    const void* src = w + (static_cast<size_t>(n0 / 64 + t) * KG + g) * TILE_BYTES;
+                    asm volatile("cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                                 :: "r"(smem(pw + t * TILE_BYTES)), "l"(src), "r"(TILE_BYTES), "r"(bar) : "memory");
+                }
+            }
+        } else
+#endif
+#ifdef TF_QMMF_K32
+        if constexpr (BK == 32) {
+            // Gather each n8 tile's two K16 fragments from the unchanged K64 pack.
+            constexpr int FRAG_BYTES = 32 * 8, HALF_BYTES = 2 * FRAG_BYTES;
+            for (int c = tid; c < T::W / 16; c += T::THREADS) {
+                const int t = c / (8 * HALF_BYTES / 16), off = c % (8 * HALF_BYTES / 16);
+                const int jj = off / (HALF_BYTES / 16), pair = off % (HALF_BYTES / 16);
+                const size_t src = (static_cast<size_t>(n0 / 64 + t) * KG + g / 2) * TILE_BYTES;
+                cp16(pw + c * 16, w + src + jj * 2 * HALF_BYTES + (g & 1) * HALF_BYTES + pair * 16);
+            }
+        } else
+#endif
         if constexpr (BN == 32) {
             // half a packed 64-column tile: its n8 tiles 0-3 or 4-7, contiguous in every format's word order
             const int half = (n0 % 64) / 32;
@@ -69,6 +131,13 @@
             }
         }
         wait<STAGES - 2>();
+#if __CUDA_ARCH__ >= 1200 && !defined(TF_QMMF_STRIDED)
+        if constexpr (T::BARRIERS > 0) {
+            const uint32_t bar = smem(ready + it % STAGES), phase = (it / STAGES) & 1;
+            asm volatile("{ .reg .pred done; WAIT: mbarrier.try_wait.parity.shared::cta.b64 done, [%0], %1;"
+                         " @!done bra WAIT; }" :: "r"(bar), "r"(phase) : "memory");
+        }
+#endif
         __syncthreads();
         const int next = it + STAGES - 1;
         if (next < per) load(next % STAGES, g0 + next);
@@ -100,7 +169,11 @@
             }
         }
 #pragma unroll
+#ifdef TF_QMMF_K32
+        for (int kt = 0; kt < BK / 16; ++kt) {
+#else
         for (int kt = 0; kt < GS / 16; ++kt) {
+#endif
             uint32_t a[T::MT][4];
 #pragma unroll
             for (int i = 0; i < T::MT; ++i) {
@@ -113,10 +186,18 @@
                 uint32_t b0, b1;
                 if constexpr (MODE == FP4) {
                     const uint32_t word = kt < 2 ? wq[j].x : wq[j].y;
+#if TF_FP_NATIVE
+                    tf_common::e2m1_pairs(word, kt & 1, b0, b1);
+#else
                     b0 = fp4pair(word, (kt & 1) * 8);
                     b1 = fp4pair(word, (kt & 1) * 8 + 4);
+#endif
                 } else if constexpr (MODE == BF16) {
+#ifdef TF_QMMF_K32
+                    const uint2 v = reinterpret_cast<const uint2*>(pw)[((wn * T::NT + j) * (BK / 16) + kt) * 32 + lane];
+#else
                     const uint2 v = reinterpret_cast<const uint2*>(pw)[((wn * T::NT + j) * 4 + kt) * 32 + lane];
+#endif
                     b0 = v.x;
                     b1 = v.y;
                 } else {
@@ -217,11 +298,19 @@
                 }
                 const float v0 = acc[i][j][2 * h] * scale, v1 = acc[i][j][2 * h + 1] * scale;
                 if (F32) {
+#ifdef TF_QMMF_STRIDED
                     float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * ldy + col;
+#else
+                    float* dst = reinterpret_cast<float*>(out) + static_cast<size_t>(row) * N + col;
+#endif
                     if (col < N) dst[0] = v0;
                     if (col + 1 < N) dst[1] = v1;
                 } else {
+#ifdef TF_QMMF_STRIDED
                     __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * ldy + col;
+#else
+                    __nv_bfloat16* dst = reinterpret_cast<__nv_bfloat16*>(out) + static_cast<size_t>(row) * N + col;
+#endif
                     if (col + 1 < N && (N & 1) == 0)
                         *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(v0, v1);
                     else {

@@ -1,4 +1,4 @@
-//! cuBLASLt opened at run time: descriptors, layouts, heuristics and matmul, with fp32 compute only (no TF32 or fast modes).
+//! cuBLASLt opened at runtime: descriptors, layouts, heuristics, matmul with fp32 compute only (no TF32 or fast modes).
 
 const std = @import("std");
 const platform = @import("sys");
@@ -30,7 +30,16 @@ pub const desc_transb: c_int = 4;
 pub const desc_epilogue: c_int = 7;
 pub const desc_bias_pointer: c_int = 8;
 pub const layout_order: c_int = 1;
+pub const layout_batch_count: c_int = 5;
+pub const layout_batch_stride: c_int = 6;
 pub const pref_max_workspace_bytes: c_int = 1;
+
+/// cublasLtMatrixLayoutAttribute_t's CUBLASLT_MATRIX_LAYOUT_COLS (cublasLt.h), a uint64_t.
+pub const layout_cols: c_int = 3;
+
+/// cublasLtMatmulAlgoConfigAttributes_t's split-K factor and reduction scheme, as ints.
+pub const algo_config_splitk: c_int = 2;
+pub const algo_config_reduction: c_int = 3;
 
 /// What D gets after the product: nothing, or a bias over its columns added in f32 before D's one rounding.
 pub const Epilogue = enum(u32) { none = 1, bias = 4 };
@@ -57,6 +66,7 @@ pub const Api = struct {
     cublasLtMatmulPreferenceSetAttribute: *const fn (Preference, c_int, CPtr, usize) callconv(.c) S,
     cublasLtMatmulAlgoGetHeuristic: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, Preference, c_int, [*]Heuristic, *c_int) callconv(.c) S,
     cublasLtMatmulAlgoCheck: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, *const Algo, *Heuristic) callconv(.c) S,
+    cublasLtMatmulAlgoConfigGetAttribute: *const fn (*const Algo, c_int, ?*anyopaque, usize, ?*usize) callconv(.c) S,
     cublasLtMatmul: *const fn (Handle, MatmulDesc, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, ?*const Algo, abi.DevicePtr, usize, abi.Stream) callconv(.c) S,
 };
 
@@ -203,6 +213,106 @@ pub const Linear = struct {
         try self.lt.check(api.cublasLtMatmulDescSetAttribute(self.desc, desc_epilogue, &none, @sizeOf(u32)), "unset epilogue");
     }
 };
+
+/// One column-major product `C = alpha op(A) op(B) + beta C`, C [m, n], batched with element strides; FP32 compute.
+pub const Spec = struct {
+    ta: Op = .n,
+    tb: Op = .n,
+    m: u64,
+    n: u64,
+    k: u64,
+    a: DataType,
+    b: DataType,
+    c: DataType,
+    lda: u64,
+    ldb: u64,
+    ldc: u64,
+    batch: u32 = 1,
+    sa: u64 = 0,
+    sb: u64 = 0,
+    sc: u64 = 0,
+};
+
+/// A planned `Spec` on a shared handle: the heuristic's first algorithm within the workspace limit.
+pub const Gemm = struct {
+    lt: *const Library,
+    handle: Handle,
+    desc: MatmulDesc,
+    a: Layout,
+    b: Layout,
+    c: Layout,
+    algo: Algo,
+    workspace_need: usize,
+
+    pub fn init(lt: *const Library, handle: Handle, s: Spec, workspace_limit: usize) Error!Gemm {
+        if (s.m == 0 or s.n == 0 or s.k == 0 or s.batch == 0) return error.Invalid;
+        var g: Gemm = undefined;
+        g.lt = lt;
+        g.handle = handle;
+        const api = lt.api;
+        try lt.check(api.cublasLtMatmulDescCreate(&g.desc, compute_32f, .f32), "cublasLtMatmulDescCreate");
+        errdefer _ = api.cublasLtMatmulDescDestroy(g.desc);
+        const ta: c_int = @backingInt(s.ta);
+        const tb: c_int = @backingInt(s.tb);
+        try lt.check(api.cublasLtMatmulDescSetAttribute(g.desc, desc_transa, &ta, @sizeOf(c_int)), "set transa");
+        try lt.check(api.cublasLtMatmulDescSetAttribute(g.desc, desc_transb, &tb, @sizeOf(c_int)), "set transb");
+        // op(A) is m x k and op(B) k x n: a transposed operand is stored the other way round
+        g.a = try layout(lt, s.a, if (s.ta == .n) s.m else s.k, if (s.ta == .n) s.k else s.m, s.lda, s.batch, s.sa);
+        errdefer _ = api.cublasLtMatrixLayoutDestroy(g.a);
+        g.b = try layout(lt, s.b, if (s.tb == .n) s.k else s.n, if (s.tb == .n) s.n else s.k, s.ldb, s.batch, s.sb);
+        errdefer _ = api.cublasLtMatrixLayoutDestroy(g.b);
+        g.c = try layout(lt, s.c, s.m, s.n, s.ldc, s.batch, s.sc);
+        errdefer _ = api.cublasLtMatrixLayoutDestroy(g.c);
+        var pref: Preference = null;
+        try lt.check(api.cublasLtMatmulPreferenceCreate(&pref), "cublasLtMatmulPreferenceCreate");
+        defer _ = api.cublasLtMatmulPreferenceDestroy(pref);
+        const limit: u64 = workspace_limit;
+        try lt.check(api.cublasLtMatmulPreferenceSetAttribute(pref, pref_max_workspace_bytes, &limit, @sizeOf(u64)), "set workspace");
+        var found: [1]Heuristic = undefined;
+        var count: c_int = 0;
+        try lt.check(api.cublasLtMatmulAlgoGetHeuristic(handle, g.desc, g.a, g.b, g.c, g.c, pref, 1, &found, &count), "cublasLtMatmulAlgoGetHeuristic");
+        if (count < 1 or found[0].state != 0) return error.NoAlgorithm;
+        g.algo = found[0].algo;
+        g.workspace_need = found[0].workspace_size;
+        return g;
+    }
+
+    pub fn deinit(g: *Gemm) void {
+        const api = g.lt.api;
+        _ = api.cublasLtMatrixLayoutDestroy(g.c);
+        _ = api.cublasLtMatrixLayoutDestroy(g.b);
+        _ = api.cublasLtMatrixLayoutDestroy(g.a);
+        _ = api.cublasLtMatmulDescDestroy(g.desc);
+        g.* = undefined;
+    }
+
+    /// C = alpha op(A) op(B) + beta C on `stream`, C read and written in place.
+    pub fn run(g: *const Gemm, alpha: f32, a: abi.DevicePtr, b: abi.DevicePtr, beta: f32, c: abi.DevicePtr, workspace: abi.DevicePtr, workspace_len: usize, stream: abi.Stream) Error!void {
+        if (workspace_len < g.workspace_need) return error.Invalid;
+        try g.lt.check(g.lt.api.cublasLtMatmul(g.handle, g.desc, &alpha, a, g.a, b, g.b, &beta, c, g.c, c, g.c, &g.algo, workspace, workspace_len, stream), "cublasLtMatmul");
+    }
+
+    fn layout(lt: *const Library, t: DataType, rows: u64, cols: u64, ld: u64, batch: u32, stride: u64) Error!Layout {
+        if (ld < rows) return error.Invalid;
+        var l: Layout = null;
+        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&l, t, rows, cols, @intCast(ld)), "cublasLtMatrixLayoutCreate");
+        errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(l);
+        if (batch > 1) {
+            const n: i32 = @intCast(batch);
+            const st: i64 = @intCast(stride);
+            try lt.check(lt.api.cublasLtMatrixLayoutSetAttribute(l, layout_batch_count, &n, @sizeOf(i32)), "set batch count");
+            try lt.check(lt.api.cublasLtMatrixLayoutSetAttribute(l, layout_batch_stride, &st, @sizeOf(i64)), "set batch stride");
+        }
+        return l;
+    }
+};
+
+/// A handle for `Gemm` plans, which share it.
+pub fn createHandle(lt: *const Library) Error!Handle {
+    var h: Handle = null;
+    try lt.check(lt.api.cublasLtCreate(&h), "cublasLtCreate");
+    return h;
+}
 
 comptime {
     std.debug.assert(@sizeOf(Algo) == 64 and @sizeOf(Heuristic) == 96);

@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "about": "Usage suites for the Bench. The categories follow NVIDIA's SPEED-Bench (prose, code, multi-turn chat, summarization and RAG, reasoning, multilingual, agent); the prompts are written for TensorFold Web so they can ship with it. Output formats are asked for in the prompt, never with response_format.",
+  "passages": {
+    "water": "The town of Harlow Ford draws its water from the river Tane, upstream of the old mill. In 2019 the council found that the treatment plant, built in 1972, could no longer meet the new limits on nitrates during dry summers, when the river runs low and farm runoff is less diluted. Three options were studied. The first was to deepen the intake and add a second filtration stage, at an estimated cost of 4.1 million pounds, with work lasting eighteen months and the plant running at half capacity during that time. The second was to drill two boreholes into the chalk aquifer east of the town and blend their water with the river's, at 2.6 million pounds; the aquifer's water is low in nitrates but hard, so a softening unit would be needed, adding 0.7 million pounds and a running cost of about 90,000 pounds a year. The third was to join the regional network through a nine-kilometre pipe to the reservoir at Elm Cross, at 5.3 million pounds, which would end local treatment altogether but leave the town dependent on a supplier whose prices it does not set. A public consultation in the spring of 2020 drew 1,140 responses. Residents favoured the boreholes by a wide margin, mainly for cost, while the farmers' union argued for the regional pipe, fearing that the boreholes would later be used to justify limits on fertiliser near the aquifer. The council chose the boreholes in September 2020. Drilling began in 2021; the first borehole met its expected yield, but the second found a fissure that let in surface water after heavy rain, and was sealed and redrilled two hundred metres north, adding five months and 310,000 pounds. The blended supply started in March 2023. Nitrate levels have stayed below the limit since, including during the dry summer of 2024, but the softening unit has needed more maintenance than planned, and the running cost reached 128,000 pounds in its first full year."
+  },
+  "suites": [
+    {
+      "id": "prose_en", "name": "English prose",
+      "prompts": [
+        {"id": "sky", "quick": true, "max_tokens": 320,
+         "messages": [{"role": "user", "content": "Write about 250 words for a curious twelve-year-old explaining why the sky is blue and why sunsets are red. Plain prose, no headings."}]},
+        {"id": "lighthouse", "max_tokens": 320,
+         "messages": [{"role": "user", "content": "Write the opening of a short story, about 250 words, set in a lighthouse during a winter storm. The keeper finds something on the stairs that should not be there."}]}
+      ]
+    },
+    {
+      "id": "code", "name": "Code",
+      "prompts": [
+        {"id": "csv_totals", "quick": true, "max_tokens": 400,
+         "messages": [{"role": "user", "content": "Write a Python function `monthly_totals(path)` that reads a CSV of transactions with columns date (YYYY-MM-DD), description and amount, and returns a dict mapping 'YYYY-MM' to the total amount. Use type hints and the standard library only, then write three pytest tests. Code only, no explanation."}]},
+        {"id": "debounce", "max_tokens": 320,
+         "messages": [{"role": "user", "content": "Write a generic TypeScript `debounce` function with a `cancel` method, fully typed, followed by a short usage example with a search box. Code only."}]}
+      ]
+    },
+    {
+      "id": "chat", "name": "Multi-turn chat",
+      "prompts": [
+        {"id": "trip", "max_tokens": 280,
+         "messages": [
+           {"role": "user", "content": "I have four days in Lisbon in November. I like walking, old trams and seafood, and I don't like crowds."},
+           {"role": "assistant", "content": "Four days is a good length for Lisbon. November is quiet, mild and sometimes rainy, which suits you: fewer crowds at the viewpoints and in Belém. Would you like a day-by-day plan, or a list of places to choose from?"},
+           {"role": "user", "content": "A day-by-day plan please, with one day trip out of the city. Keep each day to a few lines."}]},
+        {"id": "bug", "max_tokens": 280,
+         "messages": [
+           {"role": "user", "content": "My Flask app returns 500 errors only in production."},
+           {"role": "assistant", "content": "Let's narrow it down. What do the production logs show for one of those requests, and does the same request work on your machine?"},
+           {"role": "user", "content": "Logs say 'KeyError: SECRET_KEY'. Locally it works because I have a .env file."},
+           {"role": "assistant", "content": "That explains it: the variable exists on your machine but not on the server."},
+           {"role": "user", "content": "How should I set it on the server, and how do I make the app fail with a clear message when it is missing?"}]}
+      ]
+    },
+    {
+      "id": "rag", "name": "Summarization and RAG",
+      "prompts": [
+        {"id": "summary", "max_tokens": 240, "passage": "water",
+         "messages": [{"role": "user", "content": "Summarize this report in five bullet points for a council member who has not read it.\n\n{passage}"}]},
+        {"id": "question", "max_tokens": 200, "passage": "water",
+         "messages": [{"role": "system", "content": "Answer only from the document. If the document does not say, answer that it does not say."},
+                      {"role": "user", "content": "Document:\n{passage}\n\nQuestion: how much more did the boreholes option end up costing than first estimated, counting the redrilling and the first year's extra running cost? Show the arithmetic."}]}
+      ]
+    },
+    {
+      "id": "reasoning", "name": "Reasoning",
+      "prompts": [
+        {"id": "trains", "max_tokens": 320,
+         "messages": [{"role": "user", "content": "A train leaves Lyon for Paris at 9:00 at 240 km/h. Another leaves Paris for Lyon at 9:30 at 300 km/h. The line is 460 km long. At what time and how far from Paris do they meet? Work it out step by step, then give the answer on its own line."}]},
+        {"id": "schedule", "max_tokens": 320,
+         "messages": [{"role": "user", "content": "Ana, Ben, Chloé and Dev must each present once, Monday to Thursday, one per day. Ben cannot present Monday. Chloé presents the day after Ana. Dev presents before Ben. Find every schedule that works and explain how you ruled out the others."}]}
+      ]
+    },
+    {
+      "id": "multilingual", "name": "Multilingual",
+      "prompts": [
+        {"id": "fr_letter", "quick": true, "max_tokens": 320,
+         "messages": [{"role": "user", "content": "Rédige en français une lettre d'environ 200 mots à un voisin pour lui proposer de partager un potager dans la cour de l'immeuble : ce que chacun apporterait, comment s'organiser pour l'arrosage, et une date pour en parler."}]},
+        {"id": "es_de", "max_tokens": 280,
+         "messages": [{"role": "user", "content": "Explain in Spanish, in about 120 words, how to make a simple tomato sauce. Then translate your explanation into German."}]}
+      ]
+    },
+    {
+      "id": "agent", "name": "Agent",
+      "prompts": [
+        {"id": "tools_plan", "max_tokens": 320,
+         "messages": [{"role": "system", "content": "You are an assistant that acts through tools. Tools: search_files(query) returns matching paths; read_file(path) returns the text; write_file(path, text); run(command) returns stdout and exit code. Reply with a JSON array of tool calls, each {\"tool\": name, \"args\": {...}, \"why\": short reason}, and nothing else."},
+                      {"role": "user", "content": "The tests in this repository fail since yesterday's change to the date parsing code. Find the cause and fix it."}]},
+        {"id": "triage", "max_tokens": 280,
+         "messages": [{"role": "system", "content": "You triage support emails. For each email, reply with one line of JSON: {\"id\": n, \"category\": billing|bug|feature|other, \"urgent\": true|false, \"reply_needed_by\": \"today\"|\"this week\"|\"none\"}."},
+                      {"role": "user", "content": "1. I was charged twice for October, please refund one.\n2. The export button does nothing on Safari since the update.\n3. Would love a dark mode!\n4. Our whole team is locked out after the password reset, we have a launch in two hours.\n5. Thanks for the quick fix last week."}]}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+[
+ {
+  "label": "",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 64,
+  "thinking": "not applicable",
+  "thinking_off_requested": false,
+  "thinking_switch": null,
+  "thinking_applicable": null,
+  "decode_tps_median": 106.66666666666262,
+  "decode_tps_all": [
+   106.67,
+   106.67
+  ],
+  "ttft_s_median": 0.024999999999991473,
+  "prefill_tps_median": 720.0,
+  "itl_mean_ms_median": 9.375,
+  "itl_p50_ms_median": 0.0,
+  "itl_p95_ms_median": 25.0,
+  "round_gap_p50_ms_median": 25.0,
+  "round_gap_p95_ms_median": 25.0,
+  "tokens_per_chunk_median": 2.25,
+  "evidence": [
+   {
+    "prompt_tokens": 18,
+    "cached_tokens": 0,
+    "tokens": 9,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "cccccccccccc",
+    "output_sha256": "634e7b317a4c27a5da40a28321ec6e7be4f3bf05ff0f26e51bfdd25bcba4cca8"
+   },
+   {
+    "prompt_tokens": 18,
+    "cached_tokens": 0,
+    "tokens": 9,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "cccccccccccc",
+    "output_sha256": "634e7b317a4c27a5da40a28321ec6e7be4f3bf05ff0f26e51bfdd25bcba4cca8"
+   }
+  ],
+  "sample": "Fibonacci numbers add the two before"
+ },
+ {
+  "label": "",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 64,
+  "thinking": "off requested (unverified)",
+  "thinking_off_requested": true,
+  "thinking_switch": null,
+  "thinking_applicable": null,
+  "decode_tps_median": 106.66666666666262,
+  "decode_tps_all": [
+   106.67,
+   106.67
+  ],
+  "ttft_s_median": 0.024999999999991473,
+  "prefill_tps_median": 720.0,
+  "itl_mean_ms_median": 9.375,
+  "itl_p50_ms_median": 0.0,
+  "itl_p95_ms_median": 25.0,
+  "round_gap_p50_ms_median": 25.0,
+  "round_gap_p95_ms_median": 25.0,
+  "tokens_per_chunk_median": 2.25,
+  "evidence": [
+   {
+    "prompt_tokens": 18,
+    "cached_tokens": 0,
+    "tokens": 9,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "cccccccccccc",
+    "output_sha256": "634e7b317a4c27a5da40a28321ec6e7be4f3bf05ff0f26e51bfdd25bcba4cca8"
+   },
+   {
+    "prompt_tokens": 18,
+    "cached_tokens": 0,
+    "tokens": 9,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "cccccccccccc",
+    "output_sha256": "634e7b317a4c27a5da40a28321ec6e7be4f3bf05ff0f26e51bfdd25bcba4cca8"
+   }
+  ],
+  "sample": "Fibonacci numbers add the two before"
+ }
+]

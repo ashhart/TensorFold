@@ -14,6 +14,9 @@ const tail_bytes = wt.ple_tail_n * wt.wide * 2;
 /// The MTP head's cache: its own layer, whole on every rank.
 const head_heads: Heads = .full;
 
+/// The prompt cache's ladder: tokens between rungs, and the most it keeps under one history mark.
+pub const ladder = .{ .tokens = 8192, .most = 4 };
+
 /// A state's shape for its disk image (cuda_disk.zig, one rank, the whole layer): layer counts and bytes a row.
 pub const shape = .{ .linear = wt.linear_n, .attn = wt.attn_n, .conv = sizes.convBytes(.full), .state = sizes.stateBytes(.full), .kv_row = Heads.full.kvRow(), .index_row = index_row, .ratio = wt.index_ratio, .tail = tail_bytes };
 
@@ -39,7 +42,28 @@ pub const Snap = struct {
     heads: Heads = .full,
 };
 
-const Way = enum { save, restore };
+/// Where a kept state's pieces sit in its buffer (move's order) for a pass's marks (Hooks.marks): whole heads only.
+pub const layout = struct {
+    const conv_bytes = sizes.convBytes(.full);
+    const state_bytes = sizes.stateBytes(.full);
+    /// A linear layer's conv window and the n-gram tail, in bytes.
+    pub const conv_size = conv_bytes;
+    pub const tail_size = tail_bytes;
+    /// Linear layer li's conv window.
+    pub fn conv(li: usize) u64 {
+        return li * conv_bytes;
+    }
+    /// Linear layer li's DeltaNet state.
+    pub fn state(li: usize) u64 {
+        return wt.linear_n * conv_bytes + li * state_bytes;
+    }
+    /// The n-gram tail of a state after `n` tokens (after every attention cache's rows).
+    pub fn tail(n: usize) u64 {
+        return wt.linear_n * (conv_bytes + state_bytes) + wt.attn_n * attnBytes(n, .full);
+    }
+};
+
+const Way = enum { save, restore, rows };
 
 /// A piece `move` copies: `layers` buffers of `n` bytes, rows of `row` bytes (0: whole) a `per`-position block each.
 pub const Piece = struct { layers: usize, n: usize, row: usize = 0, per: usize = 1 };
@@ -65,7 +89,7 @@ fn attnOrder(layers: usize, at: usize, h: Heads) [4]Piece {
     };
 }
 
-/// Each piece of the sequence (and the head's cache, with `d`) to or from its place in the buffer at `base`.
+/// Each piece of the sequence (and the head's cache) to or from the buffer at `base`; .rows: the attention rows only.
 fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize, way: Way) !void {
     const dr = stream.d;
     var off: u64 = 0;
@@ -77,6 +101,10 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
         if (layers.len != p.layers) return error.SnapShape;
         for (layers, 0..) |b, layer| {
             if (p.n == 0) continue;
+            if (way == .rows and (pi < 2 or pi == 6)) {
+                off += p.n;
+                continue;
+            }
             // the model's caches on the stream's pages; the head's too in a pool lane (the layer after the model's)
             const head = pi >= 7 and d != null and d.?.pg.pt != 0;
             if ((pi >= 2 and pi < 6) or head) if (seq.paged) |*pg| {
@@ -91,14 +119,14 @@ fn move(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, base: u64, at: usize,
                 while (r < n) {
                     const run = @min(per - r % per, n - r);
                     const at_row = pg.rowAt(at_layer, part, r);
-                    const dst, const src = if (way == .save) .{ base + off, at_row } else .{ at_row, base + off };
+                    const dst, const src = if (way != .restore) .{ base + off, at_row } else .{ at_row, base + off };
                     try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, run * row, stream.handle), "cuMemcpyDtoDAsync");
                     off += run * row;
                     r += run;
                 }
                 continue;
             };
-            const dst, const src = if (way == .save) .{ base + off, b.ptr } else .{ b.ptr, base + off };
+            const dst, const src = if (way != .restore) .{ base + off, b.ptr } else .{ b.ptr, base + off };
             try dr.check(dr.api.cuMemcpyDtoDAsync_v2(dst, src, p.n, stream.handle), "cuMemcpyDtoDAsync");
             off += p.n;
         }
@@ -118,6 +146,21 @@ pub fn save(gpa: std.mem.Allocator, driver: *const cuda.Driver, stream: cuda.Str
     try move(stream, seq, d, snap.buf.ptr, at, .save);
     try stream.synchronize();
     return snap;
+}
+
+/// A kept state for position `at` that a pass running past it fills (Hooks.marks); `finish` adds the attention rows.
+pub fn prepare(gpa: std.mem.Allocator, driver: *const cuda.Driver, at: usize, history: [2]i64, head: bool, heads: Heads) !*Snap {
+    const snap = try gpa.create(Snap);
+    errdefer gpa.destroy(snap);
+    snap.* = .{ .buf = try cuda.DeviceBuffer.alloc(driver, bytes(at, head, heads)), .at = at, .history = history, .head = head, .heads = heads };
+    return snap;
+}
+
+/// After the pass ran past `snap.at`: the attention caches' first rows (and the head's) into `snap`, queued.
+pub fn finish(stream: cuda.Stream, seq: *prompt.Seq, d: ?*Draft, snap: *Snap) !void {
+    if (seq.fed < snap.at) return error.NotAtMark;
+    if (d) |h| if (!snap.head or h.len < snap.at) return error.NotAtMark;
+    try move(stream, seq, d, snap.buf.ptr, snap.at, .rows);
 }
 
 /// `seq` (and the head's cache, with `d`) becomes `snap`'s state; refused before any copy when it cannot hold it.

@@ -74,8 +74,16 @@ fn depth(s: c.Shape) usize {
     return s.k / 16 + 16;
 }
 
-/// Flash Next's served shapes (2,560 dims, 640 wide), then Qwen3.6-35B-A3B's ModelOpt experts (2,048 dims, 512 wide).
-const prompt_up_served = [_]c.Shape{ .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 }, .{ .rows = 130, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 512, .k = 2048 } };
+/// Flash Next and Qwen3.6 ModelOpt gate-up shapes, then GLM at TP=1/2/4 and up to 32 verify rows.
+const prompt_up_served = [_]c.Shape{
+    .{ .rows = 130, .n = 640, .k = 2560 }, .{ .rows = 1, .n = 640, .k = 2560 },
+    .{ .rows = 130, .n = 512, .k = 2048 }, .{ .rows = 1, .n = 512, .k = 2048 },
+    .{ .rows = 1, .n = 2048, .k = 4096 },  .{ .rows = 16, .n = 2048, .k = 4096 },
+    .{ .rows = 32, .n = 2048, .k = 4096 }, .{ .rows = 1, .n = 1024, .k = 4096 },
+    .{ .rows = 16, .n = 1024, .k = 4096 }, .{ .rows = 32, .n = 1024, .k = 4096 },
+    .{ .rows = 1, .n = 512, .k = 4096 },   .{ .rows = 16, .n = 512, .k = 4096 },
+    .{ .rows = 32, .n = 512, .k = 4096 },
+};
 const prompt_down_served = [_]c.Shape{ .{ .rows = 130, .n = 2560, .k = 640 }, .{ .rows = 1, .n = 2560, .k = 640 }, .{ .rows = 130, .n = 2048, .k = 512 }, .{ .rows = 1, .n = 2048, .k = 512 } };
 
 /// GLM-5.3-Flash's routed experts, 4,096 dims: TP=2's rank is 1,024 wide, TP=3's are 704 and 640.

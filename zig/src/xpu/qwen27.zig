@@ -78,6 +78,8 @@ pub const isAttention = shape.isAttention;
 pub var dump_dir: ?[]const u8 = null;
 pub var verbose = false;
 pub var dump_h: ?c_int = null;
+/// The layer-63 prompt tail (xpu/prompt_tail.zig); the tail test turns it off to compare the full layer.
+pub var prompt_tail_on = true;
 /// W4A8 study (XPU_A8): prompt GEMM inputs quantized to int8 and back in place; 128 per group, "token" per row.
 pub var a8_group: u32 = 0;
 /// K/V cache study (XPU_KV8): 1 rotates q, k, v by Hadamard, 2 quantizes k, v to int8 per head, 3 both.
@@ -188,7 +190,8 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_KV8")) |v| kv8 = try std.fmt.parseInt(i32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_A8_ROT") != null) a8_rot = 1;
         if (std.c.getenv("XPU_A8_SITES4")) |v| a8_sites4 = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("XPU_A8_BITS")) |v| a8_levels = if (std.mem.eql(u8, std.mem.span(v), "4")) 7 else 127;
+        const bits = try @import("sys").environment.read(u32, "XPU_A8_BITS", if (a8_levels == 7) 4 else 8);
+        a8_levels = if (bits == 4) 7 else 127;
         if (std.c.getenv("XPU_A8_SITES")) |v| a8_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_A8")) |v| a8_group = if (std.mem.eql(u8, std.mem.span(v), "token")) std.math.maxInt(u32) else try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_DUMP_H")) |v| dump_h = open(v, 0o2101, @as(c_uint, 0o644)); // append
@@ -415,7 +418,7 @@ pub const Runner = struct {
     /// One decoded token in; the next one's logits kept.
     pub fn step(r: *Runner, token: u32) !void {
         if (r.pos + 1 > r.context) return error.ContextFull;
-        const id: i32 = @intCast(token);
+        const id: i32 = @bitCast(token); // an id past i32 turns negative, which forward refuses
         r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on })).?);
         r.pos += 1;
         if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, 1);
@@ -585,5 +588,6 @@ test "every open starts from the process's options, and a second runner is refus
 }
 
 test {
+    _ = @import("prompt_tail.zig");
     _ = @import("runner_drain_test.zig");
 }

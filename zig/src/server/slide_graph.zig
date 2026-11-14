@@ -1,6 +1,7 @@
 //! The Sliding Weights fact graph: what was taught, how far each lesson is, where its neurons went; never the weights.
 const std = @import("std");
 const builtin = @import("builtin");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const slide_model = @import("slide_model.zig");
@@ -35,6 +36,8 @@ pub const Fact = struct {
     since: i64 = 0, // when the phase began (ms)
     step: u32 = 0, // the phase's unit, of `of` (0: unknown)
     of: u32 = 0,
+    recall: []const Answer = &.{},
+    evaluation: ?json.Value = null,
     loss: ?f32 = null, // its outputs' loss at the last step
 };
 
@@ -72,7 +75,9 @@ pub const Graph = struct {
     model_arena: std.heap.ArenaAllocator,
     saved: Save = .{},
     talks: slide_talks.Talks = .{}, // conversations written once, kept with the facts (slide_context.zig)
+    drift_base: ?json.Value = null,
     fault: Fault = .none, // a test's failure of the next file write (read in tests only)
+    test_persist_calls: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
     pub const Fault = enum { none, write, rename };
     pub const record = deleting.record;
@@ -81,6 +86,9 @@ pub const Graph = struct {
     pub const recordStates = deleting.recordStates;
     pub const removeMany = deleting.removeMany;
     pub const snapshot = deleting.snapshot;
+    pub const suppliedRecall = @import("slide_metrics_store.zig").supplied;
+    pub const evaluated = @import("slide_metrics_store.zig").record;
+    pub const driftBaseline = @import("slide_metrics_store.zig").baseline;
 
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
@@ -365,6 +373,7 @@ pub const Graph = struct {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         g.facts.clearRetainingCapacity();
+        g.drift_base = null;
         if (g.path) |p| Io.Dir.cwd().deleteFile(g.io, p) catch {};
     }
 
@@ -402,6 +411,8 @@ pub const Graph = struct {
             try o.put(a, "at", try json.intValue(a, f.at));
             try o.put(a, "state", .{ .string = @tagName(f.state) });
             try o.put(a, "links", .{ .array = links.items });
+            if (f.evaluation) |v| try o.put(a, "evaluation", v);
+            if (f.recall.len > 0) try o.put(a, "recall", try answers.value(a, f.recall));
             if (f.round > 0) try o.put(a, "round", try json.intValue(a, f.round));
             if (f.message.len > 0) try o.put(a, "message", .{ .string = f.message });
             if (f.questions.len > 0) try o.put(a, "questions", try strings(a, f.questions));
@@ -415,6 +426,7 @@ pub const Graph = struct {
         const root = try json.newObject(a);
         try root.put(a, "next", try json.intValue(a, g.next));
         try root.put(a, "facts", .{ .array = facts });
+        if (g.drift_base) |v| try root.put(a, "drift_baseline", v);
         if (g.talks.list.items.len > 0) try root.put(a, "talks", try g.talks.value(a));
         if (live) if (g.model) |m| {
             const v = try slide_model.value(a, m);
@@ -451,19 +463,20 @@ pub const Graph = struct {
 
     /// `save` with its failure returned, the old file then kept whole (called under the lock).
     pub fn persist(g: *Graph) !void {
+        if (builtin.is_test) g.test_persist_calls += 1;
         const path = g.path orelse return;
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
         const body = try g.document(a, false);
-        const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{path});
         if (std.fs.path.dirname(path)) |dir| try Io.Dir.cwd().createDirPath(g.io, dir);
         const fault: Fault = if (builtin.is_test) g.fault else .none;
         if (builtin.is_test) g.fault = .none;
         if (fault == .write) return error.GraphWrite;
-        try Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body });
+        // taught facts are private: owner-only, through a unique temporary that follows no link
+        const staged = try platform.atomic_file.stagePrivate(a, path, &.{body});
         if (fault == .rename) return error.GraphRename;
-        try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io);
+        try platform.atomic_file.commit(a, staged, path);
     }
 
     fn load(g: *Graph) !void {
@@ -477,6 +490,8 @@ pub const Graph = struct {
         for ((root.field("facts") orelse return error.BadGraph).items() orelse return error.BadGraph) |f| {
             const state = std.meta.stringToEnum(State, f.strField("state") orelse "") orelse .queued;
             var fact: Fact = .{ .id = try int(u32, f.field("id")), .text = f.strField("text") orelse "", .source = f.strField("source") orelse "", .at = try int(i64, f.field("at")), .state = state };
+            fact.evaluation = f.field("evaluation");
+            if (f.field("recall")) |v| fact.recall = try answers.read(a, v);
             fact.message = f.strField("message") orelse "";
             fact.round = int(u32, f.field("round")) catch 0;
             fact.deleted = int(i64, f.field("deleted")) catch 0;
@@ -492,6 +507,7 @@ pub const Graph = struct {
             };
             try g.facts.append(g.gpa, fact);
         }
+        g.drift_base = root.field("drift_baseline");
         try g.talks.read(g.gpa, a, root.field("talks"));
         g.next = try int(u32, root.field("next"));
     }

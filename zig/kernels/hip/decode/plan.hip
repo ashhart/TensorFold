@@ -467,4 +467,32 @@ tf_plan_keep(PlanArgs plan, const int* keep, const unsigned int* hidden, int hid
     }
 }
 
+
+// Row r's 16-bit residual into its slot's tap ring (descriptor word before the page table; 0 skips) at its position.
+__global__ void __launch_bounds__(256)
+tf_plan_tap(const unsigned* x, int rows, int hidden, int tap, int taps, int tap_rows, PlanArgs plan) {
+    const long long i = gid();
+    const int pairs = hidden / 2;
+    if (i >= static_cast<long long>(rows) * pairs) return;
+    const int r = static_cast<int>(i / pairs);
+    const int j = static_cast<int>(i % pairs);
+    const unsigned long long* desc = plan_desc(plan, plan.slot[r]);
+    if (desc == nullptr) return;
+    unsigned* ring = reinterpret_cast<unsigned*>(desc[plan.pages - 1]);
+    if (ring == nullptr) return;
+    const long long at = (static_cast<long long>(plan.pos[r] % tap_rows) * taps + tap) * pairs + j;
+    ring[at] = x[i];
+}
+
+// tf_plan_tap for one stream's prompt rows, positions pos0 .. pos0 + rows, into `ring`.
+__global__ void __launch_bounds__(256)
+tf_tap_rows(const unsigned* x, unsigned* ring, int rows, int hidden, int tap, int taps, int tap_rows, long long pos0) {
+    const long long i = gid();
+    const int pairs = hidden / 2;
+    if (i >= static_cast<long long>(rows) * pairs) return;
+    const long long r = i / pairs;
+    const int j = static_cast<int>(i % pairs);
+    ring[((pos0 + r) % tap_rows * taps + tap) * pairs + j] = x[i];
+}
+
 }  // extern "C"

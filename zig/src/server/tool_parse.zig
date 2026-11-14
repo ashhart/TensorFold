@@ -1,4 +1,4 @@
-//! Tool calls in a finished reply, every family's markup, as OpenAI tool_calls (``tools.parse_tool_calls_from_content``).
+//! Tool calls in a finished reply, each family's markup as OpenAI tool_calls (``tools.parse_tool_calls_from_content``).
 const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
@@ -18,9 +18,17 @@ pub const wrapCalls = tool_streaming.wrapCalls;
 
 const Error = tool_dsml.Error;
 const Call = tool_dsml.Call;
-const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
+pub const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
 
-pub const Parsed = struct { content: []const u8, calls: ?[]Value, rejected_envelopes: usize = 0 };
+pub const Parsed = struct {
+    content: []const u8,
+    calls: ?[]Value,
+    rejected_envelopes: usize = 0,
+    kept_unoffered: usize = 0,
+    kept_malformed: usize = 0,
+    /// The names the model wrote for kept calls that named an unoffered tool: eight at most, 64 bytes each.
+    unoffered_names: []const []const u8 = &.{},
+};
 
 fn findCI(hay: []const u8, needle: []const u8, from: usize) ?usize {
     if (from > hay.len) return null;
@@ -44,7 +52,7 @@ fn allSpace(s: []const u8) bool {
 }
 
 /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
-fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
+pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     var found: std.ArrayList(Envelope) = .empty;
     var pos: usize = 0;
     var dsml = tool_dsml.findOpen(text, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
@@ -111,8 +119,11 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
     if (envs.len == 0) return .{ .content = text, .calls = null };
     var calls: std.ArrayList(Value) = .empty;
     var residue: std.ArrayList(u8) = .empty;
+    var kept_names: std.ArrayList([]const u8) = .empty;
     var cursor: usize = 0;
     var rejected: usize = 0;
+    var kept_unoffered: usize = 0;
+    var kept_malformed: usize = 0;
     for (envs) |env| {
         try residue.appendSlice(a, text[cursor..env.start]);
         cursor = env.end;
@@ -139,12 +150,20 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
             }
             break :blk null;
         };
-        const good = if (parsed) |list| list.len > 0 and for (list) |c| {
-            if ((try callName(a, c, &known)) == null) break false;
-        } else true else false;
-        if (!good) {
+        const reject: enum { none, unoffered, malformed } = blk: {
+            const list = parsed orelse break :blk .malformed;
+            if (list.len == 0) break :blk .malformed;
+            var unoffered = false;
+            for (list) |c| if ((try callName(a, c, &known)) == null) {
+                unoffered = true;
+                try keepName(a, &kept_names, strip(c.name));
+            };
+            break :blk if (unoffered) .unoffered else .none;
+        };
+        if (reject != .none) {
             try residue.appendSlice(a, text[env.start..env.end]);
             rejected += 1;
+            if (reject == .unoffered) kept_unoffered += 1 else kept_malformed += 1;
             continue;
         }
         for (parsed.?) |c| {
@@ -152,7 +171,24 @@ pub fn parse(a: Allocator, text: []const u8, tools: []const Value, max_calls: ?u
         }
     }
     try residue.appendSlice(a, text[cursor..]);
-    return .{ .content = strip(residue.items), .calls = if (calls.items.len > 0) calls.items else null, .rejected_envelopes = rejected };
+    return .{
+        .content = strip(residue.items),
+        .calls = if (calls.items.len > 0) calls.items else null,
+        .rejected_envelopes = rejected,
+        .kept_unoffered = kept_unoffered,
+        .kept_malformed = kept_malformed,
+        .unoffered_names = kept_names.items,
+    };
+}
+
+/// Keeps one unoffered name as the model wrote it: once, eight names at most, 64 UTF-8 bytes each.
+fn keepName(a: Allocator, names: *std.ArrayList([]const u8), raw: []const u8) Allocator.Error!void {
+    var end = @min(raw.len, 64);
+    while (end > 0 and end < raw.len and (raw[end] & 0xc0) == 0x80) end -= 1;
+    const name = raw[0..end];
+    if (name.len == 0 or names.items.len >= 8) return;
+    for (names.items) |kept| if (std.mem.eql(u8, kept, name)) return;
+    try names.append(a, name);
 }
 
 /// What closes the call ``text`` ends inside (the model's end token came before its ``
@@ -433,7 +469,8 @@ fn glmCall(a: Allocator, written: []const u8, schemas: ?*const tool_params.Schem
         if (key_end != null and key_end.?[0] < s + 9) key_end = valueKey(rest, s + 9);
         const k = key_end orelse continue;
         if (value_end != null and value_end.? < k[1]) value_end = find(rest, "</arg_value>", k[1]);
-        const ve = value_end orelse continue;
+        const ve = value_end orelse return null; // the value never closes: no call (#2801)
+        if (find(rest, "<arg_key>", k[1])) |next| if (next < ve) return null; // nor for one that ran into the next pair
         try pairs.append(a, .{ .key = rest[s + 9 .. k[0]], .value = rest[k[1]..ve] });
         try residue.appendSlice(a, rest[kept..s]);
         kept = ve + 12;

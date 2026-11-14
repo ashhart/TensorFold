@@ -16,29 +16,49 @@ const AxisTaps = struct { i: [2]u32, w: [2]f32 };
 /// The four learned positions a patch reads, and their fp32 weights.
 pub const Taps = struct { index: [4]u32, weight: [4]f32 };
 
-/// Two taps on one axis into a `side`-long table for place `index` of `size` (bilinear, align_corners), fp32.
-fn axisTaps(index: u32, size: u32, side: u32) AxisTaps {
-    const src = @as(f32, @floatFromInt(index)) * @as(f32, @floatFromInt(side - 1)) / @as(f32, @floatFromInt(@max(size, 2) - 1));
+/// Bilinear align_corners taps on one axis, fp32; `torch` takes Torch's CPU linspace and lerp, else the shared towers'.
+fn axisTaps(comptime torch: bool, index: u32, size: u32, side: u32) AxisTaps {
+    const src = if (torch) coordinate(index, size, side) else @as(f32, @floatFromInt(index)) * @as(f32, @floatFromInt(side - 1)) / @as(f32, @floatFromInt(@max(size, 2) - 1));
     const fl = @floor(src);
     var out: AxisTaps = undefined;
     for (0..2) |o| {
         const raw = @as(i64, @intFromFloat(fl)) + @as(i64, @intCast(o));
         out.i[o] = @intCast(std.math.clamp(raw, 0, side - 1));
-        out.w[o] = @max(1.0 - @abs(src - fl - @as(f32, @floatFromInt(o))), 0.0);
+        out.w[o] = if (!torch) @max(1.0 - @abs(src - fl - @as(f32, @floatFromInt(o))), 0.0) else if (o == 0) 1.0 - (src - fl) else src - fl;
     }
     return out;
 }
 
-/// The taps of a patch at (row, col) of a `gh` x `gw` grid into the `side` x `side` table.
-pub fn taps(row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
-    const h = axisTaps(row, gh, side);
-    const w = axisTaps(col, gw, side);
+/// Element `index` of `size` f32 points over [0, side - 1]: head counts up by the step, tail fuses down from the end.
+fn coordinate(index: u32, size: u32, side: u32) f32 {
+    if (size <= 1) return 0;
+    std.debug.assert(side >= 1 and index < size);
+    const end: f32 = @floatFromInt(side - 1);
+    const step: f32 = end / @as(f32, @floatFromInt(size - 1));
+    if (index < size / 2) return step * @as(f32, @floatFromInt(index));
+    const from_end: f32 = @floatFromInt(size - 1 - index);
+    return @mulAdd(f32, -step, from_end, end);
+}
+
+fn tapsOf(comptime torch: bool, row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
+    const h = axisTaps(torch, row, gh, side);
+    const w = axisTaps(torch, col, gw, side);
     var out: Taps = undefined;
     for (0..2) |a| for (0..2) |b| {
         out.index[a * 2 + b] = h.i[a] * side + w.i[b];
         out.weight[a * 2 + b] = h.w[a] * w.w[b];
     };
     return out;
+}
+
+/// The taps of a patch at (row, col) of a `gh` x `gw` grid into the `side` x `side` table.
+pub fn taps(row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
+    return tapsOf(false, row, col, gh, gw, side);
+}
+
+/// `taps` with Torch's CPU interpolation arithmetic, for towers that match it bit for bit (the HIP Qwen tower).
+pub fn torchTaps(row: u32, col: u32, gh: u32, gw: u32, side: u32) Taps {
+    return tapsOf(true, row, col, gh, gw, side);
 }
 
 /// The axial rotary's frequencies as torch makes them in fp32: 1 / theta^(2i / (head_dim / 2)), head_dim / 4 of them.
@@ -84,6 +104,38 @@ test "bilinear taps with align_corners: the ends land on the table's corners" {
     const mid = taps(1, 0, 3, 2, 48); // 1 * 47 / 2 = 23.5: halfway between rows 23 and 24
     try std.testing.expectEqual([4]u32{ 23 * 48, 23 * 48 + 1, 24 * 48, 24 * 48 + 1 }, mid.index);
     try std.testing.expectEqual([4]f32{ 0.5, 0, 0.5, 0 }, mid.weight);
+}
+
+fn bf16Bits(x: f32) u16 {
+    const bits: u32 = @bitCast(x);
+    return @truncate((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
+}
+
+test "learned-grid linspace uses the CPU processor's FP32 step and fused tail" {
+    const fixtures = [_]struct { size: u32, at: u32, bits: u32, fraction: u16 }{
+        .{ .size = 144, .at = 61, .bits = 0x41a06441, .fraction = 0x3d49 },
+        .{ .size = 180, .at = 107, .bits = 0x41e0c280, .fraction = 0x3dc2 },
+        .{ .size = 218, .at = 37, .bits = 0x410038a1, .fraction = 0x3c63 },
+        .{ .size = 240, .at = 143, .bits = 0x41e0f880, .fraction = 0x3df8 },
+        .{ .size = 256, .at = 196, .bits = 0x42108080, .fraction = 0x3e00 },
+        .{ .size = 5820, .at = 3, .bits = 0x3cc68006, .fraction = 0x3cc7 },
+    };
+    for (fixtures) |f| {
+        try std.testing.expectEqual(f.bits, @as(u32, @bitCast(coordinate(f.at, f.size, 48))));
+        const t = torchTaps(f.at, 0, f.size, 2, 48);
+        try std.testing.expectEqual(f.fraction, bf16Bits(t.weight[2]));
+        const swapped = torchTaps(0, f.at, 2, f.size, 48);
+        try std.testing.expectEqual(t.weight[2], swapped.weight[1]);
+    }
+    try std.testing.expectEqual(@as(f32, 0), coordinate(0, 1, 48));
+}
+
+test "the shared taps keep their own arithmetic beside the Torch-matching ones" {
+    const shared = taps(61, 0, 144, 2, 48);
+    const torch = torchTaps(61, 0, 144, 2, 48);
+    try std.testing.expectEqual(shared.index, torch.index);
+    try std.testing.expectEqual(@as(u16, 0x3d48), bf16Bits(shared.weight[2]));
+    try std.testing.expectEqual(@as(u16, 0x3d49), bf16Bits(torch.weight[2]));
 }
 
 test "the axial rotary of a 72-wide head: 18 row frequencies, 18 column, repeated" {

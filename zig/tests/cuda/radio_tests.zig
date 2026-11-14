@@ -67,7 +67,7 @@ fn int(v: std.json.Value, key: []const u8) usize {
 fn back(gpu: Gpu, a: std.mem.Allocator, s: cuda.Stream, at: u64, len: usize) ![]f32 {
     try s.synchronize();
     const raw = try a.alloc(u16, len);
-    try gpu.d.check(gpu.d.api.cuMemcpyDtoH_v2(raw.ptr, at, 2 * len), "cuMemcpyDtoH");
+    try cuda.memory.download(gpu.d, at, std.mem.sliceAsBytes(raw)[0 .. 2 * len]);
     const out = try a.alloc(f32, len);
     for (out, raw) |*o, v| o.* = @bitCast(@as(u32, v) << 16);
     return out;

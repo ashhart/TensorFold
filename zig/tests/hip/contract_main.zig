@@ -15,14 +15,18 @@ const moe_k = @import("contract_nemo_moe.zig");
 const walk_k = @import("contract_walk.zig");
 const prefill_k = @import("contract_prefill.zig");
 const add_rms_k = @import("contract_add_rms.zig");
+const tail_k = @import("contract_tail.zig");
 const window_k = @import("contract_window.zig");
 const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
+const tap_k = @import("contract_tap.zig");
+const draft_k = @import("contract_draft.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
 const dense_k = @import("contract_dense.zig");
 const dense12_k = @import("contract_dense_wmma12.zig");
+const silu_k = @import("contract_silu_fuse.zig");
 const gate_k = @import("contract_moe_gate.zig");
 const router_k = @import("contract_router.zig");
 const kit = @import("contract_kit.zig");
@@ -32,6 +36,10 @@ const columns_k = @import("contract_columns.zig");
 const vision_k = @import("contract_vision.zig");
 const full_k = @import("contract_vision_attention.zig");
 const text_k = @import("contract_dense_text.zig");
+const vl_k = @import("contract_vl.zig");
+const pos_k = @import("contract_vl_position.zig");
+const sparse_k = @import("contract_sparse_lanes.zig");
+const skew_k = @import("contract_wmma_skew.zig");
 
 const g = core.contract.gates;
 
@@ -187,10 +195,32 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&prefills, [_]bool{ true, false }) |*p, paged| p.* = .init(a, &r, s, &l, paged);
     defer for (&prefills) |*p| p.deinit();
     for (&prefills) |*p| try kernels.append(a, p.kernel());
+    // non-finite values only past rows' edges, flat and paged, both cache types; then each without its edge pass
+    var edges: [8]prefill_k.Prefill = undefined;
+    var edge_count: usize = 0;
+    defer for (edges[0..edge_count]) |*p| p.deinit();
+    for (0..8) |i| {
+        const paged = i % 2 == 1;
+        const kind: kit.Kind = if (i / 2 % 2 == 1) .bf16 else .f16;
+        if (kind == .bf16 and kit.act() != .bf16) continue; // RDNA2 serves fp16 caches only
+        const p = &edges[edge_count];
+        p.* = .init(a, &r, s, &l, paged);
+        edge_count += 1;
+        p.k = kind;
+        p.mode = .edge;
+        if (i >= 4) p.planted = try ctl.function(([_][:0]const u8{
+            "tf_ctl_fa_wide_unmasked_f16", "tf_ctl_fa_paged_unmasked_f16", "tf_ctl_fa_wide_unmasked_bf16", "tf_ctl_fa_paged_unmasked_bf16",
+        })[i - 4]);
+        try kernels.append(a, p.kernel());
+    }
     var add_rms: [3]add_rms_k.AddRms = undefined;
     for (&add_rms, std.enums.values(add_rms_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&add_rms) |*m| m.deinit();
     for (&add_rms) |*m| try kernels.append(a, m.kernel());
+    var tails: [2]tail_k.Tail = undefined;
+    for (&tails, std.enums.values(tail_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&tails) |*m| m.deinit();
+    for (&tails) |*m| try kernels.append(a, m.kernel());
     var convs: [2]window_k.ConvWindow = undefined;
     for (&convs, std.enums.values(window_k.Part)) |*m, p| m.init(a, &r, s, &l, p);
     defer for (&convs) |*m| m.deinit();
@@ -209,6 +239,15 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var kv_write = kv_k.KvWrite.init(a, &r, s, &l);
     defer kv_write.deinit();
     try kernels.append(a, kv_write.kernel());
+    var taps: [std.enums.values(tap_k.Mode).len]tap_k.Tap = undefined;
+    for (&taps, std.enums.values(tap_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&taps) |*m| m.deinit();
+    for (&taps) |*m| try kernels.append(a, m.kernel());
+    const draft_modes = comptime std.enums.values(draft_k.Mode);
+    var drafts: [draft_modes.len]draft_k.Draft = undefined;
+    for (&drafts, draft_modes) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&drafts) |*m| m.deinit();
+    for (&drafts) |*m| try kernels.append(a, m.kernel());
     var argmax = argmax_k.Argmax.init(a, &r, s, &l);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
@@ -225,14 +264,29 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     if (l.dense.bf16) {
         for (&dense) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_gemm_block: not served on this FP16 build\n", .{});
-    var dense12: [5]dense12_k.DenseWmma12 = undefined;
-    for (&dense12, [_]bool{ true, false, true, false, true }, 0..) |*d, fp32_out, i| d.* = .init(a, &r, s, &l, fp32_out, if (i < 2 or i == 4) .w12_small else .w12_big);
+    // 0-1 small, 2-3 big (fp32 then BF16 out), 4 the BF16-sum control (small), 5-6 the big block's controls (fp32 out)
+    var dense12: [7]dense12_k.DenseWmma12 = undefined;
+    const geos = [_]hip.launches.dense.Shape{ .w12_small, .w12_small, .w12_big, .w12_big, .w12_small, .w12_big, .w12_big };
+    for (&dense12, [_]bool{ true, false, true, false, true, true, true }, geos) |*d, fp32_out, geo| d.* = .init(a, &r, s, &l, fp32_out, geo);
     defer for (&dense12) |*d| d.deinit();
-    // the WMMA dense tile serves gfx12 only; elsewhere its symbol, and its control's, keep a trap body
+    // the WMMA dense tile serves gfx12 only; elsewhere its symbol, and its controls', keep a trap body
     if (l.dense.wmma12) {
-        dense12[4].planted = try ctl.function("tf_ctl_wmma12_bf16_sum");
+        for ([_]usize{ 4, 5, 6 }, [_]dense12_k.Plant{ .bf16_sum, .unswizzled, .unordered }) |i, p| {
+            dense12[i].plant = p;
+            dense12[i].planted = try ctl.function(p.symbol());
+        }
+        const k32 = try ctl.function("tf_ref_wmma12_k32"); // the big block's byte baseline, from the controls object
+        for ([_]usize{ 2, 3, 5, 6 }) |i| dense12[i].baseline = k32;
         for (&dense12) |*d| try kernels.append(a, d.kernel());
     } else std.debug.print("N/A  hip dense_wmma12_gemm: not served off gfx12\n", .{});
+    // the fused silu product's pair and big blocks, then its control (silu on the fp32 gate sum, on the pair block)
+    var silu: [3]silu_k.SiluFuse = undefined;
+    for (&silu, [_]hip.launches.dense.PairShape{ .pair, .big, .pair }) |*d, geo| d.* = .init(a, &r, s, &l, geo);
+    defer for (&silu) |*d| d.deinit();
+    if (l.dense.wmma12) {
+        silu[2].planted = try ctl.function("tf_ctl_silu_unrounded");
+        for (&silu) |*d| try kernels.append(a, d.kernel());
+    } else std.debug.print("N/A  hip dense_wmma12_gemm_silu: not served off gfx12\n", .{});
     var gates: [3]gate_k.Gate = undefined;
     for (&gates, std.enums.values(gate_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&gates) |*m| m.deinit();
@@ -244,10 +298,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routers) |*x| try kernels.append(a, x.kernel());
     // the few-row matrix-core tiles run on gfx11's matrix cores only
     const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
-    var items: [item_k.cases.len]item_k.Item = undefined;
-    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    // the last one is the few-row passes' control, on its case's geometry
+    var items: [item_k.cases.len + 1]item_k.Item = undefined;
+    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, @min(i, item_k.control.index));
     defer for (&items) |*x| x.deinit();
-    if (matrix) for (&items) |*x| try kernels.append(a, x.kernel());
+    if (matrix) {
+        items[item_k.cases.len].planted = try ctl.function(item_k.control.symbol);
+        for (&items) |*x| try kernels.append(a, x.kernel());
+    }
     var embeds: [4]embed_k.Embed = undefined;
     var nembeds: usize = 0;
     defer for (embeds[0..nembeds]) |*x| x.deinit();
@@ -275,6 +333,35 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&text, std.enums.values(text_k.Which)) |*v, w| v.* = .init(a, &r, s, &l, w);
     defer for (&text) |*v| v.deinit();
     for (&text) |*v| try kernels.append(a, v.kernel());
+    const vl_kernels = try hip.vision.Kernels.load(l.mods[0]);
+    var vl: [std.enums.values(vl_k.Which).len]vl_k.Vision = undefined;
+    for (&vl, std.enums.values(vl_k.Which)) |*v, which_vl| v.* = .init(a, &r, s, vl_kernels, which_vl);
+    defer for (&vl) |*v| v.deinit();
+    for (&vl) |*v| try kernels.append(a, v.kernel());
+    var pos: [std.enums.values(pos_k.Which).len]pos_k.Position = undefined;
+    for (&pos, std.enums.values(pos_k.Which)) |*p, which_pos| p.* = .init(a, &r, s, vl_kernels, which_pos);
+    defer for (&pos) |*p| p.deinit();
+    for (&pos) |*p| try kernels.append(a, p.kernel());
+    var sparse = sparse_k.SparseLanes.init(a, &r, s, &l);
+    defer sparse.deinit();
+    try kernels.append(a, sparse.kernel());
+    var skews: [skew_k.cases.len]skew_k.Skew = undefined;
+    for (&skews, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    defer for (&skews) |*x| x.deinit();
+    if (matrix) for (&skews) |*x| try kernels.append(a, x.kernel());
+    const gdn_k = @import("contract_gdn.zig");
+    // y and the state, then a control on each: one row short (the state), one key head (y)
+    var gdn_prompts: [4]gdn_k.Prompt = undefined;
+    const gdn_parts = [_]gdn_k.Part{ .y, .state, .state, .y };
+    const gdn_faults = [_]gdn_k.Fault{ .none, .none, .short, .one_key };
+    for (&gdn_prompts, gdn_parts, gdn_faults) |*m, p, fault| m.* = .init(a, &r, s, &l, p, fault);
+    defer for (&gdn_prompts) |*m| m.deinit();
+    for (&gdn_prompts) |*m| try kernels.append(a, m.kernel());
+    const prep_k = @import("contract_gdn_prep.zig");
+    var gdn_preps: [std.enums.values(prep_k.Fault).len]prep_k.Prep = undefined;
+    for (&gdn_preps, std.enums.values(prep_k.Fault)) |*m, fault| m.* = .init(a, &r, s, &l, fault);
+    defer for (&gdn_preps) |*m| m.deinit();
+    for (&gdn_preps) |*m| try kernels.append(a, m.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

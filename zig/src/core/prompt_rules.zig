@@ -22,7 +22,7 @@ pub const Rules = struct {
     warm_usable: bool = false,
     /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
     page: u32 = 0,
-    /// A paged store also keeps the prompt's last whole page, for a later turn whose history the request did not name.
+    /// Keep the prompt's last page for a later turn whose history it did not name (unpaged: last chunk, none named).
     tail: bool = false,
     /// Repeated raw prompts keep near their end; only families that allow any-row cuts opt in (0: off).
     repeat_min: u32 = 0,
@@ -30,4 +30,10 @@ pub const Rules = struct {
     repeat_keyed: bool = false,
     /// Keep one before where the prompt parts from the one it resumed (a miss: the longest kept one), however near.
     fork: bool = false,
+    /// Spacing of a bounded ladder of checkpoints under the history (0: off; only chunk-invariant families opt in).
+    intermediate: u32 = 0,
+    /// Checkpoints kept from the ladder at most, the largest positions first.
+    intermediate_most: u8 = 0,
+    /// Prompts shorter than this, and ladder positions before it, keep none.
+    intermediate_min: u32 = 32768,
 };

@@ -13,13 +13,13 @@ fn itemTile(comptime rm: u32) limits.HipLaunch {
     };
 }
 
-pub const records = [_]Record{
+pub const records = [1]Record{
     .{
         .launch = itemTile(4),
         .usage = .{
             .{ .vgprs = 1, .sgprs = 1, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 176, .sgprs = 55, .lds = 34304, .private = 0, .bound = 256, .wave = 32 },
-            .{ .vgprs = 176, .sgprs = 55, .lds = 34304, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 190, .sgprs = 68, .lds = 34304, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 190, .sgprs = 68, .lds = 34304, .private = 0, .bound = 256, .wave = 32 },
             .{ .vgprs = 1, .sgprs = 1, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
         },
     },

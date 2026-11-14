@@ -44,21 +44,26 @@ pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: st
 
 /// `F`'s weight bytes on this rank: tensors or files, a split's share, a tower beside; null if tensors are unreadable.
 pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?u64 {
-    const whole = if (@hasDecl(F, "tensorWeightBytes")) F.tensorWeightBytes(a, io, o.dir, o.vision != null) catch |err| {
+    // a family that counts some formats by tensor (`textWeightBytes`, null for the rest) before the files
+    const counted: ?u64 = if (@hasDecl(F, "textWeightBytes")) F.textWeightBytes(a, io, o.dir) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "cannot read checkpoint tensor sizes ({s})", .{@errorName(err)});
+        return null;
+    } else null;
+    const whole = if (counted) |t| t else if (@hasDecl(F, "tensorWeightBytes")) F.tensorWeightBytes(a, io, o.dir, o.vision != null) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "cannot read checkpoint tensor sizes ({s})", .{@errorName(err)});
         return null;
     } else budget.weightBytes(a, io, o.dir) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "cannot estimate checkpoint weight files ({s}); refusing CUDA admission", .{@errorName(err)});
         return null;
     };
-    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
+    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole, o.drafts) else whole;
     return text + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
 }
 
 /// Logs, from 0.25 GiB, the free pages on the per-CPU lists that a pool's reading counted.
 pub fn noteParked(p: budget.Pool, what: []const u8) void {
     const line = "{s} counts the {d:.2} GiB free on the per-CPU page lists beyond their resting level (MemAvailable does not)";
-    if (p.parked >= 1 << 28) std.log.info(line, .{ what, toGib(p.parked) });
+    if (p.parked >= 1 << 28) std.log.debug(line, .{ what, toGib(p.parked) }); // debug: varies run to run
 }
 
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {

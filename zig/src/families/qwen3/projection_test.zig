@@ -130,7 +130,7 @@ test "Qwen3 projections: the WMMA tile's BF16 outputs are as close to float64 as
     if (!l.dense.wmma12) return error.SkipZigTest;
     var ar = try hip.Arena.init(&r, 2 << 30);
     defer ar.deinit();
-    var m = try qwen3.Model.load(gpa, t.io, &r, dir);
+    var m = try qwen3.Model.load(gpa, t.io, &r, dir, .plain);
     defer m.deinit();
     const spec = m.spec;
     const d = spec.hidden;

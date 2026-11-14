@@ -1,5 +1,4 @@
 //! Nemotron CUDA streams own their sequences and share window rounds.
-
 const std = @import("std");
 const vision = @import("cuda_vision.zig");
 const cuda = @import("cuda");
@@ -9,6 +8,7 @@ const engine = @import("cuda_engine.zig");
 const Engine = engine.Engine;
 const reuse = @import("cuda_reuse.zig");
 const mtp = @import("cuda_mtp.zig");
+const sampler = @import("cuda_sampler.zig");
 const Head = mtp.Head;
 const state = @import("cuda_state.zig");
 const prompt_rows = @import("cuda_prompt_rows.zig");
@@ -17,27 +17,21 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
 const lesson_route = @import("living").lesson_route;
 const Pages = @import("cuda_pages.zig").Pages;
-
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
 const row_words = lanes.logprob.words;
 /// Host-mapped words for every row a shared window holds, then the first token's row.
 const row_slots = engine.max_streams * state.max_rows + 1;
-
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
-
 /// A stream's sequence (`own`: the engine's, the graphs' buffers; `paged`: the pool's) and its first logprob row.
 const Lane = struct { seq: *state.Seq, own: bool = false, paged: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
-
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
-
 /// The one tap Nemotron gives: past its last layer, the final norm's rows its head and MTP head read.
 pub fn finalTap(c: config.Config) u32 {
     return @intCast(c.layers);
 }
-
 pub const Cuda = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -105,7 +99,6 @@ pub const Cuda = struct {
             .prompt_rows = true,
         } };
     }
-
     /// Structured output's bits for rows from `slot` (a forward's rows; a first token's: the last slot), device-read.
     pub fn putBits(self: *Cuda, slot: usize, masks: []const u32) !engine.Mask {
         const words = (self.e.c.vocab + 31) / 32;
@@ -316,10 +309,7 @@ pub const Cuda = struct {
         tap.taps.verified = null;
         if (self.tapped != null) e.taps = .{ .ctx = &tap, .call = TapSink.take };
         defer e.taps = null;
-        const first = e.prefillFrom(ids, from, null, self.head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
-            if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
-            return err;
-        };
+        const first = try servedPrefill(e, self.head, s, from, keep);
         // the head's first draft reads the prompt's last row (its hidden row waits where a window's would)
         const last = ids.len - 1 - e.last_chunk;
         try e.ops().copy(e.b.hidden, e.b.p_hidden + last * @as(u64, e.c.hidden) * 2, e.c.hidden * 2);
@@ -342,6 +332,16 @@ pub const Cuda = struct {
             for (picks, 0..) |pick, i| try p.s.prompt_rows.append(p.gpa, LogRow.fromWords(words[i * row_words ..][0..row_words], pick, p.s.prompt_logprobs.?));
         }
     };
+
+    pub fn servedPrefill(e: anytype, head: ?*Head, s: *lanes.Stream, from: usize, keep: ?engine.Keep) !u32 {
+        const ids = s.prompt();
+        const first = e.prefillFrom(ids, from, null, head, .{ .ptr = s, .check = cancelled, .yields = s.yield_check != null }, keep) catch |err| {
+            if (err == error.Cancelled) s.keepInterruptedPrefill(@intCast(e.pos));
+            return err;
+        };
+        if (e.last_chunk == from) lanes.prefill_widths.completed(e.gpa, s, ids.len - from);
+        return first;
+    }
 
     /// A prompt chunk's rows copied to the stream's host rows, a staging buffer at a time.
     const TapSink = struct {
@@ -530,7 +530,7 @@ pub const Cuda = struct {
             }
             if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
             try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
-            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .rule_host = if (self.e.sampling) |x| sampler.rule(x) else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;
             batched += 1;

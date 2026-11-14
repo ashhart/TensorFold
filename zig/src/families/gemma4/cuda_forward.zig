@@ -2,9 +2,11 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const rope_freq = @import("core").rope_freq;
+const prompt_tail = @import("core").prompt_tail;
 const cfg = @import("cuda_config.zig");
 const wts = @import("cuda_weights.zig");
 const kern = @import("cuda_kernels.zig");
+const solo = @import("cuda_solo.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
 const Window = cuda.window_attention.Window;
@@ -16,7 +18,7 @@ pub const prompt_rows = 512;
 pub const round_rows = 128;
 /// Rows a decode attention call takes: its partials' scratch is sized for this many (Metal's attend_rows).
 const attend_rows = 16;
-/// A sliding layer's ring: the window and a prompt chunk, so a chunk's writes never reach keys its first row reads.
+/// A sliding layer's ring: window + chunk, so a chunk never overwrites keys its first row reads (solo: ringRows).
 pub const ring = cfg.window + prompt_rows;
 
 /// A stream's rows in one forward: its cache slot, first position, tokens.
@@ -58,6 +60,7 @@ pub const Model = struct {
     s: Scratch,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
     planned: ?usize = null, // a plan: the bytes counted, nothing allocated
+    prompt_most: usize = prompt_rows, // rows a prompt chunk takes at most: TF_GEMMA4_CHUNK_SOLO's, else prompt_rows
     /// Decode forwards of n rows as CUDA graphs, captured at their first use ([n]; null: not yet, or graphs off).
     graphs: [round_rows + 1]?cuda.graph.Exec = @splat(null),
     graphed: bool = true,
@@ -93,7 +96,12 @@ pub const Model = struct {
 
     /// A layer's cache positions: the ring, or every position of the context (global layers).
     pub fn cacheLen(m: *const Model, i: usize) usize {
-        return if (cfg.global(i)) m.context else ring;
+        return if (cfg.global(i)) m.context else m.ringRows();
+    }
+
+    /// A sliding layer's ring rows: the window and the widest prompt chunk.
+    pub fn ringRows(m: *const Model) usize {
+        return cfg.window + m.prompt_most;
     }
 
     pub fn pagesFor(m: *const Model, slot: ?usize) ?cuda.window_attention.Pages {
@@ -107,10 +115,10 @@ pub const Model = struct {
         };
     }
 
-    /// Bytes one stream's caches take: the owning layers' (a shared layer reads its owner's).
-    pub fn streamBytes(geo: cfg.Geometry, layers: usize, context: usize) usize {
+    /// Bytes one stream's caches take: the owning layers' (a shared layer reads its owner's), rings `rings` rows each.
+    pub fn streamBytes(geo: cfg.Geometry, layers: usize, context: usize, rings: usize) usize {
         var total: usize = 0;
-        for (0..@min(layers, geo.cacheLayers())) |i| total += 2 * (if (cfg.global(i)) context else ring) * geo.kvHeads(i) * cfg.headDim(i) * 2;
+        for (0..@min(layers, geo.cacheLayers())) |i| total += 2 * (if (cfg.global(i)) context else rings) * geo.kvHeads(i) * cfg.headDim(i) * 2;
         return total;
     }
 
@@ -121,6 +129,7 @@ pub const Model = struct {
     pub fn initPaged(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !Model {
         var m = blank(gpa, d, w, context, if (paged) 1 else slots);
         m.paged = paged;
+        m.prompt_most = try solo.rows(); // refused before anything allocates
         errdefer m.deinit();
         try m.build(s);
         return m;
@@ -134,6 +143,7 @@ pub const Model = struct {
     pub fn openPagedBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, context: usize, slots: usize, paged: bool) !usize {
         var m = blank(gpa, d, w, context, if (paged) 1 else slots);
         m.paged = paged;
+        m.prompt_most = try solo.rows();
         defer m.deinit();
         m.planned = 0;
         try m.build(s);
@@ -159,18 +169,18 @@ pub const Model = struct {
             try (DeviceBuffer{ .d = m.d, .ptr = m.inv_sliding, .len = sl.len * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(&sl));
             try (DeviceBuffer{ .d = m.d, .ptr = m.inv_global, .len = gl.len * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(&gl));
         }
-        const r = @max(prompt_rows, round_rows);
+        const r = @max(m.prompt_most, round_rows);
         const h = geo.hidden;
         const qw = geo.queryWidth();
         const kw = geo.kvWidth();
         const most = @max(h, geo.intermediate);
         // the widest decode partials: attend_rows rows of a global layer over the context in 256-key chunks
         const wide: Window = .{ .h = geo.query_heads, .hk = geo.global_kv_heads, .d = cfg.global_dim, .win = 0, .ring = m.context, .scale = 1 };
-        const narrow: Window = .{ .h = geo.query_heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = geo.sliding_window, .ring = ring, .scale = 1 };
+        const narrow: Window = .{ .h = geo.query_heads, .hk = geo.sliding_kv_heads, .d = cfg.sliding_dim, .win = geo.sliding_window, .ring = m.ringRows(), .scale = 1 };
         const part = @max(cuda.window_attention.WindowAttention.scratchBytes(wide, attend_rows), cuda.window_attention.WindowAttention.scratchBytes(narrow, attend_rows));
         m.s = .{
             .ids = try m.alloc(r * 4),
-            .hi = try m.alloc(prompt_rows * 4),
+            .hi = try m.alloc(m.prompt_most * 4),
             .pos = try m.alloc(r * 4),
             .slot = try m.alloc(r * 4),
             .h = .{ try m.alloc(r * h * 2), try m.alloc(r * h * 2) },
@@ -275,7 +285,7 @@ pub const Model = struct {
             if (m.paged and c.p0 + c.tokens.len > m.caps[c.slot]) return error.PastPages;
             rows += c.tokens.len;
         }
-        if (rows > @as(usize, if (prompt) prompt_rows else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
+        if (rows > @as(usize, if (prompt) m.prompt_most else round_rows) or (prompt and chains.len != 1)) return error.BadWindow;
         if (heads > round_rows or head0 + heads > rows) return error.BadWindow;
         const ids = try m.gpa.alloc(i32, 3 * rows);
         defer m.gpa.free(ids);
@@ -333,7 +343,9 @@ pub const Model = struct {
         if (m.w.ple) |p| try m.layerInputs(k, s, p, rows, prompt);
         // layer 0's input norm alone; every later one is the previous layer's dense tail
         try k.norms.addRmsTail(s, x.h[0], null, m.w.layers[0].input_norm, x.h[1], x.n, x.xs, rows, h, cfg.eps, .{ .round = true });
-        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt);
+        const tapped = std.mem.indexOfScalar(u32, m.taps[0..m.tap_count], @intCast(m.layers - 1)) != null;
+        const unread = prompt and prompt_tail.unread(.{ .logits = heads != 0, .readers = tapped });
+        for (0..m.layers) |i| try m.layer(k, s, chains, i, rows, prompt, unread and i + 1 == m.layers);
         if (heads == 0) return;
         try m.project(k, s, m.w.head, x.n + head0 * h * 2, x.xs + head0 * (h / 64) * 4, x.logits, heads, false);
         try k.act.softcap(s, x.logits, x.logits, heads, cfg.vocab, cfg.softcap);
@@ -368,7 +380,7 @@ pub const Model = struct {
     }
 
     /// Layer i on the rows: residual in s.h[0], its normed input (and sums) in s.n (s.xs); the same on return.
-    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool) !void {
+    fn layer(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, i: usize, rows: usize, prompt: bool, unread: bool) !void {
         const geo = m.geo;
         const l = m.w.layers[i];
         const x = m.s;
@@ -379,7 +391,11 @@ pub const Model = struct {
         const qw = geo.query_heads * dh;
         const kw = kvh * dh;
         const own = l.k != null; // a shared layer: q only, attending over its owner's cache (kc[i] is the owner's)
-        if (l.k) |kp| {
+        if (unread and !own) return; // a shared layer writes no state
+        if (unread) { // no q: its rows only reach the attention this layer skips
+            try m.project(k, s, l.k.?, x.n, x.xs, x.k, rows, prompt);
+            if (l.v) |v| try m.project(k, s, v, x.n, x.xs, x.v, rows, prompt);
+        } else if (l.k) |kp| {
             if (l.v) |v| {
                 try m.projectMany(k, s, &.{ l.q, kp, v }, x.n, x.xs, &.{ x.q, x.k, x.v }, rows, prompt);
             } else try m.projectMany(k, s, &.{ l.q, kp }, x.n, x.xs, &.{ x.q, x.k }, rows, prompt);
@@ -394,6 +410,7 @@ pub const Model = struct {
         try k.qk.rowsFrom(s, src, .{ .h = geo.query_heads, .hk = if (own) kvh else 0, .dim = dh }, shape, x.pos, x.slot, out, rows);
         const w: Window = .{ .h = geo.query_heads, .hk = kvh, .d = dh, .win = if (global) 0 else geo.sliding_window, .ring = len, .scale = 1, .p32 = true, .pg = pg };
         if (own and pg != null) try k.win.put(s, x.kr, x.vr, m.kc[i], m.vc[i], x.pos, x.slot, w, rows);
+        if (unread) return;
         if (prompt) {
             const c = chains[0];
             const off = if (pg != null) 0 else c.slot * len * kw * 2;
@@ -428,9 +445,9 @@ test "a stream's caches count the owning layers only: the E4B's 24 of 42" {
     const g = cfg.e4b;
     var own: usize = 0;
     for (0..g.cacheLayers()) |i| own += 2 * (if (cfg.global(i)) @as(usize, 4096) else ring) * g.kvHeads(i) * cfg.headDim(i) * 2;
-    try std.testing.expectEqual(own, Model.streamBytes(g, g.layers, 4096));
-    try std.testing.expectEqual(Model.streamBytes(g, 24, 4096), Model.streamBytes(g, 42, 4096));
-    try std.testing.expect(Model.streamBytes(g, 23, 4096) < Model.streamBytes(g, 24, 4096));
+    try std.testing.expectEqual(own, Model.streamBytes(g, g.layers, 4096, ring));
+    try std.testing.expectEqual(Model.streamBytes(g, 24, 4096, ring), Model.streamBytes(g, 42, 4096, ring));
+    try std.testing.expect(Model.streamBytes(g, 23, 4096, ring) < Model.streamBytes(g, 24, 4096, ring));
     try std.testing.expectEqual(@as(?usize, 22), cfg.cacheOwner(40, g.cacheLayers()));
     try std.testing.expectEqual(@as(?usize, 23), cfg.cacheOwner(41, g.cacheLayers()));
 }

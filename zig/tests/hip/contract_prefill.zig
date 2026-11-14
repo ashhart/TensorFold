@@ -39,11 +39,31 @@ const names = [2][2][]const u8{
     .{ "hip prompt tile tf_fa_paged_f16 (fp16 cache pages)", "hip prompt tile tf_fa_paged_bf16 (bf16 cache pages)" },
 };
 
-/// What gate 1 finds on the tile: NaN scores leave its max, and its P x V takes every key of a tile.
+/// The edge entries: non-finite values only at keys past some rows' edges; those rows must ignore them, later rows not.
+const edge_names = [2][2][]const u8{
+    .{
+        "hip prompt tile tf_fa_wide_f16 (flat fp16 cache), non-finite values only past a row's edge",
+        "hip prompt tile tf_fa_wide_bf16 (flat bf16 cache), non-finite values only past a row's edge",
+    },
+    .{
+        "hip prompt tile tf_fa_paged_f16 (fp16 cache pages), non-finite values only past a row's edge",
+        "hip prompt tile tf_fa_paged_bf16 (bf16 cache pages), non-finite values only past a row's edge",
+    },
+};
+
+/// Their planted controls: the tile with no edge pass and no mask, so 0 x inf past a row's edge gives NaN there.
+const control_names = [2][2][]const u8{
+    .{ "control: prompt tile tf_fa_wide_f16 without its edge pass", "control: prompt tile tf_fa_wide_bf16 without its edge pass" },
+    .{ "control: prompt tile tf_fa_paged_f16 without its edge pass", "control: prompt tile tf_fa_paged_bf16 without its edge pass" },
+};
+
+/// The served entry, or an edge entry: its own plant and a span a page past its last row.
+pub const Mode = enum { served, edge };
+
+/// What gate 1 finds on the tile: NaN scores leave its max, and its P x V takes a seen key whose weight underflows.
 const finding = "a row whose every score is NaN writes 0 where float64 gives NaN (its running max is fmaxf, " ++
-    "which drops NaN, and a row at max -inf takes p = 0), and an infinite value at a key whose fp32 weight is 0 " ++
-    "(past the row's causal edge in its tile, or under fp32's least) gives NaN where float64 gives inf or a finite " ++
-    "value, as 0 x inf enters P x V";
+    "which drops NaN, and a row at max -inf takes p = 0), and an infinite value at a key the row sees under " ++
+    "fp32's least weight gives NaN where float64 gives inf, as 0 x inf enters P x V";
 
 /// A row's P x V chain: a dot2 a key pair and a fold a tile, under its keys plus a tile.
 fn keyChain(s: c.Shape) usize {
@@ -51,19 +71,21 @@ fn keyChain(s: c.Shape) usize {
 }
 
 /// Rows of a prompt chunk (rows), query heads (n) and the chunk's first position (k); the flat tile equals the paged.
-pub fn spec(k: kit.Kind, paged: bool) c.Spec {
+pub fn spec(k: kit.Kind, paged: bool, mode: Mode, planted: bool) c.Spec {
     const bf16 = k == .bf16;
+    const p = @intFromBool(paged);
+    const b = @intFromBool(bf16);
     return .{
-        .name = names[@intFromBool(paged)][@intFromBool(bf16)],
+        .name = if (planted) control_names[p][b] else if (mode == .edge) edge_names[p][b] else names[p][b],
         .accum = .f32,
         .depth = keyChain,
         .ops = 1,
         .out = .f32,
-        .replaces = if (paged) null else if (bf16) "tf_fa_paged_bf16" else "tf_fa_paged_f16",
+        .replaces = if (paged or planted) null else if (bf16) "tf_fa_paged_bf16" else "tf_fa_paged_f16",
         .tiles = .{ .{ .size = 64 }, .{}, .{ .size = page, .min = 0 } },
         .served = &served,
         .sums = .{ .why = attn.why },
-        .known = .{ .gate = .nonfinite, .finding = finding },
+        .known = if (mode == .served) .{ .gate = .nonfinite, .finding = finding } else null,
     };
 }
 
@@ -74,6 +96,9 @@ pub const Prefill = struct {
     k: kit.Kind,
     /// tf_fa_paged_* over a permuted page table; else tf_fa_wide_* over flat keys, the paged tile its baseline.
     paged: bool,
+    mode: Mode = .served,
+    /// A planted control (tf_ctl_fa_*_unmasked_*) launched in place of the served dispatch.
+    planted: ?hip.Function = null,
     arena: std.heap.ArenaAllocator,
     r: ?attn.Ref = null,
     shape: c.Shape = undefined,
@@ -106,13 +131,15 @@ pub const Prefill = struct {
     }
 
     pub fn kernel(self: *Prefill) g.Kernel {
-        return .{ .spec = spec(self.k, self.paged), .ctx = self, .vt = &vt };
+        const planted = self.planted != null;
+        const control: ?g.Gate = if (planted) .nonfinite else null;
+        return .{ .spec = spec(self.k, self.paged, self.mode, planted), .ctx = self, .vt = &vt, .control = control };
     }
 
     const vt = g.hooks(Prefill);
 
     fn span(self: *const Prefill) usize {
-        return self.shape.k + self.shape.rows;
+        return self.shape.k + self.shape.rows + @as(usize, if (self.mode == .edge) page else 0);
     }
 
     /// Element e of kv head kh's key `key` in kc and vc.
@@ -152,7 +179,7 @@ pub const Prefill = struct {
         self.r = try attn.Ref.init(self.rig.a, d, keys);
         switch (fill) {
             .random => {},
-            .nonfinite => self.plant(),
+            .nonfinite => if (self.mode == .edge) self.edgePlant() else self.plant(),
             .stress => try self.stress(rng),
         }
         self.q32 = try self.rig.input(try kit.f32Bytes(a, self.q));
@@ -203,6 +230,20 @@ pub const Prefill = struct {
             if (hk > 2) self.reach(5, 1);
             self.under(n - 1, 2 % hk);
         }
+    }
+
+    /// Non-finite values only past rows' edges: +inf, -inf, NaN, one column seeing both infinities, one past every row.
+    fn edgePlant(self: *Prefill) void {
+        const n = self.shape.rows;
+        if (n < 8) return;
+        const hk = self.geo.kv;
+        const inf = std.math.inf(f64);
+        self.vc[self.at(0, self.pos(0) + 1, 7)] = inf;
+        self.vc[self.at(1 % hk, self.pos(2) + 2, 9)] = -inf;
+        self.vc[self.at(0, self.pos(5) + 1, 11)] = std.math.nan(f64);
+        self.vc[self.at(1 % hk, self.pos(0) + 1, 13)] = inf;
+        self.vc[self.at(1 % hk, self.pos(0) + 2, 13)] = -inf;
+        self.vc[self.at(0, self.pos(n - 1) + 1, 15)] = inf;
     }
 
     /// Query row r of kv head kh's first head.
@@ -282,6 +323,7 @@ pub const Prefill = struct {
     }
 
     pub fn run(self: *Prefill) !void {
+        if (self.planted) |f| return self.runPlanted(f);
         if (self.paged) {
             try self.launchPaged(self.out);
             return self.rig.s.synchronize();
@@ -317,6 +359,28 @@ pub const Prefill = struct {
             self.rig.s.handle,
             null,
         );
+        try self.rig.s.synchronize();
+    }
+
+    /// The planted control on the served symbol's arguments and grid, with no edge pass after it.
+    fn runPlanted(self: *Prefill, f: hip.Function) !void {
+        const s = self.shape;
+        const geo = self.geo;
+        var a: hip.launch.Args = .{};
+        for ([_]u64{ self.q32, if (self.paged) self.pool[0] else self.flat[0], if (self.paged) self.pool[1] else self.flat[1], self.out }) |p| try a.add(p);
+        for ([_]usize{ s.rows, self.span(), geo.heads, geo.kv, geo.d }) |x| try a.add(@as(c_int, @intCast(x)));
+        try a.add(self.scale());
+        try a.add(@as(c_int, @intCast(s.k)));
+        if (self.paged) {
+            try a.add(self.table);
+            try a.add(@as(c_int, @intCast(self.pages)));
+        } else {
+            const ss: c_longlong = @intCast(geo.d);
+            const sh: c_longlong = @intCast(self.span() * geo.d);
+            for ([_]c_longlong{ 0, sh, ss, 0, sh, ss }) |x| try a.add(x);
+        }
+        const cfg: hip.launch.Config = .{ .grid = .{ .x = @intCast((s.rows + 63) / 64), .y = @intCast(geo.heads) }, .block = .{ .x = 256 } };
+        try hip.launch.launch(f, cfg, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
 

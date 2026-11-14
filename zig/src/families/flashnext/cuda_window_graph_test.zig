@@ -109,7 +109,35 @@ test "window graphs: a held graph takes a new length or sequence in place; new l
 }
 
 const Buf = struct { ptr: u64 };
-const Seq = struct { gen: u64, cap: usize = 262144, kc: [1]Buf, state: [1]Buf };
+const Pg = @import("cuda_glue.zig").Pg;
+const Seq = struct {
+    gen: u64,
+    cap: usize = 262144,
+    conv: [linear_n]Buf = @splat(.{ .ptr = 0 }),
+    state: [linear_n]Buf = @splat(.{ .ptr = 0 }),
+    kc: [attn_n]Buf = @splat(.{ .ptr = 0 }),
+    vc: [attn_n]Buf = @splat(.{ .ptr = 0 }),
+    ikc: [attn_n]Buf = @splat(.{ .ptr = 0 }),
+    pooled: [attn_n]Buf = @splat(.{ .ptr = 0 }),
+    tail: Buf = .{ .ptr = 0 },
+    pg: Pg = .{},
+
+    /// A sequence whose buffers start at `base`, each the next 64 KiB.
+    fn at(gen: u64, base: u64) Seq {
+        var q: Seq = .{ .gen = gen };
+        var a = base;
+        inline for (.{ "conv", "state", "kc", "vc", "ikc", "pooled" }) |f| {
+            for (&@field(q, f)) |*b| {
+                b.ptr = a;
+                a += 0x10000;
+            }
+        }
+        q.tail.ptr = a;
+        return q;
+    }
+};
+const linear_n = @import("cuda_prompt_wt.zig").linear_n;
+const attn_n = @import("cuda_prompt_wt.zig").attn_n;
 
 fn windowKey(seq: Seq, pos0: usize, rows: usize, hooks: parts.Hooks) wg.Key {
     var s: parts.Scratch = undefined;
@@ -119,8 +147,8 @@ fn windowKey(seq: Seq, pos0: usize, rows: usize, hooks: parts.Hooks) wg.Key {
 }
 
 test "window graph keys: a length, a request or a lane moves in place; the score grid and outputs are slots" {
-    const lane0: Seq = .{ .gen = 1, .kc = .{.{ .ptr = 0x10000 }}, .state = .{.{ .ptr = 0x20000 }} };
-    const lane1: Seq = .{ .gen = 2, .kc = .{.{ .ptr = 0x30000 }}, .state = .{.{ .ptr = 0x40000 }} };
+    const lane0: Seq = .at(1, 0x1000_0000);
+    const lane1: Seq = .at(2, 0x2000_0000);
     const hooks: parts.Hooks = .{ .logits = .all, .logits_out = 0x6000, .host_logits = false };
     const base = windowKey(lane0, 9000, 3, hooks);
     const same = [_]wg.Key{
@@ -145,4 +173,91 @@ test "window graph keys: a length, a request or a lane moves in place; the score
     try t.expect(!std.meta.eql(wg.slotOf(base), wg.slotOf(with_keep)));
     kept.layers[0].proj = 0xa000;
     try t.expectEqual(wg.slotOf(with_keep), wg.slotOf(windowKey(lane0, 9000, 3, .{ .logits = .all, .logits_out = 0x6000, .keep = &kept, .host_logits = false })));
+}
+
+const hooks0: parts.Hooks = .{ .logits = .all, .logits_out = 0x6000, .host_logits = false };
+
+/// The key's value of `seq` after `f` moved one of its buffers: another key, the same slot.
+fn expectMoves(seq: Seq, comptime f: []const u8, i: usize) !void {
+    const base = windowKey(seq, 9000, 3, hooks0);
+    var moved = seq;
+    if (comptime std.mem.eql(u8, f, "tail")) moved.tail.ptr += 0x100 else @field(moved, f)[i].ptr += 0x100;
+    const k = windowKey(moved, 9000, 3, hooks0);
+    try t.expect(!std.meta.eql(k, base));
+    try t.expectEqual(wg.slotOf(base), wg.slotOf(k));
+}
+
+test "window graph keys: any layer's state, conv window or cache at a new address is a new key on the same slot" {
+    const q: Seq = .at(7, 0x1000_0000);
+    for (0..linear_n) |i| {
+        try expectMoves(q, "state", i);
+        try expectMoves(q, "conv", i);
+    }
+    for (0..attn_n) |i| {
+        inline for (.{ "kc", "vc", "ikc", "pooled" }) |f| try expectMoves(q, f, i);
+    }
+    try expectMoves(q, "tail", 0);
+    var paged = q;
+    paged.pg = .{ .pt = 0x7000_0000, .ps = 4, .ptok = 256 };
+    try t.expect(!std.meta.eql(windowKey(q, 9000, 3, hooks0), windowKey(paged, 9000, 3, hooks0)));
+}
+
+test "window graph keys: equal tables give equal keys; a kept window's swapped states another, swapped back the first" {
+    const a: Seq = .at(7, 0x1000_0000);
+    var b: Seq = .at(7, 0x1000_0000);
+    try t.expectEqual(windowKey(a, 9000, 3, hooks0), windowKey(b, 9000, 3, hooks0));
+    // the states and a draft's spares trade places (Draft.settle), all layers at once
+    var spare: [linear_n]Buf = undefined;
+    for (&spare, 0..) |*x, i| x.ptr = 0x3000_0000 + i * 0x10000;
+    for (&b.state, &spare) |*x, *y| std.mem.swap(Buf, x, y);
+    const swapped = windowKey(b, 9000, 3, hooks0);
+    try t.expect(!std.meta.eql(windowKey(a, 9000, 3, hooks0), swapped));
+    for (&b.state, &spare) |*x, *y| std.mem.swap(Buf, x, y);
+    try t.expectEqual(windowKey(a, 9000, 3, hooks0), windowKey(b, 9000, 3, hooks0));
+}
+
+var history: [2]i64 = .{ 0, 0 };
+
+/// A shared pass's lane over device buffers at `seq`'s addresses (a fake driver: nothing is called).
+fn laneOf(d: *const cuda.Driver, seq: *const Seq, bufs: *[2 * linear_n + 4 * attn_n]cuda.DeviceBuffer) parts.Lane {
+    var n: usize = 0;
+    inline for (.{ "conv", "state", "kc", "vc", "ikc", "pooled" }) |f| {
+        for (@field(seq, f)) |b| {
+            bufs[n] = .{ .d = d, .ptr = b.ptr, .len = 0, .borrowed = true };
+            n += 1;
+        }
+    }
+    const tail: cuda.DeviceBuffer = .{ .d = d, .ptr = seq.tail.ptr, .len = 0, .borrowed = true };
+    const l, const s, const kv = .{ linear_n, 2 * linear_n, 2 * linear_n + attn_n };
+    return .{ .seq = .{ .gen = seq.gen, .conv = bufs[0..l], .state = bufs[l..s], .kc = bufs[s..kv], .vc = bufs[kv..][0..attn_n], .ikc = bufs[kv + attn_n ..][0..attn_n], .pooled = bufs[kv + 2 * attn_n ..][0..attn_n], .tail = tail, .history = &history, .cap = seq.cap, .scores = 0, .pg = seq.pg }, .pos = 9000, .rows = 3 };
+}
+
+fn sharedKey(lanes: []const parts.Lane) wg.SharedKey {
+    var s: parts.Scratch = undefined;
+    s.h = 0x3000;
+    s.cap = 64;
+    return .init(lanes, &s, 0x5000, 0x4000, 0x6000, false);
+}
+
+test "shared window keys: any lane's layer at a new address is a new key on the same slot; equal tables equal keys" {
+    var d: cuda.Driver = undefined;
+    const q0: Seq = .at(1, 0x1000_0000);
+    const q1: Seq = .at(2, 0x2000_0000);
+    var b0: [2 * linear_n + 4 * attn_n]cuda.DeviceBuffer = undefined;
+    var b1: [2 * linear_n + 4 * attn_n]cuda.DeviceBuffer = undefined;
+    var lanes = [_]parts.Lane{ laneOf(&d, &q0, &b0), laneOf(&d, &q1, &b1) };
+    const base = sharedKey(&lanes);
+    var c0: [2 * linear_n + 4 * attn_n]cuda.DeviceBuffer = undefined;
+    var c1: [2 * linear_n + 4 * attn_n]cuda.DeviceBuffer = undefined;
+    try t.expectEqual(base, sharedKey(&[_]parts.Lane{ laneOf(&d, &q0, &c0), laneOf(&d, &q1, &c1) }));
+    for ([_]*[2 * linear_n + 4 * attn_n]cuda.DeviceBuffer{ &b0, &b1 }) |bufs| {
+        for (bufs) |*b| {
+            b.ptr += 0x100;
+            const k = sharedKey(&lanes);
+            b.ptr -= 0x100;
+            try t.expect(!std.meta.eql(k, base));
+            try t.expectEqual(wg.slotOf(base), wg.slotOf(k));
+        }
+    }
+    try t.expectEqual(base, sharedKey(&lanes));
 }

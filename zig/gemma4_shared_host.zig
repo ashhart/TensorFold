@@ -303,9 +303,10 @@ test "Gemma shared: ring restore precedes forced snapshot eviction in reservatio
         }
     };
     var reclaim: Reclaim = .{ .f = &f, .ids = ids };
-    const original = pool.reclaim;
-    pool.reclaim = .{ .ctx = &reclaim, .call = Reclaim.call };
-    defer pool.reclaim = original;
+    const original = pool.reclaims;
+    pool.reclaims = .{};
+    try pool.joinReclaim(.{ .ctx = &reclaim, .call = Reclaim.call });
+    defer pool.reclaims = original;
     var s = try stream(ids);
     defer s.deinit(a);
     const l = try f.g.opening(&s);
@@ -344,7 +345,12 @@ test "Gemma shared: snapshots spend pool pages without new device allocations" {
     defer f.deinit();
     const layout = fwd.pages.layout(&f.m);
     try t.expectEqual(@as(u64, 7864384), layout.fixed_bytes);
+    try t.expectEqual(fwd.pages.pageBytes(&f.m), layout.pageBytes()); // the pool's page is the kernels' stride
     try t.expectEqual(@as(u64, 524288), layout.pageBytes());
+    try t.expectEqual(layout.pageBytes(), layout.group().bytes() * fwd.pages.tokens); // one group sized by its row's bytes
+    const window = layout.window.?; // a sliding row against a global one: kv heads x head width
+    try t.expectEqual(layout.group().row * geo.sliding_kv_heads * cfg.sliding_dim, window.row * geo.global_kv_heads * cfg.global_dim);
+    try t.expectEqual(@as(u32, @intCast(fwd.pages.ownLayers(&f.m))), layout.group().layers + window.layers);
     try t.expectEqual(@as(u64, 5237760), g4.snap.copyBytes(&f.m, 2048, 2048));
     try t.expectEqual(@as(usize, 10), g4.snap.blobPages(&f.m, 2048, 2048));
     const ids = try prompt();

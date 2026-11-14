@@ -17,7 +17,7 @@ fn pairTile(comptime rows: u32, comptime cb: u32) limits.HipLaunch {
     };
 }
 
-pub const records = [_]Record{
+pub const records = [8]Record{
     .{
         .launch = pairTile(1, 2),
         .usage = .{

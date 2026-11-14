@@ -13,6 +13,7 @@ const hip_prefix = @import("hip_prefix.zig");
 const memory = @import("memory.zig");
 const pages = @import("../forward/pages.zig");
 const radix = @import("engine_api").prompt_radix;
+const vision = @import("vision.zig");
 
 const be = lanes.backend;
 const draw = serve.draw;
@@ -29,15 +30,16 @@ pub const Readout = struct {
 
     pub const State = opaque {};
     pub const VTable = struct {
-        open: *const fn (ctx: *anyopaque, spec: *const lanes.readout.Spec) anyerror!*State,
+        /// The stream's state for `spec` over `prompt` (its tokens give the options' lexical rows).
+        open: *const fn (ctx: *anyopaque, spec: *const lanes.readout.Spec, prompt: []const u32) anyerror!*State,
         /// `count` rows from prompt row `first_row`, valid until the next piece; work goes on `stream`.
         consume: *const fn (ctx: *anyopaque, st: *State, rows: hip.ops.Tensor, first_row: usize, count: usize, stream: hip.Stream) anyerror!void,
         finish: *const fn (ctx: *anyopaque, st: *State, logits: []u16) anyerror!void,
         close: *const fn (ctx: *anyopaque, st: *State) void,
     };
 
-    pub fn open(r: Readout, spec: *const lanes.readout.Spec) !*State {
-        return r.vtable.open(r.ctx, spec);
+    pub fn open(r: Readout, spec: *const lanes.readout.Spec, prompt: []const u32) !*State {
+        return r.vtable.open(r.ctx, spec, prompt);
     }
     pub fn consume(r: Readout, st: *State, rows: hip.ops.Tensor, first_row: usize, count: usize, stream: hip.Stream) !void {
         return r.vtable.consume(r.ctx, st, rows, first_row, count, stream);
@@ -53,11 +55,13 @@ pub const Readout = struct {
 /// Where a stream's pass starts and the cuts it keeps: a readout at row 0 with none, the prefix tree not asked.
 pub fn startPlan(tree: anytype, s: *const lanes.Stream, owner: anytype, matched: *std.ArrayList(u32)) !radix.Plan {
     if (s.readout != null) return .{};
-    return tree.begin(s.prompt(), s.history_len, s.shared_prefixes, owner, matched);
+    return tree.begin(if (s.key.len != 0) s.key else s.prompt(), s.history_len, s.shared_prefixes, owner, matched);
 }
 
 pub const Lane = struct {
     caches: state.Caches,
+    vision: ?vision.Request = null,
+    key: []const u32 = &.{},
     /// The last kept row's final hidden row: the draft head's input.
     hidden: hip.DeviceBuffer,
     /// Drafts the head holds for the next window.
@@ -215,6 +219,7 @@ pub const Hip = struct {
         if (l.readout) |st| h.readout.?.close(st);
         l.caches.deinit(h.gpa);
         l.hidden.free();
+        if (l.vision) |*v| v.deinit(h.gpa);
         if (l.first_row) |row| h.gpa.free(row);
         h.gpa.destroy(l);
     }
@@ -262,6 +267,7 @@ pub const Hip = struct {
     pub fn begin(h: *Hip, s: *lanes.Stream) !*Lane {
         const prompt = s.prompt();
         if (prompt.len == 0 or prompt.len + s.max_new + 1 > h.e.o.capacity) return error.PromptTooLong;
+        for (prompt) |t| if (t >= h.e.model().spec.vocab) return error.InvalidQwenToken; // before the other ranks hear it
         const gop = try h.streams.map.getOrPut(h.gpa, s);
         if (gop.found_existing) h.free(gop.value_ptr.*);
         errdefer h.streams.map.removeByPtr(gop.key_ptr);
@@ -278,13 +284,18 @@ pub const Hip = struct {
         };
         errdefer h.free(lane);
         gop.value_ptr.* = lane;
-        if (s.readout) |spec| lane.readout = try (h.readout orelse return error.ReadoutsUnsupported).open(spec);
+        if (s.readout) |spec| lane.readout = try (h.readout orelse return error.ReadoutsUnsupported).open(spec, prompt);
         lane.id = try h.streams.idOf(s);
+        lane.key = if (s.key.len != 0) s.key else prompt;
+        if (h.e.vision) |v| {
+            lane.vision = try vision.Request.initCancelable(v, s.images, prompt, h.e.o.capacity, h.cancelOf(s));
+        } else if (s.images.len != 0) return error.VisionNotLoaded;
         // a request resumes from the deepest shared snapshot and keeps its own marks; a readout starts at row 0
         var owner: hip_prefix.Side.Owner = .{ .caches = &lane.caches, .id = lane.id };
         h.matched.clearRetainingCapacity();
         h.prefix.restored = serve.protocol.no_snapshot;
-        const plan = try startPlan(h.prefix, s, &owner, &h.matched);
+        // the paged radix does not store exact image identities yet: image lanes keep private pages
+        const plan = if (s.images.len != 0) radix.Plan{ .marks = try h.gpa.alloc(u32, 0) } else try startPlan(h.prefix, s, &owner, &h.matched);
         defer h.gpa.free(plan.marks);
         errdefer for (h.matched.items) |id| h.e.pool.release(id);
         const at: usize = plan.from;
@@ -332,16 +343,19 @@ pub const Hip = struct {
 
     /// The chunk's layer-cancel hook, the engine's own shape; null leaves polling between chunks only.
     pub fn cancelOf(_: *Hip, s: *lanes.Stream) ?Engine.Cancel {
-        const c = s.cancel_check orelse return null;
-        return .{ .ctx = c.ptr, .check = c.check };
+        return s.cancel_check;
     }
 
     pub fn advance(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, to: usize, cancel: ?Engine.Cancel) !void {
+        h.e.bridge.model.frame = if (lane.vision) |*v| v.frame() else null;
+        defer h.e.bridge.model.frame = null;
         try h.e.advance(&lane.caches, prompt, from, to, cancel);
     }
 
     /// The prompt's last chunk, its final row kept for the head: the first token.
     pub fn finish(h: *Hip, lane: *Lane, prompt: []const u32, from: usize, req: draw.Request, cancel: ?Engine.Cancel) !u32 {
+        h.e.bridge.model.frame = if (lane.vision) |*v| v.frame() else null;
+        defer h.e.bridge.model.frame = null;
         return h.e.prefill(&lane.caches, prompt, from, lane.hidden, req, cancel);
     }
 
@@ -363,7 +377,9 @@ pub const Hip = struct {
 
     pub fn keepCut(h: *Hip, lane: *Lane, prompt: []const u32, at: usize) !void {
         var owner: hip_prefix.Side.Owner = .{ .caches = &lane.caches, .id = lane.id };
-        try h.prefix.keep(&owner, prompt, at);
+        _ = prompt;
+        if (lane.vision) |v| if (v.layout.count != 0) return;
+        try h.prefix.keep(&owner, lane.key, at);
     }
 
     /// Each stream's window from its kept length: the pending token, then the host's drafts; one forward for all.
@@ -382,7 +398,7 @@ pub const Hip = struct {
         for (windows, 0..) |w, i| {
             const lane = try h.streams.get(w.stream);
             const n = try glue.windowTokens(w, lane.held[0..lane.held_n], lane.len, &tokens[i]);
-            rows[i] = .{ .caches = &lane.caches, .pos = lane.len, .tokens = tokens[i][0..n] };
+            rows[i] = .{ .caches = &lane.caches, .pos = lane.len, .tokens = tokens[i][0..n], .shift = if (lane.vision) |v| v.layout.shift else 0 };
             h.order[i] = w.stream;
         }
         var reqs: [256]draw.Request = undefined;
@@ -443,14 +459,13 @@ pub const Hip = struct {
                 .token = token,
                 .position = lane.len,
                 .depth = r.depth,
-                .sampling = glue.sampling(r.stream),
                 .stop_under = stop_under,
                 .out = &lane.held,
             };
             chained[n] = lane;
             n += 1;
         }
-        try head.chains(&h.e.lib, h.e.stream, &h.e.drawer, m, jobs[0..n], h.e.headGraphs());
+        try head.chains(&h.e.lib, h.e.stream, m, jobs[0..n], h.e.headGraphs());
         var k: usize = 0;
         for (requests) |r| {
             if (r.depth == 0) continue;
@@ -461,6 +476,25 @@ pub const Hip = struct {
         }
     }
 
+    /// A drafter's tapped layers, told before any stream exists: their rings then come with every stream's caches.
+    pub fn prepareFeatures(h: *Hip, taps: []const u32) !void {
+        if (h.streams.map.count() != 0) return error.TapsAfterStreams;
+        if (h.e.o.world != 1) return error.TapsUnderTensorParallel;
+        try h.e.setTaps(taps);
+    }
+
+    /// Rows [start, start + count) of a lane's tap ring (row = position % ring rows), the newest ring rows kept.
+    pub fn features(h: *Hip, lane: *const Lane, taps: []const u32, start: u64, count: u32) !be.Features {
+        const t = &h.e.model().taps;
+        if (taps.len != t.n or !std.mem.eql(u32, taps, t.layers[0..t.n])) return error.TapsMismatch;
+        const ring = lane.caches.tap orelse return error.NoTaps;
+        // a verify's rows are in the ring before its keep: they count as written until the keep drops them
+        const written = lane.len + if (lane.pending) |p| p.rows else 0;
+        if (start + count > written or start + count <= written -| t.rows) return error.RowsNotHeld;
+        const row_bytes = t.n * h.e.model().spec.hidden * 2;
+        return .{ .buffer = ring.base(), .offset = start, .rows = count, .row_bytes = @intCast(row_bytes), .space = .device, .device = h.e.o.device, .dtype = if (h.e.act == .bf16) .bf16 else .f16 };
+    }
+
     /// The stream's lane freed; the other ranks free theirs.
     pub fn release(h: *Hip, lane: *Lane) void {
         h.tp.release(lane.id) catch {};
@@ -468,3 +502,22 @@ pub const Hip = struct {
         h.free(lane);
     }
 };
+
+test "Qwen HIP image begin receives the stream's original cancellation hook" {
+    const Hook = struct {
+        fn check(ptr: *anyopaque) bool {
+            const stopped: *bool = @ptrCast(@alignCast(ptr));
+            return stopped.*;
+        }
+    };
+    var stopped = false;
+    var stream = try lanes.Stream.init(std.testing.allocator, .{ .id = "vision-cancel", .prompt = &.{1}, .max_new = 1, .cancel_check = .{ .ptr = &stopped, .check = Hook.check } });
+    defer stream.deinit(std.testing.allocator);
+    var unavailable: Hip = undefined;
+    const hook = unavailable.cancelOf(&stream) orelse return error.HookNotForwarded;
+    try std.testing.expect(hook.ptr == @as(*anyopaque, &stopped));
+    try std.testing.expect(hook.check == Hook.check);
+    try serve.cancel.poll(hook);
+    stopped = true;
+    try std.testing.expectError(error.Cancelled, serve.cancel.poll(hook));
+}

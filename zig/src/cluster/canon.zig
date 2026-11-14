@@ -1,4 +1,4 @@
-//! The cluster's exact reductions: a fixed binary tree over S slices, with any contiguous split of the slices over ranks.
+//! The cluster's exact reductions: a fixed binary tree over S slices, with any contiguous split of them over ranks.
 const std = @import("std");
 
 /// Slices [begin, end) of a reduction (heads, intermediate columns, expert groups).
@@ -11,7 +11,7 @@ pub const Range = struct {
     }
 };
 
-/// Split `units` over ranks in proportion to `weights`: largest remainder, ties to the lower rank, contiguous in rank order.
+/// Split units over ranks proportional to weights: largest remainder, ties to the lower rank, contiguous in rank order.
 pub fn partition(units: u32, weights: []const u64, out: []Range) void {
     std.debug.assert(out.len == weights.len and weights.len <= 256);
     var total: u128 = 0;
@@ -72,7 +72,7 @@ pub fn reduce(units: u32, parts: []const Part, out: []f32) void {
     for (out, 0..) |*o, i| o.* = eval(parts, 0, units, i);
 }
 
-/// Element `i` of aligned interval [lo, hi) from single slices (slices[k] is slice base + k), summed in the tree's order.
+/// Element `i` of aligned interval [lo, hi) from single slices (slices[k] is slice base + k), summed in tree order.
 pub fn subtree(slices: []const []const f32, base: u32, lo: u32, hi: u32, i: usize) f32 {
     if (hi - lo == 1) return slices[lo - base][i];
     const mid = lo + (hi - lo) / 2;

@@ -91,7 +91,11 @@ pub fn cleanupParts(root: []const u8) !void {
 }
 
 /// Payloads have no token metadata to recover a lost index entry; only exact owned, unreferenced names go.
-pub fn removeUnindexed(dir: [:0]const u8, metas: anytype) !void {
+pub fn removeUnindexed(gpa: std.mem.Allocator, dir: [:0]const u8, metas: anytype) !void {
+    var indexed: std.AutoHashMapUnmanaged(u64, void) = .empty; // whole before any unlink
+    defer indexed.deinit(gpa);
+    try indexed.ensureTotalCapacity(gpa, std.math.cast(u32, metas.len) orelse return error.OutOfMemory);
+    for (metas) |x| indexed.putAssumeCapacity(x.key, {});
     const fd = platform.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.LearnedDirectoryRead;
     const d = platform.c.fdopendir(fd) orelse {
@@ -103,10 +107,7 @@ pub fn removeUnindexed(dir: [:0]const u8, metas: anytype) !void {
         if (ent.type != platform.c.DT.REG) continue;
         const name = std.mem.sliceTo(&ent.name, 0);
         const key = stateKey(name) orelse continue;
-        const indexed = for (metas) |x| {
-            if (x.key == key) break true;
-        } else false;
-        if (indexed) continue;
+        if (indexed.contains(key)) continue;
         try unlinkAt(fd, @ptrCast(&ent.name));
     }
 }

@@ -233,6 +233,14 @@ pub fn who(s: *Stream) depth.Who {
     return .{ .state = &s.depth, .draft_room = s.draftRoom(), .finished = s.finished, .forced = s.force.items.len > 0, .granted = s.granted, .grant_short = s.grant_short, .gain = s.grant_gain, .stream = s, .sampled = s.sampling != null };
 }
 
+/// cfg.plain_streams: a shared round this wide drafts none, its copies included (each window its pending row).
+fn plainCopies(e: *const Engine, plans: []Plan) void {
+    if (e.cfg.plain_streams == 0 or plans.len < e.cfg.plain_streams) return;
+    for (plans) |*p| if (p.kind == .copy) {
+        p.* = .{ .stream = p.stream, .position = p.position, .kind = .none };
+    };
+}
+
 /// Whether any of a round's streams draws keyed samples (its rows carry their host work).
 pub fn anySampled(plans: []const Plan) bool {
     for (plans) |p| if (p.stream.sampling != null) return true;
@@ -241,6 +249,7 @@ pub fn anySampled(plans: []const Plan) bool {
 
 /// Trim draft prefixes by landing probability to the shared width with the most expected tokens a ms.
 pub fn allocate(e: *Engine, plans: []Plan) !void {
+    plainCopies(e, plans);
     if (e.trim) |t| return trimmed(e, plans, t);
     const a = e.arena.allocator();
     const fixed = try a.alloc(u32, plans.len);
@@ -282,7 +291,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
     const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
     const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
-    const counts = try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)) });
+    const counts = try alloc.allocateDrafts(a, fixed, probs, costs, overhead, if (explicit or live) @max(plans.len, e.cfg.batch_rows) else e.rule.row_cost.capRows(plans.len, anySampled(plans), @max(plans.len, e.cfg.batch_rows)), .{ .row_ms = if (explicit or live) 0 else e.rule.row_cost.extraMs(plans.len, anySampled(plans)), .least_rows = if (explicit or live) 0 else e.rule.row_cost.leastRows(plans.len, anySampled(plans)) });
     const trial = if (live) lone_costs.probe(e, plans[0]) else null;
     if (trial) |count| {
         counts[0] = count;

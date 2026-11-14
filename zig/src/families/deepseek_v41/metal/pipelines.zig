@@ -119,7 +119,7 @@ pub const Pipelines = struct {
 
 /// The route kernel compiled for `e` experts and `topk` picks.
 fn routeAt(a: std.mem.Allocator, device: mtl.Device, e: u32, topk: u32) !mtl.Pipeline {
-    const text = try std.fmt.allocPrint(a, "#define TF_DSV41_E {d}\n#define TF_DSV41_TOPK {d}\n{s}", .{ e, topk, sources.dsv41.route });
+    const text = try routeSource(a, e, topk);
     defer a.free(text);
     return one(device, text, "tf_dsv41_route_select");
 }
@@ -128,4 +128,9 @@ fn one(device: mtl.Device, text: []const u8, name: []const u8) !mtl.Pipeline {
     const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
     defer lib.deinit();
     return mtl.Pipeline.init(device, lib, name, false);
+}
+
+/// The exact routing specialization compiled by routeAt.
+pub fn routeSource(a: std.mem.Allocator, e: u32, topk: u32) ![]u8 {
+    return try std.fmt.allocPrint(a, "#define TF_DSV41_E {d}\n#define TF_DSV41_TOPK {d}\n{s}", .{ e, topk, sources.dsv41.route });
 }

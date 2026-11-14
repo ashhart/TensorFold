@@ -13,16 +13,15 @@ pub const op_reset: i64 = 42;
 pub const Error = error{ BadPlan, Group, Rows };
 
 /// TF_DSV41_SLOT_DRAFTS=1: DSpark drafts with several live slots (default off: drafts refused with TF_DSV41_SLOTS > 1).
-pub fn enabled() bool {
-    const v = std.c.getenv("TF_DSV41_SLOT_DRAFTS") orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "1");
+pub fn enabled() !bool {
+    return @import("sys").environment.read(bool, "TF_DSV41_SLOT_DRAFTS", false);
 }
 
 /// The most slots a pass: rows below 16, or within TF_DSV41_ROWS_CAP past 16; TF_DSV41_SLOT_DRAFT_GROUP lowers it.
 pub fn groupFromEnv(block: u32) !u32 {
-    const cap: u32 = if (std.c.getenv("TF_DSV41_ROWS_CAP")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 16;
+    const cap = try @import("sys").environment.read(u32, "TF_DSV41_ROWS_CAP", 16);
     // past 16 rows: every live slot (TF_DSV41_SLOTS) within the cap, in one pass
-    const live: u32 = if (std.c.getenv("TF_DSV41_SLOTS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else 1;
+    const live = try @import("sys").environment.read(u32, "TF_DSV41_SLOTS", 1);
     const most = if (cap > 16) @max(1, @min(live, cap / block)) else maxGroup(block);
     const v = std.c.getenv("TF_DSV41_SLOT_DRAFT_GROUP") orelse return most;
     const g = try std.fmt.parseInt(u32, std.mem.span(v), 10);

@@ -30,7 +30,7 @@ pub const Reg = struct { heads: at_.Heads, which: Which, control: bool = false }
 fn controlEdit(w: Which, tensor: bool) ?at_.Edit {
     return switch (w) {
         .prompt => .{ .from = "if (simd_any(inf != 0) && lane == 0) atomic_fetch_or", .to = "if (false && lane == 0) atomic_fetch_or" },
-        .decode => if (tensor) .{ .from = "const bool masked = q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
+        .decode => if (tensor) .{ .from = "const bool masked = MASKED && q27_nonfinite(", .to = "const bool masked = false && q27_nonfinite(" } else null,
     };
 }
 
@@ -107,7 +107,7 @@ pub const Attn = struct {
         const tensor = device.tensorUnits();
         if (!tensor) try q.simd_attention.check(device, queue);
         const gm = at_.geometry(r.heads, tensor);
-        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads);
+        const body = try q.simd_attention.grouped(a, tensor, true, gm.group(), gm.kv_heads, false);
         defer a.free(body);
         const text = if (!r.control) try a.dupe(u8, body) else edit: {
             const e = controlEdit(r.which, tensor) orelse return error.ControlEdit;

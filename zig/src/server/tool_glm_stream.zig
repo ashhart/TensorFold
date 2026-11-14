@@ -206,7 +206,11 @@ fn key(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error
 fn value(s: anytype, text: []const u8, out: *std.ArrayList(Value)) Allocator.Error!Next {
     const from = @max(@min(s.glm.value_from, text.len), s.glm.value_scanned -| (value_close.len - 1));
     const found = std.mem.indexOfPos(u8, text, from, value_close);
-    const end = if (found) |e| e else text.len - reply_text.partialTag(text[@min(s.glm.value_from, text.len)..], value_close);
+    // a value that ran into the next pair is malformed: the whole reply keeps the envelope's text (#2801)
+    if (std.mem.indexOfPos(u8, text, from, key_open)) |next| if (found == null or next < found.?) return .unstreamable;
+    const tail = text[@min(s.glm.value_from, text.len)..];
+    const held = @max(reply_text.partialTag(tail, value_close), reply_text.partialTag(tail, key_open));
+    const end = if (found) |e| e else text.len - held;
     try sendValue(s, text, end, out);
     if (found == null) {
         s.glm.value_scanned = text.len;

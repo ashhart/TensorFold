@@ -33,10 +33,12 @@ test "GLM prompt rows: tiled packed heads use the forward policy" {
     try std.testing.expect(set.prompt);
 }
 test "GLM prompt rows: requests for rows cannot enter the unscored batch path" {
-    const S = struct { images: []const u8 = &.{}, reuse: struct { saved: ?*u8 = null } = .{}, prompt_len: usize = 19, prompt_logprobs: ?u8 = null };
+    const S = struct { images: []const u8 = &.{}, reuse: struct { saved: ?*u8 = null } = .{}, prompt_len: usize = 19, prompt_logprobs: ?u8 = null, chunks: []const u32 = &.{} };
     var s: S = .{};
     try std.testing.expect(glm.lanes.canBatch(&s));
     s.prompt_logprobs = 2;
+    try std.testing.expect(!glm.lanes.canBatch(&s));
+    s = .{ .chunks = &.{7} }; // TF_GLM_REQUEST_STARTS: a batched pass would not cut at the request's start
     try std.testing.expect(!glm.lanes.canBatch(&s));
 }
 
@@ -99,6 +101,9 @@ const Heads = struct {
     fn copy(_: u64, _: u64, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
         return 0;
     }
+    fn copy2d(_: *const cuda.abi.Memcpy2D, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return 0;
+    }
     fn group() callconv(.c) cuda.nccl.Result {
         return 0;
     }
@@ -109,6 +114,7 @@ const Heads = struct {
     fn score(d: *cuda.Driver, output: Output, rank_: usize) !void {
         d.api.cuLaunchKernel = launch;
         d.api.cuMemcpyDtoDAsync_v2 = copy;
+        d.api.cuMemcpy2DAsync_v2 = copy2d;
         var lib: cuda.nccl.Library = undefined;
         lib.api.ncclGroupStart = group;
         lib.api.ncclGroupEnd = group;
@@ -144,6 +150,7 @@ const Heads = struct {
         e.smp.d = d;
         e.smp.vocab = 16;
         e.smp.full = .{ .d = d, .ptr = 0x50000, .len = 1024 };
+        e.smp.stage = .{ .d = d, .ptr = 0x60000, .len = 1024 };
         try glm.prompt_logprobs.run(&e, .{}, &.{7});
     }
 };
@@ -219,4 +226,8 @@ test "GLM prompt rows: an MXFP8 head (FP4-Local's) is scored on the lane, as the
         try Heads.score(&d[r], outputs[r].?, r);
         try std.testing.expectEqualSlices(usize, &.{ 0, 0, 1 }, &Heads.launches);
     }
+}
+
+test {
+    _ = @import("glm_logit_gather_host.zig");
 }

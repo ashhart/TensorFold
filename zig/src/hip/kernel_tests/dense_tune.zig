@@ -1,4 +1,4 @@
-//! hip-dense-tune: both BF16 dense tiles timed at Qwen3-8B's projection shapes, weights cold (rotated past the caches).
+//! hip-dense-tune: both BF16 dense tiles at Qwen3-8B's shapes and the WMMA thresholds, BF16 out, weights cold.
 const std = @import("std");
 const rig = @import("rig.zig");
 const Rig = rig.Rig;
@@ -18,8 +18,12 @@ const shapes = [_]Case{
     .{ .n = 1024, .k = 4096, .name = "k, v" },
     .{ .n = 12288, .k = 4096, .name = "gate, up" },
     .{ .n = 4096, .k = 12288, .name = "down" },
+    // either side of the narrow-output threshold (dense.narrow_cols)
+    .{ .n = 960, .k = 4096, .name = "n 960" },
+    .{ .n = 1088, .k = 4096, .name = "n 1088" },
 };
-const rows = [_]usize{ 1, 16, 64, 96, 128, 192, 276, 384, 512, 2048 };
+/// Each WMMA threshold and the row past it (dense.small_rows, cached_rows, narrow_rows), and the served sizes.
+const rows = [_]usize{ 1, 16, 64, 65, 96, 97, 128, 192, 256, 257, 276, 384, 385, 512, 2048 };
 
 test "hip-dense-tune: both tiles at the served shapes, TFLOPS with cold weights" {
     const t = try Rig.open(64 << 20);
@@ -46,13 +50,13 @@ test "hip-dense-tune: both tiles at the served shapes, TFLOPS with cold weights"
         for (hx) |*v| v.* = rig.bf16Bits(@floatCast(rng.normal()));
         var x = try t.upload(hx);
         defer x.free();
-        var y = try t.alloc(most * sh.n * 4);
+        var y = try t.alloc(most * sh.n * 2); // BF16 out, as qwen3 serves
         defer y.free();
         for (rows) |m| {
             const launch = struct {
                 fn go(r: *Rig, kn: Shape, xp: u64, wp: u64, yp: u64, mm: usize, s: Case) !void {
                     const tile: dense.Tile = if (kn == .dot2) .dot2 else .wmma12;
-                    try r.on.dense.gemmOn(r.on.r, tile, kn, xp, wp, yp, 0, @intCast(mm), @intCast(s.n), @intCast(s.k), r.stream.handle);
+                    try r.on.dense.gemmOn(r.on.r, tile, kn, xp, wp, 0, yp, @intCast(mm), @intCast(s.n), @intCast(s.k), r.stream.handle);
                 }
             }.go;
             for (kernels) |kernel| for (0..copies) |c| try launch(t, kernel, at(x), at(w) + c * one, at(y), m, sh); // warm-up
@@ -66,12 +70,23 @@ test "hip-dense-tune: both tiles at the served shapes, TFLOPS with cold weights"
                 try end.synchronize();
                 us[ki][b] = @as(f64, try Event.elapsedMs(start, end)) * 1000 / @as(f64, @floatFromInt(copies));
             };
+            var mids: [3]f64 = undefined;
             for (kernels, 0..) |kernel, ki| {
                 std.mem.sort(f64, &us[ki], {}, std.sort.asc(f64));
                 const mid = us[ki][batches / 2];
+                mids[ki] = mid;
                 const flops = 2.0 * @as(f64, @floatFromInt(m * sh.n * sh.k));
                 std.debug.print("DENSE {s:>8} n{d:>5} k{d:>5} m{d:>5} {t:>9}: {d:>9.2} us {d:>6.1} TFLOPS (noise {d:.1}%)\n", .{
                     sh.name, sh.n, sh.k, m, kernel, mid, flops / mid / 1e6, (us[ki][batches - 1] / us[ki][0] - 1) * 100,
+                });
+            }
+            if (kernels.len == 3) {
+                // the geometry shapeOf serves against the faster one: SLOW past 5%
+                const chosen = dense.shapeOf(.wmma12, @intCast(m), @intCast(sh.n), @intCast(sh.k));
+                const took = mids[@backingInt(chosen)];
+                const best = @min(mids[1], mids[2]);
+                std.debug.print("ROUTE {s:>8} n{d:>5} m{d:>5} {t:>9}: {d:>9.2} us, faster {d:>9.2} us {s}\n", .{
+                    sh.name, sh.n, m, chosen, took, best, if (took > best * 1.05) "SLOW" else "ok",
                 });
             }
         }

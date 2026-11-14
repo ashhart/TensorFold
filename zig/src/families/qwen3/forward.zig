@@ -108,13 +108,29 @@ fn layerRows(o: Ops, m: *const model.Model, l: *const model.Layer, x: Tensor, tr
         // the residual add and the post-attention norm in one launch, with add-then-rms's bits
         try o.residualRms(xs, y, l.post_norm, normed, rows, s.hidden, @floatCast(s.eps));
         if (taps) |tp| try copyRows(o, normed, at(.{ .ptr = tp.post, .kind = m.act }, start * s.hidden), rows * s.hidden);
-        const gate = try o.project(normed, l.gate, rows, false);
-        const up = try o.project(normed, l.up, rows, false);
-        const act = try take(o, m.act, rows * s.inter);
-        try o.siluMul(gate, up, act, rows * s.inter);
+        const act = try mlpAct(o, m, l, normed, rows);
         if (taps) |tp| try copyRows(o, act, at(.{ .ptr = tp.act, .kind = m.act }, start * s.inter), rows * s.inter);
         const z = try o.project(act, l.down, rows, false);
         try o.add(xs, z, xs, rows * s.hidden);
+    }
+}
+
+/// silu(gate) x up of `rows` normed rows: one WMMA product for an interleaved MLP, else two products and tf_silu_mul.
+fn mlpAct(o: Ops, m: *const model.Model, l: *const model.Layer, normed: Tensor, rows: usize) Error!Tensor {
+    const inter = m.spec.inter;
+    switch (l.mlp) {
+        .interleaved => |w| {
+            const act = try take(o, m.act, rows * inter);
+            try o.projectSilu(normed, w, rows, act);
+            return act;
+        },
+        .plain => |p| {
+            const gate = try o.project(normed, p.gate, rows, false);
+            const up = try o.project(normed, p.up, rows, false);
+            const act = try take(o, m.act, rows * inter);
+            try o.siluMul(gate, up, act, rows * inter);
+            return act;
+        },
     }
 }
 

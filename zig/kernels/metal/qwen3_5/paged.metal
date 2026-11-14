@@ -1,9 +1,5 @@
 // Qwen3.5-2B's keys and attention over core-pool pages: the contiguous kernels with only the K/V address changed.
 
-inline ulong qwen35_page_row(device const uint* table, uint pos, ulong page_bytes, uint h) {
-  return tf_page_offset(table, pos, page_bytes, 256 * 2) + ulong(h) * TF_PAGE_TOKENS * 256 * 2;
-}
-
 kernel void qwen35_keys_paged(const device bfloat* k [[buffer(0)]],
                               const device bfloat* v [[buffer(1)]],
                               device uchar* keys [[buffer(2)]],
@@ -14,7 +10,7 @@ kernel void qwen35_keys_paged(const device bfloat* k [[buffer(0)]],
                               uint3 p [[thread_position_in_grid]]) {
   const uint d = p.x, h = p.y, r = p.z;
   const uint m = dims.z + r;
-  const ulong at = qwen35_page_row(table, dims.x + r, page_bytes, h);
+  const ulong at = tf_paged_row(table, dims.x + r, page_bytes, h, 256);
   ((device bfloat*)(keys + at))[d] = qwen35_rotate(k + (size_t(m) * 2 + h) * 256, d, dims.x + r);
   ((device bfloat*)(values + at))[d] = v[(size_t(m) * 2 + h) * 256 + d];
 }

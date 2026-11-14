@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const kv = @import("core").kv_pool;
+const kp = @import("core").kv_prompts;
 const fw = @import("cuda_forward.zig");
 const state = @import("cuda_state.zig");
 const types = @import("cuda_engine_types.zig");
@@ -19,6 +20,11 @@ pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
     const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
     return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
+}
+
+/// TF_KV_SHARE: a kept state's slot (`e.share_pages`: its prefix's pages left to the store), at the window's last mark.
+pub fn shareSlot(e: *const Engine) u64 {
+    return e.stateBytes(e.capacity - e.capacity % @import("cuda_native.zig").snap_grid);
 }
 
 /// A request's need: its prompt, its reply and one last verify window.
@@ -58,6 +64,7 @@ pub const Pages = struct {
     used: []bool,
     leader: bool,
     poison: bool, // TF_KV_POISON=1: a stream's pages start as NaN, so a row read before its write shows in the reply
+    prompts: ?kp.Prompts = null, // TF_KV_SHARE: the shared prompt store over this pool (rank 0's), from the server
 
     /// `streams` sequences from slot 0 on `pages` pages: the engine's own (`ownSequence`) placed, the others made now.
     pub fn init(gpa: std.mem.Allocator, e: *Engine, l: kv.Layout, streams: usize, pages: usize, leader: bool) !*Pages {
@@ -236,7 +243,7 @@ pub const Pages = struct {
         p.report();
     }
 
-    /// The idle server's line: nothing promised, every page free or, under TF_GLM_KV_SHARE, the store's.
+    /// The idle server's line: nothing promised, every page free or, under TF_KV_SHARE, the store's.
     fn report(p: *const Pages) void {
         if (@import("builtin").is_test) return;
         const c = p.pool.census();

@@ -5,6 +5,7 @@
     extern __shared__ uint4 smem[];
     uint4* slots = smem;
     uint4* qs = smem + NS * HALF * CS;
+    int* ids = reinterpret_cast<int*>(qs + WARPS * 16 * CS);  // IDS: the chunk's PN page ids, past the queries
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, qd = lane % 4, mt = lane / 8;
     const int groups = G / HPC, hk = blockIdx.y / groups, hg = blockIdx.y % groups;
     const int row0 = first_row(), last = min(row0 + 16 * RB, W) - 1;
@@ -26,6 +27,9 @@
             const uint8_t* src = reinterpret_cast<const uint8_t*>(item % 4 < 2 ? kc : vc);
             const float* sc = item % 4 < 2 ? ks : vs;
             const int key0 = (item / 4) * BN + (item % 2) * HALF;
+            // HM with PT: the item's first page looked up once, as stage does
+            const int lo = HM && PT ? min(key0 + skip, limit - 1 + skip) / PTOK * PTOK : 0;
+            const int64_t first = HM && PT ? (int64_t)PT[lo / PTOK] * PS : 0;
 #pragma unroll
             for (int j = 0; j < PER; ++j) {
                 const int i = threadIdx.x + j * THREADS, key = key0 + i / C;
@@ -34,7 +38,8 @@
                 if (i < HALF * C && key < limit) {
                     if constexpr (HPAGED) {
                         const int row = key + (key < p0 ? 0 : skip);
-                        const int64_t r = row_of(row), pg = page_of(row);
+                        const bool near = HM && PT && row >= lo && row - lo < PTOK;
+                        const int64_t r = near ? (int64_t)hk * PTOK + (row - lo) : row_of(row), pg = near ? first : page_of(row);
                         pre[j] = __ldg(reinterpret_cast<const uint2*>(src + pg + r * D + (i % C) * 8));
                         pre_s[j] = __ldg(reinterpret_cast<const float*>(reinterpret_cast<const uint8_t*>(sc) + pg) + r);
                     } else {
@@ -69,17 +74,33 @@
         if constexpr (F8) {
             fetch(item);
             put(item);
+        } else if constexpr (P256) {
+            // pages of 256 positions: a tile's keys, filled or not, sit in one allocated page, so key0 needs no clamp
+            const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
+            const int key0 = (item / 4) * BN + (item % 2) * HALF, p = key0 / PTOK;
+            uint4* dst = slots + (item % NS) * HALF * CS;
+            const __nv_bfloat16* base = src + (int64_t)(IDS ? ids[p] : PT[p]) * PS + ((int64_t)hk * PTOK + key0 % PTOK) * D;
+            for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
+                const int row = i / NB, chunk = i % NB;
+                cp16z(dst + sw<8 * CS>(i / NB, chunk), base + (i / NB) * D + chunk * 8, key0 + row < limit && (NB == C || chunk < C));
+            }
         } else {
             const __nv_bfloat16* src = reinterpret_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
             const int key0 = (item / 4) * BN + (item % 2) * HALF;
             uint4* dst = slots + (item % NS) * HALF * CS;
+            // HM with PT: the item's first page looked up once; a row past it (PTOK % HALF != 0) finds its own
+            const int lo = HM && PT ? min(key0 + skip, limit - 1 + skip) / PTOK * PTOK : 0;
+            const int64_t first = HM && PT ? (int64_t)PT[lo / PTOK] * PS : 0;
             for (int i = threadIdx.x; i < HALF * NB; i += THREADS) {
                 const int key = key0 + i / NB, chunk = i % NB;
                 const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
                 const int row = in ? key + (key < p0 ? 0 : skip) : 0;
                 if constexpr (HM) {
-                    if constexpr (HPAGED) cp16z(dst + sw<8 * CS>(i / NB, chunk), src + page_of(row) + row_of(row) * D + chunk * 8, in);
-                    else cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
+                    if constexpr (HPAGED) {
+                        const bool near = PT && row >= lo && row - lo < PTOK;
+                        const int64_t at = near ? first + ((int64_t)hk * PTOK + (row - lo)) * D : page_of(row) + row_of(row) * D;
+                        cp16z(dst + sw<8 * CS>(i / NB, chunk), src + at + chunk * 8, in);
+                    } else cp16z(dst + sw<8 * CS>(i / NB, chunk), src + row_of(row) * D + chunk * 8, in);
                 } else {
                     // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run)
                     const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;
@@ -107,6 +128,10 @@
             cp16z(qs + sw<8 * CS>(i / C, i % C), q + ((int64_t)min(row, W - 1) * H + hd) * D + (i % C) * 8, row < W);
         }
         commit();
+    }
+    if constexpr (IDS) {  // every page id the chunk reads, once, so staging never waits on the table
+        for (int i = threadIdx.x; i < PN; i += THREADS) ids[i] = PT[i];
+        __syncthreads();
     }
 #pragma unroll
     for (int i = 0; i < NS; ++i) {
@@ -165,14 +190,14 @@
 #pragma unroll
         for (int i = 0; i < NB; i += 2) {
             uint32_t b[4];
-            ldmatrix4t(b, sl + sw<8 * CS>(8 * (mt % 2) + lane % 8, i + mt / 2));
+            ldmatrix4t(b, sl + sw<8 * CS>(8 * (mt % 2) + lane % 8, (i + mt / 2) ^ PATTN_VLANE));
             mma(o[i], pa0, b[0], b[1]);
             mma(o[i + 1], pa0, b[2], b[3]);
         }
 #pragma unroll
         for (int i = 0; i < NB; i += 2) {
             uint32_t b[4];
-            ldmatrix4t(b, sl + sw<8 * CS>(16 + 8 * (mt % 2) + lane % 8, i + mt / 2));
+            ldmatrix4t(b, sl + sw<8 * CS>(16 + 8 * (mt % 2) + lane % 8, (i + mt / 2) ^ PATTN_VLANE));
             mma(o[i], pa1, b[0], b[1]);
             mma(o[i + 1], pa1, b[2], b[3]);
         }

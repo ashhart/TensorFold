@@ -11,6 +11,10 @@ const mib: u64 = 1 << 20;
 /// Nemotron 3.5 Lightning on CUDA: 6 attention layers and the MTP head's, 2 KV heads of 128, Mamba states in a slot.
 const nemotron: kv.Layout = .{ .fixed_bytes = 64 * mib, .token_bytes = 7 << 10, .page_tokens = 512, .snap_bytes = 48 * mib };
 
+test {
+    _ = @import("kv_pool_band_test.zig");
+}
+
 test "a 2,048-token prompt with 4,096 reply tokens and a 16-row window reserves 13 pages of 512 rows, 45.5 MiB" {
     try expectEqual(@as(u64, 3584 * 1024), nemotron.pageBytes());
     try expectEqual(@as(usize, 13), nemotron.need(2048, 4096, 16));
@@ -323,7 +327,7 @@ test "a promise that does not fit asks the store to reclaim first, and fails onl
     try expectEqual(@as(usize, 1), p.available());
     try expectEqual(@as(usize, 3), p.reclaimable());
     try expect(p.fits(4) and !p.fits(5));
-    p.reclaim = .{ .ctx = &store, .call = Kept.call };
+    try p.joinReclaim(.{ .ctx = &store, .call = Kept.call });
     var b: Lease = .{};
     try std.testing.expectError(error.LaneMemory, p.promise(&b, 5));
     try expectEqual(@as(usize, 0), b.promised);
@@ -490,10 +494,36 @@ test "a hold past the free pages asks the store to reclaim first, as a promise d
     var old: [3]u32 = undefined;
     try expect(p.hold(&old)); // the store's own pages fill the pool
     var shed: Shed = .{ .pool = &p, .kept = &old };
-    p.reclaim = .{ .ctx = &shed, .call = Shed.call };
+    try p.joinReclaim(.{ .ctx = &shed, .call = Shed.call });
     var ids: [2]u32 = undefined;
     try expect(p.hold(&ids));
     try expectEqual(@as(usize, 1), shed.calls);
     for (ids) |id| p.release(id);
     try expect(p.idle());
+}
+
+test "TF_KV_SHARE's slots alone (GLM): the cache keeps the slots it holds, the named count at most, and the rest is pages" {
+    const g: u64 = 1 << 30;
+    const glm: kv.Layout = .{ .fixed_bytes = 180 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
+    const b: kv.Budget = .{ .room = 80 * g, .engine = 0, .lanes = 4, .cache = g, .snaps = 16, .window = 262_144 + 8, .engine_paged = true, .slots_only = true };
+    const p = try kv.plan(glm, b);
+    try expectEqual(@as(usize, 5), p.snaps); // a GiB holds five of the sixteen named
+    try expectEqual(@as(u64, 0), p.copied);
+    try expectEqual(g - 5 * 180 * mib, p.kept);
+    var two = b;
+    two.snaps = 2;
+    const q = try kv.plan(glm, two);
+    try expectEqual(@as(usize, 2), q.snaps);
+    try expectEqual(g - 2 * 180 * mib, q.kept);
+    var copies = two; // the split without the flag: the slots' rest stays copied rows
+    copies.slots_only = false;
+    const r = try kv.plan(glm, copies);
+    try expectEqual(@as(usize, 2), r.snaps);
+    try expectEqual(g - 2 * 180 * mib, r.copied);
+    try expectEqual(@as(u64, 0), r.kept);
+    try expect(q.pages > r.pages and q.pages > p.pages); // what the slots leave is pages, past the windows' bound
+    var many = b;
+    many.snaps = 100;
+    many.cache = 16 * g;
+    try expectEqual(@as(usize, kv.most_snaps), (try kv.plan(glm, many)).snaps);
 }

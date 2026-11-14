@@ -1,41 +1,17 @@
 // Step-5's perception encoder at torch's per-op bf16 rounding (vision_encoder.py); after gemm_nax.metal.
 
-#define S5V_GEMM(NAME, T, TA, TB, AM, AN)                                                                          \
-  [[max_total_threads_per_threadgroup(256)]] [[kernel]] void NAME(                                                \
-      const device T* A [[buffer(0)]], const device T* B [[buffer(1)]], const device int32_t* P [[buffer(2)]],     \
-      device T* D [[buffer(3)]], uint sg [[simdgroup_index_in_threadgroup]],                                      \
-      uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                        \
-    tfp::gemm_nax<T, TA, TB, AM, AN, false, 64, 128, 256, 2, 4>(A, B, D, P, tg, sg, lane);                         \
-  }
-S5V_GEMM(s5v_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
-S5V_GEMM(s5v_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
-S5V_GEMM(s5v_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
-S5V_GEMM(s5v_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
-S5V_GEMM(s5v_gemm_f32_nt_00, float, false, true, false, false)
-S5V_GEMM(s5v_gemm_f32_nt_01, float, false, true, false, true)
-S5V_GEMM(s5v_gemm_f32_nt_10, float, false, true, true, false)
-S5V_GEMM(s5v_gemm_f32_nt_11, float, false, true, true, true)
-S5V_GEMM(s5v_gemm_f32_nn_00, float, false, false, false, false)
-S5V_GEMM(s5v_gemm_f32_nn_01, float, false, false, false, true)
-S5V_GEMM(s5v_gemm_f32_nn_10, float, false, false, true, false)
-S5V_GEMM(s5v_gemm_f32_nn_11, float, false, false, true, true)
-
-inline float s5v_bf(float x) { return float(bfloat(x)); }
-
-inline float s5v_group_sum(float v, threadgroup float* part, uint t, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float w = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    w = simd_sum(w);
-    if (lane == 0) part[32] = w;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float r = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return r;
-}
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_00, bfloat16_t, false, true, false, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_01, bfloat16_t, false, true, false, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_10, bfloat16_t, false, true, true, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_bf16_nt_11, bfloat16_t, false, true, true, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_00, float, false, true, false, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_01, float, false, true, false, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_10, float, false, true, true, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nt_11, float, false, true, true, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_00, float, false, false, false, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_01, float, false, false, false, true)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_10, float, false, false, true, false)
+TF_GEMM_NAX_KERNEL(s5v_gemm_f32_nn_11, float, false, false, true, true)
 
 struct S5vRows { uint rows, width; float eps; };
 
@@ -53,7 +29,7 @@ struct S5vRows { uint rows, width; float eps; };
                               uint2 p [[thread_position_in_grid]]) {
   if (p.x >= width) return;
   const ulong i = ulong(p.y) * width + p.x;
-  x[i] = bfloat(float(x[i]) + s5v_bf(float(y[i]) * float(gamma[p.x])));
+  x[i] = bfloat(float(x[i]) + tf_vis_bf(float(y[i]) * float(gamma[p.x])));
 }
 
 // x = bf16(x + pos): the patches' absolute position embedding.
@@ -68,19 +44,10 @@ struct S5vRows { uint rows, width; float eps; };
                                constant S5vRows& p [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
                                uint t [[thread_position_in_threadgroup]], uint n [[threads_per_threadgroup]],
                                uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
   const device bfloat* xr = x + ulong(row) * p.width;
   device bfloat* yr = y + ulong(row) * p.width;
-  float s = 0.0f;
-  for (uint i = t; i < p.width; i += n) s += float(xr[i]);
-  const float mean = s5v_group_sum(s, part, t, n, lane, sg) / float(p.width);
-  float v = 0.0f;
-  for (uint i = t; i < p.width; i += n) {
-    const float d = float(xr[i]) - mean;
-    v += d * d;
-  }
-  const float inv = metal::precise::rsqrt(s5v_group_sum(v, part, t, n, lane, sg) / float(p.width) + p.eps);
-  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((float(xr[i]) - mean) * inv * float(w[i]) + float(b[i]));
+  TF_VIS_LAYER_NORM_STATS(TF_VIS_ROW)
+  TF_VIS_LAYER_NORM_OUT(TF_VIS_ROW)
 }
 
 // qkv [P, 4608] to q, k, v [16, P, 96] fp32, q and k by the 2D RoPE (interleaved pairs, bf16 cos and sin [P, 96]).
@@ -96,7 +63,7 @@ struct S5vRows { uint rows, width; float eps; };
     if (part == 2) { out[d] = float(x[d]); continue; }
     const float c = float(cs[row * 96 + d]), s = float(sn[row * 96 + d]);
     const float other = (d & 1) ? float(x[d - 1]) : -float(x[d + 1]); // rotate_half: (-x2, x1) per pair
-    out[d] = s5v_bf(s5v_bf(float(x[d]) * c) + s5v_bf(other * s));
+    out[d] = tf_vis_bf(tf_vis_bf(float(x[d]) * c) + tf_vis_bf(other * s));
   }
 }
 
@@ -105,29 +72,7 @@ struct S5vRows { uint rows, width; float eps; };
                             constant float& scale [[buffer(2)]], uint row [[threadgroup_position_in_grid]],
                             uint t [[thread_position_in_threadgroup]], uint tn [[threads_per_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
-  device float* s = S + ulong(row) * n;
-  float m = -INFINITY;
-  for (uint i = t; i < n; i += tn) m = max(m, s[i] * scale);
-  m = simd_max(m);
-  if (lane == 0) part[sg] = m;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float v = lane < (tn + 31) / 32 ? part[lane] : -INFINITY;
-    v = simd_max(v);
-    if (lane == 0) part[32] = v;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  m = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float z = 0.0f;
-  for (uint i = t; i < n; i += tn) {
-    const float e = metal::precise::exp(s[i] * scale - m);
-    s[i] = e;
-    z += e;
-  }
-  const float inv = 1.0f / s5v_group_sum(z, part, t, tn, lane, sg);
-  for (uint i = t; i < n; i += tn) s[i] *= inv;
+  TF_VIS_SOFTMAX_BODY(* scale)
 }
 
 // O [16, rows, 96] fp32 to out rows r0.. of [P, 1536] bf16.
@@ -141,8 +86,8 @@ struct S5vRows { uint rows, width; float eps; };
 // x * sigmoid(1.702 x) in bf16 ops, in place.
 [[kernel]] void s5v_quick_gelu(device bfloat* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
   const float v = float(x[i]);
-  const float a = s5v_bf(1.702f * v);
-  const float sg = s5v_bf(1.0f / (1.0f + metal::precise::exp(-a)));
+  const float a = tf_vis_bf(1.702f * v);
+  const float sg = tf_vis_bf(1.0f / (1.0f + metal::precise::exp(-a)));
   x[i] = bfloat(v * sg);
 }
 

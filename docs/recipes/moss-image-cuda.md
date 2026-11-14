@@ -77,6 +77,16 @@ python3 tools/zig/moss_image_case.py compare case/reference.png case/zig.png cas
 
 The case tool needs diffusers 0.38 or later: the checkpoint's decoder config names `decoder_block_out_channels`.
 
+`tf-moss-image` gates each whole forward element by element against the case's float32 run, and
+`tf-moss-image-blocks` gates each block alone against the farther of torch bf16's two runs, both as on Metal
+([moss-image.md](moss-image.md), "Run a case"). The block cases measured below were made on a Mac by
+`moss_image_case.py blocks` (torch on MPS and on the CPU); a block case runs the whole transformer in float32, which
+does not fit an RTX 5090.
+
+```sh
+zig-out/bin/tf-moss-image-blocks MODEL_DIR/transformer case/blocks-23-negative.safetensors
+```
+
 ## Measured
 
 Setup:
@@ -114,6 +124,19 @@ velocities and float32 runs as recorded on the GB10):
 - **Image:** 44.01 dB PSNR from the pipeline's picture for the fox, 34.51 dB for the sticky note. The latents differ
   from the GB10's in their low bits: cuBLASLt picks different GEMM kernels on each GPU.
 - **Repeat:** identical bytes, as on the GB10.
+- **Each block alone**, on the Metal doc's seven block cases (made on the Mac: torch bf16 on MPS and on the CPU): all
+  305 gates pass, at a mean of 0.50 of the limit and at most 0.60, and a second run repeats the first byte for byte.
+  At block 0 of the fox's step 1, negative branch, ours is 5.70e-6 from float32 in cosine error and 0.00960 in its
+  worst row (the negative prompt's seventh row), as torch bf16 on the CPU is (6.58e-6, 0.00960); torch on MPS is
+  2.28e-6 and 0.00687. Each of our operations there, run from our own inputs, matches torch's bf16 code to within the
+  order of its sums; that row turns small rounding differences into larger ones, on torch's devices as on ours.
+- **Each whole forward**, over each case's 100: our cosine error from float32 is 1.00 times torch bf16's on average
+  for the fox (0.87 to 1.13) and 1.01 times for the sticky note (0.85 to 1.55); our worst row 1.01 times (0.34 to 1.63)
+  and 1.02 times (0.66 to 1.98).
+- **The teacher gate** (`tf-moss-image`, exit 1, its bound from the GB10's torch bf16 run) fails all 100 branch-steps
+  of both cases, as on Metal ([moss-image.md](moss-image.md), Measured, where torch's own bf16 run on the CPU fails it
+  too). Worst element over its bound, min / median / max: fox 161 / 432 / 2946, sticky note 115 / 459 / 7921. Two
+  runs give identical latents.
 - **Speed**, the GPU otherwise idle:
   - torch bf16 (torch 2.13.0, the pipeline's own forward on this card): 0.307 s a forward for the fox, 0.309 s for the
     sticky note.

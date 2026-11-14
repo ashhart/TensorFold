@@ -106,7 +106,7 @@ fn matmuls(r: *Rig, set: glue.Set, s: Shape) !void {
     check.pass("b16 matmul [{d}, {d}] ({d} slices): bf16 and fp32 out within float64 tolerance, every entry and row count's bits equal", .{ s.n, s.k, b16.splitK(s.n, s.k) });
 }
 
-/// glue.router (8 K slices) at 300 rows vs float64, fewer rows and unaligned x vs its bytes; glue.select vs float64.
+/// glue.router (8 K slices) at 300 rows vs float64, fewer rows vs its bytes, unaligned x refused; glue.select too.
 fn routers(r: *Rig, set: glue.Set) !void {
     const m = wide_rows;
     const d = 4096;
@@ -123,12 +123,14 @@ fn routers(r: *Rig, set: glue.Set) !void {
     const ref = try dots(r, x, w, m, ne, d, true);
     var name: [128]u8 = undefined;
     try closeCols(r, try std.fmt.bufPrint(&name, "router {d} rows x [{d}, {d}] (K in {d} slices)", .{ m, ne, d, glue.router_ks }), full, true, ref.want, ref.tol, ne);
-    for ([_]usize{ 1, 3, 63, 64, 100, m }) |dm| for (xs, [_][]const u8{ "aligned", "unaligned" }) |xp, how| {
+    for ([_]usize{ 1, 3, 63, 64, 100, m }) |dm| {
         const o = try r.zeros(dm * ne * 4);
-        try glue.router(set, r.s, xp, d, dw, o, part, dm, d, ne);
-        try sameRows(r, try std.fmt.bufPrint(&name, "router: {d} {s} rows equal the {d}-row call's", .{ dm, how, m }), full, o, dm * ne * 4);
-    };
-    check.pass("router [{d}, {d}]: within float64 tolerance, router_tile and router_part bits equal at every row count", .{ ne, d });
+        try glue.router(set, r.s, xs[0], d, dw, o, part, dm, d, ne);
+        try sameRows(r, try std.fmt.bufPrint(&name, "router: {d} rows equal the {d}-row call's", .{ dm, m }), full, o, dm * ne * 4);
+    }
+    const refused = if (glue.router(set, r.s, xs[1], d, dw, full, part, m, d, ne)) |_| false else |e| e == error.RowShape;
+    try check.expect(refused, "router: unaligned rows must be refused with RowShape", .{});
+    check.pass("router [{d}, {d}]: within float64 tolerance, every row count's bits equal, unaligned rows refused", .{ ne, d });
 
     const bias = try r.a.alloc(f32, ne);
     for (bias) |*b| b.* = (r.rng.float(f32) * 2 - 1) * 0.05;

@@ -458,7 +458,7 @@ test "runtime library: capabilities serializes found and missing dependencies wi
     try std.testing.expectEqual(@as(usize, 2), values.len);
     try std.testing.expect(values[0].object.get("found").?.bool);
     try std.testing.expect(!values[1].object.get("found").?.bool);
-    try std.testing.expectEqualStrings("libnccl.so.2", values[0].object.get("soname").?.string);
+    try std.testing.expectEqualStrings(libs.spec(.nccl).names[0], values[0].object.get("soname").?.string);
     try std.testing.expectEqualStrings(rows[1].install, values[1].object.get("install").?.string);
     try std.testing.expect(values[0].object.get("usable").? == .null);
     try std.testing.expect(!values[1].object.get("usable").?.bool);

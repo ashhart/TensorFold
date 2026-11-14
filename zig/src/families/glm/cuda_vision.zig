@@ -170,7 +170,7 @@ pub const Tower = struct {
                 total += std.mem.alignForward(u64, p.codes, 256) + std.mem.alignForward(u64, p.scales, 256);
             } else total += std.mem.alignForward(u64, (try ck.get(name)).bytes.len, 256);
         };
-        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
+        var t: Tower = .{ .gpa = gpa, .d = d, .lt = try cuda.cublaslt.Library.open(), .mem = try weights.Weights.alloc(d, total, try weights.onHost()), .ql = ql, .inv_freq = try cuda.DeviceBuffer.alloc(d, 16 * 4), .linears = .init(gpa), .ws = undefined };
         errdefer t.deinit();
         t.bytes = t.mem.deviceBytes();
         t.ws = try cuda.DeviceBuffer.alloc(d, t.ws_len);
@@ -264,7 +264,7 @@ pub const Tower = struct {
         const n: usize = @intCast(N * H);
         if ((i + 1) * n > dst.len) return;
         try ru.stream.synchronize();
-        try t.d.check(t.d.api.cuMemcpyDtoH_v2(@ptrCast(dst[i * n ..].ptr), x32, n * 4), "vision stage");
+        try cuda.memory.download(t.d, x32, std.mem.sliceAsBytes(dst[i * n ..])[0 .. n * 4]);
     }
 
     /// D[m, n] = X[m, k] . W[n, k]^T (fp32 or bf16 out), a plan per shape kept for the next image.

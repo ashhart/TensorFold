@@ -60,7 +60,7 @@ test "runtime library: discovery uses overrides and retains found libraries with
         pub const DynLib = struct {
             pub fn open(path: []const u8) !@This() {
                 attempts += 1;
-                if (std.mem.eql(u8, path, "libnccl.so.2") or std.mem.eql(u8, path, libs.spec(.jpeg).names[0])) return .{};
+                if (std.mem.eql(u8, path, libs.spec(.nccl).names[0]) or std.mem.eql(u8, path, libs.spec(.jpeg).names[0])) return .{};
                 return error.FileNotFound;
             }
             pub fn close(_: *@This()) void {

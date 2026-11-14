@@ -1,17 +1,16 @@
 //! Kolibri-1's layer graph over streams' serial chains of rows: prompt chunks, decode rows, one-row step graphs.
 const std = @import("std");
 const cuda = @import("cuda");
-const kv = @import("core").kv_pool;
 const Config = @import("config.zig").Config;
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const tree = @import("tree.zig");
+const paging = @import("paging.zig");
 
 const DeviceBuffer = cuda.DeviceBuffer;
 const grouped = cuda.grouped;
 const experts = cuda.experts;
 const TreeAttention = cuda.tree_attention.TreeAttention;
-const Pages = cuda.window_attention.Pages;
 
 /// Prompt rows a forward takes: the chunk grid, from position 0.
 pub const prompt_rows = 8192;
@@ -107,53 +106,14 @@ pub const Model = struct {
         return .{ .gpa = gpa, .d = d, .w = w, .c = c, .context = context, .slots = slots, .ring = ringSize(prompt_rows, c.window), .max_rows = max_rows, .groups = TreeAttention.groups(context + tree.max_rows), .k = &.{}, .v = &.{}, .norms = &.{}, .cos = 0, .sin = 0, .origin = 0, .s = undefined, .paged = paged };
     }
 
-    /// Table entries a slot: the pages its context takes.
-    pub fn perSlot(m: *const Model) usize {
-        return (m.context + page_tokens - 1) / page_tokens;
-    }
-
-    /// bf16 elements a page id steps in one full layer's K (or V) region: page_tokens rows of its kv heads.
-    pub fn pageElems(m: *const Model) usize {
-        return page_tokens * m.c.kv_heads * m.c.head_dim;
-    }
-
-    fn fullLayers(m: *const Model) usize {
-        var n: usize = 0;
-        for (m.c.full[0..m.c.layers]) |full| n += @intFromBool(full);
-        return n;
-    }
-
-    /// Bytes a page holds over every full layer's K and V.
-    pub fn pageBytes(m: *const Model) u64 {
-        return m.fullLayers() * 2 * m.pageElems() * 2;
-    }
-
-    /// What the host's pool plans: a stream's sliding rings and table row fixed, a token its full layers' rows.
-    pub fn layout(m: *const Model) kv.Layout {
-        const c = m.c;
-        var fixed: u64 = m.perSlot() * 4;
-        for (c.full[0..c.layers]) |full| if (!full) {
-            fixed += 2 * m.ring * c.kv_heads * c.head_dim * 2;
-        };
-        return .{ .fixed_bytes = fixed, .token_bytes = m.pageBytes() / page_tokens, .page_tokens = page_tokens, .snap_bytes = 0 };
-    }
-
-    /// Slots a backend holds: the model's, or (paged) as many as a round takes.
-    pub fn slotCap(m: *const Model) usize {
-        return if (m.paged) round_rows else m.slots;
-    }
-
-    /// The full layers' pages as a window reads them (a prompt's slot: its own table row); null: linear caches.
-    pub fn pagesFor(m: *const Model, prompt_slot: ?usize) ?Pages {
-        if (!m.paged) return null;
-        return .{ .table = m.table + (prompt_slot orelse 0) * m.perSlot() * 4, .page_elems = m.pageElems(), .tokens = page_tokens, .stride = m.perSlot() };
-    }
-
-    /// Tree attention's pages over `table`: a row of page ids for each stream of the call, in its order.
-    fn treePages(m: *const Model, table: u64) ?cuda.tree_attention.Pages {
-        if (!m.paged) return null;
-        return .{ .table = table, .page = m.pageElems(), .tok = page_tokens, .stride = m.perSlot() };
-    }
+    pub const perSlot = paging.perSlot;
+    pub const pageElems = paging.pageElems;
+    const fullLayers = paging.fullLayers;
+    pub const pageBytes = paging.pageBytes;
+    pub const layout = paging.layout;
+    pub const slotCap = paging.slotCap;
+    pub const pagesFor = paging.pagesFor;
+    const treePages = paging.treePages;
 
     /// Makes the arena of `pool` pages to lease, the rings and tables of `extra + 1` slots (no pages mapped).
     pub fn attach(m: *Model, s: cuda.Stream, extra: usize, pool: usize) !void {
@@ -504,11 +464,11 @@ pub const Model = struct {
             const up_in: experts.Rows = .{ .x = m.s.x, .stride = c.hidden, .slots = slots_e };
             const down_in: experts.Rows = .{ .x = m.s.act, .stride = c.moe_width };
             if (prompt) {
-                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, -1);
-                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, -1);
+                try gx.prompt(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
+                try gx.prompt(s, .down_bf16, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
             } else {
-                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, -1);
-                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, -1);
+                try gx.decode(s, .up, up_in, L.experts, m.s.plan, m.s.act, items, pairs, tile, -1);
+                try gx.decode(s, .down_f32, down_in, L.experts, m.s.plan, m.s.y, items, pairs, tile, -1);
             }
             try o.combine(m.s.y, prompt, m.s.wts, m.s.mo, n, slots_e, c.hidden);
             const after = if (i + 1 < w.layers.len) w.layers[i + 1].input_norm else w.norm;
@@ -618,4 +578,15 @@ test "the f64 angle table against core's words: 19 of 64 differ, first at 7" {
     try std.testing.expectEqual(@as(usize, 19), differ);
     try std.testing.expectEqual(@as(?usize, 7), first);
     try std.testing.expectEqual(@as(u32, 1), max_ulp);
+}
+
+test "a page's bytes: the pool's layout and the kernels' stride agree" {
+    const config = @import("config.zig");
+    var why: config.Why = .{};
+    var m: Model = undefined;
+    m.c = try config.parse(std.testing.allocator, config.pinned, &why);
+    m.context = 32768;
+    m.ring = ringSize(prompt_rows, m.c.window);
+    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
+    try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
 }

@@ -18,6 +18,7 @@ const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const warm = @import("warm.zig");
 const cortheon = @import("cortheon/cortheon.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -43,17 +44,19 @@ pub const Out = struct {
 
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
+    const startup_at = @import("core").startup_receipt.offset();
     var cx: Cx = .{ .a = a };
     const body = http_body.readJson(conn, &cx) catch {
         const err = errorBody(a, &cx, if (is_chat) "messages" else "prompt") catch return;
         return routes.sendValue(conn, a, cx.status(), wrapError(a, err) catch return);
     };
-    var client: ClientOut = .{ .conn = conn, .a = a };
+    var client: ClientOut = .{ .conn = conn, .a = a, .startup_at = startup_at };
     run(srv, a, client.out(), .{ .conn = conn }, is_chat, body);
 }
 
 /// A chat reply written straight to the client.
 const ClientOut = struct {
+    startup_at: ?u64 = null,
     conn: *Conn,
     a: Allocator,
 
@@ -74,6 +77,7 @@ const ClientOut = struct {
     fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         routes.sendValue(c.conn, c.a, status, payload);
+        if (status == 200 and c.conn.response_complete and !c.conn.broken) @import("startup_receipt.zig").complete(c.startup_at, payload);
     }
 
     fn keepalive(ctx: *anyopaque) error{Closed}!void {
@@ -109,7 +113,7 @@ pub fn replyModel(srv: *const Server, body: Value) []const u8 {
     return srv.config.served_name;
 }
 
-const Plan = struct {
+pub const Plan = struct {
     input: chat.Input,
     stream: bool,
     separate_usage: bool,
@@ -119,22 +123,21 @@ const Plan = struct {
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
 pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
-    return (try plan(srv, cx, true, raw)).input;
+    return (try plan(srv, cx, true, raw, null, true)).input;
 }
 
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
-fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
+pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
-    // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
-    const exact_bytes = asked and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
+    const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
-    var input: chat.Input = .{ .fields = undefined };
+    var input: chat.Input = .{ .fields = undefined, .format = format };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
-        input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
+        input.tools = if (srv.text.native_deepseek) try @import("deepseek_request.zig").active(cx, body.get("tools"), body.get("tool_choice")) else try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
         input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, srv.media());
     };
@@ -160,15 +163,9 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
     if (thinking.clear) |c| try sampling.put(cx.a, "clear_thinking", .{ .bool = c });
     input.fields = .{ .object = sampling };
+    input.explicit_off = client_thinking and !(thinking.enable orelse true);
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
-    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.prompt_logprobs);
-    if (logprobs != null) {
-        // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape it
-        var structured = false;
-        for (grammar.fields) |k| structured = structured or json.truthyField(body, k);
-        if (input.tools.len > 0 or json.truthyField(body, "stop") or structured or json.truthyField(body, "thinking_budget"))
-            return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
-    }
+    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.capability(.prompt_logprobs));
     input.logprobs = logprobs;
     var policy: tool_stream.Policy = .{};
     if (body.field("parallel_tool_calls")) |p| {
@@ -230,19 +227,30 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
+    runNamed(srv, a, out, gone, is_chat, raw, null, true);
+}
+
+/// ``run`` for a route whose client named the grammar field (Responses' text.format, Messages' output_config.format).
+pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
     var cx: Cx = .{ .a = a };
-    var p = plan(srv, &cx, is_chat, raw) catch |e| {
+    var p = plan(srv, &cx, is_chat, raw, format, client_thinking) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         logRefused(id, cx.message);
-        const body = (if (cx.kind == .other) errorOther(a, cx.message) else errorBody(a, &cx, field)) catch return;
+        const body = errorBody(a, &cx, field) catch return;
         out.vt.reply(out.ctx, cx.status(), wrapError(a, body) catch return);
         return;
     };
     p.input.id = id;
+    // held until the reply is written: POST /v1/requests/{id}/cancel finds the request by each id its client gets
+    var asked: cancel_ids.Entry = .{};
+    const names = [_][]const u8{ id, cancel_ids.alias orelse "" };
+    cancel_ids.registry.add(srv.io, &names, &asked);
+    defer cancel_ids.registry.remove(srv.io, &names, &asked);
+    p.input.cancel = &asked.asked;
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 
@@ -250,12 +258,6 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
 fn logRefused(id: []const u8, message: []const u8) void {
     var buf: [1400]u8 = undefined;
     log.line("{s}", .{log.refused(&buf, id, message)});
-}
-
-fn errorOther(a: Allocator, message: []const u8) Allocator.Error!Value {
-    const o = try json.newObject(a);
-    try o.put(a, "message", .{ .string = message });
-    return .{ .object = o };
 }
 
 const Run = struct {
@@ -270,6 +272,7 @@ const Run = struct {
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
+    call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -336,7 +339,7 @@ const Run = struct {
     fn fail(r: *Run, cx: *const Cx, field: []const u8) void {
         const a = r.a;
         const kind_ok = cx.kind != .other and cx.kind != .server;
-        const body = (if (kind_ok) errorBody(a, cx, field) else errorOther(a, cx.message)) catch return;
+        const body = errorBody(a, cx, field) catch return;
         r.out.vt.reply(r.out.ctx, if (kind_ok) cx.status() else 500, wrapError(a, body) catch return);
     }
 
@@ -371,6 +374,7 @@ const Run = struct {
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
+        @import("logprobs.zig").project(r.srv, &cx, &reply, r.plan.input.tools, calls) catch |e| return r.unsent(&cx, e, field);
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
         r.out.vt.reply(r.out.ctx, 200, .{ .object = o });
@@ -447,6 +451,7 @@ const Run = struct {
                 if (!r.is_chat and delta != .string and (delta != .object or delta.object.get("content") == null)) return;
                 return r.emit(r.chunk(delta, null) catch return error.Closed);
             }
+            @import("openai_calls.zig").streamed(r, delta) catch return error.Closed;
             const filtered = r.policyDelta(delta) catch return error.Closed;
             const d = filtered orelse return;
             try r.prose();
@@ -485,6 +490,16 @@ const Run = struct {
         r.streamed_prose = true;
         const role = roleDelta(r.a) catch return error.Closed;
         return r.emit(r.chunk(role, null) catch return error.Closed);
+    }
+
+    /// A server error after the stream opened: its error event, then [DONE].
+    fn streamFailed(r: *Run, message: []const u8) void {
+        log.line("stream error: {s}", .{message});
+        const err = json.newObject(r.a) catch return;
+        err.put(r.a, "message", .{ .string = message }) catch return;
+        err.put(r.a, "type", .{ .string = "server_error" }) catch return;
+        r.emit(wrapError(r.a, .{ .object = err }) catch return) catch return;
+        r.out.vt.event(r.out.ctx, null) catch {};
     }
 
     fn stream(r: *Run, gone: Gone, field: []const u8) void {
@@ -529,14 +544,7 @@ const Run = struct {
                 },
                 else => {},
             }
-            const message = if (e == error.Refused) cx.message else if (e == error.OutOfMemory) "out of memory" else "the reply failed";
-            log.line("stream error: {s}", .{message});
-            const err = json.newObject(a) catch return;
-            err.put(a, "message", .{ .string = message }) catch return;
-            err.put(a, "type", .{ .string = "server_error" }) catch return;
-            r.emit(wrapError(a, .{ .object = err }) catch return) catch return;
-            r.out.vt.event(r.out.ctx, null) catch {};
-            return;
+            return r.streamFailed(if (e == error.Refused) cx.message else if (e == error.OutOfMemory) "out of memory" else "the reply failed");
         };
         var calls: ?[]Value = null;
         if (tools) {
@@ -560,6 +568,13 @@ const Run = struct {
                 r.emit(r.chunk(.{ .string = rest }, null) catch return) catch return;
             }
         }
+        @import("logprobs.zig").project(r.srv, &cx, &reply, r.plan.input.tools, calls) catch |e| return r.streamFailed(if (e == error.Refused) cx.message else "out of memory");
+        // the entries no chunk carried yet, once the stop and tool policies are final
+        if (reply.logprobs) |rows| if (@import("logprob_parts.zig").rest(a, rows, reply.probability_rows.?.sent) catch return) |left| {
+            const delta = json.newObject(a) catch return;
+            delta.put(a, "logprobs", left) catch return;
+            r.emit(r.chunk(.{ .object = delta }, null) catch return) catch return;
+        };
         const last = r.chunk(.{ .string = "" }, if (reply.finish_reason.len > 0) reply.finish_reason else "length") catch return;
         if (compaction) |s| compact.stamp(&cx, &reply, s) catch return;
         r.extras(last.object, &reply) catch return;

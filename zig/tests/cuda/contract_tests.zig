@@ -10,6 +10,8 @@ const tail_k = @import("contract_norms_tail.zig");
 const tiles_k = @import("contract_rms_tiles.zig");
 const dory_k = @import("contract_dory.zig");
 const router_k = @import("contract_router.zig");
+const qwen_router_k = @import("contract_qwen_router.zig");
+const glm_router_k = @import("contract_glm_router.zig");
 const mm_k = @import("contract_mm.zig");
 const prefill_many_k = @import("contract_qmm_prefill_many.zig");
 const prefill_tile22_k = @import("contract_qmm_prefill_tile22.zig");
@@ -71,6 +73,13 @@ const images = struct {
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
 pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
+    var t0: i96 = undefined;
+    const t = try registered(gpu, only, &t0);
+    try @import("contract_finish.zig").run(gpu, only, t, t0);
+}
+
+// The registered owners and modules end here, before the standalone suites allocate their working sets.
+fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     const a = gpu.gpa;
     if (!kk.available) return error.BuiltWithoutKernels;
     if (!options.controls) {
@@ -171,6 +180,14 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     try kernels.append(a, logits.kernel());
     try kernels.append(a, logits_tiles.kernel());
     try kernels.append(a, latent_topk.kernel());
+    var moe_mod = try cuda.Module.load(gpu.d, cuda.kernels.moe);
+    defer moe_mod.unload();
+    var qwen_router = qwen_router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .router = try moe_mod.function("tf_moe_router"), .tiles = try moe_mod.function("tf_moe_router_tiles") };
+    defer qwen_router.deinit();
+    var qwen_router_ctl = qwen_router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .router = qwen_router.router, .tiles = qwen_router.tiles, .ctl = try mods[5].function("tf_ctl_moe_router_tiles_row") };
+    defer qwen_router_ctl.deinit();
+    try kernels.append(a, qwen_router.kernel());
+    try kernels.append(a, qwen_router_ctl.kernel());
     var scan = scan_k.Scan{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[7].function("tf_nemo_scan"), .host = .init(a) };
     defer scan.deinit();
     try kernels.append(a, scan.kernel());
@@ -407,6 +424,8 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     for (&blocks) |*x| try kernels.append(a, x.kernel());
     var q35_mod = try cuda.Module.load(gpu.d, kk.qwen35);
     defer q35_mod.unload();
+    const norm_shift = try @import("contract_q35_norm_shift.zig").Group.create(a, gpu, s, q35_mod, &kernels);
+    defer norm_shift.destroy();
     var q35_kv8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
     defer q35_kv8.unload();
     var q35s: [q35_k.forms.len]q35_k.Q35 = undefined;
@@ -503,6 +522,9 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     }));
     defer for (&f32ws) |*x| x.deinit();
     for (&f32ws) |*x| try kernels.append(a, x.kernel());
+    var glm_routers = try glm_router_k.pair(.{ .gpu = gpu, .s = s }, glm_glue, mods[5]);
+    defer for (&glm_routers) |*x| x.deinit();
+    for (&glm_routers) |*x| try kernels.append(a, x.kernel());
     var bf16s: [f32w_k.bf16_entries.len]f32w_k.F32w = undefined;
     for (f32w_k.bf16_entries, &bf16s) |e, *x| {
         x.* = .init(.{ .gpu = gpu, .s = s }, e.which, try glm_glue.function(e.symbol));
@@ -542,6 +564,8 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f, glm_ops);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
+    const mla = try @import("contract_mla.zig").Group.create(a, gpu, s, glm_fns.merge, &kernels);
+    defer mla.destroy();
     var q35_flat_mod = try cuda.Module.load(gpu.d, kk.qwen35);
     defer q35_flat_mod.unload();
     var q35_fp8 = try cuda.Module.load(gpu.d, kk.qwen35_kv8);
@@ -564,16 +588,10 @@ pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     defer families.deinit();
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
-    const t0 = check.now(gpu.io);
+    t0.* = check.now(gpu.io);
     @import("contract_after.zig").keep(&kernels, only);
     try g.runAll(a, kernels.items, 0x6b63, &t);
-    if (only.len == 0) try @import("contract_back_suites.zig").run(gpu);
-    const t1 = check.now(gpu.io);
-    if (only.len == 0) try @import("contract_after.zig").suites(gpu);
-    const lim = try live(gpu, only);
-    const t2 = check.now(gpu.io);
-    std.debug.print("{s}SUMMARY {d} kernels: {d} pass gates 1-4, {d} fail, {d} known findings; {d} controls: {d} red as planted, {d} missed; {d} limit problems; gates {d} ms, limits {d} ms\n", .{ if (only.len > 0) "(filtered) " else "", t.kernels, t.passed, t.failed, t.known, t.controls, t.caught, t.missed, lim, @divTrunc(t1 - t0, std.time.ns_per_ms), @divTrunc(t2 - t1, std.time.ns_per_ms) });
-    try check.expect(t.problems() + lim == 0, "kernel-contract: {d} gate failures, {d} controls missed, {d} limit problems", .{ t.failed, t.missed, lim });
+    return t;
 }
 
 /// The named embedded image and gate 5: in the contract's own file, so the gates' registrations stay short.

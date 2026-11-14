@@ -36,6 +36,14 @@ const Clock = struct {
     }
 };
 
+var fixed_ids: @import("ids.zig").Key = undefined;
+
+/// A fixed tool-call id key for each server to take, so none draws from the scripted entropy the seeds count.
+fn fixedIds() *@import("ids.zig").Key {
+    fixed_ids = .of(@import("ids.zig").test_key_text);
+    return &fixed_ids;
+}
+
 const Capture = struct {
     bytes: std.ArrayList(u8) = .empty,
     failed: bool = false,
@@ -105,6 +113,7 @@ const Script = struct {
     tokens: []const u32 = &.{ 'h', 'i' },
     seed: ?u64 = null,
     prompt: []const u32 = &.{},
+    top_p: f64 = 0,
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
@@ -115,6 +124,7 @@ const Script = struct {
         const s: *Script = @ptrCast(@alignCast(ctx));
         s.seed = if (req.sampling) |v| v.seed else null;
         s.prompt = req.prompt;
+        s.top_p = if (req.sampling) |v| v.top_p else 0;
         Clock.ns = s.first;
         sink.event(sink.ctx, id, &.{ .prefilled = s.cached });
         sink.event(sink.ctx, id, &.{ .tokens = s.tokens });
@@ -142,7 +152,7 @@ test "slide ask: wordings are seeded from the lesson, and --prompt-seed still wi
     Clock.ns = 10_000_000_000;
     var script: Script = .{ .first = 10_000_000_000 };
     var tt: helpers = .{};
-    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -158,6 +168,31 @@ test "slide ask: wordings are seeded from the lesson, and --prompt-seed still wi
     try std.testing.expectEqual(api.seedFor(script.prompt, srv.config.seed_salt), script.seed.?);
 }
 
+test "slide ask: the server's own wordings and lessons never take --instruct-sampling's set" {
+    const gpa = std.testing.allocator;
+    var capture: Capture = .{};
+    capture.start();
+    defer capture.deinit();
+    Clock.ns = 10_000_000_000;
+    var script: Script = .{ .first = 10_000_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(gpa, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    srv.config.instruct_sampling = (try json.parse(a, "{\"temperature\":0.7,\"top_p\":0.8,\"top_k\":20}")).ok;
+    var cx: Cx = .{ .a = a };
+    // a client's sampled chat with thinking off takes the set's top_p
+    const client = try chat.prepare(srv, &cx, .{ .id = "client", .messages = (try json.parse(a, "[{\"role\":\"user\",\"content\":\"hi\"}]")).ok, .max_tokens = 2, .fields = (try json.parse(a, "{\"temperature\":0.9}")).ok }, Gone{});
+    try std.testing.expectApproxEqAbs(@as(f64, 0.8), client.request.sampling.?.top_p, 1e-6);
+    srv.release(client.preparing, client.request);
+    // a lesson's sampled wordings, asked the same way by the server itself, do not: top_p stays 1
+    _ = try slide_ask.askBaseAt(srv, &cx, "a system", "one user", 8, 0.9, Gone{});
+    try std.testing.expect(script.seed != null); // it sampled
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), script.top_p, 1e-6);
+}
+
 fn scripted(cached: u32, left: bool) !void {
     var capture: Capture = .{};
     capture.start();
@@ -165,7 +200,7 @@ fn scripted(cached: u32, left: bool) !void {
     Clock.ns = 10_000_000_000;
     var script: Script = .{ .first = if (cached > 0) 10_123_000_000 else 10_384_000_000, .cached = cached };
     var tt: helpers = .{};
-    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     srv.metrics.note(srv.io, 999, 998, 997, 996, 995, 994, 999, 998, 997, 996, 995);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -202,7 +237,7 @@ test "done times: cached tokens above the prompt are clamped in the reply, log a
 
 fn seedSample(srv: *server.Server, a: std.mem.Allocator, body: []const u8) !?api.Sampling {
     var cx: Cx = .{ .a = a };
-    return srv.resolveSampling(&cx, (try json.parse(a, body)).ok, 0, &.{ 1, 2, 3 });
+    return srv.resolveSampling(&cx, (try json.parse(a, body)).ok, 0, &.{ 1, 2, 3 }, false);
 }
 
 fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, failed, log_drawn, log_given }) !void {
@@ -215,7 +250,7 @@ fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, fa
     defer Clock.no_entropy = false;
     var script: Script = .{ .first = 10_384_000_000 };
     var tt: helpers = .{};
-    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .seed_salt = -17 }, null);
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .seed_salt = -17, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     if (mode == .keyed) {
         var usage: @import("cli.zig").Usage = .{};
@@ -240,7 +275,7 @@ fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, fa
         Clock.no_entropy = true;
         try std.testing.expectEqual(@as(?api.Sampling, null), try seedSample(srv, a, "{\"temperature\":0}"));
         var cx: Cx = .{ .a = a };
-        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{1}));
+        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{1}, false));
         try std.testing.expectEqual(@import("errors.zig").Kind.server, cx.kind);
         try std.testing.expectEqual(@as(usize, 1), Clock.draws);
     } else if (mode == .log_drawn or mode == .log_given) {
@@ -402,7 +437,7 @@ fn queued(planner: bool) !void {
     var queue: Queued = .{ .host = &host, .first = first, .planner = planner };
     if (planner) host.rounds = .{ .ctx = &queue, .vtable = &.{ .begin_admit = Queued.begin, .admit = Queued.admit, .admitted = Queued.admitted, .arm = Queued.arm, .began = Queued.started, .plan = Queued.plan, .left = Queued.arm, .after = Queued.after } };
     var tt: helpers = .{};
-    const srv = try server.Server.init(a, io, queue.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(a, io, queue.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -429,7 +464,7 @@ fn rateLine(count: usize, elapsed_ns: i96, suffix: []const u8) !void {
     const ids: [11]u32 = @splat('h');
     var script: Script = .{ .first = 10_384_000_000, .tokens = ids[0..count] };
     var tt: helpers = .{};
-    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .tool_id_key = fixedIds() }, null);
     defer srv.deinit();
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

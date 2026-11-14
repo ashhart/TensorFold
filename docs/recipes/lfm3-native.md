@@ -2,8 +2,36 @@
 
 Tracking issue: [#1491](https://github.com/ashhart/TensorFold/issues/1491).
 
-This branch adds host checks for LFM3 checkpoint configuration and text tensor layouts.
-It does not register a serving engine. Text generation and image input are not implemented or qualified here.
+This slice implements native LFM3-1.7B text generation. LFM3-VL execution is in the dependent vision slice.
+Both read the official MLX affine 4-, 6-, and 8-bit checkpoints without converting stored weights.
+This is an experimental family port. Device and model checks cover an M4 Pro and an M5 Ultra; they do not qualify other Apple GPUs.
+
+## Run the models
+
+Build the native engine with the Zig version in `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build native -Dcpu=apple_m1
+./zig-out/native/bin/tensorfold-native serve LiquidAI/LFM3-1.7B-MLX-4bit --context 8192
+```
+
+Replace `4bit` with `6bit` or `8bit` for those exports. A complete local checkpoint folder also works.
+This slice refuses VL checkpoints until the vision contribution is applied.
+Image budgets and decoder libraries are described by the stacked VL contribution.
+
+The shared lane engine handles target verification, sampling and concurrent streams.
+Convolution history and KV state are kept per stream; partial acceptance restores the accepted row's state.
+Raw prompts of at least 256 tokens can build a repeat-cache entry: the first request records interest,
+the second keeps a prefix state, and a later repeat resumes it. Image cache identity includes image content and grid.
+
+```mermaid
+flowchart LR
+  I[Image pixels] --> V[Vision encoder and projector]
+  V --> E[Placeholder embedding rows]
+  T[Text tokens] --> E
+  E --> D[Shared LFM3 decoder]
+  D --> L[Existing lane engine]
+```
 
 ## Inspect a checkpoint
 
@@ -55,18 +83,72 @@ The header inspections used these revisions:
 - VL 6-bit: `6d71bfae121abedc75f6d531fc7f6ceb4f5e3501`.
 - VL 8-bit: `83336d5be3874a2bdd3297bde77b2114dbd3a816`.
 
-## Next gate
+## Qualification and remaining gate
 
-Implement the text operators against an independent reference before advertising generation.
-Check the 7-tap convolution, per-head attention gate, sandwich normalization, sliding window, and partial-RoPE formula.
-Then exercise actual 1.7B 4-bit weights through the shared lane engine, followed by 6/8-bit checkpoints.
-The VL encoder and projector need their own native Metal operators and reference checks after text bring-up.
+Detailed counts, hashes, numerical evidence and reproducible requests are in the [receipts](../receipts/lfm3/README.md).
 
-Agree model-fidelity and performance acceptance criteria on the tracking issue before claiming release readiness.
+All six checkpoints passed 303 greedy/seeded-sampling, cache, concurrency and cancellation checks on one optimized M4 binary.
+The final source build also passed 303/303 on an M5. Text4 and VL4 additionally passed real grammar, thinking, tool,
+streaming, history and image-conditioned tool checks with the matching optional grammar library.
+The 4-bit text long exactness suite passed all 73 cases through 8,193-token seams.
+The final family contract passed 50 kernels and caught all 13 real controls, with zero limit problems.
 
-## Weight licence and checked hardware
+Independent projection audits covered 66 class/layout cells and 60,954,624 outputs with no violations of existing FP32/BF16 bounds.
+The row-pair optimization preserves the shared arithmetic: 132 checkpoint calls and a full 8,193-token logit comparison were byte-identical.
+On the M5, controlled 4-bit cold requests improved text engine prefill from 1.240 to 0.813 seconds at 2k and
+73.402 to 61.633 seconds at 64k; VL decoder requests improved from 1.262 to 0.815 and 73.920 to 59.647 seconds.
+These are engine prefill measurements; the receipt also retains client TTFT. All compared full output-token hashes matched.
 
-The official text and VL MLX exports retain the [LFM Open License v1.0](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE).
-The VL export carries its own [copy of that licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
-TensorFold code remains Apache-2.0; admission does not change the weights’ licence.
-This slice validates metadata on the host and does not register inference or qualify a GPU.
+Native inference retains the checkpoint's BF16 activation boundaries and FP32 reductions.
+Text trigonometric values round to BF16 before rotation; vision axial trigonometric values remain FP32.
+The CPU FP64 oracle records numerical differences rather than inventing a tie policy.
+MLX's vector/matrix quantized paths use different effective reconstruction, and bounded FP32 differences can propagate through history.
+See the exact primitive and whole-model evidence before interpreting a next-token mismatch.
+
+```sh
+zig build tf-lfm3-forward tf-lfm3-vision tf-lfm3-project tf-lfm3-profile tf-lfm3-exact -Dcpu=apple_m1
+./zig-out/bin/tf-lfm3-exact MODEL_DIR --long
+python3 tools/lfm3/serve_check.py --binary ./zig-out/native/bin/tensorfold-native --model-dir MODEL_DIR --sampled --cancel --output served.json
+```
+
+Long-context model fidelity, maximum image budgets, 6/8-bit performance and other Apple GPU generations remain separate qualification work.
+Structured output requires the native grammar library; logprobs and video are not advertised.
+A complete earlier global M5 contract run found one Qwen4 failure that also reproduces on the unchanged pinned base.
+It is not a final-source global pass. The qualification rules below apply before claiming release readiness.
+
+### Qualification rules
+
+The [maintainer decision](https://github.com/ashhart/TensorFold/issues/1491#issuecomment-6537143418), in one line:
+native results must be no further from an independent FP32 run than the reference's own BF16 results, partial is
+not pass, the default route's slow cold prefill does not block the opt-in text slice, and 32k stays the release
+tier until long-context fidelity against the reference is measured and judged. The rules from that decision:
+
+- Keep every top-token difference with both margins. Pooled RMS and same-engine exactness do not substitute for
+  the independent FP32 comparison.
+- The opt-in text slice ships with the cold-prefill gap written down, not as a performance pass.
+- Longer runs record time and memory only; they do not raise the release tier or establish fidelity.
+- Each receipt names what ran, on what, at which commit and flags. A field the receipt does not record stays
+  unknown in the ledger; an artifact's repository commit is not the measured commit.
+
+### Evidence ledger
+
+The [receipts README](../receipts/lfm3/README.md#qualification-ledger) links here. Each row says what ran,
+on what, and what it showed; links locate files, not necessarily the measured commit. Rows for the pending
+[#1502](https://github.com/ashhart/TensorFold/pull/1502) opt-in route are added once that PR lands and its
+files are on main.
+
+| Cell / evidence | What ran, on what | What it showed |
+|---|---|---|
+| Extracted text4/6/8 correctness, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/final-extracted-text.json) | text4/6/8 served, cancellation and focused-state checks on one M4 Pro (48 GiB, macOS 26.5.1), source `73bc567c039b7471ad621fa249b69801f1d86de5`, pinned checkpoint revisions | 120 served and 18 cancellation checks passed; 15 focused-state checks passed; logit-bridge bytes equal the combined build. No performance measured; no long-context transfer claim. |
+| Text4 runtime, [M5 maintainer check](https://github.com/ashhart/TensorFold/pull/1514#issuecomment-6658620362) | text4 on M5 Ultra, candidate `a19bb6845`; checkpoint revision, RAM and full invocation not recorded in the comment | Two runs: 0/20 prompt rows differ, 12/12 concurrent replies equal solo, solo equals draft-disabled, thinking on/off. Runtime exactness only, not an FP32/BF16 fidelity verdict. |
+| Text4 runtime, [M3 Ultra maintainer check](https://github.com/ashhart/TensorFold/pull/1514#issuecomment-6673067861) | text4 on M3 Ultra, candidate `a19bb6845`; same missing fields | 160/160 exact comparisons, 120 replies finished; 2k/8k prefill 2043/1508 tok/s, decode 133.5/138.6 tok/s. This host's observation, not every Apple chip or width. |
+| Default text/reference performance, [receipt](https://github.com/ashhart/TensorFold/blob/32505ce8dcbb1de73e3b22fc5849bbd74c8916d8/docs/receipts/lfm3/m5-text-slice-vs-mlx.json) | text4/6/8 on M5 Ultra, default route without NAX/tiled/split/stepped, cache off, greedy max 128, context 70000, three timed runs after warm-up; measured commit and environment not recorded in the artifact | At 2k/8k, text4 client TTFT 0.85/4.61 s versus 0.095/0.350 s for mlx-vlm; contextual decode 169/165 versus 334/317 tok/s. The default route stays slower; the gap remains documented. |
+| CUDA lanes, [#1508](https://github.com/ashhart/TensorFold/pull/1508), [#1634](https://github.com/ashhart/TensorFold/pull/1634) | separate owner-maintained backend/hardware cells | Kept out of this Metal ledger; no CUDA verdict is inferred from Metal results. |
+
+## Weight licence
+
+The official text and VL MLX exports retain the LFM Open License v1.0.
+See the [text licence](https://huggingface.co/LiquidAI/LFM3-1.7B-MLX-4bit/blob/main/LICENSE) and
+[VL licence](https://huggingface.co/LiquidAI/LFM3-VL-2B-MLX-4bit/blob/main/LICENSE).
+TensorFold code remains Apache-2.0. The measured Macs are M4 Pro 48 GB and M5 Ultra 256 GiB.
+Receipts that include VL describe the combined chain, not a capability enabled in this text-only slice.

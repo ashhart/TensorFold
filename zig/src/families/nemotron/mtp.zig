@@ -190,7 +190,7 @@ pub const Head = struct {
         cache.mtp_len = kept;
     }
 
-    /// `rows` drafts in one pass: row 0 is level 0's row (same kernels, row-exact), rows 1.. the block's placeholder lanes.
+    /// `rows` drafts in one pass: row 0 is level 0's (same kernels, row-exact), rows 1.. the block's placeholder lanes.
     pub fn blockPass(self: *Head, e: *fwd.Enc, cache: *st.Cache, rows: usize, bw: *const head_block.Weights, h: Buffer, h_off: usize, ids: Buffer, ids_off: usize, out: Buffer, out_off: usize) void {
         const f = self.forward();
         const s = &self.scratch;

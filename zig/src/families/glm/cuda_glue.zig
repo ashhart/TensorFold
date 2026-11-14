@@ -6,7 +6,17 @@ const mm_mod = @import("cuda_mm.zig");
 const index_mod = @import("cuda_index.zig");
 
 /// What the forward's kernels launch from: our glue's, glm_mm's when tiled, qlinear's lane for FP8 kinds, copy_rows.
-pub const Set = struct { glue: *const Kernels, index: ?*const index_mod.Kernels = null, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{}, copy_rows: ?cuda.Function = null };
+pub const Set = struct {
+    glue: *const Kernels,
+    index: ?*const index_mod.Kernels = null,
+    mm: ?*const mm_mod.Kernels = null,
+    packs: ?*const mm_mod.Packed = null,
+    prompt: bool = false,
+    linear: cuda.qlinear.Linear = .{},
+    copy_rows: ?cuda.Function = null,
+    /// A decode window's DSA select on many CTAs (cuda_sparse.decodeSelect; TF_GLM_DSEL, default on).
+    dsel: bool = false,
+};
 
 /// A hidden-size norm's weight: bf16, or float32 (FP4-Local's) read as float32 by the _f32w kernels.
 pub const Norm = union(enum) { bf16: u64, f32: u64 };
@@ -32,7 +42,6 @@ pub const Kernels = struct {
     swiglu_64: cuda.Function,
     group_sums: cuda.Function,
     topk: cuda.Function,
-    router_part: cuda.Function,
     router_tile: cuda.Function,
     hc_partial: cuda.Function,
     hc_partial8: cuda.Function,
@@ -46,6 +55,8 @@ pub const Kernels = struct {
     pool_keys: cuda.Function,
     select_rows: cuda.Function,
     select_rows_wide: cuda.Function,
+    dsel_scan: cuda.Function, // glm_index_decode.cuh: a decode window's rows marked on many CTAs
+    dsel_merge: cuda.Function, // and their picks, a CTA a row
     bmm_decode: cuda.Function,
     bmm_rows: cuda.Function,
     bmm_tile: cuda.Function,
@@ -154,7 +165,7 @@ pub fn swiglu(set: Set, stream: cuda.Stream, gu: u64, out: u64, xs: u64, limit: 
 pub const bmm_tile_smem: u32 = 3 * (128 + 64) * 64 * 2;
 /// tf_glm_bmm_tile1's [bf16, fp32 out]: 3 stages of 128 x and 128 w rows, 32 bf16 a row, or the fp32 tile if larger.
 pub const bmm_tile1_smem = [2]u32{ 3 * (128 + 128) * 32 * 2, 128 * (128 + 4) * 4 };
-/// glm_glue_attn.cuh's wide_smem<hb>(): q (hb x 512), two 32-key tiles, p (hb x 32) in bf16, then max/sum scratch.
+/// common/mla.cuh's wide_smem<hb>(): q (hb x 512), two 32-key tiles, p (hb x 32) in bf16, then max/sum scratch.
 pub fn chunksSmem(comptime hb: u32) u32 {
     return (hb * 512 + 2 * 32 * 512 + hb * 32) * 2 + (hb * 4 + 2 * hb) * 4;
 }
@@ -162,15 +173,16 @@ pub fn chunksSmem(comptime hb: u32) u32 {
 /// K slices of the router's dot (glue.ROUTER_KS): fixed by the shape, as the sliced and the single pass differ in bits.
 pub const router_ks = 8;
 
-/// glue.router: out [m][ne] fp32 = x . w rows; d a multiple of router_ks x 64: K slices in `part`, added in order.
+/// Shared bytes tf_glm_router_tile stages (common/router_mma.cuh): two stages of 64 rows and 32 experts by 64 + 8.
+pub const router_tile_smem: u32 = 2 * (64 + 32) * (64 + 8) * 2;
+
+/// glue.router: out [m][ne] fp32 = x . w rows; d a multiple of router_ks x 64, rows on 16 bytes; K slices in `part`.
 pub fn router(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, part: u64, m: usize, d: usize, ne: usize) !void {
     if (d % (router_ks * 64) != 0) return error.RouterWidth; // the Python family's single-pass _router: no GLM width
+    if (x % 16 != 0 or x_stride % 8 != 0 or w % 16 != 0) return error.RowShape; // the tiles stage rows by cp.async
     var a: cuda.Args = .{};
     inline for (.{ x, w, part, i64of(m), i64of(x_stride), i64of(d), i64of(ne), @as(c_int, router_ks) }) |v| a.add(v);
-    if (x % 16 == 0 and x_stride % 8 == 0) // rows on 16 bytes: 64-row tiles staged by cp.async (decode's rows past m load as zeros)
-        try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a)
-    else
-        try cuda.launch.launch(set.glue.router_part, .{ .grid = .{ .x = cdiv(m, 16), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 } }, stream, &a);
+    try cuda.launch.launch(set.glue.router_tile, .{ .grid = .{ .x = cdiv(m, 64), .y = cdiv(ne, 32), .z = router_ks }, .block = .{ .x = 128 }, .shared = router_tile_smem }, stream, &a);
     try sliceSum(set, stream, part, out, m * ne, router_ks, true);
 }
 

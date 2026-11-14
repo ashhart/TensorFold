@@ -18,8 +18,8 @@ pub fn nextGen() u64 {
 
 /// On by default (the same kernels, launched from a graph); TF_FLASHNEXT_WINDOW_GRAPH=0: every pass eagerly.
 pub fn enabled() bool {
-    const v = std.c.getenv("TF_FLASHNEXT_WINDOW_GRAPH") orelse return true;
-    return !std.mem.eql(u8, std.mem.span(v), "0");
+    // the startup check refused every malformed value already, so a plain default stands here
+    return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH", true) catch true;
 }
 
 /// attnRows' host values for rows ending at `ends` in a `cap`-token cache: dense chunks, the score grid (0: none).
@@ -67,6 +67,42 @@ const Hash = struct {
     }
 };
 
+/// Every buffer a pass takes from a sequence's tables (conv windows, states, caches, tail, page table) as one value.
+pub fn pieces(seq: anytype) u64 {
+    const S = switch (@typeInfo(@TypeOf(seq))) {
+        .pointer => |p| p.child,
+        else => @TypeOf(seq),
+    };
+    var d: Digest = .{};
+    inline for (.{ "conv", "state", "kc", "vc", "ikc", "pooled" }) |f| {
+        for (@field(seq, f)) |b| d.add(b.ptr);
+    }
+    const pg = if (@hasField(S, "pg")) seq.pg else seq.pg();
+    for ([_]u64{ seq.tail.ptr, pg.pt, @bitCast(pg.ps), @as(u32, @bitCast(pg.ptok)) }) |v| d.add(v);
+    return d.final();
+}
+
+/// Values hashed in blocks (one update a block, not one a value).
+const Digest = struct {
+    h: std.hash.Wyhash = .init(0),
+    buf: [64]u64 = undefined,
+    n: usize = 0,
+
+    fn add(d: *Digest, v: u64) void {
+        if (d.n == d.buf.len) {
+            d.h.update(std.mem.sliceAsBytes(&d.buf));
+            d.n = 0;
+        }
+        d.buf[d.n] = v;
+        d.n += 1;
+    }
+
+    fn final(d: *Digest) u64 {
+        d.h.update(std.mem.sliceAsBytes(d.buf[0..d.n]));
+        return d.h.final();
+    }
+};
+
 /// A verify window's pass (Engine.forward): its rows and `hooks`' outputs, then the sequence's buffers and length.
 pub const Key = struct {
     rows: u32,
@@ -76,7 +112,7 @@ pub const Key = struct {
     pub fn init(seq: anytype, pos0: usize, rows: usize, s: *const parts.Scratch, scores: u64, model: u64, hooks: parts.Hooks) Key {
         var h: Hash = .{};
         h.geometry(.at(pos0 + rows, seq.cap));
-        h.values(&[_]u64{ seq.gen, seq.cap, seq.kc[0].ptr, seq.state[0].ptr, s.h, s.cap, scores, model, hooks.logits_out, hooks.streams });
+        h.values(&[_]u64{ seq.gen, seq.cap, pieces(seq), s.h, s.cap, scores, model, hooks.logits_out, hooks.streams });
         h.keep(hooks.keep);
         return .{ .rows = @intCast(rows), .shape = h.shape.final(), .moving = h.moving.final() };
     }
@@ -113,7 +149,7 @@ pub const SharedKey = struct {
         for (lanes) |l| {
             h.fixed(l.rows);
             h.geometry(.at(l.pos + l.rows, l.seq.cap));
-            h.values(&[_]u64{ l.seq.gen, l.seq.kc[0].ptr, l.seq.state[0].ptr, l.seq.cap, l.streams, l.logits });
+            h.values(&[_]u64{ l.seq.gen, pieces(l.seq), l.seq.cap, l.streams, l.logits });
             h.keep(l.keep);
             rows += l.rows;
         }

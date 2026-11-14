@@ -5,7 +5,10 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "attention/prefill.hpp"
 #include "quant/dense_tiles.hpp"
+#include "quant/mlx_tiles.hpp"
+#include "tiles/wmma12_gemm_k32_ref.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
     return __uint_as_float(static_cast<uint32_t>(x[i]) << 16);
@@ -120,4 +123,130 @@ struct TfCtlBf16Step {
 extern "C" __global__ void __launch_bounds__(tf::rocm::W12Small::Threads) tf_ctl_wmma12_bf16_sum(tf::rocm::Affine a) {
     using namespace tf::rocm;
     wmma12_gemm_tile<W12Small, IdentityAct<DotBF16>, GemmOut<DotBF16>, TfCtlBf16Step>(a);
+}
+
+__device__ __forceinline__ uint16_t tf_ctl_bf16(float f) {
+    const uint32_t u = __float_as_uint(f);
+    return f != f ? 0x7fc0 : static_cast<uint16_t>((u + ((u >> 16) & 1u) + 0x7fffu) >> 16);
+}
+
+__device__ __forceinline__ float tf_ctl_r16(float f) { return __uint_as_float(static_cast<uint32_t>(tf_ctl_bf16(f)) << 16); }
+
+// Gate 4: tf_js_layer_norm with both sums rounded to bf16 at every add, while its spec declares fp32 sums.
+extern "C" __global__ void tf_ctl_js_norm_bf16(const uint16_t* x, const uint16_t* w, const uint16_t* b, uint16_t* y,
+                                               int dim, float eps) {
+    if (threadIdx.x != 0) return;
+    const int64_t at = static_cast<int64_t>(blockIdx.x) * dim;
+    float s = 0.0f;
+    for (int i = 0; i < dim; ++i) s = tf_ctl_r16(s + tf_ctl_x(x, at + i));
+    const float mean = s / static_cast<float>(dim);
+    float q = 0.0f;
+    for (int i = 0; i < dim; ++i) q = tf_ctl_r16(q + (tf_ctl_x(x, at + i) - mean) * (tf_ctl_x(x, at + i) - mean));
+    const float inv = 1.0f / sqrtf(q / static_cast<float>(dim) + eps);
+    for (int i = 0; i < dim; ++i) y[at + i] = tf_ctl_bf16((tf_ctl_x(x, at + i) - mean) * inv * tf_ctl_x(w, i) + tf_ctl_x(b, i));
+}
+
+// Gate 1: tf_js_softmax_rows that skips non-finite scores as masked, so a row holding NaN or infinity stays finite.
+extern "C" __global__ void tf_ctl_js_softmax_safe(float* s, int cols) {
+    if (threadIdx.x != 0) return;
+    float* row = s + static_cast<int64_t>(blockIdx.x) * cols;
+    float m = -INFINITY;
+    for (int i = 0; i < cols; ++i) if (isfinite(row[i])) m = fmaxf(m, row[i]);
+    float t = 0.0f;
+    for (int i = 0; i < cols; ++i) t += isfinite(row[i]) ? expf(row[i] - m) : 0.0f;
+    for (int i = 0; i < cols; ++i) row[i] = isfinite(row[i]) ? expf(row[i] - m) / t : 0.0f;
+}
+
+// Gate 3: tf_js_combine without its three intermediate roundings, so its logits miss the head's BF16 points.
+extern "C" __global__ void tf_ctl_js_combine_unrounded(const float* prior, const float* cosine, const uint16_t* res, int n,
+                                                       float joint_scale, float gate, uint16_t* logits) {
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= n) return;
+    logits[j] = tf_ctl_bf16(prior[j] + gate * (joint_scale * cosine[j] + tf_ctl_x(res, j)));
+}
+
+// Gate 1: the prompt tile with neither mask nor edge pass, so 0 x inf at a key past a row's edge gives NaN in that row.
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_wide_unmasked_f16(const float* q, const __half* k, const __half* v, float* out, int qlen, int span, int heads,
+                            int kv_heads, int d, float scale, int q_pos0, long long k_sb, long long k_sh, long long k_ss,
+                            long long v_sb, long long v_sh, long long v_ss) {
+    fa_dot2<__half, false, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, k_sb, k_sh,
+                                               k_ss, v_sb, v_sh, v_ss, nullptr, 0);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_wide_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_bfloat16* v, float* out, int qlen,
+                             int span, int heads, int kv_heads, int d, float scale, int q_pos0, long long k_sb,
+                             long long k_sh, long long k_ss, long long v_sb, long long v_sh, long long v_ss) {
+    fa_dot2<hip_bfloat16, false, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, k_sb,
+                                                     k_sh, k_ss, v_sb, v_sh, v_ss, nullptr, 0);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_paged_unmasked_f16(const float* q, const __half* k, const __half* v, float* out, int qlen, int span,
+                             int heads, int kv_heads, int d, float scale, int q_pos0, const unsigned* table, int count) {
+    fa_dot2<__half, true, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, 0, 0, 0, 0,
+                                              0, 0, table, count);
+}
+
+extern "C" __global__ void __launch_bounds__(256, 1)
+tf_ctl_fa_paged_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_bfloat16* v, float* out, int qlen,
+                              int span, int heads, int kv_heads, int d, float scale, int q_pos0, const unsigned* table,
+                              int count) {
+    fa_dot2<hip_bfloat16, true, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, 0, 0,
+                                                    0, 0, 0, 0, table, count);
+}
+
+// Gate 3: the routed item tile's few-row passes stop after a wave's first, leaving the block's other columns unwritten.
+struct TfCtlItemFewOnePass {
+    using Dot = tf::rocm::DotBF16;
+    using Epi = tf::rocm::GemmOut<tf::rocm::DotBF16>;
+    static constexpr bool every_pass = false;
+};
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_item_few_one_pass(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma_item_tile<MlxDecoder<4>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, 4, TfCtlItemFewOnePass>(a);
+}
+
+// Gate 3: the big block loading its operands without the stores' swizzle, and without its K loop's barriers.
+struct TfCtlUnswizzled {
+    static constexpr bool swizzled_loads = false, ordered = true;
+};
+struct TfCtlUnordered {
+    static constexpr bool swizzled_loads = true, ordered = false;
+};
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_wmma12_unswizzled(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Big, IdentityAct<DotBF16>, GemmOut<DotBF16>, W12Step, TfCtlUnswizzled>(a);
+}
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Big::Threads) tf_ctl_wmma12_unordered(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Big, IdentityAct<DotBF16>, GemmOut<DotBF16>, W12Step, TfCtlUnordered>(a);
+}
+
+// Gate 3: the fused silu product applying silu to the fp32 gate sum, not to the BF16 sum the plain product stores.
+struct TfCtlSiluUnrounded {
+    static constexpr bool pairs = true;
+    template <class Args>
+    __device__ static void store_pair(const Args& a, int row, int f, float g, float u) {
+        using namespace tf::rocm;
+        using Out = SiluPairOut<DotBF16>;
+        const float s = Out::widen(narrow<DotBF16>(g / (1.0f + expf(-g))));
+        const float ub = Out::widen(narrow<DotBF16>(u));
+        static_cast<DotBF16::elem*>(static_cast<void*>(a.out16))[out_row(a, row) * (a.n / 2) + f] = narrow<DotBF16>(s * ub);
+    }
+};
+
+extern "C" __global__ void __launch_bounds__(tf::rocm::W12Pair::Threads) tf_ctl_silu_unrounded(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_gemm_tile<W12Pair, IdentityAct<DotBF16>, TfCtlSiluUnrounded>(a);
+}
+
+// Not a control: the WMMA big block as served before #2264, the byte baseline the faster block replaces (gate 3).
+extern "C" __global__ void __launch_bounds__(256) tf_ref_wmma12_k32(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma12_k32_ref_tile<IdentityAct<DotBF16>, GemmOut<DotBF16>>(a);
 }

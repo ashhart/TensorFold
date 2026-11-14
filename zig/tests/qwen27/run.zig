@@ -10,13 +10,14 @@ const core_lane = @import("core_lane");
 const help =
     \\tf-qwen27-run --run --model DIR --tokens IDS.json [--max-tokens 256]
     \\  [--chunk 128] [--compare-chunk 16] [--reference GENERATED.json] [--force-length]
-    \\  [--no-warmup] [--profile-steps N] [--profile-prompt] [--teacher] [--seams N]
+    \\  [--no-warmup] [--profile-steps N] [--profile-prompt] [--teacher] [--seams N] [--resume-reply]
     \\IDs and reference files are JSON arrays of unsigned token IDs, already chat-rendered.
     \\Greedy only, drafts off; JSON receipt on stdout, errors on stderr.
     \\--teacher feeds every reference token and records native top2 at all positions; margin timing is diagnostic.
     \\--max-tokens 0 reports prompt tok/s including the final single-row head.
     \\--compare-chunk reruns the whole prompt and decode and checks prompt state/KV/logits bytes.
     \\--seams N (with --compare-chunk): state/KV/logits bytes every N prompt rows under both chunks and after decode.
+    \\--resume-reply: the reply fed again in one pass that keeps no row, then a turn's tail, against decoding it.
     \\--profile-prompt: GPU seconds by class over the timed prompt (split command buffers, so slower than unprofiled).
     \\CPU only: --help or --emit-sources EXISTING_DIR, no Metal device or model load.
 ;
@@ -33,7 +34,6 @@ fn emit(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     try write(a, io, dir, "glue.metal", sources.glue ++ sources.copy);
     try write(a, io, dir, "attention.metal", sources.glue ++ sources.attention_mpp ++ sources.attention_io);
     try write(a, io, dir, "gdn.metal", gdn_source.text);
-    try write(a, io, dir, "prompt.metal", sources.prompt_glue ++ sources.prompt_state);
     for ([_][]const u8{ "norm_input", "norm_xs", "mlp_xs", "xsum" }) |name| {
         const template = if (std.mem.eql(u8, name, "norm_input")) sources.norm_input else if (std.mem.eql(u8, name, "norm_xs")) sources.norm_xs else if (std.mem.eql(u8, name, "mlp_xs")) sources.mlp_xs else sources.xsum;
         const mark = std.mem.indexOf(u8, template, "Q27_SPECIALIZE") orelse return error.BadKernelSource;
@@ -68,6 +68,28 @@ fn generated(a: std.mem.Allocator, s: q.session.Session, count: usize, force: bo
     return .{ .tokens = try out.toOwnedSlice(a), .first_difference = difference, .top2 = margins };
 }
 
+const tail_rows = 24;
+const next_rows = 16;
+
+/// A resumed reply (decodeChunk, last = false) then a turn's tail, against the reply decoded a row at a time.
+fn resumed(a: std.mem.Allocator, s: q.session.Session, ids: []const u32, chunk: usize, reply: []const u32) !void {
+    const tail = ids[0..@min(ids.len, tail_rows)];
+    var states: [2][32]u8 = undefined;
+    var next: [2][]u32 = undefined;
+    for (0..2) |side| {
+        try s.runner.reset(0);
+        try s.prefill(ids, chunk);
+        if (side == 0) {
+            for (reply) |token| try s.step(token);
+        } else try s.decodeChunk(reply, false);
+        try s.promptChunk(tail, true);
+        states[side] = try s.fingerprint();
+        next[side] = (try generated(a, s, next_rows, true, null, null, 0, false)).tokens;
+    }
+    if (!std.mem.eql(u8, &states[0], &states[1])) return error.ResumedReplyStateDiffers;
+    if (!std.mem.eql(u32, next[0], next[1])) return error.ResumedReplyTokensDiffer;
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const io = init.io;
@@ -93,6 +115,7 @@ pub fn main(init: std.process.Init) !void {
     var warmup = true;
     var teacher = false;
     var profile_prompt = false;
+    var resume_reply = false;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -116,6 +139,10 @@ pub fn main(init: std.process.Init) !void {
             profile_prompt = true;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--resume-reply")) {
+            resume_reply = true;
+            continue;
+        }
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
@@ -133,8 +160,10 @@ pub fn main(init: std.process.Init) !void {
     defer m.deinit();
     for (ids) |token| if (token >= m.config.vocab) return error.BadTokenId;
     if (expected) |values| for (values) |token| if (token >= m.config.vocab) return error.BadTokenId;
-    if (ids.len + count > m.config.max_position) return error.ContextFull;
-    var runner = try q.decode_round.Runner.init(init.gpa, m, 1, @intCast(@max(ids.len + count, 128)));
+    if (resume_reply and (count > m.frame.capacity or teacher)) return error.BadOptions;
+    const extra: usize = if (resume_reply) tail_rows + next_rows else 0; // the turn's tail and the tokens after it
+    if (ids.len + count + extra > m.config.max_position) return error.ContextFull;
+    var runner = try q.decode_round.Runner.init(init.gpa, m, 1, @intCast(@max(ids.len + count + extra, 128)));
     defer runner.deinit();
     const s = q.session.Session{ .runner = &runner };
     const load_ns = load_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
@@ -164,6 +193,7 @@ pub fn main(init: std.process.Init) !void {
         if (!std.mem.eql(u32, out, second.tokens)) return error.ChunkedTokensDiffer;
         if (!std.mem.eql(u8, &decoded, &try s.fingerprint())) return error.DecodeStateOrLogitsDiffer;
     }
+    if (resume_reply) try resumed(a, s, ids, chunk, out);
     const Seam = struct { at: usize, equal: bool };
     var seams: std.ArrayList(Seam) = .empty;
     var at = seam_every;
@@ -192,6 +222,7 @@ pub fn main(init: std.process.Init) !void {
         .chunk = chunk,
         .compare_chunk = compare,
         .prompt_state_byte_equal = compare > 0,
+        .resumed_reply_state_byte_equal = resume_reply,
         .decode_state_byte_equal = compare > 0,
         .seams = seams.items,
         .seams_byte_equal = for (seams.items) |x| {

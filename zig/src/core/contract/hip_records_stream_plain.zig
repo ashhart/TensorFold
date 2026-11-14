@@ -2,7 +2,7 @@
 const Record = @import("hip_records.zig").Record;
 const tile = @import("hip_records_stream.zig").tile;
 
-pub const records = [_]Record{
+pub const records = [48]Record{
     .{
         .launch = tile(2, 1, 2, false),
         .usage = .{

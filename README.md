@@ -11,7 +11,7 @@ Building with a coding agent? Have it load the [contributor skill](docs/recipes/
 Please use [Agent Traffic Control](https://github.com/ashhart/ATC) before editing TensorFold so contributors and agents can avoid duplicate work and conflicting changes.
 Check the [live agent radar](https://tensorfold.dev/atc) before choosing an issue and follow [CONTRIBUTING.md](CONTRIBUTING.md) and the [ATC contributor instructions](docs/atc/SKILL.md).
 
-Install or upgrade ATC to 0.7.0 or later, then run from an updated TensorFold clone:
+Install or upgrade ATC to 0.9.4 or later, then run from an updated TensorFold clone:
 
 ```sh
 npm install -g github:ashhart/ATC
@@ -44,6 +44,8 @@ Before opening a pull request, have the agent run the [pull request skill](docs/
 
 Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
 pinned revision, then serve it as `local-model`. Model weights have their own licenses.
+Reviewing or benchmarking TensorFold? [Evaluating TensorFold](docs/evaluating.md) covers pinning, signature checks,
+a container and the tests that need no GPU.
 
 ### Mac with Apple Silicon
 
@@ -63,7 +65,7 @@ Its kernels are built with CUDA 13, so TensorFold refuses an older driver at sta
 See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
 ```sh
-V=1.2.3
+V=1.2.8
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;
@@ -93,6 +95,10 @@ The API also serves completions, Responses and Anthropic Messages. `/v1/models` 
 On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WINDOWS.md).
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
+
+`tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.
+If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
+See [the web launcher](docs/web.md) for manual installation and unattended use.
 
 `--parallel N` caps active requests at N; extra requests wait for a free slot.
 Omitting the flag uses `--parallel auto`, which asks for up to eight streams as memory and the engine allow.
@@ -171,9 +177,9 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 
 | Model / format | Download | Machine and memory scope | Native recipe / limits |
 | --- | --- | --- | --- |
-| dots.mocr, BF16 OCR | Use the local `dots-studio/dots.mocr` checkpoint. | Native HIP; AMD R9700 (`gfx1201`) checked, one GPU. | [Native OCR recipe](docs/recipes/dots-mocr-hip.md); full model-card demo matches HF tokens. No video, MTP head, CUDA, or Metal qualification. |
+| dots.mocr, BF16 OCR | Use the local `dots-studio/dots.mocr` checkpoint. | Native HIP; AMD R9700 (`gfx1201`) checked, one GPU. | [Native OCR recipe](docs/recipes/dots-mocr-hip.md); full model-card demo matches HF tokens. Native CUDA serves text prompts only ([CUDA recipe](docs/recipes/dots-mocr-cuda.md)). No video, MTP head, or Metal qualification. |
 | Qwen3.5-2B, MLX 4-bit | `tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3` | One Mac (M5 Max checked), or one GB10; no RAM minimum published. | [2B](docs/recipes/qwen3.5-2b-native.md); [CUDA release checks](CHANGELOG.md#110). Text only. |
-| Qwen3.8-27B, MLX 4-bit | `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit`<br>`tensorfold pull z-lab/Qwen3.8-27B-DFlash2` | One Mac (M5 Max/M3 Ultra), or one GB10. | [27B](docs/recipes/qwen3.8-27b.md). Add `--drafter z-lab/Qwen3.8-27B-DFlash2`; without it decoding is plain. |
+| Qwen3.8-27B, MLX 4-bit | `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit`<br>`tensorfold pull z-lab/Qwen3.8-27B-DFlash2` | One Mac (M5 Max/M3 Ultra), or one GB10; a 32 GB Mac needs `iogpu.wired_limit_mb` raised (the startup refusal names the value). | [27B](docs/recipes/qwen3.8-27b.md). Add `--drafter z-lab/Qwen3.8-27B-DFlash2`; without it decoding is plain. |
 | Nemotron 3.5 Lightning 30B-A3B, MLX 4-bit | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | One Mac (M1-M5), or one GB10; also checked on RTX 3090 / RTX PRO 6000. | [Lightning](docs/recipes/nemotron-3.5.md). Includes MTP. |
 | Lightning, mixed oQ4 / oQ6 / oQ8 | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`<br>`tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ6`<br>`tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ8` | One M3 Ultra checked. | [Width and MTP instructions](docs/recipes/nemotron-3.5.md#run). Metal only; copy the 4-bit checkpoint's MTP head to draft. |
 | Lightning, NVIDIA NVFP4 | `tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | One GB10 checked. Non-cluster fallback code exists for sm_80 to sm_89; no NVFP4/FP8 serving run is recorded on sm_80. | [Lightning](docs/recipes/nemotron-3.5.md); [CUDA changes](CHANGELOG.md#110). |
@@ -186,15 +192,17 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 | GLM-5.3-Flash, NVFP4 | `tensorfold pull nvidia/GLM-5.3-Flash-NVFP4@423acf37583782c51c142d145aef733d72943d93` | Two GB10s at TP=2: @Bizuayeu loaded the whole checkpoint on 1.1.0 in 302.1 s and served it. | [Native CUDA](docs/recipes/glm-5.3-flash-cuda.md); [contributed run](https://github.com/ashhart/TensorFold/issues/1040): one token hash per prompt across three runs and a passphrase found in 199,307 tokens; scored prompts and more than two ranks were not covered. |
 | GLM-5.3-Flash, FP4-Local | `tensorfold pull nvidia/GLM-5.3-Flash-FP4-Local@76348ddb2be2e35e39ecfc00e75dc07703f4f3d5` | Two GB10s at TP=2, or three at TP=3 over a ring of direct links: @Bizuayeu loaded it as stored and served it at both sizes. 165.3 GiB of weights, 13% less than NVFP4's. | [Native CUDA](docs/recipes/glm-5.3-flash-cuda.md), in 1.1.5 (#1050). NVIDIA's mixed-precision checkpoint: NVFP4 routed experts, FP8 for most of the rest. As close to BF16 as NVFP4 at its smaller size ([receipt](docs/receipts/glm-fp4local-80517fc3/README.md)). |
 | GLM-5.3-Flash, XSFP4 | `tensorfold pull Bizuayeu/GLM-5.3-Flash-XSFP4@88736f916f8939607fde8a4b881dcae749f7551d` | Two GB10s at TP=2, or three at TP=3 over a ring of direct links: @Bizuayeu served it at both sizes. 165.7 GiB of weights. | [Native CUDA](docs/recipes/glm-5.3-flash-cuda.md), in 1.1.5 through FP4-Local's path. FP4-Local with its routed experts refitted from the BF16 weights and a smoothing folded in, on the same kernels. Closer to BF16 than FP4-Local and NVFP4 by all three measures in [its card](https://huggingface.co/Bizuayeu/GLM-5.3-Flash-XSFP4#measured). |
-| GLM-5.3-Flash, Jammed XSFP4 | `tensorfold pull Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4@0a22bb46ecef3d0f5f96e41dc6011be12974fbf1` | Two GB10s at TP=2, or three at TP=3 over a ring of direct links: @Bizuayeu served it at both sizes. 160.2 GiB of weights; at TP=2 each GB10 holds [6.6 GiB less](https://huggingface.co/Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4#memory) than at block 16. | [Native CUDA](docs/recipes/glm-5.3-flash-cuda.md), on main after 1.2.2 (#2041). Refitted from BF16 at block 32 with XSFP4's smoothing, each row's scales packed (`csf0_v1`, read only by this path), at XSFP4's speed. Its KL and top-1 are nearer BF16 than NVIDIA's two checkpoints', short of XSFP4's ([its card](https://huggingface.co/Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4#measured)). |
+| GLM-5.3-Flash, Jammed XSFP4 | `tensorfold pull Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4@0a22bb46ecef3d0f5f96e41dc6011be12974fbf1` | Two GB10s at TP=2, or three at TP=3 over a ring of direct links: @Bizuayeu served it at both sizes. 160.2 GiB of weights; at TP=2 each GB10 holds [6.6 GiB less](https://huggingface.co/Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4#memory) than at block 16. | [Native CUDA](docs/recipes/glm-5.3-flash-cuda.md), in 1.2.3 (#2041). Refitted from BF16 at block 32 with XSFP4's smoothing, each row's scales packed (`csf0_v1`, read only by this path), at XSFP4's speed. Its KL and top-1 are nearer BF16 than NVIDIA's two checkpoints', short of XSFP4's ([its card](https://huggingface.co/Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4#measured)). |
+| GLM-5.3-Flash, Jammed XSFP4 NZ5 | `tensorfold pull Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4-NZ5@1c900ea0294e28a8e9ab56c1156c0338eed60aef` | Two GB10s at TP=2: @Bizuayeu served it. 160.2 GiB of weights. | [Native CUDA](docs/recipes/glm-5.3-flash-cuda.md), on main after 1.2.7 (#2894). Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`, read only by this path). Nearer BF16 than Jammed XSFP4 ([its card](https://huggingface.co/Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4-NZ5#measured)). |
 | GLM-5.3, EXLR8 `home` | `tensorfold pull kindlingai/glm-5.3-exlr8-k2-k3-k4@f459f5d0272a529403dd9b3fd32f771f4250a0d4 --exlr8 home --node 0/2 --dir ~/models/glm-5.3-exlr8-home` | Two M5 Ultra Macs, 256 GB each; about 160 GB resident per Mac at 8k context / four streams. | [Two-Mac recipe](docs/glm-5.3-exlr8.md). Use `--node 1/2` on the other Mac; Thunderbolt 5 and MCDMA required. No CUDA backend. |
-| LFM2.5-24B-A2B, MLX 4 / 6 / 8-bit | `tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-4bit@667408d494bde191c2cb9dd4f4549827816b9275`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-6bit@1deec53eb49571e21cdcbf82fd5839248f07ed88`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-8bit@67ab417dd02d0c9545802a726df668620eae049d` | One Mac; M4 Pro checked. | [Native recipe](docs/recipes/lfm2.5-24b-a2b.md), [release history](CHANGELOG.md). |
+| LFM2.5-24B-A2B, MLX 4 / 6 / 8-bit | `tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-4bit@667408d494bde191c2cb9dd4f4549827816b9275`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-6bit@1deec53eb49571e21cdcbf82fd5839248f07ed88`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-8bit@67ab417dd02d0c9545802a726df668620eae049d` | One Mac (M4 Pro checked), or one NVIDIA GPU with the 4-bit export (GB10 checked). | [Native recipe](docs/recipes/lfm2.5-24b-a2b.md) ([CUDA](docs/recipes/lfm2.5-24b-a2b.md#cuda)), [release history](CHANGELOG.md). Weights: LFM Open License v1.0. |
 | Qwen3.6-35B-A3B, MLX with MTP | `tensorfold pull TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP@81169a9bc511a27c1b4eedb77a2cd98ced431847` | One GB10; 20.9 GB checkpoint. | [Qwen3.6](docs/recipes/qwen3.6-moe.md). Native CUDA receipt here. Metal also registers this model type; the recipe's Metal commands describe Python 0.6.6. |
 | Qwen3.6-35B-A3B, NVIDIA NVFP4 with MTP | `tensorfold pull nvidia/Qwen3.6-35B-A3B-NVFP4@1355db6a052410cfd62085d94b58866fd0f2c3c5` | One GB10; 20.3 GiB on the device, 20.9 GiB with the drafter. | [Native CUDA](docs/recipes/qwen3.6-moe.md#nvidias-nvfp4-checkpoint-native-cuda). Serve with `--drafter` naming the same checkpoint for MTP drafts. |
 | Gemma 4 31B, MLX 4-bit | `tensorfold pull mlx-community/gemma-4-31B-it-4bit@696d436c404745a59f30e4939a658162b0a9e57f`<br>`tensorfold pull z-lab/gemma-4-31B-it-DFlash@eabd648301ce28583cc14757912e5e0f84e152e1` | One Mac (M5 Ultra checked), or one GB10 on CUDA. Pre-M5 Metal has a row path; its assistant and DFlash drafters require M5 tensor units. | [Native 31B on Metal](docs/recipes/gemma-4-native.md), [CUDA qualification](CHANGELOG.md#114). Name the drafter with `--drafter`; images with `--vision`. |
 | Gemma 4 12B, converted MLX 4-bit | `hf download google/gemma-4-12B-it --revision 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7 --local-dir ~/models/gemma-4-12b-hf`<br>`hf download google/gemma-4-12B-it-assistant --revision 46d4c6f13f0ac0ad827b915669b8df9b81c64c51 --local-dir ~/models/gemma-4-12b-assistant` | One Mac (M5 Ultra checked); converted text weights 6.3 GB, image weights 100 MB, plus assistant/caches. MLX 4-bit also served on one GB10. Pre-M5 Metal has a row path; the MTP assistant requires M5 tensor units. | [Convert and serve](docs/recipes/gemma-4-12b-native.md). Upstream download needs `hf`; conversion needs Python, mlx and mlx-lm. Serving is native; [CUDA qualification](CHANGELOG.md#114) includes the MTP assistant. |
 | Step-5-Preview, converted affine | `hf download stepfun-ai/Step-5-Preview --local-dir ~/models/step5-preview-fp8` | One 256 GB Mac; text 166.9 GiB, MTP adds 2.5 GiB and vision 3.7 GiB. | [Convert and serve](docs/recipes/step-5-preview.md). The documented 256 GB setup serves converted affine weights; converting the upstream FP8 download needs Python and mlx. |
 | MiniMax-M3.1-Flash, community affine 3/4-bit | `hf download BobClawblaw/MiniMax-M3.1-Flash-MLX-mix34 --revision 9524999057e0d277d26438606e033e2191fb465c --local-dir ~/models/MiniMax-M3.1-Flash-MLX-mix34`<br>`hf download BobClawblaw/MiniMax-M3.1-Flash-MLX-mix256k --revision 916e7ca1044f1c3e7566163096243c940327224d --local-dir ~/models/MiniMax-M3.1-Flash-MLX-mix256k` | One 256 GB M5 Ultra; 203.7 GiB (32,768-token window) or 189.2 GiB (147,456), plus caches. | [MiniMax-M3.1-Flash](docs/recipes/minimax-m3.1-flash.md). Set `MINIMAX_LOAD_LIMIT_GB`; images with `--vision`. Community checkpoints: lossy conversions of MiniMax's NVFP4 release (KL 0.244 / 0.295). MiniMax Community License. |
+| Recursive Flint 40B-A2.5B, MLX INT4 | `hf download RecursiveSI/flint-int4 --revision 3b93f9053b530488405ae9fca51d4900d6ce21f0 --local-dir ~/models/flint-int4` | One M5 Mac; M5 Ultra checked; 21.4 GiB resident plus caches. M1-M4 untested. | [Flint](docs/recipes/flint.md). Text and tools; always reasons; no draft head. |
 | Kolibri-1, block FP8 (research) | `tensorfold pull Aleph-Alpha/Kolibri-1@e52eb4627d11516b0c01de49210ab5a4e4061444` | One NVIDIA GPU; GB10 measured; 74 GB checkpoint. | [Kolibri](docs/recipes/kolibri-1.md). Text only; copy drafts, no EAGLE-3/neural drafter. |
 | Liquid AI d1-3B, decisions | Not documented yet. | Native CUDA; RAM minimum not published. | [API section below](#serve-flags). `/v1/systemone` and `/v1/decisions`. |
 | Fish Audio Drama 3, speech | Not documented yet. | Native Metal or CUDA; GB10 measured. | [Release audio instructions](CHANGELOG.md#110), [reference voices and dialogue speakers](docs/drama-http-voices.md). `/v1/audio/speech` with [sampling controls](docs/speech-sampling.md); checkpoint and `codec.pth` required. |
@@ -234,12 +242,14 @@ On Metal, each of up to 128 streams in the 27B's shared rounds drafts its own DF
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 tensorfold models
+tensorfold models --json
 tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks what it downloads against the Hub: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
 It refuses a checkpoint whose `model_type` has no native family, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints with a model type it knows, and `info` shows one checkpoint's family, format, context and memory floor.
+`models --json` prints the same list as one document for programs: `schema` 1, and each checkpoint's `repo`, `family` and `model_type`; `family` is a display title and `model_type` is the key to match on.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -286,23 +296,29 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | Flag | Meaning |
 | --- | --- |
 | `--host HOST`, `--port PORT` | Listen address and port, default `127.0.0.1:8080`. |
+| `--unix-socket PATH` | Listen on a new owner-only Unix socket at PATH instead of TCP, refused with `--host` or `--port`; macOS and Linux. An existing PATH, or a directory other users can write to (unless sticky, like `/tmp`), is refused, and connections from other users are closed. API keys, `--metrics-open` and the Host check apply as on TCP (a client sends a loopback `Host` or one in `--allowed-host`): the socket's permissions are a second layer, not a substitute for keys. |
 | `--profile stable` | Explicitly preserve current defaults; [profiles](docs/profiles.md) describes the initial switch registry and startup report. |
+| `--config FILE.toml` | Read serve flags from a TOML file: a key is a flag without its `--`, and `model` names the model. The command line wins over the file, and a relative path in the file starts at the file's folder. See [serve config files](docs/serve-config.md). |
 | `--name NAME` | Model ID advertised to clients. |
 | `--alias NAME` | Another accepted model ID; repeat for multiple aliases. |
 | `--api-key KEY` | Require a bearer key; repeat for multiple keys. |
 | `--api-key-file FILE` | Read keys from a restricted-permission file; a key can be limited to [some routes](docs/api.md#key-scopes). |
-| `--metrics-open` | Allow `/metrics` and `/v1/load` without a key when API authentication is enabled. |
+| `--metrics-open` | Allow `/metrics`, `/v1/metrics` and `/v1/load` without a key when API authentication is enabled. |
 | `--dashboard` | Enable the local `/dashboard` page and `/stats` endpoint. |
 | `--max-inflight N`, `--max-inflight-per-key N` | Refuse model requests past N in progress at once, overall or per key, with 429; 0, the default, is off. See [admission](docs/api.md#admission). |
+| `--max-connections N`, `--max-connections-per-address N`, `--trusted-proxy ADDRESS` | Open connections at most (default 128); from three quarters full, one address's share (default a quarter, 0 off); addresses never counted for that share, as loopback is not, such as a reverse proxy or Docker's bridge gateway. See [admission](docs/api.md#admission). |
 | `--requests-per-second N`, `--request-burst N` | Refuse a key's model requests past N a second, after a burst; 0, the default, is off. |
 | `--context N` | Bound prompt plus reply tokens; the model's window and memory checks still apply. Qwen3.8-27B defaults to 32,768 and takes up to 262,144. |
+| `--rope-yarn F` | YaRN context extension with this factor over the checkpoint's trained window, for Qwen3.5 and 3.6 on a CUDA build; other builds refuse the flag. |
+| `--loops N` | Passes over a looped model's recurrent block, from 1; without it the checkpoint's own count runs. Other builds refuse the flag. |
 | `--speed-up FILE` | Rank and link settings for two-Mac Flash Next or GLM serving. |
 | `--max-tokens N` | Default reply limit, 4096; requests can override it. |
 | `--temperature T` | Sampling temperature; zero requests greedy decoding. |
 | `--prompt-seed` | Use native prompt-derived keys instead of the fresh OS fallback; request and configured default seeds still win. |
 | `--top-p P`, `--top-k K`, `--min-p P` | Sampling defaults. |
+| `--instruct-sampling SET` | Sampling defaults for sampled chat requests with thinking off: `card` (the Qwen 3.5, 3.6 and 3.8 cards' temperature 0.7, top_p 0.8, top_k 20, presence_penalty 1.5), `name=value` pairs over it, or `none`; the serve flags still win. Greedy requests, raw completions and the server's own requests never take them. |
 | `--thinking`, `--no-thinking` | Choose whether the chat template opens a reasoning block. |
-| `--reasoning-effort LEVEL` | Default template effort: `low`, `medium`, `high` or `xhigh`. |
+| `--reasoning-effort LEVEL` | Default template effort: `minimal`, `low`, `medium`, `high`, `xhigh` or `max`. |
 | `--thinking-budget N` | Limit reasoning tokens where the engine supports closing the reasoning block. |
 | `--thinking-reserve N` | With thinking on, let reasoning use up to N tokens beyond a request's `max_tokens`, which then limits the answer (lane engines). |
 | `--loop-guard` | Close reasoning that repeats itself verbatim (a short cycle, or a long passage) where the engine supports it. |
@@ -331,7 +347,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--register-redraw-high PERCENT` | The share of that phrase's voiced frames that must lie above `--register-high-hz`. |
 | `--register-high-hz HZ` | The pitch line, 75 to 600 Hz, that marks a high register; calibrate it on your own voice. |
 | `--parallel N\|auto` | Cap active requests at N and queue the rest. Default `auto` asks for up to 8 as memory and the engine allow; an explicit count that cannot fit is refused. Read the accepted count at startup. |
-| `--prompt-cache-gib GIB` | Retained-prefix budget, 16 GiB by default or less where memory is short; 0 disables it. |
+| `--prompt-cache-gib GIB` | Retained-prefix budget; by default half the room left after streams on Metal and unified-memory CUDA (16 GiB floor where room permits), 8 GiB host snapshots on discrete CUDA, 16 GiB for Flash Next's batch host. An explicit value overrides it; 0 disables it. |
 | `--prompt-cache-over-cap` | Permit an explicit prefix budget past what 70% of RAM leaves once the server loads. |
 | `--learn` | Keep shared prompt prefixes on disk for new conversations to resume; the models are below the table. |
 | `--learn-dir DIR` | Where `--learn` keeps them, `~/.cache/tensorfold/learned` by default; implies `--learn`. |
@@ -557,6 +573,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@spenchey](https://github.com/spenchey),
 [@squarrier](https://github.com/squarrier),
 [@ss-cong](https://github.com/ss-cong),
+[@Stephane-Eden](https://github.com/Stephane-Eden),
 [@styles01](https://github.com/styles01),
 [@SvangenStudios](https://github.com/SvangenStudios),
 [@swbiggart](https://github.com/swbiggart),

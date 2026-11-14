@@ -1,6 +1,7 @@
 //! A captured set of Triton cubins (aot.json + cubins/): each launch picks the variant Triton itself would have picked.
 
 const std = @import("std");
+pub const identity = @import("aot_identity.zig");
 const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Stream = @import("stream.zig").Stream;

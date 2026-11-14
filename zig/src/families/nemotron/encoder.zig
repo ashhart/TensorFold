@@ -69,6 +69,20 @@ pub const Enc = struct {
         self.dispatches += 1;
         if (self.prof) |pr| self.e = pr.cut(self.e);
     }
+
+    /// One exclusive GPU-picked prompt grid; its paired grid is empty and may be encoded alongside it.
+    pub fn runIndirect(self: *Enc, counts: Buffer, offset: usize, group: [3]usize) void {
+        std.debug.assert(self.gate == null);
+        if (self.dropping) {
+            self.skip = false;
+            return;
+        }
+        if (self.concurrent and !self.skip and self.dispatches > 0) self.e.barrier();
+        self.skip = false;
+        self.e.dispatchIndirect(counts, offset, mtl.Size.of(group[0], group[1], group[2]));
+        self.dispatches += 1;
+        if (self.prof) |pr| self.e = pr.cut(self.e);
+    }
 };
 
 /// GPU time by kernel, each dispatch alone in a command buffer (the step's kernels without their boundaries).

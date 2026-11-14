@@ -135,6 +135,7 @@ fn admit(a: std.mem.Allocator, ck: *checkpoint.Checkpoint, prefix: []const u8, e
     if (e.dtype != .i16 or e.rank != 3) return error.Refuse;
     const halves = e.shape[2] / 8; // the trellis's last dim is 16 * bits
     if (e.shape[2] % 8 != 0 or halves < 2 or halves > 16) return error.Refuse;
+    if (e.shape[0] > std.math.maxInt(usize) / 16 or e.shape[1] > std.math.maxInt(usize) / 16) return error.Refuse;
     const k = e.shape[0] * 16;
     const n = e.shape[1] * 16;
     if (k % 128 != 0 or n % 128 != 0) return error.Refuse;
@@ -316,5 +317,34 @@ test "a scan that fails an allocation frees every group prefix it held" {
     var admitted = try scan(a, io, dir);
     defer admitted.deinit();
     try std.testing.expectEqual(@as(usize, 2), admitted.groups.len);
-    try std.testing.checkAllAllocationFailures(a, scanFault, .{ io, dir });
+    // resizes refused, so the allocation count doesn't depend on the temporary directory's path length
+    var growth = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(growth.allocator(), scanFault, .{ io, dir });
+}
+
+/// A trellis of no bytes, [2^60 + 8, 0, 32], whose K (16 x 2^60 + 128) is 128 once it wraps; fp16 scales for that K.
+fn scanWrapped() !void {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = "{\"x.trellis\":{\"dtype\":\"I16\",\"shape\":[1152921504606846984,0,32],\"data_offsets\":[0,0]},\"x.suh\":{\"dtype\":\"F16\",\"shape\":[128],\"data_offsets\":[0,256]},\"x.svh\":{\"dtype\":\"F16\",\"shape\":[0],\"data_offsets\":[256,256]}}";
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(a);
+    try bytes.appendNTimes(a, 0, 8);
+    std.mem.writeInt(u64, bytes.items[0..8], header.len, .little);
+    try bytes.appendSlice(a, header);
+    try bytes.appendNTimes(a, 0, 256);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = bytes.items });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(dir);
+    var s = try scan(a, io, dir);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 0), s.groups.len);
+    try std.testing.expectEqual(@as(usize, 1), s.bad);
+}
+
+// In a child: if admit's `e.shape[0] * 16` is unchecked, a safe build panics and only this test fails
+test "a trellis whose K wraps past 2^64 is refused, not admitted at the wrapped size" {
+    try std.testing.expectEqual(@import("sys").isolate.Outcome.passed, try @import("sys").isolate.run(scanWrapped, .{}));
 }

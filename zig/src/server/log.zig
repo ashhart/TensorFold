@@ -58,7 +58,7 @@ fn writeOut(bytes: []const u8) void {
     }
 }
 
-/// One ``[tensorfold] ...`` line.
+/// One ``[tensorfold] ...`` line; its control bytes are written as ``\xNN``, as Python's ``log_message`` writes them.
 pub fn line(comptime fmt: []const u8, args: anytype) void {
     if (@import("builtin").is_test) {
         if (Test.sink == null) return;
@@ -69,11 +69,27 @@ pub fn line(comptime fmt: []const u8, args: anytype) void {
         var t: [24]u8 = undefined;
         w.print("{s} ", .{utcTime(&t, now())}) catch unreachable;
     }
-    w.print("[tensorfold] " ++ fmt ++ "\n", args) catch {
-        buf[buf.len - 1] = '\n';
-        w.end = buf.len;
-    };
-    if (@import("builtin").is_test) Test.sink.?.call(Test.sink.?.ctx, w.buffered()) else raw(w.buffered());
+    w.print("[tensorfold] " ++ fmt, args) catch {}; // a longer line ends where the buffer does
+    var escaped: [4 * buf.len + 1]u8 = undefined;
+    const text = controlSafe(&escaped, w.buffered());
+    if (@import("builtin").is_test) Test.sink.?.call(Test.sink.?.ctx, text) else raw(text);
+}
+
+/// ``text`` and its newline with every C0, DEL and C1 control as ``\xNN``: a request line cannot drive the terminal.
+fn controlSafe(out: []u8, text: []const u8) []const u8 {
+    var w: std.Io.Writer = .fixed(out);
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const b = text[i];
+        // a request line is latin-1 re-encoded as UTF-8 (http_conn.latin1), so its C1 control is 0xc2 then the byte
+        const c1 = b == 0xc2 and i + 1 < text.len and text[i + 1] >= 0x80 and text[i + 1] <= 0x9f;
+        if (c1) i += 1;
+        if (c1 or b < 0x20 or b == 0x7f) {
+            w.print("\\x{x:0>2}", .{text[i]}) catch break;
+        } else w.writeByte(b) catch break;
+    }
+    w.writeByte('\n') catch unreachable; // out holds four bytes a character of text and the newline
+    return w.buffered();
 }
 
 /// std.log for every engine the server runs: the default line, after its UTC time when TENSORFOLD_LOG_TIME is on.
@@ -171,7 +187,7 @@ pub fn refused(buf: []u8, id: []const u8, message: []const u8) []const u8 {
     return w.buffered();
 }
 
-/// ``ended <id> reason=...``: a request that ends without its reply, because its client left (``why`` null) or it failed.
+/// ``ended <id> reason=...``: a request ending without its reply, because its client left (``why`` null) or it failed.
 pub fn ended(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens: usize, after: f64) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
     w.print("ended {s} reason=", .{id}) catch {};
@@ -236,6 +252,40 @@ test "a [tensorfold] line with the time off is as before, and with it on starts 
     try std.testing.expectEqualStrings("T", out[10..11]);
     try std.testing.expectEqualStrings(".", out[19..20]);
     try std.testing.expectEqualStrings("Z [tensorfold] serving x\n", out[23..]);
+}
+
+test "security: a request line's control bytes reach the log as \\xNN, never as terminal controls" {
+    const Capture = struct {
+        bytes: [4 * 8192 + 1]u8 = undefined, // the most a line can grow to, every byte escaped, and its newline
+        len: usize = 0,
+        fn call(ctx: *anyopaque, text: []const u8) void {
+            const c: *@This() = @ptrCast(@alignCast(ctx));
+            @memcpy(c.bytes[0..text.len], text);
+            c.len = text.len;
+        }
+    };
+    var c: Capture = .{};
+    Test.sink = .{ .ctx = &c, .call = Capture.call };
+    defer Test.sink = null;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var conn = try Conn.init(std.testing.allocator, 0, "127.0.0.1");
+    defer conn.deinit();
+    // a method of escape sequences (clear the screen, set the title), DEL, and an 8-bit CSI as http_conn reads it
+    const raw_line = "\x1b[2J\x1b]0;owned\x07\x7f\x9bGET /health HTTP/1.1";
+    conn.requestline = try @import("http_conn.zig").latin1(arena.allocator(), raw_line);
+    request(&conn, 501);
+    const want = "[tensorfold] 127.0.0.1 \"\\x1b[2J\\x1b]0;owned\\x07\\x7f\\x9bGET /health HTTP/1.1\" 501 -\n";
+    try std.testing.expectEqualStrings(want, c.bytes[0..c.len]);
+    for (c.bytes[0..c.len]) |b| try std.testing.expect((b >= 0x20 and b != 0x7f) or b == '\n');
+    // the ordinary line is as before; its own newline is the only control byte
+    line("serving {s}", .{"x"});
+    try std.testing.expectEqualStrings("[tensorfold] serving x\n", c.bytes[0..c.len]);
+    // a line past the buffer still ends with one newline
+    const long: [9000]u8 = @splat('y');
+    line("{s}", .{&long});
+    try std.testing.expectEqual(@as(u8, '\n'), c.bytes[c.len - 1]);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, c.bytes[0..c.len], "\n"));
 }
 
 test "a std.log line with the time on: the time, then the default line" {

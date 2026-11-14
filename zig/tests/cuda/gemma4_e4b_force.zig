@@ -12,7 +12,7 @@ const Meta = struct { name: []const u8, prompt_ids: []const u32, generated_ids: 
 /// The last-row logits of a forward as fp32, appended to `rows`; its top token.
 fn take(m: *fwd.Model, s: cuda.Stream, row: usize, bf: []u16, rows: *std.ArrayList(f32), gpa: std.mem.Allocator) !u32 {
     try s.synchronize();
-    try m.d.check(m.d.api.cuMemcpyDtoH_v2(bf.ptr, m.s.logits + row * vocab * 2, vocab * 2), "cuMemcpyDtoH");
+    try cuda.memory.download(m.d, m.s.logits + row * vocab * 2, std.mem.sliceAsBytes(bf)[0 .. vocab * 2]);
     var best: u32 = 0;
     var top: f32 = -std.math.inf(f32);
     for (bf, 0..) |b, i| {

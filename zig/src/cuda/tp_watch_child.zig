@@ -31,6 +31,7 @@ pub fn said(mode: u8) []const u8 {
         0 => "[default] (err): rank 0: another rank's process ended (its line closed); " ++
             "this rank stops instead of waiting on it\n",
         1 => "[default] (err): rank 0: rank 1 stopped (peer OOM); this rank stops too\n",
+        4 => "[default] (err): rank 0: rank 1 stopped (PeerWarmupTimedOut); this rank stops too\n",
         else => "",
     };
 }

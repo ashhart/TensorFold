@@ -1,5 +1,6 @@
 //! Nemotron-H on one HIP device: the kernels, a stream, the rank's weights, the KV pool and the scratch.
 const std = @import("std");
+const platform = @import("sys");
 const hip = @import("hip");
 const config = @import("../config.zig");
 const tensors = @import("tensors.zig");
@@ -171,7 +172,7 @@ pub const Engine = struct {
             head_kv,
         );
         errdefer e.pool.deinit();
-        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams);
+        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams, d.vocab);
         errdefer e.plan.deinit();
         e.wins = try e.gpa.alloc(rounds.Window, streams);
         e.sized = true;
@@ -229,6 +230,7 @@ pub const Engine = struct {
 
     /// `tokens` as int32 ids in fresh arena memory, the copy queued on the stream.
     pub fn ids(e: *Engine, o: hip.ops.Ops, tokens: []const u32) !u64 {
+        for (tokens) |t| if (t >= e.weights.model.dims.vocab) return error.TokenOutsideVocabulary; // no kernel bounds an id
         const dst = try o.arena.of(i32, tokens.len);
         try hip.runtime.check(e.driver.api.hipMemcpyHtoDAsync(
             @ptrFromInt(dst),
@@ -383,8 +385,8 @@ const Body = struct {
 };
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

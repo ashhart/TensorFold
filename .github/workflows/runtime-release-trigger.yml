@@ -1,0 +1,23 @@
+name: Queue desktop runtime for engine release
+
+on:
+  release:
+    types: [published, released]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  queue:
+    if: >-
+      github.repository == 'ashhart/TensorFold' && !github.event.release.draft &&
+      !github.event.release.prerelease && startsWith(github.event.release.tag_name, 'v1.')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Dispatch the protected default-branch publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ashhart/TensorFold
+        run: gh workflow run runtime-feed.yml --ref main -f tag=latest

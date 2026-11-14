@@ -13,12 +13,12 @@ fn replaced(theta: f64, head_dim: usize, out: []f32) void {
 
 const Diff = struct { differ: usize, ulps: u32 };
 
-/// Prints both tables' words and values side by side, then the largest absolute and relative difference.
-fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
+/// Counts the words that differ; when `loud`, prints both tables side by side and the largest differences.
+fn sideBySide(label: []const u8, old: []const f32, new: []const f32, loud: bool) Diff {
     var r: Diff = .{ .differ = 0, .ulps = 0 };
     var abs: f64 = 0;
     var rel: f64 = 0;
-    std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
+    if (loud) std.debug.print("{s}\n   i  old                         new                         ulps\n", .{label});
     for (old, new, 0..) |o, n, i| {
         const a: u32 = @bitCast(o);
         const b: u32 = @bitCast(n);
@@ -29,16 +29,26 @@ fn sideBySide(label: []const u8, old: []const f32, new: []const f32) Diff {
         abs = @max(abs, d);
         rel = @max(rel, d / @abs(@as(f64, o)));
         const sign = if (b > a) "+" else if (b < a) "-" else " ";
-        std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
+        if (loud) std.debug.print("{d:>4}  0x{x:0>8} {e:<16}  0x{x:0>8} {e:<16}  {s}{d}\n", .{ i, a, o, b, n, sign, u });
     }
-    std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
+    if (loud) std.debug.print("{s}: {d} of {d} words differ, largest {d} ulp, abs {e:.3}, rel {e:.3}\n", .{
         label, r.differ, old.len, r.ulps, abs, rel,
     });
     return r;
 }
 
-fn expectWords(want: []const u32, got: []const f32) !void {
-    for (want, got) |w, g| try testing.expectEqual(w, @as(u32, @bitCast(g)));
+/// On a failed word, names it (the uploaded table starts at word 0) and prints the expected words beside the table's.
+fn expectWords(label: []const u8, want: []const u32, got: []const f32) !void {
+    for (want, got, 0..) |w, g, i| testing.expectEqual(w, @as(u32, @bitCast(g))) catch |e| {
+        const line = "\n{s}: first mismatch at position {d}, index {d}: expected 0x{x:0>8}, got 0x{x:0>8}\n";
+        std.debug.print(line, .{ label, i, i, w, @as(u32, @bitCast(g)) });
+        std.debug.print("   i  expected    got\n", .{});
+        for (want, got, 0..) |x, y, k| {
+            const b: u32 = @bitCast(y);
+            std.debug.print("{d:>4}  0x{x:0>8}  0x{x:0>8}{s}\n", .{ k, x, b, if (x == b) "" else "  <- differs" });
+        }
+        return e;
+    };
 }
 
 // transformers' form in exact arithmetic, rn32(1 / rn32(theta^rn32(2i / 256))): it gives rope_freq.zig's torch words
@@ -104,10 +114,15 @@ test "Dory RoPE: the pinned config's tables are transformers' words, printed bes
     for (cases) |case| {
         var new: [128]f32 = undefined;
         rope_freq.inverseFrequencies(case.theta, c.head_dim, &new);
-        try expectWords(case.want, &new);
+        try expectWords(case.label, case.want, &new);
         var old: [128]f32 = undefined;
         replaced(case.theta, c.head_dim, &old);
-        const got = sideBySide(case.label, &old, &new);
-        try testing.expectEqual(case.diff, got);
+        const got = sideBySide(case.label, &old, &new, false);
+        testing.expectEqual(case.diff, got) catch |e| {
+            const line = "\n{s}: expected {d} words to differ from the replaced form by at most {d} ulp, got {d} by {d}\n";
+            std.debug.print(line, .{ case.label, case.diff.differ, case.diff.ulps, got.differ, got.ulps });
+            _ = sideBySide(case.label, &old, &new, true);
+            return e;
+        };
     }
 }

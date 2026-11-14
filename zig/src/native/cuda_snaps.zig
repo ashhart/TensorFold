@@ -2,12 +2,17 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet and snap_fork if set.
+/// Any row, the head one token on (Nemotron's); a family's snap_grid, snap_lookahead, warm_quiet, snap_fork, snap_tail.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
     if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_fork")) rules.fork = F.snap_fork; // opt-in, a family at a time after its device check
+    if (@hasDecl(F, "snap_tail")) rules.tail = if (@import("core").profile.lookup(F.snap_tail)) |v| std.mem.eql(u8, v, "1") else false;
+    if (@hasDecl(F, "snap_intermediate")) { // a chunk-invariant family's opt-in ladder of intermediate checkpoints
+        rules.intermediate = F.snap_intermediate.tokens;
+        rules.intermediate_most = F.snap_intermediate.most;
+    }
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
         rules.grid = F.snap_grid;
@@ -20,8 +25,29 @@ pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     var rules = cacheRules(F);
     rules.chunk = prompt_rows;
     if (@hasDecl(F, "snap_repeat_min")) rules.repeat_min = if (std.c.getenv("TF_FLASHNEXT_REPEAT_CACHE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else F.snap_repeat_min) else F.snap_repeat_min;
+    // Opt-in until a served A/B shows the extra marks pay: TF_PROMPT_INTERMEDIATE=1 enables the family's ladder.
+    if (rules.intermediate > 0 and !(@import("sys").environment.read(bool, "TF_PROMPT_INTERMEDIATE", false) catch false)) rules.intermediate = 0;
     rules.chunk_starts = false;
     return rules;
+}
+
+/// The server's chunk step: message starts on F's grid when F's own `request_starts_switch` is 1, else 0 (none).
+pub fn requestStep(comptime F: type) u32 {
+    if (!@hasDecl(F, "request_starts_switch")) return 0; // each family names its own opt-in, so it turns on alone
+    return requestStepFor(F, @import("profile").lookup(F.request_starts_switch));
+}
+
+/// An opted-in family keeps each message start (1), or starts its `request_min_chunk` apart; 256 when not opted in.
+pub fn requestMinimum(comptime F: type) u32 {
+    if (requestStep(F) == 0) return 256;
+    return if (@hasDecl(F, "request_min_chunk")) F.request_min_chunk else 1;
+}
+
+/// Only exact 1 opts in; a family must also declare that its cold passes honor request starts.
+pub fn requestStepFor(comptime F: type, value: ?[]const u8) u32 {
+    const v = value orelse return 0;
+    if (!std.mem.eql(u8, v, "1")) return 0;
+    return if (@hasDecl(F, "request_starts") and F.request_starts) F.snap_grid else 0;
 }
 
 /// The cache's bytes less what the family sets aside for its states (`snap_ready`, as Nemotron's spare buffers).
@@ -56,10 +82,16 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     const Headless = struct {
         pub const snap_lookahead: u32 = 0;
     };
+    const Ladder = struct {
+        pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
+    };
     try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
     const any = cacheRules(Other);
     try std.testing.expect(!any.planned and any.min_prompt == 0 and any.lookahead == 1 and any.warm == .off);
     try std.testing.expect(cacheRules(Warm).warm == .waits and cacheRules(Glm).warm == .off);
+    try std.testing.expect(!any.planned and any.intermediate == 0);
+    try std.testing.expectEqual(@as(u32, 8192), cacheRules(Ladder).intermediate);
+    try std.testing.expectEqual(@as(u8, 4), cacheRules(Ladder).intermediate_most);
     const Stub = struct {
         fn bytes(_: *anyopaque, _: u32) u64 {
             return 0;
@@ -82,12 +114,135 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
         .drop = Stub.drop,
     };
     const copies: api.prompt_cache.Snapshots = .{ .ptr = &unused, .vtable = &vtable };
-    var store = api.prompt_cache.Store.init(std.testing.allocator, copies, cacheRules(Glm), 1 << 30);
+    var rules = cacheRules(Glm);
+    rules.tail = true; // the family's setting on
+    var store = api.prompt_cache.Store.init(std.testing.allocator, copies, rules, 1 << 30);
     defer store.deinit();
     const marks = try store.marks(arena.allocator(), prompt, 0, 3540, &.{}, &.{}, &.{});
     try std.testing.expectEqualSlices(u32, &[_]u32{2048}, marks);
+    // a raw prompt names no history: its tail keeps the same chunk start
+    try std.testing.expectEqualSlices(u32, &[_]u32{2048}, try store.marks(arena.allocator(), prompt, 0, 0, &.{}, &.{}, &.{}));
+    // snap_tail names the setting that turns the tail on at 1 (GLM refuses values but 0 and 1 at startup)
+    const env = @import("sys").env;
+    const Tail = struct {
+        pub const snap_tail = "TF_SNAPS_TEST_TAIL";
+    };
+    defer _ = env.unsetenv(Tail.snap_tail);
+    for ([_]?[:0]const u8{ null, "", "0", "2", "1" }) |v| {
+        _ = if (v) |s| env.setenv(Tail.snap_tail, s, 1) else env.unsetenv(Tail.snap_tail);
+        const on = v != null and std.mem.eql(u8, v.?, "1");
+        try std.testing.expect(cacheRules(Tail).tail == on and passRules(Tail, 2048).tail == on);
+    }
+    try std.testing.expect(!cacheRules(Other).tail);
+}
+
+test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
+    const env = @import("sys").env;
+    const Ladder = struct {
+        pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
+    };
+    _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    _ = env.setenv("TF_PROMPT_INTERMEDIATE", "0", 1);
+    defer _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    _ = env.setenv("TF_PROMPT_INTERMEDIATE", "1", 1);
+    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512).intermediate);
 }
 
 test {
     _ = @import("cuda_snaps_test.zig");
+}
+
+test "only a family whose passes cut at request starts asks the server for them" {
+    const Grid = struct {
+        pub const snap_grid: u32 = 2048;
+    };
+    const Glm = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+    };
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+    };
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Grid, "1"));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(struct {}, "1"));
+    try std.testing.expectEqual(@as(u32, 2048), requestStepFor(Glm, "1"));
+    try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
+}
+
+test "request starts: one family's switch leaves every other family without starts, and unset leaves all on main" {
+    const sys = @import("sys");
+    const profile = @import("profile");
+    const Other = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+        pub const request_starts_switch = "TF_SNAPS_TEST_REQUEST_STARTS";
+    };
+    const Unnamed = struct {
+        pub const snap_grid: u32 = 2048;
+        pub const request_starts = true;
+    };
+    const names = [_][:0]const u8{ "TF_QWEN_REQUEST_STARTS", "TF_GLM_REQUEST_STARTS", Other.request_starts_switch };
+    var saved: [names.len]?[:0]u8 = @splat(null);
+    for (names, &saved) |n, *s| if (sys.getenv(n)) |v| {
+        s.* = try std.testing.allocator.dupeSentinel(u8, v, 0);
+    };
+    defer for (names, saved) |n, s| if (s) |old| {
+        _ = sys.env.setenv(n, old, 1);
+        std.testing.allocator.free(old);
+    } else {
+        _ = sys.env.unsetenv(n);
+    };
+    const registry = @import("cuda.zig").registry;
+    var named = [_]usize{ 0, 0 }; // registry entry points naming Qwen's switch, GLM's
+    inline for (registry) |F| if (@hasDecl(F, "request_starts_switch")) {
+        const glm = std.mem.eql(u8, F.request_starts_switch, names[1]);
+        try std.testing.expect(std.mem.startsWith(u8, F.model_type, if (glm) "glm5_next" else "qwen3_5"));
+        try std.testing.expect(glm or std.mem.eql(u8, F.request_starts_switch, names[0]));
+        const id = profile.registered(F.request_starts_switch) orelse return error.UnreviewedSwitch;
+        try std.testing.expect(profile.entry(id).applies(F.model_type, "cuda"));
+        named[@intFromBool(glm)] += 1;
+    };
+    try std.testing.expectEqual([_]usize{ 2, 1 }, named); // Qwen's dense and MoE entry points, GLM's one
+    for (0..names.len + 1) |on| { // on == names.len: every switch unset
+        for (names, 0..) |n, i| try std.testing.expectEqual(@as(c_int, 0), if (i == on) sys.env.setenv(n, "1", 1) else sys.env.unsetenv(n));
+        inline for (registry ++ .{ Other, Unnamed }) |F| {
+            const opted = @hasDecl(F, "request_starts_switch") and on < names.len and std.mem.eql(u8, F.request_starts_switch, names[on]);
+            const grid: u32 = if (@hasDecl(F, "snap_grid")) F.snap_grid else 0;
+            try std.testing.expect(!@hasDecl(F, "request_starts_switch") or grid > 0);
+            try std.testing.expectEqual(if (opted) grid else 0, requestStep(F));
+            const glm = opted and on == 1; // GLM keeps 256 apart, as measured; Qwen and the test family keep every start
+            try std.testing.expectEqual(@as(u32, if (opted and !glm) 1 else 256), requestMinimum(F));
+        }
+    }
+}
+
+test "request starts: unset keeps CUDA's main prefill contract" {
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+    };
+    try std.testing.expectEqual(@as(u32, 0), requestStep(Qwen));
+}
+
+test "request starts: opt in is explicit, eligible and independent of cache rules" {
+    const Qwen = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = true;
+    };
+    const Disabled = struct {
+        pub const snap_grid: u32 = 4096;
+        pub const request_starts = false;
+    };
+    for ([_]?[]const u8{ null, "", "0", "off", "on", "true", "2" }) |v| {
+        try std.testing.expectEqual(@as(u32, 0), requestStepFor(Qwen, v));
+    }
+    try std.testing.expectEqual(@as(u32, 4096), requestStepFor(Qwen, "1"));
+    try std.testing.expectEqual(@as(u32, 0), requestStepFor(Disabled, "1"));
+    const before = cacheRules(Qwen);
+    _ = requestStepFor(Qwen, "1");
+    try std.testing.expectEqualDeep(before, cacheRules(Qwen));
+    try std.testing.expectEqual(@import("profile").Class.arithmetic, @import("profile").entry(.TF_QWEN_REQUEST_STARTS).class);
 }

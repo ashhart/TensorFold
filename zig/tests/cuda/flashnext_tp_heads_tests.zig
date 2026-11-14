@@ -15,8 +15,8 @@ const Weight = cuda.qmmf.Weight;
 
 const D = 2560; // dims
 const most = 1536; // the default chunk
-/// Decode rows, a stage of 16, 64, the prompt tile's first row count (Kernels.prompt_rows) and the default chunk.
-const counts = [_]usize{ 1, 4, 16, 64, 1024, most };
+/// Decode rows, a stage of 16, 64, the prompt tile's first row count (qmmf.prompt_rows), 1,024 and the default chunk.
+const counts = [_]usize{ 1, 4, 16, 64, cuda.qmmf.prompt_rows, 1024, most };
 const head_dim = 256;
 const index_heads = 4;
 const index_dim = 128;
@@ -292,7 +292,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8) !void {
     defer r.deinit();
     var k = try Kernels.load(gpu.d);
     defer k.deinit();
-    try check.expect(k.prompt != null and k.prompt_rows == 1024, "the BF16 prompt tile is loaded and takes 1,024 rows and more", .{});
+    try check.expect(k.native_lane.prompt != null and k.native_lane.prompt_sms > 0 and cuda.qmmf.prompt_rows == 512, "the BF16 prompt tile is loaded with the SM count, from 512 rows", .{});
     var g = try flash.Glue.load(gpu.d);
     defer g.deinit();
     // the unpinned witness's two K slices of up to 8,240 fp32 columns a row
