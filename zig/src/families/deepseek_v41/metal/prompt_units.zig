@@ -4,9 +4,9 @@ const mtl = @import("metal");
 const sources = @import("kernel_sources");
 const environment = @import("sys").environment;
 
-/// Whether prompt rows run their dense FP8 products on this GPU's tensor units: it has them and 0 is not set.
+/// Tensor-unit prompt rows: on by default on the M5 (where their quality was checked), 1 on later GPUs, never with 0.
 pub fn on(device: mtl.Device) !bool {
-    return device.tensorUnits() and try environment.read(bool, "TF_DSV41_PROMPT_UNITS", true);
+    return device.tensorUnits() and try environment.read(bool, "TF_DSV41_PROMPT_UNITS", device.generation() == 17);
 }
 
 /// `text` with nax.h inlined, compiled into its f32 and bf16 kernels `names`.
