@@ -147,19 +147,28 @@ pub const Backend = struct {
         if (b.pen_row.len > 0) b.gpa.free(b.pen_row);
     }
 
+    /// The lane vtable; `prefill_step` (one chunk a call, decode rounds between) unless TF_DSV41_PREFILL_INTERLEAVE=0.
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .penalties = true, .vtable = &.{
-            .prefill = prefill,
-            .first = firstFn,
-            .queue = queue,
-            .read = read,
-            .verify = verify,
-            .keep = keep,
-            .draft = draft,
-            .tree = tree,
-            .release = release,
-        } };
+        return .{ .ptr = b, .penalties = true, .vtable = if (pass.interleaveOn()) &vtable_stepped else &vtable_whole };
     }
+
+    const vtable_whole: be.Backend.VTable = .{
+        .prefill = prefill,
+        .first = firstFn,
+        .queue = queue,
+        .read = read,
+        .verify = verify,
+        .keep = keep,
+        .draft = draft,
+        .tree = tree,
+        .release = release,
+    };
+    const vtable_stepped: be.Backend.VTable = blk: {
+        var v = vtable_whole;
+        v.prefill_step = prefill_step;
+        v.reports_fill = true;
+        break :blk v;
+    };
 
     /// A window of any width runs exactly as its slot's own forward; the lane core may bundle streams freely.
     pub fn facts(b: *const Backend) lanes.Model {
@@ -229,64 +238,9 @@ pub const Backend = struct {
         return best;
     }
 
-    fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
-        const b = self(ptr);
-        const prompt = s.prompt();
-        if (prompt.len == 0) return error.EmptyPrompt;
-        const i = b.free() orelse return error.NoFreeSlot;
-        const state = &b.model.caches[i];
-        if (prompt.len + s.max_new + 1 > state.plan.capacity) return error.ContextFull;
-        try b.by.put(b.gpa, s, i);
-        try b.model.resetSlot(i);
-        b.history[i].clearRetainingCapacity();
-        s.cached = 0;
-        var at: u32 = 0;
-        // A KEPT PROMPT STATE RESUMES THE PASS WHERE IT STOOD.
-        if (s.reuse.saved) |saved| {
-            const snap: *ds.Model.Snapshot = @ptrCast(@alignCast(saved));
-            const want = s.reuse.at;
-            if (want > 0 and want < prompt.len) blk: {
-                b.model.snapshotRestore(i, snap) catch |err| {
-                    s.reuse_failed = true;
-                    s.reuse_error = err;
-                    break :blk;
-                };
-                at = want;
-                s.cached = at;
-                b.history[i].appendSlice(b.gpa, prompt[0..at]) catch {};
-            }
-        }
-        const rows = b.model.workspace.plan.rows;
-        // THE TAIL MARK IS SNAPSHOTTED INSIDE THE CHUNK THAT RUNS PAST IT, not cut into a second forward.
-        const merge_cold = std.c.getenv("TF_DSV41_SNAP_COLD") == null;
-        const snap_at: u32 = if (std.c.getenv("TF_DSV41_NO_TAIL_SNAP") == null and b.model.snapTailAllowed() and (merge_cold or s.reuse.at > 0)) s.reuse.snap_at else 0;
-        while (at < prompt.len) {
-            if (s.isCancelled()) return error.Cancelled;
-            var end = @min(at + rows, @as(u32, @intCast(prompt.len)));
-            // The store's marks always end a chunk: the pass stands exactly there when it calls the hook.
-            for (s.reuse.marks) |m| if (m > at and m < end and m != snap_at) {
-                end = m;
-                break;
-            };
-            const last = end == prompt.len;
-            var merge: u32 = if (snap_at > at and snap_at < end and end - at >= 64) snap_at else 0;
-            if (merge != 0 and !b.model.beginSnapTail(i, prompt[@max(0, @as(usize, merge) - 4)..merge], merge, at)) merge = 0;
-            if (last) {
-                _ = try b.model.forwardOn(i, prompt[at..end], .last);
-                b.first[i] = try b.draw(i, s, @intCast(prompt.len));
-            } else {
-                _ = try b.model.forwardOn(i, prompt[at..end], .none);
-            }
-            if (merge != 0) {
-                // the state at the mark, copied from the stash the chunk's own publishes wrote
-                if (s.reuse.hook) |hook| hook.at(hook.ptr, s, merge);
-                b.model.endSnapTail();
-            }
-            at = end;
-            // The prompt cache's keep hook, at the chunk end it asked to see.
-            if (s.reuse.hook) |hook| if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) hook.at(hook.ptr, s, at);
-        }
-    }
+    const pass = @import("backend_prefill.zig");
+    const prefill = pass.whole;
+    const prefill_step = pass.step;
 
     /// The prompt cache's Snapshots functions over the resident model (`ptr`: the *Backend, `owner`: the stream).
     pub fn snapBytes(ptr: *anyopaque, _: u32) u64 {
@@ -404,10 +358,20 @@ pub const Backend = struct {
 
     /// The shared-round batch; the one-row windows of a plain shared round are the only admitted shape.
     var batch_on: ?bool = null;
+    var batch_max: ?usize = null;
     /// The instruments that read a forward's internals take the one-stream path; the batch never runs under them.
     pub fn noBatchInstrument() bool {
-        return std.c.getenv("TF_DSV41_STAGE_CB") == null and std.c.getenv("TF_DSV41_LAYER_CB") == null and
+        return std.c.getenv("TF_DSV41_LAYER_CB") == null and
             std.c.getenv("TF_DSV41_ATTN_PROF") == null and std.c.getenv("TF_DSV41_HID_HASH") == null;
+    }
+
+    /// TF_DSV41_BATCH_MAX: the most one-row windows one batched forward carries (default 4, ceiling 8).
+    pub fn batchMax() usize {
+        if (batch_max) |v| return v;
+        const raw = std.c.getenv("TF_DSV41_BATCH_MAX");
+        const parsed = if (raw) |e| std.fmt.parseInt(usize, std.mem.span(e), 10) catch 4 else 4;
+        batch_max = std.math.clamp(parsed, 1, 8);
+        return batch_max.?;
     }
 
     pub fn batchOn() bool {

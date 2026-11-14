@@ -39,7 +39,7 @@ const concurrentOn = model.concurrentOn;
 
 pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     if (!m.valid) return error.InvalidModelState;
-    if (segs.len == 0 or segs.len > 4) return error.InvalidLaneSlot;
+    if (segs.len == 0 or segs.len > 8) return error.InvalidLaneSlot;
     const first_seg = segs[0];
     const slot = first_seg.slot;
     if (slot >= m.lanes) return error.InvalidLaneSlot;
@@ -54,7 +54,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         total_rows += @intCast(sg.ids.len);
     }
     if (segs.len > 1 and (m.profile != null or m.observer != null or m.stream == null or
-        std.c.getenv("TF_DSV41_STAGE_CB") != null or std.c.getenv("TF_DSV41_LAYER_CB") != null or
+        std.c.getenv("TF_DSV41_LAYER_CB") != null or
         std.c.getenv("TF_DSV41_ATTN_PROF") != null or std.c.getenv("TF_DSV41_HID_HASH") != null))
         return error.BatchUnsupported;
     const state = &m.caches[slot];

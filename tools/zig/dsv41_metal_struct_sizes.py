@@ -9,11 +9,11 @@ import tempfile
 
 # The engine's run-time joins (csa2.zig:91, csa2_index.zig:164, metal/pipelines.zig:122).
 JOINS = [
-    ("csa2-kv-join", ["kv.metal", "csa2.metal", "csa2_nax.metal"], None),
+    ("csa2-kv-join", ["kv.metal", "csa2.metal", "csa2_nax.metal", "csa2_rows.metal"], None),
     ("index-kv-join", ["kv.metal", "index_exl3.metal", "index_exl3_nax.metal"], None),
     ("route-defines", ["route.metal"], "#define TF_DSV41_E 384\n#define TF_DSV41_TOPK 6\n"),
 ]
-JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "index_exl3.metal", "index_exl3_nax.metal", "route.metal"}
+JOIN_ONLY = {"csa2.metal", "csa2_nax.metal", "csa2_rows.metal", "index_exl3.metal", "index_exl3_nax.metal", "route.metal"}
 
 STRUCT_DEF = re.compile(r"\bstruct\s+([A-Za-z_]\w*)\s*\{")
 KERNEL = re.compile(r"(?:\[\[\s*kernel[^\]]*\]\]\s*|\bkernel\s+)void\s+([A-Za-z_]\w*)\s*\(")

@@ -192,6 +192,8 @@ pub const deepseek_v41_index_nax = @embedFile("deepseek_v41/index_exl3_nax.metal
 pub const deepseek_v41_csa2 = @embedFile("deepseek_v41/csa2.metal");
 /// The same attention's prompt chunks on the tensor units (nax.h inlined at load, after kv's decoders).
 pub const deepseek_v41_csa2_nax = @embedFile("deepseek_v41/csa2_nax.metal");
+/// The batched decode windows' kernels (joined after the tensor-unit text).
+pub const deepseek_v41_csa2_rows = @embedFile("deepseek_v41/csa2_rows.metal");
 pub const core_lane_projection = @embedFile("core/lane_projection.metal");
 pub const core_lane_order = @embedFile("core/lane_order.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).

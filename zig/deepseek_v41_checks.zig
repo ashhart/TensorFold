@@ -3,6 +3,7 @@ test {
     _ = @import("core").exl3_projection_gpu_test;
     _ = @import("src/families/deepseek_v41/engram.zig");
     _ = @import("src/families/deepseek_v41/csa2.zig");
+    _ = @import("src/families/deepseek_v41/attention_rows_test.zig");
     _ = @import("src/families/deepseek_v41/kv_test.zig");
     _ = @import("src/families/deepseek_v41/ops_check.zig");
     _ = @import("src/families/deepseek_v41/load.zig");

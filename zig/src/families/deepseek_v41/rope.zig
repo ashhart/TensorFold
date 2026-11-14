@@ -80,6 +80,7 @@ fn fillFactors(out: []f32, capacity: u32, rotary: u32, spec: Spec) void {
 
 pub const Pipelines = struct {
     rotate: mtl.Pipeline,
+    rotate_rows: mtl.Pipeline,
     factors: mtl.Buffer,
     capacity: u32,
     rotary: u32,
@@ -106,11 +107,14 @@ pub const Pipelines = struct {
         const values = factors.slice(f32, 2 * count);
         fillFactors(values[0..count], capacity, rotary, normal);
         fillFactors(values[count..], capacity, rotary, compressed);
-        return .{ .rotate = rotate, .factors = factors, .capacity = capacity, .rotary = rotary };
+        const rotate_rows = try mtl.Pipeline.init(device, lib, "dsv41_rope_rows", false);
+        errdefer rotate_rows.deinit();
+        return .{ .rotate = rotate, .rotate_rows = rotate_rows, .factors = factors, .capacity = capacity, .rotary = rotary };
     }
     pub fn deinit(p: *Pipelines) void {
         p.factors.deinit();
         p.rotate.deinit();
+        p.rotate_rows.deinit();
     }
     pub fn registerResidency(p: *const Pipelines, set: mtl.ResidencySet) void {
         set.add(p.factors);
@@ -131,5 +135,32 @@ pub const Pipelines = struct {
         // The kernel is an absolute-position grid.
         enc.dispatchThreads(mtl.Size.of(args.rotary / 2, args.heads, args.rows), mtl.Size.of(128, 1, 1));
         enc.barrier();
+    }
+    /// One row a slot, each rotated at its own position read from `pos` (a uint per row): the batched decode window.
+    pub fn encodeRows(p: *const Pipelines, enc: mtl.ComputeEncoder, x: View, pos: View, args: RowsParams, spectrum: Spectrum) void {
+        const offset: usize = switch (spectrum) {
+            .normal => 0,
+            .compressed => @as(usize, p.capacity) * p.rotary * @sizeOf(f32),
+        };
+        enc.setPipeline(p.rotate_rows);
+        enc.setBuffer(x.buffer, x.offset, 0);
+        enc.setValue(args, 1);
+        enc.setBuffer(p.factors, offset, 2);
+        enc.setBuffer(pos.buffer, pos.offset, 3);
+        enc.dispatchThreads(mtl.Size.of(args.rotary / 2, args.heads, args.rows), mtl.Size.of(128, 1, 1));
+        enc.barrier();
+    }
+};
+
+/// The batched decode window's rotation (`dsv41_rope_rows`): every row at its own position.
+pub const RowsParams = extern struct {
+    rows: u32,
+    heads: u32,
+    width: u32,
+    rotary: u32,
+    stride: u32,
+    inverse: u32 = 0,
+    comptime {
+        @import("metal/index_mirror.zig").check(RowsParams, sources.deepseek_v41_rope, "Dsv41RopeRows");
     }
 };

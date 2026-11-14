@@ -12,6 +12,7 @@ csa2_attn.metal TfAttnMeta 32
 csa2_attn.metal TfKey 32
 csa2_attn.metal TfQ 64
 csa2_nax.metal DenseKv 20
+csa2_rows.metal Dsv41AttentionRows 60
 engram.metal TfEngramArgs 20
 engram_exl3.metal EngramGateArgs 48
 engram_exl3.metal EngramGatherArgs 40
@@ -84,6 +85,7 @@ ops.metal MarkovArgs 16
 ops.metal Rms 24
 ops.metal StreamMean 28
 rope.metal Dsv41Rope 36
+rope.metal Dsv41RopeRows 24
 route.metal Dsv41RouteArgs 16
 route_exl3.metal Shape 40
 topk512.metal TfTopk512Args 4

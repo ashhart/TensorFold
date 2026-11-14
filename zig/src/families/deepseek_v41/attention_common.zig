@@ -123,6 +123,45 @@ pub const Pipelines = struct {
 pub const regions = [_]usize{ 1280 * 2, 32768 * 2, 512 * 2, 512 * 4, 512 * 4, 512 * 2, 128 * 2, 4096 * 2, 32 * 2, 8192 * 2, 2560 * 2 };
 pub const Region = enum(usize) { qr, query, raw_kv, values, gates, latent, index_k, index_q, index_weights, grouped, qkv };
 
+/// The batched decode window's per-forward tables and per-slot scratch (attention_rows.zig): slot count, table layout.
+pub const RowsScratch = struct {
+    pub const slots = 8;
+    /// The table: positions, then 4 ulongs a slot of addresses (live, 0, selection, 0), then 4 of owner main addresses.
+    pub const pos_at = 0;
+    pub const addr_at = slots * 4;
+    pub const mains_at = addr_at + slots * 4 * 8;
+    pub const tab_bytes = mains_at + slots * 4 * 8;
+    tab: mtl.Buffer,
+    /// One window chunk row (kv.cache.ring_stride bytes) a slot.
+    chunk: mtl.Buffer,
+    /// A dense key table (csa2.rows_dense rows of 512 bf16) a slot.
+    dense: mtl.Buffer,
+    /// The table's last upload; a forward re-uploads only a changed table (the GPU may still be reading it).
+    uploaded: [tab_bytes]u8 = undefined,
+    uploaded_valid: bool = false,
+
+    pub fn denseBytes() usize {
+        return slots * csa2.rows_dense * 512 * @sizeOf(u16);
+    }
+    pub fn init(device: mtl.Device) !RowsScratch {
+        const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+        const tab = try device.buffer(tab_bytes, opts);
+        errdefer tab.deinit();
+        const chunk = try device.buffer(slots * kv.cache.ring_stride, opts);
+        errdefer chunk.deinit();
+        const dense = try device.buffer(denseBytes(), opts);
+        return .{ .tab = tab, .chunk = chunk, .dense = dense };
+    }
+    pub fn deinit(r: *RowsScratch) void {
+        r.tab.deinit();
+        r.chunk.deinit();
+        r.dense.deinit();
+    }
+    pub fn residentBytes() usize {
+        return tab_bytes + slots * kv.cache.ring_stride + denseBytes();
+    }
+};
+
 pub const Workspace = struct {
     buffer: mtl.Buffer,
     /// Every visible key decoded once a layer: the window ring, the chunk, then the compressed picks.
@@ -131,7 +170,7 @@ pub const Workspace = struct {
     partials: mtl.Buffer,
     selection: index.Scratch,
     /// The batch's per-segment selection scratches; segment 0 uses `selection`.
-    sel_extra: [3]?index.Scratch = .{ null, null, null },
+    sel_extra: [RowsScratch.slots - 1]?index.Scratch = @splat(null),
     /// Identity map [0..7] for the fused wo_a indexed dispatch (one row per output group).
     ids: mtl.Buffer,
     /// A scratch row for the doubling arms; the live workspace rows would change the reply if reused.
@@ -139,6 +178,7 @@ pub const Workspace = struct {
     /// The batched wq_a+wkv call's input-row map -- both entries read the one decode row (0, 0).
     pair_in: mtl.Buffer,
     max_rows: u32,
+    rows: RowsScratch,
     selection_layer: ?u32 = null,
     selection_position: u32 = 0,
     selection_rows: u32 = 0,
@@ -163,7 +203,7 @@ pub const Workspace = struct {
         const buffer = try device.buffer(bytes(max_rows) - index.Scratch.bytes(max_rows), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer buffer.deinit();
         const selection = try index.Scratch.init(device, max_rows);
-        var sel_extra: [3]?index.Scratch = .{ null, null, null };
+        var sel_extra: [RowsScratch.slots - 1]?index.Scratch = @splat(null);
         errdefer for (&sel_extra) |*e| if (e.*) |*x| x.deinit();
         for (&sel_extra) |*e| e.* = try index.Scratch.init(device, max_rows);
         const dense_kv = try device.buffer(denseKvBytes(max_rows), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
@@ -179,7 +219,8 @@ pub const Workspace = struct {
         @memset(pair_in.contents()[0 .. 2 * 4], 0);
         const map: [*]u32 = @ptrCast(@alignCast(ids.contents()));
         for (0..64) |id| map[id] = @intCast(id % 8);
-        return .{ .buffer = buffer, .dense_kv = dense_kv, .partials = partials, .selection = selection, .sel_extra = sel_extra, .ids = ids, .dup = dup, .pair_in = pair_in, .max_rows = max_rows };
+        const rows = try RowsScratch.init(device);
+        return .{ .buffer = buffer, .dense_kv = dense_kv, .partials = partials, .selection = selection, .sel_extra = sel_extra, .ids = ids, .dup = dup, .pair_in = pair_in, .max_rows = max_rows, .rows = rows };
     }
     pub fn deinit(w: *Workspace) void {
         w.buffer.deinit();
@@ -189,10 +230,11 @@ pub const Workspace = struct {
         w.dup.deinit();
         w.pair_in.deinit();
         w.selection.deinit();
+        w.rows.deinit();
         for (&w.sel_extra) |*e| if (e.*) |*x| x.deinit();
     }
     pub fn residentBytes(w: *const Workspace) usize {
-        return bytes(w.max_rows) + denseKvBytes(w.max_rows) + 3 * index.Scratch.bytes(w.max_rows);
+        return bytes(w.max_rows) + denseKvBytes(w.max_rows) + w.sel_extra.len * index.Scratch.bytes(w.max_rows) + RowsScratch.residentBytes();
     }
     pub fn dense(self: *const Workspace) View {
         return .{ .buffer = self.dense_kv, .offset = 0 };
@@ -212,6 +254,9 @@ pub const Workspace = struct {
         set.add(w.pair_in);
         set.add(w.selection.buffer);
         for (w.sel_extra) |e| if (e) |x| set.add(x.buffer);
+        set.add(w.rows.tab);
+        set.add(w.rows.chunk);
+        set.add(w.rows.dense);
     }
     /// A region's view into the attention workspace, public so the drafter can assemble its own scan.
     pub fn view(w: *const Workspace, region: Region) View {

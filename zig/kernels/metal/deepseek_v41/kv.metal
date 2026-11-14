@@ -145,6 +145,13 @@ kernel void dsv41_publish_window(device const uchar *chunk [[buffer(0)]], device
     uint row = first + i.y, slot = (p.y + row) % 128;
     ring[slot * p.w + i.x] = chunk[row * p.z + i.x];
 }
+// Batched publish: slot z's chunk row into its ring at pos[z] % 128; p = (ring offset, row stride, row bytes, 0).
+kernel void dsv41_publish_rows(device const uchar *chunk [[buffer(0)]], constant uint4 &p [[buffer(1)]],
+    device const ulong *addr [[buffer(2)]], device const uint *pos [[buffer(3)]], uint2 i [[thread_position_in_grid]]) {
+    if (i.x >= p.z) return;
+    device uchar *ring = reinterpret_cast<device uchar *>(addr[4 * i.y]) + p.x;
+    ring[(pos[i.y] % 128) * p.y + i.x] = chunk[i.y * p.y + i.x];
+}
 kernel void dsv41_unpack_rows(device const uchar *packed [[buffer(0)]], device ushort *out [[buffer(1)]],
     constant Dsv41Pack &p [[buffer(2)]], uint2 i [[thread_position_in_grid]]) {
     if (i.x >= p.width || i.y >= p.rows) return;

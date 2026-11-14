@@ -9,6 +9,7 @@ const ops = @import("ops.zig");
 const csa2 = @import("csa2.zig");
 const kv = @import("kv.zig");
 const index = @import("csa2_index.zig");
+const rows_phase = @import("attention_rows.zig");
 const rope = @import("rope.zig");
 const common = @import("attention_common.zig");
 const stages = @import("attention_stages.zig");
@@ -53,7 +54,7 @@ pub fn encodeProfiled(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const weig
 pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weights.Attention, work: *Workspace, x: View, y: View, ep: *const exl3.Pipelines, scratch: exl3.View, layer: u32, c: config.Config, segs: []const Seg) !void {
     var e = e_in;
     const nsegs = segs.len;
-    if (nsegs < 2 or nsegs > 4) return error.InvalidAttentionChunk;
+    if (nsegs < 2 or nsegs > common.RowsScratch.slots) return error.InvalidAttentionChunk;
     const rows: u32 = segs[nsegs - 1].r0 + segs[nsegs - 1].n;
     if (layer >= 40 or rows == 0 or rows > work.max_rows or rows > 8) return error.InvalidAttentionChunk;
     for (segs) |sg| {
@@ -102,7 +103,9 @@ pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weig
         if (!dense_col) ops.encodeDense(e, &p.plain, x, tensor(selector.weights_proj), work.view(.index_weights), iq_w_args);
     }
     e.barrier();
-    // The slot-bound phase: one segment at a time, each against its own state and selection scratch.
+    // The slot-bound phase: the batched form issues each stage once for every slot, else one slot at a time.
+    const batched = rows_phase.usable(p, w, work, c, segs);
+    if (batched) try rows_phase.head(p, e, w, work, q, raw, c, ratio, segs);
     var s: usize = 0;
     while (s < nsegs) : (s += 1) {
         const sg = segs[s];
@@ -112,9 +115,11 @@ pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weig
         const sel = work.selectionFor(s);
         const qs = q.shifted(@as(usize, r0) * q_width * 2);
         const raws = raw.shifted(@as(usize, r0) * c.head_dim * 2);
-        try rotate(p, e, qs, 1, c.heads, c.head_dim, pos, ratio, 1, false, c);
+        if (!batched) {
+            try rotate(p, e, qs, 1, c.heads, c.head_dim, pos, ratio, 1, false, c);
+        }
         const chunk = sel.windowChunk();
-        if (w.kv_norm.dtype == .bf16 and c.head_dim == 512) {
+        if (!batched and w.kv_norm.dtype == .bf16 and c.head_dim == 512) {
             const factor_offset: usize = if (ratio == 0) 0 else @as(usize, p.rotary.capacity) * p.rotary.rotary * @sizeOf(f32);
             const factors: View = .{ .buffer = p.rotary.factors, .offset = factor_offset };
             try p.cache.encodeGlue(e, raws, tensor(w.kv_norm), factors, chunk, chunk, .{
@@ -128,7 +133,7 @@ pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weig
                 .write_y = 0,
                 .eps = c.eps,
             });
-        } else {
+        } else if (!batched) {
             norm(p, e, raws, w.kv_norm, 1, c.head_dim, c.eps);
             try rotate(p, e, raws, 1, 1, c.head_dim, pos, ratio, 1, false, c);
             try p.cache.encodePack(e, raws, chunk, .{ .rows = 1, .width = c.head_dim, .stride = c.head_dim, .packed_stride = kv.cache.ring_stride, .block = 32, .kind = .window_fp8 });
@@ -194,22 +199,25 @@ pub fn encodeMulti(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const weig
             }
             main = source.main;
         }
-        const ring = try st.ring(layer);
-        try p.sparse.encode(e, qs, ring, chunk, main, sel.positions(), tensor(w.sink), qs, work.dense(), work.splitPartials(), .{
-            .rows = 1,
-            .q_stride = q_width,
-            .position = pos,
-            .chunk_rows = 1,
-            .ratio = ratio,
-            .compressed_rows = compressed_rows,
-            .topk = @min(c.index_topk, compressed_rows),
-            .splits = splitScan(),
-        });
-        e.barrier();
-        try p.cache.publishWindow(e, chunk, ring, 1, pos);
-        try rotate(p, e, qs, 1, c.heads, c.head_dim, pos, ratio, 1, true, c);
-        e.barrier();
+        if (!batched) {
+            const ring = try st.ring(layer);
+            try p.sparse.encode(e, qs, ring, chunk, main, sel.positions(), tensor(w.sink), qs, work.dense(), work.splitPartials(), .{
+                .rows = 1,
+                .q_stride = q_width,
+                .position = pos,
+                .chunk_rows = 1,
+                .ratio = ratio,
+                .compressed_rows = compressed_rows,
+                .topk = @min(c.index_topk, compressed_rows),
+                .splits = splitScan(),
+            });
+            e.barrier();
+            try p.cache.publishWindow(e, chunk, ring, 1, pos);
+            try rotate(p, e, qs, 1, c.heads, c.head_dim, pos, ratio, 1, true, c);
+            e.barrier();
+        }
     }
+    if (batched) try rows_phase.tail(p, e, w, work, q, c, layer, ratio, segs);
     // The output phase: one call over every segment's rows.
     const grouped = work.view(.grouped);
     const group_input = q_width / c.o_groups;

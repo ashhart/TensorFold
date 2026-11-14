@@ -53,6 +53,28 @@ pub const Params = extern struct {
             return error.InvalidSparseAttentionShape;
     }
 };
+/// The batched decode window: one row a slot, every slot's state read through a per-forward address table.
+pub const rows_dense = 128 + 1 + 512;
+pub const RowsParams = extern struct {
+    rows: u32,
+    heads: u32 = 64,
+    width: u32 = 512,
+    q_stride: u32,
+    window: u32 = 128,
+    ring_stride: u32 = 528,
+    chunk_stride: u32 = 528,
+    main_stride: u32 = 288,
+    ring_off: u32,
+    owner: u32, // the layer's compressed owner (kv.cache.ownerFor), a column of the table's main addresses
+    ratio: u32,
+    index_topk: u32 = 512,
+    dense_rows: u32 = rows_dense,
+    splits: u32,
+    scale: f32 = 0.04419417382415922,
+    comptime {
+        @import("metal/index_mirror.zig").check(RowsParams, sources.deepseek_v41_csa2_rows, "Dsv41AttentionRows");
+    }
+};
 var merge_split_cache: ?u32 = null;
 
 /// The merge's chunk split, default ON (four threadgroups). Zero restores the one-threadgroup merge.
@@ -74,6 +96,9 @@ pub const Pipelines = struct {
     nax_min_rows: u32,
 
     dense_kv: mtl.Pipeline = undefined,
+    /// The batched decode window's pair (null where the tensor-unit scan is not the compiled path).
+    dense_rows: ?mtl.Pipeline = null,
+    nax_rows: ?mtl.Pipeline = null,
     dense_picked: mtl.Pipeline = undefined,
     merge: mtl.Pipeline = undefined,
     /// The merge with one accumulator chunk a threadgroup (four times the grid).
@@ -86,7 +111,7 @@ pub const Pipelines = struct {
         defer gpa.free(nax_text);
         // TF_DSV41_ATTN_DENSE_VALUES compiles the sparse kernel's dense-table value path instead of its per-element.
         const dense_values: []const u8 = if (std.c.getenv("TF_DSV41_ATTN_DENSE_VALUES") != null) "#undef TF_SIMD_FRAGS\n" else "";
-        const text = try std.mem.concat(gpa, u8, &.{ sources.deepseek_v41_kv, sources.deepseek_v41_csa2, dense_values, nax_text });
+        const text = try std.mem.concat(gpa, u8, &.{ sources.deepseek_v41_kv, sources.deepseek_v41_csa2, dense_values, nax_text, sources.deepseek_v41_csa2_rows });
         defer gpa.free(text);
         const lib = try mtl.Library.fromSource(device, text, options);
         defer lib.deinit();
@@ -102,12 +127,17 @@ pub const Pipelines = struct {
         const merge_split = try mtl.Pipeline.init(device, lib, "dsv41_sparse_merge_split", false);
         errdefer merge.deinit();
         const nax = try mtl.Pipeline.init(device, lib, "dsv41_sparse_nax", false);
+        const rows_ok = device.tensorUnits();
+        const dense_rows: ?mtl.Pipeline = if (rows_ok) mtl.Pipeline.init(device, lib, "dsv41_dense_kv_rows", false) catch null else null;
+        const nax_rows: ?mtl.Pipeline = if (rows_ok) mtl.Pipeline.init(device, lib, "dsv41_sparse_nax_rows", false) catch null else null;
         return .{
             .attention = attention,
             .nax = nax,
             .tensor_units = device.tensorUnits(),
             .dense_kv = dense_kv,
             .dense_picked = dense_picked,
+            .dense_rows = dense_rows,
+            .nax_rows = nax_rows,
             .merge = merge,
             .merge_split = merge_split,
             .nax_min_rows = min_rows,
@@ -117,6 +147,8 @@ pub const Pipelines = struct {
         p.attention.deinit();
         p.nax.deinit();
         p.dense_kv.deinit();
+        if (p.dense_rows) |x| x.deinit();
+        if (p.nax_rows) |x| x.deinit();
         p.dense_picked.deinit();
         p.merge.deinit();
         p.merge_split.deinit();
@@ -243,6 +275,45 @@ pub const Pipelines = struct {
         if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_SCAN") != null) {
             enc.setValue(args, 7);
             enc.dispatchGroups(mtl.Size.of(args.heads, args.rows, 1), mtl.Size.of(32, 1, 1));
+        }
+    }
+    /// True where the batched decode window's kernels compiled (the tensor-unit scan).
+    pub fn rowsReady(p: *const Pipelines, heads: u32, width: u32) bool {
+        return p.dense_rows != null and p.nax_rows != null and width == 512 and heads % 16 == 0;
+    }
+    /// `args.rows` slots' one-row windows: dense keys, scan (in place over `q`) and merge, one dispatch each.
+    pub fn encodeRows(p: *const Pipelines, enc: mtl.ComputeEncoder, q: View, sink: View, chunk: View, dense: View, partials: View, pos: View, addr: View, mains: View, args: RowsParams) void {
+        var a = args;
+        a.splits = @max(@min(args.splits, 32), 1);
+        enc.setPipeline(p.dense_rows.?);
+        enc.setBuffer(addr.buffer, addr.offset, 0);
+        enc.setBuffer(pos.buffer, pos.offset, 1);
+        enc.setBuffer(chunk.buffer, chunk.offset, 2);
+        enc.setBuffer(dense.buffer, dense.offset, 3);
+        enc.setValue(a, 4);
+        enc.setBuffer(mains.buffer, mains.offset, 5);
+        enc.dispatchThreads(mtl.Size.of(a.dense_rows, a.width / 4, a.rows), mtl.Size.of(32, 4, 1));
+        enc.barrier();
+        enc.setPipeline(p.nax_rows.?);
+        enc.setBuffer(q.buffer, q.offset, 0);
+        enc.setBuffer(addr.buffer, addr.offset, 1);
+        enc.setBuffer(pos.buffer, pos.offset, 2);
+        enc.setBuffer(sink.buffer, sink.offset, 3);
+        enc.setBuffer(q.buffer, q.offset, 4);
+        enc.setValue(a, 5);
+        enc.setBuffer(dense.buffer, dense.offset, 6);
+        enc.setBuffer(partials.buffer, partials.offset, 7);
+        enc.dispatchGroups(mtl.Size.of(a.heads / 16, a.rows, a.splits), mtl.Size.of(32, 4, 1));
+        enc.barrier();
+        if (a.splits > 1) {
+            const merge_split = mergeSplitOn();
+            enc.setPipeline(if (merge_split) p.merge_split else p.merge);
+            enc.setBuffer(partials.buffer, partials.offset, 0);
+            enc.setBuffer(q.buffer, q.offset, 1);
+            enc.setBuffer(sink.buffer, sink.offset, 2);
+            const merge: Params = .{ .rows = a.rows, .q_stride = a.q_stride, .position = 0, .chunk_rows = 1, .ratio = a.ratio, .compressed_rows = 0, .splits = a.splits };
+            enc.setValue(merge, 3);
+            enc.dispatchGroups(mtl.Size.of(a.heads / 16, a.rows, if (merge_split) 4 else 1), mtl.Size.of(32, 4, 1));
         }
     }
 };

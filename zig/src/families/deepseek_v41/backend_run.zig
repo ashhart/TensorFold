@@ -13,6 +13,7 @@ const free = Backend.free;
 const draw = Backend.draw;
 const noBatchInstrument = Backend.noBatchInstrument;
 const batchOn = Backend.batchOn;
+const batchMax = Backend.batchMax;
 const penBump = Backend.penBump;
 const sampleRow = Backend.sampleRow;
 const policy = @import("backend_policy.zig");
@@ -33,8 +34,9 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
     for (windows) |w| {
         if (w.parents != null or w.early or w.masks.len > 0) return error.TreeWindowsUnsupported;
     }
-    // A round wider than the exact four-lane rung.
-    if (windows.len > 4 and batchOn() and noBatchInstrument()) {
+    // A round wider than one batched forward (TF_DSV41_BATCH_MAX, four by default) runs as several.
+    const wide = batchMax();
+    if (windows.len > wide and batchOn() and noBatchInstrument()) {
         var all_one = true;
         for (windows) |w| if (w.rows() != 1) {
             all_one = false;
@@ -43,7 +45,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         if (all_one) {
             var done: usize = 0;
             while (done < windows.len) {
-                const n = @min(windows.len - done, 4);
+                const n = @min(windows.len - done, wide);
                 try verify(ptr, windows[done..][0..n], out[done..][0..n]);
                 done += n;
             }
@@ -51,7 +53,7 @@ pub fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) a
         }
     }
     // A shared round's plain windows are one row each.
-    const batch = batchOn() and windows.len > 1 and windows.len <= 4 and noBatchInstrument() and blk: {
+    const batch = batchOn() and windows.len > 1 and windows.len <= wide and noBatchInstrument() and blk: {
         for (windows) |w| if (w.rows() != 1) break :blk false;
         break :blk true;
     };

@@ -79,6 +79,8 @@ pub const Pool = extern struct {
 pub const Pipelines = struct {
     pack: mtl.Pipeline,
     glue: mtl.Pipeline,
+    glue_rows: mtl.Pipeline,
+    publish_rows: mtl.Pipeline,
     pool: mtl.Pipeline,
     tail: mtl.Pipeline,
     copy: mtl.Pipeline,
@@ -105,9 +107,13 @@ pub const Pipelines = struct {
         errdefer p.ring_move.deinit();
         p.unpack = try mtl.Pipeline.init(device, lib, "dsv41_unpack_rows", false);
         errdefer p.unpack.deinit();
+        p.publish_rows = try mtl.Pipeline.init(device, lib, "dsv41_publish_rows", false);
+        errdefer p.publish_rows.deinit();
         const glue_lib = try mtl.Library.fromSource(device, sources.deepseek_v41_kv_glue, options);
         defer glue_lib.deinit();
         p.glue = try mtl.Pipeline.init(device, glue_lib, "dsv41_kv_glue", false);
+        errdefer p.glue.deinit();
+        p.glue_rows = try mtl.Pipeline.init(device, glue_lib, "dsv41_kv_glue_rows", false);
         return p;
     }
     pub fn deinit(p: *Pipelines) void {
@@ -119,6 +125,8 @@ pub const Pipelines = struct {
         p.ring_move.deinit();
         p.unpack.deinit();
         p.glue.deinit();
+        p.glue_rows.deinit();
+        p.publish_rows.deinit();
     }
     pub fn encodePack(p: *const Pipelines, enc: mtl.ComputeEncoder, x: View, storage: View, args: Pack) !void {
         try args.validate();
@@ -234,6 +242,31 @@ pub const Pipelines = struct {
         enc.setBuffer(ring.buffer, ring.offset, 1);
         enc.setValue([4]u32{ rows, position, 528, 528 }, 2);
         enc.dispatchThreads(mtl.Size.of(528, @min(rows, 128), 1), mtl.Size.of(32, 1, 1));
+        enc.barrier();
+    }
+    /// `rows` slots' one-row windows at once: norm + rope + pack at each slot's own position (`pos`, a uint a row).
+    pub fn encodeGlueRows(p: *const Pipelines, enc: mtl.ComputeEncoder, x: View, weight: View, factors: View, packed_view: View, pos: View, args: Glue) !void {
+        try args.validate();
+        try weight.require(512 * 2, 2);
+        enc.setPipeline(p.glue_rows);
+        enc.setBuffer(x.buffer, x.offset, 0);
+        enc.setBuffer(weight.buffer, weight.offset, 1);
+        enc.setBuffer(factors.buffer, factors.offset, 2);
+        enc.setBuffer(packed_view.buffer, packed_view.offset, 3);
+        enc.setBuffer(packed_view.buffer, packed_view.offset, 4);
+        enc.setValue(args, 5);
+        enc.setBuffer(pos.buffer, pos.offset, 6);
+        enc.dispatchGroups(mtl.Size.of(args.width / args.block, args.rows, 1), mtl.Size.of(256, 1, 1));
+        enc.barrier();
+    }
+    /// Each slot's chunk row into its own ring (`ring_offset` into its live buffer) at `pos % 128`.
+    pub fn publishRows(p: *const Pipelines, enc: mtl.ComputeEncoder, chunk: View, addr: View, pos: View, ring_offset: usize, rows: u32) void {
+        enc.setPipeline(p.publish_rows);
+        enc.setBuffer(chunk.buffer, chunk.offset, 0);
+        enc.setValue([4]u32{ @intCast(ring_offset), 528, 528, 0 }, 1);
+        enc.setBuffer(addr.buffer, addr.offset, 2);
+        enc.setBuffer(pos.buffer, pos.offset, 3);
+        enc.dispatchThreads(mtl.Size.of(528, rows, 1), mtl.Size.of(32, 1, 1));
         enc.barrier();
     }
     pub fn snapshot(p: *const Pipelines, enc: mtl.ComputeEncoder, state: *cache.State) !void {
