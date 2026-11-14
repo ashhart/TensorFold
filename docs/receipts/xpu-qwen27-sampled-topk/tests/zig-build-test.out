@@ -376,4 +376,3 @@ Clef tokens: skipped, TF_CLEF_DIR names no clef-flash checkpoint (12 records pin
 [default] (warn): libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
 [default] (warn): libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
 failed command: ./.zig-cache/o/c00ed70fddb5c5546c326fcdc196b22c/test --cache-dir=./.zig-cache --seed=0x76a3f02 --listen=-
-
