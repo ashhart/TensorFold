@@ -5,8 +5,8 @@
   "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
   "settings": "free-running greedy, 64 steps, two runs per process, fresh process per run, one model process at a time, every process under taskset on the four P cores (CPU 4-7)",
   "start_utc": "2026-11-12T16:16:03Z",
-  "old_build": "#1990 head (vec4 build), ELF sha256 prefix 46571f11",
-  "new_build": "#2015 head (tile build), ELF sha256 prefix 6e6f47f2",
+  "old_build": "#1990 measured build commit 46571f111b2f0e92963561702b7eaab41868f823; ELF SHA-256 2a1d481c692900c1cefb08fa308d5852d2ec748ee7bc24c89ff013c26ac36d72 (6089352 bytes)",
+  "new_build": "#2015 measured build commit 6e6f47f228a662cb26dedf5b24bf7c50c780fe43; ELF SHA-256 b3b7f5e17752b31370490a7d4fe3f4ff92cf3593ed3bed447759f52c5561de41 (6128512 bytes)",
   "note": "Both include the float32 fix. The ELFs were built before the comment and name only commits that sit above them; those commits change no code.",
   "gpu_timeouts": 0
  },

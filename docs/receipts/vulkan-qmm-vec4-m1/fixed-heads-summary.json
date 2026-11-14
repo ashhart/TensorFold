@@ -7,8 +7,8 @@
   "checkpoint": "Qwen3.5-2B-MLX-4bit, revision 93760be4",
   "settings": "free-running greedy, 64 steps, two runs per process, vendor id 0x10005, one model process at a time, fresh process per run",
   "decision_rule": "median run-2 gain of at least 3 percent and every pair positive",
-  "old_build": "#1990 head built with the vec4 selection forced to the scalar kernel (qmmVariant = .scalar in ops_q4.zig, not committed), ELF sha256 prefix 4d1c6ba6",
-  "new_build": "#1990 head, ELF sha256 prefix 1e1b7d8c",
+  "old_build": "Source commit 46571f111b2f0e92963561702b7eaab41868f823 with local qmmVariant = .scalar; ELF SHA-256 4d1c6ba6c702220c44303ba674f4c3247e671b3e585d3c83bcd6960d65c2cb31 (6087144 bytes)",
+  "new_build": "Source commit 46571f111b2f0e92963561702b7eaab41868f823 with committed vec4 selection; ELF SHA-256 1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a (6087520 bytes)",
   "note": "The float32 fix sits above the vec4 commits, so an older #1544 build would not carry it. The old arm is the same head with the scalar kernel selected."
  },
  "cases": [

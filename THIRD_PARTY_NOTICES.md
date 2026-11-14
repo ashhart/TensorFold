@@ -88,7 +88,7 @@ source path and commit. The native Vulkan path does not link MLX.
 - `fast_norm_gated.comp`
 - `fast_rope.comp`
 - `gated_delta_decode.comp`
-- `gated_delta_prefill_ash.comp`
+- `gated_delta_prefill_oracle.comp`
 - `gather_take.comp`
 - `gdn_conv_decode.comp`
 - `omarchy_trig.h`

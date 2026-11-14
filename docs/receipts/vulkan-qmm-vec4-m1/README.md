@@ -1,6 +1,10 @@
 # qmm_q4_vec4 receipts, Apple M1 (13-inch)
 
-Qwen3.5-2B 4-bit, 64 greedy steps, two runs per process. Old build is #1990's head built with the vec4 selection forced to the scalar kernel (`qmmVariant = .scalar` in `ops_q4.zig`, not committed; ELF `4d1c6ba6`), new build is #1990's head (`1e1b7d8c`). The float32 fix sits above the vec4 commits, so an older #1544 build would not carry it.
+The old and new ELFs use #1990 source commit `46571f111b2f0e92963561702b7eaab41868f823`. The old arm sets
+`qmmVariant = .scalar` locally in `ops_q4.zig`; the new arm uses the committed vec4 selection. Old ELF SHA-256:
+`4d1c6ba6c702220c44303ba674f4c3247e671b3e585d3c83bcd6960d65c2cb31` (6,087,144 bytes). New ELF SHA-256:
+`1e1b7d8cdddf57645c2090207eef24812e4cbc6e6b90a11dc9d43492ce90ac5a` (6,087,520 bytes). The retained receipt does not
+record the shell build commands.
 Unicode-24 and document-256 ran three old and three new processes (old,new,new,old,old,new). Document-1024 ran two pairs, one old,new and one new,old, because the scalar arm takes about 250 s a process. Run 2 is the prefill plus 63 decode steps plus the per-step logits readback. Linux 7.3.0-2-20261110.1-lab-ARCH, Honeykrisp from the Omarchy Mesa build (library sha256 `d75f4cbc`).
 
 | Case | Old run 2 (median) | New run 2 (median) | Gain: median (pair range) | Logits digest, all processes |

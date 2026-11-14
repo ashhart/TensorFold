@@ -162,7 +162,7 @@ pub const NormMlp = struct {
         };
     }
 
-    /// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    /// RMSNorm of each row of x with gamma; the variant follows the bf16 or f32 views.
     pub fn rmsNorm(m: *NormMlp, cmds: *Commands, out: View, x: View, gamma: View, rows: u64, width: u64, eps: f32, timeout_ns: u64) Error!void {
         const variant = try normVariant(out, x, gamma);
         const plan = try normPlan(x.elements, out.elements, gamma.elements, rows, width, eps);
