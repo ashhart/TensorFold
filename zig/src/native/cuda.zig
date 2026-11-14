@@ -30,6 +30,9 @@ pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const serves: []const []const u8 = &.{ "--tp", "--mtp-drafts", "--mtp-confidence", "--policy", "--checkpoint-slots", "--spill-gib" };
 pub const families = cuda_families.families;
+/// `tensorfold device`: the SMs this build's kernels are for, and every GPU the driver lists (cuda_device.zig).
+pub const kernel_sms = cuda_device.kernel_sms;
+pub const listGpus = cuda_device.list;
 const gib: f64 = 1 << 30;
 const cuda_device = @import("cuda_device.zig");
 pub const chip = cuda_device.chip;
