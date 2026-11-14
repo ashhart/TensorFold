@@ -476,6 +476,7 @@ pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefi
     var buf: [180]u8 = undefined;
     const down_name = try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down.weight", .{prefix});
     const down_tensor = try store.tensor(down_name);
+    try @import("cuda_projection.zig").recodable(prefix, down_tensor.dtype);
     if (down_tensor.dtype == .bf16) return loadDenseHc(gpa, driver, store, prefix, inject);
     const down = try join3(gpa, store, &buf, prefix, ".input_mix_weight_down");
     defer gpa.free(down.w);
