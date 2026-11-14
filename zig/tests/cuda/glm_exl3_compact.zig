@@ -36,7 +36,7 @@ fn compact(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
         const output = if (fused) blk: {
             const scratch = try common.prompt.scratch(arena, l, cap, top_k);
             const y = arena + (try common.prompt.bytes(l, cap, top_k));
-            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, x_stride, sc.picks, n, scratch, plan_buf, y, null);
+            try k.prompt.run(k, ek.router, stream, l, x + at * x_stride * 2, .bf16, x_stride, sc.picks, n, scratch, plan_buf, y, null);
             break :blk y;
         } else blk: {
             const scratch = try common.scratch(arena, l, cap, top_k);

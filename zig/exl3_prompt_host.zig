@@ -12,10 +12,11 @@ const Capture = struct {
     var copied: usize = 0;
     fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         calls[count] = .{ .id = @intFromPtr(f), .grid = .{ gx, gy, gz }, .block = bx };
-        if (@intFromPtr(f) >= 11 and @intFromPtr(f) <= 13) {
+        if (@intFromPtr(f) == 2 or (@intFromPtr(f) >= 11 and @intFromPtr(f) <= 15)) {
             const sizes: []const u8 = switch (@intFromPtr(f)) {
+                2 => &.{ 8, 4, 4, 8, 8, 8, 8, 8, 4, 4, 4 },
                 11 => &.{ 8, 4, 8, 8, 4 },
-                12 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
+                12, 14 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
                 else => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
             };
             for (sizes, 0..) |size, i| {
@@ -217,4 +218,30 @@ test "exl3 prompt: GLM admission facts through shared lanes keep drafted plain a
         const plain = try reply(false, 0, seed);
         for ([_]bool{ false, true }) |drafts| for ([_]usize{ 0, 1, 3, 7 }) |others| try std.testing.expectEqual(plain, try reply(drafts, others, seed));
     }
+}
+
+test "exl3 prompt: mul1 FP16 dispatch retains caller output and the no-shared-expert sentinel" {
+    Capture.reset();
+    var d: cuda.Driver = undefined;
+    d.api.cuLaunchKernel = Capture.launch;
+    const s: cuda.Stream = .{ .d = &d, .handle = null };
+    const p: ex.prompt.Kernels = .{ .rotate = function(&d, 11), .gateup = .{ function(&d, 12), function(&d, 14) }, .down = .{ function(&d, 13), function(&d, 15) } };
+    const k: ex.Experts = .{ .mod = undefined, .group = function(&d, 1), .rot_in = function(&d, 2), .grouped = @splat(function(&d, 3)), .gateup = function(&d, 4), .down_combine = function(&d, 5), .prompt = p };
+    const router: cuda.grouped.Router = .{ .plan_small = function(&d, 20), .plan_rank = function(&d, 21), .plan_offsets = function(&d, 22), .plan_scatter = function(&d, 23), .plan_rows = function(&d, 24), .plan_rank_rows = function(&d, 25), .plan_scatter_rows = function(&d, 26) };
+    var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .dims = 512, .width = 256, .experts = 9, .codebook = .mul1, .uniform_k2 = 6, .act_mode = 1 };
+    const sc = try ex.prompt.scratch(4096, l, 40, 8);
+    const plan: cuda.grouped.Plan = .{ .items = 10000, .members = 20000, .counts = 30000, .rank = 40000, .hist = 50000 };
+    try p.run(&k, router, s, l, 0x200000000, .f16, 520, 0x300000000, 40, sc, plan, 0x400000000, null);
+    try std.testing.expectEqual(@as(usize, 0), Capture.by(12).len);
+    try std.testing.expectEqual(@as(usize, 0), Capture.by(13).len);
+    try std.testing.expectEqual(@as(usize, 1), Capture.by(14).len);
+    try std.testing.expectEqual(@as(usize, 1), Capture.by(15).len);
+    try std.testing.expectEqual(@as(u64, @intCast(@backingInt(ex.DType.f16))), Capture.by(2)[0].args[2]);
+    try std.testing.expectEqual(@as(u64, 0x400000000), Capture.by(15)[0].args[6]);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32)), Capture.by(14)[0].args[16]);
+    try std.testing.expectEqual(@as(u64, std.math.maxInt(u32)), Capture.by(15)[0].args[9]);
+    Capture.reset();
+    l.shared_input = true;
+    try std.testing.expectError(error.Exl3Shape, p.run(&k, router, s, l, 0, .f16, 520, 0, 40, sc, plan, 0, null));
+    try std.testing.expectEqual(@as(usize, 0), Capture.count);
 }

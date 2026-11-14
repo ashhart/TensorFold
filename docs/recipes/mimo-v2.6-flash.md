@@ -1,5 +1,7 @@
 # MiMo-V2.6-Flash
 
+The native server and `tf-mimo` require Linux for their two-rank fabric/TP sockets and verbs.
+
 The `mimo_v2` family serves an EXL3 pack of MiMo-V2.6-Flash (exllamav3's MiMo-V2 module, mul1 codebook) on the
 native CUDA server, on two DGX Sparks as tensor-parallel ranks. The pack's DFlash drafter sits in its `dflash/`
 folder (`config.json` and `model.safetensors`); the server drafts with it when it is there.
@@ -70,9 +72,9 @@ comes from its own acceptance rate, priced with a round cost that grows with its
 ## Checks
 
 - `tf-cuda-test kernel-contract`: the family's kernels against float64 (gates 1-4) and their launch records.
-- `tf-mimo m1 MODEL ORACLE [CONTEXT [DUMP_OUT [DUMP_BASE]]]` on each rank (`tf-mimo follow MODEL` beside it):
+- `tf-mimo m1 MODEL ORACLE [CONTEXT [DUMP_OUT [DUMP_BASE]]]` on both ranks, without a `follow` process:
   teacher-forced steps against an answer key's logits (KL and argmax), optionally against an earlier build's dump,
-  and the prompt path read in one chunk against two.
+  and the prompt path read in one chunk against two. Start rank 1's `m1`, then rank 0's `m1`.
 
 ## Licences and sources
 
