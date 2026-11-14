@@ -432,8 +432,9 @@ const Chunk = struct {
         for (ch.cbs[0..ch.n]) |cb| cb.wait();
     }
 
-    /// Waits for every buffer and reports the first failure.
+    /// Waits for every buffer, then reports the first failure (none still runs when the caller reuses the set).
     fn wait(ch: *const Chunk) !void {
+        for (ch.cbs[0..ch.n]) |cb| cb.wait();
         for (ch.cbs[0..ch.n]) |cb| try submitted(cb);
     }
 
