@@ -56,4 +56,6 @@ pub fn compileMetal(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.
     const step = b.step("compile-moss-teacher-metal", "Compile the MOSS Metal teacher and generate CLIs without shader compilation or execution");
     step.dependOn(&exe.step);
     step.dependOn(&gen_exe.step);
+    const rotary = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"moss image rotary:"} }));
+    b.step("test-moss-image-rotary-host", "MOSS-Image encoder RoPE words and bf16 tables against the fp32-pow form, no device").dependOn(&rotary.step);
 }
