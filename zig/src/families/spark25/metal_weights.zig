@@ -80,12 +80,12 @@ fn norm(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8) !Tensor
 }
 
 /// An affine [n, k] matrix at the checkpoint's one width, groups of 64, through the core MLX affine reader.
-fn affine(c: *const ck.Checkpoint, bits: u8, base: []const u8, n: usize, k: usize) !Linear {
+fn affine(c: anytype, bits: u8, base: []const u8, n: usize, k: usize) !Linear {
     return .{ .affine = try rows.affine(try mlx_affine.read(c, base, .{ .n = n, .k = k, .bits = bits, .group = cfg.group })) };
 }
 
 /// The release's bf16 [n, k] matrix in place: k whole 256s for the GEMM's steps, 16-byte aligned for the row kernel.
-fn dense(c: *const ck.Checkpoint, base: []const u8, n: usize, k: usize) !Linear {
+fn dense(c: anytype, base: []const u8, n: usize, k: usize) !Linear {
     var b2: [256]u8 = undefined;
     const w = try c.get(try name(&b2, base, ".weight"));
     try require(w, .bf16, &.{ n, k });
@@ -94,7 +94,7 @@ fn dense(c: *const ck.Checkpoint, base: []const u8, n: usize, k: usize) !Linear 
 }
 
 /// `base`'s matrix in the checkpoint's format.
-fn linear(c: *const ck.Checkpoint, bits: u8, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Linear {
+fn linear(c: anytype, bits: u8, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Linear {
     var buf: [256]u8 = undefined;
     const base = try name(&buf, prefix, suffix);
     return if (bits == cfg.bf16) dense(c, base, n, k) else affine(c, bits, base, n, k);
@@ -149,6 +149,22 @@ fn stacked(gpa: std.mem.Allocator, device: mtl.Device, w: *Weights, parts: []con
     }
 }
 
+/// The stacked members, left in their files at load: the stacks below read them once, through a Stage.
+pub const later = ck.laterModules(&.{ ".q_k_v_proj", ".g_proj", ".gate_proj", ".up_proj" });
+
+/// Room in `stage` for the modules `suffixes` under `prefix`: a bf16 weight, or an affine weight, scales and biases.
+fn reserve(stage: *ck.Stage, c: *const ck.Checkpoint, bits: u8, prefix: []const u8, suffixes: []const []const u8) !void {
+    var bufs: [4][3][256]u8 = undefined;
+    var names: [12][]const u8 = undefined;
+    var n: usize = 0;
+    for (suffixes, 0..) |sfx, i| for ([_][]const u8{ ".weight", ".scales", ".biases" }, 0..) |leaf, j| {
+        if (j > 0 and bits == cfg.bf16) continue;
+        names[n] = try std.fmt.bufPrint(&bufs[i][j], "{s}{s}{s}", .{ prefix, sfx, leaf });
+        n += 1;
+    };
+    try stage.reserve(c, names[0..n]);
+}
+
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint, f: *const cfg.Config) !Weights {
     const h = geo.hidden;
     const b = f.bits;
@@ -158,6 +174,9 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
         .layers = try gpa.alloc(Layer, geo.layers),
     };
     errdefer w.deinit(gpa);
+    var stage = ck.Stage{ .device = device };
+    defer stage.deinit();
+    const sc: ck.Staged = .{ .c = c, .stage = &stage };
     for (w.layers, 0..) |*l, i| {
         var pb: [64]u8 = undefined;
         const p = try std.fmt.bufPrint(&pb, "model.layers.{d}.", .{i});
@@ -165,17 +184,28 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
         const a = try name(&ab, p, "self_attn");
         var mb: [96]u8 = undefined;
         const m = try name(&mb, p, "mlp");
-        const qkv = try linear(c, b, a, ".q_k_v_proj", geo.queryWidth() + 2 * geo.kvWidth(), h);
-        const gates = try linear(c, b, a, ".g_proj", geo.query_heads, h);
+        try reserve(&stage, c, b, a, &.{ ".q_k_v_proj", ".g_proj" });
+        const qkv = try linear(sc, b, a, ".q_k_v_proj", geo.queryWidth() + 2 * geo.kvWidth(), h);
+        const gates = try linear(sc, b, a, ".g_proj", geo.query_heads, h);
+        const qkvg = try stacked(gpa, device, &w, &.{ qkv, gates }, st.qkvg_rows);
+        stage.reset();
+        try reserve(&stage, c, b, m, &.{ ".gate_proj", ".up_proj" });
+        const gu = try stacked(gpa, device, &w, &.{ try linear(sc, b, m, ".gate_proj", geo.intermediate, h), try linear(sc, b, m, ".up_proj", geo.intermediate, h) }, 2 * geo.intermediate);
+        stage.reset();
         l.* = .{
             .input_norm = try norm(c, p, "input_layernorm.weight"),
             .post_norm = try norm(c, p, "post_attention_layernorm.weight"),
-            .attn = .{ .qkvg = try stacked(gpa, device, &w, &.{ qkv, gates }, st.qkvg_rows), .out = try linear(c, b, a, ".out_proj", h, geo.queryWidth()) },
-            .mlp = .{
-                .gu = try stacked(gpa, device, &w, &.{ try linear(c, b, m, ".gate_proj", geo.intermediate, h), try linear(c, b, m, ".up_proj", geo.intermediate, h) }, 2 * geo.intermediate),
-                .down = try linear(c, b, m, ".down_proj", h, geo.intermediate),
-            },
+            .attn = .{ .qkvg = qkvg, .out = try linear(c, b, a, ".out_proj", h, geo.queryWidth()) },
+            .mlp = .{ .gu = gu, .down = try linear(c, b, m, ".down_proj", h, geo.intermediate) },
         };
     }
     return w;
+}
+
+test "later: the stacked members stay in their files; out, down, the embedding and the norms stay in the shards" {
+    const p = "model.layers.7.";
+    for ([_][]const u8{ p ++ "self_attn.q_k_v_proj.weight", p ++ "self_attn.q_k_v_proj.scales", p ++ "self_attn.g_proj.biases", p ++ "mlp.gate_proj.weight", p ++ "mlp.up_proj.scales" }) |n|
+        try std.testing.expect(later(n, 2));
+    for ([_][]const u8{ p ++ "self_attn.out_proj.weight", p ++ "mlp.down_proj.weight", "model.embedding.weight", p ++ "input_layernorm.weight", "model.norm.weight" }) |n|
+        try std.testing.expect(!later(n, 2));
 }

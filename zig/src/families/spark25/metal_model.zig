@@ -57,8 +57,10 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        for (files) |path| try m.checkpoint.addFile(m.device, path, "");
+        // the stacked members stay in their files, read once into the stacks: the shards keep what is read in place
+        for (files) |path| try m.checkpoint.addFileSplit(m.device, path, "", null, weights.later);
         m.weights = try weights.load(gpa, m.device, &m.checkpoint, &m.config);
+        m.checkpoint.closeFiles();
         errdefer m.weights.deinit(gpa);
         {
             const lib = try mtl.Library.fromSource(m.device, ks.spark25_glue, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });

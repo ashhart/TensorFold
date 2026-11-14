@@ -128,28 +128,11 @@ pub const Weights = struct {
     }
 };
 
-/// Tensors left in their files at load (checkpoint_metal's `later`): the layers' linears, read once through a Stage.
-pub fn later(name: []const u8, _: usize) bool {
-    const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return false;
-    const leaf = name[dot + 1 ..];
-    const linear = std.mem.eql(u8, leaf, "weight") or std.mem.eql(u8, leaf, "scales") or std.mem.eql(u8, leaf, "biases");
-    return linear and std.mem.indexOf(u8, name, ".layers.") != null and std.mem.endsWith(u8, name[0..dot], "_proj");
-}
+/// Tensors left in their files at load: the layers' linears (any `*_proj`), read once through a Stage.
+pub const later = ckpt.laterModules(&.{"_proj"});
 
 /// The load's reader: kept tensors where they are, the linears staged from their files.
-const Src = struct {
-    c: *const ckpt.Checkpoint,
-    stage: *ckpt.Stage,
-
-    /// A tensor's dtype and shape, kept or in its file.
-    fn meta(r: Src, name: []const u8) !ckpt.Deferred {
-        if (r.c.tensors.get(name)) |t| return .{ .file = 0, .at = 0, .bytes = t.bytes, .dtype = t.dtype, .shape = t.shape, .rank = t.rank };
-        return r.c.deferred.get(name) orelse {
-            std.log.err("checkpoint has no tensor {s}", .{name});
-            return error.MissingTensor;
-        };
-    }
-};
+const Src = ckpt.Staged;
 
 /// A member's three tensor names.
 fn names3(buf: *[3][160]u8, prefix: []const u8, member: []const u8) ![3][]const u8 {
@@ -198,7 +181,7 @@ fn mlxStack(r: Src, s: *const Stack, prefix: []const u8, members: []const []cons
             run += 1;
             row = 0;
         }
-        const n = (try r.meta((try names3(&buf, prefix, m))[0])).shape[0];
+        const n = (try r.c.describe((try names3(&buf, prefix, m))[0])).shape[0];
         o.* = mlxAlias(s.runs[run], row, n);
         row += n;
     }
@@ -208,9 +191,9 @@ fn mlxStack(r: Src, s: *const Stack, prefix: []const u8, members: []const []cons
 fn storedK(r: Src, prefix: []const u8, member: []const u8, width: cfg.widths.Width) !usize {
     var buf: [3][160]u8 = undefined;
     const ns = try names3(&buf, prefix, member);
-    const w = try r.meta(ns[0]);
-    const s = try r.meta(ns[1]);
-    const b = try r.meta(ns[2]);
+    const w = try r.c.describe(ns[0]);
+    const s = try r.c.describe(ns[1]);
+    const b = try r.c.describe(ns[2]);
     const ok = w.dtype == .u32 and w.rank == 2 and s.rank == 2 and b.rank == 2 and s.dtype == .bf16 and b.dtype == .bf16 and
         s.shape[0] == w.shape[0] and b.shape[0] == w.shape[0] and s.shape[1] == b.shape[1] and
         w.bytes == w.shape[0] * w.shape[1] * 4 and s.bytes == s.shape[0] * s.shape[1] * 2 and b.bytes == s.bytes;
@@ -235,7 +218,7 @@ fn pack(gpa: std.mem.Allocator, device: mtl.Device, r: Src, owned: *std.ArrayLis
     for (members) |m| {
         const mk = try storedK(r, prefix, m, width);
         if (k != 0 and k != mk) return error.BadGemmaWeight;
-        n += (try r.meta((try names3(&buf, prefix, m))[0])).shape[0];
+        n += (try r.c.describe((try names3(&buf, prefix, m))[0])).shape[0];
         k = mk;
     }
     const row_words = k * width.bits / 32;
