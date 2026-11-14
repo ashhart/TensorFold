@@ -145,7 +145,7 @@ pub const Tower = struct {
         errdefer t.arena.free();
         try weight.load(gpa, io, dir, c, t);
         var inv: [16]f32 = undefined;
-        core.qwen_vl.grid.invFreq(&inv, 64, 10000);
+        core.qwen_vl.grid.invFreqF32Pow(&inv, 64, 10000); // its words stay until checked on an AMD GPU (#1852)
         t.inv = try t.putFloats(&inv);
         if (t.at != wb) return error.VisionWeightSize;
         t.scratch = try t.take(sb);
