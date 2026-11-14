@@ -8,6 +8,18 @@ pub fn victimBut(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born
 
 /// `victimBut`'s order over every state, or with `own_only` over the prompt's own conversation's states alone.
 pub fn victimIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32, own_only: bool) ?usize {
+    const native = mainIn(s, skip, prompt, born, own_only) orelse return null;
+    return if (s.eviction == .decayed_resume)
+        @import("prompt_cache_decay.zig").victim(s, skip, prompt, born, own_only, native)
+    else
+        native;
+}
+
+pub fn victimMain(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32) ?usize {
+    return mainIn(s, skip, prompt, born, false);
+}
+
+fn mainIn(s: *const pc.Store, skip: ?*pc.Entry, prompt: []const u32, born: u32, own_only: bool) ?usize {
     var best: ?usize = null;
     var rung: ?usize = null; // a superseded ladder checkpoint: after every other redundant copy, before any newest state
     var oldest: ?usize = null;
