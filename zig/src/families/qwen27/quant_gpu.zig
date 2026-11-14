@@ -98,7 +98,7 @@ pub const Kernels = struct {
         if (k.prep_words) |b| b.deinit();
         if (k.sum_words) |b| b.deinit();
         var lane_it = k.lanes.valueIterator();
-        while (it.next()) |p| p.deinit();
+        while (lane_it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
