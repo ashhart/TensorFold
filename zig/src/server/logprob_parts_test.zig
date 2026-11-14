@@ -16,6 +16,46 @@ const rows_on = ",\"logprobs\":true,\"top_logprobs\":2";
 const call = "<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>";
 const named: @import("server.zig").Config = .{ .served_name = "test-model", .model_ids = &.{"test-model"}, .enable_thinking = false };
 
+test "logprob combinations: kept sets survive stops, reasoning and tool projection in whole and streamed replies" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]struct { text: []const u8, options: []const u8, thinking: bool = false }{
+        .{ .text = "HiENDtrailing", .options = ",\"stop\":[\"END\"]" },
+        .{ .text = "a" ++ call ++ "b", .options = tool },
+        .{ .text = "ab</think>\nHi", .options = ",\"thinking_budget\":5", .thinking = true },
+    }) |case| {
+        const ids = if (case.thinking) try a.dupe(u32, &.{ 'a', 'b', 300, '\n', 'H', 'i', 301 }) else try tokens(a, case.text);
+        const fields = try std.mem.concat(a, u8, &.{ ask, case.options, rows_on, ",\"temperature\":0" });
+        const off = try whole(a, ids, case.thinking, try std.mem.concat(a, u8, &.{ fields, "}" }));
+        const on = try whole(a, ids, case.thinking, try std.mem.concat(a, u8, &.{ fields, ",\"kept_probs\":true}" }));
+        try sameMessage(a, choice(off).get("message").?, choice(on).get("message").?);
+        try same(a, off.get("tensorfold").?.get("token_ids").?, on.get("tensorfold").?.get("token_ids").?);
+        const rows = choice(on).get("logprobs").?;
+        const stream = try joined(a, ids, case.thinking, try std.mem.concat(a, u8, &.{ fields, ",\"kept_probs\":true,\"stream\":true}" }));
+        try same(a, rows.get("content").?, stream.content);
+        try checkKept(rows.get("content").?);
+        if (case.thinking) {
+            try same(a, rows.get("reasoning_content").?, stream.reasoning);
+            try checkKept(stream.reasoning);
+        }
+        if (rows.get("tool_calls")) |groups| {
+            try same(a, groups, stream.calls.?);
+            for (groups.array) |group| try checkKept(group.get("content").?);
+        }
+    }
+}
+
+fn checkKept(rows: V) !void {
+    try std.testing.expect(rows.array.len > 0);
+    for (rows.array) |row| {
+        try std.testing.expectEqual(@as(usize, 2), row.get("top_logprobs").?.array.len);
+        const kept = row.get("kept_probs") orelse return error.NoKeptProbs;
+        try std.testing.expectEqual(@as(usize, 1), kept.array.len);
+        try std.testing.expectEqual(@as(f64, 1), kept.array[0].get("prob").?.float64().?);
+    }
+}
+
 /// `text` as byte tokens, then the end token.
 fn tokens(a: A, text: []const u8) ![]u32 {
     const ids = try a.alloc(u32, text.len + 1);

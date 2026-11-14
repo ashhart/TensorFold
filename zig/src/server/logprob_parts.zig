@@ -99,14 +99,14 @@ fn whole(srv: *Server, a: A, c: Capture, shown: Shown) Error!V {
     const text = if (c.closer.len > 0) try std.mem.concat(a, u8, &.{ visible, c.closer }) else visible;
     const ranges = try layout(srv, a, text, c.tokens, c.thinking, true, shown);
     const out = try json.newObject(a);
-    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0)) });
-    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0)) });
+    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0), c.opts) });
+    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0), c.opts) });
     const count = shown.calls orelse return .{ .object = out };
     const groups = try a.alloc(V, count);
     for (groups, 0..) |*slot, i| {
         const o = try json.newObject(a);
         try o.put(a, "index", try json.intValue(a, i));
-        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i)) });
+        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i), c.opts) });
         slot.* = .{ .object = o };
     }
     try out.put(a, "tool_calls", .{ .array = groups });
