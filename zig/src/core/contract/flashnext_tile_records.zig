@@ -29,6 +29,10 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "flashnext_hc fn_hc_writeback_norm_slices", .symbol = "fn_hc_writeback_norm_slices", .image = "flashnext_hc", .threads = 256 }, .usage = .{ .{ .regs = 64, .static = 1296, .bound = 256 }, .{ .regs = 64, .static = 1296, .bound = 256 }, .{ .regs = 64, .static = 1296, .bound = 256 }, .{ .regs = 64, .static = 1296, .bound = 256 }, .{ .regs = 64, .static = 1296, .bound = 256 } } },
     .{ .launch = .{ .name = "prompt16 tf_prompt_bf16", .symbol = "tf_prompt_bf16", .image = "prompt16", .threads = 256, .dynamic = 98304, .opt_in = true }, .usage = .{ .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "prompt16 tf_prompt_bf16_f32", .symbol = "tf_prompt_bf16_f32", .image = "prompt16", .threads = 256, .dynamic = 98304, .opt_in = true }, .usage = .{ .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 }, .{ .regs = 255, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down2", .symbol = "fn_hcn_down2", .image = "flashnext_hcn", .threads = 224, .dynamic = 13312 }, .usage = .{ .{ .regs = 162, .static = 0, .bound = 224 }, .{ .regs = 162, .static = 0, .bound = 224 }, .{ .regs = 162, .static = 0, .bound = 224 }, .{ .regs = 152, .static = 0, .bound = 224 }, .{ .regs = 152, .static = 0, .bound = 224 } } },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down3", .symbol = "fn_hcn_down3", .image = "flashnext_hcn", .threads = 224, .dynamic = 19968 }, .usage = .{ .{ .regs = 191, .static = 0, .bound = 224 }, .{ .regs = 191, .static = 0, .bound = 224 }, .{ .regs = 191, .static = 0, .bound = 224 }, .{ .regs = 189, .static = 0, .bound = 224 }, .{ .regs = 189, .static = 0, .bound = 224 } } },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down4", .symbol = "fn_hcn_down4", .image = "flashnext_hcn", .threads = 224, .dynamic = 26624 }, .usage = .{ .{ .regs = 221, .static = 0, .bound = 224 }, .{ .regs = 222, .static = 0, .bound = 224 }, .{ .regs = 222, .static = 0, .bound = 224 }, .{ .regs = 206, .static = 0, .bound = 224 }, .{ .regs = 206, .static = 0, .bound = 224 } } },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_up3", .symbol = "fn_hcn_up3", .image = "flashnext_hcn", .threads = 256, .dynamic = 43776 }, .usage = .{ .{ .regs = 126, .static = 0, .bound = 256 }, .{ .regs = 126, .static = 0, .bound = 256 }, .{ .regs = 126, .static = 0, .bound = 256 }, .{ .regs = 127, .static = 0, .bound = 256 }, .{ .regs = 127, .static = 0, .bound = 256 } } },
 };
 
 /// nvcc 13.2's records where it compiles these tiles differently from 13.0.
@@ -46,11 +50,7 @@ pub const cuda_133 = [_]registry.Override{
     .{ .name = "flashnext_attn fn_attn_fused", .usage = .{ .{ .regs = 118, .static = 640, .bound = 128 }, .{ .regs = 118, .static = 640, .bound = 128 }, .{ .regs = 118, .static = 640, .bound = 128 }, .{ .regs = 122, .static = 640, .bound = 128 }, .{ .regs = 122, .static = 640, .bound = 128 } } },
 };
 
-/// Launches whose fresh compiler usage is pending stay visible to device limits: the changed top-k, the fused read-out.
+/// The changed top-k stays visible to device limits while fresh compiler usage is pending.
 pub const pending = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_mtp fn_row_topk", .symbol = "fn_row_topk", .image = "flashnext_mtp", .threads = 1024 }, .usage = registry.none },
-    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down2", .symbol = "fn_hcn_down2", .image = "flashnext_hcn", .threads = 224, .dynamic = 13312 }, .usage = registry.none },
-    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down3", .symbol = "fn_hcn_down3", .image = "flashnext_hcn", .threads = 224, .dynamic = 19968 }, .usage = registry.none },
-    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down4", .symbol = "fn_hcn_down4", .image = "flashnext_hcn", .threads = 224, .dynamic = 26624 }, .usage = registry.none },
-    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_up3", .symbol = "fn_hcn_up3", .image = "flashnext_hcn", .threads = 256, .dynamic = 43776 }, .usage = registry.none },
 };
