@@ -354,6 +354,12 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     // xpu/safetensors.zig's own tests, on the same `core`
     const st_tests = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/safetensors.zig"), .target = host, .imports = &.{.{ .name = "core", .module = core }} });
     for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug), st_tests }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    // the 27B runner's RoPE tables on core's rope_freq, printed beside the expressions they replaced
+    const rope = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/rope_table.zig"), .target = host });
+    rope.addImport("core", core);
+    const rope_tests = b.addRunArtifact(b.addTest(.{ .root_module = rope }));
+    b.step("test-rope-xpu-host", "The XPU 27B runner's RoPE tables on core's rope_freq, without devices or ocloc").dependOn(&rope_tests.step);
+    step.dependOn(&rope_tests.step);
     // the Gemma 4 E4B runner's admission, over the family config (which takes `core` by name)
     const gemma4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_config.zig"), .target = host, .optimize = .debug });
     gemma4.addImport("core", core);

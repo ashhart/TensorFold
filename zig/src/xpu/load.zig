@@ -3,6 +3,7 @@ const std = @import("std");
 const q = @import("qwen27.zig");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");
+const rope_table = @import("rope_table.zig");
 const Checkpoint = dev.Checkpoint;
 const D = q.D;
 const Dev = dev.Dev;
@@ -203,8 +204,7 @@ pub fn loadGptq(d: *Dev, c: *const Checkpoint) !Model {
     m.embed_b = null;
     m.norm = try vecTensor(d, c, "model.norm.weight", true);
     m.head = try projectionQuantized(d, c, "lm_head.weight", true, stage);
-    var invf: [32]f32 = undefined;
-    for (&invf, 0..) |*f, i| f.* = @floatCast(std.math.pow(f64, 1e7, -@as(f64, @floatFromInt(i)) / 32.0));
+    const invf = rope_table.target();
     m.invf = try d.upload(std.mem.sliceAsBytes(&invf));
     for (&m.layers, 0..) |*l, i| {
         const p = try std.fmt.allocPrint(alloc, "model.layers.{d}.", .{i});
@@ -269,8 +269,7 @@ pub fn load(d: *Dev, c: *const Checkpoint) !Model {
     m.embed_b = try bf16Tensor(d, c, "model.embed_tokens.biases");
     m.norm = try bf16Tensor(d, c, "model.norm.weight");
     m.head = try projection(d, c, "lm_head", &.{""}, true, false, stage);
-    var invf: [32]f32 = undefined;
-    for (&invf, 0..) |*f, i| f.* = @floatCast(std.math.pow(f64, 1e7, -@as(f64, @floatFromInt(i)) / 32.0));
+    const invf = rope_table.target();
     m.invf = try d.upload(std.mem.sliceAsBytes(&invf));
     for (&m.layers, 0..) |*l, i| {
         const p = try std.fmt.allocPrint(alloc, "model.layers.{d}.", .{i});
