@@ -9,15 +9,13 @@ const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
 pub const eos = @import("eos.zig");
-/// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
-pub const identity = @import("identity.zig").identity;
+pub const identity = @import("identity.zig").identity; // what ids mean as loaded: what Recall keys its record by
 
 pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask, UnsafeAddedTokenMask };
 pub const Span = [2]usize;
 pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0, masked: usize = 0 };
-// Small calls keep their scratch on the stack before spilling to the tokenizer allocator.
-const scratch_stack_bytes = 4096;
+const scratch_stack_bytes = 4096; // small calls keep their scratch on the stack before spilling to the allocator
 
 pub const AddedToken = struct {
     id: u32,
