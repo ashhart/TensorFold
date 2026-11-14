@@ -200,7 +200,7 @@ pub const Forward = struct {
 
     /// Whether coop() splits this projection's K slices at `rows` rows (and how many; 0 without lane tiles).
     pub fn splitsAt(self: Forward, comptime key: []const u8, lin: wts.Linear, rows: usize) usize {
-        if (lin.tiles == null) return 0;
+        if (lin.tiles == null) return 0; // coopParts reads the tiles itself
         const sk = splitK(lin.n, lin.k);
         return if (comptime splits(key)) (if (sk > 1 and splitOn() and mp(rows) <= mp(self.s.rows)) sk else 0) else 0;
     }
