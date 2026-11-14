@@ -24,7 +24,12 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     // refused before the stream, the glue or a captured set loads: the largest pass, wider at --parallel 1 on one rank
     const chunk = try @import("cuda_chunk.zig").soloRows(try prompt.chunkRows(), o.one_stream and o.tp == 1);
     _ = try @import("cuda_modelopt_threads.zig").configured(); // TF_FLASHNEXT_LOAD_THREADS, refused before any load
-    const mode = try config.mode(gpa, io, dir);
+    const checked = try config.read(gpa, io, dir);
+    const mode = checked.mode;
+    if (captured != null and !@import("cuda_widths.zig").capturedServes(checked.widths)) {
+        std.log.err("flashnext: config.json's num_experts_per_tok is {d}; a captured kernel set routes top-10 only", .{checked.widths.top_k});
+        return error.FlashNextWidthsOnCapturedGlue;
+    }
     if (o.tp != 1 and mode != .modelopt) return error.FlashNextRanksNeedModelopt;
     if (o.tp != 1 and captured != null) return error.FlashNextRanksOnCapturedGlue;
     // the decode graph captures each layer's collectives; the dense split adds its own until a later stage qualifies it
