@@ -18,7 +18,7 @@ pub const wrapCalls = tool_streaming.wrapCalls;
 
 const Error = tool_dsml.Error;
 const Call = tool_dsml.Call;
-const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
+pub const Envelope = struct { start: usize, end: usize, payload: []const u8, complete: bool = true };
 
 pub const Parsed = struct {
     content: []const u8,
@@ -52,7 +52,7 @@ fn allSpace(s: []const u8) bool {
 }
 
 /// (start, end, payload) of each tool-call block in order; a block inside an earlier one is part of it.
-fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
+pub fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
     var found: std.ArrayList(Envelope) = .empty;
     var pos: usize = 0;
     var dsml = tool_dsml.findOpen(text, 0); // the DSML opener at or after `pos`, searched again only once `pos` passes it
