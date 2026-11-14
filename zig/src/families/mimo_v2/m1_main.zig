@@ -61,6 +61,7 @@ fn report(key: []const u8, got: []const u8, want: []const u8, half: bool) void {
 }
 
 pub fn main(init: std.process.Init) !u8 {
+    if (comptime @import("builtin").os.tag != .linux) return error.MimoV2RequiresLinux;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const cmd: []const u8 = if (args.len >= 2) args[1] else "";
     const is_m1 = args.len >= 4 and std.mem.eql(u8, cmd, "m1");
