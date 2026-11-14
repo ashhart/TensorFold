@@ -333,3 +333,21 @@ test "serve --config: parse refuses the flag itself and capabilities lists it" {
     try cli.capabilities(&out.writer, .{ .version = "test" });
     try t.expect(std.mem.indexOf(u8, out.written(), "\"--config\": {}") != null);
 }
+
+test "serve --config: CORS list overrides and file-line limits" {
+    var f: Fixture = .{};
+    defer f.deinit();
+    const a = f.arena.allocator();
+    const merged = try f.merged("cors-origin = [\"https://file.invalid\"]\n", &.{ "m", "--cors-origin", "https://cli.invalid" });
+    const got = try cli.parse(a, merged, &f.u);
+    try t.expectEqual(@as(usize, 1), got.cors_origin.len);
+    try t.expectEqualStrings("https://cli.invalid", got.cors_origin[0]);
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(a, "cors-origin = [");
+    for (0..65) |i| {
+        if (i > 0) try text.appendSlice(a, ", ");
+        try text.appendSlice(a, "\"https://ui.invalid\"");
+    }
+    try text.appendSlice(a, "]\n");
+    try f.refused(text.items, 1, "at most 64 --cors-origin entries are allowed");
+}
