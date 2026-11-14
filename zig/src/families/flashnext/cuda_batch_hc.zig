@@ -18,8 +18,7 @@ pub fn on() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_HC_FUSE", true) catch true;
 }
 
-/// Whether hc_w's read-out takes its normed rows from the writeback: native, nothing kept, 64 rows or more, our glue,
-/// and not a prompt pass on the fused tiles (those form the normed rows on chip).
+/// Whether hc_w's read-out takes its normed rows from the writeback: native, nothing kept, 64 rows or more, unfused.
 pub fn fuses(pass: anytype, hc_w: wt.HcW, n: usize, keep: parts.HcKeep) bool {
     return n >= 64 and hc_w.down.native != null and std.meta.eql(keep, parts.HcKeep{}) and dims == 2560 and
         streams == 4 and pass.tri.writebackOwned() and pass.k.forms.hc_fuse and !promptFused(pass, hc_w, n);
