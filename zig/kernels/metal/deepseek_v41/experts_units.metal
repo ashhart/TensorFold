@@ -162,7 +162,7 @@ inline void xu_chain(thread float (&cur)[16], device const uchar* wp, device con
       const float p = acc[i] * (FP8 ? 0x1p-14f : fabs(s) * 0x1p-14f);
       q[i] = TF_CTL == 3 ? xu_term<FP8>(p, s) : acc[i] * (fabs(s) * 0x1p-14f);
     }
-    const uint unsafe = simd_or((signbit(s0) ? 1u << hy : 0u) | (signbit(s1) ? 256u << hy : 0u));
+    const uint unsafe = TF_CTL == 6 ? 0u : simd_or((signbit(s0) ? 1u << hy : 0u) | (signbit(s1) ? 256u << hy : 0u));
     for (uint m = unsafe; m; m &= m - 1) {
       const uint r = ctz(m), src = ((r & 4) << 2) | ((r & 3) << 1);
       const uint at = simd_shuffle(r < 8 ? rb[0] : rb[1], ushort(src)) + 32 * g;
