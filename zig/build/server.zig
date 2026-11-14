@@ -88,6 +88,7 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 
 /// Tool parsing and actual chat visibility checks share the aggregate's real modules.
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
+    b.step("test-images-host", "Image route counts, seeds, refusals and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "image sequence:", "images_generations_test." } })).step);
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
