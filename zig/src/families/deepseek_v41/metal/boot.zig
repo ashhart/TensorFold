@@ -32,6 +32,16 @@ pub const Options = struct {
     engram_dir: ?[]const u8 = null,
 };
 
+/// The family's queue: Metal 4 under TF_METAL4=1 where this Mac has it, else Metal 3; the kernels are the same.
+pub fn openQueue(device: mtl.Device) !mtl.Queue {
+    if (!try environment.read(bool, "TF_METAL4", false)) return device.queue();
+    if (device.queue4()) |q| {
+        std.log.info("dsv41 metal: Metal 4 command queue", .{});
+        return q;
+    } else |_| std.log.warn("dsv41 metal: TF_METAL4=1 but this Mac has no Metal 4 queue; Metal 3 it is", .{});
+    return device.queue();
+}
+
 /// Everything a served model borrows, owned here and closed after the model's target and pass.
 pub const Boot = struct {
     a: Allocator,
@@ -61,7 +71,7 @@ pub const Boot = struct {
         const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
-        b.queue = try b.device.queue();
+        b.queue = try openQueue(b.device);
         errdefer b.queue.deinit();
         b.p = try pipelines.Pipelines.load(a, b.device, c);
         errdefer b.p.deinit();

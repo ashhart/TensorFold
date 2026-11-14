@@ -234,7 +234,7 @@ pub const Rig = struct {
         r.c = c;
         try r.c.validate();
         r.device = try mtl.Device.init();
-        r.queue = try r.device.queue();
+        r.queue = try pkg.boot.openQueue(r.device);
         r.p = try pkg.pipelines.Pipelines.load(a, r.device, &r.c);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
