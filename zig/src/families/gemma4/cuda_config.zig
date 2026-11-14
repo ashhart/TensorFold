@@ -1,5 +1,6 @@
 //! config.zig for CUDA builds, rule for rule (cuda_widths.zig in place of widths.zig): Gemma 4 admission.
 const std = @import("std");
+const rope_freq = @import("core").rope_freq;
 pub const widths = @import("cuda_widths.zig");
 
 pub const vocab = 262144;
@@ -129,12 +130,8 @@ pub fn headDim(index: usize) usize {
 
 /// RoPE inverse frequencies for a layer kind, as float32 [dim / 2]: zero for pairs proportional RoPE leaves alone.
 pub fn inverseFrequencies(is_global: bool, out: []f32) void {
-    const dim: f64 = if (is_global) global_dim else sliding_dim;
-    const theta = if (is_global) global_theta else sliding_theta;
-    for (out, 0..) |*f, i| {
-        const rotated = !is_global or i < global_rotated;
-        f.* = if (rotated) @floatCast(1.0 / std.math.pow(f64, theta, 2.0 * @as(f64, @floatFromInt(i)) / dim)) else 0.0;
-    }
+    if (is_global) return rope_freq.proportional(global_theta, global_dim, global_rotated, out);
+    rope_freq.inverseFrequencies(sliding_theta, sliding_dim, out);
 }
 
 fn object(v: std.json.Value) Error!std.json.ObjectMap {
@@ -527,4 +524,27 @@ test "layer kinds, head dims and the proportional RoPE table" {
     var s: [sliding_dim / 2]f32 = undefined;
     inverseFrequencies(false, &s);
     try std.testing.expect(s[127] > 0 and s[127] < s[1]);
+}
+
+/// The f64 expression the configs replaced: one rounding at the end, the power not rounded before its reciprocal.
+fn oldFrequencies(is_global: bool, out: []f32) void {
+    const dim: f64 = if (is_global) global_dim else sliding_dim;
+    const theta = if (is_global) global_theta else sliding_theta;
+    for (out, 0..) |*f, i| {
+        const rotated = !is_global or i < global_rotated;
+        f.* = if (rotated) @floatCast(1.0 / std.math.pow(f64, theta, 2.0 * @as(f64, @floatFromInt(i)) / dim)) else 0.0;
+    }
+}
+
+test "old against new RoPE tables: 43 of 128 sliding and 21 of 64 global words differ, by 1 ulp" {
+    var old_s: [sliding_dim / 2]f32 = undefined;
+    var new_s: [sliding_dim / 2]f32 = undefined;
+    oldFrequencies(false, &old_s);
+    inverseFrequencies(false, &new_s);
+    try rope_freq.expectDifferences("sliding theta 1e4 over 256", &old_s, &new_s, .{ .differ = 43, .rotated = 128, .max_ulp = 1 });
+    var old_g: [global_dim / 2]f32 = undefined;
+    var new_g: [global_dim / 2]f32 = undefined;
+    oldFrequencies(true, &old_g);
+    inverseFrequencies(true, &new_g);
+    try rope_freq.expectDifferences("global theta 1e6 over 512, 64 rotated", &old_g, &new_g, .{ .differ = 21, .rotated = 64, .max_ulp = 1 });
 }
