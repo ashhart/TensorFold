@@ -66,13 +66,15 @@ is closed. It is sent no checkpoint identity, no NCCL or RCCL id and no prompt, 
   error names the setting.
 - To change the key, replace the file on every host and restart the group.
 
-The proof shows which process connected. On a group with a key, every byte the engine itself sends between ranks
-after the proof crosses in ChaCha20-Poly1305 records under a key the proof leaves at both ends. That covers the
+The proof shows which process connected. On a group with a key, every byte the engine itself sends between ranks after
+the proof crosses in ChaCha20-Poly1305 records under a key the proof leaves at both ends. That covers the
 tensor-parallel bootstrap, fate and plan links, the ROCm ranks' command link and the Flash Next pair's control link, so
 a host on the path reads no settings, plan or failure reason, and a record it changes, drops or replays closes the
-link. A group with no key, which meets on one host only, is not sealed. The ranks' liveness lines are still clear
-text. The tensors do not cross on any of these links. NCCL, RCCL and RDMA carry them, and that traffic is clear text
-too, so run the ranks on a network you trust or on an encrypted one. The cluster links (`serve --cluster`,
+link. A group with no key, which meets on one host only, is not sealed. The ranks' liveness lines are still clear text.
+The tensors do not cross on any of these links. NCCL, RCCL and RDMA carry them, and that traffic is clear text too, so
+run the ranks on a network you trust or on an encrypted one. The GLM and MiniMax ranks also broadcast each step's
+header and prompt token ids over NCCL (`glm/cuda_follow.zig`, `minimax_m3/cuda_follow.zig`), so on those families that
+network carries the prompt as well and has to be trusted the same way. The cluster links (`serve --cluster`,
 `tensorfold node`) are a separate transport and do not use this key.
 
 ## Release files
