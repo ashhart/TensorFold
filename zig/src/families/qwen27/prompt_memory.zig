@@ -63,6 +63,64 @@ pub const Fit = struct {
         }
         return error.TooManyStreams;
     }
+
+    /// Advisory live-memory warning and smaller settings, priced with the startup's actual rows and drafter.
+    pub fn warning(f: Fit, rows: u32, slots: u32, window: u32, available: ?usize, pressure: ?u32) !?Warning {
+        const reserve = try f.cost(rows, slots);
+        if ((if (available) |bytes| reserve <= bytes else true) and (pressure orelse 1) < 2) return null;
+        var out: Warning = .{ .reserve = reserve, .available = available, .pressure = pressure };
+        if (available) |bytes| {
+            var fit = f;
+            fit.slots = slots;
+            fit.left = @min(f.left, bytes);
+            const fitting_streams = fit.streams(rows, false) catch 0;
+            if (fitting_streams < slots) out.streams = fitting_streams;
+            var lo: u32 = 0;
+            var hi = f.context -| window;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2 + 1;
+                fit.context = mid + window;
+                if (try fit.cost(rows, slots) <= fit.left) lo = mid else hi = mid - 1;
+            }
+            if (lo < f.context -| window) out.context = lo;
+        }
+        return out;
+    }
+};
+
+/// A snapshot of live memory is advice only; the fixed working-set budget still determines admission.
+pub const Warning = struct {
+    reserve: usize,
+    available: ?usize,
+    pressure: ?u32,
+    streams: ?u32 = null,
+    context: ?u32 = null,
+
+    pub fn format(warning: Warning, w: *std.Io.Writer) !void {
+        try w.print("stream and scratch reservation is {d:.1} GiB. macOS reports ", .{gibs(warning.reserve)});
+        if (warning.available) |bytes| try w.print("{d:.1} GiB available", .{gibs(bytes)}) else try w.writeAll("available memory is unknown");
+        if (warning.pressure) |p| {
+            try w.print(" and {s} memory pressure", .{if (p >= 4) "critical" else if (p >= 2) "warning" else "normal"});
+        } else try w.writeAll(" and memory pressure unavailable");
+        try w.writeAll(". ");
+        if (warning.available) |bytes| {
+            if (warning.reserve <= bytes) {
+                try w.writeAll("The current settings fit available memory. This warning is about memory pressure.");
+                return;
+            }
+        } else {
+            try w.writeAll("Wait for memory pressure to ease before starting.");
+            return;
+        }
+        if (warning.streams) |n| {
+            if (n > 0) try w.print("An estimated --parallel {d} fits at this context. ", .{n});
+        }
+        if (warning.context) |n| {
+            if (n > 0) try w.print("An estimated --context {d} fits at this parallelism. ", .{n});
+            if (n == 0) try w.writeAll("Even the minimum context exceeds current available memory. ");
+        }
+        try w.writeAll("Consider a smaller --context or --parallel, or make memory available before starting.");
+    }
 };
 
 /// A development cap can only reduce the device's reported working set.

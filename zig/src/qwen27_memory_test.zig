@@ -33,6 +33,107 @@ test "qwen27 memory: a wide frame preserves all configured slots and the exact w
     try std.testing.expectError(error.TooManyStreams, f.streams(512, false));
 }
 
+test "qwen27 memory: available bytes include free and inactive pages with checked arithmetic" {
+    const policy = @import("sys").memory_policy;
+    try std.testing.expectEqual(@as(?usize, 12 * 4096), policy.availableBytes(5, 7, 4096));
+    try std.testing.expectEqual(@as(?usize, 7 * 16384), policy.availableBytes(0, 7, 16384));
+    try std.testing.expectEqual(@as(?usize, 5 * 16384), policy.availableBytes(5, 0, 16384));
+    try std.testing.expectEqual(@as(?usize, 0), policy.availableBytes(0, 0, 16384));
+    try std.testing.expectEqual(@as(?usize, null), policy.availableBytes(1, 1, 0));
+    try std.testing.expectEqual(@as(?usize, null), policy.availableBytes(std.math.maxInt(usize), 1, 4096));
+    try std.testing.expectEqual(@as(?usize, null), policy.availableBytes(std.math.maxInt(usize) / 2, 1, 2));
+}
+
+test "qwen27 memory: the live available-memory reader is available only on macOS" {
+    const available = @import("sys").memory_policy.available();
+    if (@import("builtin").os.tag != .macos) {
+        try std.testing.expectEqual(@as(?usize, null), available);
+        return;
+    }
+    const bytes = available orelse return error.AvailableMemoryReadingFailed;
+    try std.testing.expectEqual(@as(usize, 0), bytes % std.heap.pageSize());
+}
+
+test "qwen27 memory: live startup readings warn only past available memory or under pressure" {
+    var f = fixture();
+    f.left = try f.cost(512, f.slots);
+    const page_size = 16384;
+    const pages = try std.math.divCeil(usize, f.left, page_size);
+    const reclaimed = @import("sys").memory_policy.availableBytes(1, pages - 1, page_size).?;
+    try std.testing.expect(f.left > page_size);
+    try std.testing.expectEqual(@as(?memory.Warning, null), try f.warning(512, f.slots, 128, reclaimed, 1));
+    try std.testing.expectEqual(@as(?memory.Warning, null), try f.warning(512, f.slots, 128, f.left, 1));
+    try std.testing.expectEqual(@as(?memory.Warning, null), try f.warning(512, f.slots, 128, null, null));
+    const short = (try f.warning(512, f.slots, 128, f.left - 1, 1)).?;
+    try std.testing.expectEqual(f.left, short.reserve);
+    try std.testing.expectEqual(@as(u32, 1), short.streams.?);
+    try std.testing.expect(short.context.? < f.context - 128);
+    for ([_]u32{ 2, 4 }) |pressure| {
+        const pressured = (try f.warning(512, f.slots, 128, f.left, pressure)).?;
+        try std.testing.expectEqual(@as(?u32, null), pressured.streams);
+        try std.testing.expectEqual(@as(?u32, null), pressured.context);
+    }
+    const unknown = (try f.warning(512, f.slots, 128, null, 4)).?;
+    try std.testing.expectEqual(@as(?u32, null), unknown.context);
+    try std.testing.expectEqual(@as(?u32, null), unknown.streams);
+}
+
+test "qwen27 memory: pressure-only warnings explain the pressure without repeating current settings" {
+    var f = fixture();
+    f.left = try f.cost(512, f.slots);
+    for ([_]u32{ 2, 4 }) |pressure| {
+        for ([_]usize{ f.left, f.left + (1 << 30) }) |available| {
+            const warning = (try f.warning(512, f.slots, 128, available, pressure)).?;
+            try std.testing.expectEqual(@as(?u32, null), warning.streams);
+            try std.testing.expectEqual(@as(?u32, null), warning.context);
+            var buffer: [1024]u8 = undefined;
+            const message = try std.fmt.bufPrint(&buffer, "{f}", .{warning});
+            try std.testing.expect(std.mem.indexOf(u8, message, "--parallel") == null);
+            try std.testing.expect(std.mem.indexOf(u8, message, "--context") == null);
+            try std.testing.expect(std.mem.indexOf(u8, message, "settings fit available memory") != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, "about memory pressure") != null);
+        }
+    }
+}
+
+test "qwen27 memory: startup recommendations fit the same drafted stream and scratch estimator" {
+    for ([_]bool{ false, true }) |shared| {
+        var f = fixture();
+        f.shared = shared;
+        f.slots = 4;
+        f.ring = 2048 * 5 * 5120 * 2;
+        f.planes = 7;
+        f.left = try f.cost(512, f.slots);
+        const free = try f.cost(512, 2);
+        const warning = (try f.warning(512, f.slots, 128, free, 1)).?;
+        try std.testing.expectEqual(@as(u32, 2), warning.streams.?);
+        try std.testing.expect(warning.context.? < f.context - 128);
+        var smaller = f;
+        smaller.context = warning.context.? + 128;
+        try std.testing.expect(try smaller.cost(512, f.slots) <= free);
+        smaller.context += 1;
+        try std.testing.expect(try smaller.cost(512, f.slots) > free);
+        const empty = (try f.warning(512, f.slots, 128, 0, null)).?;
+        try std.testing.expectEqual(@as(?u32, 0), empty.streams);
+        try std.testing.expectEqual(@as(?u32, 0), empty.context);
+        try std.testing.expectEqual(@as(u32, 4), try f.streams(512, true));
+    }
+}
+
+test "qwen27 memory: startup warning explains known and unavailable readings" {
+    const cases = [_]struct { warning: memory.Warning, text: []const u8 }{
+        .{ .warning = .{ .reserve = 8 << 30, .available = 4 << 30, .pressure = 1, .streams = 1, .context = 8192 }, .text = "4.0 GiB available" },
+        .{ .warning = .{ .reserve = 8 << 30, .available = null, .pressure = 4 }, .text = "available memory is unknown" },
+        .{ .warning = .{ .reserve = 8 << 30, .available = 0, .pressure = null, .streams = 0, .context = 0 }, .text = "make memory available before starting" },
+    };
+    for (cases) |case| {
+        var buffer: [1024]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "{f}", .{case.warning});
+        try std.testing.expect(std.mem.indexOf(u8, message, "8.0 GiB") != null);
+        try std.testing.expect(std.mem.indexOf(u8, message, case.text) != null);
+    }
+}
+
 test "qwen27 memory: overrides keep their width and still refuse an unaffordable startup" {
     var f = fixture();
     f.left = try f.cost(512, 2);
