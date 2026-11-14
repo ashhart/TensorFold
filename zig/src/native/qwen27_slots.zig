@@ -27,13 +27,15 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     const ids = s.prompt();
     if (ids.len == 0 or ids.len + s.max_new + b.window > b.runner.capacity) return error.PromptTooLong;
     if (s.yields()) return error.Yielded; // a background pass steps aside before it touches the slot
-    // as does one over the conversation slot 0 holds when the cache cannot keep its end: it would leave nothing there
-    if (slot == 0 and s.yield_check != null and s.max_new == 0 and !keepsEnd(s) and resumable(b, s, 0) != .none) return error.Yielded;
+    const kept_at: u32 = if (s.reuse.saved) |saved| @as(*const q.snapshot.State, @ptrCast(@alignCast(saved))).at else 0;
+    // as does one over slot 0's conversation when the cache cannot keep its end, unless a wide one and the point allow
+    if (slot == 0 and s.yield_check != null and s.max_new == 0 and
+        b.standing.warmYields(keepsEnd(s), resumable(b, s, 0), resumable(b, s, kept_at))) return error.Yielded;
     if (b.vision != null and s.images.len > 0 and b.image_fill != null and b.image_fill != s) return error.LaneMemory;
     try recover(b, s);
     b.runner.rope[slot] = try images.layout(b.vision, s);
     const d = b.drafter(slot);
-    const kept_at: u32 = if (s.reuse.saved) |saved| @as(*const q.snapshot.State, @ptrCast(@alignCast(saved))).at else 0;
+    const replay: resume_rules.Replay = if (slot == 0) b.standing.replayed(ids, s.decode_spans) else .{}; // before take
     const resumed = if (slot == 0) try takeStanding(b, s, kept_at) else 0; // slot 0's own state: nothing copied
     if (resumed == 0) {
         if (d) |x| try x.reset() else try b.runner.reset(slot);
@@ -57,7 +59,7 @@ pub fn opening(b: *Metal, s: *lanes.Stream, slot: u32) !Fill {
     s.fill_at.store(@intCast(at), .monotonic); // what the restore kept: 0 when it failed
     const encoded = if (b.vision) |v| try images.encode(v, b.runner.model.queue, s, slot) else null;
     if (encoded != null) b.image_fill = s; // the vision rows are this pass's until it closes
-    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at) };
+    return .{ .slot = slot, .at = at, .from = at, .images = encoded, .checkpoint = resume_rules.cachePoint(slot == 0 and slotResume(b) and plain(s) and s.max_new > 0 and s.reuse.hook != null and b.checkpoint_hook != null, at, b.chunk, ids.len, s.history_len, s.reuse.marks, s.chunks, s.decode_spans), .rewind = rewindPoint(b, s, slot, at, replay) };
 }
 
 /// The pass is over (done, failed or cancelled): its images' rows are free for the next image prompt.
@@ -87,7 +89,7 @@ pub fn chunk(b: *Metal, s: *lanes.Stream, f: *Fill, _: u32) !bool {
         return error.Yielded;
     }
     const at = f.at;
-    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s), ids.len, s.chunks, s.decode_spans);
+    var end = resume_rules.chunkEnd(at, @import("qwen27_prompt_rows.zig").choose(b, s, at), ids.len, s.chunks, s.decode_spans);
     if (f.checkpoint > at and f.checkpoint < end) end = f.checkpoint;
     end = resume_rules.rewindEnd(at, end, f.rewind);
     var decoded = false;
@@ -233,24 +235,34 @@ fn resumable(b: *const Metal, s: *const lanes.Stream, kept_at: u32) resume_rules
     return b.standing.plan(s.prompt(), s.decode_spans, kept_at);
 }
 
-/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, as the pass changes the slot.
+/// Slot 0's position for `s` when it resumes there (0: not); the record is used up, its rewind point carried on.
 fn takeStanding(b: *Metal, s: *const lanes.Stream, kept_at: u32) !u32 {
-    defer b.standing.deinit(b.gpa);
-    switch (resumable(b, s, kept_at)) {
+    const plan = resumable(b, s, kept_at);
+    b.standing.take(b.gpa, plan);
+    errdefer b.standing = .{ .wide = b.standing.wide }; // tokens and spans freed by take: the point and reply go too
+    // rows [0, rewind_at) and the buffer hold only while slot 0 just extends past it: a restore, reset or move drops it
+    switch (plan) {
         .none => return 0,
         .here => |n| {
-            const d = b.draft orelse return n;
-            try d.model.reset(); // a new session over the kept taps, as after a restore
-            d.model.committed_end = n;
+            if (b.draft) |d| {
+                try d.model.reset(); // a new session over the kept taps, as after a restore
+                d.model.committed_end = n;
+            }
             return n;
         },
         .back => |h| {
-            const buf = b.rewind orelse return 0;
+            const buf = b.rewind orelse return dropRewind(b);
             if (b.draft) |d| try d.model.reset();
-            q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), h, buf) catch return 0; // the pass then starts at 0
+            q.snapshot.rewindSlot(b.gpa, b.runner, 0, b.ringOf(0), h, buf) catch return dropRewind(b); // starts at 0
             return h;
         },
     }
+}
+
+/// A pass that could not rewind slot 0 starts it afresh, keeping no rewind point (0: resumed nowhere).
+fn dropRewind(b: *Metal) u32 {
+    b.standing.rewind_at = 0;
+    return 0;
 }
 
 /// A stream leaves slot 0: what it stands at stays for the next prompt that extends it, if a fresh pass stands there.
@@ -261,9 +273,9 @@ fn leave(b: *Metal, s: *const lanes.Stream) void {
     b.standing.leave(b.gpa, .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended }, s.context.items, s.decode_spans);
 }
 
-/// Where slot 0's pass keeps its rewind point: its rendered history's end, which a next turn shares (0: none).
-fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize) u32 {
-    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s)) return 0;
+/// Where slot 0's pass from `at` keeps its rewind point: its history's end (0: none, or it resumed in a `replay`).
+fn rewindPoint(b: *const Metal, s: *const lanes.Stream, slot: u32, at: usize, replay: resume_rules.Replay) u32 {
+    if (slot != 0 or b.rewind == null or !slotResume(b) or !plain(s) or replay.holds(at)) return 0;
     return if (s.history_len > at and s.history_len < s.prompt().len) s.history_len else 0;
 }
 
@@ -274,12 +286,13 @@ fn saveRewind(b: *Metal, at: u32) void {
     b.standing.rewind_at = at;
 }
 
-/// The history rewind where two full-context states do not fit in `cache`, provided `room` holds its bytes.
+/// The history rewind, where `room` holds it; beside a `cache` that keeps two full-context states it is also `wide`.
 pub fn rewindInit(b: *Metal, room: u64, cache: u64) ?mtl.Buffer {
     if (!slotResume(b) or b.runner.ready == 0) return null;
     const need = q.snapshot.rewindBytes(b.runner, b.ringOf(0));
-    if (!resume_rules.needsRewind(cache, q.snapshot.Spares.size(q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)))) return null;
-    if (need > room) {
+    const kind = resume_rules.makesRewind(need, room, cache, q.snapshot.Spares.size(q.snapshot.slotBytes(b.runner, b.ringOf(0), b.runner.capacity)));
+    b.standing.wide = kind == .wide; // such a cache keeps a reply's end, but may evict the history's end
+    if (kind == .none) {
         std.log.info("qwen27: no rewind point for slot 0 ({d} MiB, {d} MiB left under the load limit): a next turn that drops the last reply's reasoning reads its prompt again", .{ need >> 20, room >> 20 });
         return null;
     }
@@ -468,7 +481,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
     const g = &d.generation;
     const cap = try copyRows();
     var extra: u32 = @min(cap, 16); // grows while copies land whole, shrinks when most miss
-    var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = 5 }) };
+    var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = b.serial_copy_match }) };
     defer copies.lookup.deinit();
     _ = try s.commit(b.gpa, &.{try (q.session.Session{ .runner = b.runner }).greedy()}, &.{});
     hooks.committed(hooks.ctx);
@@ -484,7 +497,11 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
         const before = b.runner.gpu_seconds;
         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
         defer mtl.pass_metrics.end();
-        const result = try g.runRound(room, @min(b.nodes, 15), s.eos, true, if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null, extra);
+        const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
+        const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
+            try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
+        else
+            try g.runRound(room, @min(b.nodes, 15), s.eos, true, extend, extra);
         defer b.gpa.free(result.tokens);
         charge(b, s, before);
         if (result.extended > 0) {

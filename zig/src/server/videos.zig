@@ -82,8 +82,9 @@ pub fn prepare(
     b: *Budget,
 ) errors.Refused!api.PreparedVideo {
     const bytes = try bytesOf(cx, fetch, url, b);
+    // without libtfvideo this server takes no video: the request's refusal (400), as a model without video gets (#3004)
     var d: Decoder = .{ .v = api.tfvideo.Video.open(bytes) catch |e| return switch (e) {
-        error.NoLibrary => cx.fail(.server, "{s}", .{@import("sys").optional_libraries.spec(.video).message}),
+        error.NoLibrary => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: this server takes no video input: {s}", .{ i + 1, @import("sys").optional_libraries.spec(.video).message })),
         error.NoStream => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the video has no video stream", .{i + 1})),
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(try std.fmt.allocPrint(

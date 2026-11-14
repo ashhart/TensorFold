@@ -1,585 +1,571 @@
-//! Qwen3.5's hybrids on CUDA: qlinear projections, qwen35.cu glue, one captured forward over every stream's window.
+//! One TP rank's GLM-5.3-Flash CUDA engine (the Python family's decode.Engine); all ranks draw the same tokens.
 const std = @import("std");
 const cuda = @import("cuda");
-const core = @import("core");
-const Round = @import("cuda_round.zig");
-const geometry = @import("cuda_geometry.zig");
+const lanes = @import("lanes");
+const config = @import("config.zig");
+const shard = @import("cuda_shard.zig");
 const weights = @import("cuda_weights.zig");
-const caches = @import("cuda_cache.zig");
-const routed = @import("cuda_routed.zig");
-const hooks = @import("cuda_learn_hooks.zig");
-const pocket = @import("cuda_pocket.zig");
-const profile = @import("cuda_startup_profile.zig");
-const modelopt = @import("cuda_modelopt.zig");
-const x3w = @import("cuda_exl3_weights.zig");
-const hosted = @import("cuda_host_embed.zig");
-pub const recurrent = @import("cuda_recurrent.zig");
-pub const stage_fwd = @import("cuda_stage_forward.zig");
+const fw = @import("cuda_forward.zig");
+const ranks = @import("cuda_ranks.zig");
+const sampler = @import("cuda_sampler.zig");
+const prompt_lp = @import("cuda_prompt_logprobs.zig");
+const heat = @import("heat");
+const modelopt = @import("core").modelopt;
+const exl3 = @import("cuda_exl3.zig");
+const images_mod = @import("cuda_images.zig");
+const tile = @import("cuda_tile.zig");
+const mm_mod = @import("cuda_mm.zig");
+const dflash = @import("dflash.zig");
+const prof_mod = @import("cuda_prof.zig");
+const pages_mod = @import("cuda_pages.zig");
+const l2pf_mod = @import("cuda_l2pf.zig");
+const prompt_pair = @import("cuda_prompt_pair.zig");
+const tp = @import("tp");
+const mesh_mod = @import("mesh");
+pub const Options = @import("cuda_engine_types.zig").Options;
 
-pub const Geometry = geometry.Geometry;
-pub const Cache = caches.Cache;
-pub const tap_rows = caches.tap_rows;
-const Seg = caches.Seg;
-const DeviceBuffer = cuda.DeviceBuffer;
-const head_dim = geometry.head_dim;
+/// The most drafts a chain holds (decode.DepthPolicy's top depth).
+pub const max_drafts = 15;
+/// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
+const pair_bytes = 16;
+const pick_rows = @import("cuda_engine_pick.zig").pick_rows;
 
-/// Rows of one forward at most: a prompt chunk, or a shared round's windows.
-pub const max_rows = Round.max_rows;
-/// Streams' windows in one forward at most.
-pub const max_segs = Round.max_segs;
-/// Rows of a verify forward at most: each row's logits are kept and drawn.
-pub const most_verify = Round.most_verify;
-/// tf_q35_argmax_slices' blocks a row (ARGMAX_SLICE entries each).
-pub fn argmaxSlices(vocab: usize) usize {
-    return (vocab + 4095) / 4096;
-}
-/// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
-pub const most_window = Round.most_window;
-/// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
-pub const max_chunks = 64;
+/// A prompt pass's chunk rows (decode.prefill's).
+pub const prompt_rows = fw.prefill_rows;
+pub const solo_rows = fw.solo_rows;
+pub const max_together = @import("cuda_state.zig").prompt_heads;
+pub const Prompt = struct { slot: u32, ids: []const u32 };
 
-/// Device allocations are 256-byte aligned, as the driver's are.
-pub fn aligned(n: usize) usize {
-    return std.mem.alignForward(usize, n, 256);
-}
+/// A shared verify's max rows and streams: under hc_pre's 64-row block change; 16 streams take 2 rows each.
+pub const shared_rows = 32;
+pub const max_shared = 16;
 
-/// qwen35.cuh's Geo.
-pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
-
-const layers = @import("cuda_layers.zig");
-pub const Proj = layers.Proj;
-pub const Delta = layers.Delta;
-pub const Attention = layers.Attention;
-pub const Layer = layers.Layer;
-pub const Mlp = layers.Mlp;
-const Fns = layers.Fns;
-pub const Keeps = layers.Keeps;
-const Kv8 = layers.Kv8;
-/// A window of one stream in a forward: `parents`, for a tree, names each row's parent row (-1: the first row).
-pub const Part = struct { cache: *Cache, rows: usize, parents: ?[]const i32 = null, images: ?*const Images = null };
-
-/// An image prompt's rows for its prompt chunks: the staged tables' rows.
-pub const Images = Round.Images;
-
-/// What a forward keeps: a prompt chunk its last row's logits or (`rows`) every final-norm row; a window its draws.
-pub const Keep = union(enum) {
-    last,
-    draws: []const Draw,
-    logits,
-    hidden,
-    rows,
-
-    /// Whether the forward is a verify window (recorded, one-row bits); `last` and `rows` are prompt chunks.
-    pub fn verifies(k: Keep) bool {
-        return k != .last and k != .rows;
-    }
-};
-
-/// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
-pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
+const types = @import("cuda_engine_types.zig");
+const snapshots = @import("cuda_snapshots.zig");
+const prompt_solo = @import("cuda_prompt_solo.zig");
+pub const prompt_cuts = @import("cuda_prompt_cuts.zig"); // cuda_lanes' resume check too
+pub const Part = types.Part;
+pub const Kept = types.Kept;
+const Seq = types.Seq;
+const Snap = types.Snap;
+pub const Resume = types.Resume;
+pub const Cancel = types.Cancel;
+pub const Marks = types.Marks;
 
 pub const Engine = struct {
-    rec_scratch: recurrent.Pool,
-    startup: profile.Times = .{},
     gpa: std.mem.Allocator,
-    dir: []const u8,
-    pockets: pocket.Pockets,
-    learning: ?*const hooks.Keep = null,
-    mlp: ?hooks.MlpAdd = null,
-    taught: u64 = 0,
+    io: std.Io,
     d: *const cuda.Driver,
-    g: Geometry,
-    geo: Geo,
+    c: config.Config,
+    share: shard.Share,
+    spans: []shard.Span, // every rank's vocabulary span
+    lib: *const cuda.nccl.Library,
+    comm: cuda.nccl.Comm,
+    group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
+    mesh: mesh_mod.Mesh, // this rank's place: one tensor group of `world` ranks
+    backend: *tp.group.Backend, // the boundary's communicator over lib and comm, then the group once it is up
+    collective: tp.Collective, // backend's, made once so a const engine hands it out
+    images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
+    packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
+    drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
+    profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
+    profiling_prompt: ?*prof_mod.Prof = null,
+    prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
+    checkpoint_digest: [32]u8,
+    settings: ranks.Settings,
+    m: fw.Modules,
     stream: cuda.Stream,
-    mods: [19]cuda.Module,
-    kv8: bool, // attention caches as e4m3 rows with a scale each
-    rope_table: u64 = 0, // YaRN's attention factor and 32 frequencies on the device (cuda_rope.zig); 0: plain rope
-    rope_buf: ?cuda.DeviceBuffer = null, // the table's buffer (cuda_rope_table.zig)
-    fp8: Kv8,
-    prompt_attn: @import("cuda_prompt.zig").Fns, // a prompt chunk's attention tiles and delta-rule chain
-    int8: @import("cuda_prompt_int8.zig").State = .{}, // prompt projections with int8 activations, when on
-    draws: cuda.sample.Draws,
-    affine: cuda.qlinear.Affine4Kernels,
-    wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
-    experts: cuda.experts.Affine4Experts,
-    experts3: cuda.experts3.Affine3Experts,
-    mo: ?modelopt.Kernels = null, // a ModelOpt checkpoint's lane, prompt GEMM, packers and bf16 rows
-    plan: cuda.grouped.Router,
-    moe: cuda.moe.Fns,
-    fns: Fns,
-    keeps: Keeps,
-    /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
-    arena: DeviceBuffer,
-    arena_at: usize = 0,
-    /// Rows a verify forward takes at most, and a window's rows at most.
-    verify_rows: usize,
-    window_rows: usize,
-    // weights
-    embed_w: u64,
-    embed_s: u64,
-    embed_b: u64,
-    embed_bits: u8, // the embedding's rows' width: 4 or 8 (16: bf16 rows, an EXL3 checkpoint's)
-    host_embed: ?cuda.HostBuffer = null, // an EXL3 checkpoint's rows in mapped host memory: the card had no room
-    kit: ?*x3w.Kit = null, // an EXL3 checkpoint's kernels (g.exl3)
-    head: Proj,
-    final_norm: u64,
-    layers: []Layer,
-    // scratch, max_rows rows each
-    h: u64,
-    x: u64,
-    r: u64,
-    xs: u64,
-    qkv: u64,
-    z: u64,
-    a: u64,
-    b: u64,
-    q: u64,
-    k: u64,
-    v: u64,
-    g_: u64,
-    beta: u64,
-    y: u64,
-    mix: u64,
-    qraw: u64,
-    kraw: u64,
-    vraw: u64,
-    qn: u64,
-    kn: u64,
-    gate: u64,
-    up: u64,
-    act: u64,
-    pm: u64,
-    pl: u64,
-    po: u64,
-    logits: u64,
-    mt2: @import("cuda_mt2.zig").Mt2,
-    routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
-    amax: u64, // the argmax slices' bests: most_verify rows of argmaxSlices(vocab) (f32, i32)
-    picks: u64, // drawRows' slice scratch: most_verify rows of cuda.sample.Draws.row_scratch
-    // per-forward tables (ids, segments, rows' segment, parent and ancestors, the draws' rules) staged in pinned memory
-    tables: DeviceBuffer,
-    staged: cuda.HostBuffer,
-    host_logits: cuda.HostBuffer,
-    /// The kept rows' device draws, when forward was given them.
-    tokens: [most_verify]u32 = undefined,
-    /// presence and frequency penalties the next forward takes from its kept rows' logits (staged by the caller).
-    penalties: @import("cuda_penalties.zig").Rows = .{},
-    /// The captured forwards by shape (`Shape.key`): the launches from the embedding to the head.
-    graphs: std.AutoHashMapUnmanaged(u32, cuda.graph.Exec) = .empty,
-    /// A drafter's tapped layers (`setTaps`): each row's residual after them lands in its stream's tap ring.
-    taps: [8]u32 = undefined,
-    n_taps: usize = 0,
-    /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
-    features: u64 = 0,
-    /// A pipeline stage's ring (null: one engine, or a stage warming up) and its boundary rows in host memory.
-    hop: ?stage_fwd.Hop = null,
-    boundary: ?cuda.HostBuffer = null,
-    held: ?*stage_fwd.Held = null, // rank 0 with rounds in flight: the round's state its head reads later
+    pieces: fw.Pieces,
+    w: weights.Weights,
+    bp: fw.Buffers, // prompt chunks
+    pair: ?prompt_pair.Pair = null, // TF_GLM_PROMPT_PAIR: a paired prompt step's second chunk
+    bd: fw.Buffers, // verify windows
+    bm: fw.Buffers, // the MTP head's rows
+    bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
+    pairs: cuda.DeviceBuffer, // every rank's (value, id) of a greedy draw
+    smp: sampler.Sampler,
+    seqs: std.ArrayList(?*Seq) = .empty, // every stream's sequence by slot (the lane backend's), slot 0 made at init
+    cur: *Seq = undefined, // the bound slot's: every step below runs on it
+    slot: u32 = 0,
+    capacity: usize,
+    mtp: bool,
+    heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
+    shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
+    snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
+    snap_pages: ?snapshots.pages.Pool = null,
+    snap_setup: ?snapshots.Setup = null,
+    next_snap: u64 = 1, // rank 0: the next id
+    announce: u64 = 0, // rank 0: a state kept at this chunk's mark, for the other ranks to copy at its gate
+    dropped: std.ArrayList(u32) = .empty, // rank 0: ids dropped since the other ranks last heard (cuda_follow)
+    prompt_logprobs: ?prompt_lp.Want = null, // a prompt pass's rows asked for (every rank runs the head on them)
+    prompt_bufs: ?prompt_lp.Buffers = null, // their head passes' buffers, made at the first pass that asks
+    prompt_tried: bool = false, // that pass came: without buffers after it, the passes take the window's
+    prompt_out: prompt_lp.Output, // a head pass's logprob words, then its picks, host-mapped (rank 0 reads them)
+    structured: bool = false, // a structured output step: every rank's draws gather whole rows, rank 0 masks them
+    pages: ?*pages_mod.Pages = null, // the other streams' KV pages and sequences (cuda_pages), once the server attached them
+    index_split: bool = false, // the next prompt step's indexer rows split across the ranks: rank 0's choice, the chunk's flag 2
+    index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
+    share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
+    l2pf: ?l2pf_mod.L2pf = null, // TF_GLM_L2PF: the prefetch's side stream, kernels and table, made after the weights tile
 
-    pub const ids_at = Round.ids_at;
-    pub const segs_at = Round.segs_at;
-    pub const rowseg_at = Round.rowseg_at;
-    pub const rowpar_at = Round.rowpar_at;
-    pub const rowanc_at = Round.rowanc_at;
-    const rules_at = Round.rules_at;
-    const meta_at = Round.meta_at;
-    const tokens_at = Round.tokens_at;
-    pub const params_at = Round.params_at;
-    pub const src_at = Round.src_at;
-    pub const mpos_at = Round.mpos_at;
-    const tables_len = Round.bytes;
-
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit) !*Engine {
-        return initStage(gpa, io, ctx, dir, kv8, fit, null);
-    }
-
-    /// One engine, or with `span` a pipeline stage holding only its layers' weights and state (RFC #2005).
-    pub fn initStage(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool, fit: ?hosted.Fit, span: ?stage_fwd.Span) !*Engine {
-        if (!cuda.kernels.available) return error.BuiltWithoutKernels;
-        const started = profile.now(io);
-        const g = try stage_fwd.geometry(try Geometry.read(gpa, io, dir), span);
-        const d = ctx.d;
-        const e = try @import("cuda_prompt_int8.zig").Allocation(Engine).create(gpa);
+    /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
+        if (world > ranks.max_world) return error.TooManyRanks; // before anything is allocated
+        const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
-        errdefer e.int8.deinit();
-        e.gpa = gpa;
-        e.dir = try gpa.dupe(u8, dir);
-        errdefer gpa.free(e.dir);
-        e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
-        errdefer e.pockets.deinit();
-        e.learning = null;
-        e.mlp = null;
-        e.taught = 0;
-        e.kit = null;
-        e.d = d;
-        e.g = g;
-        e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
-        e.verify_rows = most_verify;
-        e.kv8 = kv8;
-        e.rope_table = 0; // plain rope until cuda_rope.zig uploads a YaRN table (the engine starts undefined)
-        e.rope_buf = null;
-        e.window_rows = most_window;
-        e.arena_at = 0;
-        e.graphs = .empty;
-        try @import("cuda_rope_table.zig").set(e, g.rope); // a YaRN config's table, before any weight or forward
-        errdefer @import("cuda_rope_table.zig").free(e);
-        e.penalties = .{};
-        e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
-        e.n_taps = 0;
-        e.features = 0;
-        e.hop = null;
-        e.boundary = null;
-        e.held = null;
-        e.stream = try cuda.Stream.init(d, true);
-        errdefer e.stream.deinit();
-        if (span != null) e.boundary = try cuda.HostBuffer.alloc(d, stage_fwd.bytes(g.hidden, max_rows));
-        errdefer if (e.boundary) |*b| b.free();
-        var ck = try core.Checkpoint.openModel(gpa, io, dir);
-        defer core.checkpoint.cache.close(&ck);
-        e.arena = try hosted.arena(e, io, ctx, &ck, fit);
-        errdefer hosted.release(e);
-        try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
-        const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8, kk.affine_prefill, kk.qwen35_kv8, kk.experts, kk.experts_prefill, kk.experts_pack, kk.moe, kk.experts3, kk.experts3_prefill, kk.prefill_attention, kk.gdn_prefill, kk.w4a8_prefill };
-        var loaded: usize = 0;
-        errdefer for (e.mods[0..loaded]) |*m| m.unload();
-        for (images, 0..) |img, i| {
-            e.mods[i] = try cuda.Module.load(d, img);
-            loaded += 1;
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const cfg_path = try std.fs.path.join(a, &.{ checkpoint, "config.json" });
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, cfg_path, a, .limited(1 << 24));
+        var why: modelopt.Why = .{};
+        const admitted = if (exl3.isExl3(gpa, text)) exl3.admit(gpa, text, &why) else @import("cuda_formats.zig").admit(gpa, text, &why);
+        admitted catch |err| { // anything but NVFP4, MIXED_PRECISION in recipes read here or EXL3 is refused by name before loading
+            std.log.err("{s}: {s}", .{ cfg_path, why.text() });
+            return err;
+        };
+        const c = try config.parse(gpa, text);
+        var stream = try cuda.Stream.init(d, false);
+        errdefer stream.deinit();
+        const config_hash = try ranks.hashFile(a, io, cfg_path);
+        const program_hash = try ranks.hashFile(a, io, "/proc/self/exe");
+        const checkpoint_digest = try ranks.artifact(a, io, checkpoint);
+        var fp = ranks.Fingerprint.of(
+            world,
+            rank,
+            o.settings,
+            o.capacity,
+            o.mtp,
+            config_hash,
+            program_hash,
+            checkpoint_digest,
+        );
+        if (o.vision) |lim| ranks.mediaFingerprint(&fp, lim);
+        fp.mtp += @intFromBool(o.drafter);
+        try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
+        try ranks.probeStart(d, lib, comm, stream, o.settings, rank, world);
+        const place = mesh_mod.Mesh.init(.{ .tensor = std.math.cast(u32, world) orelse 0 }, std.math.cast(u32, rank) orelse std.math.maxInt(u32)) catch return error.BadRank;
+        const tg = place.group(.tensor);
+        const share = try shard.Share.of(&c, tg.rank, tg.world);
+        const backend = try gpa.create(tp.group.Backend);
+        errdefer gpa.destroy(backend);
+        backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
+        const kb = @import("cuda_kda_block.zig");
+        kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
+        const spans = try gpa.alloc(shard.Span, world);
+        errdefer gpa.free(spans);
+        for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;
+        const block32 = !exl3.isExl3(gpa, text) and try @import("cuda_experts.zig").wantsBlock32(gpa, text);
+        var m = try fw.Modules.load(d, ctx, block32);
+        errdefer m.deinit();
+        const pair = prompt_pair.wanted(o.settings.pair, o.settings.solo, world);
+        var pieces = try fw.Pieces.init(d, o.settings.pieces, pair);
+        errdefer pieces.deinit();
+        if (o.settings.layers > c.layers) return error.BadLayers;
+        const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
+        for (layers, 0..) |*l, i| l.* = @intCast(i);
+        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
+        const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
+        if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
+        const Tile = struct {
+            gpa: std.mem.Allocator,
+            mk: *const mm_mod.Kernels,
+            s: cuda.Stream,
+            d: *const cuda.Driver,
+            enabled: bool,
+            dense: u8,
+            head: u8,
+            packs: *mm_mod.Packed,
+            fn apply(t: @This(), w: *weights.Weights) !void {
+                if (t.enabled) t.packs.* = try tile.tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
+            }
+        };
+        const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
+        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, Tile.apply);
+        errdefer e.w.deinit();
+        errdefer {
+            gpa.free(e.packs.ptrs);
+            gpa.free(e.packs.bits);
         }
-        const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
-        const major = try ctx.attribute(.compute_capability_major);
-        const minor = try ctx.attribute(.compute_capability_minor);
-        const mt2 = @import("cuda_mt2.zig");
-        e.mt2 = try mt2.Mt2.resolve(e.mods[9], @intCast(10 * major + minor), sms, mt2.qualifies(g));
-        const gb10 = major == 12 and minor == 1;
-        e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
-        e.affine.half_prompt = !gb10; // the 27B's prompt tile (Tile<64, 128, 128, 2, 2, 2>), quicker on an RTX 5090
-        errdefer e.affine.deinit();
-        // sm_120 too: a 32-row window of the 27B verifies in 17.8 ms on one weight pass, 22.3 ms on two 16-row ones
-        if (major == 12 and minor == 0) e.affine.wide_verify = true;
-        e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[8], e.mods[3], sms, gb10);
-        errdefer e.wide.deinit();
-        e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
-        e.experts = try cuda.experts.Affine4Experts.resolve(e.mods[10], e.mods[11], e.mods[12], sms);
-        e.experts3 = try cuda.experts3.Affine3Experts.resolve(e.mods[14], e.mods[15], sms);
-        e.plan = try cuda.grouped.Router.resolve(e.mods[10]);
-        e.moe = try cuda.moe.Fns.resolve(e.mods[13]);
-        inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
-        try e.fns.attn_partial.allowDynamicShared(@import("cuda_forward.zig").attn_tiles); // bf16 tiles' two buffers
-        try e.fns.attn_rows.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
-        try e.fns.attn_partial_whole.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
-        try e.fns.attn_rows_whole.allowDynamicShared(@import("cuda_forward.zig").attn_tiles);
-        inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
-        e.prompt_attn = try @import("cuda_prompt.zig").resolve(e.mods[16], e.mods[17]);
-        try e.int8.resolve(e.mods[18]);
-        e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .attn_rows = try e.mods[9].function("tf_q35_attn_rows8"), .attn_partial8_whole = try e.mods[9].function("tf_q35_attn_partial8_whole"), .attn_rows8_whole = try e.mods[9].function("tf_q35_attn_rows8_whole"), .compact = try e.mods[9].function("tf_q35k_compact8") };
-        e.mo = if (g.kinds.modelopt) try modelopt.Kernels.load(d, @intCast(10 * major + minor), sms, g.moe()) else null;
-        errdefer if (e.mo) |*m| m.unload();
-        e.layers = try gpa.alloc(Layer, g.layers);
-        errdefer gpa.free(e.layers);
-        if (g.exl3) {
-            e.kit = try x3w.Kit.init(gpa, d, g);
-            errdefer e.kit.?.deinit(gpa);
-            try x3w.load(e, &ck);
-        } else {
-            // each projection as stored, packed from here; freed before the server counts what streams can use
-            var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
-            defer stage.free();
-            try weights.load(e, &ck, &stage);
+        e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
+        e.m.tiled = o.settings.tiled;
+        if (o.settings.tiled) e.m.packs = &e.packs;
+        if (o.settings.l2pf.want(try ctx.capability(), world)) e.l2pf = try l2pf_mod.L2pf.init(gpa, d, &e.w, o.settings.l2pf);
+        errdefer if (e.l2pf) |*p| p.deinit();
+        if (o.settings.pages) try pages_mod.ownSequence(e) else try e.bind(0); // on pages: no window, its pool places it
+        errdefer {
+            e.free(0);
+            e.seqs.deinit(gpa);
         }
-        if (e.mo) |*m| try m.reserveParts(e);
-        try @import("cuda_engine_tail.zig").finish(e, io, started);
+        e.bp = try fw.Buffers.init(d, &e.w, prompt_solo.bufferRows(o.settings.solo), true, o.capacity);
+        errdefer e.bp.deinit();
+        if (o.settings.solo and rank == 0) std.log.info("glm: prompt passes of {d} rows, {d} while another stream decodes", .{ fw.solo_rows, fw.prefill_rows });
+        if (world > 1 and rank == 0) std.log.info("glm: a prompt chunk's exchanges in {d} row pieces", .{o.settings.pieces});
+        if (pair) e.pair = try prompt_pair.Pair.init(d, &e.w, &e.bp, &e.pieces, o.capacity);
+        errdefer if (e.pair) |*p| p.deinit();
+        e.bd = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
+        errdefer e.bd.deinit();
+        e.bm = try fw.Buffers.init(d, &e.w, fw.window_rows, false, o.capacity);
+        errdefer e.bm.deinit();
+        if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
+        errdefer if (e.bs) |*b| b.deinit();
+        e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world * pick_rows);
+        errdefer e.pairs.free();
+        try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
+        e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
+        errdefer e.smp.deinit();
+        errdefer e.freeProfs();
+        const profiled = try prof_mod.Prof.wanted();
+        if (profiled) for (&e.profs) |*p| {
+            p.* = try prof_mod.Prof.init(d, io);
+        };
+        if (profiled) for (&e.prompt_profs) |*p| {
+            p.* = try prof_mod.Prof.init(d, io);
+            p.*.?.every = 4;
+        };
+        e.prompt_out = try prompt_lp.Output.init(d);
+        errdefer e.prompt_out.free();
+        e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
+        errdefer e.shared_buf.free();
+        errdefer @import("cuda_load_owner.zig").drain(stream, d);
+        try e.stream.synchronize();
         return e;
     }
 
-    pub fn finishWarm(e: *Engine, io: std.Io, started: i96) !void {
-        const warm_start = profile.now(io);
-        e.startup = .{ .load = warm_start - started };
-        errdefer recurrent.shutdown(e);
-        e.startup.add(try profile.withCache(e.gpa, io, e, Cache));
-    }
-
-    /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
-    pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
-        const ids: [32]u32 = @splat(0);
-        const greedy: Draw = .{ .rule = null, .position = 33 };
-        try e.forward(&.{.{ .cache = warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
-        try e.forward(&.{.{ .cache = warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{greedy} });
-        try e.forward(&.{.{ .cache = warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = .{ .seed = 1, .inv_t = 1.0 / 0.7, .top_p = 0.95, .near = 20.0, .min_log = -std.math.inf(f32), .top_k = 20 }, .position = 34 }} });
-        // a tree window and a branch of it kept: the keep kernels, and the forward's branch path
-        try e.forward(&.{.{ .cache = warm_cache, .rows = 3, .parents = &.{ -1, 0, 0 } }}, ids[0..3], .{ .draws = &.{ greedy, greedy, greedy } });
-        try warm_cache.keep(e, &.{ 0, 2 });
-        try e.stream.synchronize();
-        recurrent.completed(e);
-    }
-
     pub fn deinit(e: *Engine) void {
-        recurrent.shutdown(e);
-        @import("cuda_rope_table.zig").free(e);
-        if (e.kit) |k| k.deinit(e.gpa);
-        e.pockets.deinit();
-        var it = e.graphs.valueIterator();
-        while (it.next()) |x| x.deinit();
-        e.graphs.deinit(e.gpa);
-        e.penalties.deinit(e.gpa);
-        e.host_logits.free();
-        e.staged.free();
-        e.tables.free();
-        hosted.release(e);
-        if (e.boundary) |*b| b.free();
-        e.gpa.free(e.layers);
-        e.gpa.free(e.dir);
-        e.affine.deinit();
-        e.wide.deinit();
-        e.int8.deinit();
-        if (e.mo) |*m| m.unload();
-        for (&e.mods) |*m| m.unload();
+        e.stream.synchronize() catch {};
+        e.gpa.free(e.packs.ptrs);
+        e.gpa.free(e.packs.bits);
+        if (e.drafter) |dr| dr.deinit();
+        var it = e.snaps.valueIterator();
+        while (it.next()) |s| e.freeSnap(s);
+        e.snaps.deinit(e.gpa);
+        if (e.snap_pages) |*p| p.deinit();
+        e.dropped.deinit(e.gpa);
+        e.shared_buf.free();
+        e.freeProfs();
+        if (e.prompt_bufs) |*b| b.free();
+        e.prompt_out.free();
+        e.smp.deinit();
+        e.pairs.free();
+        if (e.bs) |*b| b.deinit();
+        e.bm.deinit();
+        e.bd.deinit();
+        if (e.pair) |*p| p.deinit();
+        e.bp.deinit();
+        if (e.pages) |p| p.deinit();
+        for (0..e.seqs.items.len) |i| e.free(i);
+        e.seqs.deinit(e.gpa);
+        if (e.l2pf) |*p| p.deinit();
+        e.w.deinit();
+        e.pieces.deinit();
+        e.m.deinit();
         e.stream.deinit();
-        e.gpa.destroy(e);
+        e.gpa.free(e.spans);
+        e.gpa.destroy(e.backend);
+        const gpa = e.gpa;
+        gpa.destroy(e);
     }
 
-    /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
-    pub fn streamBytes(e: *const Engine, cap: usize) usize {
-        const c = @import("cuda_cache.zig");
-        return e.g.stateBytes() + c.scratchBytes(e) + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + c.pendBytes(e.g);
+    const freeProfs = @import("cuda_engine_prof.zig").freeProfs;
+
+    /// The serving group, its RoCE wires open: the main stream's and the boundary's gathers take its route now.
+    pub fn installGroup(e: *Engine, g: *cuda.tp_group.Group) void {
+        e.group = g;
+        e.backend.group = g;
+        std.log.info("[tensorfold] glm: rank {d} of {d} sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
     }
 
-    /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
-    pub fn tapBytes(e: *const Engine) usize {
-        return tap_rows * e.n_taps * e.g.hidden * 2;
+    pub fn exchange(e: *const Engine) fw.Exchange {
+        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .collective = e.collective } };
     }
 
-    /// The layers a drafter taps, told before the streams' caches exist; each forward then fills their rings.
-    pub fn setTaps(e: *Engine, taps: []const u32) !void {
-        if (e.g.whole != 0 and taps.len > 0) return error.StageTaps; // v1 stages serve no drafter
-        if (taps.len > e.taps.len) return error.TooManyTaps;
-        for (taps) |t| if (t >= e.g.layers) return error.BadTap;
-        @memcpy(e.taps[0..taps.len], taps);
-        e.n_taps = taps.len;
+    pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
+        out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
+        const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null };
     }
 
-    /// The next `bytes` of the arena, 256-byte aligned.
-    pub fn alloc(e: *Engine, bytes: usize) !u64 {
-        const at = aligned(e.arena_at);
-        if (at + bytes > e.arena.len) return error.ArenaExhausted;
-        e.arena_at = at + bytes;
-        return e.arena.ptr + at;
-    }
-
-    /// The scratch rows' bytes, or the rows themselves from the arena (cuda_scratch.zig).
-    pub const scratch = @import("cuda_scratch.zig").scratch;
-
-    pub fn run(e: *Engine, f: cuda.Function, grid: [3]usize, block: [3]usize, args: anytype) !void {
-        var a: cuda.Args = .{};
-        inline for (args) |v| a.add(v);
-        const cfg: cuda.Config = .{ .grid = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) }, .block = .{ .x = @intCast(block[0]), .y = @intCast(block[1]), .z = @intCast(block[2]) } };
-        try cuda.launch.launch(f, cfg, e.stream, &a);
-    }
-
-    /// The projections: the row tiles, the prompt GEMM and the grouped form, in their own file.
-    pub const proj = @import("cuda_projection.zig").proj;
-    pub const projSums = @import("cuda_projection.zig").projSums;
-    pub const projAgain = @import("cuda_projection.zig").projAgain;
-    pub const projMany = @import("cuda_projection.zig").projMany;
-    pub const projManyPrompt = @import("cuda_projection.zig").projManyPrompt;
-    pub const projManySums = @import("cuda_projection.zig").projManySums;
-    pub const projectMany = @import("cuda_projection.zig").projectMany;
-    pub const project = @import("cuda_projection.zig").project;
-
-    /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
-    pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
-        if (e.kit) |kit| return kit.b16.embedRows(e.stream, ids, e.embed_w, out, rows, e.g.hidden, params);
-        if (e.embed_bits == 16) return modelopt.embed(e, ids, out, rows); // bf16 rows; padding rows' ids are zeroed
-        const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
-        try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
-    }
-
-    /// Logits rows first..first + n's greedy tokens into toks: the highest logit, ties to the lower id.
-    fn argmax(e: *Engine, first: usize, n: usize, toks: u64) !void {
-        if (n == 0) return;
-        const slices = argmaxSlices(e.g.vocab);
-        const pv = e.amax;
-        const pi = e.amax + n * slices * 4;
-        try e.run(e.fns.argmax_slices, .{ slices, n, 1 }, .{ 256, 1, 1 }, .{ e.logits + first * e.g.vocab * 2, @as(c_int, @intCast(e.g.vocab)), pv, pi });
-        try e.run(e.fns.argmax_merge, .{ n, 1, 1 }, .{ 32, 1, 1 }, .{ pv, pi, @as(c_int, @intCast(slices)), toks + first * 4 });
-    }
-
-    pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
-        try e.run(if (e.g.bf16) e.fns.norm_shift else e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
-    }
-
-    /// Refuse the whole frame before settling any prior window or launching work.
-    pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
-        const g = e.g;
-        if (!geometry.supported(g, ids.len, !keep.verifies(), most_verify)) return error.UnsupportedQwenGeometry;
-        var total: usize = 0;
-        if (parts.len == 0 or parts.len > max_segs) return error.InvalidQwenSegments;
-        for (parts, 0..) |p, index| {
-            for (parts[0..index]) |prior| if (prior.cache == p.cache) return error.InvalidQwenSegments;
-            if (p.rows == 0 or p.cache.len > p.cache.cap or p.rows > p.cache.cap - p.cache.len) return error.QwenContextFull;
-            if (p.rows > max_rows - total) return error.InvalidQwenSegments;
-            total += p.rows;
-        }
-        if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
-        if (e.learning != null and total != 1) return error.BadLearningRows;
-        if (keep == .hidden and e.learning == null) return error.BadLearningRows;
-        const record = keep.verifies();
-        if (record and total > e.verify_rows) return error.InvalidQwenSegments;
-        if (!record and parts.len != 1) return error.InvalidQwenSegments;
-        if (keep == .draws and keep.draws.len != total) return error.InvalidQwenSegments;
-        for (ids) |id| if (id >= g.vocab) return error.InvalidQwenToken;
-        for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
-        for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
-    }
-
-    /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
-    pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
-        try e.admit(parts, ids, keep);
-        const g = e.g;
-        const total = ids.len;
-        const record = keep.verifies();
-        // the tables
-        const st = e.staged.bytes;
-        @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
-        @memset(st[ids_at + total * 4 .. ids_at + max_rows * 4], 0); // a bucket's padding rows read token 0
-        const segs = std.mem.bytesAsSlice(Seg, st[segs_at..][0 .. parts.len * @sizeOf(Seg)]);
-        const slot_peak = try Round.build(st, parts, record);
-        for (parts) |p| {
-            try p.cache.settle(e);
-            // pending kept rows ride in a recorded slot scan; any other pass reads the state as written
-            if (!(record and keep != .hidden)) try p.cache.flush(e);
-            try recurrent.prepare(e, p.cache, p.rows, record);
-        }
-        var row0: usize = 0;
-        for (parts, 0..) |p, i| {
-            segs[i] = p.cache.fold(p.cache.seg(e, p.cache.len, row0, p.rows));
-            row0 += p.rows;
-        }
-        if (keep == .draws) {
-            const rules = std.mem.bytesAsSlice(cuda.sample.Rule, st[rules_at..][0 .. total * @sizeOf(cuda.sample.Rule)]);
-            const meta = std.mem.bytesAsSlice(c_int, st[meta_at..][0 .. total * 4]);
-            for (keep.draws, rules, meta) |p, *r, *m| {
-                if (p.rule) |x| r.* = x;
-                m.* = @intCast(p.position -% 1); // sample.cu keys row r at meta + r + 1
+    /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
+    pub fn bind(e: *Engine, slot: u32) !void {
+        if (slot >= e.seqs.items.len) try e.seqs.appendNTimes(e.gpa, null, slot + 1 - e.seqs.items.len);
+        const made = e.seqs.items[slot] == null;
+        const previous = if (e.images != null) e.cur else null;
+        const previous_slot = if (e.images != null) e.slot else 0;
+        errdefer {
+            if (made) e.free(slot);
+            if (previous) |q| {
+                e.cur = q;
+                e.slot = previous_slot;
             }
         }
-        // words 0 and 1 are reserved (each row's attention chunks follow its own keys: qwen35.cu's chunk_keys)
-        const params = std.mem.bytesAsSlice(c_int, st[params_at..][0..32]);
-        params[0] = 0;
-        params[1] = 0;
-        params[2] = @intCast(total);
-        params[3] = @intCast(parts.len);
-        params[4] = @intFromBool(record);
-        defer e.taught = 0;
-        try @import("cuda_forward_extra.zig").stageScales(e, parts, total);
-        // an image prompt's chunk (one part, its rows at prompt positions len..): feature rows and t, h, w positions
-        const images: ?*const Images = if (record) null else parts[0].images;
-        if (images) |im| {
-            const p0 = parts[0].cache.len;
-            if (p0 + total > im.src.len or im.pos.len != 3 * im.src.len) return error.InvalidQwenImages;
-            @memcpy(std.mem.bytesAsSlice(i32, st[src_at..][0 .. total * 4]), im.src[p0..][0..total]);
-            Round.stageImageTables(st, im, p0, total);
+        if (made) {
+            const q = try e.gpa.create(Seq);
+            errdefer e.gpa.destroy(q);
+            q.* = .{ .st = try fw.State.initFormat(e.gpa, e.d, &e.w, e.capacity, e.settings.kv8) };
+            e.seqs.items[slot] = q;
         }
-        try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
-        var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
-        if (record) for (parts) |p| {
-            try recurrent.mark(p.cache, false);
-            if (p.rows == 1) try recurrent.mark(p.cache, true);
+        e.cur = e.seqs.items[slot].?;
+        e.slot = slot;
+        if (e.images) |v| try v.activate(slot);
+    }
+
+    /// Frees slot `slot`'s sequence (slot 0 stays, and a paged one gives its pages back) and binds slot 0.
+    pub fn release(e: *Engine, slot: u32) void {
+        if (e.images) |v| v.release(slot);
+        const paged = if (e.pages) |p| p.paged(slot) else false;
+        if (paged) e.pages.?.close(slot) else if (slot != 0) e.free(slot);
+        e.cur = e.seqs.items[0].?;
+        e.slot = 0;
+    }
+
+    fn free(e: *Engine, slot: usize) void {
+        const q = e.seqs.items[slot] orelse return;
+        cuda.completion.drain(e.d, e.stream, "GLM sequence release did not drain");
+        q.st.deinit();
+        q.cuts.deinit(e.gpa);
+        e.gpa.destroy(q);
+        e.seqs.items[slot] = null;
+    }
+
+    /// Bytes one more stream's sequence takes on this rank (its state arena).
+    pub fn seqBytes(e: *const Engine) u64 {
+        return e.seqs.items[0].?.st.arena.buf.len;
+    }
+
+    /// The committed length: the pending token sits at this position, a window's row r draws position pos + 1 + r.
+    pub fn pos(e: *const Engine) usize {
+        return e.cur.st.pos;
+    }
+
+    /// A follower's begin: rank 0's next request; no image rows from an earlier one splice into it.
+    pub fn beginFollowing(e: *Engine, sampling: ?sampler.Sampling) !void {
+        if (e.images) |v| v.clear();
+        return e.begin(sampling);
+    }
+
+    /// A fresh sequence with `sampling` (null or temperature 0: greedy).
+    pub fn begin(e: *Engine, sampling: ?sampler.Sampling) !void {
+        e.cur.sampling = sampler.check(sampling);
+        e.cur.in_head = 0;
+        e.cur.cuts.clearRetainingCapacity(); // a request without starts cuts on the grid alone
+        try e.cur.st.reset(e.stream);
+        if (e.drafter) |dr| try dr.restart(e.slot, 0);
+    }
+
+    /// decode.prefill: `ids` chunk by chunk to each cut, then the first token from the last row; `from` resumes.
+    pub fn prefill(e: *Engine, ids: []const u32, from: ?Resume, cancel: ?Cancel, marks: ?Marks) !u32 {
+        var start = try e.prefillStart(ids.len, from);
+        while (true) {
+            const end = prompt_cuts.nextCut(ids.len, e.cur.cuts.items, start);
+            if (try e.prefillChunk(ids[start..@min(ids.len, end + 1)], start, ids.len, null, cancel, marks)) |first| return first;
+            start = end;
+        }
+    }
+
+    /// Where a prompt pass of `len` ids starts: 0, or `from`'s position with its kept state restored.
+    fn prefillStart(e: *Engine, len: usize, from: ?Resume) !usize {
+        if (len == 0 or len + fw.window_rows >= e.cur.st.capacity) return error.PromptTooLong;
+        const r = from orelse return 0;
+        if (r.at == 0 or r.at >= len or !prompt_cuts.coldCut(len, e.cur.cuts.items, r.at)) return error.BadResume;
+        try e.restoreState(r.id);
+        if (e.drafter) |dr| try dr.restart(e.slot, r.at); // the rows before it were never tapped
+        return r.at;
+    }
+
+    /// One chunk of a `len`-id prompt pass: `part` from `start` plus the next id; first token at the end, else null.
+    pub fn prefillChunk(e: *Engine, part: []const u32, start: usize, len: usize, from: ?Resume, cancel: ?Cancel, marks: ?Marks) !?u32 {
+        const split = e.index_split; // this step's alone
+        e.index_split = false;
+        if ((from != null or start == 0) and try e.prefillStart(len, from) != start) return error.BadChunk;
+        const rows = try prompt_cuts.stepRows(len, e.cur.cuts.items, start, part.len);
+        if (rows > fw.prefill_rows and e.pair != null) return prompt_pair.prefill(e, part, start, len, cancel, marks, split);
+        if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
+        if (rows > fw.prefill_rows and !prompt_solo.allowed(e, start, rows)) return error.BadChunk;
+        var one: [1]fw.Rank = undefined;
+        var f = e.view(&e.bp, &one);
+        f.index_split = split;
+        if (start + rows <= len -| @as(usize, @intCast(dflash.WIN))) f.taps = null; // none read (dflash.promptRun)
+        const as_i32: []const i32 = @ptrCast(part);
+        if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
+        f.prof = e.prompt_profs[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3];
+        const labels = [_][]const u8{ "prompt chunk to 64 rows", "prompt chunk to 256 rows", "prompt chunk to 1024 rows", "prompt chunk to 2048 rows" };
+        if (f.prof) |p| try p.beginPrompt(e.stream, labels[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3], .{ .rank = e.share.rank, .slot = e.slot, .start = start, .rows = rows }, e.c.run, e.pieces.count);
+        if (f.prof) |p| e.profiling_prompt = p;
+        defer if (f.prof != null) {
+            e.profiling_prompt = null;
         };
-        shape.hidden = keep == .hidden;
-        shape.rows = keep == .rows;
-        shape.paged = @import("cuda_attention.zig").hasPages(segs);
-        shape.mt2 = @import("cuda_shapes.zig").useMt2(e.mt2.enabled, e.kv8, !record, total, parts.len, parts[0].cache.len);
-        if (e.learning != null or e.pockets.any()) {
-            shape.total = @intCast(total);
-            shape.nseg = @intCast(parts.len); // the exact path: uncaptured at the live counts
-        }
-        e.features = if (images) |im| im.features else 0;
-        defer e.features = 0;
-        if (g.whole == 0) try e.launchShape(shape) else try stage_fwd.run(e, shape, total);
-        for (parts) |p| p.cache.advanced(p.rows, record);
-        if (!g.heads) return recurrent.completed(e); // a stage without the head: no logits to keep
-        if (e.held) |h| return h.hold(st, shape, total); // rank 0 with rounds in flight: its head runs at `land`
-        try e.land(parts, keep, total);
-    }
-
-    /// A forward's kept rows after its launches: the draws, logits or rows `keep` asks for, read back.
-    pub fn land(e: *Engine, parts: []const Part, keep: Keep, total: usize) !void {
-        const g = e.g;
-        const heads: usize = if (keep.verifies()) total else 1;
-        if (keep == .draws or keep == .logits) try e.penalties.apply(e.d, &e.draws, e.stream, e.logits, g.vocab) else e.penalties.clear();
-        switch (keep) {
-            .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
-            .draws => |pk| {
-                const toks = e.tables.ptr + tokens_at;
-                var i: usize = 0; // runs of greedy rows argmaxed together, runs of sampled rows drawn together
-                while (i < pk.len) {
-                    const sampled = pk[i].rule != null;
-                    var n: usize = 1;
-                    while (i + n < pk.len and (pk[i + n].rule != null) == sampled) n += 1;
-                    if (sampled) {
-                        try e.draws.drawRows(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, toks + i * 4, n, e.picks);
-                    } else try e.argmax(i, n, toks);
-                    i += n;
-                }
-                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(e.host_logits.bytes.ptr, toks, total * 4, e.stream.handle), "cuMemcpyDtoHAsync");
-                try e.stream.synchronize();
-                @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
-            },
-            .rows => {}, // the rows stay in `x` for the readout that runs next on the stream
-            .logits, .last => {
-                const out = e.host_logits.bytes[0 .. heads * g.vocab * 2];
-                try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(out.ptr, e.logits, out.len, e.stream.handle), "cuMemcpyDtoHAsync");
-                try e.stream.synchronize();
-                if (keep == .last) @memcpy(parts[0].cache.logits, e.rowLogits(0));
-            },
-        }
-        // a readout piece waits for nothing: the queue's work is done only once a later forward has waited
-        if (keep != .rows) recurrent.completed(e);
-    }
-
-    pub const Shape = @import("cuda_shapes.zig").Shape;
-
-    /// One shape's launches: uncaptured for a prompt chunk or the exact path, else its captured graph replayed.
-    pub const launchShape = @import("cuda_shapes.zig").launch;
-
-    /// The same scan selected by body, exposed for host launch-contract fixtures.
-    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
-        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
-            1 => e.fns.gdn_slots_1,
-            2 => e.fns.gdn_slots_2,
-            4 => e.fns.gdn_slots_4,
-            8 => e.fns.gdn_slots_8,
-            16 => e.fns.gdn_slots_16,
-            else => return error.InvalidGdnSlots,
+        defer if (f.prof) |p| p.end();
+        errdefer if (f.prof) |p| {
+            p.prompt.?.invalid = true;
         };
-        const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);
-        // qwen35_slots.cuh: up to four slots scan two value rows a warp, so a block covers eight
-        const rows_a_warp: usize = if (record and slot_count <= 4) 2 else 1;
-        try e.run(scan, .{ 1, geometry.dk / (4 * rows_a_warp), e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
+        var stamp = prof_mod.span(f.prof, e.stream, .gate);
+        e.gate(cancel) catch |err| {
+            if (err == error.Cancelled) try snapshots.interrupted(e, marks, @intCast(start));
+            return err;
+        };
+        stamp.end();
+        if (f.prof) |p| p.mark(e.stream, .gate);
+        try f.run(as_i32[0..rows]);
+        e.index_splits += @intFromBool(split);
+        stamp = prof_mod.span(f.prof, e.stream, .prompt_score);
+        if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
+        stamp.end();
+        stamp = prof_mod.span(f.prof, e.stream, .drafter);
+        if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
+        stamp.end();
+        stamp = prof_mod.span(f.prof, e.stream, .draw);
+        const last = start + rows == len;
+        var first: ?u32 = null;
+        if (last) {
+            var t: [1]u32 = undefined;
+            try e.draw(e.bp.logits, 1, len, 0, &t);
+            first = t[0];
+        }
+        stamp.end();
+        if (f.prof) |p| p.mark(e.stream, .draw);
+        if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
+        stamp = prof_mod.span(f.prof, e.stream, .mtp);
+        if (e.mtp) try prompt_solo.mtpRows(e, &f, as_i32);
+        stamp.end();
+        if (f.prof) |p| p.mark(e.stream, .mtp);
+        stamp = prof_mod.span(f.prof, e.stream, .commit);
+        try f.commit(rows);
+        stamp.end();
+        if (f.prof) |p| p.mark(e.stream, .commit);
+        return first;
     }
 
-    /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
-    pub const body = @import("cuda_forward.zig").body;
+    pub const gate = @import("cuda_engine_gate.zig").gate;
+    pub const shared = @import("cuda_engine_gate.zig").shared;
 
-    pub const routedRows = routed.rows;
+    pub const stateBytes = snapshots.bytes;
+    pub const prepareSnapshots = snapshots.prepare;
+    pub const keepState = snapshots.keep;
+    pub const keepAs = snapshots.keepAs;
+    pub const restoreState = snapshots.restore;
+    pub const holds = snapshots.holds;
+    pub const dropState = snapshots.drop;
+    const freeSnap = snapshots.free;
 
-    /// Row `i`'s logits from the newest forward that kept logits.
-    pub fn rowLogits(e: *const Engine, i: usize) []const u16 {
-        return e.host_logits.slice(u16)[i * e.g.vocab ..][0..e.g.vocab];
+    /// A verify window: `ids` (pending token, then drafts) at the committed position; `out[r]` drawn at pos + 1 + r.
+    pub fn verify(e: *Engine, ids: []const u32, out: []u32, bits: u64) !void {
+        if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
+        var one: [1]fw.Rank = undefined;
+        var f = e.view(&e.bd, &one);
+        const at = e.cur.st.pos;
+        f.prof = e.profs[ids.len - 1];
+        if (f.prof) |p| try p.begin(e.stream, verifyLabel(ids.len));
+        try f.run(@ptrCast(ids));
+        if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
+        e.cur.rows_at = e.bd.fnormed;
+        try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
+        if (f.prof) |p| p.end();
+    }
+
+    const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
+
+    /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
+    pub fn verifyShared(e: *Engine, parts: []const Part) !void {
+        const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+        if (parts.len == 0 or parts.len > max_shared) return error.WindowTooWide;
+        var segs: [max_shared]fw.Seg = undefined;
+        var ids: [shared_rows]u32 = undefined;
+        var rows: usize = 0;
+        for (parts, 0..) |p, i| {
+            if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
+            for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
+            try e.bind(p.slot);
+            segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
+            @memcpy(ids[rows..][0..p.ids.len], p.ids);
+            rows += p.ids.len;
+        }
+        var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
+        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
+        try f.run(@ptrCast(ids[0..rows]));
+        if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
+        for (parts, segs[0..parts.len]) |p, g| {
+            try e.bind(p.slot);
+            e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
+            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
+        }
+    }
+
+    /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
+    pub fn draftBlock(e: *Engine, reqs: []dflash.Req) !void {
+        const dr = e.drafter orelse return error.NoDrafter;
+        for (reqs) |*q| q.pos = @intCast((e.seqs.items[q.slot] orelse return error.UnknownSlot).st.pos);
+        try dr.draft(e, reqs);
+    }
+
+    pub const holdPrompt = @import("cuda_prompt_hold.zig").save;
+    pub const prefillMany = @import("cuda_prompts.zig").prefillMany;
+
+    /// forward.commit of the last window's first `n` rows (the KDA replay when fewer than it ran).
+    pub fn keep(e: *Engine, n: usize) !void {
+        var one: [1]fw.Rank = undefined;
+        const f = e.view(&e.bd, &one);
+        try f.commit(n);
+    }
+
+    /// decode.draft: the MTP head absorbs the kept rows (committed first) with `follow`, then chains `depth` drafts.
+    pub fn draft(e: *Engine, from_prompt: bool, follow: []const u32, depth: usize, out: []u32, chances: ?[]f64) !void {
+        if (!e.mtp) return error.NoDraftHead;
+        if (depth > max_drafts) return error.TooDeep;
+        var one: [1]fw.Rank = undefined;
+        const f = e.view(&e.bm, &one);
+        const D = e.c.hidden;
+        const hidden = if (from_prompt) @import("cuda_prompt_hold.zig").input(e) else e.cur.rows_at;
+        try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len - e.cur.in_head);
+        e.cur.in_head = 0;
+        const next: []const i32 = @ptrCast(follow);
+        var s0: usize = 0;
+        while (s0 < next.len) : (s0 += fw.window_rows) {
+            const part = next[s0..@min(next.len, s0 + fw.window_rows)];
+            try f.mtpMode(part, &.{hidden + s0 * D * 2}, depth > 0);
+            try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
+        }
+        for (0..depth) |j| {
+            if (chances != null and !e.structured and e.cur.sampling == null) {
+                const p = try e.greedyChance(e.bm.logits);
+                out[j] = p.token;
+                chances.?[j] = p.chance;
+            } else {
+                try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, 0, out[j..][0..1]);
+                if (chances) |c| c[j] = 1; // a sampled or structured draft keeps chance 1: its window runs whole
+            }
+            if (j + 1 < depth) {
+                try f.mtp(@ptrCast(out[j..][0..1]), &.{e.bm.fnormed});
+                try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + 1);
+                e.cur.in_head += 1;
+            }
+        }
+    }
+
+    /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
+    pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+        if (e.structured) return e.drawWhole(logits, rows, first, bits, out);
+        if (e.cur.sampling) |s| {
+            try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
+            return e.checkGathers(); // the draw read rows the forward's gathers made
+        }
+        try @import("cuda_engine_pick.zig").greedyRows(e, logits, rows, out);
+    }
+
+    pub const promptHead = @import("cuda_structured.zig").promptHead;
+    pub const drawWhole = @import("cuda_structured.zig").drawWhole;
+    pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
+    /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
+    const greedy = @import("cuda_engine_pick.zig").greedy;
+    const greedyChance = @import("cuda_engine_pick.zig").greedyChance;
+
+    /// A failed RoCE gather (its rows hold nothing) or TF_GLM_KV_HOST gather past its slots, after a synchronize.
+    pub fn checkGathers(e: *const Engine) !void {
+        if (e.group) |g| try g.check();
+        try @import("cuda_kv_host.zig").checkActive(); // a TF_GLM_KV_HOST gather past its slots
+    }
+
+    pub fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {
+        try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, e.stream.handle), "cuMemcpyDtoDAsync");
     }
 };
-
-test "dense read cost: hidden and slot variants have distinct graph keys" {
-    var seen: [32]u32 = undefined;
-    var n: usize = 0;
-    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
-        for ([_]bool{ false, true }) |hidden| {
-            const shape: Engine.Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
-            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
-            seen[n] = shape.key();
-            n += 1;
-        }
-    }
-}

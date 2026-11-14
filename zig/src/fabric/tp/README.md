@@ -1,129 +1,102 @@
-# Tensor parallelism across processes
+# dots.mocr contract fixtures
 
-`zig/src/fabric/tp` runs tensor parallelism with one GPU per process, either on one host or on two hosts over RoCE.
-`TF_COMM_BACKEND` picks the transport for small exchanges: `nccl` (the default), `mailbox` (two GPUs on one host)
-or `roce` (two hosts). NCCL carries everything larger, so it must work on its own as well.
+The numeric checkpoint settings come from `dots-studio/dots.mocr` at
+revision `e539fbb52280393adc081b289ec597430a0f9031`.
+The config fixture omits remote-code loader metadata. No inference code
+or model weights are included here. Read the original model's license
+when using or distributing its assets.
 
-## Building `tf-tp-test`
+`processor-reference.json` records independent slow Qwen2VL processor
+pixels. Each synthetic RGB sample at `(y, x, channel)` is
+`(7*x + 13*y + 50*channel + (x*y)%31 + seed)%256`.
+The hash is SHA-256 over merge-ordered pixel_values as little-endian FP32.
+The image grids include time, height, and width. Cases cover an unchanged
+image, non-square resize, square resize, and a long image.
 
-The `mailbox` and `roce` backends need the mailbox kernel (`mailbox.cu`) built into the binary:
-
-```sh
-zig build tf-tp-test -Doptimize=ReleaseSafe -Dtp-nvcc=/usr/local/cuda/bin/nvcc
-# or embed a fatbin built elsewhere:
-zig build tf-tp-test -Doptimize=ReleaseSafe -Dtp-fatbin=/abs/path/tp_mailbox.fatbin
-```
-
-A build without `-Dtp-nvcc` or `-Dtp-fatbin` still runs `nccl`, `roce-host` and `tcp-host`; the last two need no GPU.
-In that build the `mailbox` and `roce` suites fail at load with `NoKernel` (an engine falls back to NCCL instead).
-The `INFO` line `tf-tp-test` prints at start shows the embedded kernel's size; `0 B` means none was built in.
-
-## Choosing the RDMA devices
-
-| Variable | Used by | Needed when |
-| --- | --- | --- |
-| `TF_TP_ROCE_HCA` | the RoCE wire | the host has more than one active RoCE port that is not cabled to the peer |
-| `NCCL_IB_HCA` | NCCL | the same as above; NCCL otherwise picks its own devices |
-| `NCCL_SOCKET_IFNAME` | NCCL bootstrap | the host has several IP interfaces and NCCL picks one the peer cannot reach |
-| `TF_TP_MASTER` | the TCP bootstrap | always on two hosts: rank 0's address as the other rank reaches it |
-
-`TF_TP_ROCE_HCA` is `name[:gid],name[:gid]`: up to two devices, and optionally each one's RoCE v2 GID index.
-Without it the rank picks the devices itself, at most `TF_TP_ROCE_HCAS` (default 2).
-A host cabled to more than one neighbour should always set it explicitly.
-The two hosts may list their devices in a different order and use different names.
-Each device pairs with the peer device on the same IPv4 /24.
-
-`NCCL_IB_HCA` should name the same devices without the `:gid` suffix.
-In NCCL, `:N` after a device name selects port `N`, not a GID index.
-
-`run_hosts.sh` sets `NCCL_IB_HCA` from `TF_TP_ROCE_HCA` when only that is set.
-When neither is set, it first runs `tf-tp-test hca` on both ranks: the RoCE pick, made with the peer over the bootstrap.
-The same rule picks the wire's devices, and each rank prints its own as `NCCL_IB_HCA=name,...`.
-`hca` needs no GPU, and it exits 1 when no port shares a /24 with the peer, so no host falls back to its first ports.
-The runner logs each rank's pick and stops with that reason when `hca` fails.
-Both hosts must use the same mode: if one names its ports and the other names none, only the latter runs `hca`.
-It finds no peer and stops after `TF_TP_PLAN_TIMEOUT` (default 300 s) with that reason.
-
-Two DGX Spark nodes, with the second ConnectX-7 port of each cabled to the other (both PCIe functions of that
-port), and the first port cabled to a third node:
+Regenerate against an existing local checkpoint:
 
 ```sh
-# on both hosts; rank 0's link address is 192.0.2.1
-export TF_TP_ROCE_HCA=rocep1s0f1,roceP2p1s0f1
-export NCCL_IB_HCA=rocep1s0f1,roceP2p1s0f1
-export NCCL_SOCKET_IFNAME=enp1s0f1np1
-zig/src/fabric/tp/run_hosts.sh 0 192.0.2.1 ./zig-out/bin/tf-tp-test out-rank0   # host A
-zig/src/fabric/tp/run_hosts.sh 1 192.0.2.1 ./zig-out/bin/tf-tp-test out-rank1   # host B
+uv run --python 3.12 --with transformers==4.51.0 \
+  --with pillow==11.2.1 --with numpy==2.2.5 \
+  python tools/zig/dots_mocr_reference.py processor CHECKPOINT_DIR \
+  zig/src/families/dots_mocr/fixtures/processor-reference.json
 ```
 
-`ibv_devices` lists the RDMA devices; `ibv_devinfo -d NAME` shows a port's state and link layer.
-`/sys/class/infiniband/NAME/ports/1/gids/N` and `gid_attrs/ndevs/N` show each GID and its netdev.
-`ulimit -l` must allow the RoCE region to be pinned (`unlimited` is simplest).
+`TF_DOTS_DIR=CHECKPOINT_DIR zig build test-dots-mocr-host
+test-dots-mocr-fast` checks the existing complete shard headers, their
+index, all 643 tensor requirements, and exact declared weight bytes.
+Header checks establish extents and layouts, not weight checksums or
+GPU inference fidelity. Without `TF_DOTS_DIR`, only that live checkpoint
+test skips. The synthetic admission and processor checks still run.
 
-## TCP between two hosts without RDMA
+## Hugging Face example
 
-`tcp.zig` is the `Collective` contract over one stream socket a pair of ranks, `Kind.tcp`, for hosts with no RDMA
-(two AMD boxes on USB4 networking, or plain Ethernet). It moves host memory; a device side that stages through it comes
-in a later pull request. It is not a `TF_COMM_BACKEND` value yet: only its tests and `tf-tp-test tcp-host` open it.
+`demo-reference.json` records the image and processor pixel hashes for
+`demo/demo_image1.jpg` from the model author's repository at
+`23f3e5612fb8066d4034d5ecfc8f33a9243533eb`. The image stays outside Git.
+The example prepares 19520 encoder patches and 4880 merged image rows.
+Set `TF_DOTS_DEMO_IMAGE` to the unchanged image file to run the native
+JPEG-to-patches comparison in both host-test modes. This check also needs
+the repository's pinned libjpeg-turbo 3.1.4.1. Use
+`TENSORFOLD_LIBTURBOJPEG` to select a separate local library file.
 
-- Every frame starts with a header both ranks check: call, element type, operation, count and the link's frame
-  number; a variable-length gather sends every rank's lengths first in its payload, and those are compared too. A
-  call one rank makes differently fails as `Invalid`, or `Aborted` where the other rank refused it first.
-  Exchange partners that disagree (rank 0 trades with 1 while 1 trades with 2) wait on frames that never come and fail
-  as `Timeout`.
-- A frame that has not arrived by the call's deadline (`Options.timeout_ns`) is `Timeout`, and the communicator is
-  closed. The transport never resends a frame, so a late one can never land in another call or reorder a sum. The
-  kernel may still retransmit a lost segment, in order, within the deadline; its retransmit floor is a host setting
-  (`ip route ... rto_min 8ms`), not a transport one.
-- A frame that cannot be sent fails its call (`PeerFailed`, or what the peer's frame says), and no frame starts on a
-  link where one was half sent.
-- `abort`, from any thread, wakes this rank's waits and queues an abort frame on every link with no frame half sent
-  (waiting at most 50 ms for room). A rank waiting on any peer hears it as `Aborted`, even in a call that does not
-  involve the rank that aborted, when the abort frame is the next thing on that link; a frame the aborting rank had
-  already queued for a later call comes first, and then the call ends on its own links or at its deadline. On a link
-  where a frame was half sent no abort frame can go, and the peer sees `PeerFailed`, as it does from a peer that hangs
-  up without one. A rank whose peer timed out after its frame was sent may finish that call and fail on its next.
-- Sums add the ranks in rank order (`reference.reduce`), so every rank's bytes equal the reference's.
-
-`tf-tp-test tcp-host`, which needs no GPU, checks it between two hosts over the bootstrap's plan link (rank 0 listens on
-one port, `TF_TP_PLAN_PORT`, else `TF_TP_PORT` + 7): all-gathers, fp32
-and bf16 sums, exchanges, send and recv and variable-length gathers from 1 B to 4 MiB, bit for bit, then each size's
-median and p90 time (`gb_s_p50` is shard bytes over the median). Every result names the link from `TF_TP_LINK`, so a
-TCP number is never read as a RoCE one:
+`tools/zig/dots_mocr_reference.py oracle` runs the pinned Hugging Face
+example on one HIP GPU with Transformers 4.57.6 and qwen-vl-utils 0.0.10;
+`compare` checks a native greedy trace against its output:
 
 ```sh
-# both hosts; rank 0's link address is 192.0.2.1
-export TF_TP_WORLD=2 TF_TP_MASTER=192.0.2.1 TF_TP_LINK="USB4 networking, cable 1 of 2, MTU 1500"
-TF_TP_RANK=0 ./zig-out/bin/tf-tp-test tcp-host   # host A
-TF_TP_RANK=1 ./zig-out/bin/tf-tp-test tcp-host   # host B
+FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+  python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR DEMO_IMAGE \
+  OUTPUT_DIR --pci PCI_ID --max-new-tokens 64
+python tools/zig/dots_mocr_reference.py compare OUTPUT_DIR NATIVE_PREFIX
 ```
 
-## RoCE limits and the failed-transport check
+`rope_inv_freq.txt` holds the 64 float32 bit patterns of the checkpoint's
+rotary `inv_freq` as Transformers 4.57.6 computes them on the CPU (theta 1e6,
+head dim 128), dumped by the oracle's `text` mode (`rope-inv_freq.npy`). The
+CUDA recipe uploads them as they are, because Torch's CPU `powf` is not
+correctly rounded: entry 37 is one ulp from the correctly rounded value.
 
-No RDMA write is larger than 1 MiB, so on `TF_COMM_BACKEND=roce` a `TF_TP_MAILBOX_MAX_KB` above 1024 fails at boot.
-`TF_TP_ROCE_CHUNKED_KB` (default 0, off) sends variable-length gathers past the slot over RoCE in slot-sized ops.
-It needs a kernel built from this tree's `mailbox.cu`.
-At most 2 MiB is posted and not yet completed at any time.
-A rank whose transport fails moves its queue pairs to the error state and keeps its region until the process exits.
+## OCR reader fixtures
 
-`run_transport.sh MASTER_ADDR PEER_SSH OUTDIR` checks that failure path on two hosts with `tf-tp-test failfast V
-transport` and stops at the first kernel log line or HCA error counter that grows; run it with no arguments for help.
+The reader's prompt (`../prompt.txt`) and both test pages are written
+for TensorFold. The `ocr-*.json` files record greedy `oracle` runs with
+that prompt on those pages, and hold no model text: `source` and
+`image_sha256` (the page), `original` (its width and height), `frame`
+(the oracle's `prepared_images` size, the tower input the boxes are in),
+`prompt_sha256`, `max_new_tokens`, `eos_reached`, `output_tokens`,
+`output_ids_sha256` (SHA-256 over the output ids as little-endian
+`u32`) and `text_sha256` (SHA-256 of the oracle's `text` field).
 
-## Experimental four-rank ring
+| Fixture | Page | `--max-new-tokens` | Result |
+| --- | --- | --- | --- |
+| `ocr-page.json` | `page.png` | 4096 | the whole page, ended by EOS |
+| `ocr-page-cut.json` | `page.png` | 128 | JSON cut by the limit |
+| `ocr-one-line.json` | `one-line.png` | 4096 | one text block |
 
-The multirank wire supports gathers for three through eight ranks. Its reductions and exchange use NCCL.
-For exactly four ranks, `TF_TP_ROCE_RELAY=1` opts into a ring with one HCA to each neighbour and no opposite link.
-Name both neighbour HCAs explicitly. The rank order follows the physical ring. All four ranks must opt in;
-the connection table and the existing NCCL byte probe must agree before the wire is retained.
-Default mesh and two- and three-rank paths keep their existing protocol.
+`ocr_test.zig` reads written block lists in the model's form. Set
+`TF_DOTS_OCR_DIR` to a directory that holds the three runs as `page`,
+`page-cut` and `one-line` to check each run's page, prompt, token ids
+and text against its fixture, and to read its text with the reader.
 
-Each neighbour receives both halves and forwards one to the opposite rank. Consumers wait for six flags.
-The proxy completes each forward before posting the other direction and posts sequence s only after consuming
-s-2 and receiving every rank's s-1. Variable-length shards carry their padded length beside each half flag.
-A producer must use the existing sequential stream contract: its preceding consumer completes before staging
-another collective. One proxy owns every QP. Wait failures report the source rank and sequence.
+`pages` draws both pages with Pillow 12.2.0 in Liberation Sans Regular,
+Liberation Sans Bold and Liberation Serif Regular 2.1.5 (font SHA-256
+`baccc64becc3eb7d104b7c84d99f5314a0a1f896e2b3ea6c2f22fc08d2003bee`,
+`769673c4355020b1e28a14c366a152da410ab6b16239fe883ebc35b73624835b` and
+`86b9ea1c2f41bed9d7c09ccad4abc2894b33df5de60e5bbbece5d48610911870`):
+`page.png` is 1240x1754 with headers, a title, text, a caption, a table
+with a spanned header cell, a list and a page number; `one-line.png` is
+960x96 with `TensorFold reads one line of text.` `record` writes a
+fixture from a run. The runs used one gfx1201 GPU, ROCm 10.1 Torch,
+Transformers 4.57.6, qwen-vl-utils 0.0.10, Pillow 12.2.0 and flash-attn
+2.8.3.post1 with `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE`:
 
-`zig build test-roce-multi-host` runs 100,000 random collectives on each of the fake-verbs and shared-memory
-wires, checks every payload word, and covers held readers, full slot boundaries and sequence wrap.
-`zig build test-roce-relay-controls-host` runs the focused custody, fault and arithmetic controls.
-These are host protocol checks. Four-rank CUDA/RDMA execution and performance remain unqualified.
+```sh
+python tools/zig/dots_mocr_reference.py pages PAGES_DIR
+HIP_VISIBLE_DEVICES=N FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \
+  python tools/zig/dots_mocr_reference.py oracle CHECKPOINT_DIR \
+  PAGES_DIR/page.png RUNS_DIR/page --pci PCI_ID --max-new-tokens 4096 \
+  --prompt zig/src/families/dots_mocr/prompt.txt
+python tools/zig/dots_mocr_reference.py record RUNS_DIR/page \
+  PAGES_DIR/page.png zig/src/families/dots_mocr/fixtures/ocr-page.json
+```

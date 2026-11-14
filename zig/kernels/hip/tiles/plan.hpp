@@ -10,6 +10,7 @@ struct Routing {
     const int* members = nullptr;
     int x_div = 1;
     int first = 0;  // set by the kernel from its item
+    int few = 0;    // an item of at most this many rows takes its tile's K-parallel passes, where the tile has them
 };
 
 // Row r of this block's x and out: the plain matrix's r, or the routed item's r-th pair.

@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -168,11 +168,11 @@ For decisions, `chat_template_kwargs` may be omitted, null, or an object contain
 ## Rerank
 
 `POST /v1/rerank` (also `/rerank`, and by `PUT` as SGLang takes it) scores each document against a query with a
-reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`: the engine declares the reranker and
-its label tokens (`1_LogitScore/config.json`), and its startup line says `qwen3 reranker`. Every other server answers
-the route with HTTP 400 "this model is not a reranker", and a reranker server answers chat, completion, Responses,
-Messages, speech, decision, System One and embedding requests with HTTP 400 "this model is a reranker: use POST
-/v1/rerank".
+reranker checkpoint. The native HIP engine serves `Qwen/Qwen3-Reranker-8B`, and the native CUDA engine `-0.6B`, `-4B`
+and `-8B`: the engine declares the reranker and its label tokens (`1_LogitScore/config.json`), and its startup line
+says `qwen3 reranker`. Every other server answers the route with HTTP 400 "this model is not a reranker", and a
+reranker server answers chat, completion, Responses, Messages, speech, decision, System One and embedding requests
+with HTTP 400 "this model is a reranker: use POST /v1/rerank".
 
 | Field | Meaning |
 | --- | --- |
@@ -192,6 +192,95 @@ instruction as plain text (text that spells a special token stays text). The sco
 context window before the first is scored, so a refused request costs no GPU work; a prompt past the window (with a
 `max_length` above it) returns HTTP 400 with `code` `context_length_exceeded`. An image or video part returns HTTP
 400. Errors use the server's envelope, as on every route: `{"error": {"message", "type"}}`.
+
+## OCR
+
+The native HIP engine reads page images through Mistral's OCR contract when it serves a model with an OCR reader
+and `--vision`.
+
+| Route | Contract | Request | Reply | Written for |
+| --- | --- | --- | --- | --- |
+| `POST /v1/ocr` | Mistral OCR | JSON `{"model", "document", ...}` | `{"pages", "model", "document_annotation", "usage_info"}` | the `mistralai` Python and `@mistralai/mistralai` TypeScript SDKs, with `server_url` set to the server root |
+
+One family has a reader. A reader gives Markdown blocks in pixels of the page the client sent (after EXIF
+orientation), never in the model's resized frame.
+
+| Model | What the reader returns | Geometry |
+| --- | --- | --- |
+| dots.mocr | one block a layout region (title, text, table, formula, picture, header, footer, ...), tables as pipe tables or, when cells span, HTML | a box a block |
+
+Any other model answers the route with HTTP 400 "this model has no OCR reader; use POST /v1/chat/completions",
+and a server started without `--vision` answers "OCR needs image input; start the server with --vision".
+Embedding, reranker and readout engines refuse the OCR route as they refuse chat. The route takes the `inference`
+key scope.
+
+### Reader Markdown
+
+The reader writes block text in one Markdown flavour, the one Mistral's page Markdown uses:
+
+- Headings with `#` markers: a title is `#`, a section header `##` unless the model gives a level.
+- GFM pipe tables, or one HTML `<table>` when a table has row or column spans a pipe table cannot hold; a table
+  block holds exactly one table.
+- Display math as `$$…$$` and inline math as `$…$`, the LaTeX kept as the model wrote it.
+- Lists with `-` or `1.` markers, and code in fenced blocks.
+- No images: a picture block has empty text, and its caption, if any, is its own block. The contract writes its
+  own image references.
+
+### Pages and budgets
+
+- Images are PNG, JPEG or WebP, one page each, up to the 32 MiB body limit and the reader's decoded-pixel limit:
+  16 megapixels and 8192 pixels a side for dots.mocr; a larger image is bad input. An image whose header and
+  decoded pixels disagree is refused as bad input.
+- PDF documents and `pages` are not read: a PDF document is HTTP 400 "PDF documents are not read on POST /v1/ocr;
+  send each page as a PNG, JPEG or WebP image", and any non-null `pages` is HTTP 400 "pages selects pages of a PDF
+  document; POST /v1/ocr reads one page image".
+- `https://` URLs (`document_url` and `image_url`) are fetched only with `--vision-urls`: images, at most 32 MiB.
+  `http://` URLs are refused.
+- Image budget, for Mistral crops (`include_image_base64`): at most 256 encoded images, 4 times the request's page
+  pixels, and 16 MiB plus 2 MiB a page of encoded bytes. Crossing one fails the whole request as an unreadable
+  page, "too many image regions". The encode needs libjpeg-turbo 3.1.4.1 (`TENSORFOLD_LIBTURBOJPEG` names its
+  file); without it `include_image_base64` is HTTP 400.
+
+The page is read as one user turn (the page image, then the reader's prompt), greedy, with thinking off and
+`max_tokens` equal to all the context the prompt leaves. It succeeds only when the reply stops on its end token
+and the reader can parse it.
+
+### Failures
+
+| Failure | Mistral |
+| --- | --- |
+| Bad input: an undecodable or unsupported file, a page or option the server cannot serve | 400 |
+| Unreadable page: the reply was cut at the context limit, repeated without end, broke the model's format or gave a box that is not finite; the image budget was crossed | 422 |
+| The engine stopped the page (it closed or drained) | 503, `Retry-After: 1` |
+| Engine fault or out of memory | 500 |
+| Envelope | `{"detail": [{"loc", "msg", "type"}]}`, `type` `bad_input`, `unreadable_page`, `capacity` or `internal` |
+
+An unreadable page's message names its index, and the model's raw text goes to the server log, never to the
+client. 422 means the same request fails the same way again under greedy decoding; a 503 carries `Retry-After`.
+A client that disconnects stops the request before its page is read.
+
+### Mistral: `POST /v1/ocr`
+
+| Field | Meaning |
+| --- | --- |
+| `model` | Any string or null. The reply names the requested id when it is the served name or an `--alias`, else the served name, so `--alias mistral-ocr-latest` lets copied examples echo it |
+| `document` | `{"type": "document_url", "document_url"}` or `{"type": "image_url", "image_url"}` (a string or `{"url"}`): a `data:` URL, or an `https://` URL as above. The bytes must be a PNG, JPEG or WebP image; a PDF is HTTP 400 (above). `{"type": "file"}` is HTTP 400 |
+| `pages` | Any non-null value is HTTP 400 (above): an image has one page |
+| `table_format` | Null: tables stay in the page Markdown as pipe tables (a spanned HTML table becomes a pipe table with the spanned text in its first cell). `"markdown"` or `"html"`: each table becomes a `tables[]` entry (`tbl-N.md` or `tbl-N.html`) and the Markdown links it; under `"markdown"` a table with spanned cells stays HTML, the only form that keeps it |
+| `extract_header`, `extract_footer` | Move page headers or footers out of `markdown` into `header` and `footer` |
+| `include_blocks` | Default `true`: one block for each region with a box. `false` leaves `blocks` out |
+| `image_limit`, `image_min_size` | Choose which pictures to keep, in reading order (`image_min_size` against the box's width and height, then the running count against `image_limit`). A dropped picture has no image entry, Markdown link or block |
+| `include_image_base64` | Add `image_base64`, a `data:image/jpeg;base64,...` crop of the picture's box, to each kept image |
+| `confidence_scores_granularity` | Accepted; no scores are returned |
+| `bbox_annotation_format`, `document_annotation_format`, `document_annotation_prompt` | Any non-null value is HTTP 400 "annotations are not supported" |
+
+`null` means absent for every optional field, and unknown keys are ignored. Each page carries `index`, `markdown`
+(blocks joined by a blank line, pictures as `![img-N.jpeg](img-N.jpeg)`), `images`, `tables`, `header`, `footer`,
+`dimensions` (`dpi`, `height`, `width`) and `blocks`; `hyperlinks` is left out. A block has `type` (`text`,
+`title`, `list`, `table`, `equation`, `code`, `caption`, `header`, `footer` or `image`), an integer box and
+`content`, its own Markdown with its tables in the `table_format` form; image blocks add `image_id` and table
+blocks `table_id`. `usage_info` gives `pages_processed` and `doc_size_bytes`, the decoded document's size. An
+image's `dimensions.dpi` is 72.
 
 ## System One on a Clef engine
 
@@ -302,19 +391,36 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 `modalities` must be absent or `["text"]`, and a truthy top-level `image`, `images`, `image_url`, `input_image`,
 `audio`, `input_audio`, `video` or `video_url` key is refused: this server accepts and produces text only.
 
-The native CUDA engine (Nemotron 3.5 Lightning) supports `logprobs: true` and `top_logprobs` from 0 through 20 on
-`/v1/chat/completions`, streamed or not, without tools, stop strings, structured output or a thinking budget. Each
-reply token has its `token`, `logprob`, `bytes` and requested `top_logprobs` in `choices[0].logprobs.content`; a
-stream sends each row with the chunk whose `delta.content` completes that token's text, so the rows joined over the
-chunks are the whole reply's. Probabilities describe the raw target-model distribution at temperature 1, before
-temperature, top-k or top-p sampling filters, including when generation is greedy, and are the same with drafts on or
-`"draft": false`. With thinking on, the rows cover the answer only, as `content` does: none for the reasoning,
-`</think>` or the newlines after it, so the first row is the answer's first token, and a reply cut inside its
-reasoning has none. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial UTF-8
-sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 through 20 alternatives, and answers in
-the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
-and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
-the Responses route and the request modes above return HTTP 400 when probabilities are requested.
+Engines that advertise `capabilities.logprobs` and give each token's exact bytes accept `logprobs: true` and
+`top_logprobs` from 0 through 20 on `/v1/chat/completions`, streamed or not, with tools, stop strings, structured
+output, reasoning and a thinking budget. Asking for them changes nothing else: the prompt, the sampled tokens and the
+text are the same with them on or off. Probabilities describe the raw target-model distribution at temperature 1,
+before temperature, top-k or top-p sampling filters, including when generation is greedy, and are the same with drafts
+on or `"draft": false`. Alternatives are tokenizer tokens and may include leading spaces; `bytes` preserves partial
+UTF-8 sequences.
+
+`choices[0].logprobs.content` has an entry for each token of the reply's `content` (`token`, `logprob`, `bytes` and
+the requested `top_logprobs`), and the entries' `bytes` joined spell `content`. With thinking on, the reasoning's
+tokens are in `logprobs.reasoning_content`; with tools, each call has an `{index, content}` group in
+`logprobs.tool_calls` with the entries of the markup the model wrote for it (not the arguments JSON the reply returns;
+a closer the server adds to a cut call has none). Thinking markers, the whitespace the text drops, a stop string and
+the text after it have no entries. A token the text shows only part of, such as one a stop string ends inside, shows
+the kept bytes in `token` and `bytes` and its id in `token_id`, with its own `logprob` and alternatives.
+
+A stream sends each entry with the chunk whose text completes that token, reasoning entries before the answer's first
+text; with tools offered, the entries come in one chunk before the finishing one, once the calls are parsed. The
+entries joined over the chunks are the whole reply's. `/v1/completions` takes the legacy `logprobs`, an integer from 0
+through 20 alternatives, and answers in the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs`
+(each alternative's text to its logprob) and `text_offset` (each token's first character in the completion, counting
+each token's own text). Other engines return HTTP 400 when probabilities are requested.
+
+The Responses API gives the same entries for `top_logprobs` (0 through 20) or the `include` name
+`message.output_text.logprobs`: in each `output_text` part's `logprobs`, and as extensions in `reasoning_text` parts
+and `function_call` items. A stream sends them in the `response.output_text.delta` and
+`response.reasoning_text.delta` events; with tools offered they come once the calls are parsed, as deltas with empty
+text, and each item's done events wait for them. `include` alone on an engine without logprobs answers without them;
+`top_logprobs` there returns HTTP 400.
+
 Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine
 and on GLM-5.3-Flash's CUDA engine.
 `choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
@@ -468,8 +574,8 @@ remain strings for the client to validate. Union types and schema references are
 A reply that is not a call returns as content, never an error: prose, JSON that names no offered tool
 (a structured answer), and malformed tool blocks, which keep their text. A GLM argument key written without its
 `<arg_key>` gets that tag back, and the call parses. A well-formed call to a tool the
-request did not offer is returned as a tool call under its valid name, so the client can report the unknown
-tool and the model can correct itself.
+request did not offer is kept as text too, under the name the model wrote, so the client sees the markup it can
+report and the model can correct itself.
 
 When a model end token arrives inside a whole tool call before its closing markup, the server closes the
 markup and returns the call. A GLM value the end token cut off is closed with `</arg_value>` first, and the call
@@ -585,7 +691,7 @@ thinking on they start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
-a grammar sent with `tool_choice: "required"` or a named function, and `logprobs` with a grammar or tools. A reply whose
+a grammar sent with `tool_choice: "required"` or a named function. A reply whose
 grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other requests go on.
 
 ## Reasoning
@@ -612,9 +718,15 @@ and `minimal` as `low`. Qwen3.8 lists `low`, `medium` and `xhigh`, so `high` and
 the template's own default. An explicit `chat_template_kwargs.enable_thinking` takes
 precedence. A request without an effort gets `--reasoning-effort` when the server was started with one; otherwise
 the template renders its own default, as vLLM and mlx-lm render it (Qwen3.8's is `xhigh`, which adds an instruction
-to the system prompt; `medium` adds none). The template hears an effort only while thinking, and both backends render
-the same prompt for the same request. Effort support depends on the checkpoint's template, and effort does not set a
-token budget. With thinking off, native passes no reasoning effort to the template. If its generation prefix ends
+to the system prompt; `medium` adds none). Both backends render the same prompt for the same request.
+Effort support depends on the checkpoint's template, and effort does not set a
+token budget. With thinking off, native passes the template only an effort the request itself names (its
+`reasoning_effort`, other than `none`); `--reasoning-effort` never reaches a thinking-off prompt, and with no named
+effort it passes none, as before. So a GLM-5.3 request can send `reasoning_effort: "high"` beside
+`chat_template_kwargs.enable_thinking: false` (or `thinking: false`) to render `Reasoning Effort: High` instead of the
+template's Max head; Qwen3.8's template reads the effort only while thinking, so its thinking-off prompt is unchanged.
+The reply's `tensorfold.reasoning_effort` names the effort the template heard (`none` when it heard none).
+If the template's generation prefix ends
 in a single `<think>` token, native appends the single `</think>` token, leaving an empty think block. This handles
 GLM-5.3 and LFM2 templates without their own off switch. Other template text stays unchanged: GLM-5.3's
 `Reasoning Effort` head stays as the template writes it, and an older GLM-5.3 template still writes its default
@@ -706,16 +818,40 @@ A startup capacity estimate is not a measured release capacity.
 
 On a unified-memory GPU (the DGX Spark's GB10), the CUDA server's allocations come out of the host's RAM but are not
 charged to a container's memory limit (`docker run --memory`, cgroup `memory.max`): the limit neither caps the
-model's weights and cache nor keeps them from crowding other work on the machine. The server sizes its window from the
-host's `MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB); to leave room for other containers, start it
-with a smaller `--context` or `--parallel`. `TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB)
-when you know the machine's headroom: a larger one leaves more for other work, a smaller one more for KV caches. The
-reserve also carries CUDA context, NCCL and workspace memory the estimate does not count, and exhausting a unified
-GPU's memory can freeze the host, so lower it only with room to spare.
+model's weights and cache nor keeps them from crowding other work on the machine. The startup budget is the host's
+`MemAvailable` less a reserve (a tenth of RAM, at least 4 GiB). On native CUDA a stream's window is `--context`, the
+model's own window at `--context 0`, or, when it is unset, the family's default capped at the model's own window; on
+the paged families the streams and pages then fill the budget up to the streams' windows plus the cache's pages, so
+once those exceed it, the free memory after load is the reserve. To leave room for other containers, start the server
+with a smaller `--context` or `--parallel`.
+`TENSORFOLD_MEMORY_RESERVE_GIB` replaces that reserve (at least 2 GiB) when you know the machine's headroom: a larger
+one leaves more for other work, a smaller one more for KV caches. The reserve also carries CUDA context, NCCL and
+workspace memory the estimate does not count, and exhausting a unified GPU's memory can freeze the host, so lower it
+only with room to spare.
 
-On a discrete card (an RTX 3090, an A100) the server sizes its window from the card's own free memory, as the driver
-reports it, less a reserve of a 32nd of the card and at least 1 GiB. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that one from
-0.5 GiB up.
+On a discrete card (an RTX 3090, an A100) the budget is the card's own free memory, as the driver reports it, less a
+reserve of a 32nd of the card and at least 1 GiB, and the plan is the same. `TENSORFOLD_MEMORY_RESERVE_GIB` sets that
+one from 0.5 GiB up.
+
+With pages, the plan takes the engine's own window first, then each other stream's fixed part, then the prompt cache:
+a named `--prompt-cache-gib` comes before every window but the engine's own, and an unnamed one after the whole
+windows the budget holds, half of what they leave but at least 16 GiB and at most all of it (#2987 shows what that
+does to `TF_KV_SHARE`'s states). The cache then holds the kept states (on GLM with `TF_KV_SHARE`, a slot a state, the
+rest of it made pages), and the rest of the budget becomes pages, up to the streams' windows plus the cache's pages.
+The settings that decide each part:
+
+| Setting | Kind | Scope | Unset | What it decides | Read in |
+|---|---|---|---|---|---|
+| `TENSORFOLD_MEMORY_RESERVE_GIB` | environment | the host: every CUDA native family, each rank at load | a tenth of RAM, at least 4 GiB (unified); a 32nd of the card, at least 1 GiB (discrete) | what the budget leaves free | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `TENSORFOLD_CUDA_MEMORY_LIMIT_GB` | environment | the host: every CUDA native family, each rank at load | none | a cap on the budget, the weights included | `zig/src/native/cuda_family_memory.zig`, `cuda_memory.zig` |
+| `--context` | flag | the launch | the family's default, capped at the model's own window | a stream's window; `0` takes the model's own | `zig/src/server/cli.zig`, `zig/src/native/cuda_window.zig` |
+| `--parallel` | flag | the launch | `auto`: up to 8 | the streams | `zig/src/server/cli.zig` |
+| `--prompt-cache-gib` | flag | the launch | after the whole windows, as above | the prompt cache's budget | `zig/src/server/cli.zig`; unset, `zig/src/native/cuda_kv_pool.zig` (`budgetOf`) and `cuda_memory.zig` |
+| `TF_KV_SHARE` | environment, in the profile registry | the launch, on the families of the core page adapter | off: copies | prompts kept as pool pages, with at most this many states past them | `zig/src/core/kv_prompts.zig` |
+| `TF_GLM_KV_HOST_GIB` | environment | GLM | one window and 16 pages | GLM's host KV pages with `TF_GLM_KV_HOST=1`, outside the device pool | `zig/src/families/glm/cuda_kv_host.zig` |
+| the pool's pages | none | the core plan | — | what is left | `zig/src/core/kv_pool.zig` (`plan`) |
+
+Measured numbers for one launch are in #3000.
 
 ## Compaction
 
@@ -780,6 +916,10 @@ Native JSON replies also carry a `tensorfold` runtime block with `engine`, `enab
 `prefill_widths`, `prefill_raised`, `sampling`, `drafts`, `token_sha`, and a `speculative` object beside
 the block with the draft counters `rounds`, `drafted`, `accepted`, `acceptance_rate`, and
 `tokens_per_round` (the drafter's own counters arrive as `proposer`).
+When a reply keeps tool-call envelopes as text instead of returning them as calls, the block also carries
+`kept_tool_calls`: `unoffered` and `malformed` counts, and `unoffered_names`, the names the model wrote for the
+kept unoffered calls, in order, without duplicates, at most 8 names of 64 bytes each. The whole reply and the
+streamed finish event carry the same object; a reply that kept none has no `kept_tool_calls` field.
 A request that sends `return_token_ids` adds `token_ids`, the reply's tokens, to the block — the tokens `token_sha` and
 `token_sha256` hash — on the whole reply and on the streamed finish event alike. A loop-guarded reply adds
 `runtime.loop.period`, and `runtime.loop.stopped` when `--loop-guard-stop` ended it; these fields describe the native
@@ -837,7 +977,8 @@ out of the text rather than reported at a permanent zero.
 The scrape carries `requests_running`, `requests_waiting`, `prompt_tokens_total`, `generation_tokens_total`,
 `generation_tokens_running`, `kv_cache_usage_ratio` (one `pool` label per live stream cache), `mtp_drafted_total` and `mtp_accepted_total`
 (draft tokens verified and kept on finished requests; the engines keep one draft counter, so copies and chain
-drafts share it), `request_latency_seconds`, `time_to_first_token_seconds` and `request_decode_seconds` (each
+drafts share it), `kept_tool_calls_unoffered_total` and `kept_tool_calls_malformed_total` (tool-call envelopes kept as
+text on finished replies, by an unoffered name and by malformed markup), `request_latency_seconds`, `time_to_first_token_seconds` and `request_decode_seconds` (each
 finished request's decode time: the CUDA engine's own figure, or first token to end on the Mac server; its `_sum`
 over `generation_tokens_total` is the decode rate), `request_time_per_output_token_seconds`, `decode_rounds_total`,
 and the `request_prefill_seconds` histogram, all under the `tensorfold:` prefix. TPOT already carries vLLM's name.
@@ -1082,10 +1223,36 @@ context window, `context_length` and `max_model_len`, both that window. A model 
 adds `reasoning`: `default_enabled`, `default_effort` when the template consumes `reasoning_effort`, and
 `supported_efforts`, the template's levels plus `none` when the template has a thinking switch.
 
+Every native entry ends with `input_types`, the content part types the model takes: `["text"]`, plus `"image"` when
+it was started with `--vision` (`image_url` parts), plus `"video"` when its checkpoint reads video and this server
+loads the `libtfvideo` runtime (`video_url` parts), for example `["text", "image", "video"]`. The server decides it
+once at startup, and requests are refused by the same fact: a `video_url` part to an entry without `"video"` gets
+HTTP 400 (`invalid_request_error`), never a 500. Without `libtfvideo` the startup log says so once.
+
 The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
 server sends the counters described under [Responses](#responses). For memory figures on a Mac, use
 [`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
 `tensorfold:process_footprint_bytes`.
+
+## Cancel a request
+
+`POST /v1/requests/{id}/cancel` (or `/requests/{id}/cancel`) cancels a running or queued request by the id its
+reply carries: a chat completion's `chatcmpl-`, a completion's `cmpl-`, or a Responses `resp_` id. The engine takes
+the same cancel a client disconnect sends, and every other stream's tokens are unchanged. The reply ends well formed
+with the tokens it had (none when it was queued): `finish_reason: "cancelled"`, or a Responses `status: "cancelled"`
+in its `response.incomplete` event. A Cortheon turn runs no further rounds. The answer is 200
+`{"id": ..., "object": "request.cancel", "cancelled": true}`, or 404 with the code `request_not_found` when no
+request holds the id: it was written out, or never existed. An id is held from the request's start until its reply is
+written, so a cancel that arrives as the reply ends leaves that ending as it was. The body, if any, is ignored.
+
+With API keys it is an admin route: a full or `[admin]` key may cancel from any address, a scoped key gets 403
+`insufficient_scope` (see [Key scopes](#key-scopes)) and a missing key 401. A server without keys answers only a
+caller whose socket is on the loopback address (127.0.0.0/8 or ::1) and refuses everyone else with 403
+`loopback_only`, so an open server never lets one client cancel another's request. The socket's own address decides;
+a forwarded address is never read. Behind a reverse proxy every caller's socket is the proxy's, so a keyless server
+also refuses a request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `Via`,
+`CF-Connecting-IP` or `True-Client-IP`. A proxy that adds none of them cannot be told apart from a local caller: give
+a proxied server keys.
 
 ## The Responses API
 
@@ -1131,10 +1298,11 @@ prompt cache resumes the shared prefix as it does for chat. `store: false` keeps
 response.
 
 HTTP 400 refuses what this server does not run: built-in tools (web search, file search, computer use and the
-others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, `top_logprobs`, file IDs and
+others), `background`, `conversation`, `prompt` templates, `context_management`, `truncation: "auto"`, file IDs and
 remote file URLs (`input_file` parts with inline `file_data` run on a model started with `--vision --vision-pdf`),
 `item_reference` items, encrypted reasoning items, and a `previous_response_id` that is not stored.
-`include` takes a list of OpenAI's names, which the server accepts and ignores (it has nothing to add for them):
+`include` takes a list of OpenAI's names. `message.output_text.logprobs` asks for logprobs where the engine has them
+(see the chat section's logprobs); the server has nothing to add for the others:
 `code_interpreter_call.outputs`, `computer_call_output.output.image_url`, `file_search_call.results`,
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
 `web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of

@@ -342,6 +342,11 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         g.c.cin.base()
     else
         try o.arena.take((g.c.layout.tail_rows + g.tokens.len) * d.wide() * m.act.size());
+    // a window's words go up inside the round: a graph holds the copy, so every replay sends this round's own
+    if (window) if (m.gdn) |s| for (segs) |g| {
+        const p = s.planFor(g.c.id) orelse return error.CachesNotPlanned;
+        try p.send(o.stream);
+    };
     for (m.layers, 0..) |layer, i| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);
