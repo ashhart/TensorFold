@@ -2,6 +2,11 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- The Vulkan engine records its dispatches into one command buffer and submits when 128 are waiting, or when the next upload, download or fill needs the queue, instead of one submission and fence wait per dispatch. Each pipeline holds a ring of 256 descriptor sets. No kernel changes, so the logits are byte-identical. On a 13-inch M1 with Qwen3.5-2B 4-bit and tiled projections, a run took 56.0% less time on a 24-token prompt, 42.0% less on a 256-token document and 30.1% less on a 1,024-token document. On a 16-inch M1 Max, it took 84.1%, 82.5% and 61.8% less time on those inputs; the 256-token cell was noisy. Receipts: [docs/receipts/vulkan-submit-batch-m1](docs/receipts/vulkan-submit-batch-m1/README.md).
+- The Vulkan engine computes four rows of x and two columns a thread (`qmm_q4_tile_rows`) for prompt chunks of four rows or more, so a weight is dequantized once for four outputs and each activation is unpacked once for two weights. Each output keeps its own accumulator and the same order of sums as `qmm_q4_tile`, so the logits are byte-identical. Decode and chunks of one to three rows keep `qmm_q4_tile`. On a 13-inch M1 with Qwen3.5-2B 4-bit, a run took 4% less time on a 24-token prompt, 12% less on a 256-token document and 15% less on a 1,024-token document (6%, 29% and 38% in an earlier run on older builds, an older kernel and an older Mesa). The kernel contract checks `qmm_q4_tile_rows` with the same gates as `qmm_bf16`. Receipts: [docs/receipts/vulkan-qmm-tile-rows-m1](docs/receipts/vulkan-qmm-tile-rows-m1/README.md).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
