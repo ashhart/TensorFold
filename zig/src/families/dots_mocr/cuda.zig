@@ -4,10 +4,27 @@ const dense = @import("cuda_dense");
 const cfg = @import("config.zig");
 const fixtures = @import("config_test.zig");
 
+pub const config = @import("config.zig");
 pub const recipe = @import("cuda_recipe.zig");
 pub const weights = @import("cuda_weights.zig");
+pub const tower_weights = @import("cuda_tower_weights.zig");
+pub const tower = @import("cuda_tower.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const native = dense.Native(recipe);
+
+/// Three chat-templated prompts of our own (fixtures/own-prompts.json): the GB10 runner's dots-text pins their replies.
+pub const OwnPrompts = struct { short: []const u32, page: []const u32, chunks: []const u32 };
+
+/// The own prompts' ids, parsed from the embedded fixture; the caller deinits the result.
+pub fn ownPrompts(gpa: std.mem.Allocator) !std.json.Parsed(OwnPrompts) {
+    return std.json.parseFromSlice(OwnPrompts, gpa, @embedFile("fixtures/own-prompts.json"), .{});
+}
+
+test {
+    std.testing.refAllDecls(tower_weights);
+    std.testing.refAllDecls(tower);
+    _ = @import("cuda_tower_test.zig");
+}
 
 test "dots geometry from the released config: 12 query heads over 2 KV heads of 128, two query heads a pattn block" {
     const c = try cfg.Config.parse(std.testing.allocator, fixtures.sample, fixtures.generation);
@@ -31,7 +48,7 @@ test "dots text bytes: embedding, untied head, final norm and 28 layers, the tow
     try std.testing.expectEqual(want, try weights.textBytes(std.testing.allocator, c));
 }
 
-test "dots on CUDA: text only, no reasoning block, its config and tensor refusals worded" {
+test "dots on CUDA: no reasoning block, its config and tensor refusals worded" {
     try std.testing.expect(!native.reasoning and native.keeps_no_prompts);
     // compiles the load and the layer
     const hooks = .{ &native.open, &native.attach, &native.fits, &native.ledgerPool, &native.textWeightBytes };
@@ -58,4 +75,20 @@ test "dots on CUDA reads its geometry from the checkpoint's files and refuses an
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = other });
     try std.testing.expectError(error.UnsupportedDotsConfig, recipe.geometry(a, io, dir));
     try std.testing.expect(native.explain(null, error.UnsupportedDotsConfig) != null);
+}
+
+test "dots own prompts: 18, 578 and 2,537 ids in the vocabulary, each one user turn up to the assistant's mark" {
+    const own = try ownPrompts(std.testing.allocator);
+    defer own.deinit();
+    const c = try cfg.Config.parse(std.testing.allocator, fixtures.sample, fixtures.generation);
+    const vocab = recipe.geometryOf(c).vocab;
+    const prompts = [_][]const u32{ own.value.short, own.value.page, own.value.chunks };
+    for (prompts, [_]usize{ 18, 578, 2537 }) |ids, n| {
+        try std.testing.expectEqual(n, ids.len);
+        for (ids) |id| try std.testing.expect(id < vocab);
+        try std.testing.expectEqual(@as(u32, 151670), ids[0]); // the template's opening user mark
+        // the turn's close and the reply's open
+        try std.testing.expectEqualSlices(u32, &.{ 151671, 151672 }, ids[n - 2 ..]);
+        try std.testing.expect(std.mem.indexOfScalar(u32, ids, tower.marks.image) == null); // text only
+    }
 }
