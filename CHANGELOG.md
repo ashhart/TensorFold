@@ -35,6 +35,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: host tests drive 200 refused, cancelled or failed requests down each lane-host path they reach (refusal at admission, cancels while queued and mid-request, backend errors, no lane memory, and a mix) and check none strands a lane, page or slot (#3015, for #2135).
 
+- DeepSeek-V4.1 on Metal: the dense FP8 prompt projections take 14 to 19% less time on an M5 Ultra, and every output bit is unchanged. Each threadgroup now stages two K groups between barriers, keeps the first three levels of the group sum tree in registers, and skips the zero groups that pad K to a power of two. A 4096-row prompt chunk of release layer 2 drops from 185 to 175 ms (#3322).
+
 - Tests: the cluster bring-up test of a stopped peer checks the membership's real promise instead of a two-second wall bound that failed on busy CI runners (#3310).
 
 - Nemotron Omni on CUDA: when an image request's setup fails (more image rows than the budget, or an encoder error), its image rows are now cleared. Before, the next text-only request on the same engine spliced them into its prompt and gave a wrong reply with no error (#2985, fixes #2943). Thanks to @jishnuvenugopal.
