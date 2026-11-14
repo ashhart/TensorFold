@@ -8,6 +8,32 @@ const Who = depth.Who;
 const Probe = depth.Probe;
 const min_samples = depth.min_samples;
 
+test "a mode transition does not price a drafted window as plain or a plain window as drafted" {
+    const empty: Table = .{};
+    var rule: Rule = .{ .gpa = std.testing.allocator, .prior = &.{ 0.5, 0.5 }, .most_drafts = 2, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = true, .rate_guard = true, .node_probabilities = true, .batch_rows = 8 };
+    defer rule.deinit();
+    var st: ?State = null;
+    defer if (st) |*s| s.deinit(std.testing.allocator);
+    const who: Who = .{ .state = &st, .draft_room = 100, .finished = false, .forced = false };
+    const guard = @import("rate_guard.zig");
+    for (0..min_samples) |_| try guard.observeWindow(&rule, who, true, 2, 60);
+    st.?.rate.chain = false;
+    try guard.observeWindow(&rule, who, true, 4, 245);
+    for (0..min_samples) |_| try guard.observeWindow(&rule, who, false, 1, 25);
+    try std.testing.expectEqual(@as(u32, min_samples), st.?.rate.plain_n);
+    try std.testing.expectEqual(@as(f64, 1), st.?.rate.plain_tok);
+    try std.testing.expectEqual(@as(f64, 25), st.?.rate.plain_ms);
+    var unused: u8 = 0;
+    const probe: Probe = .{ .ptr = &unused, .copy = never_copy.copy };
+    try std.testing.expectEqual(@as(i64, 0), try rule.headDepth(&who, null, probe));
+    st.?.rate.chain = true;
+    try guard.observeWindow(&rule, who, false, 1, 100);
+    try std.testing.expectEqual(@as(u32, min_samples), st.?.rate.draft_n);
+    // A steady drafted round can have just one row when no proposals were granted.
+    try guard.observeWindow(&rule, who, true, 1, 50);
+    try std.testing.expectEqual(@as(u32, min_samples + 1), st.?.rate.draft_n);
+}
+
 test "with chances on the wire, a stream whose plain rounds earn more tokens a ms than its drafted ones runs plain, with probes" {
     const gpa = std.testing.allocator;
     const empty: Table = .{};

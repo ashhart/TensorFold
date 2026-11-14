@@ -39,6 +39,13 @@ pub fn observeRate(r: *Rule, who: Who, tokens: usize, ms: f64) !void {
     span.* += w * (ms - span.*);
 }
 
+/// A transition combines the old window with the new proposal, so it prices neither steady mode.
+pub fn observeWindow(r: *Rule, who: Who, previous_chain: bool, tokens: usize, ms: f64) !void {
+    const next_chain = if (who.state.*) |*s| s.rate.chain else true;
+    if (previous_chain != next_chain) return;
+    try observeRate(r, who, tokens, ms);
+}
+
 /// Whether the stream's next round runs plain, based on its measured token rates.
 pub fn preferPlain(r: *Rule, who: Who) !bool {
     _ = try r.rates(who);
