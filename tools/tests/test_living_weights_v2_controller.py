@@ -232,6 +232,17 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(result[0]["state"], "needs_recovery")
         self.assertEqual(self.client.delete_count, 0)
 
+    def test_unknown_graph_states_stop_before_any_lesson(self):
+        for state in ({}, {"state": 3}, {"state": "archived"}):
+            record = {"id": 17, "text": "old", **state}
+            with self.subTest(record=record):
+                self.client.records = {17: record}
+                self.client.reply = "Sheffield"
+                with self.assertRaisesRegex(TransportError, "unrecognized state"):
+                    self.controller.teach(manifest(fact()))
+                self.assertEqual(self.client.teach_count, 0)
+                self.assertEqual(self.ledger.history(), [])
+
     def test_cannot_alter_preexisting_graph(self):
         self.client.records = {17: {"id": 17, "state": "deleting", "text": "old"}}
         with self.assertRaises(LearningError):
