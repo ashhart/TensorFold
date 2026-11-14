@@ -116,6 +116,7 @@ test {
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
+    _ = @import("pdf_measure_test.zig");
     _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
@@ -303,6 +304,7 @@ test {
     _ = @import("ocr/mistral_test.zig");
     _ = @import("ocr/mistral_sdk_test.zig");
     _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/run_pdf_test.zig");
     _ = @import("ocr/size_test.zig");
     _ = @import("ocr/prompt_ids_test.zig");
     _ = @import("ollama_e2e_test.zig");
