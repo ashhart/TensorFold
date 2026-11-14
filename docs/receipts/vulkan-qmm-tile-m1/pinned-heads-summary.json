@@ -1,0 +1,210 @@
+{
+ "change": "qmm_q4_tile_f32 (#2015) against qmm_q4_vec4 (#1990), P-core pinned",
+ "setup": {
+  "chip": "Apple M1 (G13G B1)",
+  "kernel_release": "7.3.0-2-20261110.1-lab-ARCH",
+  "settings": "free-running greedy, 64 steps, two runs per process, fresh process per run, one model process at a time, every process under taskset on the four P cores (CPU 4-7)",
+  "start_utc": "2026-11-12T16:16:03Z",
+  "old_build": "#1990 measured build commit 46571f111b2f0e92963561702b7eaab41868f823; ELF SHA-256 2a1d481c692900c1cefb08fa308d5852d2ec748ee7bc24c89ff013c26ac36d72 (6089352 bytes)",
+  "new_build": "#2015 measured build commit 6e6f47f228a662cb26dedf5b24bf7c50c780fe43; ELF SHA-256 b3b7f5e17752b31370490a7d4fe3f4ff92cf3593ed3bed447759f52c5561de41 (6128512 bytes)",
+  "note": "Both include the float32 fix. The ELFs were built before the comment and name only commits that sit above them; those commits change no code.",
+  "gpu_timeouts": 0
+ },
+ "cases": [
+  {
+   "case": "unicode-24",
+   "order": "h1990-1,h2015-1,h2015-2,h1990-2,h1990-3,h2015-3",
+   "pairs": 3,
+   "logits_sha256_all_processes": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9",
+   "run2_ms_median": {
+    "old": 11803,
+    "new": 8416
+   },
+   "run2_gain_median": 0.28569003564759804,
+   "run2_gain_range": [
+    0.2785484689561834,
+    0.3115309667033805
+   ],
+   "processes": [
+    {
+     "label": "old-1",
+     "rc": 0,
+     "run1_ms": 12449,
+     "run2_ms": 11782,
+     "ids_match": true,
+     "logits_sha256": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9"
+    },
+    {
+     "label": "new-1",
+     "rc": 0,
+     "run1_ms": 9192,
+     "run2_ms": 8416,
+     "ids_match": true,
+     "logits_sha256": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9"
+    },
+    {
+     "label": "old-2",
+     "rc": 0,
+     "run1_ms": 12410,
+     "run2_ms": 11822,
+     "ids_match": true,
+     "logits_sha256": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9"
+    },
+    {
+     "label": "new-2",
+     "rc": 0,
+     "run1_ms": 9255,
+     "run2_ms": 8529,
+     "ids_match": true,
+     "logits_sha256": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9"
+    },
+    {
+     "label": "old-3",
+     "rc": 0,
+     "run1_ms": 12364,
+     "run2_ms": 11803,
+     "ids_match": true,
+     "logits_sha256": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9"
+    },
+    {
+     "label": "new-3",
+     "rc": 0,
+     "run1_ms": 9573,
+     "run2_ms": 8126,
+     "ids_match": true,
+     "logits_sha256": "6bfbb1a55a3e7d8d95bfdf4fac7b2d5a46df28eac5a83f56bf6e55eb965c26c9"
+    }
+   ]
+  },
+  {
+   "case": "document-256",
+   "order": "h1990-1,h2015-1,h2015-2,h1990-2,h1990-3,h2015-3",
+   "pairs": 3,
+   "logits_sha256_all_processes": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b",
+   "run2_ms_median": {
+    "old": 26853,
+    "new": 12247
+   },
+   "run2_gain_median": 0.5442976744186047,
+   "run2_gain_range": [
+    0.5386565272496832,
+    0.6095408334264328
+   ],
+   "processes": [
+    {
+     "label": "old-1",
+     "rc": 0,
+     "run1_ms": 27453,
+     "run2_ms": 26875,
+     "ids_match": true,
+     "logits_sha256": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b"
+    },
+    {
+     "label": "new-1",
+     "rc": 0,
+     "run1_ms": 13154,
+     "run2_ms": 12247,
+     "ids_match": true,
+     "logits_sha256": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b"
+    },
+    {
+     "label": "old-2",
+     "rc": 0,
+     "run1_ms": 27295,
+     "run2_ms": 26853,
+     "ids_match": true,
+     "logits_sha256": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b"
+    },
+    {
+     "label": "new-2",
+     "rc": 0,
+     "run1_ms": 12509,
+     "run2_ms": 10485,
+     "ids_match": true,
+     "logits_sha256": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b"
+    },
+    {
+     "label": "old-3",
+     "rc": 0,
+     "run1_ms": 27483,
+     "run2_ms": 26826,
+     "ids_match": true,
+     "logits_sha256": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b"
+    },
+    {
+     "label": "new-3",
+     "rc": 0,
+     "run1_ms": 13112,
+     "run2_ms": 12376,
+     "ids_match": true,
+     "logits_sha256": "8901e17ccef7bffde7332519f5c70cb2389f47aaff31ddc7c91b4fe9099b709b"
+    }
+   ]
+  },
+  {
+   "case": "document-1024",
+   "order": "h1990-1,h2015-1,h2015-2,h1990-2,h1990-3,h2015-3",
+   "pairs": 3,
+   "logits_sha256_all_processes": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37",
+   "run2_ms_median": {
+    "old": 76868,
+    "new": 25765
+   },
+   "run2_gain_median": 0.6675827011405274,
+   "run2_gain_range": [
+    0.6607732634338139,
+    0.66934224905032
+   ],
+   "processes": [
+    {
+     "label": "old-1",
+     "rc": 0,
+     "run1_ms": 78056,
+     "run2_ms": 77508,
+     "ids_match": true,
+     "logits_sha256": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37"
+    },
+    {
+     "label": "new-1",
+     "rc": 0,
+     "run1_ms": 27080,
+     "run2_ms": 25765,
+     "ids_match": true,
+     "logits_sha256": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37"
+    },
+    {
+     "label": "old-2",
+     "rc": 0,
+     "run1_ms": 77068,
+     "run2_ms": 76868,
+     "ids_match": true,
+     "logits_sha256": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37"
+    },
+    {
+     "label": "new-2",
+     "rc": 0,
+     "run1_ms": 26849,
+     "run2_ms": 25417,
+     "ids_match": true,
+     "logits_sha256": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37"
+    },
+    {
+     "label": "old-3",
+     "rc": 0,
+     "run1_ms": 77571,
+     "run2_ms": 76300,
+     "ids_match": true,
+     "logits_sha256": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37"
+    },
+    {
+     "label": "new-3",
+     "rc": 0,
+     "run1_ms": 26738,
+     "run2_ms": 25883,
+     "ids_match": true,
+     "logits_sha256": "a472a62c7e221de2b9ec38e07b72011f29abc6f23adc393cf0f7b7cae2259c37"
+    }
+   ]
+  }
+ ]
+}
