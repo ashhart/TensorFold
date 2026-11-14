@@ -2,7 +2,7 @@
 
 ## Status
 
-The bubblewrap backend is **not part of this change**: it was written, reviewed below, and then scoped out
+The bubblewrap backend is **implemented on this branch** and stays opt-in; it was written, reviewed below, and scoped out
 until the gaps in items 1 and 2 close (git metadata for absent, nested and worktree repositories; minimal
 runtime roots). This review and the plan that carried the backend are the record; the branch keeps Linux
 commands on the existing fail-closed behaviour. No product default was weakened.
