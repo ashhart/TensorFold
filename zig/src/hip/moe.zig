@@ -70,6 +70,28 @@ pub fn tileOf(rows: usize, window: bool) usize {
     return if (rows < BLOCK_FROM or window) LANE_ROWS else BLOCK_ROWS;
 }
 
+/// The stacked shared expert's tile: it holds every row, so a prompt pass never cuts it below the GEMM tile.
+pub fn sharedTileFor(o: Ops, rows: usize) usize {
+    return sharedTileOf(rows, o.window, o.prefill);
+}
+
+/// sharedTileFor's rule on its own, for a fixture that plans as serving does.
+pub fn sharedTileOf(rows: usize, window: bool, prefill: bool) usize {
+    // decode and lane rounds keep tile_for's: their launches take m as the most rows an item holds
+    return if (prefill and !window) BLOCK_ROWS else tileOf(rows, window);
+}
+
+/// The routed launches' m before the rows cap it: the most rows a plan's item holds, the shared one's where it stacks.
+pub fn itemRowsFor(o: Ops, rows: usize, shared: bool) usize {
+    return itemRowsOf(rows, o.window, o.prefill, shared);
+}
+
+/// itemRowsFor's rule on its own, for a fixture that plans as serving does.
+pub fn itemRowsOf(rows: usize, window: bool, prefill: bool, shared: bool) usize {
+    const tile = tileOf(rows, window);
+    return if (shared) @max(tile, sharedTileOf(rows, window, prefill)) else tile;
+}
+
 /// The average rows an expert of `experts` takes of `rows` tokens' `top_k` routed slots, rounded up; 0 without experts.
 pub fn expertRows(rows: usize, top_k: usize, experts: usize) u32 {
     if (experts == 0) return 0;
@@ -78,7 +100,7 @@ pub fn expertRows(rows: usize, top_k: usize, experts: usize) u32 {
 
 /// `x` (rows, D) to (rows, D) in its dtype: the top-k experts plus the shared one; a tp rank returns its fp32 share.
 pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool) ops.Error!Tensor {
-    _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tile comes from tile_for)
+    _ = prefill; // the affine experts' arithmetic does not depend on it (the plan's tiles come from `o`)
     const ex = r.experts;
     const slots = r.top_k + 1;
     const size = if (r.exact) rows else bucket(rows);
@@ -98,7 +120,8 @@ pub fn run(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, prefill: bool)
         const local = try o.arena.of(i32, size * slots);
         try o.moeLocalize(pick, r.remap, local, pairs, ex.count);
         tile = tileFor(o, rows);
-        try o.moeRoute(local, pairs, r.rows, tile, members, items, cap);
+        // a rank's local ids don't name the shared expert: every expert keeps the routed tile
+        try o.moeRoute(local, pairs, r.rows, tile, null, tile, members, items, cap);
         try o.moeForeignItems(items, cap, ex.count);
         const expert_rows = expertRows(rows, r.top_k, r.count());
         const both = try o.projectRouted(x, ex.fused, items, count, members, pairs, slots, @min(tile, rows), expert_rows);
@@ -169,7 +192,11 @@ fn expertParts(o: Ops, kind: Kind, r: Routed, x: Tensor, rows: usize, logits: u6
     } else {
         try o.moeSelect(logits, pick, wts, null, 0, rows, r.count(), r.top_k);
         tile = tileFor(o, rows);
-        try o.moeRoute(pick, pairs, r.rows, tile, members, items, cap);
+        // the stacked shared expert is the last id; beside the stack its items are zeroed below, so it keeps the tile
+        const shared: ?usize = if (ex.shared == null) r.count() else null;
+        try o.moeRoute(pick, pairs, r.rows, tile, shared, sharedTileFor(o, rows), members, items, cap);
+        // the launches' m: the most rows an item holds, the shared expert's whole item in a prompt pass
+        tile = itemRowsFor(o, rows, shared != null);
     }
     // beside the stack the shared pair's id is the stack's first id past its experts: zero its item, never read its row
     if (ex.shared != null) try o.moeForeignItems(items, count, ex.count);
@@ -204,4 +231,24 @@ test "the routed products take the decode tile below 64 rows and in a lane round
     try std.testing.expectEqual(@as(usize, BLOCK_ROWS), tileFor(o, 2048));
     try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, BLOCK_FROM));
     try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, 2048));
+}
+
+test "the shared expert takes the GEMM tile in a prompt pass at any row count, the routed tile in decode and lane rounds" {
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = undefined, .arena = undefined };
+    var prompt = o;
+    prompt.prefill = true;
+    var round = o;
+    round.window = true;
+    for ([_]usize{ 2, 33, BLOCK_FROM - 1, BLOCK_FROM, 2048 }) |rows| {
+        try std.testing.expectEqual(@as(usize, BLOCK_ROWS), sharedTileFor(prompt, rows));
+        // the routed experts keep tile_for's in the same prompt pass
+        try std.testing.expectEqual(tileFor(o, rows), tileFor(prompt, rows));
+        try std.testing.expectEqual(tileFor(o, rows), sharedTileFor(o, rows));
+        try std.testing.expectEqual(@as(usize, LANE_ROWS), sharedTileFor(round, rows));
+        // the launches' m holds the plan's largest item: the shared one only where it stacks in a prompt pass
+        try std.testing.expectEqual(@as(usize, BLOCK_ROWS), itemRowsFor(prompt, rows, true));
+        try std.testing.expectEqual(tileFor(prompt, rows), itemRowsFor(prompt, rows, false));
+        try std.testing.expectEqual(tileFor(o, rows), itemRowsFor(o, rows, true));
+        try std.testing.expectEqual(@as(usize, LANE_ROWS), itemRowsFor(round, rows, true));
+    }
 }
