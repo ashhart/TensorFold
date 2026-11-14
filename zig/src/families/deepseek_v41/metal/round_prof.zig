@@ -30,6 +30,22 @@ pub fn end(t0: f64, rows: u32, first: mtl.CommandBuffer, last: mtl.CommandBuffer
     if (rounds % every == 0) log();
 }
 
+/// Reads and drops the pending round while its queue lives: an engine calls this before closing the queue.
+pub fn forget() void {
+    if (pending) |p| gpu(p.rows, p.first, p.last);
+    pending = null;
+}
+
+/// Whether a round's buffers wait to be read (tests).
+pub fn holding() bool {
+    return pending != null;
+}
+
+/// Turns the profiler on or off without the environment (tests).
+pub fn force(on: bool) void {
+    state = if (on) .on else .off;
+}
+
 fn gpu(rows: u32, first: mtl.CommandBuffer, last: mtl.CommandBuffer) void {
     const s = &sums[@min(rows, sums.len - 1)];
     const a = first.gpuTimes() orelse return;

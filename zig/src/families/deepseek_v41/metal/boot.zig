@@ -8,6 +8,7 @@ const dspark = @import("dspark.zig");
 const rope = @import("rope.zig");
 const scratch = @import("scratch.zig");
 const forward = @import("forward.zig");
+const round_prof = @import("round_prof.zig");
 const serve = @import("serve.zig");
 const target_ = @import("target.zig");
 
@@ -163,6 +164,7 @@ pub const Boot = struct {
         if (b.ds) |*w| w.deinit();
         b.w.deinit();
         b.p.deinit();
+        round_prof.forget();
         b.queue.deinit();
         b.device.deinit();
         b.a.destroy(b);
