@@ -272,6 +272,10 @@ decode its weights once for every row of a pass, each row in the one-row kernel'
 the same six experts as well, and a probe holds a launch's act, out and combine output bit-equal to each row launched
 alone at 1 to 16 rows on the same, disjoint and random experts, with NaN and Inf planted. Rows that read their pass's
 first row are a control in the registrations (red at shapes) and in the probe.
+The decode MoE's `tf_dsv41_route_gate_plan` (the router's matvec, route and plan in one launch: the last of its groups
+to finish reads the logits as atomics, ranks the picks and plans) registers twice: its matvec in the matvec suite (exact
+bytes at 384 experts, 1 to 16 rows, four controls under `TF_GCTL`), and its route and plan in the route suite on given
+logits (k 0) with the route's four controls.
 The row-split seam's four kernels (`pair_rows.metal`, launched by `pair_rows.zig`) move bf16 frames, never sums:
 `pair_stage` copies this rank's half of a frame row into the slot the relay sends, and `pair_gather` writes both halves
 of every row, its own natively and the peer's from the relayed frame. `pair_argmax` flags a row whose logits are not

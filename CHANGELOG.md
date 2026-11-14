@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: decode's router matvec, route and expert plan run as one launch beside the shared expert's up projection, so the MoE takes four waves after its norm instead of six, and the one-row expert kernels decode a word of FP4 codes by shifts; every output and KV byte is unchanged. On an M5 Ultra a round of release layers is 3.4 to 4.3% faster at one row and 2.2 to 3.2% at four (#3292).
+
 - DeepSeek-V4.1 on Metal: a greedy pick finds the first maximum of a row's logits in 16-wide steps (a row holding a NaN keeps the scalar scan) and a sampled pick reuses its float64 logits and ids instead of allocating both, so every pick is the same id; on an M5 Ultra the five prose prompts decode 2.7% faster greedy and 3.7% sampled (#3288).
 
 - DeepSeek-V4.1 on Metal: decode's FP8 projections of 1 to 5 rows issue every weight load before their chains and meet each output's tile roots in one simdgroup, and projections with K in whole 1024s take one column a simdgroup; every output bit is unchanged. On an M5 Ultra a layer's FP8 launches at one row take 214.8 us instead of 247.4 (675 to 778 GB/s) and at four rows 281.4 instead of 325.5 (#3287).

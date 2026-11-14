@@ -154,6 +154,20 @@ pub fn route(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, r: Route, rows: u32, top
     e.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
 }
 
+/// The gate's fp32 logits, `route` and the experts' plan in one launch; the last group plans (its count in `sync`).
+pub fn gatePlan(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, r: Route, plan: [4]Ref, x: Ref, gate: Ref, sync: Ref, rows: u32, k: u32, experts: u32, topk: u32, scale: f32) void {
+    e.setPipeline(pipe);
+    bind(e, &.{ r.logits, r.bias, r.bias_vl, r.image });
+    e.setValue(extern struct { rows: i32, topk: i32, scale: f32, eps: f32 }{ .rows = @intCast(rows), .topk = @intCast(topk), .scale = scale, .eps = 1e-20 }, 4);
+    for ([_]Ref{ r.picks, r.weights, plan[0], plan[1], plan[2], plan[3], x, gate }, 5..) |b, i| e.setBuffer(b.buf, b.off, i);
+    // rows over 2 split into up to four slices, a group of 32 columns each, so the matvec takes more cores
+    const slices: u32 = @min(4, (rows + 1) / 2);
+    const per = (rows + slices - 1) / slices;
+    e.setValue([2]u32{ k, per }, 13);
+    e.setBuffer(sync.buf, sync.off, 14);
+    e.dispatchGroups(mtl.Size.of((experts + 31) / 32 * ((rows + per - 1) / per), 1, 1), mtl.Size.of(1024, 1, 1));
+}
+
 /// The index top-512 of scores [rows][width] (row stride `width`), counting visible[row] keys; selected [rows][512].
 pub fn topk512(pipe: mtl.Pipeline, e: mtl.ComputeEncoder, scores: Ref, visible: Ref, selected: Ref, rows: u32, width: u32) void {
     e.setPipeline(pipe);
