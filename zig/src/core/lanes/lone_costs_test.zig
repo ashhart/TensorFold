@@ -88,6 +88,7 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
     const tokens: [63]u32 = @splat(7);
     var p: win.Plan = .{ .stream = &s, .position = 1, .kind = .head, .tokens = &tokens };
     for ([_]u32{ 0, 15, 31, 47, 63 }) |count| {
+        // 8 rounds: the first deadline (cost_probe_after) and the default Cooldown.spacing, so a width is owed
         s.rounds += 8;
         try std.testing.expectEqual(@as(?u32, count), own.probe(&e, p));
         try e.rule.observeCost(count, 100, false, win.who(&s));
@@ -96,12 +97,14 @@ test "lone price: tile probes are bounded, respect available rows, and stop afte
         try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
         s.rounds -= 1;
     }
+    // 8 more rounds: the walk 1, 16, 32, 48, 64 is sampled, so null means nothing is owed
     s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
     p.tokens = tokens[0..16];
     try std.testing.expectEqual(@as(?u32, 16), own.probe(&e, p));
     try e.rule.observeCost(16, 100, false, win.who(&s));
     own.observe(&s, 17, 17, 100);
+    // 8 rounds is the default Cooldown.spacing: past it, null means nothing is owed, not a cooldown running
     s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
@@ -432,6 +435,7 @@ test "lone price: without plain_guard no probe asks for a round with no draft, a
     try std.testing.expect(own.enabled(&e, p));
     var w = win.who(&s);
     w.lone = true;
+    // 8 rounds is the first deadline, as for a stream's cost_probe_after and every Cooldown
     s.rounds += 8;
     for ([_]u32{ 1, 5, 9, 13, 15 }) |drafts| {
         s.rounds += 8;
@@ -441,6 +445,7 @@ test "lone price: without plain_guard no probe asks for a round with no draft, a
     }
     try std.testing.expectEqual(@as(?f64, 100), s.depth.?.ms.?.get(15));
     try std.testing.expect(e.rule.greedy_ms.empty()); // the shared rounds' table is left alone
+    // 8 rounds is the default Cooldown.spacing: past it, null means nothing is owed, not a cooldown running
     s.rounds += 8;
     try std.testing.expectEqual(@as(?u32, null), own.probe(&e, p));
 }
