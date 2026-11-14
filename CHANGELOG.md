@@ -4,10 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Living Weights (`--slide --slide-drift-gate`): the recall wordings a request supplies are held out of the lesson writer's plan. A planned question that matches one under the gate's own contamination check is dropped and replaced, so the gate no longer refuses a lesson as "supplied recall is missing or trained" for a wording the writer made itself; a lesson that can't reach its three-example floor without them is refused as "the plan could not avoid the supplied recall wordings". With no recall supplied, or the gate off, nothing changes (#2929, for #1389). Thanks to @jimthedj65 for the panel run that found it.
-- GLM-5.3-Flash on CUDA: with `TF_GLM_INDEX_CUDA` unset, prompt chunks take #1449's two indexer kernels, with the same tokens; `0` keeps `tf_glm_scores`, `scores` still takes the scores kernel alone to bisect, and decode rows keep `tf_glm_select_rows_wide` (#3159).
+- GLM-5.3-Flash on CUDA: prompts take the TF_GLM_INDEX_CUDA kernels by default (0 keeps tf_glm_scores), with the same tokens; at TP=2 on two GB10s prompts are 44% faster at 2K and 31% at 8K, level at 32K (#3159). Thanks to @Bizuayeu.
 
-- HIP on gfx1151: the routed prompt tile runs an expert of at most 8 rows in K-parallel passes inside the same launch, with the matrix path's bytes; with Qwen3.6-35B-A3B on a Radeon 8060S, served cold prompts of 64 to 256 tokens are 11% to 22% faster (1.5% at 1,024), and logits and served tokens equal main's. Other cards' tables leave it off (#2878, fixes #2795). Thanks to @AbrahamCete.
+- Living Weights (`--slide --slide-drift-gate`): the recall wordings a request supplies are held out of the lesson writer's plan. A planned question that matches one under the gate's own contamination check is dropped and replaced, so the gate no longer refuses a lesson as "supplied recall is missing or trained" for a wording the writer made itself; a lesson that can't reach its three-example floor without them is refused as "the plan could not avoid the supplied recall wordings". With no recall supplied, or the gate off, nothing changes (#2929, for #1389). Thanks to @jimthedj65 for the panel run that found it.
 
 - Tests: two host tests in `test-server-cpu` pin the server's incremental reply text: a character split across tokens streams only once it is whole, and each chunk decodes only the previous chunk and its new tokens, never the whole reply (#3022).
 
