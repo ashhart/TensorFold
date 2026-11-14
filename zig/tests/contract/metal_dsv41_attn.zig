@@ -20,7 +20,7 @@ fn sh(rows: usize, heads: usize, k: usize) c.Shape {
     return .{ .rows = rows, .n = heads * D, .k = k };
 }
 
-const decode_served = [_]c.Shape{ sh(8, 8, 16), sh(4, 8, 512), sh(1, 8, 512), sh(2, 8, 0), sh(4, 64, 512), sh(16, 8, 37), sh(32, 8, 512), sh(3, 2, 5) };
+const decode_served = [_]c.Shape{ sh(8, 8, 16), sh(4, 8, 512), sh(1, 8, 512), sh(2, 8, 0), sh(4, 64, 512), sh(16, 8, 37), sh(32, 8, 512), sh(3, 2, 5), sh(72, 2, 512) };
 const prompt_served = [_]c.Shape{ sh(8, 4, 16), sh(4, 8, 512), sh(16, 4, 64), sh(17, 2, 0), sh(3, 8, 512), sh(32, 4, 128), sh(2, 2, 512), sh(8192, 2, 32), sh(1, 2, 5) };
 
 pub fn spec(v: Variant, name: []const u8) c.Spec {

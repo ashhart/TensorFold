@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: decode attention widens bf16 keys through the bfloat type and loads each step's keys a step ahead up to 64 rows (was 2), with the same bits. On an M5 Ultra, release layer 2's decode attention takes 44 us at 3 and 4 rows (was 54 and 53) and 45 us at 1 row (was 47.5); served greedy decode goes from 89.5 to 90.3 tok/s and sampled from 72.8 to 73.4, with the same replies.
+
 - DeepSeek-V4.1 on Metal: prompt attention runs two heads a simdgroup over one load of each key, widens bf16 keys through the bfloat type and reads selected indices four at a time. Output bits are unchanged and still equal decode's. On an M5 Ultra, release layer 2's attention core at 4096 prompt rows drops from 28.6 to 19.0 ms at position 16384 and from 27.5 to 17.1 ms at position 0, and the whole layer from 197 to 188 ms (#3351).
 
 - GLM-5.3-Flash on CUDA: prompts take the TF_GLM_INDEX_CUDA kernels by default (0 keeps tf_glm_scores), with the same tokens; at TP=2 on two GB10s prompts are 44% faster at 2K and 31% at 8K, level at 32K (#3159). Thanks to @Bizuayeu.
