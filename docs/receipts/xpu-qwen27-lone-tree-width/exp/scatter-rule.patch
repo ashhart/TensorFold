@@ -5,7 +5,7 @@ index 7a5b8813b..d7790e0b2 100644
 @@ -35,6 +35,51 @@ pub fn chances(landing: *const Landing, sampled: bool, parents: []const i32, own
  /// A lone round's drafts to verify, and the rows of a calibration trial when the rule asks for one.
  pub const Width = struct { nodes: u32, trial: ?u32 = null };
- 
+
 +/// Scatter of a stream's own round times around the line through them, ms: its prices cannot tell apart less.
 +pub fn scatter(ms: lanes.table.Table) f64 {
 +    var n: f64 = 0;

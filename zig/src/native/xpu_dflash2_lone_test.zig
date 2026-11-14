@@ -168,7 +168,7 @@ fn round(sim: *Sim, s0: u64, pending: u32, committed: u64, oracle: []const u32, 
     var path_out: [16]u32 = undefined;
     const round_ = try xq.drafter.follow(&g, nodes, greedy[0 .. g.n + 1], draw, null, &path_out);
     var out: Out = .{};
-    @memcpy(out.tokens[0..round_.tokens.len - 1], round_.tokens[1..]);
+    @memcpy(out.tokens[0 .. round_.tokens.len - 1], round_.tokens[1..]);
     out.n = round_.tokens.len - 1;
     out.tokens[out.n] = round_.terminal;
     out.n += 1;
