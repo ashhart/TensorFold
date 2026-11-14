@@ -317,7 +317,7 @@ pub const Kernels = struct {
         // A plain matrix off qk: tf_lane_reg on its reg copy when it has one, else the cooperative kernel.
         const on_reg = reg and (!p.plain or p.reg_copy != null);
         const words = if (p.plain) p.reg_copy orelse p.words else p.words;
-        // Non-reg prompts retain main's tensor-unit row blocks; a cooperative fallback never takes the long key.
+        // Long key: reg rows past 128; non-reg prompt row blocks follow main; cooperative never
         const long = if (on_reg) longKey(k.long_prompt, k.prompt, rows) else !reg and k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
         const sums: ?Sums = if (on_reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long, reg and !on_reg);
