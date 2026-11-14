@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -82,7 +82,7 @@ Forwarded headers do not select the scheme or bypass either check.
 
 Each 403 names the refused header and its corresponding exception flag. Clients without an `Origin`, including curl,
 SDKs and the app, keep their existing requests with a valid Host. Content-Type is not required by these checks, so
-`curl -d` requests keep working. The server adds no CORS headers; these flags do not enable cross-origin browser reads.
+`curl -d` requests keep working. `--allowed-origin` adds no CORS headers and does not enable cross-origin browser reads.
 The header checks protect browser access and do not replace API keys. Trailing spaces or tabs in Host or Origin values
 are refused; clients should omit that outer whitespace.
 
@@ -95,6 +95,20 @@ For a trusted proxy name and web origin, for example:
 ```sh
 tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin https://inference.example
 ```
+
+A browser page on another origin reads replies only from origins named with `--cors-origin ORIGIN` (repeatable, at
+most 64, the same `http(s)://HOST[:PORT]` form; no wildcard). Each one is also an allowed origin. A preflight
+(`OPTIONS` with `Access-Control-Request-Method`) from a listed origin is answered before keys are checked: 204 with
+`Access-Control-Allow-Origin` echoing that origin, `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`,
+`Access-Control-Max-Age: 600` and `Access-Control-Allow-Headers` naming `authorization`, `x-api-key`,
+`content-type`, `anthropic-version`, `anthropic-beta` and `anthropic-dangerous-direct-browser-access`, followed by any
+requested `x-stainless-*` header (the OpenAI and Anthropic browser SDKs send these; letters, digits, `-` and `_` after
+the prefix), lowercased. Another method or requested header refuses the whole preflight with 403. An unlisted origin
+gets the 403 above.
+A listed origin's request that passes the header checks gets `Access-Control-Allow-Origin` on its reply, key and
+scope refusals and SSE streams included; with the flag set, every reply past those checks carries `Vary: Origin`. Credentials mode
+is not offered (no `Access-Control-Allow-Credentials`): send the key in `Authorization` or `x-api-key`, which gated
+routes still require when keys are on. Without the flag no reply carries a CORS header.
 
 | Route | Behavior |
 | --- | --- |
@@ -111,6 +125,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | `POST /v1/messages/count_tokens` | Render the same model prompt without generating |
 | `POST /tokenize`, `POST /v1/tokenize` | vLLM's: a `prompt`'s token IDs, or the IDs a chat request's `messages` render to |
 | `POST /detokenize`, `POST /v1/detokenize` | vLLM's: the text of `tokens`, special tokens included |
+| `POST /apply-template`, `POST /v1/apply-template` | `{"prompt": TEXT}`: the text a `/tokenize` body's `messages` render to (tools, `reasoning_effort`, `chat_template_kwargs`, `add_generation_prompt`, media expanded), special tokens included; no engine work |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
