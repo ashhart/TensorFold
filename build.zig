@@ -101,6 +101,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/glm_ocr.zig").hostTests(b, test_step);
     @import("zig/build/dots_mocr.zig").hostTests(b, test_step);
     server_build.webHostTests(b, test_step);
+    server_build.launchHostTests(b, test_step);
     @import("zig/build/qwen4.zig").steps(b, test_step);
     @import("zig/build/fsr.zig").steps(b, test_step);
     @import("zig/build/kernel_symbols.zig").tests(b, test_step);

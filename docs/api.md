@@ -1379,3 +1379,20 @@ Connect Claude Code using the ID from `/v1/models`:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```
+
+## Launch a coding agent
+
+`tensorfold launch <agent> [args...]` checks that a local server answers at `http://127.0.0.1:8080/v1`,
+names the model it found, then starts the agent with its API base URL and key set in the child process only.
+No agent settings or files in the home folder are changed. Arguments after the agent name pass through
+unchanged. Set `TENSORFOLD_LAUNCH_URL` to use another local server. Claude Code gets the server's root
+(`http://127.0.0.1:8080`), since it adds `/v1/messages` itself; the others get the `/v1` URL. The key is the first of
+`TENSORFOLD_API_KEY`'s keys when it is set, for a server started with keys, and `local` otherwise. An unknown agent
+is refused with the list of known names.
+
+| agent | base URL variable | key variable |
+|---|---|---|
+| `claude` | `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` |
+| `codex` | `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
+| `opencode` | `OPENAI_BASE_URL` | `OPENAI_API_KEY` |
+| `hermes` | `TENSORFOLD_BASE_URL` | `TENSORFOLD_API_KEY` |
