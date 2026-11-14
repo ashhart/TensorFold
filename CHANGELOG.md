@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention,
+- DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention (#3382),
   per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch.
   Prompt chunks adapt to admitted memory and live decoders; incompatible shapes retain the generic projection body.
   Small dense, filtered and indexed projections retain matching reduction orders and logical output bounds.
@@ -17,7 +17,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   GPU profiling starts deferred mHC spans only when work is encoded, avoiding empty counter samples.
   Last-row logits expand the selected final stream row rather than row zero of a multi-row window.
   Fused mHC Sinkhorn uses the unfused split's FP32 row and column reduction order.
-  Stacked on #2373; whole-model qualification is still incomplete (#3382).
+  Stacked on #2373; whole-model qualification is still incomplete.
   See [scope and qualification limits](docs/deepseek-v41.md#exl3-optimization-follow-up)
   and [full-window fidelity](docs/receipts/dsv41-exl3-metal/fidelity-128.json).
 
