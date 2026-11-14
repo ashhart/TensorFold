@@ -170,7 +170,10 @@ fn urlOf(a: Allocator, id: []const u8, tail: []const u8) ![]const u8 {
 fn waitStatus(srv: *Server, a: Allocator, id: []const u8, want: []const u8) !json.Value {
     for (0..5000) |_| {
         const got = try send(srv, a, "GET", try urlOf(a, id, ""), "", null);
-        if (std.mem.eql(u8, got.body.strField("status") orelse "", want)) return got.body;
+        const state = got.body.strField("status") orelse "";
+        if (std.mem.eql(u8, state, want)) return got.body;
+        for ([_][]const u8{ "completed", "incomplete", "failed", "cancelled" }) |ended|
+            if (std.mem.eql(u8, state, ended)) return error.UnexpectedStatus;
         std.Io.sleep(t.io, .fromMilliseconds(1), .awake) catch {};
     }
     return error.Timeout;
@@ -193,6 +196,36 @@ fn textOf(v: json.Value) []const u8 {
 }
 
 const long = "{\"model\":\"m\",\"input\":\"hi\",\"background\":true,\"max_output_tokens\":100000}";
+
+test "background Responses: optional rows keep the queued id and reply, explicit unavailable rows refuse" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var lane: Lane = .{ .io = t.io, .arena = .init(t.allocator) };
+    try lane.start();
+    defer lane.deinit();
+    const srv = try serve(&lane);
+    defer srv.deinit();
+    const fields = "\"model\":\"m\",\"input\":\"hello\",\"max_output_tokens\":8,\"temperature\":1,\"seed\":7,\"include\":[\"message.output_text.logprobs\"]";
+    const created = try post(srv, a, "{" ++ fields ++ ",\"background\":true}");
+    try t.expectEqual(@as(u16, 200), created.status);
+    try t.expectEqualStrings("queued", created.body.strField("status").?);
+    const id = created.body.strField("id").?;
+    const done = try waitStatus(srv, a, id, "completed");
+    try waitFor(idle, .{srv});
+    try t.expectEqualStrings(id, done.strField("id").?);
+    const plain = try post(srv, a, "{" ++ fields ++ "}");
+    try t.expectEqual(@as(u16, 200), plain.status);
+    try t.expectEqualStrings(textOf(plain.body), textOf(done));
+    try t.expectEqualStrings(plain.body.get("tensorfold").?.strField("token_sha256").?, done.get("tensorfold").?.strField("token_sha256").?);
+    try t.expectEqual(@as(usize, 0), done.get("output").?.array[0].get("content").?.array[0].get("logprobs").?.array.len);
+    const refused = try post(srv, a, "{" ++ fields ++ ",\"background\":true,\"top_logprobs\":2}");
+    try t.expectEqual(@as(u16, 200), refused.status);
+    const failed = try waitStatus(srv, a, refused.body.strField("id").?, "failed");
+    try t.expectEqualStrings("invalid_prompt", failed.get("error").?.strField("code").?);
+    try waitFor(idle, .{srv});
+    try t.expectEqual(@as(usize, 2), lane.taken.items.len);
+}
 
 test "background Responses: queued at once, then completed with the reply the same request gets in the foreground" {
     var arena = std.heap.ArenaAllocator.init(t.allocator);
