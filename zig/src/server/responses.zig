@@ -33,8 +33,18 @@ pub fn route(path: []const u8) ?[]const u8 {
 pub const Store = store_mod.Store;
 
 fn refuse(conn: *Conn, a: Allocator, message: []const u8, status: u16, param: ?[]const u8) void {
-    const body = std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}, \"type\": \"invalid_request_error\", \"param\": {s}, \"code\": null}}}}", .{ json.quote(a, message, .{}) catch return, if (param) |p| json.quote(a, p, .{}) catch return else "null" }) catch return;
-    conn.sendJson(status, body);
+    routes.sendValue(conn, a, status, refusal(a, message, param) catch return);
+}
+
+fn refusal(a: Allocator, message: []const u8, param: ?[]const u8) !Value {
+    const detail = try json.newObject(a);
+    try detail.put(a, "message", .{ .string = message });
+    try detail.put(a, "type", .{ .string = "invalid_request_error" });
+    try detail.put(a, "param", if (param) |p| .{ .string = p } else .null);
+    try detail.put(a, "code", .null);
+    const payload = try json.newObject(a);
+    try payload.put(a, "error", .{ .object = detail });
+    return .{ .object = payload };
 }
 
 pub fn get(srv: *Server, conn: *Conn, a: Allocator, rid: []const u8) void {
@@ -96,12 +106,12 @@ pub const TurnOptions = struct {
 pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, opts: TurnOptions) Outcome {
     const base = newBase(srv, a, body, t) catch return .{ .streamed = null };
     if (!(@import("logprobs.zig").offered(srv, a) catch false)) {
-        // an engine without rows keeps main's refusal, written by this route's own writer; include alone serves without
-        if (json.truthyField(t.chat, "logprobs")) {
-            refuse(conn, a, "logprobs are not supported by this model or backend", 400, null);
-            return .{ .streamed = null };
+        if (t.rows_if_offered) {
+            _ = t.chat.object.orderedRemove("logprobs");
+        } else if (json.truthyField(t.chat, "logprobs")) {
+            const payload = refusal(a, "logprobs are not supported by this model or backend", null) catch return .{ .streamed = null };
+            return .{ .refused = .{ .status = 400, .payload = payload } };
         }
-        if (t.rows_if_offered) _ = t.chat.object.orderedRemove("logprobs");
     }
     // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
     const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");

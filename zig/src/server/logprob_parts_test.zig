@@ -303,11 +303,29 @@ test "logprob combinations: Responses include alone asks for rows only where the
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var events: Events = .{ .a = a };
-    const listed = try turn(a, &.{ 'H', 'i', 301 }, false, false, "{\"input\":\"x\",\"include\":[\"message.output_text.logprobs\"],\"store\":false}", &events);
-    const part = listed.whole.get("output").?.array[0].get("content").?.array[0];
-    try std.testing.expectEqualStrings("Hi", part.get("text").?.string);
-    try std.testing.expectEqual(@as(usize, 0), part.get("logprobs").?.array.len);
-    const asked = try turn(a, &.{ 'H', 'i', 301 }, false, false, "{\"input\":\"x\",\"top_logprobs\":2,\"store\":false}", &events);
-    try std.testing.expectEqual(@as(u16, 400), asked.refused.status);
+    for ([_]bool{ false, true }) |streaming| {
+        var events: Events = .{ .a = a };
+        const body = if (streaming) "{\"input\":\"x\",\"include\":[\"message.output_text.logprobs\"],\"store\":false,\"stream\":true}" else "{\"input\":\"x\",\"include\":[\"message.output_text.logprobs\"],\"store\":false}";
+        const listed = try turn(a, &.{ 'H', 'i', 301 }, false, false, body, &events);
+        try std.testing.expect(if (streaming) listed == .streamed else listed == .whole);
+        const final = if (streaming) listed.streamed.? else listed.whole;
+        const part = final.get("output").?.array[0].get("content").?.array[0];
+        try std.testing.expectEqualStrings("Hi", part.get("text").?.string);
+        try std.testing.expectEqual(@as(usize, 0), part.get("logprobs").?.array.len);
+        if (streaming) try std.testing.expect(events.list.items.len > 0) else try std.testing.expectEqual(@as(usize, 0), events.list.items.len);
+    }
+    for ([_][]const u8{
+        "{\"input\":\"x\",\"top_logprobs\":2,\"store\":false}",
+        "{\"input\":\"x\",\"top_logprobs\":2,\"include\":[\"message.output_text.logprobs\"],\"store\":false,\"stream\":true}",
+    }) |body| {
+        var events: Events = .{ .a = a };
+        const asked = try turn(a, &.{ 'H', 'i', 301 }, false, false, body, &events);
+        try std.testing.expect(asked == .refused);
+        try std.testing.expectEqual(@as(u16, 400), asked.refused.status);
+        const err = asked.refused.payload.get("error").?;
+        try std.testing.expectEqualStrings("invalid_request_error", err.strField("type").?);
+        try std.testing.expectEqualStrings("logprobs are not supported by this model or backend", err.strField("message").?);
+        try std.testing.expect(err.get("param").? == .null and err.get("code").? == .null);
+        try std.testing.expectEqual(@as(usize, 0), events.list.items.len);
+    }
 }
