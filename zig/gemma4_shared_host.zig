@@ -281,7 +281,7 @@ test "Gemma shared: ring restore precedes forced snapshot eviction in reservatio
     const expected = reply(try fill(&f, &teach));
     f.release(&teach);
     f.store.?.store.limit(.{ .pages = 128, .snaps = 1 });
-    try t.expectEqual(@as(u32, 2048), f.store.?.store.find(.of(ids)).?.end);
+    try t.expectEqual(@as(u32, 2048), f.store.?.store.find(.of(ids)).?.at());
     var blocker = try stream(&.{ 99, 98, 97 });
     defer blocker.deinit(a);
     _ = try fill(&f, &blocker);
