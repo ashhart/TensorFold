@@ -690,9 +690,13 @@ token-level, budgeted, captured or left-recursive rules. The masks follow from x
 thinking on they start after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
-server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
-a grammar sent with `tool_choice: "required"` or a named function. A reply whose
-grammar fails while decoding ends with HTTP 500 (an error event when streaming); the other requests go on.
+grammar over 512 KiB on the native server, a server without xgrammar (with the install command; on the native server, a
+server that cannot load `libtfgrammar`), a grammar sent with `tool_choice: "required"` or a named function. A sent grammar is measured as the server compiles it:
+a JSON schema or a list of choices as the server re-serializes it (which can differ from its size as sent), a regex or grammar as sent. Tools are
+measured by the grammar for one call to any of them, which holds each tool's name and parameter schema once (every
+tool's schema under `tool_choice: "required"` or a named function, the strict tools' under `"auto"`); the grammar for
+parallel calls repeats that call and is not measured again, and its 400 names `tools`. A reply whose grammar fails while
+decoding ends with HTTP 500 (an error event when streaming); the other requests go on.
 
 ## Reasoning
 
