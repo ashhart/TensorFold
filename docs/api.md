@@ -879,9 +879,11 @@ one from 0.5 GiB up.
 
 With pages, the plan takes the engine's own window first, then each other stream's fixed part, then the prompt cache:
 a named `--prompt-cache-gib` comes before every window but the engine's own, and an unnamed one after the whole
-windows the budget holds, half of what they leave but at least 16 GiB and at most all of it (#2987 shows what that
-does to `TF_KV_SHARE`'s states). The cache then holds the kept states (on GLM with `TF_KV_SHARE`, a slot a state, the
-rest of it made pages), and the rest of the budget becomes pages, up to the streams' windows plus the cache's pages.
+windows the budget holds, half of what they leave but at least 16 GiB and at most all of it. On GLM with
+`TF_KV_SHARE` named and the cache unnamed, the kept states' slots, `TF_KV_SHARE` at most, come where a named cache
+goes, and the rest of the cache after the windows. The cache then holds the kept states (on GLM with `TF_KV_SHARE`,
+a slot a state, the rest of it made pages), and the rest of the budget becomes pages, up to the streams' windows plus
+the cache's pages.
 The settings that decide each part:
 
 | Setting | Kind | Scope | Unset | What it decides | Read in |
