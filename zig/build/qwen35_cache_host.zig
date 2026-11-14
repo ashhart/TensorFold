@@ -15,6 +15,15 @@ pub fn tests(b: *std.Build) void {
         .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "lanes", .module = lanes }, .{ .name = "kernel_sources", .module = sources } },
     });
     b.step("test-qwen35-cache-host", "Qwen2B retained bytes, paged images and resumed host-reference tokens").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Qwen retained:"} })).step);
+    // Qwen2B's prompt pass a chunk a call (#3021): its cuts, its state, a resume, a cancel, decodes between chunks
+    const steps = b.createModule(.{
+        .root_source_file = b.path("zig/src/qwen35_prefill_steps_test.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = fake }, .{ .name = "lanes", .module = lanes }, .{ .name = "kernel_sources", .module = sources } },
+    });
+    b.step("test-qwen35-metal-steps-host", "Qwen2B Metal's stepped prompt pass on host-backed caches, no GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = steps, .filters = &.{"Qwen2B Metal steps:"} })).step);
     const pure = &.{ "admit the affine 2B", "admit untied heads", "text_config parses", "a top-level config", "the geometry refuses", "the Python loader's refusals", "candidate selection preserves", "a masked draw", "bounded BF16 keys", "the blocked selection", "a non-finite word inside", "a stream's cache bytes" };
     b.step("test-qwen35-metal-host", "Qwen2B geometry, keyed draws and state sizing on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = pure })).step);
 }
