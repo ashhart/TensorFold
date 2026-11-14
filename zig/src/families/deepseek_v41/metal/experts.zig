@@ -41,7 +41,7 @@ pub const Pipelines = struct {
     /// act_quant of the rows once, and the gate/up over its values (the decode layers'): slots of one row, of more
     quant: mtl.Pipeline,
     upc: [2]mtl.Pipeline,
-    /// Kimi's down for the slots of one row, and of more (four rows a pass)
+    /// Kimi's down for the slots of one row, and of 2 to 16 (one weight decode for every row of a pass)
     down: [2]mtl.Pipeline,
     combine: mtl.Pipeline,
     combine_f32: mtl.Pipeline,
@@ -62,8 +62,8 @@ pub const Pipelines = struct {
         p.combine_f32 = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_combine_f32", false);
         inline for (up_rows, 0..) |r, i| p.up[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_dsv41_xp_up_r{d}", .{r}), false);
         p.quant = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_quant", false);
-        inline for (.{ "one", "multi" }, 0..) |k, i| p.upc[i] = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_upc_" ++ k, false);
-        p.down = .{ try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_one", false), try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_multi", false) };
+        inline for (.{ "one", "rows" }, 0..) |k, i| p.upc[i] = try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_upc_" ++ k, false);
+        p.down = .{ try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_one", false), try mtl.Pipeline.init(device, lib, "tf_dsv41_xp_down_rows", false) };
         return p;
     }
 

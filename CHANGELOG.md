@@ -2,6 +2,20 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- DeepSeek-V4.1 on Metal: the DSpark drafter's head runs on an FP8 copy of the vocabulary head made at load (0.67 GB, the target keeps bf16), its propose launch encodes concurrently with barriers where steps depend, and its buffers stay in one residency set, so a pass no longer waits for macOS to make them resident again; every reply is unchanged. On an M5 Ultra the five prose prompts decode about 5% faster greedy and 6% sampled (#3296).
+
+- DeepSeek-V4.1 on Metal: decode's router matvec, route and expert plan run as one launch beside the shared expert's up projection, so the MoE takes four waves after its norm instead of six, and the one-row expert kernels decode a word of FP4 codes by shifts; every output and KV byte is unchanged. On an M5 Ultra a round of release layers is 3.4 to 4.3% faster at one row and 2.2 to 3.2% at four (#3292).
+
+- DeepSeek-V4.1 on Metal: a greedy pick finds the first maximum of a row's logits in 16-wide steps (a row holding a NaN keeps the scalar scan) and a sampled pick reuses its float64 logits and ids instead of allocating both, so every pick is the same id; on an M5 Ultra the five prose prompts decode 2.7% faster greedy and 3.7% sampled (#3288).
+
+- DeepSeek-V4.1 on Metal: decode's FP8 projections of 1 to 5 rows issue every weight load before their chains and meet each output's tile roots in one simdgroup, and projections with K in whole 1024s take one column a simdgroup; every output bit is unchanged. On an M5 Ultra a layer's FP8 launches at one row take 214.8 us instead of 247.4 (675 to 778 GB/s) and at four rows 281.4 instead of 325.5 (#3287).
+
+- DeepSeek-V4.1 on Metal: in decode launches of 2 to 16 rows, the routed experts read and decode an expert's MXFP4 weights once for all of the rows it takes (passes of 2, 4, 6 or 8 rows for gate/up and 2 or 4 for down) instead of padding every expert's rows to passes of four, so each row's bits equal the one-row kernel's one row a launch whatever other rows share the launch or their experts. On the release weights, with #2973 under it, decode is 6 to 17% faster at one and two streams and 2 to 3% faster at three and four on an M5 Ultra, and 5 to 17% and 2 to 5% faster on an M3 Ultra, with every token unchanged (#2983, part of #2984).
+
+- DeepSeek-V4.1 on Metal: decode launches of 6 to 16 rows (draft verify windows, alone or with other streams' rows) run the dense FP8 projections on a simdgroup-matrix tile that splits K over simdgroups in the row kernel's own group tree, so every row's bits equal the row kernel's one row at a time; launches of 1 to 5 rows keep the row kernel. On the release weights two drafted streams decode 3.7 to 5.5% faster on an M5 Ultra and 3.6 to 5.4% faster on an M3 Ultra, other stream counts are level, and every token is unchanged; `time-dsv41-metal-synth` times the dispatch classes per row without a checkpoint (#2973, part of #2984).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).

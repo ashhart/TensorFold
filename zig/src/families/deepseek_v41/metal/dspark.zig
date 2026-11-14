@@ -70,6 +70,8 @@ pub const Pass = struct {
     runs: []Run,
     /// the context-free slot the layer encoders' Ctx names (the drafter reads its own rings)
     noslot: kv.Slot,
+    /// the drafter's weights and buffers held resident on the queue (null: no residency sets on this OS)
+    resident: ?mtl.ResidencySet = null,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *const Config, p: *const pipelines.Pipelines, s: *const scratch.Scratch, tables: *const rope.Tables, top: *const weights.Top, w: *const Weights, opt: Options) !*Pass {
         if (c.mtp_layers == 0 or p.route_dspark == null or w.stages.len != c.mtp_layers) return error.NoDspark;
@@ -95,10 +97,33 @@ pub const Pass = struct {
         }
         x.runs = try a.alloc(Run, opt.slots);
         @memset(x.runs, .{});
+        x.resident = x.holdResident();
         return x;
     }
 
+    /// Every buffer a pass binds, resident in one set on the queue (outside one, an ingest waited up to 0.6 s).
+    fn holdResident(x: *const Pass) ?mtl.ResidencySet {
+        const set = x.device.residencySet(64) catch return null;
+        for (x.rings) |r| set.add(r);
+        for ([_]mtl.Buffer{ x.quant, x.plan.buf, x.b.buf, x.w.arena }) |b| set.add(b);
+        for (x.w.stages) |*l| {
+            set.add(l.arena);
+            set.add(l.table);
+            for (l.backing()) |b| set.add(b);
+        }
+        if (x.w.head) |h| set.add(h.buf);
+        set.commit();
+        set.requestResidency();
+        x.queue.addResidencySet(set);
+        std.log.info("dsv41 drafter: {d:.1} GiB kept resident in its own set", .{mtl.ResidencySet.gibs(set.allocatedSize())});
+        return set;
+    }
+
     pub fn deinit(x: *Pass) void {
+        if (x.resident) |set| {
+            x.queue.removeResidencySet(set);
+            set.deinit();
+        }
         for (x.rings) |r| r.deinit();
         x.a.free(x.rings);
         x.a.free(x.runs);
@@ -128,12 +153,12 @@ pub const Pass = struct {
         if (slot < x.runs.len) x.runs[slot] = .{ .first = at, .end = at };
     }
 
-    /// The command buffer of one serial encoder: `f` encodes, then it is committed and waited for.
-    fn run(x: *const Pass, comptime F: type, f: F) !void {
+    /// The command buffer of one encoder of `kind`: `f` encodes, then it is committed and waited for.
+    fn run(x: *const Pass, comptime F: type, f: F, kind: mtl.DispatchType) !void {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = x.queue.commandBuffer();
-        const e = cb.compute(.serial);
+        const e = cb.compute(kind);
         f.encode(e) catch |err| {
             e.end();
             return err;
@@ -184,7 +209,7 @@ pub const Pass = struct {
                 try st.ingest(&cx, e, j.x.w, j.taps, .{ .buf = j.x.quant }, j.x.rings, j.refs.pos, j.refs.dest);
             }
         };
-        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs });
+        try x.run(job, .{ .x = x, .n = n, .taps = .{ .buf = taps.buf, .off = taps.off + row0 * row_bytes }, .refs = refs }, .serial);
     }
 
     // propose ------------------------------------------------------------------------------------------------------
@@ -237,9 +262,10 @@ pub const Pass = struct {
         try st.head(&cx, e, x.top, x.w, &x.b);
     }
 
-    /// The whole launch: embed, every stage, the head.
+    /// The whole launch: embed, every stage, the head, a barrier wherever a step reads the one before (concurrent).
     pub fn encodeAll(x: *const Pass, e: mtl.ComputeEncoder, l: *const Launch) !void {
         try x.encodeEmbed(e, l);
+        e.barrier();
         for (0..x.w.stages.len) |i| try x.encodeStage(e, l, i);
         try x.encodeHead(e, l);
     }
@@ -293,7 +319,7 @@ pub const Pass = struct {
                     try j.x.encodeAll(e, j.l);
                 }
             };
-            try x.run(job, .{ .x = x, .l = &l });
+            try x.run(job, .{ .x = x, .l = &l }, .concurrent);
             try x.finish(&l, out[at..][0..m]);
         }
     }

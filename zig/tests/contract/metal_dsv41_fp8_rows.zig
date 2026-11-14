@@ -224,10 +224,10 @@ pub const Suite = struct {
                 }
             };
             // the one-launch kernels: every block kind and row tier
-            for ([_]fp8.Kind{ .a, .b, .c }) |kind| for (1..17) |r| {
+            for (std.enums.values(fp8.Kind)) |kind| for (1..17) |r| {
                 @memset(p.rig.bytes(p.y, whole.len), 0xff);
                 const pass = p.rig.begin();
-                const call: fp8.Call = .{ .k = @intCast(shape.k), .n = @intCast(n), .rows = @intCast(r), .split = if (kind == .a) 1 else 4, .out = .f32 };
+                const call: fp8.Call = .{ .k = @intCast(shape.k), .n = @intCast(n), .rows = @intCast(r), .split = kind.split(), .out = .f32 };
                 try fp8.encodeWholeAs(&p.pipes, pass.e, at(p.x), at(p.w), at(p.s), at(p.y), call, .{}, kind);
                 try p.rig.finish(pass);
                 launches += 1;
@@ -238,7 +238,7 @@ pub const Suite = struct {
             };
         }
         const word = if (bad == 0) "PASS" else "FAIL";
-        std.debug.print("{s} row invariance {s}: R=1..16 at split 1 and 4 and one launch of blocks a, b and c on 3 shapes ({d} launches) byte-equal to the 16-row launch, {d} differ\n", .{ word, base, launches, bad });
+        std.debug.print("{s} row invariance {s}: R=1..16 at split 1 and 4 and one launch of every block kind on 3 shapes ({d} launches) byte-equal to the 16-row launch, {d} differ\n", .{ word, base, launches, bad });
         return bad;
     }
 
