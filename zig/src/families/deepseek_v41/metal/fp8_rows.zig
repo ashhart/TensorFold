@@ -29,7 +29,7 @@ pub const Pipelines = struct {
     f32: mtl.Pipeline,
     bf16: mtl.Pipeline,
     /// [Kind][tier][out f32, bf16]
-    whole: [4][whole_tiers.len][2]mtl.Pipeline,
+    whole: [kinds][whole_tiers.len][2]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.dsv41.fp8_rows);
@@ -44,7 +44,7 @@ pub const Pipelines = struct {
         for (b_names, 0..) |name, i| p.b[i] = try mtl.Pipeline.init(device, lib, name, false);
         p.f32 = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_finish_f32", false);
         p.bf16 = try mtl.Pipeline.init(device, lib, "tf_dsv41_fp8_finish_bf16", false);
-        inline for (.{ 'a', 'b', 'c', 'd' }, 0..) |sp, i| inline for (whole_tiers, 0..) |t, j| inline for (.{ Out.f32, Out.bf16 }, 0..) |o, k| {
+        inline for (.{ 'a', 'b', 'c', 'd', 'e', 'f' }, 0..) |sp, i| inline for (whole_tiers, 0..) |t, j| inline for (.{ Out.f32, Out.bf16 }, 0..) |o, k| {
             p.whole[i][j][k] = try mtl.Pipeline.init(device, lib, wholeName(sp, t, o), false);
         };
         return p;
@@ -118,37 +118,43 @@ pub const Batch = struct { n: u32 = 1, xs: i64 = 0, ws: i64 = 0, ss: i64 = 0, ys
 
 const WholeArgs = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32, xs: i64, ws: i64, ss: i64, ys: i64 };
 
-/// A one-launch block: a (split 1, 4 columns), b (split 4, 4 columns), c (split 4, 8 columns), d (split 1, 1 column).
-pub const Kind = enum(u2) {
+/// A one-launch block: a (split 1, 4 columns), b (split 4, 4 columns), c (split 4, 8 columns), d (split 1, 1 column);
+/// e (split 1, 2 columns) and f (split 4, 4 columns) decode each word where it is used and read X 8 bytes at a time.
+pub const Kind = enum(u3) {
     a,
     b,
     c,
     d,
+    e,
+    f,
 
     pub fn columns(k: Kind) u32 {
         return switch (k) {
             .c => 8,
             .d => 1,
+            .e => 2,
             else => 4,
         };
     }
 
     /// The tiling a simdgroup takes: split 1 is 32 K groups, split 4 is 8.
     pub fn split(k: Kind) u32 {
-        return if (k == .a or k == .d) 1 else 4;
+        return if (k == .a or k == .d or k == .e) 1 else 4;
     }
 };
+
+const kinds = @typeInfo(Kind).@"enum".field_names.len;
 
 /// The block a call launches with alone (`encodeWhole` counts its batch's launches as columns).
 pub fn kindOf(c: Call) Kind {
     return kindFor(c, 1);
 }
 
-/// d (smallest groups, no idle lane) for K in whole 1024s and 2048 or more columns a batch at 1 or 3-5 rows, else b.
+/// K in whole 1024s and 2048 or more columns a batch: e at 1-5 rows, d above; else f at 2-6 rows and b otherwise.
 fn kindFor(c: Call, launches: u32) Kind {
     if (c.split == 1) return .a;
-    const rows_d = c.rows <= 5 and c.rows != 2; // at 2 rows b's four columns a simdgroup win
-    return if (rows_d and c.k % 1024 == 0 and c.n * launches >= 2048) .d else .b;
+    if (c.k % 1024 == 0 and c.n * launches >= 2048) return if (c.rows <= 5) .e else .d;
+    return if (c.rows >= 2 and c.rows <= 6) .f else .b;
 }
 
 /// `encode`'s two launches as one: a group of `tiles` simdgroups a column block, the same bits, no scratch.
