@@ -6,15 +6,13 @@ const rows = contract.rows;
 const c = contract.spec;
 const g = contract.gates;
 const rig = @import("rig.zig");
-const source = @import("kernel_sources").glm_ep;
+const ep = @import("metal_glm_ep.zig");
 const max_rows = @import("tensorfold").glm.ep.PROMPT_ROWS;
 
 const width = 4096;
 const picks = 8;
 const threads = 256;
-const epoch: u64 = 0x1_0000_0003;
-const stale: u64 = @as(u32, @truncate(epoch));
-const Kind = enum {
+pub const Kind = enum {
     ep_rcombine,
     ep_rfinal,
     ep_rsum,
@@ -60,7 +58,7 @@ fn combineInput(i: usize, salt: u64) f32 {
     return @as(f32, @floatFromInt(@as(i32, @as(u16, @truncate(h))) - 32768)) / 8192;
 }
 
-const Probe = struct {
+pub const Probe = struct {
     const vt = g.hooks(Probe);
 
     rig: rig.Rig,
@@ -82,9 +80,8 @@ const Probe = struct {
         return parity ^ @intFromBool(p.kind == .ep_rfinal);
     }
 
-    fn deinit(p: *Probe) void {
-        p.rig.deinit();
-        p.pipe.deinit();
+    pub fn kernel(p: *Probe, name: []const u8, control: bool) g.Kernel {
+        return .{ .spec = p.kind.spec(name), .ctx = p, .vt = &vt, .control = if (control) .shapes else null };
     }
 
     fn part(p: *const Probe, slot: usize, i: usize) f32 {
@@ -144,8 +141,8 @@ const Probe = struct {
                 p.shared = try p.rig.input(std.mem.sliceAsBytes(shared));
             }
         }
-        p.ready = try p.rig.input(std.mem.asBytes(&epoch));
-        p.expired = try p.rig.input(std.mem.asBytes(&stale));
+        p.ready = try p.rig.input(std.mem.asBytes(&ep.epoch));
+        p.expired = try p.rig.input(std.mem.asBytes(&ep.stale));
         p.out = try p.rig.output(p.outLen());
         return true;
     }
@@ -172,11 +169,11 @@ const Probe = struct {
             e.setBuffer(p.out.buf, p.out.off, 3);
             e.setBuffer(p.count_ref.buf, p.count_ref.off, 4);
             e.setBuffer(ready.buf, ready.off, 5);
-            e.setValue(epoch, 6);
+            e.setValue(ep.epoch, 6);
             e.dispatchThreads(mtl.Size.of(p.count(), 1, 1), mtl.Size.of(threads, 1, 1));
         } else {
             e.setBuffer(ready.buf, ready.off, 0);
-            e.setValue(epoch, 1);
+            e.setValue(ep.epoch, 1);
             e.setBuffer(p.data.buf, p.data.off, 3);
             e.setBuffer(p.extra.buf, p.extra.off, 4);
             e.setValue(p.rank(), 5);
@@ -285,60 +282,7 @@ const Probe = struct {
     }
 };
 
-fn name(comptime k: Kind, comptime planted: bool) []const u8 {
-    return "metal glm ep " ++ @tagName(k) ++ (if (planted) " low-word epoch control" else "");
+pub fn caseName(comptime kind: Kind, control: bool) []const u8 {
+    const normal = comptime ep.name(kind);
+    return if (control) normal ++ " low-word epoch control" else normal;
 }
-
-pub const Suite = struct {
-    a: std.mem.Allocator,
-    device: mtl.Device,
-    queue: mtl.Queue,
-    kernels: *std.ArrayList(g.Kernel),
-    probes: std.ArrayList(*Probe) = .empty,
-
-    pub fn collect(s: *Suite, only: ?[]const u8) !void {
-        inline for (.{ false, true }) |planted| {
-            var library: ?mtl.Library = null;
-            defer if (library) |lib| lib.deinit();
-            inline for (std.enums.values(Kind)) |k| {
-                const label = name(k, planted);
-                if (only == null or std.mem.indexOf(u8, label, only.?) != null) {
-                    if (library == null) library = try s.makeLibrary(planted);
-                    try s.add(library.?, k, planted, label);
-                }
-            }
-        }
-    }
-
-    pub fn deinit(s: *Suite) void {
-        for (s.probes.items) |p| {
-            p.deinit();
-            s.a.destroy(p);
-        }
-        s.probes.deinit(s.a);
-    }
-
-    fn makeLibrary(s: *Suite, planted: bool) !mtl.Library {
-        if (!planted) return mtl.Library.fromSource(s.device, source, mtl.CompileOptions.mlx());
-        const sends = try std.mem.replaceOwned(u8, s.a, source, "previous[0] != expected", "uint(previous[0]) != uint(expected)");
-        defer s.a.free(sends);
-        const receives = try std.mem.replaceOwned(u8, s.a, sends, "ready[0] == x", "uint(ready[0]) == uint(x)");
-        defer s.a.free(receives);
-        return mtl.Library.fromSource(s.device, receives, mtl.CompileOptions.mlx());
-    }
-
-    fn add(s: *Suite, library: mtl.Library, comptime k: Kind, comptime planted: bool, label: []const u8) !void {
-        const p = try s.a.create(Probe);
-        errdefer s.a.destroy(p);
-        p.* = .{
-            .rig = .{ .a = s.a, .device = s.device, .queue = s.queue },
-            .pipe = try mtl.Pipeline.init(s.device, library, @tagName(k), false),
-            .kind = k,
-        };
-        errdefer p.deinit();
-        try s.probes.ensureUnusedCapacity(s.a, 1);
-        try s.kernels.ensureUnusedCapacity(s.a, 1);
-        s.probes.appendAssumeCapacity(p);
-        s.kernels.appendAssumeCapacity(.{ .spec = k.spec(label), .ctx = p, .vt = &Probe.vt, .control = if (planted) .shapes else null });
-    }
-};

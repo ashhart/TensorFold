@@ -3,42 +3,34 @@ const std = @import("std");
 const mtl = @import("metal");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
+const ep = @import("metal_glm_ep.zig");
 
 const c = contract.spec;
 const g = contract.gates;
-const source = @import("kernel_sources").glm_ep;
 const width = 4096;
 const words = width / 2;
 const topk = 8;
 const vocab_part = 154880 / 2;
-const epoch = 0x1_0000_0003;
-const stale_epoch = epoch - (1 << 32);
 const poison: u32 = 0xd3d3d3d3;
 const absent = std.math.maxInt(u32);
 
-const Which = enum {
+pub const Kind = enum {
     ep_pack,
     ep_unpack,
     ep_rsend,
     ep_amax_send,
     ep_amax_merge,
 
-    fn name(w: Which) []const u8 {
-        return switch (w) {
-            inline else => |kind| "metal glm ep " ++ @tagName(kind),
-        };
-    }
-
-    fn threads(w: Which) u32 {
+    pub fn threads(w: Kind) u32 {
         return switch (w) {
             .ep_pack, .ep_unpack, .ep_rsend => 256,
             .ep_amax_send, .ep_amax_merge => 64,
         };
     }
 
-    fn spec(w: Which) c.Spec {
+    fn spec(w: Kind, label: []const u8) c.Spec {
         return .{
-            .name = w.name(),
+            .name = label,
             .accum = .none,
             .depth = noSums,
             .out = .raw,
@@ -65,7 +57,7 @@ const Which = enum {
         };
     }
 
-    fn maxRows(w: Which) usize {
+    fn maxRows(w: Kind) usize {
         return switch (w) {
             .ep_pack, .ep_unpack => 16,
             .ep_rsend => 4096,
@@ -73,22 +65,15 @@ const Which = enum {
         };
     }
 
-    fn countsEntries(w: Which) bool {
+    fn countsEntries(w: Kind) bool {
         return w == .ep_rsend or w == .ep_amax_send;
     }
-
-    fn planted(w: Which, a: std.mem.Allocator) ![]u8 {
-        const edit = switch (w) {
-            .ep_pack, .ep_rsend, .ep_amax_send => .{ "if (previous[0] != expected) return;", "if (uint(previous[0]) != uint(expected)) return;" },
-            .ep_unpack => .{ "ready[0] == x", "uint(ready[0]) == uint(x)" },
-            .ep_amax_merge => .{ "ready[0] != x", "uint(ready[0]) != uint(x)" },
-        };
-        const begin = std.mem.indexOf(u8, source, @tagName(w)) orelse return error.ControlEditMissing;
-        const end = std.mem.indexOf(u8, source[begin..], "\n}") orelse return error.ControlEditMissing;
-        const at = std.mem.indexOf(u8, source[begin..][0..end], edit[0]) orelse return error.ControlEditMissing;
-        return std.mem.concat(a, u8, &.{ source[0 .. begin + at], edit[1], source[begin + at + edit[0].len ..] });
-    }
 };
+
+pub fn caseName(comptime kind: Kind, control: bool) []const u8 {
+    const planted = "control: metal glm ep " ++ @tagName(kind) ++ " ignores high epoch bits";
+    return if (control) planted else ep.name(kind);
+}
 
 fn noSums(_: c.Shape) usize {
     return 0;
@@ -108,12 +93,11 @@ const Slot = struct {
     count: ?rig_.Ref = null,
 };
 
-const Probe = struct {
+pub const Probe = struct {
     rig: rig_.Rig,
-    which: Which,
+    kind: Kind,
     pipe: mtl.Pipeline,
     shape: c.Shape = undefined,
-    control: bool,
     values: rig_.Ref = undefined,
     picks: rig_.Ref = undefined,
     counts: rig_.Ref = undefined,
@@ -123,19 +107,13 @@ const Probe = struct {
 
     const vt = g.hooks(Probe);
 
-    fn kernel(p: *Probe) g.Kernel {
-        var desc = p.which.spec();
-        if (p.control) {
-            desc.name = switch (p.which) {
-                inline else => |kind| "control: metal glm ep " ++ @tagName(kind) ++ " ignores high epoch bits",
-            };
-        }
-        return .{ .spec = desc, .ctx = p, .vt = &vt, .control = if (p.control) .shapes else null };
+    pub fn kernel(p: *Probe, name: []const u8, control: bool) g.Kernel {
+        return .{ .spec = p.kind.spec(name), .ctx = p, .vt = &vt, .control = if (control) .shapes else null };
     }
 
     pub fn count(p: *Probe) usize {
         const shape = p.shape;
-        return switch (p.which) {
+        return switch (p.kind) {
             .ep_pack, .ep_unpack => shape.rows * topk * words,
             .ep_rsend => shape.rows * width,
             .ep_amax_send => 2 * 64,
@@ -157,7 +135,7 @@ const Probe = struct {
         p.picks = try p.rig.input(std.mem.sliceAsBytes(order));
         const owned: i32 = @intCast(p.entries);
         const other: i32 = @intCast(picks - p.entries);
-        const counts: [2]i32 = if (p.which == .ep_pack) .{ owned, other } else .{ other, owned };
+        const counts: [2]i32 = if (p.kind == .ep_pack) .{ owned, other } else .{ other, owned };
         p.counts = try p.rig.input(std.mem.asBytes(&counts));
         try p.payload(fill, rng, true);
     }
@@ -217,22 +195,22 @@ const Probe = struct {
     }
 
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.rows > p.which.maxRows()) return false;
+        if (shape.rows == 0 or shape.rows > p.kind.maxRows()) return false;
         p.rig.reset();
         p.shape = shape;
         var prng = std.Random.DefaultPrng.init(seed);
         const rng = prng.random();
-        switch (p.which) {
+        switch (p.kind) {
             .ep_pack, .ep_unpack => try p.route(fill, rng),
             .ep_rsend => try p.payload(fill, rng, false),
             .ep_amax_send => try p.logits(fill, rng),
             .ep_amax_merge => try p.candidates(fill, rng),
         }
-        for (&p.slots, [_]u64{ epoch, stale_epoch }) |*slot, seen_epoch| {
+        for (&p.slots, [_]u64{ ep.epoch, ep.stale }) |*slot, seen_epoch| {
             slot.* = .{
                 .stamp = try p.rig.input(std.mem.asBytes(&seen_epoch)),
                 .out = try p.rig.output(p.count() * 4),
-                .count = if (p.which.countsEntries()) try p.rig.output(4) else null,
+                .count = if (p.kind.countsEntries()) try p.rig.output(4) else null,
             };
             @memset(wordsAt(&p.rig, slot.out, p.count()), poison);
             if (slot.count) |at| wordsAt(&p.rig, at, 1)[0] = poison;
@@ -246,7 +224,7 @@ const Probe = struct {
 
     fn stamp(e: mtl.ComputeEncoder, at: usize, slot: Slot) void {
         bind(e, at, &.{slot.stamp});
-        e.setValue(@as(u64, epoch), at + 1);
+        e.setValue(ep.epoch, at + 1);
     }
 
     fn offset(p: *const Probe) u32 {
@@ -257,10 +235,10 @@ const Probe = struct {
         const pass = p.rig.begin();
         const e = pass.e;
         const rows: u32 = @intCast(p.shape.rows);
-        const group = mtl.Size.of(p.which.threads(), 1, 1);
+        const group = mtl.Size.of(p.kind.threads(), 1, 1);
         e.setPipeline(p.pipe);
         for (p.slots) |slot| {
-            switch (p.which) {
+            switch (p.kind) {
                 .ep_pack => {
                     bind(e, 0, &.{ p.values, p.picks, p.counts, slot.out });
                     stamp(e, 4, slot);
@@ -302,7 +280,7 @@ const Probe = struct {
         const data = wordsAt(&p.rig, p.values, p.count());
         var unpacked: usize = 0;
         for (0..picked.len) |row| {
-            if (p.which == .ep_pack) {
+            if (p.kind == .ep_pack) {
                 const source_row = if (ready and row < p.entries) picked[row] else absent;
                 if (checkWords(out, data, row, source_row, poison)) |at| return at;
             } else {
@@ -367,7 +345,7 @@ const Probe = struct {
         if (!try p.rig.intact()) return "a launch wrote outside its buffers";
         for (p.slots, [_]bool{ true, false }) |slot, ready| {
             const out = wordsAt(&p.rig, slot.out, p.count());
-            const mismatch = switch (p.which) {
+            const mismatch = switch (p.kind) {
                 .ep_pack, .ep_unpack => p.checkRoute(out, ready),
                 .ep_rsend => p.checkPartial(out, ready),
                 .ep_amax_send => p.checkLogits(out, ready),
@@ -376,49 +354,10 @@ const Probe = struct {
             const when = if (ready) "matching" else "stale";
             if (mismatch) |at| return try std.fmt.bufPrint(&p.message, "{s} epoch differs at output word {d}", .{ when, at });
             if (slot.count) |ref| {
-                const want: u32 = if (!ready) poison else if (p.which == .ep_rsend) @intCast(p.shape.rows * 2) else 1;
+                const want: u32 = if (!ready) poison else if (p.kind == .ep_rsend) @intCast(p.shape.rows * 2) else 1;
                 if (wordsAt(&p.rig, ref, 1)[0] != want) return try std.fmt.bufPrint(&p.message, "{s} epoch wrote an incorrect entry count", .{when});
             }
         }
         return null;
-    }
-};
-
-pub const Suite = struct {
-    a: std.mem.Allocator,
-    device: mtl.Device,
-    queue: mtl.Queue,
-    kernels: *std.ArrayList(g.Kernel),
-    probes: std.ArrayList(*Probe) = .empty,
-
-    pub fn collect(s: *Suite, only: ?[]const u8) !void {
-        for (std.enums.values(Which)) |which| {
-            if (only) |needle| if (std.mem.indexOf(u8, which.name(), needle) == null) continue;
-            try s.add(which, false);
-            try s.add(which, true);
-        }
-    }
-
-    fn add(s: *Suite, which: Which, control: bool) !void {
-        try s.probes.ensureUnusedCapacity(s.a, 1);
-        try s.kernels.ensureUnusedCapacity(s.a, 1);
-        const text = if (control) try which.planted(s.a) else source;
-        defer if (control) s.a.free(text);
-        const pipe = try rig_.pipeline(s.device, text, @tagName(which));
-        errdefer pipe.deinit();
-        if (pipe.maxThreads() < which.threads() or rig_.tgMemory(pipe) != 0) return error.UnexpectedLaunchLimits;
-        const p = try s.a.create(Probe);
-        p.* = .{ .rig = .{ .a = s.a, .device = s.device, .queue = s.queue }, .which = which, .pipe = pipe, .control = control };
-        s.probes.appendAssumeCapacity(p);
-        s.kernels.appendAssumeCapacity(p.kernel());
-    }
-
-    pub fn deinit(s: *Suite) void {
-        for (s.probes.items) |p| {
-            p.rig.deinit();
-            p.pipe.deinit();
-            s.a.destroy(p);
-        }
-        s.probes.deinit(s.a);
     }
 };
