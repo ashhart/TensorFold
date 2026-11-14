@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const Config = @import("dsv41").config.Config;
 pub const fp8 = @import("fp8_rows.zig");
 pub const fp8_mma = @import("fp8_mma.zig");
+pub const fp8_tile = @import("fp8_tile.zig");
 pub const attn = @import("csa2_attn.zig");
 pub const index = @import("index.zig");
 pub const experts = @import("experts.zig");
@@ -39,6 +40,8 @@ pub fn check(c: *const Config) !void {
 
 pub const Pipelines = struct {
     fp8: fp8.Pipelines,
+    /// the decode rows' FP8 projections at 2-16 rows
+    tile: fp8_tile.Pipelines,
     mma: fp8_mma.Pipelines,
     attn: attn.Pipelines,
     index: index.Pipelines,
@@ -62,6 +65,8 @@ pub const Pipelines = struct {
         var p: Pipelines = undefined;
         p.fp8 = try fp8.Pipelines.load(device);
         errdefer p.fp8.deinit();
+        p.tile = try fp8_tile.Pipelines.load(device);
+        errdefer p.tile.deinit();
         p.mma = try fp8_mma.Pipelines.load(device);
         errdefer p.mma.deinit();
         p.attn = try attn.Pipelines.load(device);
@@ -98,6 +103,7 @@ pub const Pipelines = struct {
 
     pub fn deinit(p: *Pipelines) void {
         p.fp8.deinit();
+        p.tile.deinit();
         p.mma.deinit();
         p.attn.deinit();
         p.index.deinit();
