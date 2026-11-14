@@ -137,7 +137,7 @@ pub fn run(gpu: check.Gpu) !void {
     // the streams' 256-column square sums, as the writeback leaves them for the read-out
     try g.hcWriteback(r.s, dh, 0, dpss, 0, 0, 0, 0, most * dims, most, dims, streams, 0, 1, 1, 1);
 
-    // every down tile at every row count: SM counts of 1, the device's and 4,096 pick the widest, the waves' and the least
+    // SM counts of 1, the device's and 4,096 take each down tile the engine can pick
     const counts = [_]usize{ 64, 65, 193, 255, 256, 767, 768, 769, 1000, 1024, 1536, 2053, 3072 };
     for (counts) |m| {
         c.rows = m;
