@@ -189,10 +189,17 @@ test "qwen27 quant: each non-reg whole prompt is one projection dispatch" {
         k.long_prompt = false;
         r.count = 0;
         try k.quant(r.encoder(), p, ref, producer, ref, ref, 2048);
-        try t.expectEqual(@as(usize, 128), r.count);
-        for (r.launches[0..r.count]) |call| {
-            try t.expectEqual(@as(u32, 16), call.rows);
-            try t.expectEqual(@as(usize, 1), call.grid.height);
+        // Tensor units take the row blocks a dispatch at every width; elsewhere 16 rows a dispatch.
+        if (r.device().tensorUnits()) {
+            try t.expectEqual(@as(usize, 1), r.count);
+            try t.expectEqual(@as(u32, 2048), r.launches[0].rows);
+            try t.expectEqual(@as(usize, (2048 + 15) / 16), r.launches[0].grid.height);
+        } else {
+            try t.expectEqual(@as(usize, 128), r.count);
+            for (r.launches[0..r.count]) |call| {
+                try t.expectEqual(@as(u32, 16), call.rows);
+                try t.expectEqual(@as(usize, 1), call.grid.height);
+            }
         }
     };
 }
