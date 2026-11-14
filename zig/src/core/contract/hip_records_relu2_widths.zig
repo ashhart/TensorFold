@@ -236,7 +236,7 @@ pub const records = [24]Record{
     },
 };
 
-/// The known findings in these records: the 1x8 tile at 5, 6 and 8 bits spills to scratch on gfx1100.
+/// The relu2 width records that spill to scratch on gfx1100; none does.
 pub const spills_on_gfx1100 = [_][]const u8{};
 
 test "relu2 width records: scratch only where a known finding names it" {

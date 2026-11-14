@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 (gates 1–4, a planted control for each width, gate-5 records on the four RDNA chips); its 1×8 tile at those widths spills to scratch on gfx1100, listed as a known finding (#3163, part of #3061).
+- Kernel contract: the HIP relu² stream tile is checked at 5, 6 and 8 bits in groups of 64 (gates 1–4, a planted control for each width, gate-5 records on the four RDNA chips) (#3163, part of #3061).
 
 - GLM-5.3-Flash: the DFlash2 drafter's startup line and docs give its licence as Apache-2.0, as its model card now says (#3084, for #1583).
 
