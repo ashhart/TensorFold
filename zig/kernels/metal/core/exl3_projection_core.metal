@@ -189,9 +189,10 @@ inline void tf_exl3_matmul_impl(const device half* x, const device uchar* trelli
                                 threadgroup float* wx, threadgroup float* xx) {
   const uint split = a.splits > 1 ? tg.y : 0;
   // A split dispatch carries a row group in tg.z (the tile already spans eight rows).
-  const uint rb = a.splits > 1 ? tg.z * 8 : (a.indexed == 1 ? tg.y : tg.y * 8), nb = tg.x * 16;
+  const uint rb = a.splits > 1 ? (a.indexed == 1 ? tg.z : tg.z * 8) : (a.indexed == 1 ? tg.y : tg.y * 8), nb = tg.x * 16;
   if (!simd_any(tf_exl3_active(routes, a, rb + (a.indexed == 1 ? 0 : lane % 8)))) return;
   const uint id = a.indexed ? routes[rb] : 0;
+  if (a.indexed && descriptors[id].reserved != 0 && nb >= descriptors[id].reserved) return;
   const device uchar* data = a.indexed ? descriptors[id].trellis : trellis;
   const ulong ks = a.indexed ? descriptors[id].tile_k_stride : a.tile_k_stride;
   const ulong ns = a.indexed ? descriptors[id].tile_n_stride : a.tile_n_stride;

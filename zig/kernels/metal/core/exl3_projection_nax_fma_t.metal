@@ -201,9 +201,9 @@ inline void tf_exl3_t_routed_kernel(const device half* x, const device uchar* tr
 // The dense body: one matrix, one row a threadgroup.
 template <uint T>
 inline void tf_exl3_t_dense_kernel(const device half* x, const device uchar* trellis, device float* sums,
-                                   constant TfExl3Args& a, uint lane, uint sg, uint3 tg, threadgroup float* red) {
+                                   constant TfExl3Args& a, const device uint* routes, uint lane, uint sg, uint3 tg, threadgroup float* red) {
   const uint row = tg.y;
-  if (row >= a.rows) return;
+  if (!tf_exl3_active(routes, a, row)) return;
   const TfExl3DecodeJob job = tf_exl3_dense_decode_job(trellis, a);
   const uint nb = tg.x * 16u * T;
   if (nb >= job.width) return;
@@ -213,10 +213,11 @@ inline void tf_exl3_t_dense_kernel(const device half* x, const device uchar* tre
 // The multi-row dense body: R rows a threadgroup share one decode of the matrix (any codebook), one tile wide.
 template <uint T, uint R>
 inline void tf_exl3_t_multi_kernel(const device half* x, const device uchar* trellis, device float* sums,
-                                   constant TfExl3Args& a, const device half* table, uint lane, uint sg, uint3 tg,
+                                   constant TfExl3Args& a, const device uint* routes, const device half* table, uint lane, uint sg, uint3 tg,
                                    threadgroup float* red) {
   const uint row0 = tg.y * R;
   if (row0 >= a.rows) return;
+  if (R == 1u && !tf_exl3_active(routes, a, row0)) return;
   const TfExl3DecodeJob job = tf_exl3_dense_decode_job(trellis, a);
   const uint nb = tg.x * 16u * T;
   if (nb >= job.width) return;
@@ -227,11 +228,16 @@ inline void tf_exl3_t_multi_kernel(const device half* x, const device uchar* tre
 #define TF_EXL3_T_MULTI(NAME, T, R)                                                                               \
   kernel void NAME(const device half* x [[buffer(0)]], const device uchar* trellis [[buffer(1)]],                 \
                    device float* sums [[buffer(2)]], constant TfExl3Args& a [[buffer(3)]],                        \
+                   const device uint* routes [[buffer(4)]],                                                       \
                    const device half* table [[buffer(7)]], uint lane [[thread_index_in_simdgroup]],               \
                    uint sg [[simdgroup_index_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {       \
     threadgroup float red[TF_EXL3_T_RANGES * 64 * T * R];                                                         \
-    tf_exl3_t_multi_kernel<T, R>(x, trellis, sums, a, table, lane, sg, tg, red);                                  \
+    tf_exl3_t_multi_kernel<T, R>(x, trellis, sums, a, routes, table, lane, sg, tg, red);                          \
   }
+
+#if TF_FMA_WARPS == 16
+TF_EXL3_T_MULTI(tf_exl3_matmul_decode_fma_dense, 1, 1)
+#endif
 
 TF_EXL3_T_MULTI(tf_exl3_matmul_decode_fma_dense_multi2, 1, 2)
 TF_EXL3_T_MULTI(tf_exl3_matmul_decode_fma_dense_multi4, 1, 4)
@@ -248,10 +254,10 @@ TF_EXL3_T_MULTI(tf_exl3_matmul_decode_fma_dense_multi4, 1, 4)
   }                                                                                                               \
   kernel void tf_exl3_matmul_decode_fma_t_dense##T(                                                               \
       const device half* x [[buffer(0)]], const device uchar* trellis [[buffer(1)]], device float* sums [[buffer(2)]], \
-      constant TfExl3Args& a [[buffer(3)]], uint lane [[thread_index_in_simdgroup]],                              \
+      constant TfExl3Args& a [[buffer(3)]], const device uint* routes [[buffer(4)]], uint lane [[thread_index_in_simdgroup]], \
       uint sg [[simdgroup_index_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {                    \
     threadgroup float red[TF_EXL3_T_RANGES * 64 * T];                                                               \
-    tf_exl3_t_dense_kernel<T>(x, trellis, sums, a, lane, sg, tg, red);                                           \
+    tf_exl3_t_dense_kernel<T>(x, trellis, sums, a, routes, lane, sg, tg, red);                                   \
   }
 
 // More tiles a threadgroup share a block's x loads and conversions; fewer threadgroups fill the GPU.

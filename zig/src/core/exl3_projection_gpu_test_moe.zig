@@ -209,6 +209,8 @@ test "the shared expert's down inside the routed down call keeps every bit of th
     for ([_]u16{ 4, 6, 8, 10, 12 }) |halves| {
         var f = try Fixture.init(device, halves);
         defer f.deinit();
+        if (!ex.canMergeDenseRows(&f.p, f.mats[3 * experts + 2].matrix, tokens, routed + tokens))
+            return error.SkipZigTest;
         const count = 2 * routed + 2 * tokens;
         const scratch_bytes = @max(try ex.scratchBytes(hidden, mid, count), @max(try ex.scratchBytes(mid, out_n, routed), try ex.scratchBytes(mid, out_n, tokens)));
         const gate = try bytesOf(device, count * mid * 2);

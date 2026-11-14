@@ -11,7 +11,13 @@ const limits = contract.limits;
 const registry = contract.registry;
 
 /// A registered pipeline as built here: its declaration, function, this GPU's source and the pre-M5 source.
-pub const Launch = struct { decl: limits.MetalLaunch, function: []const u8, here: []const u8, pre_m5: []const u8 };
+pub const Launch = struct {
+    decl: limits.MetalLaunch,
+    function: []const u8,
+    here: []const u8,
+    pre_m5: []const u8,
+    precise: bool = false,
+};
 
 /// The pre-M5 text of a source that includes nax.h (frags.source's branch for GPUs without tensor units).
 fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
@@ -117,8 +123,23 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41-native-boundary ")) {
+        const body = sources.deepseek_v41_hc_boundary;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41-native-rows ")) {
+        const body = if (std.mem.eql(u8, fun, "dsv41_rope_rows")) sources.deepseek_v41_rope else if (std.mem.eql(u8, fun, "dsv41_kv_glue_rows")) sources.deepseek_v41_kv_glue else if (std.mem.eql(u8, fun, "dsv41_publish_rows")) sources.deepseek_v41_kv else return error.UnknownLaunch;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
+    }
+    if (std.mem.startsWith(u8, d.name, "dsv41-native-attention ")) {
+        const body = try @import("dsv41_attention_rows_source.zig").text(tf.frags, device, a, .dense, null);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body, .precise = true };
+    }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun)) |l| return l;
     if (try @import("metal_exl3_projection_limits.zig").launchOf(a, device, d, fun)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "exl3-chain ")) {
+        return .{ .decl = d, .function = fun, .here = sources.core_exl3_projection, .pre_m5 = sources.core_exl3_projection, .precise = true };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         const raw = sources.lfm2_prompt_masked.source;
         const body = try tf.frags.source(device, a, raw);
@@ -263,6 +284,14 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
     return .{ .decl = d, .function = fun, .here = paged.glue, .pre_m5 = paged.glue };
 }
 
+fn pipeline(device: mtl.Device, l: Launch) !mtl.Pipeline {
+    var options = mtl.CompileOptions.mlx();
+    if (l.precise) options.math_functions = .precise;
+    const lib = try mtl.Library.fromSource(device, l.here, options);
+    defer lib.deinit();
+    return mtl.Pipeline.init(device, lib, l.function, false);
+}
+
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
     if (device.generation() < l.decl.min_gen) {
@@ -273,7 +302,7 @@ pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: b
         const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
         std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
     }
-    const p = rig_.pipeline(device, l.here, l.function) catch |err| {
+    const p = pipeline(device, l) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;
     };

@@ -159,15 +159,16 @@ fn moeEncodeNative(model: *Model, layer: usize, select_routes: bool) !void {
     for (model.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
     for (w.descriptors) |buffer| enc.useResource(buffer, mtl.ResourceUsage.read);
     if (select_routes) {
-        tf.deepseek_v41.ops.encodeDense(enc, &p.ops, ws.view(.normalized), .{ .buffer = w.gate.buffer, .offset = w.gate.offset }, ws.view(.router_logits), .{ .rows = 1, .k = 5120, .n = 384, .x_stride = 5120, .w_stride = 5120, .y_stride = 384, .w_dtype = .f16, .y_dtype = .f32 });
+        tf.deepseek_v41.ops.encodeDense(enc, &p.ops, ws.view(.normalized), .{ .buffer = w.gate.buffer, .offset = w.gate.offset }, ws.view(.router_logits), .{ .rows = 1, .k = 5120, .n = 384, .x_stride = 5120, .w_stride = 5120, .y_stride = 384, .w_dtype = if (w.gate.dtype == .bf16) .bf16 else .f16, .y_dtype = .f32 });
         enc.barrier();
-        // Bind the existing production router; no new native interface or diagnostic math kernel.
-        enc.setPipeline(p.route.select);
-        inline for (.{ ws.view(.router_logits), attention.View{ .buffer = w.bias.buffer, .offset = w.bias.offset }, ws.view(.route_ids), ws.view(.route_weights) }, 0..) |view, i|
-            enc.setBuffer(view.buffer, view.offset, i);
-        const Shape = extern struct { rows: u32, logit_stride: u32, output_stride: u32, temperature: f32, bias_dtype: u32 };
-        enc.setValue(Shape{ .rows = 1, .logit_stride = 384, .output_stride = 6, .temperature = 1, .bias_dtype = 2 }, 4);
-        enc.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(128, 1, 1));
+        tf.deepseek_v41.route.encode(enc, &p.route, ws.view(.router_logits), .{ .buffer = w.bias.buffer, .offset = w.bias.offset }, ws.view(.route_ids), ws.view(.route_weights), .{
+            .ids = ws.view(.fused_ids),
+            .sources = ws.view(.fused_sources),
+        }, .{ .rows = 1, .bias_dtype = switch (w.bias.dtype) {
+            .bf16 => .bf16,
+            .f16 => .f16,
+            else => .f32,
+        } });
         enc.barrier();
     }
     var routed_rows = ex.Rows{ .count = 6, .x_stride = 5120, .y_stride = 2304, .routes = .{ .ids = .{ .buffer = ws.view(.route_ids).buffer, .offset = ws.view(.route_ids).offset }, .repeat = 6 } };

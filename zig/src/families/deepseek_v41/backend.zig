@@ -13,10 +13,6 @@ const RING = 1024;
 const policy = @import("backend_policy.zig");
 const MtpCache = policy.MtpCache;
 const fastArgmax = policy.fastArgmax;
-const tokAt = policy.tokAt;
-const lookupTokens = policy.lookupTokens;
-const mtpDepthMax = policy.mtpDepthMax;
-const lookupDepth = policy.lookupDepth;
 const noRefeedOn = policy.noRefeedOn;
 const draftRowsFollowWindow = policy.draftRowsFollowWindow;
 const roundSignalMode = policy.roundSignalMode;
@@ -29,7 +25,6 @@ const draftOffAfter = policy.draftOffAfter;
 const draftOffGateCtx = policy.draftOffGateCtx;
 const draftOffLow = policy.draftOffLow;
 const draftOffAfterFor = policy.draftOffAfterFor;
-const mtpDepthFor = policy.mtpDepthFor;
 const draftGovernorOff = policy.draftGovernorOff;
 
 pub const Backend = struct {
@@ -46,8 +41,6 @@ pub const Backend = struct {
     held: [][]u32,
     /// The trained proposer's last proposal, so the round runs the draft forward ONCE.
     mtp_cache: [32]?MtpCache = @splat(null),
-    /// Each slot's committed tokens after the prompt, for the lookup drafter's matches.
-    history: []std.ArrayListUnmanaged(u32),
     /// What the last verify sampled per row, so a rejected window's re-feed can be compared with it.
     last_sampled: [8]u32 = @splat(0),
     /// The depth each slot's last round RAN -- the adaptive policy's state.
@@ -76,12 +69,11 @@ pub const Backend = struct {
     pub const draft = run.draft;
     pub const tree = run.tree;
     pub const release = run.release;
+    pub const adaptiveDepth = policy.mtpDepthFor;
 
     pub fn init(gpa: std.mem.Allocator, model: *ds.Model) !Backend {
         const held = try gpa.alloc([]u32, model.lanes);
         for (held) |*h| h.* = &.{};
-        const history = try gpa.alloc(std.ArrayListUnmanaged(u32), model.lanes);
-        for (history) |*h| h.* = .empty;
         const last_depth = try gpa.alloc(u32, model.lanes);
         @memset(last_depth, 0);
         const up_streak = try gpa.alloc(u32, model.lanes);
@@ -121,7 +113,6 @@ pub const Backend = struct {
             .first = try gpa.alloc(u32, model.lanes),
             .verify_len = try gpa.alloc(u32, model.lanes),
             .held = held,
-            .history = history,
         };
     }
 
@@ -131,8 +122,7 @@ pub const Backend = struct {
         b.gpa.free(b.verify_len);
         for (b.held) |h| if (h.len > 0) b.gpa.free(h);
         b.gpa.free(b.held);
-        for (b.history) |*h| h.deinit(b.gpa);
-        b.gpa.free(b.history);
+        b.gpa.free(b.last_depth);
         b.gpa.free(b.up_streak);
         b.gpa.free(b.keep_pending);
         b.gpa.free(b.keep_ratio);
@@ -173,16 +163,17 @@ pub const Backend = struct {
     /// A window of any width runs exactly as its slot's own forward; the lane core may bundle streams freely.
     pub fn facts(b: *const Backend) lanes.Model {
         const rows = b.model.workspace.plan.rows;
+        const depth = policy.maxDraftDepth(b);
         return .{
             // The widest window whose rows reproduce one-token steps: rows <= 8; wider cannot verify.
             .exact_width = @min(rows, 8),
             .first_copy_rows = 1,
-            .mtp = lookupDepth() != 0,
-            .speculate = lookupDepth() != 0,
+            .mtp = depth != 0,
+            .speculate = depth != 0,
             .speculate_early = false,
             .gpu_tokens = false,
             .plain_guard = true,
-            .drafts = @max(lookupDepth(), 1),
+            .drafts = @max(depth, 1),
             .window_costs = &.{},
             .streams_exact = true,
             .hidden_rows = true,
@@ -279,7 +270,6 @@ pub const Backend = struct {
             .handle => |h| try read(ptr, h),
         };
         _ = try b.model.forwardOn(i, &.{token}, .last);
-        try b.history[i].append(b.gpa, token);
         return b.put(try b.draw(i, s, position));
     }
 

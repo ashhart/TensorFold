@@ -330,7 +330,8 @@ pub const Pipelines = struct {
         };
         // The three codebooks as a table: the tensor-unit kernels read a value instead of deriving it.
 
-        if (table == null) std.log.err("exl3: codebook table not created; the tensor-unit path will read none", .{});
+        if (gpa != null and device.tensorUnits() and table == null)
+            std.log.err("exl3: codebook table not created; the tensor-unit path will read none", .{});
         return .{
             .rotate_in = ri,
             .matmul = mm,

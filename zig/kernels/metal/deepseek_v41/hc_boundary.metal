@@ -105,17 +105,18 @@ inline void hc_split_row(threadgroup const float* tot, constant const HcArgs& a,
   float top = max(z, simd_shuffle_xor(z, ushort(1)));
   top = max(top, simd_shuffle_xor(top, ushort(2)));
   const float e = precise::exp(z - top);
-  float row = e + simd_shuffle_xor(e, ushort(1));
-  row = row + simd_shuffle_xor(row, ushort(2));
+  // Match the unfused split's FP32 butterfly: row XOR 2,1; column XOR 8,4.
+  float row = e + simd_shuffle_xor(e, ushort(2));
+  row = row + simd_shuffle_xor(row, ushort(1));
   float comb = live ? e / row + a.hc_eps : 0.0f;
   for (uint it = 0; it < uint(a.iters); it++) {
     if (it > 0) {
-      float row_sum = comb + simd_shuffle_xor(comb, ushort(1));
-      row_sum = row_sum + simd_shuffle_xor(row_sum, ushort(2));
+      float row_sum = comb + simd_shuffle_xor(comb, ushort(2));
+      row_sum = row_sum + simd_shuffle_xor(row_sum, ushort(1));
       comb = live ? comb / (row_sum + a.hc_eps) : 0.0f;
     }
-    float col_sum = comb + simd_shuffle_xor(comb, ushort(4));
-    col_sum = col_sum + simd_shuffle_xor(col_sum, ushort(8));
+    float col_sum = comb + simd_shuffle_xor(comb, ushort(8));
+    col_sum = col_sum + simd_shuffle_xor(col_sum, ushort(4));
     comb = live ? comb / (col_sum + a.hc_eps) : 0.0f;
   }
   if (live) comb_out[r * kCopies * kCopies + lane] = comb;

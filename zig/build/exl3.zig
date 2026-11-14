@@ -78,6 +78,32 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.step("test-exl3-contract-host", "EXL3 independent full-shape oracle and reduced-precision plants")
         .dependOn(&reference.step);
     host_step.dependOn(&reference.step);
+    const chains = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/exl3_chain_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{.{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) }},
+    }) }));
+    host_step.dependOn(&chains.step);
+    b.step("test-exl3-chain-host", "EXL3 chain float64 rounding and accumulator discrimination")
+        .dependOn(&chains.step);
+    const contract = @import("kernel_contract.zig").module(b, target, optimize);
+    const chain_contract = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_exl3_chain.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "contract", .module = contract } },
+    });
+    const chain_gpu = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/exl3_chain_checks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "exl3_projection", .module = projection }, .{ .name = "contract", .module = contract }, .{ .name = "chain_contract", .module = chain_contract } },
+    }) }));
+    b.step("test-exl3-chain-contract", "Registered EXL3 chain gates and actual production-body fault controls")
+        .dependOn(&chain_gpu.step);
     const gpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/exl3_projection_gpu_test.zig"),
         .target = target,
@@ -89,4 +115,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     gpu_run.setCwd(b.path("."));
     b.step("test-exl3-gpu", "EXL3 Metal arithmetic, row windows, routes and validation regressions")
         .dependOn(&gpu_run.step);
+    const moe = b.addTest(.{ .root_module = gpu.root_module, .filters = &.{ "the fused gate+up pass", "the shared expert's down" } });
+    b.step("test-exl3-moe", "EXL3 gate/up and eligible shared-down fusions against separate calls")
+        .dependOn(&b.addRunArtifact(moe).step);
 }

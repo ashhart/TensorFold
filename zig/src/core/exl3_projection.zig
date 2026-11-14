@@ -68,6 +68,7 @@ pub const chain = chain_mod;
 pub const ReduceArgs = swi.ReduceArgs;
 pub const Plan = swi.Plan;
 pub const planBody = swi.planBody;
+pub const canMergeDenseRows = swi.canMergeDenseRows;
 pub const stages = swi.stages;
 pub const SwiGLURot = swi.SwiGLURot;
 pub const encodeSwiGLUPreRotate = swi.encodeSwiGLUPreRotate;

@@ -121,6 +121,7 @@ kernel void tf_exl3_matmul_decode_fma_static_lut(const device half* x [[buffer(0
   }
 }
 
+#if TF_FMA_WARPS != 16
 // The register-only body on the DENSE one-row path.
 kernel void tf_exl3_matmul_decode_fma_dense(const device half* x [[buffer(0)]],
                                              const device uchar* trellis [[buffer(1)]],
@@ -249,3 +250,4 @@ kernel void tf_exl3_matmul_decode_fma_dense(const device half* x [[buffer(0)]],
       lane, sg, tg, &red[0][0]);
   }
 }
+#endif

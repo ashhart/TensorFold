@@ -10,26 +10,19 @@ pub fn fastArgmax() bool {
     return fast_argmax_cache.?;
 }
 
-/// The tokens that followed the last earlier occurrence of `s`'s own tail, at most `out.len` of them.
-pub fn tokAt(p: []const u32, h: []const u32, k: usize) u32 {
-    return if (k < p.len) p[k] else h[k - p.len];
-}
-
 /// The tokens that followed the last earlier occurrence of the stream's own tail, at most `out.len` of them.
-pub fn lookupTokens(p: []const u32, h: []const u32, out: []u32) usize {
-    const total = p.len + h.len;
+pub fn lookupTokens(context: []const u32, out: []u32) usize {
+    const total = context.len;
     if (total < 4 or out.len == 0) return 0;
     var n: usize = @min(total - 1, 12);
     while (n >= 2) : (n -= 1) {
-        const tail = total - n;
+        const suffix = context[total - n ..];
         var i: usize = 0;
         while (i + n < total) : (i += 1) {
-            var j: usize = 0;
-            while (j < n and tokAt(p, h, i + j) == tokAt(p, h, tail + j)) j += 1;
-            if (j == n) {
+            if (std.mem.eql(u32, context[i..][0..n], suffix)) {
                 const start = i + n;
                 const avail = @min(out.len, total - start);
-                for (out[0..avail], 0..) |*t, k| t.* = tokAt(p, h, start + k);
+                @memcpy(out[0..avail], context[start..][0..avail]);
                 return avail;
             }
         }
@@ -41,9 +34,15 @@ pub fn lookupTokens(p: []const u32, h: []const u32, out: []u32) usize {
 pub fn mtpDepthMax() u32 {
     const v = std.c.getenv("TF_DSV41_MTP_DEPTH_MAX") orelse return 3;
     const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 3;
-    return @min(@max(n, 1), 5);
+    return @min(@max(n, 1), 4);
 }
 
+pub fn maxDraftDepth(b: *const Backend) u32 {
+    const trained: u32 = if (b.model.mtp_enabled and b.model.weights.dspark != null) mtpDepthMax() else 0;
+    return @max(lookupDepth(), trained);
+}
+
+pub const max_lookup_drafts: u32 = 7;
 var lookup_depth: ?u32 = null;
 /// TF_DSV41_LOOKUP_DRAFTS=<depth>: draft that many tokens a round from the stream's own suffix matches.
 pub fn lookupDepth() u32 {
@@ -52,7 +51,7 @@ pub fn lookupDepth() u32 {
     if (std.c.getenv("TF_DSV41_LOOKUP_DRAFTS")) |v| {
         std.log.info("deepseek-v41: lookupDepth reads TF_DSV41_LOOKUP_DRAFTS={s}", .{std.mem.span(v)});
         out = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0;
-        if (out > 7) out = 7;
+        out = @min(out, max_lookup_drafts);
     }
     lookup_depth = out;
     return out;
@@ -203,6 +202,8 @@ const MtpPolicy = struct { on: bool, up: f64, down: f64 };
 var mtp_policy: ?MtpPolicy = null;
 /// The adaptive depth policy, shared with the early `draft` hook so the drafter sizes itself to the policy.
 pub fn mtpDepthFor(b: *Backend, slot: u32) u32 {
+    const depth = maxDraftDepth(b);
+    if (depth == 0) return 0;
     const p = mtp_policy orelse blk: {
         const raw = std.c.getenv("TF_DSV41_MTP_ADAPT");
         const single: ?f64 = if (raw) |v| (std.fmt.parseFloat(f64, std.mem.span(v)) catch null) else null;
@@ -213,16 +214,16 @@ pub fn mtpDepthFor(b: *Backend, slot: u32) u32 {
         mtp_policy = v;
         break :blk v;
     };
-    if (!p.on) return lookupDepth();
+    if (!p.on) return depth;
     const mode = roundSignalMode();
     const up_rate = if (mode == 1) b.model.mtpRoundSlot(slot) else b.model.mtpAcceptSlot(slot);
     const stay_rate = if (mode >= 1) b.model.mtpRoundSlot(slot) else up_rate;
     const prev: u32 = if (slot < b.last_depth.len) b.last_depth[slot] else 0;
     if (mtpRatchetDown() > 0 and slot < b.shallow.len and b.shallow[slot]) return 1;
     return if (up_rate > p.up)
-        lookupDepth()
+        depth
     else if (prev >= 2 and stay_rate >= p.down)
-        lookupDepth()
+        depth
     else
         1;
 }

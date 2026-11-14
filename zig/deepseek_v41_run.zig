@@ -238,6 +238,12 @@ pub fn main(init: std.process.Init) !void {
         .table_dir = args[3],
         .stream_dir = if (std.c.getenv("TF_DSV41_ENGRAM_STREAM_DIR")) |d| std.mem.span(d) else null,
         .token_map = map,
+        .chunk_rows = blk: {
+            const raw = std.c.getenv("TF_DSV41_PREFILL_STEP") orelse break :blk ds.prefill_step;
+            const n = std.fmt.parseInt(u32, std.mem.span(raw), 10) catch break :blk ds.prefill_step;
+            if (n < 16) break :blk ds.prefill_step;
+            break :blk @min(n, 16384);
+        },
         .lanes = if (is_lanes or is_draftloop) 2 else 1,
         .context = if (is_lanes and args.len > 7) try number(args[7]) else if (is_draftloop) 4096 else 0,
     });
@@ -263,6 +269,7 @@ pub fn main(init: std.process.Init) !void {
         .mode = mode,
         .evidence_origin = "current_invocation_not_historical_qualification",
         .context_capacity = model.cache.plan.capacity,
+        .workspace_rows = model.workspace.plan.rows,
         .consumed_tokens = model.cache.position,
         .weight_bytes = model.checkpoint.residentBytes(),
         .resident_allocation_bytes = model.residency.allocatedSize(),

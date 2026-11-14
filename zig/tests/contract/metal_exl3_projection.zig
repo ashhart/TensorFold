@@ -9,7 +9,7 @@ const c = contract.spec;
 const g = contract.gates;
 const Fixture = @import("exl3_projection_ref.zig").For(ex.format);
 
-const Kind = enum { generic, static, lut, dense, t1, t2, t4, dense_t1, dense_t2, dense_t4, multi2, multi4, ku2 };
+const Kind = enum { scalar, generic, static, lut, dense, t1, t2, t4, dense_t1, dense_t2, dense_t4, multi2, multi4, ku2 };
 const Fault = enum(u32) { clip = 1, input_write = 2, tail = 3, half_sum = 4 };
 const FaultArgs = extern struct { k: u32, n: u32, rows: u32, stress: u32, fault: u32, base: f32 };
 const Geometry = struct { k: usize, n: usize, halves: u16 };
@@ -51,8 +51,8 @@ fn routed(kind: Kind) bool {
 
 fn supports(kind: Kind, halves: u16, book: ex.format.Codebook) bool {
     if (kind == .ku2) return halves == 6;
-    if (routed(kind) and kind != .static and kind != .lut) return true;
-    if (halves != 2 and halves != 4 and halves != 6 and halves != 8 and halves != 10 and halves != 12) return false;
+    if (kind == .static or kind == .lut)
+        return halves == 2 or halves == 4 or halves == 6 or halves == 8 or halves == 10 or halves == 12;
     return switch (kind) {
         .dense_t1, .dense_t2, .dense_t4 => book == .mul1,
         else => true,
@@ -84,6 +84,7 @@ const Probe = struct {
     decoded: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
     base: rig_.Ref = undefined,
+    partials: rig_.Ref = undefined,
     args: ex.Args = undefined,
     why: [256]u8 = undefined,
 
@@ -132,8 +133,10 @@ const Probe = struct {
         p.f = f;
         p.x = try p.rig.input(std.mem.sliceAsBytes(f.x));
         p.w = try p.rig.input(std.mem.sliceAsBytes(f.words));
-        const table = p.suite.pipelines.codebook_table orelse return error.NoExl3CodebookTable;
-        p.table = try p.rig.input(table.contents()[0 .. 3 * 65536 * 2]);
+        if (p.kind != .scalar) {
+            const table = p.suite.pipelines.codebook_table orelse return error.NoExl3CodebookTable;
+            p.table = try p.rig.input(table.contents()[0 .. 3 * 65536 * 2]);
+        }
         const ids = try p.rig.a.alloc(u32, shape.rows);
         defer p.rig.a.free(ids);
         @memset(ids, 0);
@@ -157,6 +160,7 @@ const Probe = struct {
         p.descriptors = try p.rig.input(std.mem.asBytes(&desc));
         p.out = try p.rig.output(shape.rows * shape.n * 4);
         p.base = try p.rig.scratch(shape.rows * shape.n * 4);
+        if (p.kind == .scalar) p.partials = try p.rig.scratch(16 * shape.rows * shape.n * 4);
         if (p.fault != null) p.decoded = try p.rig.input(std.mem.sliceAsBytes(f.decoded));
         p.args = std.mem.zeroes(ex.Args);
         p.args.k = @intCast(shape.k);
@@ -178,6 +182,26 @@ const Probe = struct {
 
     fn encode(p: *Probe, e: mtl.ComputeEncoder, pipeline: mtl.Pipeline, target: rig_.Ref, baseline: bool) !void {
         var args = p.args;
+        if (p.kind == .scalar) {
+            args.indexed = if (baseline) 0 else 1;
+            args.splits = 16;
+            e.setPipeline(pipeline);
+            e.setBuffer(p.x.buf, p.x.off, 0);
+            e.setBuffer(p.w.buf, p.w.off, 1);
+            e.setBuffer(target.buf, target.off, 2);
+            e.setValue(args, 3);
+            e.setBuffer(p.routes.buf, p.routes.off, 4);
+            e.setBuffer(p.descriptors.buf, p.descriptors.off, 5);
+            e.setBuffer(p.partials.buf, p.partials.off, 6);
+            e.useResource(p.w.buf, mtl.ResourceUsage.read);
+            e.dispatchGroups(.{ .width = (args.n + 15) / 16, .height = 16, .depth = if (baseline) (args.rows + 7) / 8 else args.rows }, .{ .width = 32, .height = 1, .depth = 1 });
+            e.setPipeline(p.suite.pipelines.reduce.?);
+            e.setBuffer(p.partials.buf, p.partials.off, 0);
+            e.setBuffer(target.buf, target.off, 1);
+            e.setValue([2]u32{ 16, @intCast(p.count()) }, 2);
+            e.dispatchThreads(.{ .width = p.count(), .height = 1, .depth = 1 }, .{ .width = 64, .height = 1, .depth = 1 });
+            return;
+        }
         if (baseline and p.kind != .ku2) args.indexed = 1;
         const threads: usize = if (p.kind == .ku2) 256 else 32 * p.suite.pipelines.fma_warps;
         const cols: usize = if (baseline and p.kind != .ku2) 16 else switch (p.kind) {
@@ -253,7 +277,8 @@ const Probe = struct {
         var old: ?[]const u8 = null;
         if (p.fault == null) {
             const pass = p.rig.begin();
-            try p.encode(pass.e, if (p.kind == .ku2) p.suite.ku1 else p.suite.original, p.base, true);
+            const baseline = if (p.kind == .scalar) p.suite.pipelines.matmul else if (p.kind == .ku2) p.suite.ku1.? else p.suite.original.?;
+            try p.encode(pass.e, baseline, p.base, true);
             try p.rig.finish(pass);
             old = p.rig.bytes(p.base, n * 4);
         }
@@ -289,8 +314,8 @@ const Probe = struct {
 pub const Suite = struct {
     a: std.mem.Allocator,
     pipelines: ex.Pipelines,
-    original: mtl.Pipeline,
-    ku1: mtl.Pipeline,
+    original: ?mtl.Pipeline,
+    ku1: ?mtl.Pipeline,
     fault: mtl.Pipeline,
     probes: std.ArrayList(*Probe) = .empty,
 
@@ -315,6 +340,7 @@ pub const Suite = struct {
 
     fn pipeline(s: *const Suite, kind: Kind) mtl.Pipeline {
         return (switch (kind) {
+            .scalar => s.pipelines.matmul,
             .generic => s.pipelines.decode_fma,
             .static => s.pipelines.decode_fma_static,
             .lut => s.pipelines.decode_fma_static_lut,
@@ -368,7 +394,7 @@ pub const Suite = struct {
             .spec = .{
                 .name = name,
                 .accum = .f32,
-                .depth = if (kind == .ku2) promptDepth else depth,
+                .depth = if (kind == .ku2 or kind == .scalar) promptDepth else depth,
                 .out = .f32,
                 .nan = .{ .stated = "finite, NaN and signed infinity classes match independently decoded float64 rows" },
                 .tiles = .{ .{ .size = if (kind == .ku2) 128 else 4 }, .{ .size = 128, .step = 128, .min = 128 }, .{ .size = 128, .step = 128, .min = 128 } },
@@ -380,27 +406,31 @@ pub const Suite = struct {
     }
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
-        if (!device.tensorUnits()) return error.Exl3TensorUnitsUnavailable;
-        if (ex.knobs.fma_warps != 16) return error.UnqualifiedExl3ContractWarpCount;
+        if (device.tensorUnits() and ex.knobs.fma_warps != 16) return error.UnqualifiedExl3ContractWarpCount;
         const s = try a.create(Suite);
         errdefer a.destroy(s);
         var pipelines = try ex.Pipelines.loadWith(device, a);
         errdefer pipelines.deinit();
-        if (pipelines.decode_fma == null or pipelines.decode_fma_static == null or pipelines.decode_fma_static_lut == null or
-            pipelines.decode_fma_dense == null or pipelines.decode_fma_dense_multi2 == null or pipelines.decode_fma_dense_multi4 == null or
-            pipelines.prefill_nax_dense_db == null) return error.NoExl3ProjectionPipeline;
-        for (pipelines.decode_fma_t) |p| if (p == null) return error.NoExl3ProjectionPipeline;
-        for (pipelines.decode_fma_t_dense) |p| if (p == null) return error.NoExl3ProjectionPipeline;
-        const src = try tf.frags.source(device, a, @import("kernel_sources").core_exl3_projection_nax);
-        defer a.free(src);
-        const original_src = try std.fmt.allocPrint(a, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n{s}\n{s}", .{ src, @embedFile("metal_exl3_projection_reference.metal") });
-        defer a.free(original_src);
-        const original = try rig_.pipeline(device, original_src, "tf_exl3_contract_fma_reference");
-        errdefer original.deinit();
-        const ku1_src = try std.mem.replaceOwned(u8, a, src, "constexpr constant uint TF_KU = 2;", "constexpr constant uint TF_KU = 1;");
-        defer a.free(ku1_src);
-        const ku1 = try rig_.pipeline(device, ku1_src, "tf_exl3_matmul_prefill_nax31");
-        errdefer ku1.deinit();
+        if (pipelines.reduce == null) return error.NoExl3ProjectionPipeline;
+        var original: ?mtl.Pipeline = null;
+        errdefer if (original) |p| p.deinit();
+        var ku1: ?mtl.Pipeline = null;
+        errdefer if (ku1) |p| p.deinit();
+        if (device.tensorUnits()) {
+            if (pipelines.decode_fma == null or pipelines.decode_fma_static == null or pipelines.decode_fma_static_lut == null or
+                pipelines.decode_fma_dense == null or pipelines.decode_fma_dense_multi2 == null or pipelines.decode_fma_dense_multi4 == null or
+                pipelines.prefill_nax_dense_db == null) return error.NoExl3ProjectionPipeline;
+            for (pipelines.decode_fma_t) |p| if (p == null) return error.NoExl3ProjectionPipeline;
+            for (pipelines.decode_fma_t_dense) |p| if (p == null) return error.NoExl3ProjectionPipeline;
+            const src = try tf.frags.source(device, a, @import("kernel_sources").core_exl3_projection_nax);
+            defer a.free(src);
+            const original_src = try std.fmt.allocPrint(a, "#define TF_DECODE_TABLE 1\n#define TF_FMA_WARPS 16\n{s}\n{s}", .{ src, @embedFile("metal_exl3_projection_reference.metal") });
+            defer a.free(original_src);
+            original = try rig_.pipeline(device, original_src, "tf_exl3_contract_fma_reference");
+            const ku1_src = try std.mem.replaceOwned(u8, a, src, "constexpr constant uint TF_KU = 2;", "constexpr constant uint TF_KU = 1;");
+            defer a.free(ku1_src);
+            ku1 = try rig_.pipeline(device, ku1_src, "tf_exl3_matmul_prefill_nax31");
+        }
         const fault = try rig_.pipeline(device, @embedFile("metal_exl3_projection_controls.metal"), "exl3_projection_contract_fault");
         errdefer fault.deinit();
         s.* = .{ .a = a, .pipelines = pipelines, .original = original, .ku1 = ku1, .fault = fault };
@@ -413,6 +443,7 @@ pub const Suite = struct {
             s.probes.deinit(a);
         }
         for (std.enums.values(Kind)) |kind| {
+            if (kind != .scalar and !device.tensorUnits()) continue;
             for ([_]u16{ 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16 }) |halves| {
                 for (std.enums.values(ex.format.Codebook)) |book| {
                     if ((halves % 2 != 0 and book != .mul1) or !supports(kind, halves, book)) continue;
@@ -434,8 +465,8 @@ pub const Suite = struct {
         }
         s.probes.deinit(s.a);
         s.fault.deinit();
-        s.ku1.deinit();
-        s.original.deinit();
+        if (s.ku1) |p| p.deinit();
+        if (s.original) |p| p.deinit();
         s.pipelines.deinit();
         s.a.destroy(s);
     }

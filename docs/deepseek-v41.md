@@ -86,6 +86,13 @@ It does not add CUDA serving, remote prefill, transport or approximate arithmeti
 - Decode uses pipelined half-FMA trellis values, column tiles and matching dense multi-row bodies.
 - MoE and attention chains fuse adjacent operations while preserving their rounding points and fallback paths.
 - One-row attention stages can batch across slots; request state remains separate.
+- Small dense, filtered and grouped projections share the same sixteen-warp reduction on tensor-unit devices;
+  scalar indexed windows use the dense split order and honor each descriptor's logical output width.
+- Split attention masks each final key tile at its own boundary. Draft embedding IDs grow without replacing
+  pending Markov picks; teardown releases both owners and the taps, conditioning and draft-logit buffers.
+- `TF_DSV41_MTP_DRAFTS=1` enables trained proposals independently of lookup drafting when DSpark weights exist.
+  Proposal depth is capped at four IDs. Served plain/drafted hashes match in the exercised greedy and sampled
+  cases, but the measured acceptance and verify costs do not establish a speedup or clear the no-slowdown gate.
 - Exact suffix-cone prefill retains each interleaved prompt's pending encoder run.
 - Engram lookahead reads the next chunk while the current chunk's GPU work runs; rows are consumed only when
   their hashed IDs match the current chunk. The worker is joined before the forward returns.

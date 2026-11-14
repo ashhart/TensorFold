@@ -4,7 +4,22 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention, per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch. Prompt chunks adapt to admitted memory and live decoders. Odd half-bit widths and incompatible shapes keep the supported shared/plain projection path. See [scope and qualification limits](docs/deepseek-v41.md#exl3-optimization-follow-up).
+- DeepSeek-V4.1 EXL3 on Metal: exact tiled half-FMA decode, fused projection chains, batched decode attention,
+  per-prompt suffix-cone prefill, next-chunk Engram staging and bounded vocabulary-head scratch.
+  Prompt chunks adapt to admitted memory and live decoders; incompatible shapes retain the generic projection body.
+  Small dense, filtered and indexed projections retain matching reduction orders and logical output bounds.
+  Attention tiles stop at their split boundary instead of counting some keys twice, and packed NaNs survive BF16 decoding.
+  Draft embedding IDs grow without replacing Markov picks; unload releases host state, Markov IDs and drafter scratch.
+  MTP-only configurations no longer depend on lookup drafting; proposal depth is capped at the four-ID capacity.
+  Adaptive trained depth remains available with lookup disabled; suffix lookup reads the committed stream context.
+  Matching suffix proposals take precedence over paid trained proposals.
+  The diagnostic runner honors an explicit prefill-workspace setting without changing its unset default.
+  GPU profiling starts deferred mHC spans only when work is encoded, avoiding empty counter samples.
+  Last-row logits expand the selected final stream row rather than row zero of a multi-row window.
+  Fused mHC Sinkhorn uses the unfused split's FP32 row and column reduction order.
+  Stacked on #2373; whole-model qualification is still incomplete.
+  See [scope and qualification limits](docs/deepseek-v41.md#exl3-optimization-follow-up)
+  and [full-window fidelity](docs/receipts/dsv41-exl3-metal/fidelity-128.json).
 
 - Tests: the Metal kernel contract's limits pass checks LFM3's launches again; a rebase had dropped their five entries, so the pass stopped at the first LFM3 record with `UnknownLaunch` and left every later launch unchecked (#2565).
 - HIP on gfx12 under `--policy matrix=on`: Qwen3 dense checkpoints load each layer's gate and up weights interleaved as one weight, and one WMMA product writes silu(gate) x up in its epilogue instead of two products and `tf_silu_mul`, with the same output bytes: Qwen3-Reranker-8B ranks 16 documents in 0.657 to 0.661 s instead of 0.687 to 0.697 s and Qwen3-Embedding-8B embeds 100 short inputs in 0.901 to 0.911 s instead of 0.940 to 0.948 s on a Radeon AI PRO R9700. The kernel contract checks both fused blocks byte for byte against the unfused launches (part of #2245). Thanks to @laudney.

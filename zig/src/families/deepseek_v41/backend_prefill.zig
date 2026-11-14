@@ -12,7 +12,6 @@ fn begin(b: *Backend, s: *Stream, prompt: []const u32) !u32 {
     if (prompt.len + s.max_new + 1 > state.plan.capacity) return error.ContextFull;
     try b.by.put(b.gpa, s, i);
     try b.model.resetSlot(i);
-    b.history[i].clearRetainingCapacity();
     s.cached = 0;
     // A KEPT PROMPT STATE RESUMES THE PASS WHERE IT STOOD.
     if (s.reuse.saved) |saved| {
@@ -25,7 +24,6 @@ fn begin(b: *Backend, s: *Stream, prompt: []const u32) !u32 {
                 break :blk;
             };
             s.cached = want;
-            b.history[i].appendSlice(b.gpa, prompt[0..want]) catch {};
         }
     }
     s.fill_at.store(s.cached, .monotonic);

@@ -54,7 +54,7 @@ pub const Call = struct {
 };
 
 /// Whether the gate+up call can stop at its sums and hand the routed and shared rows to the fused pass.
-pub fn plan(ws: *const work.Workspace, w: *const weights.Moe, c: Call) !Fusion {
+pub fn plan(p: *const exl3.Pipelines, ws: *const work.Workspace, w: *const weights.Moe, c: Call) !Fusion {
     var out = Fusion{};
     const sw = switches();
     if (!sw.gateup) return out;
@@ -66,6 +66,7 @@ pub fn plan(ws: *const work.Workspace, w: *const weights.Moe, c: Call) !Fusion {
     const room = ws.view(.grouping).offset - ws.view(.projection).offset;
     // The shared down joins the routed one: its input rows follow the routed rows in the same scratch.
     if (sw.shared_down and !c.skip_shared and w.down_shared != null and
+        exl3.canMergeDenseRows(p, w.shared[2], r, routed + r) and
         try exl3.scratchBytes(2304, 5120, routed + r) <= room)
     {
         const combine = sw.down_combine and

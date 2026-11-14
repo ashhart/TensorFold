@@ -199,6 +199,7 @@ pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
             std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null and
             std.c.getenv("TF_DSV41_NO_ENGRAM_FLUSH") == null)
         {
+            try m.profileSpan(&enc, .mhc);
             const cur = m.streamView();
             const nxt = if (m.stream_alt) ws.view(.stream) else ws.view(.stream_next);
             mhc.encodePost(enc, &p.mhc, ws.view(.branch), cur, ws.view(.post), ws.view(.comb), nxt, .{ .rows = rows, .width = 5120, .branch_stride = 5120, .residual_stride = 20480, .y_stride = 20480 });
@@ -377,8 +378,12 @@ pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         try m.profileSpan(&enc, .moe);
         if (std.c.getenv("TF_DSV41_SKIP_MOE") == null) try m.moe(&enc, &e, &layer.moe, rows, @intCast(index), m.cfg.topk, null);
         hid.record(enc, &p.ops, ws.view(.branch), rows, .moe, @intCast(index));
-        try m.profileSpan(&enc, .mhc);
-        if (p.hc_boundary != null) m.pending_expand = true else m.post(enc, rows);
+        if (p.hc_boundary != null) {
+            m.pending_expand = true;
+        } else {
+            try m.profileSpan(&enc, .mhc);
+            m.post(enc, rows);
+        }
         if (m.observer) |observer| observer.encode(observer.ctx, enc, @intCast(index), .moe, m);
         try splitStage(m, &enc, &e, "moe", index);
         if (cone_phase == .decoder and index + 1 == m.cone.hi and m.cone.hi < m.cfg.layers) {
@@ -409,8 +414,17 @@ pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
                 const cur = if (m.stream_alt) wsx.view(.stream_next) else wsx.view(.stream);
                 const next = if (m.stream_alt) wsx.view(.stream) else wsx.view(.stream_next);
                 enc.setPipeline(bp.expand_mix);
-                inline for (.{ cur, wsx.view(.branch), wsx.view(.post), wsx.view(.comb), tensor(last.projection), wsx.view(.hc_part), next }, 0..) |r, i| enc.setBuffer(r.buffer, r.offset, i);
-                enc.dispatchGroups(.{ .width = 20, .height = if (logits == .all) rows else 1 }, .{ .width = 256 });
+                // `.last` expands the selected row, not row zero of a multi-row window.
+                inline for (.{
+                    cur.shifted(first * 20480 * 2),
+                    wsx.view(.branch).shifted(first * 5120 * 2),
+                    wsx.view(.post).shifted(first * 4 * 4),
+                    wsx.view(.comb).shifted(first * 16 * 4),
+                    tensor(last.projection),
+                    wsx.view(.hc_part).shifted(first * 2000),
+                    next.shifted(first * 20480 * 2),
+                }, 0..) |r, i| enc.setBuffer(r.buffer, r.offset, i);
+                enc.dispatchGroups(.{ .width = 20, .height = output_rows }, .{ .width = 256 });
                 enc.barrier();
                 m.stream_alt = !m.stream_alt;
                 m.pending_expand = false;

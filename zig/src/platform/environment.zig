@@ -65,6 +65,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSV41_CONE_PARK", .scope = .dsv41, .kind = .u32, .forms = "0 to 3" },
     .{ .name = "TF_DSV41_OWN_PREFILL", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_DRAFTS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
+    .{ .name = "TF_DSV41_MTP_DRAFTS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1 (default 0; enables the trained Metal drafter independently of lookup drafts)" },
     .{ .name = "TF_DSV41_GRAPHS", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_AOT_GUARD", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_DSV41_ENGRAM_PREFETCH", .scope = .dsv41, .kind = .flag, .forms = "0 or 1" },

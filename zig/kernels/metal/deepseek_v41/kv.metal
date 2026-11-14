@@ -4,9 +4,11 @@ using namespace metal;
 inline float dsv41_bf(ushort x) { return as_type<float>(uint(x) << 16); }
 inline ushort dsv41_round(float x) {
     uint u = as_type<uint>(x);
+    if ((u & 0x7fffffff) > 0x7f800000) return ushort((u >> 16) | 0x40);
     return ushort((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 inline float dsv41_e4(uchar c) {
+    if ((c & 127) == 127) return NAN;
     uint e = (c >> 3) & 15, m = c & 7;
     float v = e == 0 ? float(m) * 0x1p-9f : ldexp(1.0f + float(m) / 8.0f, int(e) - 7);
     return (c & 128) ? -v : v;

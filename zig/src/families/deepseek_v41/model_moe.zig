@@ -161,7 +161,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     const fuse_up_picks: u32 = if (std.c.getenv("TF_DSV41_FUSE_UP_SIX") != null) 6 else picks;
     const skip_shared = std.c.getenv("TF_DSV41_SKIP_SHARED") != null;
     // The gate+up call stops at its f32 sums and one pass does its rotate_out, the SwiGLUs and the down rotate_in.
-    const fused_pass = try fusion.plan(ws, w, .{ .rows = rows, .picks = picks, .merged = moe_up_merged, .shared_split = shared_split, .swiglu_rot = swiglu_rot, .shared_rot = shared_rot, .skip_experts = skip_experts, .skip_shared = skip_shared, .mlp_passes = mlp_passes, .fuse_up_picks = fuse_up_picks });
+    const fused_pass = try fusion.plan(&p.projection, ws, w, .{ .rows = rows, .picks = picks, .merged = moe_up_merged, .shared_split = shared_split, .swiglu_rot = swiglu_rot, .shared_rot = shared_rot, .skip_experts = skip_experts, .skip_shared = skip_shared, .mlp_passes = mlp_passes, .fuse_up_picks = fuse_up_picks });
     var logits_view = logits_dest;
     const logit_dtype: u32 = 0;
     if (gate_private) {

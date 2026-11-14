@@ -93,5 +93,560 @@
     "passed": 232,
     "failed": 0,
     "build_steps": 33
+  },
+  "cuda_host_subset": {
+    "command": "zig build test-cuda-host -Dcpu=apple_m1 -j4 --summary all",
+    "passed": 5540,
+    "skipped": 32,
+    "total": 5572,
+    "build_steps_succeeded": 345,
+    "build_steps_total": 345,
+    "exit_code": 0,
+    "scope": "Before the new chain launch records; not a claim that the final host registry has been requalified."
+  },
+  "chain_contract_m4": {
+    "command": "zig build test-exl3-chain-contract test-exl3-chain-host -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "kernels": 8,
+    "passed": 8,
+    "failed": 0,
+    "known_findings": 0,
+    "controls": 34,
+    "caught": 34,
+    "missed": 0,
+    "build_steps_succeeded": 7,
+    "build_steps_total": 7,
+    "exit_code": 0,
+    "scope": "FP64 classes and explicit activation rounding; exact independent unfused GPU bytes; FP32 cancellation and ordered-combine plants; separate rounded-norm controls. Includes 384 experts, six routed picks plus shared rows, 32768-column outputs, grouped output rotation, in-place RMS and long independent RoPE positions.",
+    "m5_run": "See chain_contract_m5.",
+    "resources": {
+      "native_max_threads_all_eight": 1024,
+      "static_threadgroup_bytes": {
+        "swiglu": 0,
+        "out_in": 0,
+        "rms": 32,
+        "out_rope": 0,
+        "rope_in": 0,
+        "gate_up": 0,
+        "down": 4144,
+        "qkv": 2592
+      },
+      "formal_gate5": "M4/M5 live limits and M1/M2 offline compilation passed. RMS adapts to its pipeline limit; no M1/M2 runtime numeric claim."
+    }
+  },
+  "chain_reference_host": {
+    "command": "zig build test-exl3-chain-host -Dcpu=apple_m1 -j4 --summary all",
+    "passed": 2,
+    "failed": 0,
+    "scope": "Direct float64-to-BF16 midpoint and subnormal rounding; FP32 versus FP16/BF16 cancellation across all three replay orders. Cached in the later combined invocation."
+  },
+  "shared_down_m4_eligibility": {
+    "target": "test-exl3-moe",
+    "passed": 3,
+    "skipped": 1,
+    "total": 4,
+    "scope": "M4 keeps separate shared-down arithmetic. The merged-down differential is explicitly unserved there; the focused M5 target passed 4/4."
+  },
+  "native_rows_contract_m4": {
+    "command": "zig build test-deepseek-v41-rows-contract -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "registrations_passed": 4,
+    "entrypoints": 3,
+    "failed": 0,
+    "known": 0,
+    "controls_caught": 13,
+    "controls_missed": 0,
+    "build_steps_succeeded": 4,
+    "tests_passed": 4,
+    "scope": "Forward and inverse native batched RoPE, packed KV glue and per-slot ring publication; exact per-slot GPU outputs for 1-8 slots, 16/32/64 heads and absolute positions through 1048575. Complete ring images and untouched padding are checked.",
+    "fp16_norm_stress_minimum_margin": 1398101,
+    "bf16_norm_stress": "Not claimed: equal positive squares sum exactly under balanced BF16, and packed FP8 hides small norm errors.",
+    "native_max_threads": 1024,
+    "static_threadgroup_bytes": { "rope": 0, "glue": 32, "publish": 0 },
+    "m5_runtime": "See native_rows_contract_m5.",
+    "gate_5": "Live M4/M5 limits and M1/M2 offline limits passed; all three compile to 1024 threads on M1/M2."
+  },
+  "native_attention_reference_host": {
+    "command": "zig build test-deepseek-v41-attention-rows-host -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "passed": 2,
+    "failed": 0,
+    "build_steps_succeeded": 3,
+    "scope": "Independent packed E4/E2 decoding boundaries and a full-width value cancellation plant. FP32 is exact and both FP16/BF16 miss by over 100 bounds in all three replay orders."
+  },
+  "native_attention_runner_m4": {
+    "command": "zig build test-deepseek-v41-attention-rows-contract -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "build_steps_succeeded": 4,
+    "passed": 0,
+    "skipped": 1,
+    "scope": "Runner and native parameter ABI compiled. The tensor-unit attention contract is explicitly unserved on M4; no numeric GPU qualification is claimed.",
+    "m5_runtime": "See native_attention_contract_m5.",
+    "gate_5": "M5 live limits passed; these generation-17-only launches are explicitly unserved on M1/M2."
+  },
+  "logical_projection_audit": {
+    "physical_shape_classes": 26,
+    "grouped_wo_a_matrices": 344,
+    "backbone_groups": { "blocks": 40, "groups_per_block": 8, "k": 4096, "n": 1024, "halves": 10 },
+    "dspark_groups": { "blocks": 3, "groups_per_block": 8, "k": 4096, "n": 1024, "halves": 8 },
+    "scope": "Native weights bind each named wo_a.slice matrix as 4096x1024; both width classes already occur in the qualified projection geometry list. The eight groups do not introduce an unregistered larger dot shape."
+  },
+  "chain_contract_m5": {
+    "kernels": 8,
+    "passed": 8,
+    "failed": 0,
+    "known_findings": 0,
+    "controls_caught": 34,
+    "controls_missed": 0,
+    "max_threads_all_eight": 1024,
+    "scope": "Same source-only chain contract as M4; exercised before the later cache decoder NaN repair."
+  },
+  "native_rows_contract_m5": {
+    "registrations_passed": 4,
+    "failed": 0,
+    "known_findings": 0,
+    "controls_caught": 13,
+    "controls_missed": 0,
+    "max_threads_all_three": 1024
+  },
+  "native_attention_contract_m5": {
+    "command": "zig build test-deepseek-v41-attention-rows-contract -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all",
+    "registrations_passed": 8,
+    "failed": 0,
+    "known_findings": 0,
+    "controls_caught": 34,
+    "controls_missed": 0,
+    "build_steps_succeeded": 4,
+    "tests_passed": 1,
+    "exit_code": 0,
+    "max_threads": { "dense": 1024, "scan": 1024 },
+    "static_threadgroup_bytes": { "dense": 0, "scan": 8448 },
+    "scope": "Independent packed-code non-finite classes, exact per-slot dense/scan bytes, both split merges and full-width FP32 cancellation at 1-8 slots and 16/32/64 heads. Two controls restore the old split-tail predicate and reproduce both misaligned-split failures.",
+    "repairs": [
+      "Both scans mask each tile at its split's j_end, not merely the total key count.",
+      "Reserved E4M3 NaNs and BF16 rounding preserve non-finite classes.",
+      "The independent dense reference binds else to the visibility test, not the inner loop."
+    ]
+  },
+  "offline_limits_m4": {
+    "compiler": "Metal 27.2.47; real /usr/bin/xcrun rather than the earlier temporary shim",
+    "chain_launches": 8,
+    "native_pointwise_launches": 3,
+    "limit_problems": 0,
+    "resource_controls_caught_per_run": 2,
+    "m1_m2_compiled_minima": { "out_in": 832, "rms": 928, "other_six_chain": 1024, "rope": 1024, "glue": 1024, "publish": 1024 },
+    "scope": "Actual M1/M2 offline pipeline limits; not runtime numerical execution on those chips."
+  },
+  "later_contract_host": {
+    "command": "zig build test-kernel-contract tf-kernel-contract -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "tests_passed": 230,
+    "build_steps_succeeded": 73,
+    "exit_code": 0
+  },
+  "native_host_m4": {
+    "tests_passed": 118,
+    "tests_skipped": 3,
+    "scope": "Real Metal offline compiler; this native run predates the later attention and drafter-buffer changes."
+  },
+  "lifetime_m4": {
+    "command": "zig build test-deepseek-v41-lifetime -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "tests_passed": 2,
+    "build_steps_succeeded": 43,
+    "exit_code": 0,
+    "scope": "Backend allocator release and real Metal ID-buffer growth from one-token use to 5- and 17-row arms, preserving existing Markov picks. Does not establish served MTP shutdown."
+  },
+  "full_host_before_projection_order_repair": {
+    "command": "zig build test test-golden dev-tools -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j4 --summary all",
+    "build_steps_succeeded": 965,
+    "build_steps_total": 968,
+    "tests_passed": 11884,
+    "tests_skipped": 110,
+    "tests_failed": 1,
+    "test_golden_passed": true,
+    "dev_tools_passed": true,
+    "failure": "one-row fused wq_a+wkv: 2 unequal BF16 cells; numerical tolerances preserved"
+  },
+  "projection_order_repair_m4": {
+    "standalone_tests_passed": 38,
+    "standalone_tests_skipped": 1,
+    "standalone_tests_failed": 0,
+    "qkv_tests_passed": 2,
+    "qkv_cells": 1792,
+    "qkv_unequal_cells": 0,
+    "qkv_normalized_rms_error": 0,
+    "scope": "Actual M4 scalar execution; not a tensor-unit or model-fidelity qualification. Existing valid numerical parity assertions were retained."
+  },
+  "projection_order_repair_m5": {
+    "standalone_tests_passed": 39,
+    "standalone_tests_failed": 0,
+    "qkv_tests_passed": 2,
+    "qkv_cells": 1792,
+    "qkv_unequal_cells": 0,
+    "registrations_passed": 261,
+    "registrations_failed": 0,
+    "known_findings": 0,
+    "controls_caught": 1044,
+    "controls_missed": 0,
+    "gate_scope": "Gates 1-4; final integrated launch-resource checks are recorded separately."
+  },
+  "integrated_host_after_projection_order_repair": {
+    "command": "zig build native dev-tools test-kernel-contract -Dcpu=apple_m1 -Dversion=1.0.0 -Doptimize=ReleaseSafe -j4 --summary all",
+    "build_steps_succeeded": 291,
+    "tests_passed": 193,
+    "exit_code": 0,
+    "scope": "Real native and all developer-tool links plus contract host tests; not a rerun of the full test corpus."
+  },
+  "whole_model_fidelity": {
+    "receipt": "fidelity-128.json",
+    "tokens": 128,
+    "band_ratio_before": 1.854915614210866,
+    "band_ratio_after": 1.1400186203421705,
+    "band_gate_passed": false,
+    "greedy_disagreements_after": 6,
+    "resident_execution_window_passed_after": true,
+    "release_qualified": false,
+    "latest_projection_order_capture": {
+      "band_ratio": 1.1400186203421705,
+      "greedy_disagreements": 6,
+      "execution_disk_read_bytes": 4096,
+      "execution_pageins": 0,
+      "resident_execution_window_passed": false,
+      "release_qualified": false
+    }
+  },
+  "scalar_projection_m4_and_m5": {
+    "registrations_passed_per_chip": 27,
+    "registrations_failed": 0,
+    "known_findings": 0,
+    "controls_caught_per_chip": 108,
+    "controls_missed": 0,
+    "gate_1_through_4_passed": true,
+    "gate_5_passed": true,
+    "launch_threads": 32,
+    "threadgroup_bytes": 1536,
+    "live_max_threads_m4": 1024,
+    "live_max_threads_m5": 1024,
+    "offline_max_threads_m1": 1024,
+    "offline_max_threads_m2": 1024,
+    "scope": "Actual scalar execution and resource reflection on M4 and M5; M1/M2 are offline compilation only."
+  },
+  "combined_projection_m5": {
+    "tensor_registrations": 261,
+    "scalar_registrations": 27,
+    "total_registrations": 288,
+    "entrypoints": 14,
+    "numerical_controls_caught": 1152,
+    "numerical_controls_missed": 0,
+    "real_findings": 0,
+    "known_findings": 0
+  },
+  "final_integrated_m5_before_mtp_admission": {
+    "build_steps_succeeded": 63,
+    "tests_passed": 47,
+    "projection_chain_and_native_resource_findings": 0,
+    "actual_resource_controls_caught_per_limits_run": 2
+  },
+  "served_trained_mtp": {
+    "context": 65536,
+    "parallel": 4,
+    "prompt_cache_gib": 0,
+    "lookup": null,
+    "mtp_enabled": true,
+    "taps_enabled": true,
+    "proposal_capacity": 4,
+    "standard_benchmark": {
+      "max_tokens": 256,
+      "repetitions": 3,
+      "temperatures": [0],
+      "exit_code": 0
+    },
+    "plain_versus_drafted_full_hash_pairs_passed": 12,
+    "concurrent_versus_solo_full_token_hashes_passed": 8,
+    "post_cancel_full_token_hash_passed": true,
+    "trained_proposer_unavailable_warnings": 0,
+    "greedy_code": {
+      "accepted": 3,
+      "drafted": 10,
+      "plain_decode_tps_rounded": 52.23,
+      "mtp_decode_tps_rounded": 51.60
+    },
+    "greedy_prose": {
+      "accepted": 6,
+      "drafted": 10,
+      "plain_decode_tps_rounded": 52.20,
+      "mtp_decode_tps_rounded": 52.19
+    },
+    "speedup_proven": false,
+    "no_slowdown_gate_passed": false,
+    "scope": "Actual MTP capability admission and proposals with lookup unset; shared rounds stay plain. Does not qualify independent whole-model fidelity."
+  },
+  "served_mtp_unload_reload": {
+    "native_build_steps_succeeded": 66,
+    "temperature": 0.8,
+    "seed": 1234,
+    "completion_tokens_per_reply": 256,
+    "full_token_sha256": "f8609e4a5d0509a12f66e98c432edf7eda1bf823f8bf1cdf667f39a278643cdd",
+    "full_output_hash_equal_after_reload": true,
+    "mtp_accepted_total_after_reload": 6,
+    "mtp_drafted_total_after_reload": 20,
+    "cycles": [
+      {
+        "resident_phys_footprint_bytes": 218901594680,
+        "unloaded_phys_footprint_bytes": 119178512,
+        "released_phys_footprint_bytes": 218782416168
+      },
+      {
+        "resident_phys_footprint_bytes": 218907165432,
+        "unloaded_phys_footprint_bytes": 120227112,
+        "released_phys_footprint_bytes": 218786938320
+      }
+    ],
+    "fully_parked_state_verified_from_load_ledger": true,
+    "server_survived_unload": true,
+    "graceful_shutdown_exit_code": 0,
+    "trained_proposer_unavailable_warnings": 0,
+    "probe_correction": "Uses current ri_phys_footprint, not lifetime maximum, and waits for /v1/load parked=true after engine close. HTTP 503 alone also describes the still-unloading transition.",
+    "scope": "Actual served MTP unload, reload, exact sampled response and shutdown; not a model-fidelity or no-slowdown verdict."
+  },
+  "cold_default_policy": {
+    "context": 131072,
+    "parallel": 4,
+    "prompt_cache_gib": 0,
+    "mtp_enabled": false,
+    "prefill_step_override": null,
+    "cases": [
+      {
+        "prompt_tokens": 2048,
+        "replies": 7,
+        "generated_tokens_per_reply": 256,
+        "cached_tokens_every_reply": 0,
+        "full_hashes_equal": true,
+        "first_ttft_seconds": 1.7693967500235885,
+        "first_decode_tps": 49.47872025118041,
+        "fixture_sha256": "a9c55dc5966cd194041aad9ac8f03de7ca81f1e461d387c5253c2ac6ea4416f0",
+        "full_token_sha256": "9ef3cc1f6f11485131c610033fbf2a7bbb6aee4733c810757209ce80cd90e15b",
+        "concurrent_timing": {
+          "requested_requests": 4,
+          "timed_requests": 4,
+          "makespan_s": 18.439526708971243,
+          "end_to_end_tps": 55.53287869920224,
+          "timing_valid": true
+        }
+      },
+      {
+        "prompt_tokens": 8192,
+        "replies": 7,
+        "generated_tokens_per_reply": 256,
+        "cached_tokens_every_reply": 0,
+        "full_hashes_equal": true,
+        "first_ttft_seconds": 3.70275529200444,
+        "first_decode_tps": 49.172771365517484,
+        "fixture_sha256": "4639f4b9e6a7560fbc4317c8b7efbf5d130e78caa423cfee7d3d59158844a5da",
+        "full_token_sha256": "8c42a6046105386a0b850d0498a8165d35a2ff6b8c22ede1c092e7e6042865e5",
+        "concurrent_timing": {
+          "requested_requests": 4,
+          "timed_requests": 4,
+          "makespan_s": 26.719819499994628,
+          "end_to_end_tps": 38.323612178600456,
+          "timing_valid": true
+        }
+      },
+      {
+        "prompt_tokens": 32768,
+        "replies": 7,
+        "generated_tokens_per_reply": 256,
+        "cached_tokens_every_reply": 0,
+        "full_hashes_equal": true,
+        "first_ttft_seconds": 12.759616958966944,
+        "first_decode_tps": 48.560730179653405,
+        "fixture_sha256": "d0795240ae881e529754bd9146e5588084706465b0773e554e6547b630c38f1f",
+        "full_token_sha256": "7025b3d9b6e542d6e04d9682ed6a6ae59c43d1c5c64443f2ed807e731cdebb4c",
+        "concurrent_timing": {
+          "requested_requests": 4,
+          "timed_requests": 4,
+          "makespan_s": 64.57552454195684,
+          "end_to_end_tps": 15.8574011943902,
+          "timing_valid": true
+        }
+      },
+      {
+        "prompt_tokens": 65536,
+        "replies": 7,
+        "generated_tokens_per_reply": 256,
+        "cached_tokens_every_reply": 0,
+        "full_hashes_equal": true,
+        "first_ttft_seconds": 25.093715041002724,
+        "first_decode_tps": 47.634514745820816,
+        "fixture_sha256": "c8dfe7fc845d3b05d9d0deedc21bfb3498bcf05baaedaad5a834e4874cee9a9f",
+        "full_token_sha256": "6e6b46485f7c3afd309b3b932dde895c48933050c4d5a7d76f5bf61403a1e87f",
+        "concurrent_timing": {
+          "requested_requests": 4,
+          "timed_requests": 4,
+          "makespan_s": 116.46250274998602,
+          "end_to_end_tps": 8.792529576650567,
+          "timing_valid": true
+        }
+      }
+    ],
+    "graceful_shutdown_exit_code": 0,
+    "lifetime_peak_phys_footprint_bytes": 225854658488
+  },
+  "retained_mtp_native_window": {
+    "context": 1048576,
+    "parallel": 4,
+    "prompt_cache_gib": 2,
+    "native_window_admitted": true,
+    "plain_versus_drafted_full_hash_pairs": 8,
+    "concurrent_versus_solo_full_hashes": 8,
+    "sampled_retained_post_cancel_full_hash_equal": true,
+    "long_prompt_tokens": 8192,
+    "long_first_cached_tokens": 0,
+    "long_subsequent_cached_tokens": 8064,
+    "short_prompt_tokens": [
+      22
+    ],
+    "short_cached_tokens": 0,
+    "actual_trained_mtp_drafts_in_solo_pairs": 80.0,
+    "original_probe_failed": [
+      "retention_not_observed:prose",
+      "retention_not_observed:prose",
+      "retention_not_observed:prose",
+      "retention_not_observed:prose",
+      "concurrent_retention_not_observed:prose",
+      "concurrent_retention_not_observed:prose",
+      "concurrent_retention_not_observed:prose",
+      "concurrent_retention_not_observed:prose"
+    ],
+    "probe_correction": "Original probe incorrectly demanded short prose retention; existing tail/end mark rules require prompt>4096. Original HTTP replies audited against real policy without rerunning or changing code/defaults.",
+    "original_probe_exit_code": 1,
+    "corrected_recorded_observations_passed": true,
+    "scope": "Original real HTTP records; eligible 8k retention and full hashes audited without a rerun. The original command did not pass its invalid short-prompt retention assertions."
+  },
+  "final_full_contributing_build": {
+    "command": "zig build test test-golden dev-tools native tf-dsv41-run test-deepseek-v41-lifetime -Dcpu=apple_m1 -Dversion=1.0.0 -Doptimize=ReleaseSafe -j4 --summary all",
+    "hardware": "M5 Ultra",
+    "zig_version": "0.17.0",
+    "exit_code": 0,
+    "steps_succeeded": 977,
+    "steps_total": 977,
+    "reported_tests_passed": 1603,
+    "reported_tests_skipped": 53,
+    "reported_tests_total": 1656,
+    "unchanged_steps_cached": true,
+    "direct_lifetime_cases_passed": 5,
+    "elapsed_seconds": 486.02301579201594,
+    "qkv_diagnostic": {"cells": 1792, "unequal": 1, "nrms": 0.0000001201090447169946, "worst": 0.006024096385542169, "unchanged_bounds_passed": true},
+    "source_sha256": {
+      "backend_run.zig": "4a9cf06bbe8fe0c2685d707e4c53a3219af912a6750e2c72550497971c59632e",
+      "deepseek_v41_lifetime_checks.zig": "0b4571bf0e8164fbe155d1689f6b8e375c90e38eea7b8ca4c4c81d4575c2fde5",
+      "build_deepseek_v41.zig": "2c19585de8a1b725407f8e6d24b75c9bb4ea28971094b79b285673c2022c6952",
+      "deepseek_v41_run.zig": "450155183844565b08181b4a9104e98f6f34a73b8b1d99d35e859ad17dd440b8",
+      "forward_impl.zig": "e0c4eec4a305e31d2771007f4c3ec670fcb5d385e979a38a5c528b85145e9126"
+    },
+    "source_scope": "Includes final lookup preference, canonical context, trained depth, diagnostic workspace and deferred mHC counter-span repairs.",
+    "scope": "Full requested corpus passes; cached counts and subsequent strict profile results are separate from independent model fidelity and release gates."
+  },
+  "post_policy_full_contributing_build": {
+    "command": "zig build test test-golden dev-tools native test-deepseek-v41-lifetime -Dcpu=apple_m1 -Dversion=1.0.0 -Doptimize=ReleaseSafe -j4 --summary all",
+    "hardware": "M5 Ultra",
+    "exit_code": 0,
+    "steps_succeeded": 973,
+    "steps_total": 973,
+    "reported_tests_passed": 1529,
+    "reported_tests_skipped": 53,
+    "unchanged_steps_cached": true,
+    "direct_lifetime_cases_passed": 4,
+    "lifetime_cases": ["host ownership", "Metal ID-buffer growth preserves pending Markov picks", "trained-only adaptive depth", "lookup uses committed stream context"],
+    "source_sha256": {
+      "backend.zig": "b4150156e9bc9e3cc1725298432a6ae90f468bafcc90c9c9b0cf9d3b5531d23c",
+      "backend_run.zig": "556660b1c6a7a55c36ebcde3d24ab61ab81a2a601dcee43e8c62cb2e459a6045",
+      "backend_policy.zig": "5bd8478dd7a74b352f413bbb23b75832b51da9525da687ca97d42efc26f12c9d",
+      "backend_prefill.zig": "6ca7b78b8f0aa89adb35a1abf2267746b81af222d37f94399ec03a4660467a40",
+      "build_deepseek_v41.zig": "8c893f7beeecc263999db687819732cf6abc61bff784914310c3907686b08dc8",
+      "deepseek_v41_lifetime_checks.zig": "20f435e99351d4bbcca7181945d7479219eddf35bb6ac7166acaf5220baefc9f"
+    },
+    "qkv_diagnostic": {
+      "cells": 1792,
+      "unequal": 1,
+      "nrms": 0.0000001201090447169946,
+      "worst": 0.006024096385542169,
+      "unchanged_bounds_passed": true
+    },
+    "scope": "All requested steps pass; reported counts include caching. Served evidence predates these final policy/context repairs. Does not qualify the later diagnostic workspace adapter or clear independent full-model gates."
+  },
+  "final_strict_profile_matrix": {
+    "hardware": "M5 Ultra",
+    "source": "final_full_contributing_build",
+    "command": "TF_DSV41_PREFILL_STEP=16 tf-dsv41-run profile PACK STREAM tokens-N.json OUT",
+    "context_capacity": 1048576,
+    "workspace_rows": 16,
+    "results": [
+      {"rows": 1, "exit_code": 0, "same_logits": true, "gpu_profile_published": true, "sampled_span_gpu_seconds": 0.018823253, "resident_gate_passed": true, "execution_disk_read_bytes": 0, "execution_pageins": 0},
+      {"rows": 2, "exit_code": 1, "error": "ProfileChangedLogits", "gpu_profile_published": false, "resident_gate_passed": true, "execution_disk_read_bytes": 0, "execution_pageins": 0},
+      {"rows": 4, "exit_code": 1, "error": "ProfileChangedLogits", "gpu_profile_published": false, "resident_gate_passed": true, "execution_disk_read_bytes": 0, "execution_pageins": 0}
+    ],
+    "scope": "One-row strict profile passes in this invocation; multirow exactness fails. Does not clear earlier 128-row fidelity/residency, no-slowdown or release gates."
+  },
+  "final_row_repair_profile_matrix": {
+    "hardware": "M5 Ultra",
+    "forward_impl_sha256": "addc00ce671f94a893270618adee22ced74998ba6d728c1498dc45fbe140c4bb",
+    "repair": "Shift every per-row fused final-expansion view to the selected output row before the unchanged kernel dispatch.",
+    "diagnostic_build_exit_code": 0,
+    "prior_full_corpus_source_scope": "The preceding 977-step corpus predates this repair.",
+    "command": "TF_DSV41_ENGRAM_STREAM_DIR=STREAM TF_DSV41_PREFILL_STEP=16 tf-dsv41-run profile PACK STREAM tokens-N.json OUT",
+    "context_capacity": 1048576,
+    "workspace_rows": 16,
+    "strict_logit_gate_unchanged": true,
+    "results": [
+      {"rows": 1, "exit_code": 1, "same_logits": true, "gpu_profile_published": true, "sampled_span_gpu_seconds": 0.01879571, "resident_gate_passed": false, "execution_disk_read_bytes": 3080192, "execution_pageins": 45},
+      {"rows": 2, "exit_code": 0, "same_logits": true, "gpu_profile_published": true, "sampled_span_gpu_seconds": 0.027028085, "resident_gate_passed": true, "execution_disk_read_bytes": 0, "execution_pageins": 0},
+      {"rows": 4, "exit_code": 0, "same_logits": true, "gpu_profile_published": true, "sampled_span_gpu_seconds": 0.041256751, "resident_gate_passed": true, "execution_disk_read_bytes": 0, "execution_pageins": 0}
+    ],
+    "model_qualified": false,
+    "scope": "Clears the concrete multirow last-logit bug, not the independent full-model band, residency, no-slowdown, parent or hardware gates."
+  },
+  "after_final_row_full_contributing_build": {
+    "command": "zig build test test-golden dev-tools native tf-dsv41-run test-deepseek-v41-lifetime -Dcpu=apple_m1 -Dversion=1.0.0 -Doptimize=ReleaseSafe -j4 --summary all",
+    "exit_code": 0,
+    "steps_succeeded": 977,
+    "steps_total": 977,
+    "reported_tests_passed": 1588,
+    "reported_tests_skipped": 53,
+    "reported_tests_total": 1641,
+    "unchanged_steps_may_be_cached": true,
+    "forward_impl_sha256": "addc00ce671f94a893270618adee22ced74998ba6d728c1498dc45fbe140c4bb",
+    "source_scope": "Includes the selected-final-row correction in addition to the earlier policy/context/workspace/counter-span repairs.",
+    "full_model_qualified": false,
+    "scope": "Current-source requested corpus succeeds. The fresh 128-token GPU capture is byte-identical to the earlier failed-band capture and independently fails execution residency."
+  },
+  "current_source_serving_lifecycle": {
+    "forward_impl_sha256": "addc00ce671f94a893270618adee22ced74998ba6d728c1498dc45fbe140c4bb",
+    "context_capacity": 1048576,
+    "parallel": 4,
+    "retained_cache_gib": 4,
+    "completed_replies": 41,
+    "cancelled_after_generated_content": 1,
+    "actual_capacity_input_tokens": 65536,
+    "full_token_and_output_hashes_match_own_plain_controls": true,
+    "sampled_reply_after_cancellation_exact": true,
+    "unload_reload_cycles": 2,
+    "sampled_replies_after_reload_exact": true,
+    "loaded_phys_footprint_bytes": [226962856920, 222969100760],
+    "fully_parked_phys_footprint_bytes": [147244328, 149833024],
+    "fully_parked_state_observed": true,
+    "trained_only_lookup_depth": 0,
+    "trained_only_actual_mtp_drafted_total": 370,
+    "trained_only_full_hashes_match_plain": true,
+    "mixed_server_exit_code": 0,
+    "trained_only_server_exit_code": 0,
+    "scope": "Current contribution engine's own greedy/sampled, solo/shared, cancellation, reload and trained-only invariants. Not cross-engine equality, universal performance, no-slowdown, release or full-model fidelity qualification."
+  },
+  "current_source_cuda_host_subset": {
+    "command": "zig build test-cuda-host -Dcpu=apple_m1 -Dversion=1.0.0 -Doptimize=ReleaseSafe -j4 --summary all",
+    "hardware": "M5 Ultra",
+    "host_os": "macOS",
+    "gpu_work": false,
+    "exit_code": 0,
+    "steps_succeeded": 345,
+    "steps_total": 345,
+    "reported_tests_passed": 131,
+    "unchanged_steps_may_be_cached": true,
+    "scope": "Required device-free CUDA host subset on the current source; reported counts exclude unchanged cached work. No CUDA GPU or Linux-runtime qualification claim."
   }
 }

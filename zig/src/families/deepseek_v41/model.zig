@@ -16,7 +16,7 @@ pub const mhc = @import("mhc.zig");
 pub const csa2 = @import("csa2.zig");
 pub const csa2_index = @import("csa2_index.zig");
 pub const rope = @import("rope.zig");
-const route = @import("route.zig");
+pub const route = @import("route.zig");
 const engram = @import("engram.zig");
 const engram_stream = @import("engram_rows_safetensors.zig");
 pub const View = @import("view.zig").View;
@@ -86,6 +86,7 @@ pub const Model = struct {
     residency: mtl.ResidencySet,
     checkpoint: checkpoint.Checkpoint,
     weights: weights.Model,
+    mtp_enabled: bool = false,
     cfg: config.Config,
     cfg_arena: std.heap.ArenaAllocator,
     lanes: u32,
@@ -94,7 +95,7 @@ pub const Model = struct {
     cache: *kv.cache.State,
     /// The drafter's three KV rings (TF_DSV41_MTP_DRAFTS), built on first use; null until then.
     drafter_state: ?*kv.cache.State = null,
-    /// The drafter's one-token id (the embedding kernel reads an ids view); shared, four bytes, written a step.
+    /// Shared embedding IDs for the current draft arm; capacity grows before host writes.
     drafter_ids: ?mtl.Buffer = null,
     /// The Markov chain's picks (a u32 a step), kept apart from the one-token id buffer the embedding reads.
     markov_ids: ?mtl.Buffer = null,

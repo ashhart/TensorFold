@@ -93,7 +93,7 @@ fn mixesLegacy(x: []const u16, hc: Hc, c: Config) math.Mix {
 }
 
 // Split-stage isolation: identical projected mixes and inverse, so only unary or reduction boundaries differ.
-test "mHC split unary boundaries against the FP64 ideal on retained arguments" {
+test "mHC split fused and unfused agree on retained unary arguments and FP64 bounds" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -102,6 +102,8 @@ test "mHC split unary boundaries against the FP64 ideal on retained arguments" {
     defer queue.deinit();
     var p = try mhc.Pipelines.load(device);
     defer p.deinit();
+    var boundary = try mhc.BoundaryPipelines.load(device);
+    defer boundary.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const gpa = arena.allocator();
@@ -153,14 +155,36 @@ test "mHC split unary boundaries against the FP64 ideal on retained arguments" {
     const pre = try b.get(f32, rows * 4);
     const post = try b.get(f32, rows * 4);
     const comb = try b.get(f32, rows * 16);
+    const stream = try b.get(u16, h.stream_width);
+    const partial = try b.get(f32, mhc.boundary_slices * (h.mix_count + 1));
+    const norm_weight = try b.get(u16, h.width);
+    const normed = try b.get(u16, h.width);
+    const fused_pre = try b.get(f32, rows * 4);
+    const fused_post = try b.get(f32, rows * 4);
+    const fused_comb = try b.get(f32, rows * 16);
 
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
     mhc.encodeSplit(e, &p, h.view(mixes), h.view(inv), h.view(scale), h.view(base), h.view(pre), h.view(post), h.view(comb), .{ .rows = rows, .eps = cfg.hc_eps });
+    // Isolate the split: zero partials and eps=1 give rstd=1; bases carry the retained arguments.
+    e.setPipeline(boundary.boundary);
+    e.setBytes(std.mem.asBytes(&mhc.BoundaryArgs{ .eps = 1, .hc_eps = cfg.hc_eps, .iters = @intCast(cfg.hc_sinkhorn_iters) }), 6);
+    for (0..rows) |r| {
+        inline for (.{ stream, partial, mixes, scale, base, norm_weight }, 0..) |buffer, i|
+            e.setBuffer(buffer, if (i == 2) r * h.mix_count * 4 else 0, i);
+        e.setBuffer(fused_pre, r * 4 * 4, 7);
+        e.setBuffer(fused_post, r * 4 * 4, 8);
+        e.setBuffer(fused_comb, r * 16 * 4, 9);
+        e.setBuffer(normed, 0, 10);
+        e.dispatchGroups(.{ .width = 1 }, .{ .width = 1024 });
+    }
     e.end();
     cb.commit();
     cb.wait();
     if (cb.failure() != null) return error.MhcFp64GpuFailure;
+    try std.testing.expectEqualSlices(u32, pre.slice(u32, rows * 4), fused_pre.slice(u32, rows * 4));
+    try std.testing.expectEqualSlices(u32, post.slice(u32, rows * 4), fused_post.slice(u32, rows * 4));
+    try std.testing.expectEqualSlices(u32, comb.slice(u32, rows * 16), fused_comb.slice(u32, rows * 16));
 
     const scale_tensor: Tensor = .{ .buffer = scale, .offset = 0, .bytes = 12, .dtype = .f32 };
     const base_tensor: Tensor = .{ .buffer = base, .offset = 0, .bytes = h.mix_count * 4, .dtype = .f32 };

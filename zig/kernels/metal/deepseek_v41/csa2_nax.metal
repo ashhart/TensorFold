@@ -208,7 +208,7 @@ inline bfloat dsv41_dense_at_off(int enc, uint off, device const ushort *dense, 
   for (uint j0 = j_begin; j0 < j_end; j0 += BLOCK) {
     // One lane a key: the same values, a thirty-second of the work (every lane used to run all BLOCK steps).
     if (s == 0 && lane < uint(BLOCK)) {
-      const int enc = j0 + lane < count ? dsv41_slot_at(p, row, query, columns, j0 + lane, indices) : -1;
+      const int enc = j0 + lane < j_end ? dsv41_slot_at(p, row, query, columns, j0 + lane, indices) : -1;
       keyrow[lane] = enc;
       keyoff[lane] = enc < 0 ? 0u : uint(dsv41_dense_row(enc, p) * p.width);
     }

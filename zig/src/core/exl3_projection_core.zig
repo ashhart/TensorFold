@@ -275,10 +275,12 @@ pub fn scratchBytes(k: usize, n: usize, rows: usize) !usize {
     try shape(k, n);
     if (rows == 0 or rows > std.math.maxInt(u32) - 7) return error.InvalidExl3Rows;
     var bytes = std.math.add(usize, try rotatedBytes(k, rows), try std.math.mul(usize, try std.math.mul(usize, n, rows), 4)) catch return error.UnsupportedExl3Shape;
-    // The split dispatch's partials, one partial row a split a row of the call.
-    if (rows <= 8) bytes = std.math.add(usize, bytes, try std.math.mul(usize, try std.math.mul(usize, try std.math.mul(usize, one_row_splits, rows), n), 4)) catch return error.UnsupportedExl3Shape;
-    // A decode tile of a few routed rows can split its k range too: room for every split's rows by n.
-    if (rows <= moe_split_rows) bytes = std.math.add(usize, bytes, try std.math.mul(usize, try std.math.mul(usize, try std.math.mul(usize, moeSplitCount(), @max(rows, 8)), n), 4)) catch return error.UnsupportedExl3Shape;
+    // Scalar windows and split decode tiles reuse the same partials, rather than reserving both.
+    if (rows <= moe_split_rows) {
+        const scalar_rows = if (rows < moe_split_rows) one_row_splits * rows else 0;
+        const partial_rows = @max(scalar_rows, moeSplitCount() * @max(rows, 8));
+        bytes = std.math.add(usize, bytes, try std.math.mul(usize, try std.math.mul(usize, partial_rows, n), 4)) catch return error.UnsupportedExl3Shape;
+    }
     return bytes;
 }
 

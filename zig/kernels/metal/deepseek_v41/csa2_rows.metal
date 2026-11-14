@@ -94,7 +94,7 @@ kernel void dsv41_dense_kv_rows(device const ulong *addr [[buffer(0)]], device c
       const uint j = j0 + lane;
       int enc = -1;
       uint dense_row = 0;
-      if (j < count) {
+      if (j < j_end) {
         if (j < columns) {
           // dsv41_slot_at's window part: absolute position `wpos`, its dense row the ring slot (or this row's)
           uint wpos;

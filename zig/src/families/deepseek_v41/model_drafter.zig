@@ -73,27 +73,33 @@ const concurrentOn = model.concurrentOn;
 const headRms = model.headRms;
 const logitsTopK = model.logitsTopK;
 
-pub fn drafterId(m: *Model, token: u32) !View {
-    if (m.drafter_ids == null) {
-        m.drafter_ids = try m.device.buffer(4, mtl.ResourceOptions.shared);
-        m.markov_ids = try m.device.buffer(8 * 4, mtl.ResourceOptions.shared); // five Markov steps, a u32 each
-        m.residency.add(m.drafter_ids.?);
+fn drafterIds(m: *Model, rows: u32) !mtl.Buffer {
+    const bytes = @max((@as(usize, rows) + 1) * 4, 6 * 4);
+    if (m.drafter_ids) |ids| {
+        if (ids.length() >= bytes) return ids;
     }
-    std.mem.writeInt(u32, m.drafter_ids.?.contents()[0..4], token, .little);
-    return .{ .buffer = m.drafter_ids.? };
+    const ids = try m.device.buffer(bytes, mtl.ResourceOptions.shared);
+    m.residency.add(ids);
+    if (m.drafter_ids) |old| {
+        m.residency.remove(old);
+        old.deinit();
+    }
+    m.drafter_ids = ids;
+    return ids;
+}
+
+pub fn drafterId(m: *Model, token: u32) !View {
+    const ids = try drafterIds(m, 1);
+    std.mem.writeInt(u32, ids.contents()[0..4], token, .little);
+    return .{ .buffer = ids };
 }
 pub fn drafterRound(m: *Model, pending: u32, rows: u32) !View {
-    if (m.drafter_ids == null) {
-        if (m.drafter_ids) |old| old.deinit();
-        // The buffer is sized for the widest form (the five-row arm), not for the rows the first call happened to use.
-        m.drafter_ids = try m.device.buffer(@max((rows + 1) * 4, 6 * 4), mtl.ResourceOptions.shared);
-        m.residency.add(m.drafter_ids.?);
-    }
-    const bytes = m.drafter_ids.?.contents();
+    const ids = try drafterIds(m, rows);
+    const bytes = ids.contents();
     var r: u32 = 0;
     while (r < rows) : (r += 1)
         std.mem.writeInt(u32, bytes[@as(usize, r) * 4 ..][0..4], if (r == 0) pending else 128799, .little);
-    return .{ .buffer = m.drafter_ids.? };
+    return .{ .buffer = ids };
 }
 pub fn markovPart(m: *Model) !View {
     if (m.markov_part == null) {
