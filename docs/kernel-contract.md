@@ -306,6 +306,12 @@ replaying them, written back or not, and `tf_q35k_apply_pend`, bit-equal to `tf_
 CUDA also checks Dory's paged caches (`window_pages.cu`): `tf_wrows_put` places rows in a shuffled arena bit for bit, and the
 head dim 256 decode and prompt kernels read them through a page table, each output within float64's range (two controls:
 swapped stream tables, a stale page id).
+CUDA also checks Gemma 4 31B's V-only global pages (`window_vonly.cu`, `TF_GEMMA4_V_ONLY`), each a replacement
+bit-equal to the K+V path, NaN, infinities, signed zeros and subnormals included: `tf_vonly_keys` makes keys from values
+equal to the keys `tf_qk_rows_round` wrote and `tf_wrows_put` placed (pages of 256 and 37, positions to 262,163), and
+the V-only decode `tf_wrows_part_512_pg_vo` + `tf_wrows_merge_512_pg_vo` equals `tf_wrows_part_512_pg` +
+`tf_wrows_merge_512_pg` over K+V pages, its float64 replay included; `tf_wrows_put_v` places V as `tf_wrows_put` does
+(three controls: one bit of one made key flipped, keys without the bf16 rounding of w * V, keys from another k norm).
 CUDA also checks Dory's attention inputs (`qk_l2.cuh`): RoPE first, each head's L2 norm, q times its scale vector, v as is, at
 head dim 256 and positions past 199,800 (two controls, each dropping one rounding point).
 CUDA also checks Dory's activation rows (`act_l2.cuh`): the scaled sigmoid output gate over all heads and the scaled SwiGLU,

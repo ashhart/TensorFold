@@ -24,7 +24,7 @@ const toks = [_]usize{ 16, 37, 256 };
 const Pool = struct { kc: u64, vc: u64, pages: wa.Pages };
 
 /// Stream s's keys (rows s * top .. of kc and vc) copied to `tok`-position pages in shuffled order, NaN elsewhere.
-fn paged(b: *rows.Bufs, a: std.mem.Allocator, rng: std.Random, kc: []const u16, vc: []const u16, streams: usize, top: usize, hk: usize, tok: usize) !Pool {
+pub fn paged(b: *rows.Bufs, a: std.mem.Allocator, rng: std.Random, kc: []const u16, vc: []const u16, streams: usize, top: usize, hk: usize, tok: usize) !Pool {
     const stride = (top + tok - 1) / tok;
     const count = streams * stride + 3; // pages no stream holds
     const row = hk * d;
