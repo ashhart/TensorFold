@@ -41,7 +41,7 @@ zig/kernels/cuda/nemotron_attention.cu	a8a6bc39c2620176aff6c5d436b4a93edf5c86c8d
 zig/kernels/cuda/nemotron_keyed.cu	ed8bdd7012970d9896ec703bd7c3d5ec83e02f41dba4ce1f896fc39c1ee349c9	raw
 zig/kernels/cuda/nemotron_latent.cu	04fba97043d0948f82a3b9477f448dd76b21f6d11d1a445e020bd41cacb85c2b	raw	commits e40bd6eae, 8a8ff3d64; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/nemotron_mamba.cu	dcaba12253d3931ae48c7ebd4e13dfb956f540ae19f4ab83130c3f21745be5ec	raw	commits fa2af585f, f0ef17e69; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/kernels/cuda/nemotron_ops.cu	45679c47d5c1cbca7877ad0d0df919d7b39a8c73330131404b7d29c205e0fa48	raw
+zig/kernels/cuda/nemotron_ops.cu	2ef87c655b49d33214f8856d2ad775aacf6198ab2ca343f87fde588639ecccd1	raw	#3124
 zig/kernels/cuda/nemotron_route.cu	65da41432442f9fd99f73abefe87f34cf3c46b4971afe3c3557a48bca96f6511	raw	commits 739c924de, 8cfdaa739, b77a33b08, 7f6f940eb, 05d0617af, bc76d90d6; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/norms.cu	89d3c6cea39fe3e1bf8d5a2fe60465f7ae272548f14711abb59ddac709d2d1db	raw	main d4541b00e0 (rms_scale shared; same SASS)
 zig/kernels/cuda/nvfp4_experts.cu	9ef08b957b02e1a3ef2ee814aaf79ed15d85ada6b99e6cca2c1cadc1cadd6964	raw
@@ -107,7 +107,7 @@ zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
 zig/src/cuda/root.zig	5dbca351bbf6a42cd83d7b615d4e4624809444d7d2e714b1d71d8eec53c6e606	raw	main 42735f94f0 (#2335: cuda.mla exported)
 zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d5785e88a8907206	raw
-zig/src/cuda/sample.zig	5d374b5cd2108fd90b383cfec0a63bdce038eef8c380289495e5b9d080c590f2	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged)
+zig/src/cuda/sample.zig	9e3a31bd0480284ff069148b2d3c92f1e2ba24f16c18362dae9de48ec7fc65fe	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged), #3124
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
 zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125db2199fa6	raw	commits e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/tp_group.zig	1a2acbdf2de6b827218deb45df5b5845beecde4eb718a4e4b3966582db51d7a7	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally); #2918 (communicator abort through its owner)
