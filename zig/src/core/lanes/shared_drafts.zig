@@ -57,7 +57,11 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         @memset(out, 0);
         return;
     }
-    const counts = try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .row_ms = e.rule.row_cost.extraMs(live, sampled), .least_rows = e.rule.row_cost.leastRows(live, sampled) });
+    const paired = e.rule.sharedPrice(live, sampled);
+    const counts = if (paired) |p|
+        try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, p.fixed, e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .plain_ms = p.plain, .row_ms = p.row, .step_ms = e.cfg.mtp_step_ms, .extra_step_ms = e.cfg.draft_step_ms, .batched = e.cfg.draft_streams and depth.pricedBatched(), .heads = neural, .least_rows = e.rule.row_cost.leastRows(live, sampled) })
+    else
+        try alloc.allocateDrafts(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(@intCast(live), sampled), e.rule.row_cost.capRows(live, sampled, @max(live, e.cfg.batch_rows)), .{ .row_ms = e.rule.row_cost.extraMs(live, sampled), .least_rows = e.rule.row_cost.leastRows(live, sampled) });
     for (heads, out) |i, *budget| {
         budget.* = if (neural[i]) counts[i] else 0;
     }
@@ -83,6 +87,8 @@ fn costLimits(e: *Engine, plans: []const win.Plan, heads: []const usize, sampled
     const probe: depth.Probe = .{ .ptr = e, .copy = noCopy };
     if (e.cfg.granted_depth) {
         for (who, out) |*w, *d| d.* = try e.rule.headDepth(w, null, probe); // each stream's grant plus slack, once
+    } else if (e.cfg.plain_guard) {
+        try e.rule.budgetsFor(who, probe, sampled, out, plans.len);
     } else try e.rule.budgets(who, probe, sampled, out);
     const limits = try a.alloc(u32, plans.len);
     @memset(limits, e.cfg.most_drafts);
@@ -103,7 +109,10 @@ fn payReserved(e: *Engine, who: []depth.Who, probs: []const []const f64, heads: 
         for (probs[i][0..@min(kept, probs[i].len)]) |chance| gain += chance;
         w.gain = gain;
     }
-    try e.rule.payHolds(who, sampled, out);
+    if (e.cfg.plain_guard)
+        try e.rule.payHoldsFor(who, sampled, out, probs.len)
+    else
+        try e.rule.payHolds(who, sampled, out);
 }
 
 test "shared draft prices: a short cached tree can grow when allocation returns more rows" {
