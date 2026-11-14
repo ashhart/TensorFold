@@ -162,6 +162,6 @@ pub fn cuda(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build
     b.step("nvfp4-prompt-many-contract", "NVFP4 bit-exact multi-projection prompt launch against separate lean launches").dependOn(&prompt_many.step);
     const prompt_many_bench = b.addRunArtifact(runner);
     prompt_many_bench.addArg("nvfp4-prompt-many-bench");
-    b.step("nvfp4-prompt-many-bench", "Same-process A-B-A screening for the NVFP4 prompt launch fusion").dependOn(&prompt_many_bench.step);
+    b.step("nvfp4-prompt-many-bench", "Interleaved same-process screening for the NVFP4 prompt launch fusion").dependOn(&prompt_many_bench.step);
     return install;
 }
