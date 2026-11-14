@@ -372,7 +372,15 @@ RADIO's fused bias, activation and residual (`tf_vit_bias_act`) replaces `tf_vit
 CUDA also checks GLM-5.3-Flash's KV page kernels on a page table out of order: the latent write and the pooled keys
 (`tf_glm_lat_write`, `tf_glm_pool_keys`), the index scores and the selected tokens' rows (`tf_glm_scores`,
 `tf_glm_dsa_tokens`), and the MLA chunks through their merge (`tf_glm_chunks_16` and `tf_glm_chunks_32`, dense and
-sparse). Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
+sparse). The same eight cases also run on `TF_GLM_KV_SPLIT`'s two regions (every page's pooled keys, then every page's
+latent rows), each launch with its region's table and stride, and each control giving it the other region's table.
+With the split each rank keeps only its own class's latent pages and a trash page, so its latent table holds places in
+that smaller region; the owner's pass for another rank's heads is the same chunk and merge launches with that rank's
+queries, outputs and head count. No launch is new, so the split adds no case here: `glm-paged-check` covers it.
+A prompt chunk's history fetch packs the owner's earlier rows with `tf_glm_kvh_rows` (the `rows` case above) and
+attends them on the other ranks with the same chunk and merge launches over rows in order (no table), so it adds
+no case either.
+Its prompt indexer (`tf_glm_index_scores`, `tf_glm_index_pools`) is bit-equal to `tf_glm_scores` and
 `tf_glm_select_rows`, and its decode select at a 1,024-thread block a row (`tf_glm_select_rows_wide`) and in spans
 over many blocks (`tf_glm_dsel_scan`, then `tf_glm_dsel_merge` a block a row) to `tf_glm_select_rows`; both stated
 rules rank any NaN above +inf, as the GPU's `s + 0` makes every NaN one positive NaN.

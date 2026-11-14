@@ -346,6 +346,14 @@ pub const sites = [_]Site{
         .out = "std.mem.sliceAsBytes(if (j == 0) mine else twin)[0..rows * V * 2]",
     },
     .{
+        .path = "zig/tests/cuda/glm_paged_tests.zig",
+        .source = @embedFile("../tests/cuda/glm_paged_tests.zig"),
+        .ordinal = 3,
+        .setup = "const gpu = .{ .d = &rig.d }; const got = rig.dest(u32, 5); const st = .{ .ltable = rig.src };",
+        .at = "st.ltable",
+        .out = "std.mem.sliceAsBytes(got)",
+    },
+    .{
         .path = "zig/tests/cuda/glm_solo_tests.zig",
         .source = @embedFile("../tests/cuda/glm_solo_tests.zig"),
         .ordinal = 1,

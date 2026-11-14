@@ -34,6 +34,8 @@ pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const prompt_pair = @import("cuda_prompt_pair.zig");
 pub const pages = @import("cuda_pages.zig");
+pub const owner_attn = @import("cuda_owner_attn.zig");
+pub const start = @import("cuda_start.zig");
 pub const share = @import("cuda_share.zig");
 pub const open_owner = @import("cuda_open_owner.zig");
 pub const images = @import("cuda_images.zig");
@@ -43,6 +45,8 @@ pub const lane_costs = @import("cuda_lane_costs.zig");
 pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
 pub const kv_host = @import("cuda_kv_host.zig");
+pub const disk_image = @import("cuda_disk_image.zig");
+pub const disk_ranks = @import("cuda_disk_ranks.zig");
 
 test {
     _ = lane_costs;
@@ -56,6 +60,13 @@ test {
     _ = @import("cuda_images_interleave_test.zig");
     _ = @import("cuda_pages_test.zig");
     _ = @import("cuda_snapshot_layout_test.zig");
+    _ = @import("cuda_pages_split_test.zig");
+    _ = @import("cuda_pages_owner.zig");
+    _ = @import("cuda_owner_attn_test.zig");
+    _ = @import("cuda_owner_fetch_test.zig");
+    _ = @import("cuda_owner_route_test.zig");
+    _ = @import("cuda_follow_split_test.zig");
+    _ = @import("cuda_regions_test.zig");
     _ = @import("cuda_ranks_test.zig");
     _ = @import("cuda_ranks_roce_test.zig");
     _ = @import("cuda_env.zig");
@@ -70,6 +81,8 @@ test {
     _ = prompt_solo;
     _ = @import("cuda_l2pf.zig");
     _ = prompt_pair;
+    _ = @import("cuda_disk_image.zig");
+    _ = @import("cuda_disk_ranks_test.zig");
     _ = experts;
     _ = exl3;
     _ = vision;
