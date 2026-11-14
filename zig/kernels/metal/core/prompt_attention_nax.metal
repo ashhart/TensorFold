@@ -1,8 +1,8 @@
-// Spark2.5's prompt attention on the tensor units (gemma4's prompt kernel over a [slot, KVH, DH] cache).
+// Spark2.5's and Llama's prompt attention on the tensor units (gemma4's prompt kernel over a [slot, KVH, DH] cache).
 #include "../nax.h"
 using namespace tfp;
 
-// Defines: DH (256), NQ, G (query heads a key head), KVH, WINDOW (0: full), RING (0 or a multiple of 64), SCALE.
+// Defines: TF_PROMPT_ATTENTION (its name), DH, NQ, G (query heads a key head), KVH, WINDOW (0: full), RING, SCALE.
 
 constant constexpr int LD = KVH * DH;
 constant constexpr float kMasked = -3.402823466e+38f;
@@ -71,7 +71,7 @@ inline void prob_put(threadgroup PT* pt, int r, int c, short2 home, thread const
 
 // Q [R, NQ, DH] at positions p0..; K, V the layer's cache; O [R, NQ, DH]. P: rows, p0. A tile is RT rows of a head.
 [[max_total_threads_per_threadgroup(256)]]
-[[kernel]] void sp_prompt_attention(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
+[[kernel]] void TF_PROMPT_ATTENTION(const device bfloat* Q [[buffer(0)]], const device bfloat* K [[buffer(1)]],
                                     const device bfloat* V [[buffer(2)]], device bfloat* O [[buffer(3)]],
                                     constant int2& P [[buffer(4)]],
                                     uint sg [[simdgroup_index_in_threadgroup]],
