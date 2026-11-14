@@ -75,7 +75,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 
 | Optimization | kol1 | spk25 | dory | mm3 | dsv41 |
 | --- | --- | --- | --- | --- | --- |
-| 1. Prompt tail | yes | yes | yes | yes | yes |
+| 1. Prompt tail | yes | yes | yes | yes | open M EXL3 [cone follow-up](deepseek-v41.md#exl3-optimization-follow-up) |
 | 2. Paged KV | done [#1620] | done [#1653] | done [#1284] | yes | yes (own pool) |
 | 3. Prompt store | done [#1755] | done [#1756] | yes | yes | yes |
 | 4. iGPU states | done¹ | done¹ | done¹ | done¹ | yes |
@@ -85,7 +85,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 8. Disk cache | yes | yes | yes | yes | done¹ |
 | 9. FP8 KV | yes | yes | yes | yes | no (FP8 by design) |
 | 10. FP4/FP8 decode | failed [#1448] | no (bf16) | yes | no (EXL3) | yes |
-| 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹ |
+| 11. Fused proj. | done¹ | done [#1783] | yes | done¹ | done¹; open M EXL3 [chains](deepseek-v41.md#exl3-optimization-follow-up) |
 | 12. Add + norm | done¹ | done¹ | done [#1256] | done¹ | done M[#1714] ? C |
 | 13. MoE grouped | done¹ | no (dense) | no (dense) | done [#1388] | done M[#1707] |
 | 14. CUDA graphs | done¹ | done¹ | done¹ | yes | done¹ |
@@ -94,7 +94,7 @@ last two hold the families with only a Metal, HIP or scoring backend.
 | 17. DSpark | yes | yes | yes | done¹ | done [#1751] |
 | 18. Copy drafts | done [#2022] | done [#2022] | done [#2022] | done [#2022] | done¹ |
 | 19. Shared drafts | no (copies) | no (copies) | no (copies) | open [#1426] | done¹ (opt-in) |
-| 20. Solo chunks | yes | yes | yes | yes | yes |
+| 20. Solo chunks | yes | yes | yes | yes | open M EXL3 [load-aware chunks](deepseek-v41.md#exl3-optimization-follow-up) |
 | 21. Read-ahead | done [#2033] | done [#2033] | yes | done [#2033] | done [#2033] |
 | 22. Direct load | yes | yes | yes | yes | open [#1924] |
 | 23. Page drop | done [#1884] | done [#1884] | done [#1884] | done [#1884] | done [#1884] |

@@ -52,6 +52,27 @@ Backend-specific settings are checked when that backend starts; slide settings r
 Common server settings are checked before checkpoint resolution, including when no request would use them yet.
 Direct family readers also refuse malformed values when called without the server.
 
+## DeepSeek EXL3 Metal controls
+
+These controls use the shared parser. Empty or whitespace-only values keep the default; malformed values stop startup.
+
+| Variable | Accepted explicit value and default |
+| --- | --- |
+| `TF_DSV41_EXL3_FMA_TILES` | `0`, `1`, `2` or `4`; default `2`. Zero disables column tiling; dispatch still respects the projection's geometry. |
+| `TF_DSV41_EXL3_FMA_TILE_GROUPS` | Whole u32 threadgroup threshold; default `400`. Small grids keep one column tile. |
+| `TF_DSV41_BATCH_MAX` | Whole row count `1` through `8`; default `4`. |
+| `TF_DSV41_BATCH_ATTN` | `0` or `1`; default `1`. Zero restores the per-slot attention chain. |
+| `TF_DSV41_PREFILL_INTERLEAVE` | `0` or `1`; default `1`. Zero runs each prompt without yielding between chunks. |
+| `TF_DSV41_ENGRAM_LOOKAHEAD` | `0` or `1`; default `1`. Zero stages Engram rows inline. |
+| `TF_DSV41_CONE` | `0`, `1` or `2`; default `2`. Zero uses the full forward, one uses one replay program, two uses layer groups. |
+| `TF_DSV41_CONE_PARK` | Whole count `0` through `3`; default `3`. Other prompts' pending encoder runs retained beside the active run. |
+| `TF_DSV41_NO_FUSE_GATEUP_SWIGLU`, `TF_DSV41_NO_FUSE_SHARED_DOWN`, `TF_DSV41_NO_FUSE_DOWN_COMBINE` | `0` or `1`; default `0`. One disables the named MoE fusion. |
+| `TF_DSV41_NO_FUSE_WO_CHAIN`, `TF_DSV41_NO_FUSE_QNORM`, `TF_DSV41_NO_FUSE_QROPE`, `TF_DSV41_NO_FUSE_OROPE`, `TF_DSV41_NO_FUSE_IQROPE`, `TF_DSV41_NO_FUSE_QKV_TAIL` | `0` or `1`; default `0`. One disables the named attention fusion. |
+
+Unset `TF_DSV41_PREFILL_STEP` tries 8192 workspace rows and falls back to 4096 only on memory admission refusal.
+The admitted wide workspace uses chunks of at most 4096 rows while another stream decodes.
+An explicit step keeps the parent's parsing and disables this automatic choice.
+
 ## Existing lenient switches
 
 These settings retain their existing boolean policies rather than gaining new aliases or refusals:
@@ -67,6 +88,7 @@ These settings retain their existing boolean policies rather than gaining new al
 
 - The DeepSeek-V4.1 lane's existing experimental and diagnostic switches keep their own readers
   (presence, exact `0`, or lenient numeric parsing), so they are listed here rather than gaining refusals:
+  `TF_DSV41_CONE_CHECK` (a comma-separated list of diagnostic prompt sizes),
   `TF_DSV41_ATTN_COUNT`, `TF_DSV41_ATTN_COUNT_LAYERS`, `TF_DSV41_ATTN_DENSE_VALUES`, `TF_DSV41_ATTN_PROF`, `TF_DSV41_ATTN_PROF_LAYERS`,
   `TF_DSV41_ATTN_SCAN_BARRIER`, `TF_DSV41_ATTN_SPLITS`, `TF_DSV41_BATCH`, `TF_DSV41_BATCH_DEBUG`, `TF_DSV41_BLOCK_FILTER`,
   `TF_DSV41_BLOCK_PROF`, `TF_DSV41_CLEAR_PARTIALS`, `TF_DSV41_CLEAR_STALE`, `TF_DSV41_CONCURRENT`, `TF_DSV41_COND_NOALIGN`,
