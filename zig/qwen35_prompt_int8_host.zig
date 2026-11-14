@@ -193,7 +193,6 @@ test "prompt int8: hand-built projection fixture initializes all newly read sele
     try T.expectEqual(@as(usize, 4), @intFromPtr(e.affine.prefill22_fn.handle));
 }
 
-
 fn capacityCache(d: *cuda.Driver) q.engine.Cache {
     const b: cuda.DeviceBuffer = .{ .d = d, .ptr = 1, .len = 1 };
     return .{

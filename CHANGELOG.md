@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA Qwen3.5: reserve forward scratch and optional prompt-int8 workspace when the model loads, bounded by the configured prompt rows; oversized forward calls fail before launching kernels (#1879). Thanks to @robertosantosx2.
+
 - Flash Next on CUDA: sampled draws take one launch and one wait a step, with the same tokens (#2927, #2753).
 
 - Qwen 3.5 on CUDA: prompts from 2,048 rows run the a and b projections in one launch, with the same tokens (#2925, #2911).
