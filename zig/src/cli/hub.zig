@@ -124,14 +124,14 @@ pub fn configInt(a: Allocator, io: std.Io, dir: []const u8, key: []const u8) ?u6
     return if (v == .integer and v.integer >= 0) @intCast(v.integer) else null;
 }
 
-/// config.json's model_type, "unknown" when unreadable.
+/// config.json's model_type in `a`, "unknown" when unreadable.
 pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
     const text = @import("checkpoint_config").optional(a, io, dir) orelse return "unknown";
     var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return "unknown";
     defer parsed.deinit();
     if (parsed.value != .object) return "unknown";
     const t = parsed.value.object.get("model_type") orelse return "unknown";
-    return if (t == .string) t.string else "unknown";
+    return if (t == .string) a.dupe(u8, t.string) catch "unknown" else "unknown";
 }
 
 const ConfigDetails = struct { is_bolt: bool, modelopt_formats: ?[]const []const u8 = null };
