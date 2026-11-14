@@ -196,6 +196,9 @@ fn admissionFirst(source: []const u8) bool {
     const startup = "try @import(\"env_validate.zig\").startup();";
     if (!std.mem.startsWith(u8, body, startup)) return false;
     body = std.mem.trimStart(u8, body[startup.len..], " \t\r\n");
+    const weights = "try @import(\"mtp_weights.zig\").refuse(\"Metal\", try @import(\"mtp_weights.zig\").format());";
+    if (!std.mem.startsWith(u8, body, weights)) return false;
+    body = std.mem.trimStart(u8, body[weights.len..], " \t\r\n");
     const validation = "try window.validate(speed_up != null or platform.c.getenv(\"TF_FLASHNEXT_TP\") != null);";
     if (!std.mem.startsWith(u8, body, validation)) return false;
     body = std.mem.trimStart(u8, body[validation.len..], " \t\r\n");
