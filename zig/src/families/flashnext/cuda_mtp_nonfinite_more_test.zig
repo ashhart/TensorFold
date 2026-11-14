@@ -32,6 +32,10 @@ const Flow = struct {
     st: cuda.Stream,
     calls: *usize,
     lanes: *usize,
+    pub const flushStash = @import("cuda_mtp_stash.zig").flush;
+    pub fn absorb(o: @This(), d: *mtp.Draft, next: []const u32, rows: u64, scores: bool) !void {
+        try o.forwardHeadMany(&.{d}, &.{next}, &.{rows}, scores);
+    }
     pub fn stream(o: @This()) cuda.Stream {
         return o.st;
     }

@@ -86,6 +86,9 @@ pub const Kernels = struct {
     late_roll: cuda.Function,
     sum: cuda.Function,
     moe_sum: cuda.Function,
+    leaf_tree: cuda.Function,
+    leaf_partial: cuda.Function,
+    leaf_finish: cuda.Function,
     copy_cols: cuda.Function,
     ep_picks: cuda.Function,
     shift: cuda.Function,
@@ -129,6 +132,9 @@ pub const Kernels = struct {
         errdefer if (k.expert_tile) |*tile| tile.unload();
         k.sum = try k.batch.function("fn_sum_slices");
         k.moe_sum = try k.batch.function("fn_moe_sum");
+        k.leaf_tree = try k.batch.function("fn_exl3_leaf_tree");
+        k.leaf_partial = try k.batch.function("fn_exl3_leaf_partial");
+        k.leaf_finish = try k.batch.function("fn_exl3_leaf_finish");
         k.copy_cols = try k.batch.function("fn_copy_cols");
         k.ep_picks = try k.batch.function("fn_ep_picks");
         k.shift = try k.batch.function("fn_shift_window");
@@ -152,9 +158,8 @@ pub const Kernels = struct {
     }
 
     /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
-    pub fn profile() bool {
-        // the startup check refused every malformed value already, so a plain default stands here
-        return @import("sys").environment.read(bool, "TF_FLASHNEXT_PROFILE", false) catch false;
+    pub fn profile() @import("sys").environment.Error!bool {
+        return @import("sys").environment.read(bool, "TF_FLASHNEXT_PROFILE", false);
     }
 
     /// The DeltaNet kernels for a layer's heads `h`: the full set, or the `_h8` twins for half; any other is refused.

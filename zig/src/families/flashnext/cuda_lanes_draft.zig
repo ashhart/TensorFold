@@ -59,6 +59,55 @@ pub fn busy(lanes_map: anytype) bool {
     return false;
 }
 
+/// Whether a plain stream skips the head (EXL3 with offloaded experts: its pass costs misses); see cuda_mtp_stash.zig.
+fn deferring(self: anytype) bool {
+    return @import("exl3/model/cuda_exl3_pass.zig").offloaded(self.engine);
+}
+
+/// The window's kept rows: an open window is rolled back to them; none open (a plain round) leaves nothing to do.
+pub fn rewind(self: anytype, seq: anytype, d: *mtp.Draft, keep: usize) !void {
+    if (d.open) try self.ops().rollback(seq, d, keep);
+}
+
+/// Whether a drafting lane's one-row window runs as a plain decode round (the stream's guard left its hidden rows out).
+pub fn plainRound(self: anytype, l: anytype, w: be.Window) !bool {
+    const d = if (l.draft) |*x| x else return false;
+    if (w.hidden or w.rows() != 1 or w.stream.logprobs != null or !deferring(self) or d.media != null) {
+        d.fresh = true;
+        return false;
+    }
+    try preparePlain(self.ops(), &l.seq, d);
+    return true;
+}
+
+fn preparePlain(ops: anytype, seq: anytype, d: *mtp.Draft) !void {
+    try ops.flushLate(seq, d);
+    d.fresh = false;
+    d.verify_cache.invalidate();
+}
+
+/// A request for no drafts that the head skips: the window's kept rows are stashed, not run. False: draft as usual.
+pub fn deferred(self: anytype, r: be.DraftRequest) !bool {
+    const path = r.rows orelse return false;
+    if (!deferring(self) or r.lanes != null) return false;
+    const l = try self.lane(r.stream);
+    const d = if (l.draft) |*x| x else return false;
+    if (d.media != null) return false;
+    if (!d.fresh) {
+        // the round left the hidden rows out: nothing to absorb or draft from; the next window taps them
+        l.chain.n = 0;
+        return true;
+    }
+    for (path, 0..) |row, i| if (row != i) return false;
+    if (r.follow.len < path.len) return error.PositionMismatch;
+    if (@min(@min(r.depth, self.depth), l.seq.cap - l.seq.fed - 1) != 0) return false;
+    try rewind(self, &l.seq, d, path.len);
+    if (r.position != l.seq.fed + 1) return error.PositionMismatch;
+    if (!try self.ops().stash(d, r.follow[0..path.len], d.streams.ptr)) return false;
+    l.chain.n = 0;
+    return true;
+}
+
 /// Requests without trees or media drafted together: draftFn's rollbacks, one head pass a step; `done` marks them.
 pub fn batched(self: anytype, requests: []const be.DraftRequest, done: []bool) !void {
     const rl = rule(self, requests.len);
@@ -76,6 +125,10 @@ pub fn batched(self: anytype, requests: []const be.DraftRequest, done: []bool) !
     for (requests, 0..) |r, ri| {
         if (r.lanes != null) continue;
         if (mtp.isSampled(r.stream.sampling) and !sampledHeads()) continue;
+        if (try deferred(self, r)) {
+            done[ri] = true;
+            continue;
+        }
         const l = try self.lane(r.stream);
         const d = if (l.draft) |*x| x else continue;
         if (d.media != null) continue;
@@ -83,7 +136,7 @@ pub fn batched(self: anytype, requests: []const be.DraftRequest, done: []bool) !
             for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
             if (r.follow.len < path.len) return error.PositionMismatch;
         }
-        if (r.rows) |path| try self.ops().rollback(&l.seq, d, path.len) else {
+        if (r.rows) |path| try rewind(self, &l.seq, d, path.len) else {
             if (d.open) try self.ops().rollback(&l.seq, d, d.rows);
         }
         if (r.position != l.seq.fed + 1) return error.PositionMismatch;
@@ -136,4 +189,26 @@ pub fn depthLog(self: anytype, requests: []const be.DraftRequest) void {
 
 test {
     _ = @import("cuda_lanes_draft_test.zig");
+}
+
+test "exl3: plain guard flushes pending rows before changing draft state" {
+    const Fake = struct {
+        fail: bool = false,
+        fn flushLate(self: *@This(), _: *u8, d: *mtp.Draft) !void {
+            if (self.fail) return error.FlushFailed;
+            d.pending = 0;
+        }
+    };
+    var fake: Fake = .{ .fail = true };
+    var seq: u8 = 0;
+    var draft: mtp.Draft = undefined;
+    draft.pending = 5;
+    draft.fresh = true;
+    draft.verify_cache = .{};
+    draft.verify_cache.publish(draft.verify_cache.generation, 1, 0);
+    try std.testing.expectError(error.FlushFailed, preparePlain(&fake, &seq, &draft));
+    try std.testing.expect(draft.fresh and draft.verify_cache.ready != null);
+    fake.fail = false;
+    try preparePlain(&fake, &seq, &draft);
+    try std.testing.expect(!draft.fresh and draft.verify_cache.ready == null);
 }

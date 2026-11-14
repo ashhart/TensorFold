@@ -238,6 +238,7 @@ pub const Probe = struct {
         const mag = try p.a.alloc(f64, out.len);
         defer p.a.free(mag);
         try p.compute(switch (acc) {
+            .f64 => .f64,
             .f32 => .f32,
             .f16 => .f16,
             .bf16 => .bf16,

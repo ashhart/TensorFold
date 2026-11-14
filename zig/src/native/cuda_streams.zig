@@ -61,7 +61,8 @@ pub fn shareSlots(share: bool, snap_bytes: u64, host_cache: bool) !?usize {
 /// The family's streams in `b.room`; null with `problem` set when none fit or --parallel asks for more than fit.
 pub fn count(comptime F: type, a: Allocator, loaded: anytype, o: api.Open, b: Budget, problem: *[]const u8) !?Count {
     const free = loaded.free_streams;
-    const grow = budget.growRoom(b.room, !@hasField(F.Options, "lanes"));
+    const preallocates_lanes = if (@hasDecl(F, "preallocates_lanes")) F.preallocates_lanes else @hasField(F.Options, "lanes");
+    const grow = budget.growRoom(b.room, !preallocates_lanes);
     const wrapped = kv_pages.wrapped(F, loaded, free, b.stream_bytes, b.room);
     if (wrapped.layout) |l| {
         const slots = try shareSlots(b.share, l.snap_bytes, b.host_cache); // GLM: a slot a state

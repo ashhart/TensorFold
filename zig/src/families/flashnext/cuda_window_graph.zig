@@ -22,6 +22,14 @@ pub fn enabled() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_WINDOW_GRAPH", true) catch true;
 }
 
+/// Whole-pass graphs require device-only work; every pooled layer must use the active device plan.
+pub fn admits(
+    layers: []const @import("cuda_prompt_load.zig").Layer,
+    plans: ?*const @import("exl3/dplan/cuda_exl3_dplan.zig").State,
+) bool {
+    return enabled() and !@import("exl3/model/cuda_exl3_pass.zig").waitsHost(layers, plans);
+}
+
 /// attnRows' host values for rows ending at `ends` in a `cap`-token cache: dense chunks, the score grid (0: none).
 pub const Geometry = struct {
     chunks: u32,

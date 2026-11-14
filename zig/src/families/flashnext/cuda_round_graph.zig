@@ -1,7 +1,6 @@
 //! A single bounded decode graph, recaptured when sequence owners, scratch or attention geometry change.
 const std = @import("std");
 const cuda = @import("cuda");
-const dims = 2560;
 
 pub fn enabled() bool {
     // the startup check refused every malformed value already, so a plain default stands here
@@ -42,17 +41,17 @@ pub const Cache = struct {
 
     /// CPU histories and pinned inputs advance once per round, outside stream capture and replay.
     fn prepare(pass: anytype, ids: []const u32) !void {
-        const s = pass.s;
         // a captured round is one row a lane; windows run the plain pass
         if (ids.len != pass.lanes.len) return error.UnexpectedTensor;
-        try s.ready();
-        for (s.hostIds(ids.len), ids) |*out, token| out.* = @intCast(token);
-        const positions = s.hostPos(ids.len * 4);
-        @memset(positions, 0);
-        for (pass.lanes, 0..) |lane, i| {
-            positions[i * 4] = @intCast(lane.pos);
-            try pass.m.ngram.rows(lane.seq.history[0..], ids[i..][0..1], s.hostEmb(ids.len)[i * dims ..][0..dims], s.hostXs(ids.len)[i * (dims / 32) ..][0 .. dims / 32]);
-        }
+        try @import("cuda_batch_lanes.zig").prepareRound(pass, ids);
+    }
+
+    /// The pinned staging is read by graph copy nodes, not copied into temporary storage during capture.
+    fn captureChunk(pass: anytype, ids: []const u32) !void {
+        const hub = @import("exl3/graph/cuda_exl3_graph.zig");
+        hub.capturing = true;
+        defer hub.capturing = false;
+        try pass.chunk(ids, 0, null);
     }
 
     pub fn run(c: *Cache, key: Key, pass: anytype, ids: []const u32) !void {
@@ -61,7 +60,7 @@ pub const Cache = struct {
             c.clear();
             try cuda.graph.beginCapture(pass.stream, .thread_local);
             pass.prepared = true;
-            pass.chunk(ids, 0, null) catch |err| {
+            captureChunk(pass, ids) catch |err| {
                 if (cuda.graph.endCapture(pass.stream)) |g| {
                     var discarded = g;
                     discarded.deinit();
@@ -97,4 +96,36 @@ test "decode graph keys invalidate on owner order, attention seams and score til
     const score = try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3);
     first.fed = 2304;
     try std.testing.expect(!std.meta.eql(score, try Key.init(@as([]const *Seq, &.{&first}), 1, 2, 3)));
+}
+
+test "exl3: standard graph capture marks pinned uploads and clears the flag on failure" {
+    const hub = @import("exl3/graph/cuda_exl3_graph.zig");
+    const Pass = struct {
+        fail: bool,
+        pub fn chunk(self: *@This(), _: []const u32, _: usize, _: ?u8) !void {
+            try std.testing.expect(hub.capturing);
+            if (self.fail) return error.Refused;
+        }
+    };
+    var pass: Pass = .{ .fail = false };
+    try Cache.captureChunk(&pass, &.{1});
+    try std.testing.expect(!hub.capturing);
+    pass.fail = true;
+    try std.testing.expectError(error.Refused, Cache.captureChunk(&pass, &.{1}));
+    try std.testing.expect(!hub.capturing);
+}
+
+test "exl3: graph capture upload state is local to the submitting thread" {
+    const hub = @import("exl3/graph/cuda_exl3_graph.zig");
+    const Probe = struct {
+        fn run(observed: *bool) void {
+            observed.* = hub.capturing;
+        }
+    };
+    hub.capturing = true;
+    defer hub.capturing = false;
+    var observed = true;
+    const thread = try std.Thread.spawn(.{}, Probe.run, .{&observed});
+    thread.join();
+    try std.testing.expect(!observed);
 }

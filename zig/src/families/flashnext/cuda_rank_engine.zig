@@ -8,6 +8,8 @@ const Collective = @import("cuda_collective.zig").Collective;
 const wt = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const verify_rows = @import("cuda_rank_verify.zig");
+const telemetry = @import("cuda_prompt_telemetry.zig");
+const kvl = @import("cuda_kv_lanes.zig");
 
 pub const Identity = extern struct {
     config: [32]u8,
@@ -22,6 +24,9 @@ pub const Identity = extern struct {
     image_tokens: u64 = 0,
     max_images: u64 = 0,
     dense_split: u64 = 0,
+    /// Positions a page of the core KV pool holds on this rank (0: no pool), and whether every stream is on pages.
+    kv_pages: u64 = 0,
+    kv_pages_all: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -46,7 +51,7 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
     defer a.free(index);
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
-    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()), .dense_split = @intFromBool(try @import("cuda_dense_split.zig").appliesDir(a, io, dir, 2)) };
+    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()), .dense_split = @intFromBool(try @import("cuda_dense_split.zig").appliesDir(a, io, dir, 2)), .kv_pages = try kvl.paging(), .kv_pages_all = @intFromBool(kvl.pagedOnly()) };
 }
 
 /// How long a rank waits for its peer: a minute with a given digest, 30 when the peer may be hashing every byte.
@@ -66,6 +71,8 @@ pub const Session = struct {
     seqs: std.AutoHashMapUnmanaged(u64, *prompt.Seq) = .empty,
     saved: std.AutoHashMapUnmanaged(u64, *snaps.Snap) = .empty,
     windows: std.AutoHashMapUnmanaged(u64, mtp.Draft) = .empty,
+    /// This rank's core KV pool, when it pages (cuda_lanes.zig attach): a create with the pool flag takes a lane.
+    pool: ?*kvl.Pool = null,
     drafting: bool = false,
     stopped: bool = false,
     available: std.atomic.Value(bool) = .init(true),
@@ -124,7 +131,7 @@ pub const Session = struct {
         s.collective.deinit();
         var qi = s.seqs.valueIterator();
         while (qi.next()) |q| {
-            q.*.deinit(s.gpa);
+            s.release(q.*);
             s.gpa.destroy(q.*);
         }
         s.seqs.deinit(s.gpa);
@@ -173,12 +180,31 @@ pub const Session = struct {
         if (h.flags != 0) return error.RemoteRank;
     }
 
+    /// A stream's caches given back: a pool lane's to the pool, else freed (a window's swapped-in states first).
+    fn release(s: *Session, q: *prompt.Seq) void {
+        if (s.pool) |p| {
+            if (p.owns(q)) {
+                cuda.completion.drain(s.engine.driver, s.engine.stream.*, "flashnext: a closed rank stream did not drain");
+                for (q.state) |*b| if (!b.borrowed) b.free(); // a window swapped its own states in
+                _ = p.close(q);
+                return;
+            }
+        }
+        q.deinit(s.gpa);
+    }
+
     pub fn create(s: *Session, cap: usize) !prompt.Seq {
-        var q = try s.engine.newSeq(cap);
-        errdefer q.deinit(s.gpa);
+        return s.createOn(cap, .none);
+    }
+
+    /// A stream's caches on both ranks: a lane of each rank's pool (`from` .pool), else each rank's own.
+    pub fn createOn(s: *Session, cap: usize, from: kvl.From) !prompt.Seq {
+        const pooled = from == .pool;
+        var q = if (pooled) try s.pool.?.open(cap) else try s.engine.newSeq(cap);
+        errdefer s.release(&q);
         const id = s.next_object;
         s.next_object = std.math.add(u64, id, 1) catch return error.BadRankFrame;
-        const h = try s.command(.{ .kind = .create, .object = id, .arg = cap }, &.{});
+        const h = try s.command(.{ .kind = .create, .object = id, .arg = cap, .flags = @intFromBool(pooled) }, &.{});
         try s.ack(h);
         q.rank_id = id;
         return q;
@@ -189,20 +215,20 @@ pub const Session = struct {
         if (!s.stopped) {
             const h = s.command(.{ .kind = .drop_seq, .object = q.rank_id }, &.{}) catch {
                 s.poison();
-                q.deinit(s.gpa);
+                s.release(q);
                 return;
             };
             s.ack(h) catch s.poison();
         }
-        q.deinit(s.gpa);
+        s.release(q);
     }
 
     pub const setMedia = @import("cuda_rank_media.zig").send;
 
     pub fn forward(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) !void {
         if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.logits == .all) return error.UnsupportedRankOperation;
-        try tokenIds(ids);
-        const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
+        try verify_rows.tokenIds(ids);
+        const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .arg = telemetry.forwardArg(s.engine.telemetry, q.fed), .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
         errdefer s.poison();
         try s.engine.forward(Tri, tri, q, ids, hooks);
         try s.ack(h);
@@ -210,7 +236,7 @@ pub const Session = struct {
 
     pub fn round(s: *Session, comptime Tri: type, tri: Tri, seqs: []const *prompt.Seq, ids: []const u32, out: u64) !void {
         if (seqs.len == 0 or seqs.len != ids.len or seqs.len > 32) return error.UnsupportedRankOperation;
-        try tokenIds(ids);
+        try verify_rows.tokenIds(ids);
         var raw: [32 * 12]u8 = undefined;
         for (seqs, ids, 0..) |q, token, i| {
             if (q.rank_id == 0 or q.fed >= q.cap) return error.UnexpectedTensor;
@@ -227,14 +253,10 @@ pub const Session = struct {
 
     /// Both ranks keep their own recurrent window; only the leader consumes draft scores and hidden rows.
     pub fn verify(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) !void {
-        if (!s.drafting or ids.len == 0 or ids.len > mtp.max_rows or q.fed + ids.len > q.cap) return error.UnsupportedRankOperation;
-        try tokenIds(ids);
-        const h = try s.command(.{ .kind = .verify, .object = q.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
-        errdefer s.poison();
-        const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
-        try ops.verify(q, d, ids);
-        try s.ack(h);
+        return s.verifyWithTail(Tri, tri, q, d, ids, null);
     }
+
+    pub const verifyWithTail = verify_rows.sendWithTail;
 
     pub const verifyMany = verify_rows.send;
 
@@ -264,6 +286,7 @@ pub const Session = struct {
         kept.rank_id = s.next_object;
         s.next_object = std.math.add(u64, s.next_object, 1) catch return error.BadRankFrame;
         const h = try s.command(.{ .kind = .save, .object = q.rank_id, .arg = kept.rank_id }, &.{});
+        errdefer s.poison();
         try s.ack(h);
         return kept;
     }
@@ -320,8 +343,8 @@ pub const Session = struct {
                 if (s.seqs.contains(h.object)) return error.BadRankFrame;
                 const q = try s.gpa.create(prompt.Seq);
                 errdefer s.gpa.destroy(q);
-                q.* = try s.engine.newSeq(@intCast(h.arg));
-                errdefer q.deinit(s.gpa);
+                q.* = if (h.flags == 1) try (s.pool orelse return error.BadRankFrame).open(@intCast(h.arg)) else try s.engine.newSeq(@intCast(h.arg));
+                errdefer s.release(q);
                 q.rank_id = h.object;
                 try s.seqs.put(s.gpa, h.object, q);
             },
@@ -334,7 +357,9 @@ pub const Session = struct {
                 const ids = try s.gpa.alloc(u32, payload.len / 4);
                 defer s.gpa.free(ids);
                 for (ids, 0..) |*v, i| v.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
-                try tokenIds(ids);
+                try verify_rows.tokenIds(ids);
+                const telemetry_scope = s.engine.telemetry.enter(try telemetry.phaseFromArg(h.arg));
+                defer telemetry_scope.restore();
                 try s.engine.forward(Tri, tri, q, ids, .{ .logits = @fromBackingInt(@intCast(h.flags)) });
             },
             .round => {
@@ -355,7 +380,7 @@ pub const Session = struct {
                 var ids: [mtp.max_rows]u32 = undefined;
                 const n = payload.len / 4;
                 for (ids[0..n], 0..) |*id, i| id.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
-                try tokenIds(ids[0..n]);
+                try verify_rows.tokenIds(ids[0..n]);
                 const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
                 try ops.verify(q, try s.window(q), ids[0..n]);
             },
@@ -370,12 +395,14 @@ pub const Session = struct {
             },
             .drop_seq => {
                 s.engine.round_graph.clear();
+                const sequence = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                if (sequence.paged != null) @import("exl3/graph/cuda_exl3_graph.zig").releaseDecodeSeq(sequence);
                 if (s.windows.fetchRemove(h.object)) |entry| {
                     var d = entry.value;
                     d.deinit();
                 }
                 const entry = s.seqs.fetchRemove(h.object) orelse return error.UnknownRankSequence;
-                entry.value.deinit(s.gpa);
+                s.release(entry.value);
                 s.gpa.destroy(entry.value);
             },
             .save => {
@@ -392,6 +419,7 @@ pub const Session = struct {
             .restore => {
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
                 const kept = s.saved.get(h.arg) orelse return error.UnknownRankSnapshot;
+                s.engine.round_graph.clear();
                 try snaps.restore(s.engine.stream.*, q, null, kept);
                 if (s.windows.getPtr(h.object)) |w| w.reset(); // its pending rows were the old state's
             },
@@ -406,10 +434,6 @@ pub const Session = struct {
     }
 };
 
-fn tokenIds(ids: []const u32) !void {
-    for (ids) |id| if (id >= wt.vocab) return error.InvalidToken;
-}
-
 fn roundPayload(payload: []const u8) !void {
     if (payload.len == 0 or payload.len % 12 != 0 or payload.len / 12 > 32) return error.BadRankFrame;
     var seen: [32]u64 = undefined;
@@ -418,7 +442,7 @@ fn roundPayload(payload: []const u8) !void {
         const token = std.mem.readInt(u32, payload[i * 12 + 8 ..][0..4], .little);
         if (id == 0) return error.BadRankFrame;
         for (seen[0..i]) |prior| if (prior == id) return error.DuplicateRankSequence;
-        try tokenIds(&.{token});
+        try verify_rows.tokenIds(&.{token});
         seen[i] = id;
     }
 }
@@ -430,9 +454,12 @@ fn sameIdentity(a: Identity, b: Identity) bool {
 /// Refuse malformed operations before looking up an owner or touching the GPU.
 pub fn shape(h: wire.Header) !void {
     switch (h.kind) {
-        .create => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
+        .create => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.bytes != 0 or h.flags > 1) return error.BadRankFrame,
         .media => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 64) return error.BadRankFrame,
-        .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
+        .forward => {
+            _ = try telemetry.phaseFromArg(h.arg);
+            if (h.object == 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame;
+        },
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .verify_many => if (h.object != 0 or h.flags != 0 or h.arg == 0 or h.arg > verify_rows.max_windows or h.bytes < 16 * h.arg or h.bytes > verify_rows.max_bytes) return error.BadRankFrame,
@@ -467,10 +494,18 @@ test "rank identity binds checkpoint, config, index, program and execution setti
     other = base;
     other.head_sharded = 1;
     try std.testing.expect(!sameIdentity(base, other));
+    other = base;
+    other.kv_pages = 256;
+    try std.testing.expect(!sameIdentity(base, other));
+    other = base;
+    other.kv_pages_all = 1;
+    try std.testing.expect(!sameIdentity(base, other));
 }
 
 test "rank operations refuse invalid geometry and unsupported hooks before execution" {
     try shape(.{ .kind = .create, .object = 1, .arg = 4096 });
+    try shape(.{ .kind = .create, .object = 1, .arg = 4096, .flags = 1 }); // a lane of the core KV pool
+    try std.testing.expectError(error.BadRankFrame, shape(.{ .kind = .create, .object = 1, .arg = 4096, .flags = 2 }));
     try shape(.{ .kind = .forward, .object = 1, .bytes = 4 });
     try shape(.{ .kind = .round, .bytes = 24 });
     try shape(.{ .kind = .verify, .object = 1, .bytes = mtp.max_rows * 4 });
@@ -510,7 +545,7 @@ test "round payload rejects duplicate owners and out-of-vocabulary tokens before
     std.mem.writeInt(u64, bytes[12..20], 10, .little);
     std.mem.writeInt(u32, bytes[20..24], wt.vocab, .little);
     try std.testing.expectError(error.InvalidToken, roundPayload(&bytes));
-    try std.testing.expectError(error.InvalidToken, tokenIds(&.{ 0, wt.vocab }));
+    try std.testing.expectError(error.InvalidToken, verify_rows.tokenIds(&.{ 0, wt.vocab }));
     try std.testing.expectError(error.BadRankFrame, roundPayload(bytes[0..13]));
 }
 

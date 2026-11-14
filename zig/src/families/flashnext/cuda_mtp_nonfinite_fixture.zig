@@ -118,6 +118,7 @@ pub fn draft(d: *cuda.Driver, host: []u16) mtp.Draft {
     x.pg = .{};
     x.drafted = 0;
     x.pooled_lane = false;
+    x.stashed = 0;
     x.host = host;
     x.rows = 1;
     x.fed0 = 2050;
