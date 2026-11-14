@@ -14,6 +14,7 @@ const seed = 71;
 
 test {
     _ = @import("boot_test.zig");
+    _ = @import("tree_test.zig");
 }
 
 /// A reply's tokens and finish, written on LaneHost's thread and read on the test's.
@@ -286,4 +287,36 @@ test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two f
     say(bad == 0 and caught > 0 and drafted > 0, "(f) 4 together vs serial: {d} differ; {d} rows caught up from history, {d} drafted rows, {d} ingests", .{ bad, caught, drafted, m.ad.ingests });
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(caught > 0 and drafted > 0);
+}
+
+test "dsv41 metal serve: (g) draft trees (first-position siblings) reply in full, drafted == draft:false == serial" {
+    const p0 = try ids(160, 30);
+    defer gpa.free(p0);
+    const p1 = try ids(240, 31);
+    defer gpa.free(p1);
+    const hot: api.Sampling = .{ .seed = 4321, .temperature = 0.8, .top_k = 0, .top_p = 1.0 };
+    const asks = [_]Ask{ .{ .prompt = p0, .max = 96 }, .{ .prompt = p1, .max = 96, .sampling = hot } };
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    for ([_]u32{ 1, 2 }) |sibs| {
+        const m = try fs.open(gpa, io, seed, .{ .slots = 1 });
+        var md = m.model();
+        md.trees = .{ .siblings = sibs, .sib_rows = 4, .dup = .{ .ms = 0.0, .rows = true } };
+        const s = try Served.open(gpa, io, md, ".", null);
+        defer Served.close(s);
+        var drafted: u64 = 0;
+        var got: [2][]u32 = undefined;
+        try serve(s.engine(), &asks, false, &got, &drafted);
+        defer freeAll(&got);
+        var plain_drafted: u64 = 0;
+        var plain: [2][]u32 = undefined;
+        try serve(s.engine(), &.{ .{ .prompt = p0, .max = 96, .drafts = false }, .{ .prompt = p1, .max = 96, .sampling = hot, .drafts = false } }, false, &plain, &plain_drafted);
+        defer freeAll(&plain);
+        const bad = [2]usize{ same(&want, &got), same(&want, &plain) };
+        const pol = s.x.policy;
+        say(bad[0] + bad[1] == 0 and pol.trees > 0, "(g) {d} siblings: drafted / draft:false vs serial: {d} / {d} differ; {d} tree rounds, {d} sibling wins, {d} drafted rows", .{ sibs, bad[0], bad[1], pol.trees, pol.sib_wins, drafted });
+        try testing.expectEqual([2]usize{ 0, 0 }, bad);
+        try testing.expect(pol.trees > 0 and drafted > 0);
+    }
 }
