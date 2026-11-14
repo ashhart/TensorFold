@@ -22,10 +22,10 @@ pub const page_unit = chunk_keys;
 /// Keys a prompt tile (window_rows.cuh's BN): a paged tile takes one page base, so prompt pages hold whole tiles.
 pub const prompt_tile = 32;
 
-/// Pages any paged kernel reads or `put` writes: no window, a wide head dim, a position count, i64 page steps.
+/// Pages any paged kernel reads or `put` writes: a wide head dim, a position count, i64 steps; a window at 256 only.
 fn pageShape(w: Window) bool {
     const p = w.pg orelse return true;
-    return w.win == 0 and wide(w.d) and p.tokens > 0 and p.page_elems <= std.math.maxInt(i63);
+    return wide(w.d) and (w.win == 0 or w.d == 256) and p.tokens > 0 and p.page_elems <= std.math.maxInt(i63);
 }
 
 /// Head dim 256 decode pages hold whole chunks; 512's decode looks up each key's page (prompt rows: promptShape).
@@ -242,7 +242,7 @@ pub const WindowAttention = struct {
     /// n rows k, v [n, hk * d] bf16 into the paged caches kc/vc (a layer's part of page 0) at pos/slot (int32 [n]).
     pub fn put(g: *const WindowAttention, s: Stream, k: u64, v: u64, kc: u64, vc: u64, pos: u64, slot: u64, w: Window, n: usize) !void {
         const p = w.pg orelse return error.WindowShape;
-        if (w.win != 0 or p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return error.WindowShape; // any position count
+        if (p.tokens == 0 or p.page_elems > std.math.maxInt(i63)) return error.WindowShape; // any position count and window
         if ((w.hk * w.d) % 8 != 0) return error.WindowShape; // 16-byte rows at any head dim (Kolibri's 128 too)
         if (n == 0) return;
         var a: launch_.Args = .{};
@@ -304,7 +304,7 @@ pub const WindowAttention = struct {
     }
 };
 
-test "paged shapes: head dim 256 pages hold whole chunks, 512's decode pages any count, no window either way" {
+test "paged shapes: head dim 256 pages hold whole chunks, with or without a window; 512's any count, no window" {
     var w: Window = .{ .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 4096, .scale = 1, .pg = .{ .table = 0, .page_elems = 37 * 512, .tokens = 37 } };
     try std.testing.expect(pagedShape(w));
     w.win = 1024;
@@ -314,6 +314,9 @@ test "paged shapes: head dim 256 pages hold whole chunks, 512's decode pages any
     try std.testing.expect(!pagedShape(w));
     w.pg.?.tokens = 512;
     try std.testing.expect(pagedShape(w));
+    w.win = 1024; // a sliding layer on pages
+    try std.testing.expect(pagedShape(w));
+    w.win = 0;
     w.d = 128;
     try std.testing.expect(!pagedShape(w));
     w.d = 512;
@@ -321,9 +324,12 @@ test "paged shapes: head dim 256 pages hold whole chunks, 512's decode pages any
     try std.testing.expect(!pagedShape(w));
 }
 
-test "paged prompt rows: pages of whole 32-key tiles at head dims 256 and 512, no window" {
+test "paged prompt rows: pages of whole 32-key tiles at head dims 256 (a window too) and 512 (no window)" {
     var w: Window = .{ .h = 16, .hk = 4, .d = 256, .win = 0, .ring = 0, .scale = 1, .pg = .{ .table = 0, .page_elems = 32 * 1024, .tokens = 32 } };
     try std.testing.expect(promptShape(w) and !pagedShape(w));
+    w.win = 1024;
+    try std.testing.expect(promptShape(w));
+    w.win = 0;
     w.pg.?.tokens = 48;
     try std.testing.expect(!promptShape(w) and pageShape(w)); // `put` places rows in pages of any count
     w.pg.?.tokens = 64;
