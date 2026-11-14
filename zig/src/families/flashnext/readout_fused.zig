@@ -16,7 +16,7 @@ pub fn refuse(what: []const u8, fused: bool) !void {
     return error.InvalidEnvironment;
 }
 
-test "the fused read-out on stops Metal, HIP and an affine CUDA read-out, and off starts them" {
+test "fused read-out: on stops Metal, HIP and an affine CUDA read-out, and off starts them" {
     try std.testing.expectError(error.InvalidEnvironment, refuse("Metal", true));
     try refuse("HIP", false);
     const metal = "try @import(\"readout_fused.zig\").refuse(\"Metal\", @import(\"readout_fused.zig\").on());";

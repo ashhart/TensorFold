@@ -116,25 +116,23 @@ pub fn pickDown(n: usize, sms: usize) usize {
     return best;
 }
 
-/// The fused down over rows [0, n): the streams `h` normed on chip, times the BF16 down, into fp32 `part`.
-pub fn fusedDown(t: *const tk.TileKernels, sms: usize, stream: cuda.Stream, h: u64, pss: u64, scale: u64, down: cuda.qmmf.Weight, part: u64, n: usize, e: f32) !void {
-    const di = pickDown(n, sms);
-    const mt = tk.hcn_down_mt[di];
+/// The fused down over rows [0, n) on `f`, a tile of 16 * mt rows: the streams normed on chip, times the BF16 down.
+pub fn fusedDown(f: cuda.Function, mt: usize, stream: cuda.Stream, h: u64, pss: u64, scale: u64, down: cuda.qmmf.Weight, part: u64, n: usize, e: f32) !void {
     var a: cuda.Args = .{};
     for ([_]u64{ h, pss, scale, down.codes, part }) |v| a.add(v);
     for ([_]usize{ n, down.n, down.k, cuda.qmmf.slices(down), dims, dims / 256, streams }) |v| a.add(cint(v));
     a.add(e);
-    try cuda.launch.launch(t.hcn_down[di], .{ .grid = .{ .x = @intCast(cdiv(n, 16 * mt) * 2) }, .block = .{ .x = 224 }, .shared = tk.hcnDownSmem(mt) }, stream, &a);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(cdiv(n, 16 * mt) * 2) }, .block = .{ .x = 224 }, .shared = tk.hcnDownSmem(mt) }, stream, &a);
 }
 
-/// The fused up+mix over rows [0, n): act times the BF16 up, gated onto the streams normed on chip, mixed in order.
-pub fn fusedUpMix(t: *const tk.TileKernels, stream: cuda.Stream, act: u64, up: cuda.qmmf.Weight, h: u64, pss: u64, scale: u64, mixed: u64, xsm: u64, n: usize, e: f32) !void {
+/// The fused up+mix over rows [0, n) on `f`: act times the BF16 up, gated onto the streams normed on chip, mixed.
+pub fn fusedUpMix(f: cuda.Function, stream: cuda.Stream, act: u64, up: cuda.qmmf.Weight, h: u64, pss: u64, scale: u64, mixed: u64, xsm: u64, n: usize, e: f32) !void {
     const mt = tk.hcn_up_mt;
     var b: cuda.Args = .{};
     for ([_]u64{ act, up.codes, h, pss, scale, mixed, xsm }) |v| b.add(v);
     for ([_]usize{ n, dims, dims / 256 }) |v| b.add(cint(v));
     b.add(e);
-    try cuda.launch.launch(t.hcn_up, .{ .grid = .{ .x = @intCast(cdiv(n, 16 * mt) * (dims / 32)) }, .block = .{ .x = 256 }, .shared = tk.hcnUpSmem(mt) }, stream, &b);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(cdiv(n, 16 * mt) * (dims / 32)) }, .block = .{ .x = 256 }, .shared = tk.hcnUpSmem(mt) }, stream, &b);
 }
 
 /// Rows [r0, r0 + n) of the BF16 read-out in three launches with the five launches' bytes; no normed rows in memory.
@@ -147,12 +145,13 @@ pub fn readoutFused(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Sc
     const act = s.act + r0 * low * 2;
     const xs_act = s.xs_act + r0 * (low / 32) * 4;
     const inj = if (hc_w.has_inj == 1) s.inj + r0 * streams * 2 else act;
-    try fusedDown(&k.tiles, k.native_lane.prompt_sms, stream, h, pss, hc_w.scale.ptr, down, s.hc_part, n, eps);
+    const di = pickDown(n, k.native_lane.prompt_sms);
+    try fusedDown(k.tiles.hcn_down[di], tk.hcn_down_mt[di], stream, h, pss, hc_w.scale.ptr, down, s.hc_part, n, eps);
     try tri.hcReduceAct(s.hc_part, act, xs_act, inj, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
-    try fusedUpMix(&k.tiles, stream, act, up, h, pss, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, eps);
+    try fusedUpMix(k.tiles.hcn_up, stream, act, up, h, pss, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, eps);
 }
 
-test "the fused read-out's down tile is the one whose waves over 48 SMs cost least" {
+test "fused read-out: the down tile is the one whose waves over 48 SMs cost least" {
     try std.testing.expectEqual(@as(usize, 4), tk.hcn_down_mt[pickDown(3072, 48)]);
     try std.testing.expectEqual(@as(usize, 3), tk.hcn_down_mt[pickDown(2048, 48)]);
     try std.testing.expectEqual(@as(usize, 4), tk.hcn_down_mt[pickDown(1536, 48)]);

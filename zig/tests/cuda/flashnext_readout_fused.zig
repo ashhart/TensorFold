@@ -52,9 +52,10 @@ const Chain = struct {
     /// the fused down, reduce_act and the fused up+mix, as readoutFused runs them
     fn fused(c: *Chain) !void {
         const s = c.r.s;
-        try tiles.fusedDown(c.t, c.sms, s, c.h, c.pss, c.scale, c.wdown, c.part, c.rows, eps);
+        const di = tiles.pickDown(c.rows, c.sms);
+        try tiles.fusedDown(c.t.hcn_down[di], tk.hcn_down_mt[di], s, c.h, c.pss, c.scale, c.wdown, c.part, c.rows, eps);
         try c.g.hcReduceAct(s, c.part, c.act, c.xs, c.inj, 1, c.rows, streams, low, n_down, 1);
-        try tiles.fusedUpMix(c.t, s, c.act, c.wup, c.h, c.pss, c.scale, c.mixed, c.xsm, c.rows, eps);
+        try tiles.fusedUpMix(c.t.hcn_up, s, c.act, c.wup, c.h, c.pss, c.scale, c.mixed, c.xsm, c.rows, eps);
     }
 
     fn poison(c: *Chain) !void {
