@@ -8,7 +8,6 @@ const dims = wt.dims;
 const streams = wt.streams;
 const wide = wt.wide;
 const low = wt.low;
-const slots = wt.slots;
 const eps = wt.eps;
 const pss_n = (dims / 256) * streams;
 
@@ -45,9 +44,9 @@ pub fn writebackNorm(pass: anytype, hc_w: wt.HcW, r0: usize, n: usize) !void {
         pass.pending_f32 = false;
         return pass.tri.hcWritebackNorm(h, h, pss, s.moe_f32 + r0 * dims * 4, inj, dummy, dummy, scale, norm, eps, rs, n, dims, streams, 4, 1, 1, 1);
     }
-    const y = s.y + r0 * slots * dims * 4;
-    const wts = s.wts + r0 * slots * 4;
-    try pass.tri.hcWritebackNorm(h, h, pss, dummy, inj, y, wts, scale, norm, eps, rs, n, dims, streams, 2, 10, 11, 1);
+    const y = s.y + r0 * s.slots * dims * 4;
+    const wts = s.wts + r0 * s.slots * 4;
+    try pass.tri.hcWritebackNorm(h, h, pss, dummy, inj, y, wts, scale, norm, eps, rs, n, dims, streams, 2, s.slots - 1, s.slots, 1);
 }
 
 /// A native read-out over rows [r0, r0 + n) whose normed rows are in: down, act and gates, up, the mix.
