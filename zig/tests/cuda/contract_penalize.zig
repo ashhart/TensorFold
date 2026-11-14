@@ -29,6 +29,8 @@ pub const spec: c.Spec = .{
 
 pub const Penalize = struct {
     rig: rig_.Rig,
+    bias: bool = false,
+    bad: bool = false, // planted control: the old subtract fails to ban +inf and NaN
     draws: *const cuda.sample.Draws,
     arena: ?std.heap.ArenaAllocator = null,
     rows: usize = 0,
@@ -48,7 +50,9 @@ pub const Penalize = struct {
     const vt = g.hooks(Penalize);
 
     pub fn kernel(self: *Penalize) g.Kernel {
-        return .{ .spec = spec, .ctx = self, .vt = &vt };
+        var selected = spec;
+        if (self.bias) selected.name = if (self.bad) "cuda sample bias ban control" else "cuda sample tf_bias_rows";
+        return .{ .spec = selected, .ctx = self, .vt = &vt, .control = if (self.bad) .nonfinite else null };
     }
 
     pub fn prepare(self: *Penalize, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
@@ -86,6 +90,12 @@ pub const Penalize = struct {
         if (fill == .stress) for (self.sub) |*s| { // bf16's largest values: the difference rounds, or overflows
             s.* = 0x1p127;
         };
+        if (self.bias) {
+            for (self.sub, 0..) |*s, i| if (i % 3 == 0) {
+                s.* = std.math.inf(f32);
+            };
+            if (fill == .nonfinite) self.logits[self.row[0] * vocab + self.tok[0]] = bfr.bits(std.math.inf(f32));
+        }
         self.out = try self.rig.output(self.logits.len * 2);
         const bytes = try a.alloc(u8, shape.n * 12);
         @memcpy(bytes[0 .. shape.n * 4], std.mem.sliceAsBytes(self.row));
@@ -99,7 +109,7 @@ pub const Penalize = struct {
     pub fn run(self: *Penalize) !void {
         const b: cuda.DeviceBuffer = .{ .d = self.rig.gpu.d, .ptr = self.out, .len = self.logits.len * 2 };
         try b.upload(0, std.mem.sliceAsBytes(self.logits));
-        try self.draws.penalize(self.rig.s, self.out, vocab, self.entries, self.n);
+        if (self.bias and !self.bad) try self.draws.biasRows(self.rig.s, self.out, vocab, self.entries, self.n) else try self.draws.penalize(self.rig.s, self.out, vocab, self.entries, self.n);
         try self.rig.s.synchronize();
     }
 
@@ -110,7 +120,10 @@ pub const Penalize = struct {
     /// Every logit as it was, except each entry's, less its amount; no sums, so no magnitude.
     pub fn reference(self: *Penalize, want: []f64, mag: []f64) !void {
         for (want, self.logits) |*w, x| w.* = bfr.value(x);
-        for (self.row, self.tok, self.sub) |r, t, s| want[r * vocab + t] -= s;
+        for (self.row, self.tok, self.sub) |r, t, s| {
+            const x = &want[r * vocab + t];
+            x.* = if (self.bias and s == std.math.inf(f32)) -std.math.inf(f64) else x.* - s;
+        }
         @memset(mag, 0);
     }
 };

@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Server: `logit_bias` adds each listed token's value to its logit before every draw and -100 bans the token on Qwen CUDA, Qwen3.5-2B Metal and Nemotron Parse HIP, so drafted replies equal undrafted ones; every other engine refuses a non-empty bias with 400 (#3146).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).

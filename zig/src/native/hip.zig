@@ -324,6 +324,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .rerank = offer.rerank,
         .readouts = offer.readouts,
         .penalties = loaded.backend.penalties,
+        .logit_bias = loaded.backend.logit_bias,
         .reasoning = reasoning(F),
         .vision = offer.vision,
         .ocr = offer.ocr,
