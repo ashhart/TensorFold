@@ -12,7 +12,7 @@ const groups_tested = [_]usize{ 32, 64, 128 };
 const Shape = struct { n: usize, k: usize };
 // all tail (K < 512), full passes and a tail, full passes only
 const shapes = [_]Shape{ .{ .n = 64, .k = 384 }, .{ .n = 128, .k = 2688 }, .{ .n = 32, .k = 1536 } };
-const rows = 16;
+const rows = 32;
 // a fused stack's windows reach this many rows
 const x_rows = 48;
 const sentinel: u16 = 0xffff;
@@ -217,8 +217,8 @@ fn check(device: mtl.Device, queue: mtl.Queue, p: *const row.Pipelines, stock: ?
         if (alone[i * n + c] == toBf(@floatCast(ref[0]))) t.exact += 1;
         t.values += 1;
     };
-    // windows of 2, 3, 8 and 16 rows (ending at the last row): each row as it was alone
-    for ([_]usize{ 2, 3, 8, 16 }) |w| {
+    // Every width through 32, ending at the last row, equals those rows alone.
+    for (1..rows + 1) |w| {
         const start = rows - w;
         try run(queue, launchAt(try row.call(p, m.w, w, false), start * k * 2, 0), m, out);
         for (0..w) |i| {
