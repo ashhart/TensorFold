@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 prefilled on a GB10 pair and decoded on an Apple Silicon Mac over the #2648 hand-off: the working stack as a draft base for per-unit pull requests, off unless both hand-off flags are given (#3386).
+
 - Qwen3.8-27B: a GB10 can work through the long start of a prompt and hand the state to a Mac over ConnectX; the Mac finishes the prompt and writes the reply. Off unless the Mac is started with `--prefill-from` and `--mcdma-link` and the GB10 with `--mcdma-produce`. On a 120,832-token first message the first token came after 136 s instead of 385 s on an M5 Max; a GB10 serving the chat alone was quicker still. Replies can differ from the Mac's own where the top two choices are close (#2648, step 2b of #1594).
 
 - Remote prefill, Mac side: a landed prefix now plans the rest of the pass from where the prefix ends (the tail mark a few rows past it no longer cuts an extra forward), and the model's keepalive ticks while a hand-off is awaited, so macOS no longer un-wires an idle Mac for the seconds the GB10 pair prefills; the DeepSeek V4.1 host's keepalive target is now the model's residency set, so `--keep-warm` works for it. Landing plus tail on the Mac went from 1.7 to 4.0 s to 0.6 to 1.1 s per request (DeepSeek V4.1, 100 to 450 tail tokens); the shared lane code is also used by the Qwen3.8-27B pull.
