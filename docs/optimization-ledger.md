@@ -270,9 +270,6 @@ below; these are estimates for planning a port, not results.
 | 27. Profiles | none | none | none | names the opt-in switches |
 | 28. Scale index | none | low | 5 % of the weights once prompts read it too | one stream's decode before tensor units |
 | 29. DSpine | none | medium | low | Qwen3.8-27B; agent 2–20 % faster, chat and code 10–19 % slower |
-| 30. Small-kernel fusion | ? | ? | ? | ? |
-| 31. Stream-tile prefetch | ? | ? | ? | ? |
-| 32. Filled-item prompt grid | ? | ? | ? | ? |
 | 30. Small-kernel fusion | none | low | none | HIP Flash Next: 1.2–2.0 % of a round for the hyper-connection block, 2.4–4.0 % for all four groups |
 | 31. Stream-tile prefetch | none | none | none | HIP Flash Next: the hyper-connection projections, no gain |
 | 32. Filled-item prompt grid | low | none | none | HIP Flash Next: prompt tok/s at most 1.2 % better |
