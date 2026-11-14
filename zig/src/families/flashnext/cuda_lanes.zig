@@ -60,6 +60,7 @@ pub fn Namespace(comptime Tri: type) type {
             pub const min_gap: u32 = 256;
             pub const min_prompt: u32 = 512;
         };
+        pub const warm_quiet: u64 = 150 * std.time.ns_per_ms; // warm turns: a reply's background pass waits for quiet
         pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551, one_stream: bool = false };
         /// Living Weights' learner (--slide): lessons put neurons in each layer's pocket beside its shared expert.
         pub const slide = slide_mod.Slide(Tri);
@@ -333,7 +334,7 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 return l;
             }
-            /// One prompt chunk, rows picked as it starts, cut at a mark it cannot keep on the way; true once the last.
+            /// One prompt chunk, rows picked as it starts (busy for a warm pass), cut at an unkept mark; true at last.
             fn step(self: *Cuda, s: *lanes.Stream, l: *Lane, _: u32) !bool {
                 const ids = s.prompt();
                 const at = l.filled orelse return true;
@@ -341,7 +342,7 @@ pub fn Namespace(comptime Tri: type) type {
                     s.keepInterruptedPrefill(@intCast(at));
                     return error.Cancelled;
                 }
-                const rows = @import("cuda_chunk.zig").passRows(&self.lanes, s, self.engine.chunk, self.engine.busy_chunk);
+                const rows = @import("cuda_chunk.zig").passRows(&self.lanes, s, if (s.yield_check == null) self.engine.chunk else self.engine.busy_chunk, self.engine.busy_chunk);
                 var marks: [prompt.batch.max_marks]prompt.batch.Mark = .{ .{}, .{} };
                 defer snaps.dropPrepared(self, l);
                 const cut = snaps.cut(self, s, l, ids, at, @min(ids.len, at + rows), &marks);
@@ -411,7 +412,9 @@ pub fn Namespace(comptime Tri: type) type {
         fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
             const self = of(ptr);
             const l = try self.open(s);
-            while (!try self.step(s, l, 0)) {}
+            while (!s.yields()) if (try self.step(s, l, 0)) return; // a warm pass steps aside between chunks
+            s.keepInterruptedPrefill(@intCast(l.filled.?)); // the cache keeps what it filled
+            return error.Yielded;
         }
 
         /// One chunk of the stream's prompt between the other streams' rounds; the first call opens its caches.

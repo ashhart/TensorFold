@@ -373,3 +373,50 @@ test "a kept warm end supersedes its history at either lookahead and regeneratio
         try std.testing.expect(got.same);
     }
 }
+
+/// At a filling request's first chunk a reply's warm pass is sent, as another client's reply ends; its chunks counted.
+const Behind = struct {
+    engine: Engine,
+    warm: *const Request,
+    box: *Box,
+    sent: bool = false,
+    chunks: std.atomic.Value(usize) = .init(0),
+    fn hook(ctx: *anyopaque, s: *lanes.Stream, chunk: usize) void {
+        const b: *@This() = @ptrCast(@alignCast(ctx));
+        if (s.max_new == 0) _ = b.chunks.fetchAdd(1, .monotonic);
+        if (s.max_new == 0 or b.sent or chunk != 0) return;
+        b.sent = true;
+        b.engine.submit(1, b.warm, .{ .ctx = b.box, .event = Box.event }) catch {};
+    }
+};
+
+test "a warm pass gives way to a request still filling its prompt: no quiet wait behind it, a yield at its first chunk" {
+    const gpa = std.testing.allocator;
+    for ([_]u64{ 0, 30 * std.time.ns_per_s }) |quiet| {
+        var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+        defer cfg.deinit(gpa);
+        var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 3 };
+        defer target.deinit();
+        var clock: lanes.fake.FixedClock = .{};
+        var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock()); // prompts a chunk a call, as on CUDA
+        defer core.deinit();
+        var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+        host.warm_quiet = quiet; // 30 s: far past the request, which must not wait on it
+        try host.start();
+        defer host.stop();
+        const prompt = [_]u32{ 2, 7, 1, 8 };
+        var warm: Box = .{};
+        var real: Box = .{};
+        const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true };
+        const request: Request = .{ .prompt = &prompt, .max_tokens = 48 };
+        var behind: Behind = .{ .engine = host.engine(), .warm = &warm_request, .box = &warm };
+        target.prefill_hook = Behind.hook;
+        target.prefill_hook_ctx = &behind;
+        try host.engine().submit(2, &request, .{ .ctx = &real, .event = Box.event });
+        try std.testing.expectEqual(Reason.length, real.wait());
+        try std.testing.expectEqual(@as(usize, 48), real.tokens);
+        try std.testing.expectEqual(Reason.cancelled, warm.wait());
+        // without the wait, the pass asked before its next chunk; with it, the GPU never ran one of it
+        try std.testing.expectEqual(@as(usize, @intFromBool(quiet == 0)), behind.chunks.load(.monotonic));
+    }
+}
