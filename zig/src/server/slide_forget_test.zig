@@ -60,7 +60,7 @@ pub const ByteText = struct {
 };
 
 /// A model taught three facts at layers 20, 21 and 22; zeroing one takes it out (and, when asked, more or less).
-const Model = struct {
+pub const Model = struct {
     zeroed: u16 = 0, // the layer of the fact whose neurons are zeroed (0: none)
     breaks: bool = false, // with the sister fact out, the dog fact's answer is lost too
     lingers: bool = false, // with it out, the sister's name still comes back
@@ -76,7 +76,7 @@ const Model = struct {
     device_down: bool = false, // the device takes no put-back
     stale: bool = false, // a put-back it did not take is pending: replies are refused, learning tries it first
 
-    fn engine(m: *Model) api.Engine {
+    pub fn engine(m: *Model) api.Engine {
         return .{ .ctx = m, .vtable = if (m.learns) &learning else &plain };
     }
 
@@ -163,13 +163,13 @@ const Model = struct {
 };
 
 /// A delete whose client is never gone, as one already under way treats it.
-const Stays = struct {
+pub const Stays = struct {
     pub fn check(_: Stays) bool {
         return false;
     }
 };
 
-const Taught = struct { srv: *Server, ids: [3]u32 };
+pub const Taught = struct { srv: *Server, ids: [3]u32 };
 
 /// A server over `m` whose graph holds "I like blue.", "My sister is called Ana." and "My dog is called Ginger.".
 fn taught(text: *ByteText, m: *Model) !Taught {
@@ -177,7 +177,7 @@ fn taught(text: *ByteText, m: *Model) !Taught {
 }
 
 /// `taught`, its graph kept in the file at `path` (null: in memory).
-fn taughtAt(text: *ByteText, m: *Model, path: ?[]const u8) !Taught {
+pub fn taughtAt(text: *ByteText, m: *Model, path: ?[]const u8) !Taught {
     const srv = try Server.init(std.testing.allocator, std.testing.io, m.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"}, .enable_thinking = false, .use_drafts = false, .slide_graph = path }, null);
     const facts = [_]struct { []const u8, []const u8, []const u8, u16 }{
         .{ "I like blue.", "What colour do I like?", "blue", 20 },
@@ -362,7 +362,7 @@ fn onDisk(path: []const u8, at: usize) !slide_graph.State {
 }
 
 /// Graph file `name` in a temporary directory, its path in `buf`.
-fn graphPath(tmp: *std.testing.TmpDir, buf: []u8, name: []const u8) ![]const u8 {
+pub fn graphPath(tmp: *std.testing.TmpDir, buf: []u8, name: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, ".zig-cache/tmp/{s}/{s}.json", .{ &tmp.sub_path, name });
 }
 
