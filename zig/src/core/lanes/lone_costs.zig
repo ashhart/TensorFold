@@ -178,6 +178,45 @@ fn fill(gpa: std.mem.Allocator, own: *?Table, from: Table) !void {
     own.* = .{ .slots = try gpa.dupe(?f64, from.slots) };
 }
 
+/// Which clock timed a lone stream's rounds: the engine's backend clock, or a backend's own wall time.
+pub const Clock = enum { backend, wall };
+
+/// The kept calibrations of each clock: one clock's times never seed or price the other's rounds.
+pub const clocks = 2;
+
+pub fn table(e: anytype, clock: Clock) *[2][bands]?Kept {
+    return &e.lone_kept[@backingInt(clock)];
+}
+
+/// A stream's calibration into the table of the clock that timed it (an unmarked one is the backend's).
+pub fn retain(e: anytype, s: anytype) void {
+    keep(e.gpa, slot(table(e, s.clock orelse .backend), s), s) catch {};
+}
+
+/// A lone choice's start on `clock`: a stream that crossed clocks or lost its samples starts from this clock's table.
+pub fn prepare(e: anytype, s: anytype, clock: Clock) !void {
+    const crossed = if (s.clock) |old| old != clock else false;
+    if (crossed) retain(e, s);
+    if (crossed or (s.prices_seeded and s.depth == null)) {
+        if (s.depth) |*d| if (d.ms) |*own| {
+            own.deinit(e.gpa);
+            d.ms = null;
+        };
+        s.cost_probes = @splat(.{});
+        s.cost_probe_after = 8;
+        s.cost_probe_spacing = 8;
+        s.cost_probe_trial = null;
+        s.shared_round = false; // the flag described the samples just dropped
+        s.prices_seeded = false;
+    }
+    s.clock = clock;
+    if (!s.prices_seeded) {
+        s.prices_seeded = true;
+        _ = try e.rule.rates(@import("windows.zig").who(s));
+        try seed(e.gpa, slot(table(e, clock), s).*, s);
+    }
+}
+
 pub const Trial = struct {
     rows: u32,
     expected: f64,

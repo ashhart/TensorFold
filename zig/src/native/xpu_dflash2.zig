@@ -39,11 +39,7 @@ pub const Width = struct { nodes: u32, trial: ?u32 = null };
 pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
-    if (!s.prices_seeded) {
-        s.prices_seeded = true;
-        _ = try e.rule.rates(lanes.windows.who(s));
-        try lone_costs.seed(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
-    }
+    try lone_costs.prepare(e, s, .wall);
     _ = e.arena.reset(.retain_capacity);
     const a = e.arena.allocator();
     const prices = try lone_costs.prices(e, p);

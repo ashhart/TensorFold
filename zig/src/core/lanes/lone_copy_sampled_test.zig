@@ -129,7 +129,7 @@ fn serve(m: cfgs.Model, times: [2]f64, asks: []const Ask, out: []Reply, kept: ?*
         r.copies = Watch.copies;
         r.copy_rows = Watch.copy_rows;
     }
-    if (kept) |k| k.* = .{ e.lone_kept[0][0] != null, e.lone_kept[1][0] != null };
+    if (kept) |k| k.* = .{ e.lone_kept[0][0][0] != null, e.lone_kept[0][1][0] != null };
 }
 
 /// hip_lanes.zig facts in small (as lone_copy_price_test.zig's): 16-row windows, timed forwards, copies priced.

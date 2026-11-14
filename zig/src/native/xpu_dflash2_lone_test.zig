@@ -45,7 +45,7 @@ fn lone(e: *lanes.Engine, context: usize, world: World, rounds: usize, nodes: u3
         s.rounds += 1;
         if (s.rounds > 1) try ad.measured(e, &s, pick.trial, pick.nodes, world.base + world.per * @as(f64, @floatFromInt(pick.nodes)));
     }
-    lc.keep(e.gpa, lc.slot(&e.lone_kept, &s), &s) catch {};
+    lc.retain(e, &s);
     return .{ .first = first, .last = last };
 }
 
@@ -87,6 +87,33 @@ test "draft sources: a lone tree's width follows its context band's measured rou
     try std.testing.expectEqual(wide.last, (try lone(&e, 120, shallow, 1, 15)).first);
 }
 
+test "draft sources: a detach files a pure engine stream's calibration, and a shared round before a cross does not drop the next period's" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    // a stream that ran alone on the engine and is handed to another driver leaves its samples in the engine table
+    var b = try newStream("detached");
+    defer b.deinit(gpa);
+    try backendRounds(&e, &b, .{ .base = 70, .per = 21.5 });
+    try e.live.append(gpa, &b);
+    try std.testing.expect(e.detach(&b));
+    try std.testing.expectEqual(@as(?f64, 70 + 21.5 * 15), slots(e.lone_kept[0][0][0])[15]);
+    // a stream with a shared round, then a cross: the samples of its new clock are its own and are kept at its exit
+    var s = try newStream("shared-then-cross");
+    defer s.deinit(gpa);
+    try wallRounds(&e, &s, .{ .base = 30, .per = 1 }, 40);
+    s.shared_round = true;
+    try backendRounds(&e, &s, .{ .base = 50, .per = 3 });
+    try std.testing.expect(!s.shared_round);
+    lc.retain(&e, &s);
+    // seeded from the detached stream's 392.5, its own 95 blended in: the table moved
+    try std.testing.expect(slots(e.lone_kept[0][0][0])[15].? < 392);
+}
+
 test "draft sources: XPU_TREE caps a lone tree, and under 2 nodes nothing is priced" {
     var cfg: lanes.Config = undefined;
     var target: lanes.fake.Fake = undefined;
@@ -105,6 +132,106 @@ test "draft sources: XPU_TREE caps a lone tree, and under 2 nodes nothing is pri
         try std.testing.expect(r.last >= 1); // never a round with no draft
     }
     try std.testing.expectEqual(@as(u32, 1), (try lone(&e, 100, .{ .base = 30, .per = 1 }, 5, 1)).last); // fixed, as before
+}
+
+/// A lone stream of `context` tokens whose first `rounds` rounds ran on the wall clock in `world`.
+fn wallRounds(e: *lanes.Engine, s: *lanes.Stream, world: World, rounds: usize) !void {
+    var parents: [15]i32 = undefined;
+    var own: [15]f64 = undefined;
+    for (&parents, &own, 0..) |*p, *o, i| {
+        p.* = @as(i32, @intCast(i)) - 1;
+        o.* = @log(0.85);
+    }
+    var landing: lanes.draft_tree.Landing = .{};
+    var chance: [15]f64 = undefined;
+    ad.chances(&landing, false, &parents, &own, &chance);
+    for (0..rounds) |_| {
+        const pick = try ad.width(e, s, &chance);
+        s.rounds += 1;
+        if (s.rounds > 1) try ad.measured(e, s, pick.trial, pick.nodes, world.base + world.per * @as(f64, @floatFromInt(pick.nodes)));
+    }
+}
+
+/// `rounds` lone rounds of the engine's own, timed by its backend clock, in `world`.
+fn backendRounds(e: *lanes.Engine, s: *lanes.Stream, world: World) !void {
+    try lc.prepare(e, s, .backend);
+    for (1..16) |drafts| {
+        const ms = world.base + world.per * @as(f64, @floatFromInt(drafts));
+        try e.rule.observeCost(@intCast(drafts), ms, false, lc.marked(lanes.windows.who(s), true));
+    }
+}
+
+fn slots(k: ?lc.Kept) []const ?f64 {
+    return (k orelse return &.{}).ms.slots;
+}
+
+fn newStream(id: []const u8) !lanes.Stream {
+    const prompt = try gpa.alloc(u32, 100);
+    defer gpa.free(prompt);
+    @memset(prompt, 3);
+    return lanes.Stream.init(gpa, .{ .id = id, .prompt = prompt, .max_new = 256 });
+}
+
+test "draft sources: a stream that crosses clocks files each clock's samples apart and seeds afresh" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    var s = try newStream("crossing");
+    defer s.deinit(gpa);
+    try wallRounds(&e, &s, .{ .base = 30, .per = 1 }, 40);
+    const wall_ms = try gpa.dupe(?f64, s.depth.?.ms.?.slots);
+    defer gpa.free(wall_ms);
+    // wall -> engine: the wall samples go to the wall table, the engine's rounds start from its own (empty) table
+    try backendRounds(&e, &s, .{ .base = 70, .per = 21.5 });
+    try std.testing.expectEqualSlices(?f64, wall_ms, slots(e.lone_kept[1][0][0]));
+    try std.testing.expect(e.lone_kept[0][0][0] == null);
+    try std.testing.expectEqual(@as(?f64, 70 + 21.5 * 15), s.depth.?.ms.?.get(15));
+    // engine -> wall: the engine's samples go to the engine table, the wall rounds restart from the wall table
+    try lc.prepare(&e, &s, .wall);
+    try std.testing.expectEqual(@as(?f64, 70 + 21.5 * 15), slots(e.lone_kept[0][0][0])[15]);
+    try std.testing.expectEqualSlices(?f64, wall_ms, slots(e.lone_kept[1][0][0]));
+    try std.testing.expectEqualSlices(?f64, wall_ms, s.depth.?.ms.?.slots);
+    // dropped round state: the resumed rounds seed again from the wall table, with fresh probe deadlines
+    s.cost_probe_after = 99;
+    s.dropRoundState(gpa);
+    try lc.prepare(&e, &s, .wall);
+    try std.testing.expectEqualSlices(?f64, wall_ms, s.depth.?.ms.?.slots);
+    try std.testing.expect(s.cost_probe_after < 99); // the engine's deadline is gone: the wall table's, from here
+}
+
+test "draft sources: the exits of a lone stream keep its calibration on its own clock's table only" {
+    var cfg: lanes.Config = undefined;
+    var target: lanes.fake.Fake = undefined;
+    var clock: lanes.fake.FixedClock = undefined;
+    var e = try engine(&cfg, &target, &clock);
+    defer e.deinit();
+    defer cfg.deinit(gpa);
+    defer target.deinit();
+    // the lone driver's exit (lc.retain, as XpuLanes.alone calls it) and the engine's release, for a wall stream
+    var w = try newStream("wall-exit");
+    defer w.deinit(gpa);
+    try wallRounds(&e, &w, .{ .base = 30, .per = 1 }, 40);
+    lc.retain(&e, &w);
+    try std.testing.expect(e.lone_kept[1][0][0] != null);
+    try std.testing.expect(e.lone_kept[0][0][0] == null);
+    var r = try newStream("wall-release");
+    defer r.deinit(gpa);
+    try wallRounds(&e, &r, .{ .base = 40, .per = 2 }, 40);
+    e.release(&r);
+    try std.testing.expect(e.lone_kept[0][0][0] == null);
+    // and the engine's release of an engine stream leaves the wall table as it was
+    const wall_ms = try gpa.dupe(?f64, slots(e.lone_kept[1][0][0]));
+    defer gpa.free(wall_ms);
+    var b = try newStream("backend-release");
+    defer b.deinit(gpa);
+    try backendRounds(&e, &b, .{ .base = 70, .per = 21.5 });
+    e.release(&b);
+    try std.testing.expect(e.lone_kept[0][0][0] != null);
+    try std.testing.expectEqualSlices(?f64, wall_ms, slots(e.lone_kept[1][0][0]));
 }
 
 fn mix(h: u64, x: u64) u64 {
