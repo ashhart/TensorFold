@@ -4,3 +4,4 @@
 #include "contract_js_controls.cuh"
 #include "contract_dense_controls.cuh"
 #include "contract_experts_bf16_controls.cuh"
+#include "contract_idol_controls.cuh"

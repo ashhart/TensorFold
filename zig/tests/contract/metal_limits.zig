@@ -256,6 +256,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         text = sources.moss_image;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "idol ")) {
+        if (!assemble) return undefined;
+        text = sources.idol;
+        frags = true;
     } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
         if (!assemble) return undefined;
         text = sources.core_deltanet;

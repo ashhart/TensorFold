@@ -18,6 +18,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("pocket_records.zig").cuda ++
     @import("minimax_cuda_records.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
+    @import("idol_cuda_sets.zig").cuda ++
     @import("exl3_dense_records.zig").cuda ++
     @import("exl3_finish_records.zig").cuda ++
     @import("lfm2_moe_cuda_records.zig").cuda ++
@@ -73,6 +74,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("spark25_records.zig").records ++
     @import("gemma_attention_records.zig").records ++
     @import("moss_image_records.zig").records ++
+    @import("idol_records.zig").records ++
     @import("dsv41_metal_records.zig").records ++
     @import("minimax_records.zig").records ++
     @import("ling_route_records.zig").records ++
