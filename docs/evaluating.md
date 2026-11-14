@@ -43,8 +43,9 @@ These need no GPU, driver or checkpoint:
 - `tensorfold capabilities --json` lists the backends, model families, formats, serve flags and
   `optional_libraries`, each with a `found` flag.
 - `tensorfold info REPO` prints a pulled checkpoint's family, format, context, weights size and memory floor.
-- `tensorfold config validate FILE` reads a cluster.json, prints every problem, and does not
-  plan models or probe hosts.
+- From a source build (`tensorfold` built from source, or `tf-cluster`), `tensorfold config validate FILE`
+  reads a cluster.json, prints every problem, and does not plan models or probe hosts. The release
+  binary, `tensorfold-native`, does not have this command.
 
 ## Container
 
