@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tools: an experimental Living Weights v2 controller (`tools/living_weights_v2`) guards native lessons with independent recall and regression checks, refuses redirects and remote hosts unless allowed, and journals every write; off unless run (#3320).
+
 - Flash Next on CUDA: sampled draws take one launch and one wait a step, with the same tokens (#2927, #2753).
 
 - Qwen 3.5 on CUDA: prompts from 2,048 rows run the a and b projections in one launch, with the same tokens (#2925, #2911).
