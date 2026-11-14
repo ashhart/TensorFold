@@ -45,6 +45,7 @@ inline void mma16816(float* c, const uint32_t* a, const uint32_t* b) {  // m16n8
 
 #include "../../zig/kernels/cuda/glm_index_pools.cuh"
 #include "../../zig/kernels/cuda/glm_index_scores.cuh"
+#include "../../zig/kernels/cuda/glm_index_decode.cuh"
 
 // every block of the grid in turn, its threads at once
 static void run_grid(unsigned gx, unsigned gy, int threads, const std::function<void()>& kernel) {
@@ -220,6 +221,47 @@ int main() {
       }
   printf("pools paths: whole row %d, candidates %d, whole row after candidates %d\n", paths[0], paths[1], paths[2]);
   if (paths[1] == 0 || paths[2] == 0) { fails++; printf("a path was never taken\n"); }
+
+  // glm_index_decode.cuh: a decode window's rows marked on many CTAs, then merged, against the same plain top-K
+  int dpaths[4] = {0, 0, 0, 0};
+  const int drows = 3;
+  for (int np : {4097, 12289, 70001})
+    for (int mode = 0; mode < 3; mode++)
+      for (Kind kind : {normal, ties, equal, zeros, skewed, decoy}) {
+        const int pos = mode == 0 ? 300 : mode == 1 ? 2 * np : 4 * np - drows - 5;
+        std::vector<float> s((size_t)drows * np + 4);
+        float* base = s.data() + (np % 4 ? 1 : 0);
+        std::vector<int> limit(drows);
+        for (int r = 0; r < drows; r++) {
+          limit[r] = (int)std::min<int64_t>(np, std::max<int64_t>((pos + r + 1) / 4, K));
+          fill(g, base + (size_t)r * np, np, limit[r], kind);
+        }
+        const int64_t words = (np + 31) / 32;
+        std::vector<uint32_t> bitw((size_t)drows * 2 * words, 0xA5A5A5A5u);  // words a scan does not write stay unread
+        const int last = (int)std::min<int64_t>(np, std::max<int64_t>((pos + drows) / 4, K));
+        const unsigned ctas = last <= glm_dsel::CAP ? 0 : (unsigned)((last + glm_dsel::SPAN - 1) / glm_dsel::SPAN);
+        if (ctas > 0)
+          run_grid(ctas, drows, glm_dsel::T1, [&] { tf_glm_dsel_scan(base, np, &pos, K, 2048, bitw.data(), words); });
+        std::vector<int64_t> out((size_t)drows * K, -7);
+        std::vector<int> path(drows, -1);
+        run_grid(drows, 1, glm_dsel::T2, [&] { tf_glm_dsel_merge(base, out.data(), np, &pos, K, bitw.data(), words, path.data()); });
+        for (int r = 0; r < drows; r++) {
+          if (path[r] < 0 || path[r] > 3) {
+            fails++;
+            printf("dsel np %d mode %d kind %d row %d: path %d\n", np, mode, (int)kind, r, path[r]);
+            continue;
+          }
+          dpaths[path[r]]++;
+          const auto want = reference(base + (size_t)r * np, limit[r], K);
+          if (!std::equal(want.begin(), want.end(), out.begin() + (size_t)r * K)) {
+            fails++;
+            printf("dsel np %d mode %d kind %d row %d (path %d) differs\n", np, mode, (int)kind, r, path[r]);
+          }
+        }
+      }
+  printf("dsel paths: whole row %d, candidates %d, whole row after candidates %d, ties at the floor %d\n", dpaths[0],
+         dpaths[1], dpaths[2], dpaths[3]);
+  if (dpaths[0] == 0 || dpaths[1] == 0 || dpaths[2] == 0 || dpaths[3] == 0) { fails++; printf("a dsel path was never taken\n"); }
   printf("%s (%d failures)\n", fails ? "FAIL" : "PASS", fails);
   return fails != 0;
 }

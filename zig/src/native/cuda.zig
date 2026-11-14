@@ -163,6 +163,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
     inline for (registry) |F| if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, lfm2.family.model_type)) {
         if (refusals.lfm2(o)) |why| {
@@ -180,18 +181,22 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     }
     // a family whose rope can stretch (Qwen's YaRN, from its config or --rope-yarn) names its own ceiling
-    const native = if (comptime @hasDecl(F, "contextCeiling")) F.contextCeiling(a, io, o.dir, o.rope_yarn) catch |e| {
+    const own = if (comptime @hasDecl(F, "contextCeiling")) F.contextCeiling(a, io, o.dir, o.rope_yarn) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "{s} ({s}): YaRN takes rope_type yarn, factor, original_max_position_embeddings and their product as max_position_embeddings, and --rope-yarn a factor from 1 matching it", .{ if (o.rope_yarn != null) "--rope-yarn" else "the checkpoint's rope scaling", @errorName(e) });
         return null;
     } else modelContext(a, io, o.dir);
+    // a family with no positions to stretch (GLM-5.3-Flash) raises it with a row of its own, read at its open
+    const raised = windows.familyCeiling(F, problem) catch return null;
+    const native: i64 = if (raised.window) |n| @intCast(n) else own;
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
             error.Negative => try std.fmt.allocPrint(a, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
             error.NoNative => "--context 0 asks for the model's window, and its config.json names none: give a token count",
-            error.PastNative => try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
+            error.PastNative => if (raised.window != null) try windows.pastCeiling(a, o.context.?, native, raised.switch_name) else try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
         };
         return null;
     };
+    if (raised.window != null and window > own) std.log.info("{s}", .{try windows.pastTrained(a, window, own, raised.switch_name)});
     if (o.slide) {
         // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
@@ -489,12 +494,12 @@ fn reasoning(comptime F: type) bool {
     return if (@hasDecl(F, "reasoning")) F.reasoning else true;
 }
 
-test "a CUDA family declares replies without reasoning with `pub const reasoning = false`; every served one keeps it" {
+test "a CUDA family declares replies without reasoning with `pub const reasoning = false`; only dots.mocr does" {
     try std.testing.expect(reasoning(struct {}));
     try std.testing.expect(!reasoning(struct {
         pub const reasoning = false;
     }));
-    inline for (registry) |F| try std.testing.expect(reasoning(F));
+    inline for (registry) |F| try std.testing.expectEqual(!std.mem.eql(u8, F.model_type, "dots_ocr"), reasoning(F));
 }
 
 test "the Info openWith serves carries each family's reasoning declaration over the host's" {
@@ -555,6 +560,7 @@ test "Flash Next takes --vision at family admission" {
 }
 test {
     _ = @import("cuda_health_test.zig");
+    _ = @import("cuda_ceiling_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
     _ = kv_pages;
@@ -578,7 +584,12 @@ test "Save recovery: real native close drains the dense trainer before any child
 
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
-    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni" });
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni", "qwen3" });
+}
+
+test "qwen3 on CUDA refuses the flags it does not serve by name, before any checkpoint or device access" {
+    try @import("cuda_qwen3_test.zig").flags(open);
+    try @import("cuda_qwen3_test.zig").kernels(open);
 }
 
 test {

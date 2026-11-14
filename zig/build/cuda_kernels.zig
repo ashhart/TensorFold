@@ -97,6 +97,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
     .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
     .{ .name = "nvfp4_experts_tile", .flags = &.{"-O3"}, .min_sm = 80 },
+    .{ .name = "experts_bf16", .flags = &.{"-O3"} }, // ours: grouped bf16 experts on the plan, mma fragment blocks
     .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
     .{ .name = "nvfp4_experts32", .flags = &.{"-O3"} }, // ours: GLM's routed experts at block 32 with csf0 scales
     .{ .name = "rank_sum", .flags = &.{"-O3"} }, // ours: the rank-order sum of a reduce-scatter (rank_scatter.zig)
@@ -122,7 +123,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "embed_rows", .flags = &.{"-O3"} }, // ours: MLX affine and bf16 token rows (cuda/embed_rows.zig)
     .{ .name = "lfm2", .flags = glue }, // ours: LFM2's short convolution, QK norm and rotary, gates and label rows
     .{ .name = "lfm2_moe", .flags = glue }, // ours: LFM2.5-24B-A2B's router, Liquid's 3-tap conv and commit (liquid_conv.cuh)
-    .{ .name = "dots_mocr", .flags = glue }, // ours: dots.mocr's q|k|v bias and Torch-order RoPE (dots_rope.cuh)
+    .{ .name = "dots_mocr", .flags = glue }, // ours: dots.mocr's text q|k|v RoPE, vision 2-D rotary and patch bias
     .{ .name = "vit", .flags = glue }, // ours: vision towers' LayerNorm, Linear epilogues, activations, unshuffle
     .{ .name = "moss_image", .flags = glue }, // ours: MOSS-Image's modulated norm, q/k rotary, situ, gated add
     .{ .name = "tree_round", .flags = &.{"-O3"} }, // ours: verified tree rounds for every family (cuda/tree_round.zig)
@@ -160,7 +161,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "torch_indexing", .src = "torch_ops/indexing", .flags = torch_ops },
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
-    .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
+    .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, any world on a mesh
     .{ .name = "l2pf", .src = "deepseek_v41/l2pf", .flags = &.{"-O3"} }, // DeepSeek V4.1's L2 prefetch of a weight table, as GLM's too (records: glm_l2pf_pending.zig)
     .{ .name = "l2pace", .src = "deepseek_v41/l2pace", .flags = &.{"-O3"} }, // and its paced form
     .{ .name = "drama3_staged_gemv", .flags = glue },

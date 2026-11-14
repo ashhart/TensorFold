@@ -13,10 +13,12 @@ on:
 permissions:
   contents: read
 
-# A pull request's newer push cancels its older run; every push to main keeps its own.
+# A pull request's newer push cancels its older run, and a newer push to main cancels main's older run: a landing train
+# pushes one commit a PR (seven runs in four minutes on 13 Nov), and the train's own run already tested the tree they
+# end at. The nightly schedule keeps a group of its own.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && github.run_id || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   benchmark-clients:
@@ -57,7 +59,7 @@ jobs:
           "$RUNNER_TEMP/pytest/bin/python" -m pytest -q -p no:cacheprovider
   zig:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -123,16 +125,36 @@ jobs:
             exit 0
           fi
           python3 -m unittest discover -s tools/zig -p zig_cache_restat_test.py -v
-      # zig build test is the host unit tests. No GPU. The Python suite is not this check.
-      # A unit test that hangs fails by name after 10 minutes instead of holding the runner until the job's limit.
-      - name: zig build test
-        run: zig build -Dfixed-cpu test --test-timeout 10m
+      - name: Host test graph regressions
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            base=$(git merge-base HEAD "origin/$BASE_REF" 2> /dev/null || true)
+          else
+            base=$(git rev-parse --verify "$PUSH_BASE^{commit}" 2> /dev/null || true)
+          fi
+          if [ -n "$base" ] && git diff --quiet "$base" HEAD -- \
+              build.zig zig/build/host_tests.zig tools/zig/host_tests_test.py; then
+            echo "Host test graph inputs are unchanged."
+            exit 0
+          fi
+          python3 -m unittest discover -s tools/zig -p host_tests_test.py -v
+      # Keep per-test timeouts while allowing the DeepSeek AOT enumeration to finish on hosted runners.
+      - name: zig build test-host
+        run: zig build -Dfixed-cpu test-host --test-timeout 20m
       # The kernel contract's limits gate: every registered launch against M1-M5 and sm_80/86/89/120/121, controls red.
       - name: zig build test-kernel-contract
         run: zig build -Dfixed-cpu test-kernel-contract
       # The frozen server goldens: request parsing, rendering and streaming against recorded answers.
       - name: zig build test-golden
         run: zig build -Dfixed-cpu test-golden
+      # The serving pins ran only in the nightly, so a PR that touched a pinned file landed green and turned the
+      # next nightly red (10-12 Nov). Run them on every PR: a changed pinned file needs its re-pin in the same PR.
+      - name: zig build test-gradient-serving test-qwen-serving-host
+        run: zig build -Dfixed-cpu test-gradient-serving test-qwen-serving-host
       # Hostile HTTP framing, API keys and download paths, on the CPU.
       - name: zig build test-server-security test-pull-security
         run: zig build -Dfixed-cpu test-server-security test-pull-security
@@ -168,7 +190,7 @@ jobs:
           key: zig-build-v3-Linux-0.17.0-${{ github.sha }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
   zig-windows:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -331,7 +353,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [fast, adapters, deepseek, lanes, deferred]
+        suite: [fast, adapters, native, deepseek, lanes, deferred]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -340,11 +362,29 @@ jobs:
         with:
           version: 0.17.0
           use-cache: false
+      - name: Metal toolchain for native engine host checks
+        if: matrix.suite == 'native'
+        run: xcrun -sdk macosx metal -v || { xcodebuild -downloadComponent MetalToolchain && xcrun -sdk macosx metal -v; }
       - name: Host checks and aggregate wall time
         shell: bash
         env:
           SUITE: ${{ matrix.suite }}
         run: |
           printf 'Runner class: %s %s\n' "$RUNNER_OS" "$RUNNER_ARCH"
+          if [ "$SUITE" = native ]; then
+            printf 'Native source: %s\n' "$GITHUB_SHA"
+            status=0
+            for phase in initial warm; do
+              TIMEFORMAT="test-native $phase wall seconds: %R"
+              if { time zig build test-host-ci-macos-native --test-timeout 30m --summary all; }; then
+                printf 'test-native %s exit: 0\n' "$phase"
+              else
+                code=$?
+                printf 'test-native %s exit: %s\n' "$phase" "$code"
+                status=$code
+              fi
+            done
+            exit "$status"
+          fi
           TIMEFORMAT='Host checks wall seconds: %R'
           time zig build "test-host-ci-macos-$SUITE" --test-timeout 30m

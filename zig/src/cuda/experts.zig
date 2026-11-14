@@ -14,15 +14,16 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 const Affine3Experts = @import("experts3.zig").Affine3Experts;
+pub const Bf16Experts = @import("experts_bf16.zig").Bf16Experts;
 
-pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs };
+pub const Format = enum { affine4, affine3, fp8g, nvfp4, nvfp4_csf0, exl3, iq2xxs, bf16 };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
     format: Format,
     exl3: ?@import("exl3_experts.zig").Layer = null,
-    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; nvfp4_csf0 [E][NI/32] blocks (experts32.zig); iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig)
-    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; nvfp4_csf0 [E][D/32] blocks; iq2xxs [E][D/16][NI/256][1056]
+    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; nvfp4_csf0 [E][NI/32] blocks (experts32.zig); iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig); bf16 [E][NI/32][D/32][4][32] uint4
+    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; nvfp4_csf0 [E][D/32] blocks; iq2xxs [E][D/16][NI/256][1056]; bf16 [E][D/32][NI/32][4][32]
     up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
     down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
     width: usize, // NI
@@ -52,12 +53,13 @@ pub const Grouped = struct {
     nvfp4: ?*const Nvfp4Experts = null,
     nvfp4_csf0: ?*const @import("experts32.zig").Nvfp4b32Experts = null,
     iq2xxs: ?*const Iq2xxsExperts = null,
+    bf16: ?*const Bf16Experts = null,
 
-    /// Decode rows: `items` bounds the plan's items (grouped.maxItems at tile 16); `skip` an expert left out, or -1.
-    pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    /// Decode rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
+    pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
         if (l.after and l.format != .exl3) return error.OptionNotBuilt; // the clamp-after order is built for EXL3 only
         switch (l.format) {
-            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip, false),
+            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, pairs, tile, skip),
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_bf16) return error.EpilogueNotBuilt;
@@ -77,14 +79,15 @@ pub const Grouped = struct {
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
             .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, false, epi, in, l, p, out, items, skip),
+            .bf16 => return (g.bf16 orelse return error.FormatNotLoaded).run(s, false, epi, in, l, p, out, items, skip),
         }
     }
 
-    /// Prompt rows: `items` bounds the plan's items at the format's prompt tile (prompt_tile).
-    pub fn prompt(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    /// Prompt rows: `items` bounds the plan, `pairs` its picks; `tile` 16 or 64 (EXL3 only); `skip` an expert or -1.
+    pub fn prompt(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, pairs: usize, tile: usize, skip: i32) !void {
         if (l.after and l.format != .exl3) return error.OptionNotBuilt; // the clamp-after order is built for EXL3 only
         switch (l.format) {
-            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip, true),
+            .exl3 => return (g.exl3 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, pairs, tile, skip),
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_f32) return error.EpilogueNotBuilt;
@@ -104,6 +107,7 @@ pub const Grouped = struct {
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
             .nvfp4_csf0 => return (g.nvfp4_csf0 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
             .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, true, epi, in, l, p, out, items, skip),
+            .bf16 => return (g.bf16 orelse return error.FormatNotLoaded).run(s, true, epi, in, l, p, out, items, skip),
         }
     }
 };
@@ -111,7 +115,7 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs => 64,
+        .affine4, .affine3, .fp8g, .nvfp4, .nvfp4_csf0, .exl3, .iq2xxs, .bf16 => 64,
     };
 }
 
@@ -556,8 +560,8 @@ test "nvfp4 rows of either kind are refused when the format is not loaded" {
     const l: Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = 64, .dims = 64, .experts = 2, .relu2 = true };
     const s: Stream = undefined; // never reached: the refusal comes first
     const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
-    try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
-    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, -1));
+    try std.testing.expectError(error.FormatNotLoaded, g.prompt(s, .up, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 64, -1));
+    try std.testing.expectError(error.FormatNotLoaded, g.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, l, p, 0, 1, 1, 16, -1));
     try std.testing.expectEqual(@as(usize, 2 * 2 * 3 * 144 * 4), Nvfp4Experts.bytes(2, 64, 96, 1));
     try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(1, 8)); // 64 rows x 64 inputs, 8 x 2 blocks
     try std.testing.expectEqual(@as(u32, 2 * 17408), Nvfp4Experts.promptSmem(2, 4));

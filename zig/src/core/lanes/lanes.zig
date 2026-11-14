@@ -42,6 +42,7 @@ pub const shared_draft_check = @import("shared_draft_check.zig");
 pub const drafter = @import("drafter.zig");
 pub const drafted = @import("drafted.zig");
 pub const draft_tree = @import("draft_tree.zig");
+pub const drafter_depth_sweep = @import("drafter_depth_sweep.zig"); // any family's Drafter at depths 1..block
 pub const recorder = @import("recorder.zig");
 pub const logprob = @import("logprob.zig");
 pub const grammar = @import("grammar.zig");
@@ -61,6 +62,7 @@ pub const Trim = trim.Trim;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("plain_streams_test.zig");
     _ = @import("late_draft_test.zig");
     _ = @import("long_loop.zig");
     _ = @import("long_loop_test.zig");
@@ -71,6 +73,7 @@ test {
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafter_depth_sweep_test.zig");
     _ = @import("drafted_chances_test.zig");
     _ = @import("drafted_copy_test.zig");
     _ = @import("root_copy_test.zig");
@@ -82,6 +85,7 @@ test {
     _ = @import("depth_probe_test.zig");
     _ = @import("proposal_external_test.zig");
     _ = @import("lone_costs_test.zig");
+    _ = @import("depth_floor_test.zig");
     _ = @import("lone_backoff_test.zig");
     _ = @import("fill_test.zig");
     _ = @import("fill_trim_test.zig");

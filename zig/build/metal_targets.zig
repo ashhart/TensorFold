@@ -350,6 +350,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-moss-image-encoder", .path = "zig/tests/moss_image_encoder.zig", .about = "MOSS-Image's prompt encoder on a reference case: the ids checked, each step gated against float32, then timed" },
         .{ .name = "tf-moss-image-decoder", .path = "zig/tests/moss_image_decoder.zig", .about = "MOSS-Image's image decoder on latents, gated against float64 beside torch float32, then timed" },
         .{ .name = "tf-moss-image-blocks", .path = "zig/tests/moss_image_blocks.zig", .about = "MOSS-Image's transformer on one step, each block alone gated against float32, repeated byte for byte" },
+        .{ .name = "tf-moss-image-generate", .path = "zig/tests/moss_image_generate.zig", .about = "MOSS-Image from options alone: prompts, schedule and noise, then the decoder's picture" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
@@ -365,6 +366,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-minimax-run", .path = "zig/tests/minimax_m3/run.zig", .about = "MiniMax-M3.1-Flash greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-minimax-vision", .path = "zig/tests/minimax_m3/vision.zig", .about = "MiniMax-M3.1-Flash's image tower alone: an image's patches and text rows, for tools/vision_ref.py's check" },
         .{ .name = "tf-llama-run", .path = "zig/tests/llama/run.zig", .about = "Llama on Metal: greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
+        .{ .name = "tf-flint-run", .path = "zig/tests/flint/run.zig", .about = "Flint greedy tokens, every position's logits or a prompt's last logits, for the reference's check" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
     // the tokenizer for the programs that tokenize prompts themselves (the engine module has none)
@@ -512,8 +514,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         b.step("test-verbs", "verbs.zig and verbs_abi.zig, outside the fabric module").dependOn(&verbs_tests.step);
         test_step.dependOn(&verbs_tests.step);
     }
-    const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     const kimi_test = b.step("test-k3", "Kimi K3's host-side unit tests (no GPU work)");
     for ([_]*std.Build.Module{ kimi, tiktoken }) |m| {
         const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));

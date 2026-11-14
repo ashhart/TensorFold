@@ -7,11 +7,11 @@ const Drafted = lanes.drafted.Drafted;
 const ad = @import("xpu_dflash2.zig");
 
 const gpa = std.testing.allocator;
-const BASE: u64 = 0x100000; // the fake taps buffer's address: the drafter sees addresses only
-const ROW: u64 = 10; // its bytes a row
+pub const BASE: u64 = 0x100000; // the fake taps buffer's address: the drafter sees addresses only
+pub const ROW: u64 = 10; // its bytes a row
 
 /// A drafter that records every call that moves its contexts or its lattice, with its arguments.
-const Fake = struct {
+pub const Fake = struct {
     log: std.ArrayList(u64) = .empty,
     ends: [4]u32 = @splat(0),
     cur: u32 = 0,
@@ -74,7 +74,7 @@ const Fake = struct {
     }
 };
 
-const M = struct {
+pub const M = struct {
     pub const TOPK = 16;
     pub const WIN = 2047;
     pub const Block = struct { slot: u32, pending: u32 };
@@ -82,11 +82,11 @@ const M = struct {
     pub const Drafter = Fake;
 };
 
-const Chunk = struct { start: u64, rows: u32 };
+pub const Chunk = struct { start: u64, rows: u32 };
 const Tail = struct { start: u64, rows: u32 };
 
 /// The lane target as the adapter and Drafted see it: slots, the prompt pass's chunks, the last verify's windows.
-const Host = struct {
+pub const Host = struct {
     pub const max_slots = 4;
     pub const tap_row = ROW;
     pub const draft_step_ms = 0.6;
@@ -164,7 +164,7 @@ const Host = struct {
 };
 
 /// main's private path (native/xpu_lanes.zig before the move), its drafter calls ported as they were.
-const Private = struct {
+pub const Private = struct {
     d: *Fake,
     h: *Host,
     absorbed: [16]bool = @splat(false),
@@ -173,7 +173,7 @@ const Private = struct {
     chain_par: [4][16]i32 = undefined,
     chain_n: [4]u32 = @splat(0),
 
-    fn prefill(p: *Private, s: *Stream, slot: u32, at: u64) !void {
+    pub fn prefill(p: *Private, s: *Stream, slot: u32, at: u64) !void {
         var skip: u64 = (s.prompt_len -| M.WIN) -| at;
         for (p.h.chunks) |c| { // onTaps, a call per chunk
             try p.d.use(slot);
@@ -211,7 +211,7 @@ const Private = struct {
         @memset(&p.absorbed, false);
         p.count = 0;
     }
-    fn draft(p: *Private, requests: []const be.DraftRequest) !void {
+    pub fn draft(p: *Private, requests: []const be.DraftRequest) !void {
         const d = p.d;
         var which: [16]usize = undefined;
         var ps: [16][]const u32 = undefined;
@@ -288,7 +288,7 @@ const Step = union(enum) {
     tree: usize,
 };
 
-fn request(ss: []const *Stream, q: anytype) be.DraftRequest {
+pub fn request(ss: []const *Stream, q: anytype) be.DraftRequest {
     const s = ss[q.s];
     const follow: []const u32 = if (q.rows) |r| s.prompt()[0..r.len] else &.{};
     const cache = q.start + if (q.rows) |r| r.len else 0;

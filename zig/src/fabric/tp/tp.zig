@@ -11,7 +11,12 @@ pub const bootstrap = @import("bootstrap.zig");
 pub const fate = @import("fate.zig");
 pub const host = @import("host.zig");
 pub const device = @import("device.zig");
+pub const tcp = @import("tcp.zig");
+pub const stage = @import("stage.zig");
+pub const stage_hip = @import("stage_hip.zig");
+pub const hip_rig = @import("hip_rig.zig"); // tf-tp-test's tcp-hip opens the HIP runtime and a device with it
 pub const nccl = @import("nccl.zig");
+pub const group = @import("group.zig");
 pub const mailbox = @import("mailbox.zig");
 pub const hybrid = @import("hybrid.zig");
 pub const roce = @import("roce.zig");
@@ -222,6 +227,7 @@ pub const Session = struct {
 };
 
 test {
+    _ = group;
     _ = collective;
     _ = reference;
     _ = config;
@@ -244,6 +250,9 @@ test {
     _ = @import("roce_inflight_test.zig");
     _ = @import("host_test.zig");
     _ = @import("device_test.zig");
+    _ = @import("tcp_test.zig");
+    _ = @import("stage_test.zig");
+    _ = @import("stage_hip_test.zig");
     _ = @import("fate_test.zig");
     _ = @import("fate_lifetime_test.zig");
 }

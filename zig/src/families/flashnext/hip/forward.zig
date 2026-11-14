@@ -18,7 +18,7 @@ pub const Host = struct {
     staging: hip.HostBuffer,
     /// Bytes of `staging` this forward used: the stream is synchronized before a forward starts again.
     used: usize = 0,
-    tables: *const tables.Tables,
+    tables: *tables.Tables,
 
     /// `bytes` copied through the staging into fresh arena memory, queued on the stream.
     pub fn put(h: *Host, o: Ops, bytes: []const u8) !u64 {
@@ -197,6 +197,7 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
     for (segs) |g| {
         const n = g.tokens.len;
         for (g.tokens, 0..) |tok, r| {
+            if (tok >= d.vocab) return error.InvalidToken; // embed reads the table at id unchecked
             for (0..d.streams) |k| ids[(row + r) * d.streams + k] = @intCast(tok);
             pos[row + r] = @intCast(g.pos + r);
             ends[row + r] = @intCast(g.pos + r + 1);
@@ -341,6 +342,11 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         g.c.cin.base()
     else
         try o.arena.take((g.c.layout.tail_rows + g.tokens.len) * d.wide() * m.act.size());
+    // a window's words go up inside the round: a graph holds the copy, so every replay sends this round's own
+    if (window) if (m.gdn) |s| for (segs) |g| {
+        const p = s.planFor(g.c.id) orelse return error.CachesNotPlanned;
+        try p.send(o.stream);
+    };
     for (m.layers, 0..) |layer, i| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);

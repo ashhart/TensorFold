@@ -8,6 +8,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Family | Recipe |
 | --- | --- |
 | dots.mocr | [Native HIP OCR, BF16, one GPU](dots-mocr-hip.md) |
+| dots.mocr | [Native CUDA text decoder, BF16, one GPU](dots-mocr-cuda.md) |
 | Kimi K3 / K3.1 | [Native Metal bring-up, synthetic only, resident budget refusal](kimi-k3-metal.md) |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Parse | [Native HIP OCR, validation and qualification limits](nemotron-parse.md) |
@@ -29,6 +30,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | LFM2.5-24B-A2B | [Native Metal, MLX 4-bit, shared rounds](lfm2.5-24b-a2b.md) |
 | Spark-X2.6-4B | [Native CUDA](spark-x2.6-4b-cuda.md), [native Metal, the bf16 release, contexts to 1M](spark-x2.6-4b-metal.md) |
 | Nanbeige4.3-33B | [Native Metal, the bf16 and INT4 releases, the Llama family](nanbeige-4.3-33b-metal.md) |
+| Recursive Flint | [Native Metal, the publisher's affine 4-bit export, reasoning and tool calls](flint.md) |
 
 [Persisted serving-state identities](persisted-serving-keys.md) lists the disk owners, their compatibility keys and stale-state host checks.
 

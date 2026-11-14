@@ -16,10 +16,11 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     step.dependOn(&wiring.step);
 
     b.step("test-qwen35-request-starts-host", "Request-start and shared-KV startup refusal without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"request starts:"} })).step);
+    b.step("test-qwen35-shapes-host", "Captured window buckets for one and 2-8 rows without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"one-row and 2-8-row"} })).step);
     @import("minimax_cuda.zig").hostTests(b, host, cuda, mods.core, mods.lanes, step);
     @import("cuda_groups_host.zig").host(b, cuda, mods, step);
-    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stepped prefill:"} }));
-    b.step("test-qwen35-prefill-host", "Interrupted stepped prompt lifecycle without devices").dependOn(&prefill.step);
+    const prefill = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{ "Qwen stepped prefill:", "Qwen whole prefill:", "Qwen prefill opening:" } }));
+    b.step("test-qwen35-prefill-host", "Stepped, whole and opening prompt lifecycle without devices").dependOn(&prefill.step);
     step.dependOn(&prefill.step);
     const draft_config = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen DFlash2 config:"} }));
     b.step("test-qwen35-draft-config-host", "DFlash2 attention declarations agree with the CUDA kernels before loading").dependOn(&draft_config.step);
@@ -118,6 +119,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const prompt_moe = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"prompt MoE precision:"} }));
     b.step("test-qwen35-prompt-moe-host", "Prompt expert arithmetic stays separate from verify capacity without devices").dependOn(&prompt_moe.step);
     step.dependOn(&prompt_moe.step);
+    const stages = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"Qwen stage:"} }));
+    b.step("test-qwen35-stage-host", "Pipeline stage geometry: the stages' weights and state sum to one engine's").dependOn(&stages.step);
+    step.dependOn(&stages.step);
     const int8_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_w4a8_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_normalize_host.c"), .flags = &.{ "-std=c11", "-ffp-contract=off" } });
     int8_contract.addCSourceFile(.{ .file = b.path("zig/tests/cuda/w4a8_store_host.cpp"), .flags = &.{ "-std=c++17", "-fno-exceptions", "-fno-rtti" } });

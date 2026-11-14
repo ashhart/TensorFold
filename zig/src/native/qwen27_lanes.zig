@@ -1,4 +1,4 @@
-//! The 27B's lane core backend: a stream a runner slot, shared rounds across slots, DFlash2 trees for slot 0.
+//! The 27B's lane core: a stream a runner slot, shared rounds, DFlash2 trees for the first TF_Q27_DRAFT_SLOTS streams.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -56,6 +56,7 @@ pub const Metal = struct {
     owners: [max_streams]?*lanes.Stream = @splat(null), // the stream each runner slot holds
     contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
     draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
+    serial_copy_match: i64 = 5, // the lone callback's suffix rule, chosen once with its serving policy
     release_hook: ?Release = null,
     checkpoint_hook: ?lanes.stream.MarkHook = null, // unplanned prompt states only when the cache has room
     grow: ?Grow = null,
@@ -159,7 +160,7 @@ pub const Metal = struct {
         return .{ .ptr = b, .defer_lone_draft = b.runner.slots == 1, .first_before_draft = b.tensor_units, .vtable = &.{ .prefill = prefillFn, .prefill_step = slots.prefillStep, .cancel_prefill = slots.cancelPrefill, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .draft_capacity = draft_fns.capacityFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
-    /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
+    /// What the round loop reads at setup: up to TF_Q27_DRAFT_SLOTS streams draft trees; every stream verifies copies.
     pub fn facts(b: *const Metal) lanes.Model {
         const drafting = b.draft != null;
         const shared = b.runner.slots > 1;

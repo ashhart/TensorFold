@@ -102,8 +102,18 @@ const Served = struct {
         var pair: [2]std.c.fd_t = undefined;
         if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
         s.* = .{ .srv = undefined, .client = pair[0], .route_fd = pair[1], .route = undefined };
-        s.srv = try server.Server.init(gpa, t.io, stub.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
-        s.route = try std.Thread.spawn(.{}, serve, .{s});
+        errdefer _ = std.c.close(s.client);
+        bound(s.client);
+        s.srv = server.Server.init(gpa, t.io, stub.engine(), s.text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null) catch |e| {
+            _ = std.c.close(s.route_fd);
+            return e;
+        };
+        errdefer s.srv.deinit();
+        // from here the route thread owns route_fd and closes it on every exit (`serve`)
+        s.route = std.Thread.spawn(.{}, serve, .{s}) catch |e| {
+            _ = std.c.close(s.route_fd);
+            return e;
+        };
         errdefer {
             _ = std.c.shutdown(s.client, 1);
             s.route.join();
@@ -114,6 +124,8 @@ const Served = struct {
     }
 
     fn serve(s: *Served) void {
+        // every exit closes this end, so a client still writing the body gets EPIPE, not a full buffer for ever
+        defer _ = std.c.close(s.route_fd);
         var conn = Conn.init(gpa, s.route_fd, "test") catch return;
         defer conn.deinit();
         conn.timeouts = .{ .idle_ms = 2000, .read_ms = 2000, .write_ms = 2000 };
@@ -133,9 +145,9 @@ const Served = struct {
         }
     }
 
+    /// After `join`: the route thread has closed its own end.
     pub fn deinit(s: *Served) void {
         _ = std.c.close(s.client);
-        _ = std.c.close(s.route_fd);
         s.got.deinit(gpa);
         s.srv.deinit();
     }
@@ -165,10 +177,24 @@ const Served = struct {
     }
 };
 
+/// How long one client write may wait for the route to read: far past the route's own 2 s read timeout.
+const client_send_s = 10;
+
+/// The client end's writes end: a send timeout, and a closed route an error (EPIPE) rather than SIGPIPE.
+fn bound(fd: std.c.fd_t) void {
+    const tv: std.c.timeval = .{ .sec = client_send_s, .usec = 0 };
+    _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.SNDTIMEO, &tv, @sizeOf(std.c.timeval));
+    if (@hasDecl(std.posix.SO, "NOSIGPIPE")) {
+        const one: c_int = 1;
+        _ = std.c.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.NOSIGPIPE, &one, @sizeOf(c_int));
+    }
+}
+
 fn writeAll(fd: std.c.fd_t, data: []const u8) !void {
+    const flags: u32 = if (@hasDecl(std.posix.MSG, "NOSIGNAL")) std.posix.MSG.NOSIGNAL else 0;
     var sent: usize = 0;
     while (sent < data.len) {
-        const n = std.c.write(fd, data[sent..].ptr, data.len - sent);
+        const n = std.c.send(fd, data[sent..].ptr, data.len - sent, flags);
         if (n <= 0) return error.Closed;
         sent += @intCast(n);
     }
@@ -181,8 +207,14 @@ const Reply = struct { head: []const u8, body: []const u8 };
 fn ask(stub: *Stub, request_line: []const u8, body: []const u8) !Reply {
     var s: Served = undefined;
     try s.open(stub, request_line, body);
-    const head = try s.readHead();
-    const rest = try s.readRest();
+    // a reply that never comes still joins the route and frees the server, then fails the test
+    const head, const rest = read: {
+        errdefer {
+            s.join(stub);
+            s.deinit();
+        }
+        break :read .{ try s.readHead(), try s.readRest() };
+    };
     s.join(stub);
     const reply = Reply{ .head = try gpa.dupe(u8, head), .body = try gpa.dupe(u8, rest) };
     s.deinit();
@@ -395,6 +427,16 @@ test "a text route on an image engine is a 400 that names the images route" {
     try t.expectEqual(@as(usize, 0), stub.calls);
 }
 
+test "POST /v1/ocr on an image engine is the same 400, before the engine" {
+    var stub: Stub = .{ .inline_ = true };
+    const reply = try ask(&stub, "POST /v1/ocr", "{\"model\":\"m\",\"document\":{\"type\":\"image_url\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"}}");
+    defer gpa.free(reply.head);
+    defer gpa.free(reply.body);
+    try t.expect(std.mem.indexOf(u8, reply.head, " 400 ") != null);
+    try t.expect(std.mem.indexOf(u8, reply.body, "POST /v1/images/generations") != null);
+    try t.expectEqual(@as(usize, 0), stub.calls);
+}
+
 test "an images request to a text-only engine is the unknown-path 404" {
     var stub: Stub = .{ .caps = null };
     const reply = try ask(&stub, images_route, "{\"model\":\"m\",\"prompt\":\"hi\"}");
@@ -436,4 +478,19 @@ test "nothing reaches the client before the engine's finished event" {
     s.join(&stub);
     try t.expectEqual(@as(usize, 1), stub.calls); // the one submit, ended by the finished event the reply waited for
     s.deinit();
+}
+
+test "a route that returns before reading the body ends the client's write at once, not when the buffer fills" {
+    // a request line of four words: readRequest answers 400 from the head alone and the route returns unread
+    const body = try gpa.alloc(u8, 4 << 20); // past any socket buffer, Linux's or macOS's
+    defer gpa.free(body);
+    @memset(body, 'a');
+    var stub: Stub = .{};
+    var s: Served = undefined;
+    const start = std.Io.Clock.awake.now(t.io).toNanoseconds();
+    try t.expectError(error.Closed, s.open(&stub, "POST /v1/images/generations extra", body));
+    const took_ms = @divTrunc(std.Io.Clock.awake.now(t.io).toNanoseconds() - start, std.time.ns_per_ms);
+    // the route closed its end, so the write failed at once; a route that kept it open leaves only the send timeout
+    try t.expect(took_ms < client_send_s * std.time.ms_per_s / 2);
+    try t.expectEqual(@as(usize, 0), stub.calls);
 }

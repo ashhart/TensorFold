@@ -489,7 +489,9 @@ A quantized cache changes the output, so its replies differ from bf16's. Drafted
 families refuse `--kv-dtype` before any download.
 
 `--mtp-confidence P`, from 0 to 1, sets the probability under which a chain stops before a later draft; the CUDA
-default is 0.70, for one stream and for concurrent rounds. Only Flash Next's CUDA engine has this rule, so the MLX path and the other families refuse it.
+default is 0.70, for one stream and for concurrent rounds. The native HIP engine defaults to 0.80 for Flash Next on one
+RDNA 3.5 GPU (the Strix Halo and other gfx115x iGPUs) and to 0.3 on other cards, across several GPUs, and for Qwen 3.5,
+3.6 and 3.8. The MLX path refuses it.
 
 ## Native HIP on a Strix Halo iGPU
 
@@ -522,6 +524,10 @@ does not shift norm weights at load, and the uniform 4-bit checkpoint stores its
 taken after removing that offset. Task scores come from the HIP server: greedy, thinking off, GSM8K 300 zero-shot exact
 match, HumanEval 164 pass@1, MMLU-Pro 700 (50 a category, a letter within 16 tokens; replies without one count as wrong,
 159 of them for the uniform 4-bit checkpoint, 14 for oQ4e-mix5 and 4 for oQ4e).
+
+On this iGPU serving alone, draft chains stop at a 0.80 confidence floor by default (other cards and the other HIP
+families stay at 0.3);
+`--mtp-confidence P` overrides it, and `--mtp-drafts N` caps the chain depth at N drafts.
 
 ```bash
 zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Doptimize=ReleaseFast

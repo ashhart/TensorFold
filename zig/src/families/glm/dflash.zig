@@ -1,4 +1,4 @@
-//! DFlash2 drafts (--drafter): incoai/GLM-5.3-Flash-DFlash2 (CC BY-NC-ND 4.0, read unmodified), after z-lab (MIT).
+//! DFlash2 drafts (--drafter): incoai/GLM-5.3-Flash-DFlash2 (Apache-2.0, read unmodified), after z-lab (MIT).
 const std = @import("std");
 const cuda = @import("cuda");
 const mm = @import("cuda_mm.zig");
@@ -44,9 +44,16 @@ pub fn confidence() !f64 {
     return @import("sys").environment.read(f64, "TF_GLM_DRAFT_CONFIDENCE", 0.7);
 }
 
+/// The drafter MLP split: two ranks as before; three or more only with `wide` (TF_ROCE=1) and 256-aligned shares of FF.
+pub const MlpSplit = struct { split: bool, ff: usize };
+pub fn mlpSplit(world: usize, wide: bool) MlpSplit {
+    if (world < 2 or (world > 2 and !wide) or FF % world != 0 or (FF / world) % 256 != 0) return .{ .split = false, .ff = FF };
+    return .{ .split = true, .ff = FF / world };
+}
+
 /// Device bytes of the loader's raw scratch: a 4-bit linear's words, scales and biases, for the largest at `world`.
-pub fn rawBytes(bits: u8, world: usize) usize {
-    const ff: usize = if (world == 2) FF / 2 else FF; // the MLP width a rank holds, as dflash_load splits it
+pub fn rawBytes(bits: u8, world: usize, wide: bool) usize {
+    const ff = mlpSplit(world, wide).ff; // the MLP width a rank holds, as dflash_load splits it
     const nk: usize = @max(5 * D * D, 2 * ff * D); // fc, or gate and up stacked
     return if (bits == 4) nk / 2 + 2 * nk / 32 + 1024 else 256;
 }
@@ -60,7 +67,7 @@ pub const Kernels = struct {
     swiglu: cuda.Function,
     attn_part: cuda.Function,
     attn_merge: cuda.Function,
-    sum2: cuda.Function,
+    sumn: cuda.Function, // the split down's fp32 partials of every rank summed in rank order
     top16_part: cuda.Function,
     top16_merge: cuda.Function,
     gsum: cuda.Function,
@@ -110,7 +117,7 @@ pub const Drafter = struct {
     norm: u64 = 0,
     pred: []u16 = &.{}, // the selector's codebooks, bf16 [VOCAB][RANK] (host: it reads 16 rows a draft)
     succ: []u16 = &.{},
-    split: bool, // the MLP split across two ranks (gate and up by rows, down by K)
+    split: bool, // the MLP split across the ranks (gate and up by rows, down by K): mlpSplit
     ff: usize, // the MLP width this rank holds
     rank: usize,
     world: usize,
@@ -143,7 +150,7 @@ pub const Drafter = struct {
     logits: u64 = 0,
     part: u64 = 0, // the linears' K-slice partials
     gs: u64 = 0, // a 4-bit linear's input group sums [MAX_CTX][5 * D / 64]
-    sums: u64 = 0, // the split down's gathered fp32 partials [2][MAX_M][D]
+    sums: u64 = 0, // the split down's gathered fp32 partials [world][MAX_M][D]
     cin: u64 = 0,
     c1: u64 = 0,
     ctx: u64 = 0,

@@ -6,8 +6,8 @@ the same profile. It enables no additional optimization and supplies no new envi
 This is the foundation of [#1660](https://github.com/ashhart/TensorFold/issues/1660), beginning with the CUDA KV
 switches in its first table, their `_ALL` companions, the shared prompt store, GLM's and Nemotron's paging policies,
 the Dory, Gemma 4 and Spark2.5 pool-page switches, and Nemotron's paging on Metal. The registry also covers grouped learning modes.
-It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings keep their existing readers. `fast-exact` and `fast` are refused by name; they are not aliases for `stable` and cannot enable
-unqualified optimizations.
+It does not migrate every `TF_*` or `TENSORFOLD_*` variable yet. Other settings keep their existing readers. `fast-exact` is
+refused by name pending its token gates; `fast` is not planned: a speed mode that changes output tokens is not shipped.
 
 ## Explicit environment values win
 
@@ -241,8 +241,9 @@ the existing BF16 paging evidence is [#1322](https://github.com/ashhart/TensorFo
 ## Further profile work
 
 Migrate additional switch groups with their existing parsers and tests intact. A future `fast-exact` profile needs
-the issue's same-checkpoint token gates: solo, concurrent 1/2/4/8, and resumed runs for every affected family. An
-arithmetic-changing `fast` profile additionally needs each switch's measured quality gate and maintainer agreement.
+the issue's same-checkpoint token gates: solo, concurrent 1/2/4/8, and resumed runs for every affected family, plus a
+measurement where no served cell for that family gets slower. `fast` is not planned: a speed mode that changes output
+tokens is not shipped, so the arithmetic class has no profile to join.
 The host tests for this foundation establish lookup/CLI/reporting behavior, not those GPU or checkpoint gates.
 
 ## Four-rank RoCE relay ceiling

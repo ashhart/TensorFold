@@ -20,6 +20,8 @@ const prof_mod = @import("cuda_prof.zig");
 const pages_mod = @import("cuda_pages.zig");
 const l2pf_mod = @import("cuda_l2pf.zig");
 const prompt_pair = @import("cuda_prompt_pair.zig");
+const tp = @import("tp");
+const mesh_mod = @import("mesh");
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
@@ -60,6 +62,9 @@ pub const Engine = struct {
     lib: *const cuda.nccl.Library,
     comm: cuda.nccl.Comm,
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
+    mesh: mesh_mod.Mesh, // this rank's place: one tensor group of `world` ranks
+    backend: *tp.group.Backend, // the boundary's communicator over lib and comm, then the group once it is up
+    collective: tp.Collective, // backend's, made once so a const engine hands it out
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
     packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
@@ -139,7 +144,12 @@ pub const Engine = struct {
         fp.mtp += @intFromBool(o.drafter);
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         try ranks.probeStart(d, lib, comm, stream, o.settings, rank, world);
-        const share = try shard.Share.of(&c, rank, world);
+        const place = mesh_mod.Mesh.init(.{ .tensor = std.math.cast(u32, world) orelse 0 }, std.math.cast(u32, rank) orelse std.math.maxInt(u32)) catch return error.BadRank;
+        const tg = place.group(.tensor);
+        const share = try shard.Share.of(&c, tg.rank, tg.world);
+        const backend = try gpa.create(tp.group.Backend);
+        errdefer gpa.destroy(backend);
+        backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
         const kb = @import("cuda_kda_block.zig");
         kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
         const spans = try gpa.alloc(shard.Span, world);
@@ -154,7 +164,7 @@ pub const Engine = struct {
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
-        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
+        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         const Tile = struct {
@@ -252,14 +262,22 @@ pub const Engine = struct {
         e.m.deinit();
         e.stream.deinit();
         e.gpa.free(e.spans);
+        e.gpa.destroy(e.backend);
         const gpa = e.gpa;
         gpa.destroy(e);
     }
 
     const freeProfs = @import("cuda_engine_prof.zig").freeProfs;
 
+    /// The serving group, its RoCE wires open: the main stream's and the boundary's gathers take its route now.
+    pub fn installGroup(e: *Engine, g: *cuda.tp_group.Group) void {
+        e.group = g;
+        e.backend.group = g;
+        std.log.info("[tensorfold] glm: rank {d} of {d} sums through the {t} collective (RoCE gathers {s})", .{ g.rank, g.world, e.collective.kind(), if (g.fast != null or g.multi != null) "on" else "off" });
+    }
+
     pub fn exchange(e: *const Engine) fw.Exchange {
-        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .group = e.group } };
+        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .collective = e.collective } };
     }
 
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {

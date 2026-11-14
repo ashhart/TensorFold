@@ -13,5 +13,4 @@ pub fn main() void {
     inline for (.{ &q.gdn_pool_gpu.Pool.init, &q.gdn_pool_gpu.Pool.forward, &q.gdn_pool_gpu.Pool.commit, &q.gdn_pool_gpu.Pool.clearSlot, &q.gdn_hook.Hook.forward, &q.gdn_hook.Hook.commit }) |function| std.mem.doNotOptimizeAway(function);
     inline for (.{ &q.attention.Attention.init, &q.attention.Attention.preprocess, &q.attention.Attention.encode, &q.attention.Attention.keep, &q.attention.Scratch.init, &q.attention.Scratch.upload, &q.attention.Binding.upload, &q.attention.Binding.uploadKeep }) |function| std.mem.doNotOptimizeAway(function);
     inline for (.{ &q.decode_round.Runner.init, &q.decode_round.Runner.verify, &q.decode_round.Runner.keep, &q.decode_round.Runner.reset }) |function| std.mem.doNotOptimizeAway(function);
-    inline for (.{ &q.prompt_gpu.Kernels.rms, &q.prompt_gpu.Kernels.activation, &q.prompt_gpu.Kernels.normalizedQk, &q.prompt_gpu.Kernels.gdnDecay, &q.prompt_state_gpu.Kernels.convolution, &q.prompt_state_gpu.Kernels.recurrence }) |function| std.mem.doNotOptimizeAway(function);
 }

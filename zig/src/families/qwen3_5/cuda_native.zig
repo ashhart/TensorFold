@@ -414,7 +414,7 @@ pub const Lanes = struct {
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        if (stream.readout != null) while (!try readout.step(cast(ptr), stream, 0)) {} else return prefill.run(cast(ptr), stream);
+        return prefill.whole(cast(ptr), stream);
     }
 
     fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, max_rows: u32) !bool {
@@ -457,7 +457,7 @@ pub const Lanes = struct {
             try self.e.penalties.window(self.gpa, stream, cache.len, token);
             try self.e.penalties.row(self.gpa, 0, stream.penalties, &.{});
         }
-        try self.e.forward(&.{.{ .cache = cache, .rows = 1 }}, &.{token}, .{ .draws = &.{pick(stream.sampling, position)} });
+        try self.e.forward(&.{.{ .cache = cache, .rows = 1, .undo = self.e.learning != null }}, &.{token}, .{ .draws = &.{pick(stream.sampling, position)} });
         cache.last = null;
         return self.e.tokens[0];
     }
@@ -499,7 +499,7 @@ pub const Lanes = struct {
             var masked = false;
             while (at + n < windows.len and n < E.max_segs and total + windows[at + n].rows() <= self.e.verify_rows) : (n += 1) {
                 const w = windows[at + n];
-                parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows(), .parents = w.parents };
+                parts[n] = .{ .cache = self.caches.get(w.stream).?, .rows = w.rows(), .parents = w.parents, .undo = self.e.learning != null };
                 ids[total] = w.pending;
                 @memcpy(ids[total + 1 ..][0..w.tokens.len], w.tokens);
                 for (w.positions, 0..) |p, r| picks[total + r] = pick(w.stream.sampling, p);
