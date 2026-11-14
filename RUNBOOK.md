@@ -469,11 +469,18 @@ After a memory refusal, reduce the context or reply limit, or choose a smaller q
 `--learn` writes a shared prompt state to disk only while the disk keeps `--learn-min-free-gib` free, 4 GiB by default.
 Below that, learning pauses with a log line and serving goes on; a refused write is tried again after 1 to 60 seconds, sooner when space comes back.
 Each learned file carries a checksum over its header and contents, so a damaged, truncated or older file is refused and learned again.
-`--prompt-cache-disk DIR` writes every kept prompt state behind to that directory, while the engine idles,
-and a SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
+`--prompt-cache-disk DIR` writes kept prompt states to that directory; most families write while idle.
+A SIGTERM stop writes what waits within 20 seconds. It is equivalent to `--learn-conversations --learn-dir DIR`;
 the old flags remain supported, and `--learn-conversations` alone keeps its existing default directory.
 Use either spelling: combining `--prompt-cache-disk` with `--learn-dir` or `--learn-conversations` is refused.
 The startup line names the disk directory and the device budget when the engine reports one.
+GLM on Metal stages every resident keep, including each planned mark, before its borrowed MLA rows can be reused.
+It does so whatever `--spill-gib` is set to: with `--spill-gib`, those keeps are staged when kept, not at eviction.
+That moves the gather and its GPU wait into the request path.
+A busy staging permit waits and retries; an image larger than the permit finishes through the chunk writer there.
+Other admission or copy failures are named in the log; that keep remains in RAM only, without an automatic retry.
+The synchronous writer finishes at keep; otherwise an owned staged image publishes in the background.
+More marks can write more bytes per turn and consume the daily budget sooner; inspect the disk log's byte counts.
 Stop a server with SIGTERM, not SIGKILL, so its last turn is kept.
 `--learn-daily-gib` caps those writes a day (32 GiB by default); `DELETE /v1/imprint` forgets one model's conversation states.
 

@@ -43,8 +43,16 @@ pub const Job = struct {
 
 /// A newly kept entry joins the queue (the RAM store calls this on every new keep), with the request's chunk starts.
 pub fn queued(r: *Rows, e: *pc.Entry, starts: []const u32) void {
-    const own = rows_store.startsBelow(r, r.gpa, starts, e.at) catch return;
-    r.queue.append(r.gpa, .{ .entry = e, .starts = own }) catch r.gpa.free(own);
+    const own = rows_store.startsBelow(r, r.gpa, starts, e.at) catch |err| return refusedQueue(r, e.at, err);
+    r.queue.append(r.gpa, .{ .entry = e, .starts = own }) catch |err| {
+        r.gpa.free(own);
+        refusedQueue(r, e.at, err);
+    };
+}
+
+fn refusedQueue(r: *Rows, at: u32, err: anyerror) void {
+    r.counts.skipped += 1;
+    pc.note("imprint: saving {d} tokens skipped ({s})", .{ at, @errorName(err) });
 }
 
 /// An entry leaving the RAM store leaves the queue, and its write is given up if under way.
@@ -62,9 +70,8 @@ pub fn pending(r: *const Rows) bool {
     return r.job != null or ((r.spill != .evicted or r.flush_clock != null) and r.queue.items.len > 0);
 }
 
-/// --spill-gib: an entry evicted from RAM is written now, unless the disk holds it already; the write under way first.
-pub fn evicted(r: *Rows, e: *pc.Entry) void {
-    if (r.spill == .off) return;
+/// Finish a readable image now, including one whose mutable rows cannot wait for ordinary write-behind.
+pub fn preserve(r: *Rows, e: *pc.Entry) void {
     if (r.job) |j| if (j.entry != e) while (r.job != null) {
         _ = step(r);
     };
