@@ -89,5 +89,15 @@ test "Qwen pages default: the learner's and the prefix share's refusals stop bef
 }
 
 test {
+    _ = @import("cuda_shard.zig");
+}
+
+test "the shard plan's head widths are the kernels'" {
+    const plan = @import("cuda_shard.zig");
+    try @import("std").testing.expectEqual(geometry.head_dim, plan.head_dim);
+    try @import("std").testing.expectEqual(geometry.dk, plan.dk);
+}
+
+test {
     _ = @import("cuda_request_starts_test.zig");
 }
