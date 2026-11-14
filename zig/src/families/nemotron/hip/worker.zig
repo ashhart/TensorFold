@@ -3,6 +3,7 @@ const std = @import("std");
 const hip = @import("hip");
 const serve = @import("hip_serve");
 const lanes = @import("lanes.zig");
+const pages_ = @import("pages.zig");
 
 const protocol = serve.protocol;
 const Hip = lanes.Hip;
@@ -40,6 +41,8 @@ pub const Worker = struct {
         f.close(m[1]);
         const l = try w.h.make();
         errdefer w.h.free(l);
+        // the resume is a row of the prompt inside the stream, and the pages fit its table and this rank's pool
+        if (m[2] > prompt.len or m[2] > l.s.cap or !w.fits(l, 0, table)) return error.ShortMessage;
         l.id = m[1];
         try l.s.set(0, table);
         if (m[3] != protocol.no_snapshot) try w.h.prefix.putSlot(m[3], l);
@@ -78,12 +81,19 @@ pub const Worker = struct {
         try w.h.keepRows(try f.lane(m[1]), m[2]);
     }
 
-    pub fn pages(_: *Worker, l: *Lane, first: usize, ids: []const u32) !void {
+    /// Whether rank 0's table from page `first` on fits the lane's table and this rank's pool.
+    fn fits(w: *const Worker, l: *const Lane, first: usize, ids: []const u32) bool {
+        return protocol.pagesFit(first, ids, l.s.ids.items.len, pages_.pagesFor(l.s.cap), w.h.e.pool.count);
+    }
+
+    pub fn pages(w: *Worker, l: *Lane, first: usize, ids: []const u32) !void {
+        if (!w.fits(l, first, ids)) return error.ShortMessage;
         try l.s.set(first, ids);
     }
 
     /// Slot `slot` takes the stream's Mamba state and last row.
     pub fn snap(w: *Worker, l: *Lane, slot: u32) !void {
+        if (!protocol.slotFits(slot, w.h.prefix.slots.slots.items.len)) return error.ShortMessage;
         try w.h.prefix.takeSlot(slot, l);
     }
 
