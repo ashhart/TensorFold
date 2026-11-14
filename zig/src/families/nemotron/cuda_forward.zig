@@ -12,6 +12,7 @@ const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("living").lesson_route;
 const kept = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
+const worker = @import("cuda_worker.zig");
 
 pub const Delta = enum { none, dense, moe };
 
@@ -67,6 +68,8 @@ pub const Forward = struct {
     unread: bool = false, // nothing reads this prompt chunk's rows: it stops at its last state write
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
+    pass: ?worker.Pass = null, // a window's jobs to the other rank under one header (null: one a job)
+    flight: ?*worker.Flight = null, // a window's jobs out and replies in so far, which its failure reads
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
     page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
@@ -169,15 +172,23 @@ pub const Forward = struct {
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
-        const routed = f.routedWindow(segs);
-        try routed.windowRows(segs);
+        var routed = f.routedWindow(segs);
+        var flight: worker.Flight = .{ .jobs = if (routed.pass) |p| p.jobs else 0 };
+        routed.flight = &flight;
+        routed.windowRows(segs) catch |err| {
+            worker.windowFailed(f.ops.s, flight, @errorName(err)); // ends every rank if rank 1 waits on the window
+            return err;
+        };
     }
 
     /// Selects the window schedule while retaining each segment's lesson latch and state.
     pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
-        if (f.c.latent > 0 and f.tp != null) routed.side = null;
+        if (f.c.latent > 0 and f.tp != null) {
+            routed.side = null;
+            routed.pass = worker.Pass.blocks(f.w.blocks);
+        }
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;
