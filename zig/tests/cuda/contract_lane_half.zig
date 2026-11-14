@@ -1,4 +1,4 @@
-//! The lane's half tiles (16x32, MXFP8 and BF16, bf16 and fp32 out): the 64-column tile's bits; control: 1.5x scale.
+//! Half tiles against the 64-column tile's bits, the fused split-K form against the cluster's; control: 1.5x scale.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -20,7 +20,36 @@ const served = [_]c.Shape{
     .{ .rows = 1, .n = 324, .k = 10240 }, .{ .rows = 7, .n = 512, .k = 2560 }, .{ .rows = 3, .n = 96, .k = 512 },
 };
 
-pub fn spec(kind: Kind, format: cuda.qmmf.Out) c.Spec {
+/// The split-K decode calls the fused form takes (out_proj and o_proj, the drafter's fc), and two narrow split shapes.
+const served_fused = [_]c.Shape{
+    .{ .rows = 1, .n = 2560, .k = 6144 },  .{ .rows = 7, .n = 2560, .k = 6144 }, .{ .rows = 17, .n = 2560, .k = 6144 },
+    .{ .rows = 40, .n = 2560, .k = 5120 }, .{ .rows = 5, .n = 640, .k = 2560 },  .{ .rows = 16, .n = 324, .k = 10240 },
+};
+
+pub fn spec(kind: Kind, format: cuda.qmmf.Out, fused: bool) c.Spec {
+    if (fused) return .{
+        .name = switch (format) {
+            .bf16 => switch (kind) {
+                .mxfp8 => "cuda MXFP8 lane split-K calls on the fused form",
+                .bf16 => "cuda BF16 lane split-K calls on the fused form",
+                .control => "control: MXFP8 fused form at a 1.5x tensor scale posing as the cluster kernel",
+            },
+            .f32 => switch (kind) {
+                .mxfp8 => "cuda MXFP8 lane split-K calls on the fused form, fp32 out",
+                .bf16 => "cuda BF16 lane split-K calls on the fused form, fp32 out",
+                .control => "control: MXFP8 fp32-out fused form at a 1.5x tensor scale posing as the cluster kernel",
+            },
+        },
+        .accum = .f32,
+        .depth = depth,
+        .out = switch (format) {
+            .bf16 => .bf16,
+            .f32 => .f32,
+        },
+        .replaces = "the cluster kernel's K slices",
+        .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 32, .min = 32 }, .{ .size = 512, .step = 64, .min = 64 } },
+        .served = &served_fused,
+    };
     return .{
         .name = switch (format) {
             .bf16 => switch (kind) {
@@ -51,6 +80,7 @@ pub const Half = struct {
     lane: *cuda.qmmf.Lane,
     kind: Kind,
     format: cuda.qmmf.Out = .bf16,
+    fused: bool = false,
     d: ?Dense = null,
     weight: cuda.qmmf.Weight = undefined,
     x: u64 = 0,
@@ -64,7 +94,7 @@ pub const Half = struct {
     }
 
     pub fn kernel(self: *Half) g.Kernel {
-        return .{ .spec = spec(self.kind, self.format), .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
+        return .{ .spec = spec(self.kind, self.format, self.fused), .ctx = self, .vt = &vt, .control = if (self.kind == .control) .shapes else null };
     }
 
     const vt = g.hooks(Half);
@@ -82,7 +112,7 @@ pub const Half = struct {
         self.d = null;
         self.rig.reset();
         self.part = 0;
-        if (shape.rows == 0 or shape.rows > 16 or shape.n == 0 or shape.k == 0 or shape.k % 64 != 0) return false;
+        if (shape.rows == 0 or shape.rows > @as(usize, if (self.fused) 64 else 16) or shape.n == 0 or shape.k == 0 or shape.k % 64 != 0) return false;
         const a = self.rig.gpu.gpa;
         const d = try Dense.init(a, shape, 1);
         self.d = d;
@@ -144,8 +174,12 @@ pub const Half = struct {
     fn launch(self: *Half, half: bool, out: u64) !void {
         const d = self.d.?;
         const keep = self.lane.half_below;
-        defer self.lane.half_below = keep;
-        self.lane.half_below = if (half) std.math.maxInt(usize) else 0;
+        const keep_fuse = cuda.qmmf.fuse_split_n;
+        defer {
+            self.lane.half_below = keep;
+            cuda.qmmf.fuse_split_n = keep_fuse;
+        }
+        if (self.fused) cuda.qmmf.fuse_split_n = if (half) 1 else 0 else self.lane.half_below = if (half) std.math.maxInt(usize) else 0;
         var w = self.weight;
         if (half and self.kind == .control) w.scale = 1.5;
         try self.lane.matmulOut(self.rig.s, self.x, d.shape.k, d.shape.rows, w, out, self.format, self.part);
