@@ -9,9 +9,13 @@ const Launch = @import("metal_limits.zig").Launch;
 /// The dsv41 launch's sources, or null when the name belongs to another family.
 pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8, comptime assemble: bool) !?Launch {
     _ = device;
+    if (std.mem.startsWith(u8, d.name, "dsv41 xmma units ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = try tf.dsv41_metal.xmma.source(a, "", &.{}, true), .pre_m5 = "" };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 xmma ")) {
         if (!assemble) return @as(Launch, undefined);
-        const b = try tf.dsv41_metal.xmma.source(a, "", &.{});
+        const b = try tf.dsv41_metal.xmma.source(a, "", &.{}, false);
         return .{ .decl = d, .function = fun, .here = b, .pre_m5 = b };
     }
     if (std.mem.startsWith(u8, d.name, "dsv41 fp8 mma ")) {
