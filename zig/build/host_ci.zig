@@ -169,6 +169,7 @@ const linux_host = [_][]const u8{
     "test-flashnext-vision-memory-host",
     "test-gemma4-config",
     "test-gemma4-load-parts-host",
+    "test-gemma4-metal-steps-host",
     "test-gemma4-owners-host",
     "test-gemma4-prompt-head-host",
     "test-glm-dflash-host",

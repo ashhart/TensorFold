@@ -31,6 +31,8 @@ pub const Cache = struct {
     logits: mtl.Buffer,
     /// The drafter's rows: the prompt's last (in `last_tap`), then each verify's in the scratch.
     tap: Tap = .{},
+    /// A stepped prompt's latest chunk of tapped rows, in the prompt scratch (its gen: the backend's prompt_gen).
+    chunk_tap: Tap = .{},
     last_tap: ?mtl.Buffer = null,
     follow: ?mtl.ResidencySet.Follow = null,
 
