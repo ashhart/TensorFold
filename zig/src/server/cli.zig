@@ -43,6 +43,8 @@ pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
     .{ .name = "--allowed-host", .kind = .append, .native = true },
     .{ .name = "--allowed-origin", .kind = .append, .native = true },
+    .{ .name = "--stall-seconds", .native = true },
+    .{ .name = "--stall-exit", .kind = .store_true, .native = true },
     .{ .name = "--allowed-controls", .native = true },
     .{ .name = "--port", .native = true },
     .{ .name = "--config", .native = true }, // a TOML file of these flags, read first (cli_config.zig)
@@ -183,6 +185,8 @@ pub const Args = struct {
     api_key: []const []const u8 = &.{},
     allowed_host: []const []const u8 = &.{},
     allowed_origin: []const []const u8 = &.{},
+    stall_ns: u64 = 0,
+    stall_exit: bool = false,
     allowed_controls: ?@import("drama_allow.zig").Policy = null,
     api_key_file: ?[]const u8 = null,
     metrics_open: bool = false,
@@ -329,6 +333,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
     if (out.vision_pdf and !out.vision) return fail(u, a, "--vision-pdf needs --vision", .{});
     try @import("cli_late.zig").check(a, out, &repeated, u);
+    if (out.stall_exit and out.stall_ns == 0) return fail(u, a, "--stall-exit needs --stall-seconds greater than 0", .{});
     out.alias = repeated.alias.items;
     out.name_priority = repeated.priorities.items;
     out.api_key = repeated.keys.items;
@@ -450,7 +455,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--unix-socket")) out.unix_socket = v else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--name-priority")) try repeated.priorities.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--stall-exit")) out.stall_exit = true else if (is(name, "--stall-seconds")) out.stall_ns = @import("core").stall_timeout.timeoutNs(v) catch return fail(u, a, "argument --stall-seconds: expected whole seconds from 0 (off) without overflow: '{s}'", .{v}) else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--prompt-cache-disk")) {

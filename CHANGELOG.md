@@ -2,6 +2,10 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Lane hosts: `--stall-seconds N` (off by default) marks an engine whose round stays open past N seconds unavailable (`/health` 503, new requests `engine_unavailable`, counted in `tensorfold:engine_stalls_total`), and `--stall-exit` restarts with status 70; idle waits never count (#3112).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).

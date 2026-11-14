@@ -11,6 +11,10 @@ const window_ns: i96 = 2 * std.time.ns_per_s;
 /// Engine.status: the counts, read under the host's lock.
 pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const h: *LaneHost = @ptrCast(@alignCast(ctx));
+    if (h.stall.unhealthy.load(.acquire)) {
+        out.* = .{ .healthy = false, .engine_stalls_total = h.stall.count() };
+        return;
+    }
     h.mutex.lockUncancelable(h.io);
     defer h.mutex.unlock(h.io);
     const now = std.Io.Clock.awake.now(h.io).toNanoseconds();
@@ -21,6 +25,7 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const n = @min(stream_tokens.len, h.live_tokens.items.len);
     @memcpy(stream_tokens[0..n], h.live_tokens.items[0..n]);
     out.* = .{
+        .engine_stalls_total = h.stall.count(),
         .healthy = !h.closing and !h.stale and (if (h.health) |source| source.read(source.ctx) else true),
         .running = @intCast(h.admitted.items.len),
         .waiting = @intCast(h.queued.items.len),

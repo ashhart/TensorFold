@@ -64,7 +64,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, dir: []const u8, model_typ
         problem.* = "--record writes rows from the CUDA engine only so far: serve without --record";
         return null;
     }
-    return native.open(a, gpa, io, try cli.request(a, dir, model_type, args), problem);
+    const opened = (try native.open(a, gpa, io, try cli.request(a, dir, model_type, args), problem)) orelse return null;
+    errdefer opened.close(opened.ctx);
+    if (args.stall_ns > 0) {
+        const configure = opened.engine.vtable.configure_stall orelse {
+            problem.* = "--stall-seconds is not supported by this engine";
+            opened.close(opened.ctx);
+            return null;
+        };
+        try configure(opened.engine.ctx, .{ .timeout_ns = args.stall_ns, .exit = args.stall_exit, .family = model_type });
+    }
+    return opened;
 }
 
 /// A tensor-parallel rank above 0 runs rank 0's steps until it stops; false with ``problem`` set when it cannot.
