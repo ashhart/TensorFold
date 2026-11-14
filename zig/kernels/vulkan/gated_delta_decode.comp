@@ -146,7 +146,7 @@ vec2 gdn_gates(uint head) {
 #endif /* GDN_COMPOSED_ORDER */
     float x = bf16_load(bf16_store(a_in + dt));
 #ifdef ORACLE_QWEN35
-    // Preserve the omitted contract, precision, and host-interface facts from the original comment.
+    // Qwen3.5 gate: bf16 softplus, then g = exp(-(exp(a_log) * sp)).
     float sp = bf16_load(bf16_store(max(x, 0.0f) + log(1.0f + exp(-abs(x)))));
     g = exp(-(exp(a_log) * sp));
 #else /* ORACLE_QWEN35 */
