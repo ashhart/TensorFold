@@ -5,23 +5,25 @@ const glm = @import("glm");
 const lanes = @import("lanes");
 const ex = cuda.exl3_experts;
 const Capture = struct {
-    const Call = struct { id: usize, grid: [3]u32, block: u32, args: [20]u64 = @splat(0) };
+    const Call = struct { id: usize, grid: [3]u32, block: u32, args: [24]u64 = @splat(0) };
     var calls: [256]Call = undefined;
     var count: usize = 0;
     var copies: [16]cuda.abi.Memcpy2D = undefined;
     var copied: usize = 0;
     fn launch(f: cuda.abi.Function, gx: c_uint, gy: c_uint, gz: c_uint, bx: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         calls[count] = .{ .id = @intFromPtr(f), .grid = .{ gx, gy, gz }, .block = bx };
-        if (@intFromPtr(f) >= 11 and @intFromPtr(f) <= 13) {
-            const sizes: []const u8 = switch (@intFromPtr(f)) {
-                11 => &.{ 8, 4, 8, 8, 4 },
-                12 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
-                else => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
-            };
-            for (sizes, 0..) |size, i| {
-                const bytes: [*]const u8 = @ptrCast(args.?[i].?);
-                calls[count].args[i] = if (size == 8) std.mem.readInt(u64, bytes[0..8], .little) else std.mem.readInt(u32, bytes[0..4], .little);
-            }
+        const sizes: []const u8 = switch (@intFromPtr(f)) {
+            2 => &.{ 8, 4, 4, 8, 8, 8, 8, 8, 4, 4, 4 },
+            3 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4 },
+            5 => &.{ 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4 },
+            11 => &.{ 8, 4, 8, 8, 4 },
+            12 => &.{ 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4 },
+            13 => &.{ 8, 8, 8, 8, 8, 8, 8, 4, 4, 4 },
+            else => &.{},
+        };
+        for (sizes, 0..) |size, j| {
+            const bytes: [*]const u8 = @ptrCast(args.?[j].?);
+            calls[count].args[j] = if (size == 8) std.mem.readInt(u64, bytes[0..8], .little) else std.mem.readInt(u32, bytes[0..4], .little);
         }
         count += 1;
         return cuda.abi.success;
@@ -120,19 +122,49 @@ test "exl3 prompt: 4096-row calls keep input and output offsets on both sides of
     try std.testing.expectEqual(@as(usize, 2), outputs);
 }
 
-test "exl3 prompt: decode retains the existing split-K launches" {
-    try run(4, false, true);
-    try std.testing.expectEqual(@as(usize, 0), Capture.by(12).len);
-    try std.testing.expect(Capture.by(1).len > 0 and Capture.by(2).len > 0 and Capture.by(3).len > 0);
-    try run(1030, false, true);
-    try std.testing.expectEqual(@as(usize, 4), Capture.copied);
-    try std.testing.expectEqual(@as(usize, 1024), Capture.copies[0].height);
-    try std.testing.expectEqual(@as(usize, 6), Capture.copies[2].height);
-    try std.testing.expectEqual(@as(u64, 0x300000000 + 1024 * 9 * 4), Capture.copies[2].src);
-    try std.testing.expectEqual(@as(u64, 0x400000000 + 1024 * 9 * 512 * 4), Capture.copies[3].dst);
-    try std.testing.expectEqual(@as(usize, 8 * 4), Capture.copies[0].width);
-    try std.testing.expectEqual(@as(usize, 9 * 4), Capture.copies[0].src_pitch);
-    try std.testing.expectEqual(@as(usize, 9 * 512 * 4), Capture.copies[1].dst_pitch);
+test "exl3 prompt: decode uses item plans and keeps slot and input offsets across chunks" {
+    for ([_]usize{ 4, 1030 }) |rows| {
+        try run(rows, false, true);
+        try std.testing.expectEqual(@as(usize, 0), Capture.copied);
+        try std.testing.expectEqual(@as(usize, 0), Capture.by(1).len);
+        try std.testing.expectEqual(@as(usize, 0), Capture.by(12).len);
+        var rotations: usize = 0;
+        var projections: usize = 0;
+        var outputs: usize = 0;
+        for (Capture.calls[0..Capture.count]) |call| {
+            if (call.id == 2) {
+                const at = rotations * 1024;
+                const n: usize = @min(rows - at, 1024);
+                try std.testing.expectEqual(@as(u64, 0x200000000 + at * 520 * 2), call.args[0]);
+                try std.testing.expectEqual(@as(u64, 0x300000000 + at * 9 * 4), call.args[3]);
+                try std.testing.expectEqual(@as(u32, @intCast(n * 9)), call.grid[0]);
+                rotations += 1;
+            }
+            if (call.id == 3) {
+                try std.testing.expectEqual(@as(u64, 10000), call.args[6]);
+                try std.testing.expectEqual(@as(u64, 30000), call.args[7]);
+                try std.testing.expectEqual(@as(u64, 20000), call.args[8]);
+                try std.testing.expectEqual(@as(u64, 16), call.args[14]);
+                try std.testing.expectEqual(@as(u64, 9), call.args[15]);
+                try std.testing.expectEqual(@as(u64, 1), call.args[19]);
+                try std.testing.expectEqual(@as(u64, 9), call.args[20]);
+                projections += 1;
+            }
+            if (call.id == 5) {
+                const at = outputs * 1024;
+                const n: usize = @min(rows - at, 1024);
+                try std.testing.expectEqual(@as(u64, 0x300000000 + at * 9 * 4), call.args[1]);
+                try std.testing.expectEqual(@as(u64, 0x400000000 + at * 9 * 512 * 4), call.args[3]);
+                try std.testing.expectEqual(@as(u64, n * 9), call.args[6]);
+                try std.testing.expectEqual(@as(u64, 9), call.args[10]);
+                outputs += 1;
+            }
+        }
+        const chunks = (rows + 1023) / 1024;
+        try std.testing.expectEqual(chunks, rotations);
+        try std.testing.expectEqual(chunks * 2, projections);
+        try std.testing.expectEqual(chunks, outputs);
+    }
 }
 
 test "exl3 prompt: the common dispatch requires verified mcg4 geometry and keeps every fallback" {
