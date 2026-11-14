@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron 3.5 on CUDA: with several streams, every stream's MTP draft draws and target draws run in a fixed number of launches (15 instead of 112 at 8 greedy streams) when the streams share a draw mode; tokens unchanged (#3124).
+
 - CUDA: the release server refuses, by name at startup, a GPU it has no kernels for (#2914, #2904).
 
 - Linux: memory pressure can be read from PSI and MemAvailable; off by default (#2156).
