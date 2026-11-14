@@ -66,7 +66,7 @@ pub const Mutation = enum {
             .decode_no_rescale => .{ .from = "const float rescale = fast::exp(top - peak);", .to = "const float rescale = 1.0f;" },
             .merge_unscaled_mass => .{ .from = "ls[b] * fast::exp(ms[b] - top) : 0.0f;", .to = "ls[b] : 0.0f;" },
             .matvec_drops_tail => .{ .from = "for (uint i = 8 * lane; i < a.k; i += 256) {", .to = "for (uint i = 8 * lane; i + 256 - 8 * lane <= a.k; i += 256) {" },
-            .gemm_untransposed => .{ .from = "gemm_nax<bfloat16_t, false, true, AM, AN", .to = "gemm_nax<bfloat16_t, false, false, AM, AN" },
+            .gemm_untransposed => .{ .from = "TF_GEMM_NAX_KERNEL(ll_gemm_00, bfloat16_t, false, true, false, false)", .to = "TF_GEMM_NAX_KERNEL(ll_gemm_00, bfloat16_t, false, false, false, false)" },
             .prompt_sees_next_key => .{ .from = "col > row ? kMasked", .to = "col > row + 1 ? kMasked" },
             .q4_matvec_first_zero => .{ .from = "z = ll_q4_zero(Z, j, g, groups);", .to = "z = ll_q4_zero(Z, j, 0, groups);" },
             .q4_dequant_reversed_nibbles => .{ .from = "out[e] = bfloat(ll_q4(word, e, z, s));", .to = "out[e] = bfloat(ll_q4(word, 7 - e, z, s));" },
