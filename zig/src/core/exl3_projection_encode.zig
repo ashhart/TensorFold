@@ -28,6 +28,12 @@ const disjoint = core.disjoint;
 const readonly = core.readonly;
 
 pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y: View, scratch: View, r: Rows) !void {
+    const a = try matrixArgs(m, x, y, scratch, r);
+    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+}
+
+/// The validated kernel arguments of a dense call (`encode` and the chain entries share them).
+pub fn matrixArgs(m: Matrix, x: View, y: View, scratch: View, r: Rows) !Args {
     const storage_bytes = try m.checkStorage();
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
     if (r.grouped) return error.InvalidExl3GroupedRows;
@@ -39,7 +45,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y:
     a.has_bias = @intFromBool(m.bias != null);
     a.tile_k_stride = try m.kStride();
     a.tile_n_stride = m.nStride();
-    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+    return a;
 }
 
 /// A kept-dense EXL3 matrix: a bf16 weight beside the input/output rotation scales, no trellis.
@@ -222,6 +228,12 @@ pub fn encodePrefillInt8(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, 
 
 /// GPU routes choose caller-validated resident descriptors; grouped padding uses maxInt(u32).
 pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Experts, x: View, y: View, scratch: View, r: Rows) !void {
+    const a = try indexedArgs(experts, x, y, scratch, r);
+    stages(p, e, a, scratch, scratch, scratch, scratch, experts.descriptors, x, y, scratch, r);
+}
+
+/// The validated kernel arguments of an indexed call (`encodeIndexed` and the chain entries share them).
+pub fn indexedArgs(experts: Experts, x: View, y: View, scratch: View, r: Rows) !Args {
     if (r.routes == null or experts.count == 0 or experts.count > std.math.maxInt(u32)) return error.InvalidExl3Experts;
     if (r.grouped and (r.input_ids == null or r.output_ids == null or r.count % 8 != 0))
         return error.InvalidExl3GroupedRows;
@@ -233,7 +245,7 @@ pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Expert
     try readonly(experts.descriptors, experts.count * @sizeOf(ExpertDescriptor), y, ybytes, scratch, try scratchBytes(experts.k, experts.n, r.count));
     a.indexed = if (r.grouped) 2 else 1;
     a.experts = @intCast(experts.count);
-    stages(p, e, a, scratch, scratch, scratch, scratch, experts.descriptors, x, y, scratch, r);
+    return a;
 }
 
 pub fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows) !void {

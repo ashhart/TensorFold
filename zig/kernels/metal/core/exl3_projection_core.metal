@@ -346,6 +346,13 @@ kernel void tf_exl3_codebook_check(device half* arithmetic [[buffer(0)]],
   if (i < 3 * 65536) arithmetic[i] = tf_exl3_value(ushort(i % 65536), i / 65536);
 }
 
+// The rotate_out value of one output: the Hadamard result scaled, signed by sv, plus the bias; the caller rounds it.
+inline float tf_exl3_out_value(float v, const device ushort* scales, const device half* biases, uint n, uint signs, uint has_bias) {
+  float out = (v * 0.08838834764831845f) * tf_exl3_scale(scales, n, signs);
+  if (has_bias) out += float(biases[n]);
+  return out;
+}
+
 kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
                               const device ushort* sv [[buffer(1)]],
                               const device half* bias [[buffer(2)]],
@@ -374,8 +381,7 @@ kernel void tf_exl3_rotate_out(const device float* sums [[buffer(0)]],
   const uint dest = a.output_ids ? output_ids[row] : row;
   for (uint j = 0; j < 4; ++j) {
     const uint n = base + lane + 32 * j;
-    float out = (v[j] * 0.08838834764831845f) * tf_exl3_scale(scales, n, signs);
-    if (has_bias) out += float(biases[n]);
+    const float out = tf_exl3_out_value(v[j], scales, biases, n, signs, has_bias);
     const ulong at = ulong(dest) * a.y_stride + n;
     if (a.output_f32) reinterpret_cast<device float*>(y)[at] = out;
     else reinterpret_cast<device bfloat*>(y)[at] = bfloat(out);

@@ -3,6 +3,7 @@ const core = @import("exl3_projection_core.zig");
 const pipe = @import("exl3_projection_pipelines.zig");
 const enc = @import("exl3_projection_encode.zig");
 const swi = @import("exl3_projection_swiglu.zig");
+const chain_mod = @import("exl3_projection_chain.zig");
 
 pub const Knobs = core.Knobs;
 /// The family host writes this before a model loads.
@@ -61,9 +62,17 @@ pub const encodeInt8Tile = enc.encodeInt8Tile;
 pub const encodePrefillInt8 = enc.encodePrefillInt8;
 pub const encodeIndexed = enc.encodeIndexed;
 pub const matrixWrites = enc.matrixWrites;
+pub const indexedArgs = enc.indexedArgs;
+pub const matrixArgs = enc.matrixArgs;
+pub const chain = chain_mod;
 pub const ReduceArgs = swi.ReduceArgs;
 pub const Plan = swi.Plan;
 pub const planBody = swi.planBody;
 pub const stages = swi.stages;
 pub const SwiGLURot = swi.SwiGLURot;
 pub const encodeSwiGLUPreRotate = swi.encodeSwiGLUPreRotate;
+pub const sumsView = swi.sumsView;
+pub const GateUpRot = swi.GateUpRot;
+pub const encodeGateUpSwiGLU = swi.encodeGateUpSwiGLU;
+pub const DownCombine = swi.DownCombine;
+pub const encodeDownCombine = swi.encodeDownCombine;

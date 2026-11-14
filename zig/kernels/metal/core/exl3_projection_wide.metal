@@ -42,6 +42,125 @@ kernel void tf_exl3_swiglu_prerotate(const device ushort* gate [[buffer(0)]],
     rotated[ulong(dst) * d.output_stride + base + lane + 32u * j] = half(v[j] * 0.08838834764831845f);
 }
 
+// The gate+up call's rotate_out and the SwiGLU-plus-rotate in one pass, over the call's f32 sums.
+struct TfExl3GateUpRot { uint rows, shared_rows, k, sums_stride, experts, fused_experts, shared_dst, weighted, shared_id; };
+kernel void tf_exl3_gateup_swiglu_prerotate(const device float* sums [[buffer(0)]],
+                                           const device uint* fused_ids [[buffer(1)]],
+                                           const device float* weights [[buffer(2)]],
+                                           device uint* routes [[buffer(3)]],
+                                           const device TfExl3Expert* fused [[buffer(4)]],
+                                           const device TfExl3Expert* down [[buffer(5)]],
+                                           const device TfExl3Expert* shared_down [[buffer(6)]],
+                                           device half* rotated [[buffer(7)]],
+                                           constant TfExl3GateUpRot& d [[buffer(8)]],
+                                           uint lane [[thread_index_in_simdgroup]],
+                                           uint sg [[simdgroup_index_in_threadgroup]],
+                                           uint3 tptg [[threads_per_threadgroup]],
+                                           uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint row = tg.y;
+  if (row >= d.rows + d.shared_rows) return;
+  const bool routed = row < d.rows;
+  const uint slot = routed ? row : row - d.rows;
+  // The down call reads the shared rows' table entry from the id row after the routed picks.
+  if (!routed && lane == 0u && sg == 0u && tg.x == 0u && d.shared_id != 0xffffffffu) routes[row] = d.shared_id;
+  const uint base = (tg.x * (tptg.x / 32u) + sg) * 128u;
+  if (base >= d.k) return;
+  // Gate rows lead the call, up rows follow the routed gate rows; the shared pair sits after both routed halves.
+  const uint gate_row = routed ? row : 2u * d.rows + slot;
+  const uint up_row = routed ? d.rows + row : gate_row + d.shared_rows;
+  const uint expert = routed ? routes[row] : 0u;
+  if (routed && expert >= d.experts) return;
+  const uint gate_id = routed ? fused_ids[gate_row] : d.fused_experts - 2u;
+  const uint up_id = routed ? fused_ids[up_row] : d.fused_experts - 1u;
+  if (gate_id >= d.fused_experts || up_id >= d.fused_experts) return;
+  const device ushort* scales = routed ? down[expert].su : shared_down[0].su;
+  const uint signs = routed ? down[expert].su_signs : shared_down[0].su_signs;
+  const float weight = (routed && d.weighted) ? weights[row] : 1.0f;
+  float gv[4], uv[4], v[4];
+  for (uint j = 0; j < 4; ++j) {
+    gv[j] = sums[ulong(gate_row) * d.sums_stride + base + lane + 32u * j];
+    uv[j] = sums[ulong(up_row) * d.sums_stride + base + lane + 32u * j];
+  }
+  tf_exl3_hadamard(gv, lane);
+  tf_exl3_hadamard(uv, lane);
+  for (uint j = 0; j < 4; ++j) {
+    const uint n = base + lane + 32u * j;
+    const float gate_out = tf_exl3_out_value(gv[j], fused[gate_id].sv, fused[gate_id].bias, n, fused[gate_id].sv_signs, fused[gate_id].has_bias);
+    const float up_out = tf_exl3_out_value(uv[j], fused[up_id].sv, fused[up_id].bias, n, fused[up_id].sv_signs, fused[up_id].has_bias);
+    const float g = min(tf_exl3_bf(as_type<ushort>(bfloat(gate_out))), 10.0f);
+    const float u = clamp(tf_exl3_bf(as_type<ushort>(bfloat(up_out))), -10.0f, 10.0f);
+    float s = (g / (1.0f + exp(-g))) * u;
+    if (routed && d.weighted) s = weight * s;
+    v[j] = tf_exl3_bf(tf_exl3_round_bf16(s)) * tf_exl3_scale(scales, n, signs);
+  }
+  tf_exl3_hadamard(v, lane);
+  const uint dst = routed ? row : d.shared_dst + slot;
+  for (uint j = 0; j < 4; ++j)
+    rotated[ulong(dst) * d.k + base + lane + 32u * j] = half(v[j] * 0.08838834764831845f);
+}
+
+// The down call's rotate_out and the routed-plus-shared combine in one pass: a threadgroup is one token's 128 columns.
+struct TfExl3DownCombine { uint rows, picks, width, sums_stride, experts, y_stride, shared_row, reserved; };
+kernel void tf_exl3_down_combine(const device float* sums [[buffer(0)]],
+                                const device uint* ids [[buffer(1)]],
+                                const device TfExl3Expert* down [[buffer(2)]],
+                                device ushort* y [[buffer(3)]],
+                                constant TfExl3DownCombine& d [[buffer(4)]],
+                                uint lane [[thread_index_in_simdgroup]],
+                                uint sg [[simdgroup_index_in_threadgroup]],
+                                uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup uint slots[8];
+  threadgroup uint invalid;
+  threadgroup float values[8][128];
+  const uint token = tg.y, base = tg.x * 128u;
+  const ulong id_row = ulong(token) * d.picks;
+  // The picks in ascending expert id, ties by slot, as the combine orders them; any id past 383 poisons the row.
+  if (sg == 0u && lane == 0u) {
+    invalid = 0u;
+    for (uint a = 0; a < d.picks; a++) slots[a] = a;
+    for (uint a = 1; a < d.picks; a++) {
+      const uint slot = slots[a];
+      uint j = a;
+      while (j > 0 && ids[id_row + slots[j - 1]] > ids[id_row + slot]) {
+        slots[j] = slots[j - 1];
+        j--;
+      }
+      slots[j] = slot;
+    }
+    for (uint a = 0; a < d.picks; a++) if (ids[id_row + a] >= 384u) invalid = 1u;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (base >= d.width || token >= d.rows) return;
+  if (invalid != 0u) {
+    if (sg == 0u)
+      for (uint j = 0; j < 4; ++j) y[ulong(token) * d.y_stride + base + lane + 32u * j] = tf_exl3_round_bf16(NAN);
+    return;
+  }
+  // Simdgroup r finishes the r-th pick in id order, simdgroup `picks` the shared expert's row.
+  if (sg <= d.picks) {
+    const bool shared = sg == d.picks;
+    const uint slot = shared ? 0u : slots[sg];
+    const ulong row = shared ? ulong(d.shared_row) + token : id_row + slot;
+    const uint id = shared ? d.experts : ids[id_row + slot];
+    float v[4];
+    for (uint j = 0; j < 4; ++j) v[j] = sums[row * d.sums_stride + base + lane + 32u * j];
+    tf_exl3_hadamard(v, lane);
+    for (uint j = 0; j < 4; ++j) {
+      const uint n = base + lane + 32u * j;
+      const float out = tf_exl3_out_value(v[j], down[id].sv, down[id].bias, n, down[id].sv_signs, down[id].has_bias);
+      values[sg][lane + 32u * j] = tf_exl3_bf(as_type<ushort>(bfloat(out)));
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (sg != 0u) return;
+  for (uint j = 0; j < 4; ++j) {
+    float s = 0;
+    for (uint rank = 0; rank < d.picks; rank++) s += values[rank][lane + 32u * j];
+    s += values[d.picks][lane + 32u * j];
+    y[ulong(token) * d.y_stride + base + lane + 32u * j] = tf_exl3_round_bf16(s);
+  }
+}
+
 // Wide one-row tile: eight SIMDgroups each own a 16-column tile, and the shared activation tile is double buffered.
 template <bool Table>
 inline void tf_exl3_matmul_wide_impl(const device half* x, const device uchar* trellis,

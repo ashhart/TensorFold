@@ -12,6 +12,7 @@ const kv = @import("kv.zig");
 const index = @import("csa2_index.zig");
 const rope = @import("rope.zig");
 const common = @import("attention_common.zig");
+const fuse = @import("attention_fuse.zig");
 const View = common.View;
 const State = common.State;
 const Seg = common.Seg;
@@ -67,6 +68,10 @@ pub const Stage = struct {
     qkv_merged: bool,
     main: View,
     compressed_rows: u32,
+    /// The output's inverse RoPE waits for wo_a's rotate_in (attention_fuse.zig).
+    o_rope_deferred: bool = false,
+    /// The merged call's epilogue already ran the window key's norm, rope and pack (attention_fuse.zig).
+    kv_glue_done: bool = false,
 
     /// `Attention.forward`'s first half: `qr = q_norm(wq_a(x))`, `q = wq_b(qr)`, then the query's RoPE.
     pub fn queryStage(self: *Stage, comptime diagnostic: bool) !void {
@@ -98,36 +103,51 @@ pub const Stage = struct {
         self.qkv_merged = qkv_merged;
         if (qkv_merged) {
             const fused = work.view(.qkv);
-            // TF_DSV41_DOUBLE_ATTN_QKV -- the merged call's same-output duplicate.
-            const qkv_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_QKV") != null) 2 else 1;
-            for (0..qkv_passes) |_| {
-                try exl3.encodeIndexed(ep, e, .{ .descriptors = .{ .buffer = w.qkv_descriptors.?, .offset = 0 }, .count = 2, .k = c.hidden, .n = c.q_lora }, core(x), core(fused), scratch, .{
-                    .count = 2,
-                    .x_stride = c.hidden,
-                    .y_stride = c.q_lora,
-                    .output = .bf16,
-                    .input_ids = .{ .buffer = work.pair_in, .offset = 0 },
-                    .input_rows = 1,
-                    .output_ids = .{ .buffer = work.ids, .offset = 0 },
-                    .output_rows = 2,
-                    .routes = .{ .ids = .{ .buffer = work.ids, .offset = 0 }, .repeat = 1 },
-                    .no_epilogue = false,
-                });
+            // The call's epilogue carries the latent's norm, wq_b's rotate_in and the key's window glue.
+            self.kv_glue_done = !diagnostic and fuse.qkvTailReady(ep, p, w, c, position) and
+                std.c.getenv("TF_DSV41_DOUBLE_ATTN_QKV") == null;
+            if (self.kv_glue_done) try fuse.encodeQkvTail(ep, p, e, w, work, x, fused, self.chunk, scratch, c, ratio, position) else {
+                // TF_DSV41_DOUBLE_ATTN_QKV -- the merged call's same-output duplicate.
+                const qkv_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_QKV") != null) 2 else 1;
+                for (0..qkv_passes) |_| {
+                    try exl3.encodeIndexed(ep, e, .{ .descriptors = .{ .buffer = w.qkv_descriptors.?, .offset = 0 }, .count = 2, .k = c.hidden, .n = c.q_lora }, core(x), core(fused), scratch, .{
+                        .count = 2,
+                        .x_stride = c.hidden,
+                        .y_stride = c.q_lora,
+                        .output = .bf16,
+                        .input_ids = .{ .buffer = work.pair_in, .offset = 0 },
+                        .input_rows = 1,
+                        .output_ids = .{ .buffer = work.ids, .offset = 0 },
+                        .output_rows = 2,
+                        .routes = .{ .ids = .{ .buffer = work.ids, .offset = 0 }, .repeat = 1 },
+                        .no_epilogue = false,
+                    });
+                }
             }
             qr = fused;
             raw = .{ .buffer = fused.buffer, .offset = fused.offset + c.q_lora * 2 };
         } else for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_a }, x, qr, scratch, rows, c.hidden, c.q_lora, .bf16);
         attnMark(layer, "qkv", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .qr_projection, qr);
-        norm(p, e, qr, w.q_norm, rows, c.q_lora, c.eps);
-        if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") != null) normRepeat(p, e, qr, dup_view, w.q_norm, rows, c.q_lora, c.eps);
+        // The norm and wq_b's rotate_in as one dispatch; wq_b then runs on the rotated input it left in the scratch.
+        const fused_norm = self.kv_glue_done or (rows == 1 and dense_passes == 1 and fuse.qNormReady(ep, w, c));
+        if (self.kv_glue_done) {} else if (fused_norm) try fuse.encodeQNorm(ep, e, w, qr, scratch, c) else {
+            norm(p, e, qr, w.q_norm, rows, c.q_lora, c.eps);
+            if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") != null) normRepeat(p, e, qr, dup_view, w.q_norm, rows, c.q_lora, c.eps);
+        }
         attnMark(layer, "norm_qr", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .qr_norm, qr);
-        for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_b }, qr, q, scratch, rows, c.q_lora, q_width, .bf16);
+        // wq_b's epilogue and the query's RoPE as one dispatch (the diagnostic's pre-RoPE capture needs them apart).
+        const fused_rope = rows == 1 and dense_passes == 1 and !diagnostic and fuse.qRopeReady(ep, p, c, position);
+        if (fused_norm or fused_rope) {
+            try fuse.encodeQb(ep, p, e, w, qr, q, scratch, c, fused_norm, if (fused_rope) .{ .ratio = ratio, .position = position } else null);
+        } else for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wq_b }, qr, q, scratch, rows, c.q_lora, q_width, .bf16);
         attnMark(layer, "wq_b", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .q_projection, q);
-        try rotate(p, e, q, rows, c.heads, c.head_dim, position, ratio, 1, false, c);
-        if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ROPE") != null) try rotateRepeat(p, e, dup_view, rows, c.heads, c.head_dim, position, ratio, 1, false, c);
+        if (!fused_rope) {
+            try rotate(p, e, q, rows, c.heads, c.head_dim, position, ratio, 1, false, c);
+            if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ROPE") != null) try rotateRepeat(p, e, dup_view, rows, c.heads, c.head_dim, position, ratio, 1, false, c);
+        }
         attnMark(layer, "q_rope", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .q, q);
     }
@@ -203,10 +223,14 @@ pub const Stage = struct {
                 if (compressed_rows != 0 and !few_keys) {
                     // TF_DSV41_DOUBLE_ATTN_INDEXER -- same-output duplicate of the index layer's query projection.
                     const indexer_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_INDEXER") != null) 2 else 1;
-                    for (0..indexer_passes) |_| try projection(ep, e, selector.wq_b, qr, iq, scratch, rows, c.q_lora, iq_width, .bf16);
+                    // The indexer's wq_b epilogue and its query RoPE as one dispatch.
+                    const fused_iq = rows == 1 and indexer_passes == 1 and selector.wq_b == .trellis and fuse.iqRopeReady(ep, p, c, position);
+                    if (fused_iq) try fuse.encodeIqRope(ep, p, e, selector.wq_b.trellis, qr, iq, scratch, c, ratio, position) else {
+                        for (0..indexer_passes) |_| try projection(ep, e, selector.wq_b, qr, iq, scratch, rows, c.q_lora, iq_width, .bf16);
+                    }
                     // The index_q block's four dispatches split.
                     attnMark(layer, "iq_proj", prof, &e);
-                    try rotate(p, e, iq, rows, c.index_heads, c.index_dim, position, ratio, 1, false, c);
+                    if (!fused_iq) try rotate(p, e, iq, rows, c.index_heads, c.index_dim, position, ratio, 1, false, c);
                     attnMark(layer, "iq_rope", prof, &e);
                     try p.cache.encodePack(e, iq, work.selection.queryPacked(), .{ .rows = rows * c.index_heads, .width = c.index_dim, .stride = c.index_dim, .packed_stride = kv.cache.index_stride, .block = 32, .kind = .index_fp4, .inplace = 1 });
                     attnMark(layer, "iq_pack", prof, &e);
@@ -405,6 +429,7 @@ pub const Stage = struct {
     pub fn readStage(self: *Stage, comptime diagnostic: bool) !void {
         const p = self.p;
         const w = self.w;
+        const ep = self.ep;
         const work = self.work;
         const c = self.c;
         const layer = self.layer;
@@ -469,20 +494,27 @@ pub const Stage = struct {
         if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ATTN_PUBLISH") != null)
             try p.cache.publishWindow(e, chunk, ring, rows, position);
         attnMark(layer, "publish", prof, &e);
-        try rotate(p, e, q, rows, c.heads, c.head_dim, position, ratio, 1, true, c);
-        if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ROPE") != null) try rotateRepeat(p, e, dup_view, rows, c.heads, c.head_dim, position, ratio, 1, true, c);
+        // The inverse RoPE rides on wo_a's rotate_in when the output stage can take it (rows == 1, no capture).
+        self.o_rope_deferred = rows == 1 and !diagnostic and self.dense_passes == 1 and fuse.oRopeReady(ep, p, w, c, position);
+        if (!self.o_rope_deferred) {
+            try rotate(p, e, q, rows, c.heads, c.head_dim, position, ratio, 1, true, c);
+            if (rows == 1 and std.c.getenv("TF_DSV41_DOUBLE_ROPE") != null) try rotateRepeat(p, e, dup_view, rows, c.heads, c.head_dim, position, ratio, 1, true, c);
+        }
         attnMark(layer, "o_rope", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .o, q);
     }
 
     /// `Attention.forward`'s close: `o` split into the output groups, each through its own `wo_a` block.
     pub fn outputStage(self: *Stage, comptime diagnostic: bool) !void {
+        const p = self.p;
         const w = self.w;
         const work = self.work;
         const ep = self.ep;
         const c = self.c;
         const layer = self.layer;
         const rows = self.rows;
+        const position = self.position;
+        const ratio = self.ratio;
         const scratch = self.scratch;
         const y = self.y;
         const q_width = self.q_width;
@@ -494,8 +526,15 @@ pub const Stage = struct {
         const grouped = work.view(.grouped);
         const group_input = q_width / c.o_groups;
         const group_output = c.o_groups * c.o_lora;
+        // wo_a's epilogue and wo_b's rotate_in as one dispatch (`grouped` is still written).
+        const chain_wo = rows == 1 and w.wo_a_descriptors != null and dense_passes == 1 and
+            fuse.switches().wo_chain and exl3.chain.rotateOutInReady(ep) and
+            std.c.getenv("TF_DSV41_NO_FUSE_WO_A") == null and std.c.getenv("TF_DSV41_DOUBLE_ATTN_WOA") == null;
         // The multi-row path takes the same dispatch -- q is row-major.
-        if (rows <= 8 and w.wo_a_descriptors != null and std.c.getenv("TF_DSV41_NO_FUSE_WO_A") == null) {
+        if (chain_wo or self.o_rope_deferred) {
+            try fuse.encodeWoA(ep, p, e, w, work, q, grouped, scratch, c, chain_wo, if (self.o_rope_deferred) .{ .ratio = ratio, .position = position } else null);
+            attnMark(layer, "wo_a", prof, &e);
+        } else if (rows <= 8 and w.wo_a_descriptors != null and std.c.getenv("TF_DSV41_NO_FUSE_WO_A") == null) {
             for (&w.wo_a) |*m| exl3.useMatrix(e, m.*);
             // TF_DSV41_DOUBLE_ATTN_WOA -- the merged wo_a call's same-output duplicate.
             const wo_a_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_ATTN_WOA") != null) 2 else 1;
@@ -516,7 +555,7 @@ pub const Stage = struct {
             attnMark(layer, "wo_a", prof, &e);
         }
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .grouped, grouped);
-        for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden, .bf16);
+        if (chain_wo) try fuse.encodeWoB(ep, e, w, y, scratch, c) else for (0..dense_passes) |_| try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden, .bf16);
         attnMark(layer, "wo_b", prof, &e);
         if (diagnostic) try DiagnosticObserver.observe(true, self.observer, e, layer, .wo_b, y);
         if (prof) |pf| pf.enc = e;

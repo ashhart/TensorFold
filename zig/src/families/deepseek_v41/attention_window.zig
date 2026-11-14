@@ -67,7 +67,9 @@ pub fn windowStage(self: *Stage, comptime diagnostic: bool) !void {
         std.c.getenv("TF_DSV41_DOUBLE_ATTN_NORM") == null and
         std.c.getenv("TF_DSV41_DOUBLE_ROPE") == null and
         std.c.getenv("TF_DSV41_DOUBLE_ATTN_PACK") == null;
-    if (fuse_kv_glue) {
+    if (self.kv_glue_done) {
+        // The merged call's epilogue ran it (attention_fuse.zig).
+    } else if (fuse_kv_glue) {
         const factor_offset: usize = if (ratio == 0) 0 else @as(usize, p.rotary.capacity) * p.rotary.rotary * @sizeOf(f32);
         const factors: View = .{ .buffer = p.rotary.factors, .offset = factor_offset };
         try p.cache.encodeGlue(e, raw, tensor(w.kv_norm), factors, chunk, chunk, .{

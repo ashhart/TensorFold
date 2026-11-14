@@ -15,6 +15,7 @@ const csa2 = @import("csa2.zig");
 const csa2_index = @import("csa2_index.zig");
 const rope = @import("rope.zig");
 const route = @import("route.zig");
+const fusion = @import("model_moe_fuse.zig");
 const engram = @import("engram.zig");
 const engram_stream = @import("engram_rows_safetensors.zig");
 const gpu_counters = @import("profiler.zig");
@@ -150,6 +151,17 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         std.c.getenv("TF_DSV41_NO_FUSE_MOE_UP") == null;
     // THE SHARED EXPERT'S SLOTS OUT OF THE FUSED INDEXED CALL: the routed-only call plus two dense shared calls.
     const shared_split = moe_up_merged and rows >= 2 and std.c.getenv("TF_DSV41_SHARED_DENSE") != null;
+    // The routed SwiGLU writes the down projection's rotated input in the same pass.
+    const swiglu_rot = std.c.getenv("TF_DSV41_NO_SWIGLU_ROT") == null and std.c.getenv("TF_DSV41_SKIP_SWIGLU") == null;
+    // The shared SwiGLU writes the down projection's ROTATED input in the same pass.
+    const shared_rot = moe_up_merged and w.shared_down != null and w.shared_down_ids != null and
+        std.c.getenv("TF_DSV41_NO_FUSE_SHARED_ROT") == null;
+    const mlp_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_MLP") != null) 2 else 1;
+    // THE FUSED CALL'S UP HALF IS OFFSET BY rows * picks: six for the backbone, three for the drafter.
+    const fuse_up_picks: u32 = if (std.c.getenv("TF_DSV41_FUSE_UP_SIX") != null) 6 else picks;
+    const skip_shared = std.c.getenv("TF_DSV41_SKIP_SHARED") != null;
+    // The gate+up call stops at its f32 sums and one pass does its rotate_out, the SwiGLUs and the down rotate_in.
+    const fused_pass = try fusion.plan(ws, w, .{ .rows = rows, .picks = picks, .merged = moe_up_merged, .shared_split = shared_split, .swiglu_rot = swiglu_rot, .shared_rot = shared_rot, .skip_experts = skip_experts, .skip_shared = skip_shared, .mlp_passes = mlp_passes, .fuse_up_picks = fuse_up_picks });
     var logits_view = logits_dest;
     const logit_dtype: u32 = 0;
     if (gate_private) {
@@ -362,6 +374,7 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         if (fused_grouped != null) both.output_rows = @as(usize, rows) * 2 * picks;
         const fused_passes: u32 = Model.expertPasses();
         const fused_experts: u32 = 2 * experts + 2 * @as(u32, @intFromBool(moe_up_merged));
+        both.no_epilogue = fused_pass.gateup;
         for (0..fused_passes) |_| if (!skip_experts) try exl3.encodeIndexed(&p.projection, encoder, .{ .descriptors = .{ .buffer = w.fused.? }, .count = fused_experts, .k = 5120, .n = 2304 }, convert(ws.view(.normalized)), convert(ws.view(.gate)), ws.projection(), both);
         try splitStage(m, enc, e, "gateup", 0);
         encoder = enc.*;
@@ -377,13 +390,12 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         if (!skip_experts) try exl3.encodeIndexed(&p.projection, encoder, .{ .descriptors = .{ .buffer = w.descriptors[i] }, .count = experts, .k = 5120, .n = 2304 }, convert(ws.view(.normalized)), convert(ws.view(if (i == 0) .gate else .up)), ws.projection(), routed_rows);
         encoder.barrier();
     }
-    const mlp_passes: u32 = if (std.c.getenv("TF_DSV41_DOUBLE_MLP") != null) 2 else 1;
-    // THE FUSED CALL'S UP HALF IS OFFSET BY rows * picks: six for the backbone, three for the drafter.
-    const fuse_up_picks: u32 = if (std.c.getenv("TF_DSV41_FUSE_UP_SIX") != null) 6 else picks;
     const up_view = if (fuse) View{ .buffer = ws.view(.gate).buffer, .offset = ws.view(.gate).offset + @as(usize, rows) * fuse_up_picks * 2304 * 2 } else ws.view(.up);
-    // The routed SwiGLU writes the down projection's rotated input in the same pass.
-    const swiglu_rot = std.c.getenv("TF_DSV41_NO_SWIGLU_ROT") == null and std.c.getenv("TF_DSV41_SKIP_SWIGLU") == null;
-    if (swiglu_rot)
+    if (fused_pass.gateup) {
+        const gate_up_rows = @as(usize, rows) * (2 * picks + 2);
+        const sums = exl3.sumsView(ws.projection(), gate_up_rows, 5120);
+        exl3.encodeGateUpSwiGLU(&p.projection, encoder, sums, convert(ws.view(.fused_ids)), convert(ws.view(.route_weights)), convert(ws.view(.route_ids)), .{ .buffer = w.fused.? }, .{ .buffer = if (fused_pass.shared_down) w.down_shared.? else w.descriptors[2] }, .{ .buffer = if (fused_pass.shared_down) w.down_shared.? else w.shared_down.?, .offset = if (fused_pass.shared_down) @as(usize, experts) * @sizeOf(exl3.ExpertDescriptor) else 0 }, ws.projection(), .{ .rows = @as(usize, rows) * picks, .shared_rows = rows, .k = 2304, .experts = experts, .fused_experts = 2 * experts + 2, .shared_dst = fused_pass.shared_row, .shared_id = if (fused_pass.shared_down) experts else null });
+    } else if (swiglu_rot)
         exl3.encodeSwiGLUPreRotate(&p.projection, encoder, convert(ws.view(.gate)), convert(up_view), convert(ws.view(.route_weights)), convert(ws.view(.route_ids)), if (grouped) |g| g.view(.destination) else null, convert(.{ .buffer = w.descriptors[2] }), ws.projection(), .{ .rows = @as(usize, rows) * picks, .k = 2304, .input_stride = 2304, .output_stride = 2304, .experts = experts })
     else for (0..mlp_passes) |_| if (std.c.getenv("TF_DSV41_SKIP_SWIGLU") == null) ops.encodeSwiGLU(encoder, &p.ops, ws.view(.gate), up_view, ws.view(.route_weights), ws.view(.activation), .{ .rows = rows * picks, .width = 2304, .input_stride = 2304, .output_stride = 2304, .weighted = true });
     try splitStage(m, enc, e, "swiglu", 0);
@@ -403,8 +415,11 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     if (grouped) |g| routed_rows.input_ids = g.view(.slot_ids);
     const down_passes: u32 = Model.expertPasses();
     routed_rows.prerotated = swiglu_rot;
+    // The shared expert's down rows follow the routed rows: one more table entry, ids written by the fused pass.
+    if (fused_pass.shared_down) routed_rows.count += rows;
+    routed_rows.no_epilogue = fused_pass.down_combine;
     const down_input: exl3.View = if (swiglu_rot) ws.projection() else convert(ws.view(.activation));
-    for (0..down_passes) |_| if (!skip_experts) try exl3.encodeIndexed(&p.projection, encoder, .{ .descriptors = .{ .buffer = w.descriptors[2] }, .count = experts, .k = 2304, .n = 5120 }, down_input, convert(ws.view(.routed)), ws.projection(), routed_rows);
+    for (0..down_passes) |_| if (!skip_experts) try exl3.encodeIndexed(&p.projection, encoder, .{ .descriptors = .{ .buffer = if (fused_pass.shared_down) w.down_shared.? else w.descriptors[2] }, .count = experts + @intFromBool(fused_pass.shared_down), .k = 2304, .n = 5120 }, down_input, convert(ws.view(.routed)), ws.projection(), routed_rows);
     try splitStage(m, enc, e, "down", 0);
     encoder = enc.*;
     if (prof) |pf| {
@@ -415,13 +430,15 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
     }
 
     encoder.barrier();
-    const skip_shared = std.c.getenv("TF_DSV41_SKIP_SHARED") != null;
-    if (!skip_shared) {
+    if (fused_pass.shared_down) {
+        // The shared expert's down ran inside the routed down call.
+    } else if (!skip_shared and fused_pass.gateup) {
+        // The fused pass wrote the shared expert's rotated input past the routed rows' scratch.
+        const shared_scratch = fusion.sharedScratch(ws, fused_pass);
+        try exl3.encode(&p.projection, encoder, w.shared[2], shared_scratch, convert(ws.view(.shared_down)), shared_scratch, .{ .count = rows, .x_stride = 2304, .y_stride = 5120, .prerotated = true });
+    } else if (!skip_shared) {
         // The shared expert's gate and up in one indexed dispatch.
         const shared_fuse = rows <= 8 and w.shared_fused != null and std.c.getenv("TF_DSV41_NO_FUSE_SHARED") == null;
-        // The shared SwiGLU writes the down projection's ROTATED input in the same pass.
-        const shared_rot = moe_up_merged and w.shared_down != null and w.shared_down_ids != null and
-            std.c.getenv("TF_DSV41_NO_FUSE_SHARED_ROT") == null;
         for (0..mlp_passes) |_| {
             if (moe_up_merged) {
                 // The shared gate/up already landed: [12r, 13r) is its gate, [13r, 14r) its up, after routed [0, 12r).
@@ -474,9 +491,14 @@ pub fn moe(m: *Model, enc: *mtl.ComputeEncoder, e: ?*mtl.CommandBuffer, w: *cons
         }
     }
 
-    if (std.c.getenv("TF_DSV41_SKIP_COMBINE") == null) ops.encodeCombine(encoder, &p.ops, ws.view(.routed), ws.view(.shared_down), ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = picks * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120, .id_stride = picks });
+    const routed_view = ws.view(.routed);
+    const shared_down_view = if (fused_pass.shared_down) View{ .buffer = routed_view.buffer, .offset = routed_view.offset + @as(usize, rows) * picks * 5120 * 2 } else ws.view(.shared_down);
+    if (fused_pass.down_combine) {
+        const sums = exl3.sumsView(ws.projection(), routed_rows.count, 2304);
+        exl3.encodeDownCombine(&p.projection, encoder, sums, convert(ws.view(.route_ids)), .{ .buffer = w.down_shared.? }, convert(ws.view(.branch)), .{ .tokens = rows, .picks = picks, .width = 5120, .experts = experts, .y_stride = 5120, .shared_row = @as(usize, rows) * picks });
+    } else if (std.c.getenv("TF_DSV41_SKIP_COMBINE") == null) ops.encodeCombine(encoder, &p.ops, ws.view(.routed), shared_down_view, ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = picks * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120, .id_stride = picks });
     // A second identical pass leaves the value unchanged and isolates the kernel in place.
-    if (std.c.getenv("TF_DSV41_DOUBLE_COMBINE") != null) ops.encodeCombine(encoder, &p.ops, ws.view(.routed), ws.view(.shared_down), ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = picks * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120, .id_stride = picks });
+    if (std.c.getenv("TF_DSV41_DOUBLE_COMBINE") != null) ops.encodeCombine(encoder, &p.ops, ws.view(.routed), shared_down_view, ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = picks * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120, .id_stride = picks });
     encoder.barrier();
     if (prof) |pf| {
         if (pf.blk_on) {
