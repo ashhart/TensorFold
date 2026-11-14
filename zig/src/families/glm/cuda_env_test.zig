@@ -12,6 +12,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_VISION_HOST" },
     .{ .name = "TF_GLM_PROF" },
     .{ .name = "TF_GLM_LINK_WAIT" },
+    .{ .name = "TF_GLM_COPY_SHARE" },
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },
@@ -175,4 +176,26 @@ test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify ro
     const most = e.rule(@import("cuda_env.zig").ceiling_switch).max;
     try t.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
     try t.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
+}
+
+test "GLM strict env: TF_GLM_COPY_SHARE=1 widens TF_GLM_COPIES=1's copies and is refused without them" {
+    const cp = @import("cuda_copy_policy.zig");
+    for ([_]bool{ false, true }) |drafts| {
+        for ([_]?[]const u8{ null, "", " ", "0" }) |raw| for ([_]bool{ false, true }) |asked| {
+            try t.expectEqual(cp.Policy{ .copies = asked and drafts }, try cp.policy(drafts, asked, raw));
+        };
+        try t.expectEqual(cp.Policy{ .copies = drafts, .share = drafts }, try cp.policy(drafts, true, "1"));
+        try t.expectError(error.GlmCopyShareWithoutCopies, cp.policy(drafts, false, "1"));
+        for ([_][]const u8{ "2", "yes", " 1" }) |raw| try t.expectError(error.InvalidEnvironment, cp.policy(drafts, true, raw));
+    }
+    _ = env.unsetenv("TF_GLM_COPIES");
+    _ = env.setenv(cp.share_switch, "1", 1);
+    defer _ = env.unsetenv(cp.share_switch);
+    try t.expectError(error.GlmCopyShareWithoutCopies, cp.read(true));
+    _ = env.setenv("TF_GLM_COPIES", "1", 1);
+    defer _ = env.unsetenv("TF_GLM_COPIES");
+    try t.expectEqual(cp.Policy{ .copies = true, .share = true }, try cp.read(true));
+    try t.expectEqual(cp.Policy{}, try cp.read(false));
+    // the open's refusal reaches the server in GLM's words
+    try t.expect(@import("cuda_native.zig").explain(null, error.GlmCopyShareWithoutCopies) != null);
 }

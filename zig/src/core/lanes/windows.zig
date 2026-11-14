@@ -207,7 +207,7 @@ pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
     if (s.proposer) |p| if (!e.alone or e.cfg.lone_copies) {
         // a priced proposer's drafts are as it gives them, its none too: no width, length or match gate, no Recall
         if (p.vtable.priced) return .{ .tokens = p.propose(s.context.items, @min(@as(i64, e.cfg.max_copy), s.draftRoom() - 1)) catch &.{} };
-        const copied = p.proposeAfter(s.context.items, &.{}, most) catch &.{};
+        const copied = p.proposeAfter(s.context.items, &.{}, @min(@as(i64, sharedWidth(e, s, width)), s.draftRoom() - 1)) catch &.{};
         const least: usize = if (e.alone and e.cfg.context_copies) 1 else 2;
         if (copied.len >= least and p.lastMatch() >= e.cfg.enter_match) return .{ .tokens = copied };
     };
@@ -215,6 +215,14 @@ pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
     if (most < 2) return .{};
     const got = r.propose(s.context.items, @intCast(most), s.rounds);
     return if (got.len >= 2) .{ .tokens = got, .recalled = true } else .{};
+}
+
+/// Config.shared_copy_ramp: a shared round's copy takes its stream's ramp, to the stream's share of the rows less one.
+fn sharedWidth(e: *const Engine, s: *const Stream, width: u32) u32 {
+    if (e.alone or !e.cfg.shared_copy_ramp) return width;
+    var live: u32 = 0;
+    for (e.live.items) |x| live += @intFromBool(!x.finished and !x.paused);
+    return @min(s.copy_width orelse e.cfg.first_copy, @max(e.cfg.first_copy, e.cfg.batch_rows / @max(live, 1) -| 1));
 }
 
 pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {

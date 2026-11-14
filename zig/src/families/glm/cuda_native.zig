@@ -178,7 +178,7 @@ const Owned = struct {
     lanes: glm_lanes.Lanes,
     layout: ?kv.Layout,
     share: usize, // TF_KV_SHARE: states the shared store over the pool's pages keeps (0: the host store)
-    copies: bool, // TF_GLM_COPIES=1: verified root and context copies
+    copies: @import("cuda_copy_policy.zig").Policy, // TF_GLM_COPIES=1: verified root and context copies (and TF_GLM_COPY_SHARE)
 };
 
 const env = @import("sys").env;
@@ -237,7 +237,7 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     const o = a.o;
     const p = a.p;
     const roce_bytes = a.roce_bytes;
-    const copies = try cuda.priority_copies.read("TF_GLM_COPIES", o.drafts);
+    const copies = try @import("cuda_copy_policy.zig").read(o.drafts);
     var load_cache = @import("core").checkpoint.cache.Load.begin(io, p.world > 1);
     defer load_cache.deinit();
     // TF_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
@@ -521,6 +521,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.GlmShareNeedsPages => "TF_KV_SHARE keeps prompts as KV pool pages: set TF_KV_PAGES=on as well",
         error.GlmShareTooMany => std.fmt.comptimePrint("TF_KV_SHARE keeps at most {d} states: set {d} or fewer", .{ kv.most_snaps, kv.most_snaps }),
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
+        error.GlmCopyShareWithoutCopies => "TF_GLM_COPY_SHARE=1 widens TF_GLM_COPIES=1's copies in shared rounds: set TF_GLM_COPIES=1 as well, or unset TF_GLM_COPY_SHARE",
         error.InvalidEnvironment => "a TF_GLM_* setting is malformed: the error line before this one names it, its value and the accepted form",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
         error.TooManyRanks => std.fmt.comptimePrint(
