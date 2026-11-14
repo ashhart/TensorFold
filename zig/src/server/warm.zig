@@ -13,27 +13,65 @@ const Value = json.Value;
 /// One background prompt pass and the arena holding its request until the engine finishes it.
 const Pass = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
     request: api.Request,
 
-    fn event(ptr: *anyopaque, _: api.Id, e: *const api.Event) void {
+    fn event(ptr: *anyopaque, id: api.Id, e: *const api.Event) void {
         if (e.* != .finished) return;
         const p: *Pass = @ptrCast(@alignCast(ptr));
+        live.untrack(p.io, id);
         var arena = p.arena;
         p.gpa.destroy(p);
         arena.deinit();
     }
 };
 
-/// Prefill the conversation, `message` (the reply as sent) and the next turn's opening, on `warm_turns` engines.
-pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) void {
-    if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
-    start(srv, input, message, thinking, effort, prompt_len) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+/// Forgets begun (POST /v1/imprint/forget, the prompt cache flush), process-wide: a request reads it as it begins.
+pub var forgets: std.atomic.Value(u64) = .init(0);
+
+/// The warm passes the engine holds, by id, so that a forget can cancel them.
+pub var live: Live = .{};
+
+pub const Live = struct {
+    mutex: std.Io.Mutex = .init,
+    ids: std.ArrayList(api.Id) = .empty,
+
+    const gpa = std.heap.smp_allocator;
+
+    pub fn track(l: *Live, io: std.Io, id: api.Id) !void {
+        l.mutex.lockUncancelable(io);
+        defer l.mutex.unlock(io);
+        try l.ids.append(gpa, id);
+    }
+
+    pub fn untrack(l: *Live, io: std.Io, id: api.Id) void {
+        l.mutex.lockUncancelable(io);
+        defer l.mutex.unlock(io);
+        if (std.mem.indexOfScalar(api.Id, l.ids.items, id)) |i| _ = l.ids.swapRemove(i);
+    }
+};
+
+/// A forget begins: replies running now prefill no next turn, and warm passes in flight are cancelled before it drops.
+pub fn forgetting(srv: *Server) void {
+    _ = forgets.fetchAdd(1, .seq_cst);
+    live.mutex.lockUncancelable(srv.io);
+    const ids = Live.gpa.dupe(api.Id, live.ids.items) catch &.{}; // the engine's cancel runs outside this lock
+    live.mutex.unlock(srv.io);
+    defer Live.gpa.free(ids);
+    for (ids) |id| srv.engine.cancel(id);
 }
 
-fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
+/// Prefill the conversation, `message` (the reply as sent) and the next turn's opening, on `warm_turns` engines.
+pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize, began: u64) void {
+    if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
+    if (forgets.load(.seq_cst) != began) return; // a forget began while it ran: its next turn starts cold
+    start(srv, input, message, thinking, effort, prompt_len, began) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+}
+
+fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize, began: u64) !void {
     const p = try srv.gpa.create(Pass);
-    p.* = .{ .gpa = srv.gpa, .arena = .init(srv.gpa), .request = undefined };
+    p.* = .{ .gpa = srv.gpa, .io = srv.io, .arena = .init(srv.gpa), .request = undefined };
     var handed = false;
     defer if (!handed) {
         p.arena.deinit();
@@ -57,8 +95,13 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
         p.request.cache_key = x.cache_key;
     }
     const id = srv.next_id.fetchAdd(1, .monotonic);
-    try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
+    try live.track(srv.io, id);
+    srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event }) catch |e| {
+        live.untrack(srv.io, id);
+        return e;
+    };
     handed = true;
+    if (forgets.load(.seq_cst) != began) srv.engine.cancel(id); // a forget began as it was made, past its cancels
 }
 
 /// The tokens every next user or tool turn shares: two renderings agree up to that turn's text.

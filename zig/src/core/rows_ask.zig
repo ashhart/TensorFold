@@ -1,12 +1,28 @@
-//! The Mac app's questions about a conversation's kept states (/v1/imprint), answered on the engine thread.
+//! Questions about kept states (/v1/imprint, /v1/prompt_cache/flush), answered on the engine thread.
 const std = @import("std");
 const pc = @import("prompt_cache.zig");
 const rows = pc.rows;
+const Image = @import("lanes").stream.Image;
 
-pub const Op = enum { where, load, forget };
+/// flush: every kept state dropped once no request is in flight (admissions held meanwhile); drop: one conversation's.
+pub const Op = enum {
+    where,
+    load,
+    forget,
+    flush,
+    drop,
 
-/// Which of a request's keys the host's cache lookups pass: its chunk starts, its decoded spans.
-pub const Keys = struct { starts: bool = true, spans: bool = true };
+    /// Whether the ask waits for the requests in flight, holding admissions, and its caller may withdraw it.
+    pub fn holds(op: Op) bool {
+        return op == .flush or op == .drop;
+    }
+};
+
+/// How the host's cache lookups key a request: its chunk starts, its decoded spans, its image frame (null: none).
+pub const Keys = struct { starts: bool = true, spans: bool = true, frame: ?*const fn ([]const Image) u32 = null };
+
+/// A flush's claim: the engine thread takes a queued one, or its caller withdraws it first and it never runs.
+pub const Claim = enum(u8) { queued, taken, withdrawn };
 
 /// One question: a rendered conversation (its tokens, chunk starts and decoded spans), and the answer once `done`.
 pub const Ask = struct {
@@ -14,15 +30,22 @@ pub const Ask = struct {
     prompt: []const u32 = &.{},
     starts: []const u32 = &.{},
     spans: []const [2]u32 = &.{},
+    images: []const Image = &.{}, // drop: the request's images without pixels, for a framed family's key
     out: rows.read.Resume = .{},
     loaded: u32 = 0, // load: the tokens a disk read brought into RAM (0: none was needed, or it did not pay)
     load_seconds: f64 = 0,
-    freed: u64 = 0, // forget: bytes removed from disk
+    freed: u64 = 0, // forget, flush, drop: bytes removed from disk
+    dropped: u32 = 0, // flush, drop: states dropped from RAM
+    ram_freed: u64 = 0, // flush, drop: the bytes those states held in the cache's budget
+    disk_dropped: u32 = 0, // drop: states removed from disk
+    shared: u32 = 0, // drop: the conversation's states left in RAM or on disk, which other conversations build on
     disk: bool = false, // the engine keeps conversation states on disk
+    claim: std.atomic.Value(Claim) = .init(.queued),
     done: std.atomic.Value(bool) = .init(false),
 
     /// The engine thread's answer from its kept states (`store` null: it keeps none), keyed as its lookups are.
     pub fn answer(a: *Ask, store: ?*pc.Store, keys: Keys) void {
+        if (a.op.holds() and a.claim.cmpxchgStrong(.queued, .taken, .acq_rel, .acquire) != null) return; // withdrawn
         defer a.done.store(true, .release);
         const s = store orelse return;
         a.disk = s.disk != null;
@@ -42,8 +65,15 @@ pub const Ask = struct {
             .forget => if (s.disk) |r| {
                 a.freed = r.forgetAll();
             },
+            .flush => return flush(a, s),
+            .drop => return @import("rows_ask_drop.zig").drop(a, s, keys),
         }
         a.out = rows.read.resumable(s, a.prompt, starts, spans);
+    }
+
+    /// A flush's or drop's caller stops waiting: true when the engine had not taken it, so nothing goes or holds.
+    pub fn withdraw(a: *Ask) bool {
+        return a.claim.cmpxchgStrong(.queued, .withdrawn, .acq_rel, .acquire) == null;
     }
 
     /// The answer within `ms` milliseconds (false: none came).
@@ -57,9 +87,25 @@ pub const Ask = struct {
     }
 };
 
+/// Every kept state dropped and the store's plans reset, as on a fresh store; then its states on disk deleted.
+fn flush(a: *Ask, s: *pc.Store) void {
+    const n = s.entries.items.len;
+    const bytes = s.held;
+    for (s.entries.items) |e| e.expired = true; // expired first: nothing is staged for disk on its way out
+    s.collectExpired(); // a borrowed one (none while no request is in flight) goes when its lookup ends
+    a.dropped = @intCast(n - s.entries.items.len);
+    a.ram_freed = bytes - s.held;
+    s.shared_keys.clearRetainingCapacity();
+    s.repeat_log.keys.clearRetainingCapacity();
+    s.active_rewind_at = 0;
+    s.active_rewind_key = 0;
+    if (s.disk) |r| a.freed = r.forgetAll(); // the store's own folder and names: DELETE /v1/imprint's call
+}
+
 /// A host's side of disk states: the asks waiting for its engine thread, and when the engine last went quiet.
 pub const Disk = struct {
     asks: std.ArrayList(*Ask) = .empty,
+    flushes: std.ArrayList(*Ask) = .empty, // flushes and drops: while one waits unwithdrawn, nothing new is admitted
     seen: u64 = 0, // the host's admissions when the writer last looked: a new one restarts the quiet
     since: ?i96 = null,
 
@@ -68,8 +114,26 @@ pub const Disk = struct {
 
     /// Queue `a` (the host's lock held).
     pub fn push(d: *Disk, gpa: std.mem.Allocator, a: *Ask) bool {
-        d.asks.append(gpa, a) catch return false;
+        (if (a.op.holds()) &d.flushes else &d.asks).append(gpa, a) catch return false;
         return true;
+    }
+
+    /// Whether a flush or drop waits for the requests in flight: admissions hold until it is answered (lock held).
+    pub fn holding(d: *const Disk) bool {
+        for (d.flushes.items) |a| if (a.claim.load(.acquire) == .queued) return true;
+        return false;
+    }
+
+    /// Whether any ask waits, a flush or another (the host's lock held).
+    pub fn waiting(d: *const Disk) bool {
+        return d.asks.items.len > 0 or d.flushes.items.len > 0;
+    }
+
+    /// The waiting flushes and drops, taken whole once no request is in flight (lock held); the caller frees the list.
+    pub fn takeFlushes(d: *Disk) std.ArrayList(*Ask) {
+        const list = d.flushes;
+        d.flushes = .empty;
+        return list;
     }
 
     /// The queued asks, taken (the host's lock held); the caller frees the list.
@@ -94,5 +158,7 @@ pub const Disk = struct {
     pub fn close(d: *Disk, gpa: std.mem.Allocator) void {
         for (d.asks.items) |a| a.answer(null, .{});
         d.asks.deinit(gpa);
+        for (d.flushes.items) |a| a.answer(null, .{});
+        d.flushes.deinit(gpa);
     }
 };

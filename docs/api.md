@@ -49,10 +49,10 @@ different scopes, or scopes a key the flags or environment already give, is refu
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
-`/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
-is matched exactly after the query and trailing slashes are cut. A refused route answers 403 with the code
-`insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
-or a parked model reloads. The public routes stay public.
+`/v1/imprint`, `/v1/prompt_cache/flush`, another method, or a suffix alias such as `/alt/completions` that the server
+answers for a full key. The route is matched exactly after the query and trailing slashes are cut. A refused route
+answers 403 with the code `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the
+connection before the body is read or a parked model reloads. The public routes stay public.
 
 The stored Responses belong to the server, not to a key, so a scoped key's `POST /v1/responses` must send `"store": false`
 and no `previous_response_id`, with the whole conversation in `input`; anything else answers 403 naming the field. Over
@@ -118,6 +118,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | `POST /v1/imprint/resume` | How much of a chat body's conversation resumes, and from where ([on disk](#conversations-on-disk)) |
 | `POST /v1/imprint/load` | A chat body's conversation state read from disk into RAM now |
 | `DELETE /v1/imprint` | This model's conversation states on disk forgotten |
+| `POST /v1/imprint/forget` | A chat body's conversation [forgotten](#forget-one-conversation), in RAM and on disk |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
@@ -1183,7 +1184,9 @@ an engine that keeps no prompt states answers 501.
 - `DELETE /v1/imprint` forgets every conversation state this server's model and build keep on disk: it deletes the
   store's state and row files and answers `freed_bytes`. What stays holds no conversation data: the store's folder with
   its `used` stamp, and the `written` and `clock` files at the top of the `--learn-dir` folder (the bytes written today,
-  and the order the stores were last opened in). States in RAM stay until they are evicted.
+  and the order the stores were last opened in). States in RAM stay until they are evicted, or until a
+  [flush](#flush-the-prompt-cache). To forget one conversation and keep the rest, use
+  [`POST /v1/imprint/forget`](#forget-one-conversation).
 
 What stays on disk: under the `--learn-dir` folder (`~/.cache/tensorfold/learned` by default), directories readable by
 their owner only (0700) hold files readable by their owner only (0600). They contain token ids and the model's own
@@ -1253,6 +1256,60 @@ a forwarded address is never read. Behind a reverse proxy every caller's socket 
 also refuses a request that carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Real-IP`, `Via`,
 `CF-Connecting-IP` or `True-Client-IP`. A proxy that adds none of them cannot be told apart from a local caller: give
 a proxied server keys.
+
+## Flush the prompt cache
+
+`POST /v1/prompt_cache/flush` drops every prompt state the server keeps for resuming conversations: those in RAM, and
+those on disk when it keeps them there (`--prompt-cache-disk DIR`, `--learn-conversations` or `--spill-gib`). It waits
+for the requests already running to end, so their replies are unchanged, and requests that arrive meanwhile wait in the
+queue and start after it. Then it answers 200 with `{"object": "prompt_cache.flush", "states": ..., "ram_bytes": ...,
+"disk_bytes": ..., "disk": ..., "waited_seconds": ...}`: the states dropped from RAM and the bytes they held in the
+cache's budget, the bytes deleted from the server's own state folder, whether this server keeps states on disk, and how
+long the flush waited. The next turn of any conversation prefills its whole prompt and gives the tokens it would have
+given resumed. Two flushes asked together run one after the other, and the second finds nothing left. States `--learn`
+keeps for shared prompt prefixes stay on disk, as they do after `DELETE /v1/imprint`, so with `--learn` a later prompt
+may still resume from one. The body, if any, is ignored.
+
+An engine without the shared prompt cache (its cache turned off, or a backend that keeps its states its own way)
+answers 501 `not_supported` at once and holds nothing back. If the running requests have not ended within 10 minutes,
+the flush is withdrawn: nothing is dropped, new requests start again, and the answer is 503 `timeout`. While a flush
+waits, `--idle-unload` does not unload the model; a model it has already unloaded is not loaded for a flush, which
+answers 503 `model_unloaded` (no state is in RAM then, and the states it saved to disk stay until a flush after the next
+request loads it).
+
+Who may flush is decided as for [cancelling a request](#cancel-a-request). With API keys it is an admin route: a full
+or `[admin]` key may flush from any address, a scoped key gets 403 `insufficient_scope` and a missing key 401. Without
+keys only a caller whose socket is on the loopback address (127.0.0.0/8 or ::1) may flush, and only when the request
+carries none of the proxy headers listed there; anyone else gets 403 `loopback_only`.
+
+## Forget one conversation
+
+`POST /v1/imprint/forget` forgets one conversation's kept states and leaves every other conversation's. Its body is
+that conversation as a chat completion body (`messages`, `tools`, `chat_template_kwargs`), rendered and keyed as its
+next request would be, images by their content. The states it drops, in RAM and on disk, are those whose tokens are a
+prefix of that prompt or continue it (a later turn's), so naming an earlier turn forgets the later turns too. A state
+another conversation builds on stays: a cut at a shared system prompt, a prefix another kept conversation continues, a
+branch point another turn resumed, and the states `--learn` keeps for shared prefixes. From disk it deletes only the
+state files the store's own index names in its own folder, and the row blocks no other state names.
+
+Like a flush, it waits for the requests already running to end, so their replies are unchanged, and holds new ones in
+the queue until it is done. A background prefill of any conversation's next turn (on engines that warm turns) is
+cancelled, and a reply running at the time starts none, so none puts a forgotten state back. The named conversation's
+next request prefills from the start (or from a shared state below it) and gives the tokens it would have given
+resumed, and every other conversation still resumes from its own states. It answers 200 with
+`{"object": "imprint.forget_conversation", "found": ..., "states": ..., "ram_bytes": ..., "disk_states": ...,
+"disk_bytes": ..., "shared_states": ..., "disk": ..., "ram_tokens": ..., "disk_tokens": ..., "waited_seconds": ...}`:
+whether the server kept any state of the conversation (for one it never kept, `found` is false and nothing is
+dropped), the states dropped from RAM and the bytes they held, the states and bytes deleted from disk, the
+conversation's states kept because others build on them, how much of its next request would still resume from RAM
+and from disk, and how long it waited. It works with or without `--prompt-cache-disk`. A body the server would refuse
+as a request (a conversation that leaves no room for a reply) is refused the same way: name an earlier turn instead. An
+engine without the shared prompt cache answers 501 `not_supported`; the 10-minute wait, `--idle-unload` and the 503
+answers are as for a flush. `DELETE /v1/imprint` keeps its meaning: with no body it forgets every state on disk.
+
+Who may forget is decided as for [cancelling a request](#cancel-a-request): with API keys a full or `[admin]` key (a
+scoped key gets 403 `insufficient_scope`, a missing key 401); without keys only a direct loopback caller whose request
+carries none of the proxy headers listed there (anyone else gets 403 `loopback_only`).
 
 ## The Responses API
 

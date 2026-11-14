@@ -41,8 +41,14 @@ const Text = struct {
 const Engine = struct {
     calls: std.atomic.Value(u32) = .init(0),
     reads: std.atomic.Value(u32) = .init(0),
+    flushes: std.atomic.Value(u32) = .init(0),
     fn engine(e: *Engine) api.Engine {
-        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
+        return .{ .ctx = e, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory, .imprint = imprint } };
+    }
+    fn imprint(ptr: *anyopaque, ask: *api.ImprintAsk) bool {
+        _ = cast(ptr).flushes.fetchAdd(1, .monotonic);
+        ask.done.store(true, .release);
+        return true;
     }
     fn cast(ptr: *anyopaque) *Engine {
         return @ptrCast(@alignCast(ptr));
@@ -394,4 +400,61 @@ test "auth scopes HTTP: the request cancel route needs a full key, a loopback ca
     for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), 200);
     try t.expect(e.asked.load(.acquire));
     try expectStatus(try h.ask(a, "POST", "/v1/requests/chatcmpl-nobody/cancel", "admin-secret", ""), 404);
+}
+
+test "auth scopes HTTP: the prompt cache flush route needs a full key, a loopback caller's included" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = "/v1/prompt_cache/flush";
+    for (restricted) |key| {
+        const denied = try h.ask(a, "POST", path, key, "");
+        try expectStatus(denied, 403);
+        try t.expect(std.mem.indexOf(u8, denied, "\"code\": \"insufficient_scope\"") != null);
+    }
+    try expectStatus(try h.ask(a, "POST", path, "", ""), 401);
+    try t.expectEqual(@as(u32, 0), engine.flushes.load(.monotonic));
+    for (full_keys) |key| {
+        const done = try h.ask(a, "POST", path, key, "{}");
+        try expectStatus(done, 200);
+        try t.expectEqualStrings("prompt_cache.flush", (try payload(a, done)).strField("object").?);
+    }
+    try t.expectEqual(@as(u32, full_keys.len), engine.flushes.load(.monotonic));
+}
+
+test "auth scopes HTTP: the conversation forget route needs a full key, a loopback caller's included" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const path = "/v1/imprint/forget";
+    const body = "{\"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}";
+    for (restricted) |key| {
+        const denied = try h.ask(a, "POST", path, key, body);
+        try expectStatus(denied, 403);
+        try t.expect(std.mem.indexOf(u8, denied, "\"code\": \"insufficient_scope\"") != null);
+    }
+    try expectStatus(try h.ask(a, "POST", path, "", body), 401);
+    try t.expectEqual(@as(u32, 0), engine.flushes.load(.monotonic));
+    for (full_keys) |key| {
+        const done = try h.ask(a, "POST", path, key, body);
+        try expectStatus(done, 200);
+        try t.expectEqualStrings("imprint.forget_conversation", (try payload(a, done)).strField("object").?);
+    }
+    try t.expectEqual(@as(u32, full_keys.len), engine.flushes.load(.monotonic));
 }

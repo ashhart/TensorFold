@@ -22,6 +22,14 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     @import("q27_profile_host.zig").steps(b, server_tests);
     // the open-connection limit, one address's share under pressure and its flags (#3048), on Linux hosts too
     b.step("test-connection-admission-host", "Connection limit, per-address share, trusted proxies and idle shedding").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "security: ", "connection CLI:" } })).step);
+    const flush = b.step("test-prompt-cache-flush-host", "The prompt cache flush: its hold, a cold next turn, withdrawal and who may call it");
+    flush.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"prompt cache flush:"} })).step);
+    flush.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"prompt cache flush"} })).step);
+    const forget = b.step("test-imprint-forget-host", "Forget one conversation: shared states, in flight, who calls");
+    const forget_api = b.addTest(.{ .root_module = native_modules.api, .filters = &.{"forget one conversation:"} });
+    const forget_server = b.addTest(.{ .root_module = server_tests, .filters = &.{"imprint forget"} });
+    forget.dependOn(&b.addRunArtifact(forget_api).step);
+    forget.dependOn(&b.addRunArtifact(forget_server).step);
     b.step("test-drama-cfg-host", "Drama CFG CLI, HTTP and voice transitions without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"CFG"} })).step);
     b.step("test-speech-redraw-deadline-host", "Busy speech redraw expiry without counting an unsubmitted take").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a busy redraw stops at its latest start"} })).step);
     @import("proposal_vocab_host.zig").steps(b, mods.core);

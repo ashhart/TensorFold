@@ -68,7 +68,7 @@ const private_routes = [_][]const u8{
     "/v1/imprint/load",  "/v1/imprint/resume",  "/v1/responses/id",  "/responses/id",        "/x/models",
     "/x/completions",    "/x/chat/completions", "/x/systemone",      "/v1/completions/more", "/v1/../imprint/load",
     "/v1/%63ompletions", "/V1/COMPLETIONS",     "/v1/completions#x", "http://h/v1/models",   "/future/private",
-    "/slide/unknown.js", "/v1/completions/..",  "/./v1/completions",
+    "/slide/unknown.js", "/v1/completions/..",  "/./v1/completions", "/v1/imprint/forget",
 };
 
 test "auth scopes: route grants are exact and every other method or resource is refused" {

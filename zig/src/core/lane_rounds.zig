@@ -64,7 +64,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     defer refused.deinit(h.gpa);
     h.lock();
     // a stale device takes no reply (`learn.refuse` ends the queued ones), as in the default loop
-    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h)) {
+    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes and !pressure.holds(h) and !h.disk.holding()) {
         rd.vtable.begin_admit(rd.ctx);
         var free = h.info_.lanes - h.admitted.items.len;
         var i: usize = 0;
