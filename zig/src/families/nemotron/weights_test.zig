@@ -166,3 +166,35 @@ test "8-bit matrices read in place for the row kernels: no tiles, routed experts
         try std.testing.expectEqual(@as(u8, 8), w.embed_width.bits);
     }
 }
+
+test "without tensor units 4/64 matrices keep their lane shape but no tiles: rows read in place, no tile job, no buffer" {
+    const a = std.testing.allocator;
+    const p = "backbone.layers.0.mixer.shared_experts.";
+    const four = [_]Fake{ // the shared expert and the head at 4/64, the lane kernels' width
+        .{ .name = p ++ "up_proj.weight", .dtype = "U32", .shape = &.{ 128, 8 } },
+        .{ .name = p ++ "up_proj.scales", .shape = &.{ 128, 1 } },
+        .{ .name = p ++ "up_proj.biases", .shape = &.{ 128, 1 } },
+        .{ .name = p ++ "down_proj.weight", .dtype = "U32", .shape = &.{ 64, 16 } },
+        .{ .name = p ++ "down_proj.scales", .shape = &.{ 64, 2 } },
+        .{ .name = p ++ "down_proj.biases", .shape = &.{ 64, 2 } },
+        .{ .name = "lm_head.weight", .dtype = "U32", .shape = &.{ 128, 8 } },
+        .{ .name = "lm_head.scales", .shape = &.{ 128, 1 } },
+        .{ .name = "lm_head.biases", .shape = &.{ 128, 1 } },
+    };
+    var buf: [24]Fake = undefined;
+    var ck = try fakeCheckpoint(a, tinyTensors(&four, &buf));
+    defer ck.deinit();
+    const c = tinyMoe();
+    var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+    defer w.deinit();
+    var b = Builder{ .allocator = a, .device = undefined, .ck = &ck, .c = &c, .w = &w, .rows = true };
+    defer b.jobs.deinit(a);
+    try b.fill(null);
+    try std.testing.expectEqual(@as(usize, 0), b.jobs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), w.owned.items.len); // the row kernels read the checkpoint's own rows
+    const m = w.layers[0].moe;
+    for ([_]wts.Linear{ m.shared_up, m.shared_down, w.head }) |lin| {
+        try std.testing.expect(lin.lane and lin.tiles == null);
+        try std.testing.expectEqual(@as(u8, 4), lin.rows.?.bits);
+    }
+}
