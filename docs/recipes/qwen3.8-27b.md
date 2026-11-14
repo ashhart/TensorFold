@@ -21,7 +21,7 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
-With thinking on, serve with `--thinking-budget 4096`; a client can override it per request with `thinking_budget`
+With thinking on, serve with `--thinking-budget 4096`; a client can set its own positive `thinking_budget` per request
 ([API](../api.md#request-fields)). Measured on GPQA Diamond (198 questions) with TensorFold 1.2.7,
 `TensorFold/Qwen3.8-27B-MLX-4bit` and the DFlash2 drafter on one GB10, the model card's thinking sampling, a
 16,384-token reply limit and one attempt per question and setting: without a budget 78 of 198 replies were cut at the
