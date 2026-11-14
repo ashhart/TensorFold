@@ -486,3 +486,13 @@ fn nvfp4Project(o: Ops, x: Tensor, proj: Projection, h: quant.nvfp4.Matrix, m: u
     try o.cast(wide, narrow, m * proj.n);
     return narrow;
 }
+
+test "a grouped product declines both ModelOpt formats" {
+    var arena = @import("../arena.zig").Arena.counting();
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = null, .arena = &arena };
+    const x = Tensor{ .ptr = 0, .kind = .bf16 };
+    const nv: Projection = .{ .n = 1024, .k = 2048, .nvfp4 = .{ .codes = 0, .scale = 0, .tables = .bf16, .global = 1 } };
+    const fp: Projection = .{ .n = 1024, .k = 2048, .fp8 = .{ .codes = 0, .scale = 0 } };
+    var outs: [4]Tensor = undefined;
+    try std.testing.expect(!(try projectGroup(o, x, &.{ nv, fp }, 1, &outs)));
+}

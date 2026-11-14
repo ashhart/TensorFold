@@ -20,10 +20,7 @@ constexpr int kNvSmallM = 16;  // rows a decode block serves
 
 // The group table's entry at `i` as the float it holds: BF16's bits shifted into f32.
 __device__ __forceinline__ float nvfp4_scale(const GroupTable& t, long long i) {
-    const unsigned short* h = static_cast<const unsigned short*>(t.p);
-    if (t.kind == kScaleF32) return static_cast<const float*>(t.p)[i];
-    if (t.kind == kScaleF16) return __half2float(h[i]);
-    return __uint_as_float(static_cast<unsigned>(h[i]) << 16);
+    return __uint_as_float(static_cast<unsigned>(static_cast<const unsigned short*>(t.p)[i]) << 16);
 }
 
 // A nibble's e2m1 level as a float: the BF16 bit table shifted into f32, which is the same value.

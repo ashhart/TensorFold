@@ -30,8 +30,6 @@ pub const Weight = extern struct {
     n: c_int,
     k: c_int,
     group: c_int = 16,
-    route: Routing = .{},
-    out16: u64 = 0,
     global: f32 = 1,
 };
 
@@ -43,9 +41,9 @@ pub const group: c_int = 16;
 const threads: c_int = 256;
 
 comptime {
-    // quant/nvfp4.hpp's Nvfp4, field for field: x, words, scale, out, m, n, k, group, route, out16, global
-    std.debug.assert(@sizeOf(Table) == 16 and @sizeOf(Routing) == 24);
-    std.debug.assert(@sizeOf(Weight) == 96);
+    // quant/nvfp4.hpp's Nvfp4, field for field: x, words, scale, out, m, n, k, group, global
+    std.debug.assert(@sizeOf(Table) == 16);
+    std.debug.assert(@sizeOf(Weight) == 64);
 }
 
 pub const Kernels = struct {
@@ -74,6 +72,6 @@ pub const Kernels = struct {
 };
 
 test "the weight's layout is quant/nvfp4.hpp's" {
-    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Weight));
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(Weight));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(Table));
 }

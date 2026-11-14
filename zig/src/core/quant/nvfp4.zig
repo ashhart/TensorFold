@@ -12,15 +12,6 @@ const Allocator = std.mem.Allocator;
 /// Inputs one e4m3 scale covers.
 pub const group = 16;
 
-/// A family admits a ModelOpt checkpoint through core/modelopt.zig, so this format is never detected.
-pub const Config = void;
-
-pub fn detect(a: Allocator, src: types.Sources) Allocator.Error!?Config {
-    _ = a;
-    _ = src;
-    return null;
-}
-
 /// An e2m1 nibble's value.
 pub fn e2m1(n: u8) f64 {
     const mag = [8]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 };
@@ -36,15 +27,6 @@ fn name(buf: []u8, key: []const u8, suffix: []const u8) ?[]const u8 {
 
 fn refuse(key: []const u8, what: []const u8) error{UnexpectedTensor} {
     return types.refuse(key, what);
-}
-
-/// Whether `key` holds ModelOpt's NVFP4 tensors: U8 codes, a group table and the second (global) scale.
-pub fn matches(t: anytype, key: []const u8) bool {
-    var b: [3][320]u8 = undefined;
-    const w = t.get(name(&b[0], key, ".weight") orelse return false) catch return false;
-    _ = t.get(name(&b[1], key, ".weight_scale") orelse return false) catch return false;
-    if (!t.has(name(&b[2], key, ".weight_scale_2") orelse return false)) return false;
-    return w.dtype == .u8 and w.rank == 2;
 }
 
 /// Why these tensors cannot be this format, or null when they can: checked without a log, as `bf16.unfit` is.
@@ -128,23 +110,6 @@ pub fn sliceRows(a: Allocator, p: Host, spans: []const slice.Span) slice.Error!H
 pub fn sliceCols(a: Allocator, p: Host, r: slice.Rank, what: []const u8) slice.Error!Host {
     const width = try slice.even(inputs(p), r.world, what);
     return cols(a, p, r.rank * width, (r.rank + 1) * width);
-}
-
-/// A rank's `part` experts of a stack and the shared one last on rank 0, their globals cut the same way.
-pub fn sliceStack(a: Allocator, p: Host, r: slice.Rank, part: usize) slice.Error!Host {
-    if (p.global.len != p.weight.shape[0]) return error.UnevenSplit; // one global an expert, the shared one last
-    const first = r.rank * part;
-    const global = if (r.rank != 0) p.global[first..][0..part] else blk: {
-        const out = try a.alloc(f32, part + 1);
-        @memcpy(out[0..part], p.global[first..][0..part]);
-        out[part] = p.global[p.global.len - 1];
-        break :blk out;
-    };
-    return .{
-        .weight = try slice.takeExperts(a, p.weight, r, part),
-        .scale = try slice.takeExperts(a, p.scale, r, part),
-        .global = global,
-    };
 }
 
 /// An uploaded projection: the checkpoint's codes and group table on the device, the global scale a number.
@@ -284,7 +249,6 @@ test "a projection is read as stored, its E4M3 table widened exactly; a bad scal
         .s = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ 4, 2, 1, 1, 1 }, .bytes = &scales },
         .g = .{ .dtype = .f32, .rank = 1, .shape = .{ 1, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(&g) },
     };
-    try std.testing.expect(matches(&t, "x"));
     try std.testing.expect(unfit(t.w, t.s, t.g) == null);
     const h = try read(a, &t, "x");
     try std.testing.expectEqual(types.DType.bf16, h.scale.dtype);
@@ -350,12 +314,6 @@ test "a view is the codes' and table's addresses and the global scale; a stack i
     try std.testing.expectError(error.UnsupportedTables, view(narrow, false));
 }
 
-test "the config is never detected: a family admits a ModelOpt checkpoint itself" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const src: types.Sources = .{ .root = try parsed(arena.allocator(), "{\"quantization_config\": {\"quant_algo\": \"NVFP4\"}}"), .quantization = .empty };
-    try std.testing.expect(try detect(arena.allocator(), src) == null);
-}
 
 test "a stack of experts is refused: a global scale is one a projection" {
     var codes: [2 * 8 * 16]u8 = @splat(0);
