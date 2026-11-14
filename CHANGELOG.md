@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CUDA kernels: dots.mocr's image tower gets two kernels of our own: `tf_dots_vision_rope`, the 2-D rotary over the q|k|v rows with FP32 cos and sin and q and k rounded to BF16 as Transformers does, and `tf_dots_patch_bias`, which rounds the patch bias twice (`bf16(bf16(y) + b)`) as the reference does; both have kernel contract entries, planted controls and records for five SMs, and no served path launches them yet (#2767, part of #1927). Thanks to @laudney.
+
 - GLM-5.3-Flash on CUDA with tensor parallelism: a `prompt_logprobs` request over about 100 tokens no longer hangs every rank at TP=3. The logit gather now broadcasts one block a rank, its staging buffers are counted in the startup memory check, and replies are unchanged (#1571, fixes #1559). Thanks to @gilby.
 
 - README: Pick a model gains a GLM-5.3-Flash Jammed XSFP4 NZ5 row, the checkpoint in the `NVFP4_NZ5` form that #2894 reads, and the GLM CUDA recipe names it beside Jammed XSFP4 (#2981). Thanks to @Bizuayeu.
