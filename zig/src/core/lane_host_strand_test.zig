@@ -435,7 +435,7 @@ const Rig = struct {
             },
             .spans => try t.expectError(error.InvalidSpans, e.submit(n, &spanned, sink)),
             .cancel_at_once => {
-                try e.submit(n, &running, sink);
+                try e.submit(n, &holder, sink); // it waits for the cancel: `running` can reply in full first on a loaded runner
                 e.cancel(n);
                 try t.expectEqual(@as(?Reason, .cancelled), r.box.waitFor(5000));
             },
