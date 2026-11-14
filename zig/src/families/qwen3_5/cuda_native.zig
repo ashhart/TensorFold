@@ -9,6 +9,7 @@ pub const reservation = @import("cuda_reserve.zig");
 pub const window_costs = @import("cuda_window_costs.zig");
 pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
+const pick = @import("cuda_pick.zig").pick;
 const Draft = @import("cuda_draft.zig").Draft;
 const cuda_rope = @import("cuda_rope.zig");
 const prefill = @import("cuda_prefill.zig");
@@ -50,6 +51,9 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
+pub const snap_spare = @import("cuda_spares.zig").spare;
+pub const snap_trim = @import("cuda_spares.zig").trim;
+pub const snap_reuses = @import("cuda_spares.zig").reuses;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
@@ -259,13 +263,6 @@ fn release(p: *anyopaque) void {
     l.deinit();
 }
 
-/// The device draw of a stream's rule at `position`: sample.cu's keyed rule, greedy at temperature 0 or without one.
-fn pick(sampling: ?lanes.Sampling, position: u64) E.Draw {
-    const s = sampling orelse return .{ .rule = null, .position = position };
-    if (s.temperature <= 0) return .{ .rule = null, .position = position };
-    return .{ .rule = cuda.sample.Rule.from(lanes.gpu_rule.rule(s)), .position = position };
-}
-
 pub const Lanes = struct {
     timing_on: bool = false,
     trace: ?*round_timing.Trace = null,
@@ -323,6 +320,7 @@ pub const Lanes = struct {
         if (self.prefix) |x| x.deinit(); // its pages back to the pool before the pool goes
         if (self.pages) |p| p.deinit();
         if (self.vision) |v| v.deinit();
+        self.target.spares.deinit(); // after the host closed the prompt cache, the last to give buffers back
         self.e.deinit();
         if (self.trace) |x| self.gpa.destroy(x);
         self.gpa.destroy(self);
