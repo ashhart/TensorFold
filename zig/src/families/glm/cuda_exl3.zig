@@ -142,12 +142,16 @@ fn picksBytes(rows: usize) usize {
     const cap: usize = @min(rows, chunk_rows);
     return std.mem.alignForward(usize, cap * top_k * 4, 256);
 }
+/// A decode chunk must fit both the compact fallback and the nine-slot item layout.
+fn decodeBytes(l: common.Layer, n: usize) !usize {
+    return @max(try common.scratchBytes(l, n, top_k), try common.fusedBytes(l, n, top_k + 1));
+}
 pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool) [4]usize {
     var l = shape(dims, width);
     l.shared_input = shx;
     if (prefill and common.prompt.eligible(l)) return .{ common.prompt.bytes(l, @min(rows, prompt_rows), top_k + 1) catch unreachable, 4, 4, 4 };
     const n: usize = @min(rows, chunk_rows);
-    return .{ picksBytes(rows) + (common.scratchBytes(shape(dims, width), n, top_k) catch unreachable), 4, 4, 4 };
+    return .{ picksBytes(rows) + (decodeBytes(shape(dims, width), n) catch unreachable), 4, 4, 4 };
 }
 /// `height` rows of `width` bytes, `spitch` apart at `src`, to `dpitch` apart at `dst`, in one call.
 fn copyRows(stream: cuda.Stream, dst: u64, dpitch: usize, src: u64, spitch: usize, width: usize, height: usize, what: []const u8) !void {
@@ -168,10 +172,20 @@ pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w
         }
         return;
     }
+    if (!prompt) {
+        const cap: usize = @min(rows, chunk_rows);
+        const scratch = try common.fusedScratch(sc.picks + picksBytes(rows), l, cap, slots);
+        var at: usize = 0;
+        while (at < rows) : (at += chunk_rows) {
+            const n: usize = @min(chunk_rows, rows - at);
+            try k.runWith(stream, l, x + at * x_stride * 2, x_stride, .bf16, picks + at * slots * 4, 0, n, 0, scratch, ey + at * slots * dims * 4, .{ .router = &ek.router, .plan = plan_buf });
+        }
+        return;
+    }
     return compact(k, stream, w, sc, x, x_stride, picks, slots, rows, count, dims, width, limit, ey);
 }
 
-/// Compact routed picks and output for decode or prompt layers without the whole-pass kernel.
+/// Compact routed picks and output for prompt layers without the whole-pass kernel.
 fn compact(k: *const Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, ey: u64) !void {
     const l = layer(w, count, dims, width, limit);
     const cap: usize = @min(rows, chunk_rows);
