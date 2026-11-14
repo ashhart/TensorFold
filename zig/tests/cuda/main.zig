@@ -61,7 +61,6 @@ const recapture_tests = @import("recapture_tests.zig");
 const contract_tests = @import("contract_tests.zig");
 const gb10_many_contract = @import("contract_gb10_many.zig");
 const qmm_prefill_many_contract = @import("contract_qmm_prefill_many.zig");
-const prompt_many_contract = @import("contract_prompt_many.zig");
 const qmm_prefill_tile22_contract = @import("contract_qmm_prefill_tile22.zig");
 const glue_contract = @import("contract_flashnext_glue.zig");
 const lfm2_attention_tests = @import("lfm2_attention_tests.zig");
@@ -261,8 +260,7 @@ const usage =
     \\  qmmf-prompt-repro        isolate M=65 N=8240 K=2560 SK=4 BF16 without clusters
     \\  qmmf-prompt-bench        rank0 normal-main weighted A-B-A timings, plus separate MTP hidden timings
     \\  qmm-prefill-many-bench    same-process A-B-A screening for the GB10 launch fusion
-    \\  nvfp4-prompt-many-contract the Qwen3.8 NVFP4 {gate,up} prompt fusion against separate lean launches
-    \\  nvfp4-prompt-many-bench   same-process A-B-A screening for the NVFP4 prompt fusion
+    \\  nvfp4-prompt-many-*       NVFP4 {gate,up} prompt fusion: bit-exact contract, and an interleaved bench
     \\  mtp-rows                  tf_q36m_attn_rows: gates 1-4 (byte-equal to tf_q36m_attn a segment) and float64 alone
     \\  qwen-pages                qwen35.cu's attention cache through a page table: paged == contiguous, float64, red controls
     \\  qwen-norm-shift           qwen35.cu's _shift norms (BF16 checkpoints): 1 + w in FP32 within a BF16 ulp of float64, red controls
@@ -530,8 +528,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-contract")) return qmm_prefill_many_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-tile22-contract")) return qmm_prefill_tile22_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-bench")) return qmm_prefill_many_contract.bench(gpu);
-    if (std.mem.eql(u8, cmd, "nvfp4-prompt-many-contract")) return prompt_many_contract.run(gpu);
-    if (std.mem.eql(u8, cmd, "nvfp4-prompt-many-bench")) return prompt_many_contract.bench(gpu);
+    if (std.mem.startsWith(u8, cmd, "nvfp4-prompt-many-")) return @import("contract_prompt_many.zig").dispatch(gpu, cmd);
     if (std.mem.eql(u8, cmd, "mtp-rows")) return @import("contract_qwen_mtp_rows.zig").alone(gpu);
     if (std.mem.eql(u8, cmd, "qwen-pages")) return @import("contract_qwen_pages.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qwen-norm-shift")) return @import("qwen_norm_shift_tests.zig").run(gpu);
