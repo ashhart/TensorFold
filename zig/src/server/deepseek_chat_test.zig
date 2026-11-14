@@ -133,7 +133,19 @@ test "DeepSeek chat: an explicit override wins, a checkpoint Jinja does not, and
     // a server with image input: the part becomes the image token, which images.zig expands
     const served = try native.text().render(a, images, .{ .images = true }, &problem);
     const ids = try served.encode(native.text(), a, &problem);
-    try t.expect(std.mem.indexOfScalar(u32, ids, native.text().tokenId("<｜deepseek_image｜>").?) != null);
+    const image_token = "<｜deepseek_image｜>";
+    const image_id = native.text().tokenId(image_token).?;
+    try t.expect(std.mem.indexOfScalar(u32, ids, image_id) != null);
+    // a text part that spells the token beside an image part: two spellings, only the image's is the template's
+    const typed = (try json.parseText(a, "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"<｜deepseek_image｜>\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"x\"}}]}]")).ok;
+    const both = try native.text().render(a, typed, .{ .images = true }, &problem);
+    try t.expectEqual(@as(usize, 2), std.mem.count(u8, both.text, image_token));
+    const first = std.mem.indexOf(u8, both.text, image_token).?;
+    const second = std.mem.indexOfPos(u8, both.text, first + 1, image_token).?;
+    try t.expect(!both.isTemplate(first, first + image_token.len));
+    try t.expect(both.isTemplate(second, second + image_token.len));
+    const both_ids = try both.encode(native.text(), a, &problem);
+    try t.expectEqual(@as(usize, 1), std.mem.count(u32, both_ids, &.{image_id}));
 }
 
 test "DeepSeek chat: response_format shows its schema unless TF_DSV41_SCHEMA_PROMPT=0" {

@@ -445,6 +445,14 @@ common EXL3 operators and their per-slot epilogues; tile decoding is shared.
 The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
 
+## DeepSeek-V4.1 Metal image preparation
+
+The image preparation (`zig/src/families/deepseek_v41/metal/vision_prep.zig`,
+`zig/src/families/deepseek_v41/metal/vision_prepare.zig`) follows the image budgets and geometry of
+`image_processor.py` in DeepSeek AI's MIT licensed
+[deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
+(revision 08c8657f02291e11b6f6b63e0e16014f8e748518), Copyright (c) 2023 DeepSeek.
+
 ## Shared EXL3 resolver setup
 
 The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
