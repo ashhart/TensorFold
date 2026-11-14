@@ -7,12 +7,12 @@ pub const head_dim = 512;
 pub const window = 128;
 pub const max_selected = 512;
 pub const rope_dims = 64;
-/// Heads a simdgroup carries, and the groups of the two launch shapes.
+/// Heads a simdgroup carries (decode, prompt), and the groups of the two launch shapes.
 pub const heads_per_sg = 1;
+pub const prompt_heads_per_sg = 2;
 pub const chunks = 5;
 pub const prompt_rows = 2;
 pub const prompt_head_groups = 4;
-pub const prompt_tile = 16;
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Out = enum { f32, bf16 };
 
@@ -91,6 +91,6 @@ pub fn encodePrompt(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Call
     try check(c);
     e.setPipeline(p.pre[@backingInt(c.out)]);
     bind(e, b, c);
-    const per = heads_per_sg * prompt_head_groups;
+    const per = prompt_heads_per_sg * prompt_head_groups;
     e.dispatchGroups(mtl.Size.of((c.rows + prompt_rows - 1) / prompt_rows, (c.heads + per - 1) / per, 1), mtl.Size.of(32 * prompt_rows * prompt_head_groups, 1, 1));
 }
