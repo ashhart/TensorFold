@@ -14,7 +14,7 @@ pub fn chunk(b: anytype, current: anytype, at: usize, decoded: bool) usize {
 }
 
 /// A background chunk's width at offset `at`: narrower with depth, each about as long (256 at least).
-pub fn deep(chunk: usize, at: usize) usize {
-    const scaled = @min(chunk, chunk * 16384 / @max(at, 16384));
+pub fn deep(width: usize, at: usize) usize {
+    const scaled = @min(width, width * 16384 / @max(at, 16384));
     return @max(256, scaled / 128 * 128);
 }
