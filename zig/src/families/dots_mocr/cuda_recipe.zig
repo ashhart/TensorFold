@@ -1,4 +1,4 @@
-//! dots.mocr's Qwen2 text decoder as a cuda_dense recipe: HIP's rounding points, its tower refused until it is built.
+//! dots.mocr as a cuda_dense recipe: its Qwen2 text decoder in HIP's rounding points, and its image tower.
 const std = @import("std");
 const cuda = @import("cuda");
 const dense = @import("cuda_dense");
@@ -18,6 +18,8 @@ pub const reasoning = false;
 
 pub const Weights = wts.Weights;
 pub const Kernels = kern.Kernels;
+/// The image tower --vision opens (cuda_tower.zig).
+pub const Tower = @import("cuda_tower.zig").Tower;
 
 /// The engine's geometry of an admitted dots.mocr config.
 pub fn geometryOf(c: cfg.Config) dense.Geometry {
@@ -51,13 +53,25 @@ pub fn layer(p: P, i: usize) !void {
     const l = p.w.layers[i];
     try p.norm(if (i == 0) null else x.r, l.ln1);
     try p.projectF32(l.qkv, x.x, x.acc);
+    try tapped(p, "qkv", i, x.x, p.g.hidden, x.acc, 2 * p.g.acc); // its fp32 sums: two bf16 columns a sum
     try p.own.qkvRope(p.s, x.acc, l.bias, p.m.inv, x.pos, x.q, x.kv, p.rows, p.g.heads, p.g.kv_heads);
     try p.attend(i, x.q, x.kv, x.y);
     try p.project(l.o, x.y, x.r);
+    try tapped(p, "o", i, x.y, p.g.qWidth(), x.r, p.g.hidden);
     try p.norm(x.r, l.ln2);
     try p.project(l.gate_up, x.x, x.wide);
+    try tapped(p, "gate_up", i, x.x, p.g.hidden, x.wide, p.g.wide);
     try p.siluMul(x.wide, x.y, p.g.mid);
     try p.project(l.down, x.y, x.r);
+    try tapped(p, "down", i, x.y, p.g.mid, x.r, p.g.hidden);
+}
+
+/// A projection's input [rows, k] and output [rows, n] as `<class>.<layer>.x` and `.y`, when a check taps the pass.
+fn tapped(p: P, class: []const u8, i: usize, in: u64, k: usize, y: u64, n: usize) !void {
+    if (p.taps == null) return;
+    var stage: [32]u8 = undefined;
+    try p.tap(try std.fmt.bufPrint(&stage, "{s}.{d}.x", .{ class, i }), in, k);
+    try p.tap(try std.fmt.bufPrint(&stage, "{s}.{d}.y", .{ class, i }), y, n);
 }
 
 pub fn final(p: P) !void {
