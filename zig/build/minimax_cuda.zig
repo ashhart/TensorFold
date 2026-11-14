@@ -30,4 +30,8 @@ pub fn hostTests(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build
     const mesh = @import("mesh.zig").module(b, host, .debug, @import("cuda_engines.zig").canonModule(b, host, .debug));
     const decl = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/cuda_shard_decl_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "mesh", .module = mesh }} }) }));
     run.step.dependOn(&decl.step);
+    // the Metal backend's timed rounds as lane facts: no device code, so it runs beside the family's other host tests
+    const costs = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/minimax_m3/round_costs.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "lanes", .module = lanes }} }) }));
+    b.step("test-minimax-m3-costs-host", "MiniMax-M3 Metal's timed round widths as the lanes price them, no GPU").dependOn(&costs.step);
+    all.dependOn(&costs.step);
 }
