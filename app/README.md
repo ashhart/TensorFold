@@ -70,6 +70,15 @@ an opaque conversation ID across search, fetch and follow-up turns; a new chat g
 after 20 seconds and stop when the owning run is cancelled. Fetches return excerpts rather
 than a complete page; `max_chars` still caps the displayed text.
 
+### Optional Keenable web research
+
+Ask the built-in agent to “Use Keenable to search the web” or “Use Keenable to read this URL.”
+The `web_search` and `web_fetch` tools accept `provider: "keenable"` for the
+[Keenable API](https://docs.keenable.ai/api-reference): general web results with page text,
+and pages as Markdown, with no account or API key. Anonymous use has service rate limits.
+Queries and requested URLs, with the app name `TensorFold`, go to Keenable when this provider is selected.
+The same defaults, permissions, local-only restrictions, 20-second timeout and cancellation apply as above.
+
 ### Browser demo mode
 
 Open `http://localhost:5173` in a browser (no Electron) and TensorFold runs in **demo mode** with
