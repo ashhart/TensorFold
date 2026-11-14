@@ -269,6 +269,9 @@ pub const Family = struct {
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
 
+/// Which of --tp and --rank the command line named (a CUDA family's rank aliases fill the rest).
+pub const Given = struct { tp: bool = false, rank: bool = false };
+
 /// What a server asks of the engine it opens: the checkpoint, and the serve flags an engine reads.
 pub const Open = struct {
     pub const slideRefusal = @import("engine_slide.zig").refusal;
@@ -337,9 +340,10 @@ pub const Open = struct {
     decode_share: ?f64 = null,
     /// Kept prompt entries (--checkpoint-slots); null: the engine's plan.
     keep: ?i64 = null,
-    /// Tensor parallelism: this process is `rank` of `tp`; rank 0 listens on `master`:`master_port` for the others.
+    /// Tensor parallelism: `rank` of `tp` (named on the command line when `given` says so); rank 0 listens on `master`.
     tp: u32 = 1,
     rank: u32 = 0,
+    given: Given = .{},
     master: []const u8 = "",
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
@@ -350,19 +354,7 @@ pub const Open = struct {
     loops: ?u32 = null,
 };
 
-/// A packed decision: a trunk (pictures expand at `at`), a branch a question, and each branch's labels (`counts`).
-pub const Decision = struct {
-    trunk: []const u32,
-    at: usize = 0,
-    pictures: []const []const u8 = &.{}, // data URLs, in prompt order
-    branches: []const []const u32 = &.{},
-    counts: []const usize = &.{},
-    labels: []const u32 = &.{},
-    logits: []f64 = &.{},
-    read: usize = 0, // out: the trunk's tokens with its pictures expanded, plus every branch's
-    problem: []const u8 = "", // out: why the engine refused (error.Refused), in `arena`
-    arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
-};
+pub const Decision = @import("engine_decision.zig").Decision;
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
 pub const Opened = struct {

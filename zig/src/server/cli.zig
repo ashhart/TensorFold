@@ -133,7 +133,8 @@ pub const flags = [_]Flag{
     .{ .name = "--fsr-route-trace", .path = true, .native = builtin.os.tag == .macos },
     .{ .name = "--no-update-check", .kind = .store_true, .native = true },
     .{ .name = "--backend", .choices = &.{ "auto", "mlx", "cuda", "rocm" }, .native = true, .native_values = backend_values },
-    .{ .name = "--tp", .choices = &.{ "1", "2", "4", "8" }, .native = served("--tp") },
+    .{ .name = "--tp", .native = served("--tp") }, // 1 to 64; each family admits its own worlds
+    .{ .name = "--pp", .native = served("--tp") }, // 1 until pipeline stages serve (#2005)
     .{ .name = "--rank", .native = served("--tp") },
     .{ .name = "--master", .native = served("--tp") },
     .{ .name = "--master-port", .native = served("--tp") },
@@ -252,6 +253,8 @@ pub const Args = struct {
     spill_gib: ?f64 = null, // disk for states evicted from the prompt cache, every model together (null or 0: off)
     tp: u32 = 1,
     rank: u32 = 0,
+    tp_given: bool = false, // --tp named on the command line (a family's rank aliases fill it otherwise)
+    rank_given: bool = false,
     master: []const u8 = "",
     master_port: u16 = 29551,
     policy: []const u8 = "", // every --policy joined by commas
@@ -564,6 +567,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .keep = args.checkpoint_slots,
         .tp = args.tp,
         .rank = args.rank,
+        .given = .{ .tp = args.tp_given, .rank = args.rank_given },
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,

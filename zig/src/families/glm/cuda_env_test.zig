@@ -19,6 +19,8 @@ const switches = [_]Name{
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
+/// The rank variables, aliases of --rank and --tp (fabric/mesh/launch.zig reads them).
+const ranks = [_][:0]const u8{ "TF_GLM_RANK", "TF_GLM_WORLD" };
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 
@@ -58,12 +60,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+    for (ranks) |name| try t.expectEqual(e.Kind.u32, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + ranks.len + windows.len, n);
 }
 
 test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
