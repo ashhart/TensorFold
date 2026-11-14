@@ -112,6 +112,7 @@ const linux_hip = [_][]const u8{
     "test-hip-blas-host",
     "test-hip-contract-select-host",
     "test-hip-family-offers-host",
+    "test-hip-followers-host",
     "test-hip-native-options-host",
     "test-hip-pair-contract-host",
     "test-lighton-hip-contract-host",
