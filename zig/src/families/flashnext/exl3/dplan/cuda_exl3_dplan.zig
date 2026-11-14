@@ -45,7 +45,7 @@ fn workCap(max_rows: usize) usize {
 pub const Owner = enum { host, device };
 
 /// Device statistics of a layer (the misc words after now).
-pub const Misc = extern struct { now: u32, rounds: u32, hit_slots: u32, miss_slots: u32, copies: u32, evictions: u32, overflow: u32, inplace: u32, recent_cursor: u32, recent_filled: u32 };
+pub const Misc = extern struct { now: u32, rounds: u32, hit_slots: u32, miss_slots: u32, copies: u32, evictions: u32, overflow: u32, staged: u32, recent_cursor: u32, recent_filled: u32 };
 
 pub const DevPlan = struct {
     gpa: std.mem.Allocator,
@@ -63,6 +63,8 @@ pub const DevPlan = struct {
     /// Per pool: src [512 * 3] int64, lens [512 * 3] int64, k2 [512 * 3] int32 (static).
     statics: cuda.DeviceBuffer,
     work: cuda.DeviceBuffer,
+    /// Shared by sequential layers; holds experts that cannot occupy a pool line this round.
+    overflow: cuda.DeviceBuffer,
     owner: Owner = .host,
     /// The stream the last device round ran on (toHost waits for it).
     stream: ?cuda.Stream = null,
@@ -80,8 +82,8 @@ pub const DevPlan = struct {
     pushes: u64 = 0,
     pulls: u64 = 0,
     history_initialized: bool = false,
-    /// Experts read in place from the host bank (more misses than free lines in a round), summed at each pull.
-    inplace: u64 = 0,
+    /// Experts staged outside the resident pool, summed at each pull.
+    staged: u64 = 0,
     trace_mem: ?cuda.DeviceBuffer = null,
     trace_checkpoint_fn: ?cuda.Function = null,
 
@@ -125,6 +127,10 @@ pub const DevPlan = struct {
         }
         var work = try cuda.DeviceBuffer.alloc(d, workCap(max_rows) * 9 * 8 + 256 + (experts_n + 64) * 4);
         errdefer work.free();
+        var max_line: usize = 0;
+        for (pools) |p| max_line = @max(max_line, p.lines.layout.line_bytes);
+        var overflow = try cuda.DeviceBuffer.alloc(d, try std.math.mul(usize, workCap(max_rows), max_line));
+        errdefer overflow.free();
         const seen = try gpa.alloc(Misc, pools.len);
         errdefer gpa.free(seen);
         var side = try cuda.Stream.init(d, true);
@@ -165,6 +171,7 @@ pub const DevPlan = struct {
             .mirror = mirror,
             .statics = statics,
             .work = work,
+            .overflow = overflow,
             .seen = seen,
             .side = side,
             .ev_plan = ev_plan,
@@ -187,6 +194,7 @@ pub const DevPlan = struct {
         dp.ev_plan.deinit();
         dp.side.deinit();
         dp.work.free();
+        dp.overflow.free();
         dp.statics.free();
         dp.mirror.free();
         dp.state.free();
@@ -231,7 +239,7 @@ pub const DevPlan = struct {
             const misc: *Misc = @ptrCast(m[miscOffset(lines)..][0..misc_words]);
             const recent_cursor = if (dp.history_initialized) misc.recent_cursor else 0;
             const recent_filled = if (dp.history_initialized) misc.recent_filled else 0;
-            misc.* = .{ .now = p.now, .rounds = 0, .hit_slots = 0, .miss_slots = 0, .copies = 0, .evictions = 0, .overflow = 0, .inplace = 0, .recent_cursor = recent_cursor, .recent_filled = recent_filled };
+            misc.* = .{ .now = p.now, .rounds = 0, .hit_slots = 0, .miss_slots = 0, .copies = 0, .evictions = 0, .overflow = 0, .staged = 0, .recent_cursor = recent_cursor, .recent_filled = recent_filled };
             dp.seen[i] = misc.*;
         }
         try s.d.check(s.d.api.cuMemcpyHtoDAsync_v2(dp.state.ptr, dp.mirror.bytes.ptr, dp.state.len, s.handle), "cuMemcpyHtoDAsync");
@@ -274,7 +282,7 @@ pub const DevPlan = struct {
             p.stats.misses += misc.copies -% was.copies;
             p.stats.evictions += misc.evictions -% was.evictions;
             overflow += misc.overflow;
-            dp.inplace += misc.inplace -% was.inplace;
+            dp.staged += misc.staged -% was.staged;
             dp.seen[i] = misc.*;
             // the device's rounds finished (synchronized above): no line waits for a reader, nothing is in flight
             @memset(p.lines.line_epoch, 0);
@@ -299,7 +307,7 @@ pub const DevPlan = struct {
         for (dp.pools, 0..) |_, i| {
             const m = dp.mirrorOf(i);
             const misc: *const Misc = @ptrCast(m[miscOffset(dp.pool_states[i].lines)..][0..misc_words]);
-            inline for (.{ "rounds", "hit_slots", "miss_slots", "copies", "evictions", "overflow", "inplace" }) |f| @field(t, f) += @field(misc, f) - @field(dp.seen[i], f);
+            inline for (.{ "rounds", "hit_slots", "miss_slots", "copies", "evictions", "overflow", "staged" }) |f| @field(t, f) += @field(misc, f) - @field(dp.seen[i], f);
         }
         return t;
     }
@@ -355,12 +363,12 @@ pub const DevPlan = struct {
         return .{ .allocator = allocator, .words = words };
     }
 
-    /// The in-place experts of the last plan ([512] int32) and their count after it.
+    /// The staged experts of the last plan ([512] int32) and their count after it.
     fn ovfList(dp: *const DevPlan) u64 {
         return dp.work.ptr + workCap(dp.max_rows) * 9 * 8 + 256;
     }
 
-    /// After the round's experts (on `s`): the in-place experts' table entries cleared.
+    /// After the round's experts (on `s`): the staged experts' table entries cleared.
     pub fn restore(dp: *DevPlan, s: cuda.Stream, i: usize) !void {
         if (i >= dp.pools.len) return error.Invalid;
         const p = dp.pools[i];
@@ -409,6 +417,7 @@ pub const DevPlan = struct {
         a.add(@as(u64, p.lines.mem.ptr));
         a.add(@as(u64, p.lines.layout.line_bytes));
         for (p.lines.layout.off) |o| a.add(@as(u64, o));
+        a.add(dp.overflow.ptr);
         a.add(work);
         a.add(work_n);
         a.add(if (dp.overlap) dp.split.ptr else @as(u64, 0));

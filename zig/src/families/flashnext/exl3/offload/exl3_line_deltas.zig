@@ -46,7 +46,10 @@ pub fn apply(text: []const u8, uniform_lines: usize, decoder_pools: usize, line_
         expert_bytes = try std.math.add(u64, expert_bytes, try std.math.mul(u64, count.*, bytes));
     }
     if (before != after) return error.LineDeltaByteBudgetChanged;
-    const planner_bytes = if (planner_rows) |rows| try memory.plannerBytesForPools(counts, rows) else 0;
+    // the overflow scratch is sized by the largest line of any pool; `fixed_bytes` never holds planner bytes
+    var max_line_bytes: u64 = 0;
+    for (line_bytes) |bytes| max_line_bytes = @max(max_line_bytes, bytes);
+    const planner_bytes = if (planner_rows) |rows| try memory.plannerBytesForPools(counts, rows, max_line_bytes) else 0;
     const pool_bytes = try std.math.add(u64, try std.math.add(u64, expert_bytes, fixed_bytes), planner_bytes);
     if (pool_bytes > startup_reservation) return error.InsufficientStartupMemory;
     return .{ .pool_bytes = pool_bytes, .planner_bytes = planner_bytes };
@@ -63,7 +66,7 @@ test "exl3: line deltas parse signed decoder ordinals and leave MTP unchanged" {
     const bytes: [22]usize = @splat(256);
     const plan = try apply("20:+1,15:-1", 32, 21, &bytes, 10, 16, 100, std.math.maxInt(u64), &counts);
     for (counts, 0..) |count, index| try std.testing.expectEqual(@as(usize, if (index == 20) 33 else if (index == 15) 31 else 32), count);
-    try std.testing.expectEqual(try memory.plannerBytes(22, 32, 16), plan.planner_bytes);
+    try std.testing.expectEqual(try memory.plannerBytes(22, 32, 16, 256), plan.planner_bytes);
     try std.testing.expectEqual(22 * 32 * 256 + 100 + plan.planner_bytes, plan.pool_bytes);
     try std.testing.expectEqual(@as(usize, 32), counts[21]);
 }
@@ -93,7 +96,7 @@ test "exl3: line deltas conserve lines and actual bytes independently" {
         try std.testing.expectError(error.LineDeltaByteBudgetChanged, apply(text, 32, 3, &bytes, 10, 16, 0, std.math.maxInt(u64), &counts));
     }
     const expected_counts = [_]usize{ 33, 32, 31, 32 };
-    const planner = try memory.plannerBytes(4, 32, 16);
+    const planner = try memory.plannerBytes(4, 32, 16, 1024);
     const expected_bytes = 32 * (256 + 512 + 256 + 1024) + planner + 100;
     const plan = try apply("0:+1,2:-1", 32, 3, &bytes, 10, 16, 100, expected_bytes, &counts);
     try std.testing.expectEqualSlices(usize, &expected_counts, &counts);
@@ -122,11 +125,34 @@ test "exl3: line deltas allow byte neutral multiway transfers within conservativ
     var counts: [4]usize = undefined;
     const bytes = [_]usize{ 256, 512, 768, 1024 };
     const fixed: u64 = 100;
-    const reservation = try memory.poolBytes(32, 1024 + 8, 4, fixed + try memory.plannerBytes(4, 0, 16));
+    const reservation = try memory.poolBytes(32, 1024 + 8, 4, fixed + try memory.plannerBytes(4, 0, 16, 1024));
     const plan = try apply("0:+1,1:-2,2:+1", 32, 3, &bytes, 10, 16, fixed, reservation, &counts);
     try std.testing.expectEqualSlices(usize, &.{ 33, 30, 33, 32 }, &counts);
     try std.testing.expect(plan.pool_bytes <= reservation);
-    try std.testing.expectEqual(@as(u64, 32 * (256 + 512 + 768 + 1024) + fixed) + try memory.plannerBytes(4, 32, 16), plan.pool_bytes);
+    try std.testing.expectEqual(@as(u64, 32 * (256 + 512 + 768 + 1024) + fixed) + try memory.plannerBytes(4, 32, 16, 1024), plan.pool_bytes);
     _ = try apply("0:+0", 32, 3, &bytes, 10, 16, fixed, reservation, &counts);
     try std.testing.expectEqualSlices(usize, &.{ 32, 32, 32, 32 }, &counts);
+}
+
+test "exl3: line delta planner bytes carry one overflow scratch of the largest line and the disabled path none" {
+    var counts: [4]usize = undefined;
+    const bytes = [_]usize{ 256, 512, 768, 1024 };
+    const fixed: u64 = 100;
+    const scratch = try memory.overflowScratchBytes(16, 1024);
+    try std.testing.expectEqual(@as(u64, 160 * 1024), scratch);
+    const plan = try apply("0:+1,1:-2,2:+1", 32, 3, &bytes, 10, 16, fixed, std.math.maxInt(u64), &counts);
+    try std.testing.expectEqual(try memory.plannerBytesForPools(&counts, 16, 1024), plan.planner_bytes);
+    try std.testing.expectEqual(try memory.plannerBytesForPools(&counts, 16, 0) + scratch, plan.planner_bytes);
+    // scratch is counted once, in planner bytes, not in the caller's fixed bytes
+    try std.testing.expectEqual(@as(u64, 32 * (256 + 512 + 768 + 1024)) + fixed + plan.planner_bytes, plan.pool_bytes);
+    // manual and uniform redistribution of the same pools reserve the identical planner bytes
+    const uniform_counts = [_]usize{ 32, 32, 32, 32 };
+    try std.testing.expectEqual(try memory.plannerBytesForPools(&uniform_counts, 16, 1024), plan.planner_bytes);
+    // a reservation that excludes the scratch is refused
+    try std.testing.expectError(error.InsufficientStartupMemory, apply("0:+1,1:-2,2:+1", 32, 3, &bytes, 10, 16, fixed, plan.pool_bytes - scratch, &counts));
+    const disabled = try apply("0:+1,1:-2,2:+1", 32, 3, &bytes, 10, null, fixed, plan.pool_bytes - plan.planner_bytes, &counts);
+    try std.testing.expectEqual(@as(u64, 0), disabled.planner_bytes);
+    try std.testing.expectEqual(plan.pool_bytes - plan.planner_bytes, disabled.pool_bytes);
+    // only the scratch product (rows * 10 * line) overflows here: the lines themselves fit
+    try std.testing.expectError(error.Overflow, apply("0:+0", 1, 2, &.{ 1 << 61, 1 << 61 }, 1, 16, 0, std.math.maxInt(u64), counts[0..2]));
 }

@@ -59,16 +59,30 @@ pub fn poolBytes(lines: u64, line_bytes: u64, layers: u64, fixed: u64) !u64 {
     return std.math.add(u64, try std.math.mul(u64, try std.math.mul(u64, lines, line_bytes), layers), fixed);
 }
 
-pub fn plannerBytes(layers: u64, lines: u64, rows: u64) !u64 {
-    const state = try planner_layout.deviceBytes(layers, try std.math.mul(u64, layers, lines), rows);
-    return std.math.add(u64, state, try plannerTraceBytes(layers, traceEnabled()));
+/// Routed experts one row picks (the shared expert is not staged).
+pub const routed_per_row: u64 = 10;
+
+/// One shared staging buffer holds up to rows * 10 experts at the largest pool's line size.
+pub fn overflowScratchBytes(rows: u64, max_line_bytes: u64) !u64 {
+    return std.math.mul(u64, try std.math.mul(u64, rows, routed_per_row), max_line_bytes);
 }
 
-pub fn plannerBytesForPools(lines: []const usize, rows: u64) !u64 {
+/// Planner device allocations, including staging scratch; lines 0 gives the fixed reservation.
+pub fn plannerBytes(layers: u64, lines: u64, rows: u64, max_line_bytes: u64) !u64 {
+    const state = try planner_layout.deviceBytes(layers, try std.math.mul(u64, layers, lines), rows);
+    return plannerTotal(state, layers, rows, max_line_bytes);
+}
+
+pub fn plannerBytesForPools(lines: []const usize, rows: u64, max_line_bytes: u64) !u64 {
     var total_lines: u64 = 0;
     for (lines) |count| total_lines = try std.math.add(u64, total_lines, count);
     const state = try planner_layout.deviceBytes(lines.len, total_lines, rows);
-    return std.math.add(u64, state, try plannerTraceBytes(lines.len, traceEnabled()));
+    return plannerTotal(state, lines.len, rows, max_line_bytes);
+}
+
+fn plannerTotal(state: u64, pools: u64, rows: u64, max_line_bytes: u64) !u64 {
+    const traced = try std.math.add(u64, state, try plannerTraceBytes(pools, traceEnabled()));
+    return std.math.add(u64, traced, try overflowScratchBytes(rows, max_line_bytes));
 }
 
 pub fn plannerTraceBytes(pools: u64, enabled: bool) !u64 {
@@ -120,10 +134,35 @@ test "planner allocation ledger agrees with device state statics work and split 
     const layers: u64 = 49;
     const lines: u64 = 10;
     const rows: u64 = 16;
-    const expected = layers * planner_layout.stateWords(lines) * 4 + layers * 512 * 3 * (8 + 8 + 4) + rows * 10 * 9 * 8 + 256 + (512 + 64) * 4 + 2 * rows * 11 * 4;
-    try std.testing.expectEqual(expected, try plannerBytes(layers, lines, rows));
-    try std.testing.expectEqual(try plannerBytes(layers, 0, rows) + layers * lines * 8, try plannerBytes(layers, lines, rows));
-    try std.testing.expectError(error.Overflow, plannerBytes(layers, std.math.maxInt(u64), rows));
+    const line_bytes: u64 = 3 << 20;
+    const scratch = rows * 10 * line_bytes;
+    const expected = layers * planner_layout.stateWords(lines) * 4 + layers * 512 * 3 * (8 + 8 + 4) + rows * 10 * 9 * 8 + 256 + (512 + 64) * 4 + 2 * rows * 11 * 4 + scratch;
+    try std.testing.expectEqual(expected, try plannerBytes(layers, lines, rows, line_bytes));
+    try std.testing.expectEqual(try plannerBytes(layers, 0, rows, line_bytes) + layers * lines * 8, try plannerBytes(layers, lines, rows, line_bytes));
+    try std.testing.expectError(error.Overflow, plannerBytes(layers, std.math.maxInt(u64), rows, line_bytes));
+}
+
+test "overflow staging scratch is one rows times ten largest-line buffer, shared by every layer" {
+    const layers: u64 = 49;
+    const rows: u64 = 16;
+    const line_bytes: u64 = 3 << 20;
+    try std.testing.expectEqual(@as(u64, 160 * line_bytes), try overflowScratchBytes(rows, line_bytes));
+    try std.testing.expectEqual(@as(u64, 0), try overflowScratchBytes(0, line_bytes));
+    try std.testing.expectEqual(@as(u64, 0), try overflowScratchBytes(rows, 0));
+    // per planner, not per layer: another layer adds state but no second scratch buffer
+    try std.testing.expectEqual(try plannerBytes(layers + 1, 10, rows, line_bytes) - try plannerBytes(layers, 10, rows, line_bytes), try plannerBytes(layers + 1, 10, rows, 0) - try plannerBytes(layers, 10, rows, 0));
+    const without = try plannerBytes(layers, 10, rows, 0);
+    try std.testing.expectEqual(without + 160 * line_bytes, try plannerBytes(layers, 10, rows, line_bytes));
+    // the same buffer sits in the fixed reservation and in the after-pool reservation
+    try std.testing.expectEqual(try plannerBytes(layers, 0, rows, 0) + 160 * line_bytes, try plannerBytes(layers, 0, rows, line_bytes));
+    try std.testing.expectError(error.Overflow, overflowScratchBytes(std.math.maxInt(u64), 1));
+    try std.testing.expectError(error.Overflow, overflowScratchBytes(rows, std.math.maxInt(u64)));
+    try std.testing.expectError(error.Overflow, plannerBytes(layers, 10, rows, std.math.maxInt(u64) / 100));
+    try std.testing.expectError(error.Overflow, plannerBytesForPools(&.{ 10, 11 }, rows, std.math.maxInt(u64) / 100));
+    // no planner, no scratch: callers pass no planner rows and account zero
+    const no_planner: ?u64 = null;
+    const reserved = if (no_planner) |r| try plannerBytes(layers, 0, r, line_bytes) else 0;
+    try std.testing.expectEqual(@as(u64, 0), reserved);
 }
 
 test "opt-in demand traces are included in the startup planner reservation" {
@@ -147,16 +186,17 @@ test "exl3: ragged planner redistribution conserves each rank's exact device bud
         const work = rows * 10 * 9 * 8 + 256 + (512 + 64) * 4;
         const split = 2 * rows * 11 * 4;
         const allocated = state_words * 4 + counts.len * planner_layout.static_bytes + work + split;
-        try std.testing.expectEqual(allocated, try plannerBytesForPools(counts, rows));
-        try std.testing.expectEqual(try plannerBytes(uniform.len, uniform[0], rows), try plannerBytesForPools(counts, rows));
         const line_bytes = 3 << 20;
-        const fixed = try plannerBytesForPools(counts, rows);
+        const scratch = rows * 10 * line_bytes;
+        try std.testing.expectEqual(allocated + scratch, try plannerBytesForPools(counts, rows, line_bytes));
+        try std.testing.expectEqual(try plannerBytes(uniform.len, uniform[0], rows, line_bytes), try plannerBytesForPools(counts, rows, line_bytes));
+        const fixed = try plannerBytesForPools(counts, rows, line_bytes);
         var total = fixed;
         for (counts) |lines| total += lines * line_bytes;
         try std.testing.expectEqual(try poolBytes(32, line_bytes, 4, fixed), total);
     }
-    try std.testing.expectError(error.Overflow, plannerBytesForPools(&.{ std.math.maxInt(usize), std.math.maxInt(usize) }, 16));
-    try std.testing.expectError(error.Overflow, plannerBytesForPools(&ragged, std.math.maxInt(u64)));
+    try std.testing.expectError(error.Overflow, plannerBytesForPools(&.{ std.math.maxInt(usize), std.math.maxInt(usize) }, 16, 3 << 20));
+    try std.testing.expectError(error.Overflow, plannerBytesForPools(&ragged, std.math.maxInt(u64), 3 << 20));
 }
 
 test "lane admission protects the full graph reservation without changing BF16 stream sizes" {

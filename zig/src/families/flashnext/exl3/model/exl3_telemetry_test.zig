@@ -18,7 +18,7 @@ test "exl3: checked telemetry aggregation exceeds u32 without overflow or partia
 }
 
 test "exl3: invalid device telemetry cannot fail normal ownership transfer or publish partial totals" {
-    const Misc = struct { now: u32 = 0, rounds: u32 = 0, hit_slots: u32 = 0, miss_slots: u32 = 0, copies: u32 = 0, evictions: u32 = 0, overflow: u32 = 0, inplace: u32 = 0 };
+    const Misc = struct { now: u32 = 0, rounds: u32 = 0, hit_slots: u32 = 0, miss_slots: u32 = 0, copies: u32 = 0, evictions: u32 = 0, overflow: u32 = 0, staged: u32 = 0 };
     var total: telemetry.Device = .{ .copies = 10 };
     var valid = true;
     telemetry.Device.record(&total, &valid, Misc{ .rounds = 1, .hit_slots = 11 }, Misc{}, 10);
@@ -27,6 +27,10 @@ test "exl3: invalid device telemetry cannot fail normal ownership transfer or pu
     telemetry.Device.record(&total, &valid, Misc{ .rounds = 1, .copies = 1 }, Misc{}, 10);
     try expectEqual(@as(u64, 10), total.copies);
     try expectError(error.TelemetryExpertIntervalTooLong, telemetry.Device.pendingBounded(Misc{ .rounds = 1 << 30 }, Misc{}, 10));
+    try expectError(error.TelemetryInconsistentCounters, telemetry.Device.pendingBounded(Misc{ .rounds = 1, .copies = 6, .staged = 5 }, Misc{}, 10));
+    const split = try telemetry.Device.pendingBounded(Misc{ .rounds = 1, .copies = 4, .staged = 6 }, Misc{}, 10);
+    try expectEqual(@as(u64, 4), split.copies);
+    try expectEqual(@as(u64, 6), split.staged_experts);
 }
 
 test "exl3: phase report stable schema rank and model-row denominators" {
@@ -37,8 +41,10 @@ test "exl3: phase report stable schema rank and model-row denominators" {
     const report = try telemetry.Report.between(before, after, .{ .phase = .decode, .model_rows = 16, .steps = 8 });
     const text = try report.formatAlloc(std.testing.allocator);
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.startsWith(u8, text, "EXL3-CACHE v=1 rank=1 world=2 phase=decode rows=16 steps=8 expert_pools=0 cache=expert "));
+    try std.testing.expect(std.mem.startsWith(u8, text, "EXL3-CACHE v=2 rank=1 world=2 phase=decode rows=16 steps=8 expert_pools=0 cache=expert "));
     try std.testing.expect(std.mem.indexOf(u8, text, "device_hit_picks=40 device_miss_picks=10") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "device_copies=0 device_staged_experts=0 device_overflow_plans=0 mapped_copy_payload_min_bytes=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "inplace") == null);
     try expectError(error.TelemetryDenominator, telemetry.Report.between(before, after, .{ .phase = .prefill, .model_rows = 0, .steps = 1 }));
     after.rank.rank = 0;
     try expectError(error.TelemetryOwnerChanged, telemetry.Report.between(before, after, .{ .phase = .decode, .model_rows = 1, .steps = 1 }));

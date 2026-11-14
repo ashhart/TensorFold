@@ -192,7 +192,7 @@ pub fn eqMode(gpu: Gpu, rank: usize, world: usize, port: u16, dir: []const u8, g
         }
         graph.force = null;
     }
-    if (dplan.current(&g.e.exl3_dplan)) |dp| if (rank == 0) std.debug.print("RESULT dplan owner switches: {d} pushes, {d} pulls; {d} experts read in place (rounds with more misses than free lines)\n", .{ dp.pushes, dp.pulls, dp.inplace });
+    if (dplan.current(&g.e.exl3_dplan)) |dp| if (rank == 0) std.debug.print("RESULT dplan owner switches: {d} pushes, {d} pulls; {d} experts staged in the shared scratch (rounds with more misses than free lines)\n", .{ dp.pushes, dp.pulls, dp.staged });
     try check.expect(all_ok, "rank {d}: a device-plan or graph step's logits differ from the host cut's", .{rank});
     check.pass("rank {d}/{d}: decode rounds and verify windows on the device plan and in graphs are bit-identical to the host cut ({d} steps a prompt)", .{ rank, world, steps });
 }
