@@ -27,6 +27,7 @@ pub const dspark_weights = @import("dspark_weights.zig");
 pub const engram = pipelines.engram;
 pub const snapshots = @import("snapshots.zig");
 pub const target = @import("target.zig");
+pub const tree = @import("tree.zig");
 pub const pass = @import("pass.zig");
 pub const serve = @import("serve.zig");
 pub const boot = @import("boot.zig");
@@ -40,4 +41,5 @@ test {
     _ = dspark;
     _ = dspark_plan;
     _ = pass;
+    _ = tree;
 }
