@@ -109,6 +109,34 @@ over 213.6M tokens. On Kolibri's held-out recordings it accepts 1.937 / 1.321 / 
 German), against 1.38 / 1.23 / 0.95 for the chain drafter it replaced. Those slices chose the checkpoint, so they are
 development numbers, not a test set.
 
+## Adapting a released drafter
+
+Budget a warm-started adaptation from a few passes over the scarcest class at a low learning rate, rather than from
+throughput times a time budget. With replacement and fixed class quotas, estimate
+`expected draws per context = class batch slots * training steps / available class contexts`.
+These draws are not complete epochs. Save early checkpoints and follow each class's held-out curve before extending
+the run; a first snapshot taken after many repeats can miss the useful part of an adaptation.
+
+In the [Qwen3.8-27B DSpine-b16 pilot](https://github.com/ashhart/TensorFold/issues/2667#issuecomment-6822414789),
+203 agent contexts with four of nine batch slots had about 13 expected draws each by the first checkpoint at step
+662. A 660-step run at peak learning rate 1e-5, with one agent slot, ended at about 3.3 draws per context and stayed
+closer to the released drafter's offline acceptance on the independent agent set than the long runs. The schedule,
+objective and class quotas changed together: this supports a short adaptation budget, not an isolated learning-rate
+effect or a universal setting.
+
+Split agent development data by session or repository, and check transfer on a scaffold and tool format absent from
+training. Later turns repeat earlier context, and repository holdout alone does not test a different agent framework.
+Keep the independent set out of training and checkpoint ranking, and disclose retrospective selection. If that
+framework later enters the training mix, label the result as held-out task/repository transfer instead.
+
+More framework variety is a hypothesis to test. The later expanded-agent run's
+[selected checkpoint](https://huggingface.co/Maxrio/Qwen3.8-27B-DSpine-b16-TF4bit-AgentMix/tree/a494b31c665d66719b9fc963f167e9cd7c8419d1)
+still did not demonstrate improved transfer: on 110 independent prompts its offline delta was -0.0745 tokens per
+round, with a paired 95% group-bootstrap interval of [-0.1758, +0.0197]. Mini-SWE was now represented in training,
+and duration and quotas changed too, so this was neither an unseen-framework test nor a data-only ablation. An
+interval spanning zero does not establish non-regression. Qualify served speed separately, per class, with unchanged
+replies; offline acceptance estimates alone do not establish a speedup.
+
 ## Check it in TensorFold
 
 - **Replies.** Drafted replies equal `"draft": false` ones, greedy and sampled with a seed, solo and concurrent, and a
