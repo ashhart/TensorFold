@@ -7,6 +7,7 @@ const fields_mod = @import("fields.zig");
 const reply_text = @import("reply_text.zig");
 const tool_stream = @import("tool_stream.zig");
 const prompt_mod = @import("prompt.zig");
+const images = @import("images.zig");
 const log = @import("log.zig");
 const cached_tokens = @import("cached_tokens.zig");
 const ids = @import("ids.zig");
@@ -37,12 +38,18 @@ pub const Input = struct {
     fields: Value,
     /// The reply's id as its client gets it, so the server's lines for the request carry the same id.
     id: []const u8 = "",
+    /// POST /v1/requests/{id}/cancel's ask for the client's request (cancel_ids.zig); a server-made request has none.
+    cancel: ?*const std.atomic.Value(bool) = null,
     /// ``logprobs: true`` with this many ``top_logprobs``; null: not asked.
     logprobs: ?u8 = null,
     /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
     prompt_logprobs: ?u8 = null,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
+    /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
+    image_bytes: images.ByteLimits = .{},
+    /// With a known window, the reply may fill all the room the prompt leaves; max_tokens otherwise.
+    fill_room: bool = false,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -70,8 +77,10 @@ pub const Reply = struct {
     /// The template switches the prompt was rendered with (the next turn's prefill renders with them too).
     thinking: bool = false,
     effort: ?[]const u8 = null,
-    /// ``choices[0].logprobs`` (``{"content": [...]}``) for a request that asked; null otherwise.
+    /// ``choices[0].logprobs`` (prose, reasoning and call entries) for a request that asked; null otherwise.
     logprobs: ?Value = null,
+    /// The tokens and target rows ``logprobs`` are projected from, once the route's tool policy is final.
+    probability_rows: ?@import("logprob_parts.zig").Capture = null,
     /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
     prompt_logprobs: ?Value = null,
     loop_stop: ?u32 = null, // the loop period when --loop-guard-stop ended the reply in its reasoning
@@ -128,6 +137,7 @@ pub const Prepared = struct {
     token_ids: bool,
     stops: fields_mod.Stops,
     preparing: bool,
+    frames: []const ?api.Size = &.{}, // each image part's tower input size, in part order (prompt.Rendered.frames)
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
@@ -161,7 +171,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         const room = window - n;
         if (room < 1) return cx.fail(.context_length, "{s} {d} tokens{s}, but the rendered prompt has {d} tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.", .{ errors.context_limit, window, if (srv.info.capability(.context_fitted)) ", the most this server's memory budget fits" else "", n });
         if (input.max_tokens != null and limit > room) return cx.fail(.context_length, "{s} {d} tokens, but the rendered prompt has {d} tokens and requests {d} reply tokens, which exceeds the context window. Reduce the prompt to at most {d} prompt tokens or request at most {d} reply tokens, including chat template and thinking tokens.", .{ errors.context_limit, window, n, limit, @max(0, window - limit), room });
-        limit = @min(limit, room);
+        limit = if (input.fill_room) room else @min(limit, room);
     }
     const system_len: usize = if (input.prompt != null) 0 else prompt_mod.systemPrefixLen(srv, cx, input.messages, input.tools, rendered.ids, thinking, effort);
     var shared: std.ArrayList(u32) = .empty;
@@ -210,10 +220,10 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         // The answer quota is separate only on engines that enforce it.
         if (srv.info.capability(.answer_limit)) @import("thinking_reserve.zig").apply(&request, srv.config.thinking_reserve, if (window > 0) window - n else std.math.maxInt(u32), srv.think_close_end);
     }
-    if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, reasoning, request.think_budget, count);
+    request.logprobs = input.logprobs;
     request.prompt_logprobs = input.prompt_logprobs;
     if (try engine_refusal.of(srv.engine, cx, &request)) |message| return cx.refuse(message);
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing };
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .reasoning = reasoning, .effort = effort, .sampled = sampling != null, .drafts = drafts, .token_ids = flag(f, "return_token_ids") orelse false, .stops = stops_opt, .preparing = preparing, .frames = rendered.frames };
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -256,7 +266,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{} else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {

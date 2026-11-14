@@ -272,14 +272,14 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     } else id.internal = try cuda.tp_watch.takeId(io); // rank 0's, over this rank's line
     const comm = try cuda.startup_log.init(io, &lib, id, p.rank, p.world);
     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
-    errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
+    errdefer own.group.destroyComm(); // guarded: after an abort it destroys nothing
     cuda.p2p_report.beforePeers(&diag, .{ .lib = &own.group.lib, .comm = comm, .later = true });
     own.progress.enter(.peer_warmup);
     if (p.world > 1) try @import("cuda_warm_peers.zig").warm(io, ctx.d, &own.group, .of(set.split, set.ring), &diag);
     cuda.p2p_report.afterInit(&diag, .{ .lib = &own.group.lib, .comm = comm, .d = ctx.d, .later = true });
     const cap = capacity(o.context);
     own.progress.enter(.weights);
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision, .drafter = o.drafter != null });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision, .drafter = o.drafter != null, .owner = &own.group });
     errdefer own.e.deinit();
     if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
         var problem: []const u8 = "";
@@ -334,6 +334,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     own.e.installGroup(&own.group);
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
+    try @import("cuda_prompt_logprobs.zig").prepare(own.e);
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
     try @import("cuda_kv_host.zig").prepare(ctx.d, @import("cuda_state.zig").pageBytes(&own.e.w), own.e.capacity, own.e.w.config.kv_lora * 2);
     if (p.world > 1) try a.load_cache.finishAfter(.{ io, own.e.checkpoint_digest }, cuda.tp_watch.ready) else a.load_cache.finish();

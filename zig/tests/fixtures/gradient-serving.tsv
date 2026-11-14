@@ -17,7 +17,7 @@ zig/kernels/cuda/flashnext_hc.cu	54fa2cfa22e483341835f6349cf0a8f508459ed1b658047
 zig/kernels/cuda/flashnext_mtp.cu	0b99c76b7ed0c4a76ea59b7f121eb8c806f76edafdaad807e86214a96ee9edec	raw
 zig/kernels/cuda/fp8_experts.cu	156aa7337b41c67d200d8b58a24422cc96cfa032c9fd0711080f09ddc733baee	raw
 zig/kernels/cuda/gdn.cu	a9caeec5b270dcab933a5eae0f500d7aabcd31cde156238225ae064ac92ba2e8	raw
-zig/kernels/cuda/glm_glue.cu	8c71cb95fafdcc6a1540cb260edc40f5ef280b2d549e5b39a66ecdc60fbdaa9b	raw
+zig/kernels/cuda/glm_glue.cu	74e69a7c20827d498c190334fffaa896f2a4f05e107fdf9d2d34b09b55a1c75c	raw	#2722 (one added line, the include of glm_index_decode.cuh: the decode select's scan and merge)
 zig/kernels/cuda/glm_glue_attn.cuh	abecbecf809292c0f82294fa688e47e574fa43c8ff3b1497966f9d3dd52b9881	raw	main 42735f94f0 (#2335: MLA bodies to common/mla.cuh; glm_glue SASS identical on five SMs)
 zig/kernels/cuda/glm_glue_bmm.cuh	7fbaaa4517e309b17ebb41f84f94f9a939baa27a2fb5c9a6b7f5b857b5a21391	raw
 zig/kernels/cuda/glm_glue_hc.cuh	c3aa26475c6ce05d2508c300c8e88d429adea4c0c173e3909734bb0ece06da2a	raw
@@ -110,7 +110,7 @@ zig/src/cuda/route_rows.zig	e23257dea1f244ebba4399d7bc0730953f75eebbd7789819d578
 zig/src/cuda/sample.zig	5d374b5cd2108fd90b383cfec0a63bdce038eef8c380289495e5b9d080c590f2	raw	series patches 02-cuda-rounds.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main 37b0776ce (#2680: adds ruleFor and rule, which reach the same core rule, byte-equal over a 25,480-setting grid; existing code unchanged)
 zig/src/cuda/segments.zig	8d029a27a7b2a77916c91c9e650cee07c25aec317efacfdb3f8f8967744899a9	raw
 zig/src/cuda/stream.zig	02c1879e72a35927466ab462d6b2a461691d1f5196da770decd1125db2199fa6	raw	commits e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/tp_group.zig	cc353741ff13422e24f5c5434af189c81663e70eaf831afd6ec1e468c8204d25	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally)
+zig/src/cuda/tp_group.zig	1a2acbdf2de6b827218deb45df5b5845beecde4eb718a4e4b3966582db51d7a7	raw	commits b8d45ded3, 80afaf959; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; main c8ad9872da (#2205: RoCE small gathers at any world up to roce.max_world when every rank asks; TF_ROCE's default unchanged, two ranks on, three or more on NCCL), 61a2651577 (#2789: a call failing after the group's abort ends as Aborted, not fatally); #2918 (communicator abort through its owner)
 zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0bd5f468ace3	raw	main 13d7450fd (#2354), 7ead07c92 (bounded peer warm-up, #2512)
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw

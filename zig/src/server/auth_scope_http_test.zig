@@ -365,3 +365,33 @@ test "auth over a Unix socket: keys and the Host check apply as on TCP" {
     try expectStatus(foreign, 403);
     try t.expect(std.mem.indexOf(u8, foreign, "Host header is not allowed") != null);
 }
+
+test "auth scopes HTTP: the request cancel route needs a full key, a loopback caller's included" {
+    var file = try KeyFile.init(key_text);
+    defer file.deinit();
+    var keys: auth.Store = undefined;
+    var engine: Engine = .{};
+    var h: Harness = .{};
+    try start(&file, &keys, &engine, &h);
+    defer keys.deinit();
+    defer h.deinit();
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cancel_ids = @import("cancel_ids.zig");
+    var e: cancel_ids.Entry = .{};
+    const names = [_][]const u8{"chatcmpl-scope-held"};
+    cancel_ids.registry.add(t.io, &names, &e);
+    defer cancel_ids.registry.remove(t.io, &names, &e);
+    const path = "/v1/requests/chatcmpl-scope-held/cancel";
+    for (restricted) |key| {
+        const denied = try h.ask(a, "POST", path, key, "");
+        try expectStatus(denied, 403);
+        try t.expect(std.mem.indexOf(u8, denied, "\"code\": \"insufficient_scope\"") != null);
+    }
+    try expectStatus(try h.ask(a, "POST", path, "", ""), 401);
+    try t.expect(!e.asked.load(.acquire));
+    for (full_keys) |key| try expectStatus(try h.ask(a, "POST", path, key, ""), 200);
+    try t.expect(e.asked.load(.acquire));
+    try expectStatus(try h.ask(a, "POST", "/v1/requests/chatcmpl-nobody/cancel", "admin-secret", ""), 404);
+}

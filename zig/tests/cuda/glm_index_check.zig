@@ -166,8 +166,142 @@ pub fn run(gpu: check.Gpu) !void {
     }
     std.debug.print("glm_index_pools paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}\n", .{ paths[0], paths[1], paths[2] });
     try check.expect(paths[0] > 0 and paths[1] > 0 and paths[2] > 0, "glm-index-check: the whole-row, candidate and retry paths must all occur", .{});
+    fails += try decode(gpu, s, ops, &ks, rand);
+    std.debug.print("decode select paths: whole row {d}, candidates {d}, whole row after the candidates missed {d}, ties at the floor {d}\n", .{ dpaths[0], dpaths[1], dpaths[2], dpaths[3] });
+    try check.expect(dpaths[0] > 0 and dpaths[1] > 0 and dpaths[2] > 0 and dpaths[3] > 0, "glm-index-check: the decode select's four paths must all occur", .{});
     try check.expect(fails == 0, "glm-index-check: {d} buffers differ", .{fails});
-    check.pass("glm-index-check: scores, pools and token lists byte-equal at {d} cases, tied scores through both selects", .{cases.len});
+    check.pass("glm-index-check: scores, pools and token lists byte-equal at {d} cases, tied scores through both selects; the decode select at {d} windows", .{ cases.len, dcases.len });
+}
+
+/// A decode window at long buckets: its first position, rows, and the sequence's pool capacity (pk_rows - 2).
+const DCase = struct { pos: usize, rows: usize, cap: usize };
+const dcases = [_]DCase{
+    .{ .pos = 4 * 4096 - 1, .rows = 1, .cap = 8192 }, // 4,096 pools: the merge takes the row whole
+    .{ .pos = 4 * 4096 + 3, .rows = 2, .cap = 8192 }, // the first row whole, the second past the merge's candidates
+    .{ .pos = 131072 - 1, .rows = 1, .cap = 216080 },
+    .{ .pos = 131072 - 4, .rows = 4, .cap = 216080 },
+    .{ .pos = 204800 - 16, .rows = 16, .cap = 216080 },
+    .{ .pos = 864256 - 1, .rows = 1, .cap = 216080 },
+    .{ .pos = 864256 - 16, .rows = 16, .cap = 216080 }, // the production context: a bucket clipped to the capacity
+};
+
+/// How many rows took each path of the decode select (whole row, candidates, whole row after them, ties at the floor).
+var dpaths = [4]usize{ 0, 0, 0, 0 };
+
+/// The decode select (cuda_sparse.decodeSelect) against tf_glm_select_rows byte for byte: planted, then selectTokens.
+fn decode(gpu: check.Gpu, s: cuda.Stream, ops: cuda.Module, ks: *const glm.glue.Kernels, rand: std.Random) !usize {
+    const gpa = gpu.gpa;
+    const old: glm.glue.Set = .{ .glue = ks };
+    const new: glm.glue.Set = .{ .glue = ks, .dsel = true };
+    const special = [_]f32{ std.math.nan(f32), -std.math.nan(f32), 0.0, -0.0, std.math.inf(f32), -std.math.inf(f32) };
+    var fails: usize = 0;
+    for (dcases) |c| {
+        const np = sp.poolBucket(c.pos, c.rows, c.cap);
+        var bufs: Bufs = .empty;
+        defer {
+            for (bufs.items) |*b| b.free();
+            bufs.deinit(gpa);
+        }
+        const p0: i32 = @intCast(c.pos);
+        const dpos = try fromHost(gpu, &bufs, std.mem.asBytes(&p0));
+        const scores = try zeros(gpu, &bufs, c.rows * np * 4);
+        const pa = try zeros(gpu, &bufs, c.rows * sp.topk_pools * 8);
+        const pb = try zeros(gpu, &bufs, c.rows * sp.topk_pools * 8);
+        const bits = try zeros(gpu, &bufs, sp.bitsBytes(c.rows, np));
+        const path = try zeros(gpu, &bufs, c.rows * 4);
+        const host = try gpa.alloc(f32, c.rows * np);
+        defer gpa.free(host);
+        for (0..6) |kind| {
+            for (0..c.rows) |r| {
+                const vis = (c.pos + r + 1) / 4;
+                const limit = @min(np, @max(vis, sp.topk_pools));
+                const row = host[r * np ..][0..np];
+                for (row, 0..) |*x, i| {
+                    // past the limit: no select may read
+                    x.* = if (i >= limit) 1e9 else if (i >= vis) -std.math.inf(f32) else switch (kind) {
+                        0 => rand.floatNorm(f32),
+                        // the top level crowds the floor
+                        1 => @as(f32, @floatFromInt(rand.uintLessThan(u32, 16))) * 0.25,
+                        2 => 0.0, // every visible pool tied
+                        3 => if (rand.uintLessThan(u32, 8) == 0) special[rand.uintLessThan(usize, special.len)] else rand.floatNorm(f32),
+                        4 => rand.floatNorm(f32),
+                        else => if (i % 3 == 0) 1.0 else if (i % 997 == 0) 2.0 + rand.float(f32) else rand.floatNorm(f32) * 0.1,
+                    };
+                }
+                if (kind == 4) { // every sampled run high: the floor overshoots and the candidates fall short of K
+                    for (0..4096) |q| {
+                        const j = (q / 8) * limit / 512 / 8 * 8 + q % 8;
+                        if (j < vis) row[j] = 100.0 + @as(f32, @floatFromInt(q));
+                    }
+                }
+            }
+            step(.{ .cap = c.cap, .pos = c.pos, .rows = c.rows }, np, "decode select: planted scores");
+            try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = scores, .len = c.rows * np * 4, .borrowed = true }).upload(0, std.mem.sliceAsBytes(host));
+            var sel: cuda.Args = .{};
+            inline for (.{ scores, pa, @as(i64, @intCast(np)), dpos, @as(c_int, sp.topk_pools) }) |v| sel.add(v);
+            try cuda.launch.launch(old.glue.select_rows, .{ .grid = .{ .x = @intCast(c.rows) }, .block = .{ .x = 128 } }, s, &sel);
+            try sp.decodeSelect(new, s, scores, pb, np, dpos, c.pos, c.rows, bits, path);
+            try s.synchronize();
+            var taken: [16]i32 = undefined;
+            try (cuda.DeviceBuffer{ .d = gpu.d, .ptr = path, .len = c.rows * 4, .borrowed = true }).download(0, std.mem.sliceAsBytes(taken[0..c.rows]));
+            for (taken[0..c.rows], 0..) |q, r| {
+                if (q < 0 or q > 3) {
+                    std.debug.print("FAIL np {d} row {d} kind {d}: the decode select reported path {d}\n", .{ np, r, kind, q });
+                    return error.TestFailed;
+                }
+                dpaths[@intCast(q)] += 1;
+            }
+            const f = try same(gpu, "decode select pools", pa, pb, c.rows * sp.topk_pools * 8, np, .{ .cap = c.cap, .pos = c.pos, .rows = c.rows });
+            if (f != 0) std.debug.print("  (kind {d}, paths {any})\n", .{ kind, taken[0..c.rows] });
+            fails += f;
+        }
+        // selectTokens on tf_glm_scores' rows: today's set against the decode select's, pools and token lists
+        const qi = try gpa.alloc(u16, c.rows * 32 * d);
+        defer gpa.free(qi);
+        for (qi) |*x| x.* = bf16(rand.floatNorm(f32));
+        const wts = try gpa.alloc(u16, c.rows * 32);
+        defer gpa.free(wts);
+        for (wts) |*x| x.* = bf16(rand.floatNorm(f32));
+        const pk = try gpa.alloc(u16, c.cap * d);
+        defer gpa.free(pk);
+        for (pk) |*x| x.* = bf16(rand.floatNorm(f32) * 2);
+        step(.{ .cap = c.cap, .pos = c.pos, .rows = c.rows }, np, "decode select: selectTokens, both sets");
+        const dq = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(qi));
+        const dw = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(wts));
+        const dk = try fromHost(gpu, &bufs, std.mem.sliceAsBytes(pk));
+        var sa = try scratch(gpu, &bufs, c.rows, np);
+        var sb = try scratch(gpu, &bufs, c.rows, np);
+        sb.ls = try zeros(gpu, &bufs, sp.bitsBytes(c.rows, np));
+        sb.bits_rows = c.rows;
+        sa.bits_rows = c.rows; // today's set ignores it
+        const tok_bytes = c.rows * sp.width * 4;
+        const ta = try zeros(gpu, &bufs, tok_bytes);
+        const tb = try zeros(gpu, &bufs, tok_bytes);
+        const ca = try zeros(gpu, &bufs, c.rows * 4);
+        const cb = try zeros(gpu, &bufs, c.rows * 4);
+        var ms_old: f64 = 0;
+        var ms_new: f64 = 0;
+        for (0..4) |rep| {
+            const t0 = std.Io.Timestamp.now(gpu.io, .awake);
+            try sp.selectTokens(old, ops, s, dq, dw, 32, dk, .{}, dpos, c.pos, c.rows, 32, d, c.cap, sa, ta, ca);
+            try s.synchronize();
+            const t1 = std.Io.Timestamp.now(gpu.io, .awake);
+            try sp.selectTokens(new, ops, s, dq, dw, 32, dk, .{}, dpos, c.pos, c.rows, 32, d, c.cap, sb, tb, cb);
+            try s.synchronize();
+            const t2 = std.Io.Timestamp.now(gpu.io, .awake);
+            if (rep > 0) {
+                ms_old += ms(t0, t1) / 3;
+                ms_new += ms(t1, t2) / 3;
+            }
+        }
+        const dc: Case = .{ .cap = c.cap, .pos = c.pos, .rows = c.rows };
+        fails += try same(gpu, "decode scores", sa.scores, sb.scores, c.rows * np * 4, np, dc);
+        fails += try same(gpu, "decode pools", sa.pools, sb.pools, c.rows * sp.topk_pools * 8, np, dc);
+        fails += try same(gpu, "decode tokens", ta, tb, tok_bytes, np, dc);
+        fails += try same(gpu, "decode counts", ca, cb, c.rows * 4, np, dc);
+        std.debug.print("decode np {d} pos {d} rows {d}: selectTokens {d:.3} ms, with the decode select {d:.3} ms (host-timed, a launch each)\n", .{ np, c.pos, c.rows, ms_old, ms_new });
+    }
+    return fails;
 }
 
 /// Every 512-row block's scores from tf_glm_scores and from glm_index_scores, as selectTokens launches them.

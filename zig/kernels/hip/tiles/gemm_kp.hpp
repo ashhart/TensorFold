@@ -12,26 +12,23 @@ namespace rocm {
 // The lanes a column takes, a group each: 32, or 16 or 8 when it has few groups (a wave then takes more columns).
 __host__ __device__ inline int kp_lanes(int groups) { return groups > 16 ? 32 : groups > 8 ? 16 : 8; }
 
-// CB columns a lane, R rows a pass, WAVES waves a block; passes span <= RB adjacent row blocks to share weights.
-template <class Dec, class Act, class T, class Epi, int CB, int R, int WAVES, int RB, bool LOOP>
-__device__ __forceinline__ void gemm_kp_tile(typename Dec::Args& a) {
-    const int blocks = (a.m + R - 1) / R < RB ? (a.m + R - 1) / R : RB;  // of the launch: a routed item has its own rows
-    if (!Dec::take_item(a, blockIdx.z)) return;
+// A lane's row of each of a wave's LDS tables, what `lds(lane)` names: R * CB dots, R sums of x, CB scales, CB biases.
+struct KpRows {
+    float* part;
+    float* spart;
+    float* scl;
+    float* bil;
+};
+
+// A wave's passes over its columns from `colw`, CB a lane and R rows a pass: rows from `first`, every `step` when LOOP.
+template <class Dec, class Act, class T, class Epi, int CB, int R, bool LOOP, class Lds>
+__device__ __forceinline__ void gemm_kp_wave(typename Dec::Args& a, int colw, int first, int step, Lds lds) {
     constexpr int NO = R * CB;  // outputs of a lane set
-    constexpr int PS = NO + 1;
     constexpr int OPL = (4 * NO + 31) / 32;  // outputs a lane folds, at most
     const int groups = a.k / a.group;
     const int gp = kp_lanes(groups);  // the lanes of a set; a wave has 32 / gp sets
     const int sets = 32 / gp;
-    const int colw = ((blockIdx.x / blocks) * WAVES + (threadIdx.x >> 5)) * CB * sets;
-    if (colw >= a.n) return;
-    __shared__ float part[WAVES][32][PS];
-    __shared__ float spart[WAVES][32][R + 1];
-    __shared__ float scl[WAVES][32][CB + 1];
-    __shared__ float bil[WAVES][32][CB + 1];
-
     const int lane = threadIdx.x & 31;
-    const int wave = threadIdx.x >> 5;
     const int per = a.group / 32;
     const int rounds = (groups + gp - 1) / gp;
     const int gi = lane & (gp - 1);
@@ -128,14 +125,14 @@ __device__ __forceinline__ void gemm_kp_tile(typename Dec::Args& a) {
             // this group's results to LDS, then the round's groups in order
 #pragma unroll
             for (int r = 0; r < R; ++r) {
-                spart[wave][lane][r] = sx[r];
+                lds(lane).spart[r] = sx[r];
 #pragma unroll
-                for (int c = 0; c < CB; ++c) part[wave][lane][r * CB + c] = d[r][c];
+                for (int c = 0; c < CB; ++c) lds(lane).part[r * CB + c] = d[r][c];
             }
 #pragma unroll
             for (int c = 0; c < CB; ++c) {
-                scl[wave][lane][c] = Dec::scale_value(a, term[c]);
-                bil[wave][lane][c] = Dec::bias_value(a, term[c]);
+                lds(lane).scl[c] = Dec::scale_value(a, term[c]);
+                lds(lane).bil[c] = Dec::bias_value(a, term[c]);
             }
             if (round + 1 < rounds) tables(g + gp);
             __syncwarp();
@@ -150,8 +147,8 @@ __device__ __forceinline__ void gemm_kp_tile(typename Dec::Args& a) {
                 const int c = o % CB;
                 float v = acc[t];
                 for (int gg = 0; gg < count; ++gg) {
-                    v = Dec::fold_scale(v, part[wave][base + gg][o], scl[wave][base + gg][c]);
-                    v = Dec::fold_bias(v, spart[wave][base + gg][r], bil[wave][base + gg][c]);
+                    v = Dec::fold_scale(v, lds(base + gg).part[o], lds(base + gg).scl[c]);
+                    v = Dec::fold_bias(v, lds(base + gg).spart[r], lds(base + gg).bil[c]);
                 }
                 acc[t] = v;
             }
@@ -168,10 +165,27 @@ __device__ __forceinline__ void gemm_kp_tile(typename Dec::Args& a) {
         }
     };
     if constexpr (LOOP) {
-        for (int row0 = (blockIdx.x % blocks) * R; row0 < a.m; row0 += blocks * R) pass(row0);
+        for (int row0 = first; row0 < a.m; row0 += step) pass(row0);
     } else {
-        pass((blockIdx.x % blocks) * R);
+        pass(first);
     }
+}
+
+// CB columns a lane, R rows a pass, WAVES waves a block; passes span <= RB adjacent row blocks to share weights.
+template <class Dec, class Act, class T, class Epi, int CB, int R, int WAVES, int RB, bool LOOP>
+__device__ __forceinline__ void gemm_kp_tile(typename Dec::Args& a) {
+    const int blocks = (a.m + R - 1) / R < RB ? (a.m + R - 1) / R : RB;  // of the launch: a routed item has its own rows
+    if (!Dec::take_item(a, blockIdx.z)) return;
+    const int sets = 32 / kp_lanes(a.k / a.group);
+    const int colw = ((blockIdx.x / blocks) * WAVES + (threadIdx.x >> 5)) * CB * sets;
+    if (colw >= a.n) return;
+    __shared__ float part[WAVES][32][R * CB + 1];
+    __shared__ float spart[WAVES][32][R + 1];
+    __shared__ float scl[WAVES][32][CB + 1];
+    __shared__ float bil[WAVES][32][CB + 1];
+    const int wave = threadIdx.x >> 5;
+    const auto lds = [wave](int lane) { return KpRows{part[wave][lane], spart[wave][lane], scl[wave][lane], bil[wave][lane]}; };
+    gemm_kp_wave<Dec, Act, T, Epi, CB, R, LOOP>(a, colw, (blockIdx.x % blocks) * R, blocks * R, lds);
 }
 
 }  // namespace rocm

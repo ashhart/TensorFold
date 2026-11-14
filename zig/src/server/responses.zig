@@ -9,6 +9,7 @@ const pyrepr = @import("pyrepr.zig");
 const ids = @import("ids.zig");
 const translate_mod = @import("responses_translate.zig");
 const store_mod = @import("responses_store.zig");
+const cancel_ids = @import("cancel_ids.zig");
 const Sink = @import("responses_sink.zig").Sink;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
@@ -32,8 +33,18 @@ pub fn route(path: []const u8) ?[]const u8 {
 pub const Store = store_mod.Store;
 
 fn refuse(conn: *Conn, a: Allocator, message: []const u8, status: u16, param: ?[]const u8) void {
-    const body = std.fmt.allocPrint(a, "{{\"error\": {{\"message\": {s}, \"type\": \"invalid_request_error\", \"param\": {s}, \"code\": null}}}}", .{ json.quote(a, message, .{}) catch return, if (param) |p| json.quote(a, p, .{}) catch return else "null" }) catch return;
-    conn.sendJson(status, body);
+    routes.sendValue(conn, a, status, refusal(a, message, param) catch return);
+}
+
+fn refusal(a: Allocator, message: []const u8, param: ?[]const u8) !Value {
+    const detail = try json.newObject(a);
+    try detail.put(a, "message", .{ .string = message });
+    try detail.put(a, "type", .{ .string = "invalid_request_error" });
+    try detail.put(a, "param", if (param) |p| .{ .string = p } else .null);
+    try detail.put(a, "code", .null);
+    const payload = try json.newObject(a);
+    try payload.put(a, "error", .{ .object = detail });
+    return .{ .object = payload };
 }
 
 pub fn get(srv: *Server, conn: *Conn, a: Allocator, rid: []const u8) void {
@@ -94,8 +105,20 @@ pub const TurnOptions = struct {
 /// One translated Responses request run as its chat completion, its events sent through ``sink``.
 pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, opts: TurnOptions) Outcome {
     const base = newBase(srv, a, body, t) catch return .{ .streamed = null };
-    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history };
+    if (!(@import("logprobs.zig").offered(srv, a) catch false)) {
+        if (t.rows_if_offered) {
+            _ = t.chat.object.orderedRemove("logprobs");
+        } else if (json.truthyField(t.chat, "logprobs")) {
+            const payload = refusal(a, "logprobs are not supported by this model or backend", null) catch return .{ .streamed = null };
+            return .{ .refused = .{ .status = 400, .payload = payload } };
+        }
+    }
+    // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
+    const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");
+    var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
     var out: Wire = .{ .reply = &reply };
+    cancel_ids.alias = base.get("id").?.string; // the cancel route takes the response's id too
+    defer cancel_ids.alias = null;
     openai.runNamed(srv, a, out.out(), .{ .conn = conn }, true, t.chat, t.format, true);
     if (out.opened or conn.broken) return .{ .streamed = reply.final };
     const status = out.status orelse return .{ .streamed = null };
@@ -189,6 +212,9 @@ const Reply = struct {
     whole_history: ?[]Value = null,
     /// A warmup turn: no empty message item, so its output stays empty.
     warmup: bool = false,
+    /// Logprobs come after the calls are parsed: done events wait until ``finish``, when every item has its rows.
+    late_rows: bool = false,
+    finishing: bool = false,
 
     const E = error{Closed};
 
@@ -274,6 +300,7 @@ const Reply = struct {
         const item = r.current orelse return;
         r.current = null;
         try r.put(item, "status", .{ .string = status });
+        if (r.late_rows and !r.finishing) return;
         const where_id = item.get("id").?;
         const where_index = try r.int(r.index(item));
         if (std.mem.eql(u8, item.get("type").?.string, "function_call")) {
@@ -281,13 +308,24 @@ const Reply = struct {
         } else {
             const part = item.get("content").?.array[0].object;
             if (std.mem.eql(u8, item.get("type").?.string, "message")) {
-                try r.event("response.output_text.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "text", part.get("text").? }, .{ "logprobs", .{ .array = &.{} } } });
+                try r.event("response.output_text.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "text", part.get("text").? }, .{ "logprobs", part.get("logprobs").? } });
             } else {
                 try r.event("response.reasoning_text.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "text", part.get("text").? } });
             }
             try r.event("response.content_part.done", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "part", .{ .object = part } } });
         }
         try r.event("response.output_item.done", &.{ .{ "output_index", where_index }, .{ "item", .{ .object = item } } });
+    }
+
+    /// The open item ends with `status`; with late rows every item sends its deferred done events now, in order.
+    fn closeAll(r: *Reply, status: []const u8) E!void {
+        if (!r.late_rows) return r.close(status);
+        r.finishing = true;
+        const current = r.current;
+        for (r.items.items) |item| {
+            r.current = item;
+            try r.close(if (item == current) status else item.get("status").?.string);
+        }
     }
 
     /// Each item's text or arguments grows in one buffer, including calls whose deltas interleave.
@@ -297,16 +335,27 @@ const Reply = struct {
         return buffer.items;
     }
 
-    fn write(r: *Reply, kind: []const u8, text: []const u8) E!void {
+    /// A text delta, with the entries the chunk carried for it (null: none asked).
+    fn write(r: *Reply, kind: []const u8, text: []const u8, rows: ?[]Value) E!void {
         const reuse = if (r.current) |c| std.mem.eql(u8, c.get("type").?.string, kind) else false;
         const item = if (reuse) r.current.? else try r.open(kind, "", "");
         const part = item.get("content").?.array[0].object;
         try r.put(part, "text", .{ .string = try r.append(item, text) });
+        const entries: Value = .{ .array = if (rows) |list| try r.carry(part, list) else &.{} };
         const where_id = item.get("id").?;
         const where_index = try r.int(r.index(item));
         if (std.mem.eql(u8, kind, "message")) {
-            try r.event("response.output_text.delta", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "delta", .{ .string = text } }, .{ "logprobs", .{ .array = &.{} } } });
+            try r.event("response.output_text.delta", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "delta", .{ .string = text } }, .{ "logprobs", entries } });
+        } else if (rows != null) {
+            try r.event("response.reasoning_text.delta", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "delta", .{ .string = text } }, .{ "logprobs", entries } });
         } else try r.event("response.reasoning_text.delta", &.{ .{ "item_id", where_id }, .{ "output_index", where_index }, .{ "content_index", .{ .int = "0" } }, .{ "delta", .{ .string = text } } });
+    }
+
+    /// `list` appended to what `owner` already carries; returns `list`.
+    fn carry(r: *Reply, owner: *json.Object, list: []Value) E![]Value {
+        const had = if (owner.get("logprobs")) |v| v.array else &.{};
+        try r.put(owner, "logprobs", .{ .array = std.mem.concat(r.a, Value, &.{ had, list }) catch return error.Closed });
+        return list;
     }
 
     fn textOf(v: ?Value) ?[]const u8 {
@@ -314,11 +363,14 @@ const Reply = struct {
         return if (x == .string and x.string.len > 0) x.string else null;
     }
 
-    fn delta(r: *Reply, d: Value) E!void {
+    /// One chat delta, with its chunk's logprobs (null: none): a channel's entries go with its text, others to items.
+    fn delta(r: *Reply, d: Value, rows: ?Value) E!void {
+        const thought = if (d == .object) textOf(d.get("reasoning_content")) orelse textOf(d.get("reasoning")) else null;
+        const content = if (d == .object) textOf(d.get("content")) else null;
+        if (thought) |t| try r.write("reasoning", t, if (rows) |v| listOf(v, "reasoning_content") else null);
+        if (content) |c| try r.write("message", c, if (rows) |v| listOf(v, "content") else null);
+        if (rows) |v| try r.probabilityItems(v, thought != null, content != null);
         if (d != .object) return;
-        const thought = textOf(d.get("reasoning_content")) orelse textOf(d.get("reasoning"));
-        if (thought) |t| try r.write("reasoning", t);
-        if (textOf(d.get("content"))) |c| try r.write("message", c);
         const calls = d.get("tool_calls") orelse return;
         if (calls != .array) return;
         for (calls.array) |call| {
@@ -336,6 +388,33 @@ const Reply = struct {
                 try r.event("response.function_call_arguments.delta", &.{ .{ "item_id", item.get("id").? }, .{ "output_index", try r.int(r.index(item)) }, .{ "delta", .{ .string = args } } });
             }
         }
+    }
+
+    /// Entries that arrived without their text, and the calls' groups: each to its item, with an empty delta.
+    fn probabilityItems(r: *Reply, rows: Value, skip_reasoning: bool, skip_content: bool) E!void {
+        const logprobs = @import("response_logprobs.zig");
+        var added: std.ArrayList(logprobs.Added) = .empty;
+        logprobs.attach(r.a, r.items.items, rows, skip_reasoning, skip_content, &added) catch return error.Closed;
+        if (listOf(rows, "tool_calls")) |groups| for (groups) |group| {
+            const item = r.calls.get((group.get("index") orelse continue).int64() orelse continue) orelse continue;
+            const list = (group.get("content") orelse continue).items() orelse continue;
+            added.append(r.a, .{ .item = item, .owner = item, .rows = list }) catch return error.Closed;
+        };
+        for (added.items) |one| {
+            _ = try r.carry(one.owner, one.rows);
+            const where = try r.int(r.index(one.item));
+            const entries: Value = .{ .array = one.rows };
+            if (one.item == one.owner) {
+                try r.event("response.function_call_arguments.delta", &.{ .{ "item_id", one.item.get("id").? }, .{ "output_index", where }, .{ "delta", .{ .string = "" } }, .{ "logprobs", entries } });
+                continue;
+            }
+            const name = if (std.mem.eql(u8, one.item.get("type").?.string, "reasoning")) "response.reasoning_text.delta" else "response.output_text.delta";
+            try r.event(name, &.{ .{ "item_id", one.item.get("id").? }, .{ "output_index", where }, .{ "content_index", .{ .int = "0" } }, .{ "delta", .{ .string = "" } }, .{ "logprobs", entries } });
+        }
+    }
+
+    fn listOf(rows: Value, key: []const u8) ?[]Value {
+        return (rows.get(key) orelse return null).items();
     }
 
     fn usage(r: *Reply, chat: ?Value) E!Value {
@@ -367,15 +446,16 @@ const Reply = struct {
     fn finish(r: *Reply, reason: ?[]const u8, chat_usage: ?Value, stats: ?Value) E!Value {
         const length = reason != null and std.mem.eql(u8, reason.?, "length");
         const filtered = reason != null and std.mem.eql(u8, reason.?, @import("loop_stop.zig").finish_reason);
+        const cancelled = reason != null and std.mem.eql(u8, reason.?, "cancelled"); // POST /v1/requests/{id}/cancel
         const incomplete = length or filtered;
-        const status = if (incomplete) "incomplete" else "completed";
-        if (!incomplete and !r.warmup) {
+        const status = if (cancelled) "cancelled" else if (incomplete) "incomplete" else "completed";
+        if (!incomplete and !cancelled and !r.warmup) {
             const all_reasoning = for (r.items.items) |item| {
                 if (!std.mem.eql(u8, item.get("type").?.string, "reasoning")) break false;
             } else true;
             if (all_reasoning) _ = try r.open("message", "", ""); // an empty answer is still a message
         }
-        try r.close(status);
+        try r.closeAll(if (cancelled) "incomplete" else status); // an output item is never "cancelled"
         const final = json.copyObject(r.a, r.base) catch return error.Closed;
         try r.put(final, "status", .{ .string = status });
         try r.put(final, "output", try r.itemsValue());
@@ -385,11 +465,12 @@ const Reply = struct {
             try r.put(d, "reason", .{ .string = if (filtered) "content_filter" else "max_output_tokens" });
             try r.put(final, "incomplete_details", .{ .object = d });
         } else try r.put(final, "incomplete_details", .null);
-        if (!incomplete) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));
+        if (!incomplete and !cancelled) try r.put(final, "completed_at", try r.int(std.Io.Clock.real.now(r.srv.io).toSeconds()));
         if (stats) |s| if (s != .null) try r.put(final, "tensorfold", s);
         r.final = .{ .object = final };
         if (r.keep) r.store(.{ .object = final });
-        try r.event(if (incomplete) "response.incomplete" else "response.completed", &.{.{ "response", .{ .object = final } }});
+        // a cancelled response ends with the terminal event clients know for a cut reply, its status "cancelled"
+        try r.event(if (incomplete or cancelled) "response.incomplete" else "response.completed", &.{.{ "response", .{ .object = final } }});
         return .{ .object = final };
     }
 
@@ -403,7 +484,7 @@ const Reply = struct {
     }
 
     fn fail(r: *Reply, problem: Value) E!void {
-        try r.close("incomplete");
+        try r.closeAll("incomplete");
         const message = if (problem == .object) problem.get("message") else null;
         const kind = if (problem == .object) problem.get("type") else null;
         const is_request = kind != null and kind.? == .string and std.mem.eql(u8, kind.?.string, "invalid_request_error");
@@ -426,7 +507,7 @@ const Reply = struct {
         if (p.has("error")) return r.fail(p.get("error").?);
         const choices = p.get("choices");
         const choice: Value = if (choices != null and choices.? == .array and choices.?.array.len > 0) choices.?.array[0] else .null;
-        try r.delta(if (choice.get("delta")) |d| d else .null);
+        try r.delta(if (choice.get("delta")) |d| d else .null, choice.get("logprobs"));
         if (choice.get("finish_reason")) |f| if (f.truthy()) {
             _ = try r.finish(if (f == .string) f.string else null, p.get("usage"), p.get("tensorfold"));
         };
@@ -447,7 +528,8 @@ const Reply = struct {
             calls.append(r.a, .{ .object = c }) catch return error.Closed;
         };
         try r.put(d, "tool_calls", .{ .array = calls.items });
-        try r.delta(.{ .object = d });
+        try r.delta(.{ .object = d }, null);
+        if (choice.get("logprobs")) |rows| try r.probabilityItems(rows, false, false);
         const reason = choice.get("finish_reason");
         return r.finish(if (reason != null and reason.? == .string) reason.?.string else null, data.get("usage"), data.get("tensorfold"));
     }
@@ -461,7 +543,7 @@ test "a call delta that names no id takes the chat run's id at its index, and on
     const chat = (try json.parse(a, "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}")).ok;
     var cx: Cx = .{ .a = a };
     var reply: Reply = .{ .srv = undefined, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = chat } };
-    try reply.delta((try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f\"}},{\"index\":2,\"id\":\"call_sent\",\"function\":{\"name\":\"f\"}}]}")).ok);
+    try reply.delta((try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f\"}},{\"index\":2,\"id\":\"call_sent\",\"function\":{\"name\":\"f\"}}]}")).ok, null);
     var calls: ids.Calls = .{ .key = &key, .body = chat };
     try std.testing.expectEqualStrings(try calls.id(a, 0, 1), reply.items.items[0].get("call_id").?.string);
     try std.testing.expectEqualStrings("call_sent", reply.items.items[1].get("call_id").?.string);
@@ -477,7 +559,7 @@ test "Server recovery: Responses grows reasoning, text and interleaved call argu
     var r: Reply = .{ .srv = &srv, .a = a, .sink = undefined, .base = try json.newObject(a), .streaming = false, .keep = false, .added = &.{}, .cx = &cx, .call_ids = .{ .key = &key, .body = .null } };
     const chunk = "abcdefgh";
     for ([_][]const u8{ "reasoning", "message" }) |kind| {
-        for (0..3000) |_| try r.write(kind, chunk);
+        for (0..3000) |_| try r.write(kind, chunk, null);
         const text = r.current.?.get("content").?.array[0].get("text").?.string;
         try std.testing.expectEqual(@as(usize, 3000 * chunk.len), text.len);
         for (0..3000) |i| try std.testing.expectEqualStrings(chunk, text[i * chunk.len ..][0..chunk.len]);
@@ -485,8 +567,8 @@ test "Server recovery: Responses grows reasoning, text and interleaved call argu
     const first = (try json.parse(a, "{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"abcdefgh\"}}]}")).ok;
     const second = (try json.parse(a, "{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"function\":{\"name\":\"g\",\"arguments\":\"abcdefgh\"}}]}")).ok;
     for (0..3000) |_| {
-        try r.delta(first);
-        try r.delta(second);
+        try r.delta(first, null);
+        try r.delta(second, null);
     }
     for ([_]i64{ 0, 1 }) |i| {
         const args = r.calls.get(i).?.get("arguments").?.string;
