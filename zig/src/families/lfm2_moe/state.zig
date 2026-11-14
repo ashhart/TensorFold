@@ -107,11 +107,17 @@ pub const Cache = struct {
         const last = self.last orelse return error.NothingToKeep;
         if (path.len == 0 or path.len > last.rows) return error.NothingToKeep;
         for (path, 0..) |p, i| if (p != i) return error.UnsupportedLfmTree;
-        const row = last.base + path.len - 1;
-        self.restore(scratch, row);
-        self.len = last.start + path.len;
-        @memcpy(self.logits.contents()[0 .. c.vocab * 2], (scratch.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2]);
         self.last = null;
+        // The whole round kept: commit() restored its last row's conv state and run() copied its logits; len is right.
+        if (path.len == last.rows) return;
+        self.take(scratch, last.base + path.len - 1);
+        self.len = last.start + path.len;
+    }
+
+    /// A recorded call's scratch row as the stream's latest: that row's conv state and logits.
+    fn take(self: *Cache, scratch: *const Scratch, row: usize) void {
+        self.restore(scratch, row);
+        @memcpy(self.logits.contents()[0 .. c.vocab * 2], (scratch.logits.contents() + row * c.vocab * 2)[0 .. c.vocab * 2]);
     }
 };
 
@@ -260,4 +266,66 @@ test "a stream's cache bytes: logits and conv windows at any length, keys and va
     attention[1] = true;
     attention[3] = true;
     try std.testing.expectEqual(@as(u64, 2 * 2 * c.kv_heads * c.head_dim * 2), cacheBytes(&attention, 1) - cacheBytes(&attention, 0));
+}
+
+/// As forward.run settles a recorded call once the GPU is done: each stream's last row's logits, then commit.
+fn settle(s: *const Scratch, caches: []Cache, rows: []const usize) void {
+    var base: usize = 0;
+    for (caches, rows) |*cache, n| {
+        @memcpy(cache.logits.contents()[0 .. c.vocab * 2], (s.logits.contents() + (base + n - 1) * c.vocab * 2)[0 .. c.vocab * 2]);
+        cache.commit(s, base, n, true);
+        base += n;
+    }
+}
+
+fn expectSameState(a: *const Cache, b: *const Cache) !void {
+    try std.testing.expectEqual(a.len, b.len);
+    try std.testing.expect(a.last == null and b.last == null);
+    try std.testing.expectEqualSlices(u8, a.logits.contents()[0 .. c.vocab * 2], b.logits.contents()[0 .. c.vocab * 2]);
+    for (a.blocks, b.blocks) |x, y| if (x == .conv) {
+        try std.testing.expectEqualSlices(u8, x.conv.contents()[0..conv_bytes], y.conv.contents()[0..conv_bytes]);
+    };
+}
+
+test "lfm2_moe: keeping a whole recorded round copies nothing and leaves the state the copy would; a partial path restores" {
+    const gpa = std.testing.allocator;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var attention: [c.layers]bool = @splat(false);
+    for (&attention, 0..) |*a, i| a.* = i % 4 == 2;
+    var s = try Scratch.init(gpa, device, &attention, batch_rows);
+    defer s.deinit();
+    // The recorded rows' conv states and logits, as a two-stream round of 4 and 3 rows leaves them.
+    var prng = std.Random.DefaultPrng.init(820);
+    prng.random().bytes(s.logits.contents()[0 .. 7 * c.vocab * 2]);
+    for (s.snapshots) |snapshot| if (snapshot) |b| prng.random().bytes(b.contents()[0 .. 7 * conv_bytes]);
+    // The streams and their twins, which take the copying path.
+    var caches: [4]Cache = undefined;
+    var made: usize = 0;
+    defer for (caches[0..made]) |*cache| cache.deinit();
+    while (made < caches.len) : (made += 1) caches[made] = try Cache.init(gpa, device, &attention, 64);
+    const rows = [_]usize{ 4, 3 };
+    for ([_]usize{ 0, 2 }) |at| {
+        caches[at].len = 5;
+        caches[at + 1].len = 40;
+        settle(&s, caches[at..][0..2], &rows);
+    }
+    // The first stream keeps every row: no copy, and the state is the copy's, byte for byte.
+    try caches[0].keep(&s, &.{ 0, 1, 2, 3 });
+    caches[2].last = null;
+    caches[2].take(&s, 3);
+    caches[2].len = 5 + 4;
+    try expectSameState(&caches[0], &caches[2]);
+    try std.testing.expectError(error.NothingToKeep, caches[0].keep(&s, &.{0}));
+    // The second keeps its first row: its conv state and logits come back from scratch row 4, not its last row 6.
+    try std.testing.expect(!std.mem.eql(u8, caches[1].logits.contents()[0 .. c.vocab * 2], (s.logits.contents() + 4 * c.vocab * 2)[0 .. c.vocab * 2]));
+    try caches[1].keep(&s, &.{0});
+    caches[3].last = null;
+    caches[3].take(&s, 4);
+    caches[3].len = 40 + 1;
+    try expectSameState(&caches[1], &caches[3]);
+    try std.testing.expectEqualSlices(u8, (s.logits.contents() + 4 * c.vocab * 2)[0 .. c.vocab * 2], caches[1].logits.contents()[0 .. c.vocab * 2]);
+    for (caches[1].blocks, s.snapshots) |b, snapshot| if (b == .conv) {
+        try std.testing.expectEqualSlices(u8, (snapshot.?.contents() + 4 * conv_bytes)[0..conv_bytes], b.conv.contents()[0..conv_bytes]);
+    };
 }
