@@ -56,6 +56,90 @@ test "model supervisor: a sticky context fault reaches each rank's fate after he
     }
     try t.expectEqual(@as(u32, 2), exits.load(.acquire));
 }
+test "model supervisor: a stop signal is reported once as StopRequested, ahead of a context fault" {
+    var c: Case = .{};
+    var sig = std.atomic.Value(bool).init(false);
+    var s = c.supervisor();
+    s.signal = &sig;
+    try t.expect(!s.check());
+    sig.store(true, .release);
+    c.healthy.store(false, .release);
+    try t.expect(s.check());
+    try t.expect(s.check());
+    try t.expectEqual(@as(u32, 1), c.calls.load(.acquire));
+    try t.expectEqual(error.StopRequested, c.failure.?);
+    try t.expect(s.failed.load(.acquire));
+}
+var aborts: std.atomic.Value(u32) = .init(0);
+fn aborted(_: *anyopaque, _: []const u8) void {
+    _ = aborts.fetchAdd(1, .acq_rel);
+}
+test "model supervisor: a stop on rank 1 aborts both ranks' collectives and ends both through fail-fast" {
+    exits.store(0, .release);
+    aborts.store(0, .release);
+    const l = try tp.bootstrap.testListener();
+    defer tp.sock.close(l.fd);
+    const deadline = tp.sock.nowNs() + 5 * std.time.ns_per_s;
+    var fds: [2][tp.fate.max_ranks]tp.sock.Fd = .{ @splat(-1), @splat(-1) };
+    fds[1][0] = try tp.sock.connect("localhost", l.port, deadline);
+    fds[0][1] = try tp.sock.accept(l.fd, deadline);
+    var fates: [2]tp.Fate = undefined;
+    for (&fates, fds, 0..) |*f, fd, rank| {
+        f.* = tp.Fate.init(.{ .world = 2, .rank = @intCast(rank), .grace_ns = 0 }, fd);
+        f.exit_fn = exited;
+        f.onFail(.{ .ctx = f, .call = aborted });
+    }
+    for (&fates) |*f| try f.start();
+    defer for (&fates) |*f| f.close();
+    var sig = std.atomic.Value(bool).init(false);
+    var c: Case = .{ .fate = &fates[1] };
+    var s = c.supervisor();
+    s.signal = &sig;
+    try t.expect(!s.check());
+    const t0 = tp.sock.nowNs();
+    sig.store(true, .release);
+    try t.expect(s.check());
+    while (exits.load(.acquire) < 2) {
+        if (tp.sock.nowNs() - t0 > 2 * std.time.ns_per_s) return error.PeerNotStopped;
+        tp.sock.sleepNs(std.time.ns_per_ms);
+    }
+    for (&fates) |*f| f.close();
+    try t.expectEqual(@as(u32, 2), aborts.load(.acquire));
+    try t.expect(std.mem.indexOf(u8, fates[0].reason(), "rank 1 failed") != null);
+    try t.expect(std.mem.indexOf(u8, fates[0].reason(), "StopRequested") != null);
+}
+test "model supervisor: the stop handler raises the flag the supervisor reads, and a second signal kills" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest;
+    const sup = @import("model_supervisor.zig");
+    const platform = @import("sys");
+    var fds: [2]c_int = undefined;
+    if (platform.c.pipe(&fds) != 0) return error.PipeFailed;
+    defer _ = platform.c.close(fds[0]);
+    const pid = platform.c.fork();
+    if (pid < 0) {
+        _ = platform.c.close(fds[1]);
+        return error.ForkFailed;
+    }
+    if (pid == 0) {
+        sup.installStopSignals();
+        _ = platform.c.raise(.TERM);
+        if (!sup.stop_signal.load(.acquire)) std.c._exit(2);
+        var c: Case = .{};
+        var s = c.supervisor();
+        if (!s.check() or c.failure.? != error.StopRequested) std.c._exit(3);
+        _ = platform.c.write(fds[1], "S", 1);
+        _ = platform.c.raise(.INT);
+        std.c._exit(4);
+    }
+    _ = platform.c.close(fds[1]); // the write end is the child's alone: a child that never wrote reads 0 bytes
+    var status: c_int = 0;
+    try t.expectEqual(pid, platform.c.waitpid(pid, &status, 0));
+    var byte: [1]u8 = .{0};
+    try t.expectEqual(@as(isize, 1), platform.c.read(fds[0], &byte, 1));
+    try t.expectEqual(@as(u8, 'S'), byte[0]);
+    try t.expectEqual(@as(c_int, @backingInt(std.posix.SIG.INT)), status & 127);
+}
+
 test "model supervisor: a live independent thread notices a fault without a health poll" {
     var c: Case = .{};
     var s = c.supervisor();
