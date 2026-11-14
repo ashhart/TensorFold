@@ -30,6 +30,12 @@ fn rowsOf(a: Allocator, key: []const u8, entries: Value) Allocator.Error!Value {
     return .{ .object = o };
 }
 
+/// `d`'s logprobs: the `key` entries `settled` holds and, for a token stream, their raw token positions.
+fn putRows(a: Allocator, d: Value, settled: Value, key: []const u8) Allocator.Error!void {
+    try d.object.put(a, "logprobs", try rowsOf(a, key, settled.get(key).?));
+    if (settled.get("positions")) |at| try d.object.put(a, "logprob_positions", try rowsOf(a, key, at.get(key).?));
+}
+
 pub const Generation = struct {
     srv: *Server,
     a: Allocator,
@@ -106,6 +112,13 @@ pub const Generation = struct {
         if (g.first_ns == null) g.first_ns = arrived;
         g.last_ns = arrived;
         const sink = g.sink orelse return;
+        if (sink.tokens) |tokens| {
+            tokens(sink.ctx, g.collected.items.len - landed, chunk[0..landed]) catch {
+                g.cancel();
+                return error.Cancelled;
+            };
+            g.wrote_ns = nowNs(g.srv.io);
+        }
         if (g.streaming_done) return;
         var fresh: std.ArrayList(u32) = .empty;
         for (chunk[0..landed]) |t| {
@@ -143,13 +156,13 @@ pub const Generation = struct {
         const thought_rows = if (rows) |r| r.get("reasoning_content") else null;
         if (thought.len > 0 or thought_rows != null) {
             const d: Value = if (thought.len > 0) try deltaOf(g.a, "reasoning_content", thought) else .{ .object = try json.newObject(g.a) };
-            if (thought_rows) |t| try d.object.put(g.a, "logprobs", try rowsOf(g.a, "reasoning_content", t));
+            if (thought_rows != null) try putRows(g.a, d, rows.?, "reasoning_content");
             try g.emit(sink, d);
         }
         const prose_rows: []Value = if (rows) |r| r.get("content").?.array else &.{};
         if (delta.len > 0 or prose_rows.len > 0) {
             const d: Value = if (prose_rows.len > 0) try deltaOf(g.a, "content", delta) else .{ .string = delta };
-            if (prose_rows.len > 0) try d.object.put(g.a, "logprobs", try rowsOf(g.a, "content", .{ .array = prose_rows }));
+            if (prose_rows.len > 0) try putRows(g.a, d, rows.?, "content");
             try g.emit(sink, d);
         }
         if (g.calls) |*c| {
@@ -370,7 +383,7 @@ pub const Generation = struct {
             .speculative = .{ .object = spec },
             .thinking = thinking,
             .effort = effort,
-            .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent } else null,
+            .probability_rows = if (g.lp) |l| .{ .tokens = content_tokens, .rows = l.rows.items, .thinking = g.thinking, .stops = g.stops, .closer = close, .sent = l.sent, .positions = l.positions } else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .loop_stop = stopped,
         };
