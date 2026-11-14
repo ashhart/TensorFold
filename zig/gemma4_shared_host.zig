@@ -281,7 +281,7 @@ test "Gemma shared: ring restore precedes forced snapshot eviction in reservatio
     const expected = reply(try fill(&f, &teach));
     f.release(&teach);
     f.store.?.store.limit(.{ .pages = 128, .snaps = 1 });
-    try t.expectEqual(@as(u32, 2048), f.store.?.store.find(ids).?.end);
+    try t.expectEqual(@as(u32, 2048), f.store.?.store.find(.of(ids)).?.end);
     var blocker = try stream(&.{ 99, 98, 97 });
     defer blocker.deinit(a);
     _ = try fill(&f, &blocker);
@@ -298,7 +298,7 @@ test "Gemma shared: ring restore precedes forced snapshot eviction in reservatio
         fn call(ptr: *anyopaque, want: usize) bool {
             const x: *@This() = @ptrCast(@alignCast(ptr));
             x.restored_first = x.f.g.restored_at == 2048;
-            x.f.store.?.store.forget(x.ids, 2048);
+            x.f.store.?.store.forget(.of(x.ids), 2048);
             return x.f.g.pool.?.available() >= want;
         }
     };
@@ -313,7 +313,7 @@ test "Gemma shared: ring restore precedes forced snapshot eviction in reservatio
     defer f.release(&s);
     try t.expect(reclaim.restored_first);
     try t.expectEqual(@as(u64, 2048), s.cached);
-    try t.expect(f.store.?.store.find(ids) == null); // its blob was reclaimed by the new lane's promise
+    try t.expect(f.store.?.store.find(.of(ids)) == null); // its blob was reclaimed by the new lane's promise
     const got = reply(try finish(&f, &s, l));
     try t.expectEqualSlices(u32, &expected, &got);
 }

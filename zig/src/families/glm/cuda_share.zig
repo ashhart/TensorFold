@@ -67,6 +67,13 @@ test "TF_GLM_KV_SHARE: a count or anything else is refused; empty and 0 asked fo
     try std.testing.expect(!moved("0"));
 }
 
+/// The images a query carries, in the store's terms (none allocated for text); the caller frees them.
+fn images(gpa: std.mem.Allocator, s: []const @import("lanes").stream.Image) ![]kp.Image {
+    const out = try gpa.alloc(kp.Image, s.len);
+    for (s, out) |i, *o| o.* = .{ .at = i.at, .tokens = i.tokens, .gh = i.gh, .gw = i.gw, .hash = i.hash };
+    return out;
+}
+
 /// The store the server attached to rank 0's pages (null: none, or another rank).
 pub fn of(e: *const engine.Engine) ?kp.Prompts {
     const p = e.pages orelse return null;
@@ -79,7 +86,11 @@ pub const Owner = struct { pending: ?*engine.Kept = null };
 /// Before a prompt pass: the deepest kept state's pages in `adopt` (held for the stream), the state in `owner`.
 pub fn begin(e: *engine.Engine, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !kp.Plan {
     const prompts = of(e) orelse return error.NoPromptStore;
-    const plan = try prompts.begin(.of(cacheKey(s) orelse return error.ImageCacheKeyRequired), s.history_len, s.shared_prefixes, owner, adopt);
+    const ims = try images(e.gpa, s.images);
+    defer e.gpa.free(ims);
+    var q: kp.Query = .of(cacheKey(s) orelse return error.ImageCacheKeyRequired);
+    q.images = ims;
+    const plan = try prompts.begin(q, s.history_len, s.shared_prefixes, owner, adopt);
     defer prompts.free(plan.marks);
     const mine = e.gpa.dupe(u32, plan.marks) catch |err| { // the lane's own marks, freed by its allocator
         e.pages.?.give(adopt.items);
@@ -94,6 +105,7 @@ pub const Keeps = struct {
     e: *engine.Engine,
     slot: u32,
     prompt: []const u32,
+    images: []const @import("lanes").stream.Image = &.{},
 
     pub fn at(ctx: *anyopaque, mark: u32) void {
         const k: *Keeps = @ptrCast(@alignCast(ctx));
@@ -110,13 +122,17 @@ pub const Keeps = struct {
         if (n > ids.len) return;
         const path = k.e.gpa.alloc(u32, n) catch return;
         defer k.e.gpa.free(path);
+        const ims = images(k.e.gpa, k.images) catch return;
+        defer k.e.gpa.free(ims);
+        var q: kp.Query = .of(k.prompt);
+        q.images = ims;
         var owner: Owner = .{};
-        _ = prompts.keep(.of(k.prompt), mark, &owner, ids[0..n], path);
+        _ = prompts.keep(q, mark, &owner, ids[0..n], path);
     }
 };
 
 /// The same content key names lookup and every completed or interrupted keep.
 pub fn marks(e: *engine.Engine, slot: u32, s: *const Stream, at: []const u32, keeps: *Keeps) ?engine.Marks {
-    keeps.* = .{ .e = e, .slot = slot, .prompt = cacheKey(s) orelse return null };
+    keeps.* = .{ .e = e, .slot = slot, .prompt = cacheKey(s) orelse return null, .images = s.images };
     return if (at.len == 0) null else .{ .at = at, .ctx = keeps, .call = Keeps.at, .interrupted = Keeps.at };
 }
