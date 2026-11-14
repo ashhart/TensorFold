@@ -1,4 +1,4 @@
-//! DeepSeek V4.1's routed experts for prompt chunks (simdgroup MMA) under the contract on Metal: up, down, controls.
+//! DeepSeek V4.1's routed experts for prompt chunks (simdgroup MMA, M5 tensor units) under the contract: up, down.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -15,8 +15,8 @@ const backing_experts = 12;
 const base = "dsv41 xmma ";
 
 pub const Which = enum { up, down };
-/// What a registration varies: the kernel, the full E8M0 range, a planted fault (TF_CTL; 5 drops the last K group).
-pub const Variant = struct { which: Which, wide: bool = false, ctl: u8 = 0 };
+/// A registration's kernel, full E8M0 range, planted fault (TF_CTL; 5 drops the last K group) and tensor units.
+pub const Variant = struct { which: Which, wide: bool = false, ctl: u8 = 0, units: bool = false };
 
 const real = [_]c.Shape{ .{ .rows = 1, .n = 2304, .k = 5120 }, .{ .rows = 4, .n = 2304, .k = 5120 }, .{ .rows = 20, .n = 256, .k = 5120 } };
 const real_down = [_]c.Shape{ .{ .rows = 1, .n = 5120, .k = 2304 }, .{ .rows = 4, .n = 5120, .k = 2304 }, .{ .rows = 20, .n = 256, .k = 2304 } };
@@ -79,14 +79,15 @@ pub const Proj = struct {
     tiles: rig_.Ref = undefined,
     codes: rig_.Ref = undefined,
     scales: rig_.Ref = undefined,
+    dq: rig_.Ref = undefined,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant, name: []const u8) !Proj {
         var p: Proj = .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .name = name, .pipes = undefined };
         const head = if (v.ctl != 0) try std.fmt.allocPrint(a, "#define TF_CTL {d}\n", .{v.ctl}) else "";
         defer if (head.len > 0) a.free(head);
-        const text = try ex.source(a, head, &.{});
+        const text = try ex.source(a, head, &.{}, v.units);
         defer a.free(text);
-        p.pipes = try ex.Pipelines.loadSource(device, text);
+        p.pipes = try ex.Pipelines.loadSource(device, text, v.units);
         return p;
     }
 
@@ -211,12 +212,12 @@ pub const Proj = struct {
             .where = try p.rig.input(std.mem.sliceAsBytes(pl.where)),
         };
         p.out = try p.rig.output(p.count() * 2);
-        const b = ex.bytes(p.call());
+        const b = ex.bytes(p.call(), p.v.units);
         p.tiles = try p.rig.scratch(b[0]);
         if (up) {
             p.codes = try p.rig.scratch(b[1]);
             p.scales = try p.rig.scratch(b[2]);
-        }
+        } else p.dq = if (p.v.units) try p.rig.scratch(b[5]) else p.out;
     }
 
     fn at(r: rig_.Ref) ex.Ref {
@@ -235,7 +236,7 @@ pub const Proj = struct {
         if (p.v.which == .up) {
             ex.quant(&p.pipes, pass.e, at(p.xr), at(p.codes), at(p.scales), p.call());
             ex.up(&p.pipes, pass.e, at(p.codes), at(p.scales), at(p.table), p.route(), at(p.tiles), at(p.out), p.call());
-        } else ex.down(&p.pipes, pass.e, at(p.xr), at(p.table), at(p.tiles), at(p.out), p.call());
+        } else ex.down(&p.pipes, pass.e, at(p.xr), at(p.dq), at(p.table), at(p.tiles), at(p.out), p.call());
         try p.rig.finish(pass);
     }
 
@@ -358,6 +359,17 @@ pub const Suite = struct {
         .{ .v = .{ .which = .down, .ctl = 5 }, .name = base ++ "control: down last K group dropped" },
         .{ .v = .{ .which = .down, .ctl = 3 }, .name = base ++ "control: down sums rounded to fp16" },
         .{ .v = .{ .which = .down, .ctl = 4 }, .name = base ++ "control: down writes past its output" },
+        .{ .v = .{ .which = .up, .units = true }, .name = base ++ "units up: tensor units, exact groups, fp8 activation" },
+        .{ .v = .{ .which = .up, .ctl = 1, .units = true }, .name = base ++ "units control: up non-finite inputs flushed" },
+        .{ .v = .{ .which = .up, .ctl = 2, .units = true }, .name = base ++ "units control: up bf16 step before act_quant dropped" },
+        .{ .v = .{ .which = .up, .ctl = 3, .units = true }, .name = base ++ "units control: up sums rounded to fp16" },
+        .{ .v = .{ .which = .up, .ctl = 4, .units = true }, .name = base ++ "units control: up writes past its output" },
+        .{ .v = .{ .which = .down, .units = true }, .name = base ++ "units down: tensor units at V4.1 shapes" },
+        .{ .v = .{ .which = .down, .wide = true, .units = true }, .name = base ++ "units down: full E8M0 range" },
+        .{ .v = .{ .which = .down, .ctl = 1, .units = true }, .name = base ++ "units control: down non-finite inputs flushed" },
+        .{ .v = .{ .which = .down, .ctl = 5, .units = true }, .name = base ++ "units control: down last K group dropped" },
+        .{ .v = .{ .which = .down, .ctl = 3, .units = true }, .name = base ++ "units control: down sums rounded to fp16" },
+        .{ .v = .{ .which = .down, .ctl = 4, .units = true }, .name = base ++ "units control: down writes past its output" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
@@ -365,6 +377,7 @@ pub const Suite = struct {
         s.* = .{ .a = a, .device = device, .queue = queue };
         for (list) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
+            if (entry.v.units and !ex.units(device)) continue;
             const p = try a.create(Proj);
             p.* = try Proj.init(a, device, queue, entry.v, entry.name);
             try s.probes.append(a, p);

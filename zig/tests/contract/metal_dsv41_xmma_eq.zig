@@ -92,10 +92,11 @@ const Job = struct {
         j.out_dec = try rig.scratch(if (both) 2 * np * w.hid else 2);
         j.act_xm = try rig.output(2 * np * w.width);
         j.out_xm = try rig.output(2 * np * w.hid);
-        const b = xm.bytes(call);
+        const b = xm.bytes(call, pipes.xu != null);
         const tiles = try rig.scratch(b[0]);
         const codes = try rig.scratch(b[1]);
         const scales = try rig.scratch(b[2]);
+        const dq = try rig.scratch(@max(b[5], 4));
         const route: xm.Route = .{ .ids = ids, .weights = wts, .slots = at(j.slots), .nslots = at(j.nslots), .pairs = at(j.pairs), .where = at(j.where) };
         const back = w.backing();
         const pass = rig.begin();
@@ -108,7 +109,7 @@ const Job = struct {
         xm.tiles(pipes, pass.e, route, at(tiles));
         xm.quant(pipes, pass.e, x, at(codes), at(scales), call);
         xm.up(pipes, pass.e, at(codes), at(scales), at(w.table), route, at(tiles), at(j.act_xm), call);
-        xm.down(pipes, pass.e, at(j.act_xm), at(w.table), at(tiles), at(j.out_xm), .{ .rows = rows, .k = w.hid, .n = w.width, .experts = w.e });
+        xm.down(pipes, pass.e, at(j.act_xm), at(dq), at(w.table), at(tiles), at(j.out_xm), .{ .rows = rows, .k = w.hid, .n = w.width, .experts = w.e });
         try rig.finish(pass);
         return j;
     }
@@ -175,7 +176,7 @@ fn equality(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, pipes: *
         if (up_bad + down_bad > 0) std.debug.print("FAIL dsv41 xmma equality: rows {d}{s}: {d} up and {d} down values differ from decode\n", .{ case.rows, if (case.nonfinite) " (non-finite planted)" else "", up_bad, down_bad });
         bad += up_bad + down_bad;
     }
-    std.debug.print("{s} dsv41 xmma equality with the decode kernels: rows 1/5/16/17/100/100 (non-finite)/512 at hidden {d}, width {d}, down columns 256, {d} values, {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", ex_hidden, ex_width, cells, bad });
+    std.debug.print("{s} dsv41 xmma{s} equality with the decode kernels: rows 1/5/16/17/100/100 (non-finite)/512 at hidden {d}, width {d}, down columns 256, {d} values, {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", if (pipes.xu != null) " units" else "", ex_hidden, ex_width, cells, bad });
     return bad;
 }
 
@@ -217,16 +218,24 @@ fn invariance(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, pipes:
         if (diff > 0) std.debug.print("FAIL dsv41 xmma chunk invariance: rows {d} offset {d}: {d} values differ\n", .{ rows, off, diff });
         bad += diff;
     };
-    std.debug.print("{s} dsv41 xmma chunk invariance: 64/512/2048/8192 rows, offsets 0/1/37 of one 8192-row call, {d} launches, {d} values differ\n", .{ if (bad == 0) "PASS" else "FAIL", launches, bad });
+    std.debug.print("{s} dsv41 xmma{s} chunk invariance: 64/512/2048/8192 rows, offsets 0/1/37 of one 8192-row call, {d} launches, {d} values differ\n", .{ if (bad == 0) "PASS" else "FAIL", if (pipes.xu != null) " units" else "", launches, bad });
     return bad;
 }
 
+/// Both kernel sets where this GPU has them: simdgroup MMA, then tensor units.
 pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, seed: u64) !usize {
-    var pipes = try xm.Pipelines.load(a, device);
-    defer pipes.deinit();
     var dpipes = try dec.Pipelines.load(a, device);
     defer dpipes.deinit();
-    return try equality(a, device, queue, &pipes, &dpipes, seed) + try invariance(a, device, queue, &pipes, &dpipes, seed);
+    var bad: usize = 0;
+    for ([_]bool{ false, true }) |u| {
+        if (u and !xm.units(device)) continue;
+        const text = try xm.source(a, "", &.{}, u);
+        defer a.free(text);
+        var pipes = try xm.Pipelines.loadSource(device, text, u);
+        defer pipes.deinit();
+        bad += try equality(a, device, queue, &pipes, &dpipes, seed) + try invariance(a, device, queue, &pipes, &dpipes, seed);
+    }
+    return bad;
 }
 
 /// Median time of the stages of one layer at an 8192-row chunk, 384 experts (96 distinct weight sets), top-6.
@@ -263,12 +272,12 @@ pub fn timing(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, io: st
     const plan = try ref.Plan.init(a, rows, dec.experts, rng);
     defer plan.deinit();
     const call: xm.Call = .{ .rows = rows };
-    const b = xm.bytes(call);
+    const b = xm.bytes(call, pipes.xu != null);
     var sc: [5]mtl.Buffer = undefined;
     for (&sc, [5]usize{ 12 * np, 4, 4 * np, 4 * np, b[0] }) |*s, len| s.* = try device.buffer(len, opts);
     defer for (sc) |s| s.deinit();
-    const extra = [4]usize{ b[1], b[2], b[3], b[4] };
-    var ex_bufs: [4]mtl.Buffer = undefined;
+    const extra = [5]usize{ b[1], b[2], b[3], b[4], @max(b[5], 4) };
+    var ex_bufs: [5]mtl.Buffer = undefined;
     for (&ex_bufs, extra) |*s, len| s.* = try device.buffer(len, opts);
     defer for (ex_bufs) |s| s.deinit();
     const xs = try device.buffer(2 * rows * ex_hidden, opts);
@@ -298,7 +307,7 @@ pub fn timing(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, io: st
             xm.quant(&pipes, e, .{ .buf = xs }, .{ .buf = ex_bufs[0] }, .{ .buf = ex_bufs[1] }, call);
         }
         if (stage == 1 or stage == 3) xm.up(&pipes, e, .{ .buf = ex_bufs[0] }, .{ .buf = ex_bufs[1] }, .{ .buf = tbl }, route, .{ .buf = sc[4] }, .{ .buf = ex_bufs[2] }, call);
-        if (stage == 2 or stage == 3) xm.down(&pipes, e, .{ .buf = ex_bufs[2] }, .{ .buf = tbl }, .{ .buf = sc[4] }, .{ .buf = ex_bufs[3] }, call);
+        if (stage == 2 or stage == 3) xm.down(&pipes, e, .{ .buf = ex_bufs[2] }, .{ .buf = ex_bufs[4] }, .{ .buf = tbl }, .{ .buf = sc[4] }, .{ .buf = ex_bufs[3] }, call);
         if (stage == 1 or stage == 2) {
             dec.plan(&dpipes, e, route, .{ .rows = rows });
             xm.tiles(&pipes, e, route, .{ .buf = sc[4] });
