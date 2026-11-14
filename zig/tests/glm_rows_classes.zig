@@ -11,8 +11,8 @@ const rows = 16; // a decode window
 const prompt_rows = 33; // a prompt chunk: two 16-row steps and one more
 
 /// A class's shape [n, k] (a head's for embed_q / unembed_out) and the widths oQ4, oQ2 and the 4-bit build store it at.
-const Class = struct { name: []const u8, k: u32, n: u32, bits: []const u8 };
-const classes = [_]Class{
+pub const Class = struct { name: []const u8, k: u32, n: u32, bits: []const u8 };
+pub const classes = [_]Class{
     .{ .name = "kda_in q/k/v", .k = 4096, .n = 8192, .bits = &.{ 5, 8 } },
     .{ .name = "kda_in f_a/g_a", .k = 4096, .n = 128, .bits = &.{ 5, 8 } },
     .{ .name = "kda_in b", .k = 4096, .n = 64, .bits = &.{ 5, 8 } },
@@ -55,7 +55,7 @@ pub fn code(row: []const u8, j: usize, bits: u8) u32 {
     return (v >> @intCast(at % 8)) & ((@as(u32, 1) << @intCast(bits)) - 1);
 }
 
-const Tally = struct { values: usize = 0, worst: f64 = 0, worst_col: usize = 0, pairs: usize = 0, err: f64 = 0, ymax: f64 = 0, caught: usize = 0 };
+pub const Tally = struct { values: usize = 0, worst: f64 = 0, worst_col: usize = 0, pairs: usize = 0, err: f64 = 0, ymax: f64 = 0, caught: usize = 0 };
 
 /// fp32 sums' error per unit of |terms|: under k / 8 + 64 additions deep (row kernels and affine_mm), 2^-24 each.
 pub fn gamma(k: usize) f64 {
@@ -63,7 +63,7 @@ pub fn gamma(k: usize) f64 {
 }
 
 /// out row i vs fp64 on every column within the fp32 sums' bound; `scale` != 1: a control, columns past it counted.
-fn against(q: affine.Affine, w: []const u8, s: []const u16, b: []const u16, x: []const u16, out: []const u16, pitch: usize, i: usize, t: *Tally, scale: f64) !void {
+pub fn against(q: affine.Affine, w: []const u8, s: []const u16, b: []const u16, x: []const u16, out: []const u16, pitch: usize, i: usize, t: *Tally, scale: f64) !void {
     const k: usize = q.k;
     const g_n = k / q.group;
     const rb = k * q.bits / 8;

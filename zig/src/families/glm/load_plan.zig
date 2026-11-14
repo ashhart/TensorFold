@@ -104,8 +104,13 @@ fn stackBytes(l: anytype, comptime fmt: []const u8, args: anytype, parts: []cons
 
 /// Fewest bytes of caches and buffers a load of `cap` tokens takes (shortest prompt chunks), counted, not allocated.
 pub fn leastArena(gpa: std.mem.Allocator, c: *const cfg.Config, cap: u32, chunked: bool) !usize {
+    return leastArenaOrdered(gpa, c, cap, chunked, false);
+}
+
+/// The same admission with the selected recurrence scratch.
+pub fn leastArenaOrdered(gpa: std.mem.Allocator, c: *const cfg.Config, cap: u32, chunked: bool, ordered: bool) !usize {
     var dry: st.Arena = .{ .device = undefined, .gpa = gpa, .dry = true };
-    const both = try st.init(&dry, c, cap);
+    const both = try st.initOrdered(&dry, c, cap, ordered);
     const chunk = if (chunked) prompt_mod.chunkBytes(gpa, c, &both.scratch, cap, prompt_mod.heights[prompt_mod.heights.len - 1]) else 0;
     return dry.bytes + @as(usize, cap) * 4 + 256 + chunk;
 }
