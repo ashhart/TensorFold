@@ -1,4 +1,4 @@
-//! The CUDA contract's family sets and Clef's joint schema head.
+//! The CUDA contract's family sets (MiMo-V2's among them) and Clef's joint schema head.
 const std = @import("std");
 const cuda = @import("cuda");
 const check = @import("check.zig");
@@ -21,6 +21,8 @@ pub const Sets = struct {
     shared_down: *SharedDown,
     prompt: *Prompt,
     joint_schema: *@import("contract_joint_schema.zig").Set,
+    mimo: *@import("contract_mimo.zig").Group,
+    a: std.mem.Allocator,
 
     /// Each set's kernels appended to `list`, in this order.
     pub fn init(gpu: check.Gpu, s: cuda.Stream, a: std.mem.Allocator, list: *std.ArrayList(g.Kernel), affine4: *cuda.qlinear.Affine4Kernels, cap: u32) !Sets {
@@ -58,6 +60,8 @@ pub const Sets = struct {
         errdefer prompt.deinit();
         try prompt.append(cap, a, list);
         const joint_schema = try @import("contract_joint_schema.zig").Set.init(gpu, s, a, list);
+        errdefer joint_schema.deinit();
+        const mimo = try @import("contract_mimo.zig").Group.create(a, gpu, s, list);
         return .{
             .gpa = gpu.gpa,
             .bf16_experts = bf16_experts,
@@ -71,10 +75,13 @@ pub const Sets = struct {
             .shared_down = shared_down,
             .prompt = prompt,
             .joint_schema = joint_schema,
+            .mimo = mimo,
+            .a = a,
         };
     }
 
     pub fn deinit(sets: Sets) void {
+        sets.mimo.destroy(sets.a);
         sets.joint_schema.deinit();
         sets.prompt.deinit();
         sets.gpa.destroy(sets.prompt);

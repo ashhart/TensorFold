@@ -7,6 +7,7 @@ pub const pricedBatched = alloc.pricedBatched;
 pub const Constants = @import("depth_constants.zig").Constants;
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
+const geometric = @import("depth_geometric.zig");
 
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
@@ -15,6 +16,7 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
+    alpha: f64 = 0.6, // geometric_depth: the stream's acceptance, kept / tried (decoder.py alpha, from 0.6)
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
@@ -33,6 +35,7 @@ pub const Who = struct {
     gain: ?f64 = null, // the drafts its last grant expected to keep (null: none priced)
     stream: ?*anyopaque = null,
     sampled: bool = false, // keyed draws: host work a row that a greedy round does not have
+    position: u64 = 0, // the stream's cache length (geometric depth's context term)
 };
 
 /// Whether a copied continuation is ahead of a stream (the round loop proposes; Python `_copy_proposal`).
@@ -62,12 +65,43 @@ pub const Rule = struct {
     batched_heads: bool = false, // one batch drafts every stream of a shared round (steps: the deepest stream's)
     row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
+    geometric: bool = false, // Config.geometric_depth: a lone stream's depth by its one acceptance (Python joint_widths)
+    geo_costs: []const f64 = &.{}, // Config.geometric_costs
+    geo_draft: f64 = 0,
+    geo_ctx: [2]f64 = .{ 0, 0 }, // Config.geometric_ctx
+    geo_ctx_base: f64 = 9000,
+    sharing: bool = false, // inside budgets(): shared rounds keep the per-depth rule
     overhead: std.ArrayList(Overhead) = .empty, // a shared round's ms past its forward, by streams (insertion order)
     greedy_ms: Table = .{}, // round_ms from greedy rounds alone: what greedy streams price by
     shared_rounds: u64 = 0,
     greedy_overhead: std.ArrayList(Overhead) = .empty, // overhead from rounds without a sampled stream
-
     hold_order: []usize = &.{}, // reused hold ordering, at most batch_rows entries
+
+    /// The engine's rule from its config.
+    pub fn of(gpa: Allocator, cfg: *const @import("config.zig").Config) Rule {
+        return .{
+            .gpa = gpa,
+            .k = cfg.k,
+            .prior = cfg.depth_prior,
+            .most_drafts = cfg.most_drafts,
+            .family_costs = &cfg.family_costs,
+            .shared_costs = &cfg.shared_costs,
+            .mtp_step_ms = cfg.mtp_step_ms,
+            .draft_step_ms = cfg.draft_step_ms,
+            .plain_guard = cfg.plain_guard,
+            .node_probabilities = cfg.node_probabilities,
+            .granted_depth = cfg.granted_depth,
+            .confidence_floor = cfg.draft_confidence,
+            .plain_streams = cfg.plain_streams,
+            .batch_rows = cfg.batch_rows,
+            .batched_heads = cfg.draft_streams,
+            .geometric = cfg.geometric_depth,
+            .geo_costs = cfg.geometric_costs,
+            .geo_draft = cfg.geometric_draft_cost,
+            .geo_ctx = cfg.geometric_ctx,
+            .geo_ctx_base = cfg.geometric_ctx_base,
+        };
+    }
 
     pub fn deinit(r: *Rule) void {
         r.gpa.free(r.hold_order);
@@ -89,6 +123,7 @@ pub const Rule = struct {
     /// Draft j was tried when drafts 1 .. j - 1 were kept; its estimate moves toward whether it was kept.
     pub fn observeDepth(r: *Rule, who: Who, proposed: i64, accepted: i64) !void {
         const p = try r.rates(who);
+        if (r.geometric and proposed > 0) geometric.observe(&who.state.*.?, proposed, accepted);
         const n = @min(@max(proposed, 0), @as(i64, @intCast(p.len)));
         var j: i64 = 0;
         while (j < n) : (j += 1) {
@@ -127,6 +162,7 @@ pub const Rule = struct {
         const table = try r.costs(who);
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
+        if (r.geometric and !r.sharing) return forward + (if (drafts > 0) r.mtp_step_ms else 0.0); // one draft pass
         var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
         if (r.plain_guard) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
@@ -149,6 +185,7 @@ pub const Rule = struct {
         if (most <= 0) return 0;
         if (r.confidence_floor != null and !who.sampled and !r.k.floor_rates) return most;
         const p = try r.rates(who);
+        if (r.geometric and !r.sharing and !r.family_costs.empty()) return geometric.depthOf(r, who, who.state.*.?.alpha, most);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
             return @max(1, @min(most, want));
@@ -167,7 +204,7 @@ pub const Rule = struct {
         var run: f64 = 1.0;
         var d: i64 = 1;
         while (d <= most) : (d += 1) {
-            const cost = (try r.roundCost(d, who)) orelse break;
+            const cost = if (r.geo_costs.len > 0) geometric.cost(r.geo_costs, @intCast(d + 1)) + r.geo_draft else (try r.roundCost(d, who)) orelse break;
             const at: usize = @intCast(d - 1);
             run *= if (at < p.len) p[at] else p[p.len - 1];
             expected += run;
@@ -299,6 +336,8 @@ pub const Rule = struct {
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
         // drafts lose here: none asked, no head pass
         if (r.plain_streams > 0 and whos.len >= r.plain_streams) return @memset(out, 0);
+        r.sharing = true;
+        defer r.sharing = false;
         if (r.confidence_floor != null) {
             for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
             return;
@@ -509,31 +548,6 @@ test "a shared round's drafts come out the same whichever depths its overhead wa
     try std.testing.expectEqualSlices(i64, &got[0], &got[1]);
 }
 
-test "granted depths in a shared round fit one hold pass: every block is as deep as the deepest" {
-    const empty: Table = .{};
-    var rule: Rule = .{ .gpa = std.testing.allocator, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &empty, .mtp_step_ms = 0.5, .plain_guard = false, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
-    defer rule.deinit();
-    var states: [8]?State = @splat(null);
-    defer for (&states) |*st| if (st.*) |*x| x.deinit(std.testing.allocator);
-    var whos: [8]Who = undefined;
-    for (&whos, &states, 0..) |*w, *st, i| w.* = .{ .state = st, .draft_room = 100, .finished = false, .forced = false, .granted = @intCast(i) };
-    const No = struct {
-        fn copy(_: *anyopaque, _: *const Who) bool {
-            return false;
-        }
-    };
-    var unused: u8 = 0;
-    var out: [8]i64 = undefined;
-    try rule.budgets(&whos, .{ .ptr = &unused, .copy = No.copy }, false, &out);
-    // a grant of none probes two; grants 1..7 that took every held draft, plus one; cut to 32 rows over eight blocks
-    try std.testing.expectEqualSlices(i64, &.{ 2, 2, 3, 4, 4, 4, 4, 4 }, &out);
-    try rule.budgets(whos[0..2], .{ .ptr = &unused, .copy = No.copy }, false, out[0..2]);
-    try std.testing.expectEqualSlices(i64, &.{ 2, 2 }, out[0..2]); // two blocks fit whole
-    for (whos[0..2]) |*w| w.grant_short = true;
-    try rule.budgets(whos[0..2], .{ .ptr = &unused, .copy = No.copy }, false, out[0..2]);
-    try std.testing.expectEqualSlices(i64, &.{ 2, 1 }, out[0..2]); // a grant short of the held drafts: no slack
-}
-
 test "a copy ahead: one head draft beside it, or none when the head's drafts cost a pass of their own" {
     const empty: Table = .{};
     const Yes = struct {
@@ -557,43 +571,8 @@ test "a copy ahead: one head draft beside it, or none when the head's drafts cos
     }
 }
 
-test "a granted hold stays only while its stream's expected drafts pay for the verify rows and the hold pass" {
-    const gpa = std.testing.allocator;
-    var shared: Table = .{};
-    defer shared.deinit(gpa);
-    for (1..33) |w| try shared.put(gpa, @intCast(w), 10.0 + @as(f64, @floatFromInt(w)));
-    const empty: Table = .{};
-    const cheap = [_]HoldCost{ .{ .streams = 1, .depth = 1, .ms = 1.0 }, .{ .streams = 8, .depth = 1, .ms = 4.5 } };
-    var states: [4]?State = @splat(null);
-    defer for (&states) |*st| if (st.*) |*x| x.deinit(gpa);
-    const granted = [_]?u32{ 2, 2, 0, 1 };
-    const gains = [_]?f64{ 1.8, 0.2, null, 0.9 };
-    var whos: [4]Who = undefined;
-    for (&whos, &states, granted, gains) |*w, *st, g, x| w.* = .{ .state = st, .draft_room = 100, .finished = false, .forced = false, .granted = g, .gain = x };
-    var rule: Rule = .{ .gpa = gpa, .k = .{ .hold_costs = &cheap }, .prior = &.{0.8}, .most_drafts = 9, .family_costs = &empty, .shared_costs = &shared, .mtp_step_ms = 0.5, .plain_guard = true, .node_probabilities = true, .granted_depth = true, .batch_rows = 32 };
-    defer rule.deinit();
-    // 8 ms overhead: plain 4 / 22; stream 0 then 3 raise the rate (5.8 / 25, 6.7 / 26.5), stream 1 would lower it
-    var out = [_]i64{ 4, 4, 0, 3 };
-    try rule.payHolds(&whos, false, &out);
-    try std.testing.expectEqualSlices(i64, &.{ 4, 0, 0, 3 }, &out);
-    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
-    rule.gpa = failing.allocator();
-    out = .{ 4, 4, 0, 3 };
-    try rule.payHolds(&whos, false, &out);
-    try std.testing.expect(!failing.has_induced_failure);
-    try std.testing.expectEqualSlices(i64, &.{ 4, 0, 0, 3 }, &out);
-    rule.gpa = gpa;
-    const dear = [_]HoldCost{.{ .streams = 1, .depth = 1, .ms = 20.0 }};
-    rule.k.hold_costs = &dear;
-    out = .{ 4, 4, 0, 3 };
-    try rule.payHolds(&whos, false, &out);
-    try std.testing.expectEqualSlices(i64, &.{ 0, 0, 0, 0 }, &out); // no gain pays a 20 ms pass
-    whos[2].granted = 0;
-    out = .{ 4, 4, 2, 3 };
-    try rule.payHolds(&whos, false, &out);
-    try std.testing.expectEqualSlices(i64, &.{ 0, 0, 2, 0 }, &out); // a probe after a grant of none keeps its hold
-}
-
 test {
     _ = @import("shared_step_test.zig");
+    _ = @import("depth_hold_test.zig");
+    _ = geometric;
 }
