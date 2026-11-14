@@ -19,11 +19,11 @@ pub const Kernels = struct {
     router: cuda.grouped.Router,
     fact: bool = false, // decode windows on NVFP4's factored tiles (the same bits): load timing picks it (cuda_lane_costs)
 
-    /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too.
-    pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: bool) !Kernels {
+    /// `plans`: the loaded experts module (its plan kernels); `block32`: block 32's image too, for these values.
+    pub fn load(d: *const cuda.Driver, plans: cuda.Module, sms: u32, block32: ?cuda.experts32.Values) !Kernels {
         var nvfp4 = try cuda.experts.Nvfp4Experts.load(d, sms);
         errdefer nvfp4.unload();
-        var b32: ?cuda.experts32.Nvfp4b32Experts = if (block32) try cuda.experts32.Nvfp4b32Experts.load(d, sms) else null;
+        var b32: ?cuda.experts32.Nvfp4b32Experts = if (block32) |v| try cuda.experts32.Nvfp4b32Experts.load(d, sms, v) else null;
         errdefer if (b32) |*x| x.unload();
         return .{ .nvfp4 = nvfp4, .b32 = b32, .router = try cuda.grouped.Router.resolve(plans) };
     }
@@ -34,12 +34,14 @@ pub const Kernels = struct {
     }
 };
 
-/// Whether config.json declares a csf0_v1 module: block 32's kernels load for such a checkpoint alone.
-pub fn wantsBlock32(gpa: std.mem.Allocator, config_json: []const u8) !bool {
+/// The values config.json's csf0_v1 modules read their codes as, E2M1's or NVFP4_NZ5's; null when it declares none.
+pub fn wantsBlock32(gpa: std.mem.Allocator, config_json: []const u8) !?cuda.experts32.Values {
     var why: core.modelopt.Why = .{};
     var recipes = try core.modelopt.admitRecipes(gpa, config_json, &why);
     defer recipes.deinit();
-    return recipes.has(.nvfp4_csf0);
+    const e2m1 = recipes.has(.nvfp4_csf0);
+    if (e2m1 and recipes.has(.nvfp4_nz5)) return error.UnsupportedQuant; // formats.admit names it at the entry
+    return if (recipes.has(.nvfp4_nz5)) .nz5 else if (e2m1) .e2m1 else null;
 }
 
 /// A grouped plan: the router's arrays, the slots a row holds, the experts; `fact`: decode rows on prompt-sized items.
@@ -71,19 +73,37 @@ pub fn run(ks: *const Kernels, stream: cuda.Stream, which: Which, l: cuda.expert
 
 test "block 32's kernels are wanted for a csf0_v1 module alone, not for block 16's recipes or a single-format NVFP4" {
     const gpa = std.testing.allocator;
-    try std.testing.expect(try wantsBlock32(gpa,
+    try std.testing.expectEqual(@as(?cuda.experts32.Values, .e2m1), try wantsBlock32(gpa,
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
         \\ {"m.3.experts": {"quant_algo": "NVFP4", "group_size": 32, "weight_scale_encoding": "csf0_v1"},
         \\  "m.45.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}}}
     ));
-    try std.testing.expect(!try wantsBlock32(gpa,
+    try std.testing.expectEqual(@as(?cuda.experts32.Values, null), try wantsBlock32(gpa,
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
         \\ {"m.3.experts": {"quant_algo": "NVFP4", "group_size": 16}, "m.45.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}}}
     ));
-    try std.testing.expect(!try wantsBlock32(gpa,
+    try std.testing.expectEqual(@as(?cuda.experts32.Values, null), try wantsBlock32(gpa,
         \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4", "config_groups":
         \\ {"g": {"weights": {"num_bits": 4, "type": "float", "group_size": 16}}}}}
     ));
+}
+
+test "NVFP4_NZ5's modules want block 32's nz5 kernels, and a checkpoint that mixes them with E2M1's csf0_v1 is refused" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectEqual(@as(?cuda.experts32.Values, .nz5), try wantsBlock32(gpa,
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
+        \\ {"m.3.experts": {"quant_algo": "NVFP4_NZ5", "group_size": 32, "weight_scale_encoding": "csf0_v1", "code_map": "e2m1_nz5"},
+        \\  "m.45.experts": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}}}
+    ));
+    const mixed =
+        \\{"quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION", "quantized_layers":
+        \\ {"m.3.experts": {"quant_algo": "NVFP4_NZ5", "group_size": 32, "weight_scale_encoding": "csf0_v1"},
+        \\  "m.4.experts": {"quant_algo": "NVFP4", "group_size": 32, "weight_scale_encoding": "csf0_v1"}}}}
+    ;
+    try std.testing.expectError(error.UnsupportedQuant, wantsBlock32(gpa, mixed));
+    var why: core.modelopt.Why = .{};
+    try std.testing.expectError(error.UnsupportedQuant, @import("cuda_formats.zig").admit(gpa, mixed, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "both NVFP4 and NVFP4_NZ5") != null);
 }
 
 test "plan sizes as the Python family's" {
