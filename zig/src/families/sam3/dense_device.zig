@@ -1,7 +1,7 @@
 const std = @import("std");
 const gpu = @import("tensor_metal");
 const kernel = @import("sam3_kernels").dense_device;
-pub const Layout = enum { nk, nk_gelu, nk_gelu_linear, nk_compensated, kn, kn_compensated };
+pub const Layout = enum { nk, nk_half, nk_gelu, nk_gelu_linear, nk_compensated, kn, kn_compensated };
 
 pub fn run(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize, layout: Layout) !gpu.Tensor {
     const output = try g.allocDevice(try std.math.mul(usize, rows, cols), .f32);
@@ -12,7 +12,7 @@ pub fn run(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, row
 
 pub fn into(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, output: gpu.Tensor, rows: usize, cols: usize, depth: usize, layout: Layout) !void {
     if (rows == 0 or cols == 0 or depth == 0 or depth > 4736 or cols > 4736 or
-        x.dtype != .f32 or weight.dtype != .f32 or bias.dtype != .f32 or
+        x.dtype != .f32 or weight.dtype != (if (layout == .nk_half) gpu.DType.f16 else gpu.DType.f32) or bias.dtype != .f32 or
         x.count != try std.math.mul(usize, rows, depth) or weight.count != try std.math.mul(usize, cols, depth) or bias.count != cols or
         output.dtype != .f32 or output.count != try std.math.mul(usize, rows, cols)) return error.SamDeviceProjectionShape;
     const domain = try g.allocDevice(7, .f32);
@@ -30,6 +30,7 @@ pub fn into(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, ou
     var pipes: [5]gpu.mtl.Pipeline = undefined;
     const names = switch (layout) {
         .nk => kernel.names,
+        .nk_half => kernel.half_names,
         .nk_gelu => kernel.gelu_names,
         .nk_gelu_linear => kernel.gelu_linear_names,
         .nk_compensated => kernel.compensated_names,

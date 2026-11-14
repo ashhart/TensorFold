@@ -12,7 +12,7 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         break :tok t;
     };
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = target, .optimize = optimize });
-    const shim = b.addWriteFiles().add("drama3_core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const torch_checkpoint = @import(\"tensorfold\").torch_checkpoint;\npub const frame_rounds = @import(\"frame_rounds\");\n");
+    const shim = b.addWriteFiles().add("drama3_core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "tensorfold", .module = native.import_table.get("tensorfold").? },
         .{ .name = "tokenizer", .module = tokenizer },
@@ -29,6 +29,7 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "metal", .module = metal }, .{ .name = "drama3_metallib", .module = bytes } },
     });
+    family.addImport("tensorfold", native.import_table.get("tensorfold").?);
     native.addImport("core", core);
     native.addImport("drama3", family);
 }
@@ -65,6 +66,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } },
     });
+    family.addImport("tensorfold", core);
     const quant_check = b.addExecutable(.{
         .name = "drama3-metal-quant-check",
         .root_module = b.createModule(.{

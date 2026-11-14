@@ -174,6 +174,8 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     const lib = metallib(b, "tensorfold", &kernels, &mlx_flags);
     const lib_install = b.addInstallFile(lib, "lib/tensorfold.metallib");
     b.step("metallib", "Compile zig/kernels/metal into tensorfold.metallib").dependOn(&lib_install.step);
+    const sam3 = @import("sam3.zig").steps(b, target, optimize);
+    test_step.dependOn(sam3.tests);
 
     // Control: the same Nemotron kernels under fast math, which the bit-exact check must be able to tell apart.
     const fast_flags = [_][]const u8{ b.fmt("-std={s}", .{metal_std}), "-fmetal-math-mode=fast", "-fmetal-math-fp32-functions=fast" };
@@ -181,8 +183,6 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     b.getInstallStep().dependOn(&b.addInstallFile(fast_lib, "lib/nemotron_fastmath.metallib").step);
     b.getInstallStep().dependOn(&lib_install.step);
 
-    const sam3 = @import("sam3.zig").steps(b, target, optimize);
-    test_step.dependOn(sam3.tests);
     const mods = metalEngineModules(b, target, optimize, draft_ids);
     const metal = mods.metal;
     const kernels_mod = embedded(b, lib, "tensorfold.metallib");

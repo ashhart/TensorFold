@@ -185,9 +185,15 @@ pub const Runtime = struct {
             const output = try self.linear(key, x, width);
             return if (activate) self.gelu(output) else output;
         }
-        const w = try self.weight(try self.name("{s}.weight", .{key}));
+        const weight_key = try self.name("{s}.weight", .{key});
+        const source = try self.store.get(weight_key);
         const b = try self.weight(try self.name("{s}.bias", .{key}));
-        if (activate and w.tensor_operand_exact and (try self.store.get(try self.name("{s}.weight", .{key}))).dtype == .f16)
+        if (!activate and source.dtype == .f16) {
+            const half_weight = try self.own(try self.g.weight(source, .f16));
+            return self.own(try @import("dense_device.zig").run(self.g, x, half_weight, b, x.count / width, b.count, width, .nk_half));
+        }
+        const w = try self.weight(weight_key);
+        if (activate and w.tensor_operand_exact and source.dtype == .f16)
             return self.own(try @import("dense_expansion.zig").run(self.g, x, w, b, x.count / width, b.count, width, true));
         return self.own(try @import("dense_device.zig").run(self.g, x, w, b, x.count / width, b.count, width, if (activate) .nk_gelu else .nk));
     }

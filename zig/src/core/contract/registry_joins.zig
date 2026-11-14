@@ -52,8 +52,7 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++
     @import("lfm3_records.zig").metal;
-pub const all_metal = @import("sam3_records.zig").metal ++
-    @import("lane_q8_records.zig").records ++
+pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("attention_pv_records.zig").records ++
     registry.metal ++
     @import("delta_slots_records.zig").records ++
@@ -75,6 +74,7 @@ pub const all_metal = @import("sam3_records.zig").metal ++
     @import("flashnext_attention_records.zig").records ++
     @import("spark25_records.zig").records ++
     @import("gemma_attention_records.zig").records ++
+    @import("sam3_records.zig").metal ++
     @import("moss_image_records.zig").records ++
     @import("dsv41_metal_records.zig").records ++
     @import("minimax_records.zig").records ++

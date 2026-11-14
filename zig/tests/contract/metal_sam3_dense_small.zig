@@ -51,7 +51,16 @@ pub fn deviceText(a: std.mem.Allocator, control: bool) ![]u8 {
     return if (control) std.mem.replaceOwned(u8, a, raw, "if (domain[0]) return;", "") else a.dupe(u8, raw);
 }
 
-const Kind = enum { fused, baseline, control, device, device_control, device_nn, device_nn_compensated, device_compensated, device_gelu, device_gelu_control, expansion, expansion_gelu, expansion_control, expansion_residual_control };
+pub fn halfText(a: std.mem.Allocator, control: bool) ![]u8 {
+    const raw = try deviceText(a, false);
+    if (!control) return raw;
+    defer a.free(raw);
+    const store = "output[long(row + at[1]) * shape.columns + column + at[0]] = value;";
+    if (std.mem.count(u8, raw, store) != 1) return error.ControlTextNotFound;
+    return std.mem.replaceOwned(u8, a, raw, store, "output[long(row + at[1]) * shape.columns + column + at[0]] = float(half(value));");
+}
+
+const Kind = enum { fused, baseline, control, device, device_control, device_nn, device_nn_compensated, device_compensated, device_gelu, device_gelu_control, expansion, expansion_gelu, expansion_control, expansion_residual_control, device_half, device_half_control };
 const labels = [_][]const u8{
     "metal sam3 small compensated projection",
     "metal sam3 small compensated projection baseline",
@@ -67,6 +76,8 @@ const labels = [_][]const u8{
     "metal sam3 exact expansion projection GELU",
     "control: sam3 exact expansion projection GELU omitted",
     "control: sam3 exact expansion projection omits residual",
+    "metal sam3 device projection exact half weight",
+    "control: sam3 exact half weight rounds output",
 };
 
 const Probe = struct {
@@ -94,7 +105,11 @@ const Probe = struct {
     domain: rig_.Ref = undefined,
 
     fn device(self: *Probe) bool {
-        return self.kind == .device or self.kind == .device_control or self.kind == .device_compensated or self.kn() or self.activated() or self.expansion();
+        return self.kind == .device or self.kind == .device_control or self.kind == .device_compensated or self.kn() or self.activated() or self.expansion() or self.half();
+    }
+
+    fn half(self: *const Probe) bool {
+        return self.kind == .device_half or self.kind == .device_half_control;
     }
 
     fn activated(self: *const Probe) bool {
@@ -118,11 +133,11 @@ const Probe = struct {
                 .out = .f32,
                 .served = if (self.kind == .device_compensated) &compensated_served else if (self.device()) &device_served else &served,
                 .tiles = if (self.device()) .{ .{ .size = 32 }, .{ .size = 64 }, .{ .size = 16 } } else .{ .{ .size = 1 }, .{ .size = 4 }, .{ .size = 32 } },
-                .replaces = if (self.kind == .fused) labels[@backingInt(Kind.baseline)] else if (self.kind == .device_gelu) "separate FP32 projection and exact GELU" else null,
+                .replaces = if (self.kind == .fused) labels[@backingInt(Kind.baseline)] else if (self.kind == .device_gelu) "separate FP32 projection and exact GELU" else if (self.half()) labels[@backingInt(Kind.device)] else null,
             },
             .ctx = self,
             .vt = &vt,
-            .control = if (self.kind == .control or self.kind == .device_control or self.kind == .device_gelu_control or self.kind == .expansion_control or self.kind == .expansion_residual_control) .shapes else null,
+            .control = if (self.kind == .control or self.kind == .device_control or self.kind == .device_gelu_control or self.kind == .expansion_control or self.kind == .expansion_residual_control or self.kind == .device_half_control) .shapes else null,
         };
     }
 
@@ -212,6 +227,25 @@ const Probe = struct {
             for (0..shape.n) |column| self.weight[column * shape.k] = 1;
             @memset(self.bias, 0);
         }
+        if (self.half()) {
+            if (fill == .random and shape.k % 2 != 0) self.weight[0] = 0x1p15;
+            if (fill == .random and shape.k % 2 == 0) {
+                @memset(self.x[0..shape.k], 0);
+                self.x[0] = 1;
+                for (0..shape.n) |column| self.weight[column * shape.k] = @floatCast(@as(f16, @bitCast(@as(u16, @intCast(1 + column % 1023)))));
+                @memset(self.bias, 0);
+                if (shape.rows > 1) {
+                    @memset(self.x[shape.k..][0..shape.k], 0);
+                    self.x[shape.k] = 1 + 0x1p-20;
+                }
+            }
+            if (fill == .nonfinite and shape.n > 6) {
+                self.weight[4 * shape.k] = std.math.inf(f32);
+                self.weight[5 * shape.k] = -std.math.inf(f32);
+                self.weight[6 * shape.k] = std.math.nan(f32);
+            }
+            for (self.weight) |*value| value.* = @floatCast(@as(f16, @floatCast(value.*)));
+        }
         const upload_weight = if (self.kn()) transposed: {
             const values = try self.allocator.alloc(f32, self.weight.len);
             for (0..shape.n) |col| {
@@ -220,15 +254,21 @@ const Probe = struct {
             break :transposed values;
         } else self.weight;
         defer if (self.kn()) self.allocator.free(upload_weight);
-        self.inputs = .{ try self.rig.input(std.mem.sliceAsBytes(self.x)), try self.rig.input(std.mem.sliceAsBytes(upload_weight)), try self.rig.input(std.mem.sliceAsBytes(self.bias)) };
+        const weight_input = if (self.half()) half_buffer: {
+            const values = try self.allocator.alloc(f16, upload_weight.len);
+            defer self.allocator.free(values);
+            for (values, upload_weight) |*target, value| target.* = @floatCast(value);
+            break :half_buffer try self.rig.input(std.mem.sliceAsBytes(values));
+        } else try self.rig.input(std.mem.sliceAsBytes(upload_weight));
+        self.inputs = .{ try self.rig.input(std.mem.sliceAsBytes(self.x)), weight_input, try self.rig.input(std.mem.sliceAsBytes(self.bias)) };
         self.output = try self.rig.output(self.count() * 4);
         if (self.device()) self.domain = try self.rig.scratch(if (self.expansion()) 8 * 4 else 7 * 4);
         if (self.expansion()) self.components = try self.rig.scratch((3 * self.x.len + self.weight.len) * 2);
         if (self.expansion()) self.residuals = try self.rig.scratch(self.shape.rows * 36);
-        if (self.kind == .fused or (self.activated() and !self.expansion())) {
+        if (self.kind == .fused or (self.activated() and !self.expansion()) or self.half()) {
             self.baseline_inputs = .{ try self.baseline_rig.input(std.mem.sliceAsBytes(self.x)), try self.baseline_rig.input(std.mem.sliceAsBytes(self.weight)), try self.baseline_rig.input(std.mem.sliceAsBytes(self.bias)) };
             self.baseline_output = try self.baseline_rig.output(self.count() * 4);
-            if (self.activated()) self.baseline_domain = try self.baseline_rig.scratch(7 * 4);
+            if (self.activated() or self.half()) self.baseline_domain = try self.baseline_rig.scratch(7 * 4);
         }
         return true;
     }
@@ -270,7 +310,7 @@ const Probe = struct {
     }
 
     pub fn replaced(self: *Probe) ![]const u8 {
-        if (self.activated()) {
+        if (self.activated() or self.half()) {
             const pass = self.baseline_rig.begin();
             const Ref = struct { buffer: mtl.Buffer, offset: usize };
             var refs: [5]Ref = undefined;
@@ -278,11 +318,13 @@ const Probe = struct {
             refs[3] = .{ .buffer = self.baseline_output.buf, .offset = self.baseline_output.off };
             refs[4] = .{ .buffer = self.baseline_domain.buf, .offset = self.baseline_domain.off };
             sources.sam3_dense_device.encode(mtl, pass.e, self.baseline_device_pipelines, refs, .{ @intCast(self.shape.rows), @intCast(self.shape.n), @intCast(self.shape.k) }, true);
-            pass.e.setPipeline(self.baseline_pipeline.?);
-            pass.e.setBuffer(self.baseline_output.buf, self.baseline_output.off, 0);
-            pass.e.setBuffer(self.baseline_output.buf, self.baseline_output.off, 1);
-            pass.e.setValue(@as(u32, @intCast(self.count())), 2);
-            pass.e.dispatchThreads(mtl.Size.of(self.count(), 1, 1), mtl.Size.of(256, 1, 1));
+            if (self.activated()) {
+                pass.e.setPipeline(self.baseline_pipeline.?);
+                pass.e.setBuffer(self.baseline_output.buf, self.baseline_output.off, 0);
+                pass.e.setBuffer(self.baseline_output.buf, self.baseline_output.off, 1);
+                pass.e.setValue(@as(u32, @intCast(self.count())), 2);
+                pass.e.dispatchThreads(mtl.Size.of(self.count(), 1, 1), mtl.Size.of(256, 1, 1));
+            }
             try self.baseline_rig.finish(pass);
             if (!try self.baseline_rig.intact()) return error.BaselineGuardsChanged;
             return self.baseline_rig.outputBytes();
@@ -343,7 +385,7 @@ const Probe = struct {
 
 pub const Suite = struct {
     allocator: std.mem.Allocator,
-    probes: [14]?Probe = @splat(null),
+    probes: [labels.len]?Probe = @splat(null),
 
     pub fn collect(self: *Suite, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !void {
         for (&self.probes, 0..) |*entry, index| {
@@ -366,13 +408,15 @@ pub const Suite = struct {
                     if (probe.kind == .expansion_residual_control) names[4] = "sam_dense_expansion_drop_residual";
                     for (names, &probe.expansion_pipelines) |name, *pipe| pipe.* = try rig_.pipeline(device, source, name);
                 } else if (probe.device()) {
-                    const source = try deviceText(self.allocator, probe.kind == .device_control);
+                    const source = if (probe.half()) try halfText(self.allocator, probe.kind == .device_half_control) else try deviceText(self.allocator, probe.kind == .device_control);
                     defer self.allocator.free(source);
-                    const names = if (probe.kind == .device_gelu) sources.sam3_dense_device.gelu_names else if (probe.kind == .device_compensated) sources.sam3_dense_device.compensated_names else if (probe.kind == .device_nn_compensated) sources.sam3_dense_device.nn_compensated_names else if (probe.kn()) sources.sam3_dense_device.nn_names else sources.sam3_dense_device.names;
+                    const names = if (probe.half()) sources.sam3_dense_device.half_names else if (probe.kind == .device_gelu) sources.sam3_dense_device.gelu_names else if (probe.kind == .device_compensated) sources.sam3_dense_device.compensated_names else if (probe.kind == .device_nn_compensated) sources.sam3_dense_device.nn_compensated_names else if (probe.kn()) sources.sam3_dense_device.nn_names else sources.sam3_dense_device.names;
                     for (names, &probe.device_pipelines) |name, *pipe| pipe.* = try rig_.pipeline(device, source, name);
                     if (probe.activated()) {
                         for (sources.sam3_dense_device.gelu_linear_names, &probe.baseline_device_pipelines) |name, *pipe| pipe.* = try rig_.pipeline(device, source, name);
                         probe.baseline_pipeline = try rig_.pipeline(device, source, "im_sam_gelu");
+                    } else if (probe.half()) {
+                        for (sources.sam3_dense_device.names, &probe.baseline_device_pipelines) |name, *pipe| pipe.* = try rig_.pipeline(device, source, name);
                     }
                 }
                 try kernels.append(self.allocator, probe.kernel());
@@ -391,7 +435,7 @@ pub const Suite = struct {
                 for (probe.device_pipelines) |pipe| pipe.deinit();
             } else probe.pipeline.deinit();
             if (probe.baseline_pipeline) |pipeline| pipeline.deinit();
-            if (probe.activated() and !probe.expansion()) for (probe.baseline_device_pipelines) |pipeline| pipeline.deinit();
+            if ((probe.activated() and !probe.expansion()) or probe.half()) for (probe.baseline_device_pipelines) |pipeline| pipeline.deinit();
         };
     }
 };

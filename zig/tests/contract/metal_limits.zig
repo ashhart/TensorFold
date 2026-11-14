@@ -34,9 +34,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
-    const tensor_only = std.mem.startsWith(u8, d.name, "qwen27 q8 ") or
-        std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ") or std.mem.startsWith(u8, d.name, "sam3 attention ") or std.mem.startsWith(u8, d.name, "sam3 device projection ") or std.mem.startsWith(u8, d.name, "sam3 deconvolution matrix ");
-    return !tensor_only or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
+    return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
 }
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
@@ -71,6 +69,8 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     }
     if (std.mem.startsWith(u8, d.name, "sam3 device projection ")) {
         if (!assemble) return undefined;
+        if (std.mem.startsWith(u8, d.name, "sam3 device projection exact half weight "))
+            return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_dense_small.zig").halfText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
         return .{ .decl = d, .function = fun, .here = try @import("metal_sam3_dense_small.zig").deviceText(a, std.mem.indexOf(u8, d.name, " control ") != null), .pre_m5 = "" };
     }
     if (std.mem.startsWith(u8, d.name, "sam3 activation ")) {
@@ -418,6 +418,8 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
     if (std.mem.indexOf(u8, l.decl.name, "exact expansion ") != null) {
         std.debug.print("PRECISION limits {s}: exact FP16 components, FP32 accumulation\n", .{l.decl.name});
+    } else if (std.mem.indexOf(u8, l.decl.name, "exact half weight ") != null) {
+        std.debug.print("PRECISION limits {s}: FP32 activations and accumulation, exact FP16 weights\n", .{l.decl.name});
     } else if (std.mem.startsWith(u8, l.decl.name, "sam3 attention ") or std.mem.startsWith(u8, l.decl.name, "sam3 device projection ")) {
         std.debug.print("PRECISION limits {s}: strict FP32 tensor library\n", .{l.decl.name});
     } else if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
@@ -448,6 +450,8 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
     for (registry.all_metal) |d| {
         if (only) |needle| if (std.mem.indexOf(u8, d.name, needle) == null) continue;
         try requireMapped(d);
+        const sam3_tensor = std.mem.startsWith(u8, d.name, "sam3 fp32 mma ") or std.mem.startsWith(u8, d.name, "sam3 fp32 gemm ") or std.mem.startsWith(u8, d.name, "sam3 attention ") or std.mem.startsWith(u8, d.name, "sam3 device projection ") or std.mem.startsWith(u8, d.name, "sam3 deconvolution matrix ");
+        if (sam3_tensor and !@import("metal_support.zig").tensor(device.tensorUnits(), d.name)) continue;
         if (!supported(device, d)) continue;
         try list.append(a, d);
     }
