@@ -76,7 +76,7 @@ fn loadLimit(device: mtl.Device) !struct { bytes: u64, asked: bool } {
     return .{ .bytes = @intFromFloat(@min(gb * 1e9, @as(f64, @floatFromInt(most)))), .asked = true };
 }
 
-/// The prefill rounds tried when TF_DSV41_PREFILL_STEP is unset: wide first (jundot/omlx takes 8192-token chunks).
+/// Automatic workspace sizes; the narrow round is retried only after memory admission refusal.
 const round_wide: u32 = 8192;
 const round_narrow: u32 = 4096;
 
@@ -94,8 +94,8 @@ fn openOptions(o: api.Open, map: []const u8, context: u32, limit: u64, chunk: u3
 }
 
 fn openFailed(a: Allocator, model: *ds.Model, problem: *[]const u8, err: anyerror) !?api.Opened {
-    a.destroy(model);
     if (err == error.InvalidTokenMap) {
+        a.destroy(model);
         problem.* = "engram-token-map.bin is missing beside the checkpoint: the pull builds it; see the family guide";
         return null;
     }
