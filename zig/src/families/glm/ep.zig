@@ -35,7 +35,8 @@ const CONTROL = SYNC + PAGE; // the control protocol's region (ep_control.zig)
 pub const WINDOW = CONTROL + control.BYTES;
 const READY_STRIDE = 64; // the most recent valid receive for each parity, in a separate Metal buffer
 const post_timeout = 30 * 24_000_000;
-const transfer_budget_ns = std.time.ns_per_s;
+const transfer_budget_ns = std.time.ns_per_s; // one native send and its flush
+const arrival_budget_ns = 10 * std.time.ns_per_s; // the peer reaching the same exchange, then its send
 const failed_event = std.math.maxInt(u64);
 
 fn recvAt(x: u64) usize {
@@ -86,7 +87,7 @@ pub const Ep = struct {
     thread: ?std.Thread = null,
     monitor: ?std.Thread = null,
     publication: std.atomic.Mutex = .unlocked,
-    transfer: ?struct { exchange: u64, deadline: u64 } = null, // under publication
+    transfer: ?struct { exchange: u64, deadline: u64, expired: anyerror } = null, // under publication
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
@@ -416,7 +417,6 @@ pub const Ep = struct {
             }
             if (t.failed.load(.acquire)) return;
             if (t.posted.value() != x) return t.fail(x, error.GpuPostOutOfStep);
-            const deadline = t.armTransfer(x) orelse return;
             const seen = platform.c.mach_absolute_time();
             const n: usize = @atomicLoad(u32, t.word32(COUNT + 4 * @as(usize, @intCast(x % 2))), .acquire);
             const bytes = n * ENTRY;
@@ -428,8 +428,10 @@ pub const Ep = struct {
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
             if (t.delay_ns > 0 and bytes > 1 << 20) t.delay();
             if (t.stop.load(.acquire) or t.failed.load(.acquire)) return;
+            const deadline = t.armTransfer(x, transfer_budget_ns, error.EpTransferTimeout) orelse return;
             t.link.writeSignalFromUntil(t.peer, sendAt(x), recvAt(x), bytes, FLAG, x, deadline) catch |err| return t.fail(x, err);
             t.link.flushPeerUntil(t.peer, deadline) catch |err| return t.fail(x, err);
+            if (t.armTransfer(x, arrival_budget_ns, error.PeerSilent) == null) return;
             const sent_at = platform.c.mach_absolute_time();
             t.sent += 1;
             t.held_ticks += sent_at -% seen;
@@ -455,7 +457,7 @@ pub const Ep = struct {
         while (!t.publication.tryLock()) std.atomic.spinLoopHint();
     }
 
-    fn armTransfer(t: *Ep, x: u64) ?u64 {
+    fn armTransfer(t: *Ep, x: u64, budget: u64, expired: anyerror) ?u64 {
         const now = fabric.words.checkedNowNs() catch |err| {
             t.fail(x, err);
             return null;
@@ -463,8 +465,8 @@ pub const Ep = struct {
         t.lockPublication();
         defer t.publication.unlock();
         if (t.failed.load(.acquire)) return null;
-        const deadline = now +| transfer_budget_ns;
-        t.transfer = .{ .exchange = x, .deadline = deadline };
+        const deadline = now +| budget;
+        t.transfer = .{ .exchange = x, .deadline = deadline, .expired = expired };
         return deadline;
     }
 
@@ -477,7 +479,7 @@ pub const Ep = struct {
             return false;
         };
         if (now >= t.transfer.?.deadline) {
-            t.failLocked(x, error.EpTransferTimeout);
+            t.failLocked(x, t.transfer.?.expired);
             return false;
         }
         const ready: *u64 = @ptrCast(@alignCast(t.ready.contents() + readyAt(x)));
@@ -497,7 +499,7 @@ pub const Ep = struct {
             defer t.publication.unlock();
             if (t.transfer) |pending| {
                 const now = fabric.words.checkedNowNs() catch |err| return t.failLocked(pending.exchange, err);
-                if (now >= pending.deadline) return t.failLocked(pending.exchange, error.EpTransferTimeout);
+                if (now >= pending.deadline) return t.failLocked(pending.exchange, pending.expired);
             }
         }
     }
