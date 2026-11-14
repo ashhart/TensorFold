@@ -9,6 +9,7 @@ const swiglu_k = @import("contract_swiglu.zig");
 const argmax_k = @import("contract_argmax.zig");
 const embed_k = @import("contract_embed.zig");
 const controls_k = @import("contract_controls.zig");
+const merge_k = @import("contract_merge.zig");
 
 const g = core.gates;
 
@@ -51,6 +52,10 @@ pub fn main(init: std.process.Init) !u8 {
     var embed = try embed_k.Embed.init(a, &dev);
     defer embed.deinit();
     try kernels.append(a, embed.kernel());
+    var merges: [std.enums.values(merge_k.Variant).len]merge_k.Merge = undefined;
+    for (&merges, std.enums.values(merge_k.Variant)) |*x, v| x.* = try merge_k.Merge.init(a, &dev, v);
+    defer for (&merges) |*x| x.deinit();
+    for (&merges) |*x| try kernels.append(a, x.kernel());
     var controls: [std.enums.values(controls_k.Which).len]controls_k.Control = undefined;
     for (&controls, std.enums.values(controls_k.Which)) |*x, w| x.* = try controls_k.Control.init(a, &dev, w);
     defer for (&controls) |*x| x.deinit();

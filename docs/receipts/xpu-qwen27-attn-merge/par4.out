@@ -1,0 +1,27 @@
+| KV | prompt tokens | kind | mode | requests | (a) main = branch | (b) repeats equal | (c) = solo (main / branch) |
+|---|---|---|---|---|---|---|---|
+| bf16 | 34 | code | draft | 8 | yes | yes | yes / yes |
+| bf16 | 34 | code | plain | 8 | yes | yes | yes / yes |
+| bf16 | 7588 | code | draft | 8 | yes | yes | yes / yes |
+| bf16 | 7588 | code | plain | 8 | yes | yes | yes / yes |
+| bf16 | 28946 | code | draft | 8 | yes | yes | yes / yes |
+| bf16 | 28946 | code | plain | 8 | yes | yes | yes / yes |
+| bf16 | 30966 | text | draft | 8 | yes | yes | yes / yes |
+| bf16 | 30966 | text | plain | 8 | yes | yes | yes / yes |
+| int8 | 34 | code | draft | 8 | yes | yes | yes / yes |
+| int8 | 34 | code | plain | 8 | yes | yes | yes / yes |
+| int8 | 7588 | code | draft | 8 | yes | yes | yes / yes |
+| int8 | 7588 | code | plain | 8 | yes | yes | yes / yes |
+| int8 | 28946 | code | draft | 8 | yes | yes | yes / yes |
+| int8 | 28946 | code | plain | 8 | yes | yes | yes / yes |
+| int8 | 30966 | text | draft | 8 | yes | yes | yes / yes |
+| int8 | 30966 | text | plain | 8 | yes | yes | yes / yes |
+
+| KV | mode | main wave s | branch wave s | main tok/s | branch tok/s | branch / main | waves per side |
+|---|---|---|---|---|---|---|---|
+| bf16 | draft | 50.2 | 50.1 | 20.41 | 20.43 | 1.001 | 3 |
+| bf16 | plain | 52.9 | 51.8 | 19.36 | 19.75 | 1.021 | 3 |
+| int8 | draft | 49.0 | 48.9 | 20.90 | 20.93 | 1.001 | 3 |
+| int8 | plain | 52.0 | 51.0 | 19.68 | 20.09 | 1.021 | 3 |
+
+MISMATCH CELLS: (a) 0, (b) 0, (c) 0

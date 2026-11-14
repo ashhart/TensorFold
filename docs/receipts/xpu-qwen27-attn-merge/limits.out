@@ -1,0 +1,33 @@
+PASS limits bmg-g31 add_rmsnorm: 128 work-items, 10272 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD add_rmsnorm: .usage = .{ .{ .threads = .{ 128, 1, 1 }, .slm = 10272, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 add_rmsnorm_dec: 512 work-items, 10368 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD add_rmsnorm_dec: .usage = .{ .{ .threads = .{ 512, 1, 1 }, .slm = 10368, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 gated_norm: 256 work-items, 12288 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD gated_norm: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 12288, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 swiglu: 256 work-items, 2048 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD swiglu: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 2048, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 argmax: 256 work-items, 2048 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD argmax: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 2048, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 embed: 256 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD embed: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 attn_merge: 16 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD attn_merge: .usage = .{ .{ .threads = .{ 16, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 upstream attn_merge: 16 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD upstream attn_merge: .usage = .{ .{ .threads = .{ 16, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+PASS limits bmg-g31 planted attn_merge weighing past its last slice: 16 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current)
+RECORD planted attn_merge weighing past its last slice: .usage = .{ .{ .threads = .{ 16, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+RED  limits bmg-g31 control: 2048 work-items a work-group: 256 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current): control: 2048 work-items a work-group on bmg-g31: 2048 work-items a work-group, the most is 1024
+control: 2048 work-items a work-group on bmg-g31: a work-group dimension of 2048, the most is 1024
+control: 2048 work-items a work-group on bmg-g31: 2048 work-items at 256 GRF and sub-group 16, a Xe-core holds 512
+RECORD control: 2048 work-items a work-group: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+RED  limits bmg-g31 control: 200 work-items, not a multiple of sub-group 16: 256 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current): control: 200 work-items, not a multiple of sub-group 16 on bmg-g31: 200 work-items are not a multiple of sub-group 16
+RECORD control: 200 work-items, not a multiple of sub-group 16: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+RED  limits bmg-g31 control: 160 KiB of SLM: 256 work-items, 163840 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current): control: 160 KiB of SLM on bmg-g31: 163840 SLM bytes a work-group, the most is 131072
+RECORD control: 160 KiB of SLM: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 163840, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+RED  limits bmg-g31 control: 1024 work-items at 256 GRF: 1024 work-items, 0 SLM bytes, sub-group 16, 256 GRF, 0 spill bytes, 0 private bytes (record current): control: 1024 work-items at 256 GRF on bmg-g31: 1024 work-items at 256 GRF and sub-group 16, a Xe-core holds 512
+RECORD control: 1024 work-items at 256 GRF: .usage = .{ .{ .threads = .{ 1024, 1, 1 }, .slm = 0, .sub_group = 16, .grf = 256, .spill = 0, .private = 0 }, }
+RED  limits bmg-g31 control: sub-group 32 at 256 GRF: 256 work-items, 0 SLM bytes, sub-group 32, 256 GRF, 0 spill bytes, 0 private bytes (record current): control: sub-group 32 at 256 GRF on bmg-g31: sub-group 32 at 256 GRF (the most is 16)
+RECORD control: sub-group 32 at 256 GRF: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 0, .sub_group = 32, .grf = 256, .spill = 0, .private = 0 }, }
+RED  limits bmg-g31 control: sub-group 8: declared only, ocloc does not build it for this device: control: sub-group 8 on bmg-g31: sub-group 8, the device runs { 16, 32 }
+RECORD control: sub-group 8: .usage = .{ .{ .threads = .{ 256, 1, 1 }, .slm = 0, .sub_group = 8, .grf = 256, .spill = 0, .private = 0 }, }
+PASS xpu-kernel-contract-limits: every registered launch fits bmg-g31, every record current, every control red
