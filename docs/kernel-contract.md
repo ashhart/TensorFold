@@ -320,6 +320,13 @@ unsplit K, `linear_wc`'s tiles); a host test sweeps K and N to 16384 through `ex
 form no registration runs. A fixed plan keeps the linear. Gate 4 proves an fp16 sum would overflow on a constant-weight
 stress input (all-ones states: one weight at every width). Six controls: another K split (3, 4 and 5 bits; `linear_wc`),
 swapped scales, a swapped suh.
+Flash Next EXL3's canonical expert reduction starts in the one-rank slice: `fn_exl3_leaf_tree`,
+`fn_exl3_leaf_partial` and `fn_exl3_leaf_finish` register in `contract_flashnext_exl3_canon.zig`. Leaves,
+tree additions and transported partials are float64; only the root converts once to float32, round-to-nearest-even.
+Outputs match the host tree bit for bit (NaN payloads aside), including float64's exceptional classes.
+Controls flatten the tree, drop NaNs, write an input, use bf16 adds or narrow partials to float32; each must fail
+its intended gate. Independent integer-product references check error and TP independence without a sampled-error
+tolerance. Checkpoint BF16 state boundaries are unchanged.
 HIP: the RMS norm rows, a wave a row (fp32, fp16 and bf16 out) and a block a row (fp16 and bf16 out).
 HIP also checks the decode tail (`tf_tail`): the residual add, of a row of the activation kind or of nine slots' fp32
 rows times their weights summed in slot order, and the RMS norm after it, against float64 at Qwen3.6-35B-A3B's and
@@ -397,6 +404,10 @@ the first stream's slot). Their paged attention at head dim 64 runs over shuffle
 a launch: the decode rows' chunks and merge (`tf_paged_attn_chunk_segs_64`, `tf_paged_attn_merge_segs_64`) and the
 prompt rows (`pattn_kernel<64, 8, 4, 8>`), head by head within `attention_ref`'s float64 bound (two controls: the
 decode reading its values from the neighbouring lane's dims, the prompt from the neighbouring 8 dims).
+The three Liquid-family planted faults live in `contract_liquid_controls.cuh`, included by `contract_controls.cu`;
+the NVCC depfile tracks that header. Their entry points, launches and fault arithmetic are unchanged.
+The row-major prompt control supplies the production caller's `P256=false`, `IDS=false`, `PN=0` policy to the shared
+row body; its neighbouring-dimension fault is unchanged.
 CUDA also checks the affine-3 experts' split decode pair, bit-equal to the pair kernel it replaces (two controls,
 one dropping a last round of K groups short of the warps, one chaining the groups in reverse).
 CUDA also checks Flash Next's NVFP4 experts on prompt tiles with the decode form's sums (SwiGLU gate-up and fp32
@@ -405,6 +416,16 @@ CUDA also checks the bf16 experts (`experts_bf16.cu`, a checkpoint's own bf16 we
 and shared experts): relu^2 up, fp32 down and bf16 down, in the decode and prompt forms, against float64 (two controls:
 the fp32 down launched one 32-input group short, and a down summing in bf16). nvcc 13.2's prompt forms and 13.3's
 decode forms on sm_120 and sm_121 take other registers than 13.0's and have their own records.
+CUDA also checks Flash Next EXL3's canonical expert reduction (`flashnext_batch.cu`): the float32 root,
+float64 `fn_exl3_leaf_partial` over leaves 0-31, 32-63, all 64 and an interior subtree, and
+`fn_exl3_leaf_finish` over the pieces of 2, 3, 5 and 8 ranks (rows 1, 2, 5 and 16 at width 2560).
+Each output is byte-equal to `exl3_canon.zig` (NaN payloads aside), has float64's exceptional class and
+satisfies its numerical bound. Eight controls flatten a tree, drop NaNs, write an input, use bf16 adds,
+or round a partial through float32.
+Leaves and fixed-tree merges stay float64, including across the typed NCCL all-gather; the root alone
+rounds to float32. Every TP degree 1 to 8 gives the same bits. Exact integer-product host references
+bound root error by `2^-24 |sum| + 18 * 2^-53 sum(|y w|) + 2^-150` and require every sampled row to lose
+no accuracy to the slot chain or rank-split sums, without an error-comparison tolerance.
 CUDA also checks Nemotron's pocket (`nemotron_ops.cu`, the learned neurons the living-weights learner adds beside the
 shared expert): relu^2 up into act rows and down added into the shared expert's slot, a block row a row and tiled, the
 down to fp32 and bf16, against float64, the neurons past the count NaN so a read of one shows (two controls: the up's
@@ -477,6 +498,14 @@ software decode.
 A restored 13.0 receipt can arrive after the later compiler sets. Such records mark `later_pending` so 13.0 and
 13.1 use their base usage, while 13.2 and later keep their independently measured or pending selection.
 A missing later receipt remains pending; a 13.0 measurement never substitutes for it.
+Flash Next's 4 EXL3 launches (`flashnext_exl3_pending.zig`) carry only an nvcc 13.4 receipt: they stay pending under
+13.0 to 13.3 and take their 13.4 usage from `cuda_134`, which `pending_132.lookup` serves for that release.
+The first, `fn_exl3_split_f16`, also runs gates 1 to 4 on the CUDA runner (`contract_flashnext_exl3.zig`): an fp16
+row splits into bf16 hi = bf16(x) and lo = bf16(x - hi), every output's bits must equal float64's (NaN stays NaN; an
+infinity gives hi = Inf and lo = NaN), and the device's hi + lo must equal x for every finite pattern. Its shapes
+hold all 65,536 fp16 patterns and partial last blocks (n = 1,000 and 65,537). Three controls go red: one flushing NaN
+and Inf to zero (gate 1), one launching whole blocks only (gate 3, at every tail) and one writing hi over its input
+(gate 2). Gate 4 is N/A: it has no sums.
 
 Gemma 4 CUDA tower QKV norms and nine-term pooling register FP32 sums and BF16 outputs.
 Their contract keeps the exact FP32 mirror and adds independent FP64 ranges at the BF16 nodes.

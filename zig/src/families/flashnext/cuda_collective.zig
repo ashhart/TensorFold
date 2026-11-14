@@ -19,6 +19,8 @@ pub const Collective = struct {
     timeout_ms: u64,
     rank: usize = 0,
     failed: bool = false,
+    /// How long a wait polls before it sleeps between polls (0: sleeps from the first poll); an EXL3 engine sets it.
+    spin_ns: u64 = 0,
 
     /// `link` has completed the source/settings handshake; it stays owned by the caller.
     pub fn init(link: wire.Link, rank: usize, timeout_ms: u64) !Collective {
@@ -65,6 +67,7 @@ pub const Collective = struct {
 
     fn wait(c: *Collective, stream: ?cuda.Stream, until: u64) !void {
         errdefer c.abort();
+        var spin_until: u64 = 0;
         while (true) {
             try c.link.checkPeer();
             if (wire.now() >= until) return error.RankTimeout;
@@ -75,6 +78,13 @@ pub const Collective = struct {
                 if (stream) |s| {
                     if (try s.done()) return;
                 } else return;
+            }
+            if (c.spin_ns != 0) {
+                if (spin_until == 0) spin_until = wire.now() + c.spin_ns;
+                if (wire.now() < spin_until) {
+                    std.atomic.spinLoopHint();
+                    continue;
+                }
             }
             wire.pause();
         }
@@ -116,6 +126,11 @@ pub const Collective = struct {
     /// FP32 rank blocks are concatenated without rounding or reduction.
     pub fn gatherF32(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
         return c.gatherType(stream, local, out, count, .f32);
+    }
+
+    /// Concatenate rank blocks without reduction; count is in eight-byte doubles.
+    pub fn gatherF64(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        return c.gatherType(stream, local, out, count, .f64);
     }
 
     fn gatherType(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize, dtype: nccl.DataType) !void {
