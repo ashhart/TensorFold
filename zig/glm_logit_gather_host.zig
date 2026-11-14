@@ -89,8 +89,19 @@ const Record = struct {
     fn eventDone(_: cuda.abi.Event) callconv(.c) cuda.abi.Result {
         return 0;
     }
+    // main's downloads ask whether the GPU is integrated first (cuda/download_stage.zig): this fake is a discrete one
+    fn contextDevice(out: *cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return 0;
+    }
+    fn attribute(out: *c_int, _: cuda.abi.DeviceAttribute, _: cuda.abi.Device) callconv(.c) cuda.abi.Result {
+        out.* = 0;
+        return 0;
+    }
     fn driver() cuda.Driver {
         var d: cuda.Driver = undefined;
+        d.api.cuCtxGetDevice = contextDevice;
+        d.api.cuDeviceGetAttribute = attribute;
         d.api.cuMemcpy2DAsync_v2 = copy2d;
         d.api.cuMemAlloc_v2 = alloc;
         d.api.cuMemFree_v2 = free;
@@ -163,7 +174,8 @@ test "GLM logit gather: one broadcast per rank at every row count, TP2 and uneve
 
 test "GLM logit gather: startup byte counts cover both stages before admission, with coordinated fallback" {
     const vocab: usize = 154880;
-    try t.expectEqual(@as(usize, 2_478_080), glm.sampler.stagingBytes(vocab, glm.forward.window_rows));
+    // one bf16 logit row a window row: the window grew from 8 to 32 rows on main, so the count follows window_rows
+    try t.expectEqual(vocab * 2 * glm.forward.window_rows, glm.sampler.stagingBytes(vocab, glm.forward.window_rows));
     try t.expectEqual(@as(usize, 39_649_280), glm.sampler.stagingBytes(vocab, glm.prompt_logprobs.batch_rows));
     var d = Record.driver();
     var lib = Record.library();
