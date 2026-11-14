@@ -9,15 +9,13 @@ const qwen2_slow = @import("qwen2_slow.zig");
 const Allocator = std.mem.Allocator;
 pub const Memo = @import("memo.zig").Memo;
 pub const eos = @import("eos.zig");
-/// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
-pub const identity = @import("identity.zig").identity;
+pub const identity = @import("identity.zig").identity; // what ids mean as loaded: what Recall keys its record by
 
 pub const Kind = models.Kind;
 pub const Error = models.Error || std.json.ParseError(std.json.Scanner) || error{ UnsupportedAddedToken, BadRequestSpans, UnsafeNormalizedAddedTokenMask, UnsafeAddedTokenMask };
 pub const Span = [2]usize;
-pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0 };
-// Small calls keep their scratch on the stack before spilling to the tokenizer allocator.
-const scratch_stack_bytes = 4096;
+pub const MaskWork = struct { spans: usize = 0, matcher: usize = 0, masked: usize = 0 };
+const scratch_stack_bytes = 4096; // small calls keep their scratch on the stack before spilling to the allocator
 
 pub const AddedToken = struct {
     id: u32,
@@ -204,7 +202,7 @@ pub const Tokenizer = struct {
         return t.encodeMaskedCounted(a, text, spans, null);
     }
 
-    /// The optional work receipt counts span visits and trie transitions, independent of timing.
+    /// The optional work receipt counts span visits, trie transitions and masked gaps, independent of timing.
     pub fn encodeMaskedCounted(t: *const Tokenizer, a: Allocator, text: []const u8, spans: []const Span, work: ?*MaskWork) Error![]u32 {
         if (spans.len == 0) return t.encode(a, text);
         var previous: usize = 0;
@@ -233,11 +231,16 @@ pub const Tokenizer = struct {
             }
             const request = cursor < valid.spans.len and valid.spans[cursor][0] < seg.end;
             const gap = valid.text[seg.start..seg.end];
-            if (!request or t.normalized.ends.items.len == 0) {
+            if (!request or t.normalized.ends.items.len == 0 or blk: {
+                var zero: usize = if (seg.start == 0) unicode.decodeAt(gap, 0).len else 0;
+                const normalized = if (t.normalizer) |*n| try n.apply(&ctx, gap, &zero) else gap;
+                break :blk t.normalized.next(normalized, 0) == null;
+            }) {
                 const from = ids.items.len;
                 try t.encodeSegment(&ctx, gap, seg.start == 0, &ids);
                 if (request) try t.refuseAdded(ids.items[from..]);
             } else {
+                if (work) |w| w.masked += 1;
                 // A cached gap with this text may have been encoded using a different mask.
                 var clipped: std.ArrayList(Span) = .empty;
                 var j = cursor;
