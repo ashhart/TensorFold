@@ -198,6 +198,20 @@ template __global__ void qmmf_kernel<BF16, 32, 64, 1, 4, 4, true, true, false>(c
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 template __global__ void qmmf_kernel<BF16, 64, 64, 1, 4, 4, true, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+// The fused form at the decode row tiles: one block a 64-column tile adds its K slices in the cluster's slice order.
+#define FUSE_DECODE(MODE, BM, F32) \
+    template __global__ void qmmf_kernel<MODE, BM, 64, 1, 4, 4, F32, false, true>( \
+        const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, \
+        void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+FUSE_DECODE(MXFP8, 16, false)
+FUSE_DECODE(MXFP8, 16, true)
+FUSE_DECODE(MXFP8, 32, false)
+FUSE_DECODE(MXFP8, 32, true)
+FUSE_DECODE(BF16, 16, false)
+FUSE_DECODE(BF16, 16, true)
+FUSE_DECODE(BF16, 32, false)
+FUSE_DECODE(BF16, 32, true)
+#undef FUSE_DECODE
 // Prompt tiles retain the same m16n8k16 chains and fused slice boundaries as the 64x64 instances.
 #define BF16_PROMPT(F32, FUSE) \
     template __global__ void qmmf_kernel<BF16, 128, 128, 2, 4, 3, F32, false, FUSE>( \

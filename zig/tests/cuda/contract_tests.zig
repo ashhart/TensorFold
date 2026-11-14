@@ -234,9 +234,9 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
     defer for (&mx) |*m| m.deinit();
     for (&mx) |*m| try kernels.append(a, m.kernel());
     var half_lane = lane;
-    var halves: [6]half_k.Half = undefined;
-    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| {
-        halves[i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format };
+    var halves: [12]half_k.Half = undefined; // half tiles, then the same kinds and formats on the fused split-K form
+    for (std.enums.values(half_k.Kind), 0..) |kind, i| for ([_]cuda.qmmf.Out{ .bf16, .f32 }, 0..) |format, j| for (0..2) |f| {
+        halves[f * 6 + i * 2 + j] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &half_lane, .kind = kind, .format = format, .fused = f == 1 };
     };
     defer for (&halves) |*h| h.deinit();
     for (&halves) |*h| try kernels.append(a, h.kernel());
