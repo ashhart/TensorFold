@@ -558,8 +558,7 @@ pub const Lanes = struct {
         try d.use(slot);
         var pending = pending0;
         var out: [16]u32 = undefined;
-        const cap = dflash2.priced(b.nodes);
-        const e = if (cap != null) b.core else null;
+        const e = if (dflash2.priced(b.nodes) != null) b.core else null;
         defer if (e) |x| lanes.lone_costs.retain(x, s);
         var skip = cold; // a cold drafter context makes the round after a restart no sample
         while (!s.finished) {
@@ -578,31 +577,8 @@ pub const Lanes = struct {
             const drawer: ?xq.drafter.Draw = if (s.sampling) |sp| .{ .ctx = &sampled, .row = Sampled.row, .gumbel = Sampled.gumbel, .temperature = sp.temperature } else null;
             var logged: logrow.Logged = .{ .runner = b.runner, .k = s.logprobs orelse 0 };
             const note: ?xq.drafter.Note = if (s.logprobs != null) .{ .ctx = &logged, .f = logrow.Logged.take } else null;
-            const t0 = xq.now();
-            const g = try xq.drafter.grow(d, pending, b.block - 1, if (e != null) cap.? else b.nodes, drawer);
-            var pick: dflash2.Width = .{ .nodes = b.nodes };
-            if (e) |x| {
-                var chance: [15]f64 = undefined;
-                dflash2.chances(&b.landing, s.sampling != null, g.par[1..], g.own[1..], chance[0..g.n]);
-                pick = try dflash2.width(x, s, chance[0..g.n]);
-            }
-            const round = try xq.drafter.settle(d, &g, pick.nodes, drawer, note, &out);
-            if (e != null) try r.d.sync(); // the round as the stream pays it, taps included
-            const ms = (xq.now() - t0) * 1e3;
-            s.rounds += 1;
-            if (e) |x| {
-                b.landing.observeTree(s.sampling != null, g.par[1..], g.own[1..], round.drafted, round.path[0..round.rows]);
-                // the first round has the prefill switch, the one after a cold restart no drafter context
-                if (s.rounds > 1 and !skip) try dflash2.measured(x, s, pick.trial, round.drafted, ms);
-                skip = false;
-            }
-            s.drafted += round.drafted;
-            s.accepted += round.accepted;
-            var landed: [17]u32 = undefined;
-            const n = round.tokens.len - 1;
-            @memcpy(landed[0..n], round.tokens[1..]);
-            landed[n] = round.terminal;
-            _ = try s.commit(b.gpa, landed[0 .. n + 1], if (s.logprobs != null) logged.rows[0 .. n + 1] else &.{});
+            const round = try dflash2.lone(xq.drafter, xq.now, b, d, e, s, pending, &skip, drawer, note, &out);
+            try dflash2.land(b.gpa, s, round, if (s.logprobs != null) logged.rows[0..round.tokens.len] else &.{});
             pending = round.terminal;
             hooks.committed(hooks.ctx);
         }
