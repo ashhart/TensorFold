@@ -522,7 +522,7 @@ test "the group flags: one rank source, a supported world, a master past one ran
     try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
 }
 
-test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {
+test "--drafter, and --mtp-drafts past three, are refused before any load, on every rank" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -535,13 +535,7 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     follower.rank = 1;
     follower.master = "node0";
     try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
-}
-
-test "--mtp-drafts past three is refused by name before any load; three and fewer are not" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var problem: []const u8 = "";
+    // three drafts and fewer are not refused
     var o: api.Open = .{ .dir = "d", .model_type = "qwen4_exp", .mtp_drafts = 3 };
     try checkGroup(a, o, &problem);
     o.mtp_drafts = 4;
