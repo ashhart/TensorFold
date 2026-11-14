@@ -248,6 +248,11 @@ pub const Head = struct {
         }
         store.dropStaging(); // the head's experts are on the device
         errdefer h.layer.free(gpa);
+        // the MTP layer: the main layers' top-k (config.json gives it none) and the shared width its own tensor has
+        if (h.layer.native_experts) |moe| if (@import("cuda_widths.zig").mtp(try @import("cuda_config.zig").widthsIn(gpa, io, dir), moe.shared_width) == null) {
+            std.log.err("flashnext: mtp.layers.0.mlp.shared_expert.gate_proj has {d} rows; neither the main layers' width nor the routed width", .{moe.shared_width});
+            return error.UnexpectedTensor;
+        };
         const ids = try draftIds(gpa);
         defer gpa.free(ids);
         const head_load = @import("cuda_mtp_load.zig");
