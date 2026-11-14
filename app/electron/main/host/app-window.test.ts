@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { pathToFileURL } from 'node:url'
 import path from 'node:path'
-import { createAppWindowRuntime, trustedRendererMediaAllowed } from './app-window'
+import { createAppWindowRuntime, devRendererUrl, trustedRendererMediaAllowed } from './app-window'
 import { store } from '../state'
 
 class FakeWebContents {
@@ -82,6 +82,39 @@ try {
   store.win = null
   if (previousDevUrl == null) delete process.env.VITE_DEV_SERVER_URL
   else process.env.VITE_DEV_SERVER_URL = previousDevUrl
+}
+
+// A packaged app ignores VITE_DEV_SERVER_URL: that URL would become the trusted renderer for every IPC channel.
+{
+  const env = { VITE_DEV_SERVER_URL: 'http://127.0.0.1:5173/' }
+  assert.equal(devRendererUrl(true, env), null, 'a packaged build never trusts a dev-server URL')
+  assert.equal(devRendererUrl(false, env), 'http://127.0.0.1:5173/', 'a dev build still loads its dev server')
+  assert.equal(devRendererUrl(false, {}), null)
+
+  const baseDir = '/Applications/TensorFold-Studio.app/Contents/Resources/app.asar/dist-electron'
+  const entry = path.join(baseDir, '../dist/index.html')
+  const saved = process.env.VITE_DEV_SERVER_URL
+  process.env.VITE_DEV_SERVER_URL = 'http://attacker.invalid/'
+  try {
+    for (const packaged of [true, undefined]) {
+      createAppWindowRuntime({ BrowserWindow: FakeBrowserWindow as any, baseDir, openExternalSafely: async () => {}, session: {} as any, packaged }).createWindow()
+      const win = FakeBrowserWindow.latest!
+      assert.equal(win.loadedUrl, null, 'a packaged window never loads the URL from its environment')
+      assert.equal(win.loadedFile, entry, 'a packaged window loads the page it shipped with')
+      const guard = win.webContents.handlers.get('will-navigate')?.[0]
+      let prevented = false
+      guard!({ preventDefault: () => { prevented = true } }, 'http://attacker.invalid/')
+      assert.equal(prevented, true, 'navigation to the environment URL is blocked')
+      win.onceHandlers.get('closed')?.()
+    }
+    createAppWindowRuntime({ BrowserWindow: FakeBrowserWindow as any, baseDir, openExternalSafely: async () => {}, session: {} as any, packaged: false }).createWindow()
+    assert.equal(FakeBrowserWindow.latest!.loadedUrl, 'http://attacker.invalid/', 'only an unpackaged build honours the variable')
+    FakeBrowserWindow.latest!.onceHandlers.get('closed')?.()
+  } finally {
+    store.win = null
+    if (saved == null) delete process.env.VITE_DEV_SERVER_URL
+    else process.env.VITE_DEV_SERVER_URL = saved
+  }
 }
 
 // A cancelled load is not a failure: Electron reports ERR_ABORTED as -3 when the app replaces a load.
