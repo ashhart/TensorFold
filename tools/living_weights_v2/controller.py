@@ -6,7 +6,7 @@ from typing import Any
 from .assessment import affirmative_answer, assess, contains_answer, observe
 from .ledger import Ledger
 from .schema import Fact, Manifest
-from .transport import Client, Event, TransportError
+from .transport import Client, Event, TransportError, checked_graph
 
 
 class LearningError(RuntimeError):
@@ -61,6 +61,10 @@ class Controller:
         self.client = client
         self.ledger = ledger
 
+    def _graph(self) -> dict[int, dict]:
+        # Every graph read is checked here too, so a state the controller doesn't know stops it before any lesson.
+        return checked_graph(list(self.client.graph().values()))
+
     def _probe(self, model: str, questions: tuple[str, ...], mode: str):
         return observe(questions, lambda question: self.client.chat(model, question), mode)
 
@@ -72,7 +76,7 @@ class Controller:
             forgot = [event for event in events if event.kind == "forgot"]
             if len(forgot) != len(ids) or any(event.data.get("deleted") is not True for event in forgot):
                 return False
-            post = self.client.graph()
+            post = self._graph()
             return all(post.get(i, {}).get("state") == "deleted" for i in ids)
         except (TransportError, ValueError):
             return False
@@ -93,7 +97,7 @@ class Controller:
     def preflight(self, manifest: Manifest) -> dict:
         if manifest.model not in self.client.models():
             raise LearningError("requested model is not listed by the server")
-        graph = self.client.graph()
+        graph = self._graph()
         if any(item.get("state") == "deleting" for item in graph.values()):
             raise LearningError("graph has an unfinished native deletion")
         for fact in manifest.facts:
@@ -113,7 +117,7 @@ class Controller:
         model = manifest.model
         self.ledger.require_safe(model, fact)
         retained = self.ledger.retained(model)
-        before_graph = self.client.graph()
+        before_graph = self._graph()
         baseline_pos = self._probe(model, fact.questions, "before-positive")
         baseline_neg = self._probe(model, fact.near_misses, "before-near-miss")
         baseline_anchor = self._probe(model, manifest.anchors, "before-anchor")
@@ -142,7 +146,7 @@ class Controller:
             learned = [event for event in events if event.kind == "learned"]
             saved = [event for event in events if event.kind == "saved"]
             errors = [event for event in events if event.kind == "failed"]
-            after_graph = self.client.graph()
+            after_graph = self._graph()
             new_ids = _changes(before_graph, after_graph)
             receipt["new_graph_ids"] = new_ids
             owned = _owns_new_fact(new_ids, events, after_graph, fact)
