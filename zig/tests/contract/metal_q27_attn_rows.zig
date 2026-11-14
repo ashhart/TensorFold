@@ -356,6 +356,16 @@ pub const Suite = struct {
     attns: std.ArrayList(*Attn) = .empty,
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
+        // each chip's control edit must match its source once, checked on every chip, so an M4 run sees a stale M5 edit
+        for ([_]bool{ false, true }) |units| for (std.enums.values(Which)) |w| if (controlEdit(w, units)) |e| {
+            const gm = at_.geometry(.q27b, units);
+            const body = try q.simd_attention.grouped(s.a, units, true, gm.group(), gm.kv_heads, false);
+            defer s.a.free(body);
+            if (std.mem.count(u8, body, e.from) != 1) {
+                std.debug.print("control edit for {s} rows (tensor units {}) matches {d} times, not once: {s}\n", .{ @tagName(w), units, std.mem.count(u8, body, e.from), e.from });
+                return error.ControlEdit;
+            }
+        };
         const tensor = s.device.tensorUnits();
         var regs: std.ArrayList(Reg) = .empty;
         defer regs.deinit(s.a);

@@ -50,6 +50,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: the TCP bootstrap's three-rank gather test and the multi-rank RoCE vote test join every rank they started before returning, so a failed spawn or check no longer leaves threads writing to a finished test's frame (#2963). Thanks to @Defilan.
 
+- Tests: the kernel contract checks each qwen27 control's source edit on every chip, for both tensor-unit settings, so a run on a chip without tensor units fails on a stale M5 edit too (#3343, follow-up to #2106). Thanks to @cshintov.
+
 ## 1.2.8
 
 - GLM-5.3-Flash on CUDA: a tensor-parallel abort reaches the ranks' communicator from the engine's start, once, and a start-up failure after an abort no longer destroys the communicator again; serving and replies are unchanged (#2918, part of #2560). Thanks to @laudney.
