@@ -374,6 +374,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
+| `stream_options.tensorfold_token_stream_version` | Opt in to version 1's exact incremental token IDs and semantic anchors on chat or completions streams | Native |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; explicit off returns HTTP 400 when a thinking tokenizer has neither a template switch nor a closable generation prefix; omitted switches keep working. `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
 | `thinking` | Top-level toggle, the same forms as `chat_template_kwargs.thinking`; read only when the kwargs set neither toggle, so the kwargs win. Enabling it clears a `reasoning_effort` of `none`, so the template's default effort applies | Both |
 | `draft` | False selects the serial reference; CUDA rejects it if the engine has no serial switch | Both |
@@ -448,6 +449,49 @@ completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, d
 token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
 unless a stop string or a tool call ended the reply.
+
+### Exact incremental token IDs
+
+Native `/v1/chat/completions` and `/v1/completions` accept
+`"stream_options": {"tensorfold_token_stream_version": 1}` with `"stream": true`.
+`tensorfold-native capabilities --json` reports `"token_stream_versions": [1]` when this extension is available.
+The version must be the integer `1`; unknown versions and nonstreaming requests return HTTP 400 before generation.
+Cortheon's multi-round chat replies do not support version 1 and receive the same refusal.
+
+The opted-in stream interleaves ordinary OpenAI chunks with raw SSE data frames:
+
+```json
+{"object":"tensorfold.token.chunk","version":1,"id":"chatcmpl-...","model":"model","offset":0,"token_ids":[42,43]}
+```
+
+`offset` is the zero-based index of the first committed token in that batch. Batches are contiguous, nonempty and
+ordered. IDs come directly from the native engine and include committed reasoning, tool markup, stop-string and EOS
+tokens, even when those tokens produce no visible text. Rejected draft tokens and tokens after the server's stopping
+point are excluded. Raw frames precede the semantic deltas produced from their batch; UTF-8 characters can span
+several batches.
+
+Every ordinary chunk carries a `tensorfold_stream` object:
+
+```json
+{"version":1,"token_count":2,"token_id":43}
+```
+
+`token_count` is the total number of raw IDs committed so far, and `token_id` is the last of them, or `null` before
+any token is committed. These values anchor semantic output to a source position. Several content, reasoning or
+tool deltas may share one anchor; there is no one-to-one relationship between tokens and semantic chunks.
+
+When a chunk carries logprob entries, the metadata also carries `logprob_positions`, shaped like
+`choices[0].logprobs`: `content` and `reasoning_content` hold one zero-based raw position for each entry, in order,
+and `tool_calls` holds `{index, content}` groups. For legacy completions, `content` matches the parallel arrays in
+`choices[0].logprobs`. An entry the reply shows only part of shares its token's position with that token's other
+entries. Marker, dropped and EOS tokens have no entry, and repeated IDs still have distinct positions.
+
+Send `"return_token_ids": true` to receive the existing final `tensorfold.token_ids` array as an independent check
+against concatenated raw batches. The native final usage remains authoritative, including for an empty reply.
+The final usage and `[DONE]` events keep their usual forms, with `include_usage` honored when requested. Native SSE
+heartbeat comments keep an admitted but silent stream alive; they do not advance the token count. Closing the
+connection cancels the admitted generation and drains its engine request before releasing it. Requests without the
+version option retain their existing wire output.
 
 ### Replies that quote a template marker
 

@@ -17,7 +17,10 @@ const Error = error{ Failed, OutOfMemory };
 pub const Sent = struct { content: usize = 0, reasoning: usize = 0 };
 
 /// A finished reply's tokens and rows, projected once its text and calls are final; `closer` ends a call EOS cut.
-pub const Capture = struct { tokens: []const u32, rows: []const api.LogprobRow, thinking: bool, stops: rt.Stops, closer: []const u8 = "", sent: Sent = .{} };
+pub const Capture = struct { tokens: []const u32, rows: []const api.LogprobRow, thinking: bool, stops: rt.Stops, closer: []const u8 = "", sent: Sent = .{}, positions: bool = false };
+
+/// What a projection lists: the entries, or each entry's raw token position (a token stream's anchor).
+pub const Form = enum { entries, positions };
 
 const Channel = enum { content, reasoning, tool, dropped };
 /// Visible bytes of one channel; an open range may still grow while the reply streams.
@@ -49,47 +52,53 @@ pub const Live = struct {
     rows: std.ArrayList(api.LogprobRow) = .empty, // copied with each round's tokens
     spelled: Spelled = .{},
     sent: Sent = .{},
+    positions: bool = false, // a token stream: settled entries also name their raw token positions
 
     pub fn add(l: *Live, srv: *Server, a: A, tokens: []const u32) Error!void {
         return l.spelled.add(srv, a, tokens);
     }
 
-    /// ``{content, reasoning_content}`` entries the streamed text now settles; null when there are none.
+    /// ``{content, reasoning_content}`` entries the text now settles, and a token stream's ``positions``; null if none.
     pub fn settle(l: *Live, srv: *Server, a: A, tokens: []const u32, thinking: bool, stops: rt.Stops, content: []const u8, reasoning: []const u8) Error!?V {
         const visible = stops.visible(l.spelled.raw.items, false);
         const ranges = try layout(srv, a, visible, tokens, thinking, false, .{ .content = content, .reasoning = reasoning });
-        const prose = try fresh(srv, a, &l.spelled, tokens, l.rows.items, ranges, .content, &l.sent.content);
-        const thought = try fresh(srv, a, &l.spelled, tokens, l.rows.items, ranges, .reasoning, &l.sent.reasoning);
+        const prose = try fresh(a, &l.spelled, ranges, .content, &l.sent.content);
+        const thought = try fresh(a, &l.spelled, ranges, .reasoning, &l.sent.reasoning);
         if (prose.len == 0 and thought.len == 0) return null;
         const out = try json.newObject(a);
-        try out.put(a, "content", .{ .array = prose });
-        if (thought.len > 0) try out.put(a, "reasoning_content", .{ .array = thought });
+        try out.put(a, "content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, prose, .entries) });
+        if (thought.len > 0) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, thought, .entries) });
+        if (l.positions) {
+            const at = try json.newObject(a);
+            try at.put(a, "content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, prose, .positions) });
+            if (thought.len > 0) try at.put(a, "reasoning_content", .{ .array = try values(srv, a, &l.spelled, tokens, l.rows.items, thought, .positions) });
+            try out.put(a, "positions", .{ .object = at });
+        }
         return .{ .object = out };
     }
 };
 
-/// The newly settled entries of one channel past `sent`, which grows by their count.
-fn fresh(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, ranges: []const Range, channel: Channel, sent: *usize) Error![]V {
+/// The newly settled pieces of one channel past `sent`, which grows by their count.
+fn fresh(a: A, s: *const Spelled, ranges: []const Range, channel: Channel, sent: *usize) Error![]const Piece {
     const all = try pieces(a, s, ranges, channel, 0);
     var end = sent.*;
     while (end < all.len and all[end].settled) end += 1;
     if (end <= sent.*) return &.{};
-    const out = try values(srv, a, s, tokens, rows, all[sent.*..end]);
-    sent.* = end;
-    return out;
+    defer sent.* = end;
+    return all[sent.*..end];
 }
 
 /// ``choices[0].logprobs``: prose in ``content``, ``reasoning_content``, and one ``{index, content}`` group a call.
-pub fn project(srv: *Server, cx: *Cx, c: Capture, content: []const u8, reasoning: ?[]const u8, tools: []const V, calls: ?[]V) errors.Refused!V {
+pub fn project(srv: *Server, cx: *Cx, c: Capture, content: []const u8, reasoning: ?[]const u8, tools: []const V, calls: ?[]V, form: Form) errors.Refused!V {
     const a = cx.a;
     if (c.rows.len < c.tokens.len) return cx.other("the engine gave fewer logprob rows than reply tokens");
-    return whole(srv, a, c, .{ .content = content, .reasoning = reasoning, .tools = tools, .calls = if (calls) |list| list.len else null }) catch |e| switch (e) {
+    return whole(srv, a, c, .{ .content = content, .reasoning = reasoning, .tools = tools, .calls = if (calls) |list| list.len else null }, form) catch |e| switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Failed => cx.other("the logprob rows are out of step with the reply's tokens, or a token has no exact bytes"),
     };
 }
 
-fn whole(srv: *Server, a: A, c: Capture, shown: Shown) Error!V {
+fn whole(srv: *Server, a: A, c: Capture, shown: Shown, form: Form) Error!V {
     var s: Spelled = .{};
     try s.add(srv, a, c.tokens);
     const visible = c.stops.visible(s.raw.items, false);
@@ -97,14 +106,14 @@ fn whole(srv: *Server, a: A, c: Capture, shown: Shown) Error!V {
     const text = if (c.closer.len > 0) try std.mem.concat(a, u8, &.{ visible, c.closer }) else visible;
     const ranges = try layout(srv, a, text, c.tokens, c.thinking, true, shown);
     const out = try json.newObject(a);
-    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0)) });
-    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0)) });
+    try out.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .content, 0), form) });
+    if (shown.reasoning != null or c.thinking) try out.put(a, "reasoning_content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .reasoning, 0), form) });
     const count = shown.calls orelse return .{ .object = out };
     const groups = try a.alloc(V, count);
     for (groups, 0..) |*slot, i| {
         const o = try json.newObject(a);
         try o.put(a, "index", try json.intValue(a, i));
-        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i)) });
+        try o.put(a, "content", .{ .array = try values(srv, a, &s, c.tokens, c.rows, try pieces(a, &s, ranges, .tool, i), form) });
         slot.* = .{ .object = o };
     }
     try out.put(a, "tool_calls", .{ .array = groups });
@@ -128,9 +137,23 @@ pub fn rest(a: A, rows: V, sent: Sent) A.Error!?V {
     return if (left) .{ .object = out } else null;
 }
 
-fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, list: []const Piece) Error![]V {
+/// The last chunk's delta: entries no chunk carried yet, with a token stream's positions; null when none are left.
+pub fn restDelta(a: A, reply: *const @import("chat.zig").Reply) A.Error!?V {
+    const sent = (reply.probability_rows orelse return null).sent;
+    const left = (try rest(a, reply.logprobs orelse return null, sent)) orelse return null;
+    const out = try json.newObject(a);
+    try out.put(a, "logprobs", left);
+    if (reply.logprob_positions) |at| if (try rest(a, at, sent)) |p| try out.put(a, "logprob_positions", p);
+    return .{ .object = out };
+}
+
+fn values(srv: *Server, a: A, s: *const Spelled, tokens: []const u32, rows: []const api.LogprobRow, list: []const Piece, form: Form) Error![]V {
     const out = try a.alloc(V, list.len);
     for (list, out) |p, *slot| {
+        if (form == .positions) {
+            slot.* = try json.intValue(a, p.token);
+            continue;
+        }
         const cropped = p.lo != s.from(p.token) or p.hi != s.ends.items[p.token];
         slot.* = try lp.rowValue(srv, a, tokens[p.token], rows[p.token], s.raw.items[p.lo..p.hi], cropped);
     }
