@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- DeepSeek-V4.1 on Metal: the prompt cache now also keeps a prompt's state before its first user turn and, for a thinking prompt, before its closing `<think>`. A new conversation with the same system prompt and tools resumes after them, and the next turn of a thinking conversation resumes from the last one (its template renders that `<think>` as `</think>`, so before this the cache found nothing and every turn read the whole conversation again). Replies are unchanged.
+- DeepSeek-V4.1 on Metal: the prompt cache now also keeps a prompt's state before its first user turn (once the system part before it is 256 tokens or more) and, for a thinking prompt, before its closing `<think>`. A new conversation with the same system prompt and tools resumes after them, and the next turn of a thinking conversation resumes from the last one (its template renders that `<think>` as `</think>`, so before this the cache found nothing and every turn read the whole conversation again). Replies are unchanged (#3345).
 
 - Server: each `/v1/models` entry now ends with `input_types`, the content parts the model takes: `["text"]`, plus `"image"` with `--vision`, plus `"video"` when the checkpoint reads video and the server loads `libtfvideo`. A `video_url` part sent to a model without video now gets HTTP 400 (`invalid_request_error`) instead of a 500, decided by the same startup check, so the listing and the refusal agree; a server whose model reads video loads `libtfvideo` at startup and says once in its log when it is missing. The other keys are unchanged (#3019, for #3004). Thanks to @WebReflection for the design.
 
