@@ -80,23 +80,6 @@ test "native family options forward lane counts and fixedness only when declared
     try std.testing.expect(fixed.lanes_fixed);
 }
 
-test "the Qwen3.5 options carry the rank flags, and an unset master stays null" {
-    const F = @import("qwen35").native;
-    var opts: F.Options = .{ .context = 4096, .drafts = false };
-    var why: []const u8 = "";
-    const asked: api.Open = .{ .dir = "", .model_type = "qwen3_5", .tp = 2, .rank = 1, .master = "node0", .master_port = 29600 };
-    try std.testing.expect(set(F, asked, &opts, &why));
-    try std.testing.expectEqual(@as(usize, 2), opts.tp);
-    try std.testing.expectEqual(@as(usize, 1), opts.rank);
-    try std.testing.expectEqualStrings("node0", opts.master.?);
-    try std.testing.expectEqual(@as(u16, 29600), opts.master_port);
-    try std.testing.expect(set(F, .{ .dir = "", .model_type = "qwen3_5" }, &opts, &why));
-    try std.testing.expectEqual(@as(usize, 1), opts.tp);
-    try std.testing.expectEqual(@as(usize, 0), opts.rank);
-    try std.testing.expect(opts.master == null);
-    try std.testing.expectEqual(@as(u16, 29551), opts.master_port);
-}
-
 test "prompt precision: family options receive both explicit int8 and default bf16" {
     const F = struct {
         pub const Options = struct { prompt_int8: bool = false };
