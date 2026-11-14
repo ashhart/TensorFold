@@ -22,7 +22,7 @@ using namespace metal;
 #define TF_ATTN_KU 2u
 #define TF_ATTN_RR 2u
 #define TF_ATTN_HG 4u
-#define TF_ATTN_TILE 16u
+#define TF_ATTN_PH 2u
 #define TF_ATTN_NEG (-1e30f)
 
 struct TfAttnArgs {
@@ -47,13 +47,15 @@ struct TfQ {
   float v[TF_ATTN_HS][16];
 };
 
-// A chunk's softmax state: running max, sum, weighted sum, and how many keys it has met.
-struct TfAcc {
-  float m[TF_ATTN_HS];
-  float l[TF_ATTN_HS];
-  float acc[TF_ATTN_HS][16];
+// A chunk's softmax state of HS heads: running max, sum, weighted sum, and how many keys it has met.
+template <uint HS>
+struct TfAccN {
+  float m[HS];
+  float l[HS];
+  float acc[HS][16];
   uint n;
 };
+typedef TfAccN<TF_ATTN_HS> TfAcc;
 
 inline float tf_attn_lo(uint w) { return as_type<float>(w << 16); }
 inline float tf_attn_hi(uint w) { return as_type<float>(w & 0xFFFF0000u); }
@@ -67,8 +69,9 @@ inline void tf_attn_x16(TfKey k, thread float* x) {
   }
 }
 
-inline void tf_attn_zero(thread TfAcc& s) {
-  for (uint hh = 0; hh < TF_ATTN_HS; ++hh) {
+template <uint HS>
+inline void tf_attn_zero(thread TfAccN<HS>& s) {
+  for (uint hh = 0; hh < HS; ++hh) {
     s.m[hh] = TF_ATTN_NEG;
     s.l[hh] = 0.0f;
     for (uint i = 0; i < 16; ++i) s.acc[hh][i] = 0.0f;
@@ -184,7 +187,7 @@ inline uint tf_attn_load_selected(thread TfKey* k, const device uint4* C, IP I,
 
 // Selected run `run` (0..3) into a zeroed state; PF loads the next step's keys before this step's math.
 
-// `I` is the row's index list, in device memory (prompt) or staged in threadgroup memory (decode).
+// `I` is the row's index list, staged in threadgroup memory.
 template <bool PF = false, typename IP = const device int*>
 inline void tf_attn_selected(thread TfAcc& s, thread const TfQ& q, const device uint4* C, IP I,
                              thread const TfAttnMeta& m, uint run, float scale, uint lane) {
@@ -236,7 +239,8 @@ inline void tf_attn_window(thread TfAcc& s, thread const TfQ& q, const device ui
 }
 
 // A chunk's (max, sum, weighted sum) joined to the running result of head hh: both rescaled to the larger max.
-inline void tf_attn_join(thread TfAcc& t, uint hh, float mc, float lc, thread const float* ac) {
+template <uint HS>
+inline void tf_attn_join(thread TfAccN<HS>& t, uint hh, float mc, float lc, thread const float* ac) {
   const float nm = mc > t.m[hh] ? mc : t.m[hh];
   const float a = precise::exp(t.m[hh] - nm);
   const float b = precise::exp(mc - nm);
@@ -252,8 +256,8 @@ inline void tf_attn_join(thread TfAcc& t, uint hh, float mc, float lc, thread co
 }
 
 // Sink, normalisation, the inverse RoPE of the last 64 dims and the store of a head's row.
-template <typename T>
-inline void tf_attn_store(thread TfAcc& s, uint hh, float sink, const device float* cs, device T* out, uint lane) {
+template <typename T, uint HS>
+inline void tf_attn_store(thread TfAccN<HS>& s, uint hh, float sink, const device float* cs, device T* out, uint lane) {
   const float m = s.m[hh];
   const float top = sink > m ? sink : m;
   const float af = precise::exp(m - top);
@@ -326,61 +330,97 @@ template <typename T, bool PF>
   if (TF_CTL == 4 && r == 0 && h0 == 0 && lane == 0) O[ulong(a.rows) * a.heads * TF_ATTN_D] = T(1.0f);
 }
 
-// Prompt: a threadgroup is RR consecutive rows of one linear window buffer by HG head groups.
+// Prompt: a threadgroup is RR consecutive rows by HG pairs of heads; a simdgroup is one row and PH heads.
 
-// The window is staged in tiles of 16 keys at absolute positions, one barrier pair a tile.
+// A simdgroup's heads share each key's loads; keys come from device memory, a run's indices four at a time.
 
-// Each row reads its own span of a tile, so its keys and their order do not depend on its chunk or the rows beside it.
+// A key's 16 dims widened through the bfloat type: the values tf_attn_x16 makes.
+inline void tf_attn_pwiden(TfKey k, thread float* x) {
+  for (uint j = 0; j < 4; ++j) {
+    const bfloat2 a = as_type<bfloat2>(k.a[j]), b = as_type<bfloat2>(k.b[j]);
+    x[2 * j] = float(a.x);
+    x[2 * j + 1] = float(a.y);
+    x[8 + 2 * j] = float(b.x);
+    x[8 + 2 * j + 1] = float(b.y);
+  }
+}
+
+// One key for PH heads, lane l holding head l % PH's score: a head whose max rose is rescaled, then each head adds it.
+
+// The steps and their order are tf_attn_update's, so each head's sums carry the decode kernel's bits.
+inline void tf_attn_pkey(thread TfAccN<TF_ATTN_PH>& s, thread const float (*q)[16], TfKey k, float scale, uint lane) {
+  float x[16], v[TF_ATTN_PH];
+  tf_attn_pwiden(k, x);
+  for (uint hh = 0; hh < TF_ATTN_PH; ++hh) {
+    v[hh] = 0.0f;
+    for (uint i = 0; i < 16; ++i) v[hh] = tf_attn_step(v[hh], q[hh][i], x[i]);
+  }
+  const float w = tf_attn_reduce2(v[0], v[1], lane) * scale;
+  if (TF_CTL == 1 && simd_any(w != w)) return;
+  const uint mine = lane % TF_ATTN_PH;
+  float mm = s.m[0];
+  for (uint hh = 1; hh < TF_ATTN_PH; ++hh) mm = mine == hh ? s.m[hh] : mm;
+  const bool rise = w > mm;
+  if (simd_any(rise)) {
+    const float a = precise::exp(mm - w);
+    for (uint hh = 0; hh < TF_ATTN_PH; ++hh)
+      if (simd_broadcast(rise ? 1u : 0u, hh) != 0) {
+        const float ah = simd_broadcast(a, hh);
+        s.l[hh] = s.l[hh] * ah;
+        for (uint i = 0; i < 16; ++i) s.acc[hh][i] = s.acc[hh][i] * ah;
+        s.m[hh] = simd_broadcast(w, hh);
+      }
+    mm = rise ? w : mm;
+  }
+  const float p = precise::exp(w - mm);
+  for (uint hh = 0; hh < TF_ATTN_PH; ++hh) {
+    const float ph = simd_broadcast(p, hh);
+    s.l[hh] = s.l[hh] + ph;
+    for (uint i = 0; i < 16; ++i) s.acc[hh][i] = fma(ph, x[i], s.acc[hh][i]);
+  }
+  s.n += 1;
+}
+
 template <typename T>
 [[kernel, max_total_threads_per_threadgroup(32 * TF_ATTN_RR * TF_ATTN_HG)]] void tf_dsv41_attn_pre(
     TF_ATTN_ARGS, uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]], uint tid [[thread_index_in_threadgroup]]) {
-  threadgroup uint4 tile[TF_ATTN_TILE * (TF_ATTN_D / 8)];
-  const uint ra = sg / TF_ATTN_HG, r0 = tg.x * TF_ATTN_RR, r = r0 + ra;
-  const uint h0 = (tg.y * TF_ATTN_HG + sg % TF_ATTN_HG) * TF_ATTN_HS;
-  const bool on = r < a.rows && h0 < a.heads;
-  const TfAttnMeta m0 = M[r0];
-  const int last = M[min(r0 + TF_ATTN_RR, a.rows) - 1].pos;
-  const int lo = max(m0.pos - int(TF_ATTN_WIN) + 1, 0);
-  const TfAttnMeta m = on ? M[r] : m0;
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint ra = sg / TF_ATTN_HG, r = tg.x * TF_ATTN_RR + ra;
+  const uint h0 = (tg.y * TF_ATTN_HG + sg % TF_ATTN_HG) * TF_ATTN_PH;
+  if (r >= a.rows || h0 >= a.heads) return;
+  const uint nh = min(TF_ATTN_PH, a.heads - h0);
+  const TfAttnMeta m = M[r];
   const float scale = (TF_CTL == 5 && ra == 1) ? a.scale * 1.0000001f : a.scale;
-  TfQ q;
-  TfAcc s;
-  tf_attn_zero(s);
-  if (on) tf_attn_loadq(q, Q, r, h0, a.heads, lane);
-  for (int ti = lo / int(TF_ATTN_TILE); ti <= last / int(TF_ATTN_TILE); ++ti) {
-    const int base = ti * int(TF_ATTN_TILE);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (uint u = 0; u < TF_ATTN_TILE * (TF_ATTN_D / 8) / (32 * TF_ATTN_RR * TF_ATTN_HG); ++u) {
-      const uint g = tid + 32 * TF_ATTN_RR * TF_ATTN_HG * u;
-      const int t = base + int(g / (TF_ATTN_D / 8));
-      if (t >= lo && t <= last) tile[g] = W[ulong(m0.wofs + t - m0.wbase) * (TF_ATTN_D / 8) + g % (TF_ATTN_D / 8)];
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (!on) continue;
-    const int ja = max(base, max(m.pos - int(TF_ATTN_WIN) + 1, 0)), jb = min(base + int(TF_ATTN_TILE) - 1, m.pos);
-    for (int j = ja; j <= jb; j += int(TF_ATTN_KU)) {
-      TfKey k[TF_ATTN_KU];
-      uint valid = 0;
-      for (uint u = 0; u < TF_ATTN_KU; ++u) {
-        const bool ok = j + int(u) <= jb;
-        const uint at = uint((ok ? j + int(u) : ja) - base) * (TF_ATTN_D / 8) + 2 * lane;
-        k[u] = TfKey{tile[at], tile[at + 1]};
-        valid |= (ok ? 1u : 0u) << u;
-      }
-      tf_attn_batch(s, q, k, valid, scale, lane);
-    }
+  float q[TF_ATTN_PH][16];
+  for (uint hh = 0; hh < TF_ATTN_PH; ++hh) {
+    const ulong at = (ulong(r) * a.heads + h0 + min(hh, nh - 1)) * (TF_ATTN_D / 8) + 2 * lane;
+    tf_attn_pwiden(TfKey{Q[at], Q[at + 1]}, q[hh]);
   }
-  if (!on) return;
+  TfAccN<TF_ATTN_PH> s;
+  tf_attn_zero(s);
+  const int lo = max(m.pos - int(TF_ATTN_WIN) + 1, 0);
+  const device uint4* wk = W + ulong(m.wofs + lo - m.wbase) * (TF_ATTN_D / 8) + 2 * lane;
+  for (int t = lo; t <= m.pos; ++t, wk += TF_ATTN_D / 8) tf_attn_pkey(s, q, TfKey{wk[0], wk[1]}, scale, lane);
+  const device int4* ix = (const device int4*)(I + ulong(r) * TF_ATTN_SEL);
+  const device uint4* ck = C + ulong(m.cofs) * (TF_ATTN_D / 8) + 2 * lane;
   for (uint run = 0; run < TF_ATTN_NCH - 1; ++run) {
     if (int(run * TF_ATTN_RUN) >= m.ncomp) break;
-    TfAcc c;
+    const int end = min(m.ncomp, int((run + 1) * TF_ATTN_RUN));
+    TfAccN<TF_ATTN_PH> c;
     tf_attn_zero(c);
-    tf_attn_selected(c, q, C, I + ulong(r) * TF_ATTN_SEL, m, run, scale, lane);
+    for (int j = int(run * TF_ATTN_RUN); j < end; j += 4) {
+      const int4 iv = ix[j / 4];
+      for (uint u = 0; u < 4; ++u) {
+        const int jj = j + int(u);
+        if (jj >= end || iv[u] < 0 || (TF_CTL == 2 && jj == m.ncomp - 1)) continue;
+        const device uint4* kp = ck + uint(iv[u]) * (TF_ATTN_D / 8);
+        tf_attn_pkey(c, q, TfKey{kp[0], kp[1]}, scale, lane);
+      }
+    }
     if (c.n == 0) continue;
-    for (uint hh = 0; hh < TF_ATTN_HS; ++hh) tf_attn_join(s, hh, c.m[hh], c.l[hh], c.acc[hh]);
+    for (uint hh = 0; hh < TF_ATTN_PH; ++hh) tf_attn_join(s, hh, c.m[hh], c.l[hh], c.acc[hh]);
   }
-  for (uint hh = 0; hh < TF_ATTN_HS; ++hh)
+  for (uint hh = 0; hh < nh; ++hh)
     tf_attn_store(s, hh, SK[h0 + hh], CS + ulong(m.pos) * 64, O + (ulong(r) * a.heads + h0 + hh) * TF_ATTN_D, lane);
 }
 

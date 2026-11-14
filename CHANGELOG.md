@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: prompt attention runs two heads a simdgroup over one load of each key, widens bf16 keys through the bfloat type and reads selected indices four at a time. Output bits are unchanged and still equal decode's. On an M5 Ultra, release layer 2's attention core at 4096 prompt rows drops from 28.6 to 19.0 ms at position 16384 and from 27.5 to 17.1 ms at position 0, and the whole layer from 197 to 188 ms.
+
 - GLM-5.3-Flash on CUDA: prompts take the TF_GLM_INDEX_CUDA kernels by default (0 keeps tf_glm_scores), with the same tokens; at TP=2 on two GB10s prompts are 44% faster at 2K and 31% at 8K, level at 32K (#3159). Thanks to @Bizuayeu.
 
 - Living Weights (`--slide --slide-drift-gate`): the recall wordings a request supplies are held out of the lesson writer's plan. A planned question that matches one under the gate's own contamination check is dropped and replaced, so the gate no longer refuses a lesson as "supplied recall is missing or trained" for a wording the writer made itself; a lesson that can't reach its three-example floor without them is refused as "the plan could not avoid the supplied recall wordings". With no recall supplied, or the gate off, nothing changes (#2929, for #1389). Thanks to @jimthedj65 for the panel run that found it.
