@@ -234,7 +234,8 @@ pub const Rig = struct {
         r.c = c;
         try r.c.validate();
         r.device = try mtl.Device.init();
-        r.queue = try pkg.boot.openQueue(r.device);
+        // Metal 3 unless TF_METAL4=1: the timing harnesses sample Metal 3 encoders, and metal4_test compares the two
+        r.queue = try pkg.boot.openQueue(r.device, false);
         r.p = try pkg.pipelines.Pipelines.load(a, r.device, &r.c);
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();

@@ -32,9 +32,9 @@ pub const Options = struct {
     engram_dir: ?[]const u8 = null,
 };
 
-/// The family's queue: Metal 4 under TF_METAL4=1 where this Mac has it, else Metal 3; the kernels are the same.
-pub fn openQueue(device: mtl.Device) !mtl.Queue {
-    if (!try environment.read(bool, "TF_METAL4", false)) return device.queue();
+/// The family's queue: Metal 4 under TF_METAL4=1, or by default when `metal4` holds, else Metal 3; the same kernels.
+pub fn openQueue(device: mtl.Device, metal4: bool) !mtl.Queue {
+    if (!try environment.read(bool, "TF_METAL4", metal4)) return device.queue();
     if (device.queue4()) |q| {
         std.log.info("dsv41 metal: Metal 4 command queue", .{});
         return q;
@@ -71,7 +71,7 @@ pub const Boot = struct {
         const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
-        b.queue = try openQueue(b.device);
+        b.queue = try openQueue(b.device, b.device.hasMetal4());
         errdefer b.queue.deinit();
         b.p = try pipelines.Pipelines.load(a, b.device, c);
         errdefer b.p.deinit();

@@ -61,7 +61,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
-    .{ .name = "TF_METAL4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 sends the work of a family that supports it, DeepSeek-V4.1 for now, through Metal 4 on macOS 26 and later; 0, the default, keeps Metal 3)" },
+    .{ .name = "TF_METAL4", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps Metal 3; 1 sends the work of a family that supports it through Metal 4 on macOS 26 and later, the default for DeepSeek-V4.1 there)" },
     .{ .name = "TF_METAL4_TIMELINE", .scope = .metal, .kind = .u32, .forms = "a whole round count from 0 to 4294967295 (0, the default, stamps nothing; n stamps every stage of n rounds of each kind on a Metal 4 queue and logs them)" },
     .{ .name = "TF_DSV41_ROUND_PROF", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 logs DeepSeek-V4.1 Metal decode rounds' host and GPU milliseconds by rows)" },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's 4-bit expert kernels read scales and biases through a 16-bit index)" },
