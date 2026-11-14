@@ -10,6 +10,7 @@ const kda_block = @import("cuda_kda_block.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 const glue = @import("cuda_glue.zig");
 const projection = @import("cuda_proj.zig");
+const owner_attn = @import("cuda_owner_attn.zig");
 
 /// Checks a shared window's segments (a prompt buffer's: whole prompts) against its `rows` rows; each holds its own.
 pub fn begin(r: fw.Rank, rows: usize, stream: cuda.Stream) !void {
@@ -76,6 +77,11 @@ pub fn mixer(f: *const fw.Forward, r: fw.Rank, l: weights.Layer, li: usize, di: 
             if (out) |o| try kda_block.fill(f.set(), f.stream, k, s, 0, rows, o);
         },
         .mla => |a| {
+            if (owner_attn.owned(r)) { // TF_GLM_KV_SPLIT: a stream on owner-only rows, attended where they are
+                try owner_attn.shared(f, r, a, di, rows);
+                if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
+                return;
+            }
             var sparse_any = false;
             for (r.segs) |g| sparse_any = sparse_any or dsa_block.sparseRows(a, g.st.pos, g.rows);
             try dsa_block.prepare(f.set(), f.stream, a, b.dsa, b.normed, c.hidden, rows, sparse_any);

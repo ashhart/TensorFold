@@ -2,6 +2,12 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- GLM-5.3-Flash on CUDA: `TF_GLM_KV_SPLIT=1`, off by default, takes each stream's KV pages from one owner rank's class and lays each page's pooled keys and latent rows in two regions, each with its own table; ranks that disagree stop before loading. In this part every rank still holds every latent row, so it saves no memory, and a class holds a whole window, so a split server can admit fewer streams. Unset, the pool and the pages are as before (#2415, part 1 of #1431). Thanks to @wojo.
+
+- GLM-5.3-Flash on CUDA: with `TF_GLM_KV_SPLIT=1` each stream's latent rows now live only on its owner rank, which attends every rank's heads for them (the others send it their queries and get their outputs back); the pooled index keys stay on every rank. A token costs a rank 6,912 bytes at TP=2 instead of 13,056, so the same memory holds about 1.89 times the tokens (4,864 at TP=3), less a page of each class for a trash page. Prompt chunks are attended by their owner too, whole, without pieced exchanges or paired chunks, and kept prompt states are refused with the switch on until a later part carries them: serve it with `--prompt-cache-gib 0` and without `--learn-conversations`. The plan sets an unasked prompt cache aside first, at what the unsplit server would keep, so the saving goes to the pages (at a 1M window and 8 streams in 30 GiB: 1.90 GiB of cache either way, 2.10M tokens unsplit, 3.96M split), lowered only as far as each owner class still holds a window where it would not. Unset, nothing changes (#2935, part 2 of #1431). Thanks to @wojo.
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).

@@ -107,6 +107,17 @@ test "stable profile: the GLM host KV tier registers as an exact-one switch a fa
     }
 }
 
+test "stable profile: GLM's KV split registers as an identical switch, 1 or on, off unless set" {
+    const e = p.entry(.TF_GLM_KV_SPLIT);
+    try t.expectEqual(p.Class.identical, e.class);
+    try t.expect(e.applies("glm5_next", "cuda") and !e.applies("deepseek_v41", "cuda") and !e.applies("glm5_next", "metal"));
+    try t.expectEqualStrings("#2415, #2935", e.evidence);
+    try t.expect(p.resolve(.stable, .TF_GLM_KV_SPLIT, null) == null);
+    for ([_][]const u8{ "1", "on" }) |raw| try t.expect(e.differs(raw));
+    for ([_][]const u8{ "0", "off", "", "true", " 1 " }) |raw| try t.expect(!e.differs(raw));
+    try t.expectEqual(p.Switch.TF_GLM_KV_SPLIT, p.registered("TF_GLM_KV_SPLIT").?);
+}
+
 test "stable profile: GLM's raw prompt tail registers as an exact-one switch, off unless set" {
     const e = p.entry(.TF_GLM_PROMPT_TAIL);
     try t.expectEqual(p.Class.identical, e.class);

@@ -51,10 +51,10 @@ fn one(r: *Rows, name: Name, kind: file.Kind, ext: []const u8, at: u32, ranges: 
     return o.trailer.payload + o.trailer.meta + @sizeOf(file.Trailer);
 }
 
-/// Whether a family refused what a file holds (words that differ, a size or a range that does not fit its blank).
+/// Whether a family refused what a file holds (words that differ, of another world or layout; a size or range unfit).
 fn refused(err: anyerror) bool {
     return switch (err) {
-        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer => true,
+        error.SnapshotSize, error.BadKeptRange, error.DiskWords, error.KeptWordsDiffer, error.DiskWorld, error.DiskLayout => true,
         else => false,
     };
 }
@@ -128,9 +128,9 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
     const name = candidate.name;
     const bytes = r.blankBytes(candidate.at);
     if (bytes > s.budget or s.most == 0) return have;
-    if (!ready(s, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err, have); // nothing goes to make room for a state whose file is gone
+    if (!ready(s, candidate.at, bytes)) present(r, chosen) catch |err| return failed(before, candidate.at, err, have); // nothing goes to make room for a state whose file is gone
     if (r.spill != .off) r.touch(chosen); // the newest: the spills that make room for it push older states off first
-    while (!ready(s, bytes)) {
+    while (!ready(s, candidate.at, bytes)) {
         if (s.family.vtable.trim) |trim| {
             const spare = s.spare();
             trim(s.family.ptr, s.budget -| s.held -| bytes);
@@ -165,8 +165,11 @@ fn attempt(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, sp
     return e;
 }
 
-fn ready(s: *const pc.Store, bytes: u64) bool {
+fn ready(s: *const pc.Store, at: u32, bytes: u64) bool {
     if (s.held > s.budget or s.entries.items.len >= s.most) return false;
+    const f = s.family.vtable;
+    // a pool without trim reads into spare storage that takes the state, as a keep would
+    if (f.trim == null) if (f.reuses) |reuses| if (reuses(s.family.ptr, at)) return true;
     const room = s.budget - s.held;
     const spare = s.spare();
     return spare <= room and bytes <= room - spare;
