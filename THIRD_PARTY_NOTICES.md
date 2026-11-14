@@ -499,3 +499,29 @@ The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files
   `70ae7fac63274ff2eac54152031433374cb80f2f` (an MLX conversion of
   [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), whose template it carries), under the Apache License 2.0.
   See [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
+
+## Unlimited-OCR-2
+
+The `unlimited-ocr` family (`zig/src/families/uocr/` and its kernels) follows these parts of the Python code that ships
+with [baidu/Unlimited-OCR-2](https://huggingface.co/baidu/Unlimited-OCR-2) at revision
+`0480966938291445591f69f08a13b041c073a96a`, the release's own files:
+
+- `modeling_unlimitedocr.py`: the page guard (`_uocr_page_count_guard`), gundam's tiles (`dynamic_preprocess`,
+  `find_closest_aspect_ratio`), the views' token layout and the prompt (`_uocr_build_inputs`, `infer`), which
+  `generate.zig`, `preprocess.zig`, `prompt.zig` and `chat_template.jinja` repeat;
+- `deepencoder.py`, its CLIP section only (`CLIPVisionEmbeddings`, `NoTPTransformer`, `VitModel`, `quick_gelu`,
+  `get_abs_pos`; the release's own code, citing no library there): the class row, the position table resized to a
+  tile, the pre-norm, `quick_gelu`'s 1.702 and the layer order, which `vision.zig`'s CLIP steps repeat;
+- `dash_attention.py` and `modeling_deepseekv2.py`: the DASH router (block keys, page-aware candidates, top 16,
+  entmax-1.5).
+
+The release ships no LICENSE file; its model card states `license: mit`, and these notices carry that licence's text
+("MIT License text" above). The SAM encoder, the decoder's attention, its page2d rotary and its MoE gate follow none of
+the release's code: they are written from the papers and from the release's modules measured through their inputs and
+outputs. `resize.zig` follows no code either: it is the antialiased bicubic the release asks of torch
+(`F.interpolate(mode="bicubic", antialias=True, align_corners=False)`, Keys' cubic with a = -0.5, taps spread by the
+scale and normalised) for the position tables, written to that operator's definition, with its fp32 rounding order fixed
+by measuring torch's output on the release's tables bit for bit.
+
+TensorFold ships none of these files and no Unlimited-OCR-2 weights; `tools/zig/uocr_reference.py` runs the release's
+own code as the reference.
