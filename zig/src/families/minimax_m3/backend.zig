@@ -6,6 +6,7 @@ const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const Model = @import("model.zig").Model;
 const snapshot = @import("snapshot.zig");
+const pass = @import("prompt_pass.zig");
 const row = @import("../step5/backend.zig").row;
 const be = lanes.backend;
 
@@ -42,6 +43,8 @@ pub const Metal = struct {
     costs: [max_window]lanes.config.Cost = undefined, // window forward ms by rows, timed by measure() for the depth rule
     timed: usize = 0,
     values: []f32, // a logits row as f32, for the host twin of the GPU draw
+    passes: std.AutoHashMapUnmanaged(*lanes.Stream, pass.Pass) = .empty, // prompt passes in progress (#3021)
+    gen: u64 = 0, // forwards so far: a chunk's tapped rows in a scratch are current while their gen matches
 
     pub fn init(gpa: std.mem.Allocator, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
@@ -68,6 +71,9 @@ pub const Metal = struct {
             self.gpa.destroy(cache.*);
         }
         self.caches.deinit(self.gpa);
+        var passes = self.passes.valueIterator();
+        while (passes.next()) |p| p.deinit(self.gpa);
+        self.passes.deinit(self.gpa);
         self.scratch.deinit();
         self.prompt.deinit();
         self.gpa.destroy(self);
@@ -114,6 +120,7 @@ pub const Metal = struct {
                 var ts0: std.c.timespec = undefined;
                 _ = std.c.clock_gettime(.MONOTONIC, &ts0);
                 try fwd.run(self.model, &self.scratch, &cache, ids[0..rows], .{ .all = true });
+                self.gen +%= 1;
                 var ts1: std.c.timespec = undefined;
                 _ = std.c.clock_gettime(.MONOTONIC, &ts1);
                 if (run == 1) ms = @as(f64, @floatFromInt(ts1.sec - ts0.sec)) * 1e3 + @as(f64, @floatFromInt(ts1.nsec - ts0.nsec)) / 1e6;
@@ -124,7 +131,7 @@ pub const Metal = struct {
     }
 
     /// A tapped row's bytes: every tap's hidden row, bf16.
-    fn tapBytes(self: *const Metal) usize {
+    pub fn tapBytes(self: *const Metal) usize {
         return @as(usize, self.model.taps) * self.model.config.hidden * 2;
     }
 
@@ -148,11 +155,21 @@ pub const Metal = struct {
     /// Rows [start, start + count) of the stream's latest tapped rows, on the device.
     fn featuresFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, start: u64, count: u32) !be.Features {
         const self = cast(ptr);
-        const tp = (try self.cacheOf(stream)).tap;
-        if (taps.len != self.model.taps or tp.buf == null) return error.UnpreparedMiniMaxTaps;
-        if (count == 0 or start < tp.start or start + count > tp.start + tp.rows) return error.MiniMaxTapsNotHeld;
+        const cache = try self.cacheOf(stream);
+        var tp = cache.tap;
+        if (taps.len != self.model.taps) return error.UnpreparedMiniMaxTaps;
+        // a stepped pass's latest chunk (#3021): its rows stay in the scratch until the next forward
+        if (cache.chunk_tap) |k| if (!within(tp, start, count) and pass.within(k.tap, k.gen, self.gen, start, count)) {
+            tp = k.tap;
+        };
+        if (tp.buf == null) return error.UnpreparedMiniMaxTaps;
+        if (!within(tp, start, count)) return error.MiniMaxTapsNotHeld;
         const width = self.tapBytes();
         return .{ .buffer = @intFromPtr(tp.buf.?.id), .offset = tp.off + (start - tp.start) * width, .rows = count, .row_bytes = @intCast(width), .space = .device, .dtype = .bf16 };
+    }
+
+    fn within(tp: st.Tap, start: u64, count: u32) bool {
+        return count != 0 and start >= tp.start and start + count <= tp.start + tp.rows;
     }
 
     fn prefillFeaturesFn(ptr: *anyopaque, stream: *lanes.Stream, taps: []const u32, sink: be.FeatureSink) !void {
@@ -160,18 +177,18 @@ pub const Metal = struct {
         if (taps.len != self.model.taps) return error.UnpreparedMiniMaxTaps;
         self.sink = sink;
         defer self.sink = null;
-        return prefillFn(ptr, stream);
+        return pass.whole(self, stream);
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .prefill_step = prefillStepFn, .cancel_prefill = cancelPrefillFn, .reports_fill = true, .prepare_features = prepareFn, .features = featuresFn, .prefill_features = prefillFeaturesFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .first_row = firstRowFn, .held = heldFn } };
     }
 
     fn cast(ptr: *anyopaque) *Metal {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn cacheOf(self: *Metal, stream: *lanes.Stream) !*st.Cache {
+    pub fn cacheOf(self: *Metal, stream: *lanes.Stream) !*st.Cache {
         return self.caches.get(stream) orelse error.UnknownMiniMaxStream;
     }
 
@@ -226,112 +243,33 @@ pub const Metal = struct {
     }
 
     /// Every step in flight landed: before the host reads caches or logits, or the GPU runs anything else.
-    fn drain(self: *Metal) !void {
+    pub fn drain(self: *Metal) !void {
         while (self.flights.items.len > 0) try self.land();
     }
 
-    /// Run `ids` at the cache's end in prompt chunks; a stream's pass stops at its chunk starts and reuse marks.
-    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32, stream: ?*lanes.Stream, images: []const fwd.Span) !void {
-        const base = cache.len;
+    /// Run `ids` at the cache's end in prompt chunks, with no stream (warm): the stream's pass is prompt_pass.zig's.
+    fn feed(self: *Metal, cache: *st.Cache, ids: []const u32) !void {
         var at: usize = 0;
         while (at < ids.len) {
-            var end = @min(ids.len, at + st.prompt_rows);
-            if (stream) |sm| {
-                if (sm.isCancelled()) return error.Cancelled;
-                for (sm.chunks) |x| if (x > base + at and x < base + end) {
-                    end = x - base;
-                };
-                for (sm.reuse.marks) |x| if (x > base + at and x < base + end) {
-                    end = x - base;
-                };
-            }
+            const end = @min(ids.len, at + st.prompt_rows);
             const s = if (end - at > st.batch_rows) &self.prompt else &self.scratch;
-            const taps = if (stream != null) s.taps else null;
-            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = if (taps) |x| fwd.b(x) else null, .images = images });
-            if (taps) |x| {
-                if (self.sink) |k| try k.take(k.ptr, stream.?, .{ .buffer = @intFromPtr(x.id), .rows = @intCast(end - at), .row_bytes = @intCast(self.tapBytes()), .space = .device, .dtype = .bf16 }, cache.len);
-                if (base + end == stream.?.prompt().len) { // the prompt's last row, kept for the first draft
-                    const width = self.tapBytes();
-                    if (cache.last_tap == null) cache.last_tap = try self.model.device.buffer(width, mtl.ResourceOptions.shared);
-                    @memcpy(cache.last_tap.?.slice(u8, width), x.slice(u8, (end - at) * width)[(end - at - 1) * width ..][0..width]);
-                    cache.tap = .{ .buf = cache.last_tap, .start = cache.len + (end - at) - 1, .rows = 1 };
-                }
-            }
+            try fwd.run(self.model, s, cache, ids[at..end], .{ .taps = null, .images = &.{} });
+            self.gen +%= 1;
             cache.len += end - at;
-            if (stream) |sm| lanes.prefill_widths.completed(self.gpa, sm, end - at);
             at = end;
-            if (stream) |sm| if (std.mem.indexOfScalar(u32, sm.reuse.marks, @intCast(cache.len)) != null) if (sm.reuse.hook) |k| k.at(k.ptr, sm, @intCast(cache.len));
         }
     }
 
     fn prefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
-        const self = cast(ptr);
-        try self.drain();
-        const ids = stream.prompt();
-        if (ids.len == 0 or ids.len + stream.max_new > self.options.capacity or self.caches.contains(stream)) return error.InvalidMiniMaxPrompt;
-        const capacity = ids.len + stream.max_new + 1;
-        const need = st.cacheBytes(&self.model.config, capacity);
-        if (self.held + need > self.options.budget) {
-            std.log.warn("minimax_m3: a {d}-token stream needs {d:.1} GiB of caches; {d:.1} of {d:.1} GiB are held", .{ capacity, gib(need), gib(self.held), gib(self.options.budget) });
-            return error.MiniMaxCachesFull;
-        }
-        self.held += need;
-        errdefer self.held -= need;
-        if (stream.reuse.saved) |saved| { // a state the stream cannot hold beside its caches: freed now, no restore
-            const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (self.held + snap.bytes > self.options.budget) snap.free();
-        }
-        // kept states give way first
-        if (self.room) |r| r.fit(r.ctx, self.options.budget - self.held, stream.reuse.saved, ids);
-        const cache = try self.createCache(capacity);
-        errdefer self.gpa.destroy(cache);
-        errdefer cache.deinit();
-        try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
-        errdefer _ = self.caches.remove(stream);
-        stream.cached = 0;
-        if (stream.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
-            const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < ids.len) {
-                if (snapshot.restore(self.model.queue, &self.model.config, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
-            } else stream.reuse_failed = true;
-        }
-        var spans: std.ArrayList(fwd.Span) = .empty;
-        defer spans.deinit(self.gpa);
-        const rows_buf = try self.encodeImages(stream, cache.len, &spans);
-        defer if (rows_buf) |b| b.deinit();
-        try self.feed(cache, ids[cache.len..], stream, spans.items);
+        return pass.whole(cast(ptr), stream);
     }
 
-    /// The tower's rows of the stream's images past `from` (one before it is in the restored state), a span each.
-    fn encodeImages(self: *Metal, stream: *const lanes.Stream, from: usize, spans: *std.ArrayList(fwd.Span)) !?mtl.Buffer {
-        var total: usize = 0;
-        for (stream.images) |im| {
-            if (im.at + im.tokens > stream.prompt().len or im.tokens * 4 != im.gh * im.gw) return error.InvalidMiniMaxImage;
-            if (im.at + im.tokens > from) total += im.tokens;
-        }
-        if (total == 0) return null;
-        const v = self.model.vision orelse return error.NoMiniMaxVision;
-        const width: usize = self.model.config.hidden;
-        const buf = try self.model.device.buffer(total * width * 2, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
-        errdefer buf.deinit();
-        var done: usize = 0;
-        for (stream.images) |im| { // one command buffer an image: the tower's host-written tables are one image's
-            if (im.at + im.tokens <= from) continue;
-            const span: fwd.Span = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = buf, .off = done * width * 2 } };
-            const cb = self.model.queue.commandBuffer();
-            const e = cb.compute(.serial);
-            try v.encode(e, im.pixels, im.gh, im.gw, span.rows);
-            e.end();
-            cb.commit();
-            cb.wait();
-            if (cb.failure()) |msg| {
-                std.log.err("minimax_m3: the image tower failed: {s}", .{msg});
-                return error.GpuFailed;
-            }
-            try spans.append(self.gpa, span);
-            done += im.tokens;
-        }
-        return buf;
+    fn prefillStepFn(ptr: *anyopaque, stream: *lanes.Stream, _: u32) !bool {
+        return pass.step(cast(ptr), stream);
+    }
+
+    fn cancelPrefillFn(ptr: *anyopaque, stream: *lanes.Stream) !void {
+        return pass.cancel(cast(ptr), stream);
     }
 
     /// A prompt chunk and a decode window once: the first request skips the GPU's first touch.
@@ -342,8 +280,9 @@ pub const Metal = struct {
         var ids: [st.prompt_rows]u32 = undefined;
         for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i * 37 % 20000);
         const n = cache.capacity - st.window_rows;
-        try self.feed(&cache, ids[0..n], null, &.{});
+        try self.feed(&cache, ids[0..n]);
         try fwd.run(self.model, &self.scratch, &cache, ids[0..st.window_rows], .{ .all = true });
+        self.gen +%= 1;
     }
 
     /// The first token, drawn on the host from the prompt's last row into a fresh slot.
@@ -382,6 +321,7 @@ pub const Metal = struct {
         const how: @FieldType(fwd.Draw, "how") = if (sampled(stream.sampling)) |t| .{ .sampled = .{ .sampling = t, .position = position } } else .greedy;
         var cb: mtl.CommandBuffer = undefined;
         try fwd.run(self.model, &self.scratch, cache, &.{0}, .{ .ids = self.slotOf(in), .draw = .{ .how = how, .out = self.slotOf(out) }, .flight = &cb });
+        self.gen +%= 1;
         self.flights.append(self.gpa, .{ .end = out + 1, .cb = cb }) catch |err| {
             cb.wait();
             cb.release();
@@ -428,6 +368,7 @@ pub const Metal = struct {
             total += rows;
         }
         try fwd.runShared(self.model, &self.scratch, segments[0..windows.len], ids[0..total], .{ .all = true, .taps = if (self.scratch.taps) |x| fwd.b(x) else null });
+        self.gen +%= 1;
         if (self.scratch.taps) |x| {
             var at: usize = 0;
             for (segments[0..windows.len]) |seg| {
@@ -477,6 +418,7 @@ pub const Metal = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         self.drain() catch |err| std.log.err("minimax_m3: a step in flight failed at release: {s}", .{@errorName(err)});
+        pass.forget(self, stream); // a stream that leaves mid-pass
         if (self.caches.fetchRemove(stream)) |entry| {
             self.held -= st.cacheBytes(&self.model.config, entry.value.capacity);
             entry.value.deinit();
@@ -511,10 +453,6 @@ pub const Metal = struct {
         cast(ptr).gpa.destroy(snap);
     }
 };
-
-fn gib(bytes: u64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / (1 << 30);
-}
 
 fn logit(word: u16) f32 {
     return @bitCast(@as(u32, word) << 16);
