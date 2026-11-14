@@ -316,6 +316,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Flint on Metal: `--drafter` takes the published `incoai/Flint-DFlash2` draft model, through the DFlash2 runtime the 27B uses; every reply equals drafts off, and greedy decode on an M5 Ultra goes from 174.6 to 233.0 tok/s at one stream and 221.4 to 289.7 at two (#3511).
 
+- Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prices a Qwen3.8-27B-class start from the charge `serve` itself makes (weights, every stream's KV and state, the prompt scratch) and says whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context. `info` also no longer reads its `model_type` from a parse it had freed (#3268, for #2761).
+
 - Docs: `docs/api.md` documents the Ollama-compatible routes (`/api/tags`, `/api/ps`, `/api/version`, `/api/show`, `/api/chat`, `/api/generate`, `/api/embed`): what each takes and refuses, the NDJSON replies, and how each differs from its OpenAI-style route (#3496).
 
 - Qwen3-Embedding on Metal: 0.6B, 4B and 8B serve through `/v1/embeddings` on chips with tensor units, with the same refusals and MRL widths as CUDA; vectors match an FP32 reference within 0.001 cosine distance, and a batch equals its single inputs bit for bit (#3494).
@@ -434,8 +436,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
   same way; its departures are listed in the recipe beside float32's (#2074). Thanks to @BobClawblaw.
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 
-
-- Metal: `tensorfold info MODEL [--context N] [--parallel N|auto]` prices a Qwen3.8-27B-class start from the charge `serve` itself makes (weights, every stream's KV and state, the prompt scratch) and says whether it fits this Mac's Metal working set beside the 8 GiB margin, in place of a memory floor that ignored the context. `info` also no longer reads its `model_type` from a parse it had freed (#2761).
 
 - Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
 
