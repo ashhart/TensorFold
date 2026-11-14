@@ -45,6 +45,8 @@ pub const Metal = struct {
     opt: Options,
     t: *target_.Target,
     dp: ?*dspark.Pass = null,
+    /// the idle ticker's target: the weights' residency set (the target's buffers joined it), on a queue of its own
+    warm: ?mtl.keepalive.Target = null,
     ad: pass_.Pass = undefined,
 
     pub fn open(a: Allocator, parts: Parts, opt: Options) !*Metal {
@@ -58,7 +60,22 @@ pub const Metal = struct {
             m.dp = try dspark.Pass.init(a, e.device, e.queue, e.c, e.p, e.s, e.tables, parts.top, w, .{ .slots = opt.slots, .candidates = @min(candidates, e.c.vocab) });
             m.ad = .{ .x = m.dp.?, .t = m.t };
         };
+        try m.holdWarm();
         return m;
+    }
+
+    /// The idle ticker's target: macOS unwires an idle model in 1-2 s and a request then re-wires all of it first.
+    fn holdWarm(m: *Metal) !void {
+        const r = m.parts.resident orelse return;
+        var t = r.target();
+        // a plain queue of its own: the ticker's thread never commits on the family's queue mid-round
+        t.queue = try m.parts.env.device.queue();
+        m.warm = t;
+    }
+
+    /// The server's idle ticker target (null without a residency owner).
+    pub fn keepalive(m: *Metal) ?api.keepalive.Target {
+        return if (m.warm != null) .{ .ctx = &m.warm.?, .tick = mtl.keepalive.Target.tick } else null;
     }
 
     /// The lanes' view: one slot a stream, rows of 16 a forward, the release's DSpark shape on one device.
@@ -79,6 +96,7 @@ pub const Metal = struct {
             .calibrate = calibrate,
             .memory = .{ .ctx = m, .read = memory },
             .health = .{ .ctx = m, .read = healthy },
+            .keepalive = m.keepalive(),
             .close = close,
             // the default cost table: TF_DSV41_CALIB has nothing to time on Metal
             .calib = .{ .mode = "default" },
@@ -115,6 +133,7 @@ pub const Metal = struct {
 
     fn close(ctx: *anyopaque) void {
         const m = self(ctx);
+        if (m.warm) |w| w.queue.deinit();
         if (m.dp) |p| p.deinit();
         m.t.deinit();
         if (m.parts.owner) |o| o.close(o.ctx);

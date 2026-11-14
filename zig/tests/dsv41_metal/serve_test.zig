@@ -368,3 +368,24 @@ test "dsv41 metal serve: (h) two streams with draft trees on two slots, overlapp
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(each and boxes[0].drafted > 0 and boxes[1].drafted > 0);
 }
+
+test "dsv41 metal serve: (j) with a residency owner the server gets an idle ticker that keeps the set wired; none without" {
+    {
+        const m = try fs.open(gpa, io, seed, .{ .resident = true });
+        const s = try Served.open(gpa, io, m.model(), ".", null);
+        defer Served.close(s);
+        const k = s.engine().keepaliveTarget() orelse return error.NoKeepalive;
+        for (0..3) |_| k.tick(k.ctx); // the idle ticker's tick: waiting joins committed, a tiny blit through the set
+        var drafted: u64 = 0;
+        var got: [1][]u32 = undefined;
+        try serve(s.engine(), &.{.{ .prompt = &.{ 11, 12, 13, 14 }, .max = 8 }}, false, &got, &drafted);
+        defer freeAll(&got);
+        k.tick(k.ctx); // and again after a request
+        say(got[0].len == 8, "(j) idle ticker on a model with a residency owner: 4 ticks, a reply of {d} tokens between them", .{got[0].len});
+        try testing.expectEqual(@as(usize, 8), got[0].len);
+    }
+    const m = try fs.open(gpa, io, seed, .{});
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    try testing.expect(s.engine().keepaliveTarget() == null);
+}
