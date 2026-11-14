@@ -90,7 +90,7 @@ pub const Kernels = struct {
         k.half_twins.deinit(k.allocator);
         if (k.fits_words) |b| b.deinit();
         var lane_it = k.lanes.valueIterator();
-        while (lane_it.next()) |p| p.deinit();
+        while (it.next()) |p| p.deinit();
         k.lanes.deinit(k.allocator);
         var it = k.cache.valueIterator();
         while (it.next()) |p| p.deinit();
@@ -247,8 +247,7 @@ pub const Kernels = struct {
         }
         const reg = p.bits == 4 and p.group == 64;
         if (!reg and (skip > 0 or cut[1] > 0)) return error.BadCoreProjectionRows;
-        // Row-block prompt passes at every non-reg width on every tensor-unit chip (#2851 ran them on
-        // Ultras only; an M5 Max takes the same 16-row blocks a dispatch), Ultras keeping their long keys.
+        // Row-block prompt passes at every non-reg width on every tensor-unit chip; Ultras keep their long keys.
         const long = if (reg) longKey(k.long_prompt, k.prompt, rows) else k.prompt and rows > 16 and (k.long_prompt or k.device.tensorUnits());
         const sums: ?Sums = if (reg or (p.bits == 8 and p.group == 64)) xs else null;
         const entry = try k.laneEntry(p, sk, skip, cut, long);
