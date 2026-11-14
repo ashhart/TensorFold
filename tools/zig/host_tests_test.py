@@ -15,6 +15,7 @@ EXCLUDED = (
     "check-release-paths",
     "test-startup-states-timing",
     "test-imprint-ops-timing",
+    "test-host-draw-timing",
     "test-metal-residency-owners-host",
     "test-qwen35-draft-frame-host",
     "test-qwen35-frame-invalidation-host",
@@ -94,7 +95,7 @@ pub fn build(b: *std.Build) void {
     def test_cross_target_does_not_acquire_a_native_host_aggregate(self):
         result = self.build(args=["--help", "-Dtarget=x86_64-windows-gnu"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("test-host", result.stdout)
+        self.assertNotRegex(result.stdout, r"(?m)^\s+test-host\s")
 
 
 if __name__ == "__main__":

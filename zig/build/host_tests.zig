@@ -10,6 +10,7 @@ const exclusions = [_]Exclusion{
     .{ .name = "check-release-paths", .reason = "The release-paths CI job checks the separately built release server" },
     .{ .name = "test-startup-states-timing", .reason = "Manual disk startup timing seeds up to 100,000 states" },
     .{ .name = "test-imprint-ops-timing", .reason = "Manual Imprint timing seeds up to 100,000 learned states" },
+    .{ .name = "test-host-draw-timing", .reason = "Manual CPU row-draw timing, outside test and CI (#2846)" },
     .{ .name = "test-metal-residency-owners-host", .reason = "red on main, #2031 (Qwen27 recording fixture leaves Runner.kv unset)" },
     .{ .name = "test-qwen35-draft-frame-host", .reason = "red on main, #2031 (recording fixture leaves seg_fn uninitialized)" },
     .{ .name = "test-qwen35-frame-invalidation-host", .reason = "red on main, #2031 (same recording fixture as test-qwen35-draft-frame-host)" },
