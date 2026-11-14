@@ -66,7 +66,7 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     const block = e.drafter != null;
     const parts = try keyParts(e, ctx, &name, &shape, pin);
     const key = if (parts) |v| cache.key(gpa, io, &v) catch null else null;
-    if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (measurements.reusable(kept, block) and (pin == null or pin.? == (kept.fact != 0))) {
+    if (key) |k| if (cache.load(Kept, gpa, io, k)) |kept| if (reuses(kept, block, pin)) {
         try x.expertForm(kept.fact != 0);
         try x.idle();
         report(kept, "kept", block, pin != null);
@@ -90,6 +90,11 @@ pub fn price(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: 
     if (reference) |key_ref| cache.save(Kept, gpa, io, key_ref, kept);
     report(kept, "timed", block, pin != null);
     return tableFor(kept, block);
+}
+
+/// A kept record stands for this load when it holds prices and, under a named form, was kept at that form.
+fn reuses(kept: Kept, block: bool, pin: ?bool) bool {
+    return measurements.reusable(kept, block) and (pin == null or pin.? == (kept.fact != 0));
 }
 
 /// TF_GLM_EXPERT_FORM on rank 0, which chooses every rank's form: null races classic and factored, else the one named.
@@ -308,4 +313,37 @@ test "GLM cost identity: a load that times nothing sends a named form to every r
         try std.testing.expectEqual(@as(usize, @intFromBool(pin != null)), l.sent);
         try std.testing.expectEqual(l.sent, l.idles);
     }
+}
+
+test "GLM cost identity: a record kept at one named form is not reused at the other" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(root);
+    var e: engine.Engine = undefined;
+    e.settings = .{};
+    e.checkpoint_digest = @splat(1);
+    e.share.world = 2;
+    e.m.experts.nvfp4.warps = 4;
+    e.drafter = null;
+    var shapes: [2][512]u8 = undefined;
+    var keys: [2][32]u8 = undefined;
+    for ([_]bool{ false, true }, 0..) |fact, i| {
+        const parts = [_][]const u8{ "glm-cuda", "gpu", try keyShape(&e, 121, 13000, &shapes[i], fact) };
+        keys[i] = cache.buildKey("engine", &parts);
+    }
+    var ms: [widths.len]f64 = undefined;
+    for (&ms, widths) |*m, w| m.* = 20 + @as(f64, @floatFromInt(w));
+    cache.saveAt(Kept, a, io, keys[0], .{ .ms = ms, .step_ms = 1.5, .fact = 0 }, root);
+    // a load that names factored looks under its own key and finds nothing to reuse
+    try std.testing.expect(cache.loadAt(Kept, a, io, keys[1], root) == null);
+    // the classic load reads the record back and reuses it, as the race does; factored would refuse even this record
+    const classic = cache.loadAt(Kept, a, io, keys[0], root).?;
+    try std.testing.expect(reuses(classic, false, false) and reuses(classic, false, null));
+    try std.testing.expect(!reuses(classic, false, true));
+    var factored = classic;
+    factored.fact = 1;
+    try std.testing.expect(reuses(factored, false, true) and !reuses(factored, false, false));
 }
