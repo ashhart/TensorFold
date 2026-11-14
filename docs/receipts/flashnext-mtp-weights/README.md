@@ -5,7 +5,12 @@ BF16 linears to MXFP8 as they load; on this checkpoint the server logs `re-coded
 
 ## Source and environment
 
-- Main: `06bcb989a277c5300d40454e68020c75c780681f`. Branch: this pull request's commits on that main.
+- Main: `06bcb989a277c5300d40454e68020c75c780681f`. Branch: `d3282c225db0224e472f10bc37ee25b5ae4d35d5`, this pull
+  request's commits through `19224f8` rebased onto that main. Outside `CHANGELOG.md` and this directory its changes
+  are `19224f8`'s, line for line (11 files, 169 changed lines, only the hunk offsets differ), and its tree differs
+  from `19224f8`'s only by main's own commits from `a3aecd8` to `06bcb989` (the same 334 files, byte for byte). The
+  commits after `19224f8` change no line of the pull request's CUDA drafter code: they merge main, move the Metal and
+  HIP refusals ahead of their loads, re-pin the serving files and update this text.
 - One NVIDIA GB10 (sm_121), Zig 0.17.0, CUDA 13.3.
 - Checkpoint `nvidia/Qwen3.8-Flash-Next-FP4-Local`, revision `b9ce18a6887e18c089fdea8509a33e63429a3300`, every arm.
 - `--parallel 4`, 131,072-token context, bf16 KV, prompt cache on, a fresh server per arm.
@@ -66,6 +71,21 @@ repeat is a loss.
 `exactness.md`: drafted against `"draft": false`, resumed against fresh and concurrent against solo, on main, the
 branch unset and the branch with `mxfp8`, each with the prompt cache on and off. Every equality holds in every arm, and
 the branch's replies equal main's.
+
+## Resident memory
+
+The server's startup line prints `model N GiB`, the engine allocator's device bytes after the weights load
+(`zig/src/native/cuda.zig:344`, two decimals). From the receipt's own boots:
+
+| arm | boots | model, after load | left for streams after the reserve |
+|---|---|---|---|
+| main | M1, M2 | 72.73 GiB, 72.73 GiB | 28.0 GiB, 28.0 GiB |
+| branch, unset (U1) or blank (U2) | U1, U2 | 72.73 GiB, 72.73 GiB | 28.0 GiB, 28.0 GiB |
+| branch, `mxfp8` | X1, X2 | 72.65 GiB, 72.65 GiB | 28.1 GiB, 28.1 GiB |
+
+With `mxfp8` the resident model is 0.08 GiB smaller in both boots, at the line's 0.01 GiB resolution. That is the
+drafter's re-coded linears: 170 MiB of BF16 held as one E4M3 byte a weight and one scale byte a 32, about 88 MiB, so
+about 82 MiB less. The server does not print the drafter's share on its own.
 
 ## Not established
 
