@@ -1,12 +1,24 @@
 //! Libraries (a build-time metallib, or source compiled at run time) and compute pipelines.
 const std = @import("std");
 const objc = @import("objc.zig");
+const platform = @import("sys");
 const types = @import("types.zig");
 const Device = @import("device.zig").Device;
 
 const Id = objc.Id;
 
 pub const Error = error{ LibraryLoad, NoFunction, PipelineBuild };
+
+var timeline_on: std.atomic.Value(u8) = .init(2);
+
+/// TF_METAL4_TIMELINE set above 0, read once.
+fn timelineOn() bool {
+    const v = timeline_on.load(.monotonic);
+    if (v != 2) return v == 1;
+    const on: u8 = @intFromBool((platform.environment.read(u32, "TF_METAL4_TIMELINE", 0) catch 0) > 0);
+    timeline_on.store(on, .monotonic);
+    return on == 1;
+}
 
 extern "c" fn dispatch_data_create(buffer: *const anyopaque, size: usize, queue: ?*anyopaque, destructor: ?*anyopaque) ?*anyopaque;
 extern "c" fn dispatch_release(object: *anyopaque) void;
@@ -97,6 +109,11 @@ fn fail(comptime fmt: []const u8, what: anytype, err: ?Id) Error {
 pub const Pipeline = struct {
     id: Id,
 
+    /// Whether pipelines made from now on carry their kernel's name (tests reading the timeline set it on).
+    pub fn labels(on: bool) void {
+        timeline_on.store(@intFromBool(on), .monotonic);
+    }
+
     /// The kernel `name` of `library`; `indirect` lets indirect command buffers use it.
     pub fn init(device: Device, library: Library, name: []const u8, indirect: bool) Error!Pipeline {
         return make(device, library, name, indirect, false);
@@ -117,6 +134,12 @@ pub const Pipeline = struct {
         defer objc.release(desc);
         objc.msg(void, desc, "setComputeFunction:", .{func});
         objc.msg(void, desc, "setSupportIndirectCommandBuffers:", .{indirect});
+        // the kernel's name on the pipeline, for the Metal 4 timeline only (TF_METAL4_TIMELINE): nothing else reads it
+        if (timelineOn()) {
+            const label = objc.string(name);
+            defer objc.release(label);
+            objc.msg(void, desc, "setLabel:", .{label});
+        }
         const id = objc.msg(?Id, device.id, "newComputePipelineStateWithDescriptor:options:reflection:error:", .{ desc, @as(usize, 0), @as(?*anyopaque, null), &err });
         return .{ .id = id orelse {
             if (optional) std.log.info("pipeline {s}: {s}", .{ name, objc.errorText(err) }) else std.log.err("pipeline {s}: {s}", .{ name, objc.errorText(err) });

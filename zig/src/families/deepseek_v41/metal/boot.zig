@@ -8,6 +8,7 @@ const dspark = @import("dspark.zig");
 const rope = @import("rope.zig");
 const scratch = @import("scratch.zig");
 const forward = @import("forward.zig");
+const round_prof = @import("round_prof.zig");
 const serve = @import("serve.zig");
 const target_ = @import("target.zig");
 
@@ -31,6 +32,16 @@ pub const Options = struct {
     /// Engram row shards (null: TF_DSV41_ENGRAM_DIR, else the config's engram_table_dir beside the checkpoint)
     engram_dir: ?[]const u8 = null,
 };
+
+/// The family's queue: Metal 4 under TF_METAL4=1, or by default when `metal4` holds, else Metal 3; the same kernels.
+pub fn openQueue(device: mtl.Device, metal4: bool) !mtl.Queue {
+    if (!try environment.read(bool, "TF_METAL4", metal4)) return device.queue();
+    if (device.queue4()) |q| {
+        std.log.info("dsv41 metal: Metal 4 command queue", .{});
+        return q;
+    } else |_| std.log.warn("dsv41 metal: TF_METAL4=1 but this Mac has no Metal 4 queue; Metal 3 it is", .{});
+    return device.queue();
+}
 
 /// Everything a served model borrows, owned here and closed after the model's target and pass.
 pub const Boot = struct {
@@ -61,7 +72,7 @@ pub const Boot = struct {
         const limit: u32 = @intCast(@min(o.context orelse 262144, c.rope.max_positions));
         b.device = try mtl.Device.init();
         errdefer b.device.deinit();
-        b.queue = try b.device.queue();
+        b.queue = try openQueue(b.device, b.device.hasMetal4());
         errdefer b.queue.deinit();
         b.p = try pipelines.Pipelines.load(a, b.device, c);
         errdefer b.p.deinit();
@@ -153,6 +164,7 @@ pub const Boot = struct {
         if (b.ds) |*w| w.deinit();
         b.w.deinit();
         b.p.deinit();
+        round_prof.forget();
         b.queue.deinit();
         b.device.deinit();
         b.a.destroy(b);
