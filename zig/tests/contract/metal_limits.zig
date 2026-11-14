@@ -168,6 +168,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = try tf.lfm2_moe.source.prompt(device, a, true);
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = "" };
     }
+    if (std.mem.startsWith(u8, d.name, "tree round picks ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.core_tree_round, .pre_m5 = sources.core_tree_round };
+    }
     if (std.mem.startsWith(u8, d.name, "metal lfm2 ")) {
         if (!assemble) return undefined;
         return .{ .decl = d, .function = fun, .here = sources.lfm2, .pre_m5 = sources.lfm2 };

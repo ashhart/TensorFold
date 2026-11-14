@@ -62,6 +62,7 @@ fn program(b: *std.Build, name: []const u8, about: []const u8, path: []const u8,
 
 /// The core lane, shared-context and 27B programs and host tests; the 27B's module takes `core` from qwen27_core.zig.
 pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, sources: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, s: Shared, test_step: *std.Build.Step) void {
+    b.step("test-qwen27-metal4", "Metal 4 queue feedback and resource retirement").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal, .filters = &.{"a Metal 4 context runs"} })).step);
     const core_row = b.createModule(.{ .root_source_file = b.path("zig/src/core/row_projection.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = core_row })).step);
     const core_lane = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_projection.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
@@ -130,6 +131,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = program(b, "tf-qwen27-lanes-check", "Build synthetic lane-core versus plain greedy token and state check", "zig/tests/qwen27/lanes_check.zig", target, false, served);
     _ = program(b, "tf-qwen27-lanes-run", "Build the real-weight serial versus lane-core A/B", "zig/tests/qwen27/lanes_run.zig", target, false, served);
     _ = program(b, "tf-qwen27-bench", "Build the projection-split, one-row floor and shared-round timing bench on real weights", "zig/tests/qwen27/bench.zig", target, false, served);
+    _ = program(b, "tf-qwen27-qk-ab", "Build tf_lane_reg against qk, interleaved on real weights", "zig/tests/qwen27/qk_ab.zig", target, false, served);
+    _ = program(b, "tf-qwen27-glue-ab", "Build the general glue against the flat kernels, interleaved on real weights", "zig/tests/qwen27/glue_ab.zig", target, false, served);
+    _ = program(b, "tf-qwen27-metal4-ab", "Build Metal 3 against Metal 4 verify passes, interleaved on real weights", "zig/tests/qwen27/metal4_ab.zig", target, false, served);
+    _ = program(b, "tf-qwen27-stack-ab", "Build stock kernels on Metal 3 against qk, flat glue and Metal 4, interleaved on real weights", "zig/tests/qwen27/stack_ab.zig", target, false, served);
     _ = program(b, "tf-qwen27-classes", "Build the per-class projection GPU time against the weight-bytes roofline on real weights", "zig/tests/qwen27/classes.zig", target, false, served);
     _ = program(b, "tf-qwen27-streams", "Build the real-weight check that shared rounds keep each stream's logits alone", "zig/tests/qwen27/streams.zig", target, false, served);
     _ = program(b, "tf-qwen27-reuse", "Qwen27 prompt reuse through the served host against fresh prompt passes: states and replies", "zig/tests/qwen27/reuse.zig", target, false, served);
