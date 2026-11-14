@@ -24,6 +24,13 @@ With the opt-in, `--mtp-confidence` caps the head's probability prefix using the
 rows remain costed. The allocator can choose plain instead of a head proposal. The default confidence path is unchanged.
 No row-cost learner is added here; live learned target costs belong to the lane core (#2111).
 
+`TF_GLM_COPY_SHARE=1`, with `TF_GLM_COPIES=1`, lets a copy in a shared round take the lone ramp too (`2w+1` after a
+copy kept whole, back to the first copy's three tokens after a miss), capped at its stream's share of the round's 32
+rows less its pending row: 15 tokens at two streams, 7 at four, and three from seven streams on. Without it every copy
+in a shared round stays three tokens wide, and only a stream alone ramps. The cap leaves the other streams' rows open;
+the prices still decide what fills them. Unset or 0 keeps the facts above, and 1 without `TF_GLM_COPIES=1` refuses at
+the open. With `TF_GLM_SHARED=0` each stream's copy keeps three tokens, and Recall keeps its width.
+
 Load timing covers short contexts and one stream, and the seed tables came from an older DFlash2 profile, so neither
 establishes total round cost at a new checkpoint, long context, rank layout or high concurrency. Keep the default off until exact TP=2 whole-model replies and measured cost
 pass: baseline/OFF/ON/ON/OFF, greedy and seeded chat/code, one and eight streams, short/32K/64K context, cold prompts

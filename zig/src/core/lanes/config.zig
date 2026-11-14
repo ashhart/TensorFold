@@ -21,6 +21,7 @@ pub const Model = struct {
 
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
+    shared_copy_ramp: bool = false, // a shared round's copy takes the lone ramp too, to its stream's share of the rows
     gpu_tokens: bool = false, // one-token rounds may run a step ahead (pipelined)
     mtp: bool = false, // a draft head is loaded
     speculate: bool = false, // the head can draft from a verify's rows
@@ -70,6 +71,7 @@ pub const Config = struct {
     max_copy: u32,
     own_copy_rates: bool = false, // Model.own_copy_rates
     first_copy: u32,
+    shared_copy_ramp: bool = false, // Model.shared_copy_ramp, with shared rounds (family_streams)
     base_width: u32,
     family_mtp: bool,
     speculate_early: bool,
@@ -158,6 +160,7 @@ pub const Config = struct {
             .max_copy = max_copy,
             .own_copy_rates = m.own_copy_rates,
             .first_copy = first_copy,
+            .shared_copy_ramp = m.shared_copy_ramp and streams,
             .base_width = @min(width, first_copy + 1),
             .family_mtp = m.mtp and width >= 2 and m.speculate,
             .speculate_early = m.speculate_early and !(m.root_copies and m.copy_drafts),
