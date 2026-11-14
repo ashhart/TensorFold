@@ -313,6 +313,14 @@ pub fn main(init: std.process.Init) !u8 {
     }
     var dsv41_routes = try @import("metal_dsv41_main.zig").Routes.create(a, device, queue, &kernels, o.only);
     defer dsv41_routes.destroy();
+    const Exl3Projection = @import("metal_exl3_projection.zig").Suite;
+    var exl3_projection: ?*Exl3Projection = null;
+    defer if (exl3_projection) |suite| suite.destroy();
+    if (Exl3Projection.matches(o.only)) {
+        if (tensor) {
+            exl3_projection = try Exl3Projection.create(a, device, queue, &kernels, o.only);
+        } else std.debug.print("SKIP exl3-metal: tensor-unit projection qualification requires a supported GPU\n", .{});
+    }
     var d3combines: [std.enums.values(drama_combine.Variant).len]drama_combine.Combine = undefined;
     var d3combine_count: usize = 0;
     defer for (d3combines[0..d3combine_count]) |*p| p.deinit();

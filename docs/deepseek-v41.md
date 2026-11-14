@@ -2,15 +2,16 @@
 
 TensorFold serves DeepSeek-V4.1-Flash from resident EXL3 packs on Apple Silicon through the
 Metal engine. **Scope: a DeepSeek-only family.** The kernels below are specific to the EXL3
-2.9 bpw pack format (trellis-coded weights the GPU decodes at use time) and are tuned on one
-M5 Ultra (256 GB unified memory, 80-core GPU); receipts name that hardware class and no
-other checkpoint or chip is claimed.
+2.9 bpw pack format (trellis-coded weights the GPU decodes at use time). The parent's historical
+receipts below use an M5 Ultra with 256 GB unified memory and an 80-core GPU.
+The [optimization follow-up receipt](receipts/dsv41-exl3-metal/README.md) names its separate 64-core machine;
+neither receipt qualifies other checkpoints or chips.
 
 The lane core runs one stream per slot and windows of rows, so concurrent requests keep
-their own caches and Engram cursor. The served checks hold: a drafted request equals the
+their own caches and Engram cursor. The parent's recorded served checks report: a drafted request equals the
 no-drafts reply token for token (the 20-prompt band reads 329/329), a resumed conversation
 equals the fresh one, concurrent lanes equal their solo runs (12/12 under sampled draws),
-and the retained prompt cache is bounded by its own budget.
+and the retained prompt cache is bounded by its own budget. These are not new follow-up measurements.
 
 ## What you need
 
@@ -22,8 +23,8 @@ and the retained prompt cache is bounded by its own budget.
 - The original release's inference directory — `tokenizer.json`, `config.json`,
   `chat_template.jinja` and the two Engram tables — beside the pack or passed with
   `--engram-table-dir` / `--engram-stream-dir`. The weights come under DeepSeek's own
-  terms; the inference code is MIT and the native reference follows it (see
-  THIRD_PARTY_NOTICES).
+  terms; DeepSeek's reference inference code is MIT and the native reference follows it (see
+  THIRD_PARTY_NOTICES). TensorFold itself is Apache-2.0.
 - An EXL3 pack of the checkpoint. Pack provenance is the pack's own business: read the
   `provenance/` note that ships beside it before comparing any two packs' numbers.
 
@@ -98,6 +99,9 @@ Operator checks are `zig build test-exl3-gpu` and `zig build test-deepseek-v41`;
 fidelity, every chip's performance, or complete kernel-contract qualification for the added bodies.
 The parent's historical kernel-contract counts do not qualify these new kernels.
 The follow-up remains a draft until its remaining kernel-contract and model gates are agreed and completed.
+
+The follow-up's [reproduction commands and raw token/timing receipts](receipts/dsv41-exl3-metal/README.md)
+separate the newly exercised checks from the parent's historical results.
 
 ## Known issues (honest)
 

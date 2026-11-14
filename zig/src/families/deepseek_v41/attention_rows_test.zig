@@ -10,9 +10,7 @@ const slots = 4;
 const positions = [slots]u32{ 5, 130, 700, 16700 }; // before the ring fills, wrapped, past the pick budget, a long prompt
 const main_rows = 8400;
 const ring_at = 2 * 128 * 528; // the layer's ring inside a slot's live buffer
-const heads = 64;
 const width = 512;
-const q_stride = heads * width;
 
 fn view(b: mtl.Buffer) View {
     return .{ .buffer = b };
@@ -41,13 +39,20 @@ fn fillBf(b: mtl.Buffer, count: usize, state: *u64) void {
     for (b.slice(u16, count)) |*x| x.* = bf((@as(f32, @floatFromInt(draw(state) % 2000)) - 1000.0) / 995.0);
 }
 // A key row's scale bytes stay small: e8m0 near 2^0 (base 124) for the window, e4 near 2^-3 (0x20) for compressed.
-fn fixScales(b: mtl.Buffer, rows: usize, stride: usize, body: usize, base: u32, state: *u64) void {
+fn finishPacked(b: mtl.Buffer, rows: usize, stride: usize, body: usize, base: u32, state: *u64) void {
+    if (body == 512) for (0..rows) |r| {
+        for (b.contents()[r * stride ..][0..body]) |*x|
+            if ((x.* & 0x7f) == 0x7f) {
+                x.* = (x.* & 0x80) | 0x7e;
+            };
+    };
     for (0..rows) |r| for (b.contents()[r * stride + body .. (r + 1) * stride]) |*x| {
         x.* = @intCast(base + draw(state) % 4);
     };
 }
 
-test "batched decode windows match the per-slot chain bit for bit" {
+fn decodeWindows(comptime heads: usize) !void {
+    const q_stride = heads * width;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
@@ -73,9 +78,9 @@ test "batched decode windows match the per-slot chain bit for bit" {
         main[s] = try device.buffer(main_rows * 288, opts);
         sel[s] = try device.buffer(512 * 4, opts);
         fill(live[s], 3 * 128 * 528, &state);
-        fixScales(live[s], 3 * 128, 528, 512, 124, &state);
+        finishPacked(live[s], 3 * 128, 528, 512, 124, &state);
         fill(main[s], main_rows * 288, &state);
-        fixScales(main[s], main_rows, 288, 256, 0x20, &state);
+        finishPacked(main[s], main_rows, 288, 256, 0x20, &state);
         const comp: u32 = (positions[s] + 1) / 2;
         for (sel[s].slice(i32, 512), 0..) |*x, j| {
             const pick: i32 = @intCast(draw(&state) % comp);
@@ -90,7 +95,7 @@ test "batched decode windows match the per-slot chain bit for bit" {
     const chunk = try device.buffer(slots * 528, opts);
     defer chunk.deinit();
     fill(chunk, slots * 528, &state);
-    fixScales(chunk, slots, 528, 512, 124, &state);
+    finishPacked(chunk, slots, 528, 512, 124, &state);
     const raw = try device.buffer(slots * width * 2, opts);
     defer raw.deinit();
     fillBf(raw, slots * width, &state);
@@ -129,7 +134,7 @@ test "batched decode windows match the per-slot chain bit for bit" {
     defer dense_one.deinit();
     const dense_all = try device.buffer(slots * csa2.rows_dense * width * 2, opts);
     defer dense_all.deinit();
-    const parts = try device.buffer(8 * 8 * 4 * 32 * 68 * 4 * 2, opts);
+    const parts = try device.buffer(slots * 8 * (heads / 16) * 4 * 32 * 68 * 4, opts);
     defer parts.deinit();
     {
         const cb = queue.commandBuffer();
@@ -138,6 +143,8 @@ test "batched decode windows match the per-slot chain bit for bit" {
             const comp: u32 = (positions[s] + 1) / 2;
             try sparse.encode(enc, at(q_a, s * q_stride * 2), at(live[s], ring_at), at(chunk, s * 528), view(main[s]), view(sel[s]), view(sink), at(q_a, s * q_stride * 2), view(dense_one), view(parts), .{
                 .rows = 1,
+                .heads = heads,
+                .width = width,
                 .q_stride = q_stride,
                 .position = positions[s],
                 .chunk_rows = 1,
@@ -154,6 +161,8 @@ test "batched decode windows match the per-slot chain bit for bit" {
         const enc = cb.compute(.serial);
         sparse.encodeRows(enc, view(q_b), view(sink), view(chunk), view(dense_all), view(parts), pos_v, addr_v, mains_v, .{
             .rows = slots,
+            .heads = heads,
+            .width = width,
             .q_stride = q_stride,
             .ring_off = ring_at,
             .owner = 2,
@@ -163,6 +172,8 @@ test "batched decode windows match the per-slot chain bit for bit" {
         try submit(cb, enc);
     }
     try std.testing.expectEqualSlices(u8, q_a.contents()[0 .. slots * q_stride * 2], q_b.contents()[0 .. slots * q_stride * 2]);
+    for (q_a.slice(u16, slots * q_stride)) |bits|
+        try std.testing.expect(std.math.isFinite(@as(f32, @bitCast(@as(u32, bits) << 16))));
 
     // -- the rotation, both directions -----------------------------------------------------------------------------
     for (0..slots) |s| {
@@ -222,4 +233,8 @@ test "batched decode windows match the per-slot chain bit for bit" {
     }
     for (0..slots) |s| try std.testing.expectEqualSlices(u8, ring_ref[s].contents()[0 .. 3 * 128 * 528], live[s].contents()[0 .. 3 * 128 * 528]);
     std.debug.print("[batched decode windows] {d} slots bit-exact: scan+merge, rope both ways, glue, publish\n", .{slots});
+}
+
+test "batched decode windows match the per-slot chain bit for bit" {
+    inline for (.{ 16, 32, 64 }) |heads| try decodeWindows(heads);
 }

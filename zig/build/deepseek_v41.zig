@@ -45,6 +45,9 @@ pub fn checks(
     }) });
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
     device_step.dependOn(&b.addRunArtifact(device).step);
+    const rows_probe = b.addTest(.{ .root_module = device.root_module, .filters = &.{"batched decode windows"} });
+    b.step("test-deepseek-v41-rows", "Per-slot attention, rotation and KV publication at supported head counts")
+        .dependOn(&b.addRunArtifact(rows_probe).step);
     // The family's Metal sources carry struct-size static_asserts; compile them the way the engine joins them.
     const mirrors = b.addSystemCommand(&.{ "sh", "tools/zig/check_dsv41_metal_mirrors.sh" });
     mirrors.setCwd(b.path("."));

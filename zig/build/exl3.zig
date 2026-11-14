@@ -66,6 +66,18 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     host_step.dependOn(&host.step);
     host_step.dependOn(&oracle_tests.step);
     host_tests.dependOn(host_step);
+    const reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/exl3_projection_ref.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "exl3_format", .module = b.createModule(.{ .root_source_file = b.path("zig/src/core/exl3_format.zig") }) },
+            .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) },
+        },
+    }) }));
+    b.step("test-exl3-contract-host", "EXL3 independent full-shape oracle and reduced-precision plants")
+        .dependOn(&reference.step);
+    host_step.dependOn(&reference.step);
     const gpu = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/core/exl3_projection_gpu_test.zig"),
         .target = target,

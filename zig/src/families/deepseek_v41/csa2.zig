@@ -311,7 +311,7 @@ pub const Pipelines = struct {
             enc.setBuffer(partials.buffer, partials.offset, 0);
             enc.setBuffer(q.buffer, q.offset, 1);
             enc.setBuffer(sink.buffer, sink.offset, 2);
-            const merge: Params = .{ .rows = a.rows, .q_stride = a.q_stride, .position = 0, .chunk_rows = 1, .ratio = a.ratio, .compressed_rows = 0, .splits = a.splits };
+            const merge: Params = .{ .rows = a.rows, .heads = a.heads, .width = a.width, .q_stride = a.q_stride, .position = 0, .chunk_rows = 1, .ratio = a.ratio, .compressed_rows = 0, .splits = a.splits };
             enc.setValue(merge, 3);
             enc.dispatchGroups(mtl.Size.of(a.heads / 16, a.rows, if (merge_split) 4 else 1), mtl.Size.of(32, 4, 1));
         }

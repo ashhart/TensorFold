@@ -1,0 +1,97 @@
+{
+  "exl3_projection": {
+    "command": "zig build test-exl3-gpu -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all",
+    "base": {
+      "commit": "bec140d545aa50b765f26cf295b43179c6b2834f",
+      "passed": 21,
+      "failed": 6,
+      "total": 27,
+      "exit_code": 1
+    },
+    "candidate": {
+      "commit": "128cfe743a76f59b350d0c750a12669708029ff3",
+      "passed": 36,
+      "failed": 3,
+      "total": 39,
+      "exit_code": 1
+    },
+    "remaining_failing_tests_also_failed_on_base": [
+      "GPU router descriptors select mixed-width experts with gather and scatter without host routing",
+      "packed signs and GPU expert filtering preserve untouched output slots",
+      "caller-prepared grouped expert tiles preserve scatter slots and ignore padding"
+    ],
+    "notes": [
+      "The complete target is NOT passing on either revision.",
+      "The unsupported indexed-width scalar-reference regression, tiled/table bit checks and chain/MoE fusion checks pass.",
+      "The shared-down fixture must reserve the maximum scratch of its gate/up, routed-down and shared-down stages."
+    ]
+  },
+  "native_build": {
+    "commit": "e070123319b69e73c969b91409dd7195fbbef93e",
+    "command": "zig build native -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all",
+    "steps_succeeded": 66,
+    "steps_total": 66,
+    "exit_code": 0
+  },
+  "native_host": {
+    "commit": "0870c860f48ba88a53e72b14dafa0434a01dbd84",
+    "command": "zig build native test-native -Dcpu=apple_m1 -Doptimize=ReleaseSafe -j8 --summary all",
+    "passed": 118,
+    "skipped": 3,
+    "total": 121,
+    "exit_code": 0
+  },
+  "earlier_family_gpu": {
+    "commit": "59535dad914819ea4d281f87c81a138c4f2c4e1b",
+    "target": "test-deepseek-v41",
+    "passed": 73,
+    "total": 73,
+    "notes": "This target passed within a combined invocation that failed native compilation. The native dependency was fixed and checked separately. This is not a rerun of the family suite after the core fallback fix."
+  },
+  "host_lane_api": {
+    "target": "test-lane-api-host",
+    "passed": 545,
+    "total": 545,
+    "exit_code": 0,
+    "notes": "Scheduler/interface sources unchanged since this host check."
+  },
+  "environment_host": {
+    "target": "test-environment-host",
+    "passed": 12,
+    "total": 12,
+    "exit_code": 0
+  },
+  "receipt_checker_controls": {
+    "changed_complete_token_hash_exit_code": 1,
+    "missing_complete_token_hash_exit_code": 1,
+    "temporary_control_files_removed": true
+  },
+  "release_qualified": false,
+  "projection_contract": {
+    "command": "tf-kernel-contract --only exl3-metal --no-limits",
+    "kernels": 219,
+    "entrypoints": 13,
+    "passed": 219,
+    "failed": 0,
+    "known_findings": 0,
+    "controls": 876,
+    "caught": 876,
+    "missed": 0,
+    "gate_ms": 183561,
+    "scope": "Registered default-sixteen-warp decode width/codebook cases and KU2 prompt cases; independent scalar-decoded FP64, exact parent reduction and KU1 replacement, full output columns and served dimensions."
+  },
+  "projection_resources": {
+    "command": "tf-kernel-contract --only exl3-metal --no-gates --offline OFFLINE_DIR",
+    "selected_launches": 13,
+    "live_passed": 13,
+    "limit_problems": 0,
+    "resource_controls_caught": 2,
+    "m1_m2": "Not served: projection pipeline selection requires tensor units (GPU generation 17). Offline controls exercised on M1/M2 targets; no claim of projection execution there."
+  },
+  "contract_host": {
+    "command": "zig build test-exl3-contract-host test-kernel-contract -Dcpu=apple_m1 -j4 --summary all",
+    "passed": 232,
+    "failed": 0,
+    "build_steps": 33
+  }
+}

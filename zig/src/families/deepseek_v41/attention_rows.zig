@@ -103,6 +103,8 @@ pub fn tail(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const weights.Attent
     const dense: View = .{ .buffer = work.rows.dense, .offset = 0 };
     p.sparse.encodeRows(e, q, tensor(w.sink), chunkView(work), dense, work.splitPartials(), pos, addr, view(work, RowsScratch.mains_at), .{
         .rows = n,
+        .heads = c.heads,
+        .width = c.head_dim,
         .q_stride = c.heads * c.head_dim,
         .ring_off = ring_off,
         .owner = owner,

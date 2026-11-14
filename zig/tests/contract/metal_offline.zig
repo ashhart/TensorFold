@@ -127,6 +127,12 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
     const x = Ctx{ .a = a, .io = io, .dir = dir };
     var n: usize = 0;
     for (list) |d| {
+        const need_m1 = d.min_gen <= 13;
+        const need_m2 = d.min_gen <= 14;
+        if (!need_m1 and !need_m2) {
+            std.debug.print("SKIP offline {s}: engine selects this launch only from GPU generation {d}\n", .{ d.name, d.min_gen });
+            continue;
+        }
         const l = try launchOf(a, device, d);
         const control = std.mem.startsWith(u8, d.name, "control");
         if (d.unbuildable) {
@@ -136,8 +142,8 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
         const safe = d.adapts or d.reserved >= d.threads or (!d.offline and d.threads <= 256);
         const got = blk: {
             const lib = library(x, l.pre_m5) catch |err| break :blk err;
-            const m1 = familyLimit(x, lib, l.function, &m1_archs, d.reserved) catch |err| break :blk err;
-            const m2 = familyLimit(x, lib, l.function, &m2_archs, d.reserved) catch |err| break :blk err;
+            const m1 = if (need_m1) (familyLimit(x, lib, l.function, &m1_archs, d.reserved) catch |err| break :blk err) else 0;
+            const m2 = if (need_m2) (familyLimit(x, lib, l.function, &m2_archs, d.reserved) catch |err| break :blk err) else 0;
             break :blk [2]u32{ m1, m2 };
         };
         const m = got catch |err| {
@@ -147,8 +153,9 @@ pub fn run(a: std.mem.Allocator, io: std.Io, dir: []const u8, list: []const limi
             std.debug.print("{s} offline {s}: no M1/M2 build ({t}); {d} threads a group\n", .{ word, d.name, err, d.threads });
             continue;
         };
-        const fits = (m[0] >= d.threads and m[1] >= d.threads) or d.reserved >= d.threads or d.adapts;
-        const current = (d.m1 <= m[0] and d.m2 <= m[1] and d.m1 > 0) or d.adapts or d.reserved >= d.threads; // a record: the least any toolchain compiled
+        const fits = ((!need_m1 or m[0] >= d.threads) and (!need_m2 or m[1] >= d.threads)) or d.reserved >= d.threads or d.adapts;
+        const recorded = (!need_m1 or d.m1 <= m[0]) and (!need_m2 or d.m2 <= m[1]) and (if (need_m1) d.m1 > 0 else d.m2 > 0);
+        const current = recorded or d.adapts or d.reserved >= d.threads;
         if (!control and (!fits or !current)) n += 1;
         const word = if (control) (if (fits) "MISSED" else "RED ") else if (fits and current) "PASS" else "FAIL";
         std.debug.print("{s} offline {s}: {d} threads; M1 pipelines take {d}, M2 {d} (recorded {d}, {d})\n", .{ word, d.name, d.threads, m[0], m[1], d.m1, d.m2 });

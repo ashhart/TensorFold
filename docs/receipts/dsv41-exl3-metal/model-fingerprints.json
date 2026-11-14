@@ -1,0 +1,103 @@
+{
+  "pack": {
+    "repository": "Mia-AiLab/DeepSeek-V4.1-Flash-1017-EXL3-EAQ-v1-2.9-bpw",
+    "revision": "45ee5d0fd106c94a3d77f721e09cbb2f50e5a16b",
+    "weight_shard_sha256": {
+      "model-00001-of-00039.safetensors": "7d18021abd2971d7a1986507e0777f2d49d046ad6ac24f5fe70588cebdcf1910",
+      "model-00002-of-00039.safetensors": "e24859cfbd8ebd4bc24b8579a2992da284ab002015847c6295009d4fea00c711",
+      "model-00003-of-00039.safetensors": "bb4edfb31a01ecd74a2d8091945fa24f02d8c64397876d39e0c4ea104bd1b0e5",
+      "model-00004-of-00039.safetensors": "3ef8a8bed655b747550154d0bca71267fcb46239e35a990db9f373c7bfda3f94",
+      "model-00005-of-00039.safetensors": "87366b18c6e49c5143c0a1afef189ef170de8dfb78a47ba14edfb6cc7ebf2753",
+      "model-00006-of-00039.safetensors": "3ba7c830ef44613ee1ab9c9f6a796f813f42f0519053ebbec03514a6d8714349",
+      "model-00007-of-00039.safetensors": "6b4c8d0b081f27e6288a66626be2c11515e9280a3086d0925670a571e40a1ad4",
+      "model-00008-of-00039.safetensors": "6e6c204a67d66ce98c9f6188816c3535f11af0f6db98c562228af4b27dcc9a2d",
+      "model-00009-of-00039.safetensors": "ed0a69b7307076462b9d4578839c9956c198f716b857a6fc6aeea95fbdd0ff9e",
+      "model-00010-of-00039.safetensors": "45a621997686e51648c54333ddd309521cbc4fb54debd7a65fb293085cfb9694",
+      "model-00011-of-00039.safetensors": "348d4b250f86b21f9793be736c5d05a29da14357ddce6bf635d23b47b10f1eec",
+      "model-00012-of-00039.safetensors": "e4d04c60e5e88c2fa2a2fd1c0af9d45018f5092411aad87087693bbe74119300",
+      "model-00013-of-00039.safetensors": "978514e757cdafd2cd506c98bccb51e488cebd62caa215034fca0d401f8be1d7",
+      "model-00014-of-00039.safetensors": "b0fdb9d59a46d4c15140a406cb796ea41de41961537b6abff5b712555847e984",
+      "model-00015-of-00039.safetensors": "b7b11a4b2823bd3b9186c97905416867a71c270cc058287f88517f8a1caf3e87",
+      "model-00016-of-00039.safetensors": "584e16c28ba6e800c6e22a4f660aa6bb257f7ea9bd4a140d9ecd5427f16aff66",
+      "model-00017-of-00039.safetensors": "a584ba0235153a2d042873200707a3705a0cb7c7ef5741b176578e560c390b27",
+      "model-00018-of-00039.safetensors": "1c29b236ec0d7b7e853eb5794c47845ef9fee0dc24112e83238279c0db31b273",
+      "model-00019-of-00039.safetensors": "468e038fa7ece5329b49114aaf6ed43f159919db4d328adac6390deb565edbaf",
+      "model-00020-of-00039.safetensors": "9e4edbaefb94a853c16ced7d82cc0b0c0fac010a638007dece005aa6e0400842",
+      "model-00021-of-00039.safetensors": "b4ca1f13b6c84544018ba479e996de40a49e3f4700370048d2f50006ba304aef",
+      "model-00022-of-00039.safetensors": "7145fe502df043f952f6635e05cf08cd5f12b00b123117eb36f6aa1ec1932dad",
+      "model-00023-of-00039.safetensors": "786449496a8d466a9fd350c0bd8fa1aa9ec40c3e1e2ecb1f1f2e186e53fa40fd",
+      "model-00024-of-00039.safetensors": "9149b4f9b5b9bbfa24f7344ce31421237bbade2bb59e991493ef3cf3de931ae7",
+      "model-00025-of-00039.safetensors": "6bfa439fe9797eafede930a049270983bf7102e2f57801a0cb674a9fa8a6f137",
+      "model-00026-of-00039.safetensors": "1ec3a165626069f904966540b0d0f43b47a58808b5bfb696c382fd6d118adf29",
+      "model-00027-of-00039.safetensors": "25029c1fe6e177931608d8fbc7a2202de2e3d614b12ff37c8299038a24ec8537",
+      "model-00028-of-00039.safetensors": "9e861f7437be6274c7e5ac106597bd8571fea4c915f9db86790710dfc5cc73f9",
+      "model-00029-of-00039.safetensors": "059aa4933a7e5cbde98f69797bf6a2a6163bd0a8a3280613e57699ce295f7c64",
+      "model-00030-of-00039.safetensors": "4b1825b7fbf71c01dcde9e8b8f6dbc34778d7b33998c33e962bc0c72c282f214",
+      "model-00031-of-00039.safetensors": "be975db269aad71de4134d3f5295e4a30b75171c959b52ecff74e6af3b009626",
+      "model-00032-of-00039.safetensors": "99acb8bcff210fc016f4308edd6f1c6acd6ffb73c655e058bf65a302c1919a27",
+      "model-00033-of-00039.safetensors": "6fa29eb49ddcd74a226442b22563426a231dfdf33bd813fd731039151a7edf95",
+      "model-00034-of-00039.safetensors": "bc80bf84d7f88b66e906eeab7fe345efb2335075e02aaa66993053fcb6ff51ed",
+      "model-00035-of-00039.safetensors": "7b51f60e19164fa57a9dc3fa451a61af5acb224944d7cb65f242e45cc80d2f21",
+      "model-00036-of-00039.safetensors": "e291dd4ac2633bf86a4415b3fda2bfe51bba05406a9885f3070220c72b17b313",
+      "model-00037-of-00039.safetensors": "b16e8fb4010d2bc8cf6e6f59dd26bd36ab77b97584c0bcc6762aac5cdd459a88",
+      "model-00038-of-00039.safetensors": "aa4e072510ae20240222f95f5dfc37fa103d8a8bc433315844f2cd4f566ec6ab",
+      "model-00039-of-00039.safetensors": "2e363ac298b1f59f6a788c404f5b97622c72bfa39818c317dea40f7f518d27b9"
+    },
+    "metadata": {
+      "config.json": {
+        "sha256": "4eac47f0da99a65f2bcfb97ca357f7d5388a79c9b377d6dd65b1ed18548d846d",
+        "git_blob_sha1": "14e367895dbf40db85380acc67b2af38d9744d03",
+        "size": 3563
+      },
+      "model.safetensors.index.json": {
+        "sha256": "6c4679e6407806ab4e63f9a2a46a825c5cab4990cd916723721e7ba0c6bb7d77",
+        "git_blob_sha1": "0e63aa262cee29350edf1e734c76871d189166c9",
+        "size": 15504210
+      },
+      "tokenizer.json": {
+        "sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+        "git_blob_sha1": "6a15814dd25c934028034531da744c689f87ff21",
+        "size": 6367257
+      },
+      "tokenizer_config.json": {
+        "sha256": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+        "git_blob_sha1": "f3dad388a2bbfd6a8605bd02754acd86d9ca5112",
+        "size": 801
+      },
+      "chat_template.jinja": {
+        "sha256": "3e0c2a31ea12b1d7c02319e20356e2e2bc46da2638e4bae6980493329efeca73",
+        "git_blob_sha1": "c5d8fa8a9d8b8054f0a077201df3c0c2cdaa6033",
+        "size": 34236
+      }
+    }
+  },
+  "source": {
+    "repository": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    "revision": "1bae0e1088993b9b82de08f59de5be5a34e42170",
+    "streamed_shard_sha256": {
+      "model-00047-of-00048.safetensors": "76a05106ece259be83d1bfea0dcb54f23377864ee60fd321690f35e6698a2af5",
+      "model-00048-of-00048.safetensors": "9dc51433e195bc78b5ad846b68643cc0351d3b174e5e4309222d3b7402c83afd"
+    },
+    "metadata": {
+      "config.json": {
+        "sha256": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+        "git_blob_sha1": "09917a9139b22d5bf8be52132787f435147b1020",
+        "size": 3311
+      },
+      "tokenizer.json": {
+        "sha256": "c90dfa01249db1be4245780a052ede752e1361c612ac6d08e2bdada7d599476b",
+        "git_blob_sha1": "6a15814dd25c934028034531da744c689f87ff21",
+        "size": 6367257
+      },
+      "tokenizer_config.json": {
+        "sha256": "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547",
+        "git_blob_sha1": "f3dad388a2bbfd6a8605bd02754acd86d9ca5112",
+        "size": 801
+      }
+    }
+  },
+  "generated": {
+    "engram-token-map.bin": "b9a7cf9d341f5daf8fc435dbc36153bf4b28c1b8075be20de30d0556fb910511"
+  },
+  "verification": "Hugging Face pinned tree LFS SHA256 where present; otherwise Git blob SHA1. All listed files verified. Generated token map has no public repository object."
+}

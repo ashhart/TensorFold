@@ -118,6 +118,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun)) |l| return l;
+    if (try @import("metal_exl3_projection_limits.zig").launchOf(a, device, d, fun)) |l| return l;
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         const raw = sources.lfm2_prompt_masked.source;
         const body = try tf.frags.source(device, a, raw);
@@ -264,6 +265,10 @@ fn pagedLaunch(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, 
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
 pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
+    if (device.generation() < l.decl.min_gen) {
+        std.debug.print("SKIP limits here {s}: engine selects this launch only from GPU generation {d}\n", .{ l.decl.name, l.decl.min_gen });
+        return 0;
+    }
     if (std.mem.indexOf(u8, l.here, "TF_ATTN_PV_FP32") != null) {
         const full = std.mem.indexOf(u8, l.here, tf.frags.precision.define) != null;
         std.debug.print("PRECISION limits {s}: shared P x V library {s}\n", .{ l.decl.name, if (full) "fp32" else "legacy" });
@@ -295,7 +300,7 @@ pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]co
         try list.append(a, d);
     }
     var n = try registry.checkMetal(a, list.items, false);
-    std.debug.print("{s} limits: {d} selected registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
+    std.debug.print("{s} limits: {d} selected Metal launches on their declared device generations, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", list.items.len, n });
     for (list.items) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
