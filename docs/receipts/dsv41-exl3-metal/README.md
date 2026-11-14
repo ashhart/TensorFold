@@ -341,7 +341,7 @@ current process footprint falls from 226,962,856,920 / 222,969,100,760 bytes loa
 The parked flag and current footprint must both be observed; no lifetime-maximum RSS substitution is used.
 With lookup disabled, real trained MTP proposes **370 tokens** and preserves the same full reply hashes.
 Both mixed and trained-only servers exit gracefully. These current-source invariants do not waive the numerical band,
-residency, source-matched no-slowdown, release or unavailable-chip/parent gates. Publication remains explicitly held by the owner.
+residency, source-matched no-slowdown, release or unavailable-chip/parent gates.
 
 ### Fused Sinkhorn reduction-order repair
 
@@ -358,7 +358,42 @@ The command still exits 1 on **4096 execution disk bytes**, with zero page-ins. 
 profile commands all pass exact logits and zero-read/zero-page-in execution on this source. These short windows
 do not replace the failed full-history residency result. Post-repair serving also passes 41 full-hash replies, cancellation recovery,
 two real idle unload/reloads and trained-only lookup0 with 367 actual proposals; both servers exit0. These runs were under filesystem
-tracing, not controlled performance measurements. Publication stays held; the changed fused kernel's contract registration is being completed.
+tracing, not controlled performance measurements. The fused boundary's contract registration and the final tree's results follow.
+
+### Final qualification of source `efdf7a464e`
+
+Every command below ran on that exact tree, synced from the commit, on an M5 Ultra (M4 Pro where stated).
+
+- Build and test corpus, reported counts: **977/977 steps; 4760 of 4845 tests passed, 85 skipped**. The device-free CUDA host
+  subset passes **345/345 steps, 131 tests**.
+- Kernel contract on the M5 Ultra: `--only dsv41` **102 kernels pass gates 1-4**, 237 controls red as planted, 0 missed;
+  `--only exl3` **296 kernels pass**, 1186 controls red as planted, 0 limit problems. On the M4 Pro: dsv41 94 and exl3 35 pass.
+  The six dsv41 offline M1/M2 limit problems (`xp_quant`, `fp4pack`, `fp4rt`, `hcmix`, `hcpost`, `joinpost`) are identical at the
+  parent `bec140d545` (89 kernels pass there), so this delta does not introduce them. The unfiltered contract aborts in
+  `metal_lfm3_attention_sums.zig:39` (integer overflow in `valuesDepth`), a file this delta does not touch, so it was not completed.
+  The exhaustive rotary sweep covers 302,008,320 cases.
+- Strict one-, two- and four-row profiles return identical grouped and ungrouped logits. The first run, after the build had
+  evicted the file cache, read 7,700,480 / 7,782,400 / 15,450,112 bytes (96 / 97 / 193 page-ins) and failed the residency gate.
+  Two consecutive reruns pass for all three, with 0 bytes and 0 page-ins. The gate therefore measures cache temperature at
+  execution time; a warm pass does not prove that every Engram table page is resident.
+- The unchanged full 128-token comparison: band ratio **0.967305** (clear at 1.05), mean KL 0.042165, worst-row KL 0.832581,
+  five teacher argmax differences; execution residency passes with 0 bytes and 0 page-ins in that warm run.
+- Served checks on this tree, as above: 41 full-hash replies, cancellation, two idle unload/reload cycles (loaded
+  226,963,086,272 / 222,898,212,784 bytes, parked 749,290,720 / 151,176,440), trained-only lookup0 with 367 proposals.
+- Parent against this tree, same machine, 4096 workspace rows and prefill step 4096 in both arms, 64 tokens, three repetitions.
+  Solo, serial and concurrent hashes are equal inside each build. Tokens differ between the builds because the arithmetic
+  changed, so `tools/bench_exl3_compare.py` refuses the pair and this is an observation, not a no-slowdown qualification:
+
+| Cell | Parent tok/s | This tree tok/s |
+|---|---|---|
+| short, 1 stream | 40.6 | 52.5 |
+| short, 4 streams, aggregate / steady | 43.5 / 61.0 | 59.0 / 93.9 |
+| long, 1 stream | 38.5 | 49.1 |
+| long, 4 streams, aggregate / steady | 6.1 / 58.1 | 11.1 / 88.4 |
+| long TTFT max, 1 / 4 streams | 12.34 s / 48.87 s | 6.53 s / 26.47 s |
+
+Still open: the parent's review gates (code provenance and copy rule, integration), ATC coverage (the board is incomplete),
+runtime on M1, M2 and M3 chips, and a source-matched no-slowdown comparator against the parent.
 
 
 
@@ -369,6 +404,6 @@ The long fixture repeats public prose; the short fixture mixes completion and ch
 The client warms the server; disabling prompt retention does not make disk/Engram pages cold.
 `aggregate_tps` sums per-stream decode rates; use `end_to_end_tps` for completed tokens per concurrent request window.
 Historical pinned-workspace comparisons, current default-policy cold runs and explicit trained-MTP checks have
-different source/settings scopes; none substitutes for another. Whole-model band, the 128-row execution residency,
-the latest one-row profile residency and no-slowdown gates remain uncleared, as do unavailable-chip runtime checks and the
-parent's remaining integration gates. The new family controls use shared strict validation, not a global profile.
+different source/settings scopes; none substitutes for another. The final section above is the current scope. Unavailable-chip
+runtime checks, a token-equal no-slowdown comparator and the parent's remaining integration gates remain uncleared.
+The new family controls use shared strict validation, not a global profile.
