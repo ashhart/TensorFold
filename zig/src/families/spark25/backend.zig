@@ -339,7 +339,8 @@ pub const Spark = struct {
             end = mk;
         };
         const done = end == p.len;
-        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        // the last layer's rows nothing reads stop at their cache writes (an earlier chunk's head is off)
+        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done), @import("prompt_tail.zig").first(end - at, done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
@@ -398,7 +399,7 @@ pub const Spark = struct {
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
         try x.reach(l, l.len + 1);
-        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1, null);
         l.len += 1;
         const h = x.next;
         try x.drawRows(l, x.m.s.logits, 0, 1, position, x.handle(), 0);
@@ -434,7 +435,7 @@ pub const Spark = struct {
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;
-        try x.m.forward(x.k, x.s, chains, false, 0, total);
+        try x.m.forward(x.k, x.s, chains, false, 0, total, null);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;
