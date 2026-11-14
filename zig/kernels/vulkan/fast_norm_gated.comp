@@ -51,7 +51,7 @@ uint16_t bf16_store(float value) {
 #define ACT_NORMED(f) WIDEN(STORE_VALUE(f))
 #endif
 
-// Preserve the omitted contract, precision, and host-interface facts from the original comment.
+// GATED_ONLY builds the gated-norm kernel; otherwise params.operation selects scaled (1) or gated (0).
 #ifdef GATED_ONLY
 #define IS_SCALED (false)
 #define IS_GATED (true)
