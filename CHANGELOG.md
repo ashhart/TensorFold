@@ -2,6 +2,14 @@
 
 Each release's page on GitHub has its notes and measurements. See [the 1.0.0 release notes](RELEASE-NOTES-1.0.0.md) for the native binary's supported models and migration details.
 
+## Unreleased
+
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds each 512-key chunk's two pages once instead of reading the page table at every 32-key step, with every token and cache row unchanged (#3180, part of #1293). Thanks to @CodingEmil.
+
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: a stream is promised its prompt's KV pages when it opens a slot and its reply's as it writes them, and gives every page and its promise back when it leaves, is reset or moves to slot 0, instead of each slot holding a promise of its whole window from startup (part of #1293).
+
+- Lanes: a backend may say before a verify that a stream's next rows find no memory (`Backend.grow`); that stream ends with `length` and a message, and the round's other streams run on instead of the whole round failing. Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1` says so when a slot's next rows find no KV page (part of #1293).
+
 ## 1.2.9
 
 - Tests: the sessions writes test on real files does the same coverage with 40 requests at half the token sizes, so it no longer times out on busy CI runners (#3347).
