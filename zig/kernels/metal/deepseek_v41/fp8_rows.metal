@@ -195,7 +195,7 @@ template <uint RT, uint NB, uint CL, typename T>
     const device uchar* S0 [[buffer(2)]], device uchar* Y0 [[buffer(3)]],
     constant TfDsv41Fp8WArgs& a [[buffer(4)]], uint2 tg [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]], uint tile [[simdgroup_index_in_threadgroup]],
-    uint t [[thread_index_in_threadgroup]]) {
+    uint nsg [[simdgroups_per_threadgroup]]) {
   constexpr uint BW = CL * NB;
   threadgroup float roots[32 * BW * RT];
   const device uint4* X = (const device uint4*)(X0 + long(tg.y) * a.xs);
@@ -209,18 +209,20 @@ template <uint RT, uint NB, uint CL, typename T>
   float acc[NB][RT];
   for (uint nb = 0; nb < NB; ++nb)
     for (uint r = 0; r < RT; ++r) acc[nb][r] = 0.0f;
+  // every weight and scale load of the lane issued before any chain (a lane past the groups reads a valid group)
+  const uint gs = min(g, a.groups - 1);
+  uint4 raw[NB][2];
+  uint code[NB];
+  for (uint nb = 0; nb < NB; ++nb) {
+    const uint n = blk * BW + c * NB + nb;
+    raw[nb][0] = W[ulong(n) * (a.K / 16) + 2 * gs];
+    raw[nb][1] = W[ulong(n) * (a.K / 16) + 2 * gs + 1];
+    code[nb] = S[ulong(n / 32) * a.groups + gs];
+  }
   if (g < a.groups) {
-    TfDsv41Scale sc[NB];
-    for (uint nb = 0; nb < NB; ++nb) {
-      const uint n = blk * BW + c * NB + nb;
-      sc[nb] = tf_dsv41_scale(S[ulong(n / 32) * a.groups + g]);
-    }
     for (uint h = 0; h < 2; ++h) {
       float w[NB][16];
-      for (uint nb = 0; nb < NB; ++nb) {
-        const uint n = blk * BW + c * NB + nb;
-        tf_dsv41_w16(W[ulong(n) * (a.K / 16) + 2 * g + h], sc[nb], w[nb]);
-      }
+      for (uint nb = 0; nb < NB; ++nb) tf_dsv41_w16(raw[nb][h], tf_dsv41_scale(code[nb]), w[nb]);
       for (uint r = 0; r < RT; ++r) {
         if (r >= a.R) break;
         const ulong at = ulong(r) * (a.K / 8) + 4 * g + 2 * h;
@@ -239,14 +241,13 @@ template <uint RT, uint NB, uint CL, typename T>
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
-  for (uint o = t; o < BW * RT; o += 32 * a.tiles) {
+  // an output a simdgroup: lane k holds tile k's root (zero past the tiles); lane 0's butterfly is the pair tree
+  for (uint o = tile; o < BW * RT; o += nsg) {
     const uint col = o / RT, r = o % RT;
     if (r >= a.R) continue;
-    float v[32];
-    for (uint k = 0; k < 32; ++k) v[k] = k < a.tiles ? roots[(k * BW + col) * RT + r] : 0.0f;
-    for (uint s = 1; s < 32; s *= 2)
-      for (uint i = 0; i < 32; i += 2 * s) v[i] += v[i + s];
-    Y[ulong(r) * a.N + blk * BW + col] = T(v[0]);
+    float v = lane < a.tiles ? roots[(lane * BW + col) * RT + r] : 0.0f;
+    for (uint m = 1; m < 32; m *= 2) v += simd_shuffle_xor(v, m);
+    if (lane == 0) Y[ulong(r) * a.N + blk * BW + col] = T(v);
   }
 }
 
@@ -258,7 +259,9 @@ template <uint RT, uint NB, uint CL, typename T>
   TF_WHOLE(RT, 1, 4, float, "tf_dsv41_fp8_wb_r" #RT "_f32") \
   TF_WHOLE(RT, 1, 4, bfloat, "tf_dsv41_fp8_wb_r" #RT "_bf16") \
   TF_WHOLE(RT, 2, 4, float, "tf_dsv41_fp8_wc_r" #RT "_f32") \
-  TF_WHOLE(RT, 2, 4, bfloat, "tf_dsv41_fp8_wc_r" #RT "_bf16")
+  TF_WHOLE(RT, 2, 4, bfloat, "tf_dsv41_fp8_wc_r" #RT "_bf16") \
+  TF_WHOLE(RT, 1, 1, float, "tf_dsv41_fp8_wd_r" #RT "_f32") \
+  TF_WHOLE(RT, 1, 1, bfloat, "tf_dsv41_fp8_wd_r" #RT "_bf16")
 TF_WHOLE_TIER(1)
 TF_WHOLE_TIER(2)
 TF_WHOLE_TIER(3)
