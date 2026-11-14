@@ -51,6 +51,20 @@ pub fn complete(cb: mtl.CommandBuffer, e: mtl.ComputeEncoder) !void {
     if (cb.failure() != null) return error.Exl3GpuFailure;
 }
 
+/// One output cell as f32; a BF16 cell is the top half of an f32.
+pub fn cell(kind: ex.Output, bytes: []const u8, i: usize) f32 {
+    if (kind == .f32) return @bitCast(std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little));
+    return @bitCast(@as(u32, std.mem.readInt(u16, bytes[i * 2 ..][0..2], .little)) << 16);
+}
+
+/// Two rows of `count` cells from bodies that sum k in another order: equal within f32 rounding of the row's peak.
+pub fn expectRowClose(kind: ex.Output, want: []const u8, have: []const u8, count: usize) !void {
+    var peak: f32 = 1;
+    for (0..count) |i| peak = @max(peak, @abs(cell(kind, want, i)));
+    const slack: f32 = if (kind == .bf16) 0x1p-7 else 0.00005;
+    for (0..count) |i| try std.testing.expectApproxEqAbs(cell(kind, want, i), cell(kind, have, i), slack * peak);
+}
+
 pub fn reference(w: Owned, x: []const u16, out: *[n]f32) void {
     var rotated: [k]f16 = undefined;
     const su = w.buffers[1].slice(f16, k + 8)[8..];

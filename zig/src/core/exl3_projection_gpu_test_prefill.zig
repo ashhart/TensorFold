@@ -15,6 +15,19 @@ const reference = support.reference;
 
 const StateWindowInput = extern struct { lo: u32, hi: u32, off: u32, reserved: u32 = 0 };
 
+/// Cells of two windows agree to f32 rounding; every byte outside the cells (guards and row padding) agrees exactly.
+fn expectWindowClose(kind: ex.Output, want: []const u8, have: []const u8, count: usize) !void {
+    const size: usize = if (kind == .bf16) 2 else 4;
+    try std.testing.expectEqualSlices(u8, want[0..32], have[0..32]);
+    for (0..count) |row| {
+        const at = 32 + row * (n + 8) * size;
+        try support.expectRowClose(kind, want[at..][0 .. n * size], have[at..][0 .. n * size], n);
+        try std.testing.expectEqualSlices(u8, want[at + n * size ..][0 .. 8 * size], have[at + n * size ..][0 .. 8 * size]);
+    }
+    const end = 32 + count * (n + 8) * size;
+    try std.testing.expectEqualSlices(u8, want[end..], have[end..]);
+}
+
 test "Metal EXL3 mapped windows match independent 64-bit extraction at every offset" {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -76,11 +89,11 @@ test "Metal EXL3 mapped windows match independent 64-bit extraction at every off
     std.debug.print("mapped_state_cases={d} offsets=32 mismatches=0 guards=unchanged\n", .{count});
 }
 
-// Larger and resumed windows must retain the original per-row arithmetic and untouched padding.
+// Windows of any size leave padding untouched; a shared window sums compensated, the plain body does not.
 test "shared prefill retains exact row bits and guards across tile boundaries and fallback" {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     const prefill = p.prefill orelse return error.SharedPrefillUnavailable;
     try std.testing.expect(prefill.simdWidth() == 32 and prefill.maxThreads() >= 128);
@@ -88,9 +101,10 @@ test "shared prefill retains exact row bits and guards across tile boundaries an
     legacy.prefill = null;
     const queue = try device.queue();
     defer queue.deinit();
-    const w = try Owned.init(device, 5, .mul1, 0x7368617265);
-    defer w.deinit();
-    for ([_]usize{ 31, 32, 33, 63, 64, 65 }) |count| {
+    // A half-bit width (5) never takes the tensor-unit tile; a whole-bit width (6) does from 64 rows.
+    for ([_]u16{ 5, 6 }) |halves| for ([_]usize{ 31, 32, 33, 63, 64, 65 }) |count| {
+        const w = try Owned.init(device, halves, .mul1, 0x7368617265);
+        defer w.deinit();
         const x = try input(device, count);
         defer x.deinit();
         const ids = try device.buffer(count * 4, mtl.ResourceOptions.shared);
@@ -103,7 +117,8 @@ test "shared prefill retains exact row bits and guards across tile boundaries an
             defer actual.deinit();
             const original = try device.buffer(bytes + 64, mtl.ResourceOptions.shared);
             defer original.deinit();
-            const scratch_bytes = try ex.scratchBytes(k, n, count);
+            // The byte count is not monotone in rows: any window up to 64 rows adds split partials a longer one lacks.
+            const scratch_bytes = @max(try ex.scratchBytes(k, n, count), try ex.scratchBytes(k, n, 64));
             const scratch = try device.buffer(scratch_bytes + 32, mtl.ResourceOptions.shared);
             defer scratch.deinit();
             for ([_]bool{ false, true }) |filtered| {
@@ -117,8 +132,11 @@ test "shared prefill retains exact row bits and guards across tile boundaries an
                 e.barrier();
                 try ex.encode(&legacy, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch, .offset = 16 }, r);
                 try complete(cb, e);
-                try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64));
-                if (!filtered) {
+                // The same body gives the same bits; a shared window and the plain eight-row body differ in rounding.
+                if (count < 32 or filtered) try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64)) else try expectWindowClose(kind, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64), count);
+                const tile = halves % 2 == 0 and count >= 64;
+                // The tensor-unit tile is another body, not this check's.
+                if (!filtered and !tile) {
                     @memset(original.slice(u8, bytes + 64), 0xa5);
                     const resumed = queue.commandBuffer();
                     const re = resumed.compute(.concurrent);
@@ -132,7 +150,20 @@ test "shared prefill retains exact row bits and guards across tile boundaries an
                         try ex.encode(&p, re, w.matrix, .{ .buffer = x, .offset = 32 + 31 * (k + 16) * 2 }, .{ .buffer = original, .offset = 32 + 31 * (n + 8) * size }, .{ .buffer = scratch, .offset = 16 }, tail);
                     }
                     try complete(resumed, re);
-                    try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64));
+                    if (count == 31) try std.testing.expectEqualSlices(u8, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64)) else try expectWindowClose(kind, original.slice(u8, bytes + 64), actual.slice(u8, bytes + 64), count);
+                }
+                if (!filtered and count >= 32 and !tile) {
+                    // A shared row's bits do not depend on its window: the last 32 rows alone are the same rows.
+                    @memset(original.slice(u8, bytes + 64), 0xa5);
+                    const from = count - 32;
+                    const last = queue.commandBuffer();
+                    const le = last.compute(.concurrent);
+                    var window = r;
+                    window.count = 32;
+                    try ex.encode(&p, le, w.matrix, .{ .buffer = x, .offset = 32 + from * (k + 16) * 2 }, .{ .buffer = original, .offset = 32 + from * (n + 8) * size }, .{ .buffer = scratch, .offset = 16 }, window);
+                    try complete(last, le);
+                    const row_bytes = (n + 8) * size;
+                    try std.testing.expectEqualSlices(u8, actual.slice(u8, bytes + 64)[32 + from * row_bytes ..][0 .. 32 * row_bytes], original.slice(u8, bytes + 64)[32 + from * row_bytes ..][0 .. 32 * row_bytes]);
                 }
                 for (actual.slice(u8, bytes + 64)[0..32]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
                 for (actual.slice(u8, bytes + 64)[bytes + 32 ..]) |v| try std.testing.expectEqual(@as(u8, 0xa5), v);
@@ -148,13 +179,13 @@ test "shared prefill retains exact row bits and guards across tile boundaries an
                 for (scratch.slice(u8, scratch_bytes + 32)[scratch_bytes + 16 ..]) |v| try std.testing.expectEqual(@as(u8, 0xcd), v);
             }
         }
-    }
+    };
 }
 
 test "shared prefill preserves gather and scatter maps across a partial tile" {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     if (p.prefill == null) return error.SharedPrefillUnavailable;
     var legacy = p;
@@ -192,7 +223,27 @@ test "shared prefill preserves gather and scatter maps across a partial tile" {
         e.barrier();
         try ex.encode(&legacy, e, w.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = original, .offset = 32 }, .{ .buffer = scratch }, r);
         try complete(cb, e);
-        try std.testing.expectEqualSlices(u8, original.slice(u8, bytes), actual.slice(u8, bytes));
+        try expectWindowClose(kind, original.slice(u8, bytes), actual.slice(u8, bytes), count);
+        // The same shared body on rows gathered and scattered by hand gives the mapped result bit for bit.
+        const gathered = try input(device, count);
+        defer gathered.deinit();
+        for (0..count) |i| {
+            const source = gather.slice(u32, count + 4)[4 + i];
+            @memcpy(gathered.slice(u16, count * (k + 16) + 16)[16 + i * (k + 16) ..][0..k], x.slice(u16, 3 * (k + 16) + 16)[16 + source * (k + 16) ..][0..k]);
+        }
+        const direct = try device.buffer(bytes, mtl.ResourceOptions.shared);
+        defer direct.deinit();
+        @memset(direct.slice(u8, bytes), 0xa5);
+        const cb_direct = queue.commandBuffer();
+        const e_direct = cb_direct.compute(.concurrent);
+        try ex.encode(&p, e_direct, w.matrix, .{ .buffer = gathered, .offset = 32 }, .{ .buffer = direct, .offset = 32 }, .{ .buffer = scratch }, .{ .count = count, .x_stride = k + 16, .y_stride = n + 8, .output = kind });
+        try complete(cb_direct, e_direct);
+        const row_bytes = (n + 8) * size;
+        const scattered = try device.buffer(bytes, mtl.ResourceOptions.shared);
+        defer scattered.deinit();
+        @memset(scattered.slice(u8, bytes), 0xa5);
+        for (0..count) |i| @memcpy(scattered.slice(u8, bytes)[32 + scatter.slice(u32, count + 4)[4 + i] * row_bytes ..][0..row_bytes], direct.slice(u8, bytes)[32 + i * row_bytes ..][0..row_bytes]);
+        try std.testing.expectEqualSlices(u8, scattered.slice(u8, bytes), actual.slice(u8, bytes));
     }
 }
 

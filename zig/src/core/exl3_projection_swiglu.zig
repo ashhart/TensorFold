@@ -115,14 +115,23 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const nax_cols: usize = if (a.indexed != 0 and nax_tile >= 256) 64 else if (moe_cols != 0) moe_cols else (knobs.nax_cols orelse 64);
     const tile_id: usize = ((nax_tile / 64) - 1) * 2 + (nax_cols / 64 - 1);
     const nax_pick: ?mtl.Pipeline = p.prefill_nax_tiles[tile_id];
+    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS, so a wrapped conditioning piece stays on the tile.
+    const dense8 = knobs.nax_dense8;
+    // The gate is the CALLER's hint and the flag together: the hint alone moves nothing.
+    const dense8_on = dense8 and r.dense8;
+    const nax_min_rows: u32 = knobs.nax_min_rows;
+    // The tile bodies decode whole-bit widths; a half-bit (odd) width takes the shared or plain body.
+    const nax = nax_pick != null and a.k % 64 == 0 and a.halves % 2 == 0 and
+        a.rows >= (if (dense8_on and a.indexed == 0 and a.routed == 0) @min(nax_min_rows, 8) else nax_min_rows) and
+        ((a.indexed == 0 and a.routed == 0) or grouped_nax);
     // The funnel read in the routed prompt tile: halves = 6 is the packed width; another width takes the shipped path.
-    const nax_funnel_pick: ?mtl.Pipeline = if (funnelPrefillOn() and a.indexed != 0 and tile_id == 0)
+    const nax_funnel_pick: ?mtl.Pipeline = if (nax and funnelPrefillOn() and a.indexed != 0 and tile_id == 0)
         p.prefill_nax_funnel
     else
         null;
     const nax_funnel = nax_funnel_pick != null;
     // The same tile with the grouping's padded rows skipped.
-    const nax_skip_pad_pick: ?mtl.Pipeline = if (skipPadOn() and a.indexed != 0)
+    const nax_skip_pad_pick: ?mtl.Pipeline = if (nax and skipPadOn() and a.indexed != 0)
         (if (tile_id == 0)
             p.prefill_nax_skip_pad
         else if (tile_id == 2)
@@ -139,14 +148,6 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     else
         null;
     const nax_funnel_only = nax_funnel_only_pick != null;
-    // (THE LEVER, default off): THE DENSE TILE AT EIGHT ROWS, so a wrapped conditioning piece stays on the tile.
-    const dense8 = knobs.nax_dense8;
-    // The gate is the CALLER's hint and the flag together: the hint alone moves nothing.
-    const dense8_on = dense8 and r.dense8;
-    const nax_min_rows: u32 = knobs.nax_min_rows;
-    const nax = nax_pick != null and a.k % 64 == 0 and
-        a.rows >= (if (dense8_on and a.indexed == 0 and a.routed == 0) @min(nax_min_rows, 8) else nax_min_rows) and
-        ((a.indexed == 0 and a.routed == 0) or grouped_nax);
     // The dense 128x64 tile's double-buffered twin: one barrier a block.
     const nax_dense_db = p.prefill_nax_dense_db != null and nax and a.indexed == 0 and tile_id == 2 and denseDb();
     if (nax_dense_db and !pipe.nax_db_logged) {

@@ -39,7 +39,7 @@ pub const Signed = struct {
 fn woChain(first: ex.Matrix, second: ex.Matrix, next: ex.Matrix) !void {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     if (!ex.chain.rotateOutInReady(&p)) return error.SkipZigTest;
     const queue = try device.queue();
@@ -117,7 +117,7 @@ test "wo_a epilogue fused with wo_b's rotate_in keeps every bit (packed sign sca
 fn qNorm(matrix: ex.Matrix, rows: u32, weight_f32: bool, scale: f32) !void {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     if (ex.chain.rmsRotateInWidth(&p) < k) return error.SkipZigTest;
     const queue = try device.queue();
@@ -190,7 +190,7 @@ test "norm fused with the next rotate_in keeps every bit (packed sign scales)" {
 fn qRope(matrix: ex.Matrix, rows: u32, rotary: u32, position: u32, inverse: bool, prerotated: bool) !void {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     if (p.chain.rotate_out_rope == null) return error.SkipZigTest;
     const queue = try device.queue();
@@ -274,7 +274,7 @@ test "wq_b epilogue fused with the query rope keeps every bit (packed sign scale
 fn oRope(first: ex.Matrix, second: ex.Matrix, next: ex.Matrix, rotary: u32, position: u32, chained: bool) !void {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     if (!ex.chain.ropeRotateInReady(&p) or !ex.chain.rotateOutInReady(&p)) return error.SkipZigTest;
     const queue = try device.queue();
@@ -394,7 +394,7 @@ const Wide = struct {
 fn qkvTail(weight_f32: bool, position: u32, scale: f32) !void {
     const device = try mtl.Device.init();
     defer device.deinit();
-    var p = try ex.Pipelines.load(device);
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
     defer p.deinit();
     if (!ex.chain.qkvEpilogueReady(&p)) return error.SkipZigTest;
     const queue = try device.queue();

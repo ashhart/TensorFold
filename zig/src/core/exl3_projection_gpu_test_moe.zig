@@ -68,7 +68,7 @@ pub const Fixture = struct {
     pub fn init(device: mtl.Device, halves: u16) !Fixture {
         var f: Fixture = undefined;
         f.device = device;
-        f.p = try ex.Pipelines.load(device);
+        f.p = try ex.Pipelines.loadWith(device, std.heap.page_allocator);
         errdefer f.p.deinit();
         var made: usize = 0;
         errdefer for (f.mats[0..made]) |m| m.deinit();
