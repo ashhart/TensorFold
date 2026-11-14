@@ -3,6 +3,8 @@ const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
+const Fence = @import("../../core/fence.zig").Fence;
+const Pass = @import("pass.zig").Pass;
 const settings = @import("../flashnext/tp_settings.zig");
 const control = @import("ep_control.zig");
 const Ref = @import("weights.zig").Ref;
@@ -28,11 +30,13 @@ const SEND = RECV + 2 * SLOT;
 const FLAGS = SEND + 2 * (PAGE + SLOT);
 const FLAG = FLAGS; // u64: the last exchange whose peer entries have landed
 const SYNC = FLAGS + PAGE;
-const POSTED = SYNC; // u32: the last exchange the GPU has packed (its low 32 bits)
 const COUNT = SYNC + 64; // u32 by parity: each exchange's packed entries
-const GAVE_UP = SYNC + 128; // u32: GPU waits that gave up (nonzero: the run is invalid)
 const CONTROL = SYNC + PAGE; // the control protocol's region (ep_control.zig)
 pub const WINDOW = CONTROL + control.BYTES;
+const READY_STRIDE = 64; // the most recent valid receive for each parity, in a separate Metal buffer
+const post_timeout = 30 * 24_000_000;
+const transfer_budget_ns = std.time.ns_per_s;
+const failed_event = std.math.maxInt(u64);
 
 fn recvAt(x: u64) usize {
     return RECV + @as(usize, @intCast(x % 2)) * SLOT;
@@ -40,11 +44,6 @@ fn recvAt(x: u64) usize {
 
 fn sendAt(x: u64) usize {
     return SEND + @as(usize, @intCast(x % 2)) * (PAGE + SLOT) + PAGE;
-}
-
-/// Whether the GPU's posted word (an exchange's low 32 bits) has reached exchange x, across the 32-bit wrap.
-fn reached(posted: u32, x: u64) bool {
-    return @as(i32, @bitCast(posted -% @as(u32, @truncate(x)))) >= 0;
 }
 
 // Lists one exchange keeps (i32): this Mac's unique experts with local ids and members, the picks each Mac computes.
@@ -68,9 +67,12 @@ pub const Ep = struct {
     win: []u8,
     wbuf: mtl.Buffer,
     lists: mtl.Buffer,
+    ready: mtl.Buffer,
+    posted: mtl.SharedEvent,
+    landed: mtl.SharedEvent,
+    fence: Fence,
     localize_pipe: mtl.Pipeline,
     pack_pipe: mtl.Pipeline,
-    post_pipe: mtl.Pipeline,
     unpack_pipe: mtl.Pipeline,
     rcombine_pipe: mtl.Pipeline,
     rfinal_pipe: mtl.Pipeline,
@@ -78,12 +80,17 @@ pub const Ep = struct {
     rsum_pipe: mtl.Pipeline,
     amax_send_pipe: mtl.Pipeline,
     amax_merge_pipe: mtl.Pipeline,
-    x: u64 = 0, // exchanges encoded so far, the same count on both Macs (the GPU sees the low 32 bits)
+    x: u64 = 0, // exchanges encoded so far, the same count on both Macs
+    submitted: std.atomic.Value(u64) = .init(0),
     ctl: control.Control, // identities, requests and stop decisions
     thread: ?std.Thread = null,
+    monitor: ?std.Thread = null,
+    publication: std.atomic.Mutex = .unlocked,
+    transfer: ?struct { exchange: u64, deadline: u64 } = null, // under publication
     stop: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     trace: bool = false, // GLM_EP_TRACE: log every exchange the host sends
+    by_experts: bool,
     delay_ns: u64 = 0, // GLM_EP_DELAY_US: hold every prompt-chunk send (over 1 MiB) this long: a slow link, for stress runs
     sent: u64 = 0, // exchanges the host has sent
     held_ticks: u64 = 0, // their time from the GPU's post to the send returning
@@ -109,16 +116,49 @@ pub const Ep = struct {
         errdefer wbuf.deinit();
         const lists = try device.buffer(LISTS, opts);
         errdefer lists.deinit();
+        const ready = try device.buffer(2 * READY_STRIDE, opts);
+        errdefer ready.deinit();
+        @memset(ready.contents()[0 .. 2 * READY_STRIDE], 0);
+        const posted = try device.sharedEvent();
+        errdefer posted.deinit();
+        const landed = try device.sharedEvent();
+        errdefer landed.deinit();
+        const fence = try Fence.init(device);
+        errdefer fence.deinit();
         const lib_m = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
         defer lib_m.deinit();
-        var pipes: [10]mtl.Pipeline = undefined;
+        var pipes: [9]mtl.Pipeline = undefined;
         var made: usize = 0;
         errdefer for (pipes[0..made]) |pp| pp.deinit();
-        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_post", "ep_unpack", "ep_rcombine", "ep_rfinal", "ep_rsend", "ep_rsum", "ep_amax_send", "ep_amax_merge" }) |name| {
+        for ([_][]const u8{ "ep_localize", "ep_pack", "ep_unpack", "ep_rcombine", "ep_rfinal", "ep_rsend", "ep_rsum", "ep_amax_send", "ep_amax_merge" }) |name| {
             pipes[made] = try mtl.Pipeline.init(device, lib_m, name, false);
             made += 1;
         }
-        t.* = .{ .rank = s.rank, .peer = 1 - s.rank, .own = .{ me.own_lo, me.own_hi }, .link = link, .rd = rd, .win = win, .wbuf = wbuf, .lists = lists, .localize_pipe = pipes[0], .pack_pipe = pipes[1], .post_pipe = pipes[2], .unpack_pipe = pipes[3], .rcombine_pipe = pipes[4], .rfinal_pipe = pipes[5], .rsend_pipe = pipes[6], .rsum_pipe = pipes[7], .amax_send_pipe = pipes[8], .amax_merge_pipe = pipes[9], .ctl = undefined };
+        t.* = .{
+            .rank = s.rank,
+            .peer = 1 - s.rank,
+            .own = .{ me.own_lo, me.own_hi },
+            .link = link,
+            .rd = rd,
+            .win = win,
+            .wbuf = wbuf,
+            .lists = lists,
+            .ready = ready,
+            .posted = posted,
+            .landed = landed,
+            .fence = fence,
+            .localize_pipe = pipes[0],
+            .pack_pipe = pipes[1],
+            .unpack_pipe = pipes[2],
+            .rcombine_pipe = pipes[3],
+            .rfinal_pipe = pipes[4],
+            .rsend_pipe = pipes[5],
+            .rsum_pipe = pipes[6],
+            .amax_send_pipe = pipes[7],
+            .amax_merge_pipe = pipes[8],
+            .ctl = undefined,
+            .by_experts = me.rest[0] == 0,
+        };
         t.ctl = try control.Control.init(gpa, rd, CONTROL, &t.failed);
         errdefer t.ctl.deinit(gpa);
         t.ctl.inventory = true;
@@ -127,6 +167,11 @@ pub const Ep = struct {
         errdefer if (t.benchmark_group) |b| gpa.free(b);
         t.trace = platform.c.getenv("GLM_EP_TRACE") != null;
         if (platform.c.getenv("GLM_EP_DELAY_US")) |v| t.delay_ns = 1000 * (std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0);
+        t.monitor = try std.Thread.spawn(.{}, watchTransfers, .{t});
+        errdefer {
+            t.stop.store(true, .release);
+            t.monitor.?.join();
+        }
         t.thread = try std.Thread.spawn(.{}, service, .{t});
         std.log.info("expert parallel: rank {d} of 2 holds experts {d}-{d}, connected", .{ t.rank, me.own_lo, me.own_hi - 1 });
         return t;
@@ -134,18 +179,26 @@ pub const Ep = struct {
 
     /// Say goodbye (rank 0), stop the sending thread and close the link (no GPU work may still use the window).
     pub fn deinit(t: *Ep, gpa: std.mem.Allocator) void {
-        t.ctl.bye();
-        t.rd.flush() catch {};
         t.stop.store(true, .release);
         if (t.thread) |th| th.join();
+        if (t.monitor) |th| th.join();
+        if (!t.failed.load(.acquire)) if (fabric.words.checkedNowNs()) |now| {
+            t.rd.setDeadline(now + std.time.ns_per_s);
+            t.ctl.bye();
+            t.rd.flush() catch {};
+        } else |_| {};
         if (t.sent > 0) {
             const n: f64 = @floatFromInt(t.sent);
             const late: f64 = @floatFromInt(@max(t.st.late, 1));
             if (t.st.big_n > 0) std.log.info("expert parallel rank {d}: {d} prompt-chunk exchanges, {d:.0} us a send, the peer's sums landed {d:.0} us after our post on average", .{ t.rank, t.st.big_n, @as(f64, @floatFromInt(t.big_held_ticks)) / @as(f64, @floatFromInt(@max(t.big_sent, 1))) / 24.0, @as(f64, @floatFromInt(t.st.big_ticks)) / @as(f64, @floatFromInt(t.st.big_n)) / 24.0 });
-            std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send; the peer's entries landed {d:.1} us after our post on average ({d} times, {d} before it); entries a exchange: ours {d:.2}, theirs {d:.2}, |difference| {d:.2}; {d} GPU waits gave up", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / n / 24.0, @as(f64, @floatFromInt(t.st.late_ticks)) / late / 24.0, t.st.late, t.st.early, @as(f64, @floatFromInt(t.st.mine)) / n, @as(f64, @floatFromInt(t.st.theirs)) / n, @as(f64, @floatFromInt(t.st.imbalance)) / n, t.gaveUp() });
+            std.log.info("expert parallel rank {d}: {d} exchanges, {d:.1} us a send; the peer's entries landed {d:.1} us after our post on average ({d} times, {d} before it); entries a exchange: ours {d:.2}, theirs {d:.2}, |difference| {d:.2}", .{ t.rank, t.sent, @as(f64, @floatFromInt(t.held_ticks)) / n / 24.0, @as(f64, @floatFromInt(t.st.late_ticks)) / late / 24.0, t.st.late, t.st.early, @as(f64, @floatFromInt(t.st.mine)) / n, @as(f64, @floatFromInt(t.st.theirs)) / n, @as(f64, @floatFromInt(t.st.imbalance)) / n });
         }
         t.ctl.deinit(gpa);
-        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.post_pipe, t.unpack_pipe, t.rcombine_pipe, t.rfinal_pipe, t.rsend_pipe, t.rsum_pipe, t.amax_send_pipe, t.amax_merge_pipe }) |pp| pp.deinit();
+        for ([_]mtl.Pipeline{ t.localize_pipe, t.pack_pipe, t.unpack_pipe, t.rcombine_pipe, t.rfinal_pipe, t.rsend_pipe, t.rsum_pipe, t.amax_send_pipe, t.amax_merge_pipe }) |pp| pp.deinit();
+        t.fence.deinit();
+        t.landed.deinit();
+        t.posted.deinit();
+        t.ready.deinit();
         t.lists.deinit();
         t.wbuf.deinit();
         t.link.deinit();
@@ -153,9 +206,9 @@ pub const Ep = struct {
         gpa.destroy(t);
     }
 
-    /// GPU waits that gave up (a peer that never answered); nonzero means the replies since are invalid.
-    pub fn gaveUp(t: *const Ep) u32 {
-        return @atomicLoad(u32, t.word32(GAVE_UP), .acquire);
+    /// Arm the relay's post deadline only after Metal has a committed command buffer.
+    pub fn submit(t: *Ep) void {
+        t.submitted.store(t.x, .release);
     }
 
     fn list(t: *const Ep, off: usize) Ref {
@@ -188,26 +241,23 @@ pub const Ep = struct {
     }
 
     /// After this Mac's routed outputs are in `ye` [rows * TOPK, D]: pack them and post; the host sends them.
-    pub fn send(t: *Ep, enc: mtl.ComputeEncoder, ye: Ref, rows: u32, pack: bool, post: bool) void {
+    pub fn send(t: *Ep, pass: *Pass, ye: Ref, rows: u32, pack: bool) void {
+        const enc = pass.enc;
         if (pack) {
             enc.setPipeline(t.pack_pipe);
             enc.setBuffer(ye.buf, ye.off, 0);
             enc.setBuffer(t.lists, MINE, 1);
             enc.setBuffer(t.lists, COUNTS, 2);
             enc.setBuffer(t.wbuf, sendAt(t.x), 3);
-            t.slotGuard(enc, 4);
+            t.bindPrevious(enc, 4);
             enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
         }
-        if (!post) return;
-        enc.setPipeline(t.post_pipe);
-        enc.setBuffer(t.wbuf, POSTED, 0);
-        enc.setValue(@as(u32, @truncate(t.x)), 1);
-        enc.setBuffer(t.wbuf, GAVE_UP, 2); // after a give-up nothing more is sent: the run is already invalid
-        enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
+        t.post(pass);
     }
 
     /// By rows: our routed sums (`yp` partials weighted by `wts`) to the send slot, then the post (window or chunk).
-    pub fn sendRows(t: *Ep, enc: mtl.ComputeEncoder, yp: Ref, wts: Ref, rows: u32) void {
+    pub fn sendRows(t: *Ep, pass: *Pass, yp: Ref, wts: Ref, rows: u32) void {
+        const enc = pass.enc;
         std.debug.assert(rows <= PROMPT_ROWS);
         enc.setPipeline(t.rcombine_pipe);
         enc.setBuffer(yp.buf, yp.off, 0);
@@ -215,24 +265,49 @@ pub const Ep = struct {
         enc.setValue(@as(i32, @intCast(rows)), 2);
         enc.setBuffer(t.wbuf, sendAt(t.x), 3);
         enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 4);
-        t.slotGuard(enc, 5);
+        t.bindPrevious(enc, 5);
         enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
-        t.send(enc, yp, rows, false, true);
+        t.post(pass);
     }
 
-    /// The send slot guard's operands (ep_slot_free) from buffer `first`: the flag, this exchange, the give-up count.
-    fn slotGuard(t: *const Ep, enc: mtl.ComputeEncoder, first: usize) void {
-        enc.setBuffer(t.wbuf, FLAG, first);
-        enc.setValue(@as(u32, @truncate(t.x)), first + 1);
-        enc.setBuffer(t.wbuf, GAVE_UP, first + 2);
+    /// GPU → host: the count and send slot are complete at this signal.
+    fn post(t: *const Ep, pass: *Pass) void {
+        t.handoff(pass, true);
+    }
+
+    /// Host → GPU: wait before consuming, including before any later exchange can reuse a parity slot.
+    pub fn wait(t: *const Ep, pass: *Pass) void {
+        t.handoff(pass, false);
+    }
+
+    fn handoff(t: *const Ep, pass: *Pass, sending: bool) void {
+        const mode = pass.enc.dispatchType();
+        t.fence.update(pass.enc);
+        pass.enc.end();
+        if (sending) pass.cb.signal(t.posted, t.x) else pass.cb.waitFor(t.landed, t.x);
+        pass.enc = pass.cb.compute(mode);
+        t.fence.wait(pass.enc);
+    }
+
+    fn readyAt(x: u64) usize {
+        return @as(usize, @intCast(x % 2)) * READY_STRIDE;
+    }
+
+    fn bindReady(t: *const Ep, enc: mtl.ComputeEncoder) void {
+        enc.setBuffer(t.ready, readyAt(t.x), 0);
+        enc.setValue(t.x, 1);
+    }
+
+    /// A terminal wake must not let a later producer overwrite a slot still in use by the transport.
+    fn bindPrevious(t: *const Ep, enc: mtl.ComputeEncoder, first: usize) void {
+        enc.setBuffer(t.ready, readyAt(t.x - 1), first);
+        enc.setValue(t.x - 1, first + 1);
     }
 
     /// By rows: once the peer's sums land, each row's branch: both sums in rank order, rounded, plus the shared `ys`.
     pub fn receiveRows(t: *Ep, enc: mtl.ComputeEncoder, ys: Ref, out: Ref, rows: u32) void {
         enc.setPipeline(t.rfinal_pipe);
-        enc.setBuffer(t.wbuf, FLAG, 0);
-        enc.setValue(@as(u32, @truncate(t.x)), 1);
-        enc.setBuffer(t.wbuf, GAVE_UP, 2);
+        t.bindReady(enc);
         enc.setBuffer(t.wbuf, sendAt(t.x), 3);
         enc.setBuffer(t.wbuf, recvAt(t.x), 4);
         enc.setValue(t.rank, 5);
@@ -243,21 +318,20 @@ pub const Ep = struct {
     }
 
     /// TP: this Mac's fp32 partials `part` [rows, 4096] and the peer's, added in rank order and rounded into `out`.
-    pub fn reduce(t: *Ep, enc: mtl.ComputeEncoder, part: Ref, out: Ref, rows: u32) void {
+    pub fn reduce(t: *Ep, pass: *Pass, part: Ref, out: Ref, rows: u32) void {
         std.debug.assert(rows <= PROMPT_ROWS);
         t.begin();
-        enc.setPipeline(t.rsend_pipe);
-        enc.setBuffer(part.buf, part.off, 0);
-        enc.setValue(@as(i32, @intCast(rows)), 1);
-        enc.setBuffer(t.wbuf, sendAt(t.x), 2);
-        enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 3);
-        t.slotGuard(enc, 4);
-        enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
-        t.send(enc, part, rows, false, true);
+        pass.enc.setPipeline(t.rsend_pipe);
+        pass.enc.setBuffer(part.buf, part.off, 0);
+        pass.enc.setValue(@as(i32, @intCast(rows)), 1);
+        pass.enc.setBuffer(t.wbuf, sendAt(t.x), 2);
+        pass.enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 3);
+        t.bindPrevious(pass.enc, 4);
+        pass.enc.dispatchThreads(mtl.Size.of(rows * 4096, 1, 1), mtl.Size.of(256, 1, 1));
+        t.exchange(pass);
+        const enc = pass.enc;
         enc.setPipeline(t.rsum_pipe);
-        enc.setBuffer(t.wbuf, FLAG, 0);
-        enc.setValue(@as(u32, @truncate(t.x)), 1);
-        enc.setBuffer(t.wbuf, GAVE_UP, 2);
+        t.bindReady(enc);
         enc.setBuffer(t.wbuf, sendAt(t.x), 3);
         enc.setBuffer(t.wbuf, recvAt(t.x), 4);
         enc.setValue(t.rank, 5);
@@ -267,22 +341,21 @@ pub const Ep = struct {
     }
 
     /// TP: each row's pick from this Mac's vocabulary rows [lo, lo + n) (local picks in `picks`) and the peer's.
-    pub fn argmax(t: *Ep, enc: mtl.ComputeEncoder, logits: Ref, picks: Ref, n: u32, lo: u32, rows: u32) void {
+    pub fn argmax(t: *Ep, pass: *Pass, logits: Ref, picks: Ref, n: u32, lo: u32, rows: u32) void {
         std.debug.assert(rows <= 64);
         t.begin();
-        enc.setPipeline(t.amax_send_pipe);
-        enc.setBuffer(logits.buf, logits.off, 0);
-        enc.setBuffer(picks.buf, picks.off, 1);
-        enc.setValue([4]u32{ rows, n, lo, 0 }, 2);
-        enc.setBuffer(t.wbuf, sendAt(t.x), 3);
-        enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 4);
-        t.slotGuard(enc, 5);
-        enc.dispatchThreads(mtl.Size.of(64, 1, 1), mtl.Size.of(64, 1, 1));
-        t.send(enc, picks, rows, false, true);
+        pass.enc.setPipeline(t.amax_send_pipe);
+        pass.enc.setBuffer(logits.buf, logits.off, 0);
+        pass.enc.setBuffer(picks.buf, picks.off, 1);
+        pass.enc.setValue([4]u32{ rows, n, lo, 0 }, 2);
+        pass.enc.setBuffer(t.wbuf, sendAt(t.x), 3);
+        pass.enc.setBuffer(t.wbuf, COUNT + 4 * @as(usize, @intCast(t.x % 2)), 4);
+        t.bindPrevious(pass.enc, 5);
+        pass.enc.dispatchThreads(mtl.Size.of(64, 1, 1), mtl.Size.of(64, 1, 1));
+        t.exchange(pass);
+        const enc = pass.enc;
         enc.setPipeline(t.amax_merge_pipe);
-        enc.setBuffer(t.wbuf, FLAG, 0);
-        enc.setValue(@as(u32, @truncate(t.x)), 1);
-        enc.setBuffer(t.wbuf, GAVE_UP, 2);
+        t.bindReady(enc);
         enc.setBuffer(t.wbuf, sendAt(t.x), 3);
         enc.setBuffer(t.wbuf, recvAt(t.x), 4);
         enc.setValue(rows, 5);
@@ -290,17 +363,26 @@ pub const Ep = struct {
         enc.dispatchThreads(mtl.Size.of(64, 1, 1), mtl.Size.of(64, 1, 1));
     }
 
-    /// Wait for the peer's outputs of this exchange and put them in their picks' rows of `ye`.
+    /// After the host's arrival event, put the peer's outputs in their picks' rows of `ye`.
     pub fn receive(t: *Ep, enc: mtl.ComputeEncoder, ye: Ref, rows: u32) void {
         enc.setPipeline(t.unpack_pipe);
-        enc.setBuffer(t.wbuf, FLAG, 0);
-        enc.setValue(@as(u32, @truncate(t.x)), 1);
-        enc.setBuffer(t.wbuf, GAVE_UP, 2);
+        t.bindReady(enc);
         enc.setBuffer(t.wbuf, recvAt(t.x), 3);
         enc.setBuffer(t.lists, THEIRS, 4);
         enc.setBuffer(t.lists, COUNTS, 5);
         enc.setBuffer(ye.buf, ye.off, 6);
         enc.dispatchGroups(mtl.Size.of(1, rows * TOPK, 1), mtl.Size.of(256, 1, 1));
+    }
+
+    /// For reductions without independent GPU work between the post and the wait, use a single encoder boundary.
+    fn exchange(t: *const Ep, pass: *Pass) void {
+        const mode = pass.enc.dispatchType();
+        t.fence.update(pass.enc);
+        pass.enc.end();
+        pass.cb.signal(t.posted, t.x);
+        pass.cb.waitFor(t.landed, t.x);
+        pass.enc = pass.cb.compute(mode);
+        t.fence.wait(pass.enc);
     }
 
     fn word32(t: *const Ep, off: usize) *u32 {
@@ -311,66 +393,127 @@ pub const Ep = struct {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
 
-    /// Each posted exchange's entries to the peer, then its flag; 10 s with no answer fails the link, lands every flag.
+    /// GPU post, write to peer, CPU arrival, then GPU release. One exchange at a time protects both parity slots.
     fn service(t: *Ep) void {
-        _ = platform.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
-        const posted = t.word32(POSTED);
+        _ = platform.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0);
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
         const flag = t.word64(FLAG);
         var x: u64 = 1;
-        var waiting = false; // an exchange sent whose peer entries have not landed yet
-        var want: u64 = 0;
-        var want_at: u64 = 0;
-        while (true) {
-            var spins: usize = 0;
-            while (!reached(@atomicLoad(u32, posted, .acquire), x)) {
+        while (!t.stop.load(.acquire)) : (x += 1) {
+            var began: ?u64 = null;
+            while (t.posted.value() < x) {
                 t.st.watch(@atomicLoad(u64, flag, .acquire), x - 1);
-                if (t.stop.load(.acquire)) return;
-                if (waiting and @atomicLoad(u64, flag, .acquire) >= want) waiting = false;
-                if (waiting and !t.failed.load(.acquire) and platform.c.mach_absolute_time() - want_at > 240_000_000) {
-                    t.fail(want, error.PeerSilent);
-                    t.land(want);
-                    waiting = false;
+                if (t.stop.load(.acquire) or t.failed.load(.acquire)) return;
+                if (t.submitted.load(.acquire) < x) {
+                    sleep(20_000);
+                } else {
+                    const now = platform.c.mach_absolute_time();
+                    if (began == null) began = now;
+                    if (now -% began.? > post_timeout) return t.fail(x, error.GpuPostTimeout);
+                    std.atomic.spinLoopHint();
                 }
-                spins += 1;
-                if (spins > 1_000_000) { // idle: back off
-                    const ts: platform.c.timespec = .{ .sec = 0, .nsec = 20_000 };
-                    _ = platform.c.nanosleep(&ts, null);
-                } else std.atomic.spinLoopHint();
             }
+            if (t.failed.load(.acquire)) return;
+            if (t.posted.value() != x) return t.fail(x, error.GpuPostOutOfStep);
+            const deadline = t.armTransfer(x) orelse return;
             const seen = platform.c.mach_absolute_time();
             const n: usize = @atomicLoad(u32, t.word32(COUNT + 4 * @as(usize, @intCast(x % 2))), .acquire);
-            const theirs: u32 = @bitCast(@as([*]const i32, @ptrCast(@alignCast(t.lists.contents() + COUNTS)))[1]);
+            const bytes = n * ENTRY;
+            if (bytes > SLOT) return t.fail(x, error.BadCount);
+            const counts: [*]const u32 = @ptrCast(@alignCast(t.lists.contents() + COUNTS));
+            const theirs = if (t.by_experts) counts[1] else @as(u32, @intCast(n));
             t.st.posted(x, seen, @intCast(n), theirs);
             t.st.watch(@atomicLoad(u64, flag, .acquire), x);
             if (t.trace) std.debug.print("EP rank{d} exchange {d}: {d} entries\n", .{ t.rank, x, n });
-            if (t.delay_ns > 0 and n * ENTRY > 1 << 20) {
-                const ts: platform.c.timespec = .{ .sec = @intCast(t.delay_ns / std.time.ns_per_s), .nsec = @intCast(t.delay_ns % std.time.ns_per_s) };
-                _ = platform.c.nanosleep(&ts, null);
-            }
-            if (t.failed.load(.acquire) or n * ENTRY > SLOT) {
-                if (n * ENTRY > SLOT) t.fail(x, error.BadCount);
-                t.land(x);
-            } else t.link.writeSignalFrom(t.peer, sendAt(x), recvAt(x), n * ENTRY, FLAG, x) catch |err| {
-                t.fail(x, err);
-                t.land(x);
-            };
-            want = x;
-            want_at = platform.c.mach_absolute_time();
-            waiting = true;
+            if (t.delay_ns > 0 and bytes > 1 << 20) t.delay();
+            if (t.stop.load(.acquire) or t.failed.load(.acquire)) return;
+            t.link.writeSignalFromUntil(t.peer, sendAt(x), recvAt(x), bytes, FLAG, x, deadline) catch |err| return t.fail(x, err);
+            t.link.flushPeerUntil(t.peer, deadline) catch |err| return t.fail(x, err);
+            const sent_at = platform.c.mach_absolute_time();
             t.sent += 1;
-            t.held_ticks += want_at - seen;
-            if (n * ENTRY > 1 << 20) {
+            t.held_ticks += sent_at -% seen;
+            if (bytes > 1 << 20) {
                 t.big_sent += 1;
-                t.big_held_ticks += want_at - seen;
+                t.big_held_ticks += sent_at -% seen;
             }
-            x += 1;
+            while (true) {
+                const arrived = @atomicLoad(u64, flag, .acquire);
+                t.st.watch(arrived, x);
+                if (t.stop.load(.acquire) or t.failed.load(.acquire)) return;
+                // A fast peer can already have posted x + 1. It needs our x + 1 before it can reuse x's slot.
+                if (arrived > x + 1) return t.fail(x, error.EpOutOfStep);
+                if (arrived >= x) break;
+                std.atomic.spinLoopHint();
+            }
+            if (!t.publishArrival(x)) return;
+            if (t.trace) std.debug.print("EP rank{d} exchange {d}: peer payload landed\n", .{ t.rank, x });
         }
     }
 
-    /// The flag the GPU waits on, set here as if the peer's message had landed (its bytes stale).
-    fn land(t: *Ep, x: u64) void {
-        const flag = t.word64(FLAG);
-        if (@atomicLoad(u64, flag, .acquire) < x) @atomicStore(u64, flag, x, .release);
+    fn lockPublication(t: *Ep) void {
+        while (!t.publication.tryLock()) std.atomic.spinLoopHint();
+    }
+
+    fn armTransfer(t: *Ep, x: u64) ?u64 {
+        const now = fabric.words.checkedNowNs() catch |err| {
+            t.fail(x, err);
+            return null;
+        };
+        t.lockPublication();
+        defer t.publication.unlock();
+        if (t.failed.load(.acquire)) return null;
+        const deadline = now +| transfer_budget_ns;
+        t.transfer = .{ .exchange = x, .deadline = deadline };
+        return deadline;
+    }
+
+    fn publishArrival(t: *Ep, x: u64) bool {
+        t.lockPublication();
+        defer t.publication.unlock();
+        if (t.failed.load(.acquire)) return false;
+        const now = fabric.words.checkedNowNs() catch |err| {
+            t.failLocked(x, err);
+            return false;
+        };
+        if (now >= t.transfer.?.deadline) {
+            t.failLocked(x, error.EpTransferTimeout);
+            return false;
+        }
+        const ready: *u64 = @ptrCast(@alignCast(t.ready.contents() + readyAt(x)));
+        ready.* = x;
+        t.landed.set(x);
+        t.transfer = null;
+        return true;
+    }
+
+    /// This thread can release GPU waits even while the relay is inside a native transport call.
+    fn watchTransfers(t: *Ep) void {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        while (!t.stop.load(.acquire) and !t.failed.load(.acquire)) {
+            sleep(std.time.ns_per_ms);
+            t.lockPublication();
+            defer t.publication.unlock();
+            if (t.transfer) |pending| {
+                const now = fabric.words.checkedNowNs() catch |err| return t.failLocked(pending.exchange, err);
+                if (now >= pending.deadline) return t.failLocked(pending.exchange, error.EpTransferTimeout);
+            }
+        }
+    }
+
+    fn delay(t: *const Ep) void {
+        var left = t.delay_ns;
+        while (left > 0 and !t.stop.load(.acquire) and !t.failed.load(.acquire)) {
+            const step = @min(left, 10 * std.time.ns_per_ms);
+            sleep(step);
+            left -= step;
+        }
+    }
+
+    fn sleep(ns: u64) void {
+        const ts: platform.c.timespec = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+        _ = platform.c.nanosleep(&ts, null);
     }
 
     /// The host's view of each exchange: when the GPU posted it and when the peer's entries landed (64 in flight).
@@ -422,8 +565,21 @@ pub const Ep = struct {
     };
 
     fn fail(t: *Ep, x: u64, err: anyerror) void {
-        std.log.err("expert parallel rank {d}: exchange {d} failed: {s}", .{ t.rank, x, @errorName(err) });
-        t.failed.store(true, .release);
+        t.lockPublication();
+        defer t.publication.unlock();
+        t.failLocked(x, err);
+    }
+
+    fn failLocked(t: *Ep, x: u64, err: anyerror) void {
+        if (!t.failed.swap(true, .acq_rel)) {
+            t.transfer = null;
+            t.landed.set(failed_event);
+            std.log.err("expert parallel rank {d}: exchange {d} failed: {s}", .{ t.rank, x, @errorName(err) });
+        }
+    }
+
+    pub fn gpuFailed(t: *Ep) void {
+        t.fail(t.posted.value() + 1, error.GpuFailed);
     }
 };
 
@@ -432,15 +588,7 @@ test "the window's regions tile without overlap, slots by parity, a page of room
     try std.testing.expect(recvAt(1) + SLOT <= SEND and recvAt(2) == RECV);
     try std.testing.expect(sendAt(1) - PAGE >= sendAt(2) + SLOT and sendAt(2) == SEND + PAGE);
     try std.testing.expect(sendAt(1) + SLOT <= FLAGS and FLAG + 8 <= SYNC);
-    try std.testing.expect(GAVE_UP + 4 <= CONTROL and COUNT + 8 <= GAVE_UP and CONTROL % PAGE == 0);
+    try std.testing.expect(COUNT + 8 <= CONTROL and CONTROL % PAGE == 0);
     try std.testing.expectEqual(@as(usize, 4096), D);
     try std.testing.expect(COUNTS + 8 <= LISTS);
-}
-
-test "the posted word reaches an exchange across the 32-bit wrap" {
-    try std.testing.expect(reached(5, 5) and reached(6, 5) and !reached(4, 5));
-    const top: u64 = 0xffff_fffe;
-    try std.testing.expect(reached(0xffff_fffe, top) and !reached(0xffff_fffd, top));
-    try std.testing.expect(reached(0, top + 2) and reached(1, top + 2) and !reached(0xffff_ffff, top + 2)); // 2^32 posts as 0
-    try std.testing.expect(reached(3, (1 << 33) + 3) and !reached(2, (1 << 33) + 3));
 }

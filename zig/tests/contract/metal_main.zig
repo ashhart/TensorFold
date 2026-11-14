@@ -418,6 +418,12 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
+    var glm_ep_copy: @import("metal_glm_ep_copy.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_ep_copy.deinit();
+    try glm_ep_copy.collect(o.only);
+    var glm_ep_reduce: @import("metal_glm_ep_reduce.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
+    defer glm_ep_reduce.deinit();
+    try glm_ep_reduce.collect(o.only);
     var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer flint.deinit();
     try flint.collect(o.only);

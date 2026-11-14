@@ -1,6 +1,7 @@
 //! GLM-5.3-Flash's MoE block on a decode window: shared expert, route, routed experts, combine.
 const std = @import("std");
 const mtl = @import("metal");
+const Pass = @import("pass.zig").Pass;
 const wts = @import("weights.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
@@ -16,47 +17,54 @@ const shape = fwd.shape;
 const size = fwd.size;
 
 /// MoE block (shared expert, route, routed experts, combine); expert parallel: our experts, sent, the peer's received.
-pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, rows: u32) void {
+pub fn moe(x: *const Ctx, pass: *Pass, w: *const wts.Moe, x_in: Ref, rows: u32) void {
     std.debug.assert(rows <= st.max_rows);
     const c = x.c;
     const k = x.k;
     const sc = x.sc;
     const top = c.topk;
     const s = x.skip;
+    const exchange = s & Class.exchange == 0 and on(x, "x_locpost");
     if (x.ep) |ep| if (c.byRows()) { // every expert's half on each Mac: both compute every pick, then swap their sums
-        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        if (s & Class.routed == 0) halfExperts(x, e, w, x_in, rows);
-        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.sendRows(e, sc.yp, sc.wts, rows); // with its begin
-        if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
-        if (s & Class.combine == 0) ep.receiveRows(e, sc.ys, sc.branch, rows);
+        if (exchange) ep.begin();
+        if (s & Class.route == 0) route(x, pass.enc, w, x_in, rows);
+        if (s & Class.routed == 0) halfExperts(x, pass.enc, w, x_in, rows);
+        if (exchange) ep.sendRows(pass, sc.yp, sc.wts, rows);
+        if (s & Class.shared == 0) experts(x, pass.enc, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (exchange) {
+            ep.wait(pass);
+            if (s & Class.combine == 0) ep.receiveRows(pass.enc, sc.ys, sc.branch, rows);
+        }
         return;
     };
     if (x.ep) |ep| {
-        if (s & Class.exchange == 0 and on(x, "x_locpost")) ep.begin();
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        if (!x.fused_route and s & Class.exchange == 0 and on(x, "x_locpost")) ep.localize(e, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
-        if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, ep.group());
-        if (s & Class.exchange == 0) ep.send(e, sc.ye, rows, on(x, "x_pack") and on(x, "x_locpost"), on(x, "x_locpost"));
-        if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
-        if (s & Class.exchange == 0 and on(x, "x_unpack")) ep.receive(e, sc.ye, rows);
+        if (exchange) ep.begin();
+        if (s & Class.route == 0) route(x, pass.enc, w, x_in, rows);
+        if (!x.fused_route and exchange) ep.localize(pass.enc, sc.pick, sc.uids, sc.umem, sc.ucount, rows);
+        if (s & Class.routed == 0) experts(x, pass.enc, w, x_in, rows, 2, ep.group());
+        if (exchange) ep.send(pass, sc.ye, rows, on(x, "x_pack"));
+        if (s & Class.shared == 0) experts(x, pass.enc, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (exchange) {
+            ep.wait(pass);
+            if (on(x, "x_unpack")) ep.receive(pass.enc, sc.ye, rows);
+        }
     } else if (native(w, .both) and s & (Class.shared | Class.routed) == 0 and on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down")) {
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        both(x, e, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
+        if (s & Class.route == 0) route(x, pass.enc, w, x_in, rows);
+        both(x, pass.enc, w, x_in, rows); // the shared expert as the gathers' last slot: two launches fewer
         if (s & Class.combine != 0 or !on(x, "combine")) return;
-        e.setPipeline(k.combine_0);
-        bind(e, 0, .{ sc.ye, sc.ye, sc.wts });
-        shape(e, 3, .{ rows, top });
-        bind(e, 4, .{sc.branch});
-        e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+        pass.enc.setPipeline(k.combine_0);
+        bind(pass.enc, 0, .{ sc.ye, sc.ye, sc.wts });
+        shape(pass.enc, 3, .{ rows, top });
+        bind(pass.enc, 4, .{sc.branch});
+        pass.enc.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
         return;
     } else if (x.k.wide != null and wide.moeOne(parts(w)) and s & (Class.shared | Class.routed) == 0 and
         on(x, "e_gateup") and on(x, "e_down") and on(x, "s_gateup") and on(x, "s_down"))
     {
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
+        if (s & Class.route == 0) route(x, pass.enc, w, x_in, rows);
         wide.moe(
             &x.k.wide.?,
-            e,
+            pass.enc,
             parts(w),
             c.experts,
             c.topk,
@@ -65,16 +73,16 @@ pub fn moe(x: *const Ctx, e: mtl.ComputeEncoder, w: *const wts.Moe, x_in: Ref, r
             rows,
         );
     } else {
-        if (s & Class.shared == 0) experts(x, e, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
-        if (s & Class.route == 0) route(x, e, w, x_in, rows);
-        if (s & Class.routed == 0) experts(x, e, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
+        if (s & Class.shared == 0) experts(x, pass.enc, w, x_in, rows, 1, .{ sc.none, sc.none, sc.none });
+        if (s & Class.route == 0) route(x, pass.enc, w, x_in, rows);
+        if (s & Class.routed == 0) experts(x, pass.enc, w, x_in, rows, 2, .{ sc.uids, sc.umem, sc.ucount });
     }
     if (s & Class.combine != 0 or !on(x, "combine")) return;
-    e.setPipeline(k.moe_combine);
-    bind(e, 0, .{ sc.ys, sc.ye, sc.wts });
-    shape(e, 3, .{ rows, top });
-    bind(e, 4, .{sc.branch});
-    e.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
+    pass.enc.setPipeline(k.moe_combine);
+    bind(pass.enc, 0, .{ sc.ys, sc.ye, sc.wts });
+    shape(pass.enc, 3, .{ rows, top });
+    bind(pass.enc, 4, .{sc.branch});
+    pass.enc.dispatchThreads(size(rows * c.hidden, 1, 1), size(256, 1, 1));
 }
 
 fn parts(w: *const wts.Moe) wide.Moe {
