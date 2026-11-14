@@ -162,6 +162,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
+    if (o.slide and (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text"))) {
+        problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
+        return null;
+    }
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4") or std.mem.eql(u8, o.model_type, "qwen4_text")) return @import("qwen4_cuda.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3")) return @import("cuda_qwen3.zig").open(a, gpa, io, o, problem, budget, windows);
@@ -528,20 +532,7 @@ test {
 }
 
 test "CUDA host preserves prefill_step, first-before-draft and chunk-invariance capability" {
-    var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
-    defer target.deinit();
-    var h: Host = undefined;
-    h.inner = target.stepped();
-    try std.testing.expect(h.backend().vtable.prefill_step != null);
-    try std.testing.expect(!h.backend().first_before_draft);
-    h.inner.first_before_draft = true;
-    try std.testing.expect(h.backend().first_before_draft);
-    try std.testing.expect(!h.backend().penalties);
-    h.inner.penalties = true;
-    try std.testing.expect(h.backend().penalties);
-    try std.testing.expect(h.backend().chunk_invariant); // the fake declares it; the wrapper must carry it
-    h.inner.chunk_invariant = false;
-    try std.testing.expect(!h.backend().chunk_invariant);
+    try @import("cuda_backend_flags_test.zig").check(Host, Host.backend);
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {
@@ -585,7 +576,7 @@ test "Save recovery: real native close drains the dense trainer before any child
 
 test "slide admission: cuda refuses before checkpoint or device access" {
     try @import("slide_open_test.zig").omni(open);
-    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "qwen4", "qwen4_text", "lfm2_vl", "glm5_next", "gemma4", "fish_omni", "qwen3" });
+    try @import("slide_open_test.zig").check(open, "CUDA", &.{ "lfm2_vl", "glm5_next", "gemma4", "qwen4", "qwen4_text", "fish_omni", "qwen3" });
 }
 
 test "qwen3 on CUDA refuses the flags it does not serve by name, before any checkpoint or device access" {

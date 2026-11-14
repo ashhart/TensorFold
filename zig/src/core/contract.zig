@@ -12,6 +12,7 @@ pub const bf16_round = @import("bf16_round");
 pub const attention_range = @import("attention_range.zig");
 pub const limits = @import("contract/limits.zig");
 pub const lane_q8 = @import("contract/lane_q8_records.zig");
+pub const living_native = @import("contract/living_native_records.zig");
 pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
 pub const hsaco = @import("contract/hsaco.zig");

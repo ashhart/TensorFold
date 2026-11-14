@@ -48,7 +48,8 @@ pub const cuda_pending = @import("qwen_whole_records.zig").records ++
     @import("cuda_lane_pending.zig").records ++
     @import("weight_only_records.zig").cuda ++
     @import("hc_activation_records.zig").cuda ++
-    @import("qwen4_records.zig").cuda;
+    @import("qwen4_records.zig").cuda ++
+    @import("living_native_records.zig").cuda;
 pub const metal_before = @import("fsr_records.zig").metal ++
     @import("scale_index_records.zig").metal ++
     @import("lfm3_records.zig").metal;
@@ -65,6 +66,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("grouped_records.zig").metal ++
     @import("hc_activation_records.zig").metal ++
     @import("qwen4_records.zig").metal ++
+    @import("living_native_records.zig").metal ++
     @import("lfm2_records.zig").records ++
     @import("nemotron_experts_records.zig").records ++
     @import("nemotron_pages_records.zig").records ++
@@ -119,4 +121,5 @@ pub const dsv41_pending = @import("registry_union.zig").extra(
 
 test {
     _ = @import("mla_cuda_records.zig");
+    _ = @import("living_native_records.zig");
 }
