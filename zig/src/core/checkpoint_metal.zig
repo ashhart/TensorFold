@@ -221,6 +221,15 @@ pub const Checkpoint = struct {
         };
     }
 
+    /// A tensor's dtype, shape and size, kept in a shard or left in its file.
+    pub fn describe(self: *const Checkpoint, name: []const u8) !Deferred {
+        if (self.tensors.get(name)) |t| return .{ .file = 0, .at = 0, .bytes = t.bytes, .dtype = t.dtype, .shape = t.shape, .rank = t.rank };
+        return self.deferred.get(name) orelse {
+            std.log.err("checkpoint has no tensor {s}", .{name});
+            return error.MissingTensor;
+        };
+    }
+
     pub fn has(self: *const Checkpoint, name: []const u8) bool {
         return self.tensors.contains(name) or self.deferred.contains(name);
     }
@@ -260,6 +269,30 @@ pub const Checkpoint = struct {
         self.tensors.deinit(self.allocator);
         for (self.shards.items) |s| s.buffer.deinit();
         self.shards.deinit(self.allocator);
+    }
+};
+
+/// A `Later` for the layers' linears whose module name ends in one of `modules`: their weight, scales and biases.
+pub fn laterModules(comptime modules: []const []const u8) Later {
+    return struct {
+        fn pick(name: []const u8, _: usize) bool {
+            const dot = std.mem.lastIndexOfScalar(u8, name, '.') orelse return false;
+            const leaf = name[dot + 1 ..];
+            const linear = std.mem.eql(u8, leaf, "weight") or std.mem.eql(u8, leaf, "scales") or std.mem.eql(u8, leaf, "biases");
+            if (!linear or std.mem.indexOf(u8, name, ".layers.") == null) return false;
+            inline for (modules) |m| if (std.mem.endsWith(u8, name[0..dot], m)) return true;
+            return false;
+        }
+    }.pick;
+}
+
+/// A checkpoint read through a Stage (anything that takes `get(name)`): kept tensors in place, deferred ones staged.
+pub const Staged = struct {
+    c: *const Checkpoint,
+    stage: *Stage,
+
+    pub fn get(s: Staged, name: []const u8) !Tensor {
+        return s.stage.read(s.c, name);
     }
 };
 
@@ -431,6 +464,12 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     try std.testing.expectError(error.ShardClosed, split.read("text.weight", 0, &part));
     try std.testing.expectEqualSlices(u32, (try full.get("text.weight")).host(u32), w.host(u32));
     try std.testing.expectEqualSlices(u16, (try full.get("text.scales")).host(u16), (try split.get("text.scales")).host(u16));
+}
+
+test "laterModules picks the named layer linears' three tensors and nothing else" {
+    const later = laterModules(&.{ "_proj", ".mixer.in" });
+    for ([_][]const u8{ "model.layers.3.self_attn.q_proj.weight", "model.layers.0.mlp.down_proj.biases", "x.layers.1.mixer.in.scales" }) |n| try std.testing.expect(later(n, 2));
+    for ([_][]const u8{ "model.embed_tokens.weight", "model.layers.3.input_layernorm.weight", "model.layers.3.self_attn.q_proj", "lm_head.weight", "model.layers.2.mixer.in_norm.weight" }) |n| try std.testing.expect(!later(n, 2));
 }
 
 test {
