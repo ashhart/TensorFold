@@ -100,6 +100,43 @@ and what it fixes.
 
 The [API reference](api.md) lists every field and refusal.
 
+## Agent eval: a heat exchanger with tools
+
+`tools/eval_hx_entu.py` holds a five-turn conversation with a served model that has one tool, `run_python`. Each
+turn gives an exchanger's capacity rates, inlets (200 °C and 20 °C) and UA, asks the model to compute the answer with
+the tool, and wants one JSON line at the end of its reply:
+
+1. Counterflow, C_h = C_c = 500 W/K, UA = 1000 W/K: the duty q and both outlets. With equal capacity rates the
+   general counterflow effectiveness formula is 0/0; the right one there is NTU / (1 + NTU).
+2. The same exchanger in parallel flow.
+3. Counterflow with C_c = 1000 W/K.
+4. Sizing: the UA that brings the hot gas out at 100 °C, with equal capacity rates.
+5. The first exchanger split into 200 cells and solved numerically; its hot outlet must agree with turn 1.
+
+A turn passes when every value is within 0.5% of the reference, which the tool computes from the closed forms. Each
+turn also records its tool calls, how many were well-formed (JSON arguments holding a `code` string), the runs that
+failed, completion and thinking tokens, and wall time. A turn whose duty is zero or far off while both stream
+balances match it exactly is flagged as an energy balance by construction: outlets computed from a wrong q always
+balance, so the check proves nothing.
+
+```sh
+tensorfold serve REPO --name local-model
+python3 tools/eval_hx_entu.py --model local-model --runs 3 --out hx.json
+```
+
+- `--base-url` defaults to `http://127.0.0.1:8080/v1` and `--temperature` to 0.2. A turn ends when the model answers
+  without a tool call or after `--max-tool-calls` calls (8).
+- `--reasoning-effort` sends `reasoning_effort` (`none` turns thinking off). `--thinking-budget N` sends
+  `thinking_budget`, so the server closes the reasoning after N tokens. Thinking tokens are read from the reply's
+  `usage.completion_tokens_details.reasoning_tokens`.
+- The model's code runs as `python3 -I` in a new temporary directory with only `PATH` set, under a wall limit (30 s),
+  CPU, file-size and memory limits. On macOS it runs inside `sandbox-exec` with no network, no writes outside that
+  directory and no reads in the home folder; macOS refuses address-space limits, so memory is held by watching the
+  program's resident size. On Linux it runs under `unshare -n`, which takes away the network only. Without either,
+  the tool refuses to run unless you pass `--unsafe-no-sandbox`.
+- It prints each turn's verdict with its values against the references, the totals, and how many turns each run
+  reached; a failed request ends that run. It exits 0 only when every run passes every turn.
+
 ## Memory
 
 `tensorfold info REPO` prints a checkpoint's memory floor: its weights plus the reserve the server keeps.
