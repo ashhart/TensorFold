@@ -23,9 +23,9 @@ pub fn capture(e: *Engine, prompt: []const u32, path: []const u8) !void {
     const dump = try e.arena.buffer(bytes);
     var x = e.ctx();
     x.dump = dump;
-    const b = e.begin();
-    fwd.backbone(&x, b.enc, e.prompt_ids, n, 0);
-    fwd.head(&x, b.enc, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
+    var b = e.begin();
+    fwd.backbone(&x, &b, e.prompt_ids, n, 0);
+    fwd.head(&x, &b, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
     try e.finish(b.cb, b.enc);
     fwd.flipKda(&x);
     const file = platform.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
@@ -57,9 +57,9 @@ pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, 
         const n: u32 = if (at < P) @min(st.max_rows, P - at) else 1;
         x.dump = dump;
         x.dump_at = 0;
-        const b = e.begin();
-        fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
-        fwd.head(&x, b.enc, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
+        var b = e.begin();
+        fwd.backbone(&x, &b, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+        fwd.head(&x, &b, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
         try e.finish(b.cb, b.enc);
         fwd.flipKda(&x);
         const bytes = x.dump_at + @as(usize, n) * c.vocab * 2;
@@ -88,9 +88,9 @@ pub fn forced(e: *Engine, prompt: []const u32, reply: []const u32) !struct { sam
     var first: ?usize = null;
     while (at < total) {
         const n: u32 = if (at < P) @min(st.max_rows, P - at) else 1;
-        const b = e.begin();
-        fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
-        fwd.head(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * c.hidden * 2), e.sc.logits, e.sc.picks, 1);
+        var b = e.begin();
+        fwd.backbone(&x, &b, e.prompt_ids.at(@as(usize, at) * 4), n, at);
+        fwd.head(&x, &b, e.sc.hidden.at(@as(usize, n - 1) * c.hidden * 2), e.sc.logits, e.sc.picks, 1);
         try e.finish(b.cb, b.enc);
         fwd.flipKda(&x);
         at += n;
@@ -131,13 +131,13 @@ pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !vo
         const m = if (mask == 0xffff_ffff) all else if (only and mask != 0) all & ~mask else mask;
         if (parts) x.pskip = m else x.skip = m;
         for (0..reps + 1) |rep| {
-            const b = e.begin();
+            var b = e.begin();
             if (d > 0 and x.skip & fwd.Class.mtp == 0) {
-                mtp.run(&x, b.enc, e.sc.hidden, e.sc.picks, R, e.s.mtp_pos, e.sc.ids.at(4));
-                for (1..d) |j| mtp.chain(&x, b.enc, if (j == 1) e.sc.m_x.at(@as(usize, R - 1) * D * 2) else e.sc.m_x, e.sc.ids.at(j * 4), e.s.mtp_pos + R + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
+                mtp.run(&x, &b, e.sc.hidden, e.sc.picks, R, e.s.mtp_pos, e.sc.ids.at(4));
+                for (1..d) |j| mtp.chain(&x, &b, if (j == 1) e.sc.m_x.at(@as(usize, R - 1) * D * 2) else e.sc.m_x, e.sc.ids.at(j * 4), e.s.mtp_pos + R + @as(u32, @intCast(j)) - 1, e.sc.ids.at((j + 1) * 4));
             }
-            fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
-            fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
+            fwd.backbone(&x, &b, e.sc.ids, R, e.s.pos);
+            fwd.head(&x, &b, e.sc.hidden, e.sc.logits, e.sc.picks, R);
             try e.finish(b.cb, b.enc);
             if (rep > 0) times[rep - 1] = (e.gpu[1] - e.gpu[0]) * 1e3; // the first run warms the class's state
         }
@@ -213,8 +213,8 @@ pub fn profilePrompt(e: *Engine, prompt: []const u32, reps: usize, only: bool, p
         if (parts) x.pskip = m else x.skip = m;
         for (0..reps + 1) |rep| {
             e.s.reset();
-            const b = e.begin();
-            prompt_mod.backbone(pr, &x, b.enc, e.prompt_ids, rows, 0);
+            var b = e.begin();
+            prompt_mod.backbone(pr, &x, &b, e.prompt_ids, rows, 0);
             try e.finish(b.cb, b.enc);
             if (rep > 0) times[rep - 1] = (e.gpu[1] - e.gpu[0]) * 1e3;
         }

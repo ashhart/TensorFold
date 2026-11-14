@@ -249,12 +249,19 @@ pub const Endpoint = struct {
 
     /// Send `len` bytes at `local` to peer `offset`, then `value` at `flag`; head goes before `local`; keep till acked.
     pub fn writeSignalFrom(self: *Endpoint, peer: u32, local: usize, offset: usize, len: usize, flag: usize, value: u64) rma.Error!void {
-        if (len == 0) return signal(self, peer, flag, value); // the library takes a zero-length write-and-signal as a dead peer
-        if (local < abi.ws_room or !self.in(local - abi.ws_room, len + abi.ws_room) or !self.in(offset, len) or !self.in(flag, 8)) return error.OutOfBounds;
+        return self.writeSignalFromUntil(peer, local, offset, len, flag, value, std.math.maxInt(u64));
+    }
+
+    /// The call deadline bounds admission to the native write. The library owns the timeout once inside that call.
+    pub fn writeSignalFromUntil(self: *Endpoint, peer: u32, local: usize, offset: usize, len: usize, flag: usize, value: u64, until: u64) rma.Error!void {
+        if (len > 0 and (local < abi.ws_room or !self.in(local - abi.ws_room, len + abi.ws_room) or !self.in(offset, len) or !self.in(flag, 8))) return error.OutOfBounds;
+        if (len == 0) return self.signalUntil(peer, flag, value, until);
         if (flag % 8 != 0) return error.Unaligned;
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        const end_at = @min(until, try self.end());
+        try port.mutex.lock(end_at);
         defer port.mutex.unlock();
+        if (try words.checkedNowNs() >= end_at) return error.Timeout;
         if (port.link == roce) { // ConnectX has no fused message: the write, then the signal, on the one queue pair
             try self.checkPort(port, self.library.api.write(port.peer.?, local, offset, len));
             port.pending = true;
@@ -355,8 +362,14 @@ pub const Endpoint = struct {
     }
 
     fn flushPort(self: *Endpoint, port: *Port) rma.Error!void {
+        try self.flushPortUntil(port, try self.end());
+    }
+
+    fn flushPortUntil(self: *Endpoint, port: *Port, end_at: u64) rma.Error!void {
         if (!port.pending) return;
-        const timeout = try self.left();
+        const now = try words.checkedNowNs();
+        if (now >= end_at) return error.Timeout;
+        const timeout = end_at - now;
         try self.checkPort(port, self.library.api.flush(port.peer.?, timeout));
         port.used = 0;
         port.pending = false;
@@ -446,7 +459,10 @@ pub const Endpoint = struct {
     }
 
     fn signal(ptr: *anyopaque, peer: u32, offset: usize, value: u64) rma.Error!void {
-        const self = of(ptr);
+        return of(ptr).signalUntil(peer, offset, value, std.math.maxInt(u64));
+    }
+
+    fn signalUntil(self: *Endpoint, peer: u32, offset: usize, value: u64, until: u64) rma.Error!void {
         if (offset % 8 != 0) return error.Unaligned;
         if (!self.in(offset, 8)) return error.OutOfBounds;
         if (peer == self.config.rank) {
@@ -454,8 +470,10 @@ pub const Endpoint = struct {
             return;
         }
         const port = try self.portFor(peer);
-        try port.mutex.lock(try self.end());
+        const end_at = @min(until, try self.end());
+        try port.mutex.lock(end_at);
         defer port.mutex.unlock();
+        if (try words.checkedNowNs() >= end_at) return error.Timeout;
         try self.checkPort(port, self.library.api.signal(port.peer.?, offset, value));
         port.pending = true;
     }
@@ -478,6 +496,15 @@ pub const Endpoint = struct {
             defer port.mutex.unlock();
             try self.flushPort(port);
         }
+    }
+
+    /// Retire a peer's posted writes without changing deadlines on concurrent control or benchmark calls.
+    pub fn flushPeerUntil(self: *Endpoint, peer: u32, until: u64) rma.Error!void {
+        const port = try self.portFor(peer);
+        const end_at = @min(until, try self.end());
+        try port.mutex.lock(end_at);
+        defer port.mutex.unlock();
+        try self.flushPortUntil(port, end_at);
     }
 
     fn kind(ptr: *anyopaque, peer: u32) rma.LinkKind {
