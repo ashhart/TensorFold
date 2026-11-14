@@ -15,6 +15,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_RESTORE_PREFETCH_GIB` | Whole unsigned 64-bit GiB count, capped at 16777216; default 16 |
 | `TENSORFOLD_RESTORE_PREFETCH_MS` | Whole unsigned 64-bit milliseconds, capped at 1099511627776; default 30000 |
 | `TENSORFOLD_TOOL_ID_KEY_FILE` | The path of the file that holds the key for tool-call ids ([API](api.md#messages-and-tools)). The file must be a regular file, not a link, that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset, each server process makes its own random key. If the file is wrong, the server does not start; the message names this setting but never shows the path or what the file holds |
+| `TF_RANK_SECRET_FILE` | The path of the file that holds the key the ranks of a multi-GPU group prove to each other ([SECURITY.md](../SECURITY.md#ranks-on-more-than-one-host)). The file must be a regular file (a symbolic link to one is followed) that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset or blank, ranks meet only on one host. `serve --rank-secret FILE` sets it |
 | `TF_STARTUP_RECEIPT` | Exactly `0` or `1`; default off. `1` writes the startup and first completion receipts |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |

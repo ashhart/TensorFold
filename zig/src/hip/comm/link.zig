@@ -8,6 +8,7 @@ const Policy = @import("../policy.zig").Policy;
 const Identity = agree_.Identity;
 const Field = agree_.Field;
 const Fault = agree_.Fault;
+const auth = @import("sys").rank_auth;
 
 pub const Error = error{
     SocketFailed,
@@ -16,7 +17,7 @@ pub const Error = error{
     LinkClosed,
     BadRank,
     RanksDiffer,
-} || std.mem.Allocator.Error;
+} || auth.Error || std.mem.Allocator.Error;
 
 pub const max_world = 16;
 
@@ -26,6 +27,9 @@ const layout: u32 = 2;
 
 /// Milliseconds rank 0 keeps telling late ranks that the group was refused before it gives up on them.
 const linger_ms = 5000;
+
+/// Milliseconds a rank waits for rank 0's side of the key proof: rank 0 may be busy with other connections.
+const proof_ms = 600_000;
 
 /// What a rank says when it joins: its place, its GPU and RCCL, and what it runs.
 pub const Hello = extern struct {
@@ -60,7 +64,7 @@ pub const Link = struct {
     /// Rank 0: the follower of rank r + 1 at index r. A follower: rank 0's socket at index 0.
     fds: [max_world - 1]posix.socket_t = undefined,
 
-    /// Rank 0 listens on `host:port`, answers once every hello matches its own; `fault` names a rank that does not.
+    /// Rank 0 listens on `host:port`, answers once every proven hello matches its own; `fault` names one that does not.
     pub fn open(
         io: std.Io,
         host: []const u8,
@@ -69,6 +73,7 @@ pub const Link = struct {
         hello: Hello,
         policy: [Policy.word_count]u32,
         fault: *Fault,
+        secret: *const auth.Secret,
     ) Error!struct { Link, rccl.UniqueId, [Policy.word_count]u32 } {
         const rank = hello.rank;
         const world = hello.world;
@@ -78,7 +83,7 @@ pub const Link = struct {
         var addr: posix.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = std.mem.readInt(u32, &ip.ip4.bytes, .little) };
         var link: Link = .{ .rank = rank, .world = world };
         if (rank == 0) {
-            try link.lead(&addr, hello, fault);
+            try link.lead(&addr, hello, fault, secret);
             for (link.fds[0 .. world - 1]) |fd| {
                 try writeAll(fd, std.mem.asBytes(&Answer{}));
                 try writeAll(fd, std.mem.asBytes(&id));
@@ -98,6 +103,7 @@ pub const Link = struct {
             std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
         }
         errdefer _ = posix.system.close(link.fds[0]);
+        _ = try auth.connect(link.fds[0], secret, .rocm, rank, world, proof_ms);
         try writeAll(link.fds[0], std.mem.asBytes(&hello));
         var answer: Answer = undefined;
         try readAll(link.fds[0], std.mem.asBytes(&answer));
@@ -121,7 +127,7 @@ pub const Link = struct {
     }
 
     /// Rank 0 takes every hello; at the first that differs, every rank in (and any arriving soon after) is told.
-    fn lead(l: *Link, addr: *posix.sockaddr.in, hello: Hello, fault: *Fault) Error!void {
+    fn lead(l: *Link, addr: *posix.sockaddr.in, hello: Hello, fault: *Fault, secret: *const auth.Secret) Error!void {
         const server = try socket();
         defer _ = posix.system.close(server);
         const one: c_int = 1;
@@ -141,13 +147,24 @@ pub const Link = struct {
         taken[0] = true;
         var refused: ?Fault = null;
         var arrived: usize = 0;
-        while (arrived < l.world - 1) : (arrived += 1) {
-            const fd = (try accept(server, if (refused == null) -1 else linger_ms)) orelse break;
+        var linger_until: u64 = 0;
+        while (arrived < l.world - 1) {
+            const wait: i32 = if (refused == null) -1 else @intCast(@min(linger_until -| auth.nowMs(), linger_ms));
+            const fd = (try accept(server, wait)) orelse break;
+            // a connection that proves no key takes no place and hears no answer: it is closed and the wait goes on
+            const who = auth.accept(fd, secret, &.{.rocm}, auth.budget_ms) catch |e| {
+                var at: [64]u8 = undefined;
+                std.log.warn("hip: a connection from {s} to the ranks' link proved no key and is ignored: {s}", .{ auth.peerText(fd, &at), auth.explain(e) orelse @errorName(e) });
+                _ = posix.system.close(fd);
+                continue;
+            };
+            arrived += 1;
             var h = std.mem.zeroes(Hello);
-            const field = if (readHello(fd, &h)) |_| differs(hello, h, &taken) else |_| Field.layout;
+            const field = if (readHello(fd, &h)) |_| (if (h.rank != who.rank or h.world != who.world) Field.rank else differs(hello, h, &taken)) else |_| Field.layout;
             if (refused == null) {
                 if (field) |f| {
                     refused = .{ .field = f, .rank = h.rank };
+                    linger_until = auth.nowMs() + linger_ms;
                     for (1..l.world) |r| if (taken[r]) tell(l.fds[r - 1], refused.?);
                 } else {
                     taken[h.rank] = true;
@@ -205,12 +222,32 @@ pub const Link = struct {
     }
 };
 
-/// A rank's hello, its layout checked before the rest is read.
+/// A proven rank's hello, its layout checked before the rest is read; a rank that stalls is not waited on.
 fn readHello(fd: posix.socket_t, h: *Hello) Error!void {
+    const until = auth.nowMs() + auth.budget_ms;
     const bytes = std.mem.asBytes(h);
-    try readAll(fd, bytes[0..8]);
+    try readBefore(fd, bytes[0..8], until);
     if (h.magic != magic or h.layout != layout) return;
-    try readAll(fd, bytes[8..]);
+    try readBefore(fd, bytes[8..], until);
+}
+
+/// Fills `bytes` before `until` (auth.nowMs's clock); a peer that sends too little in time counts as gone.
+fn readBefore(fd: posix.socket_t, bytes: []u8, until: u64) Error!void {
+    var at: usize = 0;
+    while (at < bytes.len) {
+        const left = until -| auth.nowMs();
+        var fds = [_]posix.pollfd{.{ .fd = fd, .events = posix.POLL.IN, .revents = 0 }};
+        if (left == 0 or (posix.poll(&fds, @intCast(left)) catch 0) == 0) return error.LinkClosed;
+        const rc = posix.system.read(fd, bytes[at..].ptr, bytes.len - at);
+        switch (posix.errno(rc)) {
+            .SUCCESS => {
+                if (rc == 0) return error.LinkClosed;
+                at += @intCast(rc);
+            },
+            .INTR => {},
+            else => return error.LinkClosed,
+        }
+    }
 }
 
 /// Tells a rank that the group was refused, and why; it may already be gone.

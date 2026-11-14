@@ -2,6 +2,8 @@
 const std = @import("std");
 const api = @import("engine_api");
 const cli = @import("cli.zig");
+const sys = @import("sys");
+const auth = sys.rank_auth;
 
 const Args = cli.Args;
 const Usage = cli.Usage;
@@ -41,6 +43,11 @@ pub fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Us
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --master-port: invalid port: '{s}'", .{v});
         out.master_port = @intCast(p);
+    } else if (is(name, "--rank-secret")) {
+        // every rank link reads its key from TF_RANK_SECRET_FILE (sys.rank_auth): the flag names that file
+        const path = try a.dupeSentinel(u8, v, 0);
+        _ = auth.Secret.fromFile(path) catch |e| return fail(u, a, "argument --rank-secret: {s}: '{s}'", .{ auth.explain(e) orelse @errorName(e), v });
+        if (sys.env.setenv(auth.env_name, path, 1) != 0) return fail(u, a, "argument --rank-secret: the environment could not be set", .{});
     } else if (is(name, "--mtp-drafts")) {
         const n = try int(u, a, name, v);
         if (n < 0 or n > 64) return fail(u, a, "argument --mtp-drafts: a count from 0 to 64: '{s}'", .{v});
@@ -61,3 +68,35 @@ pub fn gpuFlag(a: Allocator, out: *Args, name: []const u8, v: []const u8, u: *Us
 }
 
 const Allocator = std.mem.Allocator;
+
+test "security: --rank-secret takes only a key file its owner alone can read, and names it for every rank link" {
+    if (sys.windows) return error.SkipZigTest; // refusal by mode bits
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = std.c;
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/tf-rank-secret-flag-{d}", .{c.getpid()}, 0);
+    defer _ = c.unlink(path);
+    defer _ = sys.env.unsetenv(auth.env_name);
+    _ = sys.env.unsetenv(auth.env_name);
+    var args: Args = .{};
+    var u: Usage = .{};
+    for ([_]c.mode_t{ 0o644, 0o600 }) |mode| {
+        _ = c.unlink(path);
+        const fd = c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true }, mode);
+        try std.testing.expect(fd >= 0);
+        _ = c.fchmod(fd, mode);
+        _ = c.write(fd, "0123456789abcdef0123456789abcdef0123\n", 37);
+        _ = c.close(fd);
+        if (mode == 0o600) {
+            try std.testing.expect(try gpuFlag(a, &args, "--rank-secret", path, &u));
+            try std.testing.expectEqualStrings(path, sys.getenv(auth.env_name).?);
+            try std.testing.expect((try auth.Secret.fromEnv()).keyed);
+        } else {
+            try std.testing.expectError(error.Usage, gpuFlag(a, &args, "--rank-secret", path, &u));
+            try std.testing.expect(std.mem.indexOf(u8, u.message, "chmod 600") != null);
+            try std.testing.expect(sys.getenv(auth.env_name) == null);
+        }
+    }
+    try std.testing.expectError(error.Usage, gpuFlag(a, &args, "--rank-secret", "/nonexistent/rank-secret", &u));
+}

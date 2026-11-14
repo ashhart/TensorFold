@@ -192,7 +192,8 @@ and RTX PRO 6000 Blackwell (sm_120). A receipt on one sm_86 card does not measur
 Flash Next MLX 4-bit has served on a GB10 ([native recipe](docs/recipes/flash-next-cuda.md)).
 [GLM-5.3-Flash](docs/recipes/glm-5.3-flash-cuda.md) has recorded native TP=2 and TP=3 runs, including FP4-Local and
 XSFP4 on two and three GB10s. GLM uses `TF_GLM_RANK`, `TF_GLM_WORLD` and `NCCL_COMM_ID`; other ranked families use
-their supported `--tp` options. [Gemma 4](CHANGELOG.md#114) 12B and 31B MLX checkpoints have served on a GB10 too.
+their supported `--tp` options. Ranks on more than one host need `TF_RANK_SECRET_FILE` set to the same owner-only
+key file on each ([SECURITY.md](SECURITY.md#ranks-on-more-than-one-host)). [Gemma 4](CHANGELOG.md#114) 12B and 31B MLX checkpoints have served on a GB10 too.
 The largest recorded CUDA server is GLM on three GB10s; GLM refuses more than 16 ranks and `--tp` offers only
 1, 2, 4 or 8, so no native family serves 32 GPUs as one server and no run beyond three is recorded.
 

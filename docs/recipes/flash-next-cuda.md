@@ -35,6 +35,9 @@ tensorfold-native serve nvidia/Qwen3.8-Flash-Next-NVFP4 --tp 2 --rank 0 --master
 
 - Both ranks run the same executable (they compare it) and need NCCL 2.30 or later; set `NCCL_SOCKET_IFNAME` and
   `NCCL_IB_HCA` for the link between the hosts. `--master-port` (default 29551) names rank 0's control port.
+- Ranks on two hosts prove a shared key before they exchange anything: add `--rank-secret rank.key` to both commands,
+  with the same owner-only file on each host. Without it, a rank that reaches another host refuses to start. See
+  [Ranks on more than one host](../../SECURITY.md#ranks-on-more-than-one-host).
 - Each rank sends a digest of every checkpoint byte, cached after the first read (about 2 minutes for this
   checkpoint's 124 GiB on a GB10), and both wait up to 30 minutes for the other. `TENSORFOLD_CHECKPOINT_SHA256`, when
   set the same on both ranks, replaces the digest and keeps the wait at a minute.

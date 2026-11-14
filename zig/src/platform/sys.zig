@@ -13,6 +13,8 @@ pub const env = if (windows) @import("win_c.zig") else struct {
 };
 pub const environment = @import("environment.zig");
 pub const atomic_file = @import("atomic_file.zig");
+/// The rank group's key and the proof every rank connection makes before its first protocol byte.
+pub const rank_auth = @import("rank_auth.zig");
 
 /// std.posix, or its sockets, signals and limits over Winsock and console events.
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;
