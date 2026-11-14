@@ -7,6 +7,8 @@ pub const records = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down", .symbol = "tf_exl3_prompt_down", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_k6", .symbol = "tf_exl3_prompt_gu_k6", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_k6", .symbol = "tf_exl3_prompt_down_k6", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu_k6_mul1", .symbol = "tf_exl3_prompt_gu_k6_mul1", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down_k6_mul1", .symbol = "tf_exl3_prompt_down_k6_mul1", .image = "exl3_experts", .threads = 256 }, .usage = registry.none },
 };
 
 pub fn owns(name: []const u8) bool {

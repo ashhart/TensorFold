@@ -52,7 +52,7 @@ Coverage includes:
   shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
   dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B, Muse Spark Open, Ripple,
-  Inkling 2 Mini):
+  Inkling 2 Mini, MiMo-V2):
   `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
 - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,

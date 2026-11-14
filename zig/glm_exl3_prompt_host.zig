@@ -82,7 +82,7 @@ fn run(rows: usize, prompt: bool, shared: bool, count: usize) !void {
     var k: glm.exl3.Kernels = undefined;
     inline for (.{ "group", "rot_in", "gateup", "down_combine" }, .{ 9, 5, 13, 14 }) |field, id| @field(k, field) = Record.function(&d, id);
     k.grouped = .{ Record.function(&d, 10), Record.function(&d, 11), Record.function(&d, 12) };
-    k.prompt = .{ .rotate = Record.function(&d, 6), .gateup = Record.function(&d, 7), .down = Record.function(&d, 8), .gateup_k6 = Record.function(&d, 21), .down_k6 = Record.function(&d, 22) };
+    k.prompt = .{ .rotate = Record.function(&d, 6), .gateup = Record.function(&d, 7), .down = Record.function(&d, 8), .gateup_k6 = Record.function(&d, 21), .down_k6 = Record.function(&d, 22), .gateup_k6_mul1 = Record.function(&d, 23), .down_k6_mul1 = Record.function(&d, 24) };
     var ek: glm.experts.Kernels = undefined;
     inline for (.{ "plan_small", "plan_rows", "plan_rank", "plan_offsets", "plan_scatter", "plan_rank_rows", "plan_scatter_rows" }, .{ 1, 18, 2, 3, 4, 19, 20 }) |field, id| @field(ek.router, field) = Record.function(&d, id);
     const w = glm.exl3.Experts{ .gt = 101, .ut = 102, .dt = 103, .k2 = 104, .suh_g = 105, .suh_u = 106, .svh_g = 107, .svh_u = 108, .suh_d = 109, .svh_d = 110, .shx = shared };
@@ -170,20 +170,12 @@ fn guarded(text: []const u8, name: []const u8, payload: []const u8) bool {
     return guard < @min(load, member);
 }
 
-/// Whether kernel `name`'s whole body is the call `call` (the guarded template at one width).
-fn forwards(text: []const u8, name: []const u8, call: []const u8) bool {
-    const at = std.mem.indexOf(u8, text, name) orelse return false;
-    const tail = text[at..];
-    const open = std.mem.indexOf(u8, tail, "{\n") orelse return false;
-    const end = std.mem.indexOf(u8, tail, "\n}") orelse return false;
-    return open < end and std.mem.startsWith(u8, std.mem.trim(u8, tail[open + 2 .. end], " "), call) and std.mem.count(u8, tail[open + 2 .. end], ";") == 1;
-}
-
 test "GLM EXL3 prompt: shared-id guards precede payload loads and late-guard controls are caught" {
     try t.expect(guarded(source, "void prompt_gu(", "tgateup<"));
     try t.expect(guarded(source, "void prompt_down(", "members[first"));
-    for ([_][2][]const u8{ .{ "tf_exl3_prompt_gu(", "prompt_gu<8>(" }, .{ "tf_exl3_prompt_gu_k6(", "prompt_gu<6>(" }, .{ "tf_exl3_prompt_down(", "prompt_down<8>(" }, .{ "tf_exl3_prompt_down_k6(", "prompt_down<6>(" } }) |k| try t.expect(forwards(source, k[0], k[1]));
-    try t.expect(!forwards(source, "tf_exl3_prompt_gu(", "prompt_gu<6>("));
+    try t.expect(std.mem.indexOf(u8, source, "TF_EXL3_PROMPT(tf_exl3_prompt_gu, tf_exl3_prompt_down, 8, CB_MCG)") != null);
+    try t.expect(std.mem.indexOf(u8, source, "TF_EXL3_PROMPT(tf_exl3_prompt_gu_k6, tf_exl3_prompt_down_k6, 6, CB_MCG)") != null);
+    try t.expect(std.mem.indexOf(u8, source, "TF_EXL3_PROMPT(tf_exl3_prompt_gu_k6_mul1, tf_exl3_prompt_down_k6_mul1, 6, CB_MUL1)") != null);
     const bad = try std.mem.replaceOwned(u8, t.allocator, source, "if (e == skip) return;", "const volatile int control_member = members[items[3 * item + 1]];\n    if (e == skip) return;");
     defer t.allocator.free(bad);
     try t.expectEqual(@as(usize, 2), std.mem.count(u8, bad, "if (e == skip) return;"));

@@ -3,11 +3,16 @@ const std = @import("std");
 
 /// Its forward, prompt path, DFlash drafter and native lane backend, over TP sessions with the RoCE mailbox kernel.
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
+    return moduleOver(b, target, optimize, cuda, core, lanes, @import("tp.zig").module(b, target, optimize, cuda));
+}
+
+/// Same, over the caller's `tp` (the engines' binary passes GLM's, over the verbs its fabric shares).
+pub fn moduleOver(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, tp: *std.Build.Module) *std.Build.Module {
     const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/mimo_v2/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     m.addImport("cuda", cuda);
     m.addImport("core", core);
     m.addImport("lanes", lanes);
-    m.addImport("tp", @import("tp.zig").module(b, target, optimize, cuda));
+    m.addImport("tp", tp);
     m.addImport("tp_kernel", @import("tp.zig").mailboxModule(b));
     return m;
 }

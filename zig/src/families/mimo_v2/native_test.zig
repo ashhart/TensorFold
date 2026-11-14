@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const native = @import("native.zig");
 
 test "MiMo-V2 refuses every GPU but GB10 (sm_121) before reading anything" {
+    if (comptime @import("builtin").os.tag != .linux) return error.SkipZigTest;
     const abi = cuda.abi;
     const Fake = struct {
         var sm: u32 = 0;
@@ -35,4 +36,12 @@ test "the admission refusals say what was validated" {
         const text = native.explain(null, err) orelse return error.Unexplained;
         try std.testing.expect(std.mem.indexOf(u8, text, "validated") != null);
     }
+}
+
+test "MiMo-V2 refuses non-Linux admission before touching the driver or TP" {
+    if (comptime @import("builtin").os.tag == .linux) return error.SkipZigTest;
+    const ctx: cuda.Context = undefined;
+    try std.testing.expectError(error.MimoV2RequiresLinux, native.open(std.testing.allocator, std.testing.io, &ctx, "no-such-pack", null, .{ .context = 4096, .drafts = false }));
+    const text = native.explain(null, error.MimoV2RequiresLinux) orelse return error.Unexplained;
+    try std.testing.expect(std.mem.indexOf(u8, text, "Linux") != null);
 }
