@@ -40,23 +40,52 @@ pub fn width(e: *lanes.Engine, s: *Stream, chance: []const f64) !Width {
     const tokens: [16]u32 = @splat(0);
     const p: lanes.windows.Plan = .{ .stream = s, .position = s.cache_len, .kind = .head, .tokens = tokens[0..chance.len] };
     try lone_costs.prepare(e, s, .wall);
-    _ = e.arena.reset(.retain_capacity);
-    const a = e.arena.allocator();
-    const prices = try lone_costs.prices(e, p);
+    // the prices and the counts are the round's temporaries: a lone tree prices at most 17 widths, 16 bytes each
+    var buf: [2048]u8 align(16) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&buf);
     // least_rows 2: a lone tree drafts at least one node
-    const counts = try lanes.allocate.allocateDrafts(a, &.{1}, &.{chance}, &prices, 0, @max(1, e.cfg.batch_rows), .{ .least_rows = 2 });
-    var out: Width = .{ .nodes = counts[0] };
-    if (lone_costs.probe(e, p)) |drafts| {
-        out = .{ .nodes = drafts, .trial = drafts + 1 };
-        s.cost_probe_trial = lone_costs.trial(s, chance, drafts + 1);
-    }
-    return out;
+    const pick = try lone_costs.choose(e, fixed.allocator(), p, chance, 2);
+    return .{ .nodes = pick.counts[0], .trial = pick.trial };
 }
 
 /// A complete lone round of `drafts` took `ms`: the rule blends it into the stream's table, and the trial's result.
 pub fn measured(e: *lanes.Engine, s: *Stream, trial: ?u32, drafts: u32, ms: f64) !void {
     try e.rule.observeCost(drafts, ms, false, lone_costs.marked(lanes.windows.who(s), true));
     lone_costs.observe(s, trial, drafts + 1, ms);
+}
+
+/// One lone round of `s` from `pending`: a tree grown at the cap and cut to the width `e` prices (none: a fixed tree).
+pub fn lone(comptime D: type, comptime now: fn () f64, b: anytype, d: *D.Drafter, e: ?*lanes.Engine, s: *Stream, pending: u32, skip: *bool, drawer: ?D.Draw, note: ?D.Note, out: *[16]u32) !D.Round {
+    const x = e orelse {
+        const round = try D.treeRound(d, pending, b.block - 1, b.nodes, drawer, note, out);
+        s.rounds += 1;
+        return round;
+    };
+    const t0 = now();
+    const g = try D.grow(d, pending, b.block - 1, priced(b.nodes).?, drawer);
+    var chance: [15]f64 = undefined;
+    chances(&b.landing, s.sampling != null, g.par[1..], g.own[1..], chance[0..g.n]);
+    const pick = try width(x, s, chance[0..g.n]);
+    const round = try D.settle(d, &g, pick.nodes, drawer, note, out);
+    try b.runner.d.sync(); // the round as the stream pays it, taps included
+    const ms = (now() - t0) * 1e3;
+    s.rounds += 1;
+    b.landing.observeTree(s.sampling != null, g.par[1..], g.own[1..], round.drafted, round.path[0..round.rows]);
+    // the first round has the prefill switch, the one after a cold restart no drafter context
+    if (s.rounds > 1 and !skip.*) try measured(x, s, pick.trial, round.drafted, ms);
+    skip.* = false;
+    return round;
+}
+
+/// A lone round's accepted drafts and its terminal token, committed to `s` with their logprob rows (none: no logprobs).
+pub fn land(gpa: Allocator, s: *Stream, round: anytype, rows: []const lanes.LogprobRow) !void {
+    s.drafted += round.drafted;
+    s.accepted += round.accepted;
+    var landed: [17]u32 = undefined;
+    const n = round.tokens.len - 1;
+    @memcpy(landed[0..n], round.tokens[1..]);
+    landed[n] = round.terminal;
+    _ = try s.commit(gpa, landed[0 .. n + 1], rows);
 }
 
 /// `M`: the drafter's module (Drafter, Block, Absorb, TOPK, WIN); `H`: the lane target it reads slots and taps from.

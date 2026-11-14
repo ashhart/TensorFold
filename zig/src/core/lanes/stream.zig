@@ -18,7 +18,6 @@ pub const Reason = enum {
     length,
     @"error",
     cancelled,
-
     pub fn name(r: Reason) []const u8 {
         return if (r == .none) "" else @tagName(r);
     }
