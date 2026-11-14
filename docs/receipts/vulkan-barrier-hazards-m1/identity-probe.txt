@@ -1,0 +1,1 @@
+RESULT stage1 elapsed_ms=6440 on "Apple M1 (G13G B1)": passed=25 total=25
