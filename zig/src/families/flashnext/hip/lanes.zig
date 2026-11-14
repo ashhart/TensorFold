@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const serve = @import("hip_serve");
 const Engine = @import("engine.zig").Engine;
 const cache = @import("cache.zig");
+const facts_mod = @import("facts.zig");
 const forward = @import("forward.zig");
 const head_mod = @import("head.zig");
 const load = @import("load.zig");
@@ -19,7 +20,6 @@ const draw = serve.draw;
 const ring = 1024;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
-
 pub const Fill = struct {
     at: usize,
     stops: [16]u32 = undefined,
@@ -81,7 +81,7 @@ pub const Fx = struct {
             .streams = streams,
             .ones = try hip.DeviceBuffer.fromHost(&e.driver, std.mem.sliceAsBytes(host)),
             .draft_ids = &.{},
-            .drafts = @min(max_depth, e.o.policy.mtp.drafts),
+            .drafts = facts_mod.capDrafts(e.o.policy.mtp.drafts),
         };
         errdefer f.ones.free();
         if (e.weights.model.mtp != null) f.draft_ids = try load.draftIds(gpa);
@@ -205,19 +205,7 @@ pub const Fx = struct {
     }
 
     pub fn facts(f: *const Fx) lanes.Model {
-        const drafting = f.e.weights.model.mtp != null and f.drafts > 0;
-        return .{
-            .exact_width = cache.max_window,
-            .gpu_tokens = false,
-            .mtp = drafting,
-            .speculate = drafting,
-            .speculate_early = false,
-            .drafts = f.drafts,
-            .hidden_rows = true,
-            .batch_rows = @intCast(cache.max_window * f.streams),
-            .max_streams = @intCast(f.streams),
-            .draft_streams = false,
-        };
+        return facts_mod.factsFor(cache.max_window, f.streams, f.e.weights.model.mtp != null and f.drafts > 0, f.drafts);
     }
 
     fn free(f: *Fx, l: *Lane) void {
@@ -594,3 +582,14 @@ pub const Fx = struct {
         f.free(kv.value);
     }
 };
+
+test "MTP stays at three: the constant, the cap and the facts never report more" {
+    try std.testing.expectEqual(@as(u32, 3), facts_mod.mtp_max_drafts);
+    try std.testing.expectEqual(@as(u32, 3), facts_mod.capDrafts(3));
+    try std.testing.expectEqual(@as(u32, 3), facts_mod.capDrafts(7));
+    const m = facts_mod.factsFor(cache.max_window, 2, true, facts_mod.capDrafts(7));
+    try std.testing.expectEqual(@as(u32, 3), m.drafts);
+    var cfg = try lanes.Config.init(std.testing.allocator, m, cache.max_window, cache.max_window - 1);
+    defer cfg.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 3), cfg.most_drafts);
+}
