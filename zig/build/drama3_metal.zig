@@ -29,6 +29,7 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .link_libc = true,
         .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "metal", .module = metal }, .{ .name = "drama3_metallib", .module = bytes } },
     });
+    family.addImport("tensorfold", native.import_table.get("tensorfold").?);
     native.addImport("core", core);
     native.addImport("drama3", family);
 }
@@ -65,6 +66,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } },
     });
+    family.addImport("tensorfold", core);
     const quant_check = b.addExecutable(.{
         .name = "drama3-metal-quant-check",
         .root_module = b.createModule(.{

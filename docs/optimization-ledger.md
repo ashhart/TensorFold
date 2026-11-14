@@ -217,9 +217,16 @@ q27 `qwen27` (M: Qwen3.8-27B and Qwen3.5-MoE), lfm2 `lfm2` (C: LFM2-VL, scores d
 llama `llama` (M), step5 `step5` (M), gdsa `glm_dsa` (M), kimi `kimi_k3` (M, native serving on [#2221]),
 qwen3 `qwen3` (H: embeddings and rerankers, prompt only).
 
-Not in the table: `h3` (MiniMax H3 denoising blocks), `drama3` (speech), `moss_image`, `qwen_image`, `radio`, and
-the HIP OCR families `dots_mocr` and `glm_ocr`. They are not autoregressive text servers on the lane host, so few rows
-apply.
+Not in the table: `h3` (MiniMax H3 denoising blocks), `drama3` (speech), `moss_image`, `qwen_image`, `radio`,
+`sam3` (segmentation), and the HIP OCR families `dots_mocr` and `glm_ocr`. They are not autoregressive text servers
+on the lane host, so few rows apply.
+
+SAM3 (M) caches convolution matrices and rotary tables; its FP32 transposed convolution computes four spatial
+outputs per thread. Its FP32 tensor products reconstruct operand bits omitted by the hardware operation.
+GEMMs with weights expanded from FP16/BF16 omit zero correction products at compile time.
+FP16 checkpoint projections retain the original weight bits with FP32 activations and accumulation.
+Its FP32 D256 attention computes scores once and reuses them across two value halves, preserving output bytes.
+The tracker reserves reusable probability and softmax workspace before encoding each batch.
 
 ## Rough gain
 

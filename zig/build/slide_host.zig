@@ -17,6 +17,7 @@ pub fn metal(b: *std.Build, m: anytype) void {
     native.addImport("kimi_k3", @import("metal_targets.zig").kimiModule(b, target, .Debug, m.metal, m.engine, m.lanes));
     native.addImport("kimi_metallib", bytes);
     const drama = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3_metal.zig"), .target = target, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "core", .module = core }, .{ .name = "drama3_metallib", .module = bytes } } });
+    drama.addImport("tensorfold", m.engine);
     native.addImport("drama3", drama);
     native.addImport("core", core);
     native.addImport("tokenizer", tokenizer);

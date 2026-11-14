@@ -301,7 +301,7 @@ const macos_deepseek = [_][]const u8{
     "test-sessions-writes-host",
 };
 
-const macos_fast = [_][]const u8{
+const macos_fast = [_][]const u8{"test-sam3"} ++ [_][]const u8{
     "check-qwen27-speed-host",
     "test-cluster-membership-host",
     "test-glm-disk-charge-host",
