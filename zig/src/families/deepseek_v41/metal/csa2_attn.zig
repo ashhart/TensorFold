@@ -27,11 +27,14 @@ const pf_names = [_][:0]const u8{ "tf_dsv41_attn_dec_pf_f32", "tf_dsv41_attn_dec
 /// Decode launches of at most this many rows load each step's keys a step ahead (the same math, so the same bits).
 pub const prefetch_rows = 2;
 const pre_names = [_][:0]const u8{ "tf_dsv41_attn_pre_f32", "tf_dsv41_attn_pre_bf16" };
+const seg_names = [_][:0]const u8{ "tf_dsv41_attn_dec_segs_bf16", "tf_dsv41_attn_dec_segs_pf_bf16" };
 
 pub const Pipelines = struct {
     dec: [2]mtl.Pipeline,
     pf: [2]mtl.Pipeline,
     pre: [2]mtl.Pipeline,
+    /// bf16 decode rows of several slots (segs.zig's table): without and with the key prefetch
+    segs: [2]mtl.Pipeline,
 
     pub fn load(device: mtl.Device) !Pipelines {
         return loadSource(device, sources.dsv41.csa2_attn);
@@ -45,6 +48,7 @@ pub const Pipelines = struct {
         for (dec_names, 0..) |name, i| p.dec[i] = try mtl.Pipeline.init(device, lib, name, false);
         for (pf_names, 0..) |name, i| p.pf[i] = try mtl.Pipeline.init(device, lib, name, false);
         for (pre_names, 0..) |name, i| p.pre[i] = try mtl.Pipeline.init(device, lib, name, false);
+        for (seg_names, 0..) |name, i| p.segs[i] = try mtl.Pipeline.init(device, lib, name, false);
         return p;
     }
 
@@ -52,6 +56,7 @@ pub const Pipelines = struct {
         for (p.dec) |x| x.deinit();
         for (p.pf) |x| x.deinit();
         for (p.pre) |x| x.deinit();
+        for (p.segs) |x| x.deinit();
     }
 };
 
@@ -83,6 +88,17 @@ pub fn encodeDecodeAs(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, c: Ca
     try check(c);
     e.setPipeline((if (prefetch) p.pf else p.dec)[@backingInt(c.out)]);
     bind(e, b, c);
+    e.dispatchGroups(mtl.Size.of(c.rows, c.heads / heads_per_sg, 1), mtl.Size.of(32 * chunks, 1, 1));
+}
+
+/// Decode rows of several slots, bf16 out: row r over its slot's window and compressed rows (`segs`, `slots` [rows]).
+pub fn encodeDecodeSegs(p: *const Pipelines, e: mtl.ComputeEncoder, b: Bind, segs: Ref, slots: Ref, c: Call, prefetch: bool) !void {
+    try check(c);
+    if (c.out != .bf16) return error.BadAttnShape;
+    e.setPipeline(p.segs[@intFromBool(prefetch)]);
+    bind(e, b, c);
+    e.setBuffer(segs.buf, segs.off, 9);
+    e.setBuffer(slots.buf, slots.off, 10);
     e.dispatchGroups(mtl.Size.of(c.rows, c.heads / heads_per_sg, 1), mtl.Size.of(32 * chunks, 1, 1));
 }
 

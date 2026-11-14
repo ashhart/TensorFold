@@ -148,17 +148,20 @@ static inline float tf_ix_q(const device uchar* Q, const device uchar* QS, const
   return tf_ix_e2m1((Q[at + h * (ID / 2u) + (d >> 1)] >> (4u * (d & 1u))) & 0xFu) * tf_ix_e8m0(QS[at / QROW * QSROW + h * 4u + (d >> 5)]);
 }
 
+// A decode row's query, decoded once for the whole chunk (16 KiB), and its head weights.
+struct TfIxDecShared {
+  float qf[IH * TF_IX_QPAD];
+  float wf[IH];
+};
+
 // Decode's few rows: eight simdgroups share a row's decoded query and score a key each in turn, the same bits as above.
-[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec(
-    const device uchar* Q [[buffer(0)]], const device uchar* QS [[buffer(1)]], const device bfloat* W [[buffer(2)]],
-    const device uchar* IK [[buffer(3)]], device float* S [[buffer(4)]], const device uchar* CM [[buffer(5)]],
-    constant TfDsv41IxArgs& a [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
-    uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-    uint sg [[simdgroup_index_in_threadgroup]], uint sgs [[simdgroups_per_threadgroup]]) {
+inline void tf_ix_dec_row(const device uchar* Q, const device uchar* QS, const device bfloat* W, const device uchar* IK,
+                          device float* S, const device uchar* CM, TfDsv41IxArgs a, uint2 tg, uint t, uint lane,
+                          uint sg, uint sgs, threadgroup TfIxDecShared& sh) {
   const uint row = tg.y;
   if (row >= a.rows) return;
-  threadgroup float qf[IH * TF_IX_QPAD]; // 16 KiB: this row's query, decoded once for the whole chunk
-  threadgroup float wf[IH];
+  threadgroup auto& qf = sh.qf;
+  threadgroup auto& wf = sh.wf;
   const size_t at = size_t(row) * QROW;
   for (uint i = t; i < IH * ID; i += sgs * 32u) qf[(i / ID) * TF_IX_QPAD + i % ID] = tf_ix_q(Q, QS, at, i / ID, i % ID);
   // the row's weights times the softmax scale once, in fp32 (model.py:556), before any head meets a score
@@ -204,4 +207,34 @@ static inline float tf_ix_q(const device uchar* Q, const device uchar* QS, const
 #endif
     if (lane == 0u) S[size_t(row) * a.out_stride + key] = acc;
   }
+}
+
+#define TF_IX_DEC_ARGS                                                                                              \
+  const device uchar* Q [[buffer(0)]], const device uchar* QS [[buffer(1)]], const device bfloat* W [[buffer(2)]],  \
+      device float* S [[buffer(4)]], const device uchar* CM [[buffer(5)]], constant TfDsv41IxArgs& a [[buffer(6)]], \
+      uint2 tg [[threadgroup_position_in_grid]], uint t [[thread_index_in_threadgroup]],                           \
+      uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]],                         \
+      uint sgs [[simdgroups_per_threadgroup]]
+
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec(TF_IX_DEC_ARGS,
+                                                                              const device uchar* IK [[buffer(3)]]) {
+  threadgroup TfIxDecShared sh;
+  tf_ix_dec_row(Q, QS, W, IK, S, CM, a, tg, t, lane, sg, sgs, sh);
+}
+
+// Decode rows of several slots: row tg.y scores its slot's keys from its slot's first row on; control 6: slot 0's keys.
+[[kernel, max_total_threads_per_threadgroup(256)]] void tf_dsv41_ix_scores_dec_segs(
+    TF_IX_DEC_ARGS, const device TfDsv41Seg* SG [[buffer(7)]], const device int* RS [[buffer(8)]]) {
+  if (tg.y >= a.rows) return;
+  const TfDsv41Seg s = SG[RS[tg.y]];
+  if (tg.x * a.chunk >= s.nkeys) return; // past this slot's keys: the launch is as wide as its widest slot
+  TfDsv41IxArgs b = a;
+  b.rows = s.rows;
+  b.keys = s.nkeys;
+  b.start = s.start;
+  const size_t r0 = s.base;
+  threadgroup TfIxDecShared sh;
+  const device uchar* ik = SG[TF_CTL == 6 ? 0 : RS[tg.y]].ikeys;
+  tf_ix_dec_row(Q + r0 * QROW, QS + r0 * QSROW, W + r0 * a.w_stride, ik, S + r0 * a.out_stride, CM + r0 * a.mask_stride, b,
+                uint2(tg.x, tg.y - s.base), t, lane, sg, sgs, sh);
 }

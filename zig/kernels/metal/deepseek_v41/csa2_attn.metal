@@ -282,15 +282,23 @@ inline void tf_attn_store(thread TfAcc& s, uint hh, float sink, const device flo
 
 // Decode: a threadgroup is one row, HS heads and a simdgroup for each of the five chunks; simdgroup 0 joins them.
 
+// A decode threadgroup's shared memory: the chunks' states, their counts and the staged indices.
+struct TfAttnDecShared {
+  float tacc[TF_ATTN_NCH][TF_ATTN_HS][TF_ATTN_D];
+  float tml[TF_ATTN_NCH][TF_ATTN_HS][2];
+  uint tn[TF_ATTN_NCH];
+  int tidx[TF_ATTN_SEL];
+};
+
 // A selected run's simdgroup first copies its 128 indices to threadgroup memory, so no key load waits on an index load.
 template <typename T, bool PF>
-[[kernel, max_total_threads_per_threadgroup(32 * TF_ATTN_NCH)]] void tf_dsv41_attn_dec(
-    TF_ATTN_ARGS, uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]) {
-  threadgroup float tacc[TF_ATTN_NCH][TF_ATTN_HS][TF_ATTN_D];
-  threadgroup float tml[TF_ATTN_NCH][TF_ATTN_HS][2];
-  threadgroup uint tn[TF_ATTN_NCH];
-  threadgroup int tidx[TF_ATTN_SEL];
+inline void tf_attn_dec_row(const device uint4* Q, const device uint4* W, const device uint4* C, const device int* I,
+                            const device TfAttnMeta* M, const device float* SK, const device float* CS, device T* O,
+                            constant TfAttnArgs& a, uint2 tg, uint sg, uint lane, threadgroup TfAttnDecShared& sh) {
+  threadgroup auto& tacc = sh.tacc;
+  threadgroup auto& tml = sh.tml;
+  threadgroup auto& tn = sh.tn;
+  threadgroup auto& tidx = sh.tidx;
   const uint r = tg.x, h0 = tg.y * TF_ATTN_HS;
   if (r >= a.rows || h0 >= a.heads) return;
   if (sg != 0)
@@ -324,6 +332,28 @@ template <typename T, bool PF>
     tf_attn_store(s, hh, SK[h0 + hh], CS + ulong(m.pos + m.rope) * 64, O + (ulong(r) * a.heads + h0 + hh) * TF_ATTN_D,
                   lane);
   if (TF_CTL == 4 && r == 0 && h0 == 0 && lane == 0) O[ulong(a.rows) * a.heads * TF_ATTN_D] = T(1.0f);
+}
+
+template <typename T, bool PF>
+[[kernel, max_total_threads_per_threadgroup(32 * TF_ATTN_NCH)]] void tf_dsv41_attn_dec(
+    TF_ATTN_ARGS, uint2 tg [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup TfAttnDecShared sh;
+  tf_attn_dec_row<T, PF>(Q, W, C, I, M, SK, CS, O, a, tg, sg, lane, sh);
+}
+
+// Decode rows of several slots in one launch, each over its slot's window and compressed rows; control 6: slot 0's.
+template <typename T, bool PF>
+[[kernel, max_total_threads_per_threadgroup(32 * TF_ATTN_NCH)]] void tf_dsv41_attn_dec_segs(
+    const device uint4* Q [[buffer(0)]], const device int* I [[buffer(3)]], const device TfAttnMeta* M [[buffer(4)]],
+    const device float* SK [[buffer(5)]], const device float* CS [[buffer(6)]], device T* O [[buffer(7)]],
+    constant TfAttnArgs& a [[buffer(8)]], const device TfDsv41Seg* SG [[buffer(9)]],
+    const device int* RS [[buffer(10)]], uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup TfAttnDecShared sh;
+  const TfDsv41Seg s = SG[(TF_CTL == 6 || tg.x >= a.rows) ? 0 : RS[tg.x]];
+  tf_attn_dec_row<T, PF>(Q, (const device uint4*)s.window, (const device uint4*)s.comp, I, M, SK, CS, O, a, tg, sg, lane,
+                         sh);
 }
 
 // Prompt: a threadgroup is RR consecutive rows of one linear window buffer by HG head groups.
@@ -390,3 +420,5 @@ template [[host_name("tf_dsv41_attn_dec_pf_bf16")]] [[kernel]] decltype(tf_dsv41
 template [[host_name("tf_dsv41_attn_dec_pf_f32")]] [[kernel]] decltype(tf_dsv41_attn_dec<float, true>) tf_dsv41_attn_dec<float, true>;
 template [[host_name("tf_dsv41_attn_pre_bf16")]] [[kernel]] decltype(tf_dsv41_attn_pre<bfloat>) tf_dsv41_attn_pre<bfloat>;
 template [[host_name("tf_dsv41_attn_pre_f32")]] [[kernel]] decltype(tf_dsv41_attn_pre<float>) tf_dsv41_attn_pre<float>;
+template [[host_name("tf_dsv41_attn_dec_segs_bf16")]] [[kernel]] decltype(tf_dsv41_attn_dec_segs<bfloat, false>) tf_dsv41_attn_dec_segs<bfloat, false>;
+template [[host_name("tf_dsv41_attn_dec_segs_pf_bf16")]] [[kernel]] decltype(tf_dsv41_attn_dec_segs<bfloat, true>) tf_dsv41_attn_dec_segs<bfloat, true>;

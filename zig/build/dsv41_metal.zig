@@ -96,6 +96,17 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const timing_run = b.addRunArtifact(b.addTest(.{ .root_module = timing }));
     timing_run.has_side_effects = true;
     b.step("time-dsv41-metal-real", "DeepSeek-V4.1 Metal: one release layer's decode timed at 1 and 4 rows").dependOn(&timing_run.step);
+    // the tiny forward's round at 1, 2 and 4 slots on synthetic weights: dispatches, barriers and time
+    const slots = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/slots_time.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "dsv41_metal", .module = quick.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = quick.host } },
+    });
+    const slots_run = b.addRunArtifact(b.addTest(.{ .root_module = slots }));
+    slots_run.has_side_effects = true;
+    b.step("time-dsv41-metal-slots", "DeepSeek-V4.1 Metal: the tiny forward's round at 1, 2 and 4 slots (dispatches, time)").dependOn(&slots_run.step);
     const ptime = b.createModule(.{
         .root_source_file = b.path("zig/tests/dsv41_metal/prompt_time.zig"),
         .target = b.graph.host,
