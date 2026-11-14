@@ -71,6 +71,9 @@ pub const cfgs = [_]Cfg{
 } ++ @import("window_rows_shapes.zig").cases(Cfg) ++ paged;
 
 const paged_decode = &[_]c.Shape{ .{ .rows = 4, .n = 16, .k = 32768 }, .{ .rows = 16, .n = 16, .k = 3000 }, .{ .rows = 1, .n = 16, .k = 257 } };
+const window_decode = &[_]c.Shape{ .{ .rows = 16, .n = 32, .k = 32000 }, .{ .rows = 64, .n = 32, .k = 3000 }, .{ .rows = 1, .n = 32, .k = 1100 }, .{ .rows = 4, .n = 32, .k = 700 } };
+const window512_decode = &[_]c.Shape{ .{ .rows = 16, .n = 16, .k = 32000 }, .{ .rows = 1, .n = 16, .k = 600 }, .{ .rows = 4, .n = 16, .k = 300 } };
+const window_prompt = &[_]c.Shape{ .{ .rows = 512, .n = 32, .k = 0 }, .{ .rows = 512, .n = 32, .k = 5000 }, .{ .rows = 96, .n = 32, .k = 1300 } };
 const paged_prompt = &[_]c.Shape{ .{ .rows = 256, .n = 16, .k = 0 }, .{ .rows = 128, .n = 16, .k = 4096 }, .{ .rows = 32, .n = 16, .k = 1000 } };
 
 /// Dory's and Spark2.5's full-attention layers (16 query heads over 4 of 256, no window): caches in pages.
@@ -94,6 +97,13 @@ const paged = [_]Cfg{
     .{ .name = "cuda window_pages prompt tf_wrows_prompt_512_p32_pg, 10/2 heads of 512 (GQA 5), pages of 32", .h = 10, .hk = 2, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 32, .served = gqa5_prompt },
     .{ .name = "control: head dim 512 paged decode whose first two streams' tables are swapped", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 32768, .streams = 2, .pages = 37, .ctl = .swap, .served = global_decode },
     .{ .name = "control: head dim 512 paged prompt rows whose first page id is a later page's", .h = 16, .hk = 1, .d = 512, .win = 0, .ring = 0, .prompt = true, .p32 = true, .pages = 256, .ctl = .stale, .served = global_prompt },
+    // P4: sliding layers on pages (Gemma 4 31B's 32 over 16 at window 1024, E4B's window 512)
+    .{ .name = "cuda window_pages decode tf_wrows_part_256_pg + tf_wrows_merge_256_pg, 32/16 heads, window 1024, pages of 256", .h = 32, .hk = 16, .win = 1024, .ring = 32768, .streams = 2, .pages = 256, .served = window_decode },
+    .{ .name = "cuda window_pages decode tf_wrows_part_256_pg + tf_wrows_merge_256_pg, 16/8 heads, window 512, pages of 256", .h = 16, .hk = 8, .win = 512, .ring = 32768, .streams = 2, .pages = 256, .served = window512_decode },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_p32_pg, 32/16 heads, window 1024, pages of 256, image rows", .h = 32, .hk = 16, .win = 1024, .ring = 0, .prompt = true, .p32 = true, .image = true, .pages = 256, .served = window_prompt },
+    .{ .name = "cuda window_pages prompt tf_wrows_prompt_256_pg (P as bf16), 32/16 heads, window 1024, pages of 256", .h = 32, .hk = 16, .win = 1024, .ring = 0, .prompt = true, .pages = 256, .served = window_prompt },
+    .{ .name = "control: windowed paged decode whose first two streams' tables are swapped", .h = 32, .hk = 16, .win = 1024, .ring = 32768, .streams = 2, .pages = 256, .ctl = .swap, .served = window_decode },
+    .{ .name = "control: windowed paged prompt rows whose first page id is a later page's", .h = 32, .hk = 16, .win = 1024, .ring = 0, .prompt = true, .p32 = true, .pages = 256, .ctl = .stale, .served = window_prompt },
 };
 
 fn decodeAt(comptime h: usize) []const c.Shape {
