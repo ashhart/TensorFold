@@ -42,6 +42,11 @@ fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: an
     return error.Refused;
 }
 
+/// Whether the run is one RDNA 3.5 GPU serving alone, where a family's measured draft defaults apply.
+pub fn rdna3_5Alone(caps: hip.Caps, ranks: u32) bool {
+    return caps.generation == .rdna3_5 and ranks == 1;
+}
+
 /// Why `matrix=on` cannot run on a GPU of `caps`, or null when its matrix-core tiles exist (gfx11's WMMA).
 fn matrixRefused(comptime F: type, policy: hip.Policy, caps: hip.Caps) ?[]const u8 {
     if (policy.matrix != .on) return null;
@@ -116,7 +121,7 @@ fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open
         s,
     });
     if (o.mtp_drafts) |n| policy.mtp.drafts = @intCast(n);
-    if (o.mtp_confidence) |c| policy.mtp.confidence = c;
+    policy.mtp.confidence = fam.confidenceFloor(F, o, rdna3_5Alone(caps, o.tp), policy.mtp.confidence);
     if (o.keep) |n| policy.slots = @intCast(@min(n, 1 << 16));
     if (matrixRefused(F, policy, caps)) |why| return refuse(a, problem, "matrix=on: {s}; matrix=auto runs the dot2 tiles", .{why});
     const group: ?hip.collective.Group = if (o.tp > 1) try join(a, gpa, io, o, caps, &policy, problem) else null;
@@ -556,6 +561,7 @@ test "matrix=on runs only where the matrix-core tiles exist; auto runs everywher
 
 test {
     _ = @import("draft_sources_hip_test.zig");
+    _ = @import("hip_confidence_test.zig");
 }
 
 test "slide admission: hip refuses before checkpoint or device access" {
