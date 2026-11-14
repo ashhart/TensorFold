@@ -1,6 +1,7 @@
 //! A finite BF16 row's bounded top-k, ordered by value then id, with scratch owned by the draw.
 const std = @import("std");
-const lanes = @import("lanes");
+const sampling = @import("sampling.zig");
+const grammar = @import("grammar.zig");
 const capacity = 128;
 const Entry = struct { key: u16, word: u16, id: u64 };
 
@@ -21,7 +22,7 @@ fn keys(words: Block) Block {
 
 /// Inserts a finite allowed word that beats the k-th key, after equal keys so ties keep id order.
 inline fn consider(selected: *[capacity]Entry, filled: *usize, k: usize, word: u16, id: usize, mask: []const u32) void {
-    if (mask.len > 0 and !lanes.grammar.allows(mask, id)) return;
+    if (mask.len > 0 and !grammar.allows(mask, id)) return;
     const rank = key(word);
     if (filled.* == k and rank <= selected[k - 1].key) return;
     var at = @min(filled.*, k - 1);
@@ -35,35 +36,36 @@ fn value(word: u16) f64 {
 }
 
 /// The k best allowed words of a finite row, ordered by key then id; a block that can't beat the k-th key is skipped.
-fn select(logits: []const u16, k: usize, mask: []const u32, selected: *[capacity]Entry) error{NonfiniteQwenLogits}!usize {
+fn select(logits: []const u16, k: usize, mask: []const u32, selected: *[capacity]Entry) error{NonfiniteLogits}!usize {
     var filled: usize = 0;
     var at: usize = 0;
     while (at + block <= logits.len) : (at += block) {
         const row: Block = logits[at..][0..block].*;
-        if (@reduce(.Or, row & @as(Block, @splat(0x7f80)) == @as(Block, @splat(0x7f80)))) return error.NonfiniteQwenLogits;
+        if (@reduce(.Or, row & @as(Block, @splat(0x7f80)) == @as(Block, @splat(0x7f80)))) return error.NonfiniteLogits;
         if (filled == k and @reduce(.Max, keys(row)) <= selected[k - 1].key) continue;
         for (logits[at..][0..block], at..) |word, id| consider(selected, &filled, k, word, id, mask);
     }
     for (logits[at..], at..) |word, id| {
-        if (word & 0x7f80 == 0x7f80) return error.NonfiniteQwenLogits;
+        if (word & 0x7f80 == 0x7f80) return error.NonfiniteLogits;
         consider(selected, &filled, k, word, id, mask);
     }
     return filled;
 }
 
 /// Null retains the general draw for unbounded or larger top-k and greedy requests.
-pub fn draw(logits: []const u16, sampling: lanes.Sampling, position: u64, mask: []const u32) !?u32 {
-    if (sampling.temperature <= 0 or sampling.top_k == 0 or sampling.top_k > capacity) return null;
+pub fn draw(logits: []const u16, settings: sampling.Sampling, position: u64, mask: []const u32) !?u32 {
+    if (settings.temperature <= 0 or settings.top_k == 0 or settings.top_k > capacity) return null;
     var selected: [capacity]Entry = undefined;
     // Validate the whole row, including masked tokens and candidates below the cut.
-    const filled = try select(logits, sampling.top_k, mask, &selected);
-    if (filled == 0) return error.NoAllowedQwenToken;
-    var candidates: [capacity]lanes.sampling.Candidate = undefined;
+    const filled = try select(logits, settings.top_k, mask, &selected);
+    if (filled == 0) return error.NoAllowedToken;
+    var candidates: [capacity]sampling.Candidate = undefined;
     for (candidates[0..filled], selected[0..filled]) |*out, entry| out.* = .{ .value = value(entry.word), .id = entry.id };
     // The canonical FP64 sampler needs only its scaled values and optional probabilities for this ordered cut.
     var words: [2 * capacity]f64 = undefined;
     var scratch = std.heap.FixedBufferAllocator.init(std.mem.sliceAsBytes(&words));
-    return @as(u32, @intCast(try lanes.sampling.chooseOrdered(scratch.allocator(), candidates[0..filled], position, sampling)));
+    const chosen = try sampling.chooseOrdered(scratch.allocator(), candidates[0..filled], position, settings);
+    return @as(u32, @intCast(chosen));
 }
 
 test "bounded BF16 keys preserve numeric order over every finite word and both zero encodings" {
@@ -82,7 +84,7 @@ test "bounded BF16 keys preserve numeric order over every finite word and both z
 fn selectScalar(logits: []const u16, k: usize, mask: []const u32, selected: *[capacity]Entry) !usize {
     var filled: usize = 0;
     for (logits, 0..) |word, id| {
-        if (word & 0x7f80 == 0x7f80) return error.NonfiniteQwenLogits;
+        if (word & 0x7f80 == 0x7f80) return error.NonfiniteLogits;
         consider(selected, &filled, k, word, id, mask);
     }
     return filled;
@@ -131,5 +133,5 @@ test "a non-finite word inside a block the selection skips is still refused" {
     for (words[0..32]) |*w| w.* = 0x4000; // 2.0 fills k = 4 in the first block
     words[70] = 0xff80; // -inf in the third block, whose largest key is below the selection's
     var selected: [capacity]Entry = undefined;
-    try std.testing.expectError(error.NonfiniteQwenLogits, select(&words, 4, &.{}, &selected));
+    try std.testing.expectError(error.NonfiniteLogits, select(&words, 4, &.{}, &selected));
 }
