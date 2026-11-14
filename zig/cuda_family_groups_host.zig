@@ -15,6 +15,7 @@ fn reset() void {
     Trace.count = 0;
     Trace.prompts = 0;
     Trace.grouped = 0;
+    Trace.segmented = 0;
 }
 fn check(rows: usize, parts: usize, tile: usize, grouped: bool, prompt: bool) !void {
     const per = (rows + tile - 1) / tile;
@@ -134,7 +135,7 @@ test "GB10 family grouping: Spark stacked gate-up views use one segmented launch
         reset();
         try m.projectMany(&k, e.stream, &ps, x, xs, &.{ out, out + 0x1000000 }, rows, false);
         const chunks = (rows + 15) / 16;
-        try t.expectEqual(chunks, Trace.grouped);
+        try t.expectEqual(chunks, Trace.segmented);
         try t.expectEqual(2 * chunks, Trace.count);
         for (Trace.calls[0..Trace.count], 0..) |call, i| {
             const start = i / 2 * 16;
