@@ -1,7 +1,12 @@
 //! The XPU glue's float64 references: the normed and residual rows, the gated row, the SwiGLU, embed and argmax.
 const std = @import("std");
+pub const attention = @import("xpu_attn_ref.zig");
 const c = @import("contract.zig");
 const rows = @import("rows.zig");
+
+test {
+    _ = attention;
+}
 
 /// glue.cl's GS, the group the glue's row sums cover, and ASC, the scale it stores them at.
 pub const GS: usize = 64;

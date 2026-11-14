@@ -72,16 +72,17 @@ KERNEL(16) void gdn_step(global const ushort *Q, global const ushort *K, global 
       for (int i = 0; i < 8; i++) SO[((long)h * 128 + vb * 8 + r) * 128 + i * 16 + lane] = s[r][i];
 }
 
-// Decode attention by key slices: one subgroup per (slice, K/V head, query part, row). Grid y is AKV * QPARTS.
+// Decode attention by key slices: one subgroup per (row, K/V head, query part, slice). Grid y is AKV * QPARTS.
 #define SPLIT 32
 KERNEL(16) void attn_decode(global const ushort *Q, global const ushort *KC, global const ushort *VC, global float *PM,
                             global float *PL, global float *PO, int p0, int NS, float scale, global const int *TREE,
                             global const ulong *MT, global const int *POS, int cap) {
   // MT (if non-null): several streams, one row each; with TREE, tree windows; cap > 0: int8 cache (256 bytes per row).
 #if Q27_QPARTS == 1
-  const int sp = get_group_id(0), hk = get_group_id(1), t = get_group_id(2), lane = get_sub_group_local_id();
+  // Grid (rows, heads, slices): the tree rows of one key slice run back to back and share its K/V rows in L2.
+  const int sp = get_group_id(2), hk = get_group_id(1), t = get_group_id(0), lane = get_sub_group_local_id();
 #else
-  const int sp = get_group_id(0), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(2), lane = get_sub_group_local_id();
+  const int sp = get_group_id(2), hk = get_group_id(1) / Q27_QPARTS, t = get_group_id(0), lane = get_sub_group_local_id();
   const int qh0 = hk * Q27_GQA + (get_group_id(1) % Q27_QPARTS) * Q27_QPG; // the first query head held
 #endif
   int base = p0, wf = 0;

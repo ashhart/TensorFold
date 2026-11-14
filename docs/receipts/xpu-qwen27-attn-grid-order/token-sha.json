@@ -1,0 +1,178 @@
+[
+ {
+  "prompt_tokens": 52,
+  "main": [
+   "596a68a0fce5"
+  ],
+  "main-serial": [
+   "596a68a0fce5"
+  ],
+  "pr1": [
+   "596a68a0fce5"
+  ],
+  "pr1-serial": [
+   "596a68a0fce5"
+  ],
+  "n": {
+   "main": 2,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 68,
+  "main": [
+   "a6b86fdf8992"
+  ],
+  "main-serial": [
+   "a6b86fdf8992"
+  ],
+  "pr1": [
+   "a6b86fdf8992"
+  ],
+  "pr1-serial": [
+   "a6b86fdf8992"
+  ],
+  "n": {
+   "main": 2,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 7963,
+  "main": [
+   "3cb4af2530db"
+  ],
+  "main-serial": [
+   "3cb4af2530db"
+  ],
+  "pr1": [
+   "3cb4af2530db"
+  ],
+  "pr1-serial": [
+   "3cb4af2530db"
+  ],
+  "n": {
+   "main": 2,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 7976,
+  "main": [
+   "46ebf41df2f3"
+  ],
+  "main-serial": [
+   "46ebf41df2f3"
+  ],
+  "pr1": [
+   "46ebf41df2f3"
+  ],
+  "pr1-serial": [
+   "46ebf41df2f3"
+  ],
+  "n": {
+   "main": 2,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 32540,
+  "main": [
+   "150f6d329941"
+  ],
+  "main-serial": [
+   "150f6d329941"
+  ],
+  "pr1": [
+   "150f6d329941"
+  ],
+  "pr1-serial": [
+   "150f6d329941"
+  ],
+  "n": {
+   "main": 2,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 32552,
+  "main": [
+   "4bf356e770cb"
+  ],
+  "main-serial": [
+   "4bf356e770cb"
+  ],
+  "pr1": [
+   "4bf356e770cb"
+  ],
+  "pr1-serial": [
+   "4bf356e770cb"
+  ],
+  "n": {
+   "main": 2,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 130846,
+  "main": [
+   "8d68ee4e9421"
+  ],
+  "main-serial": [
+   "8d68ee4e9421"
+  ],
+  "pr1": [
+   "8d68ee4e9421"
+  ],
+  "pr1-serial": [
+   "8d68ee4e9421"
+  ],
+  "n": {
+   "main": 1,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ },
+ {
+  "prompt_tokens": 130856,
+  "main": [
+   "4fd3ed8293b5"
+  ],
+  "main-serial": [
+   "4fd3ed8293b5"
+  ],
+  "pr1": [
+   "4fd3ed8293b5"
+  ],
+  "pr1-serial": [
+   "4fd3ed8293b5"
+  ],
+  "n": {
+   "main": 1,
+   "main-serial": 1,
+   "pr1": 2,
+   "pr1-serial": 1
+  },
+  "all_equal": true
+ }
+]

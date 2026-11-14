@@ -1,0 +1,106 @@
+[
+ {
+  "label": "main-r1",
+  "prompt": "fibonacci-raw",
+  "decode_tps_median": 131.9,
+  "decode_tps_all": [
+   131.91,
+   131.9,
+   131.9
+  ],
+  "token_sha": [
+   "9ccc5ea1a3d7"
+  ]
+ },
+ {
+  "label": "main-r1",
+  "prompt": "gpu-chat-no-think",
+  "decode_tps_median": 87.82,
+  "decode_tps_all": [
+   87.83,
+   87.82,
+   87.8
+  ],
+  "token_sha": [
+   "703e2fba4510"
+  ]
+ },
+ {
+  "label": "main-r2",
+  "prompt": "fibonacci-raw",
+  "decode_tps_median": 131.91,
+  "decode_tps_all": [
+   131.9,
+   131.94,
+   131.91
+  ],
+  "token_sha": [
+   "9ccc5ea1a3d7"
+  ]
+ },
+ {
+  "label": "main-r2",
+  "prompt": "gpu-chat-no-think",
+  "decode_tps_median": 87.8,
+  "decode_tps_all": [
+   87.79,
+   87.81,
+   87.8
+  ],
+  "token_sha": [
+   "703e2fba4510"
+  ]
+ },
+ {
+  "label": "pr1-r1",
+  "prompt": "fibonacci-raw",
+  "decode_tps_median": 131.8,
+  "decode_tps_all": [
+   131.84,
+   131.78,
+   131.8
+  ],
+  "token_sha": [
+   "9ccc5ea1a3d7"
+  ]
+ },
+ {
+  "label": "pr1-r1",
+  "prompt": "gpu-chat-no-think",
+  "decode_tps_median": 87.74,
+  "decode_tps_all": [
+   87.74,
+   87.74,
+   87.74
+  ],
+  "token_sha": [
+   "703e2fba4510"
+  ]
+ },
+ {
+  "label": "pr1-r2",
+  "prompt": "fibonacci-raw",
+  "decode_tps_median": 131.83,
+  "decode_tps_all": [
+   131.86,
+   131.83,
+   131.81
+  ],
+  "token_sha": [
+   "9ccc5ea1a3d7"
+  ]
+ },
+ {
+  "label": "pr1-r2",
+  "prompt": "gpu-chat-no-think",
+  "decode_tps_median": 87.76,
+  "decode_tps_all": [
+   87.76,
+   87.76,
+   87.75
+  ],
+  "token_sha": [
+   "703e2fba4510"
+  ]
+ }
+]
