@@ -13,6 +13,23 @@ fn Blob(comptime import_name: []const u8) type {
 pub const available = options.with_kernels;
 /// The one SM (10 * major + minor) every image is built for (-Dgpu), or null for a build that holds several.
 pub const built_sm: ?u32 = options.built_sm;
+/// The embedded images' declared SASS capabilities; empty means unknown for a custom prebuilt bundle.
+pub const target_sms: []const u32 = options.sms;
+
+pub fn supports(capability: u32) ?bool {
+    if (!available) return false;
+    if (target_sms.len == 0) return null;
+    return covers(target_sms, capability);
+}
+
+/// Whether SASS for one of `sms` runs on a `capability` GPU: the same SM or, below sm_90, a lower minor of its major.
+pub fn covers(sms: []const u32, capability: u32) bool {
+    for (sms) |sm| {
+        if (sm == capability) return true;
+        if (sm < 90 and sm / 10 == capability / 10 and sm % 10 <= capability % 10) return true;
+    }
+    return false;
+}
 
 pub const qwen4_hc: []const u8 = if (available) &Blob("fatbin_qwen4_hc").bytes else &.{};
 pub const qwen4_ple: []const u8 = if (available) &Blob("fatbin_qwen4_ple").bytes else &.{};
@@ -51,6 +68,7 @@ pub const fp8_experts: []const u8 = if (available) &Blob("fatbin_fp8_experts").b
 pub const exlr8: []const u8 = if (available) &Blob("fatbin_exlr8").bytes else &.{};
 pub const exlr8_dense: []const u8 = if (available) &Blob("fatbin_exlr8_dense").bytes else &.{};
 pub const nvfp4_experts_tile: []const u8 = if (available) &Blob("fatbin_nvfp4_experts_tile").bytes else &.{};
+pub const experts_bf16: []const u8 = if (available) &Blob("fatbin_experts_bf16").bytes else &.{};
 pub const nvfp4_experts: []const u8 = if (available) &Blob("fatbin_nvfp4_experts").bytes else &.{};
 pub const nvfp4_experts32: []const u8 = if (available) &Blob("fatbin_nvfp4_experts32").bytes else &.{};
 pub const rank_sum: []const u8 = if (available) &Blob("fatbin_rank_sum").bytes else &.{};

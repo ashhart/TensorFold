@@ -292,8 +292,7 @@ below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0
 Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) are TensorFold's own.
 
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
-The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
-without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model card states Apache-2.0 too. Each checkpoint keeps its own license.
 
 ## Structured output: libtfgrammar
 
@@ -495,3 +494,8 @@ The fixtures in `zig/src/server/fixtures/thinking/` are unmodified release files
   [LiquidAI/LFM2.5-24B-A2B-MLX-4bit](https://huggingface.co/LiquidAI/LFM2.5-24B-A2B-MLX-4bit) at revision
   `667408d494bde191c2cb9dd4f4549827816b9275`, under the LFM Open License v1.0. See
   [`LICENSES/LFM-Open-1.0.txt`](LICENSES/LFM-Open-1.0.txt).
+- `qwen38.jinja` and `qwen38-tokenizer_config.json` come from
+  [TensorFold/Qwen3.8-27B-MLX-4bit](https://huggingface.co/TensorFold/Qwen3.8-27B-MLX-4bit) at revision
+  `70ae7fac63274ff2eac54152031433374cb80f2f` (an MLX conversion of
+  [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B), whose template it carries), under the Apache License 2.0.
+  See [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).

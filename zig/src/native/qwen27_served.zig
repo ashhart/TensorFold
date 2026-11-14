@@ -265,28 +265,10 @@ test "--prompt-cache-gib 40: a later 192k-token slot takes its room back from ke
     try std.testing.expectEqual(@as(usize, 1), fake.live);
 }
 
-test "a reply's end is born with its request's prompt: the history mark that request kept outlives the reply's keep" {
-    const gpa = std.testing.allocator;
-    const at: u32 = 5000; // a history mark at 5000 tokens, then a 7-token generation prompt and a 100-token reply
+test "a reply's end keeps its prompt's born: newest conversations precede redundant history under pressure" {
     var fake: FakeStates = .{};
-    var store = pc.Store.init(gpa, .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } }, .{ .warm = .on }, (3 * at + 100) << 16);
-    defer store.deinit();
-    var other: [at + 7]u32 = undefined; // another conversation's prompt, its history kept first
-    for (&other, 0..) |*t, i| t.* = @intCast(i);
-    try std.testing.expect(store.keep(&other, at, null, &.{}, &.{}));
-    var tokens: [at + 107]u32 = undefined;
-    for (&tokens, 0..) |*t, i| t.* = @intCast(1_000_000 + i);
-    const prompt = tokens[0 .. at + 7];
-    try std.testing.expect(store.keep(prompt, at, null, &.{}, &.{}));
-    var s = try lanes.Stream.init(gpa, .{ .id = "reply", .prompt = prompt, .max_new = 100 });
-    defer s.deinit(gpa);
-    try s.context.appendSlice(gpa, tokens[at + 7 ..]);
-    keepEnd(&store, gpa, &s, tokens.len); // three states pass the budget: the least recently used goes
-    try std.testing.expect(store.find(&other, &.{}, &.{}) == null);
-    const history = store.find(prompt, &.{}, &.{}) orelse return error.HistoryEvicted; // a regenerate resumes it
-    try std.testing.expectEqual(at, history.at);
-    try std.testing.expectEqual(@as(u32, at + 7), store.entries.items[1].born);
-    try std.testing.expectEqual(@as(usize, 2), fake.live);
+    const snapshots: pc.Snapshots = .{ .ptr = &fake, .vtable = &.{ .bytes = FakeStates.bytes, .save = FakeStates.save, .restore = FakeStates.restore, .drop = FakeStates.drop } };
+    try @import("qwen27_reply_cache_test.zig").replyBorn(keepEnd, snapshots, &fake.live);
 }
 
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
@@ -439,7 +421,7 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
         if (model.ane) |share| share.footprint_growth = platform.memory_policy.growth(before, cache_fit.footprint());
     }
     ane.end();
-    // Slot 0's history rewind when two full-context copies do not fit, wired before cache sizing.
+    // Slot 0's history rewind, wired before cache sizing: even a cache with two full-context copies may evict it.
     const rewind_room = laterRoom(h);
     if (slot_state.rewindInit(h.back, rewind_room, if (o.cache_gib) |g| gibBytes(g) else cache_fit.defaultBudget(rewind_room))) |buf| if (h.resident) |*r| r.addNow(&.{buf});
     try enableCache(h, o.cache_gib, o.cache_over_cap, a, why);

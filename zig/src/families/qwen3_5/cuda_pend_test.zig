@@ -99,7 +99,7 @@ fn release(c: *caches.Cache) void {
 
 /// A recorded window of `most` rows, then `path` kept.
 fn keepAfterWindow(e: *E, c: *caches.Cache, path: []const u32) !void {
-    c.advanced(most, true);
+    c.advanced(most, true, true);
     try c.keep(e, path);
 }
 

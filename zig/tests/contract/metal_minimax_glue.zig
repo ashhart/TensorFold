@@ -422,7 +422,7 @@ pub const Copy = struct {
 
 // --- mm_argmax: the greedy draw over a bf16 logits row, ties to the lower id ---------------------------------------
 
-/// mm_better: NaN beats any number (the lower id among NaNs), else the larger value, ties to the lower id.
+/// tf_bf16_argmax_better (core/bf16_argmax.metal): NaN first (lower id among NaNs), then larger, ties to the lower id.
 fn better(v: f32, i: usize, best: f32, at: usize) bool {
     if (std.math.isNan(v)) return !std.math.isNan(best) or i < at;
     if (std.math.isNan(best)) return false;

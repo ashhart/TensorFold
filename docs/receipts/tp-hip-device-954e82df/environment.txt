@@ -1,0 +1,9 @@
+commit 954e82dfa
+zig 0.17.0
+Linux 7.2.7+rex-amd64
+model name	: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+Mem:             124           2           2           0         120         122
+  Name:                    gfx1151
+  Marketing Name:          AMD Radeon 8060S Graphics
+/opt/rocm/core-10.0/lib/libamdhip64.so.7
+lo mtu 65536

@@ -384,14 +384,20 @@ pub const Conn = struct {
 
     /// A JSON reply with Python's ``_send_json`` headers.
     pub fn sendJson(c: *Conn, code: u16, body: []const u8) void {
-        c.sendJsonOr(code, body) catch {};
+        c.sendJsonWith(code, body, &.{});
     }
 
-    fn sendJsonOr(c: *Conn, code: u16, body: []const u8) !void {
+    /// ``sendJson`` with ``extra`` name/value headers (``Retry-After``, say) before the body.
+    pub fn sendJsonWith(c: *Conn, code: u16, body: []const u8, extra: []const [2][]const u8) void {
+        c.sendJsonOr(code, body, extra) catch {};
+    }
+
+    fn sendJsonOr(c: *Conn, code: u16, body: []const u8, extra: []const [2][]const u8) !void {
         try c.startResponse(code, null);
         try c.addHeader("Content-Type", "application/json");
         var len: [24]u8 = undefined;
         try c.addHeader("Content-Length", try std.fmt.bufPrint(&len, "{d}", .{body.len}));
+        for (extra) |kv| try c.addHeader(kv[0], kv[1]);
         if (c.close) try c.addHeader("Connection", "close");
         try c.finish(body);
     }

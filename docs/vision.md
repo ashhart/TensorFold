@@ -298,7 +298,8 @@ as transformers 5.19's `Glm5NextProcessor` prepares them:
   most 256.
 
 Video needs `libtfvideo`, an optional library over FFmpeg 9.0.2 (the release PyAV 19.0.1 ships). The server loads it
-when the first video arrives and refuses videos by name without it:
+at startup for a model that reads video. Without it the startup log names the library, `/v1/models` lists no `"video"`
+in the model's `input_types`, and `video_url` parts get HTTP 400:
 
 ```sh
 tools/zig/build_ffmpeg.sh ~/ffmpeg-9.0.2        # static FFmpeg: H.264, HEVC, VP8, VP9, MPEG-4; MP4/MOV, MKV/WebM

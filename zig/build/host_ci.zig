@@ -14,6 +14,7 @@ pub fn steps(b: *std.Build) void {
         .macos => {
             wire(b, "test-host-ci-macos-fast", "Nightly host checks without a GPU or shader compiler", &macos_fast);
             wire(b, "test-host-ci-macos-adapters", "Nightly host checks without a GPU or shader compiler", &macos_adapters);
+            wire(b, "test-host-ci-macos-native", "Nightly Metal engine host checks with the Metal toolchain", &macos_native);
             wire(b, "test-host-ci-macos-deepseek", "Nightly host checks without a GPU or shader compiler", &macos_deepseek);
             wire(b, "test-host-ci-macos-lanes", "Nightly host checks without a GPU or shader compiler", &macos_lanes);
             wire(b, "test-host-ci-macos-deferred", "Nightly host checks without a GPU or shader compiler", &macos_deferred);
@@ -188,6 +189,7 @@ const linux_host = [_][]const u8{
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
+    "test-lane-strand-host",
     "test-lfm2-load-host",
     "test-living-shards-host",
     "test-merge",
@@ -250,6 +252,7 @@ const macos_adapters = [_][]const u8{
     "check-nemotron-prefill-widths-host",
     "check-qwen35-cache-host",
     "check-sessions-linux",
+    "check-video-exports-linux",
     "check-video-layout-linux",
     "compile-disk-identity-metal-host",
     "compile-dsv41-engram-alloc-aarch64",
@@ -288,6 +291,8 @@ const macos_adapters = [_][]const u8{
     "test-step5-host",
     "test-verbs",
 };
+
+const macos_native = [_][]const u8{"test-native"};
 
 const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",

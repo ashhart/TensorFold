@@ -6,6 +6,9 @@ pub fn steps(b: *std.Build) void {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const interrupted = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_interrupted_test.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     b.step("test-lane-interrupted-host", "Interrupted prompt retention and clean retries without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = interrupted, .filters = &.{"interrupted prefill:"} })).step);
+    const safe_lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true });
+    const strand = b.createModule(.{ .root_source_file = b.path("zig/src/core/lane_host_strand_test.zig"), .target = b.graph.host, .optimize = .safe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = safe_lanes }} });
+    b.step("test-lane-strand-host", "Refused, cancelled and failed requests give back every lane, page and slot without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = strand, .filters = &.{"lane strand:"} })).step);
     const halt = b.addTest(.{ .root_module = api, .filters = &.{ "halt (", "halt fails" } });
     b.step("test-lane-halt-host", "Halt ordering with a fake backend and no GPU dependencies").dependOn(&b.addRunArtifact(halt).step);
     b.step("test-lane-lone-host", "Existing lone-driver handoff and reclaim with a fake backend").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"lone driver"} })).step);

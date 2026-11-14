@@ -56,7 +56,10 @@ fn create(s: *Session, a: Allocator, body: Value) void {
     const done = respond(s, a, body, lane, &history);
     const final = done.final;
     const status = if (final) |f| f.strField("status") orelse "" else "";
-    const kept = done.status == 200 and (std.mem.eql(u8, status, "completed") or std.mem.eql(u8, status, "incomplete"));
+    const ended = for ([_][]const u8{ "completed", "incomplete", "cancelled" }) |k| { // a cut reply is kept as written
+        if (std.mem.eql(u8, status, k)) break true;
+    } else false;
+    const kept = done.status == 200 and ended;
     if (kept) remember(s, a, lane, final.?, history.earlier, done.added) else if (done.status != 0) forget(s, body, lane);
     count(s, done.status, if (final) |f| f.strField("id") else null, lane, started);
 }

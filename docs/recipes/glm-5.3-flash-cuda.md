@@ -5,6 +5,7 @@ The native CUDA build serves GLM-5.3-Flash at tensor parallel over hosts: from N
 ([1.1.0](../../CHANGELOG.md#110), [the checkpoint](glm-5.3-flash.md#exl3)), and in [1.1.5](../../CHANGELOG.md#115) (#1050) from
 NVIDIA's FP4-Local checkpoint as stored and from XSFP4, which keeps FP4-Local's tensors outside the routed experts.
 Jammed XSFP4, in [1.2.3](../../CHANGELOG.md#123) ([#2041](https://github.com/ashhart/TensorFold/pull/2041)), holds those experts at block 32 in the `csf0_v1` form and loads the same way.
+Jammed XSFP4 NZ5, on `main` after 1.2.7 ([#2894](https://github.com/ashhart/TensorFold/pull/2894)), is Jammed XSFP4 refitted with E2M1's -0 code read as +5 (`NVFP4_NZ5`) and loads the same way.
 Rank 0 serves HTTP and the other ranks follow its steps, with MTP drafts, concurrent streams and kept prompt states.
 The [Python 0.6.6 recipe](glm-5.3-flash.md) and its `--tp`, `--rank` and `--master` flags belong to the frozen engine.
 
@@ -162,7 +163,7 @@ concurrent one its run alone.
 | DFlash2 | Prose, 16 streams | 526.0 | 583.6 |
 
 One-stream runs are `tools/bench_openai.py` at 512 tokens and stream runs `tools/bench_concurrent.py` at 256. DFlash2's
-weights are CC BY-NC-ND 4.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
+weights are Apache-2.0. After uses `TF_GLM_DRAFT_CONFIDENCE=0.4` and before keeps the default 0.7. Cold prompts
 are unchanged at about 4,430 tok/s from 8K to 131K tokens, and a repeated code reply reaches about 850 tok/s with
 windows of up to 32 rows. Other GPUs and rank counts are not covered here.
 
@@ -249,6 +250,15 @@ without solo at 3, with the same tokens; in another, 8 pieces without solo staye
 Long prompts and long runs of replies heat a GB10. The runbook's [heat bands](../../RUNBOOK.md#linux-and-cuda) (with a
 1,035,295-token prompt at TP=3), [CPU pinning](../../RUNBOOK.md#gb10-cpu-pinning-for-long-cuda-runs) and
 [GPU clock cap](../../RUNBOOK.md#gb10-gpu-clock-cap-for-long-cuda-runs) each carry a measured GLM-5.3-Flash run.
+
+## Windows past 1,048,576 tokens
+
+GLM-5.3-Flash's attention keeps no rotary positions (`qk_rope_head_dim` is 0, and KDA keeps none), so only its trained
+length, config.json's 1,048,576 tokens, bounds the window. `TF_GLM_CONTEXT_CEILING` sets the window `--context` may ask
+for and `--context 0` serves. GLM reads it at its open, and the startup log says when the window passes the trained
+length, past which the quality is the operator's to check. On three GB10s with `Bizuayeu/GLM-5.3-Flash-XSFP4`,
+`TF_GLM_CONTEXT_CEILING=2097152`, `--context 2097152 --parallel 1` and no prompt cache, rank 0 took 4,097 KV pages, and
+a 1,996,430-token prompt answered all three of its passphrases.
 
 ## Shared KDA operator
 
