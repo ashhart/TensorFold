@@ -454,6 +454,8 @@ test {
     _ = @import("cuda_mtp_graphs_test.zig");
     _ = embed;
     _ = hc;
+    _ = tiles;
+    _ = readout_fused;
     _ = qmm;
     _ = gdn;
     _ = mlp;

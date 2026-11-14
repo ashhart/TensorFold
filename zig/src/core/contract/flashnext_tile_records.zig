@@ -46,7 +46,11 @@ pub const cuda_133 = [_]registry.Override{
     .{ .name = "flashnext_attn fn_attn_fused", .usage = .{ .{ .regs = 118, .static = 640, .bound = 128 }, .{ .regs = 118, .static = 640, .bound = 128 }, .{ .regs = 118, .static = 640, .bound = 128 }, .{ .regs = 122, .static = 640, .bound = 128 }, .{ .regs = 122, .static = 640, .bound = 128 } } },
 };
 
-/// The changed top-k stays visible to device limits while fresh compiler usage is pending.
+/// Launches whose fresh compiler usage is pending stay visible to device limits: the changed top-k, the fused read-out.
 pub const pending = [_]registry.CudaRecord{
     .{ .launch = .{ .name = "flashnext_mtp fn_row_topk", .symbol = "fn_row_topk", .image = "flashnext_mtp", .threads = 1024 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down2", .symbol = "fn_hcn_down2", .image = "flashnext_hcn", .threads = 224, .dynamic = 13312 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down3", .symbol = "fn_hcn_down3", .image = "flashnext_hcn", .threads = 224, .dynamic = 19968 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_down4", .symbol = "fn_hcn_down4", .image = "flashnext_hcn", .threads = 224, .dynamic = 26624 }, .usage = registry.none },
+    .{ .launch = .{ .name = "flashnext_hcn fn_hcn_up3", .symbol = "fn_hcn_up3", .image = "flashnext_hcn", .threads = 256, .dynamic = 43776 }, .usage = registry.none },
 };
