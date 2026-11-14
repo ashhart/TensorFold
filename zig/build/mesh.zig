@@ -12,3 +12,11 @@ pub fn qwenDeclTest(b: *std.Build, core: *std.Build.Module) *std.Build.Step {
     const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/slicing_decl_test.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "mesh", .module = mesh } } });
     return &b.addRunArtifact(b.addTest(.{ .root_module = root })).step;
 }
+
+/// The dense Qwen3.5 CUDA family's shares as mesh declarations: a test-only module, so no binary roots mesh twice.
+pub fn qwenCudaDeclTest(b: *std.Build) *std.Build.Step {
+    const host = b.graph.host;
+    const mesh = module(b, host, .debug, @import("cuda_engines.zig").canonModule(b, host, .debug));
+    const root = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_shard_decl_test.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "mesh", .module = mesh }} });
+    return &b.addRunArtifact(b.addTest(.{ .root_module = root })).step;
+}
