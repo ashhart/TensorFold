@@ -37,10 +37,10 @@ pub fn budgets(e: *Engine, plans: []const win.Plan, heads: []const usize, out: [
         if (most == 0) continue;
         head.* = true;
         const cached = s.draft_chances.items;
-        // a legacy cap prices by the rule's rates; granted depths keep the drafter's own chances under their bound
-        if (cached.len > 0 and (limits == null or e.cfg.granted_depth)) {
+        // a legacy cap prices by the rule's rates; a cut never starts the tail, so the measured prefix prices the rest
+        const known = @min(s.draft_chances_cut orelse cached.len, cached.len, most);
+        if (known > 0 and (limits == null or e.cfg.granted_depth)) {
             const prices = try a.alloc(f64, most);
-            const known = @min(cached.len, most);
             @memcpy(prices[0..known], cached[0..known]);
             const rates = try e.rule.rates(win.who(s));
             var chance = cached[known - 1];
@@ -177,4 +177,37 @@ test "shared draft prices: plain forced streams cost one row and paused streams 
     plain.paused = true;
     try budgets(&e, &plans, &.{0}, &out);
     try std.testing.expectEqual(@as(i64, 7), out[0]);
+}
+
+test "shared draft prices: a cut chance tail prices by the rule's rates, not as a measured zero" {
+    const a = std.testing.allocator;
+    const Cfg = @import("config.zig");
+    const S = @import("stream.zig").Stream;
+    var cfg = try Cfg.Config.init(a, .{ .exact_width = 32, .drafts = 5, .batch_rows = 11 }, 32, 5);
+    defer cfg.deinit(a);
+    var fake: @import("fake.zig").Fake = .{ .gpa = a };
+    defer fake.deinit();
+    var clock: @import("fake.zig").FixedClock = .{};
+    var e = Engine.init(a, &cfg, fake.backend(), clock.clock());
+    defer e.deinit();
+    var cut = try S.init(a, .{ .id = "cut", .prompt = &.{ 7, 13, 29 }, .max_new = 64 });
+    defer cut.deinit(a);
+    var zero = try S.init(a, .{ .id = "zero", .prompt = &.{ 7, 13, 29 }, .max_new = 64 });
+    defer zero.deinit(a);
+    var grown = try S.init(a, .{ .id = "grown", .prompt = &.{ 7, 13, 29 }, .max_new = 64 });
+    defer grown.deinit(a);
+    try cut.draft_chances.appendSlice(a, &.{ 0.9, 0.4, 0, 0, 0 });
+    cut.draft_chances_cut = 2; // the chain cut left the last three chances unknown
+    try zero.draft_chances.appendSlice(a, &.{ 0.9, 0.4, 0, 0, 0 }); // main's rule: that tail priced as measured zeros
+    const rates = try e.rule.rates(win.who(&grown));
+    var continuation = [_]f64{ 0.9, 0.4, 0, 0, 0 };
+    for (continuation[2..], 2..) |*c, j| c.* = continuation[j - 1] * rates[@min(j, rates.len - 1)];
+    try grown.draft_chances.appendSlice(a, &continuation);
+    const cutp: win.Plan = .{ .stream = &cut, .position = 0, .kind = .none };
+    const zerop: win.Plan = .{ .stream = &zero, .position = 0, .kind = .none };
+    const grownp: win.Plan = .{ .stream = &grown, .position = 0, .kind = .none };
+    var out: [3]i64 = undefined;
+    try budgets(&e, &.{ cutp, grownp, zerop }, &.{ 0, 1, 2 }, &out);
+    try std.testing.expect(out[0] > out[2]); // main's rule prices the cut tail as measured zeros
+    try std.testing.expectEqual(out[1], out[0]); // the cut stream prices as the rate continuation
 }
