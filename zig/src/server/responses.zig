@@ -95,7 +95,14 @@ pub const TurnOptions = struct {
 /// One translated Responses request run as its chat completion, its events sent through ``sink``.
 pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, opts: TurnOptions) Outcome {
     const base = newBase(srv, a, body, t) catch return .{ .streamed = null };
-    if (t.rows_if_offered and !(@import("logprobs.zig").offered(srv, a) catch false)) _ = t.chat.object.orderedRemove("logprobs");
+    if (!(@import("logprobs.zig").offered(srv, a) catch false)) {
+        // an engine without rows keeps main's refusal, written by this route's own writer; include alone serves without
+        if (json.truthyField(t.chat, "logprobs")) {
+            refuse(conn, a, "logprobs are not supported by this model or backend", 400, null);
+            return .{ .streamed = null };
+        }
+        if (t.rows_if_offered) _ = t.chat.object.orderedRemove("logprobs");
+    }
     // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
     const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");
     var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
