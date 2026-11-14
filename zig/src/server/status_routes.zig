@@ -322,7 +322,7 @@ test "model discovery distinguishes speech row and frame budgets from context" {
         try std.testing.expectEqual(@as(i64, 4096), speech.get("max_input_code_points").?.int64().?);
         try std.testing.expectEqual(@as(i64, 8192), value.get("context_length").?.int64().?);
     }
-    const text_only = try modelValue(a, "text", .{ .context_window = 8192 }, 0, null);
+    const text_only = try modelValue(a, "text", .{ .context_window = 8192 }, 0, null, .{});
     try std.testing.expect(text_only.get("speech") == null);
 }
 
