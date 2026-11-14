@@ -1,10 +1,13 @@
 # qmm_q4_tile receipts, Apple M1 (13-inch)
 
-The #1990 measured build uses source commit `46571f111b2f0e92963561702b7eaab41868f823`, ELF SHA-256
-`2a1d481c692900c1cefb08fa308d5852d2ec748ee7bc24c89ff013c26ac36d72` (6,089,352 bytes). The #2015 measured build
-uses source commit `6e6f47f228a662cb26dedf5b24bf7c50c780fe43`, ELF SHA-256
+The "old" arm is #1990 built from source commit `46571f111b2f0e92963561702b7eaab41868f823`, ELF SHA-256
+`2a1d481c692900c1cefb08fa308d5852d2ec748ee7bc24c89ff013c26ac36d72` (6,089,352 bytes). The "new" arm is #2015 built
+from source commit `6e6f47f228a662cb26dedf5b24bf7c50c780fe43`, ELF SHA-256
 `b3b7f5e17752b31370490a7d4fe3f4ff92cf3593ed3bed447759f52c5561de41` (6,128,512 bytes). Both include the float32
-fix. The ELFs predate comment- and name-only commits. The retained receipt does not record the shell build commands.
+fix. These two ELFs produced every time and digest in this file. The ELFs predate comment- and name-only commits.
+The retained receipt does not record the shell build commands. The branch now sits on #1990's later head
+`70ff845318d32e99e0598c82dc5c388f8b7a869d` (266d2f62 merged with 8267ec1). That head was measured separately
+against its scalar twin in #1990's comments; no table here comes from it.
 Each case ran three old and three new processes, interleaved in both orders (old,new,new,old,old,new). Every process ran under `taskset` on the four P cores (CPU 4-7). Run 2 is the prefill plus 63 decode steps plus the per-step logits readback. Linux 7.3.0-2-20261110.1-lab-ARCH, started 2026-11-12 16:16Z, GPU timeouts 0. All 18 processes returned 0 with the pinned ids and the pinned logits digest.
 
 | Case | Old run 2 (median) | New run 2 (median) | Gain: median (pair range) | Logits digest, all six processes |
