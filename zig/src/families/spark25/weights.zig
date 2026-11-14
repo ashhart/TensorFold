@@ -183,12 +183,60 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, s: cuda.S
         const qkv = geo.queryWidth() + 2 * geo.kvWidth();
         l.qkvg = try x.linear(&.{ try name(&b1, i, "self_attn.q_k_v_proj"), try name(&b2, i, "self_attn.g_proj") }, &.{ qkv, geo.query_heads }, h);
         l.out = try x.linear(&.{try name(&b1, i, "self_attn.out_proj")}, &.{h}, geo.queryWidth());
-        l.gate = try x.linear(&.{try name(&b1, i, "mlp.gate_proj")}, &.{geo.intermediate}, h);
-        l.up = try x.linear(&.{try name(&b1, i, "mlp.up_proj")}, &.{geo.intermediate}, h);
+        if (cuda.qlinear.servedBits(c.bits) == 4) {
+            const gu = try x.linear(&.{ try name(&b1, i, "mlp.gate_proj"), try name(&b2, i, "mlp.up_proj") }, &.{ geo.intermediate, geo.intermediate }, h);
+            const views = try gateUpViews(gu.a4, geo.intermediate);
+            l.gate = .{ .a4 = views[0] };
+            l.up = .{ .a4 = views[1] };
+        } else {
+            l.gate = try x.linear(&.{try name(&b1, i, "mlp.gate_proj")}, &.{geo.intermediate}, h);
+            l.up = try x.linear(&.{try name(&b1, i, "mlp.up_proj")}, &.{geo.intermediate}, h);
+        }
         l.down = try x.linear(&.{try name(&b1, i, "mlp.down_proj")}, &.{h}, geo.intermediate);
         l.input_norm = try x.widened(try name(&b1, i, "input_layernorm.weight"), h);
         l.post_attention = try x.widened(try name(&b1, i, "post_attention_layernorm.weight"), h);
         _ = try reading.check();
     }
     return w;
+}
+
+/// Two aligned members of one packed gate|up allocation, retaining each member's n and the stack's metadata stride.
+pub fn gateUpViews(stack: Affine4, n: usize) ![2]Affine4 {
+    if (n == 0 or n % 128 != 0 or stack.n != 2 * n or stack.npad < stack.n or stack.npad % 128 != 0 or stack.k == 0 or stack.k % 64 != 0)
+        return error.UnsupportedGateUpStack;
+    var gate = stack;
+    gate.n = n;
+    var up = gate;
+    up.w += n * stack.k / 2;
+    up.s += n * 2;
+    up.b += n * 2;
+    return .{ gate, up };
+}
+
+test "Spark gate-up stack preserves each member's codes metadata stride and split-K" {
+    const n = cfg.spark4b.intermediate;
+    const k = cfg.spark4b.hidden;
+    const stack: Affine4 = .{ .w = 0x100000, .s = 0x2000000, .b = 0x3000000, .n = 2 * n, .k = k, .npad = 2 * n };
+    const views = try gateUpViews(stack, n);
+    for (views, 0..) |view, member| {
+        try std.testing.expectEqual(n, view.n);
+        try std.testing.expectEqual(k, view.k);
+        try std.testing.expectEqual(stack.npad, view.npad);
+        try std.testing.expectEqual(@as(usize, 2), cuda.qlinear.splitK(view.n, view.k));
+        for (0..k / 64) |g| {
+            for (0..n) |col| {
+                const absolute = g * stack.npad + member * n + col;
+                try std.testing.expectEqual(stack.s + absolute * 2, view.s + (g * view.npad + col) * 2);
+                try std.testing.expectEqual(stack.b + absolute * 2, view.b + (g * view.npad + col) * 2);
+            }
+            for (0..n / 64) |tile| for ([_]usize{ 0, 17, 511 }) |word| {
+                const local = (tile * (k / 64) + g) * 512 + word;
+                const absolute = ((member * n / 64 + tile) * (k / 64) + g) * 512 + word;
+                try std.testing.expectEqual(stack.w + absolute * 4, view.w + local * 4);
+            };
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), cuda.qlinear.splitK(stack.n, stack.k));
+    try std.testing.expectError(error.UnsupportedGateUpStack, gateUpViews(stack, n - 1));
+    try std.testing.expectError(error.UnsupportedGateUpStack, gateUpViews(stack, n / 2));
 }
