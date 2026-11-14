@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Nơi Hugging Face lưu bộ nhớ đệm tải xuống. Thư mục mô hình của TensorFold đặt trong Cài đặt → Thư mục mô hình.",
  "Engine knob: append per-request records to a file for diagnostics.": "Tùy chọn engine: ghi thêm nhật ký từng yêu cầu vào tệp để chẩn đoán.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Đặt 1 để ẩn hiển thị văn bản trực tiếp của engine trong terminal; mô hình phục vụ không thay đổi.",
- "Engine knob: mix a salt into request seeds.": "Tùy chọn engine: trộn muối vào seed của yêu cầu."
+ "Engine knob: mix a salt into request seeds.": "Tùy chọn engine: trộn muối vào seed của yêu cầu.",
+ "Control vector": "Véc-tơ điều khiển",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Véc-tơ điều khiển dẫn hướng phong cách hoặc chủ đề trong câu trả lời của mô hình cục bộ. Nó tắt cho đến khi bạn bật. Khi khởi động, động cơ nêu tên tệp đã nạp và SHA-256 của tệp, đồng thời cho biết các câu trả lời đang được dẫn hướng.",
+ "Apply a control vector": "Áp dụng véc-tơ điều khiển",
+ "Choose…": "Chọn…",
+ "Strength": "Cường độ",
+ "File: {value0}": "Tệp: {value0}",
+ "In force in the loaded model.": "Đang có hiệu lực trong mô hình đã tải.",
+ "Strength scales the added direction. Large values can degrade replies.": "Cường độ thay đổi độ lớn của hướng được cộng vào. Giá trị lớn có thể làm giảm chất lượng câu trả lời.",
+ "The strength must be above 0 and at most {value0}.": "Cường độ phải lớn hơn 0 và không quá {value0}.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Bản dựng này của động cơ TensorFold chưa có véc-tơ điều khiển, nên động cơ đang dùng không nhận được.",
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Khi véc-tơ điều khiển có hiệu lực, câu trả lời được dẫn hướng theo phong cách hoặc chủ đề mà tệp mã hóa. Chỉ hỗ trợ véc-tơ kiểu cộng (add); động cơ từ chối véc-tơ project và các tệp mà nó không thể xác thực."
 }

@@ -24,7 +24,7 @@ import type { LocalTtsDiscovery, VoiceSynthesisResult, VoiceTranscriptionInput, 
 import type { KokoroStatus, KokoroSynthesisInput } from '../electron/agent/types'
 import type { OrchestrationEvent } from '../electron/agent/types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from '../electron/agent/types'
-import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from '../electron/agent/types'
+import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineControlVectorSnapshot, EngineEnvOverrides, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from '../electron/agent/types'
 import type { MobileBridgePairing, MobileBridgeStatus } from '../electron/agent/types/mobile-bridge'
 
 import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from '../electron/agent/types'
@@ -502,6 +502,11 @@ export interface TensorFoldStudioApi extends ClusterWorkspaceApi, InputHistoryAp
   engineLoad(repo: string): Promise<EngineStatus>
   engineUnload(): Promise<EngineStatus>
   engineSetCortheon(enabled: boolean): Promise<EngineStatus>
+  // A control vector for the local engine: the file, whether it is in force, and the strength.
+  engineControlVector(): Promise<EngineControlVectorSnapshot>
+  engineChooseControlVector(): Promise<EngineControlVectorSnapshot>
+  engineSetControlVector(input: { enabled?: boolean; alpha?: number }): Promise<EngineControlVectorSnapshot>
+  engineClearControlVector(): Promise<EngineControlVectorSnapshot>
   engineLearning(): Promise<EngineLearningSnapshot>
   engineSetLearning(enabled: boolean, model?: string): Promise<EngineLearningSnapshot>
   // Advanced: environment variables passed through to every engine process at its next launch.

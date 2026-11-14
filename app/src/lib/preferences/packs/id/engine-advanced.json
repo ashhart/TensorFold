@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Lokasi cache unduhan Hugging Face. TensorFold menyimpan folder modelnya sendiri di Setelan → Folder model.",
  "Engine knob: append per-request records to a file for diagnostics.": "Pengaturan mesin: tambahkan catatan per permintaan ke berkas untuk diagnostik.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "Setel 1 untuk menyembunyikan tampilan teks langsung mesin di terminalnya; model yang dilayani tidak berubah.",
- "Engine knob: mix a salt into request seeds.": "Pengaturan mesin: campurkan salt ke seed permintaan."
+ "Engine knob: mix a salt into request seeds.": "Pengaturan mesin: campurkan salt ke seed permintaan.",
+ "Control vector": "Vektor kendali",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "Vektor kendali mengarahkan gaya atau topik balasan model lokal. Vektor ini mati sampai Anda menyalakannya. Saat mulai, mesin menyebut berkas yang dimuat beserta SHA-256-nya, dan menyatakan bahwa balasan diarahkan.",
+ "Apply a control vector": "Terapkan vektor kendali",
+ "Choose…": "Pilih…",
+ "Strength": "Kekuatan",
+ "File: {value0}": "Berkas: {value0}",
+ "In force in the loaded model.": "Berlaku pada model yang dimuat.",
+ "Strength scales the added direction. Large values can degrade replies.": "Kekuatan mengalikan arah yang ditambahkan. Nilai besar dapat menurunkan kualitas balasan.",
+ "The strength must be above 0 and at most {value0}.": "Kekuatan harus lebih besar dari 0 dan tidak lebih dari {value0}.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "Mesin TensorFold pada build ini belum menawarkan vektor kendali, jadi mesin yang dipakai tidak dapat menerimanya.",
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "Dengan vektor kendali berlaku, balasan diarahkan ke gaya atau topik yang dikodekan berkas itu. Hanya vektor jenis penambahan (add) yang didukung; mesin menolak vektor project dan berkas yang tidak dapat divalidasinya."
 }

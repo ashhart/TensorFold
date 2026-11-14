@@ -18,5 +18,16 @@
  "Where Hugging Face caches downloads. TensorFold keeps its own model folders in Settings → Model folders.": "Hugging Face가 다운로드를 캐시하는 위치입니다. TensorFold의 모델 폴더는 설정 → 모델 폴더에서 관리합니다.",
  "Engine knob: append per-request records to a file for diagnostics.": "엔진 옵션: 진단용으로 요청별 기록을 파일에 추가합니다.",
  "Set 1 to hide the engine live text display in its terminal; the served model is unchanged.": "1로 설정하면 엔진 터미널의 라이브 텍스트 표시를 숨깁니다. 제공되는 모델은 그대로입니다.",
- "Engine knob: mix a salt into request seeds.": "엔진 옵션: 요청 시드에 솔트를 혼합합니다."
+ "Engine knob: mix a salt into request seeds.": "엔진 옵션: 요청 시드에 솔트를 혼합합니다.",
+ "Control vector": "제어 벡터",
+ "A control vector steers the style or topic of the local model's replies. It is off until you turn it on. When the engine starts it names the file it loaded and its SHA-256, and says replies are steered.": "제어 벡터는 로컬 모델 답변의 스타일이나 주제를 유도합니다. 켜기 전까지는 꺼져 있습니다. 엔진은 시작할 때 불러온 파일과 그 SHA-256을 알리고, 답변이 유도되고 있음을 알려줍니다.",
+ "Apply a control vector": "제어 벡터 적용",
+ "Choose…": "선택…",
+ "Strength": "강도",
+ "File: {value0}": "파일: {value0}",
+ "In force in the loaded model.": "불러온 모델에서 적용 중입니다.",
+ "Strength scales the added direction. Large values can degrade replies.": "강도는 더해지는 방향의 배율입니다. 값이 크면 답변 품질이 떨어질 수 있습니다.",
+ "The strength must be above 0 and at most {value0}.": "강도는 0보다 크고 {value0} 이하여야 합니다.",
+ "This build's TensorFold engine does not offer control vectors yet, so the engine in use cannot take one.": "이 빌드의 TensorFold 엔진은 아직 제어 벡터를 지원하지 않아 현재 엔진에는 전달할 수 없습니다.",
+ "With a control vector in force, replies are steered toward the style or topic the file encodes. Only add-style vectors are supported; the engine refuses project vectors and files it cannot validate.": "제어 벡터가 적용되는 동안 답변은 파일이 담고 있는 스타일이나 주제 쪽으로 유도됩니다. 더하기(add) 방식 벡터만 지원하며, 엔진은 project 방식 벡터와 검증할 수 없는 파일을 거부합니다."
 }
