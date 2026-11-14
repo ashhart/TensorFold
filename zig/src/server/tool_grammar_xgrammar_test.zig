@@ -13,23 +13,27 @@ const ascii = blk: {
     break :blk s;
 };
 
-/// The stop token, then printable ASCII, blanks and DSML's fullwidth bar: every reply here spells one per character.
+/// Tokens across a structural tag's edges: text into a begin, the begin into JSON, JSON into the end, the end out.
+const straddles = [_][]const u8{ "ng <wea", "ther>{\"ci", "ty\":\"Oslo\"}</wea", "ther> ok" };
+
+/// The stop token, printable ASCII, blanks and DSML's fullwidth bar (a reply a character a token), then `straddles`.
 const vocab = blk: {
-    var v: [ascii.len + 4][]const u8 = undefined;
+    var v: [ascii.len + 4 + straddles.len][]const u8 = undefined;
     v[0] = "<eos>";
     for (v[1 .. ascii.len + 1], 0..) |*t, i| t.* = ascii[i..][0..1];
     v[ascii.len + 1] = "\n";
     v[ascii.len + 2] = "\t";
     v[ascii.len + 3] = "｜";
+    for (v[ascii.len + 4 ..], straddles) |*t, s| t.* = s;
     break :blk v;
 };
 const words = (vocab.len + 31) / 32;
 
-const Lib = struct {
+pub const Lib = struct {
     f: lanes.grammar.Library,
     h: *anyopaque,
 
-    fn open(a: std.mem.Allocator) !Lib {
+    pub fn open(a: std.mem.Allocator) !Lib {
         var dl = try sys.DynLib.open(built.library);
         var f: lanes.grammar.Library = undefined;
         const info = @typeInfo(lanes.grammar.Library).@"struct";
@@ -50,22 +54,38 @@ const Lib = struct {
     }
 
     /// Whether the grammar takes `reply` a character a token and may then stop.
-    fn admits(l: Lib, g: *anyopaque, reply: []const u8) !bool {
+    pub fn admits(l: Lib, g: *anyopaque, reply: []const u8) !bool {
         const m = l.f.matcher(g) orelse return error.Matcher;
         defer l.f.matcher_free(m);
         var i: usize = 0;
         while (i < reply.len) {
             const n = try std.unicode.utf8ByteSequenceLength(reply[i]);
-            const id = for (vocab[1..], 1..) |v, t| {
-                if (std.mem.eql(u8, v, reply[i..][0..n])) break t;
-            } else return error.NotInVocab;
-            switch (l.f.accept(m, @intCast(id))) {
-                1 => {},
-                0 => return false,
-                else => return error.Accept,
-            }
+            if (!try l.step(m, reply[i..][0..n])) return false;
             i += n;
         }
+        return l.mayStop(m);
+    }
+
+    /// Whether the grammar takes `tokens`, each a whole vocabulary entry, and may then stop.
+    pub fn takes(l: Lib, g: *anyopaque, tokens: []const []const u8) !bool {
+        const m = l.f.matcher(g) orelse return error.Matcher;
+        defer l.f.matcher_free(m);
+        for (tokens) |t| if (!try l.step(m, t)) return false;
+        return l.mayStop(m);
+    }
+
+    fn step(l: Lib, m: *anyopaque, token: []const u8) !bool {
+        const id = for (vocab[1..], 1..) |v, t| {
+            if (std.mem.eql(u8, v, token)) break t;
+        } else return error.NotInVocab;
+        return switch (l.f.accept(m, @intCast(id))) {
+            1 => true,
+            0 => false,
+            else => error.Accept,
+        };
+    }
+
+    fn mayStop(l: Lib, m: *anyopaque) !bool {
         var bits: [words]u32 = @splat(0);
         if (l.f.fill(m, @ptrCast(&bits), words) != 0) return error.Fill;
         return bits[0] & 1 != 0;
@@ -141,4 +161,8 @@ test "auto tools through xgrammar: non-strict now takes any object, strict looku
         wrong += 1;
     };
     try std.testing.expectEqual(@as(usize, 0), wrong);
+}
+
+test {
+    _ = @import("structural_tag_xgrammar_test.zig");
 }
