@@ -21,6 +21,8 @@ pub const Parts = struct {
     /// the drafter's weights (null: serial windows, no drafts)
     dspark: ?*const dspark.Weights,
     owner: ?Owner = null,
+    /// the weights' residency owner the target's buffers join (null: none join)
+    resident: ?*mtl.resident.Resident = null,
 };
 
 pub const Owner = struct { ctx: *anyopaque, close: *const fn (ctx: *anyopaque) void };
@@ -49,7 +51,7 @@ pub const Metal = struct {
         const m = try a.create(Metal);
         errdefer a.destroy(m);
         m.* = .{ .a = a, .parts = parts, .opt = opt, .t = undefined };
-        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes });
+        m.t = try target_.Target.init(a, parts.env, .{ .slots = opt.slots, .limit = opt.limit, .prompt = opt.prompt, .cache_bytes = opt.cache_bytes, .resident = parts.resident });
         errdefer m.t.deinit();
         const e = parts.env;
         if (opt.drafts) if (parts.dspark) |w| {

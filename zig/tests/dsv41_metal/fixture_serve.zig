@@ -1,5 +1,6 @@
 //! The tiny model served on Metal: prompt split, Engram before it, a DSpark drafter; its serve.Metal over the rig.
 const std = @import("std");
+const mtl = @import("metal");
 const pkg = @import("dsv41_metal");
 const host = @import("dsv41");
 const fixture = @import("fixture.zig");
@@ -25,22 +26,34 @@ const Held = struct {
     a: std.mem.Allocator,
     f: *ff.Fwd,
     w: pkg.dspark.Weights,
+    /// a residency owner as the weights' (Opts.resident), its own buffer and the bytes it held before the target's
+    res: ?mtl.resident.Resident = null,
+    own: ?mtl.Buffer = null,
+    base: u64 = 0,
 
     fn close(ctx: *anyopaque) void {
         const h: *Held = @ptrCast(@alignCast(ctx));
+        if (h.res) |*r| {
+            resident_left = r.held.bytes == h.base;
+            r.deinit();
+        }
+        if (h.own) |b| b.deinit();
         h.w.deinit();
         h.f.deinit();
         h.a.destroy(h);
     }
 };
 
-pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64 };
+pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, resident: bool = false };
+
+/// Set when a model opened with a residency owner closes: every buffer the target joined to it had left.
+pub var resident_left: ?bool = null;
 
 /// The tiny model from `seed` served on this GPU; the returned model owns the rig (closed with it).
 pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Metal {
     const h = try a.create(Held);
     errdefer a.destroy(h);
-    h.a = a;
+    h.* = .{ .a = a, .f = undefined, .w = undefined };
     h.f = try ff.Fwd.initWith(a, io, config(), limit, seed);
     errdefer h.f.deinit();
     const r = h.f.r;
@@ -57,8 +70,13 @@ pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Me
         h.w = try pkg.dspark.loadWeights(a, io, r.device, &pack, &r.c);
     }
     errdefer h.w.deinit();
+    if (o.resident) {
+        h.own = try r.device.buffer(64, mtl.ResourceOptions.shared);
+        h.res = try mtl.resident.Resident.hold(a, io, r.device, r.queue, &.{h.own.?}, "dsv41 fixture");
+        if (h.res) |*x| h.base = x.held.bytes;
+    }
     const env: pkg.target.Env = .{ .device = r.device, .queue = r.queue, .c = &r.c, .p = &r.p, .tables = &r.tables, .s = &r.s, .model = h.f.model(), .lookup = h.f.lookup() };
-    const parts: pkg.serve.Parts = .{ .env = env, .top = &r.top.?, .dspark = &h.w, .owner = .{ .ctx = h, .close = Held.close } };
+    const parts: pkg.serve.Parts = .{ .env = env, .top = &r.top.?, .dspark = &h.w, .owner = .{ .ctx = h, .close = Held.close }, .resident = if (h.res) |*x| x else null };
     return pkg.serve.Metal.open(a, parts, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .chunk = o.chunk } });
 }
 

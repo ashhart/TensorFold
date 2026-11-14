@@ -10,6 +10,7 @@ const forward = @import("forward.zig");
 const prompt = @import("prompt.zig");
 const pipelines = @import("pipelines.zig");
 const snapshots = @import("snapshots.zig");
+const tree_ = @import("tree.zig");
 
 const iface = host.iface;
 const lanes = host.lanes;
@@ -36,13 +37,15 @@ pub const Options = struct {
     prompt: prompt.Opts = .{},
     /// bytes of kept prompt states (0: no prompt cache)
     cache_bytes: u64 = 0,
+    /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
+    resident: ?*mtl.resident.Resident = null,
 };
 
 /// What the target did, for the tests and the logs.
 pub const Stats = struct { prompts: u64 = 0, hits: u64 = 0, cached_rows: u64 = 0, windows: u64 = 0, rows: u64 = 0, rewinds: u64 = 0, launches: u64 = 0, history_rows: u64 = 0 };
 
 /// A slot: its device state, prompt tail, ids (rows run, the last window's included until its keep) and taps.
-const Slot = struct {
+pub const Slot = struct {
     kv: kv.Slot,
     tail: prompt.Tail,
     hist: std.ArrayList(u32) = .empty,
@@ -76,6 +79,10 @@ pub const Target = struct {
     stats: Stats = .{},
     /// a command buffer failed: the device state is no longer trusted (the health hook)
     failed: bool = false,
+    /// the target's own buffers joined the weights' residency owner (they leave it before they are freed)
+    joined: bool = false,
+    /// draft trees: the branches' shadow slots and the open tree window (tree.zig)
+    tree: tree_.Tree = .{},
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -107,7 +114,33 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        t.joinResident() catch {};
         return t;
+    }
+
+    /// Every buffer the target binds besides the weights joins their residency owner, so none waits to be mapped.
+    fn joinResident(t: *Target) !void {
+        const r = t.opt.resident orelse return;
+        var bufs: std.ArrayList(mtl.Buffer) = .empty;
+        defer bufs.deinit(t.a);
+        try t.ownBuffers(&bufs);
+        var bytes: u64 = 0;
+        for (bufs.items) |b| bytes += b.length();
+        // the owner refuses (and logs) buffers that would take it past its load limit
+        t.joined = r.tryAddNow(bufs.items);
+        if (t.joined) std.log.info("dsv41 target: {d:.1} GiB of buffers joined the weights' residency set", .{mtl.ResidencySet.gibs(bytes)});
+    }
+
+    fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
+        try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
+        for (t.slots) |*s| {
+            for (s.kv.regions) |r| {
+                try out.append(t.a, r.window);
+                inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
+            }
+            if (s.kv.taps) |b| try out.append(t.a, b);
+            try out.appendSlice(t.a, &.{ s.tail.x, s.tail.pre, s.ptaps });
+        }
     }
 
     fn freeSlot(a: Allocator, s: *Slot) void {
@@ -119,6 +152,13 @@ pub const Target = struct {
     }
 
     pub fn deinit(t: *Target) void {
+        t.tree.deinit(t);
+        if (t.joined) {
+            var bufs: std.ArrayList(mtl.Buffer) = .empty;
+            defer bufs.deinit(t.a);
+            t.ownBuffers(&bufs) catch {};
+            for (bufs.items) |b| t.opt.resident.?.remove(b);
+        }
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
@@ -173,6 +213,7 @@ pub const Target = struct {
         if (ids.len == 0) return error.EmptyPrompt;
         if (ids.len >= t.opt.limit) return error.PastLimit;
         for (ids) |id| if (id >= c.vocab) return error.BadToken;
+        t.tree.forget(slot);
         s.whole = false;
         s.open = false;
         s.rows = 0;
@@ -236,7 +277,7 @@ pub const Target = struct {
     }
 
     /// The keyed choice of a logits row over the whole vocabulary (greedy: the first maximum, ties to the lower id).
-    fn choose(t: *const Target, row: []const f32, draw: u64, smp: ?lanes.Sampling) !u32 {
+    pub fn choose(t: *const Target, row: []const f32, draw: u64, smp: ?lanes.Sampling) !u32 {
         const s = smp orelse return argmax(row);
         if (s.temperature <= 0) return argmax(row);
         const vals = try t.a.alloc(f64, row.len);
@@ -258,7 +299,7 @@ pub const Target = struct {
         return @intCast(best);
     }
 
-    fn fail(t: *Target, e: anyerror) anyerror {
+    pub fn fail(t: *Target, e: anyerror) anyerror {
         if (e == error.CommandBufferFailed) t.failed = true;
         return e;
     }
@@ -268,13 +309,20 @@ pub const Target = struct {
     /// A round's windows: slots' rows share a launch (up to R rows, a slot once), each launch one forward.
     fn window(ptr: *anyopaque, segments: []const iface.Segment, choices: [][]u32) anyerror!void {
         const t = self(ptr);
+        // the tree windows (parents not one chain) run first, together: their branches on shadow slots
+        try t.tree.window(t, segments, choices);
         var from: usize = 0;
         while (from < segments.len) {
+            if (tree_.branched(segments[from])) {
+                from += 1;
+                continue;
+            }
             var rows: usize = 0;
             var to = from;
             while (to < segments.len) : (to += 1) {
                 const g = segments[to];
                 if (g.slot >= t.slots.len) return error.NoSlot;
+                if (tree_.branched(g)) break;
                 if (to > from and (rows + g.tokens.len > R or dup(segments[from..to], g.slot))) break;
                 rows += g.tokens.len;
             }
@@ -307,6 +355,7 @@ pub const Target = struct {
         }
         for (group) |g| {
             const s = &t.slots[g.slot];
+            t.tree.close(g.slot);
             if (s.open) t.commitTaps(s, s.rows); // a window never kept keeps all its rows
             s.whole = false;
             try s.hist.appendSlice(t.a, g.tokens);
@@ -335,25 +384,36 @@ pub const Target = struct {
 
     /// One launch of the decode forward over the segments' rows, each slot's ids at its positions from `start`.
     fn launch(t: *Target, group: []const iface.Segment) !void {
+        const look = t.env.c.engram_max_ngram - 1;
+        var runs: [R]Run = undefined;
+        for (group, runs[0..group.len]) |g, *r| {
+            const s = &t.slots[g.slot];
+            r.* = .{ .kv = &s.kv, .ids = g.tokens, .start = @intCast(g.start), .lookback = s.hist.items[@as(usize, @intCast(g.start)) -| look..@intCast(g.start)] };
+        }
+        return t.launchRuns(runs[0..group.len]);
+    }
+
+    /// One chain of a launch: the state it runs on, its ids from position `start`, the Engram ids before them.
+    pub const Run = struct { kv: *const kv.Slot, ids: []const u32, start: u32, lookback: []const u32 };
+
+    /// One launch of the decode forward over the runs' rows, in order (at most R rows).
+    pub fn launchRuns(t: *Target, runs: []const Run) !void {
         const e = t.env;
         const c = e.c;
-        const look = c.engram_max_ngram - 1;
         var pieces: [R]forward.Piece = undefined;
         var spans: [R]scratch.Span = undefined;
         var segs: [R]ctx_.Seg = undefined;
         var r0: u32 = 0;
-        for (group, 0..) |g, i| {
-            const s = &t.slots[g.slot];
-            const n: u32 = @intCast(g.tokens.len);
-            const start: u32 = @intCast(g.start);
-            pieces[i] = .{ .ids = g.tokens, .lookback = s.hist.items[start -| look..start] };
-            spans[i] = .{ .p0 = start, .n = n };
-            segs[i] = .{ .slot = &s.kv, .p0 = start, .r0 = r0, .n = n };
+        for (runs, 0..) |g, i| {
+            const n: u32 = @intCast(g.ids.len);
+            pieces[i] = .{ .ids = g.ids, .lookback = g.lookback };
+            spans[i] = .{ .p0 = g.start, .n = n };
+            segs[i] = .{ .slot = g.kv, .p0 = g.start, .r0 = r0, .n = n };
             r0 += n;
         }
-        try forward.prepareSegs(&t.b, c, pieces[0..group.len], e.lookup);
-        try e.s.writeSpans(c, spans[0..group.len]);
-        const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..group.len] };
+        try forward.prepareSegs(&t.b, c, pieces[0..runs.len], e.lookup);
+        try e.s.writeSpans(c, spans[0..runs.len]);
+        const x: ctx_.Ctx = .{ .c = c, .p = e.p, .s = e.s, .slot = segs[0].slot, .tables = e.tables, .p0 = segs[0].p0, .rows = r0, .segs = segs[0..runs.len] };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         try forward.run(&x, e.queue, e.model, &t.b);
@@ -365,8 +425,9 @@ pub const Target = struct {
         if (slot >= t.slots.len) return error.NoSlot;
         const s = &t.slots[slot];
         if (!s.open) return error.NoWindow;
+        // a tree window's path: its branch's chain, taken from its shadow slot first when not the main one
+        if (t.tree.pending(slot)) try t.tree.keep(t, slot, path) else for (path, 0..) |r, i| if (r != i) return error.NotAPath;
         if (path.len == 0 or path.len > s.rows) return error.NotAPath;
-        for (path, 0..) |r, i| if (r != i) return error.NotAPath;
         s.open = false;
         const m: u32 = @intCast(path.len);
         t.commitTaps(s, m);
@@ -380,7 +441,7 @@ pub const Target = struct {
     }
 
     /// The ring takes the first `m` rows of the slot's last window (its kept rows); rows not kept never land in it.
-    fn commitTaps(t: *const Target, s: *Slot, m: u32) void {
+    pub fn commitTaps(t: *const Target, s: *Slot, m: u32) void {
         const tb = s.kv.taps orelse return;
         const w = tapWidth(t.env.c);
         for (0..m) |r| t.ringPut(s, s.base + r, tb.slice(u16, @as(usize, s.rows) * w)[r * w ..][0..w]);
@@ -407,7 +468,7 @@ pub const Target = struct {
         const w: u32 = @intCast(tapWidth(t.env.c));
         if (s.after_prompt) return .{ .address = @intFromPtr(s.ptaps.contents()), .rows = s.ptaps_rows, .stride = w };
         const tb = s.kv.taps orelse return .{ .address = 0, .rows = 0, .stride = w };
-        return .{ .address = @intFromPtr(tb.contents()), .rows = s.rows, .stride = w };
+        return .{ .address = @intFromPtr(tb.contents()), .rows = s.rows, .stride = w, .map = t.tree.map(slot) };
     }
 
     /// The request ended: its state is kept (the prompt cache) when every launch of it completed.
@@ -416,6 +477,7 @@ pub const Target = struct {
         if (slot >= t.slots.len) return;
         const s = &t.slots[slot];
         if (!s.live) return;
+        t.tree.forget(slot);
         s.live = false;
         if (s.open) t.commitTaps(s, s.rows);
         s.open = false;
