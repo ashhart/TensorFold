@@ -73,7 +73,10 @@ pub fn glueFn(ctx: *anyopaque, r: *run.Runner, c: *const calls.Call) anyerror!vo
         return error.NotEngram;
     }
     if (std.mem.eql(u8, step, "kx_dense")) return b.exchange(r, c);
-    if (std.mem.eql(u8, step, "trace")) return error.TracedRows;
+    if (std.mem.eql(u8, step, "trace")) {
+        if (f.layer_hash == null) return error.TracedRows;
+        return @import("layer_hash_forward.zig").batch(f, r, c, b.hash_mix, b.hash_ids);
+    }
     return fwd.Forward.glueFn(f, r, c);
 }
 
