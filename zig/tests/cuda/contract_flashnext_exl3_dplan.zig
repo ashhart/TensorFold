@@ -36,7 +36,7 @@ const Model = struct {
         return ia > ib;
     }
 
-    fn round(m: *Model, lines: usize, recent: bool, picks: []const i32, src: []const i64, lens: []const i64, k2: []const i32, line_base: u64, line_bytes: u64, offs: [3]u64) void {
+    fn round(m: *Model, lines: usize, recent: bool, picks: []const i32, src: []const i64, lens: []const i64, k2: []const i32, line_base: u64, line_bytes: u64, offs: [3]u64, overflow_base: u64) void {
         const line_id: []i32 = @ptrCast(m.st[0..lines]);
         const stamp = m.st[lines .. 2 * lines];
         const line_of: []i32 = @ptrCast(m.st[2 * lines ..][0..experts]);
@@ -156,10 +156,14 @@ const Model = struct {
                 m.work_n += 1;
                 misc[4] += 1;
             } else {
+                const base = overflow_base + @as(u64, @intCast(m.ovf_n)) * line_bytes;
                 for (0..3) |w| {
-                    m.tab[w][id] = src[id * 3 + w];
+                    const dst: i64 = @bitCast(base + offs[w]);
+                    m.tab[w][id] = dst;
                     m.k2t[w][id] = k2[id * 3 + w];
+                    m.work[@as(usize, @intCast(m.work_n)) * 9 + w * 3 ..][0..3].* = .{ src[id * 3 + w], dst, lens[id * 3 + w] };
                 }
+                m.work_n += 1;
                 m.ovf[@intCast(m.ovf_n)] = @intCast(id);
                 m.ovf_n += 1;
                 misc[7] += 1;
@@ -185,6 +189,7 @@ pub const Plan = struct {
     msg: [160]u8 = undefined,
     const line_base: u64 = 0x7000_0000_0000;
     const line_bytes: u64 = 1 << 20;
+    const overflow_base: u64 = 0x7100_0000_0000;
     const offs: [3]u64 = .{ 0, 4096, 8192 };
 
     pub fn deinit(self: *Plan) void {
@@ -236,7 +241,7 @@ pub const Plan = struct {
         const line_id: []i32 = @ptrCast(self.st0[0..lines]);
         const line_of: []i32 = @ptrCast(self.st0[2 * lines ..][0..experts]);
         @memset(line_of, -1);
-        // held lines: a stress fill leaves none empty (every miss must evict, or be read in place)
+        // Held lines: a stress fill leaves none empty (every miss must evict or be staged).
         var order: [experts]u16 = undefined;
         for (&order, 0..) |*o, i| o.* = @intCast(i);
         rng.shuffle(u16, &order);
@@ -317,6 +322,7 @@ pub const Plan = struct {
         a.add(line_base);
         a.add(line_bytes);
         for (offs) |o| a.add(o);
+        a.add(overflow_base);
         a.add(d[11]);
         a.add(d[12]);
         a.add(d[13]);
@@ -352,7 +358,7 @@ pub const Plan = struct {
         @memset(m.hit, 0);
         @memset(m.miss, 0);
         @memset(m.ovf, 0);
-        m.round(self.lines, self.recent, self.picks, &self.src, &self.lens, &self.k2, line_base, line_bytes, offs);
+        m.round(self.lines, self.recent, self.picks, &self.src, &self.lens, &self.k2, line_base, line_bytes, offs, overflow_base);
         const r = &self.rig;
         const msg = &self.msg;
         if (try same(r, u32, self.d[4], m.st, "state", msg)) |why| return why;
@@ -364,8 +370,8 @@ pub const Plan = struct {
         if (try same(r, i32, self.d[12], &.{m.work_n}, "copies", msg)) |why| return why;
         if (try same(r, i32, self.d[13], m.hit, "held picks", msg)) |why| return why;
         if (try same(r, i32, self.d[14], m.miss, "missed picks", msg)) |why| return why;
-        if (try same(r, i32, self.d[15], m.ovf, "in-place experts", msg)) |why| return why;
-        return try same(r, i32, self.d[16], &.{m.ovf_n}, "in-place count", msg);
+        if (try same(r, i32, self.d[15], m.ovf, "staged experts", msg)) |why| return why;
+        return try same(r, i32, self.d[16], &.{m.ovf_n}, "staged count", msg);
     }
 };
 

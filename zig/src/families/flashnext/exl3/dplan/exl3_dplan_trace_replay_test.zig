@@ -15,7 +15,7 @@ fn capture(words: []u32, state: *replay.ExactState, picks: []const i32, recent: 
     record_words[3] = @intFromBool(recent);
     for (picks, 0..) |pick, index| record_words[trace.record_header_words + index] = @bitCast(pick);
     const delta = try state.replay(.{ .words = record_words, .lines = state.lines, .max_rows = words[5] });
-    fixture.append(words, before, state.words, picks, recent, @intCast(delta.mapped_picks));
+    fixture.append(words, before, state.words, picks, recent, @intCast(delta.staged_picks));
     return delta;
 }
 
@@ -50,8 +50,8 @@ test "exl3: ownership checkpoints verify every segment including repeated and fi
     try std.testing.expectEqual(result.delta.miss_picks, comparison.lifetime.miss_picks);
     try std.testing.expectEqual(result.delta.copies, comparison.lifetime.copies);
     try std.testing.expectEqual(result.delta.evictions, comparison.lifetime.evictions);
-    try std.testing.expectEqual(result.delta.inplace, comparison.lifetime.mapped_experts);
-    try std.testing.expectEqual(result.delta.mapped_picks, comparison.lifetime.mapped_picks);
+    try std.testing.expectEqual(result.delta.staged, comparison.lifetime.staged_experts);
+    try std.testing.expectEqual(result.delta.staged_picks, comparison.lifetime.staged_picks);
     try std.testing.expectEqual(result.rounds, comparison.lifetime.rounds);
     try std.testing.expectEqual(@as(usize, 4), view.checkpoints());
     for ([_]usize{ 0, 1, 1, 2 }, 0..) |round, index| try std.testing.expectEqual(round, (try view.checkpoint(index)).roundIndex());
@@ -114,7 +114,7 @@ test "exl3: dropped ownership checkpoints invalidate exact replay even without d
     try std.testing.expectError(error.TraceDroppedRecords, replay.verifyTrace(allocator, try trace.View.init(words)));
 }
 
-test "exl3: v4 exact warm replay matches known decisions counters and all terminal words" {
+test "exl3: v5 exact warm replay matches known decisions counters and all terminal words" {
     const allocator = std.testing.allocator;
     const words = try fixture.make(allocator, 2, 1);
     defer allocator.free(words);
@@ -149,7 +149,7 @@ test "exl3: v4 exact warm replay matches known decisions counters and all termin
     try std.testing.expectError(error.PlannerFinalStateMismatch, replay.verifyTraceWithFinal(allocator, view, state.words));
 }
 
-test "exl3: v4 1200 full rounds replay recent wrap saturated counts and modular counters" {
+test "exl3: v5 1200 full rounds replay recent wrap saturated counts and modular counters" {
     const allocator = std.testing.allocator;
     const words = try fixture.make(allocator, 10, 16);
     defer allocator.free(words);
@@ -191,7 +191,7 @@ test "exl3: v4 1200 full rounds replay recent wrap saturated counts and modular 
     _ = try replay.verifyTrace(allocator, try snapshot.view());
 }
 
-test "exl3: v4 starts from warm recent history and retains empty masked rounds" {
+test "exl3: v5 starts from warm recent history and retains empty masked rounds" {
     const allocator = std.testing.allocator;
     const words = try fixture.make(allocator, 2, 1);
     defer allocator.free(words);
@@ -213,7 +213,7 @@ test "exl3: v4 starts from warm recent history and retains empty masked rounds" 
     try std.testing.expectEqual(@as(usize, 2), result.rounds);
 }
 
-test "exl3: v4 mapped experts count repeated reads and mask shared and invalid slots" {
+test "exl3: v5 staged experts count repeated picks and mask shared and invalid slots" {
     const allocator = std.testing.allocator;
     const words = try fixture.make(allocator, 1, 1);
     defer allocator.free(words);
@@ -224,20 +224,20 @@ test "exl3: v4 mapped experts count repeated reads and mask shared and invalid s
     var state = try replay.ExactState.init(allocator, 1, seed);
     defer state.deinit();
     const delta = try capture(words, &state, &.{ 0, 0, 1, 1, 1, 512, -1, 700, -9, 512, -1 }, false);
-    try std.testing.expectEqual(replay.Delta{ .hit_picks = 2, .miss_picks = 3, .inplace = 1, .mapped_picks = 3 }, delta);
+    try std.testing.expectEqual(replay.Delta{ .hit_picks = 2, .miss_picks = 3, .staged = 1, .staged_picks = 3 }, delta);
     const view = try trace.View.init(words);
     _ = try replay.verifyTrace(allocator, view);
     const comparison = try policies.evaluateTrace(allocator, view);
     try std.testing.expectEqual(delta.hit_picks, comparison.lifetime.hit_picks);
     try std.testing.expectEqual(delta.miss_picks, comparison.lifetime.miss_picks);
-    try std.testing.expectEqual(delta.inplace, comparison.lifetime.mapped_experts);
-    try std.testing.expectEqual(delta.mapped_picks, comparison.lifetime.mapped_picks);
+    try std.testing.expectEqual(delta.staged, comparison.lifetime.staged_experts);
+    try std.testing.expectEqual(delta.staged_picks, comparison.lifetime.staged_picks);
     const offset = (try trace.View.init(words)).recordsOffset();
     words[offset + 14] = 2;
     try std.testing.expectError(error.PlannerCounterMismatch, replay.verifyTrace(allocator, try trace.View.init(words)));
 }
 
-test "exl3: v4 replay rejects altered production outcomes every terminal field and bad seeds" {
+test "exl3: v5 replay rejects altered production outcomes every terminal field and bad seeds" {
     const allocator = std.testing.allocator;
     const words = try fixture.make(allocator, 2, 1);
     defer allocator.free(words);
@@ -267,7 +267,7 @@ test "exl3: v4 replay rejects altered production outcomes every terminal field a
     }
 }
 
-test "exl3: v4 overflow dropped empty invalid and discontinuous timelines cannot pass" {
+test "exl3: v5 overflow dropped empty invalid and discontinuous timelines cannot pass" {
     const allocator = std.testing.allocator;
     const words = try fixture.make(allocator, 2, 47);
     defer allocator.free(words);

@@ -20,13 +20,14 @@ pub const Seed = struct {
     now: u32,
 };
 
+/// Residency copies and evictions are separate from per-round staged experts and their picks.
 pub const Delta = struct {
     hit_picks: u64 = 0,
     miss_picks: u64 = 0,
     copies: u64 = 0,
     evictions: u64 = 0,
-    inplace: u64 = 0,
-    mapped_picks: u64 = 0,
+    staged: u64 = 0,
+    staged_picks: u64 = 0,
     overflow: u64 = 0,
 };
 
@@ -112,8 +113,8 @@ pub const State = struct {
                 self.stamps[line] = self.now;
                 delta.copies += 1;
             } else {
-                delta.inplace += 1;
-                delta.mapped_picks += entry.appearances;
+                delta.staged += 1;
+                delta.staged_picks += entry.appearances;
             }
         }
         return delta;
@@ -283,13 +284,13 @@ pub const ExactState = struct {
                 stamps[line] = misc[0];
                 delta.copies += 1;
             } else {
-                delta.inplace += 1;
+                delta.staged += 1;
                 for (record.picks()) |raw| {
-                    if (raw == expert) delta.mapped_picks += 1;
+                    if (raw == expert) delta.staged_picks += 1;
                 }
             }
         }
-        inline for (.{ .{ 2, "hit_picks" }, .{ 3, "miss_picks" }, .{ 4, "copies" }, .{ 5, "evictions" }, .{ 6, "overflow" }, .{ 7, "inplace" } }) |field| {
+        inline for (.{ .{ 2, "hit_picks" }, .{ 3, "miss_picks" }, .{ 4, "copies" }, .{ 5, "evictions" }, .{ 6, "overflow" }, .{ 7, "staged" } }) |field| {
             misc[field[0]] +%= @truncate(@field(delta, field[1]));
         }
         return delta;
@@ -322,7 +323,7 @@ pub fn verifyTraceWithFinal(allocator: std.mem.Allocator, view: trace.View, fina
         if (index == view.recorded()) break;
         const record = try view.round(index);
         const delta = try state.replay(record);
-        if (!std.mem.eql(u32, state.words[layout.miscOffset(state.lines)..], record.misc()) or delta.mapped_picks != record.mappedPicks()) return error.PlannerCounterMismatch;
+        if (!std.mem.eql(u32, state.words[layout.miscOffset(state.lines)..], record.misc()) or delta.staged_picks != record.stagedPicks()) return error.PlannerCounterMismatch;
         try add(&total, delta);
     }
     if (!std.mem.eql(u32, state.words, view.terminalSeed())) return error.PlannerFinalStateMismatch;
@@ -334,7 +335,7 @@ pub fn verifyTraceWithFinal(allocator: std.mem.Allocator, view: trace.View, fina
 }
 
 fn add(total: *Delta, delta: Delta) !void {
-    inline for (.{ "hit_picks", "miss_picks", "copies", "evictions", "inplace", "mapped_picks", "overflow" }) |field| {
+    inline for (.{ "hit_picks", "miss_picks", "copies", "evictions", "staged", "staged_picks", "overflow" }) |field| {
         @field(total, field) = try std.math.add(u64, @field(total, field), @field(delta, field));
     }
 }
@@ -370,14 +371,14 @@ test "planner replay reproduces current lifetime-count admission and eviction" {
     try std.testing.expectEqual(@as(u32, 5), state.counts[2]);
 }
 
-test "planner replay counts repeated slot misses and preserves held lines under overflow pressure" {
+test "planner replay counts repeated slot misses and stages the rest while preserving held lines" {
     var counts: [expert_count]u32 = @splat(0);
     counts[0] = 9;
     var state = try State.init(std.testing.allocator, .{ .line_ids = &.{0}, .stamps = &.{5}, .counts = counts, .now = 5 });
     defer state.deinit();
 
     const delta = try state.replay(.{ .rows = 1, .valid_picks = 4, .entries = &.{ .{ .expert = 0, .appearances = 3 }, .{ .expert = 1, .appearances = 1 } } });
-    try std.testing.expectEqual(Delta{ .hit_picks = 3, .miss_picks = 1, .inplace = 1, .mapped_picks = 1 }, delta);
+    try std.testing.expectEqual(Delta{ .hit_picks = 3, .miss_picks = 1, .staged = 1, .staged_picks = 1 }, delta);
     try std.testing.expectEqualSlices(i32, &.{0}, state.line_ids);
     try std.testing.expectEqual(@as(u32, 6), state.stamps[0]);
 }

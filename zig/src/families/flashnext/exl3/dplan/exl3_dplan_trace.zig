@@ -1,10 +1,10 @@
-//! DPLAN v4: default off, little-endian u32 words, fixed 1 MiB per device pool.
+//! DPLAN v5: 1 MiB per pool; misc word 7 counts staged experts, record word 14 their picks.
 
 const std = @import("std");
 const layout = @import("exl3_dplan_layout.zig");
 
 pub const magic: u32 = 0x44505431;
-pub const version: u32 = 4;
+pub const version: u32 = 5;
 pub const pool_bytes: usize = 1024 * 1024;
 pub const pool_words: usize = pool_bytes / 4;
 pub const header_words: usize = 16;
@@ -70,7 +70,8 @@ pub const Round = struct {
     pub fn misc(self: Round) []const u32 {
         return self.words[4..][0..layout.misc_words];
     }
-    pub fn mappedPicks(self: Round) u32 {
+    /// Picks served from scratch rather than a resident pool line in this round.
+    pub fn stagedPicks(self: Round) u32 {
         return self.words[4 + layout.misc_words];
     }
     pub fn picks(self: Round) []const u32 {
@@ -90,7 +91,7 @@ pub const Round = struct {
             seen[index] = true;
             valid += 1;
         }
-        if (unique != self.uniqueCount() or valid != self.validPicks() or self.mappedPicks() > valid) return error.InvalidTrace;
+        if (unique != self.uniqueCount() or valid != self.validPicks() or self.stagedPicks() > valid) return error.InvalidTrace;
         if (self.misc()[8] >= layout.recent_window or self.misc()[9] > layout.recent_window) return error.InvalidTrace;
     }
 };

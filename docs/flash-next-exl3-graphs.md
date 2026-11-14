@@ -18,6 +18,12 @@ Everything else is fixed in the code: a shape is captured at its second sighting
 16 rows (the MTP window), and the graph memory model (reservation, headroom, per-graph charges) follows the stream
 count. `tools/exl3_serve_tp2.sh` sets `GRAPH=1` and `GRAPH_ASYNC=0`.
 
+The device planner reserves one reusable device scratch buffer per rank, sized for ten routed experts per planned row
+at the largest expert-line size. When a round needs more distinct experts than its pool can hold, it stages the excess
+into this buffer rather than reading their weights in place from host memory. Startup accounts for the buffer before
+sizing expert pools. Planner telemetry distinguishes resident-pool copies from staged experts; demand traces use
+version 5 for these semantics.
+
 ## A graph that cannot be built
 
 A capture or an instantiation that fails runs its round eagerly and leaves other graphs usable. The failed owner/shape
