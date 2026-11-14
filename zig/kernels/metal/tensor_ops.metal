@@ -50,14 +50,14 @@ struct ImNorm {
     if (!p.rms) {
         float sum = 0;
         for (uint d = tid; d < p.width; d += 256) sum += im_read(x, base + d, p.kind);
-        mean = qwv_sum(sum, partial, 256, lane, sg) / p.width;
+        mean = tf_vis_sum(sum, partial, 256, lane, sg) / p.width;
     }
     float squares = 0;
     for (uint d = tid; d < p.width; d += 256) {
         const float value = im_read(x, base + d, p.kind) - mean;
         squares += value * value;
     }
-    const float inv = metal::precise::rsqrt(qwv_sum(squares, partial, 256, lane, sg) / p.width + p.eps);
+    const float inv = metal::precise::rsqrt(tf_vis_sum(squares, partial, 256, lane, sg) / p.width + p.eps);
     for (uint d = tid; d < p.width; d += 256) {
         const float value = (im_read(x, base + d, p.kind) - mean) * inv * im_read(weight, d, p.kind);
         im_write(out, base + d, p.kind, value + (p.has_bias ? im_read(bias, d, p.kind) : 0.0f));

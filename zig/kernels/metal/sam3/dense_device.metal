@@ -2,6 +2,59 @@ constant uint sam_dense_device_rows = 32;
 constant uint sam_dense_device_columns = 64;
 
 [[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_dense_half_domain(const device float* x, const device ushort* weight, const device float* bias,
+    device atomic_uint* domain, constant SamDenseShape& shape, uint at [[thread_position_in_grid]],
+    uint width [[threads_per_grid]]) {
+    const ulong nx = ulong(shape.rows) * shape.depth, nw = ulong(shape.columns) * shape.depth;
+    uint invalid = 0;
+    for (ulong i = at; i < nx + nw + shape.columns; i += width) {
+        if (i >= nx && i < nx + nw) invalid |= uint((weight[i - nx] & 0x7c00u) == 0x7c00u);
+        else {
+            const float value = i < nx ? x[i] : bias[i - nx - nw];
+            const uint bits = as_type<uint>(value) & 0x7fffffffu;
+            invalid |= uint(bits != 0 && (bits < 0x2d800000u || bits > 0x51800000u));
+        }
+    }
+    if (invalid) atomic_fetch_or_explicit(domain, invalid, memory_order_relaxed);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_dense_half_weight(const device float* input, const device half* weight, const device float* bias,
+    device float* output, constant SamDenseShape& shape, const device uint* domain,
+    uint2 group [[threadgroup_position_in_grid]]) {
+    if (domain[0]) return;
+    using namespace mpp::tensor_ops;
+    using Activations = tensor<device float, dextents<int, 2>, tensor_inline>;
+    using Weights = tensor<device half, dextents<int, 2>, tensor_inline>;
+    Activations x((device float*)input, dextents<int, 2>(shape.depth, shape.rows), array<int, 2>({1, int(shape.depth)}));
+    Weights w((device half*)weight, dextents<int, 2>(shape.depth, shape.columns), array<int, 2>({1, int(shape.depth)}));
+    const int row = int(group.y) * 32, column = int(group.x) * 64;
+    auto left = x.slice(0, row);
+    auto right = w.slice(0, column);
+    constexpr auto descriptor = matmul2d_descriptor(32, 64, int(dynamic_extent), false, true, false);
+    matmul2d<descriptor, execution_simdgroups<4>> op;
+    auto result = op.get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(left)>, metal::remove_addrspace_t<decltype(right)>, float>();
+    op.run(left, right, result);
+    TF_UNROLL
+    for (ushort e = 0; e < result.get_capacity(); ++e) {
+        const auto at = result.get_multidimensional_index(e);
+        if (row + at[1] < shape.rows && column + at[0] < shape.columns) {
+            const float value = result[e] + bias[column + at[0]];
+            output[long(row + at[1]) * shape.columns + column + at[0]] = value;
+        }
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void sam_dense_half_fallback(const device float* x, const device half* weight, const device float* bias,
+    device float* out, constant SamDenseShape& shape, const device uint* domain,
+    uint2 group [[threadgroup_position_in_grid]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    if (!domain[0]) return;
+    sam_dense_small<false, false, half>(x, weight, bias, out, shape, group, sg, lane);
+}
+
+[[kernel, max_total_threads_per_threadgroup(128)]]
 void sam_dense_device_clear(device uint* domain, uint at [[thread_position_in_grid]]) {
     if (at == 0) domain[0] = 0;
 }

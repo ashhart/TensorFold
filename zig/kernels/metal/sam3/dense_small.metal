@@ -51,17 +51,18 @@ inline uint sam_scaled_bits(float2 sum, int exponent) {
     return sign | uint(abs(rounded));
 }
 
-template<bool DROP_TAIL, bool KN = false>
-inline void sam_dense_small(const device float *x, const device float *weight, const device float *bias,
+template<bool DROP_TAIL, bool KN = false, typename Weight = float>
+inline void sam_dense_small(const device float *x, const device Weight *weight, const device float *bias,
     device float *out, constant SamDenseShape &shape, uint2 group, uint subgroup, uint lane) {
     const uint column = group.x * 4 + subgroup, row = group.y, depth = shape.depth;
     if (column >= shape.columns || row >= shape.rows) return;
-    const device float *a = x + row * depth, *b = weight + (KN ? column : column * depth);
+    const device float *a = x + row * depth;
+    const device Weight *b = weight + (KN ? column : column * depth);
     int largest = -2048, smallest = 2048;
     uint exceptional = 0, subnormal = 0;
     float2 sum = float2(0);
     for (uint k = lane; k < depth; k += 32) {
-        const uint left = as_type<uint>(a[k]), right = as_type<uint>(b[k * (KN ? shape.columns : 1)]);
+        const uint left = as_type<uint>(a[k]), right = as_type<uint>(float(b[k * (KN ? shape.columns : 1)]));
         const uint flag = sam_exception(left, right);
         exceptional |= flag;
         if (flag || (left & 0x7fffffffu) == 0 || (right & 0x7fffffffu) == 0) continue;
@@ -103,7 +104,7 @@ inline void sam_dense_small(const device float *x, const device float *weight, c
     if (scaled) {
         sum = float2(0);
         for (uint k = lane; k < depth - uint(DROP_TAIL); k += 32) {
-            const uint left = as_type<uint>(a[k]), right = as_type<uint>(b[k * (KN ? shape.columns : 1)]);
+            const uint left = as_type<uint>(a[k]), right = as_type<uint>(float(b[k * (KN ? shape.columns : 1)]));
             if ((left & 0x7fffffffu) == 0 || (right & 0x7fffffffu) == 0) continue;
             const float av = sam_binary_mantissa(left), bv = sam_binary_mantissa(right);
             const int shift = sam_binary_exponent(left) + sam_binary_exponent(right) - scale;

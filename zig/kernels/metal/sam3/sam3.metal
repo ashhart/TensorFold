@@ -157,10 +157,10 @@ kernel void im_sam_vision_norm(const device float *x, const device float *weight
     const uint src=windowed ? (win/3*24+local/24)*72+win%3*24+local%24 : row;
     float sum=0;
     for(uint c=tid;c<1024;c+=256)sum+=x[src*1024+c];
-    const float mean=qwv_sum(sum,partial,256,lane,sg)/1024;
+    const float mean=tf_vis_sum(sum,partial,256,lane,sg)/1024;
     float squares=0;
     for(uint c=tid;c<1024;c+=256){const float v=x[src*1024+c]-mean;squares+=v*v;}
-    const float inv=metal::precise::rsqrt(qwv_sum(squares,partial,256,lane,sg)/1024+1e-5f);
+    const float inv=metal::precise::rsqrt(tf_vis_sum(squares,partial,256,lane,sg)/1024+1e-5f);
     for(uint c=tid;c<1024;c+=256){const float v=(x[src*1024+c]-mean)*inv*weight[c];out[row*1024+c]=half(v+bias[c]);}
 }
 

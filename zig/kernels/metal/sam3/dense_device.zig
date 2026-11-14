@@ -1,5 +1,6 @@
 pub const source = @embedFile("dense_device.metal");
 pub const names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device", "sam_dense_device_fallback" };
+pub const half_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_half_domain", "sam_dense_device_plan", "sam_dense_half_weight", "sam_dense_half_fallback" };
 pub const gelu_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_gelu", "sam_dense_device_gelu_fallback" };
 pub const gelu_linear_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_gelu_linear", "sam_dense_device_fallback" };
 pub const compensated_names = [_][]const u8{ "sam_dense_device_clear", "sam_dense_device_domain", "sam_dense_device_plan", "sam_dense_device_compensated", "sam_dense_device_fallback" };

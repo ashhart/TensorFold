@@ -4,9 +4,10 @@ pub fn source(a: std.mem.Allocator, extra: []const u8) ![]u8 {
     const attention = try attentionSource(a);
     defer a.free(attention);
     const combined = try std.mem.concat(a, u8, &.{
-        "#define TF_NAX_STRICT_FP32\n",          @embedFile("prefill/gemm_nax.metal") ++ @embedFile("prefill/gemm_nax_kernel.metal"), @embedFile("core/qwen_vision.metal"),
-        @embedFile("tensor_attention_pv.metal"), attention,                                                                           @embedFile("tensor_ops.metal"),
-        @embedFile("tensor_attention.metal"),    @import("tensor_attention_passes.zig").source,                                       extra,
+        "#define TF_NAX_STRICT_FP32\n",                @import("sources.zig").core_qwen_vision,
+        @embedFile("tensor_attention_pv.metal"),       attention,
+        @embedFile("tensor_ops.metal"),                @embedFile("tensor_attention.metal"),
+        @import("tensor_attention_passes.zig").source, extra,
     });
     defer a.free(combined);
     return std.mem.replaceOwned(u8, a, combined, "#include \"../nax.h\"", "\n#ifndef TF_TENSOR_NAX_INCLUDED\n#define TF_TENSOR_NAX_INCLUDED\n" ++ @embedFile("nax.h") ++ "\n#endif\n");
