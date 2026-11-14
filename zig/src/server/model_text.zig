@@ -143,6 +143,8 @@ pub const Rendered = struct {
 
 pub const Text = struct {
     native_deepseek: bool = false,
+    /// The chat template renders ``defer_loading`` and ``tool_reference`` itself (deferred_tools.zig).
+    deferred_native: bool = false,
     ctx: *anyopaque,
     vtable: *const VTable,
 
@@ -211,7 +213,9 @@ pub const Text = struct {
     }
 
     pub fn render(t: Text, a: Allocator, messages: json.Value, options: RenderOptions, problem: *[]const u8) Error!Rendered {
-        return t.vtable.render(t.ctx, a, messages, options, problem);
+        var shown = options;
+        if (!t.deferred_native) shown.tools = try @import("deferred_tools.zig").shown(a, options.tools);
+        return t.vtable.render(t.ctx, a, messages, shown, problem);
     }
 
     /// The chat template's ids, as ``apply_chat_template(tokenize=True)`` gives them.

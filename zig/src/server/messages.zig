@@ -103,8 +103,10 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
         var item: *json.Object = message.object;
         if (content != null and content.? == .array) {
             var text: std.ArrayList(u8) = .empty;
-            var parts: std.ArrayList(Value) = .empty; // with images: text and image parts in order
+            var parts: std.ArrayList(Value) = .empty; // with images or in a tool result: text and other parts in order
+            var has_reference = false;
             var has_image = false;
+            const tool = std.mem.eql(u8, role.?.string, "tool");
             for (content.?.array, 0..) |part, part_index| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
                 // an image part, or one this normalization already wrote with the template's type (it runs twice)
@@ -135,19 +137,29 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
                     has_image = true;
                     continue;
                 }
+                if (tool and std.mem.eql(u8, kind, "tool_reference")) {
+                    const name = part.get("name") orelse Value.null;
+                    if (name != .string or name.string.len == 0) return cx.refuse("a tool_reference part must name a tool");
+                    const ref = try json.newObject(cx.a);
+                    try ref.put(cx.a, "type", .{ .string = "tool_reference" });
+                    try ref.put(cx.a, "name", name);
+                    try parts.append(cx.a, .{ .object = ref });
+                    has_reference = true;
+                    continue;
+                }
                 if (!std.mem.eql(u8, kind, "text") or fields.hasMedia(part)) return cx.refuse(if (media.videos) "content parts must be text, image_url or video_url; audio is unsupported" else if (images) "content parts must be text or image_url; audio and video inputs are unsupported" else "this server accepts text parts only; image, audio and video inputs are unsupported");
                 const t = part.get("text") orelse return cx.refuse("a text content part must contain a text string");
                 if (t != .string) return cx.refuse("a text content part must contain a text string");
                 if (media.native_deepseek and part_index > 0) try text.appendSlice(cx.a, "\n\n");
                 try text.appendSlice(cx.a, t.string);
-                if (images) {
+                if (images or tool) {
                     const tp = try json.newObject(cx.a);
                     try tp.put(cx.a, "type", .{ .string = "text" });
                     try tp.put(cx.a, "text", t);
                     try parts.append(cx.a, .{ .object = tp });
                 }
             }
-            item = try withField(cx, message.object, "content", if (has_image) Value{ .array = parts.items } else Value{ .string = text.items });
+            item = try withField(cx, message.object, "content", if (has_image or has_reference) Value{ .array = parts.items } else Value{ .string = text.items });
         } else if (content == null or content.? == .null) {
             item = try withField(cx, message.object, "content", .{ .string = "" });
         } else if (content.? != .string) {

@@ -53,7 +53,8 @@ fn countTokens(srv: *Server, cx: *Cx, chat: Value, client_thinking: bool) errors
     cx.clear_thinking = thinking.clear;
     cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels); // as the chat route sets it
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
-    const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+    const normalized = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
+    const msgs = try @import("deferred_tools.zig").resolve(cx, normalized, chat.get("tools"), srv.text.deferred_native);
     const explicit_off = client_thinking and !(thinking.enable orelse true);
     const ids_ = prompt.renderRequest(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true, explicit_off) catch |e| switch (e) {
         error.Refused => return cx.other(cx.message),
