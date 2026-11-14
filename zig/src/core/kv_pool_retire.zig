@@ -138,4 +138,5 @@ pub fn forget(p: *Pool, l: *const Lease) void {
 
 test {
     _ = @import("kv_pool_window_test.zig");
+    _ = @import("kv_window.zig");
 }
