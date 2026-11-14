@@ -107,6 +107,7 @@ pub const Engine = struct {
     index_splits: u64 = 0, // prompt steps whose indexer rows split (glm-split-check counts them)
     share_pages: bool = false, // TF_KV_SHARE: a kept state leaves its prefix's pages to the shared store that holds them
     l2pf: ?l2pf_mod.L2pf = null, // TF_GLM_L2PF: the prefetch's side stream, kernels and table, made after the weights tile
+    room: ?@import("cuda_owner_attn.zig").Room = null, // TF_GLM_KV_SPLIT: owner-computed attention's exchanges
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -209,6 +210,8 @@ pub const Engine = struct {
         errdefer e.bm.deinit();
         if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
         errdefer if (e.bs) |*b| b.deinit();
+        if (o.settings.kv_split) e.room = try @import("cuda_owner_attn.zig").Room.init(d, &e.c, rank, world, @max(e.bp.rows, shared_rows), lib, comm); // before the room is read
+        errdefer if (e.room) |*r| r.deinit();
         e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world * pick_rows);
         errdefer e.pairs.free();
         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world * pick_rows), "cuMemsetD8"); // each pair's padding stays zero
@@ -249,6 +252,7 @@ pub const Engine = struct {
         e.smp.deinit();
         e.pairs.free();
         if (e.bs) |*b| b.deinit();
+        if (e.room) |*r| r.deinit();
         e.bm.deinit();
         e.bd.deinit();
         if (e.pair) |*p| p.deinit();
@@ -283,7 +287,7 @@ pub const Engine = struct {
     pub fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = prompt_pair.piecesOf(e, b), .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null, .l2pf = if (e.l2pf) |*p| p else null, .owners = if (e.room) |*r| r else null };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -445,12 +449,14 @@ pub const Engine = struct {
     pub const keepAs = snapshots.keepAs;
     pub const restoreState = snapshots.restore;
     pub const holds = snapshots.holds;
+    pub const homeOf = snapshots.home;
     pub const dropState = snapshots.drop;
     const freeSnap = snapshots.free;
 
     /// A verify window: `ids` (pending token, then drafts) at the committed position; `out[r]` drawn at pos + 1 + r.
     pub fn verify(e: *Engine, ids: []const u32, out: []u32, bits: u64) !void {
         if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
+        if (e.pages) |p| try p.giveTwin(e.slot); // TF_GLM_KV_SPLIT: no decode round reads a prompt's twin
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bd, &one);
         const at = e.cur.st.pos;
@@ -465,23 +471,30 @@ pub const Engine = struct {
 
     const verifyLabel = @import("cuda_engine_prof.zig").verifyLabel;
 
-    /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
-    pub fn verifyShared(e: *Engine, parts: []const Part) !void {
-        const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+    /// verifyShared's parts as one forward's segments and rows, each stream's prompt twin given back first.
+    pub fn sharedParts(e: *Engine, parts: []const Part, segs: *[max_shared]fw.Seg, ids: *[shared_rows]u32) !usize {
         if (parts.len == 0 or parts.len > max_shared) return error.WindowTooWide;
-        var segs: [max_shared]fw.Seg = undefined;
-        var ids: [shared_rows]u32 = undefined;
         var rows: usize = 0;
         for (parts, 0..) |p, i| {
             if (p.ids.len == 0 or p.ids.len > fw.window_rows or rows + p.ids.len > shared_rows) return error.WindowTooWide;
             for (parts[0..i]) |q| if (q.slot == p.slot) return error.SlotTwice;
             try e.bind(p.slot);
+            if (e.pages) |q| try q.giveTwin(p.slot); // TF_GLM_KV_SPLIT: no decode round reads a prompt's twin
             segs[i] = .{ .st = &e.cur.st, .row0 = rows, .rows = p.ids.len };
             @memcpy(ids[rows..][0..p.ids.len], p.ids);
             rows += p.ids.len;
         }
+        return rows;
+    }
+
+    /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
+    pub fn verifyShared(e: *Engine, parts: []const Part) !void {
+        const b = if (e.bs) |*x| x else return error.NoSharedWindows;
+        var segs: [max_shared]fw.Seg = undefined;
+        var ids: [shared_rows]u32 = undefined;
+        const rows = try e.sharedParts(parts, &segs, &ids);
         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
-        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null };
+        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .ring = e.settings.ring, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null, .l2pf = if (e.l2pf) |*p| p else null, .owners = if (e.room) |*r| r else null };
         try f.run(@ptrCast(ids[0..rows]));
         if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
         for (parts, segs[0..parts.len]) |p, g| {
@@ -559,13 +572,6 @@ pub const Engine = struct {
     const greedy = @import("cuda_engine_pick.zig").greedy;
     const greedyChance = @import("cuda_engine_pick.zig").greedyChance;
 
-    /// A failed RoCE gather (its rows hold nothing) or TF_GLM_KV_HOST gather past its slots, after a synchronize.
-    pub fn checkGathers(e: *const Engine) !void {
-        if (e.group) |g| try g.check();
-        try @import("cuda_kv_host.zig").checkActive(); // a TF_GLM_KV_HOST gather past its slots
-    }
-
-    pub fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {
-        try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, e.stream.handle), "cuMemcpyDtoDAsync");
-    }
+    pub const checkGathers = @import("cuda_engine_pick.zig").checkGathers;
+    pub const copy = @import("cuda_engine_pick.zig").copy;
 };

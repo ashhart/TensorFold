@@ -38,6 +38,9 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mod
     const thin_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM thin weights:"} }));
     b.step("test-glm-thin-weights-host", "TF_GLM_LAYERS's admission bytes by tensor from synthetic shard headers").dependOn(&thin_run.step);
     step.dependOn(&thin_run.step);
+    const fetch_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM owner fetch:"} }));
+    b.step("test-glm-owner-fetch-host", "TF_GLM_KV_SPLIT's prompt history fetch on host ranks against unsplit attention").dependOn(&fetch_run.step);
+    step.dependOn(&fetch_run.step);
     b.step("test-glm-tp3-host", "Uneven KDA head shares through actual projection and load planning, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM TP3:"} })).step);
     // TF_GLM_INDEX_CUDA: the launch rules, and (its own slower step) glm_index_*.cuh as host C++ against plain models
     const index_run = b.addRunArtifact(b.addTest(.{ .root_module = glm, .filters = &.{"GLM index:"} }));

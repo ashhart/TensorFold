@@ -293,7 +293,7 @@ pub const Lanes = struct {
         const marks: []const u32 = if (share) (try share_mod.begin(self.x.e, s, &owner, &adopt)).marks else &.{};
         var held = true;
         errdefer if (held) gpa.free(marks);
-        const pages = try self.seat(s, ids.len, s.max_new, adopt.items);
+        const pages = try self.seat(s, ids.len, s.max_new, adopt.items, if (s.reuse.saved) |k| self.x.e.homeOf(@as(*const engine.Kept, @ptrCast(@alignCast(k))).id) else null);
         errdefer {
             self.x.e.release(self.lanes.get(s).?.slot);
             _ = self.lanes.remove(s);
@@ -320,8 +320,8 @@ pub const Lanes = struct {
         return share_mod.of(self.x.e) != null and share_mod.cacheable(s);
     }
 
-    /// The stream's slot, its pages (the cache's `adopted` first, given back on a refusal), then its sequence.
-    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
+    /// The stream's slot, its pages (the cache's `adopted` first, near a kept `home`), then its sequence.
+    pub fn seat(self: *Lanes, s: *const lanes.Stream, prompt: usize, max_new: usize, adopted: []const u32, home: ?u32) ![]const u32 {
         const l = self.claim(s) catch |err| {
             if (self.x.e.pages) |p| p.give(adopted);
             return err;
@@ -334,20 +334,20 @@ pub const Lanes = struct {
             if (self.x.e.pages) |p| p.close(l.slot);
             _ = self.lanes.remove(s);
         }
-        const pages = try self.pagesFor(l.slot, prompt, max_new, adopted);
+        const pages = try self.pagesFor(l.slot, prompt, max_new, adopted, home);
         try self.x.bind(l.slot);
         return pages;
     }
 
-    /// A slot's pages for a prompt and its reply (none without a pool); LaneMemory: the pool lacks them now.
-    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize, adopted: []const u32) ![]const u32 {
+    /// A slot's pages for a prompt and its reply (none without a pool), near a kept `home`; LaneMemory: not now.
+    fn pagesFor(self: *Lanes, slot: u32, prompt: usize, max_new: usize, adopted: []const u32, home: ?u32) ![]const u32 {
         const p = self.x.e.pages orelse return &.{};
         if (!p.paged(slot)) { // every paged sequence is taken
             p.give(adopted);
             return error.LaneMemory;
         }
         p.close(slot); // a stream that opens again gives its earlier pages back first
-        return p.openWith(slot, prompt, max_new, adopted);
+        return p.openNear(slot, prompt, max_new, adopted, home);
     }
 
     /// The lane host's admission: with a pool, a paged sequence and the request's pages are free.
