@@ -6,7 +6,7 @@ pub const records = blk: {
     var i: usize = 0;
     for ([_]u32{ 16, 32, 64 }) |bm| for ([_]bool{ false, true }) |cluster| {
         var usage = registry.none;
-        // registers on sm_80, sm_86, sm_89, sm_120, sm_121 (13 Nov); a cluster of 8 needs sm_90, so it runs on the last two
+        // registers on sm_80, 86, 89, 120 and 121 (13 Nov); a cluster of 8 needs sm_90, so only the last two run it
         const regs = regsFor(bm, cluster);
         for (regs, 0..) |r, sm| if (r > 0) {
             usage[sm] = .{ .regs = r, .static = 0, .bound = 128 };
