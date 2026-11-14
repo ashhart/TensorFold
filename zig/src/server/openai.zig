@@ -24,24 +24,17 @@ const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// Where a chat reply goes: the client's socket, or a Responses or Messages translation of it.
 pub const Out = struct {
     ctx: *anyopaque,
     vt: *const VTable,
-
     pub const VTable = struct {
-        /// 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none).
-        open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void,
-        /// One ``data:`` payload; null is ``[DONE]``.
-        event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void,
-        /// A whole JSON reply.
-        reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
-        /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
-        keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
+        open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void, // 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none)
+        event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void, // one ``data:`` payload; null is ``[DONE]``
+        reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void, // a whole JSON reply
+        keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null, // bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none
     };
 };
-
 /// POST /v1/chat/completions or /v1/completions, read from the client and answered to it.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, is_chat: bool) void {
     const startup_at = @import("core").startup_receipt.offset();
@@ -119,10 +112,12 @@ pub const Plan = struct {
     separate_usage: bool,
     policy: tool_stream.Policy,
     named: []const u8,
+    choices: u32 = 1, // ``n``: engine requests on the one prompt (choices.zig)
 };
 
 /// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
 pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
+    if (raw == .object) try fields.singleChoice(cx, raw); // one reply: /v1/imprint's
     return (try plan(srv, cx, true, raw, null, true)).input;
 }
 
@@ -133,6 +128,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
     const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
+    const n = try fields.choiceCount(cx, body);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined, .format = format };
     if (is_chat) {
@@ -158,6 +154,9 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     try grammar.refusal(cx, body);
     if (input.tools.len > 0 and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice"))) try sampling.put(cx.a, "tool_call_required", .{ .bool = true });
     if (body.field("parallel_tool_calls")) |p| if (p == .bool and !p.bool) try sampling.put(cx.a, "tool_call_single", .{ .bool = true });
+    // a choice's rows or required call would be its own: these alone do not split over n choices
+    if (n > 1 and (logprobs != null or sampling.contains("tool_call_required"))) return cx.refuse("n above 1 cannot be served with logprobs or a required tool call");
+    if (n > 1 and cortheon.engages(srv, cx.a, raw, is_chat, &input)) return cx.refuse("n above 1 is not served by --cortheon's turn loop: send \"cortheon\": false");
     const thinking = try fields.thinkingFields(cx, body, srv.effort_levels);
     if (thinking.effort) |e| try sampling.put(cx.a, "reasoning_effort", .{ .string = e });
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
@@ -179,6 +178,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
+        .choices = n,
     };
 }
 
@@ -249,6 +249,7 @@ pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool,
     cancel_ids.registry.add(srv.io, &names, &asked);
     defer cancel_ids.registry.remove(srv.io, &names, &asked);
     p.input.cancel = &asked.asked;
+    if (p.choices > 1) return @import("choices.zig").run(srv, a, out, gone, is_chat, p, raw);
     const turn = cortheon.begin(srv, a, raw, id, is_chat, &p.input);
     var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn, .call_ids = .{ .key = &srv.tool_ids, .body = raw } };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
@@ -260,7 +261,7 @@ fn logRefused(id: []const u8, message: []const u8) void {
     log.line("{s}", .{log.refused(&buf, id, message)});
 }
 
-const Run = struct {
+pub const Run = struct {
     srv: *Server,
     a: Allocator,
     out: Out,
@@ -273,6 +274,7 @@ const Run = struct {
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
     turn: ?*cortheon.Turn = null, // --cortheon's work on this request
     call_ids: ids.Calls, // the reply's tool-call ids, from this request (openai_calls.zig)
+    warm: bool = true, // the next turn prefills from this reply (one of n choices: choice 0's alone)
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -369,7 +371,7 @@ const Run = struct {
         r.out.vt.event(r.out.ctx, null) catch {};
     }
 
-    fn whole(r: *Run, gone: Gone, field: []const u8) void {
+    pub fn whole(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         var cx: Cx = .{ .a = a };
         var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
@@ -383,7 +385,7 @@ const Run = struct {
 
     /// The next turn's prompt prefilled in the background, from the reply as its client got it (warm.zig).
     fn warmNext(r: *Run, reply: *const chat.Reply, calls: ?[]Value) void {
-        if (!r.is_chat) return;
+        if (!r.is_chat or !r.warm) return;
         const message = json.newObject(r.a) catch return;
         message.put(r.a, "role", .{ .string = "assistant" }) catch return;
         message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
@@ -502,7 +504,7 @@ const Run = struct {
         r.out.vt.event(r.out.ctx, null) catch {};
     }
 
-    fn stream(r: *Run, gone: Gone, field: []const u8) void {
+    pub fn stream(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         const tools = r.plan.input.tools.len > 0;
         var cx: Cx = .{ .a = a };

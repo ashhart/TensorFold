@@ -284,9 +284,24 @@ pub fn effortLevels(a: Allocator, template: []const u8) Allocator.Error![]const 
     return found.items;
 }
 
-/// ``probability_options``: n must be 1; the ``top_logprobs`` count when logprobs are asked and ``supported``.
-pub fn probabilityOptions(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 {
+/// Choices a request may ask for: each is its own engine request on the one prompt.
+pub const most_choices = 16;
+
+/// ``n``: how many choices, 1 through ``most_choices`` (absent or null: 1).
+pub fn choiceCount(cx: *Cx, body: Value) errors.Refused!u32 {
+    const n = body.field("n") orelse return 1;
+    const v = n.int64();
+    if (n != .int or v == null or v.? < 1 or v.? > most_choices) return cx.refuse("n must be an integer between 1 and 16");
+    return @intCast(v.?);
+}
+
+/// ``n`` on a route that serves one reply (Responses, /v1/imprint): 1, absent or null, as before choices.
+pub fn singleChoice(cx: *Cx, body: Value) errors.Refused!void {
     if (body.field("n")) |n| if (n != .int or !std.mem.eql(u8, n.int, "1")) return cx.refuse("n must be 1; multiple choices are not supported");
+}
+
+/// ``probability_options``: the ``top_logprobs`` count when logprobs are asked and ``supported``.
+pub fn probabilityOptions(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 {
     const enabled = body.field("logprobs");
     if (enabled) |e| if (e != .bool) return cx.refuse("logprobs must be a boolean or null");
     var count: u8 = 0;
@@ -301,9 +316,8 @@ pub fn probabilityOptions(cx: *Cx, body: Value, supported: bool) errors.Refused!
     return count;
 }
 
-/// ``/v1/completions``' ``logprobs``: n must be 1; how many alternatives (0 through 20), or null when not asked.
+/// ``/v1/completions``' ``logprobs``: how many alternatives (0 through 20), or null when not asked.
 pub fn legacyLogprobs(cx: *Cx, body: Value, supported: bool) errors.Refused!?u8 {
-    if (body.field("n")) |n| if (n != .int or !std.mem.eql(u8, n.int, "1")) return cx.refuse("n must be 1; multiple choices are not supported");
     const asked = body.field("logprobs") orelse return null;
     const n = asked.int64();
     if (asked != .int or n == null or n.? < 0 or n.? > 20) return cx.refuse("logprobs must be an integer between 0 and 20, or null");

@@ -270,11 +270,11 @@ class GateRunTests(unittest.TestCase):
         with fake(True) as url:
             plain = conformance.Client(url, "fake", timeout=10).post(body)
             streamed = conformance.Client(url, "fake", timeout=10, stream=True).post(body)
-            refused = conformance.Client(url, "fake", timeout=10, stream=True).post({**body, "n": 2}, stream=False)
+            refused = conformance.Client(url, "fake", timeout=10, stream=True).post({**body, "n": 17}, stream=False)
         self.assertEqual(streamed.pop("completion"), "finished")
         self.assertEqual(streamed, plain)
         self.assertEqual((plain["cached"], plain["accepted"]), (5, 2))
-        self.assertEqual((refused["status"], refused["error"]), (400, "n must be 1; multiple choices are not supported"))
+        self.assertEqual((refused["status"], refused["error"]), (400, "n must be an integer between 1 and 16"))
 
     def test_a_stream_that_errs_or_stops_early_is_unverified(self):
         words = [(0, "content", w) for w in ("a", "b", "c")]
