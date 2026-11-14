@@ -24,7 +24,6 @@ const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
 /// Where a chat reply goes: the client's socket, or a Responses or Messages translation of it.
 pub const Out = struct {
     ctx: *anyopaque,
