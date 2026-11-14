@@ -156,6 +156,24 @@ test "--learn-conversations at --tp names the Qwen3.5 family's states, and witho
     try std.testing.expectEqualStrings(qwen35_learn_ranks, family(qwen35.native, two).?);
 }
 
+test "the Qwen3.5 options carry the rank flags, and an unset master stays null" {
+    const F = qwen35.native;
+    const options = @import("cuda_options.zig");
+    var opts: F.Options = .{ .context = 4096, .drafts = false };
+    var why: []const u8 = "";
+    const asked: api.Open = .{ .dir = "", .model_type = "qwen3_5", .tp = 2, .rank = 1, .master = "node0", .master_port = 29600 };
+    try std.testing.expect(options.set(F, asked, &opts, &why));
+    try std.testing.expectEqual(@as(usize, 2), opts.tp);
+    try std.testing.expectEqual(@as(usize, 1), opts.rank);
+    try std.testing.expectEqualStrings("node0", opts.master.?);
+    try std.testing.expectEqual(@as(u16, 29600), opts.master_port);
+    try std.testing.expect(options.set(F, .{ .dir = "", .model_type = "qwen3_5" }, &opts, &why));
+    try std.testing.expectEqual(@as(usize, 1), opts.tp);
+    try std.testing.expectEqual(@as(usize, 0), opts.rank);
+    try std.testing.expect(opts.master == null);
+    try std.testing.expectEqual(@as(u16, 29551), opts.master_port);
+}
+
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
     try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = "nemotron_h", .learn = "/x" }) orelse "", "--learn learns shared prompt prefixes on Macs only");
     try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .learn = "/x", .learn_conversations = true }) == null);
