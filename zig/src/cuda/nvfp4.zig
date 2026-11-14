@@ -70,6 +70,7 @@ pub const Prompt = struct {
     bf16_f32: Function,
     lean: Function, // prompt_lean FP4, bf16 out
     lean_f32: Function, // and fp32 out
+    lean_swiglu: Function, // a gate/up pair on the lean tile, bf16(silu(gate) * up) out
     sms: usize, // the current device's multiprocessors: prompt_lean's blocks (one a multiprocessor, tiles in turn)
 
     pub const Tile = enum { lean, classic };
@@ -95,9 +96,14 @@ pub const Prompt = struct {
     const lean_bn = 256;
     const lean_threads = 256;
     const lean_stages = 3;
-    const lean_name = "_ZN11tf_prompt1611prompt_leanILi0ELi128ELi256ELi1ELi8ELi3ELb{d}" ++
-        "EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
-    pub const lean_symbols = [2][:0]const u8{ std.fmt.comptimePrint(lean_name, .{0}), std.fmt.comptimePrint(lean_name, .{1}) };
+    const lean_name = "_ZN11tf_prompt1611prompt_leanILi0ELi128ELi256ELi1ELi8ELi3ELi{d}" ++
+        "EEEvPK13__nv_bfloat16PKhS5_fPviiiiiiS5_S5_fPKi";
+    /// prompt_lean's LeanOut instances: bf16, fp32, and the gate/up pair's SwiGLU (prompt16_lean.cuh).
+    pub const lean_symbols = [3][:0]const u8{
+        std.fmt.comptimePrint(lean_name, .{0}),
+        std.fmt.comptimePrint(lean_name, .{1}),
+        std.fmt.comptimePrint(lean_name, .{2}),
+    };
 
     /// prompt16.cu LeanTile<FP4, 128, 256, 1, 8, 3>::SMEM: three stages, then a full and an empty barrier each.
     pub fn leanSharedBytes() u32 {
@@ -130,11 +136,13 @@ pub const Prompt = struct {
         try lean.allowDynamicShared(leanSharedBytes());
         const lean_f32 = try mod.function(lean_symbols[1]);
         try lean_f32.allowDynamicShared(leanSharedBytes());
+        const lean_swiglu = try mod.function(lean_symbols[2]);
+        try lean_swiglu.allowDynamicShared(leanSharedBytes());
         var dev: abi.Device = 0;
         try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
         var sms: c_int = 0;
         try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
-        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .sms = @intCast(@max(sms, 1)) };
+        return .{ .mod = mod, .fp4 = fp4, .fp8 = fp8, .fp4_f32 = fp4_f32, .bf16 = bf16, .bf16_f32 = bf16_f32, .lean = lean, .lean_f32 = lean_f32, .lean_swiglu = lean_swiglu, .sms = @intCast(@max(sms, 1)) };
     }
 
     pub fn unload(p: *Prompt) void {
@@ -154,24 +162,36 @@ pub const Prompt = struct {
 
     /// matmulOut() on a chosen FP4 tile (FP8 has the classic one only); both write the same bits.
     pub fn matmulTile(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, out: qmmf.Out, tile: Tile) !void {
-        if (w.mode == .fp4 and tile == .lean) return run(s, x, ldx, m, w, y, if (out == .f32) p.lean_f32 else p.lean, .{
-            .bm = lean_bm,
-            .bn = lean_bn,
-            .threads = lean_threads,
-            .shared = leanSharedBytes(),
-            .blocks = p.sms,
-        });
+        if (w.mode == .fp4 and tile == .lean) return run(s, x, ldx, m, w, y, if (out == .f32) p.lean_f32 else p.lean, p.leanShape(lean_bn), null);
         const f = switch (w.mode) {
             .fp4 => if (out == .f32) p.fp4_f32 else p.fp4,
             .fp8 => if (out == .f32) return error.EpilogueNotBuilt else p.fp8,
             else => return error.FormatMismatch,
         };
-        return run(s, x, ldx, m, w, y, f, .{ .bm = bm, .bn = bn, .threads = threads, .shared = sharedBytes(w.mode) });
+        return run(s, x, ldx, m, w, y, f, .{ .bm = bm, .bn = bn, .threads = threads, .shared = sharedBytes(w.mode) }, null);
     }
 
-    const Shape = struct { bm: usize, bn: usize, threads: u32, shared: u32, blocks: usize = std.math.maxInt(usize) };
+    /// y [m, n] = bf16(silu(gate) * up) in one lean launch: two matmulTile()s then tf_q35_mlp_act's bytes (`rows`: P).
+    pub fn swiglu(p: Prompt, s: Stream, x: u64, ldx: usize, m: usize, gate: qmmf.Weight, up: qmmf.Weight, y: u64, rows: u64) !void {
+        if (!pairs(gate, up)) return error.FormatMismatch;
+        return run(s, x, ldx, m, gate, y, p.lean_swiglu, p.leanShape(lean_bn / 2), .{ .w = up, .rows = rows });
+    }
 
-    fn run(s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, f: Function, t: Shape) !void {
+    /// Whether swiglu() takes this gate and up: both FP4 of one shape, whole 128-feature tiles.
+    pub fn pairs(gate: qmmf.Weight, up: qmmf.Weight) bool {
+        return gate.mode == .fp4 and up.mode == .fp4 and gate.n == up.n and gate.k == up.k and gate.npad == up.npad and
+            gate.n % (lean_bn / 2) == 0;
+    }
+
+    fn leanShape(p: Prompt, columns: usize) Shape {
+        return .{ .bm = lean_bm, .bn = columns, .threads = lean_threads, .shared = leanSharedBytes(), .blocks = p.sms, .lean = true };
+    }
+
+    const Shape = struct { bm: usize, bn: usize, threads: u32, shared: u32, blocks: usize = std.math.maxInt(usize), lean: bool = false };
+    /// The lean pair's second weight and the device row count (prompt_lean's trailing arguments).
+    const Pair = struct { w: qmmf.Weight, rows: u64 };
+
+    fn run(s: Stream, x: u64, ldx: usize, m: usize, w: qmmf.Weight, y: u64, f: Function, t: Shape, pair: ?Pair) !void {
         const rows_t = (m + t.bm - 1) / t.bm;
         const band = @max(1, @min(rows_t, (12 << 20) / (t.bm * w.k * 2)));
         var args: launch_.Args = .{};
@@ -186,6 +206,13 @@ pub const Prompt = struct {
         args.add(@as(i32, @intCast(w.npad)));
         args.add(@as(i32, @intCast(if (m == 1) w.k else ldx)));
         args.add(@as(i32, @intCast(band)));
+        if (t.lean) { // prompt_lean's trailing arguments: the pair's up weight and row count, zeros for one product
+            const two: Pair = pair orelse .{ .w = .{ .mode = .fp4, .codes = 0, .scales = 0, .scale = 0, .n = 0, .k = 0, .npad = 0 }, .rows = 0 };
+            args.add(two.w.codes);
+            args.add(two.w.scales);
+            args.add(two.w.scale);
+            args.add(two.rows);
+        }
         try launch_.launch(f, .{
             .grid = .{ .x = @intCast(@min(t.blocks, rows_t * ((w.n + t.bn - 1) / t.bn))), .y = 1, .z = 1 },
             .block = .{ .x = t.threads, .y = 1, .z = 1 },
@@ -220,7 +247,8 @@ pub const Prompt = struct {
 test "the prompt tile's shared bytes and instance names" {
     try std.testing.expectEqual(@as(u32, 41984), Prompt.sharedBytes(.fp4));
     try std.testing.expectEqual(@as(u32, 76848), Prompt.leanSharedBytes()); // 3 x (16384 + 8192 + 1024) + 48
-    try std.testing.expectEqualStrings("_ZN11tf_prompt1611prompt_leanILi0ELi128ELi256ELi1ELi8ELi3ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.lean_symbols[0]);
+    const lean = "_ZN11tf_prompt1611prompt_leanILi0ELi128ELi256ELi1ELi8ELi3ELi2EEEvPK13__nv_bfloat16PKhS5_fPviiiiiiS5_S5_fPKi";
+    try std.testing.expectEqualStrings(lean, Prompt.lean_symbols[2]);
     try std.testing.expectEqual(@as(u32, 49152), Prompt.sharedBytes(.fp8)); // 2 x (16384 + 8192): no scale tile
     try std.testing.expectEqualStrings("_ZN11tf_prompt1613prompt_kernelILi0ELi128ELi128ELi2ELi2ELi2ELb0EEEvPK13__nv_bfloat16PKhS5_fPviiiiii", Prompt.symbols[0]);
     try std.testing.expectEqualStrings(
