@@ -1,6 +1,7 @@
 //! Host reference of the Mac GPU sampler tf_gpu_sample; it can pick differently where scores tie within a few ulps.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const selection = @import("sampling_selection.zig");
 const Sampling = @import("sampling.zig").Sampling;
 const keyBits = @import("sampling.zig").keyBits;
 
@@ -56,7 +57,7 @@ pub fn argmax(values: []const f32) u32 {
     return @intCast(best);
 }
 
-pub const Cand = struct { v: f32, i: u32 };
+pub const Cand = selection.Candidate32;
 
 /// The kernel's candidate order: value descending, then id ascending.
 pub fn better(_: void, a: Cand, b: Cand) bool {
@@ -77,16 +78,12 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
     const min_log = r.min_log;
     const kc = r.top_k;
     const cap: usize = if (kc == 0 or kc > candidates) candidates else kc;
-    const all = try gpa.alloc(Cand, logits.len);
-    defer gpa.free(all);
     var m = -std.math.inf(f32);
-    for (all, logits, 0..) |*c, l, i| {
-        c.* = .{ .v = l * inv_t, .i = @intCast(i) };
-        m = @max(m, c.v);
-    }
-    const z = threadSum(all, m);
-    std.mem.sort(Cand, all, {}, better);
-    const n: usize = @min(@min(all.len, candidates), cap);
+    for (logits) |l| m = @max(m, l * inv_t);
+    const z = threadSum(logits, inv_t, m);
+    const n: usize = @min(logits.len, cap);
+    const all = try selection.topK32(gpa, logits, inv_t, n, better);
+    defer gpa.free(all);
     var norm = z;
     if (kc != 0) {
         norm = 0.0;
@@ -124,9 +121,9 @@ pub fn sample(gpa: Allocator, logits: []const f32, s: ?Sampling, position: u32, 
 }
 
 /// The row's normalizer in the kernel's order: 1024 strided thread sums, a 32-lane butterfly, simdgroups in order.
-fn threadSum(all: []const Cand, m: f32) f32 {
+fn threadSum(logits: []const f32, inv_t: f32, m: f32) f32 {
     var lanes: [1024]f32 = @splat(0.0);
-    for (all, 0..) |c, i| lanes[i % 1024] += @exp(c.v - m);
+    for (logits, 0..) |l, i| lanes[i % 1024] += @exp(l * inv_t - m);
     return lanesSum(&lanes);
 }
 

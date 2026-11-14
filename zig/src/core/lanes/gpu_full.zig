@@ -1,6 +1,7 @@
 //! Host reference of tf_sample_full, the Metal engine's draw for rows tf_gpu_sample would cut to 1,024 candidates.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const selection = @import("sampling_selection.zig");
 const Sampling = @import("sampling.zig").Sampling;
 const rule = @import("gpu_rule.zig");
 
@@ -62,14 +63,11 @@ fn markOf(c: rule.Cand) Mark {
 pub fn plan(gpa: Allocator, logits: []const f32, s: Sampling) !Plan {
     const r = rule.rule(s);
     const inv_t = r.inv_t;
-    const order = try gpa.alloc(rule.Cand, logits.len);
-    defer gpa.free(order);
     var m = -std.math.inf(f32);
-    for (order, logits, 0..) |*c, l, i| {
-        c.* = .{ .v = l * inv_t, .i = @intCast(i) };
-        m = @max(m, c.v);
-    }
-    std.mem.sort(rule.Cand, order, {}, rule.better);
+    for (logits) |l| m = @max(m, l * inv_t);
+    const k = @min(logits.len, @max(rule.candidates, @as(usize, s.top_k)));
+    const order = try selection.topK32(gpa, logits, inv_t, k, rule.better);
+    defer gpa.free(order);
     const min_log = r.min_log;
     var p = Plan{ .inv_t = inv_t, .m = m, .lo = @max(m + min_log, m - never) };
     if (s.top_k != 0 and s.top_k < logits.len) p.top = markOf(order[s.top_k - 1]);

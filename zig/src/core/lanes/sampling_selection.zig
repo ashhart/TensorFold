@@ -23,6 +23,10 @@ const Order = struct {
     values: []const f64,
     ids: []const u64,
 
+    fn valid(o: Order, i: usize) bool {
+        return std.math.isFinite(o.values[i]);
+    }
+
     fn before(o: Order, a: usize, b: usize) bool {
         if (o.values[a] != o.values[b]) return o.values[a] > o.values[b];
         if (o.ids[a] != o.ids[b]) return o.ids[a] < o.ids[b];
@@ -31,7 +35,7 @@ const Order = struct {
 };
 
 /// Keep the worst retained index at the root, including stable ties with duplicate ids and signed zero.
-fn sink(indices: []usize, o: Order, start: usize) void {
+fn sink(indices: []usize, o: anytype, start: usize) void {
     var at = start;
     while (at < indices.len / 2) {
         var child = 2 * at + 1;
@@ -49,24 +53,70 @@ pub fn topK(gpa: Allocator, values: []const f64, ids: []const u64, k: usize) !?[
     const indices = try gpa.alloc(usize, k);
     defer gpa.free(indices);
     const o: Order = .{ .values = values, .ids = ids };
-    for (values[0..k], indices, 0..) |value, *index, i| {
-        if (!std.math.isFinite(value)) return null;
+    if (!selectIndices(indices, o, values.len)) return null;
+    const selected = try gpa.alloc(Candidate, k);
+    for (selected, indices) |*candidate, index| candidate.* = .{ .value = values[index], .id = ids[index] };
+    return selected;
+}
+
+/// The common bounded heap, sorted afterward in the caller's exact total order.
+fn selectIndices(indices: []usize, o: anytype, len: usize) bool {
+    for (indices, 0..) |*index, i| {
+        if (!o.valid(i)) return false;
         index.* = i;
     }
-    var parent = k / 2;
+    var parent = indices.len / 2;
     while (parent > 0) {
         parent -= 1;
         sink(indices, o, parent);
     }
-    for (values[k..], k..) |value, i| {
-        if (!std.math.isFinite(value)) return null;
+    for (indices.len..len) |i| {
+        if (!o.valid(i)) return false;
         if (o.before(i, indices[0])) {
             indices[0] = i;
             sink(indices, o, 0);
         }
     }
-    std.mem.sort(usize, indices, o, Order.before);
-    const selected = try gpa.alloc(Candidate, k);
-    for (selected, indices) |*candidate, index| candidate.* = .{ .value = values[index], .id = ids[index] };
+    std.mem.sort(usize, indices, o, @TypeOf(o).before);
+    return true;
+}
+
+pub const Candidate32 = struct { v: f32, i: u32 };
+
+fn Order32(comptime better: anytype) type {
+    return struct {
+        values: []const f32,
+        inv_t: f32,
+
+        fn valid(_: @This(), _: usize) bool {
+            return true;
+        }
+
+        fn candidate(o: @This(), i: usize) Candidate32 {
+            return .{ .v = o.values[i] * o.inv_t, .i = @intCast(i) };
+        }
+
+        fn before(o: @This(), a: usize, b: usize) bool {
+            return better({}, o.candidate(a), o.candidate(b));
+        }
+    };
+}
+
+/// At least k sorted float32 candidates; a full sort when k exceeds half the row, including nonfinite keys.
+pub fn topK32(gpa: Allocator, values: []const f32, inv_t: f32, k: usize, comptime better: anytype) ![]Candidate32 {
+    std.debug.assert(k > 0 and k <= values.len);
+    const o: Order32(better) = .{ .values = values, .inv_t = inv_t };
+    if (k > values.len / 2) {
+        const all = try gpa.alloc(Candidate32, values.len);
+        for (all, 0..) |*c, i| c.* = o.candidate(i);
+        std.mem.sort(Candidate32, all, {}, better);
+        return all;
+    }
+    const indices = try gpa.alloc(usize, k);
+    defer gpa.free(indices);
+    const valid = selectIndices(indices, o, values.len);
+    std.debug.assert(valid);
+    const selected = try gpa.alloc(Candidate32, k);
+    for (selected, indices) |*c, i| c.* = o.candidate(i);
     return selected;
 }
