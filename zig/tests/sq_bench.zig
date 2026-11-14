@@ -5,14 +5,15 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 
 const usage =
-    \\tf-sq-bench M K N ENTRY:ROWS:COLS:THREADS ...
+    \\tf-sq-bench M K N ENTRY:ROWS:COLS:THREADS[:PREP] ...
     \\Each ENTRY is a kernel of core/simd_qmm.metal (or of SQ_FILE) taking tf_sq_mma's buffers, launched over tiles of ROWS
-    \\rows and COLS columns at THREADS a threadgroup; the first is the reference every other output is compared with.
+    \\rows and COLS columns at THREADS a threadgroup, after PREP (tf_sq_prep_s or tf_sq_prep_h) if given; tf_sq_fits's
+    \\words are bound at 6. The first is the reference every other output is compared with.
     \\SQ_REPS (dispatches a timed buffer, 16), SQ_TRIALS (5), SQ_COPIES (weight copies cycled so reads come from DRAM, 4).
 ;
 
 const Args = extern struct { k: i32, n: i32, r: i32, one: f32 = 1.0 };
-const Kernel = struct { entry: [:0]const u8, rows: u32, cols: u32, threads: u32, pipe: mtl.Pipeline = undefined, y: mtl.Buffer = undefined, ms: [64]f64 = undefined };
+const Kernel = struct { entry: [:0]const u8, rows: u32, cols: u32, threads: u32, pre: ?[:0]const u8 = null, pre_pipe: ?mtl.Pipeline = null, pipe: mtl.Pipeline = undefined, y: mtl.Buffer = undefined, ms: [64]f64 = undefined };
 
 fn envInt(name: [:0]const u8, default: usize) usize {
     const v = platform.c.getenv(name) orelse return default;
@@ -30,7 +31,8 @@ fn parseKernel(a: std.mem.Allocator, spec: []const u8) !Kernel {
     const rows = try std.fmt.parseInt(u32, it.next() orelse return error.BadSpec, 10);
     const cols = try std.fmt.parseInt(u32, it.next() orelse return error.BadSpec, 10);
     const threads = try std.fmt.parseInt(u32, it.next() orelse return error.BadSpec, 10);
-    return .{ .entry = entry, .rows = rows, .cols = cols, .threads = threads };
+    const pre: ?[:0]const u8 = if (it.next()) |s| try a.dupeSentinel(u8, s, 0) else null;
+    return .{ .entry = entry, .rows = rows, .cols = cols, .threads = threads, .pre = pre };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -87,15 +89,53 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         }
         k.y = try device.buffer(@as(usize, M) * N * 2, opts);
+        if (k.pre) |pn| k.pre_pipe = try mtl.Pipeline.init(device, lib, pn, false);
     }
     defer for (kernels) |*k| {
         k.y.deinit();
         k.pipe.deinit();
     };
 
+    // tf_sq_fits's words at 6 and tf_sq_prep's output at 7, as the served half and summed paths bind them
+    const fl = try device.buffer(@max(4, @as(usize, G) * ((M + 15) / 16) * 4), opts);
+    const xs = try device.buffer((@as(usize, M) + 1) * (G * 4 + K * 2) + 16, opts); // tf_sq_prep's sums and halves
+    defer fl.deinit();
+    defer xs.deinit();
+    @memset(fl.slice(u8, @max(4, @as(usize, G) * ((M + 15) / 16) * 4)), 0);
+    var fits_ms: f64 = -1;
+    if (mtl.Pipeline.init(device, lib, "tf_sq_fits", false)) |fp| {
+        defer fp.deinit();
+        for (0..2) |pass| {
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.serial);
+            for (0..reps) |_| {
+                e.setPipeline(fp);
+                e.setBuffer(x, 0, 0);
+                e.setValue(Args{ .k = @intCast(K), .n = @intCast(N), .r = @intCast(M) }, 4);
+                e.setBuffer(fl, 0, 6);
+                e.dispatchGroups(mtl.Size.of(G, (M + 15) / 16, 1), mtl.Size.of(32, 1, 1));
+            }
+            e.end();
+            cb.commit();
+            cb.wait();
+            if (pass == 1) fits_ms = (cb.gpuEnd() - cb.gpuStart()) * 1e3 / @as(f64, @floatFromInt(reps));
+        }
+    } else |_| {}
+    var fit_ones: usize = 0;
+    for (fl.slice(u32, @as(usize, G) * ((M + 15) / 16))) |v| fit_ones += v;
+
     const encode = struct {
-        fn one(e: mtl.ComputeEncoder, k: *const Kernel, xb: mtl.Buffer, wb: mtl.Buffer, sb: mtl.Buffer, bb: mtl.Buffer, copy: usize, m: u32, kk: u32, n: u32) void {
+        fn one(e: mtl.ComputeEncoder, k: *const Kernel, xb: mtl.Buffer, wb: mtl.Buffer, sb: mtl.Buffer, bb: mtl.Buffer, copy: usize, m: u32, kk: u32, n: u32, flb: mtl.Buffer, xsb: mtl.Buffer) void {
             const g = kk / 64;
+            if (k.pre_pipe) |pp| {
+                e.setPipeline(pp);
+                e.setBuffer(xb, 0, 0);
+                e.setValue(Args{ .k = @intCast(kk), .n = @intCast(n), .r = @intCast(m) }, 4);
+                e.setBuffer(xsb, 0, 7);
+                e.dispatchGroups(mtl.Size.of(g, (m + 31) / 32, 1), mtl.Size.of(32, 1, 1));
+            }
+            e.setBuffer(flb, 0, 6);
+            e.setBuffer(xsb, 0, 7);
             e.setPipeline(k.pipe);
             e.setBuffer(xb, 0, 0);
             e.setBuffer(wb, copy * @as(usize, n) * kk / 2, 1);
@@ -111,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
     for (0..trials + 1) |t| for (kernels) |*k| {
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        for (0..reps) |r| encode.one(e, k, x, w, sc, bi, r % copies, M, K, N);
+        for (0..reps) |r| encode.one(e, k, x, w, sc, bi, r % copies, M, K, N, fl, xs);
         e.end();
         cb.commit();
         cb.wait();
@@ -126,14 +166,14 @@ pub fn main(init: std.process.Init) !void {
         @memset(k.y.slice(u8, @as(usize, M) * N * 2), 0xff);
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        encode.one(e, k, x, w, sc, bi, 0, M, K, N);
+        encode.one(e, k, x, w, sc, bi, 0, M, K, N, fl, xs);
         e.end();
         cb.commit();
         cb.wait();
     }
 
     const flops = 2.0 * @as(f64, @floatFromInt(M)) * @as(f64, @floatFromInt(N)) * @as(f64, @floatFromInt(K));
-    std.debug.print("M {d} K {d} N {d}: {d} dispatches a buffer, {d} weight copies\n", .{ M, K, N, reps, copies });
+    std.debug.print("M {d} K {d} N {d}: {d} dispatches a buffer, {d} weight copies; tf_sq_fits {d:.4} ms, {d}/{d} words 1\n", .{ M, K, N, reps, copies, fits_ms, fit_ones, @as(usize, G) * ((M + 15) / 16) });
     const total = @as(usize, M) * N;
     const y0 = kernels[0].y.slice(u16, total);
     for (kernels) |*k| {
@@ -142,6 +182,8 @@ pub fn main(init: std.process.Init) !void {
         const med = ms[trials / 2];
         var differ: usize = 0;
         for (k.y.slice(u16, total), y0) |a, b| differ += @intFromBool(a != b);
-        std.debug.print("{s:<24} {d:>3}x{d:<3} {d:>4} threads  {d:8.3} ms  {d:6.2} TFLOPS  bits differ {d}/{d}\n", .{ k.entry, k.rows, k.cols, k.threads, med, flops / (med * 1e-3) / 1e12, differ, total });
+        var md: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(k.y.slice(u8, total * 2), &md, .{});
+        std.debug.print("{s:<24} {d:>3}x{d:<3} {d:>4} threads  {d:8.3} ms  {d:6.2} TFLOPS  bits differ {d}/{d}  md5 {x}  min {d:.3} max {d:.3}\n", .{ k.entry, k.rows, k.cols, k.threads, med, flops / (med * 1e-3) / 1e12, differ, total, md, ms[0], ms[trials - 1] });
     }
 }
