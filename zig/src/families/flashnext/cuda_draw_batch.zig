@@ -63,7 +63,9 @@ pub fn drawsMany(h: *const mtp.Head, st: cuda.Stream, a: std.mem.Allocator, scor
         if (!mtp.isSampled(sm)) greedy = true else if (k == 0 and draw.usable(sm.?)) k = sm.?.top_k;
     }
     if (rows > rows_max) return error.ProposalScoreShape;
-    if (b.on and (greedy or k != 0)) {
+    // a lone stream has nothing to share: its own draw skips the group's whole-buffer download
+    const group = b.on and ds.len > 1;
+    if (group and (greedy or k != 0)) {
         if (greedy) try h.best(st, scores, vocab, vocab, rows, b.device.ptr);
         if (k != 0) try h.topk(st, scores, vocab, vocab, rows, k, b.device.ptr + vals_at, b.device.ptr + cols_at);
         try st.synchronize();
@@ -72,7 +74,7 @@ pub fn drawsMany(h: *const mtp.Head, st: cuda.Stream, a: std.mem.Allocator, scor
     var row0: usize = 0;
     for (ds, sms, masks, outs) |d, sm, mask, out| {
         defer row0 += d.rows;
-        if (!b.on or !matching(sm, mask, k)) {
+        if (!group or !matching(sm, mask, k)) {
             try draw.draws(h, st, a, d, sm, mask, out);
             continue;
         }

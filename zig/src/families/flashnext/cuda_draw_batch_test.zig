@@ -56,6 +56,18 @@ test "Flash Next batch draws: eight mixed streams match serial draws, two grids 
     try t.expectEqualSlices(usize, &.{ 1, 2 }, D.functions[0..D.launches]);
     try t.expectEqualSlices(u32, &.{ 8, 8 }, D.grids[0..D.launches]);
     try t.expectEqual(@as(usize, 2), D.waits);
+    // A lone stream takes its own per-stream draw: the same launches and waits as serial, no group download
+    D.reset();
+    try draw.draws(&h, st, a, refs[0], sms[0], masks[0], &baseline[0]);
+    const serial: [2]usize = .{ D.launches, D.waits };
+    var serial_fn: [8]usize = undefined;
+    const serial_n = D.launches;
+    @memcpy(serial_fn[0..serial_n], D.functions[0..serial_n]);
+    D.reset();
+    try batch.drawsMany(&h, st, a, 0x4000, refs[0..1], sms[0..1], masks[0..1], outs[0..1]);
+    try t.expectEqual(baseline[0], got[0]);
+    try t.expectEqual(serial, [2]usize{ D.launches, D.waits });
+    try t.expectEqualSlices(usize, serial_fn[0..serial_n], D.functions[0..D.launches]);
     try t.expectEqual(@as(usize, 2), D.reads);
     // A mismatched K uses its complete smaller set; never a prefix of the larger column-ordered set.
     sms[1].?.top_k = 2;
