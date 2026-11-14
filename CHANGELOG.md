@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: drafted decode rounds of 5 to 16 rows read the dense FP8 weights faster, and every output bit is unchanged. The simdgroup-matrix tile now takes 16 columns a threadgroup for any projection whose launches hold 2048 or more columns (before, only wq_b), takes wq_b, the index wq_b and the shared w2 from 5 rows, and leaves projections under 1024 columns (wkv, the compressor) on the row kernel, which reads them up to twice as fast; the Engram projection takes the tile at the same rows. On an M5 Ultra at 6 rows, wo_b takes 62 µs instead of 91, the shared w1 and w3 40 instead of 58 and w2 21 instead of 34 (launches back to back on cold weights), and a release layer's 6-row decode takes 2.6 to 3.8% less GPU time (#NEW).
+
 - DeepSeek-V4.1 on Metal: the DSpark drafter's head runs on an FP8 copy of the vocabulary head made at load (0.67 GB, the target keeps bf16), its propose launch encodes concurrently with barriers where steps depend, and its buffers stay in one residency set, so a pass no longer waits for macOS to make them resident again; every reply is unchanged. On an M5 Ultra the five prose prompts decode about 5% faster greedy and 6% sampled (#3296).
 
 - DeepSeek-V4.1 on Metal: decode's router matvec, route and expert plan run as one launch beside the shared expert's up projection, so the MoE takes four waves after its norm instead of six, and the one-row expert kernels decode a word of FP4 codes by shifts; every output and KV byte is unchanged. On an M5 Ultra a round of release layers is 3.4 to 4.3% faster at one row and 2.2 to 3.2% at four (#3292).
