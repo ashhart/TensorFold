@@ -18,7 +18,7 @@ pub fn pagedLayout(config: anytype, attention_layers: usize) kv_pool.Layout {
     return .{ .fixed_bytes = 0, .token_bytes = attention_layers * 2 * config.kvDim() * 2, .page_tokens = kvp.page_tokens, .snap_bytes = 0 };
 }
 
-/// The pool's pages, arena and tables a paged runner holds; slot i is lane i, promised its whole capacity.
+/// The pool's pages, arena and tables a paged runner holds; slot i is lane i, promised as its stream's rows come.
 pub const KvPages = struct { pages: *kvp.Pages, arena: mtl.Buffer, tables: mtl.Buffer };
 
 /// A span of a slot's K/V rows in a buffer, as snapshot and digest copy and hash them.
@@ -50,7 +50,7 @@ pub fn spans(r: anytype, a: std.mem.Allocator, slot: u32, at: u32, list: *std.Ar
     }
 }
 
-/// The pool over `slots` lanes of `capacity` rows, every lane promised them; each layer's caches its part of a page.
+/// The pool over `slots` lanes of `capacity` rows each at most; each layer's caches its part of a page.
 pub fn caches(a: std.mem.Allocator, m: *Model, layers: usize, slots: u32, capacity: u32, out: []attn.Cache) !KvPages {
     const l = pagedLayout(m.config, layers);
     const pages = @as(usize, slots) * l.pages(capacity);
@@ -63,7 +63,6 @@ pub fn caches(a: std.mem.Allocator, m: *Model, layers: usize, slots: u32, capaci
     errdefer tables.deinit();
     const p = try kvp.Pages.initIn(a, l, slots, pages, capacity, arena, tables);
     errdefer p.deinit();
-    for (0..slots) |slot| try p.admit(slot, l.pages(capacity));
     const part = @as(usize, kvp.page_tokens) * m.config.kvDim() * 2;
     for (0..layers) |layer| for (0..slots) |slot| {
         const table: Ref = .{ .buffer = tables, .offset = p.tables.offset(slot) };
