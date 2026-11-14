@@ -122,7 +122,7 @@ pub const Model = struct {
         p.* = try row.simd_bits.Pipelines.load(m.device);
         errdefer p.deinit();
         var it = m.weights.linears.valueIterator();
-        while (it.next()) |lin| if (lin.tiles == null) {
+        while (it.next()) |lin| if (!lin.lane) {
             for (lin.stack[0..lin.stacked]) |s| if (fwd.tiled(s.rows)) {
                 _ = try row.simd_bits.call(p, s.rows.bits, s.rows.n, s.rows.k, prefill.lane_rows + 1, lin.n, false, 0);
             };

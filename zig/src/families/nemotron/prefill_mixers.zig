@@ -113,9 +113,9 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
     kvp.holds(kv, x.cache.len + L);
     const qkv = At.of(s.qkv);
     var q_row = row;
-    if (L <= pre.lane_rows or lin.qkv.tiles == null) {
+    if (L <= pre.lane_rows or !lin.qkv.lane) {
         // lane_qmm's q, k and v columns stacked in one call: a column's bits follow only K and its K slices
-        if (lin.qkv.tiles != null) x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
+        if (lin.qkv.lane) x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
         if (L <= pre.lane_rows or !x.f.wide(x.e, lin.qkv, s.x, s.qkv, L)) x.f.coop(x.e, "qkv", lin.qkv, s.x, 0, s.xs, s.qkv, L);
         const e = x.e;
         e.pipe(if (kv.paged != null) x.f.k.paged.?.glue[0] else x.f.k.get("tf_kv_write"));
