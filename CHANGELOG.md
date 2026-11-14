@@ -610,7 +610,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: chat and completion streams can carry the exact committed token IDs. A client opts in with `stream_options.tensorfold_token_stream_version: 1`; the stream then interleaves `tensorfold.token.chunk` events (an offset and the committed IDs, including reasoning, tool markup and EOS tokens) with the usual chunks, and every chunk carries a `tensorfold_stream` anchor (the token count so far and the last ID, plus each logprob entry's raw token position when entries are present). `capabilities --json` reports `token_stream_versions: [1]`. Unknown versions, non-streaming requests and Cortheon multi-round replies get HTTP 400 before generation. Streams without the option are unchanged. exo's proposed TensorFold backend reads these IDs instead of retokenizing text (#3285).
 
-- GLM-5.3-Flash on CUDA: with `TF_GLM_COPIES=1`, `TF_GLM_COPY_SHARE=1` lets copies in shared rounds grow on the lone ramp up to their stream's share of the round's rows (15 tokens at two streams, 7 at four), where every shared copy stayed three tokens wide. Default off, and refused without `TF_GLM_COPIES=1`; replies are unchanged (#N).
+- GLM-5.3-Flash on CUDA: with `TF_GLM_COPIES=1`, `TF_GLM_COPY_SHARE=1` lets copies in shared rounds grow on the lone ramp up to their stream's share of the round's rows (15 tokens at two streams, 7 at four), where every shared copy stayed three tokens wide. Default off, and refused without `TF_GLM_COPIES=1`; replies are unchanged (#3333).
 
 - README: Pick a model gains a GLM-5.3-Flash Jammed XSFP4 NZ5 row, the checkpoint in the `NVFP4_NZ5` form that #2894 reads, and the GLM CUDA recipe names it beside Jammed XSFP4 (#2981). Thanks to @Bizuayeu.
 
