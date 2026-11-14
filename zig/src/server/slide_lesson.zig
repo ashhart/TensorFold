@@ -83,7 +83,7 @@ pub const Check = struct { question: []const u8, before: []const u8, thinking: [
 pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "", context: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it; context: the conversation it is asked after
 
 /// A lesson for the learner, its facts, and what to ask after it; `probes` are wordings it never trains on.
-pub const Plan = struct { questions: []const Held = &.{}, corrections: []const @import("slide_correction.zig").Entry = &.{}, full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{}, wordings: []const @import("slide_redraw.zig").Entry = &.{} };
+pub const Plan = struct { reserved: @import("slide_reserved.zig").Reserved = .{}, questions: []const Held = &.{}, corrections: []const @import("slide_correction.zig").Entry = &.{}, full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{}, wordings: []const @import("slide_redraw.zig").Entry = &.{} };
 
 /// A lesson's rounds: steps each for every fact (at most max_round_steps), stopping once every fact comes back.
 pub const round_steps = 20;
@@ -199,7 +199,7 @@ pub fn withRecall(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []cons
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .questions = parts.all.items, .full = try reserved.clean(a, full), .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items }, .wordings = parts.wordings.items };
+    return try @import("slide_redraw.zig").clean(a, .{ .reserved = reserved, .questions = parts.all.items, .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items }, .wordings = parts.wordings.items });
 }
 
 pub const Parts = @import("slide_lesson_parts.zig").Parts;
