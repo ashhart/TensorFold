@@ -57,6 +57,12 @@ head dim 128), dumped by the oracle's `text` mode (`rope-inv_freq.npy`). The
 CUDA recipe uploads them as they are, because Torch's CPU `powf` is not
 correctly rounded: entry 37 is one ulp from the correctly rounded value.
 
+`vision_inv_freq.txt` holds the 32 float32 bit patterns of the tower's
+rotary `inv_freq` (theta 10,000, dim 64) as the checkpoint's Transformers
+model holds them on the GB10, dumped by the oracle as
+`vision-rope-inv_freq.npy`. They equal the correctly rounded table, which
+the host test checks bit for bit.
+
 ## OCR reader fixtures
 
 The reader's prompt (`../prompt.txt`) and both test pages are written

@@ -6,8 +6,16 @@ const fixtures = @import("config_test.zig");
 
 pub const recipe = @import("cuda_recipe.zig");
 pub const weights = @import("cuda_weights.zig");
+pub const tower_weights = @import("cuda_tower_weights.zig");
+pub const tower = @import("cuda_tower.zig");
 pub const kernels = @import("cuda_kernels.zig");
 pub const native = dense.Native(recipe);
+
+test {
+    std.testing.refAllDecls(tower_weights);
+    std.testing.refAllDecls(tower);
+    _ = @import("cuda_tower_test.zig");
+}
 
 test "dots geometry from the released config: 12 query heads over 2 KV heads of 128, two query heads a pattn block" {
     const c = try cfg.Config.parse(std.testing.allocator, fixtures.sample, fixtures.generation);
