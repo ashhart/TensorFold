@@ -112,6 +112,7 @@ test {
     _ = @import("process_memory.zig");
     _ = @import("process_resident.zig");
     _ = @import("log.zig");
+    _ = @import("log_test.zig");
     _ = @import("request_log.zig");
     _ = @import("messages.zig");
     _ = @import("pdf.zig");

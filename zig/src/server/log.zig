@@ -10,7 +10,7 @@ var shown = false; // the live line is on screen
 var line_start = true; // the newest write ended its line, so a redraw cannot split it
 var quiet = false;
 var stamped = false; // TENSORFOLD_LOG_TIME: each log line starts with its UTC time
-var json_log = false; // --log-json: request start/end as one JSON object a line
+var json_log = false; // --log-json: access, ended and refused lines as one JSON object each
 
 pub const Test = if (@import("builtin").is_test) struct {
     pub threadlocal var sink: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque, []const u8) void } = null;
@@ -28,7 +28,7 @@ pub fn timeWanted(text: ?[]const u8) bool {
     return std.mem.eql(u8, s, "1") or std.ascii.eqlIgnoreCase(s, "on");
 }
 
-/// --log-json: request start and end as compact JSON; off (the default) keeps the text lines.
+/// --log-json: access, ended and refused lines as compact JSON; off (the default) keeps the text lines.
 pub fn setJson(on: bool) void {
     json_log = on;
 }
@@ -181,50 +181,65 @@ fn label_suffix(label: []const u8) []const u8 {
     return std.fmt.bufPrint(&suffix_buf, " key={s}", .{label}) catch " key=?";
 }
 
-/// A JSON string, one line: quotes and controls escaped, C1 as ``\\u00NN`` so controlSafe leaves it.
-fn jsonString(w: *std.Io.Writer, s: []const u8) void {
+/// A JSON string in at most ``cap`` bytes with its quotes, cut before an escape or character that would not fit.
+fn jsonString(w: *std.Io.Writer, s: []const u8, cap: usize) void {
+    const room = @min(cap, w.buffer.len - w.end);
+    if (room < 2) return;
+    const limit = w.end + room - 1; // the closing quote always fits
     w.writeByte('"') catch return;
     var i: usize = 0;
-    while (i < s.len) : (i += 1) {
+    while (i < s.len) {
         const b = s[i];
         const c1 = b == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f;
-        if (c1) i += 1;
-        if (c1 or b < 0x20 or b == 0x7f) {
-            w.print("\\u00{x:0>2}", .{s[i]}) catch return;
-        } else if (b == '"' or b == '\\') {
-            w.writeByte('\\') catch return;
-            w.writeByte(b) catch return;
-        } else w.writeByte(b) catch return;
+        var esc: [6]u8 = undefined;
+        var step: usize = 1;
+        const piece: []const u8 = if (c1 or b < 0x20 or b == 0x7f) blk: {
+            if (c1) step = 2;
+            break :blk std.fmt.bufPrint(&esc, "\\u00{x:0>2}", .{s[i + step - 1]}) catch unreachable;
+        } else if (b == '"' or b == '\\') blk: {
+            esc[0] = '\\';
+            esc[1] = b;
+            break :blk esc[0..2];
+        } else blk: {
+            step = @min(std.unicode.utf8ByteSequenceLength(b) catch 1, s.len - i);
+            break :blk s[i .. i + step];
+        };
+        if (w.end + piece.len > limit) break;
+        w.writeAll(piece) catch return;
+        i += step;
     }
     w.writeByte('"') catch return;
 }
+
+const json_field_cap = 256; // ids, peers, key labels and error names
+const json_request_cap = 4096; // the request line, of up to 65,536 bytes, so the whole line stays one parsable object
 
 fn jsonKey(w: *std.Io.Writer, first: *bool, key: []const u8) void {
     if (!first.*) w.writeByte(',') catch return;
     first.* = false;
-    jsonString(w, key);
+    jsonString(w, key, json_field_cap);
     w.writeByte(':') catch return;
 }
 
-fn jsonStart(buf: []u8, c: *const Conn, code: u16) []const u8 {
+fn jsonAccess(buf: []u8, c: *const Conn, code: u16) []const u8 {
     var w: std.Io.Writer = .fixed(buf);
     var first = true;
     w.writeByte('{') catch {};
     jsonKey(&w, &first, "event");
-    jsonString(&w, "start");
+    jsonString(&w, "access", json_field_cap);
     if (c.id) |id| {
         jsonKey(&w, &first, "id");
-        jsonString(&w, id);
+        jsonString(&w, id, json_field_cap);
     }
     jsonKey(&w, &first, "status");
     w.print("{d}", .{code}) catch {};
     jsonKey(&w, &first, "peer");
-    jsonString(&w, c.peer);
+    jsonString(&w, c.peer, json_field_cap);
     jsonKey(&w, &first, "request");
-    jsonString(&w, c.requestline);
+    jsonString(&w, c.requestline, json_request_cap);
     if (c.auth_enabled) {
         jsonKey(&w, &first, "key");
-        jsonString(&w, c.key_label orelse "unauthenticated");
+        jsonString(&w, c.key_label orelse "unauthenticated", json_field_cap);
     }
     w.writeByte('}') catch {};
     return w.buffered();
@@ -235,14 +250,14 @@ fn jsonEnded(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens:
     var first = true;
     w.writeByte('{') catch {};
     jsonKey(&w, &first, "event");
-    jsonString(&w, "end");
+    jsonString(&w, "ended", json_field_cap);
     jsonKey(&w, &first, "id");
-    jsonString(&w, id);
+    jsonString(&w, id, json_field_cap);
     jsonKey(&w, &first, "reason");
     if (why) |e| {
         var reason: [320]u8 = undefined;
-        jsonString(&w, std.fmt.bufPrint(&reason, "error ({s})", .{e}) catch "error");
-    } else jsonString(&w, "client-left");
+        jsonString(&w, std.fmt.bufPrint(&reason, "error ({s})", .{e}) catch "error", json_field_cap);
+    } else jsonString(&w, "client-left", json_field_cap);
     jsonKey(&w, &first, "prompt");
     w.print("{d}", .{prompt}) catch {};
     jsonKey(&w, &first, "tokens");
@@ -257,7 +272,7 @@ fn jsonEnded(buf: []u8, id: []const u8, why: ?[]const u8, prompt: usize, tokens:
 pub fn request(c: *const Conn, code: u16) void {
     if (json_log) {
         var buf: [8192]u8 = undefined;
-        line("{s}", .{jsonStart(&buf, c, code)});
+        line("{s}", .{jsonAccess(&buf, c, code)});
         return;
     }
     line("{s} \"{s}\" {d} -{s}", .{ c.peer, c.requestline, code, keySuffix(c) });
@@ -271,11 +286,11 @@ pub fn refused(buf: []u8, id: []const u8, message: []const u8) []const u8 {
         var first = true;
         w.writeByte('{') catch {};
         jsonKey(&w, &first, "event");
-        jsonString(&w, "end");
+        jsonString(&w, "refused", json_field_cap);
         jsonKey(&w, &first, "id");
-        jsonString(&w, id);
+        jsonString(&w, id, json_field_cap);
         jsonKey(&w, &first, "reason");
-        jsonString(&w, cut);
+        jsonString(&w, cut, (buf.len -| w.end) -| 1); // room for the closing brace
         w.writeByte('}') catch {};
         return w.buffered();
     }
@@ -394,183 +409,4 @@ test "a std.log line with the time on: the time, then the default line" {
     try stampedLine(.info, .glm, "rank {d} up", .{0}, t, 1_793_396_823_513);
     const want = "2026-10-30T21:47:03.512Z warning: hi 1\n2026-10-30T21:47:03.513Z info(glm): rank 0 up\n";
     try std.testing.expectEqualStrings(want, w.buffered());
-}
-
-const JsonLogTest = if (@import("builtin").is_test) struct {
-    const Capture = struct {
-        bytes: [4 * 8192 + 1]u8 = undefined,
-        len: usize = 0,
-        fn call(ctx: *anyopaque, bytes: []const u8) void {
-            const c: *@This() = @ptrCast(@alignCast(ctx));
-            @memcpy(c.bytes[0..bytes.len], bytes);
-            c.len = bytes.len;
-        }
-        fn line(c: *const @This()) []const u8 {
-            return c.bytes[0..c.len];
-        }
-        fn payload(c: *const @This()) []const u8 {
-            const prefix = "[tensorfold] ";
-            return c.bytes[prefix.len .. c.len - 1];
-        }
-    };
-
-    fn sink(c: *Capture) void {
-        Test.sink = .{ .ctx = c, .call = Capture.call };
-    }
-} else struct {};
-
-test "default request log: access, ended and refused lines stay text" {
-    var c: JsonLogTest.Capture = .{};
-    JsonLogTest.sink(&c);
-    defer Test.sink = null;
-    setJson(false);
-    var conn = try Conn.init(std.testing.allocator, 0, "127.0.0.1");
-    defer conn.deinit();
-    conn.requestline = "GET / HTTP/1.1";
-    conn.id = "chatcmpl-1";
-    request(&conn, 200);
-    try std.testing.expectEqualStrings("[tensorfold] 127.0.0.1 \"GET / HTTP/1.1\" 200 -\n", c.line());
-    var buf: [1400]u8 = undefined;
-    line("{s}", .{ended(&buf, "chatcmpl-1", null, 12, 3, 0.5)});
-    try std.testing.expectEqualStrings("[tensorfold] ended chatcmpl-1 reason=client-left prompt=12 tokens=3 after=0.50s\n", c.line());
-    line("{s}", .{refused(&buf, "cmpl-1", "short")});
-    try std.testing.expectEqualStrings("[tensorfold] refused cmpl-1: short\n", c.line());
-}
-
-test "json request log: start includes the id when known" {
-    var c: JsonLogTest.Capture = .{};
-    JsonLogTest.sink(&c);
-    defer Test.sink = null;
-    setJson(true);
-    defer setJson(false);
-    var conn = try Conn.init(std.testing.allocator, 0, "127.0.0.1");
-    defer conn.deinit();
-    conn.requestline = "POST /v1/chat/completions HTTP/1.1";
-    conn.id = "chatcmpl-1";
-    request(&conn, 200);
-    try std.testing.expectEqual(@as(u8, '\n'), c.line()[c.len - 1]);
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, c.line(), "\n"));
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer parsed.deinit();
-    const o = parsed.value.object;
-    try std.testing.expectEqualStrings("start", o.get("event").?.string);
-    try std.testing.expectEqualStrings("chatcmpl-1", o.get("id").?.string);
-    try std.testing.expectEqual(@as(i64, 200), o.get("status").?.integer);
-    try std.testing.expectEqualStrings("127.0.0.1", o.get("peer").?.string);
-    try std.testing.expectEqualStrings("POST /v1/chat/completions HTTP/1.1", o.get("request").?.string);
-    conn.id = null;
-    request(&conn, 503);
-    const parsed2 = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer parsed2.deinit();
-    try std.testing.expectEqualStrings("start", parsed2.value.object.get("event").?.string);
-    try std.testing.expect(parsed2.value.object.get("id") == null);
-    try std.testing.expectEqual(@as(i64, 503), parsed2.value.object.get("status").?.integer);
-}
-
-test "json request log: end includes id and tokens; refused invents none" {
-    var c: JsonLogTest.Capture = .{};
-    JsonLogTest.sink(&c);
-    defer Test.sink = null;
-    setJson(true);
-    defer setJson(false);
-    var buf: [1400]u8 = undefined;
-    line("{s}", .{ended(&buf, "chatcmpl-1", null, 12, 3, 0.5)});
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, c.line(), "\n"));
-    const ended_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer ended_json.deinit();
-    const e = ended_json.value.object;
-    try std.testing.expectEqualStrings("end", e.get("event").?.string);
-    try std.testing.expectEqualStrings("chatcmpl-1", e.get("id").?.string);
-    try std.testing.expectEqual(@as(i64, 12), e.get("prompt").?.integer);
-    try std.testing.expectEqual(@as(i64, 3), e.get("tokens").?.integer);
-    try std.testing.expectEqualStrings("client-left", e.get("reason").?.string);
-    try std.testing.expect(e.get("status") == null);
-    line("{s}", .{ended(&buf, "chatcmpl-1", "OutOfMemory", 12, 0, 1.25)});
-    const err_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer err_json.deinit();
-    try std.testing.expectEqualStrings("error (OutOfMemory)", err_json.value.object.get("reason").?.string);
-    try std.testing.expectEqual(@as(i64, 0), err_json.value.object.get("tokens").?.integer);
-    line("{s}", .{refused(&buf, "cmpl-1", "short")});
-    const refused_json = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer refused_json.deinit();
-    const r = refused_json.value.object;
-    try std.testing.expectEqualStrings("end", r.get("event").?.string);
-    try std.testing.expectEqualStrings("cmpl-1", r.get("id").?.string);
-    try std.testing.expectEqualStrings("short", r.get("reason").?.string);
-    try std.testing.expect(r.get("prompt") == null);
-    try std.testing.expect(r.get("tokens") == null);
-}
-
-test "json request log: secrets stay out of the line" {
-    var c: JsonLogTest.Capture = .{};
-    JsonLogTest.sink(&c);
-    defer Test.sink = null;
-    setJson(true);
-    defer setJson(false);
-    var conn = try Conn.init(std.testing.allocator, 0, "127.0.0.1");
-    defer conn.deinit();
-    conn.requestline = "GET /health HTTP/1.1";
-    var headers = [_]@import("http_conn.zig").Header{.{ .name = "Authorization", .value = "Bearer sk-secret-value" }};
-    conn.headers = &headers;
-    conn.auth_enabled = true;
-    conn.key_label = "cli-1";
-    request(&conn, 200);
-    const line_text = c.line();
-    try std.testing.expect(std.mem.indexOf(u8, line_text, "sk-secret-value") == null);
-    try std.testing.expect(std.mem.indexOf(u8, line_text, "Bearer") == null);
-    try std.testing.expect(std.mem.indexOf(u8, line_text, "Authorization") == null);
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("cli-1", parsed.value.object.get("key").?.string);
-    conn.requestline = "GET / \"quoted\" HTTP/1.1";
-    request(&conn, 400);
-    const quoted = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, c.payload(), .{});
-    defer quoted.deinit();
-    try std.testing.expectEqualStrings("GET / \"quoted\" HTTP/1.1", quoted.value.object.get("request").?.string);
-}
-
-test "json request log: demo capture" {
-    const dir = platform.getenv("DEMO_OUT") orelse return error.SkipZigTest;
-    var c: JsonLogTest.Capture = .{};
-    JsonLogTest.sink(&c);
-    defer Test.sink = null;
-    var conn = try Conn.init(std.testing.allocator, 0, "127.0.0.1");
-    defer conn.deinit();
-    conn.requestline = "GET / HTTP/1.1";
-    conn.id = "chatcmpl-1";
-    setJson(false);
-    request(&conn, 200);
-    const default_start = try std.testing.allocator.dupe(u8, c.line());
-    defer std.testing.allocator.free(default_start);
-    var buf: [1400]u8 = undefined;
-    line("{s}", .{ended(&buf, "chatcmpl-1", null, 12, 3, 0.5)});
-    const default_end = try std.testing.allocator.dupe(u8, c.line());
-    defer std.testing.allocator.free(default_end);
-    line("{s}", .{refused(&buf, "cmpl-1", "short")});
-    const default_refused = try std.testing.allocator.dupe(u8, c.line());
-    defer std.testing.allocator.free(default_refused);
-    setJson(true);
-    defer setJson(false);
-    request(&conn, 200);
-    const json_start = try std.testing.allocator.dupe(u8, c.line());
-    defer std.testing.allocator.free(json_start);
-    line("{s}", .{ended(&buf, "chatcmpl-1", null, 12, 3, 0.5)});
-    const json_end = try std.testing.allocator.dupe(u8, c.line());
-    defer std.testing.allocator.free(json_end);
-    line("{s}", .{refused(&buf, "cmpl-1", "short")});
-    const json_refused = try std.testing.allocator.dupe(u8, c.line());
-    defer std.testing.allocator.free(json_refused);
-    const files = [_]struct { name: []const u8, data: []const u8 }{
-        .{ .name = "default-start.txt", .data = default_start },
-        .{ .name = "default-end.txt", .data = default_end },
-        .{ .name = "default-refused.txt", .data = default_refused },
-        .{ .name = "json-start.txt", .data = json_start },
-        .{ .name = "json-end.txt", .data = json_end },
-        .{ .name = "json-refused.txt", .data = json_refused },
-    };
-    for (files) |pair| {
-        const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ dir, pair.name });
-        defer std.testing.allocator.free(path);
-        try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = path, .data = pair.data });
-    }
 }
