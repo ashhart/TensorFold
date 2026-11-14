@@ -62,6 +62,8 @@ pub const Built = struct {
     frames: [][W]i32,
     /// End of the invariant reference prompt, before request text (0 without references).
     reference_rows: u32,
+    /// Rows of the request's own text, its speaker tag included: the text's share of `frames`.
+    text_rows: u32 = 0,
 };
 
 pub fn build(gpa: std.mem.Allocator, tok: anytype, text: []const u8, refs: []const Reference) !Built {
@@ -91,13 +93,16 @@ pub fn build(gpa: std.mem.Allocator, tok: anytype, text: []const u8, refs: []con
     try segs.append(a, .{ .text = message_end });
     try segs.append(a, .{ .text = "<|im_start|>user\n" });
     try segs.append(a, .reference_end);
+    const request_segment = segs.items.len;
     try segs.append(a, .{ .text = try withSpeaker(a, text) });
     try segs.append(a, .{ .text = message_end });
     try segs.append(a, .{ .text = generation_start });
     var reference_rows: u32 = 0;
-    for (segs.items) |seg| switch (seg) {
+    var text_rows: u32 = 0;
+    for (segs.items, 0..) |seg, i| switch (seg) {
         .text => |t| {
             const ids = try tok.encode(a, t);
+            if (i == request_segment) text_rows = @intCast(ids.len);
             for (ids) |id| {
                 var row: [W]i32 = @splat(0);
                 row[0] = @intCast(id);
@@ -114,7 +119,7 @@ pub fn build(gpa: std.mem.Allocator, tok: anytype, text: []const u8, refs: []con
             reference_rows = @intCast(rows.items.len);
         },
     };
-    return .{ .frames = try rows.toOwnedSlice(gpa), .reference_rows = reference_rows };
+    return .{ .frames = try rows.toOwnedSlice(gpa), .reference_rows = reference_rows, .text_rows = text_rows };
 }
 
 test "speaker tags as prompt.py places them" {
@@ -165,17 +170,24 @@ test "reference prompt boundary preserves every row and ends before request text
     try t.expectEqualSlices(i32, &.{ 1007, 7, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, &built.frames[before.len]);
     try expectTextRows(after, built.frames[before.len + 1 .. boundary]);
     try expectTextRows(suffix, built.frames[boundary..]);
+    try t.expectEqual(@as(u32, "<|speaker:0|> One.".len), built.text_rows);
 
     const other = try build(t.allocator, ByteTokenizer{}, "  <|speaker:1|> Different text.", &refs);
     defer t.allocator.free(other.frames);
     try t.expectEqual(built.reference_rows, other.reference_rows);
     try t.expectEqualSlices(u8, std.mem.sliceAsBytes(built.frames[0..boundary]), std.mem.sliceAsBytes(other.frames[0..boundary]));
     try expectTextRows("  <|speaker:1|> Different text." ++ message_end ++ generation_start, other.frames[boundary..]);
+    try t.expectEqual(@as(u32, "  <|speaker:1|> Different text.".len), other.text_rows);
 
     const plain = try build(t.allocator, ByteTokenizer{}, "One.", &.{});
     defer t.allocator.free(plain.frames);
     try t.expectEqual(@as(u32, 0), plain.reference_rows);
     try expectTextRows("<|im_start|>system\n" ++ tts_instruction ++ message_end ++ "<|im_start|>user\n" ++ suffix, plain.frames);
+    try t.expectEqual(built.text_rows, plain.text_rows);
+    const spaced = try build(t.allocator, ByteTokenizer{}, "  One.", &refs);
+    defer t.allocator.free(spaced.frames);
+    try t.expectEqual(@as(u32, "<|speaker:0|>   One.".len), spaced.text_rows);
+    try t.expectEqual(spaced.frames.len - spaced.reference_rows - (message_end ++ generation_start).len, spaced.text_rows);
 }
 
 test "reference prompt boundary includes all transcripts, wrappers and multiple references" {

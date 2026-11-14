@@ -113,8 +113,8 @@ pub fn build(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []
     return prompt.build(a, Tokenizer{ .value = tokenizer }, input, refs);
 }
 
-/// A voice's prompt: its own ids and frame rows.
-pub const Prompt = struct { prompt: []const u32, frames: []const [11]i32, reference_rows: u32 = 0 };
+/// A voice's prompt: its own ids and frame rows; `text_rows` of them are the request's own text.
+pub const Prompt = struct { prompt: []const u32, frames: []const [11]i32, reference_rows: u32 = 0, text_rows: u32 = 0 };
 
 /// A voice's prompt ids and frame rows for an input.
 pub fn promptFor(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs: []const prompt.Reference) !Prompt {
@@ -122,7 +122,7 @@ pub fn promptFor(a: Allocator, tokenizer: text_mod.Text, input: []const u8, refs
     const frames = built.frames;
     const ids = try a.alloc(u32, frames.len);
     for (frames, ids) |row, *token| token.* = @intCast(row[0]);
-    return .{ .prompt = ids, .frames = frames, .reference_rows = built.reference_rows };
+    return .{ .prompt = ids, .frames = frames, .reference_rows = built.reference_rows, .text_rows = built.text_rows };
 }
 
 /// A voice's prompt for a speech request: its ids and frame rows; null when the request named no voice.
@@ -133,8 +133,7 @@ pub fn requestPrompt(cx: *Cx, tokenizer: text_mod.Text, sp: api.SpeechInfo, inpu
         error.OutOfMemory => error.OutOfMemory,
         else => cx.other("the tokenizer cannot encode this voice prompt"),
     };
-    if (made.frames.len > sp.max_prompt_tokens)
-        return cx.fail(.request, checks.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ made.frames.len, sp.max_prompt_tokens });
+    try @import("drama_admission.zig").check(cx, made.text_rows, refs, made.frames.len, sp.max_prompt_tokens);
     return made;
 }
 
@@ -258,4 +257,59 @@ test "voices: real tokenizer rows equal the CLI path without server postprocessi
     const http_rows = try build(a, hf.text(), "A cloud.", &refs);
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(cli_rows.frames), std.mem.sliceAsBytes(http_rows.frames));
     try std.testing.expectEqual(cli_rows.reference_rows, http_rows.reference_rows);
+    var cx: Cx = .{ .a = a };
+    const admitted: api.SpeechInfo = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = 1, .max_prompt_tokens = @intCast(http_rows.frames.len) };
+    _ = try requestPrompt(&cx, hf.text(), admitted, "A cloud.", &refs);
+    var refused = admitted;
+    refused.max_prompt_tokens -= 1;
+    try std.testing.expectError(error.Refused, requestPrompt(&cx, hf.text(), refused, "A cloud.", &refs));
+    try std.testing.expectEqual(@as(u16, 400), cx.status());
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "assembled prompt rows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "acoustic references: 1 frames") != null);
+    const expected_text = try std.fmt.allocPrint(a, "request text: {d} tokens", .{http_rows.text_rows});
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, expected_text) != null);
+    try std.testing.expect(http_rows.reference_rows > codes.len);
+    try std.testing.expectError(error.Refused, @import("drama_admission.zig").check(&cx, 3, &.{}, 9, 8));
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "acoustic references: 0 frames") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "9 assembled prompt rows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "limit of 8 assembled prompt rows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cx.message, "request text: 3 tokens") != null);
+    try @import("drama_admission.zig").check(&cx, 3, &.{}, 8, 8);
+}
+
+test "speech admission: the request text figure is its share of the assembled rows, as the prompt encodes it" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tok = try @import("tokenizer").parse(gpa,
+        \\{"pre_tokenizer":{"type":"WhitespaceSplit"},"model":{"type":"WordLevel","vocab":{"[UNK]":0,"<|semantic:0|>":1000},"unk_token":"[UNK]"}}
+    );
+    defer tok.deinit();
+    var hf: @import("hf_text.zig").HfText = .{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa), .tok = tok, .prefix = &.{17}, .suffix = &.{18} };
+    defer hf.arena.deinit();
+    const words = hf.text();
+    const codes = [_][10]i32{.{ 7, 1, 2, 3, 4, 5, 6, 7, 8, 9 }};
+    const refs = [_]prompt.Reference{.{ .transcript = "A small cloud passes.", .codes = &codes }};
+    const tight: api.SpeechInfo = .{ .sample_rate = 44100, .frame_length = 2048, .max_frames = 1, .max_prompt_tokens = 1 };
+    const tail = (try words.encode(a, checks.message_end, false)).len + (try words.encode(a, checks.generation_start, false)).len;
+    for ([_][]const u8{ "A cloud.", "  A cloud.", "\u{3000}<|speaker:1|> A cloud." }) |input| {
+        // a voice: the builder encodes the tagged text without special tokens
+        const made = try promptFor(a, words, input, &refs);
+        try std.testing.expectEqual(made.frames.len - made.reference_rows - tail, made.text_rows);
+        var cx: Cx = .{ .a = a };
+        try std.testing.expectError(error.Refused, requestPrompt(&cx, words, tight, input, &refs));
+        try std.testing.expect(std.mem.indexOf(u8, cx.message, try std.fmt.allocPrint(a, "request text: {d} tokens", .{made.text_rows})) != null);
+        // the default voice: each segment with special tokens, the request's tagged
+        const counted = try checks.encodeCounted(a, words, input);
+        var others: usize = 0;
+        for (try checks.segments(a, input), 0..) |segment, i| {
+            if (i != checks.request_segment) others += (try words.encode(a, segment, true)).len;
+        }
+        try std.testing.expectEqual(counted.ids.len - others, counted.text_tokens);
+    }
+    // untagged text: on its own it encodes to fewer ids than its share of either prompt
+    const alone = (try words.encode(a, "A cloud.", false)).len;
+    try std.testing.expect((try promptFor(a, words, "A cloud.", &refs)).text_rows > alone);
+    try std.testing.expect((try checks.encodeCounted(a, words, "A cloud.")).text_tokens > alone);
 }

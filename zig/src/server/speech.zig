@@ -138,13 +138,12 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
 fn promptOf(srv: *Server, cx: *Cx, sp: api.SpeechInfo, input: []const u8) errors.Refused![]const u32 {
     if (try drama_prompt.problem(cx.a, input)) |message| return cx.refuse(message);
-    const prompt = drama_prompt.encode(cx.a, srv.text, input) catch |e| return switch (e) {
+    const counted = drama_prompt.encodeCounted(cx.a, srv.text, input) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         error.Template => cx.other("the tokenizer cannot encode this prompt"),
     };
-    if (prompt.len > sp.max_prompt_tokens)
-        return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ prompt.len, sp.max_prompt_tokens });
-    return prompt;
+    try @import("drama_admission.zig").check(cx, counted.text_tokens, &.{}, counted.ids.len, sp.max_prompt_tokens);
+    return counted.ids;
 }
 
 /// Acquired errors, final replies and completed stream observations release the lane before client writes.
@@ -494,4 +493,6 @@ pub const Test = if (@import("builtin").is_test) struct {
 
 test {
     _ = @import("speech_audio_test.zig");
+    // The HTTP admission harness uses a Unix socket pair, unavailable on Windows.
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("drama_admission_test.zig");
 }
