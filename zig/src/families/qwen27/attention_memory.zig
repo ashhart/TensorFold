@@ -4,6 +4,7 @@ pub const Layout = struct {
     tiles: u32,
     chunks: u32,
     tail_chunks: u32,
+    chunk_rows: usize,
     sizes: [16]usize,
     pub fn init(limits: anytype) Layout {
         const hk: usize = limits.geometry.kv_heads;
@@ -13,8 +14,10 @@ pub const Layout = struct {
         const rp: usize = tiles * 16;
         const a: usize = if (limits.shared_prefix) hk * @as(usize, chunks) * rp else 0;
         const tail_chunks = if (limits.shared_prefix) 3 else chunks; // a tail of up to 191 keys over 128-key chunks
-        const b: usize = hk * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
-        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * planning.path_width * 4, limits.rows * 4, hk * rp * dim * 2, hk * @as(usize, limits.rows) * 16 * dim * 2, a * dim * 4, a * 4, a * 4, b * dim * 4, b * 4, b * 4, limits.rows * hk * dim * 2, limits.rows * hk * dim * 2, 48 }; // pick: the scan's flag, then two indirect grids
-        return .{ .tiles = tiles, .chunks = chunks, .tail_chunks = tail_chunks, .sizes = sizes };
+        const tree_rows = if (limits.shared_prefix) limits.rows else @min(limits.rows, planning.max_rows);
+        const chunk_rows = if (limits.shared_prefix) @as(usize, tree_rows) * 16 else @max(@as(usize, tree_rows) * 16, rp);
+        const b: usize = hk * @as(usize, tail_chunks) * chunk_rows;
+        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * planning.path_width * 4, limits.rows * 4, hk * rp * dim * 2, hk * @as(usize, tree_rows) * 16 * dim * 2, a * dim * 4, a * 4, a * 4, b * dim * 4, b * 4, b * 4, limits.rows * hk * dim * 2, limits.rows * hk * dim * 2, 48 }; // pick: the scan's flag, then two indirect grids
+        return .{ .tiles = tiles, .chunks = chunks, .tail_chunks = tail_chunks, .chunk_rows = chunk_rows, .sizes = sizes };
     }
 };
