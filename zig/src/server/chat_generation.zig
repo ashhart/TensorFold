@@ -244,6 +244,7 @@ pub const Generation = struct {
             }
             const tokens = chunk orelse continue;
             if (g.reason == null) try g.commit(tokens);
+            _ = m.unread.fetchSub(@intCast(tokens.len), .monotonic); // written out: the lane host may run it again
         }
     }
 

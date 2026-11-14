@@ -89,6 +89,8 @@ pub const Request = struct {
     images: []const Image = &.{},
     /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
     cache_key: []const u32 = &.{},
+    /// A streamed reply's tokens its client has not read yet (the server's mailbox counts them); null: not watched.
+    unread: ?*const std.atomic.Value(u32) = null,
 
     /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
     pub fn cacheKey(r: *const Request) []const u32 {

@@ -11,6 +11,7 @@ pub const Mailbox = struct {
     audio: usize = 0,
     tokens: std.ArrayList(u32) = .empty,
     chunks: std.ArrayList(usize) = .empty, // where each round's tokens end
+    unread: std.atomic.Value(u32) = .init(0), // tokens landed and not yet written to the client (Request.unread)
     rows: std.ArrayList(api.LogprobRow) = .empty, // one a token of `tokens`, for requests with logprobs
     prompt_rows: ?[]api.LogprobRow = null, // one a prompt token after the first, for requests with prompt_logprobs
     cached: ?u32 = null,
@@ -34,10 +35,10 @@ pub const Mailbox = struct {
             },
             .logprobs => |r| m.rows.appendSlice(m.gpa, r) catch {},
             .prompt_logprobs => |r| m.prompt_rows = m.gpa.dupe(api.LogprobRow, r) catch null,
-            .tokens => |t| {
-                m.tokens.appendSlice(m.gpa, t) catch {};
+            .tokens => |t| if (m.tokens.appendSlice(m.gpa, t)) |_| {
+                _ = m.unread.fetchAdd(@intCast(t.len), .monotonic); // only tokens the reader will take and count down
                 m.chunks.append(m.gpa, m.tokens.items.len) catch {};
-            },
+            } else |_| {},
             .audio => |n| m.audio = n,
             .finished => |f| {
                 m.finished = true;
