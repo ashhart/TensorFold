@@ -42,6 +42,8 @@ pub const Metrics = struct {
     drafted: u64 = 0,
     accepted: u64 = 0,
     rounds: u64 = 0,
+    kept_unoffered: u64 = 0,
+    kept_malformed: u64 = 0,
     disconnects: u64 = 0,
     latency: Histogram = .{},
     ttft: Histogram = .{},
@@ -104,6 +106,14 @@ pub const Metrics = struct {
         m.disconnects += 1;
     }
 
+    /// Tool-call envelopes a finished reply kept as text, by an unoffered name and by malformed markup.
+    pub fn keptToolCalls(m: *Metrics, io: std.Io, unoffered: usize, malformed: usize) void {
+        m.mutex.lockUncancelable(io);
+        defer m.mutex.unlock(io);
+        m.kept_unoffered += unoffered;
+        m.kept_malformed += malformed;
+    }
+
     /// What the ledger says of an engine that cannot render live: parked (no engine values), or its last counts.
     pub const Parked = struct { parked: bool = false, running: u32 = 0, waiting: u32 = 0, generation: u64 = 0 };
 
@@ -130,6 +140,8 @@ pub const Metrics = struct {
         try gauge(w, "generation_tokens_total", "counter", "Generated tokens of finished requests.", snap.generation);
         try gauge(w, "mtp_drafted_total", "counter", "Draft tokens verified on finished requests.", snap.drafted);
         try gauge(w, "mtp_accepted_total", "counter", "Draft tokens kept on finished requests.", snap.accepted);
+        try gauge(w, "kept_tool_calls_unoffered_total", "counter", "Tool-call envelopes kept as text because they named a tool the request did not offer.", snap.kept_unoffered);
+        try gauge(w, "kept_tool_calls_malformed_total", "counter", "Tool-call envelopes kept as text because their markup did not parse.", snap.kept_malformed);
         try histogram(w, "request_latency_seconds", "Seconds from arrival to the reply leaving.", snap.latency);
         try histogram(w, "time_to_first_token_seconds", "Seconds from arrival to the first generated token.", snap.ttft);
         try histogram(w, "request_decode_seconds", "Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.", snap.decode);
@@ -191,6 +203,8 @@ pub const Metrics = struct {
         try pools(w, "kv_cache_usage_ratio", "pool", live, window);
         try gauge(w, "mtp_drafted_total", "counter", "Draft tokens verified on finished requests.", snap.drafted);
         try gauge(w, "mtp_accepted_total", "counter", "Draft tokens kept on finished requests.", snap.accepted);
+        try gauge(w, "kept_tool_calls_unoffered_total", "counter", "Tool-call envelopes kept as text because they named a tool the request did not offer.", snap.kept_unoffered);
+        try gauge(w, "kept_tool_calls_malformed_total", "counter", "Tool-call envelopes kept as text because their markup did not parse.", snap.kept_malformed);
         try histogram(w, "request_latency_seconds", "Seconds from arrival to the reply leaving.", snap.latency);
         try histogram(w, "time_to_first_token_seconds", "Seconds from arrival to the first generated token.", snap.ttft);
         try histogram(w, "request_decode_seconds", "Seconds a finished request spent decoding. Its sum over generation_tokens_total is the decode rate.", snap.decode);
