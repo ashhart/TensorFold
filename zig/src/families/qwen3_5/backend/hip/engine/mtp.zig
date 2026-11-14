@@ -40,6 +40,8 @@ pub const Head = struct {
     gpa: std.mem.Allocator,
     d: *const hip.Runtime,
     w: *const weights.MtpHead,
+    /// rocBLAS on the engine's stream: a dequantized (ModelOpt) head's BF16 projections run through it.
+    blas: ?*const hip.blas.Blas,
     heads: usize,
     kv_heads: usize,
     mlp: ?view.Mlp,
@@ -62,7 +64,7 @@ pub const Head = struct {
     graphs: graph_cache.Cache(ChainKey, void),
 
     /// The head of `m` with no device memory yet, or null when the checkpoint has none: what `deviceBytes` counts.
-    fn describe(gpa: std.mem.Allocator, d: *const hip.Runtime, m: *const weights.Model, model: *const view.Model, cap: usize) !?Head {
+    fn describe(gpa: std.mem.Allocator, d: *const hip.Runtime, blas: ?*const hip.blas.Blas, m: *const weights.Model, model: *const view.Model, cap: usize) !?Head {
         const w = if (m.mtp) |*x| x else return null;
         const s = m.spec;
         const qa = try bridge.projection(w.q);
@@ -77,6 +79,7 @@ pub const Head = struct {
             .gpa = gpa,
             .d = d,
             .w = w,
+            .blas = blas,
             .heads = qa.n / s.head_dim / @as(usize, if (w.gated) 2 else 1),
             .kv_heads = kv_heads,
             .mlp = if (w.mlp) |x| try bridge.mlpView(x, false) else null,
@@ -96,15 +99,15 @@ pub const Head = struct {
 
     /// Device bytes the head of `m` holds for `cap` chains (0 without one): caches, rows, scalars and its arena.
     pub fn deviceBytes(gpa: std.mem.Allocator, d: *const hip.Runtime, lib: *const hip.Launcher, m: *const weights.Model, model: *const view.Model, cap: usize) !usize {
-        var h = (try describe(gpa, d, m, model, cap)) orelse return 0;
+        var h = (try describe(gpa, d, null, m, model, cap)) orelse return 0;
         defer h.graphs.deinit();
         const row = m.spec.hidden * model.act.size();
         return 2 * h.cache_bytes * cap + cap * row + row + h.layout().total + try h.scratch(lib, model);
     }
 
     /// The head of `m`, or null when the checkpoint has none; `cap` chains at most run in one batch.
-    pub fn init(gpa: std.mem.Allocator, d: *const hip.Runtime, lib: *const hip.Launcher, m: *const weights.Model, model: *const view.Model, cap: usize) !?*Head {
-        const described = (try describe(gpa, d, m, model, cap)) orelse return null;
+    pub fn init(gpa: std.mem.Allocator, d: *const hip.Runtime, lib: *const hip.Launcher, blas: ?*const hip.blas.Blas, m: *const weights.Model, model: *const view.Model, cap: usize) !?*Head {
+        const described = (try describe(gpa, d, blas, m, model, cap)) orelse return null;
         const s = m.spec;
         const h = try gpa.create(Head);
         errdefer gpa.destroy(h);
@@ -127,10 +130,15 @@ pub const Head = struct {
         return h;
     }
 
+    /// This head's launches on `s`: the engine's library and arena, the activation kind and its rocBLAS.
+    fn ops(h: *const Head, m: *const view.Model, lib: *const hip.Launcher, s: hip.abi.Stream, arena: *hip.Arena) Ops {
+        return .{ .l = lib, .bf16 = m.act == .bf16, .stream = s, .arena = arena, .blas = h.blas };
+    }
+
     /// The arena a batch of `cap` chains takes at full depth, counted on the counting stream.
     fn scratch(h: *Head, lib: *const hip.Launcher, m: *const view.Model) !usize {
         var arena = hip.Arena.counting();
-        const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = hip.counting, .arena = &arena };
+        const o: Ops = h.ops(m, lib, hip.counting, &arena);
         try h.steps(o, m, h.draft_head, h.cap, max_depth, true);
         return arena.peak;
     }
@@ -171,7 +179,7 @@ pub const Head = struct {
     }
 
     fn batch(h: *Head, lib: *const hip.Launcher, stream: hip.Stream, m: *const view.Model, jobs: []Job, graphs: bool) !void {
-        const o: Ops = .{ .l = lib, .bf16 = m.act == .bf16, .stream = stream.handle, .arena = &h.arena };
+        const o: Ops = h.ops(m, lib, stream.handle, &h.arena);
         h.arena.reset();
         const rows = jobs.len;
         const at = h.layout();
@@ -258,7 +266,7 @@ pub const Head = struct {
             const ids = if (n == 0) dev else drafts - 4 * h.cap;
             const logits = try h.step(o, m, head, cur, ids, rows, dev + at.slots + 4 * n, dev + at.pos + 4 * h.cap * n, n);
             try o.argmaxRows(logits, rows, head.n, drafts);
-            if (cut and n + 1 < most) try o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n);
+            try if (cut and n + 1 < most) o.tokenProb(logits, rows, head.n, 0, dev + at.probs + 4 * h.cap * n);
             cur = .{ .ptr = h.last, .kind = m.act };
         }
     }

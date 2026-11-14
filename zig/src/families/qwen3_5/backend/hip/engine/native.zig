@@ -15,13 +15,15 @@ const hip_lanes = @import("hip_lanes.zig");
 const joint = @import("joint_readout.zig");
 const config = @import("../../../weights/config.zig");
 
-/// The MLX affine widths this native text server loads, each with its group size.
+/// The MLX affine widths this native text server loads, each with its group size, then ModelOpt's own formats.
 const mlx_formats = blk: {
     const widths = @import("core").quant.mlx.bit_widths;
-    var out: [widths.len * 3][]const u8 = undefined;
+    const extra = [_][]const u8{ "modelopt-nvfp4", "modelopt-fp8" };
+    var out: [widths.len * 3 + extra.len][]const u8 = undefined;
     for (widths, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |g, j| {
         out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, g });
     };
+    for (extra, 0..) |f, k| out[widths.len * 3 + k] = f;
     const done = out;
     break :blk &done;
 };
@@ -82,7 +84,7 @@ fn decisionOnly(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: [
         const what = "the joint schema head needs the BF16 checkpoint";
         return std.fmt.allocPrint(a, "{s}: {s} is quantized ({t})", .{ what, dir, c.quant }) catch what;
     }
-    if (c.quant != .bf16 or head) return null;
+    if (c.quant != .bf16 or c.modelopt or head) return null;
     if (engine.chatBf16(gpa, io, dir)) return null; // an image checkpoint: a tower the engine reads, no joint head
     const what = "BF16 Qwen3.5 serves as a decision backbone only";
     return std.fmt.allocPrint(a, "{s}: {s} has no joint_head_config.json", .{ what, dir }) catch what;
@@ -220,12 +222,14 @@ fn prepare(
     // the most streams up to the ones asked whose bytes fit, then the least of that over the ranks
     var streams = o.streams;
     while (streams > 0) : (streams -= 1) {
-        if ((served(e, streams, capacity, readouts) catch |err| return steps.refuseAll(
-            a,
-            problem,
-            "the native HIP engine cannot count its scratch ({s})",
-            .{@errorName(err)},
-        )) <= room) break;
+        if ((served(e, streams, capacity, readouts) catch |err| {
+            return steps.refuseAll(
+                a,
+                problem,
+                "the native HIP engine cannot count its scratch ({s})",
+                .{@errorName(err)},
+            );
+        }) <= room) break;
     }
     streams = (try steps.together(a, .{ streams, 0 }, .least, problem))[0];
     // every rank holds the same least, so every rank refuses here alike
@@ -366,9 +370,10 @@ fn openJoint(a: std.mem.Allocator, gpa: std.mem.Allocator, e: *Engine, loaded: j
     errdefer if (owned) w.deinit();
     const blas = if (e.blas) |*b| b else return steps.refuseAll(a, problem, "the joint schema head needs rocBLAS", .{});
     const head_rows = e.model().head;
-    if (head_rows.format() != .bf16) return steps.refuseAll(a, problem, "the joint schema head reads a BF16 lm_head", .{});
+    const head_format = head_rows.format();
+    if (head_format == null or head_format.? != .bf16) return steps.refuseAll(a, problem, "the joint schema head reads a BF16 lm_head", .{});
     const before = hip.usage(false).device;
-    const head = hip.joint_schema.Head.init(gpa, &e.driver, &e.lib, blas, w.weights, bounds, head_rows.handle.bf16.weight, head_rows.n) catch |err|
+    const head = hip.joint_schema.Head.init(gpa, &e.driver, &e.lib, blas, w.weights, bounds, head_rows.handle.?.bf16.weight, head_rows.n) catch |err|
         return steps.refuseAll(a, problem, "the joint schema head cannot start ({s})", .{@errorName(err)});
     owned = false;
     errdefer head.deinit();

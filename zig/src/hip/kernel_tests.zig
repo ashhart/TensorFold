@@ -60,6 +60,8 @@ test {
     _ = @import("kernel_tests/ops.zig");
     _ = @import("kernel_tests/conv_split.zig");
     _ = @import("kernel_tests/dense.zig");
+    _ = @import("kernel_tests/nvfp4.zig");
+    _ = @import("kernel_tests/fp8.zig");
     _ = @import("kernel_tests/silu_fuse.zig");
     _ = @import("kernel_tests/argmax.zig");
     _ = @import("kernel_tests/embed.zig");

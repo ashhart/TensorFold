@@ -1,0 +1,61 @@
+//! ModelOpt's weight-only formats, NVFP4 and FP8, kept as stored with a product kernel decoding each in flight.
+
+const std = @import("std");
+const core = @import("core");
+const quant = core.quant;
+const bf16_round = core.bf16_round;
+const table = @import("table.zig");
+const host = @import("host.zig");
+
+const convert = quant.convert;
+const Tensor = table.Tensor;
+const Allocator = std.mem.Allocator;
+
+/// Inputs sharing one NVFP4 scale, as ModelOpt writes it.
+pub const group = quant.nvfp4.group;
+
+/// The ModelOpt algorithms this reader takes.
+pub const Algo = enum { nvfp4, fp8 };
+
+/// `key`'s stored algorithm, by the tensors beside it; null when they are not ModelOpt's.
+pub fn algo(t: *const table.Table, key: []const u8) ?Algo {
+    var w: [320]u8 = undefined;
+    var s2: [320]u8 = undefined;
+    var s: [320]u8 = undefined;
+    if (!t.has(name(&w, key, ".weight") orelse return null)) return null;
+    if (t.has(name(&s2, key, ".weight_scale_2") orelse return null)) return .nvfp4;
+    if (t.has(name(&s, key, ".weight_scale") orelse return null)) return .fp8;
+    return null;
+}
+
+fn name(buf: []u8, key: []const u8, suffix: []const u8) ?[]const u8 {
+    return std.fmt.bufPrint(buf, "{s}{s}", .{ key, suffix }) catch null;
+}
+
+/// `key`'s projection: ModelOpt's NVFP4 and FP8 stay as stored, their kernels decoding in flight.
+pub fn read(a: Allocator, t: *const table.Table, key: []const u8, what: Algo) !host.Projection {
+    return switch (what) {
+        .nvfp4 => .{ .nvfp4 = try quant.nvfp4.read(a, t, key) },
+        .fp8 => .{ .fp8 = try fp8(a, t, key) },
+    };
+}
+
+fn fp8(a: Allocator, t: *const table.Table, key: []const u8) !host.StoredFp8 {
+    var b: [2][320]u8 = undefined;
+    const w = try t.get(name(&b[0], key, ".weight") orelse return error.MissingTensor);
+    const s = try t.get(name(&b[1], key, ".weight_scale") orelse return error.MissingTensor);
+    if (w.dtype != .f8_e4m3 or w.rank != 2) return refuse(b[0][0..], "an FP8 weight is E4M3 [N, K]");
+    if (s.dtype != .f32) return refuse(b[1][0..], "FP8's weight scale is F32");
+    if (s.numel() != 1) return refuse(b[1][0..], "FP8's weight scale is one number a projection, as ModelOpt writes it");
+    const one = convert.load(.f32, s.bytes, 0);
+    if (!std.math.isFinite(one) or one == 0) return refuse(b[1][0..], "FP8's weight scale is zero, infinite or nan");
+    for (w.bytes) |byte| if (byte & 0x7f == 0x7f) return refuse(b[0][0..], "an FP8 weight holds an E4M3 nan code");
+    // the codes stay as stored; the product kernel decodes them and applies this scale once to its f32 sum
+    const scale = try a.alloc(f32, 1);
+    scale[0] = one;
+    return .{ .weight = w, .scale = scale };
+}
+
+fn refuse(key: []const u8, what: []const u8) error{UnexpectedTensor} {
+    return quant.types.refuse(key, what);
+}

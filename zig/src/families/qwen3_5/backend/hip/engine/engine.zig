@@ -66,10 +66,12 @@ fn gib(bytes: usize) f64 {
     return @as(f64, @floatFromInt(bytes)) / (1 << 30);
 }
 
-/// The checkpoint's device bytes, near enough to refuse before reading: bf16 text, doubled when `chat` widens it.
+/// The checkpoint's device bytes, near enough to refuse before reading: a ModelOpt one's own, or bf16 text.
 fn checkpointBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, chat: bool) !u64 {
     var c = try config.Config.read(gpa, io, dir);
     defer c.deinit();
+    // a ModelOpt checkpoint keeps its codes as stored and widens its group tables: count what the device holds
+    if (c.modelopt) return table.deviceBytes(gpa, io, dir);
     if (c.quant != .bf16) return admission.weightBytes(io, dir);
     const bf16 = try table.textBytes(gpa, io, dir);
     return if (chat) 2 * bf16 else bf16;
@@ -113,6 +115,10 @@ pub const Engine = struct {
     pub const Rows = lane_round.Rows;
 
     gpa: std.mem.Allocator,
+    /// A ModelOpt checkpoint: its text layers decode in flight, its vision tower runs on rocBLAS.
+    modelopt: bool = false,
+    /// An image tower the engine reads: rocBLAS serves its linears, so the plan counts its workspace.
+    tower: bool = false,
     driver: hip.Runtime,
     ctx: hip.Context,
     lib: hip.Launcher,
@@ -200,16 +206,35 @@ pub const Engine = struct {
             if (seen) |limits| pf.weights += try vision.Vision.bytes(try vision.Vision.config(gpa, io, dir), limits);
             if (pf.weights > pf.pool.room(pf.held)) return error.WeightsDoNotFit;
         }
-        _ = try steps.done(.{ 0, 0 }, .first);
-        e.weights = try weights.Model.loadRankWith(gpa, io, &e.driver, dir, group, chat);
-        errdefer e.weights.deinit();
-        if (e.plain() or chat) {
-            // a bf16 checkpoint's products (rocBLAS, or widened for chat): one rank, not qualified under graphs
+        var modelopt = false;
+        {
+            var cfg = config.Config.read(gpa, io, dir) catch null;
+            defer if (cfg) |*c| c.deinit();
+            modelopt = if (cfg) |c| c.modelopt else false;
+            e.modelopt = modelopt;
+        }
+        e.tower = if (vision.Vision.config(gpa, io, dir)) |_| true else |_| false;
+        // a ModelOpt checkpoint's own products: bf16 activations and one rank, refused before its shards are read
+        if (modelopt) {
             if (e.act != .bf16) {
-                std.log.err("a bf16 checkpoint needs bf16 activations; this GPU computes in fp16", .{});
+                std.log.err("a ModelOpt checkpoint needs bf16 activations; this GPU computes in fp16", .{});
                 return error.UnsupportedQuantization;
             }
             if (o.world > 1) {
+                std.log.err("a ModelOpt checkpoint runs on one rank", .{});
+                return error.UnsupportedQuantization;
+            }
+        }
+        _ = try steps.done(.{ 0, 0 }, .first);
+        e.weights = try weights.Model.loadRankWith(gpa, io, &e.driver, dir, group, chat);
+        errdefer e.weights.deinit();
+        if (e.plain() or chat or modelopt) {
+            // bf16 products (rocBLAS, or the dense kernels a ModelOpt or chat checkpoint reads): no graphs
+            if ((e.plain() or chat) and e.act != .bf16) {
+                std.log.err("a bf16 checkpoint needs bf16 activations; this GPU computes in fp16", .{});
+                return error.UnsupportedQuantization;
+            }
+            if ((e.plain() or chat) and o.world > 1) {
                 std.log.err("a bf16 checkpoint runs on one rank", .{});
                 return error.UnsupportedQuantization;
             }
@@ -260,7 +285,8 @@ pub const Engine = struct {
         errdefer e.pool.deinit();
         e.round = try lane_round.State.init(e);
         errdefer e.round.deinit(e);
-        if (e.plain()) {
+        // rocBLAS serves an unquantized checkpoint's projections and a ModelOpt checkpoint's vision tower
+        if (e.plain() or e.tower) {
             e.workspace = try hip.DeviceBuffer.alloc(&e.driver, hip.blas.workspace_bytes);
             e.blas = hip.blas.Blas.open(e.stream) catch |err| {
                 e.workspace.free();
@@ -286,7 +312,7 @@ pub const Engine = struct {
     /// Device bytes `size` allocates beside the weights, with the arenas already counted.
     fn sizedBytes(e: *const Engine, arenas: [2]usize, rows: usize, prompt_rows: usize, capacity: usize, pool_pages: usize) usize {
         const m = e.model();
-        const blas: usize = if (e.plain()) hip.blas.workspace_bytes else 0;
+        const blas: usize = if (e.plain() or e.tower) hip.blas.workspace_bytes else 0;
         return arenas[0] + arenas[1] + prompt_rows * 4 + draw.Drawer.deviceBytes(rows) + pages.Pool.deviceBytes(m, pool_pages) +
             plan.Buffer.deviceBytes(rows, m.spec.n_layers) + state.Caches.deviceBytes(m, rows) +
             hip.Votes.bytes(e.o.world) + blas + if (m.torch_text) capacity * 12 else 0;
@@ -294,7 +320,10 @@ pub const Engine = struct {
 
     /// The checkpoint's projections are BF16 as stored (an unquantized HF checkpoint): rocBLAS runs them.
     pub fn plain(e: *const Engine) bool {
-        return e.weights.embed == .bf16;
+        return switch (e.weights.embed) {
+            .core => |d| std.meta.activeTag(d) == .bf16,
+            .nvfp4, .fp8 => false,
+        };
     }
 
     fn closeBlas(e: *Engine) void {

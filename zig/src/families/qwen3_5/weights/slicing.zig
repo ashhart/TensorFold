@@ -25,12 +25,12 @@ pub fn localSpec(s: config.Spec, r: Rank) Error!config.Spec {
 
 /// `_rows`: output rows `spans` of a projection, the share of a column-split one.
 fn sliceRows(a: Allocator, p: host.Projection, spans: []const Span) Error!host.Projection {
-    return quant.sliceRows(a, p, spans);
+    return host.sliceRows(a, p, spans);
 }
 
 /// `_cols`: one rank's whole input groups of a row-split projection, whose fp32 outputs the ranks sum.
 fn cols(a: Allocator, p: host.Projection, r: Rank, what: []const u8) Error!host.Projection {
-    return quant.sliceCols(a, p, r, what);
+    return host.sliceCols(a, p, r, what);
 }
 
 /// This rank's rows of each segment of a concatenated output (q | k | v), each segment split evenly.

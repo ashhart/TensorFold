@@ -125,7 +125,7 @@ pub const Hip = struct {
         h.order = try gpa.alloc(*const lanes.Stream, rows);
         errdefer gpa.free(h.order);
         // under tensor parallelism only rank 0 holds the head (whole): drafts only choose the rows every rank verifies
-        h.head = try mtp.Head.init(gpa, &e.driver, &e.lib, &e.weights, e.model(), @min(rows, max_jobs));
+        h.head = try mtp.Head.init(gpa, &e.driver, &e.lib, if (e.blas) |*b| b else null, &e.weights, e.model(), @min(rows, max_jobs));
         return h;
     }
 

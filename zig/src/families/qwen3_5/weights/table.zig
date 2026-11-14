@@ -22,6 +22,8 @@ pub const Table = struct {
     quant: formats.Config,
     /// A bf16 chat checkpoint's projections read as fp32 dense (row-invariant kernels), not as rocBLAS BF16.
     widen: bool = false,
+    /// A ModelOpt checkpoint's own bf16 layers (an lm_head, a linear) read dense: row-invariant, not rocBLAS.
+    modelopt: bool = false,
 
     /// Maps `paths` (later files win a repeated name, as the Python dict does).
     pub fn open(gpa: std.mem.Allocator, io: Io, paths: []const []const u8, strip: []const u8, quant: formats.Config) !Table {
@@ -179,13 +181,39 @@ pub fn textBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
         var it = shard.names.iterator();
         while (it.next()) |kv| {
             const key = kv.key_ptr.*;
-            if (!std.mem.startsWith(u8, key, "model.language_model.") and !std.mem.eql(u8, key, "lm_head.weight")) continue;
+            const text = std.mem.startsWith(u8, key, "model.language_model.");
+            const head = std.mem.startsWith(u8, key, "lm_head.");
+            const mtp = std.mem.startsWith(u8, key, "mtp.");
+            if (!text and !head and !mtp) continue;
             total += kv.value_ptr.end - kv.value_ptr.begin;
         }
     }
     return total;
 }
 
+/// The bytes a ModelOpt checkpoint takes on the device: U8 codes as stored, an E4M3 tensor at 2 bytes a value.
+pub fn deviceBytes(gpa: std.mem.Allocator, io: Io, dir: []const u8) !u64 {
+    var files = try Files.indexed(gpa, io, dir);
+    defer files.deinit();
+    var total: u64 = 0;
+    for (files.model) |path| {
+        var shard = try Shard.open(gpa, io, path);
+        defer shard.close(io);
+        var it = shard.names.iterator();
+        while (it.next()) |kv| {
+            const key = kv.key_ptr.*;
+            const text = std.mem.startsWith(u8, key, "model.language_model.");
+            const head = std.mem.startsWith(u8, key, "lm_head.");
+            const mtp = std.mem.startsWith(u8, key, "mtp.");
+            if (!text and !head and !mtp) continue;
+            const stored: u64 = @intCast(kv.value_ptr.end - kv.value_ptr.begin);
+            // an E4M3 group table widens to BF16; an FP8 weight's codes stay the byte they are
+            const group_table = std.mem.endsWith(u8, key, ".weight_scale");
+            total += if (group_table and kv.value_ptr.dtype == .f8_e4m3) 2 * stored else stored;
+        }
+    }
+    return total;
+}
 fn containsLower(name: []const u8, needle: []const u8) bool {
     var i: usize = 0;
     while (i + needle.len <= name.len) : (i += 1) {

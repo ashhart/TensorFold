@@ -12,8 +12,9 @@ pub const dense = @import("dense.zig");
 /// BF16 as stored, an unquantized checkpoint's: the family opts in (`bf16.detect`), so `read_order` never offers it.
 pub const bf16 = @import("bf16.zig");
 pub const experts = @import("experts.zig");
-/// FP8 and NVFP4 values and fp64 references; host only (no Format: their kernels' layouts are each backend's).
+/// FP8 values and fp64 references; host only (no Format: kernel layouts are each backend's).
 pub const fp8 = @import("fp8.zig");
+/// ModelOpt NVFP4: e2m1 codes, an e4m3 scale a 16 inputs and one global scale, kept as stored on the device.
 pub const nvfp4 = @import("nvfp4.zig");
 pub const widen = @import("widen.zig");
 
@@ -180,14 +181,22 @@ pub const Projection = struct {
     k: u32,
     /// Split along K: the product stays fp32, one rank's share of a sum.
     partial: bool = false,
-    handle: Handle,
+    /// The shared format's handle; null for a ModelOpt NVFP4 projection, whose matrix is `nvfp4`.
+    handle: ?Handle = null,
+    /// ModelOpt NVFP4's matrix, a format the engine names: core keeps no such `Format`.
+    nvfp4: ?nvfp4.Matrix = null,
+    /// ModelOpt FP8's matrix, the same way.
+    fp8: ?fp8.Matrix = null,
 
-    pub fn format(p: Projection) Format {
-        return std.meta.activeTag(p.handle);
+    pub fn format(p: Projection) ?Format {
+        const h = p.handle orelse return null;
+        return switch (h) {
+            inline else => |_, tag| tag,
+        };
     }
 
-    pub fn decoder(p: Projection) Decoder {
-        return switch (p.format()) {
+    pub fn decoder(p: Projection) ?Decoder {
+        return switch (p.format() orelse return null) {
             inline else => |f| Module(f).decoder,
         };
     }
