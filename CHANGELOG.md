@@ -35,6 +35,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: host tests drive 200 refused, cancelled or failed requests down each lane-host path they reach (refusal at admission, cancels while queued and mid-request, backend errors, no lane memory, and a mix) and check none strands a lane, page or slot (#3015, for #2135).
 
+- DeepSeek-V4.1 on Metal: the target's own buffers (prompt scratch, each slot's KV, tails, forward and layer scratch, RoPE tables) now join the weights' residency set, inside its load limit (the set refuses and logs what would take it past 70% of RAM). Before, a prompt chunk or decoder pass could wait 20-830 ms between commit and its first GPU instruction while macOS mapped them again, and a server's first request waited about 1.9 s. Replies are unchanged. On an M5 Ultra, cold prompts run about 5-7% faster (2K tokens 600 -> 631 tok/s, 8K 855 -> 917, 30K about 1,000 -> 1,063) (#3321).
+
 - Tests: the cluster bring-up test of a stopped peer checks the membership's real promise instead of a two-second wall bound that failed on busy CI runners (#3310).
 
 - Nemotron Omni on CUDA: when an image request's setup fails (more image rows than the budget, or an encoder error), its image rows are now cleared. Before, the next text-only request on the same engine spliced them into its prompt and gave a wrong reply with no error (#2985, fixes #2943). Thanks to @jishnuvenugopal.
