@@ -419,7 +419,12 @@ pub const Target = struct {
         s.live = false;
         if (s.open) t.commitTaps(s, s.rows);
         s.open = false;
-        if (s.whole and t.cache.on()) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
+        if (s.whole and t.cache.on() and !promptDiffers(t)) t.cache.save(t.env.c, &s.kv, s.hist.items, s.ring, null) catch {};
+    }
+
+    /// Prompt rows on tensor units: their bits are not decode's, so a reply's decoded rows are never a kept prefix.
+    fn promptDiffers(t: *const Target) bool {
+        return t.env.p.promptUnits();
     }
 
     /// The serial reference without lanes: the prompt, then one row a step, each drawn at its own position.

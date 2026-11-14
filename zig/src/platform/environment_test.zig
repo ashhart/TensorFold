@@ -103,6 +103,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_CUDA_KERNELS", .raw = "/tmp/captured set", .n = 0 },
     .{ .name = "TF_SLIDE_FORGET_FAIL", .raw = " 0 ", .n = 0 },
     .{ .name = "TF_DSV41_SMALL", .raw = "1", .n = 1 },
+    .{ .name = "TF_DSV41_PROMPT_UNITS", .raw = "0", .n = 0 },
+    .{ .name = "TF_DSV41_PROMPT_UNITS", .raw = "1", .n = 1 },
     .{ .name = "TF_DSV41_ASSETS", .raw = "deepseek assets", .n = 0 },
     .{ .name = "TF_DSV41_ENGRAM_DIR", .raw = "engram-rows", .n = 0 },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .raw = "full", .n = 1 },
@@ -225,6 +227,11 @@ test "environment: word switches take 0 and 1 and the word forms in any case; ex
         try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_SAMPLING", raw));
     }
     try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_KV_SPLIT", "true"));
+    // the prompt units are on unless set to exactly 0; unset or blank keeps the default
+    try t.expect(try e.value(bool, "TF_DSV41_PROMPT_UNITS", null, true));
+    try t.expect(try e.value(bool, "TF_DSV41_PROMPT_UNITS", "", true));
+    try t.expect(!try e.value(bool, "TF_DSV41_PROMPT_UNITS", "0", true));
+    try t.expectError(error.InvalidEnvironment, e.parse("TF_DSV41_PROMPT_UNITS", "off"));
 }
 
 test "environment: the keep-others switch is exact 0 or 1, checked when the CUDA backend starts" {

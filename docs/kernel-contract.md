@@ -415,6 +415,13 @@ Metal also checks DeepSeek V4.1's CSA2 attention (`csa2_attn.metal`): decode row
 the sink with the inverse RoPE, and a row's bytes equal across chunk splits and between the two launches (four controls,
 each one planted fault, and one on the row bytes).
 
+On the M5's tensor units, Metal also checks DeepSeek V4.1's dense FP8 prompt rows there, `fp8_nax` (on by default;
+`TF_DSV41_PROMPT_UNITS=0` keeps decode's bits): each output within an `mma_step` for every k16 step of float64, and its
+rows' bytes equal across chunk splits. It folds each E4M3 code times its E8M0 block scale into one bf16 operand, exact
+for scale bytes 10 and up; at load the host turns it off when a block under 10 holds a nonzero code (`scale_guard.zig`).
+The controls read NaN codes as finite, drop the last K group, round the sums to fp16 and write past the output. Before
+the M5 it is not registered; its launches are in `dsv41_nax_records.zig`.
+
 CUDA also checks the grouped EXL3 experts' `tf_exl3_plan_finish`: its bf16 and fp32 SwiGLU and its fp32 and bf16 down
 epilogues bit-equal to main's kernel (kept in `contract_controls.cu`), and its SwiGLU-OAI (`act_mode` 2,
 MiniMax-M3.1-Flash's) against float64 at its rounding points (two controls: the up without its + 1, alpha 1).

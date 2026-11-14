@@ -30,6 +30,7 @@ pub const target = @import("target.zig");
 pub const pass = @import("pass.zig");
 pub const serve = @import("serve.zig");
 pub const boot = @import("boot.zig");
+pub const scale_guard = @import("scale_guard.zig");
 
 test {
     std.testing.refAllDecls(@This());

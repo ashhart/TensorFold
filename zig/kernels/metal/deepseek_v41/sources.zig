@@ -2,6 +2,8 @@
 
 /// DeepSeek V4.1's release FP8 dense prompt rows, decoded exactly into fp32 MMA groups.
 pub const fp8_mma = @embedFile("fp8_mma.metal");
+/// DeepSeek V4.1's release FP8 dense prompt rows on the M5's tensor units (nax.h inlined at load).
+pub const fp8_nax = @embedFile("fp8_nax.metal");
 /// DeepSeek V4.1 release FP8 dense projections: 32x32 blocks and split-invariant row sums.
 pub const fp8_rows = @embedFile("fp8_rows.metal");
 /// DeepSeek V4.1 CSA2 attention: window, selected compressed rows and the sink over one shared latent row.

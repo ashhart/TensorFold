@@ -94,7 +94,12 @@ fn freeAll(xs: [][]u32) void {
 
 /// The reference: the target's serial decode of each ask on a model of its own (no lanes, no cache, no drafts).
 fn reference(asks: []const Ask, out: [][]u32) !void {
-    const m = try fs.open(gpa, io, seed, .{ .slots = 1, .drafts = false });
+    return referenceWith(asks, out, true);
+}
+
+/// `reference` with prompt rows on tensor units where the GPU has them (`units`), or on the decode-equal kernels.
+fn referenceWith(asks: []const Ask, out: [][]u32, units: bool) !void {
+    const m = try fs.open(gpa, io, seed, .{ .slots = 1, .drafts = false, .units = units });
     defer fs.close(m);
     for (asks, out) |k, *o| o.* = try m.t.serial(0, k.prompt, k.max, k.sampling);
 }
@@ -151,7 +156,8 @@ test "dsv41 metal serve: (a) concurrent == solo == serial, (b) drafted == draft:
 test "dsv41 metal serve: (c) prompt-cache hits (the same prompt, a later turn) == fresh runs" {
     const p = try ids(300, 3);
     defer gpa.free(p);
-    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    // decode-equal prompt rows keep a reply's rows as a prefix too; (c1) checks tensor-unit prompt rows
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30, .units = false });
     const s = try Served.open(gpa, io, m.model(), ".", null);
     defer Served.close(s);
     const e = s.engine();
@@ -175,7 +181,7 @@ test "dsv41 metal serve: (c) prompt-cache hits (the same prompt, a later turn) =
     const hits = m.t.stats.hits - hits0;
     const reported = cached_rows[0..3].*;
     var want: [3][]u32 = undefined;
-    try reference(&asks, &want);
+    try referenceWith(&asks, &want, false);
     defer freeAll(&want);
     const bad = same(&want, &got);
     say(bad == 0 and hits == 3, "(c) 3 cached prompts ({d} hits, {d} rows restored in all) vs fresh: {d} replies differ", .{ hits, m.t.stats.cached_rows, bad });
@@ -286,4 +292,40 @@ test "dsv41 metal serve: (f) plain rounds at four streams, drafts again at two f
     say(bad == 0 and caught > 0 and drafted > 0, "(f) 4 together vs serial: {d} differ; {d} rows caught up from history, {d} drafted rows, {d} ingests", .{ bad, caught, drafted, m.ad.ingests });
     try testing.expectEqual(@as(usize, 0), bad);
     try testing.expect(caught > 0 and drafted > 0);
+}
+
+test "dsv41 metal serve: (c1) prompt-cache hits with prompt rows on tensor units == fresh; a reply's rows are not kept" {
+    const p = try ids(300, 11);
+    defer gpa.free(p);
+    const m = try fs.open(gpa, io, seed, .{ .cache_bytes = 1 << 30 });
+    const s = try Served.open(gpa, io, m.model(), ".", null);
+    defer Served.close(s);
+    const e = s.engine();
+    var drafted: u64 = 0;
+    var first: [1][]u32 = undefined;
+    try serve(e, &.{.{ .prompt = p, .max = 40 }}, false, &first, &drafted);
+    defer freeAll(&first);
+    // a later turn (the prompt, the reply but its last token, new ids), then the first prompt again
+    const extra = try ids(50, 12);
+    defer gpa.free(extra);
+    const turn = try std.mem.concat(gpa, u32, &.{ p, first[0][0..39], extra });
+    defer gpa.free(turn);
+    const asks = [_]Ask{ .{ .prompt = turn, .max = 30 }, .{ .prompt = p, .max = 40 } };
+    const hits0 = m.t.stats.hits;
+    var got: [2][]u32 = undefined;
+    try serve(e, &asks, false, &got, &drafted);
+    defer freeAll(&got);
+    const hits = m.t.stats.hits - hits0;
+    const reported = cached_rows[0..2].*;
+    var want: [2][]u32 = undefined;
+    try reference(&asks, &want);
+    defer freeAll(&want);
+    const bad = same(&want, &got);
+    // tensor-unit prompt rows are not decode's bits, so the later turn resumes at the first prompt, not past it
+    const units = m.t.env.p.promptUnits();
+    const later = if (units) reported[0] == p.len else reported[0] > p.len;
+    say(bad == 0 and hits == 2 and later, "(c1) prompt rows on tensor units: {}; 2 cached prompts ({d} hits, rows resumed {any} for {d} and {d} tokens) vs fresh: {d} replies differ", .{ units, hits, reported, turn.len, p.len, bad });
+    try testing.expectEqual(@as(usize, 0), bad);
+    try testing.expectEqual(@as(u64, 2), hits);
+    try testing.expect(later and reported[1] == p.len);
 }

@@ -34,6 +34,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
+    if (@import("metal_dsv41_limits.zig").tensorOnly(d.name)) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     return !std.mem.startsWith(u8, d.name, "qwen27 q8 ") or @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
 }
 

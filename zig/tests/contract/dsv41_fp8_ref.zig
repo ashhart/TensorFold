@@ -169,6 +169,42 @@ pub const Fp8 = struct {
         };
     }
 
+    /// Float64 sums and their terms' magnitudes as `want`, for a kernel whose own fp32 order is not fp8_rows'.
+    pub fn exactSums(f: Fp8, want: []f64, mag: []f64) void {
+        const k = f.shape.k;
+        for (0..f.shape.rows) |r| for (0..f.shape.n) |j| {
+            var s: f64 = 0;
+            var m: f64 = 0;
+            for (0..k) |i| {
+                const t = @as(f64, f.xv(r, i)) * f.wf[j * k + i];
+                s += t;
+                m += @abs(t);
+            }
+            want[r * f.shape.n + j] = s;
+            mag[r * f.shape.n + j] = m;
+        };
+    }
+
+    /// E4M3's NaN codes (0x7f and 0xff) in two weight rows: every output of those columns is NaN.
+    pub fn nanCodes(f: Fp8) void {
+        const k = f.shape.k;
+        for ([_][2]usize{ .{ 1, k / 2 }, .{ f.shape.n - 1, 3 } }, [_]u8{ 0x7f, 0xff }) |at, code| {
+            f.codes[at[0] * k + at[1]] = code;
+            f.wf[at[0] * k + at[1]] = std.math.nan(f32);
+        }
+    }
+
+    /// On gate 4's inputs: each output as the tensor units leave it, 16 products a step onto one sum over K.
+    pub fn simulateSteps(f: Fp8, acc: c.Accum, order: rows.Order, out: []f64) !void {
+        const k = f.shape.k;
+        const t = try f.a.alloc(f64, k + k / 16 + 1);
+        defer f.a.free(t);
+        for (0..f.shape.rows) |r| for (0..f.shape.n) |j| {
+            for (0..k) |i| t[i] = @as(f64, f.xv(r, i)) * f.wf[j * k + i];
+            out[r * f.shape.n + j] = @import("dsv41_nax_ref.zig").steps(acc, order, t[0..k], t[k..]);
+        };
+    }
+
     /// Float64 magnitudes only, for inputs whose reference values come from elsewhere.
     pub fn magnitudes(f: Fp8, mag: []f64) void {
         const k = f.shape.k;

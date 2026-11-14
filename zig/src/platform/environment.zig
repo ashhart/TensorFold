@@ -62,6 +62,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's 4-bit expert kernels read scales and biases through a 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
+    .{ .name = "TF_DSV41_PROMPT_UNITS", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 keeps DeepSeek-V4.1 prompt rows on the decode kernels' bits; 1, the default, runs their dense FP8 products on an M5's tensor units)" },
     .{ .name = "TF_DSV41_SMALL", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1 reads a DeepSeek-V4.1 Metal checkpoint's config at its own small shapes)" },
     .{ .name = "TF_DSV41_ASSETS", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's Engram token map" },
     .{ .name = "TF_DSV41_ENGRAM_DIR", .scope = .metal, .kind = .path, .forms = "a directory path without control characters holding DeepSeek-V4.1's packed Engram tables" },

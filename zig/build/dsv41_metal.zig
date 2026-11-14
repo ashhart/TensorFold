@@ -106,6 +106,16 @@ pub fn steps(b: *std.Build, metal: *std.Build.Module, sources: *std.Build.Module
     const ptime_run = b.addRunArtifact(b.addTest(.{ .root_module = ptime }));
     ptime_run.has_side_effects = true;
     b.step("test-dsv41-metal-prompt-time", "DeepSeek-V4.1 Metal: ms a stage of one release layer's prompt chunks (TF_DSV41_REAL)").dependOn(&ptime_run.step);
+    const gate = b.createModule(.{
+        .root_source_file = b.path("zig/tests/dsv41_metal/gate_real.zig"),
+        .target = b.graph.host,
+        .optimize = .ReleaseSafe,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "dsv41_metal", .module = fast.pkg }, .{ .name = "metal", .module = metal }, .{ .name = "dsv41", .module = fast.host } },
+    });
+    const gate_run = b.addRunArtifact(b.addTest(.{ .root_module = gate }));
+    gate_run.has_side_effects = true;
+    b.step("test-dsv41-metal-gate", "DeepSeek-V4.1 Metal: tensor-unit prompt rows against decode arithmetic's on the release (TF_DSV41_REAL, TF_DSV41_GATE_IDS)").dependOn(&gate_run.step);
     // tensorfold-dsv41 over Metal: the native server with this family's lane engine (the CUDA pair's macOS twin)
     const exe = @import("dsv41_draft.zig").serverOn(b, b.graph.host, .ReleaseSafe, engine(b, metal, sources, .ReleaseFast));
     b.step("dsv41-metal-serve", "Install tensorfold-dsv41 over Metal (DeepSeek-V4.1 release checkpoints on this Mac)").dependOn(&b.addInstallArtifact(exe, .{}).step);

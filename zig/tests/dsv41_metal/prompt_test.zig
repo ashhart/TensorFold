@@ -129,6 +129,8 @@ test "dsv41 metal prompt: a prompt then 8 decode steps equal the same tokens dec
     const c = &f.r.c;
     const hist = try ff.ids(a, c, n_prompt + steps, 62);
     defer a.free(hist);
+    // tensor-unit prompt rows have their own sums (TF_DSV41_PROMPT_UNITS), so this comparison runs without them
+    f.r.p.promptUnitsOff();
     // decode only: every position one row a launch
     var dslot = try pkg.kv.Slot.init(a, f.r.device, c, limit);
     defer dslot.deinit();

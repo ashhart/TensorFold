@@ -96,6 +96,17 @@ pub const Pipelines = struct {
         return p;
     }
 
+    /// Whether prompt rows' FP8 products run on tensor units (TF_DSV41_PROMPT_UNITS), so their bits are not decode's.
+    pub fn promptUnits(p: *const Pipelines) bool {
+        return p.mma.nax != null;
+    }
+
+    /// Prompt rows back on the decode-equal kernels, the tensor-unit ones released (as TF_DSV41_PROMPT_UNITS=0).
+    pub fn promptUnitsOff(p: *Pipelines) void {
+        if (p.mma.nax) |n| for (n) |x| x.deinit();
+        p.mma.nax = null;
+    }
+
     pub fn deinit(p: *Pipelines) void {
         p.fp8.deinit();
         p.mma.deinit();

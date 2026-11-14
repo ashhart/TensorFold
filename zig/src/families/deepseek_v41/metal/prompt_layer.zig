@@ -56,7 +56,7 @@ pub const Px = struct {
         return .{ .buf = x.tables.of(if (x.c.compressRatio(layer) > 0) .compressed else .window) };
     }
 
-    /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's).
+    /// A dense FP8 projection by the prompt MMA tiles (each row's bits equal the decode row kernel's) or tensor units.
     fn proj(x: *const Px, e: mtl.ComputeEncoder, in: Ref, w: weights.Fp8, out: Ref, rows: u32) !void {
         try mma.encode(&x.p.mma, e, cv(mma.Ref, in), cv(mma.Ref, w.w), cv(mma.Ref, w.s), cv(mma.Ref, out), .{ .k = w.k, .n = w.n, .rows = rows, .out = .bf16 });
     }

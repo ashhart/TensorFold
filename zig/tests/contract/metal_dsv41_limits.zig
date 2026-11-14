@@ -6,9 +6,23 @@ const sources = @import("kernel_sources");
 const limits = @import("contract").limits;
 const Launch = @import("metal_limits.zig").Launch;
 
+/// The tensor-unit prompt kernels: built only on a GPU with tensor units, and the loader has no M1/M2 library.
+pub fn tensorOnly(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "dsv41 nax ");
+}
+
+/// fp8_nax's source as the loader builds it, nax.h inlined.
+pub fn naxText(a: std.mem.Allocator) ![]u8 {
+    return std.mem.replaceOwned(u8, a, sources.dsv41.fp8_nax, "#include \"../nax.h\"", sources.nax);
+}
+
 /// The dsv41 launch's sources, or null when the name belongs to another family.
 pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8, comptime assemble: bool) !?Launch {
     _ = device;
+    if (tensorOnly(d.name)) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = try naxText(a), .pre_m5 = "" };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 xmma units ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = try tf.dsv41_metal.xmma.source(a, "", &.{}, true), .pre_m5 = "" };

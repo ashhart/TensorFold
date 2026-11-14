@@ -1,4 +1,4 @@
-//! DeepSeek V4.1 FP8 prompt MMA under the contract: exact groups, release fixture, chunk invariance, timing.
+//! DeepSeek V4.1 FP8 prompt MMA under the contract (exact groups, chunk invariance, timing); fp8_nax on tensor units.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -6,13 +6,15 @@ const sources = @import("kernel_sources");
 const contract = @import("contract");
 const rig_ = @import("rig.zig");
 const ref = @import("dsv41_fp8_ref.zig");
+const nr = @import("dsv41_nax_ref.zig");
 
 const c = contract.spec;
 const g = contract.gates;
 const fp8 = tf.dsv41_metal.fp8_mma;
 const base = "dsv41_fp8_mma ";
 
-pub const Variant = struct { out: fp8.Out = .f32, fixture: bool = false, ctl: u8 = 0 };
+/// `nax`: fp8_nax.metal on the tensor units (its own bits; TF_CTL 1 keeps NaN codes finite, 2 drops the last group).
+pub const Variant = struct { out: fp8.Out = .f32, fixture: bool = false, ctl: u8 = 0, nax: bool = false };
 
 const real = [_]c.Shape{
     .{ .rows = 16, .n = 1280, .k = 5120 }, // wq_a
@@ -31,7 +33,24 @@ const served = blk: {
     break :blk out;
 };
 
+/// The tensor-unit tiles' shapes: a cheap first shape for gates 1 and 2, rows about a 64-row tile, V4.1's sizes.
+const nax_served = blk: {
+    var out: [real.len + 6]c.Shape = undefined;
+    out[0] = real[5];
+    for ([_]usize{ 1, 63, 64, 65, 130 }, 0..) |r, i| out[1 + i] = .{ .rows = r, .n = 128, .k = 1536 };
+    for (real, 0..) |s, i| out[6 + i] = s;
+    break :blk out;
+};
+
 pub fn spec(v: Variant, name: []const u8) c.Spec {
+    if (v.nax) return .{
+        .name = name,
+        .accum = .f32,
+        .depth = nr.depth,
+        .out = if (v.out == .f32) .f32 else .bf16,
+        .tiles = if (v.fixture) .{ .{}, .{}, .{} } else .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 64, .step = 64, .min = 64 } },
+        .served = if (v.fixture) &.{ref.fixture.shape} else &nax_served,
+    };
     return .{
         .name = name,
         .accum = .f32,
@@ -58,8 +77,13 @@ pub const Proj = struct {
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Variant, name: []const u8) !Proj {
         var p: Proj = .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .name = name, .pipes = undefined };
-        if (v.ctl == 0) {
-            p.pipes = try fp8.Pipelines.load(device);
+        if (v.nax) {
+            p.pipes = try fp8.Pipelines.loadSource(device, sources.dsv41.fp8_mma);
+            const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ v.ctl, sources.dsv41.fp8_nax });
+            defer a.free(text);
+            p.pipes.nax = try fp8.Pipelines.loadNax(device, text);
+        } else if (v.ctl == 0) {
+            p.pipes = try fp8.Pipelines.loadSource(device, sources.dsv41.fp8_mma);
         } else {
             const text = try std.fmt.allocPrint(a, "#define TF_CTL {d}\n{s}", .{ v.ctl, sources.dsv41.fp8_mma });
             defer a.free(text);
@@ -101,11 +125,13 @@ pub const Proj = struct {
     pub fn prepare(p: *Proj, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         p.drop();
         fp8.check(.{ .k = @intCast(shape.k), .n = @intCast(shape.n), .rows = @intCast(shape.rows) }) catch return false;
+        if (p.v.nax and (shape.k % 64 != 0 or shape.n % 64 != 0)) return false; // the encoder would take fp8_mma
         const f = try ref.Fp8.init(p.a, shape);
         p.f = f;
         p.fill = fill;
         p.real_fixture = p.v.fixture and fill == .random and std.meta.eql(shape, ref.fixture.shape);
         if (p.real_fixture) try ref.fixture.load(f, null) else f.fill(fill, seed);
+        if (p.v.nax and fill == .nonfinite) f.nanCodes();
         try p.upload(f);
         return true;
     }
@@ -141,18 +167,20 @@ pub const Proj = struct {
 
     pub fn reference(p: *Proj, want: []f64, mag: []f64) !void {
         const f = p.f.?;
+        if (p.v.nax and !p.real_fixture) return f.exactSums(want, mag);
         if (!p.real_fixture) return f.reference(want, mag, p.v.out == .bf16);
         try ref.npyF64(ref.fixture.ref_npy, want);
         f.magnitudes(mag);
     }
 
-    /// Random inputs must reproduce the fp8_rows order bit for bit; stress inputs keep the generic bound.
+    /// Random inputs must give the fp8_rows order's bits; stress inputs and tensor units keep the generic bound.
     pub fn bounds(p: *Proj, _: []const f64, _: []const f64, allow: []f64) !void {
-        if (p.real_fixture or p.fill == .stress) return;
+        if (p.real_fixture or p.fill == .stress or p.v.nax) return;
         @memset(allow, 0);
     }
 
     pub fn simulate(p: *Proj, acc: c.Accum, order: g.Order, out: []f64) !void {
+        if (p.v.nax) return p.f.?.simulateSteps(acc, order, out);
         return p.f.?.simulate(acc, order, out);
     }
 };
@@ -163,7 +191,7 @@ pub const Suite = struct {
     queue: mtl.Queue,
     probes: std.ArrayList(*Proj) = .empty,
 
-    const list = [_]struct { v: Variant, name: []const u8 }{
+    const list = [_]Entry{
         .{ .v = .{}, .name = base ++ "f32" },
         .{ .v = .{ .out = .bf16 }, .name = base ++ "bf16" },
         .{ .v = .{ .fixture = true }, .name = base ++ "release wkv fixture" },
@@ -173,10 +201,26 @@ pub const Suite = struct {
         .{ .v = .{ .ctl = 4 }, .name = base ++ "control: writes past its output" },
     };
 
+    /// fp8_nax.metal's variants, registered on a GPU with tensor units (the f32 one first: invariance takes it).
+    pub const nax_list = [_]Entry{
+        .{ .v = .{ .nax = true }, .name = base ++ "tensor units f32" },
+        .{ .v = .{ .nax = true, .out = .bf16 }, .name = base ++ "tensor units bf16" },
+        .{ .v = .{ .nax = true, .fixture = true }, .name = base ++ "tensor units release wkv fixture" },
+        .{ .v = .{ .nax = true, .ctl = 1 }, .name = base ++ "tensor units control: NaN codes read as finite" },
+        .{ .v = .{ .nax = true, .ctl = 2 }, .name = base ++ "tensor units control: the last K group dropped" },
+        .{ .v = .{ .nax = true, .ctl = 3 }, .name = base ++ "tensor units control: sums rounded to fp16" },
+        .{ .v = .{ .nax = true, .ctl = 4 }, .name = base ++ "tensor units control: writes past its output" },
+    };
+    const Entry = struct { v: Variant, name: []const u8 };
+
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
+        return createFrom(a, device, queue, kernels, only, &list);
+    }
+
+    pub fn createFrom(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8, entries: []const Entry) !*Suite {
         const s = try a.create(Suite);
         s.* = .{ .a = a, .device = device, .queue = queue };
-        for (list) |entry| {
+        for (entries) |entry| {
             if (only) |text| if (std.mem.indexOf(u8, entry.name, text) == null) continue;
             const p = try a.create(Proj);
             p.* = try Proj.init(a, device, queue, entry.v, entry.name);
@@ -224,19 +268,19 @@ pub const Suite = struct {
                     const want = whole[offset * shape.n * 4 ..][0 .. rows * shape.n * 4];
                     if (!std.mem.eql(u8, want, got)) {
                         bad += 1;
-                        std.debug.print("FAIL {s}chunk invariance: rows {d} offset {d}\n", .{ base, rows, offset });
+                        std.debug.print("FAIL {s}chunk invariance: rows {d} offset {d}\n", .{ p.name, rows, offset });
                     }
                 }
             }
         }
-        std.debug.print("{s} {s}chunk invariance: 64/512/2048/8192 rows, offsets 0/1/37, {d} launches, {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", base, launches, bad });
+        std.debug.print("{s} {s} chunk invariance: 64/512/2048/8192 rows, offsets 0/1/37, {d} launches, {d} differ\n", .{ if (bad == 0) "PASS" else "FAIL", p.name, launches, bad });
         return bad;
     }
 
     /// Per projection class: the worst error against float64 must not exceed the fp8_rows order's.
     pub fn accuracy(s: *Suite, seed: u64) !usize {
         const p = if (s.probes.items.len > 0) s.probes.items[0] else return 0;
-        if (p.v.ctl != 0 or p.v.out != .f32) return 0;
+        if (p.v.ctl != 0 or p.v.out != .f32 or p.v.nax) return 0;
         var bad: usize = 0;
         for (real) |shape| {
             if (!try p.prepare(shape, .random, seed)) return error.Refused;

@@ -94,6 +94,8 @@ pub const Suites = struct {
     fused3: *dsv41_fused3.Suite,
     fused4: *dsv41_fused4.Suite,
     fused5: *dsv41_fused5.Suite,
+    /// fp8_nax's variants: registered only on a GPU with tensor units.
+    fp8_nax: ?*dsv41_fp8_mma.Suite = null,
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !Suites {
         const fp8 = try dsv41_fp8_rows.Suite.create(a, device, queue, kernels, only);
@@ -138,10 +140,13 @@ pub const Suites = struct {
         errdefer fused5.destroy();
         const glue_tmp2 = try dsv41_glue_tmp2.Suite.create(a, device, queue, kernels, only);
         errdefer glue_tmp2.destroy();
-        return .{ .fp8 = fp8, .fp8_mma = fp8_mma, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2 };
+        const units = device.tensorUnits();
+        const fp8_nax = if (units) try dsv41_fp8_mma.Suite.createFrom(a, device, queue, kernels, only, &dsv41_fp8_mma.Suite.nax_list) else null;
+        return .{ .fp8_nax = fp8_nax, .fp8 = fp8, .fp8_mma = fp8_mma, .topk = topk, .cand = cand, .attn = attn, .experts = experts, .xmma = xmma, .ix = ix, .engram = engram, .glue = glue, .compress = compress, .mv = mv, .hc = hc, .fold = fold, .glue_tmp = glue_tmp, .fused = fused, .fused2 = fused2, .fused3 = fused3, .fused4 = fused4, .fused5 = fused5, .glue_tmp2 = glue_tmp2 };
     }
 
     pub fn destroy(s: *Suites) void {
+        if (s.fp8_nax) |x| x.destroy();
         s.glue_tmp2.destroy();
         s.fused5.destroy();
         s.fused4.destroy();
@@ -204,5 +209,6 @@ pub const Suites = struct {
         t.failed += try s.fused4.invariance(seed);
         t.failed += try s.fused5.invariance(seed);
         if (std.c.getenv("TF_DSV41_TIME") != null) try s.ix.timing(io);
+        if (s.fp8_nax) |x| t.failed += try x.invariance(seed);
     }
 };

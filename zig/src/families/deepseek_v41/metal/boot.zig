@@ -69,6 +69,7 @@ pub const Boot = struct {
         defer pack.deinit();
         b.w = try model_weights.Model.load(a, io, b.device, b.queue, &pack, c, null);
         errdefer b.w.deinit();
+        @import("scale_guard.zig").check(io, &b.p.mma, b.w.layers);
         if (o.drafts and c.mtp_layers > 0) b.ds = try dspark.loadWeights(a, io, b.device, &pack, c);
         errdefer if (b.ds) |*w| w.deinit();
         b.tables = try rope.Tables.init(b.device, c, limit);

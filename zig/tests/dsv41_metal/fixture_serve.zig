@@ -34,7 +34,8 @@ const Held = struct {
     }
 };
 
-pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64 };
+/// `units` false: prompt rows on the decode-equal kernels even on tensor units (TF_DSV41_PROMPT_UNITS=0).
+pub const Opts = struct { slots: u32 = 4, drafts: bool = true, cache_bytes: u64 = 0, chunk: u32 = 64, units: bool = true };
 
 /// The tiny model from `seed` served on this GPU; the returned model owns the rig (closed with it).
 pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Metal {
@@ -44,6 +45,7 @@ pub fn open(a: std.mem.Allocator, io: std.Io, seed: u64, o: Opts) !*pkg.serve.Me
     h.f = try ff.Fwd.initWith(a, io, config(), limit, seed);
     errdefer h.f.deinit();
     const r = h.f.r;
+    if (!o.units) r.p.promptUnitsOff();
     {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
