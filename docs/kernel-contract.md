@@ -386,6 +386,15 @@ Ornith-1.5-122B's routed block on Metal registers the experts' decode rows with 
 (`q27_rows_extra`, 4 and 8 bits), the router's softmax and top-k with renormalized bf16 weights (`q27_route`: picks
 equal to the host's, each weight within float64's range at its bf16 points), the tensor units' expert sort and gather
 (bit for bit), the experts' SwiGLU, and the weighted combine with the gated shared expert (in place and from its slot).
+The same kernels register at Qwen3.6-35B-A3B's served widths (experts of 512 over 2,048).
+qwen27's attention registers at the 27B's 24 query heads over 4 and the 35B-A3B's 16 over 2: a round's rows through the
+engine's own plan and launcher against float64 attention, prompt rows through the prompt kernel on every chip that
+builds it (`attention_prompt_sg` before the M5), and attention_io's packing, append and keep checked bit for bit (keep
+a second time on the caches the first left). A plan check shows the decode shapes plan prefix_1 to _6 for chains and
+_2 to _6 for trees, and a tree over two tail chunks. Its known finding: before the M5 a masked key's zero probability
+times an infinite value gives NaN in P V. Its controls: a row seeing one key past its own, the one-Mac merge dropping
+a round's later tail chunks, the prompt kernel losing its bounded last step, and an append one row late. prefix_5 and
+_6 have no launch record yet: past 256 threads they need a reserved thread count before M1 and M2 can admit them.
 GLM's Metal window projections register narrow and wide rows at 2, 3, 4, 5, 6 and 8 bits, plus both gathered paths.
 Independent FP64 linear cases accompany byte replacements against frozen pre-window-optimization kernels.
 The gathered SwiGLU keeps its predecessor's clipped BF16 output and nonfinite rules; gate/up taps qualify its dots separately.

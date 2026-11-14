@@ -46,9 +46,9 @@ pub const Geometry = struct {
     }
 
     pub fn check(g: Geometry) !void {
-        // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2) or the 9B's 4 (16/4).
+        // The GQA group is a shader constant: 6 (24/4, 12/2 on a rank), or on one Mac 16 (32/2), 4 (16/4) or 8 (16/2).
         if (g.dim != 256 or g.rotary != 64 or g.heads == 0 or g.kv_heads == 0 or g.heads % g.kv_heads != 0) return error.TargetAttentionShape;
-        const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4);
+        const one_mac = (g.heads == 32 and g.kv_heads == 2) or (g.heads == 16 and g.kv_heads == 4) or (g.heads == 16 and g.kv_heads == 2);
         if (g.heads / g.kv_heads != 6 and !one_mac) return error.TargetAttentionShape;
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
@@ -509,6 +509,11 @@ test "target attention reads every config dimension without widening kernel qual
     c.kv_heads = 2;
     try std.testing.expectEqual(@as(u32, 16), (try Geometry.fromConfig(c, true)).group());
     c.heads = 16; // its rank of a two-way split is not qualified
+    c.kv_heads = 1;
+    try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
+    c.kv_heads = 2; // Qwen3.6-35B-A3B: GQA8, one Mac only
+    try std.testing.expectEqual(@as(u32, 8), (try Geometry.fromConfig(c, true)).group());
+    c.heads = 8; // its rank of a two-way split is not qualified
     c.kv_heads = 1;
     try std.testing.expectError(error.TargetAttentionShape, Geometry.fromConfig(c, true));
     c.heads = 24;

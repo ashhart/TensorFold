@@ -69,8 +69,8 @@ const offset_inf = c.Known{ .gate = .nonfinite, .finding = "an infinite input gi
 
 pub fn spec(v: Variant) c.Spec {
     const known = if (v.bits == 4 and v.mutation == .none) offset_inf else null;
-    // Ornith-1.5-122B: gate and up 1024 x 3072, down 3072 x 1024; 32 rows an expert (32-row tiles), past 64 (64-row)
-    const served = &[_]c.Shape{ .{ .rows = 256, .n = 1024, .k = 3072 }, .{ .rows = 520, .n = 3072, .k = 1024 } };
+    // Ornith-1.5-122B's experts (1024 x 3072, 3072 x 1024), then Qwen3.6-35B-A3B's (512 x 2048, 2048 x 512)
+    const served = &[_]c.Shape{ .{ .rows = 256, .n = 1024, .k = 3072 }, .{ .rows = 520, .n = 3072, .k = 1024 }, .{ .rows = 256, .n = 512, .k = 2048 }, .{ .rows = 520, .n = 2048, .k = 512 } };
     return .{ .name = name(v), .accum = .f32, .depth = groupDepth64, .out = .bf16, .known = known, .tiles = .{ .{ .size = 32 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = served };
 }
 

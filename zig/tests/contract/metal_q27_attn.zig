@@ -12,8 +12,8 @@ const planning = q.attention_plan;
 
 const D = 256;
 
-/// Geometry.check's shapes: the 27B (24 over 4), its two-Mac rank (12 over 2), GQA16 (32 over 2), the 9B (16 over 4).
-pub const Heads = enum { q27b, rank, gqa16, q9b };
+/// Geometry.check's shapes: the 27B (24/4), its two-Mac rank (12/2), GQA16 (32/2), the 9B (16/4), the 35B-A3B (16/2).
+pub const Heads = enum { q27b, rank, gqa16, q9b, q35b };
 
 pub fn geometry(h: Heads, shared: bool) planning.Geometry {
     return switch (h) {
@@ -21,6 +21,7 @@ pub fn geometry(h: Heads, shared: bool) planning.Geometry {
         .rank => .{ .heads = 12, .kv_heads = 2, .shared_prefix = shared },
         .gqa16 => .{ .heads = 32, .kv_heads = 2, .shared_prefix = shared },
         .q9b => .{ .heads = 16, .kv_heads = 4, .shared_prefix = shared },
+        .q35b => .{ .heads = 16, .kv_heads = 2, .shared_prefix = shared },
     };
 }
 
@@ -30,6 +31,7 @@ pub fn label(h: Heads) []const u8 {
         .rank => "27B rank",
         .gqa16 => "GQA16",
         .q9b => "9B",
+        .q35b => "35B-A3B",
     };
 }
 
