@@ -8,6 +8,7 @@ const block = @import("block.zig");
 pub const modulation = @import("modulation.zig");
 pub const schedule = @import("schedule.zig");
 pub const geometry = @import("geometry.zig");
+pub const picture = @import("picture.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;
@@ -75,6 +76,8 @@ pub const Model = struct {
     b_audio_in: Ref,
     w_video_out: Ref,
     b_video_out: Ref,
+    /// Output heads `w_video_out` holds, one a step (a picture's distilled heads); 0 when one serves every step.
+    step_heads: usize = 0,
     w_audio_out: Ref,
     b_audio_out: Ref,
     cos: Ref,
@@ -173,12 +176,17 @@ pub const Model = struct {
         self.final_norm = try self.held("final_norm.weight", .bf16, hidden);
         self.w_video_in = try self.held("video_in.weight", .f32, hidden * self.video_in);
         self.b_video_in = try self.held("video_in.bias", .f32, hidden);
-        self.w_audio_in = try self.held("audio_in.weight", .f32, hidden * self.audio_in);
-        self.b_audio_in = try self.held("audio_in.bias", .f32, hidden);
-        self.w_video_out = try self.held("video_out.weight", .f32, hidden * self.video_in);
-        self.b_video_out = try self.held("video_out.bias", .f32, self.video_in);
-        self.w_audio_out = try self.held("audio_out.weight", .f32, hidden * self.audio_in);
-        self.b_audio_out = try self.held("audio_out.bias", .f32, self.audio_in);
+        // a picture's case has no audio: its audio projections stand in for nothing and are never dispatched
+        const audio_case = self.audio > 0;
+        self.w_audio_in = if (audio_case) try self.held("audio_in.weight", .f32, hidden * self.audio_in) else self.w_video_in;
+        self.b_audio_in = if (audio_case) try self.held("audio_in.bias", .f32, hidden) else self.b_video_in;
+        // a picture's case may hold an output head per step; step i reads head i
+        self.step_heads = if (admitted.step_heads) admitted.steps else 0;
+        const heads_out: usize = @max(self.step_heads, 1);
+        self.w_video_out = try self.held("video_out.weight", .f32, heads_out * hidden * self.video_in);
+        self.b_video_out = try self.held("video_out.bias", .f32, heads_out * self.video_in);
+        self.w_audio_out = if (audio_case) try self.held("audio_out.weight", .f32, hidden * self.audio_in) else self.w_video_in;
+        self.b_audio_out = if (audio_case) try self.held("audio_out.bias", .f32, self.audio_in) else self.b_video_in;
         self.cos = try self.held("cos", .f32, rows * self.rot);
         self.sin = try self.held("sin", .f32, rows * self.rot);
         self.slot = try self.held("tile_slot", .i32, rows);
@@ -218,10 +226,10 @@ pub const Model = struct {
             @memcpy(self.condition_latents.slice(f32, n), held_rows);
         }
         self.video_latents = try device.buffer(self.video * self.video_in * 4, shared);
-        self.audio_latents = try device.buffer(self.audio * self.audio_in * 4, shared);
+        self.audio_latents = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
         self.normed = try device.buffer(rows * hidden * 2, shared);
         self.video_velocity = try device.buffer(self.video * self.video_in * 4, shared);
-        self.audio_velocity = try device.buffer(self.audio * self.audio_in * 4, shared);
+        self.audio_velocity = try device.buffer(@max(self.audio * self.audio_in, 1) * 4, shared);
 
         self.blocks = try gpa.alloc(Block, layers);
         for (self.blocks, 0..) |*b, i| {
@@ -323,6 +331,8 @@ pub const Model = struct {
     /// The video and audio velocities for the latent rows at denoising step `step` of the case's schedule.
     pub fn forward(self: *Model, video: []const f32, audio: []const f32, step: usize, video_velocity: []f32, audio_velocity: []f32) !Timing {
         try geometry.forward(self.rows, self.video * self.video_in, self.audio * self.audio_in, self.adaln.len, self.times.len, step, video.len, audio.len, video_velocity.len, audio_velocity.len);
+        // this step's output head (its byte offsets), before anything is encoded
+        const at = try geometry.headOffsets(self.step_heads, step, self.adaln.len / self.rows, self.video_in, self.hidden);
         const started = mtl.clock.seconds();
         const rows = self.rows;
         const hidden = self.hidden;
@@ -342,7 +352,7 @@ pub const Model = struct {
         // a first frame's rows enter like video rows on every pass and are never stepped
         const media = self.text + self.condition;
         if (self.condition > 0) self.rowsIn(enc.*, self.condition_latents, self.w_video_in, self.b_video_in, self.condition, self.video_in, self.text);
-        self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
+        if (self.audio > 0) self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
         self.rowsIn(enc.*, self.video_latents, self.w_video_in, self.b_video_in, self.video, self.video_in, media + self.audio);
         self.lap(&pass, "rows in");
         for (0..self.blocks.len) |index| block.run(self, &pass, index);
@@ -365,8 +375,10 @@ pub const Model = struct {
         enc.setBuffer(self.normed, 0, 6);
         enc.dispatchGroups(mtl.Size.of(rows, 1, 1), mtl.Size.of(32, 1, 1));
         enc.barrier();
-        self.rowsOut(enc.*, self.w_audio_out, self.b_audio_out, self.audio_velocity, self.audio, self.audio_in, media);
-        self.rowsOut(enc.*, self.w_video_out, self.b_video_out, self.video_velocity, self.video, self.video_in, media + self.audio);
+        if (self.audio > 0) self.rowsOut(enc.*, self.w_audio_out, self.b_audio_out, self.audio_velocity, self.audio, self.audio_in, media);
+        const w_out: Ref = .{ .buffer = self.w_video_out.buffer, .offset = self.w_video_out.offset + at[0] };
+        const b_out: Ref = .{ .buffer = self.b_video_out.buffer, .offset = self.b_video_out.offset + at[1] };
+        self.rowsOut(enc.*, w_out, b_out, self.video_velocity, self.video, self.video_in, media + self.audio);
         pass.enc.end();
         pass.cb.commit();
         pass.cb.wait();
