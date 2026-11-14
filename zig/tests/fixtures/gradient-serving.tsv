@@ -127,9 +127,9 @@ zig/src/families/flashnext/cuda_gdn.zig	bc952357f4d6c076542b419b0ee71bbdce89715f
 zig/src/families/flashnext/cuda_glue.zig	0bd837ea17d1bd0a7a0820dc0ee99c4da90113c15d62b3fac31bd7af47a0ecb1	raw
 zig/src/families/flashnext/cuda_hc.zig	01f897ac65d6edd2cd6ac76d97cb4d96619c25ffa85bd619d6d76f4f465cda9a	raw
 zig/src/families/flashnext/cuda_head.zig	fc6410e8b17d559a12d81fd4bee9ab4e65f6f8b0999796c68baba58efb8fe818	raw
-zig/src/families/flashnext/cuda_images.zig	5bd8a6c06cb69440522f4392794d9ef52b3760195b97d96f2316b1acac271bd4	raw
-zig/src/families/flashnext/cuda_images_test.zig	df984d54d9de1bb732544785cddf82a124de2a7019041ed1f7483b2a4a2d7c99	raw
-zig/src/families/flashnext/cuda_lanes.zig	1ebf522d252b795b15d58a15eb38d9d3227c341df80522ad8a89d5ff3cfbdac4	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate
+zig/src/families/flashnext/cuda_images.zig	ef78a0eb8403a73da2d19bd7ed2aa4b2349a191f408060da79bee3963cd56ff2	raw	#3164 (a resumed prompt sends only the images past its kept state)
+zig/src/families/flashnext/cuda_images_test.zig	4278e5241f6c7e0e710e9a8ddf0482855db158eeee2463200a2c2de32c9dadd7	raw	#3164 (resumed image rows tested)
+zig/src/families/flashnext/cuda_lanes.zig	88e0a2f4af7b7b58a56d757ee5e4b09c2b188db50e3ee69b889c39dbabc17550	raw	main 4f6017ced (marks inside the pass), fbca90714 (shared solo-chunk rule, #2391), 80e0fd72c (#2753: non-finite draft rows refused by name; finite rows unchanged), dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning), #1953: the ladder's values through snap_intermediate, #3164 (resumed image rows passed to the tower)
 zig/src/families/flashnext/cuda_lanes_admission_test.zig	4b8052db793ba81f0e73e1b9bd77b1780bbc4fd550d90976d017da47e76faaa2	raw
 zig/src/families/flashnext/cuda_lanes_load.zig	241d091d4b5199325665d25ea5d4def81fd15660351a199773c596ca2025fa18	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_lanes_restore_test.zig	f9947521a6d9c7d7380ca1b784a93a43b364c6fa5861cad15efd3538d2b8ceff	raw
