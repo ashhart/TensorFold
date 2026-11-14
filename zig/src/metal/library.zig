@@ -117,6 +117,10 @@ pub const Pipeline = struct {
         defer objc.release(desc);
         objc.msg(void, desc, "setComputeFunction:", .{func});
         objc.msg(void, desc, "setSupportIndirectCommandBuffers:", .{indirect});
+        // the kernel's name on the pipeline, for GPU captures and the Metal 4 timeline
+        const label = objc.string(name);
+        defer objc.release(label);
+        objc.msg(void, desc, "setLabel:", .{label});
         const id = objc.msg(?Id, device.id, "newComputePipelineStateWithDescriptor:options:reflection:error:", .{ desc, @as(usize, 0), @as(?*anyopaque, null), &err });
         return .{ .id = id orelse {
             if (optional) std.log.info("pipeline {s}: {s}", .{ name, objc.errorText(err) }) else std.log.err("pipeline {s}: {s}", .{ name, objc.errorText(err) });

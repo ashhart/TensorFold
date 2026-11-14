@@ -61,6 +61,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_HEAD_GEOMETRY", .scope = .metal, .kind = .size, .forms = "a whole nonnegative native-size geometry count" },
     .{ .name = "TF_PROMPT_ROWS", .scope = .metal, .kind = .prompt, .forms = "a multiple of 16 from 128 to 2048 for native serving" },
     .{ .name = "TF_ANE_COLUMNS", .scope = .metal, .kind = .u32, .forms = "a whole column count from 0 to 4294967295 (0 disables the share)" },
+    .{ .name = "TF_METAL4_TIMELINE", .scope = .metal, .kind = .u32, .forms = "a whole round count from 0 to 4294967295 (0, the default, stamps nothing; n stamps every stage of n rounds of each kind on a Metal 4 queue and logs them)" },
     .{ .name = "TF_FLASHNEXT_SCALE_INDEX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (1: Flash Next's 4-bit expert kernels read scales and biases through a 16-bit index)" },
     .{ .name = "GLM_EHPROJ_NAX", .scope = .metal, .kind = .flag, .forms = "0 or 1 (0 serves GLM's MTP eh_proj on the scalar kernel)" },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .scope = .metal, .kind = .size, .forms = "0 (never) or the rows, 1 to 32, from which a window's experts run grouped", .max = 32 },
