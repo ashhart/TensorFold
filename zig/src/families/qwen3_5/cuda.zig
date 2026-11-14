@@ -79,6 +79,7 @@ test {
 }
 
 test {
+    _ = @import("cuda_sm110_modes.zig");
     _ = train;
     _ = @import("cuda_read_cost_test.zig");
 }
