@@ -16,6 +16,10 @@ const Record = struct {
     var outputs: [16]u64 = undefined;
     var skip: [16]i32 = undefined;
     var routes: usize = 0;
+    var item_calls: usize = 0;
+    var item_outputs: [16]u64 = undefined;
+    var item_picks: [16]u64 = undefined;
+    var item_pairs: [16]i32 = undefined;
 
     fn reset() void {
         copies = 0;
@@ -23,6 +27,7 @@ const Record = struct {
         down = 0;
         decode = 0;
         routes = 0;
+        item_calls = 0;
     }
     fn arg(comptime T: type, args: ?[*]?*anyopaque, index: usize) T {
         return @as(*const T, @ptrCast(@alignCast(args.?[index].?))).*;
@@ -46,6 +51,17 @@ const Record = struct {
                 outputs[down] = arg(u64, args, 6);
                 skip[down] = arg(i32, args, 9);
                 down += 1;
+            },
+            10 => {
+                t.expectEqual(@as(i32, 16), arg(i32, args, 14)) catch return 1;
+                t.expectEqual(@as(i32, 1), arg(i32, args, 19)) catch return 1;
+                t.expectEqual(@as(i32, 288), arg(i32, args, 20)) catch return 1;
+            },
+            14 => {
+                item_outputs[item_calls] = arg(u64, args, 3);
+                item_picks[item_calls] = arg(u64, args, 1);
+                item_pairs[item_calls] = arg(i32, args, 6);
+                item_calls += 1;
             },
             9 => decode += 1,
             else => {},
@@ -94,12 +110,24 @@ test "GLM EXL3 prompt: a whole pass makes one expert call and no 2D copies" {
     };
 }
 
-test "GLM EXL3 prompt: decode retains compact 1024-row calls" {
-    try run(2048, false, false, 288);
-    try t.expectEqual(@as(usize, 4), Record.copies);
-    try t.expectEqual(@as(usize, 2), Record.decode);
-    try t.expectEqual(@as(usize, 0), Record.up);
-    try t.expectEqual(@as(usize, 0), Record.down);
+test "GLM EXL3 prompt: decode item calls keep the shared slot and chunk offsets without copies" {
+    for ([_]usize{ 4, 1030 }) |rows| {
+        try run(rows, false, false, 288);
+        try t.expectEqual(@as(usize, 0), Record.copies);
+        try t.expectEqual(@as(usize, 0), Record.decode);
+        try t.expectEqual(@as(usize, 0), Record.up);
+        try t.expectEqual(@as(usize, 0), Record.down);
+        const calls = (rows + 1023) / 1024;
+        try t.expectEqual(calls, Record.routes);
+        try t.expectEqual(calls, Record.item_calls);
+        for (0..calls) |j| {
+            const at = j * 1024;
+            const n: usize = @min(rows - at, 1024);
+            try t.expectEqual(@as(i32, @intCast(n * 9)), Record.item_pairs[j]);
+            try t.expectEqual(@as(u64, 0x300000000 + at * 9 * 4), Record.item_picks[j]);
+            try t.expectEqual(@as(u64, 0x400000000 + at * 9 * 512 * 4), Record.item_outputs[j]);
+        }
+    }
 }
 
 test "GLM EXL3 prompt: the direct shared-id route refuses an overflowing expert table before launch" {
@@ -121,6 +149,13 @@ test "GLM EXL3 prompt: scratch names the rank width and rotation layout" {
         try t.expectEqual(@as(usize, 360 * MiB * scale), glm.exl3.scratchBytes(rows, D, W_tp1, true, false)[0]);
     }
     try t.expectEqual(glm.exl3.scratchBytes(4096, D, W_tp2, true, true), glm.exl3.scratchBytes(4102, D, W_tp2, true, true));
+    const l: cuda.exl3_experts.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .experts = cuda.grouped.max_experts, .dims = D, .width = W_tp2, .codebook = .mcg };
+    for ([_]usize{ 1, 4, 64, 1024, 1030 }) |rows| {
+        const n: usize = @min(rows, 1024);
+        const picks = std.mem.alignForward(usize, n * 8 * 4, 256);
+        const need = @max(try cuda.exl3_experts.scratchBytes(l, n, 8), try cuda.exl3_experts.fusedBytes(l, n, 9));
+        try t.expectEqual(picks + need, glm.exl3.scratchBytes(rows, D, W_tp2, false, false)[0]);
+    }
 }
 
 fn guarded(text: []const u8, name: []const u8, payload: []const u8) bool {
