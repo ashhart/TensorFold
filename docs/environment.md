@@ -166,6 +166,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_DECODE_GRAPH` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_SPLIT_DENSE` | Exactly `0` or `1`; default on: two ranks split the BF16 dense projections |
 | `TF_FLASHNEXT_SHARD_HEAD` | Exactly `0` or `1`; default off: each rank keeps its half of the output head |
+| `TF_FLASHNEXT_FUSED_SPLIT` | Exactly `0` or `1`; default off. `1` runs CUDA split-K lane calls of 2,048 columns or more on the fused form, with the same bits; Metal and HIP refuse `1` |
 | `TF_FLASHNEXT_ATTN_LANES` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_WARM_AHEAD` | Exactly `0` or `1`; default off |
 | `TF_FLASHNEXT_TABLE_WARM` | Exactly `0` or `1`; default off |
