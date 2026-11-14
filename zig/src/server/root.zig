@@ -262,6 +262,7 @@ test {
     _ = @import("slide_retention_test.zig");
     _ = @import("slide_shrink_test.zig");
     _ = @import("slide_correction_test.zig");
+    _ = @import("benchmark_form_factor_test.zig");
 }
 
 test {
