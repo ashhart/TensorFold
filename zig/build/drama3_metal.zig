@@ -12,7 +12,7 @@ pub fn addNative(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         break :tok t;
     };
     const rounds = b.createModule(.{ .root_source_file = b.path("zig/src/core/frame_rounds.zig"), .target = target, .optimize = optimize });
-    const shim = b.addWriteFiles().add("drama3_core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\n");
+    const shim = b.addWriteFiles().add("drama3_core.zig", "pub const safetensors = @import(\"tensorfold\").safetensors;\npub const tokenizer = @import(\"tokenizer\");\npub const frame_rounds = @import(\"frame_rounds\");\npub const audio = @import(\"tensorfold\").audio;\n");
     const core = b.createModule(.{ .root_source_file = shim, .target = target, .optimize = optimize, .imports = &.{
         .{ .name = "tensorfold", .module = native.import_table.get("tensorfold").? },
         .{ .name = "tokenizer", .module = tokenizer },

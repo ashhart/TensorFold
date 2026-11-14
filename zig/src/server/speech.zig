@@ -1,4 +1,4 @@
-//! POST /v1/audio/speech: WAV or raw PCM whole, or raw PCM chunks with stream; only complete synthesis is audio.
+//! POST /v1/audio/speech: WAV, raw PCM or FLAC whole, or raw PCM chunks with stream; only complete synthesis is audio.
 const std = @import("std");
 const streaming = @import("speech_stream.zig");
 const api = @import("engine_api");
@@ -13,6 +13,7 @@ const drama_prompt = @import("drama_prompt.zig");
 const speech_sampling = @import("speech_sampling.zig");
 const speech_redraw = @import("speech_redraw.zig");
 const speech_register = @import("speech_register_log.zig");
+const audio_out = @import("audio_out.zig");
 const drama_cfg = @import("drama_cfg.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
@@ -34,19 +35,10 @@ const served_fields = [_][]const u8{ "model", "input", "voice", "speaker", "resp
 /// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
 const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "repetition_penalty", "stage_params" };
 
-pub const Format = enum {
-    wav,
-    pcm,
+pub const Format = audio_out.Format;
 
-    pub fn contentType(f: Format) []const u8 {
-        return switch (f) {
-            .wav => "audio/wav",
-            .pcm => "audio/pcm",
-        };
-    }
-};
-
-pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, budget_s: ?f64 = null };
+/// `rate` and `channels` are the reply's: the model's own rate and mono unless the request asked otherwise.
+pub const Plan = struct { input: []const u8, prompt: []const u32, frames: ?[]const [11]i32 = null, refs: []const @import("drama_prompt").Reference = &.{}, reference_rows: u32 = 0, sampling: speech_sampling.Options, format: Format, stream: bool, rate: u32 = 0, channels: u8 = 1, budget_s: ?f64 = null };
 
 /// One whole take: its audio, why it ended, and whether it ended in a mid-utterance silence.
 const Take = struct { pcm: []f32, reason: api.Reason, silence_mid: bool = false, trip: bool = false, jump: ?f64 = null };
@@ -91,6 +83,8 @@ fn checkFields(cx: *Cx, body: Value) errors.Refused!void {
             if (value == .null or (value == .string and std.mem.eql(u8, value.string, "audio"))) continue;
             if (value == .string and std.mem.eql(u8, value.string, "sse")) return cx.refuse("stream_format sse is not supported by this model");
             return cx.refuse("stream_format must be one of: audio, sse");
+        } else if (std.mem.eql(u8, key, "sample_rate") or std.mem.eql(u8, key, "channels")) {
+            continue; // checked with the format and stream in prepare
         } else if (speech_sampling.isField(key)) {
             continue; // validated together before building the prompt
         } else if (listed(&modifier_fields, key)) {
@@ -99,13 +93,39 @@ fn checkFields(cx: *Cx, body: Value) errors.Refused!void {
     }
 }
 
-/// ``response_format.strip().lower()``, which must name WAV or raw PCM.
+/// ``response_format.strip().lower()``: WAV at 16 or 24 bits or float, raw 16-bit PCM, or FLAC.
 fn responseFormat(cx: *Cx, value: []const u8) errors.Refused!Format {
     const name = reply_text.pyStrip(value);
-    if (std.ascii.eqlIgnoreCase(name, "wav")) return .wav;
-    if (std.ascii.eqlIgnoreCase(name, "pcm")) return .pcm;
-    return cx.refuse("response_format must be one of: pcm, wav");
+    for (std.enums.values(Format)) |f| if (std.ascii.eqlIgnoreCase(name, @tagName(f))) return f;
+    for ([_][]const u8{ "mp3", "opus", "aac" }) |codec| if (std.ascii.eqlIgnoreCase(name, codec))
+        return cx.fail(.request, "response_format {s} is not supported: use flac, pcm, wav, wav24 or wav32f", .{codec});
+    return cx.refuse("response_format must be one of: flac, pcm, wav, wav24, wav32f");
 }
+
+/// ``sample_rate`` (one of audio_out.rates) and ``channels`` (1 or 2); a stream takes only the model's rate, mono.
+fn output(cx: *Cx, raw: Value, sp: api.SpeechInfo, stream: bool) errors.Refused!struct { u32, u8 } {
+    var rate = sp.sample_rate;
+    if (raw.get("sample_rate")) |value| if (value != .null) {
+        const asked = value.int64() orelse 0;
+        rate = for (audio_out.rates) |r| {
+            if (asked == r) break r;
+        } else return cx.refuse("sample_rate must be one of: " ++ rate_list);
+    };
+    var channels: u8 = 1;
+    if (raw.get("channels")) |value| if (value != .null) {
+        const asked = value.int64() orelse 0;
+        if (asked != 1 and asked != 2) return cx.refuse("channels must be 1 or 2");
+        channels = @intCast(asked);
+    };
+    if (stream and (rate != sp.sample_rate or channels != 1)) return cx.refuse("stream=true requires the model's sample_rate and channels 1");
+    return .{ rate, channels };
+}
+
+const rate_list = list: {
+    var text: []const u8 = "";
+    for (audio_out.rates, 0..) |r, i| text = text ++ (if (i == 0) "" else ", ") ++ std.fmt.comptimePrint("{d}", .{r});
+    break :list text;
+};
 
 /// Every check that can refuse the request, then its prompt ids, before anything reaches the engine.
 fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused!Plan {
@@ -123,6 +143,7 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
     const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
     if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
+    const rate, const channels = try output(cx, raw, sp, stream);
     const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
     const refs = @import("drama_voice.zig").select(srv.voices, srv.config.default_voice, voice) catch {
         const name = try pyrepr.repr(cx.a, .{ .string = voice });
@@ -130,9 +151,9 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
             return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; see /v1/voices", .{name});
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{name});
     };
-    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream };
+    if (try @import("drama_voice.zig").requestPrompt(cx, srv.text, sp, input, refs)) |made| return .{ .input = input, .prompt = made.prompt, .frames = made.frames, .refs = refs, .reference_rows = made.reference_rows, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
     const prompt = try promptOf(srv, cx, sp, input);
-    return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream };
+    return .{ .input = input, .prompt = prompt, .sampling = sampling, .format = format, .stream = stream, .rate = rate, .channels = channels };
 }
 
 /// The prompt ids of a valid UTF-8 input, refused when it cannot be spoken or is too long.
@@ -332,11 +353,21 @@ fn unused(id: []const u8, k: usize, take: Take, why_not: []const u8) Take {
     return take;
 }
 
-/// Sends a whole take under its finish reason.
+/// Sends a whole take under its finish reason: WAV or PCM at the model's rate in place, any other output encoded.
 fn reply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, take: Take, metadata: Metadata) void {
-    const data = quantizeInPlace(take.pcm) catch return fail(c, cx, id, metadata, .server, "the synthesized audio has non-finite samples");
+    const in_place = (plan.format == .wav or plan.format == .pcm) and plan.rate == sp.sample_rate and plan.channels == 1;
+    var encoded: []u8 = &.{};
+    defer srv.gpa.free(encoded);
+    if (!in_place) encoded = audio_out.encode(srv.gpa, take.pcm, sp.sample_rate, plan.rate, plan.channels, plan.format) catch |e|
+        return fail(c, cx, id, metadata, .server, switch (e) {
+            error.NonFinite => "the synthesized audio has non-finite samples",
+            error.TooLarge => "the synthesized audio is too long for one reply",
+            error.OutOfMemory => "out of memory",
+        });
+    const data = if (!in_place) encoded else quantizeInPlace(take.pcm) catch return fail(c, cx, id, metadata, .server, "the synthesized audio has non-finite samples");
     if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, metadata, .server, "the synthesized audio is too long for one reply");
-    sendAudio(c, plan.format, sp.sample_rate, data, take.reason, if (srv.config.silence_mid) @intFromBool(take.silence_mid) else null, metadata) catch {
+    const header = if (in_place and plan.format == .wav) wavHeader(sp.sample_rate, @intCast(data.len)) else null;
+    sendAudio(c, plan.format, header, data, take.reason, if (srv.config.silence_mid) @intFromBool(take.silence_mid) else null, metadata) catch {
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
@@ -375,8 +406,7 @@ fn send(c: *Conn, cx: *Cx, id: []const u8, metadata: Metadata) void {
 }
 
 /// The head, then the WAV header and the samples where they lie: the audio is never copied to prepend a header.
-fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reason: api.Reason, silence_mid: ?u8, metadata: Metadata) error{ Closed, OutOfMemory }!void {
-    const header: ?[wav_header_len]u8 = if (format == .wav) wavHeader(sample_rate, @intCast(data.len)) else null;
+fn sendAudio(c: *Conn, format: Format, header: ?[wav_header_len]u8, data: []const u8, reason: api.Reason, silence_mid: ?u8, metadata: Metadata) error{ Closed, OutOfMemory }!void {
     const header_len: usize = if (header != null) wav_header_len else 0;
     try c.startResponse(200, null);
     try c.addHeader("Content-Type", format.contentType());
@@ -401,21 +431,7 @@ pub const wav_header_len = 44;
 
 /// A canonical 44-byte RIFF/WAVE header for mono 16-bit PCM of ``data_bytes`` bytes.
 pub fn wavHeader(sample_rate: u32, data_bytes: u32) [wav_header_len]u8 {
-    var h: [wav_header_len]u8 = undefined;
-    @memcpy(h[0..4], "RIFF");
-    std.mem.writeInt(u32, h[4..8], 36 + data_bytes, .little);
-    @memcpy(h[8..12], "WAVE");
-    @memcpy(h[12..16], "fmt ");
-    std.mem.writeInt(u32, h[16..20], 16, .little); // fmt chunk size
-    std.mem.writeInt(u16, h[20..22], 1, .little); // PCM
-    std.mem.writeInt(u16, h[22..24], 1, .little); // mono
-    std.mem.writeInt(u32, h[24..28], sample_rate, .little);
-    std.mem.writeInt(u32, h[28..32], sample_rate * 2, .little); // byte rate
-    std.mem.writeInt(u16, h[32..34], 2, .little); // block align
-    std.mem.writeInt(u16, h[34..36], 16, .little); // bits a sample
-    @memcpy(h[36..40], "data");
-    std.mem.writeInt(u32, h[40..44], data_bytes, .little);
-    return h;
+    return audio_out.wavHeader(sample_rate, 1, 16, false, data_bytes);
 }
 
 /// The reference's (clip(x, -1, 1) * 32767).astype(int16) as PCM16LE in place; each sample is read before written.
@@ -460,11 +476,21 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
     }
 }
 
-test "response_format is WAV or PCM, stripped and case-folded as Python does" {
-    var cx: Cx = .{ .a = std.testing.allocator };
+test "response_format names a WAV depth, PCM or FLAC, stripped and case-folded as Python does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var cx: Cx = .{ .a = arena.allocator() };
     try std.testing.expectEqual(Format.wav, try responseFormat(&cx, " WAV\n"));
     try std.testing.expectEqual(Format.pcm, try responseFormat(&cx, "\u{3000}Pcm\x1c"));
-    for ([_][]const u8{ "mp3", "", "wave", "pcm16" }) |bad| try std.testing.expectError(error.Refused, responseFormat(&cx, bad));
+    try std.testing.expectEqual(Format.wav24, try responseFormat(&cx, "Wav24"));
+    try std.testing.expectEqual(Format.wav32f, try responseFormat(&cx, " wav32f"));
+    try std.testing.expectEqual(Format.flac, try responseFormat(&cx, "FLAC "));
+    for ([_][]const u8{ "", "wave", "pcm16", "wav_24", "f32" }) |bad| {
+        try std.testing.expectError(error.Refused, responseFormat(&cx, bad));
+        try std.testing.expectEqualStrings("response_format must be one of: flac, pcm, wav, wav24, wav32f", cx.message);
+    }
+    try std.testing.expectError(error.Refused, responseFormat(&cx, " Opus"));
+    try std.testing.expectEqualStrings("response_format opus is not supported: use flac, pcm, wav, wav24 or wav32f", cx.message);
 }
 
 test "allowed controls filters before speech input validation" {

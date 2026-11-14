@@ -1,4 +1,4 @@
-//! WAV in and out for the codec, and torchaudio's sinc_interp_hann resample in fp32 for reference clips.
+//! WAV in and out for the codec; reference clips resample through core/audio.zig.
 const std = @import("std");
 
 pub const Audio = struct {
@@ -98,48 +98,8 @@ pub fn pcm16(samples: []const f32, out: []u8) void {
     }
 }
 
-/// torchaudio.functional.resample(x, from, to) for a float32 waveform.
-pub fn resample(gpa: std.mem.Allocator, x: []const f32, from: u32, to: u32) ![]f32 {
-    if (from == to) return gpa.dupe(f32, x);
-    const g = std.math.gcd(from, to);
-    const orig: usize = from / g;
-    const new: usize = to / g;
-    const lpw: f64 = 6;
-    const base_freq: f64 = @as(f64, @floatFromInt(@min(orig, new))) * 0.99;
-    const width: usize = @intFromFloat(@ceil(lpw * @as(f64, @floatFromInt(orig)) / base_freq));
-    const klen = 2 * width + orig;
-    const kern = try gpa.alloc(f32, new * klen);
-    defer gpa.free(kern);
-    const bf: f32 = @floatCast(base_freq);
-    const pi: f32 = @floatCast(std.math.pi);
-    const scale: f32 = @floatCast(base_freq / @as(f64, @floatFromInt(orig)));
-    for (0..new) |k| for (0..klen) |m| {
-        const idx: f32 = @as(f32, @floatFromInt(@as(i64, @intCast(m)) - @as(i64, @intCast(width)))) / @as(f32, @floatFromInt(orig));
-        var t: f32 = -@as(f32, @floatFromInt(k)) / @as(f32, @floatFromInt(new)) + idx;
-        t *= bf;
-        t = std.math.clamp(t, -6.0, 6.0);
-        const c = @cos(t * pi / 6.0 / 2.0);
-        const window = c * c;
-        t *= pi;
-        const sinc: f32 = if (t == 0) 1.0 else @sin(t) / t;
-        kern[k * klen + m] = sinc * (window * scale);
-    };
-    const len = x.len;
-    const target: usize = @intFromFloat(@ceil(@as(f64, @floatFromInt(new * len)) / @as(f64, @floatFromInt(orig))));
-    const out = try gpa.alloc(f32, target);
-    for (out, 0..) |*o, n| {
-        const i = n / new;
-        const k = n % new;
-        var acc: f32 = 0;
-        const kr = kern[k * klen ..][0..klen];
-        for (kr, 0..) |kv, m| {
-            const p = @as(i64, @intCast(i * orig + m)) - @as(i64, @intCast(width)); // padded index -> x index
-            if (p >= 0 and p < len) acc += kv * x[@intCast(p)];
-        }
-        o.* = acc;
-    }
-    return out;
-}
+/// torchaudio.functional.resample(x, from, to) for a float32 waveform, shared with the speech route (core/audio.zig).
+pub const resample = @import("core").audio.resample;
 
 test "a written 16-bit WAV parses back to its samples, clamped and rounded" {
     const gpa = std.testing.allocator;
