@@ -109,6 +109,7 @@ pub const Gpu = struct {
     operator_observer: ?OperatorObserver = null,
     operator_active: bool = false,
     operator_name: []const u8 = "",
+    operator_shape: ?[3]usize = null,
     weight_cache: std.AutoHashMapUnmanaged(WeightKey, Tensor) = .empty,
     batch: ?struct { pass: Pass, pool: mtl.objc.Pool } = null,
 
@@ -340,8 +341,14 @@ pub const Gpu = struct {
         }
         const seconds = cb.gpuSeconds();
         self.gpu_seconds += seconds;
-        if (self.operator_active) if (self.operator_observer) |observer|
-            try observer.write(observer.context, self.operator_name, seconds);
+        if (self.operator_active) if (self.operator_observer) |observer| {
+            var label: [192]u8 = undefined;
+            const name = if (self.operator_shape) |shape|
+                try std.fmt.bufPrint(&label, "{s} {d}x{d}x{d}", .{ self.operator_name, shape[0], shape[1], shape[2] })
+            else
+                self.operator_name;
+            try observer.write(observer.context, name, seconds);
+        };
     }
 
     pub fn command(self: *Gpu) Pass {
@@ -368,6 +375,7 @@ pub const Gpu = struct {
         std.debug.assert(!self.operator_active);
         const batched = self.batch != null;
         if (batched) try self.endBatch();
+        self.operator_shape = null;
         self.operator_active = true;
         return batched;
     }
@@ -422,6 +430,7 @@ pub const Gpu = struct {
             w.count != try std.math.mul(usize, ws, batch) or out.count != try std.math.mul(usize, ys, batch)) return error.MatrixShape;
         const batched = try self.beginOperator();
         defer self.endOperator(batched);
+        if (self.operator_observer != null) self.operator_shape = .{ m, n, k };
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var name: [64]u8 = undefined;

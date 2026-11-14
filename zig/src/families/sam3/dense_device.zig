@@ -24,6 +24,7 @@ pub fn into(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, ou
     };
     const batched = try g.beginOperator();
     defer g.endOperator(batched);
+    if (g.operator_observer != null) g.operator_shape = .{ rows, cols, depth };
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     var pipes: [5]gpu.mtl.Pipeline = undefined;

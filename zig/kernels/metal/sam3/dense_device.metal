@@ -131,7 +131,8 @@ void sam_dense_device_gelu_linear(const device float* x, const device float* wei
 void sam_dense_device_compensated(const device float* x, const device float* weight, const device float* bias,
     device float* out, constant SamDenseShape& shape, const device uint* domain,
     uint2 group [[threadgroup_position_in_grid]]) {
-    sam_dense_device_compensated_impl<false>(x, weight, bias, out, shape, domain, group);
+    if (shape.depth == 2304 && shape.columns == 256) sam_dense_device_compensated_impl<false, 256>(x, weight, bias, out, shape, domain, group);
+    else sam_dense_device_compensated_impl<false>(x, weight, bias, out, shape, domain, group);
 }
 
 [[kernel, max_total_threads_per_threadgroup(128)]]

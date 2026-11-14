@@ -27,6 +27,7 @@ pub fn run(g: *gpu.Gpu, q: gpu.Tensor, k: gpu.Tensor, v: gpu.Tensor, shape: [5]u
     params[26] = @bitCast(1 / @sqrt(@as(f32, @floatFromInt(dim))));
     const batched = try g.beginOperator();
     defer g.endOperator(batched);
+    if (g.operator_observer != null) g.operator_shape = .{ rows, keys, dim };
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     var pipes: [6]gpu.mtl.Pipeline = undefined;

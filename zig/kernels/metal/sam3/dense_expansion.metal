@@ -62,8 +62,8 @@ inline void sam_dense_expansion_impl(const device half* packed, const device flo
     auto left = x.slice(0, row), right = w.slice(0, column);
     constexpr auto high_descriptor = matmul2d_descriptor(32, 64, 64, false, true, false);
     constexpr auto correction_descriptor = matmul2d_descriptor(32, 64, int(dynamic_extent), false, true, false);
-    matmul2d<high_descriptor, execution_simdgroups<4>> high_op;
-    matmul2d<correction_descriptor, execution_simdgroups<4>> correction_op;
+    matmul2d<high_descriptor, execution_simdgroups<2>> high_op;
+    matmul2d<correction_descriptor, execution_simdgroups<2>> correction_op;
     auto product = high_op.get_destination_cooperative_tensor<metal::remove_addrspace_t<decltype(left)>, metal::remove_addrspace_t<decltype(right)>, float>();
     float2 sums[32];
     TF_UNROLL
@@ -115,21 +115,21 @@ inline void sam_dense_expansion_impl(const device half* packed, const device flo
     }
 }
 
-[[kernel, max_total_threads_per_threadgroup(128)]]
+[[kernel, max_total_threads_per_threadgroup(64)]]
 void sam_dense_expansion(const device half* packed, const device float* bias, device float* output,
     constant SamDenseShape& shape, const device uint* domain, device SamDenseResiduals* residuals,
     uint2 group [[threadgroup_position_in_grid]]) {
     sam_dense_expansion_impl<false>(packed, bias, output, shape, domain, residuals, group);
 }
 
-[[kernel, max_total_threads_per_threadgroup(128)]]
+[[kernel, max_total_threads_per_threadgroup(64)]]
 void sam_dense_expansion_gelu(const device half* packed, const device float* bias, device float* output,
     constant SamDenseShape& shape, const device uint* domain, device SamDenseResiduals* residuals,
     uint2 group [[threadgroup_position_in_grid]]) {
     sam_dense_expansion_impl<true>(packed, bias, output, shape, domain, residuals, group);
 }
 
-[[kernel, max_total_threads_per_threadgroup(128)]]
+[[kernel, max_total_threads_per_threadgroup(64)]]
 void sam_dense_expansion_drop_residual(const device half* packed, const device float* bias, device float* output,
     constant SamDenseShape& shape, const device uint* domain, device SamDenseResiduals* residuals,
     uint2 group [[threadgroup_position_in_grid]]) {

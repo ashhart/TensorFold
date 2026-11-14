@@ -83,6 +83,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const source = if (std.mem.indexOf(u8, d.name, " nonfinite-control ") != null) try @import("metal_sam3_resize.zig").nonfiniteText(a) else try @import("metal_sam3_resize.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null);
         return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
     }
+    if (std.mem.startsWith(u8, d.name, "sam3 sparse mask ")) {
+        if (!assemble) return undefined;
+        const source = try @import("metal_sam3_sparse_mask.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null);
+        return .{ .decl = d, .function = fun, .here = source, .pre_m5 = source };
+    }
     if (std.mem.startsWith(u8, d.name, "sam3 compensated normalization ")) {
         if (!assemble) return undefined;
         const source = try @import("metal_sam3_norm.zig").text(a, std.mem.indexOf(u8, d.name, " control ") != null);

@@ -5,15 +5,29 @@ const Backend = enum { tensor, split, device, split32 };
 const PhaseProfile = struct {
     const Entry = struct { name: []const u8, gpu_seconds: f64 };
     entries: [8]Entry = undefined,
+    names: [8][192]u8 = undefined,
     count: usize = 0,
 
     fn record(context: *anyopaque, name: []const u8, seconds: f64) !void {
         const self: *PhaseProfile = @ptrCast(@alignCast(context));
         if (self.count == self.entries.len) return error.AttentionProfileOverflow;
-        self.entries[self.count] = .{ .name = name, .gpu_seconds = seconds };
+        if (name.len > self.names[self.count].len) return error.AttentionProfileNameTooLong;
+        const saved = self.names[self.count][0..name.len];
+        @memcpy(saved, name);
+        self.entries[self.count] = .{ .name = saved, .gpu_seconds = seconds };
         self.count += 1;
     }
 };
+
+test "SAM attention phase profiles own borrowed operator names" {
+    var profile: PhaseProfile = .{};
+    var name = "query".*;
+    try PhaseProfile.record(&profile, &name, 1);
+    @memcpy(&name, "value");
+    try PhaseProfile.record(&profile, &name, 2);
+    try std.testing.expectEqualStrings("query", profile.entries[0].name);
+    try std.testing.expectEqualStrings("value", profile.entries[1].name);
+}
 
 fn upload(g: *gpu.Gpu, value: st.Tensor) !gpu.Tensor {
     if (value.dtype != .f32 or value.rank != 4) return error.ExpectedFloat32Attention;

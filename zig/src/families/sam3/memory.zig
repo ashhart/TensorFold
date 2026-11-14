@@ -66,6 +66,14 @@ const Encoder = struct {
     multiplex: bool,
     sparse: bool,
 
+    fn singleMask(self: Encoder, active: u16) !bool {
+        if (!self.multiplex or active != 1) return false;
+        const network = try self.backbone.child("mask_downsampler.encoder");
+        const weight = try network.parameter("0.weight");
+        // Keep the dense path for exceptional weights and unsafe FP32 product ranges.
+        return sparseWeights(weight.slice(f32, weight.count));
+    }
+
     fn absence(self: Encoder, prediction: decoder.Result, active: u16) !ops.Tensor {
         const r = self.owner.runtime;
         const embedding = try self.owner.parameter("no_obj_embed_spatial");
@@ -84,7 +92,7 @@ const Encoder = struct {
         const resized = try r.resize(input, side, side, true);
         const channels: usize = if (self.multiplex and !self.sparse) r.config.bucket_size * 2 else 1;
         const output = try r.device(side * side * channels);
-        if (self.sparse) {
+        if (self.sparse and r.precision != .fp32) {
             try r.g.dispatch("im_sam_mask_values", &.{ resized.tensor, output }, @as(u32, @intCast(side * side)), Size.of(output.count, 1, 1), Size.of(256, 1, 1));
         } else {
             const parameters = MaskParams{
@@ -160,11 +168,12 @@ pub fn encode(r: *ops.Runtime, image: ops.Tensor, prediction: decoder.Result, ac
     const mark = r.mark();
     errdefer r.trim(mark, &.{});
     const owner = Layer{ .runtime = r, .prefix = r.config.trackerPrefix() };
-    const encoder = Encoder{ .owner = owner, .backbone = try owner.child("maskmem_backbone"), .multiplex = r.config.version == .sam31, .sparse = r.config.version == .sam31 and r.precision == .mixed and active == 1 };
+    var encoder = Encoder{ .owner = owner, .backbone = try owner.child("maskmem_backbone"), .multiplex = r.config.version == .sam31, .sparse = false };
+    encoder.sparse = try encoder.singleMask(active);
     const absent = try encoder.absence(prediction, active);
     var mask = prediction.input_masks orelse prediction.masks;
-    if (prediction.input_masks != null) mask = try r.resize(mask, r.config.image_size, r.config.image_size, true);
     if (encoder.sparse) mask = ops.feature(try r.columns(mask.tensor, mask.height * mask.width, r.config.bucket_size, 0, 1), mask.height, mask.width, 1);
+    if (prediction.input_masks != null) mask = try r.resize(mask, r.config.image_size, r.config.image_size, true);
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     const memory_mask = try encoder.masks(mask, active, conditioning, from_points);
@@ -185,4 +194,20 @@ pub fn encode(r: *ops.Runtime, image: ops.Tensor, prediction: decoder.Result, ac
     r.trim(mark, memory.retained(&retained));
     try r.g.endBatch();
     return memory;
+}
+
+fn sparseWeights(values: []const f32) bool {
+    for (values) |value| {
+        const magnitude = @as(u32, @bitCast(value)) & 0x7fffffff;
+        if (magnitude != 0 and (magnitude < 0x2d800000 or magnitude > 0x51800000)) return false;
+    }
+    return true;
+}
+
+test "SAM sparse memory masks require bounded finite weights" {
+    const std = @import("std");
+    try std.testing.expect(sparseWeights(&.{ 0, -0.0, 0x1p-36, -0x1p-36, 0x1p36, -0x1p36 }));
+    for ([_]f32{ 0x1p-37, 0x1p37, 0x1p-149, std.math.floatMax(f32), std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32) }) |value| {
+        try std.testing.expect(!sparseWeights(&.{ 0, value, 1 }));
+    }
 }
