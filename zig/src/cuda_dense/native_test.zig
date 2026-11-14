@@ -1,67 +1,29 @@
 //! Native(R)'s host contract with a tiny recipe: the decls it emits and omits, its refusals' words, a compiled path.
 const std = @import("std");
 const cuda = @import("cuda");
+const kv = @import("core").kv_pool;
 const native = @import("native.zig");
-const Pass = @import("pass.zig").Pass;
-const Geometry = @import("recipe.zig").Geometry;
-const Allocator = std.mem.Allocator;
+const recipe = @import("recipe.zig");
+const fixtures = @import("tiny_test.zig");
 
-const tiny: Geometry = .{ .hidden = 256, .layers = 2, .heads = 4, .kv_heads = 2, .head_dim = 64, .vocab = 512, .eps = 1e-6, .context = 4096, .acc = 512, .wide = 1024, .mid = 512, .theta = 1e4 };
-
-/// A recipe of the dots shape on tiny sizes: biased q|k|v sums, attention, o, SwiGLU, an untied head.
-const Tiny = struct {
-    pub const name = "Tiny";
-    pub const model_type = "tiny_dense";
-    pub const formats: []const []const u8 = &.{"bf16"};
-    pub const default_context: i64 = 4096;
-    pub const reasoning = false;
-    pub const post_embed: ?fn (*const Pass(Tiny)) anyerror!void = null;
-    pub const Weights = struct {
-        embed: u64 = 0,
-        norm: u64 = 0,
-        bias: u64 = 0,
-        proj: cuda.qmmf.Weight = cuda.modelopt.bf16Weight(0, 512, 256),
-        pub fn deinit(_: *Weights) void {}
-    };
-    pub const Kernels = struct {
-        pub fn load(_: *const cuda.Context) !Kernels {
-            return .{};
-        }
-        pub fn deinit(_: *Kernels) void {}
-    };
-    pub fn geometry(_: Allocator, _: std.Io, _: []const u8) !Geometry {
-        return tiny;
-    }
-    pub fn load(_: Allocator, _: std.Io, _: *const cuda.Driver, _: cuda.Stream, _: []const u8) !Weights {
-        return .{};
-    }
-    pub fn weightBytes(_: Allocator, _: std.Io, _: []const u8) !u64 {
-        return 1 << 20;
-    }
-    pub fn embed(p: *const Pass(Tiny)) !void {
-        try p.k.embed.bf16(p.s, p.m.s.ids, p.w.embed, p.m.s.h, p.rows, p.g.hidden);
-    }
-    pub fn layer(p: *const Pass(Tiny), i: usize) !void {
-        const x = p.m.s;
-        try p.norm(if (i == 0) null else x.r, p.w.norm);
-        try p.projectBias(p.w.proj, p.w.bias, x.x, x.wide);
-        try p.projectF32(p.w.proj, x.x, x.acc);
-        try p.attend(i, x.q, x.kv, x.y);
-        try p.project(p.w.proj, x.y, x.r);
-        try p.siluMul(x.wide, x.y, p.g.mid);
-    }
-    pub fn final(p: *const Pass(Tiny)) !void {
-        try p.norm(p.m.s.r, p.w.norm);
-    }
-    pub fn head(w: *const Weights) cuda.qmmf.Weight {
-        return w.proj;
-    }
-    pub fn explain(err: anyerror) ?[]const u8 {
-        return if (err == error.TinyConfig) "this Tiny checkpoint is not the one the recipe serves" else null;
-    }
-};
+const tiny = fixtures.tiny;
+const Tiny = fixtures.Tiny;
+const Fake = fixtures.Fake;
 
 const N = native.Native(Tiny);
+const V = native.Native(fixtures.TinyTower);
+
+/// The decl set of a text-only dense family: the host switches paths on by the decls present.
+const text_decls = .{ "model_type", "formats", "default_context", "max_segments", "prompt_rows", "window_rows", "explains_open", "takes_drafter", "drafter_refusal", "keeps_no_prompts", "reasoning", "Room", "Options", "Loaded", "open", "textWeightBytes", "attach", "fits", "ledgerPool", "explain" };
+
+/// Whether `F`'s public decls are exactly `want` and `more`.
+fn exactly(comptime F: type, comptime want: anytype, comptime more: anytype) bool {
+    const decls = @typeInfo(F).@"struct".decl_names;
+    if (decls.len != want.len + more.len) return false;
+    inline for (want) |d| if (!@hasDecl(F, d)) return false;
+    inline for (more) |d| if (!@hasDecl(F, d)) return false;
+    return true;
+}
 
 test "Native emits the host decls a dense family takes and no others" {
     inline for (.{ "model_type", "formats", "default_context", "max_segments", "prompt_rows", "window_rows", "explains_open", "takes_drafter", "drafter_refusal", "Room", "Options", "Loaded", "open", "textWeightBytes", "attach", "fits", "ledgerPool", "explain", "keeps_no_prompts", "reasoning" }) |d| {
@@ -80,9 +42,83 @@ test "Native emits the host decls a dense family takes and no others" {
     try std.testing.expectEqual(@as(u32, 1024), N.prompt_rows);
     try std.testing.expectEqual(@as(u32, 1), N.max_segments);
     try std.testing.expectStringStartsWith(N.drafter_refusal, "--drafter: Tiny on CUDA");
+    try std.testing.expect(comptime exactly(N, text_decls, .{}));
+    try std.testing.expect(comptime !exactly(N, text_decls, .{"visionBytes"})); // red control: one decl more is seen
+}
+
+test "a recipe with a tower adds exactly the vision decls and fields the host reads, the rest as text-only" {
+    try std.testing.expect(comptime exactly(V, text_decls, .{ "default_image_tokens", "visionBytes" }));
+    try std.testing.expect(@FieldType(V.Options, "vision") == ?Fake.Limits);
+    try std.testing.expect(@FieldType(V.Loaded, "vision") == ?*Fake);
+    try std.testing.expectEqual(@as(u32, 64), V.default_image_tokens);
+    inline for (.{ "context", "drafts", "segments", "slide", "lanes", "lanes_fixed", "room" }) |f| try std.testing.expect(@hasField(V.Options, f));
+    inline for (.{ "precision", "kv8", "prompt_int8", "loops", "rank", "drafter" }) |f| try std.testing.expect(!@hasField(V.Options, f));
+    inline for (.{ "layout", "engine_paged", "free_streams", "target" }) |f| try std.testing.expect(@hasField(V.Loaded, f));
+    try std.testing.expect(!@hasDecl(N, "default_image_tokens") and !@hasDecl(N, "visionBytes") and !@hasField(N.Loaded, "vision"));
+    try std.testing.expectEqual(@as(u64, (5 << 20) + (3 << 16)), try V.visionBytes(std.testing.allocator, std.testing.io, ""));
+    try std.testing.expectEqual(@as(?u64, 1 << 20), try V.textWeightBytes(std.testing.allocator, std.testing.io, ""));
+}
+
+test "the tower contract: the fake tower passes, and each decl of another shape is refused by name" {
+    try std.testing.expect(comptime recipe.towerProblem(Fake) == null);
+    comptime recipe.checkTower(Fake);
+    const named = .{ .{ .limits, "Limits has max_images" }, .{ .width, "field width" }, .{ .marks, "marks has close" }, .{ .encode, "declares encode" }, .{ .prepare, "pixels, gh, gw, tokens and hash" }, .{ .explain, "declares explain" }, .{ .sure_encode, "declares encode" }, .{ .fallible_explain, "declares explain" } };
+    inline for (named) |c| {
+        const why = comptime recipe.towerProblem(fixtures.FakeTower(c[0])) orelse return error.TowerAccepted;
+        try std.testing.expect(std.mem.indexOf(u8, why, c[1]) != null);
+    }
+    try std.testing.expect(comptime recipe.towerProblem(u32) != null);
+    try std.testing.expect(comptime recipe.towerOf(Tiny) == null and recipe.towerOf(fixtures.TinyTower).? == Fake);
+}
+
+test "the tower's refusals follow the engine's and the recipe's words; a text-only recipe leaves them to the server" {
+    try std.testing.expectStringStartsWith(V.explain(null, error.FakeImage).?, "the fake tower");
+    try std.testing.expect(N.explain(null, error.FakeImage) == null);
+    try std.testing.expectStringStartsWith(V.explain(null, error.TinyConfig).?, "this Tiny checkpoint");
+    try std.testing.expectStringStartsWith(V.explain(null, error.DenseServedWithoutVision).?, "Tiny on CUDA was served without --vision");
+    try std.testing.expect(V.explain(null, error.DenseImageSpan) != null and V.explain(null, error.DenseTowerWidth) != null);
+    try std.testing.expect(std.mem.indexOf(u8, V.explain(null, error.DenseImageSpan).?, "(--vision-image-tokens)") != null);
+}
+
+/// The host's view of an engine of recipe `R` at a 4,096-token window, tower `v` (void for text-only).
+fn loadedOf(comptime R: type, comptime L: type, v: native.Core(R).Dense.Vision) L {
+    const C = native.Core(R);
+    var own: C.Owned = undefined;
+    own.m = .{ .gpa = std.testing.allocator, .d = undefined, .g = tiny, .context = 4096, .acc_width = 512, .part_bytes = 0 };
+    own.v = v;
+    own.b.tower = v;
+    return C.loaded(L, &own);
+}
+
+test "each lane's image rows join every stream's bytes and fixed part with --vision, none without" {
+    const pages = @import("pages.zig");
+    const rows: u64 = 64 * 256 * 2; // the request's image tokens at the decoder's width, bf16
+    const plain = pages.streamBytes(tiny, 4096);
+    const fixed = pages.layout(tiny, 4096).fixed_bytes;
+    var t: Fake = .{};
+    const with = loadedOf(fixtures.TinyTower, V.Loaded, &t);
+    try std.testing.expectEqual(plain + rows, with.stream_bytes);
+    try std.testing.expectEqual(fixed + rows, with.layout.?.fixed_bytes);
+    try std.testing.expect(with.vision.? == &t);
+    const without = loadedOf(fixtures.TinyTower, V.Loaded, null);
+    try std.testing.expectEqual(plain, without.stream_bytes);
+    try std.testing.expectEqual(fixed, without.layout.?.fixed_bytes);
+    try std.testing.expect(without.vision == null);
+    const text = loadedOf(Tiny, N.Loaded, {});
+    try std.testing.expectEqual(plain, text.stream_bytes);
+    try std.testing.expectEqual(fixed, text.layout.?.fixed_bytes);
+    // the page planner charges each extra lane its rows: an automatic count shrinks in a room that fits it without
+    const l = text.layout.?;
+    const budget: kv.Budget = .{ .room = 4 * (fixed + l.pageBytes()), .engine = 0, .lanes = 5 };
+    try std.testing.expectEqual(@as(u32, 5), (try kv.plan(l, budget)).lanes);
+    try std.testing.expectEqual(@as(u32, 4), (try kv.plan(with.layout.?, budget)).lanes);
+    var fixed_count = budget;
+    fixed_count.fixed = true; // a fixed count whose rows do not fit is refused, not shrunk
+    try std.testing.expectError(error.TooMany, kv.plan(with.layout.?, fixed_count));
 }
 
 test "every engine refusal is worded, the recipe's own after it, the rest left to the server" {
+    for (native.engine_errors) |e| try std.testing.expect(V.explain(null, e) != null);
     for (native.engine_errors) |e| try std.testing.expect(N.explain(null, e) != null);
     try std.testing.expectStringStartsWith(N.explain(null, error.TinyConfig).?, "this Tiny checkpoint");
     try std.testing.expectStringStartsWith(N.explain(null, error.DenseTextOnly).?, "Tiny on CUDA reads text prompts only");
@@ -102,4 +138,31 @@ test "open refuses captured kernels and a fixed --parallel past a round before i
 test "a recipe's whole path compiles against the engine: open, the lane backend, the forward" {
     const hooks = .{ &N.open, &N.attach, &N.fits, &N.ledgerPool, &N.textWeightBytes, &N.explain };
     inline for (hooks) |h| try std.testing.expect(@intFromPtr(h) != 0);
+    const tower = .{ &V.open, &V.attach, &V.fits, &V.ledgerPool, &V.textWeightBytes, &V.explain, &V.visionBytes };
+    inline for (tower) |h| try std.testing.expect(@intFromPtr(h) != 0);
+}
+
+test "open with a tower refuses captured kernels and a fixed --parallel past a round before it reads the checkpoint" {
+    const ctx: *const cuda.Context = undefined;
+    const base: V.Options = .{ .context = 4096, .drafts = true, .vision = .{ .image_tokens = 64, .max_images = 4 } };
+    try std.testing.expectError(error.CapturedKernels, V.open(std.testing.allocator, undefined, ctx, "", "captured", base));
+    var wide = base;
+    wide.lanes = 129;
+    wide.lanes_fixed = true;
+    try std.testing.expectError(error.ParallelPastRound, V.open(std.testing.allocator, undefined, ctx, "", null, wide));
+}
+
+test "openTower refuses a tower whose rows are not the decoder's width, and opens one that is" {
+    const C = native.Core(fixtures.TinyTower);
+    const ctx: *const cuda.Context = undefined; // the fake tower's open reaches no device
+    const s: cuda.Stream = undefined;
+    const o = .{ .vision = @as(?Fake.Limits, .{ .image_tokens = 64, .max_images = 4 }) };
+    if (C.openTower(std.testing.allocator, std.testing.io, ctx, s, "", tiny.hidden + 1, o)) |got| {
+        if (got) |tw| tw.deinit(); // a tower of the wrong width opened: close it, then fail
+        return error.TestExpectedError;
+    } else |err| try std.testing.expectEqual(error.DenseTowerWidth, err);
+    const t = (try C.openTower(std.testing.allocator, std.testing.io, ctx, s, "", tiny.hidden, o)).?;
+    defer t.deinit();
+    try std.testing.expectEqual(tiny.hidden, t.width);
+    try std.testing.expect(try C.openTower(std.testing.allocator, std.testing.io, ctx, s, "", tiny.hidden, .{}) == null);
 }
