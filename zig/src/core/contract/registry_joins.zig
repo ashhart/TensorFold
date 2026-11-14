@@ -80,6 +80,7 @@ pub const all_metal = @import("penalties_records.zig").records ++
     @import("flashnext_pending.zig").records ++
     @import("simd_pairs_records.zig").records ++
     @import("simd_half_records.zig").records ++
+    @import("glm_ep_records.zig").records ++
     @import("metal_pair_records.zig").records ++
     @import("glm_rows_records.zig").records ++
     @import("glm_launch_records.zig").records ++
