@@ -315,10 +315,9 @@ const Open = struct {
     var phase: usize = 0;
     fn after(_: void) !void {
         return switch (phase) {
-            0 => error.Fp8OnPages,
-            1 => error.DrafterNeedsDrafts,
-            2 => error.LinkRefused,
-            3 => error.RoomRefused,
+            0 => error.DrafterNeedsDrafts,
+            1 => error.LinkRefused,
+            2 => error.RoomRefused,
             else => {},
         };
     }
@@ -353,7 +352,7 @@ fn imageOwner(f: *Fixture) !*glm.images.Images {
 }
 
 test "GLM pages: every post-image startup refusal drains and frees the actual image owner exactly once" {
-    for (0..4) |phase| {
+    for (0..3) |phase| {
         var f: Fixture = undefined;
         try f.prepare();
         defer f.freeSequences();
@@ -372,7 +371,7 @@ test "GLM pages: every post-image startup refusal drains and frees the actual im
         try t.expectEqual(@as(usize, 1), F.unloads);
         F.fail_wait = false;
         f.e.images = try imageOwner(&f);
-        Open.phase = 4;
+        Open.phase = 3;
         try glm.open_owner.finish(&f.e, {}, Open.after);
         f.e.images.?.deinit();
         f.e.images = null;

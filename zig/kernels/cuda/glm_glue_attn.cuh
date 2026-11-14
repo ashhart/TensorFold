@@ -36,6 +36,26 @@ extern "C" __global__ void __launch_bounds__(256)
                                  po, pm, pl, rows, heads, w, scale, sparse, nullptr, 0, scales);
 }
 
+// E4M3 page addresses enter the unchanged chunk arithmetic.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_chunks_16_fp8_paged(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
+                               const int* tok, const int* cnt, float* po, float* pm, float* pl,
+                               int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
+                               const int* pt, int64_t pstep) {
+  glm_attn::chunks_wide<16, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
+                                  po, pm, pl, rows, heads, w, scale, sparse, pt, pstep, scales);
+}
+
+// E4M3 page addresses enter the unchanged chunk arithmetic.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_chunks_32_fp8_paged(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
+                               const int* tok, const int* cnt, float* po, float* pm, float* pl,
+                               int64_t rows, int64_t heads, int64_t w, float scale, int sparse,
+                               const int* pt, int64_t pstep) {
+  glm_attn::chunks_wide<32, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
+                                  po, pm, pl, rows, heads, w, scale, sparse, pt, pstep, scales);
+}
+
 // latent._merge, block (row, head), 128 threads: chunks merged in order, o / l by div.full; skips sparse count-0 rows.
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_merge(const float* po, const float* pm, const float* pl, __nv_bfloat16* out, const int* cnt, int64_t rows,

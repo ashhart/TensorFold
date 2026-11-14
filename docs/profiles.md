@@ -230,13 +230,14 @@ can still refuse startup. The line is printed again when an idle engine reloads.
 | --- | --- | --- | --- |
 | Unset or exactly `auto` | Window per stream | Pool pages | Window per stream |
 | Exactly `off` or `0` | Window per stream | Window per stream | Window per stream |
-| Every other value | Pool pages | Pool pages | Refused with `Fp8OnPages` |
+| Every other value | Pool pages | Pool pages | Pool pages |
 
 These are the existing parser rules, including empty text, `all`, `false`, uppercase spellings and whitespace counting
 as `on`. Prefer `auto`, `off` or `on` explicitly. The family line normalizes these choices and never echoes arbitrary
-input; the registry line shows bounded, escaped raw overrides. FP8 refusals keep their existing error and peer
-notification behavior, and do not print a resolved selection. No paging or FP8 qualification is added by this report;
-the existing BF16 paging evidence is [#1322](https://github.com/ashhart/TensorFold/pull/1322).
+input; the registry line shows bounded, escaped raw overrides. `TF_GLM_KV_HOST=1` with FP8 is refused before the
+selection report or engine construction; peer notification carries `GlmFp8HostKvUnsupported`. The existing BF16
+paging evidence is [#1322](https://github.com/ashhart/TensorFold/pull/1322); paged-FP8 qualification is tracked in
+the [paged-FP8 recipe](recipes/glm-fp8-pages.md).
 
 ## Further profile work
 

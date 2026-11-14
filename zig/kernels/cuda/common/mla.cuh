@@ -77,11 +77,15 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
       if constexpr (FP8) {
         const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc);
-        const float row_scale = ok ? scales[src] : 1.0f;
+        const int64_t page = pt && ok ? (int64_t)pt[src / CH] * pstep : 0;
+        const int64_t row = pt ? src % CH : src;
+        codes += page;
+        const float* scale_at = reinterpret_cast<const float*>(reinterpret_cast<const unsigned char*>(scales) + page);
+        const float row_scale = ok ? scale_at[row] : 1.0f;
 #pragma unroll
         for (int j = 0; j < 8; j += 2) {
-          const uint16_t bits = ok ? (uint16_t)codes[src * LW + u * 8 + j] |
-                                        ((uint16_t)codes[src * LW + u * 8 + j + 1] << 8) : 0;
+          const uint16_t bits = ok ? (uint16_t)codes[row * LW + u * 8 + j] |
+                                        ((uint16_t)codes[row * LW + u * 8 + j + 1] << 8) : 0;
           const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
           dst[wide(key, u) + j] = __float2bfloat16_rn(__fmul_rn(v.x, row_scale));
           dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));

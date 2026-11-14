@@ -90,5 +90,6 @@ pub fn run(r: *Rig, set: glm.glue.Set) !void {
         try latent.sparseAttention(set, r.s, dq, bf_cache, .{}, dt, dc, 3, try partials(r, 1, rows), sparse_bf, rows, heads, lw, 0.125);
         try check.sameBytes("GLM FP8 sparse reader and count-zero preservation", try r.back(sparse_fp, rows * heads * lw * 2), try r.back(sparse_bf, rows * heads * lw * 2));
     }
+    try @import("glm_ref_fp8_pages.zig").run(r, set);
     check.pass("GLM FP8 synthetic format, masking, row/chunk identity and reconstructed BF16/FP64 attention", .{});
 }

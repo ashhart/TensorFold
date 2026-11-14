@@ -2,6 +2,12 @@
 const std = @import("std");
 const startup = @import("cuda_start.zig");
 
+test "GLM FP8 pages compatibility: explicit paging reaches construction at every rank count" {
+    for (1..5) |world| for ([_][]const u8{ "on", "1", "all" }) |mode| {
+        try std.testing.expect(try startup.paging(mode, world, true));
+    };
+}
+
 fn recordReport(args: Args, selection: startup.Report) void {
     const w = args.world;
     const line = std.fmt.bufPrint(&w.report, "glm kv selection: {f}", .{selection}) catch @panic("unbounded startup report");
@@ -58,7 +64,44 @@ fn construct(a: Args, settings: Settings) anyerror!void {
 }
 
 fn run(w: *World, rank: usize, world: usize, text: ?[]const u8, kv8: bool) !void {
-    return startup.open(std.testing.io, Place{ .rank = rank, .world = world }, text, Settings{ .kv8 = kv8 }, Watch{ .world = w, .rank = rank }, Args{ .world = w, .rank = rank }, construct, recordReport);
+    return runWithHost(w, rank, world, text, kv8, false);
+}
+
+fn runWithHost(w: *World, rank: usize, world: usize, text: ?[]const u8, kv8: bool, kv_host: bool) !void {
+    return startup.open(std.testing.io, Place{ .rank = rank, .world = world }, text, Settings{ .kv8 = kv8 }, kv_host, Watch{ .world = w, .rank = rank }, Args{ .world = w, .rank = rank }, construct, recordReport);
+}
+
+test "GLM startup: FP8 host KV refuses before reporting or constructing at every page selection" {
+    const modes = [_]?[]const u8{ null, "auto", "off", "0", "on", "1", "all" };
+    for ([_]usize{ 1, 2, 3, 16 }) |world| for (modes) |mode| for (0..@min(world, 2)) |rank| {
+        var w: World = .{ .expected_world = world };
+        try std.testing.expectError(error.GlmFp8HostKvUnsupported, runWithHost(&w, rank, world, mode, true, true));
+        try std.testing.expect(!w.constructed[rank]);
+        try std.testing.expectEqual(@as(usize, 0), w.reports);
+        try std.testing.expectEqual(@as(usize, 1), w.notifications);
+    };
+}
+
+test "GLM startup: BF16 host KV requires pages and reaches construction when pages are selected" {
+    for ([_]usize{ 1, 2, 3, 16 }) |world| {
+        for ([_][]const u8{ "off", "0" }) |mode| {
+            var refused: World = .{ .expected_world = world };
+            try std.testing.expectError(error.GlmKvHostNeedsPages, runWithHost(&refused, 0, world, mode, false, true));
+            try std.testing.expect(!refused.constructed[0]);
+            try std.testing.expectEqual(@as(usize, 0), refused.reports);
+        }
+        for ([_][]const u8{ "on", "1", "all" }) |mode| {
+            var allowed: World = .{ .expected_world = world };
+            try runWithHost(&allowed, 0, world, mode, false, true);
+            try std.testing.expect(allowed.constructed[0]);
+            try std.testing.expect(allowed.settings[0].?.pages);
+        }
+    }
+    var single_auto: World = .{ .expected_world = 1 };
+    try std.testing.expectError(error.GlmKvHostNeedsPages, runWithHost(&single_auto, 0, 1, null, false, true));
+    var multi_auto: World = .{ .expected_world = 2 };
+    try runWithHost(&multi_auto, 0, 2, null, false, true);
+    try std.testing.expect(multi_auto.constructed[0]);
 }
 
 fn refusal(rank: usize) !void {
@@ -67,28 +110,28 @@ fn refusal(rank: usize) !void {
         const peer = 1 - rank;
         try run(&w, peer, 2, "auto", true);
         try std.testing.expect(w.waiting[peer]);
-        try std.testing.expectError(error.Fp8OnPages, run(&w, rank, 2, mode, true));
-        try std.testing.expectEqualStrings("Fp8OnPages", w.refused[peer] orelse "waiting for missing rank");
+        w.fail_engine = true;
+        try std.testing.expectError(error.InjectedEngineFailure, run(&w, rank, 2, mode, true));
+        try std.testing.expectEqualStrings("InjectedEngineFailure", w.refused[peer] orelse "waiting for missing rank");
         try std.testing.expect(!w.waiting[peer]);
         try std.testing.expect(w.connected[rank] and w.connected[peer]);
-        try std.testing.expect(!w.constructed[rank]);
+        try std.testing.expect(w.constructed[rank]);
         try std.testing.expectEqual(@as(usize, 2), w.starts);
         try std.testing.expectEqual(@as(usize, 1), w.notifications);
-        try std.testing.expectEqual(@as(usize, 1), w.reports);
+        try std.testing.expectEqual(@as(usize, 2), w.reports);
     }
 }
 
-test "GLM startup: refusing rank zero promptly tells the waiting follower Fp8OnPages" {
+test "GLM startup: engine refusal at rank zero promptly tells the waiting follower its error" {
     try refusal(0);
 }
 
-test "GLM startup: refusing follower promptly tells waiting rank zero Fp8OnPages" {
+test "GLM startup: engine refusal at a follower promptly tells waiting rank zero its error" {
     try refusal(1);
 }
 
 test "GLM startup: valid modes reach construction with every other setting intact" {
     for ([_]bool{ false, true }) |kv8| for ([_][]const u8{ "auto", "off", "0", "on", "all" }) |mode| {
-        if (kv8 and (std.mem.eql(u8, mode, "on") or std.mem.eql(u8, mode, "all"))) continue;
         var w: World = .{};
         try run(&w, 0, 2, mode, kv8);
         try std.testing.expect(w.connected[0]);
@@ -126,34 +169,27 @@ test "GLM startup: failed liveness connection never resolves settings or constru
 }
 
 test "GLM startup: legacy paging matrix preserves settings and reports each rank before construction" {
-    const Case = struct { raw: ?[]const u8, single: bool, multi: bool, fp8_refuses: bool, mode: []const u8 };
+    const Case = struct { raw: ?[]const u8, single: bool, multi: bool, fp8_pages: bool, mode: []const u8 };
     const cases = [_]Case{
-        .{ .raw = null, .single = false, .multi = true, .fp8_refuses = false, .mode = "auto" },
-        .{ .raw = "auto", .single = false, .multi = true, .fp8_refuses = false, .mode = "auto" },
-        .{ .raw = "off", .single = false, .multi = false, .fp8_refuses = false, .mode = "off" },
-        .{ .raw = "0", .single = false, .multi = false, .fp8_refuses = false, .mode = "off" },
-        .{ .raw = "on", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "1", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "all", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "false", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "AUTO", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "00", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = " 0 ", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
-        .{ .raw = "off\n\x1b[31m", .single = true, .multi = true, .fp8_refuses = true, .mode = "on" },
+        .{ .raw = null, .single = false, .multi = true, .fp8_pages = false, .mode = "auto" },
+        .{ .raw = "auto", .single = false, .multi = true, .fp8_pages = false, .mode = "auto" },
+        .{ .raw = "off", .single = false, .multi = false, .fp8_pages = false, .mode = "off" },
+        .{ .raw = "0", .single = false, .multi = false, .fp8_pages = false, .mode = "off" },
+        .{ .raw = "on", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "1", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "all", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "false", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "AUTO", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "00", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = " 0 ", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
+        .{ .raw = "off\n\x1b[31m", .single = true, .multi = true, .fp8_pages = true, .mode = "on" },
     };
     for (cases) |c| for (1..17) |world| for ([_]bool{ false, true }) |kv8| {
         const last_rank = @min(world, 2);
         for (0..last_rank) |rank| {
             var w: World = .{ .expected_world = world };
-            if (kv8 and c.fp8_refuses) {
-                try std.testing.expectError(error.Fp8OnPages, run(&w, rank, world, c.raw, kv8));
-                try std.testing.expect(!w.constructed[rank]);
-                try std.testing.expectEqual(@as(usize, 0), w.reports);
-                try std.testing.expectEqual(@as(usize, 1), w.notifications);
-                continue;
-            }
-            const pages = !kv8 and (if (world == 1) c.single else c.multi);
+            const pages = if (kv8) c.fp8_pages else (if (world == 1) c.single else c.multi);
             try run(&w, rank, world, c.raw, kv8);
             try std.testing.expectEqualDeep(Settings{ .kv8 = kv8, .pages = pages }, w.settings[rank].?);
             try std.testing.expectEqual(@as(usize, 1), w.reports);

@@ -214,7 +214,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("TF_KV_SHARE={d} asks more kept states than the {d} it keeps: set {d} or fewer", .{ share_snaps, kv.most_snaps, kv.most_snaps });
         return error.GlmShareTooMany;
     }
-    return startup.open(io, p, startup.pagesText(), set, cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes, .share = share_snaps }, openRank, startup.log);
+    return startup.open(io, p, startup.pagesText(), set, @import("cuda_kv_host.zig").onHost(), cuda.tp_watch, StartArgs{ .gpa = gpa, .io = io, .ctx = ctx, .dir = dir, .o = o, .p = p, .roce_bytes = roce_bytes, .share = share_snaps }, openRank, startup.log);
 }
 
 const StartArgs = struct {
@@ -242,7 +242,6 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     defer load_cache.deinit();
     // TF_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
-    if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -513,7 +512,6 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.NoRank => "GLM-5.3-Flash runs at TP over hosts: set TF_GLM_RANK and TF_GLM_WORLD on every host (WORLD 1: one GPU, with TF_GLM_LAYERS for a thin model)",
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: with TF_GLM_WORLD 2 or more, set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",
-        error.Fp8OnPages => "--kv-cache fp8 keeps a window per stream: unset TF_KV_PAGES, or set it to auto or off",
         error.BadKvShare => "TF_KV_SHARE: give how many states the prompt store over the KV pages keeps, or 0 or unset for off",
         error.GlmKvShareMoved => "TF_GLM_KV_SHARE is now TF_KV_SHARE, the prompt store every family on the KV pool shares: set that instead",
         error.GlmRequestStartsWithSharedKv => "TF_GLM_REQUEST_STARTS=1 cannot be used with TF_KV_SHARE above 0: unset request starts or disable shared KV",
@@ -523,6 +521,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.BadCopyPolicy => "TF_GLM_COPIES: expected 0 or 1 for verified root/context copies",
         error.InvalidEnvironment => "a TF_GLM_* setting is malformed: the error line before this one names it, its value and the accepted form",
         error.GlmKvHostNeedsPages => "TF_GLM_KV_HOST keeps the KV pool's pages in host memory: set TF_KV_PAGES=on (and --kv-cache bf16) as well",
+        error.GlmFp8HostKvUnsupported => "TF_GLM_KV_HOST currently supports BF16 KV pages only: unset TF_GLM_KV_HOST or serve with --kv-cache bf16 and TF_KV_PAGES=on",
         error.TooManyRanks => std.fmt.comptimePrint(
             "GLM-5.3-Flash on CUDA runs on at most {d} ranks: set TF_GLM_WORLD to {d} or fewer",
             .{ ranks.max_world, ranks.max_world },
@@ -564,16 +563,16 @@ test "TF_KV_PAGES: auto pages from two ranks, off and 0 give windows, all and ot
     }
 }
 
-test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank count, on and all are refused by name" {
+test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows; explicit pages are accepted at every rank count" {
     for ([_]usize{ 1, 2, 3, 16 }) |w| {
         try std.testing.expect(!try paging(null, w, true));
         try std.testing.expect(!try paging("auto", w, true));
         try std.testing.expect(!try paging("off", w, true));
         try std.testing.expect(!try paging("0", w, true));
-        for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
+        for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expect(try paging(v, w, true));
     }
-    try std.testing.expect(explain(null, error.Fp8OnPages) != null);
     try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
+    try std.testing.expect(explain(null, error.GlmFp8HostKvUnsupported) != null);
 }
 
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {

@@ -16,9 +16,10 @@ pub fn tableLen(capacity: usize) usize {
 
 /// What a stream of engine `e` holds: its fixed part and table (and `extra`, its other buffers), 13,056 bytes a token.
 pub fn layout(gpa: std.mem.Allocator, e: *const Engine, extra: u64) !kv.Layout {
+    if (e.settings.kv8 and kv_host.onHost()) return error.GlmFp8HostKvUnsupported;
     const fixed = try state.State.pagedBytes(gpa, &e.w, e.capacity, tableLen(e.capacity));
     // TF_GLM_KV_HOST: a page costs the device only its pooled keys (the pages themselves are in host memory)
-    const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytes(&e.w);
+    const page = if (kv_host.onHost()) state.pkPageBytes(&e.w) else state.pageBytesFormat(&e.w, e.settings.kv8);
     return .{ .fixed_bytes = fixed + extra, .token_bytes = page / state.page_rows, .page_tokens = state.page_rows, .snap_bytes = 0 };
 }
 
@@ -38,7 +39,7 @@ pub fn ownSequence(e: *Engine) !void {
     if (e.seqs.items[0] != null) return error.SlotTaken;
     const q = try e.gpa.create(types.Seq);
     errdefer e.gpa.destroy(q);
-    q.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, on(e, 0, state.pageBytes(&e.w))) };
+    q.* = .{ .st = try fw.State.initPagedFormat(e.gpa, e.d, &e.w, e.capacity, on(e, 0, state.pageBytesFormat(&e.w, e.settings.kv8)), e.settings.kv8) };
     e.seqs.items[0] = q;
     e.cur = q;
     e.slot = 0;
@@ -72,7 +73,7 @@ pub const Pages = struct {
         if (own == null or own.?.st.table == 0) return error.OwnNotPaged; // slot 0 holds a window, or none was made
         const p = try gpa.create(Pages);
         errdefer gpa.destroy(p);
-        const page = if (kv_host.onHost()) state.pageBytes(&e.w) else l.pageBytes();
+        const page = if (kv_host.onHost()) state.pageBytesFormat(&e.w, e.settings.kv8) else l.pageBytes();
         p.* = .{ .gpa = gpa, .e = e, .layout = l, .page = page, .pool = try kv.Pool.init(gpa, pages, page), .arena = null, .leases = &.{}, .used = &.{}, .leader = leader, .poison = poisoned() };
         errdefer p.pool.deinit();
         const host = kv_host.onHost() and pages > 0;
@@ -117,7 +118,7 @@ pub const Pages = struct {
             if (q.* != null) return error.SlotTaken; // attach comes before any stream
             const s = try e.gpa.create(types.Seq);
             errdefer e.gpa.destroy(s);
-            s.* = .{ .st = try fw.State.initPaged(e.gpa, e.d, &e.w, e.capacity, at) };
+            s.* = .{ .st = try fw.State.initPagedFormat(e.gpa, e.d, &e.w, e.capacity, at, e.settings.kv8) };
             q.* = s;
             made += 1;
         }

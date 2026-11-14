@@ -65,12 +65,10 @@ const q35_contiguous = @import("contract_q35_contiguous.zig");
 const contract = core.contract;
 const g = contract.gates;
 const kk = cuda.kernels;
-
 const images = struct {
     pub const controls align(16) = @embedFile("fatbin_contract_controls").*;
     pub const h3 align(16) = @embedFile("fatbin_h3").*;
 };
-
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5; `only`: contract_after.zig.
 pub fn run(gpu: check.Gpu, only: []const []const u8) !void {
     var t0: i96 = undefined;
@@ -561,6 +559,8 @@ fn registered(gpu: check.Gpu, only: []const []const u8, t0: *i96) !g.Tally {
         x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = if (hb == 16) glm_fns.chunks_16 else glm_fns.chunks_32, .merge = glm_fns.merge, .form = .{ .hb = hb, .sparse = sparse } };
     defer for (&glm_chunks) |*x| x.deinit();
     for (&glm_chunks) |*x| try kernels.append(a, x.kernel());
+    const glm_fp8 = try @import("contract_glm_fp8_group.zig").Group.create(a, gpu, s, glm_fns, &kernels);
+    defer glm_fp8.destroy();
     var glm_controls = @import("contract_glm_controls.zig").Controls.init(gpu, s, glm_fns, glm_tokens.f, glm_ops);
     defer glm_controls.deinit();
     try glm_controls.append(a, &kernels);
