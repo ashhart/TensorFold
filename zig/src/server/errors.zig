@@ -36,6 +36,8 @@ pub const Cx = struct {
     named_effort: ?[]const u8 = null,
     /// The request controls a native prompt renderer must retain in every prefix probe.
     template_fields: @import("json").Value = .null,
+    /// Set by a route that has already planned the same body (its first plan writes the request log).
+    skip_request_log: bool = false,
 
     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
         cx.kind = kind;

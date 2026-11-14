@@ -87,7 +87,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     reply.init() catch return;
     var wire: Wire = .{ .reply = &reply };
     const format_name = translate_mod.formatName(prepared[1]);
-    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0], format_name, translate_mod.thinkingSent(prepared[1]));
+    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0], format_name, translate_mod.thinkingSent(prepared[1]), false);
     if (wire.opened or wire.status == null or conn.broken) return;
     const payload = wire.payload;
     if (wire.status.? != 200) {

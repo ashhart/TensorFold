@@ -14,6 +14,22 @@ pub fn webHostTests(b: *std.Build, all: *std.Build.Step) void {
     all.dependOn(&run.step);
 }
 
+/// Ollama body translation and refusals, no server or device.
+pub fn ollamaHostTests(b: *std.Build, all: *std.Build.Step) void {
+    const json_mod = json(b, b.graph.host, .Debug);
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/ollama_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "json", .module = json_mod }},
+    }) });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    b.step("test-ollama-host", "Ollama request translation, option refusals and NDJSON framing").dependOn(&run.step);
+    all.dependOn(&run.step);
+}
+
 /// The server's JSON values as a module (zig/src/server/json.zig), so a family's serving code shares them.
 pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
