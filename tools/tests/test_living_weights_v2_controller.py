@@ -5,6 +5,9 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/, as the other tool tests do
 from living_weights_v2.controller import Controller, LearningError, _changes
 from living_weights_v2.ledger import Ledger, LedgerError, exclusive_file
 from living_weights_v2.schema import Fact, Manifest

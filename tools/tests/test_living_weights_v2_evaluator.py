@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/, as the other tool tests do
 from living_weights_v2.evaluator import evaluate
 from living_weights_v2.schema import Fact, Manifest
 

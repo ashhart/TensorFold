@@ -7,6 +7,9 @@ from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 from pathlib import Path
 
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # tools/, as the other tool tests do
 from living_weights_v2.__main__ import main
 
 

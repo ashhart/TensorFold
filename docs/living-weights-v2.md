@@ -17,7 +17,7 @@ PYTHONPATH=tools python3 -m living_weights_v2 teach docs/living-weights-v2-manif
 PYTHONPATH=tools python3 -m living_weights_v2 evaluate docs/living-weights-v2-manifest.example.json \
   --api-key-file "$HOME/models/slide-key"
 PYTHONPATH=tools python3 -m living_weights_v2 status
-PYTHONPATH=tools python3 -m unittest discover -s tests -p 'test_living_weights_v2*.py' -v
+python3 -m pytest -q tools/tests -k living_weights_v2
 ```
 
 The example is fictional. Edit it for a real, user-approved lesson and correct probes. `asserted_by_user` means approval of the supplied claim; the tool does not automatically verify a document, URL, or third-party claim. The manifest hash is a provenance fingerprint, not a content authenticity signature.
