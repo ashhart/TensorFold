@@ -4,8 +4,6 @@ const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 
 const dims = wt.dims;
-const slots = wt.slots;
-const moe_w = wt.moe_w;
 
 /// On by default: its slot rows of y are apart from the routed experts', so the bits match; =0 runs it after them.
 pub fn on() bool {
@@ -40,7 +38,7 @@ pub fn run(pass: anytype, st: cuda.Stream, native: anytype, n: usize) !void {
     const glue = pass.tri.own orelse return error.NativeGlueRequired;
     try pass.k.nativeMatmul(st, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part, .bf16);
     try pass.k.nativeMatmul(st, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part, .bf16);
-    try glue.sharedSwiGLU(st, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
+    try glue.sharedSwiGLU(st, s.shared_gate, s.shared_up, s.shared_act, n, native.shared_width);
     try down(pass, st, s.shared_act, native, n);
 }
 
@@ -48,11 +46,11 @@ pub fn run(pass: anytype, st: cuda.Stream, native: anytype, n: usize) !void {
 pub fn down(pass: anytype, st: cuda.Stream, input: u64, native: anytype, n: usize) !void {
     const s = pass.s;
     const w = native.shared[2].native.?;
-    if (w.n == dims and cuda.qmmf_shared.eligible(pass.k.native_lane, n, w, moe_w, slots * dims))
-        return pass.k.native_lane.matmulF32Strided(st, input, moe_w, n, w, s.y + (slots - 1) * dims * 4, slots * dims);
+    if (w.n == dims and cuda.qmmf_shared.eligible(pass.k.native_lane, n, w, native.shared_width, s.slots * dims))
+        return pass.k.native_lane.matmulF32Strided(st, input, native.shared_width, n, w, s.y + (s.slots - 1) * dims * 4, s.slots * dims);
     const glue = pass.tri.own orelse return error.NativeGlueRequired;
-    try pass.k.nativeMatmul(st, input, moe_w, n, w, s.shared_out, s.native_part, .f32);
-    try glue.sharedScatter(st, s.shared_out, s.y, n, dims, slots);
+    try pass.k.nativeMatmul(st, input, native.shared_width, n, w, s.shared_out, s.native_part, .f32);
+    try glue.sharedScatter(st, s.shared_out, s.y, n, dims, s.slots);
 }
 
 /// After y is cleared: the shared expert forked onto the side stream (one GPU, not a prompt fill), or null.
