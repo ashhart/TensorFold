@@ -38,6 +38,7 @@ test "residency owner GLM DSA: actual scratch, packed weights, transport, MTP an
             e.queue = record.queue();
             e.context = 4;
             e.resident = null;
+            e.request_gate = .{};
             e.m.c = .{ .hidden = 64, .layers = 1, .vocab = 32, .experts = 4, .topk = 1, .heads = 2, .dense_inter = 128, .moe_inter = 128, .q_lora = 64, .kv_lora = 64, .i_heads = 1, .i_topk = 4 };
             try buffers.fill(&e.m);
             try buffers.fill(&e.m.K);
@@ -59,7 +60,9 @@ test "residency owner GLM DSA: actual scratch, packed weights, transport, MTP an
                 e.m.mtp = extra;
             }
             var pair: @import("src/core/pair.zig").Pair = undefined;
-            pair.wbuf = try buffers.take(64);
+            try buffers.fill(&pair);
+            pair.failed = .init(false);
+            pair.handoff.ready = try buffers.take(64);
             e.pair = &pair;
             e.s = try g.gpu.Scratch.init(e.device, &e.m.c, e.context);
             defer e.s.deinit();
@@ -87,6 +90,11 @@ test "residency owner GLM DSA: actual scratch, packed weights, transport, MTP an
             const refused = g.snap.save(&e, 1, 0, 1);
             e.gpa = a;
             try std.testing.expectError(error.OutOfMemory, refused);
+            try record.check();
+            pair.failed.store(true, .release);
+            try std.testing.expectError(error.PairLinkFailed, g.snap.save(&e, 1, 0, 1));
+            try std.testing.expect(!e.snaps.contains(1));
+            pair.failed.store(false, .release);
             try record.check();
             _ = try g.snap.save(&e, 1, 0, 1);
             defer g.snap.drop(&e, 1);

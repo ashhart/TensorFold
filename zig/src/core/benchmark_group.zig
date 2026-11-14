@@ -98,6 +98,11 @@ pub fn cuda(a: Allocator, io: std.Io, ctx: anytype, group: anytype, stream: anyt
 
 /// The connected endpoint attests two ranks; HELLO=1 peers retain serving compatibility but no inventory.
 pub fn metal(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usize, hello: usize, ready: u64) !?[]const u8 {
+    return metalFor(a, io, device, rd, offset, hello, ready, null);
+}
+
+/// A bounded inventory wait for transports whose startup must fail when a connected peer goes silent.
+pub fn metalFor(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usize, hello: usize, ready: u64, comptime wait_ns: ?u64) !?[]const u8 {
     if (rd.size() != 2 or rd.rank() > 1) return error.BadWorld;
     const win = rd.window();
     if (offset > win.len or @sizeOf(Wire) > win.len - offset or hello > win.len - 8) return error.BadInventoryOffset;
@@ -107,7 +112,10 @@ pub fn metal(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usi
     try rd.write2Signal(1 - rank, offset, std.mem.asBytes(&mine), &.{}, hello, ready);
     try rd.flush();
     const word: *const u64 = @ptrCast(@alignCast(win[hello..][0..8]));
+    const start: std.Io.Timestamp = if (wait_ns != null) .now(io, .awake) else .{ .nanoseconds = 0 };
     while (@atomicLoad(u64, word, .acquire) < ready and @atomicLoad(u64, word, .acquire) != 1) {
+        if (wait_ns) |budget| if (start.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds >= budget)
+            return error.PairPeerSilent;
         std.atomic.spinLoopHint();
     }
     if (@atomicLoad(u64, word, .acquire) != ready) return null;

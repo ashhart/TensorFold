@@ -78,6 +78,8 @@ fn alias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.
 
 /// GLM-5.3 (glm_moe_dsa) on EXLR8: a layer on Metal against the fp32 reference forward's tensors.
 pub fn glmTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module) void {
+    const pair = b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{ "GLM DSA pair loopback:", "pair deadline:", "pair shutdown:", "pair heartbeat:", "GLM DSA request gate:" } }));
+    b.step("test-glm-dsa-pair", "Full GLM pair event ordering, stale slots and host deadlines without a checkpoint").dependOn(&pair.step);
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     for ([_][3][]const u8{
         .{ "tf-glm-dsa-layer-check", "zig/tests/glm_dsa_layer_check.zig", "One GLM-5.3 layer on Metal against ref_layer.py's fp32 tensors (MODEL_DIR REF_DIR)" },

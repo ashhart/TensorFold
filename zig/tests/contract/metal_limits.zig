@@ -269,6 +269,9 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     } else if (std.mem.startsWith(u8, d.name, "metal pair ")) {
         if (!assemble) return undefined;
         text = sources.core_pair_rows;
+    } else if (std.mem.startsWith(u8, d.name, "metal glm dsa pair ")) {
+        if (!assemble) return undefined;
+        text = sources.core_pair;
     } else if (has(d.name, "tile_qmm")) {
         if (!assemble) return undefined;
         text = sources.core_tile_qmm;

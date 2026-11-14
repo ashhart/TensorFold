@@ -78,13 +78,23 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     }
     errdefer if (h.cache) |*store| store.deinit();
     h.warm = g.residency.target(e);
-    h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
+    h.host.keepalive_target = .{ .ctx = h, .tick = keepWarm };
     try h.host.start();
     errdefer h.host.stop();
     if (e.rank() == 1) h.follower = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, follow, .{h});
     std.log.info("GLM-5.3 (EXLR8) loaded in {d:.1} s, {d:.1} GB on this Mac, pair rank {d}, context {d} tokens, {d} streams", .{ e.load_seconds, @as(f64, @floatFromInt(e.m.bytes)) / 1e9, e.rank(), window, streams });
     if (h.back.timed) for (h.back.costs) |c| std.log.info("glm_dsa: a window of {d} rows {d:.1} ms", .{ c.width, c.ms });
     return h;
+}
+
+fn keepWarm(ctx: *anyopaque) void {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    _ = h.e.request_gate.keepWarm(&h.warm) catch |err| {
+        h.e.pair.handoff.fail(h.e.pair.submitted.load(.acquire), err);
+        return;
+    };
 }
 
 fn follow(h: *Host) void {
