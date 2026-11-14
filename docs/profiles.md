@@ -51,12 +51,15 @@ Coverage includes:
   with `TENSORFOLD_DORY_KV_PAGES=0` it refuses to load, by both names. With the switch unset, the startup line
   shows `TENSORFOLD_DORY_KV_PAGES=1 (arithmetic, TF_KV_SHARE)` and kept states carry the same identity as `=1`.
 - Every CUDA family whose host prompt cache the CUDA host builds (Nemotron, Nemotron Omni, GLM, MiniMax M3, Qwen3.5
-  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`, exact `1` only.
+  dense/MoE, Flash Next, Kolibri-1, Gemma 4, Spark2.5, Dory, LFM2.5-24B-A2B): `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS`,
+  exact `1` only.
 - Flash Next on CUDA: `TF_FLASHNEXT_KV_PAGES`, `TF_FLASHNEXT_KV_PAGES_ALL`.
 - Dory on CUDA: `TENSORFOLD_DORY_KV_PAGES`, full-attention caches in pool pages unless it is exactly `0`; unset,
   every stream's caches are contiguous and made at open.
 - Gemma 4 on CUDA: `TENSORFOLD_GEMMA4_KV_PAGES`, global caches in pool pages by default, where `0` keeps them linear.
 - Spark2.5 on CUDA: `TENSORFOLD_SPARK25_KV_PAGES`, full caches in pool pages by default, where `0` keeps them linear.
+- LFM2.5-24B-A2B on CUDA: `TENSORFOLD_LFM2_KV_PAGES`, attention caches in pool pages by default, where `0` gives
+  each stream fixed pages made at open.
 - Nemotron-H on Metal: `TF_NEMOTRON_METAL_KV_PAGES`, where exactly `1` puts keys
   and values in the core pool's pages.
 - DeepSeek V4.1 on CUDA: the settings below, with no stable fallback.

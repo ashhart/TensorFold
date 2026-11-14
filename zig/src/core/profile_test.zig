@@ -158,8 +158,8 @@ test "stable profile: Dory paging is on unless the value is exactly zero" {
     try t.expect(!e.differs("0"));
 }
 
-test "stable profile: Gemma 4 and Spark2.5 paging is off only for exactly zero" {
-    inline for (.{ .TENSORFOLD_GEMMA4_KV_PAGES, .TENSORFOLD_SPARK25_KV_PAGES }) |id| {
+test "stable profile: Gemma 4, Spark2.5 and LFM2.5 paging is off only for exactly zero" {
+    inline for (.{ .TENSORFOLD_GEMMA4_KV_PAGES, .TENSORFOLD_SPARK25_KV_PAGES, .TENSORFOLD_LFM2_KV_PAGES }) |id| {
         const e = p.entry(id);
         try t.expect(e.report_values != null and e.report_values.?.len == 1 and std.mem.eql(u8, e.report_values.?[0], "0"));
         try t.expectEqual(p.Class.identical, e.class);
@@ -169,6 +169,8 @@ test "stable profile: Gemma 4 and Spark2.5 paging is off only for exactly zero" 
     }
     try t.expect(p.entry(.TENSORFOLD_GEMMA4_KV_PAGES).applies("gemma4_unified", "cuda"));
     try t.expect(p.entry(.TENSORFOLD_SPARK25_KV_PAGES).applies("spark2_5", "cuda"));
+    try t.expect(p.entry(.TENSORFOLD_LFM2_KV_PAGES).applies("lfm2_moe", "cuda"));
+    try t.expect(!p.entry(.TENSORFOLD_LFM2_KV_PAGES).applies("lfm2_moe", "metal"));
 }
 
 test "stable profile: Nemotron's paging on Metal has its own scope" {

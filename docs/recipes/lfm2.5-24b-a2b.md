@@ -53,7 +53,10 @@ zig-out/native/bin/tensorfold-native serve "$HOME/models/lfm2.5-24b-a2b-4bit" --
 ```
 
 The default window is 32,768 tokens (`--context`), and `--parallel` holds up to 128 streams if the memory budget fits
-them. Each stream has fixed pages for its keys and values. The family reads MLX affine 4-bit weights in groups of
+them. Streams lease 512-position pages of keys and values from one pool as they need them
+(`TENSORFOLD_LFM2_KV_PAGES=0` gives each stream fixed pages instead). The prompt cache keeps a chat's state at its
+history marks, the conv states and the K/V rows before the mark, in pages allocated once inside its budget
+(`--prompt-cache-gib`). The family reads MLX affine 4-bit weights in groups of
 64, with the embedding at 4, 6 or 8 bits. The 6- and 8-bit exports are refused by name and stay on Metal. Drafts
 are the lane core's copy drafts from the prompt's own text; there is no draft head yet.
 
