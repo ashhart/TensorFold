@@ -115,7 +115,7 @@ pub const Proj = struct {
     pub fn kernel(p: *Proj) g.Kernel {
         const control: ?g.Gate = switch (p.v.ctl) {
             1 => .nonfinite,
-            2, 5 => .shapes,
+            2, 5, 6 => .shapes,
             3 => .sums,
             4 => .repeat,
             else => null,
@@ -159,9 +159,22 @@ pub const Proj = struct {
             ref.fillX(p.x, rng);
             if (p.v.wide) p.wideX(rng);
             if (fill == .nonfinite) ref.plantNonfinite(p.x, if (up) shape.rows else np, shape.k);
+            if (!up and !p.v.wide and fill == .random) p.plantUnsafe();
         }
         try p.upload();
         return true;
+    }
+
+    /// Pair 0, column 0: decode drops 4 half-ulp terms after 2^24 + 2^23 + 2^16 (a bf16 tie); exact sums keep them.
+    fn plantUnsafe(p: *Proj) void {
+        const k = p.shape.k;
+        const m = p.m1.?;
+        const w = (p.plan.?.expertAt(0) % m.e) * m.n;
+        @memset(p.x[0..k], 0);
+        for ([_]f32{ 0x1p24, 0x1p23, 0x1p16, 2, 2, 2, 2 }, 0..) |v, i| p.x[i] = c.toBf16(v);
+        @memset(m.codes[w * k / 2 ..][0..16], 0);
+        @memcpy(m.codes[w * k / 2 ..][0..4], &[_]u8{ 0x22, 0x12, 0x11, 0x01 });
+        m.scales[w * k / 32] = 127;
     }
 
     /// Full-range scales: each K group's activation is sized so its terms stay normal floats and its sum finite.
@@ -370,6 +383,7 @@ pub const Suite = struct {
         .{ .v = .{ .which = .down, .ctl = 5, .units = true }, .name = base ++ "units control: down last K group dropped" },
         .{ .v = .{ .which = .down, .ctl = 3, .units = true }, .name = base ++ "units control: down sums rounded to fp16" },
         .{ .v = .{ .which = .down, .ctl = 4, .units = true }, .name = base ++ "units control: down writes past its output" },
+        .{ .v = .{ .which = .down, .ctl = 6, .units = true }, .name = base ++ "units control: down unsafe groups on the tensor unit" },
     };
 
     pub fn create(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, kernels: *std.ArrayList(g.Kernel), only: ?[]const u8) !*Suite {
