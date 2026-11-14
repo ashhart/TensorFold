@@ -89,7 +89,21 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     const fma_dense_multi2 = fma_dense_ok and p.decode_fma_dense_multi2 != null and multi_rows >= 2 and
         a.rows >= 2 and (multi_ceil or a.rows % 2 == 0) and (multi_rows == 2 or !fma_dense_multi4);
     const fma_dense = fma_dense_ok and fmaDenseOn() and !fma_dense_multi4 and !fma_dense_multi2;
-    const splits: usize = if (fma or fma_dense or fma_dense_multi2 or fma_dense_multi4) 1 else if (a.indexed == 0 and a.routed == 0 and (a.rows == 1 or (row_invariant and a.rows <= 8)) and p.reduce != null)
+    // T-tile exact half-FMA bodies (routed, one-row dense): the widest T up to the knob that keeps the group count.
+    const tiles: u32 = if (knobs.fma_tiles == 0) 0 else blk: {
+        var t: u32 = if (knobs.fma_tiles >= 4) 4 else if (knobs.fma_tiles >= 2) 2 else 1;
+        while (t > 1 and ((@as(usize, a.n) + 16 * t - 1) / (16 * t)) * a.rows < knobs.fma_tile_groups) t /= 2;
+        break :blk t;
+    };
+    const tile_pick: ?usize = switch (tiles) {
+        1 => 0,
+        2 => 1,
+        4 => 2,
+        else => null,
+    };
+    const fma_t = if (tile_pick) |ti| p.decode_fma_t[ti] != null and decode_nax and a.rows <= moe_split_rows and !fma_off else false;
+    const fma_t_dense = if (tile_pick) |ti| p.decode_fma_t_dense[ti] != null and fma_dense and a.codebook == 2 else false;
+    const splits: usize = if (fma or fma_t or fma_dense or fma_dense_multi2 or fma_dense_multi4) 1 else if (a.indexed == 0 and a.routed == 0 and (a.rows == 1 or (row_invariant and a.rows <= 8)) and p.reduce != null)
         @as(usize, splitOverride() orelse @as(u32, @intCast(if (wide) wide_splits else one_row_splits)))
     else
         moe_splits;
@@ -150,12 +164,12 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
         pipe.matmul_tab_logged = true;
         std.log.info("exl3: one-row table body {s} rows={d} n={d} k={d} splits={d}", .{ if (matmul_static_lut) "static-lut" else "matmul", a.rows, a.n, a.k, splits });
     }
-    const pipeline = (if (fma_static_lut) p.decode_fma_static_lut.? else if (fma_static) p.decode_fma_static.? else if (fma) p.decode_fma.? else if (fma_dense_multi4) p.decode_fma_dense_multi4.? else if (fma_dense_multi2) p.decode_fma_dense_multi2.? else if (fma_dense) p.decode_fma_dense.? else if (decode_pipe) |dp| dp else if (matmul_static_lut) p.matmul_static_lut.? else if (matmul_tab) p.matmul_tab.? else if (nax_dense_db) p.prefill_nax_dense_db.? else if (nax_funnel_only) nax_funnel_only_pick.? else if (nax_skip_pad) nax_skip_pad_pick.? else if (nax_funnel) nax_funnel_pick.? else if (nax) nax_pick.? else if (shared) p.prefill.? else p.matmul);
+    const pipeline = (if (fma_t) p.decode_fma_t[tile_pick.?].? else if (fma_t_dense) p.decode_fma_t_dense[tile_pick.?].? else if (fma_static_lut) p.decode_fma_static_lut.? else if (fma_static) p.decode_fma_static.? else if (fma) p.decode_fma.? else if (fma_dense_multi4) p.decode_fma_dense_multi4.? else if (fma_dense_multi2) p.decode_fma_dense_multi2.? else if (fma_dense) p.decode_fma_dense.? else if (decode_pipe) |dp| dp else if (matmul_static_lut) p.matmul_static_lut.? else if (matmul_tab) p.matmul_tab.? else if (nax_dense_db) p.prefill_nax_dense_db.? else if (nax_funnel_only) nax_funnel_only_pick.? else if (nax_skip_pad) nax_skip_pad_pick.? else if (nax_funnel) nax_funnel_pick.? else if (nax) nax_pick.? else if (shared) p.prefill.? else p.matmul);
     // Rows a decode threadgroup takes: one a SIMDgroup (the row knob selects one a threadgroup).
     const moe_rows: usize = if (decode_nax) (if (compact) 1 else knobs.moe_rows) else 4;
     const group_rows: usize = if (fma or fma_static or fma_static_lut or fma_dense_multi2 or fma_dense_multi4) 1 else if (decode_nax) moe_rows else if (nax) nax_tile else if (shared) 32 else 8;
     // The geometry must follow the pipeline: the static one-row body is 128 columns and 256 threads.
-    const group_cols: usize = if (fma or fma_static or fma_static_lut or fma_dense) 16 else if (matmul_static_lut) 128 else if (nax) nax_cols else if (decode_nax) 32 else 16;
+    const group_cols: usize = if (fma_t or fma_t_dense) 16 * @as(usize, tiles) else if (fma or fma_static or fma_static_lut or fma_dense) 16 else if (matmul_static_lut) 128 else if (nax) nax_cols else if (decode_nax) 32 else 16;
     const height: usize = if (fma_dense_multi4) (a.rows + 3) / 4 else if (fma_dense_multi2) (a.rows + 1) / 2 else if (fma or fma_static or fma_static_lut or fma_dense) a.rows else if (splits > 1 and !decode_nax) splits else if (a.indexed == 1 and !decode_nax) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows;
     // The warp32 tile runs four warps (a warp owns two sixteen-row groups).
     const nax_warp32: bool = nax and a.indexed != 0 and tile_id == 2 and warp32On() and nax_skip_pad_pick != null;

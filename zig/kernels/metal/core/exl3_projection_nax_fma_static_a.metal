@@ -249,38 +249,3 @@ kernel void tf_exl3_matmul_decode_fma_dense(const device half* x [[buffer(0)]],
       lane, sg, tg, &red[0][0]);
   }
 }
-
-// The multi-row dense body, two rows a threadgroup and four rows a threadgroup.
-template <uint R>
-inline void tf_exl3_decode_fma_dense_multi_kernel(const device half* x, const device uchar* trellis,
-                                                   device float* sums, constant TfExl3Args& a,
-                                                   const device half* table, uint lane, uint sg, uint tid,
-                                                   uint3 tptg, uint3 tg, threadgroup float* red,
-                                                   threadgroup half* lut) {
-  const uint halves = a.halves;
-  const bool mul1 = a.codebook == 2u;
-  if (halves == 6u) {
-    if (mul1) tf_exl3_decode_fma_dense_multi_body<3, true, R>(x, trellis, sums, a, table, lane, sg, tg, red, lut);
-    else tf_exl3_decode_fma_dense_multi_body<3, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
-  } else
-  if (halves == 10u) {
-    if (mul1) tf_exl3_decode_fma_dense_multi_body<5, true, R>(x, trellis, sums, a, table, lane, sg, tg, red, lut);
-    else tf_exl3_decode_fma_dense_multi_body<5, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
-  } else
-  if (halves == 12u) {
-    if (mul1) tf_exl3_decode_fma_dense_multi_body<6, true, R>(x, trellis, sums, a, table, lane, sg, tg, red, lut);
-    else tf_exl3_decode_fma_dense_multi_body<6, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
-  } else
-  if (halves == 8u) {
-    if (mul1) tf_exl3_decode_fma_dense_multi_body<4, true, R>(x, trellis, sums, a, table, lane, sg, tg, red, lut);
-    else tf_exl3_decode_fma_dense_multi_body<4, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
-  } else
-  if (halves == 4u) {
-    if (mul1) tf_exl3_decode_fma_dense_multi_body<2, true, R>(x, trellis, sums, a, table, lane, sg, tg, red, lut);
-    else tf_exl3_decode_fma_dense_multi_body<2, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
-  } else
-  if (halves == 2u) {
-    if (mul1) tf_exl3_decode_fma_dense_multi_body<1, true, R>(x, trellis, sums, a, table, lane, sg, tg, red, lut);
-    else tf_exl3_decode_fma_dense_multi_body<1, false, R>(x, trellis, sums, a, table, lane, sg, tg, red);
-  }
-}

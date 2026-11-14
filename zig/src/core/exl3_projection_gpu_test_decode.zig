@@ -325,3 +325,54 @@ test "caller-prepared grouped expert tiles preserve scatter slots and ignore pad
     try complete(cb, e);
     try std.testing.expectEqualSlices(u32, plain.slice(u32, 16 * n), grouped.slice(u32, 16 * n));
 }
+
+test "the exact half-FMA decode bodies keep every bit of the table bodies for any tile count" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const saved = ex.knobs.fma_tiles;
+    const saved_groups = ex.knobs.fma_tile_groups;
+    defer ex.knobs.fma_tiles = saved;
+    defer ex.knobs.fma_tile_groups = saved_groups;
+    ex.knobs.fma_tile_groups = 0;
+    const x = try input(device, 3);
+    defer x.deinit();
+    const scratch = try device.buffer(try ex.scratchBytes(k, n, 6), mtl.ResourceOptions.shared);
+    defer scratch.deinit();
+    const ref = try device.buffer(7 * n * 4, mtl.ResourceOptions.shared);
+    defer ref.deinit();
+    const got = try device.buffer(7 * n * 4, mtl.ResourceOptions.shared);
+    defer got.deinit();
+    const descriptors = try device.buffer(2 * @sizeOf(ex.ExpertDescriptor), mtl.ResourceOptions.shared);
+    defer descriptors.deinit();
+    const ids = try device.buffer(6 * 4, mtl.ResourceOptions.shared);
+    defer ids.deinit();
+    @memcpy(ids.slice(u32, 6), &[_]u32{ 0, 1, 1, 0, 1, 0 });
+    const gather = try device.buffer(6 * 4, mtl.ResourceOptions.shared);
+    defer gather.deinit();
+    @memcpy(gather.slice(u32, 6), &[_]u32{ 2, 0, 1, 2, 1, 0 });
+    for ([_]u16{ 2, 4, 6, 8, 10, 12 }) |halves| {
+        const w0 = try Owned.init(device, halves, .mul1, 0xa0 + @as(u64, halves));
+        defer w0.deinit();
+        const w1 = try Owned.init(device, halves, .mcg, 0xb0 + @as(u64, halves));
+        defer w1.deinit();
+        descriptors.slice(ex.ExpertDescriptor, 2)[0] = try ex.descriptor(w0.matrix);
+        descriptors.slice(ex.ExpertDescriptor, 2)[1] = try ex.descriptor(w1.matrix);
+        // Zero tiles is the table body; every other count writes the same bits, dense and routed.
+        for ([_]u32{ 0, 1, 2, 4 }) |tiles| {
+            ex.knobs.fma_tiles = tiles;
+            const out = if (tiles == 0) ref else got;
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.concurrent);
+            ex.useMatrix(e, w0.matrix);
+            ex.useMatrix(e, w1.matrix);
+            try ex.encode(&p, e, w0.matrix, .{ .buffer = x, .offset = 32 }, .{ .buffer = out }, .{ .buffer = scratch }, .{ .count = 1, .x_stride = k + 16, .y_stride = n, .output = .f32 });
+            try ex.encodeIndexed(&p, e, .{ .descriptors = .{ .buffer = descriptors }, .count = 2, .k = k, .n = n }, .{ .buffer = x, .offset = 32 }, .{ .buffer = out, .offset = n * 4 }, .{ .buffer = scratch }, .{ .count = 6, .x_stride = k + 16, .y_stride = n, .output = .f32, .routes = .{ .ids = .{ .buffer = ids }, .repeat = 2 }, .input_rows = 3, .output_rows = 6, .input_ids = .{ .buffer = gather } });
+            try complete(cb, e);
+            if (tiles != 0) try std.testing.expectEqualSlices(u32, ref.slice(u32, 7 * n), got.slice(u32, 7 * n));
+        }
+    }
+}

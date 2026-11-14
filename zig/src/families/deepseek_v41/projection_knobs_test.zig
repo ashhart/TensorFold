@@ -38,6 +38,8 @@ const names = [_][:0]const u8{
     "TF_DSV41_NO_ROW_INVARIANT",
     "TF_DSV41_EXL3_FMA_DENSE_H8",
     "TF_DSV41_EXL3_FMA_DENSE_MULTI",
+    "TF_DSV41_EXL3_FMA_TILES",
+    "TF_DSV41_EXL3_FMA_TILE_GROUPS",
     "TF_DSV41_EXL3_FMA_DENSE_MULTI_CEIL",
     "TF_DSV41_EXL3_NAX_DENSE8",
     "TF_DSV41_DOUBLE_ROTATE",
@@ -94,6 +96,8 @@ test "projection knobs: every A/B value reaches its field" {
     set("TF_DSV41_NO_ROW_INVARIANT", "1");
     set("TF_DSV41_EXL3_FMA_DENSE_H8", "0");
     set("TF_DSV41_EXL3_FMA_DENSE_MULTI", "2");
+    set("TF_DSV41_EXL3_FMA_TILES", "2");
+    set("TF_DSV41_EXL3_FMA_TILE_GROUPS", "64");
     set("TF_DSV41_EXL3_FMA_DENSE_MULTI_CEIL", "0");
     set("TF_DSV41_EXL3_NAX_DENSE8", "0");
     set("TF_DSV41_DOUBLE_ROTATE", "1");
@@ -132,6 +136,8 @@ test "projection knobs: every A/B value reaches its field" {
         .row_invariant = false,
         .fma_dense_h8 = false,
         .fma_dense_multi = 2,
+        .fma_tiles = 2,
+        .fma_tile_groups = 64,
         .fma_dense_multi_ceil = false,
         .nax_dense8 = false,
         .double_rotate = true,

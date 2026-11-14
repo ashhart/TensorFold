@@ -61,6 +61,9 @@ pub const Pipelines = struct {
     /// The MULTI-ROW dense body (`tf_exl3_matmul_decode_fma_dense_multi2` / `_multi4`).
     decode_fma_dense_multi2: ?mtl.Pipeline = null,
     decode_fma_dense_multi4: ?mtl.Pipeline = null,
+    /// The exact half-FMA bodies with one, two and four column tiles a warp: routed, and the one-row dense path.
+    decode_fma_t: [3]?mtl.Pipeline = @splat(null),
+    decode_fma_t_dense: [3]?mtl.Pipeline = @splat(null),
     fma_warps: usize = 16,
     /// The one-row matmul body with the codebook value read from `codebook_table` (bit-identical values).
     matmul_tab: ?mtl.Pipeline = null,
@@ -138,6 +141,8 @@ pub const Pipelines = struct {
         var decode_fma_dense_multi2: ?mtl.Pipeline = null;
         var decode_fma_dense_multi4: ?mtl.Pipeline = null;
         var fma_warps: usize = 16;
+        var decode_fma_t: [3]?mtl.Pipeline = @splat(null);
+        var decode_fma_t_dense: [3]?mtl.Pipeline = @splat(null);
         var int8_tile: ?mtl.Pipeline = null;
         // The codebook table: the routed decode body reads its values from here.
         const table = if (gpa != null and device.tensorUnits()) codebookTable(device) else null;
@@ -284,6 +289,15 @@ pub const Pipelines = struct {
                                             std.log.info("exl3: multi-row dense register-only decode pipeline active (tf_exl3_matmul_decode_fma_dense_multi4, {d} warps)", .{warps});
                                         } else pd.deinit();
                                     }
+                                    // The exact half-FMA bodies: one, two and four column tiles a warp.
+                                    inline for (.{ "1", "2", "4" }, 0..) |tiles, ti| {
+                                        if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_t" ++ tiles, false) catch null) |pt| {
+                                            if (pt.simdWidth() == 32 and pt.maxThreads() >= 32 * warps) decode_fma_t[ti] = pt else pt.deinit();
+                                        }
+                                        if (mtl.Pipeline.init(device, libfma, "tf_exl3_matmul_decode_fma_t_dense" ++ tiles, false) catch null) |pt| {
+                                            if (pt.simdWidth() == 32 and pt.maxThreads() >= 32 * warps) decode_fma_t_dense[ti] = pt else pt.deinit();
+                                        }
+                                    }
                                 } else std.log.err("exl3: fma decode library compile failed", .{});
                             } else |_| {}
                         }
@@ -334,6 +348,8 @@ pub const Pipelines = struct {
             .decode_fma_dense = decode_fma_dense,
             .decode_fma_dense_multi2 = decode_fma_dense_multi2,
             .decode_fma_dense_multi4 = decode_fma_dense_multi4,
+            .decode_fma_t = decode_fma_t,
+            .decode_fma_t_dense = decode_fma_t_dense,
             .fma_warps = fma_warps,
             .int8_tile = int8_tile,
             .matmul_tab = if (table != null) mmt else null,
@@ -368,6 +384,8 @@ pub const Pipelines = struct {
         if (p.decode_fma_dense) |pf| pf.deinit();
         if (p.decode_fma_dense_multi2) |pf| pf.deinit();
         if (p.decode_fma_dense_multi4) |pf| pf.deinit();
+        for (p.decode_fma_t) |maybe| if (maybe) |pf| pf.deinit();
+        for (p.decode_fma_t_dense) |maybe| if (maybe) |pf| pf.deinit();
         if (p.matmul_tab) |pf| pf.deinit();
         if (p.matmul_static_lut) |pf| pf.deinit();
         if (p.int8_tile) |pf| pf.deinit();
