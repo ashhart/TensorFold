@@ -178,8 +178,8 @@ test "a shared cut outlives the conversation that made it, and a state its conve
     f.leave(mine.items);
     try std.testing.expectEqual(@as(u32, 16), plan.from);
     try std.testing.expectEqual(@as(usize, 3), s.tree.snaps);
-    try std.testing.expectEqual(@as(u32, 16), s.find(.of(&p1)).?.end);
-    try std.testing.expectEqual(@as(u32, 64), s.find(.of(&p2)).?.end);
+    try std.testing.expectEqual(@as(u32, 16), s.find(.of(&p1)).?.at());
+    try std.testing.expectEqual(@as(u32, 64), s.find(.of(&p2)).?.at());
     try std.testing.expectEqual(@as(u64, 1), s.tree.counts.evicted);
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
@@ -390,7 +390,7 @@ test "lookahead 1: a state resumes when the token past it repeats, and not when 
     plan = try pass(&f, &s, a, &t3, 28, &.{}, &mine);
     try std.testing.expectEqual(@as(u32, 0), plan.from);
     f.leave(mine.items);
-    try std.testing.expectEqual(@as(u32, 20), s.find(.of(&seq(21, 0))).?.end); // its lookahead, the one token to prefill
+    try std.testing.expectEqual(@as(u32, 20), s.find(.of(&seq(21, 0))).?.at()); // its lookahead, the one token to prefill
     try std.testing.expect(s.find(.of(&seq(20, 0))) == null); // no token past the state: nothing to resume
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
