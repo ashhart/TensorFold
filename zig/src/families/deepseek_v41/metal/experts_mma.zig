@@ -16,9 +16,9 @@ const XmArgs = extern struct { K: u32, N: u32, topk: u32, pairs: u32, limit: f32
 
 pub const Call = struct { rows: u32, k: u32 = ex.hidden, n: u32 = ex.width, experts: u32 = ex.experts };
 
-/// Whether this GPU takes the tensor-unit kernels: M5 tensor units and Metal 4.1 (fp4 tensors, macOS 27).
+/// Whether this GPU takes the tensor-unit kernels: generation 17 (M5, the one checked) and Metal 4.1 (macOS 27).
 pub fn units(device: mtl.Device) bool {
-    return device.tensorUnits() and mtl.objc.osVersion().major >= 27;
+    return device.tensorUnits() and device.generation() == 17 and mtl.objc.osVersion().major >= 27;
 }
 
 /// Most tiles a chunk can make: full tiles, plus one partial per active expert.
