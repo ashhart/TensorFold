@@ -102,8 +102,9 @@ kernel void dsv41_pool(device const uchar *values [[buffer(0)]], device const fl
             gslots[j] = score;
             exponent[j] = exp(score - mx); sum += exponent[j];
         }
-        // The raw row's capture -- the row's own values and its gate, one slot a position.
-        if (p.capture_rows != 0) {
+        // The raw row's capture (values, gate), a slot a position; a call's last capture_rows positions write it.
+        uint done = (p.position + p.rows) / p.ratio - p.position / p.ratio;
+        if (p.capture_rows != 0 && group + p.capture_rows / p.ratio >= done) {
             for (uint j = 0; j < p.ratio; ++j) {
                 uint pos = start + j;
                 uint slot = pos % p.capture_rows;

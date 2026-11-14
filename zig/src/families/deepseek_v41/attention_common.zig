@@ -161,6 +161,8 @@ pub const RowsScratch = struct {
         return tab_bytes + slots * kv.cache.ring_stride + denseBytes();
     }
 };
+/// `.publish` runs only a kv source layer's compressor (pool, index keys, main pack); `.skip` leaves them out.
+pub const ConeMode = enum { full, publish, skip };
 
 pub const Workspace = struct {
     buffer: mtl.Buffer,
@@ -187,6 +189,8 @@ pub const Workspace = struct {
     /// A merged tail chunk's PREFIX (its rows before the tail mark) is published here as well as the whole chunk.
     publish_limit: u32 = 0,
     publish_stash: ?View = null,
+    /// The cone prefill's mode for the next attention pass (forward_cone.zig).
+    cone: ConeMode = .full,
 
     /// The selection scratch of batch segment `s`; the one-stream path is segment 0.
     pub fn selectionFor(w: *Workspace, s: usize) *index.Scratch {

@@ -59,7 +59,7 @@ pub const Pool = extern struct {
     stride: u32,
     input_f32: u32,
     eps: f32 = 1e-20,
-    /// The capture's slots (zero disables it): the pool writes every row it consumes.
+    /// The capture's slots (zero disables it): the pool writes the last `capture_rows` positions it consumes.
     capture_rows: u32 = 0,
     comptime {
         @import("metal/index_mirror.zig").check(Pool, sources.deepseek_v41_kv, "Dsv41Pool");

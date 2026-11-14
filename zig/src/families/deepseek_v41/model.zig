@@ -30,6 +30,7 @@ const model_lifecycle = @import("model_lifecycle.zig");
 const model_propose = @import("model_propose.zig");
 const model_draft_attention = @import("model_draft_attention.zig");
 const forward_impl = @import("forward_impl.zig");
+pub const forward_cone = @import("forward_cone.zig");
 const moe_impl = @import("model_moe.zig");
 pub const nowNs = support.nowNs;
 pub const prefill_step = support.prefill_step;
@@ -183,6 +184,8 @@ pub const Model = struct {
     observer: ?Observer = null,
     /// The attention's own per-stage observer (the `stagediff` harness).
     attention_observer: ?attention.DiagnosticObserver = null,
+    /// The cone prefill's state (forward_cone.zig).
+    cone: forward_cone.Cone = .{},
     pub const Observer = struct {
         ctx: *anyopaque,
         encode: *const fn (*anyopaque, mtl.ComputeEncoder, u32, gpu_counters.Stage, *const Model) void,
@@ -203,7 +206,7 @@ pub const Model = struct {
     pub fn beginSnapTail(m: *Model, slot: u32, hist: []const u32, at: u32, from: u32) bool {
         return model_lifecycle.beginSnapTail(m, slot, hist, at, from);
     }
-    pub fn snapTailAllowed(m: *const Model) bool {
+    pub fn snapTailAllowed(m: *Model) bool {
         return model_lifecycle.snapTailAllowed(m);
     }
     pub fn endSnapTail(m: *Model) void {

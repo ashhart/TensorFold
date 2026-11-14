@@ -295,7 +295,12 @@ pub fn encodeDiagnostic(p: *const Pipelines, e_in: mtl.ComputeEncoder, w: *const
         .qkv_merged = false,
         .main = chunk,
         .compressed_rows = 0,
+        .mode = work.cone,
     };
+    if (work.cone == .publish) {
+        try st.compressedStage();
+        return;
+    }
     try st.queryStage(diagnostic);
     try window.windowStage(&st, diagnostic);
     try st.compressedStage();

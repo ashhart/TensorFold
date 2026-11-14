@@ -36,8 +36,17 @@ const tapsOn = model.tapsOn;
 const tapsSharedBaseOn = model.tapsSharedBaseOn;
 const condAlignOn = model.condAlignOn;
 const concurrentOn = model.concurrentOn;
+const forward_cone = @import("forward_cone.zig");
 
+/// One forward over the segments; the cone prefill (forward_cone.zig) takes a long prompt's chunks first.
 pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
+    if (!m.valid) return error.InvalidModelState;
+    if (try forward_cone.route(m, segs, logits)) |out| return out;
+    return forwardCore(m, segs, logits);
+}
+
+/// The forward itself; `m.cone.phase` makes it the cone's encoder half (stops at the decoder) or decoder half (replay).
+pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     if (!m.valid) return error.InvalidModelState;
     if (segs.len == 0 or segs.len > 8) return error.InvalidLaneSlot;
     const first_seg = segs[0];
@@ -58,6 +67,9 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         std.c.getenv("TF_DSV41_ATTN_PROF") != null or std.c.getenv("TF_DSV41_HID_HASH") != null))
         return error.BatchUnsupported;
     const state = &m.caches[slot];
+    const cone_phase = m.cone.phase;
+    const cone_d = m.cone.d;
+    defer m.attention_workspace.cone = .full;
     const rows: u32 = total_rows;
     if (segs.len > 1 and std.c.getenv("TF_DSV41_BATCH_DEBUG") != null) std.log.info("forwardSegs: segs={d} rows={d}", .{ segs.len, rows });
     // A forward starts from the embedding: its stream lives in `.stream` and no sublayer branch is pending.
@@ -100,7 +112,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         scan_probe.stage = sp_stage.?;
         scan_probe.reset();
     }
-    if (m.stream != null and std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null) {
+    if (m.stream != null and cone_phase != .decoder and std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null) {
         const hash_start: u64 = if (m.host_prof) nowNs() else 0;
         m.host_stage_ns = 0;
         m.host_stage_misses = 0;
@@ -147,16 +159,18 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     try m.profileSpan(&enc, .other);
     const p = &m.pipelines;
     const ws = &m.workspace;
-    if (m.stream == null) {
+    if (m.stream == null and cone_phase != .decoder) {
         for (engram.hash.layers, 0..) |meta, index| {
             try engram.encodeHash(enc, &p.engram, meta, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows);
         }
         try engram.encodeCommit(enc, &p.engram, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), rows);
     }
-    ops.encodeEmbedding(enc, &p.ops, ws.view(.ids), tensor(m.weights.embed), ws.view(.collapsed), .{ .rows = rows, .width = 5120, .table_stride = 5120, .y_stride = 5120, .copies = 1 });
-    enc.barrier();
-    mhc.encodeExpand(enc, &p.mhc, ws.view(.collapsed), ws.view(.stream), ws.view(.previous_pre), .{ .rows = rows, .width = 5120, .x_stride = 5120, .stream_stride = 20480 });
-    enc.barrier();
+    if (cone_phase == .decoder) forward_cone.loadStash(m, enc, rows) else {
+        ops.encodeEmbedding(enc, &p.ops, ws.view(.ids), tensor(m.weights.embed), ws.view(.collapsed), .{ .rows = rows, .width = 5120, .table_stride = 5120, .y_stride = 5120, .copies = 1 });
+        enc.barrier();
+        mhc.encodeExpand(enc, &p.mhc, ws.view(.collapsed), ws.view(.stream), ws.view(.previous_pre), .{ .rows = rows, .width = 5120, .x_stride = 5120, .stream_stride = 20480 });
+        enc.barrier();
+    }
     hid.record(enc, &p.ops, m.streamView(), rows, .embed, 0);
     var asegs: [8]attention.Seg = undefined;
     {
@@ -167,6 +181,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         }
     }
     for (&m.weights.layers, 0..) |*layer, index| {
+        if (cone_phase == .decoder and index < m.cone.lo) continue;
         if (pipe_layers != 0 and index == pipe_layers) {
             enc.end();
             e.commit();
@@ -259,6 +274,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         }
         try splitStage(m, &enc, &e, "engram", index);
         try m.profileSpan(&enc, .mhc);
+        if (cone_phase == .encoder and index == cone_d) forward_cone.stashRows(m, enc, rows, state.position);
         if (p.hc_boundary) |*bp| {
             m.boundary(enc, bp, layer.hc_attn, ws.view(.previous_pre), ws.view(.attention_pre), layer.attn_norm, rows, true);
             enc.barrier();
@@ -271,6 +287,11 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         hid.record(enc, &p.ops, ws.view(.normalized), rows, .attn_in, @intCast(index));
         try splitStage(m, &enc, &e, "mhc_attn", index);
         try m.profileSpan(&enc, .attention);
+        m.attention_workspace.cone = if (index != cone_d) .full else switch (cone_phase) {
+            .encoder => .publish,
+            .decoder => .skip,
+            .off => .full,
+        };
         if (std.c.getenv("TF_DSV41_SKIP_ATTN") == null) {
             if (attention.profLayerOn(@intCast(index))) {
                 var aprof = attention.Prof{ .queue = m.queue, .cb = e, .enc = enc, .on = true };
@@ -285,6 +306,7 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
                 try attention.encode(&p.attention, enc, &layer.attn, state, &m.attention_workspace, ws.view(.normalized), ws.view(.branch), &p.projection, ws.projection(), @intCast(index), rows, m.cfg);
         }
         enc.barrier();
+        if (cone_phase == .encoder and index == cone_d) break;
         hid.record(enc, &p.ops, ws.view(.branch), rows, .attn, @intCast(index));
         if (hid.full_layer >= 0 and index == @as(usize, @intCast(hid.full_layer))) {
             // The attention block's own regions, in execution order, so the first one that moves names the kernel.
@@ -356,6 +378,10 @@ pub fn forwardSegs(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         if (p.hc_boundary != null) m.pending_expand = true else m.post(enc, rows);
         if (m.observer) |observer| observer.encode(observer.ctx, enc, @intCast(index), .moe, m);
         try splitStage(m, &enc, &e, "moe", index);
+        if (cone_phase == .decoder and index + 1 == m.cone.hi and m.cone.hi < m.cfg.layers) {
+            forward_cone.stashRows(m, enc, rows, state.position);
+            break;
+        }
         if (layer_cb) {
             enc.end();
             e.commit();

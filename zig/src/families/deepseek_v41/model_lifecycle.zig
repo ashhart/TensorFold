@@ -24,6 +24,7 @@ const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
 const projection_knobs = @import("projection_knobs.zig");
 const model = @import("model.zig");
+const forward_cone = @import("forward_cone.zig");
 const Model = model.Model;
 const CondProf = Model.CondProf;
 const Snapshot = Model.Snapshot;
@@ -211,6 +212,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, o: Options) !Model {
     return .{ .gpa = gpa, .io = io, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .partial_stash = partial_stash, .ring_stash = ring_stash, .snap_ring = snap_ring, .taps_stash = taps_stash, .stream = stream_rows, .stream_stage = stream_stage, .workspace = workspace, .attention_workspace = aw, .taps = taps, .cond = cond, .cond_wkv = cond_wkv, .mtp_logits = mtp_logits, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
 }
 pub fn deinit(m: *Model) void {
+    forward_cone.release(m);
     m.queue.removeResidencySet(m.residency);
     m.residency.deinit();
     if (m.drafter_ids) |ids| ids.deinit();
@@ -244,6 +246,7 @@ pub fn reset(m: *Model) !void {
     for (0..m.lanes) |slot| try m.resetSlot(@intCast(slot));
 }
 pub fn resetSlot(m: *Model, slot: u32) !void {
+    forward_cone.drop(m, slot);
     if (slot >= m.lanes) return error.InvalidLaneSlot;
     const state = &m.caches[slot];
     const pool = mtl.objc.Pool.push();
@@ -293,9 +296,9 @@ pub fn beginSnapTail(m: *Model, slot: u32, hist: []const u32, at: u32, from: u32
     m.attention_workspace.publish_stash = .{ .buffer = m.snap_ring, .offset = @as(usize, slot) * ring_bytes };
     return true;
 }
-pub fn snapTailAllowed(m: *const Model) bool {
-    _ = m;
-    return condAlignOn();
+/// The tail mark is captured inside its chunk, except under the cone: that cuts at the mark and replays there.
+pub fn snapTailAllowed(m: *Model) bool {
+    return condAlignOn() and !forward_cone.active(m);
 }
 pub fn endSnapTail(m: *Model) void {
     m.publish_limit = 0;
@@ -307,6 +310,7 @@ pub fn snapshotBytes(m: *const Model) u64 {
     return @as(u64, plan.packedBytes()) + plan.mutableBytes() + m.taps.length();
 }
 pub fn snapshotSave(m: *Model, slot: u32) !*Snapshot {
+    try forward_cone.flush(m, slot);
     if (slot >= m.lanes) return error.InvalidLaneSlot;
     const state = &m.caches[slot];
     const snap = try m.gpa.create(Snapshot);
@@ -364,6 +368,7 @@ pub fn snapshotDrop(m: *Model, snap: *Snapshot) void {
     m.gpa.destroy(snap);
 }
 pub fn snapshotRestore(m: *Model, slot: u32, snap: *const Snapshot) !void {
+    forward_cone.drop(m, slot);
     if (slot >= m.lanes) return error.InvalidLaneSlot;
     const state = &m.caches[slot];
     if (snap.storage.len != state.plan.packedBytes() or snap.live.len != state.plan.mutableBytes() or snap.taps.len != m.taps.length()) return error.SnapshotLayout;

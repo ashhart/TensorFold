@@ -100,6 +100,53 @@ test "compressor carries a partial group across chunks without changing the pool
     try std.testing.expectEqualSlices(f32, partial.slice(f32, 2048)[1024..1536], one_shot.slice(f32, 2048)[1024..1536]);
 }
 
+test "a long chunk's raw-row capture holds the last eight positions, whatever order the groups run in" {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var pipes = try kv.Pipelines.load(device);
+    defer pipes.deinit();
+    const w = 4;
+    const rows = 4097;
+    const values = try device.buffer(rows * w * 4, mtl.ResourceOptions.shared);
+    defer values.deinit();
+    const gates = try device.buffer(rows * w * 4, mtl.ResourceOptions.shared);
+    defer gates.deinit();
+    const partial = try device.buffer(4 * w * 4, mtl.ResourceOptions.shared);
+    defer partial.deinit();
+    const weight = try device.buffer(w * 2, mtl.ResourceOptions.shared);
+    defer weight.deinit();
+    const out = try device.buffer(rows * w * 2, mtl.ResourceOptions.shared);
+    defer out.deinit();
+    const capture = try device.buffer(8 * 2 * w * 4, mtl.ResourceOptions.shared);
+    defer capture.deinit();
+    @memset(partial.contents()[0 .. 4 * w * 4], 0);
+    @memset(weight.slice(u16, w), bf(1));
+    for (0..rows * w) |i| {
+        values.slice(f32, rows * w)[i] = @floatFromInt(i / w + 1);
+        gates.slice(f32, rows * w)[i] = @floatFromInt(i % w);
+    }
+    // position 1: the call's groups are (0,1), (2,3), ... and the last completes position 4097
+    for (0..3) |_| {
+        @memset(capture.contents()[0 .. 8 * 2 * w * 4], 0);
+        const cb = queue.commandBuffer();
+        const enc = cb.compute(.serial);
+        try pipes.encodePool(enc, view(values), view(gates), view(partial), view(weight), view(out), view(capture), .{ .rows = rows, .width = w, .ratio = 2, .position = 1, .stride = w, .input_f32 = 1, .capture_rows = 8 });
+        try submit(cb, enc);
+        const got = capture.slice(f32, 8 * 2 * w);
+        for (4090..4098) |pos| {
+            const slot = pos % 8;
+            for (0..w) |d| {
+                try std.testing.expectEqual(@as(f32, @floatFromInt(pos)), got[slot * 2 * w + d]);
+                try std.testing.expectEqual(@as(f32, @floatFromInt(d)), got[slot * 2 * w + w + d]);
+            }
+        }
+    }
+}
+
 test "compressor rounds the pooled FP32 latent to BF16 before RMS normalization" {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
