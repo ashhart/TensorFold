@@ -15,23 +15,6 @@ TF_GEMM_NAX_KERNEL(g4v_gemm_f32_nn_11, float, false, false, true, true)
 
 constant constexpr uint G4V_W = 1152, G4V_HEADS = 16, G4V_DH = 72, G4V_HALF = 36, G4V_QKV = 3 * G4V_W;
 
-inline float g4v_bf(float x) { return float(bfloat(x)); }
-
-inline float g4v_group_sum(float v, threadgroup float* part, uint n, uint lane, uint sg) {
-  v = simd_sum(v);
-  if (lane == 0) part[sg] = v;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float w = lane < (n + 31) / 32 ? part[lane] : 0.0f;
-    w = simd_sum(w);
-    if (lane == 0) part[32] = w;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  const float r = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  return r;
-}
-
 struct G4vRows { uint width; uint weighted; float eps; };
 
 // The patches' x and y position rows into the projected patches: x = bf16(x + bf16(tx[px] + ty[py])), grid gw wide.
@@ -39,7 +22,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
                         constant uint& gw [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x >= G4V_W) return;
   const uint px = p.y % gw, py = p.y / gw;
-  const float e = g4v_bf(float(table[ulong(px) * G4V_W + p.x]) + float(table[(10240ul + py) * G4V_W + p.x]));
+  const float e = tf_vis_bf(float(table[ulong(px) * G4V_W + p.x]) + float(table[(10240ul + py) * G4V_W + p.x]));
   const ulong i = ulong(p.y) * G4V_W + p.x;
   x[i] = bfloat(float(x[i]) + e);
 }
@@ -54,7 +37,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
   device bfloat* yr = y + ulong(row) * p.width;
   float s = 0.0f;
   for (uint i = t; i < p.width; i += n) s += float(xr[i]) * float(xr[i]);
-  const float r = metal::precise::rsqrt(g4v_group_sum(s, part, n, lane, sg) / float(p.width) + p.eps);
+  const float r = metal::precise::rsqrt(tf_vis_sum(s, part, n, lane, sg) / float(p.width) + p.eps);
   for (uint i = t; i < p.width; i += n) yr[i] = bfloat(p.weighted ? float(xr[i]) * r * float(w[i]) : float(xr[i]) * r);
 }
 
@@ -68,8 +51,8 @@ struct G4vRows { uint width; uint weighted; float eps; };
   const device bfloat* yr = y + ulong(row) * G4V_W;
   float s = 0.0f;
   for (uint i = t; i < G4V_W; i += n) s += float(yr[i]) * float(yr[i]);
-  const float r = metal::precise::rsqrt(g4v_group_sum(s, part, n, lane, sg) / float(G4V_W) + eps);
-  for (uint i = t; i < G4V_W; i += n) xr[i] = bfloat(float(xr[i]) + g4v_bf(float(yr[i]) * r * float(w[i])));
+  const float r = metal::precise::rsqrt(tf_vis_sum(s, part, n, lane, sg) / float(G4V_W) + eps);
+  for (uint i = t; i < G4V_W; i += n) xr[i] = bfloat(float(xr[i]) + tf_vis_bf(float(yr[i]) * r * float(w[i])));
 }
 
 // qkv [P, 3456] to head-major q, k, v fp32: per-head norms (v unweighted), q and k by the 2D RoPE (x, then y).
@@ -86,7 +69,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
   float s = 0.0f;
   for (uint d = lane; d < G4V_DH; d += 32) s += float(x[d]) * float(x[d]);
   const float r = metal::precise::rsqrt(simd_sum(s) / float(G4V_DH) + eps);
-  for (uint d = lane; d < G4V_DH; d += 32) nrm[d] = g4v_bf(part == 2 ? float(x[d]) * r : float(x[d]) * r * float(w[d]));
+  for (uint d = lane; d < G4V_DH; d += 32) nrm[d] = tf_vis_bf(part == 2 ? float(x[d]) * r : float(x[d]) * r * float(w[d]));
   threadgroup_barrier(mem_flags::mem_threadgroup);
   device float* out = (part == 0 ? Q : part == 1 ? K : V) + (ulong(head) * P + row) * G4V_DH;
   for (uint d = lane; d < G4V_DH; d += 32) {
@@ -94,7 +77,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
     const uint base = d / G4V_HALF * G4V_HALF, j = d % G4V_HALF;
     const float other = j < G4V_HALF / 2 ? -nrm[base + j + G4V_HALF / 2] : nrm[base + j - G4V_HALF / 2];
     const float c = float(cs[row * G4V_DH + d]), sv = float(sn[row * G4V_DH + d]);
-    out[d] = g4v_bf(g4v_bf(nrm[d] * c) + g4v_bf(other * sv));
+    out[d] = tf_vis_bf(tf_vis_bf(nrm[d] * c) + tf_vis_bf(other * sv));
   }
 }
 
@@ -102,29 +85,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
 [[kernel]] void g4v_softmax(device float* S [[buffer(0)]], constant uint& n [[buffer(1)]], uint row [[threadgroup_position_in_grid]],
                             uint t [[thread_position_in_threadgroup]], uint tn [[threads_per_threadgroup]],
                             uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
-  device float* s = S + ulong(row) * n;
-  float m = -INFINITY;
-  for (uint i = t; i < n; i += tn) m = max(m, s[i]);
-  m = simd_max(m);
-  if (lane == 0) part[sg] = m;
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  if (sg == 0) {
-    float v = lane < (tn + 31) / 32 ? part[lane] : -INFINITY;
-    v = simd_max(v);
-    if (lane == 0) part[32] = v;
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  m = part[32];
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-  float z = 0.0f;
-  for (uint i = t; i < n; i += tn) {
-    const float e = metal::precise::exp(s[i] - m);
-    s[i] = e;
-    z += e;
-  }
-  const float inv = 1.0f / g4v_group_sum(z, part, tn, lane, sg);
-  for (uint i = t; i < n; i += tn) s[i] *= inv;
+  TF_VIS_SOFTMAX_BODY()
 }
 
 // O [16, rows, 72] fp32 to rows r0.. of out [P, 1152] bf16.
@@ -140,7 +101,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
                           constant uint& n [[buffer(2)]], uint2 p [[thread_position_in_grid]]) {
   if (p.x >= n) return;
   const float g = float(gu[ulong(p.y) * 2 * n + p.x]), u = float(gu[ulong(p.y) * 2 * n + n + p.x]);
-  const float a = g4v_bf(0.5f * g * (1.0f + metal::precise::tanh(0.7978845608028654f * (g + 0.044715f * g * g * g))));
+  const float a = tf_vis_bf(0.5f * g * (1.0f + metal::precise::tanh(0.7978845608028654f * (g + 0.044715f * g * g * g))));
   act[ulong(p.y) * n + p.x] = bfloat(a * u);
 }
 
@@ -153,7 +114,7 @@ struct G4vRows { uint width; uint weighted; float eps; };
   float s = 0.0f;
   for (uint dy = 0; dy < 3; dy++)
     for (uint dx = 0; dx < 3; dx++) s += float(x[(ulong(3 * ty + dy) * gw + 3 * tx + dx) * G4V_W + p.x]) * (1.0f / 9.0f);
-  const float h = g4v_bf(s) * 33.941125496954285f;
+  const float h = tf_vis_bf(s) * 33.941125496954285f;
   out[ulong(p.y) * G4V_W + p.x] = bfloat((h - float(bias[p.x])) * float(scale[p.x]));
 }
 
@@ -177,8 +138,8 @@ inline float g4u_in(const device bfloat* x, const device bfloat* extra, constant
   if (p.add == 1) return v + float(extra[i]);
   if (p.add == 2) {
     const uint px = row % p.gw, py = row / p.gw;
-    const float e = g4v_bf(float(extra[ulong(2 * px) * p.width + i]) + float(extra[ulong(2 * py + 1) * p.width + i]));
-    return g4v_bf(v + e);
+    const float e = tf_vis_bf(float(extra[ulong(2 * px) * p.width + i]) + float(extra[ulong(2 * py + 1) * p.width + i]));
+    return tf_vis_bf(v + e);
   }
   return v;
 }
@@ -189,16 +150,9 @@ inline float g4u_in(const device bfloat* x, const device bfloat* extra, constant
                          uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
                          uint n [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                          uint sg [[simdgroup_index_in_threadgroup]]) {
-  threadgroup float part[33];
-  float s = 0.0f;
-  for (uint i = t; i < p.width; i += n) s += g4u_in(x, extra, p, row, i);
-  const float mean = g4v_group_sum(s, part, n, lane, sg) / float(p.width);
-  float d2 = 0.0f;
-  for (uint i = t; i < p.width; i += n) {
-    const float d = g4u_in(x, extra, p, row, i) - mean;
-    d2 += d * d;
-  }
-  const float r = metal::precise::rsqrt(g4v_group_sum(d2, part, n, lane, sg) / float(p.width) + p.eps);
+#define G4U_IN(i) g4u_in(x, extra, p, row, i)
+  TF_VIS_LAYER_NORM_STATS(G4U_IN)
   device bfloat* yr = y + ulong(row) * p.width;
-  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((g4u_in(x, extra, p, row, i) - mean) * r * float(w[i]) + float(b[i]));
+  TF_VIS_LAYER_NORM_OUT(G4U_IN)
+#undef G4U_IN
 }

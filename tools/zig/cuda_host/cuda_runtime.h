@@ -8,6 +8,7 @@
 #define __noinline__ __attribute__((noinline))
 #define __align__(n) __attribute__((aligned(n)))
 #define __launch_bounds__(...) __attribute__((launch_bounds(__VA_ARGS__)))
+#define __maxnreg__(a) __attribute__((maxnreg(a)))
 #define __grid_constant__
 #define __CUDACC__ 1
 #include <cstddef>
@@ -31,6 +32,7 @@ template<class T> __device__ T __shfl_xor_sync(unsigned,T,int,int=32);
 template<class T> __device__ T __shfl_up_sync(unsigned,T,unsigned,int=32);
 template<class T> __device__ T __shfl_down_sync(unsigned,T,unsigned,int=32);
 __device__ void __syncthreads(); __device__ int __syncthreads_count(int); __device__ void __syncwarp(unsigned=~0u);
+__device__ int __syncthreads_or(int);
 __device__ void __threadfence(); __device__ void __threadfence_system(); __device__ void __trap();
 __device__ void __nanosleep(unsigned); __device__ unsigned long long clock64();
 __device__ unsigned __ballot_sync(unsigned,int); __device__ int __any_sync(unsigned,int);
@@ -49,6 +51,7 @@ __device__ int __float_as_int(float);
 __device__ unsigned __float_as_uint(float); __device__ float __int_as_float(int); __device__ float __uint_as_float(unsigned);
 __device__ double __longlong_as_double(long long); __device__ long long __double2ll_rz(double);
 __device__ float __double2float_rn(double);
+__device__ float __double2float_rz(double); __device__ int __float2int_rn(float);
 __device__ float __fadd_rn(float,float); __device__ float __fsub_rn(float,float);
 __device__ float __fmul_rn(float,float); __device__ float __fdiv_rn(float,float); __device__ float __fsqrt_rn(float);
 __device__ float __fmaf_rn(float,float,float); __device__ float __expf(float);

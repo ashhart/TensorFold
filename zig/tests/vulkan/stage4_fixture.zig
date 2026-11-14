@@ -41,11 +41,11 @@ test "gateRefOracle replays the fixture seed and diagnoses g and beta separately
     defer a.free(beta_bits);
     var old_worst: f64 = 0;
     for (0..@intCast(Model.heads)) |hv| {
-        const ash = gateRefOracle(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
-        const gbits: u32 = @bitCast(@as(f32, @floatCast(ash.g)));
+        const oracle = gateRefOracle(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+        const gbits: u32 = @bitCast(@as(f32, @floatCast(oracle.g)));
         g_pairs[2 * hv] = @truncate(gbits);
         g_pairs[2 * hv + 1] = @truncate(gbits >> 16);
-        beta_bits[hv] = c.toBf16(@floatCast(ash.beta));
+        beta_bits[hv] = c.toBf16(@floatCast(oracle.beta));
         // evidence: the OLD unrounded f64 reference vs the shader chain
         const old = gateRef(
             c.fromBf16(f.a_bits[hv]),
@@ -53,8 +53,8 @@ test "gateRefOracle replays the fixture seed and diagnoses g and beta separately
             f32Of(f.a_log_bits, hv),
             c.fromBf16(f.dt_bits[hv]),
         );
-        const gd = @abs(old.g - ash.g);
-        const gbound = budget(1, 4, 2, ash.g, @abs(ash.g));
+        const gd = @abs(old.g - oracle.g);
+        const gbound = budget(1, 4, 2, oracle.g, @abs(oracle.g));
         old_worst = @max(old_worst, gd / gbound);
     }
     std.debug.print("HOST gate old-reference drift seed=0x57ac max_ratio={e} (not a GPU diagnosis)\n", .{old_worst});
@@ -81,8 +81,8 @@ test "gateRefOracle replays the fixture seed and diagnoses g and beta separately
     var min_g: f32 = std.math.floatMax(f32);
     var subnormals: usize = 0;
     for (0..@intCast(Model.heads)) |hv| {
-        const ash = gateRefOracle(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
-        const g: f32 = @floatCast(ash.g);
+        const oracle = gateRefOracle(f.a_bits[hv], f.b_bits[hv], f32Of(f.a_log_bits, hv), f.dt_bits[hv]);
+        const g: f32 = @floatCast(oracle.g);
         if (g > 0) min_g = @min(min_g, g);
         const bits: u32 = @bitCast(g);
         const exponent = (bits >> 23) & 0xff;

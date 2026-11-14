@@ -1,4 +1,4 @@
-//! OpenAI ``logprobs`` (who may ask, ``choices[0].logprobs`` from the engine's rows) and vLLM's ``prompt_logprobs``.
+//! OpenAI ``logprobs`` entries from the engine's rows, their legacy completions form, and vLLM's ``prompt_logprobs``.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -8,60 +8,6 @@ const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
 const Allocator = std.mem.Allocator;
-
-/// The rows are cut where the text is: after the end-of-thinking token, which must be a token of its own.
-pub fn admit(srv: *Server, cx: *Cx, thinking: bool, think_budget: u32, count: u8) errors.Refused!u8 {
-    if (thinking and srv.text.tokenId(srv.markers.close) == null) return cx.refuse("logprobs with thinking on need the template's end-of-thinking marker as one token");
-    if (think_budget > 0) return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
-    return count;
-}
-
-/// ``choices[0].logprobs`` for the answer's tokens: after the first end-of-thinking token and dropped newlines.
-pub fn value(srv: *Server, cx: *Cx, a: Allocator, thinking: bool, tokens: []const u32, rows: []const api.LogprobRow) errors.Refused!Value {
-    if (rows.len < tokens.len) return cx.other("the engine gave fewer logprob rows than reply tokens");
-    const start = (try answerStart(srv, a, thinking, tokens)) orelse tokens.len;
-    return wrap(a, entries(srv, a, tokens[start..], rows[start..tokens.len]) catch |e| return switch (e) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.Failed => cx.other("the logprob rows are out of step with the reply's tokens, or a forced token has none"),
-    });
-}
-
-/// A streamed reply's rows: each content chunk carries those of the answer tokens its text now spells.
-pub const Stream = struct {
-    rows: std.ArrayList(api.LogprobRow) = .empty, // the reply's rows, copied with each round's tokens
-    sent: usize = 0, // answer rows already sent
-    spelled: usize = 0, // bytes of the streamed content those rows spell
-
-    /// ``{content, logprobs}`` for `text`, with the rows `streamed` content bytes now cover (all of them once `done`).
-    pub fn delta(st: *Stream, srv: *Server, a: Allocator, thinking: bool, ignore_eos: bool, collected: []const u32, text: []const u8, streamed: usize, done: bool) error{ Failed, OutOfMemory }!?Value {
-        const tokens = if (ignore_eos) collected else reply_text.stripTrailing(collected, srv.eos);
-        if (st.rows.items.len < tokens.len) return error.Failed;
-        var ready: usize = 0;
-        if (try answerStart(srv, a, thinking, tokens)) |start| {
-            for (tokens[start + st.sent ..], start + st.sent..) |id, i| {
-                const bytes = (try srv.text.tokenBytes(a, id)) orelse &.{};
-                // the answer's text drops the newlines its first token may start with
-                const lead = if (thinking and i == start) bytes.len - std.mem.trimStart(u8, bytes, "\n").len else 0;
-                if (!done and st.spelled + bytes.len - lead > streamed) break;
-                st.spelled += bytes.len - lead;
-                ready += 1;
-            }
-            if (ready > 0) {
-                const from = start + st.sent;
-                const lp = try wrap(a, try entries(srv, a, tokens[from..][0..ready], st.rows.items[from..][0..ready]));
-                st.sent += ready;
-                const o = try json.newObject(a);
-                try o.put(a, "content", .{ .string = text });
-                try o.put(a, "logprobs", lp);
-                return .{ .object = o };
-            }
-        }
-        if (text.len == 0) return null;
-        const o = try json.newObject(a);
-        try o.put(a, "content", .{ .string = text });
-        return .{ .object = o };
-    }
-};
 
 /// ``/v1/completions``' legacy ``logprobs`` from the chat form's rows; ``text_offset`` counts on from `offset` chars.
 pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
@@ -112,24 +58,6 @@ fn promptEntry(srv: *Server, a: Allocator, o: *json.Object, id: u32, logprob: f3
     try o.put(a, try std.fmt.allocPrint(a, "{d}", .{id}), .{ .object = e });
 }
 
-/// Where the answer's rows start: past the first end-of-thinking token and newline-only tokens; null: no answer yet.
-fn answerStart(srv: *Server, a: Allocator, thinking: bool, tokens: []const u32) Allocator.Error!?usize {
-    if (!thinking) return 0;
-    const end = srv.text.tokenId(srv.markers.close) orelse return null;
-    var start = (std.mem.indexOfScalar(u32, tokens, end) orelse return null) + 1;
-    while (start < tokens.len) : (start += 1) {
-        const bytes = (try srv.text.tokenBytes(a, tokens[start])) orelse return start;
-        if (bytes.len == 0 or std.mem.indexOfNone(u8, bytes, "\n") != null) return start;
-    }
-    return null;
-}
-
-fn wrap(a: Allocator, content: []Value) Allocator.Error!Value {
-    const out = try json.newObject(a);
-    try out.put(a, "content", .{ .array = content });
-    return .{ .object = out };
-}
-
 fn entries(srv: *Server, a: Allocator, tokens: []const u32, rows: []const api.LogprobRow) error{ Failed, OutOfMemory }![]Value {
     const content = try a.alloc(Value, tokens.len);
     for (content, tokens, rows) |*slot, id, r| {
@@ -153,4 +81,46 @@ fn entry(srv: *Server, a: Allocator, id: u32, logprob: f32) Allocator.Error!*jso
     for (b, bytes) |*v, x| v.* = try json.intValue(a, x);
     try o.put(a, "bytes", .{ .array = b });
     return o;
+}
+
+/// The engine gives rows and each token's exact bytes, in a reply format read as text (not Kimi's token channels).
+pub fn offered(srv: *Server, a: Allocator) Allocator.Error!bool {
+    if (!srv.info.capability(.logprobs) or srv.text.vtable.format == .kimi) return false;
+    return (try srv.text.tokenBytes(a, 0)) != null; // a tokenizer whose decoding depends on context has none
+}
+
+/// ``reply.logprobs`` from its captured rows, once the route's tool policy has settled its content and calls.
+pub fn project(srv: *Server, cx: *Cx, reply: *@import("chat.zig").Reply, tools: []const Value, calls: ?[]Value) errors.Refused!void {
+    const captured = reply.probability_rows orelse return;
+    reply.logprobs = try @import("logprob_parts.zig").project(srv, cx, captured, reply.content, reply.reasoning, tools, calls);
+}
+
+/// One token's entry; a token the reply shows only part of keeps its row but shows those `bytes` and its ``token_id``.
+pub fn rowValue(srv: *Server, a: Allocator, id: u32, row: api.LogprobRow, bytes: []const u8, cropped: bool) error{ Failed, OutOfMemory }!Value {
+    const made = try entries(srv, a, &.{id}, &.{row});
+    if (!cropped) return made[0];
+    const o = made[0].object;
+    try o.put(a, "token", .{ .string = try validText(a, bytes) });
+    const b = try a.alloc(Value, bytes.len);
+    for (bytes, b) |x, *v| v.* = try json.intValue(a, x);
+    try o.put(a, "bytes", .{ .array = b });
+    try o.put(a, "token_id", try json.intValue(a, id));
+    return made[0];
+}
+
+/// `bytes` as text, each byte of an incomplete or invalid UTF-8 sequence as U+FFFD.
+fn validText(a: Allocator, bytes: []const u8) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 0;
+        if (n > 0 and i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i..][0..n])) {
+            try out.appendSlice(a, bytes[i..][0..n]);
+            i += n;
+            continue;
+        }
+        try out.appendSlice(a, "\u{fffd}");
+        i += 1;
+    }
+    return out.items;
 }

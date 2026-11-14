@@ -29,6 +29,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"EOS policy:"} })).step);
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.tokenizer, .filters = &.{"EOS policy:"} })).step);
     eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), .filters = &.{"EOS policy:"} })).step);
+    b.step("test-serve-flags-host", "Serve flag parsing, the flat TOML reader and --config expansion, without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "--compact-at:", "flat TOML:", "serve --config:" } })).step);
     b.step("test-dory-cli-host", "Dory CUDA loop option forwarding and invalid-value refusals").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"--device and --segments:"} })).step);
     b.step("test-dory-chat-host", "Dory chat template, EOS, reasoning split and qwen3_coder call on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Dory chat:"} })).step);
     b.step("test-embeddings-protocol-host", "Embedding request and response contracts without an admitted model or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"embeddings protocol:"} })).step);
@@ -58,6 +59,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-lesson-gate-host", "Production server rounds and earlier-fact retention").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Learning persistence:"} })).step);
     b.step("test-slide-delete-host", "Single and multiple fact deletion without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "delete", "a graph file", "allocation that fails anywhere in recording" } })).step);
     b.step("test-frame-cache-identity-host", "Image frame identities through the actual shared cache").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Frame cache:"} })).step);
+    b.step("test-originals-host", "Model folder snapshots, holds and slide rollback without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"originals_test."} })).step);
     const media_gate = b.step("test-media-request-ownership-host", "Shared request ownership, image frame caches and media expansion on the CPU");
     media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api })).step);
     media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "image", "video" } })).step);
@@ -65,6 +67,7 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
     b.step("test-http-limits-host", "Total HTTP read deadlines and connection admission without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"HTTP limits:"} })).step);
     b.step("test-server-recovery-host", "Incomplete replies, token allocation and bounded SSE storage without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Server recovery:"} })).step);
     b.step("test-prompt-interior-host", "Last-user metadata excludes later messages without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"interior prompt:"} })).step);
+    b.step("test-ocr-host", "OCR route readers, shared page steps and dialects without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"ocr "} })).step);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     @import("request_starts_host.zig").steps(b, native_modules.engines, server_tests);
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
