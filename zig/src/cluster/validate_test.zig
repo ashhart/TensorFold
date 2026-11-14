@@ -45,7 +45,7 @@ test "config validate: the worked example exits 0 and names the path and counts"
     try std.testing.expectEqualStrings("", got.err);
 }
 
-test "config validate: an unknown key exits 1 and names the key" {
+test "config validate: an unknown backend exits 1 and names it" {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
