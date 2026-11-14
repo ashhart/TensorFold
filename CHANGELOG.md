@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: two host tests in `test-server-cpu` pin the server's incremental reply text: a character split across tokens streams only once it is whole, and each chunk decodes only the previous chunk and its new tokens, never the whole reply (#3022).
+
 - Drama 3: an explicit `--max-frames` is now the reply's cap exactly, or it is refused. `--context - 2`, which used to be trimmed silently to `--context - 3`, is now refused, and the message says what fits. An overlong prompt's 400 names the assembled rows, the request text's own rows and the reference frames separately, and `/v1/models` lists a loaded speech engine's budgets under `speech`. Context and prompt limits are unchanged (#2143, for #2002). Thanks to @akol1.
 
 - Living Weights (`--slide --slide-drift-gate`): the recall wordings a request supplies are held out of the lesson writer's plan. A planned question that matches one under the gate's own contamination check is dropped and replaced, so the gate no longer refuses a lesson as "supplied recall is missing or trained" for a wording the writer made itself; a lesson that can't reach its three-example floor without them is refused as "the plan could not avoid the supplied recall wordings". With no recall supplied, or the gate off, nothing changes (#2929, for #1389). Thanks to @jimthedj65 for the panel run that found it.
