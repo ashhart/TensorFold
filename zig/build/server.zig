@@ -14,6 +14,22 @@ pub fn webHostTests(b: *std.Build, all: *std.Build.Step) void {
     all.dependOn(&run.step);
 }
 
+/// Ollama body translation and refusals, no server or device.
+pub fn ollamaHostTests(b: *std.Build, all: *std.Build.Step) void {
+    const json_mod = json(b, b.graph.host, .Debug);
+    const tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/server/ollama_test.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "json", .module = json_mod }},
+    }) });
+    const run = b.addRunArtifact(tests);
+    run.has_side_effects = true;
+    b.step("test-ollama-host", "Ollama request translation, option refusals and NDJSON framing").dependOn(&run.step);
+    all.dependOn(&run.step);
+}
+
 /// The server's JSON values as a module (zig/src/server/json.zig), so a family's serving code shares them.
 pub fn json(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{
@@ -74,11 +90,12 @@ pub fn testImports(b: *std.Build, m: *std.Build.Module, target: std.Build.Resolv
 pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Build.Module, all: *std.Build.Step) void {
     testImports(b, parser, b.graph.host, .debug);
     testImports(b, server, b.graph.host, .debug);
+    b.step("test-token-stream-host", "Native token streams, semantic anchors and cancellation without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"token stream:"} })).step);
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
-    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"logprobs_test"} }));
-    b.step("test-logprob-offers-host", "Logprob request capability refusals before engine submission").dependOn(&logprobs.step);
+    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
+    b.step("test-logprob-offers-host", "Logprob refusals before submission, and entries with tools, stops, reasoning and Responses").dependOn(&logprobs.step);
     const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));

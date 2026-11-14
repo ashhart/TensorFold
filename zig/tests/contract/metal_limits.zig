@@ -158,6 +158,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }
     if (try @import("metal_dsv41_limits.zig").launchOf(a, device, d, fun, assemble)) |l| return l;
+    if (std.mem.startsWith(u8, d.name, "flint ") or std.mem.startsWith(u8, d.name, "moe_route ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_flint.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt ")) {
         if (!assemble) return undefined;
         const body = try tf.lfm2_moe.source.prompt(device, a, true);

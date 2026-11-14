@@ -70,6 +70,7 @@ pub const Vision = struct {
         v.end();
         if (images.len == 0) return;
         v.spans = try radio.plan(v.gpa, images, @intCast(from));
+        errdefer v.end();
         if (radio.rows.total(v.spans) > v.rows.limit) return error.ImageRows;
         if (v.encoder) |x| return x.encode(x.ctx, s, images, v.spans, &v.rows);
         try v.tower.encode(s, images, v.spans, &v.rows);

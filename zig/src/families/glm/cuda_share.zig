@@ -79,7 +79,7 @@ pub const Owner = struct { pending: ?*engine.Kept = null };
 /// Before a prompt pass: the deepest kept state's pages in `adopt` (held for the stream), the state in `owner`.
 pub fn begin(e: *engine.Engine, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !kp.Plan {
     const prompts = of(e) orelse return error.NoPromptStore;
-    const plan = try prompts.begin(cacheKey(s) orelse return error.ImageCacheKeyRequired, s.history_len, s.shared_prefixes, owner, adopt);
+    const plan = try prompts.begin(.of(cacheKey(s) orelse return error.ImageCacheKeyRequired), s.history_len, s.shared_prefixes, owner, adopt);
     defer prompts.free(plan.marks);
     const mine = e.gpa.dupe(u32, plan.marks) catch |err| { // the lane's own marks, freed by its allocator
         e.pages.?.give(adopt.items);
@@ -111,7 +111,7 @@ pub const Keeps = struct {
         const path = k.e.gpa.alloc(u32, n) catch return;
         defer k.e.gpa.free(path);
         var owner: Owner = .{};
-        _ = prompts.keep(k.prompt, mark, &owner, ids[0..n], path);
+        _ = prompts.keep(.of(k.prompt), mark, &owner, ids[0..n], path);
     }
 };
 

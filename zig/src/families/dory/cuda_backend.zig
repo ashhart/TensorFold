@@ -242,7 +242,7 @@ pub const Dory = struct {
         x.restore_slot = slot;
         defer x.restore_slot = null;
         x.restored = 0;
-        const got = try pr.plan(x.gpa, &x.pool.?, s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
+        const got = try pr.plan(x.gpa, &x.pool.?, .of(s.prompt()), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
         if (got.from == x.restored) return got;
         for (adopt.items) |id| x.pool.?.release(id);
         x.gpa.free(got.marks);
@@ -309,7 +309,7 @@ pub const Dory = struct {
     /// TF_KV_SHARE: at mark `at` the store takes the lane's pages and rings; pages it held already replace the lane's.
     fn keepPages(x: *Dory, pr: kp.Prompts, s: *Stream, l: *Lane, at: usize) !void {
         var map: Map = .{ .x = x, .slot = l.slot };
-        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, @ptrCast(s), pages.tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, .of(s.prompt()), at, @ptrCast(s), pages.tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
     }
 
     /// One chunk from `l.fill` to the next grid line or mark; true once the prompt's last row is in. `_: u32`.

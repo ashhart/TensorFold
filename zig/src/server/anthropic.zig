@@ -51,6 +51,7 @@ fn countTokens(srv: *Server, cx: *Cx, chat: Value, client_thinking: bool) errors
     const thinking = try fields.thinkingFields(cx, chat, srv.effort_levels);
     const on = thinking.enable orelse srv.config.enable_thinking;
     cx.clear_thinking = thinking.clear;
+    cx.named_effort = fields.namedEffort(thinking.effort, srv.effort_levels); // as the chat route sets it
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
     const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, srv.media());
     const explicit_off = client_thinking and !(thinking.enable orelse true);
@@ -86,7 +87,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     reply.init() catch return;
     var wire: Wire = .{ .reply = &reply };
     const format_name = translate_mod.formatName(prepared[1]);
-    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0], format_name, translate_mod.thinkingSent(prepared[1]));
+    openai.runNamed(srv, a, wire.out(), .{ .conn = conn }, true, prepared[0], format_name, translate_mod.thinkingSent(prepared[1]), false);
     if (wire.opened or wire.status == null or conn.broken) return;
     const payload = wire.payload;
     if (wire.status.? != 200) {

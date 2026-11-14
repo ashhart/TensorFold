@@ -59,6 +59,11 @@ pub const pin_sampled = pin_ids + state.max_rows;
 const window_words = pin_sampled + state.max_rows; // a window's words, as a shared window's stream lays its own out
 pub const pin_prompt = window_words;
 const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
+// a shared window's batched draw: a Rule a row, a position a row, then its tokens
+const pin_draw = pin_shared + max_streams * window_words;
+const draw_rules_words = state.max_rows * 8;
+const draw_meta_words = state.max_rows;
+const draw_tokens_words = state.max_rows;
 /// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
 const masked_ids = 4000;
 
@@ -90,6 +95,7 @@ pub const Engine = struct {
     done: [lookahead]cuda.Event = undefined,
     copied: cuda.Event = undefined, // the last window's uploads have read the pinned words
     sampled_ready: cuda.Event = undefined,
+    draw_at: [max_streams]u32 = @splat(0), // part k's first row in the last shared window's drawn-token slab
     pos: usize = 0,
     parity: usize = 0,
     prev_keep: usize = 0,
@@ -210,7 +216,7 @@ pub const Engine = struct {
         errdefer if (!keep_owner) if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
-        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_shared + max_streams * window_words) * 4);
+        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_draw + draw_rules_words + draw_meta_words + draw_tokens_words) * 4);
         errdefer if (!keep_owner) e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
         errdefer if (!keep_owner) e.history.free();
@@ -509,9 +515,25 @@ pub const Engine = struct {
             parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot, .untaught = p.seq.untaught };
             row0 += p.rows;
         }
+        var sd: [max_streams]@import("cuda_shared_draw.zig").SharedDraw = undefined;
+        var draw_row: usize = 0;
+        for (parts, 0..) |p, k| {
+            sd[k] = .{ .sampling = p.seq.sampling, .pos = p.seq.pos, .rows = p.rows };
+            e.draw_at[k] = @intCast(draw_row);
+            draw_row += p.rows;
+        }
+        var batch = if (parts.len > 1) @import("cuda_shared_draw.zig").batch(sd[0..parts.len], e.pinned, e.b.draw_rules, e.b.draw_meta, e.b.draw_tokens, pin_draw, pin_draw + draw_rules_words) else null;
+        if (batch) |b| try @import("cuda_shared_draw.zig").upload(b, e.ops());
         try e.copied.record(e.stream);
-        try e.forward(null).windowSegs(parts_f[0..parts.len]);
-        for (parts, 0..) |p, k| try e.ops().download(std.mem.sliceAsBytes(host[k * window_words + pin_sampled ..][0..p.rows]), views[k].sampled);
+        var f = e.forward(null);
+        f.batch = if (batch) |*b| b else null;
+        try f.windowSegs(parts_f[0..parts.len]);
+        const slab = e.pinned.slice(u32)[pin_draw + draw_rules_words + draw_meta_words ..][0..draw_row];
+        if (batch != null) {
+            try e.ops().download(std.mem.sliceAsBytes(slab), e.b.draw_tokens);
+        } else for (parts, 0..) |p, k| {
+            try e.ops().download(std.mem.sliceAsBytes(slab[e.draw_at[k]..][0..p.rows]), views[k].sampled);
+        }
         try e.sampled_ready.record(e.stream);
         for (parts) |p| {
             e.bind(p.seq);
@@ -523,7 +545,7 @@ pub const Engine = struct {
     /// Part k's drawn ids from the last shared window (row r: the token at its position + r + 1).
     pub fn sharedTokens(e: *Engine, k: usize, rows: usize) ![]const u32 {
         try e.sampled_ready.synchronize();
-        return e.pinned.slice(u32)[pin_shared + k * window_words + pin_sampled ..][0..rows];
+        return e.pinned.slice(u32)[pin_draw + draw_rules_words + draw_meta_words + e.draw_at[k] ..][0..rows];
     }
 
     /// The window's meta row as the kernels read it: position, buffer parity, previous keep, a spare word.

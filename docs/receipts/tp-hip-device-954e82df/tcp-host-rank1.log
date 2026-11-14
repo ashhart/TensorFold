@@ -1,0 +1,2 @@
+PASS tcp-host rank 1/2: 400 all-gathers (1 B to 4 MiB), 796 fp32 and bf16 sums, 100 exchanges, send/recv and variable all-gathers bit-exact over loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395
+exit 0

@@ -28,7 +28,13 @@ pub const std_options: std.Options = @import("std_options.zig").of(native);
 
 /// What ``capabilities --json`` reports: this release, the chip here, and what the built-in backend serves.
 pub fn capabilities(a: Allocator) cli.Engines {
-    return .{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
+    var caps = cli.Engines{ .version = @import("build_options").version, .chip = if (native.families.len > 0) native.chip(a) else null, .backends = native.backends, .families = native.families };
+    if (@hasDecl(native, "kernelSupport")) {
+        const support = native.kernelSupport(a);
+        caps.kernels = support.kernels;
+        caps.kernel_sms = support.sms;
+    }
+    return caps;
 }
 
 /// ``capabilities --json``'s NVML P2P summary when the backend has one (CUDA, two or more GPUs); else null.
