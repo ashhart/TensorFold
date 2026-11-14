@@ -2,11 +2,13 @@ const std = @import("std");
 const gpu = @import("tensor_metal");
 const st = @import("safetensors");
 const Mps = @import("mps_ndarray_probe.zig").Backend;
+const SparseMask = @import("sparse_mask_replay.zig").Probe;
+const Override = union(enum) { mps: *Mps, sparse: *SparseMask };
 const timed_batch = 64;
 const batch_output_target = 32 << 20;
 const NativeBackend = enum { tensor, small, tensor_device, tensor_device_compensated, tensor_device_nn, tensor_device_nn_compensated, tensor_device_gelu, tensor_device_gelu_baseline, expansion, expansion_gelu };
 
-fn project(g: *gpu.Gpu, mps: ?*Mps, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize) !gpu.Tensor {
+fn project(g: *gpu.Gpu, override: ?*Override, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize) !gpu.Tensor {
     return switch (native) {
         .small => @import("dense_small.zig").run(g, x, w, bias, rows, cols, depth),
         .expansion, .expansion_gelu => @import("dense_expansion.zig").run(g, x, w, bias, rows, cols, depth, native == .expansion_gelu),
@@ -19,7 +21,10 @@ fn project(g: *gpu.Gpu, mps: ?*Mps, native: NativeBackend, x: gpu.Tensor, w: gpu
             break :activated output;
         },
         .tensor_device, .tensor_device_compensated, .tensor_device_nn, .tensor_device_nn_compensated, .tensor_device_gelu => @import("dense_device.zig").run(g, x, w, bias, rows, cols, depth, if (native == .tensor_device_gelu) .nk_gelu else if (native == .tensor_device_nn_compensated) .kn_compensated else if (native == .tensor_device_nn) .kn else if (native == .tensor_device_compensated) .nk_compensated else .nk),
-        .tensor => if (mps) |backend| backend.run(g, x, w, bias, rows, cols, depth) else g.linear(x, w, bias, rows, cols, depth),
+        .tensor => if (override) |backend| switch (backend.*) {
+            .mps => |value| value.run(g, x, w, bias, rows, cols, depth),
+            .sparse => |value| value.run(g, bias),
+        } else g.linear(x, w, bias, rows, cols, depth),
     };
 }
 
@@ -38,7 +43,7 @@ fn upload(g: *gpu.Gpu, value: st.Tensor) !gpu.Tensor {
     return tensor;
 }
 
-fn linear(g: *gpu.Gpu, mps: ?*Mps, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize) !gpu.Tensor {
+fn linear(g: *gpu.Gpu, mps: ?*Override, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize) !gpu.Tensor {
     try g.beginBatch();
     errdefer if (g.batch != null) g.endBatch() catch {};
     const output = try project(g, mps, native, x, w, bias, rows, cols, depth);
@@ -47,7 +52,7 @@ fn linear(g: *gpu.Gpu, mps: ?*Mps, native: NativeBackend, x: gpu.Tensor, w: gpu.
     return output;
 }
 
-fn timedBatch(g: *gpu.Gpu, mps: ?*Mps, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize, expected: ?[]const u8) !void {
+fn timedBatch(g: *gpu.Gpu, mps: ?*Override, native: NativeBackend, x: gpu.Tensor, w: gpu.Tensor, bias: gpu.Tensor, rows: usize, cols: usize, depth: usize, expected: ?[]const u8) !void {
     var outputs: [timed_batch]gpu.Tensor = undefined;
     var made: usize = 0;
     defer for (outputs[0..made]) |output| output.deinit();
@@ -66,6 +71,7 @@ fn timedBatch(g: *gpu.Gpu, mps: ?*Mps, native: NativeBackend, x: gpu.Tensor, w: 
 pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !void {
     if (args.len != 2 and args.len != 3) return error.ExpectedProjectionCaptureAndReceipt;
     const use_mps = args.len == 3 and std.mem.eql(u8, args[2], "--mps-ndarray");
+    const use_sparse = args.len == 3 and std.mem.eql(u8, args[2], "--sparse-mask");
     const baseline_gemm = args.len == 3 and std.mem.eql(u8, args[2], "--baseline-gemm");
     const small_baseline = args.len == 3 and std.mem.eql(u8, args[2], "--compensated-baseline");
     const use_small = small_baseline or (args.len == 3 and std.mem.eql(u8, args[2], "--compensated"));
@@ -78,14 +84,17 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     const compensated_nn = args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-nn-compensated");
     const tensor_device_nn = compensated_nn or (args.len == 3 and std.mem.eql(u8, args[2], "--tensor-device-nn"));
     const native_backend: NativeBackend = if (expansion_gelu) .expansion_gelu else if (expansion) .expansion else if (gelu_baseline) .tensor_device_gelu_baseline else if (activated) .tensor_device_gelu else if (compensated_nn) .tensor_device_nn_compensated else if (tensor_device_nn) .tensor_device_nn else if (compensated) .tensor_device_compensated else if (tensor_device) .tensor_device else if (use_small) .small else .tensor;
-    if (args.len == 3 and !use_mps and !use_small and !baseline_gemm and !tensor_device and !tensor_device_nn) return error.UnexpectedProjectionBackend;
+    if (args.len == 3 and !use_mps and !use_sparse and !use_small and !baseline_gemm and !tensor_device and !tensor_device_nn) return error.UnexpectedProjectionBackend;
     var mps = if (use_mps) try Mps.init(g.device) else null;
     defer if (mps) |*backend| backend.deinit();
-    const backend: ?*Mps = if (mps) |*value| value else null;
     g.buffer_cache_limit = 1 << 30;
     const a = init.arena.allocator();
     var file = try st.File.open(init.gpa, init.io, args[0]);
     defer file.close(init.io);
+    var sparse = if (use_sparse) try SparseMask.init(g, &file) else null;
+    defer if (sparse) |value| value.deinit();
+    var override: ?Override = if (mps) |*value| .{ .mps = value } else if (sparse) |*value| .{ .sparse = value } else null;
+    const backend: ?*Override = if (override) |*value| value else null;
     if ((file.get("linear_output") != null) != activated) return error.ProjectionCaptureActivationMismatch;
     const input = file.get("input") orelse return error.MissingProjectionInput;
     const weight = file.get("weight") orelse return error.MissingProjectionWeight;
@@ -126,7 +135,7 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     defer actual.deinit();
     const bytes = actual.slice(u8, actual.count * 4);
     const replacement_equal = std.mem.eql(u8, baseline.slice(u8, bytes.len), bytes);
-    if (native_backend == .tensor and !use_mps and !replacement_equal) return error.ProjectionReplacementChanged;
+    if (native_backend == .tensor and !use_mps and !use_sparse and !replacement_equal) return error.ProjectionReplacementChanged;
     if (activated and !expansion and !replacement_equal) return error.ProjectionGeluReplacementChanged;
     const reference_equal = std.mem.eql(u8, truth.bytes, bytes);
     for (0..5) |_| {
@@ -169,12 +178,15 @@ pub fn run(init: std.process.Init, g: *gpu.Gpu, args: []const [:0]const u8) !voi
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(file.map.memory, &digest, .{});
     const source_hash = std.fmt.bytesToHex(digest, .lower);
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const output_hash = std.fmt.bytesToHex(digest, .lower);
     std.crypto.hash.sha2.Sha256.hash(if (small_baseline) @import("sam3_kernels").baseline_source else @import("sam3_kernels").source, &digest, .{});
     const shader_hash = std.fmt.bytesToHex(digest, .lower);
-    const backend_name = if (expansion_gelu) "tensor_exact_expansion_gelu_guarded" else if (expansion) "tensor_exact_expansion_guarded" else if (gelu_baseline) "tensor_device_separate_gelu_guarded" else if (activated) "tensor_device_fused_gelu_guarded" else if (compensated_nn) "tensor_device_nn_compensated_guarded" else if (tensor_device_nn) "tensor_device_nn_full_precision_guarded" else if (compensated) "tensor_device_compensated_guarded" else if (tensor_device) "tensor_device_full_precision_guarded" else if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else if (baseline_gemm) "tensor_64_rows" else "tensor_32_rows";
+    const backend_name = if (use_sparse) "sam31_sparse_mask_fp32_probe" else if (expansion_gelu) "tensor_exact_expansion_gelu_guarded" else if (expansion) "tensor_exact_expansion_guarded" else if (gelu_baseline) "tensor_device_separate_gelu_guarded" else if (activated) "tensor_device_fused_gelu_guarded" else if (compensated_nn) "tensor_device_nn_compensated_guarded" else if (tensor_device_nn) "tensor_device_nn_full_precision_guarded" else if (compensated) "tensor_device_compensated_guarded" else if (tensor_device) "tensor_device_full_precision_guarded" else if (small_baseline) "compensated_single_row_baseline" else if (use_small) "compensated_small_rows" else if (use_mps) "mps_ndarray" else if (baseline_gemm) "tensor_64_rows" else "tensor_32_rows";
     const json = try std.json.Stringify.valueAlloc(a, .{
         .shape = .{ rows, cols, depth },
         .capture_sha256 = source_hash[0..],
+        .output_sha256 = output_hash[0..],
         .sam3_metal_source_sha256 = shader_hash[0..],
         .backend = backend_name,
         .expansion_packing = expansion_packing,

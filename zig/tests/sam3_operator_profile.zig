@@ -28,7 +28,7 @@ pub const Profile = struct {
         return left.gpu_seconds > right.gpu_seconds;
     }
 
-    pub fn write(self: *const Profile, a: std.mem.Allocator, io: std.Io, path: []const u8, identity: anytype, frames: usize, gpu_seconds: f64) !void {
+    pub fn write(self: *const Profile, a: std.mem.Allocator, io: std.Io, path: []const u8, identity: anytype, frames: usize, profiled_frames: usize, selected_frame: ?usize, gpu_seconds: f64) !void {
         const entries = try a.alloc(Entry, self.totals.count());
         var values = self.totals.valueIterator();
         var total: f64 = 0;
@@ -44,6 +44,8 @@ pub const Profile = struct {
             .frames_tensor_sha256 = identity.frames_tensor_sha256[0..],
             .executable_sha256 = identity.executable_sha256[0..],
             .frames = frames,
+            .profiled_frames = profiled_frames,
+            .selected_frame = selected_frame,
             .total_gpu_seconds = gpu_seconds,
             .profiled_gpu_seconds = total,
             .operators = entries,

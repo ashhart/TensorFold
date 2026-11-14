@@ -19,6 +19,8 @@ pub const metal = blk: {
     }
     break :blk out;
 } ++ [_]M{
+    .{ .name = "sam3 sparse mask im_sam_mask_downsample", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "sam3 sparse mask control im_sam_mask_downsample", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 resize im_sam_resize", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 resize control im_sam_resize", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "sam3 resize nonfinite-control im_sam_resize", .threads = 256, .tg_memory = 0, .reserved = 256 },
@@ -62,9 +64,9 @@ pub const metal = blk: {
     .{ .name = "sam3 device projection exact expansion sam_dense_device_domain", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 device projection exact expansion sam_dense_expansion_pack", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 device projection exact expansion sam_dense_device_plan", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
-    .{ .name = "sam3 device projection exact expansion sam_dense_expansion", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
-    .{ .name = "sam3 device projection exact expansion sam_dense_expansion_gelu", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
-    .{ .name = "sam3 device projection exact expansion sam_dense_expansion_drop_residual", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
+    .{ .name = "sam3 device projection exact expansion sam_dense_expansion", .threads = 64, .tg_memory = 0, .reserved = 64, .offline = false },
+    .{ .name = "sam3 device projection exact expansion sam_dense_expansion_gelu", .threads = 64, .tg_memory = 0, .reserved = 64, .offline = false },
+    .{ .name = "sam3 device projection exact expansion sam_dense_expansion_drop_residual", .threads = 64, .tg_memory = 0, .reserved = 64, .offline = false },
     .{ .name = "sam3 device projection exact expansion sam_dense_device_fallback", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 device projection exact expansion sam_dense_device_gelu_fallback", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },
     .{ .name = "sam3 device projection sam_dense_device_compensated", .threads = 128, .tg_memory = 0, .reserved = 128, .offline = false },

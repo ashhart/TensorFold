@@ -135,6 +135,13 @@ fn choose(table: TokenTable, quality: []const f32, scores: []const f32, multimas
 }
 
 pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requested: Options) !Result {
+    const image_side = r.config.featureSide();
+    if (image.count != image_side * image_side * r.config.hidden) return error.SamDecoderShape;
+    for (features, 0..) |feature, i| {
+        const expected = image_side * (@as(usize, 4) >> @intCast(i));
+        if (feature.height != expected or feature.width != expected or feature.channels != r.config.hidden or
+            feature.tensor.count != expected * expected * feature.channels) return error.SamDecoderShape;
+    }
     const mark = r.mark();
     errdefer r.trim(mark, &.{});
     var options = requested;
@@ -162,7 +169,6 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     try r.g.beginBatch();
     errdefer if (r.g.batch != null) r.g.endBatch() catch {};
     try state.run(try layer.child("transformer"));
-    const pixels = try upsample(layer, state.image, features);
     const quality_logits = try layer.mlp("iou_prediction_head", ops.view(state.queries, table.slots * table.width, table.slots * table.width), 3);
     const quality = if (r.config.version == .sam3) try r.unary(quality_logits, 1) else quality_logits;
     const scores = try layer.mlp("pred_obj_score_head", ops.view(state.queries, 0, table.slots * table.width), 3);
@@ -170,7 +176,8 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     if (quality.count != table.slots * table.masks or scores.count != table.slots) return error.SamDecoderShape;
     try r.observe("decoder.quality", quality, &.{ table.slots, table.masks });
     const selected = choose(table, quality.slice(f32, quality.count), scores.slice(f32, scores.count), options.multimask and !options.multiplex);
-    const empty_mask = try r.alloc(pixels.height * pixels.width);
+    const side = r.config.featureSide() * 4;
+    const empty_mask = try r.alloc(side * side);
     const empty_pointer = try r.alloc(table.width);
     @memset(empty_mask.slice(f32, empty_mask.count), -1024);
     @memset(empty_pointer.slice(f32, empty_pointer.count), 0);
@@ -178,14 +185,18 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
     var pointer_rows: [16]ops.Tensor = @splat(empty_pointer);
     var output = Result{ .masks = undefined, .pointer = undefined, .count = table.slots, .scores = @splat(-10), .ious = @splat(0) };
     try r.g.beginBatch();
+    const pixels: ?ops.Feature = if (needsPixels(selected[0..table.slots], options)) try upsample(layer, state.image, features) else null;
     for (selected[0..table.slots], 0..) |choice, slot| {
         output.scores[slot] = choice.score;
         output.ious[slot] = choice.iou;
         if (options.multiplex and options.active & (@as(u16, 1) << @intCast(slot)) == 0) continue;
         const mask_token = table.mask(state.queries, slot, choice.candidate);
-        const head = try r.name("output_hypernetworks_mlps.{d}", .{choice.candidate});
-        const classifier = try layer.mlp(head, mask_token, 3);
-        mask_rows[slot] = try r.matmul(pixels.tensor, classifier, pixels.height * pixels.width, 1, pixels.channels);
+        if (!(choice.score <= 0)) {
+            const visible = pixels.?;
+            const head = try r.name("output_hypernetworks_mlps.{d}", .{choice.candidate});
+            const classifier = try layer.mlp(head, mask_token, 3);
+            mask_rows[slot] = try r.matmul(visible.tensor, classifier, side * side, 1, visible.channels);
+        }
         var pointer = try owner.mlp(if (r.config.version == .sam31 and !options.multiplex) "interactive_obj_ptr_proj" else "obj_ptr_proj", mask_token, 3);
         if (choice.score <= 0) {
             pointer = if (r.config.version == .sam31) try owner.linear("no_obj_ptr_linear", pointer) else try owner.parameter("no_obj_ptr");
@@ -193,11 +204,38 @@ pub fn decode(r: *ops.Runtime, features: [3]ops.Feature, image: ops.Tensor, requ
         }
         pointer_rows[slot] = pointer;
     }
-    output.masks = ops.feature(if (table.slots == 1) mask_rows[0] else try r.transpose(try r.concat(mask_rows[0..table.slots]), table.slots, pixels.height * pixels.width), pixels.height, pixels.width, table.slots);
+    output.masks = ops.feature(if (table.slots == 1) mask_rows[0] else try r.transpose(try r.concat(mask_rows[0..table.slots]), table.slots, side * side), side, side, table.slots);
     output.pointer = try r.concat(pointer_rows[0..table.slots]);
     try r.g.endBatch();
     r.trim(mark, &.{ output.masks.tensor, output.pointer });
     return output;
+}
+
+fn needsPixels(selected: []const Choice, options: Options) bool {
+    for (selected, 0..) |choice, slot| {
+        if (options.multiplex and options.active & (@as(u16, 1) << @intCast(slot)) == 0) continue;
+        if (!(choice.score <= 0)) return true;
+    }
+    return false;
+}
+
+test "SAM absent masks skip pixels without hiding active NaN scores" {
+    var selected: [16]Choice = @splat(.{});
+    const options = Options{ .multiplex = true, .active = 1 };
+    for ([_]f32{ -std.math.inf(f32), -1, -0.0, 0 }) |score| {
+        selected[0].score = score;
+        try std.testing.expect(!needsPixels(&selected, options));
+    }
+    for ([_]f32{ 0x1p-149, std.math.inf(f32), std.math.nan(f32) }) |score| {
+        selected[0].score = score;
+        try std.testing.expect(needsPixels(&selected, options));
+    }
+    selected[0].score = -1;
+    selected[1].score = std.math.nan(f32);
+    try std.testing.expect(!needsPixels(&selected, options));
+    try std.testing.expect(needsPixels(&selected, .{ .multiplex = true, .active = 2 }));
+    selected[0].score = 1;
+    try std.testing.expect(needsPixels(selected[0..1], .{ .active = 0 }));
 }
 
 test "SAM tracked masks exclude candidate zero while explicit single-mask prompts retain it" {

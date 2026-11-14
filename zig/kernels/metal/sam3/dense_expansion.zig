@@ -39,7 +39,7 @@ pub fn encodePhase(comptime mtl: type, e: mtl.ComputeEncoder, pipes: [6]mtl.Pipe
             e.setValue(shape, 3);
             e.setBuffer(refs[4].buffer, refs[4].offset, 4);
             e.setBuffer(refs[6].buffer, refs[6].offset, 5);
-            e.dispatchIndirect(refs[4].buffer, refs[4].offset + 4, mtl.Size.of(128, 1, 1));
+            e.dispatchIndirect(refs[4].buffer, refs[4].offset + 4, mtl.Size.of(64, 1, 1));
         },
         5 => {
             for (0..4) |i| e.setBuffer(refs[i].buffer, refs[i].offset, i);

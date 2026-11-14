@@ -187,7 +187,8 @@ kernel void im_sam_mask_values(const device float *x, device float *out, constan
     if(i<count)out[i]=2/(1+metal::precise::exp(-x[i]))-1;
 }
 
-kernel void im_sam_mask_downsample(const device float *x, const device float *w, const device float *bias, device float *out,
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void im_sam_mask_downsample(const device float *x, const device float *w, const device float *bias, device float *out,
     constant uint &conditioning, uint i [[thread_position_in_grid]]) {
     if(i>=576*576*16)return;
     const uint channel=i%16,row=i/16/576,col=i/16%576;

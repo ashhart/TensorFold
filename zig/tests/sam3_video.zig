@@ -16,7 +16,7 @@ pub fn main(init: std.process.Init) !void {
             \\  --start N --frames N --reverse --fp32 --exercise-lifecycle --baseline-attention --baseline-gemm
             \\  --split-attention --device-projections --device-attention
             \\  --compensated-normalization
-            \\  --operator-profile FILE.json (synchronizes every operation; separate from timing)
+            \\  --operator-profile FILE.json [--operator-profile-frame N] (separate from timing)
             \\  --reference MASKS --min-frame-iou N --min-mean-iou N
             \\  --raw-masks FILE.safetensors --benchmark FILE.json --warmup N
             \\  --trace DIR --trace-frames N,N (NHWC tensors; recomputes preprocessing and trunk)
@@ -45,6 +45,7 @@ pub fn main(init: std.process.Init) !void {
     var raw_path: ?[]const u8 = null;
     var benchmark_path: ?[]const u8 = null;
     var operator_profile_path: ?[]const u8 = null;
+    var operator_profile_frame: ?usize = null;
     var warmup: usize = 0;
     var trace_path: ?[]const u8 = null;
     var trace_frames: std.ArrayList(usize) = .empty;
@@ -123,6 +124,10 @@ pub fn main(init: std.process.Init) !void {
                 operator_profile_path = value;
                 continue;
             }
+            if (std.mem.eql(u8, flag, "--operator-profile-frame")) {
+                operator_profile_frame = try std.fmt.parseInt(usize, value, 10);
+                continue;
+            }
             if (std.mem.eql(u8, flag, "--trace-frames")) {
                 var parts = std.mem.splitScalar(u8, value, ',');
                 while (parts.next()) |part| {
@@ -138,7 +143,8 @@ pub fn main(init: std.process.Init) !void {
     if (count == 0) return error.EmptyVideo;
     if (warmup >= count or (warmup != 0 and benchmark_path == null)) return error.InvalidWarmup;
     if (trace_path != null and benchmark_path != null) return error.TraceTimingRequiresSeparateRuns;
-    if (operator_profile_path != null and (trace_path != null or benchmark_path != null)) return error.OperatorProfilingRequiresSeparateRun;
+    if (operator_profile_path != null and (trace_path != null or benchmark_path != null or exercise)) return error.OperatorProfilingRequiresSeparateRun;
+    if (operator_profile_frame != null and operator_profile_path == null) return error.ExpectedOperatorProfile;
     if (trace_path == null and (trace_frames.items.len != 0 or trace_layers)) return error.ExpectedTraceDirectory;
     if (trace_path != null and trace_frames.items.len == 0) try trace_frames.append(a, start);
     var file = try st.File.open(init.gpa, init.io, args[2]);
@@ -147,6 +153,10 @@ pub fn main(init: std.process.Init) !void {
     if (frames.dtype != .u8 or frames.rank != 4 or frames.dim(3) != 3) return error.ExpectedRgbFrames;
     if (start >= frames.dim(0) or (reverse and count - 1 > start) or
         (!reverse and count > frames.dim(0) - start)) return error.FrameOutOfRange;
+    if (operator_profile_frame) |frame| {
+        if (frame >= frames.dim(0) or (reverse and (frame > start or start - frame >= count)) or
+            (!reverse and (frame < start or frame - start >= count))) return error.ProfileFrameOutOfRange;
+    }
     for (trace_frames.items) |frame| {
         if (frame >= frames.dim(0) or (reverse and (frame > start or start - frame >= count)) or
             (!reverse and (frame < start or frame - start >= count))) return error.TraceFrameOutOfRange;
@@ -206,7 +216,6 @@ pub fn main(init: std.process.Init) !void {
     const load_seconds = clock.seconds() - load_started;
     var operator_profile = OperatorProfile{ .allocator = init.gpa };
     defer operator_profile.deinit();
-    if (operator_profile_path != null) loaded.gpu.operator_observer = .{ .context = &operator_profile, .write = OperatorProfile.record };
     defer loaded.gpu.operator_observer = null;
     loaded.gpu.attention_two_pass = attention_two_pass;
     const started = clock.seconds();
@@ -227,8 +236,12 @@ pub fn main(init: std.process.Init) !void {
     });
     defer session.deinit();
     var quality = sam.comparison.Quality{};
+    var profiled_frames: usize = 0;
     for (0..count) |step| {
         const index = if (reverse) start - step else start + step;
+        const profiling = operator_profile_path != null and (operator_profile_frame == null or operator_profile_frame.? == index);
+        loaded.gpu.operator_observer = if (profiling) .{ .context = &operator_profile, .write = OperatorProfile.record } else null;
+        profiled_frames += @intFromBool(profiling);
         const image = sam.Image{ .size = .{ .width = width, .height = height }, .rgb = frames.bytes[index * bytes ..][0..bytes] };
         if (exercise and step != 0) switch (step % 5) {
             1, 3 => try session.prompt(seeds.items[0].id, seeds.items[0].prompt),
@@ -275,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     if (capture) |*output| try output.finish(init.io);
-    if (operator_profile_path) |path| try operator_profile.write(a, init.io, path, identity.?, count, loaded.gpu.gpu_seconds);
+    if (operator_profile_path) |path| try operator_profile.write(a, init.io, path, identity.?, count, profiled_frames, operator_profile_frame, loaded.gpu.gpu_seconds);
     if (benchmark_path) |path| {
         var digest: [32]u8 = undefined;
         masks_hash.final(&digest);

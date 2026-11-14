@@ -39,6 +39,12 @@ const device_served = [_]c.Shape{
     .{ .rows = 65, .n = 1024, .k = 588 },
 };
 
+const compensated_served = device_served ++ [_]c.Shape{
+    .{ .rows = 65, .n = 256, .k = 2304 },
+    .{ .rows = 64, .n = 255, .k = 2303 },
+    .{ .rows = 63, .n = 257, .k = 2305 },
+};
+
 pub fn deviceText(a: std.mem.Allocator, control: bool) ![]u8 {
     const raw = try sources.tensor_library.source(a, sources.sam3_source);
     defer a.free(raw);
@@ -110,7 +116,7 @@ const Probe = struct {
                 .accum = .f32,
                 .depth = depth,
                 .out = .f32,
-                .served = if (self.device()) &device_served else &served,
+                .served = if (self.kind == .device_compensated) &compensated_served else if (self.device()) &device_served else &served,
                 .tiles = if (self.device()) .{ .{ .size = 32 }, .{ .size = 64 }, .{ .size = 16 } } else .{ .{ .size = 1 }, .{ .size = 4 }, .{ .size = 32 } },
                 .replaces = if (self.kind == .fused) labels[@backingInt(Kind.baseline)] else if (self.kind == .device_gelu) "separate FP32 projection and exact GELU" else null,
             },

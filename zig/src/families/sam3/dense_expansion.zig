@@ -79,6 +79,7 @@ fn encode(g: *gpu.Gpu, x: gpu.Tensor, weight: gpu.Tensor, bias: gpu.Tensor, rows
     const shape = [3]u32{ @intCast(std.math.cast(i32, rows) orelse return error.SamExpansionProjectionShape), @intCast(cols), @intCast(depth) };
     const batched = try g.beginOperator();
     defer g.endOperator(batched);
+    if (g.operator_observer != null) g.operator_shape = .{ rows, cols, depth };
     const pool = gpu.mtl.objc.Pool.push();
     defer pool.pop();
     var pipes: [6]gpu.mtl.Pipeline = undefined;
