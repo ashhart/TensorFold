@@ -350,6 +350,13 @@ is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rm
 Four controls: the recurrence one row short of the prompt and with one key head, and the prework norming q with k's
 weights and writing gate and beta to each other's outputs.
 
+HIP also checks EXL3's projections for decode rows (`exl3/exl3.hip`, CUDA's `exl3_block/linear.cu`): `tf_exl3_rot_in`
+(bf16 rows times suh, rotated by 128 and rounded to fp16) and `tf_exl3_linear` at 2, 3, 4, 5, 6 and 8 bits (mul1) on 4
+and 8 waves, each against float64 at deepseek_v41's indexer wk and Engram wkv (and its head at 8 bits) and the plan's
+8-wave edge. The linear's gate 4 is exact: all-ones trellis states give one weight (-0.651 at every width), so 6144
+terms of 4096 times it stay integers under 2^24 where fp16 overflows. Two controls: rot_in reading the next block's suh,
+and the linear reading its input rows one row late.
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the

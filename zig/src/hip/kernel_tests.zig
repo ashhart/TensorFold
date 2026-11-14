@@ -57,6 +57,7 @@ test {
     _ = @import("kernel_tests/stats.zig");
     _ = @import("kernel_tests/tap.zig");
     _ = @import("kernel_tests/draft.zig");
+    _ = @import("kernel_tests/exl3.zig");
     _ = @import("kernel_tests/ops.zig");
     _ = @import("kernel_tests/conv_split.zig");
     _ = @import("kernel_tests/dense.zig");

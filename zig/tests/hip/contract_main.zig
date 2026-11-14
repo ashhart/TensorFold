@@ -21,6 +21,7 @@ const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const tap_k = @import("contract_tap.zig");
 const draft_k = @import("contract_draft.zig");
+const exl3_k = @import("contract_exl3.zig");
 const argmax_k = @import("contract_argmax.zig");
 const pair_k = @import("contract_relu2_pair.zig");
 const heads_rows_k = @import("contract_heads_rows.zig");
@@ -248,6 +249,10 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&drafts, draft_modes) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&drafts) |*m| m.deinit();
     for (&drafts) |*m| try kernels.append(a, m.kernel());
+    var exl3s: [exl3_k.registrations.len]exl3_k.Case = undefined;
+    for (&exl3s, exl3_k.registrations) |*m, reg| m.* = .init(a, &r, s, &l, reg);
+    defer for (&exl3s) |*m| m.deinit();
+    for (&exl3s) |*m| try kernels.append(a, m.kernel());
     var argmax = argmax_k.Argmax.init(a, &r, s, &l);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
