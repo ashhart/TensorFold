@@ -282,6 +282,12 @@ fn runSwapped(ctx: *anyopaque) anyerror!void {
     return product.runSwapped();
 }
 
+/// The two commands this module serves: `nvfp4-prompt-many-contract` and `nvfp4-prompt-many-bench`.
+pub fn dispatch(gpu: gpu_check.Gpu, cmd: []const u8) !void {
+    if (std.mem.endsWith(u8, cmd, "-bench")) return bench(gpu);
+    return run(gpu);
+}
+
 /// Focused gate run, kept separate so a live GPU need not retain every contract fixture at once.
 pub fn run(gpu: gpu_check.Gpu) !void {
     var s = try cuda.Stream.init(gpu.d, false);
