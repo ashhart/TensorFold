@@ -186,6 +186,7 @@ const linux_host = [_][]const u8{
     "test-inc4-round-host",
     "test-inc4-rows-host",
     "test-kernel-seed-host",
+    "test-lane-explore-host",
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
