@@ -92,6 +92,11 @@ export function securityRoleAllows(required: SecurityRole): boolean {
   return SECURITY_ROLE_RANK[currentSecurityRoleFromEnv(process.env)] >= SECURITY_ROLE_RANK[required]
 }
 
+/** Resolving a tool approval is the owner's call: a paired device is told it cannot, and its snapshot hides approvals. */
+export function remoteMutationNeedsOwnerToken(pathname: string): boolean {
+  return /^\/v1\/approvals\/[^/]+$/.test(pathname)
+}
+
 export function requiredRoleForRemoteMutation(pathname: string): SecurityRole {
   if (pathname === '/v1/auth/sessions/revoke' || pathname === '/v1/terminals' || /^\/v1\/terminals\/[^/]+\/(?:write|resize|rename|kill)$/.test(pathname)) {
     return 'owner'
