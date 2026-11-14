@@ -50,6 +50,7 @@ pub const Generation = struct {
     chat: bool = true,
     stops: reply_text.Stops,
     ignore_eos: bool,
+    grammar: @import("eos_phase.zig").Phase = .none, // the request's grammar at the next token to commit
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
@@ -73,7 +74,7 @@ pub const Generation = struct {
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
 
     fn eos(g: *const Generation, t: u32) bool {
-        return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
+        return g.grammar.ends(g.ignore_eos, g.srv.eos, t);
     }
 
     /// Close a tool call left open at the model end token, except when another stop condition ended the reply.
@@ -95,6 +96,7 @@ pub const Generation = struct {
 
     /// Commits a round's tokens as ``LaneStream.commit`` would, then streams what they add.
     fn commit(g: *Generation, chunk: []const u32) Failure!void {
+        const before = g.grammar; // the stream below judges each token's end at its own phase, as this loop does
         var landed: usize = 0;
         for (chunk) |t| {
             if (g.reason != null) break;
@@ -106,6 +108,7 @@ pub const Generation = struct {
                 g.reason = "stop";
                 g.srv.engine.cancel(g.id); // the engine ends EOS and length itself; a stop string is the server's
             } else if (g.collected.items.len >= g.max_tokens) g.reason = "length";
+            g.grammar = g.grammar.next(t); // thinking on: the grammar takes the reply from the token after `</think>`
         }
         if (landed == 0) return;
         const arrived = nowNs(g.srv.io);
@@ -120,17 +123,11 @@ pub const Generation = struct {
             g.wrote_ns = nowNs(g.srv.io);
         }
         if (g.streaming_done) return;
-        var fresh: std.ArrayList(u32) = .empty;
-        for (chunk[0..landed]) |t| {
-            if (g.eos(t)) {
-                g.streaming_done = true;
-                break;
-            }
-            try fresh.append(g.a, t);
-        }
+        const fresh = @import("eos_phase.zig").streamed(before, g.ignore_eos, g.srv.eos, chunk[0..landed]);
+        if (fresh.ended) g.streaming_done = true;
         const live = g.liveRows();
-        if (live) |l| try l.add(g.srv, g.a, fresh.items);
-        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.items);
+        if (live) |l| try l.add(g.srv, g.a, fresh.tokens);
+        const all = try g.visible.extend(g.a, g.srv.text, reply_text.decodeText, fresh.tokens);
         if (g.visible.pending()) return; // a character still split across tokens
         if (g.srv.text.vtable.format == .kimi) return @import("chat_kimi.zig").stream(g, sink);
         const raw_visible = g.stops.visible(all, true);
@@ -274,7 +271,7 @@ pub const Generation = struct {
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.grammar.keepsTrailing(g.ignore_eos)) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
         const raw = try g.srv.text.decode(a, content_tokens);
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
