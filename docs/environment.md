@@ -127,7 +127,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 31 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 32 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -163,6 +163,7 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_KV_PAGE_TEST` | Whole page size the kernels take: whole blocks of the indexer's ratio up to the window; unset or blank leaves the plain caches |
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |
 | `TF_FLASHNEXT_PROMPT` | Exactly `rows` for the rows path; unset or blank keeps the plain path |
+| `TF_FLASHNEXT_DRAFT_HEAD` | Exactly `bf16` or `affine4`; unset or blank is `affine4`, a bf16 language head's draft rows held as 4-bit affine groups of 32. `bf16` keeps the rows as stored. Drafts only, so replies are unchanged |
 
 An on-by-default switch keeps the same kernels and bits as off; only the launch count changes.
 The two row counts and the two draft counts keep their existing clamps after parsing.
