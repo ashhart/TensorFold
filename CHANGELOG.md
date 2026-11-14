@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on Metal without an MTP head: concurrent streams now share one exact round instead of taking turns. Replies are unchanged. On an M5 Ultra, two streams decode about 20% faster, four streams about 75%, eight streams 2.3 to 2.5 times as fast and 24 streams 3.2 to 3.5 times; one stream is unchanged (#3005, for #2968).
+
 - HIP: the TCP fabric Kind gains its device side for two hosts over a network link: staged copies through mapped host memory, a stream that waits on a peer's counter, a 30 s limit on each proxy copy, and every rank refusing a bad part size together. Nothing selects the Kind yet (#2961). Thanks to @Shoestring-dev.
 
 - GLM-5.3-Flash on CUDA: a decode window's DSA select spreads each row over many blocks (`TF_GLM_DSEL`, default on; `TF_GLM_DSEL=0` keeps one block a row) and picks `tf_glm_select_rows`' pools. At TP=4 on four GB10s, the decode round after a 1,040,384-token prompt is 5.05%, 9.36% and 11.36% shorter at 1, 4 and 8 streams, with every reply unchanged (#2722). Ported from patch 0067 of Mia's AI Lab's GLM-5.3-Flash stack. Thanks to Mia's AI Lab (@MiaAI-Lab).
