@@ -185,6 +185,18 @@ missing link (#1971). The ring also needs these NCCL settings at start (#1971):
 - `NCCL_ALGO=Ring`, and a graph for each rank that receives on the port toward the previous rank and sends toward
   the next.
 
+For switchless RoCE links on separate IPv4 subnets, use NCCL 2.30.7 or later: [subnet-aware
+routing](https://github.com/NVIDIA/nccl/blob/v2.30.7-1/src/transport/net_ib/connect.cc#L61-L62)
+first shipped in [v2.30.7-1](https://github.com/NVIDIA/nccl/commit/5c1c4288e6627e9b442eda997aa6ee9136cda0bd).
+Point each rank at a newer `libnccl.so.2` with `LD_LIBRARY_PATH=/path/to/nccl/lib`, retaining other trusted library
+directories.
+Set `NCCL_IB_SUBNET_AWARE_ROUTING=1` and `NCCL_IB_SUBNET_PREFIX_LEN=24`, keeping the settings above;
+the prefix must match the links' IPv4 subnets (24 for /24).
+On every rank, check `rank N startup: entering NCCL init (..., NCCL X.Y.Z, ...)` and `NCCL_DEBUG=INFO`
+for the selected NIC and subnet-aware overrides.
+With gather prefill, replacing 2.28.9 with a build reporting 2.30.7 and enabling these settings fixed startup timeouts
+and completed requests.
+
 `TF_GLM_ROCE_MULTI=1` with `TF_TP_ROCE_RELAY=1` relays gathers through both neighbours on such a ring instead of
 NCCL (#2352, opt-in, four ranks only). Gathers up to `TF_TP_ROCE_RELAY_MAX_KB` a rank go on the wire (64 KiB by
 default, 4 to 1024); larger ones, reductions and exchanges stay on NCCL. On the ring with gather, @Bizuayeu measured
