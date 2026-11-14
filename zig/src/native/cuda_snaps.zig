@@ -20,14 +20,18 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     return rules;
 }
 
-/// Native CUDA families own their grid, independently of the server's template chunk starts.
-pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
+/// Native CUDA families own their grid; a loaded `snap_grid` (the prefill step) keeps states on chunk starts only.
+pub fn passRules(comptime F: type, prompt_rows: u32, snap_grid: u32) api.prompt_cache.Rules {
     var rules = cacheRules(F);
     rules.chunk = prompt_rows;
     if (@hasDecl(F, "snap_repeat_min")) rules.repeat_min = if (std.c.getenv("TF_FLASHNEXT_REPEAT_CACHE")) |v| (if (std.mem.eql(u8, std.mem.span(v), "0")) 0 else F.snap_repeat_min) else F.snap_repeat_min;
     // Opt-in until a served A/B shows the extra marks pay: TF_PROMPT_INTERMEDIATE=1 enables the family's ladder.
     if (rules.intermediate > 0 and !(@import("sys").environment.read(bool, "TF_PROMPT_INTERMEDIATE", false) catch false)) rules.intermediate = 0;
     rules.chunk_starts = false;
+    if (snap_grid > 0) {
+        rules.planned = true;
+        rules.grid = snap_grid;
+    }
     return rules;
 }
 
@@ -48,6 +52,11 @@ pub fn requestStepFor(comptime F: type, value: ?[]const u8) u32 {
     const v = value orelse return 0;
     if (!std.mem.eql(u8, v, "1")) return 0;
     return if (@hasDecl(F, "request_starts") and F.request_starts) F.snap_grid else 0;
+}
+
+/// The grid a loaded family declares (0: any row).
+pub fn loadedGrid(loaded: anytype) u32 {
+    return if (@hasField(@TypeOf(loaded), "snap_grid")) loaded.snap_grid else 0;
 }
 
 /// The cache's bytes less what the family sets aside for its states (`snap_ready`, as Nemotron's spare buffers).
@@ -131,7 +140,7 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     for ([_]?[:0]const u8{ null, "", "0", "2", "1" }) |v| {
         _ = if (v) |s| env.setenv(Tail.snap_tail, s, 1) else env.unsetenv(Tail.snap_tail);
         const on = v != null and std.mem.eql(u8, v.?, "1");
-        try std.testing.expect(cacheRules(Tail).tail == on and passRules(Tail, 2048).tail == on);
+        try std.testing.expect(cacheRules(Tail).tail == on and passRules(Tail, 2048, 0).tail == on);
     }
     try std.testing.expect(!cacheRules(Other).tail);
 }
@@ -142,12 +151,12 @@ test "the ladder stays off unless TF_PROMPT_INTERMEDIATE is set" {
         pub const snap_intermediate = .{ .tokens = 8192, .most = 4 };
     };
     _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
-    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512, 0).intermediate);
     _ = env.setenv("TF_PROMPT_INTERMEDIATE", "0", 1);
     defer _ = env.unsetenv("TF_PROMPT_INTERMEDIATE");
-    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512).intermediate);
+    try std.testing.expectEqual(@as(u32, 0), passRules(Ladder, 512, 0).intermediate);
     _ = env.setenv("TF_PROMPT_INTERMEDIATE", "1", 1);
-    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512).intermediate);
+    try std.testing.expectEqual(@as(u32, 8192), passRules(Ladder, 512, 0).intermediate);
 }
 
 test {
@@ -245,4 +254,35 @@ test "request starts: opt in is explicit, eligible and independent of cache rule
     _ = requestStepFor(Qwen, "1");
     try std.testing.expectEqualDeep(before, cacheRules(Qwen));
     try std.testing.expectEqual(@import("profile").Class.arithmetic, @import("profile").entry(.TF_QWEN_REQUEST_STARTS).class);
+}
+
+test "a family that names its prefill step keeps marks on chunk starts, so a resumed pass cuts as a fresh one" {
+    const Exl3 = struct {};
+    const Stub = struct {
+        fn bytes(_: *anyopaque, _: u32) u64 {
+            return 0;
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return error.Unused;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var unused: u8 = 0;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const prompt = try arena.allocator().alloc(u32, 12780);
+    for (prompt, 0..) |*t, i| t.* = @intCast(i);
+    const vtable: api.prompt_cache.Snapshots.VTable = .{ .bytes = Stub.bytes, .save = Stub.save, .restore = Stub.restore, .drop = Stub.drop };
+    const copies: api.prompt_cache.Snapshots = .{ .ptr = &unused, .vtable = &vtable };
+    // any row: the history mark cuts the cold pass's last chunk to 7 rows, a different kernel path than the fresh pass
+    var any = api.prompt_cache.Store.init(std.testing.allocator, copies, passRules(Exl3, 4096, 0), 1 << 30);
+    defer any.deinit();
+    const loose = try any.marks(arena.allocator(), prompt, 0, 12773, &.{}, &.{}, &.{});
+    try std.testing.expect(std.mem.indexOfScalar(u32, loose, 12773) != null);
+    var grid = api.prompt_cache.Store.init(std.testing.allocator, copies, passRules(Exl3, 4096, 4096), 1 << 30);
+    defer grid.deinit();
+    const exact = try grid.marks(arena.allocator(), prompt, 0, 12773, &.{}, &.{}, &.{});
+    try std.testing.expect(std.mem.indexOfScalar(u32, exact, 12288) != null);
+    for (exact) |m| try std.testing.expectEqual(@as(u32, 0), m % 4096);
 }

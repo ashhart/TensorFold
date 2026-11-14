@@ -1,0 +1,1 @@
+../../../../src/families/flashnext/exl3/pack/exl3_scan.zig
