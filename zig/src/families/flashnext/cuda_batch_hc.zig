@@ -2,6 +2,7 @@
 const std = @import("std");
 const wt = @import("cuda_prompt_wt.zig");
 const parts = @import("cuda_batch_state.zig");
+const tiles = @import("cuda_tiles.zig");
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -17,10 +18,16 @@ pub fn on() bool {
     return @import("sys").environment.read(bool, "TF_FLASHNEXT_HC_FUSE", true) catch true;
 }
 
-/// Whether hc_w's read-out takes its normed rows from the writeback: native, nothing kept, 64 rows or more, our glue.
+/// Whether hc_w's read-out takes its normed rows from the writeback: native, nothing kept, 64 rows or more, our glue,
+/// and not a prompt pass on the fused tiles (those form the normed rows on chip).
 pub fn fuses(pass: anytype, hc_w: wt.HcW, n: usize, keep: parts.HcKeep) bool {
     return n >= 64 and hc_w.down.native != null and std.meta.eql(keep, parts.HcKeep{}) and dims == 2560 and
-        streams == 4 and pass.tri.writebackOwned() and pass.k.forms.hc_fuse;
+        streams == 4 and pass.tri.writebackOwned() and pass.k.forms.hc_fuse and !promptFused(pass, hc_w, n);
+}
+
+/// Whether a prompt pass's rows take tiles.readoutFused: the setting, tiles.fused_rows or more, its BF16 shapes.
+pub fn promptFused(pass: anytype, hc_w: wt.HcW, n: usize) bool {
+    return pass.k.forms.readout_fused and pass.hooks.prompt and n >= tiles.fused_rows and tiles.nativeFused(hc_w);
 }
 
 /// The pass's pending writeback with hc_w's normalize in the same launch: the normed rows readoutNative reads.
