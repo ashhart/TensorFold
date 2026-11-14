@@ -149,7 +149,11 @@ pub fn main(init: std.process.Init) !u8 {
     if (o.rotary_long) std.debug.print("MODE rotary-long: FP64 references through position 1048639; pooling ends at the allocation limit\n", .{});
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const device = try mtl.Device.init();
+    const device = mtl.Device.init() catch |err| {
+        if (err != error.NoDevice) return err;
+        std.debug.print("SKIP Metal kernel contract: no Metal device\n", .{});
+        return 0;
+    };
     defer device.deinit();
     var receipt: ?std.json.Parsed(tf.flashnext_vision_contract.rotary_accuracy.Receipt) = null;
     defer if (receipt) |*value| value.deinit();
