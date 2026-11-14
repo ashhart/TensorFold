@@ -1,4 +1,4 @@
-//! The OS as TensorFold calls it, imported as `sys`: `c` is std.c or win_c.zig, `DynLib` is std.DynLib or LoadLibraryW.
+//! The OS as TensorFold calls it, imported as `sys`: `c` is std.c or win_c.zig, `DynLib` is each system's loader.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,7 +17,8 @@ pub const atomic_file = @import("atomic_file.zig");
 /// std.posix, or its sockets, signals and limits over Winsock and console events.
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;
 
-pub const DynLib = if (windows) WinDynLib else std.DynLib;
+/// A library by path or by name. A bare name is never looked for in the working directory, on any system.
+pub const DynLib = if (windows) WinDynLib else if (builtin.os.tag == .macos) MacDynLib else std.DynLib;
 pub const experimental = @import("experimental.zig");
 pub const memory_policy = @import("memory_policy.zig");
 pub const optional_libraries = @import("optional_libraries.zig");
@@ -47,6 +48,36 @@ extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?*anyo
 extern "kernel32" fn LoadLibraryExW(name: [*:0]const u16, file: ?*anyopaque, flags: u32) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn FreeLibrary(module: *anyopaque) callconv(.winapi) c_int;
+extern "kernel32" fn SetDllDirectoryW(path: ?[*:0]const u16) callconv(.winapi) c_int;
+
+/// std.DynLib on macOS, where dlopen would find a bare name in the working directory: mac_library.zig resolves it.
+const MacDynLib = struct {
+    inner: std.DynLib,
+
+    pub const Error = error{FileNotFound};
+
+    pub fn open(path: []const u8) Error!MacDynLib {
+        return .{ .inner = @import("mac_library.zig").open(Dyld, path) orelse return error.FileNotFound };
+    }
+    pub fn openZ(path: [*:0]const u8) Error!MacDynLib {
+        return open(std.mem.span(path));
+    }
+    pub fn close(self: *MacDynLib) void {
+        self.inner.close();
+    }
+    pub fn lookup(self: *MacDynLib, comptime T: type, name: [:0]const u8) ?T {
+        return self.inner.lookup(T, name);
+    }
+    const Dyld = struct {
+        pub const Handle = std.DynLib;
+        pub fn load(path: []const u8) ?Handle {
+            return std.DynLib.open(path) catch null;
+        }
+        pub fn variable(name: [*:0]const u8) ?[]const u8 {
+            return getenv(name);
+        }
+    };
+};
 
 const WinDynLib = struct {
     module: *anyopaque,
@@ -67,10 +98,15 @@ const WinDynLib = struct {
         pub fn load(path: [:0]const u16) ?Handle {
             return LoadLibraryW(path.ptr);
         }
+        /// An empty DLL directory takes the working directory out of this process's search, for a name and its imports.
+        pub fn withoutWorkingDirectory() void {
+            _ = SetDllDirectoryW(&[_:0]u16{});
+        }
     };
     const RestrictedKernel = struct {
         pub const Handle = *anyopaque;
         pub const fullPath = Kernel.fullPath;
+        pub const withoutWorkingDirectory = Kernel.withoutWorkingDirectory;
         pub fn load(path: [:0]const u16) ?Handle {
             // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | APPLICATION_DIR | SYSTEM32: excludes the working directory.
             const flags: u32 = if (std.mem.indexOfScalar(u16, path, '\\') != null) 0x00000100 | 0x00000200 | 0x00000800 else 0x00000200 | 0x00000800;

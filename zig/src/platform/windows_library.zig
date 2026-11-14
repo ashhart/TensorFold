@@ -1,7 +1,9 @@
-//! Windows DLL names keep system search; paths with separators are normalized and resolved before loading.
+//! Windows DLL names keep the system search without the working directory; paths are normalized and resolved first.
 const std = @import("std");
 pub const Error = error{ FileNotFound, NameTooLong, InvalidWtf8 };
 pub fn open(comptime Api: type, path: []const u8) Error!Api.Handle {
+    // the default search for a name, and for what any DLL imports, includes the working directory: taken out first
+    Api.withoutWorkingDirectory();
     var buf: [1024:0]u16 = undefined;
     const need = std.unicode.calcWtf16LeLen(path) catch return error.InvalidWtf8;
     if (need >= buf.len) return error.NameTooLong;
