@@ -29,17 +29,23 @@ inline ushort tf_exl3_t_state(uint c0, uint c1, uint mid) {
 // The decode of one block's eight weights of a lane, then each row's eight products.
 template <uint S, uint R, bool Mul1>
 inline void tf_exl3_t_block(thread float (*acc)[8], uint c0, uint c1, const device half* x, const thread uint* xo,
-                             const device half* table, uint codebook) {
+                             const device half* table, uint codebook, const device ushort* tile, uint halves,
+                             uint lane) {
   const uint mid = (c0 << 16) | (c1 >> 16);
   float w[8];
-  w[0] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 0>(c0, c1, mid), table, codebook);
-  w[1] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 1>(c0, c1, mid), table, codebook);
-  w[2] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 2>(c0, c1, mid), table, codebook);
-  w[3] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 3>(c0, c1, mid), table, codebook);
-  w[4] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 4>(c0, c1, mid), table, codebook);
-  w[5] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 5>(c0, c1, mid), table, codebook);
-  w[6] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 6>(c0, c1, mid), table, codebook);
-  w[7] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 7>(c0, c1, mid), table, codebook);
+  if (S == 0u) {
+    for (uint j = 0; j < 8u; ++j)
+      w[j] = tf_exl3_t_load<Mul1>(tf_exl3_mapped_state(tile, tf_exl3_map_for(lane * 8u + j, halves)), table, codebook);
+  } else {
+    w[0] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 0>(c0, c1, mid), table, codebook);
+    w[1] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 1>(c0, c1, mid), table, codebook);
+    w[2] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 2>(c0, c1, mid), table, codebook);
+    w[3] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 3>(c0, c1, mid), table, codebook);
+    w[4] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 4>(c0, c1, mid), table, codebook);
+    w[5] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 5>(c0, c1, mid), table, codebook);
+    w[6] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 6>(c0, c1, mid), table, codebook);
+    w[7] = tf_exl3_t_load<Mul1>(tf_exl3_t_state<S, 7>(c0, c1, mid), table, codebook);
+  }
   for (uint r = 0; r < R; ++r) {
     // The lane's four k rows of this block, read as two halves each (the rows are adjacent in pairs).
     const half2 xa = *(const device half2*)(x + xo[r]);
@@ -92,11 +98,15 @@ inline void tf_exl3_t_body(const device half* x, const TfExl3DecodeJob job, devi
     for (uint t = 0; t < T; ++t) {
       tile[t] = reinterpret_cast<const device ushort*>(job.trellis + ulong(b0) * job.tile_k_stride +
                                                        ulong(nb / 16 + t) * job.tile_n_stride);
-      uint p[3];
-      tf_exl3_t_read<Two>(tile[t], walk, p);
-      const uint2 c = tf_exl3_t_funnel<Two>(p, walk.first_bit);
-      c0[t] = c.x;
-      c1[t] = c.y;
+      if (S != 0u) {
+        uint p[3];
+        tf_exl3_t_read<Two>(tile[t], walk, p);
+        const uint2 c = tf_exl3_t_funnel<Two>(p, walk.first_bit);
+        c0[t] = c.x;
+        c1[t] = c.y;
+      } else {
+        c0[t] = c1[t] = 0u;
+      }
     }
     float acc[T][R][8];
     for (uint t = 0; t < T; ++t)
@@ -107,20 +117,22 @@ inline void tf_exl3_t_body(const device half* x, const TfExl3DecodeJob job, devi
     for (uint bb = b0; bb < b1; ++bb) {
       uint pre[T][3];
       const bool more = bb + 1 < b1;
-      if (more) {
+      if (more and S != 0u) {
         for (uint t = 0; t < T; ++t) {
           tile[t] += block_step;
           tf_exl3_t_read<Two>(tile[t], walk, pre[t]);
         }
       }
-      for (uint t = 0; t < T; ++t) tf_exl3_t_block<S, R, Mul1>(acc[t], c0[t], c1[t], x, xo, table, job.codebook);
-      if (more) {
+      for (uint t = 0; t < T; ++t)
+        tf_exl3_t_block<S, R, Mul1>(acc[t], c0[t], c1[t], x, xo, table, job.codebook, tile[t], job.halves, lane);
+      if (more and S != 0u) {
         for (uint t = 0; t < T; ++t) {
           const uint2 c = tf_exl3_t_funnel<Two>(pre[t], walk.first_bit);
           c0[t] = c.x;
           c1[t] = c.y;
         }
       }
+      if (S == 0u) for (uint t = 0; t < T; ++t) tile[t] += block_step;
       for (uint r = 0; r < R; ++r) xo[r] += 16u;
     }
     for (uint r = 0; r < R; ++r) {
@@ -165,7 +177,7 @@ inline void tf_exl3_t_halves(const device half* x, const TfExl3DecodeJob job, de
     case 8u: tf_exl3_t_body<4, T, R, Mul1>(x, job, sums, a, table, row, nb, lane, sg, red); break;
     case 4u: tf_exl3_t_body<2, T, R, Mul1>(x, job, sums, a, table, row, nb, lane, sg, red); break;
     case 2u: tf_exl3_t_body<1, T, R, Mul1>(x, job, sums, a, table, row, nb, lane, sg, red); break;
-    default: break;
+    default: tf_exl3_t_body<0, T, R, Mul1>(x, job, sums, a, table, row, nb, lane, sg, red); break;
   }
 }
 

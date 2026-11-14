@@ -378,3 +378,45 @@ test "the exact half-FMA decode bodies keep every bit of the table bodies for an
         }
     }
 }
+
+test "indexed odd and wide codebooks project routed rows against the scalar reference" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.loadWith(device, std.testing.allocator);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const w0 = try Owned.init(device, 3, .mul1, 31);
+    defer w0.deinit();
+    const w1 = try Owned.init(device, 14, .inst3, 32);
+    defer w1.deinit();
+    const w2 = try Owned.init(device, 16, .mcg, 33);
+    defer w2.deinit();
+    const matrices = [_]Owned{ w0, w1, w2 };
+    const descriptors = try device.buffer(matrices.len * @sizeOf(ex.ExpertDescriptor), mtl.ResourceOptions.shared);
+    defer descriptors.deinit();
+    for (matrices, 0..) |w, i| descriptors.slice(ex.ExpertDescriptor, matrices.len)[i] = try ex.descriptor(w.matrix);
+    const ids = try device.buffer(matrices.len * 4, mtl.ResourceOptions.shared);
+    defer ids.deinit();
+    @memcpy(ids.slice(u32, matrices.len), &[_]u32{ 2, 0, 1 });
+    const x = try input(device, matrices.len);
+    defer x.deinit();
+    const y = try device.buffer(matrices.len * n * 4, mtl.ResourceOptions.shared);
+    defer y.deinit();
+    @memset(y.slice(u8, matrices.len * n * 4), 0);
+    const scratch = try device.buffer(try ex.scratchBytes(k, n, matrices.len), mtl.ResourceOptions.shared);
+    defer scratch.deinit();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.concurrent);
+    for (matrices) |w| ex.useMatrix(e, w.matrix);
+    try ex.encodeIndexed(&p, e, .{ .descriptors = .{ .buffer = descriptors }, .count = matrices.len, .k = k, .n = n }, .{ .buffer = x, .offset = 32 }, .{ .buffer = y }, .{ .buffer = scratch }, .{ .count = matrices.len, .x_stride = k + 16, .y_stride = n, .output = .f32, .routes = .{ .ids = .{ .buffer = ids }, .repeat = 1 }, .input_rows = matrices.len });
+    try complete(cb, e);
+    for (ids.slice(u32, matrices.len), 0..) |expert, row| {
+        var want: [n]f32 = undefined;
+        reference(matrices[expert], x.slice(u16, matrices.len * (k + 16) + 16)[16 + row * (k + 16) ..][0..k], &want);
+        var peak: f32 = 1;
+        for (want) |v| peak = @max(peak, @abs(v));
+        for (y.slice(f32, matrices.len * n)[row * n ..][0..n], want) |got, expected|
+            try std.testing.expectApproxEqAbs(expected, got, 0.00005 * peak);
+    }
+}

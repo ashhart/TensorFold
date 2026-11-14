@@ -78,7 +78,7 @@ pub fn planBody(p: *const Pipelines, args: Args, r: Rows) Plan {
     // The register-only body on the dense one-row path.
     const fma_dense_h8 = knobs.fma_dense_h8;
     const fma_dense_ok = p.decode_fma_dense != null and a.indexed == 0 and a.routed == 0 and a.rows <= 8 and
-        a.n % 16 == 0 and a.k % 16 == 0 and (a.halves == 6 or a.halves == 10 or a.halves == 12 or
+        a.n % 16 == 0 and a.k % 16 == 0 and (a.halves == 2 or a.halves == 4 or a.halves == 6 or a.halves == 10 or a.halves == 12 or
         (a.halves == 8 and fma_dense_h8));
     // The MULTI-ROW dense body -- R rows a threadgroup, so the weight decode is shared by the rows.
     const multi_rows: u32 = knobs.fma_dense_multi;
