@@ -19,6 +19,7 @@ const Script = struct {
     reasoning: bool = true,
     reason: api.Reason = .length,
     chunk: usize = 0, // tokens an event (0: all in one)
+    logprobs: bool = false,
     structured: bool = false, // the request carried a grammar
     after: ?u32 = null, // the token the grammar starts after
 
@@ -27,7 +28,7 @@ const Script = struct {
     }
     fn info(ctx: *anyopaque) api.Info {
         const s: *Script = @ptrCast(@alignCast(ctx));
-        return .{ .context_window = 262144, .reasoning = s.reasoning };
+        return .{ .context_window = 262144, .reasoning = s.reasoning, .logprobs = s.logprobs };
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *Script = @ptrCast(@alignCast(ctx));
@@ -38,7 +39,15 @@ const Script = struct {
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         const step = if (s.chunk == 0) s.ids.len else s.chunk;
         var at: usize = 0;
-        while (at < s.ids.len) : (at += step) sink.event(sink.ctx, id, &.{ .tokens = s.ids[at..@min(s.ids.len, at + step)] });
+        while (at < s.ids.len) : (at += step) {
+            const part = s.ids[at..@min(s.ids.len, at + step)];
+            if (request.logprobs != null) {
+                const rows = s.a.alloc(api.LogprobRow, part.len) catch return error.Busy;
+                for (part, rows, at..) |token, *row, i| row.* = .{ .token = token, .logprob = -@as(f32, @floatFromInt(i + 1)) / 4 };
+                sink.event(sink.ctx, id, &.{ .logprobs = rows });
+            }
+            sink.event(sink.ctx, id, &.{ .tokens = part });
+        }
         sink.event(sink.ctx, id, &.{ .finished = .{ .reason = s.reason } });
     }
     fn cancel(_: *anyopaque, _: api.Id) void {}
@@ -151,7 +160,7 @@ test "EOS policy: HTTP preserves ordinary answer text before either declared EOS
 }
 
 /// One structured chat reply with ignore_eos, on the DeepSeek-V4.1 test tokenizer, `chunk` tokens an event.
-fn grammarStop(thinking: bool, streaming: bool, chunk: usize) !void {
+fn grammarStop(thinking: bool, streaming: bool, chunk: usize, rows: bool) !void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -177,7 +186,7 @@ fn grammarStop(thinking: bool, streaming: bool, chunk: usize) !void {
     const close = text.text().tokenId("</think>").?;
     const reply = [_]u32{ 'h', 'm', end, 'o', 'k', close, '{', '}', end };
     const ids: []const u32 = if (thinking) &reply else reply[6..];
-    var script = Script{ .a = a, .ids = ids, .reason = .stop, .chunk = chunk };
+    var script = Script{ .a = a, .ids = ids, .reason = .stop, .chunk = chunk, .logprobs = rows };
     const srv = try Server.init(gpa, io, script.engine(), text.text(), .{
         .served_name = "m",
         .model_ids = &.{"m"},
@@ -188,12 +197,18 @@ fn grammarStop(thinking: bool, streaming: bool, chunk: usize) !void {
     srv.info.structures = true;
     srv.grammars = &compiler;
     const body = (try json.parse(a, try std.fmt.allocPrint(a, "{{\"model\":\"m\",\"messages\":[{{\"role\":\"user\",\"content\":\"H\"}}],\"max_tokens\":{d},\"stream\":{},\"ignore_eos\":true,\"response_format\":{{\"type\":\"json_object\"}}}}", .{ ids.len, streaming }))).ok;
+    if (rows) {
+        try body.object.put(a, "logprobs", .{ .bool = true });
+        try body.object.put(a, "return_token_ids", .{ .bool = true });
+    }
     var conn = Conn{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
     var response = Reply{ .a = a };
     openai.run(srv, a, response.out(), .{ .conn = &conn }, true, body);
     var content: std.ArrayList(u8) = .empty;
     var reasoning: std.ArrayList(u8) = .empty;
     var final: ?json.Value = response.whole;
+    var prose_rows: std.ArrayList(json.Value) = .empty;
+    var thought_rows: std.ArrayList(json.Value) = .empty;
     var pieces: [2]usize = .{ 0, 0 }; // reasoning and content deltas
     if (streaming) {
         try std.testing.expect(response.opened and response.done and response.whole == null);
@@ -206,6 +221,10 @@ fn grammarStop(thinking: bool, streaming: bool, chunk: usize) !void {
                 try reasoning.appendSlice(a, said[0]);
                 try content.appendSlice(a, said[1]);
                 for (&pieces, said) |*n, x| n.* += @intFromBool(x.len > 0);
+            }
+            if (choice.get("logprobs")) |lp| {
+                try prose_rows.appendSlice(a, lp.get("content").?.array);
+                if (lp.get("reasoning_content")) |r| try thought_rows.appendSlice(a, r.array);
             }
             if (choice.get("finish_reason")) |reason| {
                 if (reason == .string) final = value;
@@ -222,7 +241,36 @@ fn grammarStop(thinking: bool, streaming: bool, chunk: usize) !void {
         try content.appendSlice(a, message.strField("content") orelse "");
         try reasoning.appendSlice(a, message.strField("reasoning_content") orelse "");
     }
+    if (rows and !streaming) {
+        const lp = response.whole.?.get("choices").?.array[0].get("logprobs").?;
+        try prose_rows.appendSlice(a, lp.get("content").?.array);
+        if (lp.get("reasoning_content")) |r| try thought_rows.appendSlice(a, r.array);
+    }
+    if (rows) {
+        try std.testing.expectEqual(@as(usize, 2), prose_rows.items.len);
+        try std.testing.expectEqual(@as(usize, if (thinking) 5 else 0), thought_rows.items.len);
+        const answer_at: usize = if (thinking) 6 else 0;
+        for (prose_rows.items, answer_at..) |row, i| {
+            const bytes = row.get("bytes").?.array;
+            const expected = (try text.text().tokenBytes(a, ids[i])).?;
+            try std.testing.expectEqual(expected.len, bytes.len);
+            for (bytes, expected) |byte, want| try std.testing.expectEqual(@as(i64, want), byte.int64().?);
+            try std.testing.expectEqual(-@as(f64, @floatFromInt(i + 1)) / 4, row.get("logprob").?.float);
+        }
+        for (thought_rows.items, 0..) |row, i| {
+            const bytes = row.get("bytes").?.array;
+            const expected = (try text.text().tokenBytes(a, ids[i])).?;
+            try std.testing.expectEqual(expected.len, bytes.len);
+            for (bytes, expected) |byte, want| try std.testing.expectEqual(@as(i64, want), byte.int64().?);
+            try std.testing.expectEqual(-@as(f64, @floatFromInt(i + 1)) / 4, row.get("logprob").?.float);
+        }
+    }
     const value = final orelse return error.MissingFinalReply;
+    if (rows) {
+        const got = value.get("tensorfold").?.get("token_ids").?.array;
+        try std.testing.expectEqual(ids.len, got.len);
+        for (got, ids) |id, expected| try std.testing.expectEqual(@as(i64, expected), id.int64().?);
+    }
     try std.testing.expect(script.structured);
     try std.testing.expectEqual(@as(?u32, if (thinking) close else null), script.after);
     try std.testing.expectEqualSlices(u32, &.{}, script.seen_eos);
@@ -236,7 +284,12 @@ fn grammarStop(thinking: bool, streaming: bool, chunk: usize) !void {
 test "EOS policy: with ignore_eos a grammar's stop token ends the reply outside its text, and an earlier end token stays" {
     // every chunk size: the reasoning's end token, `</think>` and the grammar's stop land together or apart
     for ([_]bool{ false, true }) |thinking| for ([_]bool{ false, true }) |streaming| for (0..10) |chunk|
-        try grammarStop(thinking, streaming, chunk);
+        try grammarStop(thinking, streaming, chunk, false);
+}
+
+test "EOS policy: grammar stops preserve current whole and live logprob rows across every chunk boundary" {
+    for ([_]bool{ false, true }) |thinking| for ([_]bool{ false, true }) |streaming| for (0..10) |chunk|
+        try grammarStop(thinking, streaming, chunk, true);
 }
 
 fn tokenIds(streaming: bool, asked: bool) !void {
