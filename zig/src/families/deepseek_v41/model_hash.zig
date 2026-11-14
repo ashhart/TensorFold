@@ -23,6 +23,7 @@ const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
 const model = @import("model.zig");
+const lookahead = @import("model_lookahead.zig");
 const Model = model.Model;
 const CondProf = Model.CondProf;
 const Snapshot = Model.Snapshot;
@@ -211,6 +212,11 @@ pub fn stageRows(m: *Model, rows: u32) !void {
     };
     m.stageHash(rows, "pre");
     const src = m.stream orelse return;
+    if (lookahead.take(m, m.look_slot, rows)) {
+        m.stageHash(rows, "look");
+        src.recordWindow(rows);
+        return;
+    }
     const buf = m.stream_stage orelse return error.EngramNotOpen;
     const ws = &m.workspace;
     const cols: usize = engram.hash.columns;

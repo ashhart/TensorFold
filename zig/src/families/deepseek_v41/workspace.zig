@@ -51,6 +51,9 @@ pub const Field = enum {
 };
 const count = std.enums.values(Field).len;
 
+/// Rows the vocabulary head can score in one call (`.all` logits): prompt chunks only ever need the last row.
+pub const head_rows_max: u32 = 1024;
+
 pub const Plan = struct {
     rows: u32,
     lanes: u32,
@@ -69,17 +72,19 @@ pub const Plan = struct {
         // The fused plan only ever covers a window (the fused call is taken below eight rows).
         const window_rows: usize = @min(t, 8);
         const fused_group = if (rows > 1) try groups.Plan.init(window_rows * 12, 768, groups.tileRows()) else null;
-        const dense_scratch = try exl3.scratchBytes(5120, 129280, t);
+        const head_rows: usize = @min(t, head_rows_max);
+        // The widest trunk projection (the 64 x 512 query up-projection) at the chunk's rows; the head at its own.
+        const dense_scratch = @max(try exl3.scratchBytes(8192, 32768, t), try exl3.scratchBytes(5120, 129280, head_rows));
         const grouped_scratch = if (grouped) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else @max(try exl3.scratchBytes(2304, 5120, t * 6), try exl3.scratchBytes(5120, 2304, t * 12));
         // The fused plan pads twelve slots a token to 64-row tiles (five rows -> 60 slots -> 3,840 padded).
         const fused_scratch = if (fused_group) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else 0;
         const projection_bytes = @max(dense_scratch, @max(grouped_scratch, fused_scratch));
         const sizes = [_]usize{
-            t * 4,            hash.raw_vocab * 4, @as(usize, lanes) * 16,          t * 20480 * 2,                       t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
-            t * 4 * 4,        t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,                          t * 24 * 4,   t * 4,        t * 24 * 4,
-            t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,                         t * 7 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
-            t * 6 * 2304 * 2, t * 6 * 2304 * 2,   t * 7 * 5120 * 2,                t * 2304 * 2,                        t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
-            t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, if (fused_group) |g| g.bytes else 0, t * 12 * 4,   t * 12 * 4,   t * 20480 * 2,
+            t * 4,                  hash.raw_vocab * 4, @as(usize, lanes) * 16,          t * 20480 * 2,                       t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
+            t * 4 * 4,              t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,                          t * 24 * 4,   t * 4,        t * 24 * 4,
+            t * 24 * 4,             t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,                         t * 7 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
+            t * 6 * 2304 * 2,       t * 6 * 2304 * 2,   t * 7 * 5120 * 2,                t * 2304 * 2,                        t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
+            head_rows * 129280 * 4, projection_bytes,   if (grouped) |g| g.bytes else 0, if (fused_group) |g| g.bytes else 0, t * 12 * 4,   t * 12 * 4,   t * 20480 * 2,
             t * 2000,
         };
         var out = Plan{ .rows = rows, .lanes = lanes, .offsets = undefined, .bytes = 0 };
@@ -169,3 +174,9 @@ pub const Workspace = struct {
         return @as([*]const f32, @ptrCast(@alignCast(v.buffer.contents() + v.offset)))[0 .. rows * 129280];
     }
 };
+
+test "the vocabulary head's logits are capped, not one row a chunk row" {
+    const plan = try Plan.init(16384);
+    const span = plan.offsets[@backingInt(Field.projection)] - plan.offsets[@backingInt(Field.logits)];
+    try std.testing.expect(span <= @as(usize, head_rows_max) * 129280 * 4 + 16);
+}

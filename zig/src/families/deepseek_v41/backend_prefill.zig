@@ -52,6 +52,8 @@ pub fn step(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
         break;
     };
     const last = end == prompt.len;
+    // The next chunk's Engram rows are read while this chunk's GPU work runs.
+    if (!last) b.model.lookahead(i, prompt[end..@min(prompt.len, end + plan_rows)]);
     var merge: u32 = if (snap_at > at and snap_at < end and end - at >= 64) snap_at else 0;
     if (merge != 0 and !b.model.beginSnapTail(i, prompt[@max(0, @as(usize, merge) - 4)..merge], merge, at)) merge = 0;
     if (last) {

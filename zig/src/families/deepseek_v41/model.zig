@@ -26,6 +26,7 @@ const scan_probe = @import("scan_probe.zig");
 const support = @import("model_support.zig");
 const model_drafter = @import("model_drafter.zig");
 const model_hash = @import("model_hash.zig");
+const model_lookahead = @import("model_lookahead.zig");
 const model_lifecycle = @import("model_lifecycle.zig");
 const model_propose = @import("model_propose.zig");
 const model_draft_attention = @import("model_draft_attention.zig");
@@ -177,6 +178,10 @@ pub const Model = struct {
     engram_slow_n: u8 = 0,
     /// The second Engram layer's prompt gather is deferred to its own layer.
     engram_pending: bool = false,
+    /// The next prompt chunk's Engram rows, read while the GPU runs this one (model_lookahead.zig).
+    look: [model_lookahead.slots]?*model_lookahead.State = @splat(null),
+    /// The slot the running forward hashes for (the lookahead keeps one hint a slot).
+    look_slot: u32 = 0,
     profile_stage_dispatch: [gpu_counters.stage_count]u64 = @splat(0),
     profile_last_count: u64 = 0,
     profile_open_stage: ?gpu_counters.Stage = null,
@@ -316,6 +321,10 @@ pub const Model = struct {
     }
     pub fn stageRows(m: *Model, rows: u32) !void {
         return model_hash.stageRows(m, rows);
+    }
+    /// The prompt rows after the next big forward's: their Engram rows are read during its GPU time.
+    pub fn lookahead(m: *Model, slot: u32, next: []const u32) void {
+        model_lookahead.hint(m, slot, next);
     }
     pub fn drafterId(m: *Model, token: u32) !View {
         return model_drafter.drafterId(m, token);

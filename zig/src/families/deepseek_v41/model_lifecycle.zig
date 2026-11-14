@@ -221,6 +221,7 @@ pub fn deinit(m: *Model) void {
         state.deinit();
         m.gpa.destroy(state);
     }
+    @import("model_lookahead.zig").deinit(m);
     if (m.stream) |rows| rows.close();
     if (m.stream_stage) |buf| buf.deinit();
     m.attention_workspace.deinit();

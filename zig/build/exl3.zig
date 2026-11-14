@@ -7,6 +7,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_chain.metal"), "exl3_projection_chain.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_base.metal"), "exl3_projection_nax_base.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill_body.metal"), "exl3_projection_nax_prefill_body.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill_ku.metal"), "exl3_projection_nax_prefill_ku.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_prefill.metal"), "exl3_projection_nax_prefill.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_variants_a.metal"), "exl3_projection_nax_variants_a.metal");
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/exl3_projection_nax_variants_b.metal"), "exl3_projection_nax_variants_b.metal");
@@ -26,7 +27,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const sources = b.createModule(.{
         .root_source_file = files.add("sources.zig", "pub const core_exl3_projection = @embedFile(\"exl3_projection_core.metal\") ++ @embedFile(\"exl3_projection_wide.metal\") ++ @embedFile(\"exl3_projection_chain.metal\");\n" ++
             "pub const core_exl3_projection_i8 = @embedFile(\"exl3_projection_i8.metal\");\n" ++
-            "pub const core_exl3_projection_nax = @embedFile(\"exl3_projection_nax_base.metal\") ++ @embedFile(\"exl3_projection_nax_prefill_body.metal\") ++ @embedFile(\"exl3_projection_nax_prefill.metal\") ++ @embedFile(\"exl3_projection_nax_variants_a.metal\") ++ @embedFile(\"exl3_projection_nax_variants_b.metal\") ++ @embedFile(\"exl3_projection_nax_variants_c.metal\") ++ @embedFile(\"exl3_projection_nax_fma.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_a.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_b.metal\") ++ @embedFile(\"exl3_projection_nax_fma_t.metal\") ++ @embedFile(\"exl3_projection_nax_fp8.metal\");\n" ++
+            "pub const core_exl3_projection_nax = @embedFile(\"exl3_projection_nax_base.metal\") ++ @embedFile(\"exl3_projection_nax_prefill_body.metal\") ++ @embedFile(\"exl3_projection_nax_prefill_ku.metal\") ++ @embedFile(\"exl3_projection_nax_prefill.metal\") ++ @embedFile(\"exl3_projection_nax_variants_a.metal\") ++ @embedFile(\"exl3_projection_nax_variants_b.metal\") ++ @embedFile(\"exl3_projection_nax_variants_c.metal\") ++ @embedFile(\"exl3_projection_nax_fma.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_a.metal\") ++ @embedFile(\"exl3_projection_nax_fma_static_b.metal\") ++ @embedFile(\"exl3_projection_nax_fma_t.metal\") ++ @embedFile(\"exl3_projection_nax_fp8.metal\");\n" ++
             "pub const nax = @embedFile(\"nax.h\");\n" ++
             "pub const deepseek_v41_ops = @embedFile(\"deepseek_v41_ops.metal\");\n" ++
             "pub const deepseek_v41_rope = @embedFile(\"deepseek_v41_rope.metal\");\n" ++

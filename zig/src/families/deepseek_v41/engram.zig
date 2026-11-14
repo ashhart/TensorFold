@@ -201,6 +201,24 @@ pub fn encodeHashHost(history: View, ids: View, token_map: View, out_0: View, ou
     std.mem.writeInt(u32, hb[12..16], @intCast(@min(3, advanced.position)), .little);
 }
 
+/// The ids a host hash of `tokens` would produce from the record as it stands, without advancing the record.
+pub fn peekHashChunk(history: View, token_map: View, tokens: []const u32, out_0: []u32, out_1: []u32) !void {
+    try token_map.require(hash.raw_vocab * 4, 4);
+    try history.require(history_bytes, 4);
+    if (tokens.len == 0 or out_0.len != tokens.len * hash.columns or out_1.len != out_0.len) return error.EmptyEngramChunk;
+    const hb: [*]u8 = @ptrCast(@alignCast(history.buffer.contents() + history.offset));
+    const tail: [*]const i32 = @ptrCast(@alignCast(hb));
+    const available = std.mem.readInt(u32, hb[12..16], .little);
+    if (available > 3) return error.InvalidEngramMetadata;
+    const start = hash.History{ .tail = .{ tail[0], tail[1], tail[2] }, .position = available };
+    const map = hash.TokenMap{ .bytes = (token_map.buffer.contents() + token_map.offset)[0 .. hash.raw_vocab * 4] };
+    for ([_][]u32{ out_0, out_1 }, hash.layers) |out, meta| {
+        const rows: [*][hash.columns]u32 = @ptrCast(out.ptr);
+        var state = start;
+        try hash.hashChunk(&state, map, meta, tokens, null, rows[0..tokens.len]);
+    }
+}
+
 /// The ids a one-token host hash would produce from the record AS IT STANDS, without advancing it.
 pub fn peekHashHost(history: View, token_map: View, pending: u32, out: *[2][hash.columns]u32) !void {
     try token_map.require(hash.raw_vocab * 4, 4);

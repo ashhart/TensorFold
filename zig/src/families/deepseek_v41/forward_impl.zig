@@ -23,6 +23,7 @@ const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("core").expert_groups;
 const scan_probe = @import("scan_probe.zig");
 const model = @import("model.zig");
+const lookahead = @import("model_lookahead.zig");
 const Model = model.Model;
 const View = model.View;
 const Logits = model.Logits;
@@ -66,6 +67,7 @@ pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         std.c.getenv("TF_DSV41_LAYER_CB") != null or
         std.c.getenv("TF_DSV41_ATTN_PROF") != null or std.c.getenv("TF_DSV41_HID_HASH") != null))
         return error.BatchUnsupported;
+    if (logits == .all and total_rows > @min(m.workspace.plan.rows, work.head_rows_max)) return error.InvalidPrefillChunk;
     const state = &m.caches[slot];
     const cone_phase = m.cone.phase;
     const cone_d = m.cone.d;
@@ -112,6 +114,7 @@ pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
         scan_probe.stage = sp_stage.?;
         scan_probe.reset();
     }
+    m.look_slot = slot;
     if (m.stream != null and cone_phase != .decoder and std.c.getenv("TF_DSV41_SKIP_ENGRAM") == null) {
         const hash_start: u64 = if (m.host_prof) nowNs() else 0;
         m.host_stage_ns = 0;
@@ -452,7 +455,9 @@ pub fn forwardCore(m: *Model, segs: []const Seg, logits: Logits) ![]const f32 {
     m.valid = false;
     const host_commit: u64 = nowNs();
     e.commit();
+    if (segs.len == 1) lookahead.start(m, slot);
     e.wait();
+    lookahead.join(m, slot);
     const host_done: u64 = nowNs();
     try completed(e);
     hid.report();

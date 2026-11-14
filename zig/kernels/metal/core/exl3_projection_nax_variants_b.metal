@@ -10,14 +10,16 @@ kernel void tf_exl3_matmul_prefill_nax59(const device half* x [[buffer(0)]],
                                         uint tid [[thread_index_in_threadgroup]],
                                         uint3 tptg [[threads_per_threadgroup]],
                                         uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[16 * 64];
+  threadgroup half wx[2 * TF_KU * 16 * 64];
   // The funnel path is the one the routed pack's width (halves = 6) takes; the expert's own descriptor says so.
   const uint rb = tg.y * 64u;
   uint e = 0u;
   if (a.indexed != 1u and rb < a.rows) e = routes[rb];
   if (a.experts != 0u and e >= a.experts) e = 0u;
   const uint halves = (a.indexed != 0u) ? descriptors[e].halves : a.halves;
-  if (halves == 6u) {
+  if (halves == 6u and a.k % (16u * TF_KU) == 0u) {
+    tf_exl3_prefill_body_ku<4, 1, TF_KU, 1, true>(wx, x, trellis, sums, a, routes, descriptors, lane, sg, tid, tptg.x, tg);
+  } else if (halves == 6u) {
     tf_exl3_prefill_body<true, 4, 1, false, true, true, 1, true>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);
   } else {
     tf_exl3_prefill_body<true, 4, 1, false, true, true, 1, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, nullptr, lane, sg, tid, tptg.x, tg);

@@ -9,8 +9,12 @@ kernel void tf_exl3_matmul_prefill_nax31(const device half* const x [[buffer(0)]
                                         uint tid [[thread_index_in_threadgroup]],
                                         uint3 tptg [[threads_per_threadgroup]],
                                         uint3 tg [[threadgroup_position_in_grid]]) {
-  threadgroup half wx[2 * 16 * 64];
-  tf_exl3_prefill_body_db<8, 1, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+  threadgroup half wx[2 * TF_KU * 16 * 64];
+  if (a.halves == 6u and a.k % (16u * TF_KU) == 0u) {
+    tf_exl3_prefill_body_ku<8, 1, TF_KU, 1, false>(wx, x, trellis, sums, a, routes, descriptors, lane, sg, tid, tptg.x, tg);
+  } else {
+    tf_exl3_prefill_body_db<8, 1, true, 4, false>(wx, x, trellis, sums, a, routes, descriptors, nullptr, lane, sg, tid, tptg.x, tg);
+  }
 }
 
 // The register-only decode on our map: one threadgroup a sixteen-column tile, one k walk, no split-K or reduce.
