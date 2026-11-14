@@ -121,6 +121,7 @@ fn call(g: *const wa.WindowAttention, s: cuda.Stream, q: u64, kc: u64, vc: u64, 
 
 /// `which`: callers (Kolibri-1's shapes) or gemma (the new head dims).
 pub fn run(gpu: check.Gpu, which: []const u8) !void {
+    if (std.mem.eql(u8, which, "vonly")) return @import("window_vonly_bench.zig").run(gpu); // TF_GEMMA4_V_ONLY
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
     var g = try wa.WindowAttention.load(gpu.d);

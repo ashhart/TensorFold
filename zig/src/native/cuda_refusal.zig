@@ -283,6 +283,17 @@ test "GLM keeps its prompt states in the process: no disk image, so --spill-gib 
     try std.testing.expectStringStartsWith(family(glm, learn) orelse "", "--learn-conversations keeps");
 }
 
+test "Gemma 4 has no disk image here, so no TF_GEMMA4_V_ONLY page image reaches a kept state on disk" {
+    // V-only pages are another page image: the PR that adds Gemma 4's disk image keys it by the mode, or refuses it
+    const g = @import("gemma4_cuda").native31;
+    try std.testing.expect(@import("cuda_disk.zig").keptDisk(g) == null);
+    const learn: api.Open = .{ .dir = "d", .model_type = "gemma4", .learn = "/s", .learn_conversations = true };
+    var spill = learn;
+    spill.spill = .evicted;
+    try std.testing.expectStringStartsWith(family(g, spill) orelse "", "--spill-gib keeps evicted states");
+    try std.testing.expectStringStartsWith(family(g, learn) orelse "", "--learn-conversations keeps");
+}
+
 /// The scopes this open's startup check covers, from its flags and model type.
 fn startupFlags(o: api.Open) @import("sys").environment.Flags {
     const flashnext = @import("flashnext").native.model_type; // families/flashnext/cuda_lanes.zig declares it

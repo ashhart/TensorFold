@@ -31,7 +31,10 @@ fn rowBytes(m: *const fwd.Model, i: usize) usize {
 /// Bytes a state at `at` copies, its full layers' positions below `from` held as pages.
 pub fn copyBytes(m: *const fwd.Model, at: usize, from: usize) u64 {
     var n: usize = 0;
-    for (0..fwd.pages.ownLayers(m)) |i| n += 2 * (if (cfg.global(i)) at - from else tail(at)) * rowBytes(m, i);
+    for (0..fwd.pages.ownLayers(m)) |i| {
+        const rows = if (cfg.global(i)) fwd.pages.copies(m) * (at - from) else 2 * tail(at); // V-only: V alone
+        n += rows * rowBytes(m, i);
+    }
     return n;
 }
 
@@ -39,7 +42,8 @@ pub fn copyBytes(m: *const fwd.Model, at: usize, from: usize) u64 {
 fn each(m: *const fwd.Model, slot: usize, at: usize, from: usize, ctx: anytype, comptime f: fn (@TypeOf(ctx), dev: u64, off: usize, len: usize) anyerror!void) !void {
     if (from > 0 and (!m.paged or from % fwd.pages.tokens != 0 or from > at)) return error.KeptPagesUnpaged;
     var off: usize = 0;
-    for (0..fwd.pages.ownLayers(m)) |i| for ([_][]u64{ m.kc, m.vc }) |cache| {
+    for (0..fwd.pages.ownLayers(m)) |i| for ([_][]u64{ m.kc, m.vc }, 0..) |cache, kv| {
+        if (kv == 0 and m.v_only and cfg.global(i)) continue; // V-only pages: kc aliases vc (TF_GEMMA4_V_ONLY)
         const rb = rowBytes(m, i);
         if (cfg.global(i) and m.paged) { // pages: p in page p / page_tokens of the slot's row, a copy a run within one
             var p: usize = from;
@@ -165,6 +169,7 @@ test "a state holds global layers' positions and each sliding ring's last window
     m.layers = 6; // layer 5 is global
     m.context = 4096;
     m.paged = false;
+    m.v_only = false;
     m.prompt_most = fwd.prompt_rows;
     m.kc = &k;
     m.vc = &v;
@@ -191,6 +196,7 @@ test "a solo model's wider ring holds the same window - 1 positions, unwrapped w
     m.layers = 6;
     m.context = 4096;
     m.paged = false;
+    m.v_only = false;
     m.prompt_most = 2048; // ring rows 3072: positions 977..1999 sit in rows 977..1999
     m.kc = &k;
     m.vc = &v;
@@ -214,6 +220,7 @@ test "a paged state takes a global layer's positions through the slot's pages, a
     m.layers = 6; // layer 5 is global
     m.context = 4 * fwd.pages.tokens;
     m.paged = true;
+    m.v_only = false;
     m.prompt_most = fwd.prompt_rows;
     m.ids = &ids;
     m.kc = &k;
@@ -230,4 +237,31 @@ test "a paged state takes a global layer's positions through the slot's pages, a
     try testing.expectEqual([3]usize{ (6 << 30) + 2 * pt * gb, kr[0][1] + pt * gb, pt * gb }, kr[1]);
     try testing.expectEqual([3]usize{ (6 << 30) + 9 * pt * gb, kr[0][1] + 2 * pt * gb, 10 * gb }, kr[2]);
     try testing.expectEqual(bytes(&m, at), runs.items[runs.items.len - 1][1] + runs.items[runs.items.len - 1][2]);
+}
+
+test "a V-only state copies a global layer's V pages alone, and as many bytes as it says" {
+    var k = [_]u64{ 1 << 30, 2 << 30, 3 << 30, 4 << 30, 5 << 30, 6 << 30 };
+    var v = [_]u64{ 7 << 30, 8 << 30, 9 << 30, 10 << 30, 11 << 30, 12 << 30 };
+    var ids = [_]u32{ 0, 0, 0, 0, 7, 2, 9, 0 };
+    var m: fwd.Model = undefined;
+    m.geo = cfg.unified12b;
+    m.layers = 6; // layer 5 is global
+    m.context = 4 * fwd.pages.tokens;
+    m.paged = true;
+    m.v_only = true;
+    m.prompt_most = fwd.prompt_rows;
+    m.ids = &ids;
+    m.kc = &k;
+    m.vc = &v;
+    const at = 2 * fwd.pages.tokens + 10;
+    var runs: std.ArrayList([3]usize) = .empty;
+    defer runs.deinit(testing.allocator);
+    try each(&m, 1, at, 0, Count{ .runs = &runs }, Count.add);
+    try testing.expectEqual(@as(usize, 5 * 2 + 3), runs.items.len); // the global layer's V runs, no K run
+    for (runs.items[runs.items.len - 3 ..]) |r| try testing.expect(r[0] >= 12 << 30);
+    const last = runs.items[runs.items.len - 1];
+    try testing.expectEqual(bytes(&m, at), last[1] + last[2]);
+    const vo = bytes(&m, at);
+    m.v_only = false;
+    try testing.expectEqual(bytes(&m, at) - at * 512 * 2, vo); // the global layer's keys
 }

@@ -89,6 +89,7 @@ pub const block_attention: []const u8 = if (available) &Blob("fatbin_block_atten
 pub const window_attention: []const u8 = if (available) &Blob("fatbin_window_attention").bytes else &.{};
 pub const window_rows: []const u8 = if (available) &Blob("fatbin_window_rows").bytes else &.{};
 pub const window_pages: []const u8 = if (available) &Blob("fatbin_window_pages").bytes else &.{};
+pub const window_vonly: []const u8 = if (available) &Blob("fatbin_window_vonly").bytes else &.{};
 pub const moe_glue: []const u8 = if (available) &Blob("fatbin_moe_glue").bytes else &.{};
 pub const mla: []const u8 = if (available) &Blob("fatbin_mla").bytes else &.{};
 pub const dense_rows: []const u8 = if (available) &Blob("fatbin_dense_rows").bytes else &.{};
