@@ -21,6 +21,17 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+With thinking on, serve with `--thinking-budget 4096`; a client can set its own positive `thinking_budget` per request
+([API](../api.md#request-fields)). Measured on GPQA Diamond (198 questions) with TensorFold 1.2.7,
+`TensorFold/Qwen3.8-27B-MLX-4bit` and the DFlash2 drafter on one GB10, the model card's thinking sampling, a
+16,384-token reply limit and one attempt per question and setting: without a budget 78 of 198 replies were cut at the
+limit and with 4096 none were; the correct share went from 58.1% to 82.8%, and the 198 questions finished 3.2 times
+sooner (60 against 194 minutes at 8 parallel requests). Budgets from 4096 to 8192 measured the same within noise, and
+2048 was too tight. The table, the method and the per-question files are in
+[#3323](https://github.com/ashhart/TensorFold/issues/3323).
+
+`--thinking-reserve` ([API](../api.md#reasoning)) keeps a client's `max_tokens` for the answer; it was not tested.
+
 A lone Metal DFlash2 stream can verify 16, 32 or 64 rows (`TF_QWEN27_WINDOW`), on tensor units and earlier chips.
 Both device classes retain the 16-row default. Startup prices every row count through
 the selected width, in a width-tagged cache.
