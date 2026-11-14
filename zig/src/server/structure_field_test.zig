@@ -74,7 +74,6 @@ const Compile = struct {
         var out: api.grammar.Compiler = undefined;
         out.h = c;
         out.words = 4;
-        out.mutex = .init;
         out.f.compile = compile;
         out.f.free = free;
         out.f.close = free;
