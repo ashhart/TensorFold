@@ -9,7 +9,7 @@ fn power(exponent: i32) f64 {
 pub const bf64 = @import("core").contract.bf16_round.bf16;
 fn reduced(acc: c.Accum, x: f64) f64 {
     return switch (acc) {
-        .none => x,
+        .f64, .none => x,
         .f32 => @as(f32, @floatCast(x)),
         .f16 => @as(f16, @floatCast(x)),
         .bf16 => bf64(x),

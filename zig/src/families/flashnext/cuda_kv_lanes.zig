@@ -22,6 +22,11 @@ pub fn pagingOf(v: ?[]const u8) !usize {
     return n;
 }
 
+/// TF_FLASHNEXT_KV_PAGES at load: our own glue, no --slide, one rank (two for an EXL3 pack).
+pub fn refusePages(page_tokens: usize, tp: usize, exl3: bool, slide: bool, captured: bool) !void {
+    if (page_tokens > 0 and ((tp != 1 and !exl3) or slide or captured)) return error.FlashNextPagesUnsupported;
+}
+
 /// TF_FLASHNEXT_KV_PAGES_ALL=1: every stream on pages, none on its own contiguous caches (checks).
 pub fn pagedOnly() bool {
     const v = @import("core").profile.get(.TF_FLASHNEXT_KV_PAGES_ALL) orelse return false;
@@ -54,6 +59,29 @@ pub fn layout(capacity: usize, tokens: usize, head: ?Head, extra: usize) kv.Layo
     const layers = wt.attn_n + @intFromBool(head != null);
     const run = seqRunBytes() + if (head) |h| mtp.Draft.runBytes(h.draft_n, h.rows) else 0;
     return .{ .fixed_bytes = mostPages(capacity, tokens) * 4 + extra, .token_bytes = pages.pageBytesOf(tokens, layers) / tokens, .page_tokens = @intCast(tokens), .snap_bytes = snap.bytes(0, head != null, .full), .run_bytes = run };
+}
+
+/// `l` with every stream's run `k` pages: the ranks of a pair agree the larger, so their pools open the same ids.
+pub fn withRunPages(l: kv.Layout, k: usize) kv.Layout {
+    var out = l;
+    out.run_bytes = k * l.pageBytes();
+    return out;
+}
+
+/// The lanes' pool on `own`; a pair's ranks agree lanes, pages and run pages, so their page ids are equal.
+pub fn attachTo(own: anytype, streams: u32, count: usize) !void {
+    var lay = own.kv.layout.?;
+    var lane_count = streams;
+    var page_count = count;
+    if (own.ranks) |r| {
+        lane_count = @intCast(try r.room(streams));
+        page_count = @intCast(try r.room(count));
+        lay = withRunPages(lay, @intCast(~(try r.room(~@as(u64, lay.runPages())))));
+    }
+    own.kv.layout = lay;
+    own.kv.pool = try Pool.init(own.gpa, own.engine, lay, own.context, own.kv.head, lane_count, page_count);
+    own.kv.paged_only = pagedOnly() and lane_count > 0;
+    if (own.ranks) |r| r.pool = own.kv.pool;
 }
 
 /// Where a stream's caches came from: no pool, the one stream on its own caches beside a pool, or a pool lane.
@@ -236,6 +264,11 @@ pub const Pool = struct {
         const run_len = p.layout.runPages() * p.layout.pageBytes();
         if (run_len < seqRunBytes()) return error.FlashNextRunTooShort;
         return mtp.Draft.initIn(p.gpa, p.e.driver, cap, h.draft_n, h.rows, &x.seq.paged.?, p.runBase(x) + seqRunBytes(), run_len - seqRunBytes());
+    }
+
+    /// Whether `seq` is a lane's cache.
+    pub fn owns(p: *Pool, seq: *const prompt.Seq) bool {
+        return p.laneOf(seq) != null;
     }
 
     fn laneOf(p: *Pool, seq: *const prompt.Seq) ?*Lane {

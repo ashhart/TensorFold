@@ -115,6 +115,67 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
   `_chunks,_merge`) runs those entry points on our kernels and the rest on the set's, to put a difference down to one
   kernel.
 
+## EXL3 checkpoints
+
+An EXL3 pack (see [EXL3 weights](exl3.md)) serves on one sm_120 rank, or on two with expert parallel (`--tp 2`), with
+its routed experts in pinned host memory and a pool of expert lines a layer on the device. `tools/exl3_serve_tp2.sh`
+starts a rank. These switches tune it:
+
+| Name | Default | Effect |
+| --- | --- | --- |
+| `TF_FLASHNEXT_EXPERT_LINES` | from free memory | A whole number of expert lines a layer keeps on the device; the pool refuses fewer than 10. |
+| `TF_FLASHNEXT_EXPERT_RESERVE_MB` | the server's reserve (`TENSORFOLD_MEMORY_RESERVE_GIB`) | A whole number of MiB left free after the pools (0 to 17592186044415). |
+| `TF_FLASHNEXT_EXL3_STREAMS` | 1 | A positive whole number of streams whose caches the pool leaves room for, when `--parallel` does not say. |
+| `TF_FLASHNEXT_EXL3_LINE_DELTAS` | unset | `POOL:+N,POOL:-N` lines added to or removed from single pools of the uniform count, as many added as removed; no control characters. |
+| `TF_FLASHNEXT_EXL3_PROFILE_DIR` | unset | A directory path, without control characters, where expert-use profiles persist between runs. |
+| `TF_FLASHNEXT_EXL3_PROFILE_SIZING` | `0` | `0` or `1`; `1` sizes the pools from the stored profile and is ignored with `TF_FLASHNEXT_EXPERT_LINES`. |
+| `TF_FLASHNEXT_EXL3_ROUTED` | `host` | `host` or `device`; `device` keeps every routed expert on the device. |
+| `TF_FLASHNEXT_EXL3_ARCH` | unset | `unqualified` serves on a device that is not sm_120, without a claim. |
+| `TF_FLASHNEXT_EXL3_MTP_RESIDENT` | `0` | `0` or `1`; `1` keeps the MTP layer's experts on the device instead of a pool (one rank). |
+| `TF_FLASHNEXT_EXL3_PREFILL` | on | `0` or `1`; `0` turns the deep-chunk prefill path off. |
+| `TF_FLASHNEXT_EXL3_PREFILL_ROWS` | 8,192 general / 4,096 server | Whole nonnegative rows of a deep chunk; an explicit count sets both budgets. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING` | on | `0` or `1`; `0` stops streaming the coming layers' experts into one ring of the pools' lines. |
+| `TF_FLASHNEXT_EXL3_PREFILL_RING_AHEAD` | 1 | Whole nonnegative layers ahead the ring prefetches. |
+| `TF_FLASHNEXT_EXL3_PREFILL_OVERLAP` | on | `0` or `1`; `0` (two ranks) stops overlapping the all-gather with a chunk's compute. |
+| `TF_FLASHNEXT_EXL3_PREFILL_REDUCED_BRANCH` | `0` | Experimental: `0` or `1`; `1` (two ranks) combines float64 partials into one float32 branch, written back with unit weights. |
+| `TF_FLASHNEXT_EXL3_PREFILL_TWO_CHUNK` | `0` | Experimental: `0` or `1`; `1` (two ranks, ring) runs a second deep chunk beside the first when memory admits it. |
+| `TF_FLASHNEXT_PROFILE` | `0` | Diagnostics only: `0` or `1`; `1` times the ranks' combine, all-gather, finish and place of a deep chunk, with a wait each. |
+| `TF_FLASHNEXT_PLE_READ` | `map` | `map` or `pread`; `pread` reads the n-gram embedding rows by positional read. |
+| `TF_FLASHNEXT_SNAP_HOST` | `1` above 32,768 tokens of context, else `0` | `0` or `1`: whether kept prompt-cache states live in pinned host memory. |
+| `TF_FLASHNEXT_CACHE_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1` logs `EXL3-CACHE` expert-cache counters per phase, with a sync at each boundary. |
+| `TF_FLASHNEXT_EXL3_LAYER_TELEMETRY` | `0` | Diagnostics only: `0` or `1`; `1`, with the switch above, adds per-layer counters. |
+| `TENSORFOLD_BIN`, `TF_SRC` | built binary, the checkout | Diagnostics only: the binary `tools/exl3_*.sh` run and the checkout `tools/exl3_*.py` read their corpus from. |
+
+Deep prefill keeps canonical partials in float64 until one float32 root rounding. One rank uses the
+existing root kernel and branch buffer, with no partial-gather region. Multiple ranks reserve
+eight-byte partials in their existing scratch layout; checkpoint and persistent state formats are unchanged.
+
+A blank or whitespace-only value is unset. Text outside these forms, or those of `TF_FLASHNEXT_CHUNK` and
+`TF_FLASHNEXT_CHUNK_SOLO` above, is refused when the CUDA backend starts, naming the variable and its accepted forms.
+`TENSORFOLD_MEMORY_RESERVE_GIB` must be a finite number of GiB, which the server also holds to at least 0.5 (2 on
+unified memory) and at most the memory's size.
+
+A pass that holds an offloaded experts layer reads each block's picks back to the host before it copies the missing
+expert lines, and a CUDA graph capture cannot hold that wait: on such a pack the drafted-window, shared-window, MTP-head
+(where the pack drafts with one) and `TF_FLASHNEXT_DECODE_GRAPH` graphs are not captured and those passes run eagerly,
+`TF_FLASHNEXT_WINDOW_GRAPH` notwithstanding. With `TF_FLASHNEXT_EXL3_ROUTED=device` no layer waits, and those graphs
+apply.
+
+The EXL3 layer diagnostic compares the float64 oracle with the canonical FP32 MoE branch
+consumed by writeback, not with a rank's local expert slots.
+
+EXL3 keeps its configured prompt cuts, including cache marks; `TF_FLASHNEXT_KEEP_INPASS` does not enable in-pass
+snapshots for this format. Classic checkpoints retain main's in-pass marks and per-lane convolution histories.
+
+
+### TP integration scope
+
+Expert-parallel EXL3 placement and the collective spin override are EXL3-only; NVFP4 retains its existing placement
+and reduction. Rank forward frames carry the telemetry phase, and MTP advances `prompt_last` after every prompt chunk.
+Both formats retain main's tensor-rank MTP snapshots; EXL3 does not reintroduce the old classic-format refusal.
+Exact-head TP=1/TP=2 greedy and seeded token-hash receipts remain required before this integration is qualified.
+
+
 ## What the core runs and what the family runs
 
 The family plugs into the core's pieces and adds no scheduler:
