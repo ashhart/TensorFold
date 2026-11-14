@@ -1,4 +1,5 @@
 //! Prompt rows on tiles keeping #952's bits: the dense matmul (qmm.cu's arithmetic), the read-out and the experts.
+const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const parts = @import("cuda_batch_state.zig");
@@ -87,6 +88,76 @@ pub fn readout(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Scratch
     try cuda.launch.launch(k.tiles.hcf_up, .{ .grid = .{ .x = @intCast(cdiv(n, 64) * cdiv(wide, 128)) }, .block = .{ .x = 256 }, .shared = tk.hcf_up_smem }, stream, &b);
     try tri.hcRinv(pss, rinv, eps, n, dims, nc, streams);
     try tri.hcMixH(s.proj, h, rinv, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
+}
+
+/// Rows of a prompt pass from which the BF16 read-out takes the fused tiles (TF_FLASHNEXT_READOUT_FUSED=1).
+pub const fused_rows: usize = 768;
+
+/// Whether readoutFused takes these weights: the BF16 read-out at the shapes flashnext_hcn.cu's tiles are built for.
+pub fn nativeFused(hc_w: HcW) bool {
+    const down = hc_w.down.native orelse return false;
+    const up = hc_w.up.native orelse return false;
+    return down.mode == .bf16 and up.mode == .bf16 and down.scale == 1.0 and up.scale == 1.0 and streams == 4 and
+        dims % 64 == 0 and down.k == wide and down.n == hc_w.n_down and down.n <= 336 and down.n % 2 == 0 and
+        up.k == low and low == 320 and up.n == wide;
+}
+
+/// The down tile (16 * mt rows a CTA, two CTAs a row tile) whose CTAs take the fewest waves over `sms` times mt.
+pub fn pickDown(n: usize, sms: usize) usize {
+    var best: usize = 0;
+    var best_cost: usize = std.math.maxInt(usize);
+    for (tk.hcn_down_mt, 0..) |mt, i| {
+        const cost = cdiv(cdiv(n, 16 * mt) * 2, @max(sms, 1)) * mt;
+        if (cost <= best_cost) {
+            best = i;
+            best_cost = cost;
+        }
+    }
+    return best;
+}
+
+/// The fused down over rows [0, n): the streams `h` normed on chip, times the BF16 down, into fp32 `part`.
+pub fn fusedDown(t: *const tk.TileKernels, sms: usize, stream: cuda.Stream, h: u64, pss: u64, scale: u64, down: cuda.qmmf.Weight, part: u64, n: usize, e: f32) !void {
+    const di = pickDown(n, sms);
+    const mt = tk.hcn_down_mt[di];
+    var a: cuda.Args = .{};
+    for ([_]u64{ h, pss, scale, down.codes, part }) |v| a.add(v);
+    for ([_]usize{ n, down.n, down.k, cuda.qmmf.slices(down), dims, dims / 256, streams }) |v| a.add(cint(v));
+    a.add(e);
+    try cuda.launch.launch(t.hcn_down[di], .{ .grid = .{ .x = @intCast(cdiv(n, 16 * mt) * 2) }, .block = .{ .x = 224 }, .shared = tk.hcnDownSmem(mt) }, stream, &a);
+}
+
+/// The fused up+mix over rows [0, n): act times the BF16 up, gated onto the streams normed on chip, mixed in order.
+pub fn fusedUpMix(t: *const tk.TileKernels, stream: cuda.Stream, act: u64, up: cuda.qmmf.Weight, h: u64, pss: u64, scale: u64, mixed: u64, xsm: u64, n: usize, e: f32) !void {
+    const mt = tk.hcn_up_mt;
+    var b: cuda.Args = .{};
+    for ([_]u64{ act, up.codes, h, pss, scale, mixed, xsm }) |v| b.add(v);
+    for ([_]usize{ n, dims, dims / 256 }) |v| b.add(cint(v));
+    b.add(e);
+    try cuda.launch.launch(t.hcn_up, .{ .grid = .{ .x = @intCast(cdiv(n, 16 * mt) * (dims / 32)) }, .block = .{ .x = 256 }, .shared = tk.hcnUpSmem(mt) }, stream, &b);
+}
+
+/// Rows [r0, r0 + n) of the BF16 read-out in three launches with the five launches' bytes; no normed rows in memory.
+pub fn readoutFused(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Scratch, hc_w: HcW, r0: usize, n: usize) !void {
+    const down = hc_w.down.native orelse return error.UnexpectedTensor;
+    const up = hc_w.up.native orelse return error.UnexpectedTensor;
+    if (n * hc_w.n_down * 4 > s.hc_part_bytes) return error.UnexpectedTensor; // one slice within hc_part (hcPartRows)
+    const h = s.h + r0 * wide * 2;
+    const pss = s.pss + r0 * pss_n * 4;
+    const act = s.act + r0 * low * 2;
+    const xs_act = s.xs_act + r0 * (low / 32) * 4;
+    const inj = if (hc_w.has_inj == 1) s.inj + r0 * streams * 2 else act;
+    try fusedDown(&k.tiles, k.native_lane.prompt_sms, stream, h, pss, hc_w.scale.ptr, down, s.hc_part, n, eps);
+    try tri.hcReduceAct(s.hc_part, act, xs_act, inj, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
+    try fusedUpMix(&k.tiles, stream, act, up, h, pss, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, eps);
+}
+
+test "the fused read-out's down tile is the one whose waves over 48 SMs cost least" {
+    try std.testing.expectEqual(@as(usize, 4), tk.hcn_down_mt[pickDown(3072, 48)]);
+    try std.testing.expectEqual(@as(usize, 3), tk.hcn_down_mt[pickDown(2048, 48)]);
+    try std.testing.expectEqual(@as(usize, 4), tk.hcn_down_mt[pickDown(1536, 48)]);
+    try std.testing.expectEqual(@as(usize, 3), tk.hcn_down_mt[pickDown(1024, 48)]);
+    try std.testing.expectEqual(@as(usize, 2), tk.hcn_down_mt[pickDown(64, 48)]);
 }
 
 /// The grouped experts on flashnext_fexp.cu's 64-pair tiles (expert_rows' bits), wn column blocks a CTA.
