@@ -1,0 +1,21 @@
+{#- Unlimited-OCR-2: every image part is a page, "<PAGE><image>" in order, then the instruction (the user's text with
+    its own "<PAGE>" and "<image>" left out; "Multi page parsing." when none), as the publisher's infer() builds it. -#}
+{{- bos_token -}}
+{%- set ns = namespace(text='') -%}
+{%- for message in messages -%}
+{%- if message['role'] == 'user' -%}
+{%- if message['content'] is string -%}
+{%- set ns.text = ns.text + message['content'] -%}
+{%- else -%}
+{%- for part in message['content'] -%}
+{%- if part['type'] == 'image_url' or part['type'] == 'image' -%}
+<PAGE><image>
+{%- elif part['type'] == 'text' -%}
+{%- set ns.text = ns.text + part['text'] -%}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- set instruction = ns.text.replace('<PAGE>', '').replace('<image>', '') | trim -%}
+{{- instruction if instruction else 'Multi page parsing.' -}}

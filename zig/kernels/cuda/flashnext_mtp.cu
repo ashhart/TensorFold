@@ -91,8 +91,13 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_topk(const __nv_bfloat
     __shared__ unsigned int pick_hi, pick_lo, above;
     for (int i = t; i < 256; i += nt) hist[i] = 0;
     __syncthreads();
-    for (int i = t; i < V; i += nt) atomicAdd(&hist[order_key(row[i]) >> 8], 1u);
-    __syncthreads();
+    int bad = 0;
+    for (int i = t; i < V; i += nt) {
+        const unsigned short u = row[i];
+        bad |= ((u & 0x7fff) > 0x7f80) | (u == 0x7f80);
+        atomicAdd(&hist[order_key(u) >> 8], 1u);
+    }
+    const int row_bad = __syncthreads_or(bad);
     if (t == 0) {
         unsigned int cum = 0;
         int b = 255;
@@ -160,4 +165,6 @@ extern "C" __global__ void __launch_bounds__(1024) fn_row_topk(const __nv_bfloat
             ++rank;
         }
     }
+    __syncthreads();
+    if (t == 0 && row_bad) oc[0] = -1;
 }

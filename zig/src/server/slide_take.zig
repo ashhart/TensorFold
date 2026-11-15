@@ -25,6 +25,8 @@ const bare_words = 12; // a bare answer's words at most, kept whole when the mod
 
 /// A fact's questions kept so far: their examples, answers and (for the first few) subjects.
 pub const Got = struct {
+    reserved: @import("slide_reserved.zig").Reserved = .{},
+    reserved_dropped: bool = false,
     entity: bool = false, // the fact is about someone or something in particular: its questions key on that subject
     words: []const []const u8 = &.{}, // the words its questions name that subject by (from the fact itself)
     named: []const []const u8 = &.{}, // of those, its proper names, which a question must say when it has any
@@ -45,6 +47,10 @@ pub fn take(srv: *Server, cx: *Cx, got: *Got, fact: []const u8, f: usize, qs: []
     const a = cx.a;
     var fresh: std.ArrayList([]const u8) = .empty;
     next: for (qs) |q| {
+        if (try got.reserved.question(srv, cx, q)) {
+            got.reserved_dropped = true;
+            continue;
+        }
         for (got.refs.items) |r| if (std.mem.eql(u8, r.question, q)) continue :next;
         for (fresh.items) |x| if (std.mem.eql(u8, x, q)) continue :next;
         try fresh.append(a, q);

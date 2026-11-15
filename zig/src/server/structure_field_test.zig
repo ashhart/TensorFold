@@ -336,7 +336,7 @@ test "structure field: the Responses translation hands the engine text.format" {
     const r = try responses_translate.translate(&cx, body, History{});
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = g };
     var wire: Wire = .{};
-    openai.runNamed(srv, g, wire.out(), .{ .conn = &conn }, true, r.chat, r.format, true);
+    openai.runNamed(srv, g, wire.out(), .{ .conn = &conn }, true, r.chat, r.format, true, false);
     try std.testing.expectEqual(@as(u16, 200), wire.status);
     try std.testing.expectEqualStrings("text.format", rec.field());
     try std.testing.expectEqualStrings("json", rec.kind);

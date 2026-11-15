@@ -119,7 +119,8 @@ pub const prefill = [_]Case{
     .{ .name = "flash next served gate_up", .path = .prefill, .rows = 42, .n = 1280, .k = 2560, .group = 32, .experts = 512, .slots = 11, .shared = true, .served = true, .exact = true },
 };
 
-pub const widths = [_]u8{ 2, 3, 4, 5, 6, 8 };
+/// The registry's own list: the kernel cases and the selection tests walk the same widths.
+pub const widths = registry.widths;
 pub const groups = [_]u16{ 32, 64, 128 };
 
 /// A short prompt's few rows, for the timings of each tile on dense and routed products.

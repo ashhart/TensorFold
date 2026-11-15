@@ -63,12 +63,13 @@ zig/src/fabric/tp/run_hosts.sh 1 192.0.2.1 ./zig-out/bin/tf-tp-test out-rank1   
 ## TCP between two hosts without RDMA
 
 `tcp.zig` is the `Collective` contract over one stream socket a pair of ranks, `Kind.tcp`, for hosts with no RDMA
-(two AMD boxes on USB4 networking, or plain Ethernet). It moves host memory; a device side that stages through it comes
-in a later pull request. It is not a `TF_COMM_BACKEND` value yet: only its tests and `tf-tp-test tcp-host` open it.
+(two AMD boxes on USB4 networking, or plain Ethernet). It moves host memory; `stage.zig`, below, puts device memory
+behind it. It is not a `TF_COMM_BACKEND` value yet: only its tests and `tf-tp-test tcp-host` and `tcp-hip` open it.
 
-- Every frame starts with a header both ranks check: call, element type, operation, count and the link's frame
-  number; a variable-length gather sends every rank's lengths first in its payload, and those are compared too. A
-  call one rank makes differently fails as `Invalid`, or `Aborted` where the other rank refused it first.
+- Every frame starts with a header both ranks check: call, element type, operation, count, the link's frame number
+  and the part of a staged call; a variable-length gather sends every rank's lengths first in its payload, and those
+  are compared too. A call one rank makes differently fails as `Invalid`, or `Aborted` where the other rank refused it
+  first.
   Exchange partners that disagree (rank 0 trades with 1 while 1 trades with 2) wait on frames that never come and fail
   as `Timeout`.
 - A frame that has not arrived by the call's deadline (`Options.timeout_ns`) is `Timeout`, and the communicator is
@@ -97,6 +98,32 @@ export TF_TP_WORLD=2 TF_TP_MASTER=192.0.2.1 TF_TP_LINK="USB4 networking, cable 1
 TF_TP_RANK=0 ./zig-out/bin/tf-tp-test tcp-host   # host A
 TF_TP_RANK=1 ./zig-out/bin/tf-tp-test tcp-host   # host B
 ```
+
+## Device memory over the TCP Kind
+
+`stage.zig` stages device memory through `tcp.zig`, still `Kind.tcp`. A call only queues on its stream and returns:
+the stream writes the call's `ready` word, then waits until its `done` word is set (64-bit words in pinned host memory).
+A proxy thread sees `ready`, copies the input into a pinned slab on a stream of its own, moves it with `tcp.zig`, copies
+the result back and sets `done`. `stage_hip.zig` is the HIP side: `hipStreamWriteValue64` and `hipStreamWaitValue64` on
+mapped coherent host memory; a GPU without them is refused by name.
+
+- The caller's stream gets no copies of ours, only the two words. With the copies queued on it around the wait, two
+  ranks of one process hung, or read stale bytes, once a call reached 16 KiB (ROCm 10.0, gfx1151).
+- A call larger than `Options.part_bytes` (default 4 MiB, the same on every rank or the open fails) moves in parts.
+  Each frame names its part, so one call in two parts never pairs with two whole calls.
+- The stream writes `ready` only after the work queued before it on that stream has finished, so when the proxy sees
+  it the input is complete in device memory, and the proxy's own stream reads it from there.
+- A failure, the peer's, a timeout or a device call's, sets every `done` word, so no stream waits on it; it shows at
+  the next call or at `check`, and the outputs of the calls in flight are not defined.
+- The proxy waits for each of its copies at most `Hip.limit_ns` (30 s), then fails the call: past the runtime's
+  hardware queues (`GPU_MAX_HW_QUEUES`, 4 by default) its stream can share one with a stream parked on a word.
+- A capturing stream is refused (`Unsupported`): a replay would write and wait on the words' old values.
+- `allGatherV` moves whole strides, as `Collective` does for a transport without its own.
+- `deinit` frees the slab once every stream has passed its last call; the caller synchronises its streams first.
+
+`tf-tp-test tcp-hip` runs `tcp-host`'s checks and timings from HIP memory on the GPU of `TF_TP_DEVICE`: each call is
+checked after its stream synchronised, and each time is a call and its stream's synchronisation (`queue_p50_us` is the
+call alone). Its results name the link from `TF_TP_LINK` too.
 
 ## RoCE limits and the failed-transport check
 
