@@ -336,7 +336,7 @@ pub const Model = struct {
     fn launch(m: *Model, k: *const kern.Kernels, s: cuda.Stream, chains: []const Chain, rows: usize, prompt: bool, head0: usize, heads: usize) !void {
         const h = m.geo.hidden;
         const x = m.s;
-        try k.embed.affine(s, x.ids, m.w.embed_w, m.w.embed_s, m.w.embed_b, x.h[0], rows, h, .{ .bits = @intCast(m.w.embed_bits), .group = cfg.group, .scale = embedScale(h) });
+        try m.w.embed(&k.embed, s, x.ids, x.h[0], rows, embedScale(h));
         if (prompt) for (chains[0].images) |im| {
             try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(x.h[0] + im.row * h * 2, im.src, im.rows * h * 2, s.handle), "cuMemcpyDtoDAsync");
         };

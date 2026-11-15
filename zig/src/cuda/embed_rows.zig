@@ -9,6 +9,7 @@ const Driver = @import("driver.zig").Driver;
 const Module = module.Module;
 const Function = module.Function;
 const Stream = stream_.Stream;
+const Affine4 = @import("qlinear.zig").Affine4;
 
 const threads = 256;
 
@@ -18,12 +19,13 @@ pub const EmbedRows = struct {
     bf16_fn: Function,
     bf16_copies_fn: Function,
     affine_fn: Function,
+    tiles4_fn: Function,
 
     pub fn load(d: *const Driver) !EmbedRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.embed_rows);
         errdefer mod.unload();
-        return .{ .mod = mod, .affine4_fn = try mod.function("tf_embed_rows_affine4"), .bf16_fn = try mod.function("tf_embed_rows_bf16"), .bf16_copies_fn = try mod.function("tf_embed_rows_bf16_copies"), .affine_fn = try mod.function("tf_embed_rows_affine") };
+        return .{ .mod = mod, .affine4_fn = try mod.function("tf_embed_rows_affine4"), .bf16_fn = try mod.function("tf_embed_rows_bf16"), .bf16_copies_fn = try mod.function("tf_embed_rows_bf16_copies"), .affine_fn = try mod.function("tf_embed_rows_affine"), .tiles4_fn = try mod.function("tf_embed_rows_tiles4") };
     }
 
     pub fn unload(g: *EmbedRows) void {
@@ -61,6 +63,19 @@ pub const EmbedRows = struct {
         for ([_]usize{ d, o.bits, o.group }) |v| a.add(@as(i32, @intCast(v)));
         a.add(o.scale orelse 1);
         try launch_.launch(g.affine_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((d / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
+    /// `affine`'s rows of 4 bits in groups of 64 read from q, the same table packed as a tied head's tiles (d = q.k).
+    pub fn tiles4(g: *const EmbedRows, s: Stream, ids: u64, q: Affine4, out: u64, rows: usize, scale: ?f32) !void {
+        const scale_ok = if (scale) |x| std.math.isFinite(x) and @as(u32, @bitCast(x)) & 0xFFFF == 0 else true;
+        if (!scale_ok or q.k == 0 or q.k % 64 != 0 or q.k > std.math.maxInt(i32) or q.npad > std.math.maxInt(i32) or
+            rows > std.math.maxInt(u32) or out % 16 != 0) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        for ([_]u64{ ids, q.w, q.s, q.b, out }) |v| a.add(v);
+        for ([_]usize{ q.k, q.npad }) |v| a.add(@as(i32, @intCast(v)));
+        a.add(scale orelse 1);
+        try launch_.launch(g.tiles4_fn, .{ .grid = .{ .x = @intCast(rows), .y = @intCast((q.k / 8 + threads - 1) / threads), .z = 1 }, .block = .{ .x = threads } }, s, &a);
     }
 
     /// out [rows, d] = w [vocab, d] bf16 rows at ids.
