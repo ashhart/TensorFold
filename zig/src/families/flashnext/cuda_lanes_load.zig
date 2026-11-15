@@ -91,7 +91,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         own.confidence = try @import("sys").environment.read(f64, "TF_FLASHNEXT_CONFIDENCE", mtp.default_confidence);
     }
     errdefer if (own.head) |h| h.deinit();
-    @import("cuda_prompt_wt.zig").dropPageCache(io, dir, e.ngram.files.items);
+    @import("cuda_prompt_wt.zig").dropPageCache(gpa, io, dir, e.ngram.files.items);
     const window = @min(o.context + mtp.max_rows, prompt.max_tokens);
     // and an attention block's block scores at the window (64 MiB at 262,144 tokens)
     _ = try own.engine.reserveScores(window, @min(o.context, own.engine.chunk));

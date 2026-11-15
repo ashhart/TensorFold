@@ -109,10 +109,11 @@ test "CUDA load cache: DeepSeek finishes backbone and DSpark before the pack swe
 
 test "CUDA load cache: Flash Next sweep follows MTP and retains live PLE files" {
     const s = @embedFile("src/families/flashnext/cuda_lanes_load.zig");
-    const drop = std.mem.indexOf(u8, s, ".dropPageCache(io, dir, e.ngram.files.items)") orelse return error.NoPleExclusion;
+    const drop = std.mem.indexOf(u8, s, ".dropPageCache(gpa, io, dir, e.ngram.files.items)") orelse return error.NoPleExclusion;
     try t.expect(std.mem.indexOf(u8, s, "mtp.Head.init").? < drop);
     const owner = @embedFile("src/families/flashnext/cuda_prompt_wt.zig");
-    try t.expect(std.mem.indexOf(u8, owner, "if (!runtimePages(self.f.names.keys())) self.f.release(std.heap.page_allocator)") != null);
+    try t.expect(std.mem.indexOf(u8, owner, "if (runtimePage(name)) keep.append(scratch, self.f.get(name).?.bytes) catch return;") != null);
+    try t.expect(std.mem.indexOf(u8, owner, "self.f.releaseExcept(keep.items, scratch)") != null);
 }
 
 test "CUDA load cache: LFM2 decision model releases its direct-read fallback" {
@@ -137,7 +138,7 @@ test "CUDA load cache: every TP load scope defers file advice through all-rank r
         const read = std.mem.indexOfPos(u8, source, start, last) orelse return error.NoLastLoad;
         try t.expect(start < read and read < ready);
         if (std.mem.eql(u8, path, "flashnext/cuda_lanes_load.zig")) {
-            const drop = std.mem.indexOf(u8, source, "dropPageCache(io,") orelse return error.NoSweep;
+            const drop = std.mem.indexOf(u8, source, "dropPageCache(gpa, io,") orelse return error.NoSweep;
             try t.expect(drop < ready);
         }
     }
