@@ -18,6 +18,7 @@ const Taps = @import("taps.zig").Taps;
 const image_rows = @import("image_rows.zig");
 const mrope = @import("core").qwen_vl.rope;
 const kv_pages = @import("kv_pages.zig");
+const slot_pages = @import("slot_pages.zig");
 pub const pagesOn = kv_pages.on;
 pub const KvPages = kv_pages.KvPages;
 pub const KvSpan = kv_pages.KvSpan;
@@ -161,11 +162,10 @@ pub const Runner = struct {
         return .{ .allocator = a, .model = m, .geometry = geometry, .gdn = pool, .attention = attention, .scratch = scratch, .bindings = bindings, .caches = caches, .linear_index = linear_index, .attention_index = attention_index, .offsets = offsets, .owned = owned, .taps = taps, .slots = slots, .ready = ready, .capacity = capacity, .kv = kv };
     }
 
-    /// Slot `slot` holds the pages of its first `rows` rows before a pass or a copy writes them (paged runners).
-    pub fn cover(r: *Runner, slot: u32, rows: u32) !void {
-        const k = r.kv orelse return;
-        try k.pages.cover(slot, @min(rows, r.capacity));
-    }
+    pub const cover = slot_pages.cover;
+    pub const promise = slot_pages.promiseRows;
+    pub const release = slot_pages.release;
+    pub const reset = slot_pages.reset;
 
     /// Slot `slot`'s pages past its committed rows go back to its promise; no GPU work in flight reads them.
     fn trimSlot(r: *Runner, slot: u32) void {
@@ -456,7 +456,8 @@ pub const Runner = struct {
         r.reading[slot] = cb.retain();
     }
 
-    pub fn reset(r: *Runner, slot: u32) !void {
+    /// `reset` that keeps the slot's pages: a rewind writes its K/V rows again only from its rewind point on.
+    pub fn clearState(r: *Runner, slot: u32) !void {
         r.settleSlot(slot);
         if (r.failed or r.active != null or slot >= r.ready) return error.RoundNotReady;
         const pool = mtl.objc.Pool.push();

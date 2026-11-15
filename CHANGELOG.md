@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: a stream is promised its prompt's KV pages when it opens a slot and its reply's as it writes them, and gives every page and its promise back when it leaves, is reset or moves to slot 0, instead of each slot holding a promise of its whole window from startup (#3377, part of #1293).
+
+- Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1`: Macs with tensor units (M5) take the flag instead of refusing it, and a paged prompt pass finds each 512-key chunk's two pages once instead of reading the page table at every 32-key step, with every token and cache row unchanged (#3180, part of #1293). Thanks to @CodingEmil.
+
 - Docs: strict tools under `tool_choice: "auto"` and `TENSORFOLD_TOOL_GRAMMAR`: what a strict tool's schema holds, what is served unconstrained and what is refused, and the legacy DeepSeek alias (#3235, fixes #3177).
 
 - Qwen 3.5, 3.6 and 3.8 on CUDA: a background prompt fill stops between chunks when a foreground request is waiting, keeps the prefix it has already filled, and resumes from there; replies are unchanged (#2873, part of #2812). Thanks to @tacosta.
@@ -22,6 +26,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: an image URL's host lookup stops at 3 seconds (or the request's deadline, if sooner) even when the system resolver keeps retrying, at most 64 lookups run at once, and a refused connection falls through to the host's next checked address (#3127).
 
 - Living Weights: a fact graph write the OS refuses names its cause, for example "ShardWrite (ISDIR)" (#3126).
+
+- Lanes: a backend may say before a verify that a stream's next rows find no memory (`Backend.grow`); that stream ends with `length` and a message, and the round's other streams run on instead of the whole round failing. Qwen3.8-27B on Metal with `TF_QWEN27_METAL_KV_PAGES=1` says so when a slot's next rows find no KV page (#3378, part of #1293).
 
 - Pull: a hub file path refused for a reserved name or a path escape now names the path and the reason, and the pull exits 1 (#3097).
 

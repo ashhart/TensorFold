@@ -151,7 +151,7 @@ pub const Engine = struct {
                 // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
                 const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
                 const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
-                s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
+                if (r.rows > 0) s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
         }
         try trail.resolve(e);
@@ -212,7 +212,7 @@ pub const Engine = struct {
         const windows = [_]be.Window{try win.build(e, plan, early)};
         const rows = windows[0].rows();
         var out = [_]be.Verified{.{ .sampled = try a.alloc(u32, rows), .drafts = try a.alloc(u32, rows - 1), .rows = if (s.logprobs != null) try a.alloc(LogRow, rows) else &.{} }};
-        try e.backend.verify(&windows, &out);
+        if (!try @import("outgrown.zig").one(e.backend, s, &windows, &out)) return .{ .rows = 0, .keep = 0, .got = &.{} };
         const tokens = try win.tokens(e, windows[0], out[0]);
         const parents = try win.rowParents(e, windows[0]);
         const o = try e.conclude(s, plan, out[0].sampled, out[0].rows, tokens, parents, windows[0].positions);
@@ -259,19 +259,19 @@ pub const Engine = struct {
         e.clock.start();
         try e.late.flush(e, Engine.askDrafts);
         const a = e.arena.allocator();
-        const plans = try a.alloc(Plan, entries.len);
+        var plans = try a.alloc(Plan, entries.len);
         for (entries, plans) |s, *p| p.* = try win.plan(e, s, null);
         try win.allocate(e, plans);
         try @import("grammar_parallel.zig").constrain(e, plans);
-        const windows = try a.alloc(be.Window, plans.len);
-        const out = try a.alloc(be.Verified, plans.len);
+        var windows = try a.alloc(be.Window, plans.len);
+        var out = try a.alloc(be.Verified, plans.len);
         var total: u64 = 0;
         for (plans, windows, out) |p, *w, *o| {
             w.* = try win.build(e, p, false);
             o.* = .{ .sampled = try a.alloc(u32, w.rows()), .drafts = try a.alloc(u32, w.rows() - 1), .rows = if (p.stream.logprobs != null) try a.alloc(LogRow, w.rows()) else &.{} };
             total += w.rows();
         }
-        try e.backend.verify(windows, out);
+        if (!try @import("outgrown.zig").shared(e.backend, &plans, &windows, &out, &total)) return;
         const outcomes = try a.alloc(Outcome, plans.len);
         const paths = try a.alloc([]const u32, plans.len);
         for (plans, windows, out, outcomes, paths) |p, w, o, *oc, *path| {
