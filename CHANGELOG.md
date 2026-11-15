@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next CUDA retires its engine-owned graphs before closing cached prompts, releasing NCCL graph references before peer-loss handling during idle shutdown (#1445).
+
 - Flash Next EXL3's device planner stages experts that exceed a round's resident pool into budgeted reusable device memory, rather than reading their weights in place from host memory. Planner telemetry and version 5 demand traces distinguish staged experts from resident-pool copies (#1445).
 
 - CUDA: the shared dense engine gains an image path for recipes that declare an image tower: each lane holds its request's image rows, which the planner counts per lane so an admitted request never allocates more, images encode once when the lane begins, and a prompt chunk may cut through an image; an image span the prompt does not hold is refused naming `--vision-image-tokens`, and a tower of the wrong width or a tower served without `--vision` is refused by name; text-only recipes declare the same as before, and no served model changes (#2768, part of #1927). Thanks to @laudney.
