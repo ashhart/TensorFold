@@ -40,6 +40,9 @@ pub fn Namespace(comptime Tri: type) type {
         pub const snap_save = copies.save;
         pub const snap_restore = copies.restore;
         pub const snap_drop = copies.drop;
+        pub fn prepareClose(p: *anyopaque) void {
+            @import("exl3/graph/cuda_exl3_graph_cache.zig").releaseFor(of(p).engine);
+        }
         pub const kept_disk = @import("cuda_disk.zig").Kept(@This()); // their disk image, as qwen3_5 declares its own
         /// TF_FLASHNEXT_KV_PAGES: the pool's lanes, the pages of a request's rows and a drafted window (kvl).
         pub const window_rows = kvl.window_rows;

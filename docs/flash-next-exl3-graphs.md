@@ -51,3 +51,6 @@ only the request that first captured a graph. Graphs for other allocations or CU
 Engine teardown retires its decode, prefill and chain cache entries, releases their graph-admission tickets and removes
 their failure records. It leaves other engines' graph executables and retry state intact; cache updates cannot borrow
 another engine's key.
+
+The native host retires the engine's graphs after its lane worker stops and before closing cached prompts, so those
+graph executables release their communicator references before peer-loss handling during shutdown.
