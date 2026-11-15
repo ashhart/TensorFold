@@ -15,12 +15,18 @@ const kernel_group = 64;
 /// A projection: lane_qmm's tiles at 4/64, the checkpoint's rows for the row kernels, or a mixed stack's members.
 pub const Linear = struct {
     tiles: ?Tiles = null, // 4/64 only: weight [N/64][K/64][64 x 8 words], SBt [K/64][N][scale, bias]
-    lane: bool = false, // 4/64: the lane kernels' shape, its tiles built only where a kernel reads them (`Builder.tiled`)
     n: usize,
     k: usize,
     rows: ?row.Weights = null, // the checkpoint's row layout: chips without tensor units, and every width but 4/64
     stack: [3]Member = undefined, // a fused stack not all 4/64: each member's rows into its own output columns
     stacked: usize = 0, // members in `stack` (0: one matrix)
+
+    /// A 4/64 projection the lane kernels take: its tiles, or its 4/64 rows where none are built (`Builder.tiled`).
+    pub fn lane(l: Linear) bool {
+        if (l.tiles != null) return true; // with tensor units every 4/64 projection has tiles, as on main
+        const r = l.rows orelse return false;
+        return l.stacked == 0 and r.bits == 4 and r.group == 64;
+    }
 };
 
 /// lane_qmm's 64-wide tiles of a 4/64 projection.
@@ -179,7 +185,7 @@ pub const Builder = struct {
         for (parts) |p| n += p.t[0].shape[0];
         const words = parts[0].t[0].shape[1];
         const k = words * 8;
-        var lin = Linear{ .lane = true, .n = n, .k = k };
+        var lin = Linear{ .n = n, .k = k };
         if (self.tiled()) lin.tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4) };
         var row0: usize = 0;
         for (parts) |p| {
@@ -230,7 +236,7 @@ pub const Builder = struct {
         for (pick) |r| if (r >= src.t[0].shape[0]) return error.BadDraftIds;
         if (!src.w.four()) return .{ .n = n, .k = k, .rows = try self.packRows(&.{src}, pick, n, k) };
         const words = k / 8;
-        var lin = Linear{ .lane = true, .n = n, .k = k };
+        var lin = Linear{ .n = n, .k = k };
         if (self.tiled()) {
             lin.tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4) };
             try self.jobs.append(self.allocator, .{ .src = src.t, .dst = lin, .row0 = 0, .pick = pick });
@@ -371,13 +377,14 @@ pub const Builder = struct {
         @memcpy(ids.slice(u32, draft_ids.len), draft_ids);
         const d: []const usize = &.{self.c.hidden};
         const four: [4]Width = @splat(.{});
-        self.pin = true; // mtp.zig's coopParts reads eh's tiles without the row kernels first
-        const eh = self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden }, .{})});
-        self.pin = false;
         return .{
             .enorm = try self.typed("mtp.layers.0.enorm.weight", .{}, .bf16, d),
             .hnorm = try self.typed("mtp.layers.0.hnorm.weight", .{}, .bf16, d),
-            .eh = try eh,
+            .eh = eh: { // in main's place, so a chip with tensor units builds the head in the same order
+                self.pin = true; // mtp.zig's coopParts reads eh's tiles without the row kernels first
+                defer self.pin = false;
+                break :eh try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden }, .{})});
+            },
             .norm = try self.typed("mtp.layers.0.norm.weight", .{}, .bf16, d),
             .attention = try self.attention("mtp.layers.0.mixer", "mtp.fused.qkv", .{}, four),
             .norm2 = try self.typed("mtp.layers.1.norm.weight", .{}, .bf16, d),
