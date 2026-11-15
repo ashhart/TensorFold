@@ -20,6 +20,19 @@ fn preM5(a: std.mem.Allocator, head: []const u8, text: []const u8) ![]u8 {
     return std.mem.concat(a, u8, &.{ head, "#define TF_SIMD_FRAGS 1\n", body });
 }
 
+/// A Bolt op's source: a norm by its key beside Lightning's, else the engine's prefill op file its label names.
+fn boltSource(name: []const u8) ![]const u8 {
+    const in = std.mem.indexOf;
+    if (in(u8, name, " norm ") != null) {
+        const key = if (in(u8, name, " group norm ") != null) "group_norm_xs_bolt_16" else if (in(u8, name, "add_norm_moe") != null) "add_norm_moe_xs_bolt" else "add_norm_xs_bolt";
+        for (sources.nemotron.all) |k| if (std.mem.eql(u8, k.key, key)) return k.source;
+        return error.UnknownLaunch;
+    }
+    const file = if (in(u8, name, " gemv ") != null) "gemv_ops" else if (in(u8, name, " combine ") != null) "elementwise" else if (in(u8, name, " route ") != null) "route" else return error.UnknownLaunch;
+    for (sources.prefill) |f| if (std.mem.eql(u8, f.name, file)) return f.text;
+    return error.UnknownLaunch;
+}
+
 /// Each registration's function is its label's last word; the label's words say which source it compiles.
 fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !Launch {
     return resolve(a, device, d, true);
@@ -293,23 +306,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         if (!assemble) return undefined;
         text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "bolt ")) {
-        // Bolt's ops are the engine's prefill op files (kernels/metal/sources.zig `prefill`), named by the label's 2nd word
-        if (has(d.name, " mamba ")) {
-            // the tree source as kernels.zig compiles it before the M5 (Bolt is refused on tensor-unit chips)
-            head = "#define TF_SIMD_LAYOUT 1\n";
-            text = sources.nemotron_tree;
-        } else if (has(d.name, " norm ")) {
-            // Bolt's norm instantiations live beside Lightning's in kernels/metal/nemotron (kernels.zig `all`, by key)
-            const key = if (has(d.name, " group norm ")) "group_norm_xs_bolt_16" else if (has(d.name, "add_norm_moe")) "add_norm_moe_xs_bolt" else "add_norm_xs_bolt";
-            text = for (sources.nemotron.all) |k| {
-                if (std.mem.eql(u8, k.key, key)) break k.source;
-            } else return error.UnknownLaunch;
-        } else {
-            const file = if (has(d.name, " gemv ")) "gemv_ops" else if (has(d.name, " combine ")) "elementwise" else if (has(d.name, " route ")) "route" else return error.UnknownLaunch;
-            text = for (sources.prefill) |f| {
-                if (std.mem.eql(u8, f.name, file)) break f.text;
-            } else return error.UnknownLaunch;
-        }
+        if (!assemble) return undefined;
+        // the tree source as kernels.zig compiles it below the M5, where Bolt is refused before load
+        if (has(d.name, " mamba ")) head = "#define TF_SIMD_LAYOUT 1\n";
+        text = if (has(d.name, " mamba ")) sources.nemotron_tree else try boltSource(d.name);
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         if (!assemble) return undefined;
         text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else if (has(d.name, " moe rows ")) tf.qwen27.moe_gpu.rows_source else if (has(d.name, " moe ")) tf.qwen27.runtime_sources.moe else tf.qwen27.runtime_sources.glue;

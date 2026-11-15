@@ -1,4 +1,4 @@
-//! Nemotron 3.5 Bolt's MLX-exact ops as nemotron/bolt.zig launches them (gate 5; gates 1-4 in tests/contract/metal_bolt.zig).
+//! Nemotron 3.5 Bolt's MLX-exact ops as nemotron/bolt.zig launches them, for gate 5.
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
@@ -20,7 +20,7 @@ pub const records = [_]M{
     // the residual add + RMS norm at hidden 4,096: 512 threads, xb 8 KiB + 16 partials
     .{ .name = "bolt add norm tf_nemotron_add_norm_xs_bolt", .threads = 512, .tg_memory = 8256, .m1 = 1024, .m2 = 1024 },
     .{ .name = "bolt add norm tf_nemotron_add_norm_moe_xs_bolt", .threads = 512, .tg_memory = 8256, .m1 = 1024, .m2 = 1024 },
-    // the Mamba conv: a thread a channel and row, 256 a group; the scan: 32 lanes x 8 channels, a lane's states in registers
+    // the Mamba conv: a thread a channel and row, 256 a group; the scan: 32 lanes of 8 channels, states in registers
     .{ .name = "bolt mamba conv tf_tree_conv_bolt", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "bolt mamba scan tf_tree_scan_bolt", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
 };

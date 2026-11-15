@@ -132,13 +132,12 @@ pub const Weights = struct {
     }
 };
 
-/// Every tensor the kernels read, checked and laid out for them.
-/// MLX quantizes a module only where {path}.scales exists, so Bolt's lm_head stays bf16 and is read as a dense head;
-/// every other family keeps the quantized head it always loaded (and is refused without one, as before).
+/// MLX quantizes a module only where {path}.scales exists: Bolt's lm_head stays bf16 and is read as a dense head.
 pub fn denseHead(c: cfg.Config, ck: *const ckpt.Checkpoint) bool {
     return c.bolt and !ck.has("lm_head.scales");
 }
 
+/// Every tensor the kernels read, checked and laid out for them.
 pub const Builder = struct {
     allocator: std.mem.Allocator,
     device: mtl.Device,

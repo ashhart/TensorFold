@@ -392,8 +392,7 @@ test "an unquantized bf16 lm_head loads as Bolt's dense head, and is refused for
         try std.testing.expectEqual(@as(usize, 128), w.head_dense.?.k);
     }
     {
-        // Lightning (tinyMoe) with the same bf16 head and no lm_head.scales: still the quantized head's load (which
-        // refuses it for the missing scales, as before), never the dense one
+        // Lightning with the same bf16 head and no lm_head.scales: still the quantized head's load, never the dense one
         var ck = try fakeCheckpoint(a, &.{.{ .name = "lm_head.weight", .shape = &.{ 128, 64 } }});
         defer ck.deinit();
         try std.testing.expect(!wts.denseHead(tinyMoe(), &ck));
