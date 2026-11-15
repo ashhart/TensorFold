@@ -9,7 +9,7 @@ const Arena = vk.arena.Arena;
 const View = vk.tensor.View;
 
 // Whole-prompt rows are split into dispatch chunks capped here; persistent windows use this cap.
-pub const max_prefill_rows: usize = 32;
+pub const max_prefill_rows: usize = 64;
 
 // Layers 0-3 keep every activation store in f32; 4+ round stores to bf16 (the validated store policy).
 pub const wide_layers: usize = state.wide_layers;
@@ -19,7 +19,7 @@ pub fn actKind(layer: usize) vk.tensor.Kind {
     return if (layer < wide_layers) .f32 else .bf16;
 }
 /// The GDN prefill scan's chunk cap (chunks of 1 when a prefill fits one).
-pub const max_gdn_chunk: u64 = 32;
+pub const max_gdn_chunk: u64 = max_prefill_rows;
 
 comptime {
     if (2 * pinned.query_heads * pinned.head_dim != 4096)

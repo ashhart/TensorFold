@@ -526,14 +526,14 @@ test "parseArgs context and mode flags keep the anchor default and bound the con
     try testing.expect(parseArgs(&.{ "--context", "256", "/m", "/i", "/o", "/out", "/extra" }) == null);
 }
 
-test "chunkCount spans the canonical 32-row chunks without a configurable size" {
-    try testing.expectEqual(@as(usize, engine_mod.max_prefill_rows), 32);
+test "chunkCount spans the canonical 64-row chunks without a configurable size" {
+    try testing.expectEqual(@as(usize, engine_mod.max_prefill_rows), 64);
     try testing.expectEqual(@as(usize, 1), chunkCount(1));
-    try testing.expectEqual(@as(usize, 1), chunkCount(32));
-    try testing.expectEqual(@as(usize, 2), chunkCount(33)); // boundary: two chunks
-    try testing.expectEqual(@as(usize, 2), chunkCount(64));
-    try testing.expectEqual(@as(usize, 3), chunkCount(65)); // boundary: three chunks
-    try testing.expectEqual(@as(usize, 224), chunkCount(7168)); // full context
+    try testing.expectEqual(@as(usize, 1), chunkCount(64));
+    try testing.expectEqual(@as(usize, 2), chunkCount(65)); // boundary: two chunks
+    try testing.expectEqual(@as(usize, 2), chunkCount(128));
+    try testing.expectEqual(@as(usize, 3), chunkCount(129)); // boundary: three chunks
+    try testing.expectEqual(@as(usize, 112), chunkCount(7168)); // full context
 }
 
 test "parseNpy takes exactly a v1 LE u32 rank-1 array" {
