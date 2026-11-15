@@ -36,6 +36,8 @@ pub const Options = struct {
     prompt: prompt.Opts = .{},
     /// bytes of kept prompt states (0: no prompt cache)
     cache_bytes: u64 = 0,
+    /// the weights' residency owner, which the target's own buffers join inside its load limit (null: none join)
+    resident: ?*mtl.resident.Resident = null,
 };
 
 /// What the target did, for the tests and the logs.
@@ -76,6 +78,8 @@ pub const Target = struct {
     stats: Stats = .{},
     /// a command buffer failed: the device state is no longer trusted (the health hook)
     failed: bool = false,
+    /// the target's own buffers joined the weights' residency owner (they leave it before they are freed)
+    joined: bool = false,
 
     pub fn init(a: Allocator, env: Env, opt: Options) !*Target {
         const c = env.c;
@@ -107,7 +111,33 @@ pub const Target = struct {
             made += 1;
         }
         t.slots = slots;
+        t.joinResident() catch {};
         return t;
+    }
+
+    /// Every buffer the target binds besides the weights joins their residency owner, so none waits to be mapped.
+    fn joinResident(t: *Target) !void {
+        const r = t.opt.resident orelse return;
+        var bufs: std.ArrayList(mtl.Buffer) = .empty;
+        defer bufs.deinit(t.a);
+        try t.ownBuffers(&bufs);
+        var bytes: u64 = 0;
+        for (bufs.items) |b| bytes += b.length();
+        // the owner refuses (and logs) buffers that would take it past its load limit
+        t.joined = r.tryAddNow(bufs.items);
+        if (t.joined) std.log.info("dsv41 target: {d:.1} GiB of buffers joined the weights' residency set", .{mtl.ResidencySet.gibs(bytes)});
+    }
+
+    fn ownBuffers(t: *const Target, out: *std.ArrayList(mtl.Buffer)) !void {
+        try out.appendSlice(t.a, &.{ t.b.buf, t.pr.s.buf, t.pr.b.buf, t.env.s.buf, t.env.tables.window, t.env.tables.compressed });
+        for (t.slots) |*s| {
+            for (s.kv.regions) |r| {
+                try out.append(t.a, r.window);
+                inline for (.{ "pool", "keys", "carry", "inputs" }) |f| if (@field(r, f)) |b| try out.append(t.a, b);
+            }
+            if (s.kv.taps) |b| try out.append(t.a, b);
+            try out.appendSlice(t.a, &.{ s.tail.x, s.tail.pre, s.ptaps });
+        }
     }
 
     fn freeSlot(a: Allocator, s: *Slot) void {
@@ -119,6 +149,12 @@ pub const Target = struct {
     }
 
     pub fn deinit(t: *Target) void {
+        if (t.joined) {
+            var bufs: std.ArrayList(mtl.Buffer) = .empty;
+            defer bufs.deinit(t.a);
+            t.ownBuffers(&bufs) catch {};
+            for (bufs.items) |b| t.opt.resident.?.remove(b);
+        }
         for (t.slots) |*s| freeSlot(t.a, s);
         t.a.free(t.slots);
         t.cache.deinit();
