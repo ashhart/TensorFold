@@ -41,6 +41,8 @@ pub const TileKernels = struct {
     hcn_mod: cuda.Module,
     hcn_down: [hcn_down_names.len]cuda.Function,
     hcn_up: cuda.Function,
+    /// The device's SMs, over which the fused read-out picks its down tile.
+    sms: usize,
     fexp_mod: cuda.Module,
     fexp_up: cuda.Function,
     fexp_down: cuda.Function,
@@ -73,6 +75,11 @@ pub const TileKernels = struct {
         }
         k.hcn_up = try k.hcn_mod.function(hcn_up_name);
         try k.hcn_up.allowDynamicShared(hcnUpSmem(hcn_up_mt));
+        var dev: c_int = 0;
+        var sms: c_int = 0;
+        try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
+        try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, dev), "cuDeviceGetAttribute");
+        k.sms = @intCast(@max(sms, 1));
         return k;
     }
 

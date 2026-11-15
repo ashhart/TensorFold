@@ -241,6 +241,7 @@ pub const Set = struct {
         var ctl = try cuda.Module.load(gpu.d, &controls.bytes);
         errdefer ctl.unload();
         set.* = .{ .gpa = gpu.gpa, .glue = glue, .lane = lane, .t = t, .ctl = ctl };
+        try set.lane.loadPrompt(gpu.d); // the engine's lane: qmmf's BF16 prompt tiles (TF_FLASHNEXT_PROMPT_BF16)
         const rz = try set.ctl.function("tf_ctl_hcn_down3_rz");
         try rz.allowDynamicShared(tk.hcnDownSmem(3));
         const raw = try set.ctl.function("tf_ctl_hcn_up3_raw");
