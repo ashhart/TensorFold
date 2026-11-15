@@ -17,7 +17,7 @@ const Seen = struct {
     }
 };
 
-/// Whether the pool's counts match a scan: free, pending, leased, kept and the store's alone, page by page.
+/// Whether the pool's counts match a scan: free, pending, marked, waiting, leased, kept and the store's alone.
 fn exact(p: *const kv.Pool) bool {
     var free: usize = 0;
     var leased: usize = 0;
@@ -31,6 +31,14 @@ fn exact(p: *const kv.Pool) bool {
     }
     const r = &p.retired;
     for (r.pending.items) |id| if (p.refs[id] != 0 or r.tokens[id] <= r.settled) return false;
+    var marks: usize = 0;
+    var waits: usize = 0;
+    for (r.tokens, 0..) |t, i| {
+        marks += @intFromBool(t != 0);
+        waits += @intFromBool(t > r.settled and p.refs[i] == 1 and p.leased[i] == 0);
+    }
+    for (r.marked.items, 0..) |id, i| if (r.tokens[id] == 0 or r.slots[id] != i) return false;
+    if (marks != r.marked.items.len or waits != kv.retirement.waiting(p)) return false;
     if (p.nfree < p.promised) return false;
     return free == p.nfree and
         leased == p.nleased and kept == p.nkept and alone == p.nreclaimable;
@@ -214,7 +222,7 @@ test "a share into an empty entry takes the store's page with nothing to give ba
 }
 
 test "a retire whose allocations fail changes nothing, at each of them, and its retry succeeds" {
-    for (0..3) |j| { // a fresh pool's first retire: the pending list's room, the tokens, the credit
+    for (0..5) |j| { // a fresh pool's first retire: the pending list's and marks' room, the slots, the tokens, the credit
         var fail = std.testing.FailingAllocator.init(testing.allocator, .{});
         var p = try kv.Pool.init(fail.allocator(), 2, 64);
         defer p.deinit();
