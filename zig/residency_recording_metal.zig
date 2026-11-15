@@ -21,6 +21,8 @@ pub const Library = real.Library;
 pub const CompileOptions = real.CompileOptions;
 pub const Event = real.Event;
 pub const SharedEvent = struct {
+    id: real.objc.Id = undefined,
+    pub fn deinit(_: @This()) void {}
     pub fn value(_: @This()) u64 {
         return std.math.maxInt(u64);
     }
@@ -72,6 +74,9 @@ pub const Record = struct {
     allocations: std.ArrayList(*Allocation) = .empty,
     active: bool = false,
     attached: bool = false,
+    queue_adds: usize = 0,
+    queue_removes: usize = 0,
+    residency_requests: usize = 0,
     commits: usize = 0,
     waits: usize = 0,
     queue_releases: usize = 0,
@@ -187,7 +192,9 @@ pub const ResidencySet = struct {
         };
         s.record.set_commits += 1;
     }
-    pub fn requestResidency(_: ResidencySet) void {}
+    pub fn requestResidency(s: ResidencySet) void {
+        s.record.residency_requests += 1;
+    }
     pub fn deinit(s: ResidencySet) void {
         for (s.record.allocations.items) |p| p.enrolled = false;
         s.record.active = false;
@@ -206,9 +213,11 @@ pub const Queue = struct {
         return q.commandBuffer();
     }
     pub fn addResidencySet(q: Queue, _: ResidencySet) void {
+        q.record.queue_adds += 1;
         q.record.attached = true;
     }
     pub fn removeResidencySet(q: Queue, _: ResidencySet) void {
+        q.record.queue_removes += 1;
         q.record.attached = false;
     }
 };
@@ -222,8 +231,8 @@ pub const CommandBuffer = struct {
     pub fn blit(c: CommandBuffer) BlitEncoder {
         return .{ .record = c.record };
     }
-    pub fn compute(_: CommandBuffer, _: DispatchType) ComputeEncoder {
-        return .{};
+    pub fn compute(_: CommandBuffer, mode: DispatchType) ComputeEncoder {
+        return .{ .mode = mode };
     }
     pub fn commit(c: CommandBuffer) void {
         c.record.commits += 1;
@@ -269,6 +278,10 @@ pub const BlitEncoder = struct {
 
 pub const ComputeEncoder = struct {
     id: objc.Id = @ptrFromInt(1),
+    mode: DispatchType = .serial,
+    pub fn dispatchType(e: @This()) DispatchType {
+        return e.mode;
+    }
     pub fn setPipeline(_: @This(), _: Pipeline) void {}
     pub fn setBuffer(_: @This(), _: Buffer, _: usize, _: usize) void {}
     pub fn setValue(_: @This(), _: anytype, _: usize) void {}

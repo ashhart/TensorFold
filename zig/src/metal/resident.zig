@@ -17,6 +17,8 @@ pub fn Owner(comptime Metal: type) type {
         mutex: std.Io.Mutex = .init,
         work: mtl.Queue,
         scratch: mtl.Buffer, // inside the set: the keepalive's tick copies 16 bytes within it
+        queue_attached: bool = true,
+        pub const HoldOptions = struct { queue_attach: bool = true };
 
         /// Hold the buffers on the queue, or log a refusal when they exceed the 70% limit.
         pub fn hold(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, work: mtl.Queue, buffers: []const mtl.Buffer, name: []const u8) !?Self {
@@ -25,6 +27,11 @@ pub fn Owner(comptime Metal: type) type {
 
         /// As hold, under a family's validated load limit when supplied, keeping the margin inside it.
         pub fn holdUnder(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, work: mtl.Queue, buffers: []const mtl.Buffer, name: []const u8, limit: ?u64) !?Self {
+            return holdUnderOptions(gpa, io, device, work, buffers, name, limit, .{});
+        }
+
+        /// Keep explicit requested residency and probe use independent of automatic queue attachment.
+        pub fn holdUnderOptions(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, work: mtl.Queue, buffers: []const mtl.Buffer, name: []const u8, limit: ?u64, options: HoldOptions) !?Self {
             const set = try device.residencySet(buffers.len + 1);
             errdefer set.deinit();
             const scratch = try device.buffer(64, mtl.ResourceOptions.shared);
@@ -36,11 +43,11 @@ pub fn Owner(comptime Metal: type) type {
             };
             errdefer held.deinit();
             set.requestResidency();
-            work.addResidencySet(set);
+            if (options.queue_attach) work.addResidencySet(set);
             if (limit) |n| {
                 std.log.info("{s}: {d:.1} GiB kept wired between requests, inside the {d:.1} GiB load limit", .{ name, mtl.ResidencySet.gibs(held.bytes), mtl.ResidencySet.gibs(@min(n, held.ram.?)) });
             } else std.log.info("{s}: {d:.1} GiB kept wired between requests, inside 70% of {d:.0} GiB of RAM", .{ name, mtl.ResidencySet.gibs(held.bytes), mtl.ResidencySet.gibs(held.ram.?) });
-            return .{ .held = held, .io = io, .work = work, .scratch = scratch };
+            return .{ .held = held, .io = io, .work = work, .scratch = scratch, .queue_attached = options.queue_attach };
         }
 
         /// Buffers made after the set join it at the next flush, if they fit beside what it holds; else they stay out.
@@ -111,7 +118,7 @@ pub fn Owner(comptime Metal: type) type {
         pub fn deinit(r: *Self) void {
             r.mutex.lockUncancelable(r.io);
             defer r.mutex.unlock(r.io);
-            r.work.removeResidencySet(r.held.set);
+            if (r.queue_attached) r.work.removeResidencySet(r.held.set);
             r.held.deinit();
             r.held.set.deinit();
             r.scratch.deinit();
