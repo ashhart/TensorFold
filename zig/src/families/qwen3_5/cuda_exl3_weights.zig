@@ -138,7 +138,7 @@ fn dense(s: *Sink, kit: ?*Kit, ck: *core.Checkpoint, prefix: []const u8, mod: []
         .k = @intCast(k),
         .n = @intCast(n),
         .halves = gr.halves,
-        .codebook = .mul1,
+        .codebook = gr.codebook,
         .stride_k = st.k,
         .stride_nb = st.nb,
     };
@@ -180,6 +180,7 @@ fn experts(s: *Sink, ck: *core.Checkpoint, p: []const u8) !cuda.experts.Layer {
     var suh: [3]u64 = undefined;
     var svh: [3]u64 = undefined;
     var buf: [200]u8 = undefined;
+    var expert_cb: ?cuda.exl3.Codebook = null;
     for (mods, 0..) |mod, m| {
         const k = if (m == 2) g.intermediate else g.hidden;
         const n = if (m == 2) g.hidden else g.intermediate;
@@ -194,6 +195,11 @@ fn experts(s: *Sink, ck: *core.Checkpoint, p: []const u8) !cuda.experts.Layer {
         for (0..count) |e| {
             const base = if (e < g.experts) try name(&buf, "{s}mlp.experts.{d}.{s}", .{ p, e, mod }) else try name(&buf, "{s}mlp.shared_expert.{s}", .{ p, mod });
             const gr = try group(ck, base, n, k);
+            if (expert_cb) |ecb| {
+                if (ecb != gr.codebook) return error.UnsupportedQwenQuantization;
+            } else {
+                expert_cb = gr.codebook;
+            }
             tp[e] = try s.put(gr.trellis.bytes);
             widths[e] = @intCast(gr.halves);
             @memcpy(su[e * k * 2 ..][0 .. k * 2], gr.suh.bytes);
@@ -220,7 +226,7 @@ fn experts(s: *Sink, ck: *core.Checkpoint, p: []const u8) !cuda.experts.Layer {
         .experts = count,
         .dims = g.hidden,
         .width = g.intermediate,
-        .codebook = .mul1,
+        .codebook = expert_cb orelse return error.UnsupportedQwenQuantization,
         .limit = 0, // Qwen's SwiGLU is unclamped
         .act_mode = 1, // fp32 silu(gate) * up
     };
