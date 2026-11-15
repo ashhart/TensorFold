@@ -4,6 +4,40 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- The core host KV tier rejects zero page bytes, partial host pages, zero frames and zero logical pages before allocating (#1501). Thanks to @BlivionIaG.
+
+- Flash Next's opt-in EXL3 host K/V tier admits the bounded device working set, frees the pinned store on failed kernel load, refuses non-EXL3 scratch before allocation, takes TP rank from its collective and rejects snapshot restoration while another lease pins its pages. The lane host's single ledger uses the active pool directly, without copying ownership. Grouped MTP heads retain their stream's tier selection, so their progress releases completed frames across rounds and tier restores (#1522). Thanks to @BlivionIaG.
+
+- Tests: Flash Next covers host-tier media's full page-plane ABI, missing-kernel refusal and learning-format diagnostic agreement (#1522). Thanks to @BlivionIaG.
+
+- EXL3 attention and MTP caches can use the existing core K/V page pool through opt-in `TF_FLASHNEXT_KV_PAGES`; paging remains off by default. TP ranks agree their state-run size before planning the pool, so a rank without the MTP head does not underallocate pages (#1444).
+
+- EXL3 prefill and profiling use registered settings and propagate malformed-value refusals. Unset row budgets remain 8192 general / 4096 server; kept prompt states now resume at any row without a chunk-grid restriction (#1443). Thanks to @BlivionIaG.
+
+- EXL3 deep prefill uses decode-exact prompt tiles and canonical float64 partials with one final float32 rounding, including empty-sibling zero signs. One rank reuses the root kernel and branch buffer without allocating a partial-gather region; TP reduction probes run under `test-flashnext-contract-host` (#1443). Thanks to @BlivionIaG.
+
+- CUDA EXL3 Flash Next: expert-parallel TP=2 with the same tokens as TP=1, and MTP drafts (#1442). Thanks to @BlivionIaG.
+
+- Tests: video budgets again cover the common valid-setting matrix and reject storage-maximum advice in refusals (#1441). Thanks to @BlivionIaG.
+
+- CUDA tests: Flash Next's real-weight EXL3 layer oracle attaches its expert pool before executing the family pass (#1441). Thanks to @BlivionIaG.
+
+- CUDA resource checks use measured NVCC 13.4 register counts for paged Flash Next preparation, retaining earlier compiler receipts and unchanged launch bounds (#1441).
+
+- EXL3's mapped n-gram table participates in upstream's opt-in read-ahead once per file, and teardown joins the worker before unmapping (#1441).
+
+- Flash Next's first CUDA EXL3 slice uses float64 expert leaves, fixed-tree merges and transported partials, rounding once to float32 at the root so cancellation does not lose low-order terms and tensor parallelism preserves the one-rank result (#1441, #1442). Other formats and checkpoint BF16 state boundaries are unchanged. Thanks to @BlivionIaG.
+
+- Flash Next's EXL3 integration keeps the existing ModelOpt rank scratch and split-head snapshot geometry (#1441). Its configured prompt cut stays fixed when main widens a one-stream ModelOpt pass, preserving stream-independent EXL3 arithmetic.
+
+- Canonical EXL3 expert reductions retain empty-sibling additions, so underflowed negative-zero outputs do not differ between one and two ranks (#1441).
+
+- Flash Next CUDA avoids invalid whole-pass graph capture when EXL3 expert pools need host planning; resident experts and rollback retain their graphs (#1441). Thanks to @BlivionIaG.
+
+- CUDA startup refuses a malformed Flash Next EXL3 setting (the `TF_FLASHNEXT_*` pool, profile, telemetry, placement and snapshot switches), `TF_FLASHNEXT_CHUNK`, `TF_FLASHNEXT_CHUNK_SOLO` or `TENSORFOLD_MEMORY_RESERVE_GIB`, naming the variable and its accepted forms, from the central environment table; a blank value is unset, and every documented value keeps its meaning (#1441).
+
+- The CPU-only server build shares its existing core module with the server adapter, resolving the slide-model import after integration (#1441).
+
 - DeepSeek V4.1 on Metal: on M5 GPUs (generation 17, macOS 27) the prompt's routed experts run on the tensor units, with every output bit-equal to the decode kernels as before. A 32-wide group of products goes to the tensor unit only when no fp32 sum of it can round; the few other groups take the decode kernels' fmas. On an M5 Ultra, a 4096-row chunk of a layer spends 23.5 ms instead of 45.2 ms in gate/up and 13.2 ms instead of 21.8 ms in down, and the layer takes 155 ms instead of 185 ms. Other Macs keep the simdgroup kernels (#3330).
 
 - DeepSeek-V4.1 on Metal: the dense FP8 prompt projections take 14 to 19% less time on an M5 Ultra, and every output bit is unchanged. Each threadgroup now stages two K groups between barriers, keeps the first three levels of the group sum tree in registers, and skips the zero groups that pad K to a power of two. A 4096-row prompt chunk of release layer 2 drops from 185 to 175 ms (#3322).

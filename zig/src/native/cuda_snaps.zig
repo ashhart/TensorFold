@@ -20,7 +20,7 @@ pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     return rules;
 }
 
-/// Native CUDA families own their grid, independently of the server's template chunk starts.
+/// Keep each native family's cache restrictions and the loaded prompt pass size.
 pub fn passRules(comptime F: type, prompt_rows: u32) api.prompt_cache.Rules {
     var rules = cacheRules(F);
     rules.chunk = prompt_rows;
@@ -245,4 +245,30 @@ test "request starts: opt in is explicit, eligible and independent of cache rule
     _ = requestStepFor(Qwen, "1");
     try std.testing.expectEqualDeep(before, cacheRules(Qwen));
     try std.testing.expectEqual(@import("profile").Class.arithmetic, @import("profile").entry(.TF_QWEN_REQUEST_STARTS).class);
+}
+
+test "Flash Next's cache can keep a history mark between prefill chunk starts" {
+    const Exl3 = struct {};
+    const Stub = struct {
+        fn bytes(_: *anyopaque, _: u32) u64 {
+            return 0;
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!api.prompt_cache.Saved {
+            return error.Unused;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) anyerror!void {}
+        fn drop(_: *anyopaque, _: api.prompt_cache.Saved) void {}
+    };
+    var unused: u8 = 0;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const prompt = try arena.allocator().alloc(u32, 12780);
+    for (prompt, 0..) |*t, i| t.* = @intCast(i);
+    const vtable: api.prompt_cache.Snapshots.VTable = .{ .bytes = Stub.bytes, .save = Stub.save, .restore = Stub.restore, .drop = Stub.drop };
+    const copies: api.prompt_cache.Snapshots = .{ .ptr = &unused, .vtable = &vtable };
+    // any row: the history mark cuts the cold pass's last chunk to 7 rows, a different kernel path than the fresh pass
+    var any = api.prompt_cache.Store.init(std.testing.allocator, copies, passRules(Exl3, 4096), 1 << 30);
+    defer any.deinit();
+    const loose = try any.marks(arena.allocator(), prompt, 0, 12773, &.{}, &.{}, &.{});
+    try std.testing.expect(std.mem.indexOfScalar(u32, loose, 12773) != null);
 }
