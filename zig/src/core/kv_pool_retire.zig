@@ -14,8 +14,9 @@ pub const Credit = struct { token: u64, lease: *Lease };
 pub const Retired = struct {
     /// A page's last reader's token, 0 for none; allocated at the pool's first retire.
     tokens: []u64 = &.{},
-    /// Pages whose token is not 0.
-    ntokens: usize = 0,
+    /// Pages whose token is not 0, and each one's place in this list (`slots[id]`).
+    marked: std.ArrayList(u32) = .empty,
+    slots: []u32 = &.{},
     /// Every reader up to this token is done.
     settled: u64 = 0,
     /// Pages nobody holds whose readers are not done (room for every page, from the first retire).
@@ -24,6 +25,8 @@ pub const Retired = struct {
 
     pub fn deinit(r: *Retired, gpa: std.mem.Allocator) void {
         gpa.free(r.tokens);
+        gpa.free(r.slots);
+        r.marked.deinit(gpa);
         r.pending.deinit(gpa);
         r.credits.deinit(gpa);
     }
@@ -34,15 +37,22 @@ pub fn retire(p: *Pool, l: *Lease, i: usize, token: u64) error{OutOfMemory}!void
     const r = &p.retired;
     const id = l.ids.items[i];
     if (id == none) std.debug.panic("kv pool: lease entry {d} retired twice", .{i});
-    if (r.tokens.len == 0) { // the pool's first retire: room for a token and a pending slot a page
+    if (r.tokens.len == 0) { // the pool's first retire: room for a token, a mark and a pending slot a page
         try r.pending.ensureTotalCapacity(p.gpa, p.total());
+        try r.marked.ensureTotalCapacity(p.gpa, p.total());
+        const slots = try p.gpa.alloc(u32, p.total());
+        errdefer p.gpa.free(slots);
         r.tokens = try p.gpa.alloc(u64, p.total());
         @memset(r.tokens, 0);
+        r.slots = slots;
     }
     try r.credits.ensureUnusedCapacity(p.gpa, 1);
     p.enter();
     defer p.leave();
-    if (r.tokens[id] == 0) r.ntokens += 1;
+    if (r.tokens[id] == 0) {
+        r.slots[id] = @intCast(r.marked.items.len);
+        r.marked.appendAssumeCapacity(id);
+    }
     r.tokens[id] = @max(r.tokens[id], token);
     l.ids.items[i] = none;
     p.unlease(id);
@@ -51,12 +61,12 @@ pub fn retire(p: *Pool, l: *Lease, i: usize, token: u64) error{OutOfMemory}!void
 
 /// Whether page `id` carries a retired page's token: not free to take, even when nobody holds it.
 pub fn held(p: *const Pool, id: usize) bool {
-    return p.retired.ntokens > 0 and p.retired.tokens[id] != 0;
+    return p.retired.marked.items.len > 0 and p.retired.tokens[id] != 0;
 }
 
 /// Whether any page of [start, start + k) carries a token.
 pub fn anyHeld(p: *const Pool, start: usize, k: usize) bool {
-    if (p.retired.ntokens == 0) return false;
+    if (p.retired.marked.items.len == 0) return false;
     for (start..start + k) |i| if (p.retired.tokens[i] != 0) return true;
     return false;
 }
@@ -69,7 +79,7 @@ pub fn idle(p: *const Pool) bool {
 /// A page nobody holds: free when its readers are done, else pending until `settle` passes its token.
 pub fn freeOrPend(p: *Pool, id: u32) void {
     const r = &p.retired;
-    if (r.ntokens > 0 and r.tokens[id] > r.settled) return r.pending.appendAssumeCapacity(id); // room: one a page
+    if (r.marked.items.len > 0 and r.tokens[id] > r.settled) return r.pending.appendAssumeCapacity(id); // room: one a page
     clear(p, id);
     p.free[p.nfree] = id;
     p.nfree += 1;
@@ -101,17 +111,20 @@ pub fn settle(p: *Pool, token: u64) error{LaneMemory}!void {
 
 fn clear(p: *Pool, id: u32) void {
     const r = &p.retired;
-    if (r.ntokens == 0 or r.tokens[id] == 0) return;
-    r.ntokens -= 1;
+    if (r.tokens.len == 0 or r.tokens[id] == 0) return;
     r.tokens[id] = 0;
+    const last = r.marked.pop().?;
+    if (last != id) {
+        r.marked.items[r.slots[id]] = last;
+        r.slots[last] = r.slots[id];
+    }
 }
 
 /// Pages the store alone holds whose readers are not done: reclaiming them frees nothing until `settle`.
 pub fn waiting(p: *const Pool) usize {
     const r = &p.retired;
-    if (r.ntokens == 0) return 0;
     var n: usize = 0;
-    for (r.tokens, p.refs, p.leased) |t, refs, l| n += @intFromBool(t > r.settled and refs == 1 and l == 0);
+    for (r.marked.items) |id| n += @intFromBool(r.tokens[id] > r.settled and p.refs[id] == 1 and p.leased[id] == 0);
     return n;
 }
 
