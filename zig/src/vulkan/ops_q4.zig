@@ -123,7 +123,7 @@ pub fn projectTiled(o: *Ops, cmds: *Commands, out: View, x: View, w: View, scale
     };
     try pipe.bind(&.{ x.bind(), w.bind(), scales.bind(), biases.bind(), out.bind() });
     const p = try q4Push(g.m, g.n, k);
-    // qmm_q4_tile and qmm_q4_tile_f32 run one workgroup per (row, 32-column tile); qmm_q4_tile_rows runs 16 threads a tile.
+    // qmm_q4_tile and qmm_q4_tile_f32 run a workgroup per (row, 32-column tile); qmm_q4_tile_rows 16 threads a tile.
     const threads = if (image == .tile_rows)
         try ops_mod.cast32((g.m + tile_rows - 1) / tile_rows * ((g.n + 31) / 32 * 16))
     else
