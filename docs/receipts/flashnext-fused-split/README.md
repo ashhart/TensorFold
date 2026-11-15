@@ -7,10 +7,13 @@ cluster's slice order, so the outputs keep the cluster kernel's bits. The server
 
 ## Source and environment
 
-- Main: `41a72fd2578dfbdd73b25663da78d5fc0047bd95`.
+- Main: `41a72fd2578dfbdd73b25663da78d5fc0047bd95`, the base every speed, prompt and exactness arm below ran on.
 - Branch: commit `4df765a1c806158f40bdc3a57c0036fe2048bb2d`, that main plus this pull request's four commits before
-  this receipt (the change, the earlier receipt, the contract's launch records and the host-test step). The pull
-  request's head adds one commit after it, with this receipt and the changelog line; it changes no source file.
+  this receipt (the change, the earlier receipt, the contract's launch records and the host-test step).
+- Main has since moved to `964174ea05879e6dde1de1198a3aae3ef8b46a3b`, which the branch merges at `120123a6c4`. Its 29
+  files are DeepSeek-V4.1 and Qwen3.8-27B on Metal, their records and their tests, and none is a file this change
+  touches, so the files the arms measured are byte-identical at that merge and the arms describe it too. The five-SM
+  limits run below was built from `120123a6c4`.
 - Both images were built the same way from their own commit: `zig build -Dnvcc=/usr/local/cuda/bin/nvcc
   -Doptimize=fast fatbins install native` in `nvcr.io/nvidia/pytorch:26.07-py3` (nvcc 13.3, V13.3.73), Zig 0.17.0.
 - One NVIDIA GB10 (sm_121), driver 580.178.04, Ubuntu 24.04.5 LTS, Linux 7.0.0-1019-nvidia-64k, 128 GB of unified
@@ -130,9 +133,18 @@ The eight launch records (`zig/src/core/contract/lane_fused_records.zig`) hold n
 and bounds for sm_80, sm_86, sm_89, sm_120 and sm_121, read from a five-SM `qmmf` fatbin with the contract's own cubin
 reader, as the commit that added them says.
 
+`tf-cuda-test kernel-contract-limits` over a five-SM fatbin set (`zig build -Dnvcc=/usr/local/cuda/bin/nvcc
+-Doptimize=fast -Dsm=80,86,89,120,121 fatbins kernel-contract-fatbins install`, nvcc 13.3.73, 149 images) on
+`120123a6c4` (`limits.txt`) prints `INFO limits fatbins: images built by nvcc 13.3, checked against nvcc 13.3's
+records`; 5,345 of its per-SM checks pass, 2,567 are below the chip's minimum, both planted controls go red on all five
+SMs, and the run ends `FAIL kernel-contract-limits: 834 problems`, exit 1. Every problem is a registered launch whose
+nvcc 13.0 record differs from what nvcc 13.3 compiles, an inherited record of another launch: in this image the
+128x128 prompt tiles and the shared-down half-tile launches. None is one of this change's eight, which report `record
+current` on all five SMs, and none is a 64-row fused instance, the form a row-tile-64 call of this setting takes.
+
 ## Not established
 
 GB10 only. sm_80, sm_86 and sm_89 have no clusters, so their plans never take the fused form, and sm_120 was not run.
-`tf-cuda-test kernel-contract-limits` over a full five-SM fatbin set was started for this receipt and stopped before it
-finished, so the records are not checked that way here. Metal and HIP refusing `1` is covered by host tests, not run on
-that hardware.
+The limits run above re-derives this change's records on every SM it serves; the stale nvcc 13.0 records of other
+launches are that run's 834 problems and are not this change's. Metal and HIP refusing `1` is covered by host tests,
+not run on that hardware.
