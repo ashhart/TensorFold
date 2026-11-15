@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- HIP on gfx1151: a plain prompt of 1 or 2 rows takes the 2-row K-parallel tile, with byte-identical output (#3273). Thanks to @AbrahamCete.
+
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 - Metal: Baidu's Unlimited-OCR-2 is served natively from its BF16 release on M5-class Macs: page images through `serve --vision`, the family's chat template built in, its SAM and CLIP image encoders and decoder under the kernel contract; on five reference pages every departure from the release's own reply is a one-step tie (#2074). Thanks to @BobClawblaw.
 - Unlimited-OCR-2 on native Metal (M5 GPUs): Baidu's BF16 release as published serves page images through
