@@ -64,10 +64,23 @@ function main() {
     const probe = (script: string, file: string) => spawnSync(spec.command, [
       ...spec.args.slice(0, 2), '/bin/sh', '-c', script, 'fixture', file,
     ], options)
-    assert.equal(probe('cat "$1"', resource).stdout, 'bundle resource')
-    assert.notEqual(probe('cat "$1"', unrelated).status, 0, 'other application bundles remain unreadable')
-    assert.notEqual(probe('printf changed > "$1"', resource).status, 0, 'the selected bundle remains read-only')
+    const assertDenied = (result: ReturnType<typeof probe>, message: string) => {
+      assert.ifError(result.error)
+      assert.equal(result.signal, null, message)
+      assert.ok(result.status !== null && result.status !== 0, message)
+      assert.match(result.stderr, /Operation not permitted|Permission denied/, message)
+    }
+    const read = probe('cat "$1"', resource)
+    assert.equal(read.status, 0, read.stderr)
+    assert.equal(read.stdout, 'bundle resource')
+    assertDenied(probe('cat "$1"', unrelated), 'other application bundles remain unreadable')
+    assertDenied(probe('printf changed > "$1"', resource), 'the selected bundle remains read-only')
     assert.equal(readFileSync(resource, 'utf8'), 'bundle resource')
+    const argumentOnly = mcpSpawnSpec(createMcpServer({ command: '/bin/echo', args: [binary], cwd }))
+    const argumentRead = spawnSync(argumentOnly.command, [
+      ...argumentOnly.args.slice(0, 2), '/bin/cat', resource,
+    ], options)
+    assertDenied(argumentRead, 'passing a bundle path as an argument does not grant access to its Contents')
     console.log('MCP app bundle: framework loading, spaced arguments and sandbox boundaries passed')
   } finally {
     rmSync(root, { recursive: true, force: true })
