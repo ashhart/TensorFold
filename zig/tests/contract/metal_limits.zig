@@ -58,6 +58,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "metal flashnext tp ")) {
+        if (!assemble) return undefined;
+        const pair_source = tf.flashnext_replay.Tp2.shader;
+        return .{ .decl = d, .function = fun, .here = pair_source, .pre_m5 = pair_source };
+    }
     if (std.mem.eql(u8, d.name, "contract masked values tf_masked_control")) {
         if (!assemble) return undefined;
         const control_text = @import("masked_value_probe.zig").control_source;
