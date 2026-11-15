@@ -327,7 +327,7 @@ pub const Drafter = struct {
         const hid = x.m.geo.hidden;
         for (0..steps) |step| {
             if (step > 0) try x.nextIds(step - 1, rows);
-            try x.k.embed.affine(x.s, s.ids, x.m.w.embed_w, x.m.w.embed_s, x.m.w.embed_b, s.e, rows, hid, .{ .bits = @intCast(x.m.w.embed_bits), .group = cfg.group, .scale = fwd.embedScale(hid) });
+            try x.m.w.embed(&x.k.embed, x.s, s.ids, s.e, rows, fwd.embedScale(hid));
             try x.copy2d(s.cat, 4 * hid, s.e, 2 * hid, 2 * hid, rows);
             try x.copy2d(s.cat + 2 * hid, 4 * hid, s.hin, 2 * hid, 2 * hid, rows);
             try x.k.act.groupSums(x.s, s.cat, 2 * hid, s.xs, rows, 2 * hid);

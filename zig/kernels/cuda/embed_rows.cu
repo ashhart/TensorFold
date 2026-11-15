@@ -69,3 +69,13 @@ extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_affine(const int*
                                                                       int group, float scale) {
     tf_embed_affine::rows(ids, w, s, b, out, d, bits, group, scale, tf_embed_affine::ROUND);
 }
+
+// tf_embed_rows_affine's 4-bit rows (groups of 64) from a tied head's affine-4 tiles: one table serves both.
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_tiles4(const int* __restrict__ ids,
+                                                                      const uint32_t* __restrict__ w,
+                                                                      const __nv_bfloat16* __restrict__ s,
+                                                                      const __nv_bfloat16* __restrict__ b,
+                                                                      __nv_bfloat16* __restrict__ out, int d, int npad,
+                                                                      float scale) {
+    tf_embed_affine::tile4_rows(ids, w, s, b, out, d, npad, scale, tf_embed_affine::ROUND);
+}
