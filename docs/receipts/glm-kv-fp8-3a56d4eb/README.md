@@ -96,7 +96,9 @@ the BF16 launches an hour before the FP8 ones.
 | Row | BF16 cache | FP8 cache |
 | --- | --- | --- |
 | Cache at a 131,072-token window, 4 streams (`sp-*` startup line) | 1,028 pages of 512 rows, 6.40 GiB, as streams need them | 1.08 GiB a stream, whole windows (`TF_KV_PAGES` keeps FP8 off pages) |
-| Bytes a token on each rank | 13,056 (the recipe's) | about 8,850 (−32%) |
+| Cache bytes a token on each rank, 12 latent caches (`cacheBytes` in `cuda_latent.zig`) | 13,056 = 12 × (1,024 latent + 64 index), the recipe's | 6,960 = 12 × (512 codes + 4 scale + 64 index) (−47%); the startup line gives (1.08 GiB − 231 MiB) / 131,072 ≈ 7,000 |
+| Fixed state a stream, whatever its length | 231 MiB (startup line) | the same buffers |
+| A whole stream at a 131,072-token window | about 1.82 GiB | 1.08 GiB (−41%) |
 | `"draft": false` decode, fibonacci-raw / gpu-chat-no-think (tok/s) | 23.9 / 23.9 | 23.5 / 23.6 |
 | Drafted decode, greedy (tok/s) | 42.3 / 34.4 | 44.7 / 36.5 (different replies, so different drafts) |
 | Cold prompt of 8,192 / 32,768 / 65,536 tokens (s) | 5.69 / 22.88 / 45.84 | 5.99 / 23.59 / 47.27 (3 to 5% slower) |
