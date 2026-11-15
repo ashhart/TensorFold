@@ -22,7 +22,7 @@ const R = pipelines.max_rows;
 pub const Model = struct { top: *const weights.Top, layers: []const weights.Layer };
 
 /// Where Engram rows come from: the family's hashes over the token history, then a row source (null: index rows).
-pub const Lookup = struct { a: std.mem.Allocator, host: *const host.engram_host.Host, source: ?host.engram_host.Source };
+pub const Lookup = struct { a: std.mem.Allocator, host: *const host.engram_host.Host, source: ?host.engram_host.Source, stats: ?*const host.engram_rows.Stats = null };
 
 /// The Engram call of a launch's rows: hash columns of 256 values in, a key per stream and one value out.
 pub fn engramCall(c: *const Config, rows: u32) eng.Call {

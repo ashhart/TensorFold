@@ -207,7 +207,7 @@ pub const Boot = struct {
         const cap = try environment.read(u32, "TF_DSV41_ENGRAM_CACHE", 65536);
         b.rows = try er.Rows.open(b.a, rows_dir, 0, 1, b.eng.layer_ids, cap);
         std.log.info("dsv41 metal: Engram rows from {s} ({d} records a layer cached)", .{ rows_dir, cap });
-        return .{ .a = b.a, .host = &b.eng, .source = b.rows.?.source() };
+        return .{ .a = b.a, .host = &b.eng, .source = b.rows.?.source(), .stats = &b.rows.?.stats };
     }
 
     /// The row shards' folder: the option, TF_DSV41_ENGRAM_DIR, else engram_table_dir (relative to the checkpoint).
