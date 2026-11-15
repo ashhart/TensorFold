@@ -222,6 +222,8 @@ pub const Info = struct {
     prompt_cache_plan: ?PromptCachePlan = null,
     /// --decode-share: the reply's share of a fill step's wall time beside live decoders; null: the engine's default.
     decode_share: ?f64 = null,
+    /// engine-level default for --decode-share: the flag wins, the env's TENSORFOLD_PREFILL_SHARE wins over it (and never opts into the chunk cap), other backends pass null.
+    default_decode_share: ?f64 = null,
     /// The engine scores decisions (`score`) and writes no text: the server refuses text requests.
     decides: bool = false,
     /// The engine is a reranker (it scores through `score`): the server answers POST /v1/rerank only when set.
