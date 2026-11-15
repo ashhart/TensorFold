@@ -255,7 +255,7 @@ pub fn pairSend(pr: *const Pair, m: *Model, s: *Seg, i: usize) void {
         ws[n] = .{ .src = bytesOf(s.p.b.cin) + s.rows * WIDE * 2, .len = PLE_TAIL * WIDE * 2, .dst = tpm.TAIL };
         n += 1;
     }
-    pr.tp.send(s.p.r.enc, ws[0..n], tpm.LAYER_FLAG + 8 * i, pr.call);
+    pr.tp.send(&s.p.r.enc, ws[0..n], tpm.LAYER_FLAG + 8 * i, pr.call);
 }
 
 pub fn pairTake(pr: *const Pair, m: *Model, s: *Seg, i: usize) void {
@@ -263,18 +263,19 @@ pub fn pairTake(pr: *const Pair, m: *Model, s: *Seg, i: usize) void {
     const w = pr.tp.window();
     const slot = tpm.layerSlot(i);
     const p = s.p;
-    pr.tp.waitWord(p.r.enc, tpm.LAYER_FLAG + 8 * i, pr.call);
+    pr.tp.waitWord(&p.r.enc, tpm.LAYER_FLAG + 8 * i, pr.call);
     if (L.linear) {
-        p.copyWords(.{ .b = w, .off = slot }, L.cs[1 - pr.a], CS_ROW / 4);
-        p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[1 - pr.a], SO_ROW / 4);
+        pr.tp.copyPeer(p.r.enc, .{ .b = w, .off = slot }, L.cs[1 - pr.a], CS_ROW / 4);
+        pr.tp.copyPeer(p.r.enc, .{ .b = w, .off = slot + CS_ROW }, L.so[1 - pr.a], SO_ROW / 4);
     } else {
         for (0..2) |hd| {
-            p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
-            p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
+            pr.tp.copyPeer(p.r.enc, .{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
+            pr.tp.copyPeer(p.r.enc, .{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
         }
-        p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pr.pos0 * 256 }, pr.rows0 * 64);
+        pr.tp.copyPeer(p.r.enc, .{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pr.pos0 * 256 }, pr.rows0 * 64);
     }
-    if (i == 1) p.copyWords(.{ .b = w, .off = tpm.TAIL }, p.b.cin, PLE_TAIL * WIDE * 2 / 4);
+    if (i == 1) pr.tp.copyPeer(p.r.enc, .{ .b = w, .off = tpm.TAIL }, p.b.cin, PLE_TAIL * WIDE * 2 / 4);
+    p.barrier();
 }
 
 pub const Hooks = struct {
@@ -317,12 +318,14 @@ pub const Hooks = struct {
         const s = h.at(l);
         if (h.pair) |pr| if (pr.k == 1 and i == 1) pairTake(pr, h.m, s, i);
         try segPre(s, h.m, i);
+        l.enc = s.p.r.enc;
     }
     pub fn mixer(h: *Hooks, l: *segments.Lane, i: usize) !void {
         const s = h.at(l);
         if (h.pair) |pr| if (pr.k == 1 and i != 1) pairTake(pr, h.m, s, i);
         try segMixer(s, h.m, i);
         if (h.pair) |pr| if (pr.k == 0) pairSend(pr, h.m, s, i);
+        l.enc = s.p.r.enc;
     }
     pub fn post(h: *Hooks, l: *segments.Lane, i: usize) !void {
         try segPost(h.at(l), h.m, i);
@@ -339,7 +342,10 @@ pub const Hooks = struct {
         s.cur = 1 - s.cur;
         p.last = b.h[s.cur];
         if (l.k + 1 < h.segs.len) return;
-        if (h.pair) |pr| if (pr.k == 0) return; // the peer's segment ends the chunk: it runs the head
+        if (h.pair) |pr| if (pr.k == 0) {
+            try pr.tp.prepareSubmit();
+            return; // the peer's segment ends the chunk: it runs the head
+        };
         m.last = p.last;
         p.hc(m, b.h[s.cur], m.mix, s.rows, b.inj_a);
         r.rows = 1;
@@ -350,5 +356,6 @@ pub const Hooks = struct {
         r.enc.setBuffer(t.picks.b, 0, 1);
         r.enc.setBuffer(t.vocab.b, 0, 2);
         r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
+        if (h.pair) |pr| try pr.tp.prepareSubmit();
     }
 };

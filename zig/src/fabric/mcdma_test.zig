@@ -343,8 +343,51 @@ test "write2Signal refuses a bad flag before posting anything, over ConnectX as 
         try std.testing.expectEqual(@as(usize, 0), Fake.n); // nothing posted, and nothing pending to flush
         @memset(ep.memory[8192..][0..11], 0);
         try std.testing.expectError(error.Unaligned, r.write2Signal(0, 8192, "head!", "body..", 20, 9));
-        try std.testing.expect(std.mem.allEqual(u8, ep.memory[8192..][0..11], 0)); // nothing written to the local window
+        try std.testing.expect(std.mem.allEqual(u8, ep.memory[8192..][0..11], 0)); // local bytes stay unchanged
     }
+}
+
+test "an expired send deadline refuses payload and signal-only posts before calling the library" {
+    for ([_]c_int{ roce, abi.thunderbolt }) |link| {
+        Fake.reset(link);
+        const ep = try Fake.endpoint(Fake.cx);
+        defer ep.deinit();
+        const expired = try words.checkedNowNs();
+        try std.testing.expectError(error.Timeout, ep.writeSignalFromUntil(1, 1024, 2048, 64, 24, 3, expired));
+        try std.testing.expectError(error.Timeout, ep.writeSignalFromUntil(1, 0, 0, 0, 32, 4, expired));
+        try std.testing.expectEqual(@as(usize, 0), Fake.n);
+        try std.testing.expect(!ep.ports[0].pending);
+    }
+}
+
+test "a bounded peer flush retires a signal-only post only after native success" {
+    Fake.reset(abi.thunderbolt);
+    const ep = try Fake.endpoint(Fake.cx);
+    defer ep.deinit();
+    const budget = 500 * std.time.ns_per_ms;
+
+    var deadline = (try words.checkedNowNs()) + budget;
+    try ep.writeSignalFromUntil(1, 0, 0, 0, 32, 4, deadline);
+    try std.testing.expectEqualDeep(Fake.Call{ .signal = .{ 32, 4 } }, Fake.calls[0]);
+    try std.testing.expect(ep.ports[0].pending);
+    try std.testing.expectError(error.Timeout, ep.flushPeerUntil(1, try words.checkedNowNs()));
+    try std.testing.expectEqual(@as(usize, 1), Fake.n);
+    try std.testing.expect(ep.ports[0].pending);
+
+    try ep.flushPeerUntil(1, deadline);
+    try std.testing.expectEqual(@as(usize, 2), Fake.n);
+    try std.testing.expect(Fake.calls[1] == .flush);
+    try std.testing.expect(Fake.calls[1].flush > 0 and Fake.calls[1].flush <= budget);
+    try std.testing.expect(!ep.ports[0].pending);
+
+    deadline = (try words.checkedNowNs()) + budget;
+    try ep.writeSignalFromUntil(1, 1024, 2048, 64, 24, 5, deadline);
+    Fake.flush_status = 6;
+    try std.testing.expectError(error.Timeout, ep.flushPeerUntil(1, deadline));
+    try std.testing.expectEqual(@as(usize, 4), Fake.n);
+    try std.testing.expect(Fake.calls[3] == .flush);
+    try std.testing.expect(Fake.calls[3].flush > 0 and Fake.calls[3].flush <= budget);
+    try std.testing.expect(ep.ports[0].pending);
 }
 
 test "one endpoint with a Thunderbolt peer and a ConnectX peer picks each port's path and kind" {

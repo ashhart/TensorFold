@@ -26,6 +26,43 @@ pub const kv_pool = @import("src/core/kv_pool.zig");
 pub const metal_kv_pages = @import("src/core/metal_kv_pages.zig");
 const a = std.testing.allocator;
 
+test "residency owner can request and probe residency without ever attaching the queue" {
+    for ([_]bool{ false, true }) |queue_attach| {
+        var record: mtl.Record = .{ .gpa = a };
+        defer record.deinit();
+        {
+            const device = record.device();
+            const buffer = try device.buffer(64, mtl.ResourceOptions.shared);
+            defer buffer.deinit();
+            var owner = (try mtl.resident.Resident.holdUnderOptions(a, std.testing.io, device, record.queue(), &.{buffer}, "queue policy", null, .{ .queue_attach = queue_attach })).?;
+            defer owner.deinit();
+            try std.testing.expectEqual(queue_attach, owner.queue_attached);
+            try std.testing.expectEqual(queue_attach, record.attached);
+            try std.testing.expectEqual(@as(usize, if (queue_attach) 1 else 0), record.queue_adds);
+            try std.testing.expectEqual(@as(usize, 0), record.queue_removes);
+            try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
+            try record.checkInitial();
+            try record.check();
+            var target = owner.target();
+            target.probe().wait();
+            try std.testing.expectEqual(@as(usize, 1), record.uses);
+            try std.testing.expectEqual(@as(usize, 1), record.copies);
+            const lazy = try device.buffer(128, mtl.ResourceOptions.shared);
+            const follow = owner.follow();
+            follow.join(follow.ctx, lazy);
+            owner.held.flush();
+            try record.check();
+            follow.leave(follow.ctx, lazy);
+            lazy.deinit();
+            try record.check();
+        }
+        try record.allFreed();
+        try std.testing.expectEqual(@as(usize, if (queue_attach) 1 else 0), record.queue_adds);
+        try std.testing.expectEqual(@as(usize, if (queue_attach) 1 else 0), record.queue_removes);
+        try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
+    }
+}
+
 test "residency owner GLM: actual arena slots tower and snapshots match live unique allocations" {
     if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
     for ([_]bool{ false, true }) |images| {

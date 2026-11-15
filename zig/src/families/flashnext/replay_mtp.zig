@@ -160,7 +160,7 @@ pub fn mtpLayer(m: *Model, sl: *Slot, rows: usize, ids: Buf, streams: Buf, out: 
         r.denseTiles(x, D, six, h.logits, t0, tn);
         const lo = @min(t0 * 32, h.ids_n);
         const hi = @min((t0 + tn) * 32, h.ids_n);
-        tp.argmax(r.enc, h.logits, n, lo, hi - lo, Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
+        tp.argmax(&r.enc, h.logits, n, lo, hi - lo, Buf{ .b = tp.pick_tmp }, Buf{ .b = tp.one }, 1);
         tp.mapIds(r.enc, h.ids, out);
         return;
     }

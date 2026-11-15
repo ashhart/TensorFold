@@ -98,6 +98,16 @@ pub fn cuda(a: Allocator, io: std.Io, ctx: anytype, group: anytype, stream: anyt
 
 /// The connected endpoint attests two ranks; HELLO=1 peers retain serving compatibility but no inventory.
 pub fn metal(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usize, hello: usize, ready: u64) !?[]const u8 {
+    return metalWait(a, io, device, rd, offset, hello, ready, null);
+}
+
+/// Bound reciprocal HELLO arrival independently of acknowledgement of the outgoing message.
+pub fn metalWithTimeout(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usize, hello: usize, ready: u64, timeout_ns: u64) !?[]const u8 {
+    const until = std.Io.Clock.awake.now(io).nanoseconds + timeout_ns;
+    return metalWait(a, io, device, rd, offset, hello, ready, until);
+}
+
+fn metalWait(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usize, hello: usize, ready: u64, until: ?i96) !?[]const u8 {
     if (rd.size() != 2 or rd.rank() > 1) return error.BadWorld;
     const win = rd.window();
     if (offset > win.len or @sizeOf(Wire) > win.len - offset or hello > win.len - 8) return error.BadInventoryOffset;
@@ -108,6 +118,7 @@ pub fn metal(a: Allocator, io: std.Io, device: anytype, rd: anytype, offset: usi
     try rd.flush();
     const word: *const u64 = @ptrCast(@alignCast(win[hello..][0..8]));
     while (@atomicLoad(u64, word, .acquire) < ready and @atomicLoad(u64, word, .acquire) != 1) {
+        if (until) |deadline| if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.TpStartupPeerSilent;
         std.atomic.spinLoopHint();
     }
     if (@atomicLoad(u64, word, .acquire) != ready) return null;

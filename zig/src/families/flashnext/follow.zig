@@ -22,7 +22,7 @@ fn requestWaiting(ctx: *anyopaque) bool {
 }
 
 fn msSince(t0: u64) f64 {
-    return @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6; // mach ticks are 125/3 ns on Apple silicon
+    return @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) * 125 / 3 / 1e6; // 125/3 ns ticks
 }
 
 /// Rank 0's request for `one`: a 16-word head, then the prompt, marks, dropped states' keys and the budget.
@@ -48,17 +48,21 @@ pub fn send(e: *Engine, tp: *fz.Tp2, prompt: []const u32, from: usize, marks: []
     e.peer_drops.clearRetainingCapacity();
 }
 
-/// One of rank 0's requests: its resume state (answered to rank 0), its drops, then the reply in step into `out` (null: hashed and
-/// logged, this Mac's states kept at its marks; tf-flashnext-run passes its own); null once rank 0 closes.
+/// Run one request in step, preserving rank 0's named states; null when rank 0 closes.
 pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     const tp = e.r.tp orelse return error.NotSpeedUpMode;
-    const req = tp.waitRequest() orelse return null;
+    const req = (try tp.waitRequest()) orelse return null;
+    tp.request_gate.begin();
+    defer tp.request_gate.end();
     var head: [16]u32 = undefined;
     @memcpy(std.mem.asBytes(&head), req.head[0..64]);
     if (head[0] == 0) return null;
+    var entered_generate = false;
+    defer if (!entered_generate) tp.finishStats();
     const n = head[0];
     const at_budget = n + head[13] + 2 * head[14];
-    const words = try e.gpa.dupe(u32, req.tokens[0 .. at_budget + 3 + @min(req.tokens[at_budget + 2], think.MAX_CLOSE)]); // rank 0 may write its next request meanwhile
+    // Copy tokens before rank 0 can publish its next request.
+    const words = try e.gpa.dupe(u32, req.tokens[0 .. at_budget + 3 + @min(req.tokens[at_budget + 2], think.MAX_CLOSE)]);
     defer e.gpa.free(words);
     const prompt = words[0..n];
     const marks = words[n..][0..head[13]];
@@ -74,7 +78,7 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     };
     const restore_ms = msSince(t0);
     try tp.ackRequest(ok);
-    for (0..head[14]) |i| { // states rank 0's prompt cache let go (after the restore: rank 0 may let go the one this request resumed)
+    for (0..head[14]) |i| { // Drop rank 0's released states after restoring this request's resume.
         const w = words[n + head[13] + 2 * i ..][0..2];
         if (e.peer_kept.fetchRemove(@as(u64, w[0]) | @as(u64, w[1]) << 32)) |kv| drop(e, kv.value);
     }
@@ -82,6 +86,7 @@ pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     const eos = try e.gpa.dupe(u32, head[4 .. 4 + head[2]]);
     defer e.gpa.free(eos);
     var reply: Reply = .{ .e = e, .prompt = prompt };
+    entered_generate = true;
     const res = try e.generateFrom(prompt, from, marks, head[1], eos, if (head[3] == std.math.maxInt(u32)) null else head[3], budget, out orelse reply.out());
     if (out != null) return res;
     std.log.info("speed-up rank 1: resumed at {d} of {d} (restore {d:.1} ms), kept {d} marks ({d:.1} ms), {d} states {d} MiB and {d} MiB spare; reply {d} tokens, sha {s}", .{ from, n, restore_ms, reply.kept, reply.keep_ns / 1e6, e.peer_kept.count(), e.peer_held >> 20, e.snap_pool.spare() >> 20, reply.tokens, &reply.sha() });
@@ -133,7 +138,7 @@ const Reply = struct {
     }
 };
 
-/// This Mac's state at `at`, kept under the name rank 0 gives the same tokens unless it passes the budget by more than SLACK; free buffers then trimmed.
+/// Keep this Mac's state under rank 0's name within the budget and slack, then trim free buffers.
 fn keep(e: *Engine, prompt: []const u32, at: usize) void {
     const size = e.snap_pool.size(snapshot.bytes(at));
     if (!admits(e.peer_budget, e.peer_held, size)) return std.log.warn("speed-up rank 1: kept nothing at {d}: {d} MiB held and {d} MiB more pass the {d} MiB budget and its slack", .{ at, e.peer_held >> 20, size >> 20, e.peer_budget >> 20 });
@@ -144,10 +149,10 @@ fn keep(e: *Engine, prompt: []const u32, at: usize) void {
     e.snap_pool.trim(e.peer_budget -| e.peer_held);
 }
 
-/// How far rank 1's buffers may run past the budget: it holds rank 0's states, but its pool hands some of them larger buffers.
+/// Extra bytes allowed for rank 1's pooled state buffers beyond rank 0's budget.
 const SLACK: u64 = 1 << 30;
 
-/// Whether a new state of `size` bytes fits beside `held` (rank 0 makes room before the request; this stops only a runaway).
+/// Whether size fits beside held under rank 0's budget and the allowed slack.
 fn admits(budget: u64, held: u64, size: u64) bool {
     return budget > 0 and held + size <= budget + SLACK;
 }
@@ -167,7 +172,7 @@ test "rank 1's reply hash is the server's token_sha" {
 }
 
 test "rank 1 keeps rank 0's states up to the budget and its slack, and nothing without a budget" {
-    try std.testing.expect(admits(4 << 30, 3808 << 20, 352 << 20)); // the pair's 6,855-token state: rank 0 kept it at 4,064 MiB
+    try std.testing.expect(admits(4 << 30, 3808 << 20, 352 << 20));
     try std.testing.expect(admits(1 << 30, 600 << 20, 1448 << 20));
     try std.testing.expect(!admits(1 << 30, 600 << 20, 1449 << 20));
     try std.testing.expect(!admits(0, 0, 1));

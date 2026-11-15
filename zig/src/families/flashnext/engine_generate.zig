@@ -49,9 +49,14 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
     var watch = try think.Watch.init(budget);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
+    var entered_decode = false;
+    defer if (!entered_decode) {
+        if (r.tp) |tp| tp.finishStats();
+    };
     if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
         const t0 = platform.c.mach_absolute_time();
-        defer e.handoff_ns = @intCast((platform.c.mach_absolute_time() - t0) * 125 / 3); // mach ticks are 125/3 ns on Apple silicon
+        // mach ticks are 125/3 ns on Apple silicon
+        defer e.handoff_ns = @intCast((platform.c.mach_absolute_time() - t0) * 125 / 3);
         try follow_mod.send(e, tp, prompt, from, marks, max_tokens, eos, depth, budget);
         if (!try tp.waitAck()) return error.PeerNotResumed;
     };
@@ -114,7 +119,8 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
             n_in = in_.n;
             if (in_.cut) |cut| c = e.chunkCall(cut);
         }
-        const hist0 = m.ple.hist; // the two tokens before the call: the n-gram history at a passed mark follows from them
+        // the two tokens before the call: the n-gram history at a passed mark follows from them
+        const hist0 = m.ple.hist;
         pick = try Prompt.chunkMarked(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows], inside[0..n_in]);
         if (at + c.rows == prompt.len) if (out.sampling) |p| { // the first token, from the last row
             e.draw_at.b.slice(u32, MAXR)[0] = @intCast(prompt.len);
@@ -147,6 +153,7 @@ pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const
     if (e.call_log) calls.log(if (r.tp) |tp| tp.rank else 0);
     if (try e.agree(first_stop)) return .{ .reason = .stop };
     if (max_tokens <= 1) return .{ .reason = .length };
+    entered_decode = true;
     return e.decode(prompt, pick, .{ .b = m.last.b, .off = m.last.off + (last_n - 1) * WIDE * 2 }, max_tokens, eos, depth, &watch, out, null);
 }
 
@@ -156,6 +163,7 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     const r = e.r;
     const m = e.m;
     defer e.hostMode();
+    defer if (r.tp) |tp| tp.finishStats();
     var res: Result = .{ .reason = .length };
     var emitted: usize = 1;
     const ar = r.ar.b.slice(i32, fz.AR_WORDS);
@@ -170,14 +178,16 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         m.state_row = 0;
     }
     var rule: DepthRule = .{ .pair = r.tp != null };
-    var by_cost: ?CostDepth = if (r.tp == null and !r.device.tensorUnits()) .{} else null; // 0.6.5's rule before M5
+    // cost-based depth on devices without tensor units
+    var by_cost: ?CostDepth = if (r.tp == null and !r.device.tensorUnits()) .{} else null;
     var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
     const busy_log = platform.c.getenv("FZ_BUSY") != null; // dev: the GPU's busy share of a reply's rounds
     var busy_s: f64 = 0;
     var gap_s: f64 = 0;
     var first_start: f64 = 0;
     defer if (busy_log and last_end > first_start) std.log.info("rounds: GPU busy {d:.1} ms, gaps {d:.2} ms, span {d:.1} ms", .{ busy_s * 1e3, gap_s * 1e3, (last_end - first_start) * 1e3 });
-    const round_log = platform.c.getenv("FZ_ROUND_LOG") != null; // dev: a reply's rounds by source, verified rows and kept
+    // dev: a reply's rounds by source, verified rows and kept
+    const round_log = platform.c.getenv("FZ_ROUND_LOG") != null;
     var kept_by = std.mem.zeroes([2][MAXR + 1][MAXR + 1]u32);
     defer if (round_log) logRounds(&kept_by);
     var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
@@ -191,7 +201,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     if (tr) |t| t.select(prompt);
     // gated lanes (FZ_GATE), greedy or sampled, at any context: the head's confidence sets each round's width
     const gt: ?*gate_mod.Gate = if (e.gate) |g| (if (tr == null and drafted and !watch.armed and r.tp == null) g else null) else null;
-    const gfix: ?usize = if (platform.c.getenv("FZ_GATE_FIX")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch null else null; // dev: a fixed host window
+    // dev: a fixed host window
+    const gfix: ?usize = if (platform.c.getenv("FZ_GATE_FIX")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch null else null;
     const fixed = if (tr) |t| t.a + t.b else if (gt != null) (gfix orelse gate_mod.WMAX_FIRST) - 1 else depth;
     const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
     var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
@@ -250,6 +261,9 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
     }
     const base = r.event_value;
     var cbs: [4]?mtl.CommandBuffer = .{ null, null, null, null };
+    defer if (r.tp) |tp| {
+        if (tp.stats) @import("engine_drain.zig").drain(&cbs, r.tp) catch {};
+    };
     var widths: [4]usize = undefined;
     widths[0] = W0;
     var round: usize = 0;
@@ -269,7 +283,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         m.t.mdims = e.mdims_w[wr];
         if (round > 0) {
             const wp = widths[(round - 1) % 4];
-            if (tr != null) { // the kept path's last row: the verdict leaves path[keep - 1] + 1 past the arena's own words
+            // the kept path's last row: the verdict leaves path[keep - 1] + 1 past the arena's own words
+            if (tr != null) {
                 const ar0 = r.ar;
                 r.ar = .{ .b = ar0.b, .off = ar0.off + tree_mod.AR_LAST * 4 };
                 e.statesCopy(true);
@@ -302,7 +317,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
                 }
                 if (tr) |t| {
                     if (t.sib == 0) t.feedEncode(r, e.wids);
-                } else if (e.copy) lookupEncode(e, wr, gt, lenient, 0); // copied drafts replace the head's, closed steps' too
+                    // copied drafts replace the head's, closed steps' too
+                } else if (e.copy) lookupEncode(e, wr, gt, lenient, 0);
             }
         }
         if (watch.armed) think.force(r, e.wids, e.hist, wr); // the close's tokens as the window's drafts
@@ -355,7 +371,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             failed = error.GpuFailed;
             break;
         }
-        if (r.tp) |tp| if (tp.failed.load(.acquire)) { // the link failed: the host drained the round, its tokens are wrong
+        // the link failed: the host drained the round, its tokens are wrong
+        if (r.tp) |tp| if (tp.failed.load(.acquire)) {
             failed = error.TpLinkFailed;
             break;
         };
@@ -376,7 +393,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
         if (learn and wd > 1) {
             const frac = @as(f64, @floatFromInt(keep - 1)) / @as(f64, @floatFromInt(wd - 1));
             if (rg[slot + 1] != 0) copy_rate = 0.8 * copy_rate + 0.2 * frac else head_rate = 0.8 * head_rate + 0.2 * frac;
-            if (rg[slot + 1] == 0 and wd == MAXR) copy_rate *= 0.8; // a full window that found no copy: copies stopped landing
+            // a full window that found no copy: copies stopped landing
+            if (rg[slot + 1] == 0 and wd == MAXR) copy_rate *= 0.8;
         }
         if (learn and rg[slot + 1] != 0) {
             res.copy_rounds += 1;
@@ -385,7 +403,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             res.copy_by_len[n][0] += 1;
             res.copy_by_len[n][1] += keep - 1;
         }
-        if (gt) |g| if (learn and gfix == null and rg[slot + 1] == 0) { // a row wider after the gate kept the window whole, one narrower after two short
+        // a row wider after the gate kept the window whole, one narrower after two short
+        if (gt) |g| if (learn and gfix == null and rg[slot + 1] == 0) {
             const wh = widths[done % 4];
             if (wd == wh) gw = @min(gw + 1, g.width) else if (wd + 2 <= wh) gw = @max(gw - 1, gate_mod.WMAX_FIRST);
         };
@@ -423,9 +442,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             break;
         }
     }
-    for (&cbs) |*c| if (c.*) |cb| {
-        cb.wait();
-        c.* = null;
+    @import("engine_drain.zig").drain(&cbs, r.tp) catch |err| {
+        if (failed == null) failed = err;
     };
     r.event_value = base + round + 1;
     if (failed) |err| return err;

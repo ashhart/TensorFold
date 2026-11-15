@@ -61,7 +61,7 @@ pub const Run = struct {
     force_pipe: mtl.Pipeline = undefined,
     span_pipe: mtl.Pipeline = undefined,
     positions_pipe: mtl.Pipeline = undefined,
-    draws: @import("sample.zig").Draws = undefined, // a sampled reply's draws, and a sampled stream's drafts over the head's ids
+    draws: @import("sample.zig").Draws = undefined, // sampled reply draws and draft draws over the head's ids
     take_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
@@ -73,7 +73,7 @@ pub const Run = struct {
     dense: bool = false,
     dense_target: bool = false,
     skip: u32 = 0,
-    sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: the 4/32 expert kernels read scales and biases through scale_index's tables
+    sb_index: bool = false, // TF_FLASHNEXT_SCALE_INDEX: expert kernels read scale and bias tables
     sbix: std.AutoHashMapUnmanaged(@import("scale_index.zig").Key, [2]Buf) = .empty,
     sb_pairs: usize = 0, // the most distinct pairs any indexed tensor has
     hcskip: u32 = 0, // FZ_HCSKIP: hyper-connection knock-outs by kernel (1 norms, 2 downs, 4 ups)
@@ -82,7 +82,7 @@ pub const Run = struct {
     split: bool = false,
     gdn_step: bool = false,
     hc_mma: bool = false,
-    event: mtl.Event = undefined, // GPU-side rounds: each waits for the one before (a shared event's wait goes through the OS)
+    event: mtl.Event = undefined, // GPU rounds wait for the preceding round through a queue event
     event_value: u64 = 0,
     dense8_pipe: mtl.Pipeline = undefined,
     grouped: bool = false,
@@ -109,7 +109,7 @@ pub const Run = struct {
     dense16_pipe: mtl.Pipeline = undefined,
     tp_gdn: std.AutoHashMapUnmanaged(*Variant, mtl.Pipeline) = .empty, // TP: DeltaNet steps from value head 24
     tp_lane: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty, // TP: recorded lane kernels over tile maps
-    lane_new: bool = false, // the target's lane projections on core lane (dense.zig): the recorded bits, weights read ahead
+    lane_new: bool = false, // core lane projections retain the recorded bits and read weights ahead
     lane_pf: usize = 1, // groups a simdgroup reads ahead in core lane
     lane_pipes: std.AutoHashMapUnmanaged(u64, mtl.Pipeline) = .empty,
     wide_pipes: lane_w.Cache = .empty, // lane products at other widths than 6/32 (lane_w.zig)
@@ -128,7 +128,7 @@ pub const Run = struct {
     gsel: ?GSelect = null, // the same in GPU-side rounds
     sel_meta_pipe: mtl.Pipeline = undefined,
     pool_abs_pipe: mtl.Pipeline = undefined,
-    pool_pos_pipe: mtl.Pipeline = undefined, // fz_idx_pool_pos: an image stream's blocks at their three positions (the standard frame)
+    pool_pos_pipe: mtl.Pipeline = undefined, // fz_idx_pool_pos: image blocks at the standard frame's three positions
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
     load_limit: u64 = 0,
@@ -145,6 +145,7 @@ pub const Run = struct {
     pub fn finishEncoding(r: *Run, cb: mtl.CommandBuffer) !mtl.CommandBuffer {
         if (r.fsr) |s| return s.commands.end(r.enc);
         r.enc.end();
+        if (r.tp) |tp| try tp.prepareSubmit();
         return cb;
     }
 

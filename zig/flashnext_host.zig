@@ -1,5 +1,11 @@
 //! FlashNext metadata contracts run on a CPU without Metal or tensor-runtime dependencies.
 test {
+    _ = @import("src/families/flashnext/tp_source_test.zig");
+    _ = @import("src/families/flashnext/engine_drain.zig");
+    _ = @import("src/families/flashnext/tp_request.zig");
+    _ = @import("src/families/flashnext/tp_request_gate.zig");
+    _ = @import("src/families/flashnext/tp_deadline.zig");
+    _ = @import("src/families/flashnext/tp_submit.zig");
     _ = @import("src/families/flashnext/checkpoint_cache.zig");
     _ = @import("src/families/flashnext/host_test.zig");
     _ = @import("src/families/flashnext/pack.zig");

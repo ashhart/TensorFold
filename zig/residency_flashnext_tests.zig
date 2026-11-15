@@ -28,8 +28,8 @@ fn waiting(_: *anyopaque) bool {
     return false;
 }
 
-test "residency owner Flash Next: both native inventories cover initial pools and TP buffers and follow lazy allocations" {
-    for ([_]bool{ false, true }) |shared| {
+test "residency owner Flash Next: paired and single native inventories retain requested residency and lazy cache allocations" {
+    for ([_]bool{ false, true }) |shared| for ([_]bool{ false, true }) |paired| {
         var record: mtl.Record = .{ .gpa = a };
         defer record.deinit();
         {
@@ -40,13 +40,16 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             }
             _ = try run.buffer(64);
             var tp: fz.Tp2 = undefined;
-            tp.wbuf = try record.device().buffer(64, 0);
-            defer tp.wbuf.deinit();
-            tp.one = try record.device().buffer(64, 0);
-            defer tp.one.deinit();
-            tp.pick_tmp = try record.device().buffer(64, 0);
-            defer tp.pick_tmp.deinit();
-            run.tp = &tp;
+            var tp_buffers: [4]?mtl.Buffer = @splat(null);
+            defer for (tp_buffers) |maybe| if (maybe) |buffer| buffer.deinit();
+            if (paired) {
+                for (&tp_buffers) |*buffer| buffer.* = try record.device().buffer(64, 0);
+                tp.wbuf = tp_buffers[0].?;
+                tp.one = tp_buffers[1].?;
+                tp.pick_tmp = tp_buffers[2].?;
+                tp.partial = tp_buffers[3].?;
+                run.tp = &tp;
+            }
             var engine: Engine = undefined;
             engine.r = &run;
             engine.snap_pool = .{ .max = 1024, .last = 64 };
@@ -68,6 +71,11 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             var h: Host = .{ .eng = &engine, .back = &back, .vis = &vision };
             if (shared) try residency.holdShared(&h) else try residency.hold(&h);
             defer if (shared) residency.dropShared(&h) else residency.drop(&h);
+            try std.testing.expectEqual(!paired, h.resident.?.queue_attached);
+            try std.testing.expectEqual(!paired, record.attached);
+            try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_adds);
+            try std.testing.expectEqual(@as(usize, 0), record.queue_removes);
+            try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
             try record.checkInitial();
             try record.check();
             mtl.keepalive.Target.tick(&h.warm);
@@ -89,7 +97,10 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             try record.check();
         }
         try record.allFreed();
-    }
+        try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_adds);
+        try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_removes);
+        try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
+    };
 }
 
 test "residency owner Flash Next: failed runner publication frees its new Metal buffer" {
@@ -104,6 +115,66 @@ test "residency owner Flash Next: failed runner publication frees its new Metal 
         owner.held.flush();
         try record.check();
     }
+    try record.allFreed();
+}
+
+test "Flash Next cleanup: failed open joins a follower holding borrowed residency and Host callbacks" {
+    const FakeEngine = struct {
+        r: *fz.Run,
+        snap_pool: @FieldType(Engine, "snap_pool") = .{},
+        stopped: std.atomic.Value(bool) = .init(false),
+        pub fn stopFollowing(e: *@This()) void {
+            e.stopped.store(true, .release);
+        }
+    };
+    const Opening = struct {
+        gpa: std.mem.Allocator = a,
+        io: std.Io = std.testing.io,
+        eng: *FakeEngine,
+        vis: ?*Vision = null,
+        load_limit: u64 = 0,
+        resident: ?mtl.resident.Resident = null,
+        warm: mtl.keepalive.Target = undefined,
+        follower: ?std.Thread = null,
+        borrowed: std.atomic.Value(bool) = .init(false),
+        used_live: *bool,
+        buffer: mtl.Buffer,
+
+        fn follow(h: *@This()) void {
+            const allocation = h.eng.r.follow.?;
+            const probe = h.eng.r.warm_probe.?;
+            h.borrowed.store(true, .release);
+            while (!h.eng.stopped.load(.acquire)) std.Thread.yield() catch {};
+            if (h.resident == null or h.eng.r.follow == null or h.eng.r.warm_probe == null) return;
+            allocation.join(allocation.ctx, h.buffer);
+            probe.run(probe.ctx).wait();
+            allocation.leave(allocation.ctx, h.buffer);
+            h.used_live.* = true;
+        }
+
+        fn fail(eng: *FakeEngine, buffer: mtl.Buffer, used_live: *bool) !void {
+            const h = try a.create(@This());
+            errdefer a.destroy(h);
+            h.* = .{ .eng = eng, .buffer = buffer, .used_live = used_live };
+            try residency.hold(h);
+            errdefer residency.unwind(h);
+            h.follower = try std.Thread.spawn(.{}, follow, .{h});
+            while (!h.borrowed.load(.acquire)) std.Thread.yield() catch {};
+            return error.InjectedHostStartFailure;
+        }
+    };
+    var record: mtl.Record = .{ .gpa = a };
+    defer record.deinit();
+    var run: fz.Run = .{ .arena = a, .device = record.device(), .queue = record.queue() };
+    var eng: FakeEngine = .{ .r = &run };
+    const buffer = try record.device().buffer(64, mtl.ResourceOptions.shared);
+    var used_live = false;
+    try std.testing.expectError(error.InjectedHostStartFailure, Opening.fail(&eng, buffer, &used_live));
+    try std.testing.expect(used_live);
+    try std.testing.expect(eng.stopped.load(.acquire));
+    try std.testing.expect(run.follow == null and run.warm_probe == null and eng.snap_pool.follow == null);
+    try std.testing.expectEqual(@as(usize, 1), record.uses);
+    buffer.deinit();
     try record.allFreed();
 }
 
