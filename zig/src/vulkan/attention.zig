@@ -33,8 +33,7 @@ pub const shared_stream_keys: u64 = 7168;
 const sdpa_shared_bytes: u64 = 30720;
 /// Longest prefill chunk the tiled path takes (forward.zig max_prefill_rows) and the scratch its scores need.
 const tile_max_rows: u32 = 64;
-/// A 1-row decode over at least this many keys takes the tiled path too: the decode kernel runs 8 workgroups (one per head) and
-/// walks every key in one of them, so it leaves the GPU idle on long prefixes. Below it the single dispatch wins.
+/// A 1-row decode over this many keys or more goes tiled: the 8-workgroup decode kernel leaves the GPU idle on them.
 const decode_tile_keys: u64 = 512;
 const score_scratch_words: u64 = query_heads * tile_max_rows * max_visible_keys;
 
@@ -80,7 +79,7 @@ pub const Attention = struct {
     sdpa_f32q: dispatch.Pipeline,
     sdpa_f32q_long: dispatch.Pipeline,
     gate_f32: dispatch.Pipeline,
-    // Prefill chunks of 2..tile_max_rows rows run scores, softmax and PV as three tiled passes over a global score scratch.
+    // Prefill chunks of 2..tile_max_rows rows: tiled scores, softmax and PV over a global score scratch.
     scores_bf16: dispatch.Pipeline,
     scores_f32q: dispatch.Pipeline,
     softmax_rows: dispatch.Pipeline,
@@ -253,8 +252,7 @@ pub const Attention = struct {
         try pipe.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
     }
 
-    // Chunks of 2..tile_max_rows rows, and 1-row decodes over decode_tile_keys or more keys: scores, row softmax and P*V as three
-    // tiled dispatches over an f32 score scratch. Each dot and each key sum keeps the decode kernel's accumulation order, so the output is bit-identical to it.
+    // Chunks of 2..tile_max_rows rows and long 1-row decodes: tiled scores, softmax, P*V in the decode kernel's order.
     fn attendTiled(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, plan: AttendPlan, capacity: u64, timeout_ns: u64) Error!void {
         var p: params.Params = .{
             .matrix_m = @intCast(query_heads),
