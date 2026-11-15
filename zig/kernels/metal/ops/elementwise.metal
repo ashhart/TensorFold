@@ -27,8 +27,7 @@ inline void tf_moe_combine_at(const device bfloat* Y, WP W, int k, int cols, uin
   OUT[long(row) * cols + c] = static_cast<bfloat>(total);
 }
 
-// Bolt's combine past 8 picks: fp32 products (g2_Multiply), then col_reduce_small's order: lane j < 8 sums picks
-// j, j + 8, ..; lanes add in order. At k <= 8 it equals tf_moe_combine_at bit for bit.
+// Bolt's combine past 8 picks: fp32 products, then col_reduce_small's order (lane j sums picks j, j + 8).
 template <typename WP>
 inline void tf_moe_combine_lanes8_at(const device bfloat* Y, WP W, int k, int cols, uint3 at, device bfloat* OUT) {
   const int c = int(at.x), row = int(at.y);

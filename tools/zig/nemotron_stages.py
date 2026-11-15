@@ -1,13 +1,4 @@
-"""Nemotron 3.5 Bolt: each native stage against float64, from the native's own input to that stage.
-
-tf-nemotron-forward MODEL TOKENS.npy OUT.bin --decode-from N --stages DIR dumps every stage forward.Point names, of
-every layer of every forward. Here each stage is recomputed in float64 from the dequantized checkpoint weights and the
-native's own input to that stage (its x for a projection, its in_proj for the conv, its conv for the scan, ...), so the
-errors are each stage's own and do not compound. Prompt rows (forwards of several rows) and decode rows (one row) are
-reported apart. Errors are in bf16 ulps of the float64 value; route picks are compared exactly.
-
-usage: nemotron_stages.py MODEL STAGES_DIR [--json OUT]
-"""
+"""Nemotron 3.5 Bolt: each native stage against float64, from the native's own input to that stage."""
 from __future__ import annotations
 
 import argparse
@@ -19,6 +10,13 @@ import mlx.core as mx
 import numpy as np
 
 TOP_K = 9
+
+ABOUT = """\
+tf-nemotron-forward MODEL TOKENS.npy OUT.bin --decode-from N --stages DIR dumps every stage forward.Point names, of
+every layer of every forward. Here each stage is recomputed in float64 from the dequantized checkpoint weights and the
+native's own input to that stage (its x for a projection, its in_proj for the conv, its conv for the scan, ...), so the
+errors are each stage's own and do not compound. Prompt rows (forwards of several rows) and decode rows (one row) are
+reported apart. Errors are in bf16 ulps of the float64 value; route picks are compared exactly."""
 
 
 def bf16_to_f64(words: np.ndarray) -> np.ndarray:
@@ -69,8 +67,7 @@ class Weights:
             return np.array(d.astype(mx.float32), np.float64)
 
     def mlx(self, path: str, x: np.ndarray, rows=None) -> np.ndarray:
-        """MLX's own bf16 result for x @ `path`^T on the same input (quantized_matmul where it is quantized): the
-        floor a native projection is held to."""
+        """MLX's own bf16 result for x @ `path`^T on the same input: the floor a native projection is held to."""
         xb = mx.array(x.astype(np.float32)).astype(mx.bfloat16)
         w = self.raw(path + ".weight")
         if rows is not None:
@@ -112,10 +109,7 @@ class Dump:
 
 
 class Report:
-    """Errors a stage, prompt rows and decode rows apart, the native's and (for projections) MLX's on the same input.
-
-    An error is in bf16 ulps of its row's RMS: what a bf16 output of that row's scale can resolve, so outputs that
-    cancel to near zero do not read as huge relative errors."""
+    """Errors a stage in bf16 ulps of its row's RMS, prompt and decode rows apart, the native's and MLX's."""
 
     def __init__(self):
         self.err = defaultdict(list)  # (kind, stage, phase, who) -> arrays of row-ulps
@@ -132,8 +126,7 @@ class Report:
             out, ref = np.atleast_2d(out), np.atleast_2d(want)
             bad = ~np.isfinite(out)
             self.nonfinite[key] += int((bad & np.isfinite(ref)).sum())
-            # the row's scale: the larger of its float64 RMS and its output's (a row float64 makes exactly 0, as relu^2
-            # can, is measured at what its bf16 output can resolve)
+            # the row's scale: the larger of its float64 RMS and its output's, so an exact 0 row reads at bf16's grain
             rms_ref = np.sqrt(np.mean(np.where(np.isfinite(ref), ref, 0) ** 2, -1, keepdims=True))
             rms_out = np.sqrt(np.mean(np.where(np.isfinite(out), out, 0) ** 2, -1, keepdims=True))
             scale = ulp_bf16(np.maximum(rms_ref, rms_out))
@@ -167,7 +160,7 @@ def silu(x):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description=ABOUT, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model", type=Path)
     p.add_argument("stages", type=Path)
     p.add_argument("--json", type=Path)
@@ -274,7 +267,7 @@ def main():
                     bad += 1
                     ours = [int(e) for e in idx[r] if e not in want_idx[r]]
                     theirs = [int(e) for e in want_idx[r] if e not in idx[r]]
-                    # the keys as the engine and mlx-lm both compute them: fp32 sigmoid of the bf16 logit, + the fp32 bias
+                    # the keys as the engine and mlx-lm compute them: fp32 sigmoid of the bf16 logit, plus the fp32 bias
                     k32 = (1 / (1 + np.exp(-logits[r].astype(np.float32)))).astype(np.float32) + bias.astype(np.float32)
                     rep.pick_details.append(dict(layer=i, row=at + r, phase=ph, native=ours, float64=theirs,
                         float64_gap=float(key[r][theirs].min() - key[r][ours].max()),

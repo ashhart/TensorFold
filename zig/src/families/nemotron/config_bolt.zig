@@ -9,8 +9,7 @@ pub fn device(c: Config, tensor_units: bool) !void {
     if (c.bolt and tensor_units) return error.BoltNeedsRowKernels;
 }
 
-/// The router gemv computes its rows in tiles of 4 (ops/gemv.metal, TM 4). At an expert count off the tile, its last
-/// tile clamps back over the one before it (MLX's clamp), so those rows are written twice: such counts are refused.
+/// The router gemv writes rows in tiles of 4; off the tile its last tile clamps back and writes rows twice: refused.
 pub const expert_tile = 4;
 
 /// Nemotron 3.5 Bolt 74B-A9B: per-layer experts 240-496, widths 1536-2560, a 1,024 latent, shared 5,376, top-k 9.

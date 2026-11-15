@@ -15,8 +15,7 @@ fn opSource(name: []const u8) []const u8 {
     unreachable;
 }
 
-/// MLX's bn1 gemv at BM simdgroups a threadgroup (ops/gemv.metal tf_gemv_sn32): a lane's fma chain over K/32
-/// products (bf16 x bf16 is exact in fp32), then a 5-level shuffle-down tree.
+/// MLX's bn1 gemv, BM simdgroups a threadgroup: a lane's fma chain over K/32 products, then a 5-level tree.
 fn gemvDepth(s: c.Shape) usize {
     return (s.k + 31) / 32 + 5;
 }
@@ -45,11 +44,34 @@ pub fn under(s: c.Spec, mut: ?Mut) c.Spec {
     return out;
 }
 
+/// A value as its nearest bf16.
+pub fn bf16of(v: f32) f32 {
+    return c.fromBf16(c.toBf16(v));
+}
+
+/// A closed interval of float64, widened and scaled as a kernel's arithmetic would move it.
+pub const Range = struct {
+    lo: f64,
+    hi: f64,
+    pub fn widen(r: Range, rel: f64) Range {
+        const e = rel * @max(@abs(r.lo), @abs(r.hi)) + 0x1p-149;
+        return .{ .lo = r.lo - e, .hi = r.hi + e };
+    }
+    pub fn scale(r: Range, b: f64) Range {
+        return if (b >= 0) .{ .lo = r.lo * b, .hi = r.hi * b } else .{ .lo = r.hi * b, .hi = r.lo * b };
+    }
+    pub fn times(r: Range, s: Range) Range {
+        const p = [4]f64{ r.lo * s.lo, r.lo * s.hi, r.hi * s.lo, r.hi * s.hi };
+        return .{ .lo = @min(@min(p[0], p[1]), @min(p[2], p[3])), .hi = @max(@max(p[0], p[1]), @max(p[2], p[3])) };
+    }
+    pub fn bf16(r: Range) Range {
+        return .{ .lo = c.fromBf16(c.toBf16(@floatCast(r.lo))), .hi = c.fromBf16(c.toBf16(@floatCast(r.hi))) };
+    }
+};
+
 pub const Gemv = enum { bm4, bm8 };
 
-/// Bolt's calls (nemotron/bolt.zig gemv): bm 4 for N < 4096 (the router gate at 304-496 experts, `into` to the
-/// 1,024 latent), bm 8 from N 4096 (`out` back to hidden, the bf16 lm_head). Rows are a decode step's 1 or a prompt
-/// chunk's 16 (backend.zig pins Bolt's chunk to fused_rows). E = 240 takes the wide gemv (K >= 16 N), not these.
+/// Bolt's calls: bm 4 below N 4096 (the gate, `into`), bm 8 from 4096 (`out`, the bf16 head); rows 1 or 16.
 const served_bm4 = [_]c.Shape{
     .{ .rows = 1, .n = 1024, .k = 4096 },
     .{ .rows = 16, .n = 1024, .k = 4096 },
@@ -69,8 +91,7 @@ pub fn gemvSpec(v: Gemv) c.Spec {
         .accum = .f32,
         .depth = gemvDepth,
         .out = .bf16,
-        // rows: one threadgroup z each, any count; n: BM simdgroups of 4 rows a threadgroup, in steps of 4 (the
-        // clamp Bolt's admission refuses off the tile); k: 32 lanes of 4, any length (the tail is guarded).
+        // rows: any count; n: BM simdgroups of 4 rows, in steps of 4; k: 32 lanes of 4, any length (a guarded tail)
         .tiles = .{ .{}, .{ .size = 4 * bm, .step = 4, .min = 4 }, .{ .size = 128, .step = 1, .min = 1 } },
         .served = if (v == .bm4) &served_bm4 else &served_bm8,
     };
@@ -163,9 +184,7 @@ pub const GemvProbe = struct {
     }
 };
 
-/// Bolt's router top-k (ops/route.metal tf_route_topk) at its layers' expert counts, top-k 9: sigmoid, the
-/// e_score_correction_bias added for the choice only, a stable descending pick (lowest id first on a tie), weights
-/// p / (sum p + 1e-20) * 5. Picks are checked exactly; weights against float64 within the bound.
+/// Bolt's router top-k of 9: sigmoid, the bias for the choice only, lowest id on a tie, weights p / (sum p + 1e-20) * 5
 const top_k = 9;
 const route_rule = "a NaN logit sorts after every number (MLX's sort) and is picked only when fewer than 9 numbers remain; " ++
     "+Inf and -Inf saturate the sigmoid to 1 and 0; a row whose picks hold a NaN has NaN weights";
@@ -254,8 +273,7 @@ pub const RouteProbe = struct {
         t.previous = try t.a.alloc(u8, t.count() * 4);
         var prng = std.Random.DefaultPrng.init(seed ^ 0x726f);
         const rng = prng.random();
-        // logits on a grid of 1/8 in [-4, 4): distinct grid points' sigmoids differ by far more than fp32 rounds, so the
-        // float64 choice is the fp32 choice; equal logits are exact ties, which the stable order settles by id.
+        // logits on a grid of 1/8 in [-4, 4): float64's choice is fp32's, and equal logits are exact ties settled by id
         for (t.logits) |*l| l.* = c.toBf16(@as(f32, @floatFromInt(rng.uintLessThan(u32, 64))) / 8 - 4);
         // the bias moves the choice, never the weights: a few experts pulled in by +2, a few pushed out by -2
         for (t.bias, 0..) |*b, e| b.* = if (e % 37 == 5) 2 else if (e % 41 == 7) -2 else 0;
@@ -355,8 +373,7 @@ pub const RouteProbe = struct {
         }
     }
 
-    /// The stated rule: every pick equals float64's (exactly), every weight's class equals float64's, and finite
-    /// weights are within the bound.
+    /// Every pick equals float64's, every weight's class equals float64's, and finite weights are within the bound.
     pub fn check(t: *RouteProbe, at: g.Gate) !?[]const u8 {
         const picked = t.rig.bytes(t.ids, t.count() * 4);
         const weights = t.rig.bytes(t.wt, t.count() * 4);
@@ -382,8 +399,7 @@ pub const RouteProbe = struct {
     }
 };
 
-/// Bolt's latent combine (ops/elementwise.metal tf_moe_combine_rows_lanes8): out = bf16(sum_j y_j * w_j) over the 9
-/// picks, fp32 products, col_reduce_small's 8 lanes (pick 8 onto pick 0) added in order.
+/// Bolt's latent combine: out = bf16(sum_j y_j * w_j) over 9 picks, fp32 products, 8 lanes (pick 8 onto pick 0).
 fn combineDepth(s: c.Shape) usize {
     const k = s.n;
     return 1 + (k + 7) / 8 + @min(k, 8); // the product's rounding, a lane's chain, the lanes in order
@@ -462,9 +478,7 @@ pub const CombineProbe = struct {
                 };
             },
             .stress => for (0..shape.rows) |r| {
-                // picks 0-3 carry integer y against +W (products to 2^21), picks 5-8 the same products negated in a
-                // rotated order (5 cancels 1, 6 cancels 2, 7 cancels 3, 8 cancels 0) so no halving tree pairs them,
-                // and pick 4 a small integer: the result. Every fp32 partial in every order is an integer below 2^24.
+                // picks 5-8 cancel picks 1, 2, 3 and 0 in a rotated order, pick 4 is the result: every partial is exact
                 if (k != top_k) continue;
                 const mate = [4]usize{ 8, 5, 6, 7 };
                 for (0..4) |j| {
@@ -535,398 +549,6 @@ pub const CombineProbe = struct {
             t.terms(r, col, tm);
             out[r * t.shape.k + col] = contract.rows.sumIn(acc, order, tm);
         };
-    }
-};
-
-// ---------------------------------------------------------------------------------------------------------------
-// Bolt's norm rows: the gated group norm over the 8,192-wide Mamba inner state (group_norm_xs_bolt, groups of 1,024),
-// and the residual add + RMS norm at hidden 4,096 (add_norm_xs <4096, 512>, add_norm_moe_xs <4096, 512, 1>).
-// Each writes a bf16 row (the contract's output, checked as float64 ranges through its bf16 points), and 64-wide fp32
-// sums of that row (XS) for the next projection; the add variants also write the new residual HN. check() requires
-// HN bit for bit (one f32 add of two bf16, then a bf16 rounding, emulated here) and XS bit for bit as the f32 sum, in
-// order, of the kernel's own bf16 outputs, with the rows past `rows` up to MP zeroed.
-
-/// A Nemotron kernel's source by its key in kernels/metal/nemotron/kernels.zig `all`, as the engine compiles it.
-fn nemotronSource(key: []const u8) []const u8 {
-    for (sources.nemotron.all) |k| if (std.mem.eql(u8, k.key, key)) return k.source;
-    unreachable;
-}
-
-pub const Norm = enum { group16, group128, add, add_moe };
-
-fn normDims(v: Norm) struct { width: usize, group: usize, threads: usize, mp: usize } {
-    return switch (v) {
-        .group16 => .{ .width = 8192, .group = 1024, .threads = 256, .mp = 16 },
-        .group128 => .{ .width = 8192, .group = 1024, .threads = 256, .mp = 128 },
-        .add, .add_moe => .{ .width = 4096, .group = 4096, .threads = 512, .mp = 16 },
-    };
-}
-
-/// A thread's fma chain over its values, the simd_sum tree, then the threadgroup's simdgroup partials in order.
-fn normDepth(v: Norm) usize {
-    const d = normDims(v);
-    return d.group / d.threads + 5 + d.threads / 32;
-}
-fn depthGroup(_: c.Shape) usize {
-    return normDepth(.group16);
-}
-fn depthAdd(_: c.Shape) usize {
-    return normDepth(.add);
-}
-
-const norm_why = "a bf16 row follows the sum of squares as ss^-1/2, so a bf16 sum's error is a few output ulps";
-
-/// rows (a decode step's 1 to a prompt chunk's 16, or up to MP 128), the row width, the reduction (a norm group).
-const served_group16 = [_]c.Shape{ .{ .rows = 16, .n = 8192, .k = 1024 }, .{ .rows = 1, .n = 8192, .k = 1024 } };
-const served_group128 = [_]c.Shape{.{ .rows = 128, .n = 8192, .k = 1024 }};
-const served_add = [_]c.Shape{ .{ .rows = 16, .n = 4096, .k = 4096 }, .{ .rows = 1, .n = 4096, .k = 4096 } };
-
-pub fn normSpec(v: Norm) c.Spec {
-    return .{
-        .name = switch (v) {
-            .group16 => "metal bolt group norm tf_nemotron_group_norm_xs_bolt_16",
-            .group128 => "metal bolt group norm tf_nemotron_group_norm_xs_bolt_128",
-            .add => "metal bolt add norm tf_nemotron_add_norm_xs_bolt",
-            .add_moe => "metal bolt add norm tf_nemotron_add_norm_moe_xs_bolt",
-        },
-        .accum = .f32,
-        .depth = if (v == .group16 or v == .group128) depthGroup else depthAdd,
-        .ops = 8, // the mean's division, + eps, rsqrt, the two products
-        .mids = if (v == .group16 or v == .group128) 1 else 0, // bf16(v * scale) before the weight
-        .out = .bf16,
-        .served = switch (v) {
-            .group16 => &served_group16,
-            .group128 => &served_group128,
-            .add, .add_moe => &served_add,
-        },
-        .sums = .{ .bf16 = 0, .why = norm_why },
-    };
-}
-
-pub fn bf16of(v: f32) f32 {
-    return c.fromBf16(c.toBf16(v));
-}
-
-pub const Range = struct {
-    lo: f64,
-    hi: f64,
-    pub fn widen(r: Range, rel: f64) Range {
-        const e = rel * @max(@abs(r.lo), @abs(r.hi)) + 0x1p-149;
-        return .{ .lo = r.lo - e, .hi = r.hi + e };
-    }
-    pub fn scale(r: Range, b: f64) Range {
-        return if (b >= 0) .{ .lo = r.lo * b, .hi = r.hi * b } else .{ .lo = r.hi * b, .hi = r.lo * b };
-    }
-    pub fn times(r: Range, s: Range) Range {
-        const p = [4]f64{ r.lo * s.lo, r.lo * s.hi, r.hi * s.lo, r.hi * s.hi };
-        return .{ .lo = @min(@min(p[0], p[1]), @min(p[2], p[3])), .hi = @max(@max(p[0], p[1]), @max(p[2], p[3])) };
-    }
-    pub fn bf16(r: Range) Range {
-        return .{ .lo = c.fromBf16(c.toBf16(@floatCast(r.lo))), .hi = c.fromBf16(c.toBf16(@floatCast(r.hi))) };
-    }
-};
-
-pub const NormProbe = struct {
-    a: std.mem.Allocator,
-    rig: rig_.Rig,
-    pipe: mtl.Pipeline,
-    v: Norm,
-    mut: ?Mut = null,
-    shape: c.Shape = undefined,
-    fill: g.Fill = .random,
-    eps: f32 = 1e-5,
-    h: []u16 = &.{}, // group: X (the gated input); add: H
-    x: []u16 = &.{}, // add: the delta; add_moe: Y (one pick)
-    sh: []u16 = &.{}, // add_moe: the shared expert's output
-    w: []u16 = &.{}, // the norm weight, one row
-    hv: []f32 = &.{}, // what the kernel normalizes: X itself, or bf16(H + delta) as HN must hold it
-    refs: [5]rig_.Ref = undefined,
-    hn: rig_.Ref = undefined,
-    out: rig_.Ref = undefined,
-    xs: rig_.Ref = undefined,
-    msg: [200]u8 = undefined,
-
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: Norm, mut: ?Mut) !NormProbe {
-        const name = switch (v) {
-            .group16 => "tf_nemotron_group_norm_xs_bolt_16",
-            .group128 => "tf_nemotron_group_norm_xs_bolt_128",
-            .add => "tf_nemotron_add_norm_xs_bolt",
-            .add_moe => "tf_nemotron_add_norm_moe_xs_bolt",
-        };
-        const src = switch (v) {
-            .group16, .group128 => nemotronSource("group_norm_xs_bolt_16"),
-            .add => nemotronSource("add_norm_xs_bolt"),
-            .add_moe => nemotronSource("add_norm_moe_xs_bolt"),
-        };
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .mut = mut, .pipe = try build(a, device, src, name, mut) };
-    }
-
-    fn free(t: *NormProbe) void {
-        for ([_][]u16{ t.h, t.x, t.sh, t.w }) |b| t.a.free(b);
-        t.a.free(t.hv);
-        t.h = &.{};
-        t.x = &.{};
-        t.sh = &.{};
-        t.w = &.{};
-        t.hv = &.{};
-    }
-
-    pub fn deinit(t: *NormProbe) void {
-        t.free();
-        t.rig.deinit();
-        t.pipe.deinit();
-    }
-
-    pub fn kernel(t: *NormProbe) g.Kernel {
-        return .{ .spec = under(normSpec(t.v), t.mut), .ctx = t, .vt = &vt, .control = if (t.mut) |m| m.gate else null };
-    }
-
-    const vt = g.hooks(NormProbe);
-
-    fn group(t: *const NormProbe) bool {
-        return t.v == .group16 or t.v == .group128;
-    }
-
-    pub fn prepare(t: *NormProbe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        const d = normDims(t.v);
-        if (shape.n != d.width or shape.k != d.group or shape.rows == 0 or shape.rows > d.mp) return false;
-        t.rig.reset();
-        t.free();
-        t.shape = shape;
-        t.fill = fill;
-        const n = shape.rows * d.width;
-        t.h = try t.a.alloc(u16, n);
-        t.x = try t.a.alloc(u16, n);
-        t.sh = try t.a.alloc(u16, n);
-        t.w = try t.a.alloc(u16, d.width);
-        t.hv = try t.a.alloc(f32, n);
-        var prng = std.Random.DefaultPrng.init(seed ^ 0x6e6f);
-        const rng = prng.random();
-        for (t.h) |*v| v.* = c.toBf16(rng.float(f32) * 4 - 2);
-        for (t.x) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) / 4);
-        for (t.sh) |*v| v.* = c.toBf16((rng.float(f32) * 2 - 1) / 4);
-        for (t.w) |*v| v.* = c.toBf16(0.5 + rng.float(f32));
-        switch (fill) {
-            .random => {},
-            .nonfinite => {
-                // row 0 a NaN, row 1 +Inf, row 2 -Inf, row 3 both (in the group norm, all in group 0 of the row)
-                const at = [_][2]usize{ .{ 0, 5 }, .{ 1, 7 }, .{ 2, 0 }, .{ 3, 1 }, .{ 3, 2 } };
-                const put = [_]f32{ std.math.nan(f32), std.math.inf(f32), -std.math.inf(f32), std.math.inf(f32), -std.math.inf(f32) };
-                for (at, put) |p, val| if (p[0] < shape.rows) {
-                    t.h[p[0] * d.width + p[1]] = c.toBf16(val);
-                };
-            },
-            .stress => {
-                // integers whose squares sum below 2^24 in any order (exact in fp32); fp16 overflows on the way
-                const most: u32 = if (t.group()) 90 else 63;
-                for (t.h) |*v| v.* = c.toBf16(@floatFromInt(1 + rng.uintLessThan(u32, most)));
-                @memset(t.x, 0);
-                @memset(t.sh, 0);
-                for (t.w) |*v| v.* = c.toBf16(1);
-            },
-        }
-        // what the kernel normalizes: the group norm its input; the add norms bf16(H + delta) in f32, as HN holds it
-        for (t.hv, 0..) |*o, i| {
-            const hval = c.fromBf16(t.h[i]);
-            o.* = switch (t.v) {
-                .group16, .group128 => hval,
-                .add => bf16of(hval + c.fromBf16(t.x[i])),
-                .add_moe => bf16of(hval + bf16of(c.fromBf16(t.x[i]) + c.fromBf16(t.sh[i]))),
-            };
-        }
-        t.refs[0] = try t.rig.input(std.mem.sliceAsBytes(t.h));
-        t.refs[1] = try t.rig.input(std.mem.sliceAsBytes(t.x));
-        t.refs[2] = try t.rig.input(std.mem.sliceAsBytes(t.sh));
-        t.refs[3] = try t.rig.input(std.mem.sliceAsBytes(t.w));
-        t.refs[4] = try t.rig.input(std.mem.sliceAsBytes(&[2]i32{ @intCast(shape.rows), @intCast(d.mp) }));
-        t.out = try t.rig.output(n * 2);
-        if (!t.group()) t.hn = try t.rig.scratch(n * 2);
-        t.xs = try t.rig.scratch(d.width / 64 * d.mp * 4);
-        return true;
-    }
-
-    pub fn run(t: *NormProbe) !void {
-        const d = normDims(t.v);
-        const p = t.rig.begin();
-        const e = p.e;
-        e.setPipeline(t.pipe);
-        const eps = t.eps;
-        switch (t.v) {
-            .group16, .group128 => {
-                e.setBuffer(t.refs[0].buf, t.refs[0].off, 0);
-                e.setBuffer(t.refs[3].buf, t.refs[3].off, 1);
-                e.setValue(eps, 2);
-                e.setBuffer(t.refs[4].buf, t.refs[4].off, 3);
-                e.setBuffer(t.out.buf, t.out.off, 4);
-                e.setBuffer(t.xs.buf, t.xs.off, 5);
-                // as layers.groupNorm launches it: a threadgroup per group and row, rows padded to MP
-                e.dispatchGroups(mtl.Size.of(d.width / d.group, d.mp, 1), mtl.Size.of(d.threads, 1, 1));
-            },
-            .add => {
-                e.setBuffer(t.refs[0].buf, t.refs[0].off, 0);
-                e.setBuffer(t.refs[1].buf, t.refs[1].off, 1);
-                e.setBuffer(t.refs[3].buf, t.refs[3].off, 2);
-                e.setValue(eps, 3);
-                e.setBuffer(t.refs[4].buf, t.refs[4].off, 4);
-                e.setBuffer(t.hn.buf, t.hn.off, 5);
-                e.setBuffer(t.out.buf, t.out.off, 6);
-                e.setBuffer(t.xs.buf, t.xs.off, 7);
-                e.dispatchGroups(mtl.Size.of(d.mp, 1, 1), mtl.Size.of(d.threads, 1, 1));
-            },
-            .add_moe => {
-                const ones: [16]f32 = @splat(1);
-                e.setBuffer(t.refs[0].buf, t.refs[0].off, 0);
-                e.setBuffer(t.refs[1].buf, t.refs[1].off, 1);
-                e.setBytes(std.mem.sliceAsBytes(&ones), 2); // one pick of weight 1 a row (bolt.moe's s.ones)
-                e.setBuffer(t.refs[2].buf, t.refs[2].off, 3);
-                e.setBuffer(t.refs[3].buf, t.refs[3].off, 4);
-                e.setValue(eps, 5);
-                e.setBuffer(t.refs[4].buf, t.refs[4].off, 6);
-                e.setBuffer(t.hn.buf, t.hn.off, 7);
-                e.setBuffer(t.out.buf, t.out.off, 8);
-                e.setBuffer(t.xs.buf, t.xs.off, 9);
-                e.dispatchGroups(mtl.Size.of(d.mp, 1, 1), mtl.Size.of(d.threads, 1, 1));
-            },
-        }
-        try t.rig.finish(p);
-    }
-
-    pub fn count(t: *NormProbe) usize {
-        return t.shape.rows * t.shape.n;
-    }
-
-    /// Group (or row) g of row r: its first column and its float64 sum of squares and their magnitude.
-    fn squares(t: *const NormProbe, r: usize, col: usize) struct { at: usize, ss: f64 } {
-        const d = normDims(t.v);
-        const first = col / d.group * d.group;
-        var ss: f64 = 0;
-        for (t.hv[r * d.width + first ..][0..d.group]) |v| ss += @as(f64, v) * v;
-        return .{ .at = first, .ss = ss };
-    }
-
-    pub fn reference(t: *NormProbe, want: []f64, mag: []f64) !void {
-        const d = normDims(t.v);
-        for (0..t.shape.rows) |r| {
-            var col: usize = 0;
-            while (col < d.width) : (col += d.group) {
-                const q = t.squares(r, col);
-                const scale = 1 / @sqrt(q.ss / @as(f64, @floatFromInt(d.group)) + t.eps);
-                for (col..col + d.group) |j| {
-                    const i = r * d.width + j;
-                    want[i] = c.fromBf16(t.w[j]) * (@as(f64, t.hv[i]) * scale);
-                    mag[i] = @abs(want[i]);
-                }
-            }
-        }
-    }
-
-    pub fn intervals(t: *NormProbe, low: []f64, high: []f64) !void {
-        const d = normDims(t.v);
-        const u = c.unit(.f32);
-        for (0..t.shape.rows) |r| {
-            var col: usize = 0;
-            while (col < d.width) : (col += d.group) {
-                const q = t.squares(r, col);
-                // the fp32 sum of squares within gamma(depth) of float64, then / group, + eps, rsqrt (8 ulps)
-                const err = c.gamma(@floatFromInt(normDepth(t.v)), u) * q.ss;
-                const gw: f64 = @floatFromInt(d.group);
-                const lo_ss = @max(0, q.ss - err);
-                const hi_ss = q.ss + err;
-                const s = Range{ .lo = 1 / @sqrt(hi_ss / gw + t.eps), .hi = 1 / @sqrt(lo_ss / gw + t.eps) };
-                const scale = s.widen(c.gamma(10, u));
-                for (col..col + d.group) |j| {
-                    const i = r * d.width + j;
-                    const wv: f64 = c.fromBf16(t.w[j]);
-                    const v = Range{ .lo = t.hv[i], .hi = t.hv[i] };
-                    const out = if (t.group())
-                        // bf16(W * bf16(v * scale)): the product, its bf16 point, the weight's product, the output
-                        v.times(scale).widen(u).bf16().scale(wv).widen(u).bf16()
-                    else
-                        // bf16(W * (v * scale)): two fp32 products, then the output
-                        v.times(scale).widen(u).scale(wv).widen(u).bf16();
-                    low[i] = out.lo;
-                    high[i] = out.hi;
-                }
-            }
-        }
-    }
-
-    pub fn bounds(t: *NormProbe, want: []const f64, _: []const f64, allow: []f64) !void {
-        const ranges = try t.a.alloc(f64, t.count() * 2);
-        defer t.a.free(ranges);
-        const low = ranges[0..t.count()];
-        const high = ranges[t.count()..];
-        try t.intervals(low, high);
-        for (allow, want, low, high) |*v, w, lo, hi| v.* = @max(@abs(w - lo), @abs(hi - w));
-    }
-
-    pub fn simulate(t: *NormProbe, acc: c.Accum, order: g.Order, out: []f64) !void {
-        const d = normDims(t.v);
-        const sq = try t.a.alloc(f64, d.group);
-        defer t.a.free(sq);
-        for (0..t.shape.rows) |r| {
-            var col: usize = 0;
-            while (col < d.width) : (col += d.group) {
-                for (sq, 0..) |*o, j| {
-                    const v: f64 = t.hv[r * d.width + col + j];
-                    o.* = v * v;
-                }
-                const ss = contract.rows.sumIn(acc, order, sq);
-                const scale = 1 / @sqrt(ss / @as(f64, @floatFromInt(d.group)) + t.eps);
-                for (col..col + d.group) |j| {
-                    const i = r * d.width + j;
-                    out[i] = c.fromBf16(t.w[j]) * (@as(f64, t.hv[i]) * scale);
-                }
-            }
-        }
-    }
-
-    /// OUT against float64 (its class on gate 1, its interval through the bf16 points otherwise); HN bit for bit;
-    /// XS as the in-order f32 sum of the kernel's own 64 bf16 outputs; the padded rows' XS zero.
-    pub fn check(t: *NormProbe, at: g.Gate) !?[]const u8 {
-        const d = normDims(t.v);
-        const out = t.rig.bytes(t.out, t.count() * 2);
-        {
-            const n = t.count();
-            const buf = try t.a.alloc(f64, 4 * n);
-            defer t.a.free(buf);
-            const want = buf[0..n];
-            const mag = buf[n .. 2 * n];
-            const low = buf[2 * n .. 3 * n];
-            const high = buf[3 * n ..];
-            try t.reference(want, mag);
-            if (at == .nonfinite) {
-                for (want, 0..) |w, i| {
-                    const got = c.read(.bf16, out, i);
-                    if (c.classOf(got) != c.classOf(w)) return try std.fmt.bufPrint(&t.msg, "OUT[{d}] = {d} is not of float64's class ({d})", .{ i, got, w });
-                }
-            } else {
-                try t.intervals(low, high);
-                for (low, high, 0..) |lo, hi, i| {
-                    const got = c.read(.bf16, out, i);
-                    if (!(got >= lo and got <= hi)) return try std.fmt.bufPrint(&t.msg, "OUT[{d}] = {d} outside float64's [{d}, {d}] through its bf16 points", .{ i, got, lo, hi });
-                }
-            }
-        }
-        if (!t.group()) {
-            const hn = t.rig.bytes(t.hn, t.count() * 2);
-            for (t.hv, 0..) |want, i| {
-                const got = c.fromBf16(std.mem.readInt(u16, hn[i * 2 ..][0..2], .little));
-                const same = got == want or (std.math.isNan(got) and std.math.isNan(want));
-                if (!same) return try std.fmt.bufPrint(&t.msg, "HN[{d}] = {d}, bf16(H + delta) = {d}", .{ i, got, want });
-            }
-        }
-        const xs = t.rig.bytes(t.xs, d.width / 64 * d.mp * 4);
-        for (0..d.width / 64) |gi| for (0..d.mp) |r| {
-            const got: f32 = @bitCast(std.mem.readInt(u32, xs[(gi * d.mp + r) * 4 ..][0..4], .little));
-            var want: f32 = 0;
-            if (r < t.shape.rows) for (0..64) |j| {
-                want += c.fromBf16(std.mem.readInt(u16, out[(r * d.width + gi * 64 + j) * 2 ..][0..2], .little));
-            };
-            const same = @as(u32, @bitCast(got)) == @as(u32, @bitCast(want)) or (std.math.isNan(got) and std.math.isNan(want));
-            if (!same) return try std.fmt.bufPrint(&t.msg, "XS group {d} row {d} = {d}, the f32 sum of its 64 outputs = {d}", .{ gi, r, got, want });
-        };
-        return null;
     }
 };
 
