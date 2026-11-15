@@ -18,9 +18,14 @@ pub fn family(comptime F: type) Family {
     return .other;
 }
 
-/// `o` with `tp` and `rank` resolved and `launch_from` named, or null with `problem` set; before admission and `open`.
+/// `o` resolved (`tp`, `rank`, `launch_from`) in a world `F` serves, or null with `problem` set; before admission.
 pub fn resolve(comptime F: type, a: Allocator, o: api.Open, problem: *[]const u8) !?api.Open {
-    return resolveWith(a, o, family(F), settings.Process{}, problem);
+    const out = (try resolveWith(a, o, family(F), settings.Process{}, problem)) orelse return null;
+    if (try @import("cuda_refusal.zig").place(F, a, out)) |why| { // a rank inside its world, a world the family serves
+        problem.* = why;
+        return null;
+    }
+    return out;
 }
 
 pub fn resolveWith(a: Allocator, o: api.Open, fam: Family, lookup: anytype, problem: *[]const u8) !?api.Open {
