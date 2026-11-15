@@ -8,8 +8,9 @@ Unset or blank is main's chain.
 ## Source and environment
 
 - Main: `d6c4cce602eef4aff235625a5325bb617a9674ff`. Branch: this pull request's first commit on that main. The later
-  commits add the kernel contract's entries and controls, tests, docs and pins, and merge main `2ba55ec7d3`, whose 17
-  commits touch no Flash Next, qmmf, kernel-contract or kernel-list file; the arms below were not rerun on it.
+  commits add the kernel contract's entries and controls, tests, docs and pins, and merge main up to `643db94726`. Of
+  main's 19 commits since `d6c4cce602`, one touches Flash Next (`6b9de69510`: a lone sampled stream's draws) and none
+  touches the read-out, qmmf, the kernel contract or the kernel list; the arms below were not rerun on it.
 - One NVIDIA GB10 (sm_121), Zig 0.17.0, CUDA 13.3.
 - Checkpoint `nvidia/Qwen3.8-Flash-Next-FP4-Local`, revision `b9ce18a6887e18c089fdea8509a33e63429a3300`, every arm.
   Its read-out weights are BF16 (`input_mix_weight_down` [320, 10240], `input_mix_weight_up` [10240, 320]).
