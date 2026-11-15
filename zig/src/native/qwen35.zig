@@ -137,9 +137,9 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
                 .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
             }, .{ .planned = true, .grid = chunk, .chunk = chunk }, plan.budget_bytes);
             h.host.cache = &h.cache.?;
-            h.host.info_.prompt_cache = true;
         }
     }
+    h.host.advertiseCache(if (h.cache) |*store| store else null);
     errdefer if (h.cache) |*store| store.deinit();
     try mtl.resident.streams.hold(h, io, "qwen3.5");
     errdefer mtl.resident.streams.drop(h);
