@@ -3,6 +3,7 @@ const std = @import("std");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const mtl = @import("metal");
 
 const Builder = wts.Builder;
 const Weights = wts.Weights;
@@ -197,4 +198,24 @@ test "without tensor units 4/64 matrices keep their lane shape but no tiles: row
         try std.testing.expect(lin.lane and lin.tiles == null);
         try std.testing.expectEqual(@as(u8, 4), lin.rows.?.bits);
     }
+}
+
+test "a slide commit to a 4/64 projection without tiles rewrites its row copy and touches no tiles" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const n = 64;
+    const k = 128;
+    const words = n * k / 8;
+    const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const own = try device.buffer(words * 4, opts);
+    defer own.deinit();
+    const sb = try device.buffer(n * k / 64 * 2, opts);
+    defer sb.deinit();
+    @memset(own.slice(u32, words), 0);
+    const lin = wts.Linear{ .lane = true, .n = n, .k = k, .rows = .{ .w = own, .scales = sb, .biases = sb, .n = n, .k = k } };
+    var edited: [words]u32 = undefined;
+    for (&edited, 0..) |*x, i| x.* = @intCast(i * 2654435761 % (1 << 32));
+    wts.retile(lin, &edited); // tiles absent: the row copy alone takes the edit
+    try std.testing.expectEqualSlices(u32, &edited, own.slice(u32, words));
 }
