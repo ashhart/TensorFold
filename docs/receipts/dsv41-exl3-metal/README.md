@@ -463,6 +463,22 @@ does), `TF_DSV41_PREFILL_INTERLEAVE` and `TF_DSV41_ENGRAM_LOOKAHEAD` (both behav
 `TF_DSV41_NO_FUSE_*` fusion switches were removed earlier for the same reason: a fusion is taken when its shape and pipeline checks
 admit it. `TF_DSV41_MTP_DRAFTS` already existed in the parent and is only registered here.
 
+#### Eight concurrent streams against the parent
+
+The widest stream count the lane takes (`--parallel 8`, context 32768) on the same machine, with `bench_concurrent.py` at 64 tokens,
+three repetitions, temperature 0, 1, 4 and 8 streams, `--alone --serial`, aggregate decode tok/s with the slowest first token. The
+prompt files hold four prompts, so at eight streams each prompt is sent twice. 0 failed or unmeasured cells in every arm. The
+candidate is the final tree and the parent is #2373's head; the arithmetic differs between them, so only speed is compared here.
+
+| Arm | short, 1 | short, 4 | short, 8 | long, 1 | long, 4 | long, 8 |
+|---|---|---|---|---|---|---|
+| parent | 40.6 | 43.5 | 41.7 (first token 4.38 s) | 38.5 | 6.2 | 5.4 (97.4 s) |
+| candidate | 52.5 | 59.0 | 56.1 (4.15 s) | 49.1 | 11.1 | 8.8 (59.4 s) |
+| candidate, `BATCH_MAX=8` | 52.5 | 59.1 | 48.8 (4.15 s) | 49.1 | 11.1 | 8.5 (59.7 s) |
+
+The candidate is faster than the parent at every count, by 35% at eight short streams and 63% at eight long ones. Raising
+`BATCH_MAX` to 8 is 13% slower at eight short streams and 3% slower at eight long ones, so the default of 4 stays.
+
 Still open: the parent's review gates (code provenance and copy rule, integration), ATC coverage (the board is incomplete),
 runtime on M1, M2 and M3 chips, the native window, a comparison against `mlx_lm`, and a source-matched no-slowdown
 comparator against the parent.
