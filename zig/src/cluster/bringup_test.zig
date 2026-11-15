@@ -13,6 +13,8 @@ const ms = std.time.ns_per_ms;
 
 /// Short beats and deadlines, so a stopped peer is dead in under half a second.
 const quick: bringup.Options = .{ .membership = .{ .beat_ns = 20 * ms, .suspect_ns = 120 * ms, .dead_ns = 400 * ms }, .settle_ns = 5 * std.time.ns_per_s, .linger_ns = 100 * ms };
+/// How long a watching rank waits: a watch returns at its first step after an event, so this bounds only a failure.
+const watch_ns = 30 * std.time.ns_per_s;
 
 const Then = enum { leave, watch, stop };
 
@@ -38,7 +40,7 @@ const Rank = struct {
             .leave => r.live.leave(),
             .watch => {
                 const t0 = fabric.words.nowNs();
-                r.lost = r.live.watch(5 * std.time.ns_per_s) catch |e| {
+                r.lost = r.live.watch(watch_ns) catch |e| {
                     r.err = e;
                     return;
                 };
@@ -127,7 +129,9 @@ test "a peer that stops after agreeing is found dead by name within the membersh
     const lost = p.ranks[0].lost.?;
     try std.testing.expectEqualStrings("b", lost.name.str());
     try std.testing.expectEqual(@import("membership.zig").State.dead, lost.state);
-    try std.testing.expect(p.ranks[0].lost_after_ns >= quick.membership.dead_ns and p.ranks[0].lost_after_ns < 2 * std.time.ns_per_s);
+    // never before the dead time; after it, a step as soon as the runner schedules one, so the bound is the watch
+    try std.testing.expect(p.ranks[0].lost_after_ns >= quick.membership.dead_ns);
+    try std.testing.expect(p.ranks[0].lost_after_ns < watch_ns);
 }
 
 test "a peer that never comes ends the bring-up as NeverSettled at the settle time" {

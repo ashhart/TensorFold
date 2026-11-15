@@ -20,11 +20,57 @@ fn cdiv(a: usize, b: usize) usize {
 }
 
 /// At most wide_rows rows (one wave on 48 SMs) over wide_pools pools or more: 1,024 threads a row, the same bytes.
-const wide_rows = 48;
+pub const wide_rows = 48;
 const wide_pools = 4096;
 
 fn wideSelect(rows: usize, np: usize) bool {
     return rows <= wide_rows and np >= wide_pools;
+}
+
+/// glm_index_decode.cuh's sizes: a scan CTA's pools and threads, a merge CTA's candidates and threads, the floor's aim.
+pub const dsel_span = 4096;
+pub const dsel_scan_threads = 256;
+pub const dsel_cap = 4096;
+pub const dsel_merge_threads = 1024;
+/// The floor's aim, for speed only: every path picks tf_glm_select_rows' pools.
+pub const dsel_target = 2048;
+
+/// The bytes of a decode select's gt and eq bit words for `rows` rows at `np` pools (Scratch.ls, its bits_rows).
+pub fn bitsBytes(rows: usize, np: usize) usize {
+    return rows * 2 * cdiv(np, 32) * 4;
+}
+
+/// tf_glm_dsel_scan's grid for `rows` rows from host_pos: the last row's pools (it sees the most) in spans.
+pub fn dselScanCtas(host_pos: usize, rows: usize, np: usize) usize {
+    const last = @min(np, @max((host_pos + rows) / pool, topk_pools));
+    // 0 when every row fits a merge CTA's candidates: the merge takes the rows whole and the scan marks nothing
+    return if (last <= dsel_cap) 0 else cdiv(last, dsel_span);
+}
+
+/// A decode window's picks (the wide select's rows) on many CTAs: scores [rows][np] at `at` into pools [rows][512].
+pub fn decodeSelect(
+    set: glue.Set,
+    stream: cuda.Stream,
+    scores: u64,
+    pools: u64,
+    np: usize,
+    at: u64,
+    host_pos: usize,
+    rows: usize,
+    bits: u64,
+    /// 0, or [rows] int32 for each row's path (glm_index_decode.cuh; the checks count them).
+    path: u64,
+) !void {
+    const words = cdiv(np, 32);
+    const g = dselScanCtas(host_pos, rows, np);
+    if (g > 0) {
+        var sa: cuda.Args = .{};
+        inline for (.{ scores, @as(i64, @intCast(np)), at, @as(c_int, topk_pools), @as(c_int, dsel_target), bits, @as(i64, @intCast(words)) }) |v| sa.add(v);
+        try cuda.launch.launch(set.glue.dsel_scan, .{ .grid = .{ .x = @intCast(g), .y = @intCast(rows) }, .block = .{ .x = dsel_scan_threads } }, stream, &sa);
+    }
+    var ma: cuda.Args = .{};
+    inline for (.{ scores, pools, @as(i64, @intCast(np)), at, @as(c_int, topk_pools), bits, @as(i64, @intCast(words)), path }) |v| ma.add(v);
+    try cuda.launch.launch(set.glue.dsel_merge, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = dsel_merge_threads } }, stream, &ma);
 }
 
 /// sparse.index_update: the window's LayerNormed index keys and gates into ik and ig at pos, completed pools into pk.
@@ -55,7 +101,15 @@ pub fn headScale(heads: usize) f32 {
 }
 
 /// The scratch of one selectTokens: scores fp32 [min(rows, 512)][np], and with np past select_list the list rows.
-pub const Scratch = struct { scores: u64, ls: u64, li: u64, pools: u64, at: u64 };
+pub const Scratch = struct {
+    scores: u64,
+    ls: u64,
+    li: u64,
+    pools: u64,
+    at: u64,
+    /// The rows of decode select bit words (bitsBytes) `ls` also holds; 0: none, and the wide select runs.
+    bits_rows: usize = 0,
+};
 
 /// A prompt chunk's indexer rows split across the ranks (TF_GLM_INDEX_SPLIT): a block each, the picks all-gathered.
 pub const Split = struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize };
@@ -107,9 +161,14 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
             stamp.end();
             continue;
         };
+        const wide = wideSelect(n, np_max);
+        if (wide and set.dsel and n <= s.bits_rows) {
+            try decodeSelect(set, stream, s.scores, s.pools + a * topk_pools * 8, np_max, at, host_pos + a, n, s.ls, 0);
+            stamp.end();
+            continue;
+        }
         var sel: cuda.Args = .{};
         inline for (.{ s.scores, s.pools + a * topk_pools * 8, @as(i64, @intCast(np_max)), at, @as(c_int, topk_pools) }) |v| sel.add(v);
-        const wide = wideSelect(n, np_max);
         try cuda.launch.launch(if (wide) set.glue.select_rows_wide else set.glue.select_rows, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = if (wide) 1024 else 128 } }, stream, &sel);
         stamp.end();
     }
@@ -138,6 +197,17 @@ test "sparse.py's sizing rules" {
     try std.testing.expectEqual(@as(usize, 1250), scoreColumns(5000, 1, 2048));
     try std.testing.expectEqual(@as(usize, 2051), width);
     try std.testing.expectEqual(@as(f32, @floatCast(1.0 / 5.656854249492381)), headScale(32));
+}
+
+test "GLM index: a decode select's scan covers the last row's pools in spans, and none when the merge takes rows whole" {
+    // 864K: the last row sees 216,064 pools of a 216,080 bucket
+    try std.testing.expectEqual(@as(usize, 53), dselScanCtas(864256 - 16, 16, 216080));
+    try std.testing.expectEqual(@as(usize, 8), dselScanCtas(131072 - 1, 1, 65536)); // 32,768 visible of 65,536
+    try std.testing.expectEqual(@as(usize, 0), dselScanCtas(4 * 4096 - 1, 1, 8192)); // 4,096 pools: one merge CTA
+    try std.testing.expectEqual(@as(usize, 2), dselScanCtas(4 * 4096 + 3, 1, 8192));
+    try std.testing.expectEqual(@as(usize, 0), dselScanCtas(100, 1, 4096)); // a few visible: K pools
+    try std.testing.expect(dsel_span % (32 * (dsel_scan_threads / 32)) == 0); // whole words for every warp
+    try std.testing.expectEqual(@as(usize, 16 * 2 * 6753 * 4), bitsBytes(16, 216080));
 }
 
 test "rank 0 splits a prompt chunk's indexer rows from TF_GLM_INDEX_SPLIT's position on, over two ranks or more" {

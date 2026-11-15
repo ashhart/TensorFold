@@ -58,7 +58,7 @@ pub fn pick(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp
 }
 
 // Failure-only downloads leave the normal row selection and graph captures unchanged.
-fn badRow(st: cuda.Stream, d: *mtp.Draft, best: [4]f32, batched: bool, scores: u64, n: usize) void {
+pub fn badRow(st: cuda.Stream, d: *mtp.Draft, best: [4]f32, batched: bool, scores: u64, n: usize) void {
     var input: [wt.wide]u16 = undefined;
     const input_ok: ?bool = if (download(st, std.mem.sliceAsBytes(&input), d.out.ptr)) |_| finite(&input) else |_| null;
     const row = d.host[0..n];
@@ -94,7 +94,7 @@ pub fn pickHead(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: 
 }
 
 /// A verify failure names its own row; the head's stream activations are not a verify input capture.
-fn badVerify(d: *const mtp.Draft, row: usize, best: ?[4]f32, row_ok: ?bool, masked: bool) void {
+pub fn badVerify(d: *const mtp.Draft, row: usize, best: ?[4]f32, row_ok: ?bool, masked: bool) void {
     const top: ?f32 = if (best) |b| b[0] else null;
     const lse: ?f32 = if (best) |b| b[1] else null;
     std.debug.print("Flash Next ProposalNonfinite stream={s} kind=verify row={d} rows={d} len={d} cap={d} top={?} lse={?} cache={s} input=not_captured scores={s} row_finite={?}\n", .{ d.label, row, d.rows, d.len, d.cap, top, lse, if (d.pooled_lane) "pool" else "own", if (masked) "masked" else "raw", row_ok });
@@ -113,7 +113,7 @@ fn checkBest(st: cuda.Stream, d: *mtp.Draft, rows: ?[]const u16) !void {
 pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mtp.Draft, sm: ?Sampling, masks: []const u32, out: []u32) !void {
     const n = d.rows;
     var pending: [max_rows]u32 = undefined;
-    if (masks.len == 0) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
+    if (masks.len == 0 and (!mtp.isSampled(sm) or !usable(sm.?))) try h.best(st, d.logits.ptr, vocab, vocab, n, d.best.ptr);
     if (!mtp.isSampled(sm) and masks.len == 0) {
         try st.synchronize();
         try checkBest(st, d, null);
@@ -124,9 +124,10 @@ pub fn draws(h: *const mtp.Head, st: cuda.Stream, gpa: std.mem.Allocator, d: *mt
     if (masks.len == 0) if (sm) |s| if (usable(s)) {
         const k: usize = s.top_k;
         const c = try candidates(h, st, d, d.logits.ptr, vocab, vocab, n, k);
-        try checkBest(st, d, null);
         for (pending[0..n], 0..) |*t, r| t.* = drawTopk(gpa, c.vals[r * k ..][0..k], c.cols[r * k ..][0..k], null, d.fed0 + 1 + r, s) catch |err| {
-            if (err == error.ProposalNonfinite) badVerify(d, r, d.best_host[r * 4 ..][0..4].*, null, false);
+            if (err == error.ProposalNonfinite) {
+                try badCandidates(h, st, d, r);
+            }
             return err;
         };
         @memcpy(out[0..n], pending[0..n]);
@@ -163,4 +164,22 @@ fn copyReady(st: cuda.Stream, dst: []u8, src: u64) !void {
 fn download(st: cuda.Stream, dst: []u8, src: u64) !void {
     try st.synchronize();
     try copyReady(st, dst, src);
+}
+
+/// Diagnostic reductions are only queued after a top-k sentinel refuses a verify row.
+pub fn badCandidates(h: *const mtp.Head, st: cuda.Stream, d: *mtp.Draft, row: usize) !void {
+    try h.best(st, d.logits.ptr, vocab, vocab, d.rows, d.best.ptr);
+    try download(st, std.mem.sliceAsBytes(d.best_host[0 .. 4 * d.rows]), d.best.ptr);
+    badVerify(d, row, d.best_host[row * 4 ..][0..4].*, null, false);
+}
+
+/// Device-free draft draw over the same reduced best and full top-k set as the per-stream path.
+pub fn pickFrom(h: *const mtp.Head, a: std.mem.Allocator, best: [4]f32, vals: []const u16, cols: []const i32, position: u64, sm: ?Sampling) !Pick {
+    const tok = try h.view().pickBest(best);
+    if (!mtp.isSampled(sm)) return .{ .token = tok, .prob = @exp(@as(f64, best[0]) - @as(f64, best[1])) };
+    if (!usable(sm.?)) return error.ProposalScoreShape;
+    const sampled = try drawTopk(a, vals, cols, h.ids, position, sm.?);
+    for (vals, cols) |v, col| if (h.ids[@intCast(col)] == sampled)
+        return .{ .token = sampled, .prob = @exp(@as(f64, mtp.promote(v)) - @as(f64, best[1])) };
+    return .{ .token = sampled, .prob = 0 };
 }

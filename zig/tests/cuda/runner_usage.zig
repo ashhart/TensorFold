@@ -4,6 +4,7 @@ pub const text =
     \\  qwen4                     synthetic native Qwen4: binary64 logits/tokens, state seams, lanes and copied drafts
     \\  qwen-draft-frames MODEL DRAFTER IDS OUT  native 27B DFlash frames: raw bytes equal across partitions, controls red
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
+    \\  nemotron-draws            Nemotron's batched draws and row kernels against the per-row path, byte for byte
     \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
     \\  flashnext-fidelity-single MODEL FIXTURE OUTPUT  single-rank reference isolation
     \\  flashnext-fidelity-rank MODEL RANK PORT FIXTURE OUTPUT  fixed-history full score rows
