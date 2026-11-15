@@ -240,7 +240,7 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     defer keys.deinit();
     var values = try upload16(dev, cmds, staging, f.v_bits, timeout);
     defer values.deinit();
-    // Long cases stage scores in an f32 stream: 8 heads x rows x total keys words, zero-filled once (write-before-read).
+    // Long cases stage scores in an f32 stream: 8 heads x rows x total keys words, zero-filled once.
     const total_keys = ca.capacityOf(case);
     var stream_buf: ?vk.Buffer = null;
     defer if (stream_buf) |*b| b.deinit();

@@ -452,7 +452,7 @@ pub fn main(init: std.process.Init) !u8 {
     return if (match_a and match_b and ids_equal and logits_equal) 0 else 1;
 }
 
-// Greedy: prefill (max_prefill_rows chunks; --sequential-prefill per token = boundary evidence); ids_out.len argreduce draws.
+// Greedy: prefill in max_prefill_rows chunks (--sequential-prefill: per token); ids_out.len argreduce draws.
 fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
     if (sequential) {
         for (prompt) |tok| try e.prefill(&.{tok});

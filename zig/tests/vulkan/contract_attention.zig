@@ -65,7 +65,7 @@ pub fn visibleKeys(case: SdpaCase, r: u64) u64 {
     return case.prefix + r + 1;
 }
 
-// Cases test n=1,15/16/17,255/256/257,1023/1024/1025,7167/7168,7169/8192 and rows 17/32/64 at the 1024/7168/8192 limits.
+// Cases test n=1,15/16/17,255/256/257,1023/1024/1025,7167/7168,7169/8192 and rows 17/32/64 at 1024/7168/8192.
 pub const served_cases = [_]SdpaCase{
     .{ .name = "decode n=1", .rows = 1, .prefix = 0 },
     .{ .name = "decode n=16 tile", .rows = 1, .prefix = 15 },

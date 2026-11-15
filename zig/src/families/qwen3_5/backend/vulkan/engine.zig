@@ -11,15 +11,14 @@ const View = vk.tensor.View;
 
 pub const max_prefill_rows = fwd.max_prefill_rows;
 
-// Chunk cut = min(done+64,total), pure, host-tested; totals 64/65/127/128/129 cut at 64 / 64,65 / 64,127 / 64,128 / 64,128,129
+// Chunk cut = min(done+64,total), host-tested; 64/65/127/128/129 rows cut at 64, 64+65, 64+127, 64+128, 64+128+129
 pub fn chunkEnd(done: usize, total: usize) usize {
     return @min(done +| max_prefill_rows, total);
 }
 
 // The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in large chunks instead of one 64 KiB fence each.
 pub const staging_bytes: u64 = 8 << 20;
-// The 32 MiB scratch arena holds persistent windows (~2.6 MB), worst-layer prefill transients (~11.1 MB at 64 rows),
-// and the long-attention f32 score stream (16 MiB at capacity 8192).
+// The 32 MiB scratch arena: windows ~2.6 MB, prefill transients ~11.1 MB at 64 rows, 16 MiB score stream at 8192.
 pub const arena_bytes: u64 = 32 << 20;
 
 // Step errors include dispatch.Error; Timeout exits 124 and InFlight exits 1 inside `vk.orExit`, before teardown.
@@ -81,7 +80,7 @@ pub const Engine = struct {
     base_mark: u64,
     poisoned: bool,
 
-    // Pinned-model admission runs inside the weights load before GPU work; the arm's visible-key cap is 8192; probe uses 256.
+    // Pinned-model admission runs in the weights load before GPU work; the visible-key cap is 8192; probe uses 256.
     pub fn init(
         gpa: Allocator,
         io: std.Io,

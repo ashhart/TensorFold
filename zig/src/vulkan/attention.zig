@@ -26,7 +26,7 @@ pub const rotary_pairs: u64 = 32;
 pub const theta: f32 = 1e7;
 /// head_dim^-1/2 as the oracle passes it: e.setValue(1.0 / 16.0, 3).
 pub const scale: f32 = 1.0 / 16.0;
-// Totals past shared_stream_keys run the -DSTREAM_GLOBAL images with the f32 score stream; longer prefixes refuse, not truncate.
+// Totals past shared_stream_keys use the -DSTREAM_GLOBAL images and an f32 score stream; longer prefixes refuse.
 pub const max_visible_keys: u64 = 8192;
 /// kStreamKeys: s_qrow (256) + s_stream (7168) + s_tree (256) fit shared memory; the stream arm stages scores past it.
 pub const shared_stream_keys: u64 = 7168;
@@ -181,7 +181,6 @@ pub const Attention = struct {
     }
 
     // SDPA scales q once, streams f32 scores; Metal scales per-score in 128-key chunks. No bit-exact/performance claim.
-    // Past shared_stream_keys the stream view stages f32 scores; the long image indexes one total_keys region per workgroup.
     pub fn attend(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, stream: ?View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
         const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements, if (stream) |s| s.elements else 0);
         if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
