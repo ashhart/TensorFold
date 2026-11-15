@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Living Weights: a fact graph write the OS refuses names its cause, for example "ShardWrite (ISDIR)" (#3126).
+
 - Pull: a hub file path refused for a reserved name or a path escape now names the path and the reason, and the pull exits 1 (#3097).
 
 - Server: a fact graph save whose final rename fails no longer leaves its temporary file behind (#3096).
