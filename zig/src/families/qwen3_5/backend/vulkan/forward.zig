@@ -190,7 +190,8 @@ test "extractQPlan derives the interleaved geometry and refuses torn views" {
     try testing.expectEqual(@as(u32, 24), plan.heads_rows);
     try testing.expectEqual(@as(u32, 512), plan.in_head_stride);
     try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(0, 0, 0));
-    try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(33, 33 * 2048, 33 * 4096)); // past the prefill cap
+    const past = max_prefill_rows + 1;
+    try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(past, past * 2048, past * 4096)); // past the prefill cap
     try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(2, 2 * 2048, 2 * 4095));
     try testing.expectEqual(@as(?ExtractQPlan, null), extractQPlan(2, 2 * 2047, 2 * 4096));
 }
