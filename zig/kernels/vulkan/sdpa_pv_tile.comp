@@ -1,0 +1,128 @@
+// Prefill attention output for one kv head, tiled: a workgroup sums 16 queries (4 query heads x 4 rows) over 16 value
+// dimensions, so every V tile is read once for 16 queries instead of once per (head, row) workgroup.
+// Per-output order is sdpa_decode_native.comp's: ascending key, probability * widened bf16 V, one RNE store.
+// A key past a row's causal bound has probability 0 and adds an exact zero.
+// The last pass of the three-kernel prefill SDPA: sdpa_scores_tile, sdpa_softmax_rows, sdpa_pv_tile.
+
+#version 460
+
+#extension GL_EXT_shader_16bit_storage : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Probs {
+  float values[];
+} prob_data;
+layout(set = 0, binding = 1, std430) readonly buffer Value {
+  uint16_t values[];
+} value_data;
+layout(set = 0, binding = 2, std430) writeonly buffer Output {
+#ifdef F32_OUT
+  float values[];
+#else
+  uint16_t values[];
+#endif
+} output_data;
+
+layout(push_constant) uniform Params {
+  uint count;
+  uint operation;
+  uint lhs_size;
+  uint rhs_size;
+  uint reduce_size;
+  uint output_size;
+  uint lhs_offset;
+  uint rhs_offset;
+  uint output_offset;
+  uint aux_size;
+  uint aux_offset;
+  uint matrix_m;
+  uint matrix_n;
+  uint matrix_k;
+  uint flags;
+  float alpha;
+  float beta;
+  uint dims;
+  uint shape[4];
+  uint in_strides[4];
+  uint out_strides[4];
+} params;
+
+const uint QT = 16u;
+const uint DT = 16u;
+const uint KC = 64u;
+// Score row stride in words is out_strides[1], set by Attention from max_visible_keys.
+
+shared float s_p[QT * KC];
+shared float s_v[KC * DT];
+
+float bf16_load(uint16_t bits) {
+  return uintBitsToFloat(uint(bits) << 16u);
+}
+uint16_t bf16_store(float value) {
+  uint bits = floatBitsToUint(value);
+  if (isnan(value)) {
+    return uint16_t((bits >> 16) | 0x40u);
+  }
+  return uint16_t((bits + 0x7fffu + ((bits >> 16) & 1u)) >> 16);
+}
+#ifdef F32_OUT
+#define OUT_STORE(x) (x)
+#else
+#define OUT_STORE(x) bf16_store(x)
+#endif
+
+void main() {
+  uint tx = gl_LocalInvocationID.x;
+  uint ty = gl_LocalInvocationID.y;
+  uint lin = ty * 16u + tx;
+  uint kv_head = gl_WorkGroupID.z;
+  uint repeats = params.matrix_m / params.matrix_n;
+  uint rows = params.dims;
+  uint rows_per_block = QT / repeats;
+  uint row0 = gl_WorkGroupID.y * rows_per_block;
+  uint d0 = gl_WorkGroupID.x * DT;
+  uint first_key = params.matrix_k - rows;
+  uint block_end = first_key + min(row0 + rows_per_block, rows);
+
+  float acc = 0.0;
+  for (uint k0 = 0u; k0 < block_end; k0 += KC) {
+    for (uint i = lin; i < QT * KC; i += 256u) {
+      uint qq = i / KC;
+      uint kk = i % KC;
+      uint qhead = kv_head * repeats + qq / rows_per_block;
+      uint qrow = row0 + qq % rows_per_block;
+      uint key = k0 + kk;
+      float p = 0.0;
+      if (qrow < rows && key < first_key + qrow + 1u) {
+        p = prob_data.values[(qhead * rows + qrow) * params.out_strides[1] + key];
+      }
+      s_p[i] = p;
+    }
+    for (uint i = lin; i < KC * DT; i += 256u) {
+      uint kk = i / DT;
+      uint dd = i % DT;
+      uint key = k0 + kk;
+      float v = 0.0;
+      if (key < params.matrix_k) {
+        v = bf16_load(value_data.values[params.aux_offset +
+            kv_head * params.in_strides[1] + key * params.in_strides[2] +
+            (d0 + dd) * params.in_strides[3]]);
+      }
+      s_v[i] = v;
+    }
+    barrier();
+    for (uint kk = 0u; kk < KC; ++kk) {
+      acc += s_p[ty * KC + kk] * s_v[kk * DT + tx];
+    }
+    barrier();
+  }
+
+  uint head = kv_head * repeats + ty / rows_per_block;
+  uint row = row0 + ty % rows_per_block;
+  if (row < rows) {
+    output_data.values[params.output_offset + head * params.shape[0] +
+        row * params.out_strides[0] + d0 + tx] = OUT_STORE(1.0 * acc);
+  }
+}

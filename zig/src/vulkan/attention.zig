@@ -31,6 +31,9 @@ pub const max_visible_keys: u64 = 8192;
 /// kStreamKeys: s_qrow (256) + s_stream (7168) + s_tree (256) fit shared memory; the stream arm stages scores past it.
 pub const shared_stream_keys: u64 = 7168;
 const sdpa_shared_bytes: u64 = 30720;
+/// Longest prefill chunk the tiled path takes (forward.zig max_prefill_rows) and the scratch its scores need.
+const tile_max_rows: u32 = 64;
+const score_scratch_words: u64 = query_heads * tile_max_rows * max_visible_keys;
 
 // The compiled shader images Attention runs; every field is a real SPIR-V image of the named variant.
 pub const Shaders = struct {
@@ -43,6 +46,11 @@ pub const Shaders = struct {
     sdpa_rows_f32q: []align(4) const u8,
     sdpa_rows_f32q_long: []align(4) const u8,
     gate_f32: []align(4) const u8,
+    sdpa_scores_tile_bf16: []align(4) const u8,
+    sdpa_scores_tile_f32q: []align(4) const u8,
+    sdpa_softmax_rows: []align(4) const u8,
+    sdpa_pv_tile_bf16: []align(4) const u8,
+    sdpa_pv_tile_f32: []align(4) const u8,
 };
 
 /// attention_gate.comp's own one-word push block.
@@ -69,6 +77,13 @@ pub const Attention = struct {
     sdpa_f32q: dispatch.Pipeline,
     sdpa_f32q_long: dispatch.Pipeline,
     gate_f32: dispatch.Pipeline,
+    // Prefill chunks of 2..tile_max_rows rows run scores, softmax and PV as three tiled passes over a global score scratch.
+    scores_bf16: dispatch.Pipeline,
+    scores_f32q: dispatch.Pipeline,
+    softmax_rows: dispatch.Pipeline,
+    pv_bf16: dispatch.Pipeline,
+    pv_f32: dispatch.Pipeline,
+    score_scratch: Buffer,
     // The i32 base position is read by each rope dispatch; setBasePosition writes it between operations.
     offsets: Buffer,
 
@@ -88,6 +103,12 @@ pub const Attention = struct {
             .sdpa_f32q = undefined,
             .sdpa_f32q_long = undefined,
             .gate_f32 = undefined,
+            .scores_bf16 = undefined,
+            .scores_f32q = undefined,
+            .softmax_rows = undefined,
+            .pv_bf16 = undefined,
+            .pv_f32 = undefined,
+            .score_scratch = undefined,
             .offsets = try Buffer.init(dev, .device, 4),
         };
         errdefer a.offsets.deinit();
@@ -109,6 +130,18 @@ pub const Attention = struct {
         a.sdpa_f32q_long = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_f32q_long, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = (1 << 3) | (1 << 4) });
         errdefer a.sdpa_f32q_long.deinit();
         a.gate_f32 = try dispatch.Pipeline.init(dev, shaders.gate_f32, .{ .bindings = 3, .push_bytes = gate_push_bytes, .writes = 1 << 2 });
+        errdefer a.gate_f32.deinit();
+        a.scores_bf16 = try dispatch.Pipeline.init(dev, shaders.sdpa_scores_tile_bf16, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 2 });
+        errdefer a.scores_bf16.deinit();
+        a.scores_f32q = try dispatch.Pipeline.init(dev, shaders.sdpa_scores_tile_f32q, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 2 });
+        errdefer a.scores_f32q.deinit();
+        a.softmax_rows = try dispatch.Pipeline.init(dev, shaders.sdpa_softmax_rows, .{ .bindings = 1, .push_bytes = params.push_bytes, .writes = 1 << 0 });
+        errdefer a.softmax_rows.deinit();
+        a.pv_bf16 = try dispatch.Pipeline.init(dev, shaders.sdpa_pv_tile_bf16, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 2 });
+        errdefer a.pv_bf16.deinit();
+        a.pv_f32 = try dispatch.Pipeline.init(dev, shaders.sdpa_pv_tile_f32, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 2 });
+        errdefer a.pv_f32.deinit();
+        a.score_scratch = try Buffer.init(dev, .device, score_scratch_words * 4);
         return a;
     }
 
@@ -123,6 +156,12 @@ pub const Attention = struct {
         a.sdpa_f32q.deinit();
         a.sdpa_f32q_long.deinit();
         a.gate_f32.deinit();
+        a.scores_bf16.deinit();
+        a.scores_f32q.deinit();
+        a.softmax_rows.deinit();
+        a.pv_bf16.deinit();
+        a.pv_f32.deinit();
+        a.score_scratch.deinit();
         a.offsets.deinit();
     }
 
@@ -185,6 +224,7 @@ pub const Attention = struct {
         const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements, if (stream) |s| s.elements else 0);
         if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
         if (y.overlaps(queries) or y.overlaps(cache_keys) or y.overlaps(cache_values)) return error.Aliased;
+        if (plan.rows > 1 and plan.rows <= tile_max_rows) return a.attendTiled(cmds, y, queries, cache_keys, cache_values, plan, capacity, timeout_ns);
         const long = plan.total_keys > shared_stream_keys;
         var bindings: [5]dispatch.Binding = .{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind(), undefined };
         const pipe = if (long) blk: {
@@ -208,6 +248,34 @@ pub const Attention = struct {
         };
         const groups_x = std.math.cast(u32, plan.rows) orelse return error.TooLarge;
         try pipe.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
+    }
+
+    // Prefill chunks of 2..tile_max_rows rows: scores, row softmax and P*V as three tiled dispatches over an f32 score scratch.
+    // Each dot and each key sum keeps the decode kernel's accumulation order, so the output is bit-identical to it.
+    fn attendTiled(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, plan: AttendPlan, capacity: u64, timeout_ns: u64) Error!void {
+        var p: params.Params = .{
+            .matrix_m = @intCast(query_heads),
+            .matrix_n = @intCast(kv_heads),
+            .matrix_k = plan.total_keys,
+            .flags = 0,
+            .alpha = scale,
+            .dims = plan.rows,
+            .shape = .{ @intCast(head_dim), try ops_mod.cast32(capacity * head_dim), @intCast(head_dim), 1 },
+            .in_strides = .{ 1, try ops_mod.cast32(capacity * head_dim), @intCast(head_dim), 1 },
+            .out_strides = .{ @intCast(query_heads * head_dim), @intCast(max_visible_keys), 0, 0 }, // [1] = score row stride
+        };
+        const scores = try View.init(&a.score_scratch, .f32, 0, score_scratch_words);
+        const f32q = queries.kind == .f32;
+        const sp = if (f32q) &a.scores_f32q else &a.scores_bf16;
+        const pv = if (f32q) &a.pv_f32 else &a.pv_bf16;
+        const row_blocks: u32 = (plan.rows + 3) / 4;
+        const key_tiles: u32 = (plan.total_keys + 15) / 16;
+        try sp.bind(&.{ queries.bind(), cache_keys.bind(), scores.bind() });
+        try sp.run(cmds, std.mem.asBytes(&p), .{ key_tiles, row_blocks, @intCast(kv_heads) }, timeout_ns);
+        try a.softmax_rows.bind(&.{scores.bind()});
+        try a.softmax_rows.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), plan.rows, 1 }, timeout_ns);
+        try pv.bind(&.{ scores.bind(), cache_values.bind(), y.bind() });
+        try pv.run(cmds, std.mem.asBytes(&p), .{ @intCast(head_dim / 16), row_blocks, @intCast(kv_heads) }, timeout_ns);
     }
 
     // Gate is bf16(ctx*bf16(sigmoid(gate))) narrow or f32(ctx*sigmoid(gate)) wide; qraw's second halves hold the gate.

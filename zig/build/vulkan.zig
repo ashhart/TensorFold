@@ -128,6 +128,11 @@ pub const stage3_variants = [_]ShaderVariant{
     .{ .name = "sdpa_rows_f32q", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DF32_Q", "-DF32_OUT", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
     .{ .name = "sdpa_rows_f32q_long", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DF32_Q", "-DF32_OUT", "-DSDPA_DIM=256", "-DSDPA_ROWS", "-DSTREAM_GLOBAL" } },
     .{ .name = "gate_f32", .src = "zig/kernels/vulkan/attention_gate.comp", .defines = &.{"-DACT_F32"} },
+    .{ .name = "sdpa_scores_tile_bf16", .src = "zig/kernels/vulkan/sdpa_scores_tile.comp", .defines = &.{} },
+    .{ .name = "sdpa_scores_tile_f32q", .src = "zig/kernels/vulkan/sdpa_scores_tile.comp", .defines = &.{"-DF32_Q"} },
+    .{ .name = "sdpa_softmax_rows", .src = "zig/kernels/vulkan/sdpa_softmax_rows.comp", .defines = &.{} },
+    .{ .name = "sdpa_pv_tile_bf16", .src = "zig/kernels/vulkan/sdpa_pv_tile.comp", .defines = &.{} },
+    .{ .name = "sdpa_pv_tile_f32", .src = "zig/kernels/vulkan/sdpa_pv_tile.comp", .defines = &.{"-DF32_OUT"} },
 };
 
 pub const stage3_shaders_src =
@@ -140,6 +145,11 @@ pub const stage3_shaders_src =
     \\pub const sdpa_rows_f32q align(4) = @embedFile("sdpa_rows_f32q.spv").*;
     \\pub const sdpa_rows_f32q_long align(4) = @embedFile("sdpa_rows_f32q_long.spv").*;
     \\pub const gate_f32 align(4) = @embedFile("gate_f32.spv").*;
+    \\pub const sdpa_scores_tile_bf16 align(4) = @embedFile("sdpa_scores_tile_bf16.spv").*;
+    \\pub const sdpa_scores_tile_f32q align(4) = @embedFile("sdpa_scores_tile_f32q.spv").*;
+    \\pub const sdpa_softmax_rows align(4) = @embedFile("sdpa_softmax_rows.spv").*;
+    \\pub const sdpa_pv_tile_bf16 align(4) = @embedFile("sdpa_pv_tile_bf16.spv").*;
+    \\pub const sdpa_pv_tile_f32 align(4) = @embedFile("sdpa_pv_tile_f32.spv").*;
 ;
 
 /// Stage 4's images: GDN conv, gate split, prefill scan, decode, RMSNorm epilogue and the bf16 copy, all -DUSE_BF16.
