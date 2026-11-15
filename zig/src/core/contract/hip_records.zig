@@ -162,10 +162,10 @@ const own_records = [own_count]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -177,10 +177,10 @@ const own_records = [own_count]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -394,10 +394,10 @@ const own_records = [own_count]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
@@ -409,10 +409,10 @@ const own_records = [own_count]Record{
             .dynamic = 16 * 128 * 4,
         },
         .usage = .{
-            .{ .vgprs = 48, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-            .{ .vgprs = 48, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 107, .sgprs = 78, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
         },
     },
     .{
