@@ -4,6 +4,9 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const rope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/rope_refusal_test.zig"), .target = b.graph.host }) }));
     b.step("test-flashnext-rope-host", "The Metal/HIP config reader refuses scaled RoPE and keeps plain configs' rotary").dependOn(&rope.step);
     all.dependOn(&rope.step);
+    const fused_split = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/fused_split.zig"), .target = b.graph.host, .link_libc = true }) }));
+    b.step("test-flashnext-fused-split-host", "TF_FLASHNEXT_FUSED_SPLIT's reader, its CUDA threshold and the Metal and HIP refusals").dependOn(&fused_split.step);
+    all.dependOn(&fused_split.step);
     const memory = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/load_memory.zig"), .target = b.graph.host });
     b.step("test-flashnext-memory-host", "Flash Next allocation floor and working-set refusal without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = memory })).step);
     const metal = b.createModule(.{ .root_source_file = b.path("zig/flashnext_recording_metal.zig"), .target = b.graph.host });
