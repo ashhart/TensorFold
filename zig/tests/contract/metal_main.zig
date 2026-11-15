@@ -428,6 +428,9 @@ pub fn main(init: std.process.Init) !u8 {
     var glm_windows: @import("metal_glm_rows.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer glm_windows.deinit();
     try glm_windows.collect(o.only);
+    var glm_launches = @import("metal_glm_launch.zig").Suite.init(a, device, queue, &kernels);
+    defer glm_launches.deinit();
+    try glm_launches.collect(o.only);
     var flint: @import("metal_flint.zig").Suite = .{ .a = a, .device = device, .queue = queue, .kernels = &kernels };
     defer flint.deinit();
     try flint.collect(o.only);

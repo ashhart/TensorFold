@@ -63,6 +63,7 @@ pub const all_metal = @import("lane_q8_records.zig").records ++
     @import("metal_pair_records.zig").records ++
     @import("glm_rows_records.zig").records ++
     @import("row_wide_records.zig").records ++
+    @import("glm_launch_records.zig").records ++
     @import("weight_only_records.zig").metal ++
     @import("grouped_records.zig").metal ++
     @import("prompt_index_records.zig").metal ++

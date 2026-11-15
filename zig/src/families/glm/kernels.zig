@@ -77,7 +77,7 @@ pub const Kernels = struct {
     index_select: mtl.Pipeline,
     index_scores_nax: mtl.Pipeline, // a prompt chunk's index scores on the tensor units (glm_index_nax.metal)
     index_decode: mtl.Pipeline, // and decode rows' (a row's heads as the op's rows)
-    select_mark: mtl.Pipeline, // decode rows' key lists past CAP blocks: the blocks at or above a sampled floor (glm_select.metal)
+    select_mark: mtl.Pipeline, // long decode key lists: candidate blocks above a sampled floor
     select_merge: mtl.Pipeline, // and the selection among them, glm_index_select's bytes
     exp_f32: mtl.Pipeline,
     streams: mtl.Pipeline,
