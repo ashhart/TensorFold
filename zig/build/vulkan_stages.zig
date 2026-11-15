@@ -501,6 +501,12 @@ pub fn kernelContract(ctx: *Context) void {
     const qmm_tile_f32_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DACT_F32=1", "-o" });
     const qmm_tile_f32 = qmm_tile_f32_cmd.addOutputFileArg("qmm_q4_tile_f32.spv");
     qmm_tile_f32_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm_q4_tile.comp"));
+    const qmm_tile_ref_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-o" });
+    const qmm_tile_ref = qmm_tile_ref_cmd.addOutputFileArg("qmm_q4_tile_order_ref.spv");
+    qmm_tile_ref_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm_q4_tile_order_ref.comp"));
+    const qmm_tile_ref_f32_cmd = b.addSystemCommand(&.{ ctx.glslang, "-V", "--target-env", "vulkan1.2", "-S", "comp", "-DACT_F32=1", "-o" });
+    const qmm_tile_ref_f32 = qmm_tile_ref_f32_cmd.addOutputFileArg("qmm_q4_tile_order_ref_f32.spv");
+    qmm_tile_ref_f32_cmd.addFileArg(b.path("zig/kernels/vulkan/qmm_q4_tile_order_ref.comp"));
     const variants = .{
         .{ "qmm_fmax", "-DTF_CTL_QMM_FMAX=1" },
         .{ "atomic_sum", "-DTF_CTL_ATOMIC_SUM=1" },
@@ -524,6 +530,8 @@ pub fn kernelContract(ctx: *Context) void {
     _ = contract_files.addCopyFile(qmm_tile, "qmm_q4_tile.spv");
     _ = contract_files.addCopyFile(qmm_tile_rows, "qmm_q4_tile_rows.spv");
     _ = contract_files.addCopyFile(qmm_tile_f32, "qmm_q4_tile_f32.spv");
+    _ = contract_files.addCopyFile(qmm_tile_ref, "qmm_q4_tile_order_ref.spv");
+    _ = contract_files.addCopyFile(qmm_tile_ref_f32, "qmm_q4_tile_order_ref_f32.spv");
     inline for (variants, 0..) |variant, i| {
         _ = contract_files.addCopyFile(controls[i], variant[0] ++ ".spv");
     }
@@ -532,6 +540,8 @@ pub fn kernelContract(ctx: *Context) void {
         "pub const qmm_q4_tile align(4) = @embedFile(\"qmm_q4_tile.spv\").*;\n" ++
         "pub const qmm_q4_tile_rows align(4) = @embedFile(\"qmm_q4_tile_rows.spv\").*;\n" ++
         "pub const qmm_q4_tile_f32 align(4) = @embedFile(\"qmm_q4_tile_f32.spv\").*;\n" ++
+        "pub const qmm_q4_tile_order_ref align(4) = @embedFile(\"qmm_q4_tile_order_ref.spv\").*;\n" ++
+        "pub const qmm_q4_tile_order_ref_f32 align(4) = @embedFile(\"qmm_q4_tile_order_ref_f32.spv\").*;\n" ++
         "pub const qmm_fmax align(4) = @embedFile(\"qmm_fmax.spv\").*;\n" ++
         "pub const atomic_sum align(4) = @embedFile(\"atomic_sum.spv\").*;\n" ++
         "pub const scribble_sum align(4) = @embedFile(\"scribble_sum.spv\").*;\n" ++
@@ -559,4 +569,18 @@ pub fn kernelContract(ctx: *Context) void {
     const contract_install = b.addInstallArtifact(contract_exe, .{});
     b.step("tf-vulkan-kernel-contract", "Build Vulkan QMM contract runner and planted control shaders without running them").dependOn(&contract_install.step);
     b.step("vulkan-kernel-contract", "Run Vulkan QMM contract gates and planted controls on the selected device").dependOn(&b.addRunArtifact(contract_exe).step);
+    const exact_exe = b.addExecutable(.{ .name = "tf-vulkan-qmm-exact", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/vulkan/contract_qmm_exact_main.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "vulkan", .module = ctx.vulkan },
+            .{ .name = "vulkan_shaders", .module = contract_shaders },
+            .{ .name = "contract", .module = contract_module },
+        },
+    }) });
+    const exact_install = b.addInstallArtifact(exact_exe, .{});
+    b.step("tf-vulkan-qmm-exact", "Build the qmm_q4_tile order exactness runner without running GPU work").dependOn(&exact_install.step);
+    b.step("vulkan-qmm-exact", "Run the qmm_q4_tile order exactness comparison on the selected device").dependOn(&b.addRunArtifact(exact_exe).step);
 }
