@@ -75,20 +75,40 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       const int64_t ki = first + key;
       const bool ok = sparse ? ki < n : ki <= limit;
       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
-      if constexpr (FP8) {
-        const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc);
-        const float row_scale = ok ? scales[src] : 1.0f;
+      cp16(dst + wide<KW>(key, u), keys_at + src * KW + u * 8, ok);
+    }
+  };
+  // E4M3: tile + 2's codes load 8 bytes a unit into registers before tile's math, decode after it, 16-byte stores.
+  constexpr int FU = FP8 ? KT * (LW / 8) / 256 : 1;  // units a thread: every launcher runs 256 threads
+  uint2 fc[FU];
+  float fs[FU];
+  auto fetch_fp8 = [&](int tile) {
+    const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc);
+    const int64_t first = start + tile * KT;
 #pragma unroll
-        for (int j = 0; j < 8; j += 2) {
-          const uint16_t bits = ok ? (uint16_t)codes[src * LW + u * 8 + j] |
-                                        ((uint16_t)codes[src * LW + u * 8 + j + 1] << 8) : 0;
-          const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
-          dst[wide(key, u) + j] = __float2bfloat16_rn(__fmul_rn(v.x, row_scale));
-          dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));
-        }
-      } else {
-        cp16(dst + wide<KW>(key, u), keys_at + src * KW + u * 8, ok);
+    for (int i = 0; i < FU; ++i) {
+      const int idx = t + i * 256, key = idx / (LW / 8), u = idx % (LW / 8);
+      const int64_t ki = first + key;
+      const bool ok = sparse ? ki < n : ki <= limit;
+      const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
+      fc[i] = ok ? *reinterpret_cast<const uint2*>(codes + src * LW + u * 8) : make_uint2(0u, 0u);
+      fs[i] = ok ? scales[src] : 1.0f;
+    }
+  };
+  auto store_fp8 = [&](int tile) {
+    __nv_bfloat16* dst = kvs + (tile & 1) * KT * KW;
+#pragma unroll
+    for (int i = 0; i < FU; ++i) {
+      const int idx = t + i * 256, key = idx / (LW / 8), u = idx % (LW / 8);
+      uint32_t out[4];
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        const uint16_t bits = (uint16_t)((j < 2 ? fc[i].x : fc[i].y) >> ((j & 1) * 16));
+        const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
+        const __nv_bfloat162 b = __floats2bfloat162_rn(__fmul_rn(v.x, fs[i]), __fmul_rn(v.y, fs[i]));
+        out[j] = *reinterpret_cast<const uint32_t*>(&b);
       }
+      *reinterpret_cast<uint4*>(dst + wide(key, u)) = make_uint4(out[0], out[1], out[2], out[3]);
     }
   };
   float m[MT][2], l[MT][2], o[MT][8][4];
@@ -104,13 +124,22 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       const bool ok = h0 + hd < heads;
       cp16(qs + wide<KW>(hd, u), qa + (r * heads + (ok ? h0 + hd : 0)) * KW + u * 8, ok);
     }
-    load_kv(0);
-    commit();
-    load_kv(1);
-    commit();
+    if constexpr (FP8) {
+      fetch_fp8(0);
+      store_fp8(0);
+      fetch_fp8(1);
+      store_fp8(1);
+      commit();
+    } else {
+      load_kv(0);
+      commit();
+      load_kv(1);
+      commit();
+    }
   }
   for (int tile = 0; live && tile < tiles; ++tile) {
     if constexpr (FP8) {
+      if (tile + 2 < tiles) fetch_fp8(tile + 2);
       wait<0>();
     } else {
       if (tile + 1 < tiles)
@@ -200,7 +229,11 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
     __syncthreads();
     for (int i = 0; i < MT; ++i)
       for (int hf = 0; hf < 2; ++hf) l[i][hf] = __fmaf_rn(l[i][hf], alpha[i][hf], stat[HB + i * 16 + hf * 8 + g]);
-    if (tile + 2 < tiles) load_kv(tile + 2);
+    if constexpr (FP8) {
+      if (tile + 2 < tiles) store_fp8(tile + 2);
+    } else {
+      if (tile + 2 < tiles) load_kv(tile + 2);
+    }
     commit();
   }
   for (int i = 0; i < MT; ++i)
