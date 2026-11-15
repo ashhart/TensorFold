@@ -3,6 +3,9 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const sm110 = b.addRunArtifact(b.addTest(.{ .root_module = mods.qwen35, .filters = &.{"SM110"} }));
+    b.step("test-qwen35-sm110-host", "SM110 startup refusals without device or weight loading").dependOn(&sm110.step);
+    step.dependOn(&sm110.step);
     @import("prefill_widths_cuda.zig").tests(b, cuda, mods, step);
     const metal_scope = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/config.zig"), .target = host }), .filters = &.{ "Metal 2B format scope:", "admit the affine 2B", "admit untied heads" } }));
     b.step("test-qwen35-metal-scope-host", "Metal 2B format admission without device or Metal compiler").dependOn(&metal_scope.step);
