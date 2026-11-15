@@ -13,6 +13,7 @@ const pb = @import("prompt_bufs.zig");
 const pl = @import("prompt_layer.zig");
 const vrows = @import("vision_rows.zig");
 const prep = @import("vision_prep.zig");
+const pp = @import("prompt_prof.zig");
 
 const Config = host.config.Config;
 const ced = host.ced;
@@ -75,15 +76,9 @@ pub fn check(c: *const Config) !u32 {
     return d;
 }
 
-/// Where a prompt's encoder time went: host fills, host encoding, host waits, GPU time (TF_DSV41_PROMPT_PROF).
-pub const Prof = struct { prep_ns: u64 = 0, enc_ns: u64 = 0, stall_ns: u64 = 0, gpu_s: f64 = 0, chunks: u32 = 0 };
-
+pub const Prof = pp.Prof;
 /// The monotonic clock in ns (the prompt's profile and wall time).
-pub fn now() u64 {
-    var t: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &t);
-    return @as(u64, @intCast(t.sec)) * std.time.ns_per_s + @as(u64, @intCast(t.nsec));
-}
+pub const now = pp.now;
 
 /// A chunk's inputs prepared ahead into input set `set`: the tail (slot) they are for and the chunk's rows.
 const Stage = struct { tail: *const Tail, a: u32, b: u32, set: usize };
@@ -123,12 +118,14 @@ pub const Prompt = struct {
 
     /// The whole prompt: positions [tail.end, hist.len) through the encoder, then the decoder's cone and the head.
     pub fn run(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *Tail, hist: []const u32) !void {
-        p.prof = .{};
+        p.prof = .{ .t0 = now() };
         p.stage = null;
-        const t0 = now();
+        const t0 = p.prof.t0;
         try p.encode(env, slot, tail, hist, @intCast(hist.len));
+        const td = now();
         try p.finish(env, slot, tail);
-        p.report(hist.len, now() - t0);
+        p.prof.dec_ns = now() - td;
+        if (std.c.getenv("TF_DSV41_PROMPT_PROF") != null) p.prof.report(env.c, hist.len, now() - t0);
     }
 
     /// The prompt's encoder profile and wall time on the log when TF_DSV41_PROMPT_PROF is set.
@@ -189,6 +186,7 @@ pub const Prompt = struct {
             p.prof.stall_ns += now() - t0;
             try ran;
             p.prof.gpu_s += ch.gpuSeconds();
+            p.prof.enc_late_s += ch.lateSeconds();
             p.prof.chunks += 1;
             tail.end = b;
             try ahead;
@@ -219,10 +217,10 @@ pub const Prompt = struct {
         return ch;
     }
 
+    /// The chunk's ids (image positions embed the image token, the Engram gate shuts there) and Engram rows.
     fn prepTimed(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
-        const t0 = now();
-        defer p.prof.prep_ns += now() - t0;
-        return p.prepare(env, hist, a, b, set);
+        try p.writeIds(env, hist, a, b, set);
+        for (0..env.c.engram_layers.len) |li| try p.rowsTimed(env, hist, a, b, set, li);
     }
 
     fn encoderPass(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, ch: *Chunk, a: u32, b: u32, late: ?Late) !void {
@@ -240,6 +238,7 @@ pub const Prompt = struct {
                 if (late) |l| {
                     // the layers before run while this layer's rows are read and written
                     ch.close();
+                    if (p.prof.first_ns == 0) p.prof.first_ns = now() - p.prof.t0;
                     try p.rowsTimed(env, l.hist, a, b, l.set, li);
                     ch.open(env.queue);
                 }
@@ -302,7 +301,10 @@ pub const Prompt = struct {
         const done = p.decoderPass(env, slot, tail, e, a, b);
         e.end();
         try done;
+        const tc = mtl.clock.seconds();
         try submit(cb);
+        p.prof.dec_gpu_s += cb.gpuSeconds();
+        p.prof.dec_late_s += cb.gpuStart() - tc;
     }
 
     fn decoderPass(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, e: mtl.ComputeEncoder, a: u32, b: u32) !void {
@@ -381,12 +383,6 @@ pub const Prompt = struct {
         if (p.images) |im| im.describe(a, b, flags) else @memset(flags, 0);
     }
 
-    /// The chunk's ids (image positions embed the image token, the Engram gate shuts there) and Engram rows.
-    fn prepare(p: *const Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
-        try p.writeIds(env, hist, a, b, set);
-        for (0..env.c.engram_layers.len) |li| try p.engramRows(env, hist, a, b, set, li);
-    }
-
     /// The chunk's ids, with every Engram layer's reads started (its rows come later, between command buffers).
     fn prepIds(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize) !void {
         const t0 = now();
@@ -395,12 +391,19 @@ pub const Prompt = struct {
         const c = env.c;
         if (c.engram_layers.len == 0) return;
         const l = env.lookup orelse return error.EngramLookupMissing;
+        const ti = now();
         l.host.prefetch(l.a, l.source, hist[a..b], hist[a -| (c.engram_max_ngram - 1)..a], 0, 1);
+        if (p.prof.issue_ns == 0) p.prof.issue_ns = now() - ti;
     }
 
     fn rowsTimed(p: *Prompt, env: Env, hist: []const u32, a: u32, b: u32, set: usize, li: usize) !void {
         const t0 = now();
-        defer p.prof.prep_ns += now() - t0;
+        const s0 = pp.statsOf(env.lookup);
+        defer {
+            const dt = now() - t0;
+            p.prof.prep_ns += dt;
+            p.prof.eng[li].add(dt, s0, pp.statsOf(env.lookup), @as(u64, b - a) * env.c.hashCols());
+        }
         return p.engramRows(env, hist, a, b, set, li);
     }
 
@@ -449,6 +452,8 @@ const Late = struct { hist: []const u32, set: usize };
 /// An encoder chunk's command buffers, committed in order on one queue; its open encoder is `e`.
 const Chunk = struct {
     cbs: [1 + host.engram_host.max_layers]mtl.CommandBuffer = undefined,
+    /// each buffer's commit on the host clock Metal's GPU times use
+    at: [1 + host.engram_host.max_layers]f64 = undefined,
     n: usize = 0,
     e: mtl.ComputeEncoder = undefined,
     live: bool = false,
@@ -462,6 +467,7 @@ const Chunk = struct {
 
     fn close(ch: *Chunk) void {
         ch.e.end();
+        ch.at[ch.n - 1] = mtl.clock.seconds();
         ch.cbs[ch.n - 1].commit();
         ch.live = false;
     }
@@ -485,6 +491,16 @@ const Chunk = struct {
     fn gpuSeconds(ch: *const Chunk) f64 {
         var t: f64 = 0;
         for (ch.cbs[0..ch.n]) |cb| t += cb.gpuSeconds();
+        return t;
+    }
+
+    /// Seconds the buffers waited to start after both their commit and the previous buffer's end.
+    fn lateSeconds(ch: *const Chunk) f64 {
+        var t: f64 = 0;
+        for (ch.cbs[0..ch.n], ch.at[0..ch.n], 0..) |cb, at, k| {
+            const ready = if (k == 0) at else @max(at, ch.cbs[k - 1].gpuEnd());
+            t += @max(0, cb.gpuStart() - ready);
+        }
         return t;
     }
 };
