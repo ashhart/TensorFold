@@ -255,7 +255,7 @@ pub const Engine = struct {
         return .{ .rows = @intCast(rows), .keep = @intCast(o.path.len), .got = o.got };
     }
 
-    /// The shared round lives in its own file; it gets the private draft call as an argument so `askDrafts` stays private.
+    /// The shared round lives in its own file and takes the private draft call as an argument.
     fn roundStreams(e: *Engine, entries: []*Stream) !void {
         return @import("shared_round.zig").run(e, entries, Engine.askDrafts);
     }
