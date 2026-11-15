@@ -93,10 +93,13 @@ pub const Scratch = struct {
     ones: Ref = undefined,
     image: Ref = undefined,
     plan: [4]Ref = undefined,
-    /// the grouped experts' tile table, act_quant codes and scales, and gate scratch
+    /// the grouped experts' tile table, act_quant codes and scales, down's input halves (tensor units), gate scratch
     xtiles: Ref = undefined,
     xcodes: Ref = undefined,
     xscales: Ref = undefined,
+    xdq: Ref = undefined,
+    /// the grouped experts run on tensor units (xm.units)
+    units: bool = false,
     act: Ref = undefined,
     eout: Ref = undefined,
     yr: Ref = undefined,
@@ -111,7 +114,7 @@ pub const Scratch = struct {
     /// Buffers for chunks of up to `rows` rows; `limit` positions bound the index scores, scored `ix_rows` at a time.
     pub fn init(device: mtl.Device, c: *const Config, rows: u32, ix_rows: u32, limit: u32) !Scratch {
         if (rows == 0 or ix_rows == 0) return error.BadRows;
-        var s: Scratch = .{};
+        var s: Scratch = .{ .units = xm.units(device) };
         const size = s.layout(c, rows, ix_rows, limit);
         s.buf = try device.buffer(size, mtl.ResourceOptions.shared);
         @memset(s.buf.contents()[0..size], 0);
@@ -143,7 +146,7 @@ pub const Scratch = struct {
         const IX: usize = @as(usize, c.index_heads) * c.index_dim;
         const W: usize = c.expert_width;
         const P: usize = @as(usize, rows) * c.topk;
-        const xb = xm.bytes(.{ .rows = rows, .k = c.hidden, .n = c.expert_width, .experts = c.experts });
+        const xb = xm.bytes(.{ .rows = rows, .k = c.hidden, .n = c.expert_width, .experts = c.experts }, s.units);
         s.rows = rows;
         s.ix_rows = @min(ix_rows, rows);
         s.keys = limit;
@@ -177,6 +180,7 @@ pub const Scratch = struct {
         s.xtiles = L.take(s, &off, xb[0]);
         s.xcodes = L.take(s, &off, xb[1]);
         s.xscales = L.take(s, &off, xb[2]);
+        s.xdq = L.take(s, &off, xb[5]);
         s.act = L.take(s, &off, P * W * 2);
         s.eout = L.take(s, &off, P * H * 2);
         s.yr = L.take(s, &off, R * H * 4);
