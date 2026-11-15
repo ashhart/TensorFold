@@ -18,6 +18,40 @@ pub var draws: usize = 0;
 pub var rotary_calls: usize = 0;
 pub var fsr_fence_updates: usize = 0;
 pub var fsr_fence_waits: usize = 0;
+pub const HandoffOp = struct {
+    kind: enum { compute, end, signal, wait, dispatch },
+    cb_id: usize = 0,
+    event_id: usize = 0,
+    seq: u64 = 0,
+    mode: DispatchType = .serial,
+    pipeline: []const u8 = "",
+};
+pub var record_handoffs: bool = false;
+pub var handoff_ops: [1024]HandoffOp = undefined;
+pub var handoff_op_count: usize = 0;
+const SharedState = struct {
+    value: std.atomic.Value(u64) = .init(0),
+    sets: std.atomic.Value(usize) = .init(0),
+};
+var shared_states: [512]SharedState = @splat(.{});
+var next_shared: usize = 1;
+
+pub fn resetHandoffs() void {
+    record_handoffs = false;
+    handoff_op_count = 0;
+    next_shared = 1;
+    for (&shared_states) |*state| {
+        state.value.store(0, .release);
+        state.sets.store(0, .release);
+    }
+}
+
+fn recordHandoff(op: HandoffOp) void {
+    if (!record_handoffs) return;
+    std.debug.assert(handoff_op_count < handoff_ops.len);
+    handoff_ops[handoff_op_count] = op;
+    handoff_op_count += 1;
+}
 pub const Buffer = struct {
     id: usize,
     data: []align(256) u8,
@@ -45,6 +79,13 @@ pub const Device = struct {
     }
     pub fn event(_: Device) !Event {
         return .{};
+    }
+    pub fn sharedEvent(_: Device) !SharedEvent {
+        if (next_shared == shared_states.len) return error.RecordingEventLimit;
+        const id = next_shared;
+        next_shared += 1;
+        shared_states[id] = .{};
+        return .{ .id = id };
     }
     pub fn tensorUnits(d: Device) bool {
         return d.tensor_units;
@@ -86,6 +127,14 @@ var pipe: Pipeline = .{};
 var bound: [32]Bound = undefined;
 pub const ComputeEncoder = struct {
     id: usize = 0,
+    cb_id: usize = 0,
+    mode: DispatchType = .serial,
+    pub fn commandBuffer(e: ComputeEncoder) CommandBuffer {
+        return .{ .id = e.cb_id };
+    }
+    pub fn dispatchType(e: ComputeEncoder) DispatchType {
+        return e.mode;
+    }
     pub fn setPipeline(_: ComputeEncoder, p: Pipeline) void {
         pipe = p;
     }
@@ -105,7 +154,8 @@ pub const ComputeEncoder = struct {
             wrong += 1;
         };
     }
-    pub fn dispatchThreads(_: ComputeEncoder, grid: Size, _: Size) void {
+    pub fn dispatchThreads(e: ComputeEncoder, grid: Size, _: Size) void {
+        recordHandoff(.{ .kind = .dispatch, .cb_id = e.cb_id, .mode = e.mode, .pipeline = pipe.name });
         if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
             rotary_calls += 1;
             return;
@@ -138,7 +188,9 @@ pub const ComputeEncoder = struct {
     }
     pub fn dispatchIndirect(_: ComputeEncoder, _: Buffer, _: usize, _: Size) void {}
     pub fn barrier(_: ComputeEncoder) void {}
-    pub fn end(_: ComputeEncoder) void {}
+    pub fn end(e: ComputeEncoder) void {
+        recordHandoff(.{ .kind = .end, .cb_id = e.cb_id, .mode = e.mode });
+    }
 };
 pub const Queue = struct {
     pub fn deinit(_: @This()) void {}
@@ -147,12 +199,14 @@ pub const Queue = struct {
     }
 };
 pub const CommandBuffer = struct {
+    id: usize = 0,
     pub fn retain(c: @This()) @This() {
         return c;
     }
     pub fn release(_: @This()) void {}
-    pub fn compute(_: CommandBuffer, _: DispatchType) ComputeEncoder {
-        return .{};
+    pub fn compute(cb: CommandBuffer, mode: DispatchType) ComputeEncoder {
+        recordHandoff(.{ .kind = .compute, .cb_id = cb.id, .mode = mode });
+        return .{ .mode = mode, .cb_id = cb.id };
     }
     pub fn blit(_: CommandBuffer) BlitEncoder {
         return .{};
@@ -173,6 +227,12 @@ pub const CommandBuffer = struct {
     }
     pub fn waitForEvent(_: CommandBuffer, _: Event, _: u64) void {}
     pub fn signalEvent(_: CommandBuffer, _: Event, _: u64) void {}
+    pub fn waitFor(cb: CommandBuffer, event: SharedEvent, seq: u64) void {
+        recordHandoff(.{ .kind = .wait, .cb_id = cb.id, .event_id = event.id, .seq = seq });
+    }
+    pub fn signal(cb: CommandBuffer, event: SharedEvent, seq: u64) void {
+        recordHandoff(.{ .kind = .signal, .cb_id = cb.id, .event_id = event.id, .seq = seq });
+    }
 };
 pub const BlitEncoder = struct {
     pub fn copy(_: BlitEncoder, a: Buffer, ao: usize, b: Buffer, bo: usize, n: usize) void {
@@ -203,6 +263,19 @@ pub const ResidencySet = struct {
 };
 pub const SharedEvent = struct {
     id: usize = 0,
+    pub fn value(event: @This()) u64 {
+        return shared_states[event.id].value.load(.acquire);
+    }
+    pub fn wait(event: @This(), seq: u64, _: u64) bool {
+        return event.value() >= seq;
+    }
+    pub fn set(event: @This(), seq: u64) void {
+        shared_states[event.id].value.store(seq, .release);
+        _ = shared_states[event.id].sets.fetchAdd(1, .acq_rel);
+    }
+    pub fn setCount(event: @This()) usize {
+        return shared_states[event.id].sets.load(.acquire);
+    }
     pub fn deinit(_: @This()) void {}
 };
 pub const Event = struct {
