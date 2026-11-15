@@ -81,9 +81,11 @@ pub const Pipelines = struct {
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const lib = try mtl.Library.fromSource(device, sources.core_row_projection, mtl.CompileOptions.mlx());
+        const wide = device.tensorUnits();
+        const lib = try mtl.Library.fromSource(device, source(wide), mtl.CompileOptions.mlx());
         defer lib.deinit();
         var p: Pipelines = undefined;
+        p.wide = wide;
         inline for (bit_widths, 0..) |bits, b| inline for (.{ "f32", "bf16" }, 0..) |sum, m| {
             const i = b * 2 + m;
             p.plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_q{d}_{s}", .{ bits, sum }), false);
@@ -91,11 +93,12 @@ pub const Pipelines = struct {
             p.indexed[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_q{d}_{s}", .{ bits, sum }), false);
             p.indexed_relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_indexed_relu2_q{d}_{s}", .{ bits, sum }), false);
             p.strided[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_strided_q{d}_{s}", .{ bits, sum }), false);
-            p.wide_plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_q{d}_{s}", .{ bits, sum }), false);
-            p.wide_relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_relu2_q{d}_{s}", .{ bits, sum }), false);
-            p.wide_strided[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_strided_q{d}_{s}", .{ bits, sum }), false);
+            if (wide) {
+                p.wide_plain[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_q{d}_{s}", .{ bits, sum }), false);
+                p.wide_relu2[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_relu2_q{d}_{s}", .{ bits, sum }), false);
+                p.wide_strided[i] = try mtl.Pipeline.init(device, lib, std.fmt.comptimePrint("tf_row_projection_wide_strided_q{d}_{s}", .{ bits, sum }), false);
+            }
         };
-        p.wide = device.tensorUnits();
         return p;
     }
 
@@ -105,11 +108,18 @@ pub const Pipelines = struct {
         for (p.indexed) |x| x.deinit();
         for (p.indexed_relu2) |x| x.deinit();
         for (p.strided) |x| x.deinit();
-        for (p.wide_plain) |x| x.deinit();
-        for (p.wide_relu2) |x| x.deinit();
-        for (p.wide_strided) |x| x.deinit();
+        if (p.wide) {
+            for (p.wide_plain) |x| x.deinit();
+            for (p.wide_relu2) |x| x.deinit();
+            for (p.wide_strided) |x| x.deinit();
+        }
     }
 };
+
+/// Chips without tensor units compile the original narrow source, with no wide definitions or control edits.
+pub fn source(wide: bool) []const u8 {
+    return if (wide) sources.core_row_projection else sources.core_row_projection_legacy;
+}
 
 /// Dispatch: pipeline, dims (K, N, group, rows/slots, experts, repeat), grid; buffers x, W, S, B, dims, out 0-5, ids 6.
 pub const Call = struct { pipeline: mtl.Pipeline, dims: [6]i32, groups: usize, slots: usize = 1, threads: usize = 32 * groups };
@@ -231,4 +241,14 @@ test "row dispatch without tensor units keeps main's pipelines at every row coun
             try std.testing.expectEqual(p.strided[i].id, (try callStrided(&p, w, rows, 128)).pipeline.id);
         }
     };
+}
+
+test "without tensor units the source has no wide grouping, tensor units retain the wide source" {
+    const narrow = source(false);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "tf_row_projection_wide") == null);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "tf_row_projection_body") == null);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "TF_RP_BAD_ROWS") == null);
+    try std.testing.expect(std.mem.indexOf(u8, narrow, "tf_row_projection_indexed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source(true), "tf_row_projection_wide") != null);
+    try std.testing.expectEqualStrings(sources.core_row_projection, source(true));
 }

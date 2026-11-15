@@ -171,6 +171,7 @@ pub const Suite = struct {
     probes: std.ArrayList(*Probe) = .empty,
 
     pub fn collect(s: *Suite, only: ?[]const u8) !void {
+        if (!s.device.tensorUnits()) return; // the served wide pipelines exist only on tensor-unit chips
         for (row.bit_widths) |bits| for ([_]row.Sum{ .f32, .bf16 }) |sum| for (std.enums.values(Style)) |style| {
             for (std.enums.values(Proof)) |proof| {
                 if (proof == .fp64 and (sum != .f32 or style != .plain)) continue;

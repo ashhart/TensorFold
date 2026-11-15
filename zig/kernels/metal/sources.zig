@@ -44,6 +44,7 @@ pub const lfm3_projection = @embedFile("lfm3/projection.metal");
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
+pub const core_row_projection_legacy = @embedFile("core/row_projection_legacy.metal");
 pub const core_binned_projection = @embedFile("core/binned_projection.metal");
 pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
     @embedFile("core/tile_qmv_rows.metal");
