@@ -1,5 +1,5 @@
-Main `d6c4cce602` and the branch on it: unset, and `TF_FLASHNEXT_READOUT_FUSED=1`. Each arm booted fresh with the
-prompt cache on and again with `--prompt-cache-gib 0`; `--parallel 4`, bf16 KV, a 131,072-token window.
+Main `41a72fd257` and the branch on it at `ee13555c8e`: unset, and `TF_FLASHNEXT_READOUT_FUSED=1`. Each arm booted
+fresh with the prompt cache on and again with `--prompt-cache-gib 0`; `--parallel 4`, bf16 KV, a 131,072-token window.
 
 | check | measure | main | branch, unset | branch, fused |
 |---|---|---|---|---|
@@ -31,8 +31,10 @@ fused tiles run on these:
 
 - Three long prompts (about 1.5k, 5k and 15k tokens), `bench_concurrent --alone --serial` at 1 and 4 streams, greedy,
   128 tokens: 20 reply hashes an arm, 3 distinct, the same 20 in main, unset and fused, with the cache on and off.
-- The same long prompts with prompt passes of 3,072 rows (`TF_FLASHNEXT_CHUNK=3072`), one stream: main and fused
-  record the same 4 hashes. With passes of 768 rows, main and fused each record one failed request and the same one
-  reply hash.
-- `bench_cache.py --require-cold`'s 2,571-token prompt in the six speed arms: the same reply hash in all six.
-- The speed arms' own replies (greedy, code and chat, 1, 2 and 4 streams): every `token_sha256` equals main's.
+- The same long prompts with prompt passes of 2,048 rows and of 3,072 rows (`TF_FLASHNEXT_CHUNK`), 1 and 4 streams:
+  main and fused record the same 20 hashes each, 0 failed requests.
+- With passes of 1,000 rows, every request fails on main and on the branch alike (`CudaFailed`, after
+  `cuMemsetD8Async: CUDA_ERROR_INVALID_VALUE`), so that size gives no comparison.
+- `bench_cache.py --require-cold`'s 2,571-token prompt in the six speed arms: the same 4 reply hashes in all six.
+- The speed arms' own replies, greedy and at temperature 1.0 with seed 1234, code and chat, 1, 2 and 4 streams: all 168
+  `token_sha256` values of each invocation equal M1's in every arm.
