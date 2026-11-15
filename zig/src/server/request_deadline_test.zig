@@ -50,7 +50,9 @@ const Script = struct {
     id: api.Id = 0,
     done: bool = false,
     cancelled: bool = false,
+    cancels: usize = 0, // every cancel the server sent, before or after the end
     lazy: bool = false, // a cancel is only noted; the stream ends at the 40th check, as a slow engine's would
+    quick: bool = false, // ends by itself (`de`, stop) inside submit, before any deadline
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
@@ -59,9 +61,10 @@ const Script = struct {
     }
     fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *Script = @ptrCast(@alignCast(ctx));
-        s.* = .{ .sink = sink, .id = id, .lazy = s.lazy };
+        s.* = .{ .sink = sink, .id = id, .lazy = s.lazy, .quick = s.quick };
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{ 'a', 'b', 'c' } });
+        if (s.quick) s.end(&.{ 'd', 'e' }, .stop);
     }
     fn end(s: *Script, tokens: []const u32, reason: api.Reason) void {
         if (s.done) return;
@@ -72,6 +75,7 @@ const Script = struct {
     }
     fn cancel(ctx: *anyopaque, _: api.Id) void {
         const s: *Script = @ptrCast(@alignCast(ctx));
+        s.cancels += 1;
         if (!s.done) s.cancelled = true;
         if (!s.lazy) s.end(&.{'d'}, .cancelled);
     }
@@ -98,33 +102,35 @@ const Gone = struct {
 const Deltas = struct {
     a: std.mem.Allocator,
     out: std.ArrayList([]const u8) = .empty,
+    slow: bool = false, // the first write takes 100 ms, as a slow client's would
     fn call(ctx: *anyopaque, delta: json.Value) error{Closed}!void {
         const d: *Deltas = @ptrCast(@alignCast(ctx));
+        if (d.slow and d.out.items.len == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake) catch {};
         d.out.append(d.a, json.stringify(d.a, delta, .{}) catch return error.Closed) catch return error.Closed;
     }
 };
 
-const Run = struct { reply: chat.Reply, deltas: []const []const u8, cancelled: bool };
+const Run = struct { reply: chat.Reply, deltas: []const []const u8, cancelled: bool, cancels: usize };
 
 fn run(a: std.mem.Allocator, deadline: ?json.Value) !Run {
-    return runAsked(a, deadline, null);
+    return runAsked(a, deadline, null, false);
 }
 
-/// `asked` is the cancel route's ask (POST /v1/requests/{id}/cancel); with one, the engine ends late on cancel.
-fn runAsked(a: std.mem.Allocator, deadline: ?json.Value, asked: ?*const std.atomic.Value(bool)) !Run {
-    var script: Script = .{ .lazy = asked != null };
+/// `asked`: the cancel route's ask (the engine then ends late on cancel); `slow`: ends in submit, first write 100 ms.
+fn runAsked(a: std.mem.Allocator, deadline: ?json.Value, asked: ?*const std.atomic.Value(bool), slow: bool) !Run {
+    var script: Script = .{ .lazy = asked != null, .quick = slow };
     var bytes: Bytes = .{};
     const srv = try server.Server.init(gpa, std.testing.io, script.engine(), bytes.text(), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false }, null);
     defer srv.deinit();
     const fields = try json.newObject(a);
     try fields.put(a, "return_token_ids", .{ .bool = true });
     if (deadline) |d| try fields.put(a, "deadline_s", d);
-    var deltas: Deltas = .{ .a = a };
+    var deltas: Deltas = .{ .a = a, .slow = slow };
     var checks: usize = 0;
     var cx: Cx = .{ .a = a };
     const input: chat.Input = .{ .id = "chatcmpl-deadline", .prompt = .{ .text = "prompt" }, .max_tokens = 100, .fields = .{ .object = fields }, .cancel = asked };
     const reply = try chat.run(srv, &cx, input, .{ .ctx = &deltas, .call = Deltas.call }, Gone{ .s = &script, .checks = &checks });
-    return .{ .reply = reply, .deltas = deltas.out.items, .cancelled = script.cancelled };
+    return .{ .reply = reply, .deltas = deltas.out.items, .cancelled = script.cancelled, .cancels = script.cancels };
 }
 
 fn tokenIds(a: std.mem.Allocator, reply: chat.Reply) ![]const u8 {
@@ -174,8 +180,19 @@ test "request deadline: a client's cancel that came first keeps finish cancelled
     defer arena.deinit();
     const a = arena.allocator();
     const asked: std.atomic.Value(bool) = .init(true);
-    const got = try runAsked(a, .{ .float = 0.05 }, &asked);
+    const got = try runAsked(a, .{ .float = 0.05 }, &asked, false);
     try std.testing.expect(got.cancelled);
     try std.testing.expectEqualStrings("cancelled", got.reply.finish_reason);
     try std.testing.expectEqualStrings("abcd", got.reply.content);
+}
+
+test "request deadline: a slow writer draining a reply the engine already ended keeps finish stop and sends no cancel" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const got = try runAsked(a, .{ .float = 0.05 }, null, true);
+    try std.testing.expectEqualStrings("stop", got.reply.finish_reason);
+    try std.testing.expectEqual(0, got.cancels);
+    try std.testing.expectEqualStrings("abcde", got.reply.content);
+    try std.testing.expectEqualStrings("[97, 98, 99, 100, 101]", try tokenIds(a, got.reply));
 }
