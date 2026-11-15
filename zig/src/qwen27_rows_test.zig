@@ -186,13 +186,13 @@ test "qwen27 rows: pre-M5 decoded spans and a live decoder keep the 128-row boun
         b.runner.model.device.units = units;
         b.runner.decode_rows = if (units) 2048 else 128;
         b.owners[1] = null;
-        try std.testing.expectEqual(@as(usize, 2048), policy.chunk(&b, &prompt, false));
-        try std.testing.expectEqual(@as(usize, b.runner.decode_rows), policy.chunk(&b, &prompt, true));
+        try std.testing.expectEqual(@as(usize, 2048), policy.chunk(&b, &prompt, 0, false));
+        try std.testing.expectEqual(@as(usize, b.runner.decode_rows), policy.chunk(&b, &prompt, 0, true));
         b.owners[1] = &decoder;
-        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.choose(&b, &prompt));
-        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.chunk(&b, &prompt, true));
+        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.choose(&b, &prompt, 0));
+        try std.testing.expectEqual(@as(usize, if (units) 512 else 128), policy.chunk(&b, &prompt, 0, true));
         decoder.paused = true;
-        try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+        try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
         decoder.paused = false;
     }
 }
