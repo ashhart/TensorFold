@@ -83,6 +83,22 @@ The fused path is slower at 256 rows and about level at 512, which is why the en
 served pass the writeback already carries the normalize (`TF_FLASHNEXT_HC_FUSE`), so a pass saves less than this
 table's difference.
 
+## Kernel contract
+
+`tf-cuda-test kernel-contract fn_hcn` on the GB10, in an image of this branch at `25dec090f8` built with nvcc 13.3,
+exit status 0:
+
+    (filtered) SUMMARY 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 1908 ms, limits 0 ms
+
+- `fn_hcn_down2`, `fn_hcn_down3`, `fn_hcn_down4` and `fn_hcn_up3` pass gates 1 to 3: every output byte equals the
+  launches each replaces, planted non-finite rows included, at 768, 769, 1,000, 1,536, 2,053 and 3,072 rows, and five
+  runs are byte-identical. Gate 4 does not apply, as they declare no sums of their own.
+- The two controls go red at gate 3 as planted: rounding the normed rows toward zero differs from byte 0, and gating
+  the up rows before their bf16 rounding differs from byte 2.
+- Gate 5, live on sm_121: each kernel's registers and static shared bytes equal its record (152, 189, 206 and 127
+  registers; 0 static shared bytes), within the driver's thread and shared-memory limits.
+- `zig build test-kernel-contract`, with no device: 205 of 205.
+
 ## Off, on and a malformed value
 
 - U1 (unset) and U2 (`TF_FLASHNEXT_READOUT_FUSED=` empty) take main's chain, and every reply hash their bench files
