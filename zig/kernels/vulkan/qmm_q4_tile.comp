@@ -70,20 +70,26 @@ float bf16_value(uint16_t x) {
   return uintBitsToFloat(uint(x) << 16u);
 }
 
+// One workgroup is one (row, 32-column tile) block: 32 lanes by SPLITS slices of k. Slice s takes groups s, s+SPLITS, ...;
+// the slice-0 lanes then add the SPLITS partial sums in slice order.
+const uint SPLITS = 8u;
+shared float partial[SPLITS * 32u];
+
 void main() {
   uint groups_per_row = params.matrix_k / 64u;
-  uint total = params.matrix_m * params.matrix_n;
-  uint stride = gl_NumWorkGroups.x * 256u;
-  for (uint index = gl_GlobalInvocationID.x; index < total; index += stride) {
-    uint row = index / params.matrix_n;
-    uint column = index - row * params.matrix_n;
-    uint tile = column >> 5u;
-    uint lane = column & 31u;
+  uint tiles = (params.matrix_n + 31u) >> 5u;
+  uint lane = gl_LocalInvocationID.x & 31u;
+  uint split = gl_LocalInvocationID.x >> 5u;
+  uint blocks = params.matrix_m * tiles;
+  for (uint block = gl_WorkGroupID.x; block < blocks; block += gl_NumWorkGroups.x) {
+    uint row = block / tiles;
+    uint tile = block - row * tiles;
+    uint column = (tile << 5u) + lane;
     uint w_base = tile * params.matrix_k + lane;
     uint x_vec = row * (params.matrix_k / 8u);
     uint param_base = tile * (groups_per_row * 32u) + lane;
     float accumulator = 0.0;
-    for (uint group = 0u; group < groups_per_row; ++group) {
+    for (uint group = split; group < groups_per_row; group += SPLITS) {
       float scale = bf16_value(scales.values[param_base + group * 32u]);
       float bias = bf16_value(biases.values[param_base + group * 32u]);
       for (uint half_group = 0u; half_group < 2u; ++half_group) {
@@ -111,10 +117,20 @@ void main() {
         }
       }
     }
+    partial[split * 32u + lane] = accumulator;
+    barrier();
+    if (split == 0u && column < params.matrix_n) {
+      float total = partial[lane];
+      for (uint s = 1u; s < SPLITS; ++s) {
+        total += partial[s * 32u + lane];
+      }
+      uint index = row * params.matrix_n + column;
 #ifdef ACT_F32
-    output_data.values[params.output_offset + index] = accumulator;
+      output_data.values[params.output_offset + index] = total;
 #else
-    output_data.values[params.output_offset + index] = bf16_store(accumulator);
+      output_data.values[params.output_offset + index] = bf16_store(total);
 #endif
+    }
+    barrier();
   }
 }
