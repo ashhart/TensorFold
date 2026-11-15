@@ -145,9 +145,8 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min((left + own) / l.pageBytes(), most)), .kept = kept, .taken = taken };
 }
 
-/// `plan` over `l.classes` owner classes, and the classes a pool holds at most (kv_pool_classes.zig).
-pub const planClasses = owners.plan;
-pub const max_classes = owners.max;
+pub const planClasses = owners.plan; // `plan` over `l.classes` owner classes (kv_pool_classes.zig)
+pub const max_classes = owners.max; // the classes a pool holds at most
 
 /// Whether `b.cache` fits whole in what `plan` leaves it: the room past the engine and a fixed part and page a stream.
 pub fn holds(l: Layout, b: Budget) bool {
@@ -291,7 +290,6 @@ pub const Pool = struct {
     pub const availableIn = owners.availableIn;
     pub const roomiest = owners.roomiest;
     pub const fitsAny = owners.fitsAny;
-
     /// Pages the store alone holds: evicting its idle leaves frees them.
     pub fn reclaimable(p: *const Pool) usize {
         return p.nreclaimable;
