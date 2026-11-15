@@ -235,3 +235,42 @@ test "a tower that fails to load leaves the model without one, so deinit frees n
     try std.testing.expectError(error.UnexpectedGemmaVisionTensor, m.loadVision(std.testing.io, dir));
     try std.testing.expect(m.vision == null);
 }
+
+/// A shard's language-model tensors, packed into their own buffer, not the file span between them holding the tower.
+pub fn addShard(c: *ckpt.Checkpoint, device: mtl.Device, path: [:0]const u8) !void {
+    try c.addFileSplit(device, path, "", "language_model.", vision.never);
+}
+
+test "a shard's language model is held without the vision tower stored between its tensors" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // the 31B's last shard: language-model tensors on both sides of vision_tower. and embed_vision.
+    const header =
+        \\{"language_model.a":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]},
+        \\ "vision_tower.x":{"dtype":"U8","shape":[4096],"data_offsets":[4,4100]},
+        \\ "embed_vision.y":{"dtype":"U8","shape":[1024],"data_offsets":[4100,5124]},
+        \\ "language_model.b":{"dtype":"BF16","shape":[3],"data_offsets":[5124,5130]}}
+    ;
+    var data: [8 + header.len + 5130]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    for (data[8 + header.len ..], 0..) |*b, i| b.* = @truncate(i);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors", .data = &data });
+    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/model.safetensors", .{tmp.sub_path}, 0);
+    defer gpa.free(path);
+    var span = ckpt.Checkpoint.init(gpa);
+    defer span.deinit();
+    try span.addFileSelected(device, path, "", "language_model.");
+    try std.testing.expectEqual(@as(usize, 5130), span.residentBytes());
+    var text = ckpt.Checkpoint.init(gpa);
+    defer text.deinit();
+    try addShard(&text, device, path);
+    try std.testing.expectEqual(@as(usize, ckpt.alignment + 6), text.residentBytes());
+    try std.testing.expect(!text.has("vision_tower.x") and !text.has("embed_vision.y"));
+    inline for (.{ "language_model.a", "language_model.b" }) |name|
+        try std.testing.expectEqualSlices(u16, (try span.get(name)).host(u16), (try text.get(name)).host(u16));
+}
