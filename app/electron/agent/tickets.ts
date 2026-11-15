@@ -237,12 +237,11 @@ export interface TicketReviewGateState {
 export function ticketReviewGateState(ticket: Ticket): TicketReviewGateState {
   const evidence = meaningfulTicketEvidence(ticket)
   const builder = newestEvidence(evidence.filter(isBuilderEvidence))
-  const review = newestReviewPassAfterBuilder(evidence)
-  const skip = newestReviewSkipAfterBuilder(evidence, ticket)
+  const review = newestReviewDecisionAfterBuilder(evidence)
   return {
     hasBuilderEvidence: !!builder,
     builderEvidenceBy: builder?.createdBy ?? null,
-    hasReviewOrSkipAfterBuilder: !!review || !!skip,
+    hasReviewOrSkipAfterBuilder: !!review,
   }
 }
 
@@ -264,23 +263,15 @@ function newestEvidence(items: TicketEvidence[]): TicketEvidence | null {
   }, null)
 }
 
-function newestReviewPassAfterBuilder(evidence: TicketEvidence[]): TicketEvidence | null {
-  return newestEvidence(evidence.filter((item) => {
-    if (!isReviewPassEvidence(item)) return false
-    const builder = newestBuilderEvidenceBefore(evidence, item)
-    if (!builder) return false
-    return !sameEvidenceCreator(builder, item)
-  }))
-}
-
-function newestReviewSkipAfterBuilder(evidence: TicketEvidence[], ticket: Ticket): TicketEvidence | null {
-  if (hasCodeChangeEvidence(ticket)) return null
-  return newestEvidence(evidence.filter((item) => {
-    if (!isReviewSkipEvidence(item)) return false
-    const builder = newestBuilderEvidenceBefore(evidence, item)
-    if (!builder) return false
-    return !sameEvidenceCreator(builder, item)
-  }))
+function newestReviewDecisionAfterBuilder(evidence: TicketEvidence[]): TicketEvidence | null {
+  const canSkip = !evidence.some(isCodeChangeEvidence)
+  const decision = newestEvidence(evidence.filter((item) =>
+    isReviewPassEvidence(item) || canSkip && isReviewSkipEvidence(item)
+    || hasReviewerSignal(item) && isBlockingReviewEvidence(item),
+  ))
+  if (!decision || !(isReviewPassEvidence(decision) || canSkip && isReviewSkipEvidence(decision))) return null
+  const builder = newestBuilderEvidenceBefore(evidence, decision)
+  return builder && !sameEvidenceCreator(builder, decision) ? decision : null
 }
 
 function newestBuilderEvidenceBefore(evidence: TicketEvidence[], item: TicketEvidence): TicketEvidence | null {
@@ -307,10 +298,6 @@ function hasUnresolvedExternalDestructiveApproval(ticket: Ticket): boolean {
   return !approvalAt || approvalAt < actionAt
 }
 
-function hasCodeChangeEvidence(ticket: Ticket): boolean {
-  return meaningfulTicketEvidence(ticket).some(isCodeChangeEvidence)
-}
-
 function isBuilderEvidence(item: TicketEvidence): boolean {
   return !isReviewEvidence(item) && !isReviewSkipEvidence(item)
 }
@@ -325,12 +312,15 @@ function isReviewEvidence(item: TicketEvidence): boolean {
   return item.kind === 'review' || /\b(reviewed|reviewer|verdict|approved|approval|blocking issues?|ready for final)\b/i.test(text)
 }
 
+function hasReviewerSignal(item: TicketEvidence): boolean {
+  return item.kind === 'review' || /\b(reviewed|reviewer|review verdict|verdict)\b/i.test(evidenceText(item))
+}
+
 function isReviewPassEvidence(item: TicketEvidence): boolean {
   if (isReviewSkipEvidence(item)) return false
   if (isBlockingReviewEvidence(item)) return false
   const text = evidenceText(item)
-  const reviewerSignal = item.kind === 'review' || /\b(reviewed|reviewer|review verdict|verdict)\b/i.test(text)
-  if (!reviewerSignal) return false
+  if (!hasReviewerSignal(item)) return false
   return /\b(approved|approval|pass(?:ed)?|verified|accepted|ready for final|ready to final|ready|finished|looks good|lgtm|no blockers?|no blocking issues?)\b/i.test(text)
 }
 
