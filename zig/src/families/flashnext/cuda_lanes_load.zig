@@ -10,6 +10,8 @@ const images = @import("cuda_images.zig");
 pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: F.Options) !F.Loaded {
     try @import("env_validate.zig").startup();
     if (o.vision) |v| try @import("qwen_vision").media.checkLimits(v);
+    // --vision on a checkpoint without a tower refuses by name (core's gate) before a stream or a weight loads
+    if (o.vision != null) _ = try @import("engine_api").visionGate(true, try @import("qwen_vision").Settings.read(gpa, io, dir) != null);
     var load_cache = @import("core").checkpoint.cache.Load.begin(io, o.tp > 1);
     defer load_cache.deinit();
     const Cuda = F.Cuda;
