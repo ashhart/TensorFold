@@ -84,6 +84,8 @@ const cases = [_]Case{
     .{ .piece = .shared, .err = error.BadKeptRange, .mine = false, .other = false },
     .{ .piece = .own, .err = error.DiskWords, .mine = false, .other = true }, // the state's own file
     .{ .piece = .own, .err = error.KeptWordsDiffer, .mine = false, .other = true },
+    .{ .piece = .own, .err = error.DiskWorld, .mine = false, .other = true }, // written by another number of ranks
+    .{ .piece = .own, .err = error.DiskLayout, .mine = false, .other = true }, // or in another layout
     .{ .piece = .own, .err = error.ScatterFailed, .mine = true, .other = true }, // a link failing: the disk is fine
     .{ .piece = .shared, .err = error.OutOfMemory, .mine = true, .other = true },
 };

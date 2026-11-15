@@ -30,6 +30,7 @@ const fw = struct {
         kda_wide: bool,
         ring: bool = false,
         taps: ?Taps = null,
+        owners: ?*u8 = null,
         pub fn run(f: *Forward, ids: []const i32) !void {
             observed_ring = f.ring;
             observed_taps = f.taps != null;
@@ -75,6 +76,7 @@ const engine = struct {
         stream: u8 = 0,
         w: u8 = 0,
         pieces: u8 = 0,
+        room: ?u8 = null,
         drafter: ?*Drafter = null,
         const Vocab = struct {
             pub fn len(_: Vocab) usize {

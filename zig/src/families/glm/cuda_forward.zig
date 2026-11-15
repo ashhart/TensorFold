@@ -26,6 +26,7 @@ const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const index_mod = @import("cuda_index.zig");
 const l2pf_mod = @import("cuda_l2pf.zig");
+const owner_attn = @import("cuda_owner_attn.zig");
 const pieces_mod = @import("cuda_forward_pieces.zig");
 
 pub const prefill_rows = state.prefill_rows;
@@ -156,6 +157,7 @@ pub const Forward = struct {
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
     index_split: bool = false, // TF_GLM_INDEX_SPLIT: this prompt chunk's indexer rows split across the ranks (rank 0's choice)
     l2pf: ?*const l2pf_mod.L2pf = null, // TF_GLM_L2PF: a decode window's sites read their next weights into L2
+    owners: ?*owner_attn.Room = null, // TF_GLM_KV_SPLIT: the exchange room for streams on owner-only rows
 
     /// TF_GLM_L2PF on this forward: a decode window of this process's one rank (a prompt chunk reads at full rate).
     pub fn prefetch(f: *const Forward) ?*const l2pf_mod.L2pf {
@@ -215,7 +217,7 @@ pub const Forward = struct {
                 if (b.prefill) st.cur[li] = 1 - cur; // a prompt chunk keeps every row: the layer commits now
             },
             .mla => |a| {
-                try dsa_block.body(.{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, f.stream, a, st.caches[di], b.dsa, b.normed, c.hidden, rows, st.pos_dev, st.pos, nch, b.part_rows);
+                try owner_attn.body(f, r, .{ .set = f.set(), .ops = f.m.ops(), .prof = f.prof, .split = f.indexSplit(r) }, a, b.normed, .{ .c = st.caches[di], .pos = st.pos_dev, .host_pos = st.pos, .owner = st.owner }, rows, nch);
                 if (out) |o| try dsa_block.fill(f.set(), f.stream, a, b.dsa, 0, rows, o);
             },
         }
@@ -472,14 +474,8 @@ pub const Forward = struct {
             try b16.matmul(f.set(), f.stream, b.mcat, 2 * D, m.eh, b.mx, b.kda.mm_part, n, D, 2 * D, false);
             try glue.rmsnormBy(f.set(), f.stream, b.mx, D, m.layer.in_norm, b.normed, D, b.xs, c.eps, n, D);
             const nch = @min(latent.chunksFor(r.st.mtp_len + n), b.nch);
-            const k: dsa_block.Kernels = .{ .set = f.set(), .ops = f.m.ops() };
-            if (!propose) {
-                try dsa_block.commit(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len);
-            } else if (last_row) { // all n rows' caches, one row's attention, its partial in the slot's row 0
-                try dsa_block.blockLastRow(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, slot(r, 1));
-            } else {
-                try dsa_block.block(k, f.stream, m.layer.mixer.mla, r.st.mtp_caches, b.dsa, b.normed, D, n, r.st.mtp_pos_dev, r.st.mtp_len, nch, b.part_rows, slot(r, n));
-            }
+            // rows committed alone; a prompt chunk's last row (n rows' caches, its partial in row 0); a chain's rows
+            try owner_attn.head(f, r, .{ .set = f.set(), .ops = f.m.ops() }, m.layer.mixer.mla, n, nch, propose, last_row, slot(r, if (last_row) 1 else n));
         }
         if (!propose) return;
         try f.resolve(rows);

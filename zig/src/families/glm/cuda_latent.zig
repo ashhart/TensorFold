@@ -114,8 +114,13 @@ pub fn sparseAttention(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, 
 }
 
 pub fn sparseAttentionFormat(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32) !void {
+    return sparseAttentionBlock(set, stream, qa, cache, scales, t, tokens, counts, w, p, out, rows, heads, lw, scale, headBlock(rows));
+}
+
+/// sparseAttentionFormat in head blocks of `hb` (TF_GLM_KV_SPLIT: a call over some rows takes the whole window's).
+pub fn sparseAttentionBlock(set: glue.Set, stream: cuda.Stream, qa: u64, cache: u64, scales: u64, t: Table, tokens: u64, counts: u64, w: usize, p: Partials, out: u64, rows: usize, heads: usize, lw: usize, scale: f32, hb: usize) !void {
     const nch = chunksFor(w);
-    try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, headBlock(rows), true);
+    try chunks(set, stream, qa, cache, scales, t, 0, tokens, counts, p, rows, heads, lw, nch, w, scale, hb, true);
     try merge(set, stream, p, out, counts, rows, heads, lw, nch, true);
 }
 

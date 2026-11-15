@@ -53,6 +53,7 @@ pub fn ringsAgree(base: usize, ring: usize, start: usize, rb: usize) bool {
 
 /// The pieces a forward over `b` exchanges in: the engine's, or the pair's for its twin; none for other buffers.
 pub fn piecesOf(e: *const Engine, b: *const fw.Buffers) ?*const fw.Pieces {
+    if (e.room != null) return null; // TF_GLM_KV_SPLIT: a chunk's exchanges whole, on the main stream with the owners'
     if (b == &e.bp) return &e.pieces;
     const p = if (e.pair) |*p| p else return null;
     return if (b == &p.bp) &p.pieces else null;
