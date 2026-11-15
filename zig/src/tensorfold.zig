@@ -85,6 +85,7 @@ test {
     _ = @import("families/uocr/uocr.zig");
     _ = lora_merge;
     _ = @import("families/lfm3/backend.zig");
+    _ = @import("families/lfm3/model.zig");
     _ = @import("families/lfm3/state.zig");
     _ = @import("families/lfm3/snapshot.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.

@@ -1,4 +1,4 @@
-//! An owned LFM3 checkpoint and its native Metal text pipelines; VL tensors remain intact without vision execution.
+//! An owned LFM3 checkpoint and its native Metal text pipelines; a VL checkpoint holds its language model only.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -45,7 +45,7 @@ pub const Model = struct {
         errdefer m.checkpoint.deinit();
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
-        for (files) |path| try m.checkpoint.addFile(m.device, path, "");
+        for (files) |path| try addShard(&m.checkpoint, m.device, path, config.kind);
         m.weights = try weights.load(&m.checkpoint, &m.config);
         m.kernels = try kernels.load(m.device);
         m.resident = null;
@@ -102,3 +102,46 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 };
+
+/// A VL checkpoint's text tensors pack into their own buffer, without the tower and projector no Metal kernel runs.
+pub fn addShard(c: *ckpt.Checkpoint, device: mtl.Device, path: [:0]const u8, kind: cfg.Kind) !void {
+    if (kind == .text) return c.addFile(device, path, "");
+    try c.addFileSplit(device, path, "", "language_model.", never);
+}
+
+fn never(_: []const u8, _: usize) bool {
+    return false;
+}
+
+test "an LFM3-VL shard holds its language model only; a text shard holds everything as before" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // LFM3-VL's order: language_model.model., then multi_modal_projector. and vision_tower.
+    const header =
+        \\{"language_model.model.a":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]},
+        \\ "multi_modal_projector.p":{"dtype":"U8","shape":[1024],"data_offsets":[4,1028]},
+        \\ "vision_tower.x":{"dtype":"U8","shape":[4096],"data_offsets":[1028,5124]}}
+    ;
+    var data: [8 + header.len + 5124]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    for (data[8 + header.len ..], 0..) |*b, i| b.* = @truncate(i);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors", .data = &data });
+    const path = try std.fmt.allocPrintSentinel(gpa, ".zig-cache/tmp/{s}/model.safetensors", .{tmp.sub_path}, 0);
+    defer gpa.free(path);
+    var all = ckpt.Checkpoint.init(gpa);
+    defer all.deinit();
+    try addShard(&all, device, path, .text);
+    try std.testing.expectEqual(@as(usize, 5124), all.residentBytes());
+    var text = ckpt.Checkpoint.init(gpa);
+    defer text.deinit();
+    try addShard(&text, device, path, .vision_language);
+    try std.testing.expectEqual(@as(usize, 4), text.residentBytes());
+    try std.testing.expect(!text.has("vision_tower.x") and !text.has("multi_modal_projector.p"));
+    const name = "language_model.model.a";
+    try std.testing.expectEqualSlices(u16, (try all.get(name)).host(u16), (try text.get(name)).host(u16));
+}
