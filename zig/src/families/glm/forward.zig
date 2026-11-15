@@ -38,6 +38,7 @@ pub const Ctx = struct {
     draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
     moe_branch: bool = false, // the pending branch is the last MoE block's ye and wts: the next expand combines them
     q_normed: bool = false, // mlaKeys normed the rows' queries into qr (with the cache writes): mlaAttend's projection next
+    draft_draws: ?*const Draws = null, // the MTP head's rows' rules, each keyed where its draft lands (null: argmax)
 };
 
 pub const Inject = struct { rows: Ref, spans: []const Span }; // tower rows: [at,at+n) -> [row,row+n)
