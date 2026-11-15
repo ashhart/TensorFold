@@ -42,7 +42,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const model = s5.Model.load(gpa, io, o.dir) catch |err| {
+    const model = s5.Model.load(gpa, io, o.dir, o.vision != null) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the native Step-5 engine cannot load this checkpoint ({s})", .{@errorName(err)});
         return null;
     };

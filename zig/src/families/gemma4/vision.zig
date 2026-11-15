@@ -42,8 +42,8 @@ const G = enum { pos, rms, rms_add, qkv, softmax, heads_, geglu, pool, rows };
 
 const Layer = struct { in_norm: Ref, post_attn: Ref, pre_ff: Ref, post_ff: Ref, q: Ref, k: Ref, v: Ref, o: Ref, q_norm: Ref, k_norm: Ref, gate: Ref, up: Ref, down: Ref };
 
-/// No tower tensor stays in its file: vision_tower. and embed_vision. pack, 256-byte aligned, into their own buffers.
-fn never(_: []const u8, _: usize) bool {
+/// No tensor stays in its file: the selected ones pack, 256-byte aligned, into their own buffer (tower and text alike).
+pub fn never(_: []const u8, _: usize) bool {
     return false;
 }
 
