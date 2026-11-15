@@ -328,8 +328,9 @@ below; these are estimates for planning a port, not results.
    what stays in RAM beside it.
 
 9. **FP8 KV cache.** `--kv-cache fp8` stores keys and values as e4m3 with a scale a row, which halves KV memory for
-   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; its quality qualification is
-   pending. DeepSeek-V4.1's compressed attention is FP8 by design.
+   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache, qualified on FP4-Local at
+   TP=2: about a third less cache a token, the mean NLL within 0.06% teacher-forced, cold prompts 3 to 5% slower
+   ([receipt](receipts/glm-kv-fp8-3a56d4eb/README.md)). DeepSeek-V4.1's compressed attention is FP8 by design.
 
 10. **Native FP4/FP8 pair decode.** nvcc 13.2 (PTX ISA 9.2) decodes an FP4 or FP8 pair to a bf16 pair in one
     instruction on `sm_120a`/`sm_121a`, where TF decodes in software today (`fp4pair`, `fp8pair` in `fp_pairs.cuh`,
