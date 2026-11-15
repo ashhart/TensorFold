@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Tests: the Qwen3.8-27B reply-end keep test names its history, as the keep pin added on 10 Nov requires, and `test-qwen27-reply-cache-host` now runs it (#3012).
+
 - Lanes: shared rounds price a plain (undrafted) round apart from drafted rows, from trial rounds whose first is a dropped warm-up, and fit row costs from plain and drafted widths, so only how many drafts a round asks for changes; on gfx1151 with Qwen3.6-35B-A3B and MTP it is level with main with tokens unchanged, and opt-in `TF_SHARED_PRICE_LOG=1` prints each shared round's prices (#2687, refs #2605).
 
 - Docs: strict tools under `tool_choice: "auto"` and `TENSORFOLD_TOOL_GRAMMAR`: what a strict tool's schema holds, what is served unconstrained and what is refused, and the legacy DeepSeek alias (#3235, fixes #3177).
