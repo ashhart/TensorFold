@@ -8,6 +8,8 @@ const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const streams = @import("cuda_engine.zig").max_streams;
+const kern = @import("cuda_kernels.zig");
+const glue = @import("cuda_glue.zig");
 
 pub const max_chain = state.max_rows - 1; // drafts a window holds beside the pending token
 /// What a sequence keeps of the head between rounds: its caches and its drafts' confidences.
@@ -17,6 +19,9 @@ const host_drafts = meta_words; // pinned layout: meta, drafts, confidences, the
 const host_probs = host_drafts + max_chain;
 const host_tokens = host_probs + max_chain;
 const host_metas = host_tokens + state.pass_rows; // a meta row a stream for `chains`
+const host_rules = host_metas + streams * meta_words; // a Rule a stream
+const host_pos = host_rules + streams * 8;
+const host_words = host_pos + streams;
 
 /// The output rows a draft level reads: the draft vocabulary's (the draft head), or the target's whole head.
 pub const Vocab = @import("cuda_mtp_projection.zig").Vocab;
@@ -31,6 +36,7 @@ pub const Part = struct {
     hidden: u64,
     sampled: u64,
     rule: ?u64, // null: greedy drafts
+    rule_host: ?sampler.Rule = null, // the same rule on the host, for a batched level's rules slab
     pos: usize,
     keep: usize,
     depth: usize,
@@ -77,6 +83,10 @@ pub const Head = struct {
     atok: u64,
     topk: u64,
     invalid: u64, // the id lookup's error word: topk's columns are the table's, so it stays zero
+    rules: u64, // a batched level's rules, one a stream
+    pos_slab: u64, // its rows' positions, one a stream (pos + keep)
+    tok_rows: u64, // its tokens, one a row
+    prob_rows: u64, // its probabilities, one a row
     pos: usize = 0,
     keep: usize = 0,
     levels: usize = 0,
@@ -119,23 +129,23 @@ pub const Head = struct {
         const kv: usize = @as(usize, e.max_len) * c.kv_heads * c.head_dim * 2;
         const n = if (e.w.draft_coverage != null) c.vocab else e.w.draft_count;
         const S: usize = streams;
-        const sizes = [_]usize{ kv, kv, meta_words * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, S * D * 2, S * D * 2, S * D * 2, S * D / 64 * 4, S * n * 2, n * 4, sampler.max_candidates * 4, sampler.max_candidates * 8, sampler.max_candidates * 8, 32, S * D * 2, S * meta_words * 4, R * 4, torch_ops.topkScratchBytes(1, n), 4 };
+        const sizes = [_]usize{ kv, kv, meta_words * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, S * D * 2, S * D * 2, S * D * 2, S * D / 64 * 4, S * n * 2, S * n * 4, S * sampler.max_candidates * 4, S * sampler.max_candidates * 8, S * sampler.max_candidates * 8, 32, S * D * 2, S * meta_words * 4, R * 4, torch_ops.topkScratchBytes(S, n), 4, S * 32, S * 4, S * 4, S * 4 };
         var total: usize = 0;
         for (sizes) |s| total += std.mem.alignForward(usize, s, 256);
         const h = try e.gpa.create(Head);
         errdefer e.gpa.destroy(h);
-        h.* = .{ .e = e, .buf = undefined, .pinned = undefined, .copied = undefined, .ready = undefined, .k_cache = 0, .v_cache = 0, .meta = 0, .hin = 0, .tok = 0, .probs = 0, .out = 0, .emb = 0, .cat = 0, .cxs = 0, .x = 0, .h1 = 0, .hn = 0, .row = 0, .rxs = 0, .logits = 0, .flog = 0, .vals = 0, .cols = 0, .cand = 0, .fp = 0, .outs = 0, .metas = 0, .atok = 0, .topk = 0, .invalid = 0 };
+        h.* = .{ .e = e, .buf = undefined, .pinned = undefined, .copied = undefined, .ready = undefined, .k_cache = 0, .v_cache = 0, .meta = 0, .hin = 0, .tok = 0, .probs = 0, .out = 0, .emb = 0, .cat = 0, .cxs = 0, .x = 0, .h1 = 0, .hn = 0, .row = 0, .rxs = 0, .logits = 0, .flog = 0, .vals = 0, .cols = 0, .cand = 0, .fp = 0, .outs = 0, .metas = 0, .atok = 0, .topk = 0, .invalid = 0, .rules = 0, .pos_slab = 0, .tok_rows = 0, .prob_rows = 0 };
         errdefer if (!h.cleanup()) @panic("MTP construction completion failed; keeping all parents until process exit");
         h.buf = try cuda.DeviceBuffer.alloc(e.ctx.d, total);
         h.has_buf = true;
-        const fields = [_]*u64{ &h.k_cache, &h.v_cache, &h.meta, &h.hin, &h.tok, &h.probs, &h.out, &h.emb, &h.cat, &h.cxs, &h.x, &h.h1, &h.hn, &h.row, &h.rxs, &h.logits, &h.flog, &h.vals, &h.cols, &h.cand, &h.fp, &h.outs, &h.metas, &h.atok, &h.topk, &h.invalid };
+        const fields = [_]*u64{ &h.k_cache, &h.v_cache, &h.meta, &h.hin, &h.tok, &h.probs, &h.out, &h.emb, &h.cat, &h.cxs, &h.x, &h.h1, &h.hn, &h.row, &h.rxs, &h.logits, &h.flog, &h.vals, &h.cols, &h.cand, &h.fp, &h.outs, &h.metas, &h.atok, &h.topk, &h.invalid, &h.rules, &h.pos_slab, &h.tok_rows, &h.prob_rows };
         var at: usize = 0;
         for (fields, sizes) |f, s| {
             f.* = h.buf.ptr + at;
             at += std.mem.alignForward(usize, s, 256);
         }
         try h.buf.fill8(0, e.stream.handle); // on the engine's stream: the legacy one would race its first uploads
-        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, (host_metas + S * meta_words) * 4);
+        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, host_words * 4);
         h.has_pinned = true;
         h.copied = try cuda.Event.init(e.ctx.d, false);
         h.has_copied = true;
@@ -241,7 +251,6 @@ pub const Head = struct {
         const o = f.ops;
         const t = f.glue;
         const D: u64 = c.hidden;
-        const qd: u64 = c.heads * c.head_dim;
         var rows: usize = 0;
         for (spans) |s| rows += s.rows;
         try f.embed(h.tok, h.emb, rows);
@@ -249,13 +258,13 @@ pub const Head = struct {
         try o.dense(h.cat, h.cxs, m.eh_proj, h.x, rows);
         try t.addRmsnorm(h.x, null, m.attn_norm, h.x, b.y, b.xs, rows, c.hidden, c.eps);
         try o.dense(b.y, b.xs, m.attn.qkv, b.qkv, rows);
-        for (spans) |s| {
-            const r0: u64 = s.row0;
-            const qkv = b.qkv + r0 * c.qkvDim() * 2;
-            var at = f.ashape();
-            at.pt = s.table;
-            try t.kvWrite(qkv, s.k_cache, s.v_cache, s.meta, s.rows, at);
-            try t.attention(qkv, s.k_cache, s.v_cache, s.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
+        var segs_buf: [glue.max_segs]glue.AttnSeg = undefined;
+        var at0: usize = 0;
+        while (at0 < spans.len) {
+            const take = @min(glue.max_segs, spans.len - at0);
+            for (spans[at0..][0..take], segs_buf[0..take]) |s, *sg| sg.* = .{ .kc = s.k_cache, .vc = s.v_cache, .meta = s.meta, .row0 = s.row0, .rows = s.rows, .pt = s.table };
+            try t.attentionSegs(segs_buf[0..take], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, f.ashape());
+            at0 += take;
         }
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
         if (!tail) return;
@@ -263,13 +272,14 @@ pub const Head = struct {
             const last = spans[0].row0 + spans[0].rows - 1;
             try t.addRmsnorm(h.x + last * D * 2, b.delta + last * D * 2, m.moe_norm, h.h1, b.y, b.xs, 1, c.hidden, c.eps);
         } else {
-            // span k's last row moves to row k: one norm launch on aligned rows, which a captured set needs
+            // span k's last row moves to row k: one ordered gather, which a captured set needs
+            var last: kern.LastRows = std.mem.zeroes(kern.LastRows);
             for (spans, 0..) |s, k| {
-                const last = s.row0 + s.rows - 1;
-                if (last == k) continue;
-                try o.copy(h.x + k * D * 2, h.x + last * D * 2, D * 2);
-                try o.copy(b.delta + k * D * 2, b.delta + last * D * 2, D * 2);
+                const at = s.row0 + s.rows - 1;
+                last.a[k] = h.x + at * D * 2;
+                last.b[k] = b.delta + at * D * 2;
             }
+            try o.gatherLast(last, h.x, b.delta, D * 2, D * 2, spans.len);
             try t.addRmsnorm(h.x, b.delta, m.moe_norm, h.h1, b.y, b.xs, spans.len, c.hidden, c.eps);
         }
         if (m.moe.latent != null) {
@@ -378,6 +388,35 @@ pub const Head = struct {
         for (1..depth + 1) |j| try h.launch(j, v);
     }
 
+    /// Every live part's level j draw in one pass: the same draw per row, then one scatter to their buffers.
+    fn sampleRows(h: *Head, parts: []const Part, j: usize, v: Vocab) !void {
+        const e = h.e;
+        const live = parts.len;
+        const n = h.width(v);
+        const ids: ?u64 = if (v == .subset) e.w.draft_ids else null;
+        if (parts[0].rule != null) {
+            try e.ops().drawIdsRows(h.logits, n, h.rules, h.pos_slab, j - 1, h.tok_rows, live, ids, h.prob_rows);
+        } else {
+            const k = sampler.greedy_draft;
+            const count = sampler.count(k.k, n);
+            const t = e.ops().torch();
+            try t.toF32(h.logits, h.flog, n * live);
+            try t.topk(h.flog, n, live, count, h.vals, h.cols, h.topk);
+            if (ids) |x| try t.lookup(x, n, h.cols, h.cand, live * count, h.invalid);
+            try e.forward(null).glue.keyed(h.vals, if (ids != null) h.cand else h.cols, h.meta, h.tok_rows, h.fp, h.fp, h.prob_rows, j - 1, live, count, k);
+        }
+        var g: kern.ScatterRows = std.mem.zeroes(kern.ScatterRows);
+        for (parts, 0..) |p, row| {
+            g.tok[row] = p.ids;
+            g.prob[row] = p.probs;
+            g.rows[row] = 1;
+            g.row0[row] = @intCast(row);
+        }
+        g.tok_at = @intCast(j);
+        g.prob_at = @intCast(j - 1);
+        try e.ops().scatterRows(g, h.tok_rows, h.prob_rows, live);
+    }
+
     /// Several streams' draft requests level by level, a row a stream: drafts to their `ids`, confidences to `probs`.
     pub fn chains(h: *Head, parts: []Part) !void {
         const e = h.e;
@@ -404,29 +443,62 @@ pub const Head = struct {
             for (0..max_chain + 1) |j| m[1 + j] = @intCast(p.pos + p.keep + j);
         }
         try o.upload(h.metas, std.mem.sliceAsBytes(host));
+        const sampled = parts[0].rule != null;
+        var batched = e.k.triton == null and parts.len > 1;
+        for (parts) |p| batched = batched and p.vocab == parts[0].vocab and (p.rule != null) == sampled and (!sampled or p.rule_host != null);
+        if (batched and sampled) {
+            const rules = std.mem.sliceAsBytes(h.pinned.slice(u32)[host_rules..][0 .. parts.len * 8]);
+            for (parts, 0..) |p, k| @memcpy(rules[k * 32 ..][0..32], std.mem.asBytes(&p.rule_host.?));
+            try o.upload(h.rules, rules);
+            const pos = h.pinned.slice(u32)[host_pos..][0..parts.len];
+            for (parts, 0..) |p, k| pos[k] = @intCast(p.pos + p.keep);
+            try o.upload(h.pos_slab, std.mem.sliceAsBytes(pos));
+        }
         try h.copied.record(e.stream);
         var spans: [streams]Span = undefined;
         var row0: usize = 0;
+        if (parts.len > 1) {
+            var g: kern.GatherRows = std.mem.zeroes(kern.GatherRows);
+            for (parts, 0..) |p, k| {
+                g.a[k] = p.hidden;
+                g.b[k] = p.sampled;
+                g.rows[k] = @intCast(p.keep);
+                g.row0[k] = @intCast(row0);
+                row0 += p.keep;
+            }
+            g.wa = @intCast(D * 2);
+            g.wb = 4;
+            try o.gatherRows(g, h.hin, h.tok, row0);
+        } else {
+            const p = parts[0];
+            try o.copy(h.hin, p.hidden, p.keep * D * 2);
+            try o.copy(h.tok, p.sampled, p.keep * 4);
+            row0 = p.keep;
+        }
+        row0 = 0;
         for (parts, spans[0..parts.len]) |p, *s| {
-            try o.copy(h.hin + row0 * D * 2, p.hidden, p.keep * D * 2);
-            try o.copy(h.tok + row0 * 4, p.sampled, p.keep * 4);
             s.* = .{ .row0 = row0, .rows = p.keep, .meta = 0, .k_cache = p.k_cache, .v_cache = p.v_cache, .table = p.table, .vocab = p.vocab };
             row0 += p.keep;
         }
         var live = parts.len;
         for (1..parts[0].depth + 1) |j| {
             while (parts[live - 1].depth < j) live -= 1;
-            if (j > 1) try o.copy(h.hin, h.outs, live * D * 2);
+            if (j > 1) {
+                try o.copy(h.hin, h.outs, live * D * 2);
+                if (batched) try o.copy(h.tok, h.tok_rows, live * 4);
+            }
             for (parts[0..live], spans[0..live], 0..) |p, *s, k| {
                 s.meta = h.metas + k * meta_words * 4 + (j - 1) * 4;
                 if (j == 1) continue;
-                try o.copy(h.tok + k * 4, p.ids + (j - 1) * 4, 4);
+                if (!batched) try o.copy(h.tok + k * 4, p.ids + (j - 1) * 4, 4);
                 s.row0 = k;
                 s.rows = 1;
             }
             const n = try h.forwardSpans(spans[0..live], true);
             try o.copy(h.outs, h.row, live * D * 2);
-            for (parts[0..live], 0..) |p, k| {
+            if (batched) {
+                try h.sampleRows(parts[0..live], j, parts[0].vocab);
+            } else for (parts[0..live], 0..) |p, k| {
                 const meta = h.metas + k * meta_words * 4;
                 try h.sample(h.logits + k * n * 2, p.rule, meta + 4, p.ids + j * 4, p.probs + (j - 1) * 4, j, p.vocab);
             }

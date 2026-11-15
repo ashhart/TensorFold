@@ -193,7 +193,7 @@ test "modelopt host: real buffer and sibling allocations cover all dense partial
         defer sibling.deinit();
         sibling.follow(&b);
         const bytes = b.arena.buf.ptr + b.arena.used - b.lane_part;
-        try t.expectEqual(@as(u64, if (latent == 12224) 24936960 else 21934080), bytes);
+        try t.expectEqual(@as(u64, if (latent == 12224) 24938368 else if (latent == 1024) 21935488 else 21934912), bytes);
         try t.expect(b.lane_part != sibling.lane_part);
         try t.expectEqual(bytes, sibling.arena.buf.ptr + sibling.arena.used - sibling.lane_part);
         const shapes = [_][2]usize{ .{ c.projDim(), c.hidden }, .{ c.hidden, c.inner() }, .{ c.qkvDim(), c.hidden }, .{ c.hidden, c.heads * c.head_dim }, .{ c.vocab, c.hidden }, .{ c.hidden, 2 * c.hidden }, .{ c.latent, c.hidden }, .{ c.hidden, c.latent } };

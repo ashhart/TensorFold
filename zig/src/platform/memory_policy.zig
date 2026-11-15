@@ -1,5 +1,6 @@
 //! The shared reserve inside a Metal residency or preflight bound.
 pub const margin: u64 = 2 << 30;
+pub const linux_pressure = @import("memory_pressure_linux.zig");
 
 extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
 extern "c" fn getpid() c_int;
@@ -7,6 +8,7 @@ extern "c" fn sysctlbyname(name: [*:0]const u8, old: ?*anyopaque, old_len: ?*usi
 
 /// The kernel's memory pressure level (1 normal, 2 warning, 4 critical); null where the OS gives none.
 pub fn pressure() ?u32 {
+    if (@import("builtin").os.tag == .linux) return linux_pressure.pressure();
     if (@import("builtin").os.tag != .macos) return null;
     var level: u32 = 0;
     var len: usize = @sizeOf(u32);
