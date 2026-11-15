@@ -52,7 +52,8 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   not qualified. A diagnostic receipt on FP4-Local at TP=2 on two GB10
   ([receipt](../receipts/glm-kv-fp8-3a56d4eb/README.md)) measures how far it moves: teacher-forced over 360,418
   positions, the mean NLL within 0.06% and the best token the same at 95.5% of positions, a KL over the top 20 of
-  0.016 where NVFP4 against FP4-Local is 0.043; a token's cache about a third smaller; cold prompts 3 to 5% slower.
+  0.016 where NVFP4 against FP4-Local is 0.043; a token's cache 6,960 bytes a rank against 13,056 (−47%), beside the
+  231 MiB each stream holds either way; cold prompts 3 to 5% slower.
 - `TF_GLM_HOST_CACHE=1` on every rank keeps kept prompt states in pinned host memory instead of on the card, so a
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
