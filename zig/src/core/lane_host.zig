@@ -107,7 +107,14 @@ pub const LaneHost = struct {
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var shown = info_.ofLanes();
         shown.draft_sources = shown.draft_sources.ofLanes(core.cfg, shown.lanes);
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = .withDecode(info_.decode_share), .decode_cap = info_.decode_share != null, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
+        // --decode-share: the flag wins, the env's TENSORFOLD_PREFILL_SHARE beats an engine's default and never opts into the cap; the env's row budget survives, as under the flag.
+        var share: fill.Share = .withDecode(info_.decode_share);
+        var decode_cap = info_.decode_share != null;
+        if (info_.decode_share == null) if (info_.default_decode_share) |default| if (share.p >= 1) { // the env's share is not effectively set: the engine's default arms
+            share.p = fill.Share.fromDecode(default).p;
+            decode_cap = true;
+        };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = shown, .share = share, .decode_cap = decode_cap, .prefix = .fromEnv(), .pressure = .fromEnv(), .srpt = .fromEnv(), .kv = ledger.of(info_) };
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
