@@ -160,6 +160,12 @@ pub const LaneHost = struct {
         return .{ .ctx = h, .vtable = if (vt.score != null and vt.decide != null) &decided_vtable else if (vt.score != null) &scored_vtable else &plain_vtable };
     }
 
+    /// Advertise the cache capabilities: warm turns follow the store, so a cache-less start claims none.
+    pub fn advertiseCache(h: *LaneHost, store: ?*pc.Store) void {
+        h.info_.prompt_cache = store != null;
+        h.info_.warm_turns = store != null;
+    }
+
     const plain_vtable: Engine.VTable = .{
         .info = infoFn,
         .submit = submitFn,
