@@ -77,7 +77,7 @@ pub const Attention = struct {
     sdpa_f32q: dispatch.Pipeline,
     sdpa_f32q_long: dispatch.Pipeline,
     gate_f32: dispatch.Pipeline,
-    // Prefill chunks of 2..tile_max_rows rows run scores, softmax and PV as three tiled passes over a global score scratch.
+    // Prefill chunks of 2..tile_max_rows rows: tiled scores, softmax and PV over a global score scratch.
     scores_bf16: dispatch.Pipeline,
     scores_f32q: dispatch.Pipeline,
     softmax_rows: dispatch.Pipeline,
@@ -250,8 +250,7 @@ pub const Attention = struct {
         try pipe.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
     }
 
-    // Prefill chunks of 2..tile_max_rows rows: scores, row softmax and P*V as three tiled dispatches over an f32 score scratch.
-    // Each dot and each key sum keeps the decode kernel's accumulation order, so the output is bit-identical to it.
+    // Prefill chunks of 2..tile_max_rows rows: tiled scores, softmax and P*V in the decode kernel's sum order.
     fn attendTiled(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, plan: AttendPlan, capacity: u64, timeout_ns: u64) Error!void {
         var p: params.Params = .{
             .matrix_m = @intCast(query_heads),
