@@ -99,6 +99,7 @@ test {
     _ = @import("families/uocr/uocr.zig");
     _ = lora_merge;
     _ = @import("families/lfm3/backend.zig");
+    _ = @import("families/lfm3/model.zig");
     _ = @import("families/lfm3/state.zig");
     _ = @import("families/lfm3/qk_segments_test.zig"); // a shared round's qk in one dispatch (Metal)
     _ = @import("families/lfm3/snapshot.zig");
