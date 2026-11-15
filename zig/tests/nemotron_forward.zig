@@ -1,6 +1,4 @@
-//! Native teacher-forced Nemotron logits for tools/zig/nemotron_fidelity.py: prompt rows fused_rows a forward, then
-//! (from --decode-from) decode rows one a forward. With --stages DIR, every stage forward.Point names, of every layer
-//! of every forward, is copied out beside the logits (stages.bin, manifest stages.jsonl) for nemotron_stages.py.
+//! Native teacher-forced Nemotron logits, and with --stages DIR every stage's bytes, for nemotron_fidelity.py.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -81,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     const out = try gpa.alloc(u8, ids.len * vocab * 2);
     defer gpa.free(out);
 
-    // --stages: one shared buffer a forward, appended to stages.bin after it; the manifest's offsets are into stages.bin
+    // --stages: one shared buffer a forward, appended to stages.bin after it; the manifest's offsets are into that file
     var stages: ?Stages = null;
     var stage_bytes: std.ArrayList(u8) = .empty;
     defer stage_bytes.deinit(gpa);

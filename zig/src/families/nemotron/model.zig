@@ -41,12 +41,18 @@ pub const Model = struct {
         errdefer allocator.free(m.dir);
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
-        m.queue = try m.device.queue();
+        // making a queue and asking the generation leave autoreleased objects: drained here, whatever the caller holds
+        const tensor_units = units: {
+            const pool = mtl.objc.Pool.push();
+            defer pool.pop();
+            m.queue = try m.device.queue();
+            break :units m.device.tensorUnits();
+        };
         errdefer m.queue.deinit();
 
         m.config = try cfg.Config.read(allocator, io, dir);
         try cfg.checkShapes(m.config);
-        cfg.checkDevice(m.config, m.device.tensorUnits()) catch |e| {
+        cfg.checkDevice(m.config, tensor_units) catch |e| {
             std.log.err("Nemotron 3.5 Bolt runs on Apple GPUs without tensor units (M1 to M4); its M5 lane kernels are not built yet", .{});
             return e;
         };
@@ -185,8 +191,6 @@ test "a config refused after the device opens releases the device and its queue"
     defer device.deinit();
     const io = std.testing.io;
     const a = std.testing.allocator;
-    // the queue holds its device, so the device's count covers both
-    const held = mtl.objc.msg(usize, device.id, "retainCount", .{});
     // refused by its time-step clamp, next after the tensor-unit check and under the same release
     const dt = try std.mem.replaceOwned(u8, a, cfg.lightning, "\"layer_norm_epsilon\"", "\"time_step_limit\": [0.001, 0.1], \"layer_norm_epsilon\"");
     defer a.free(dt);
@@ -195,6 +199,14 @@ test "a config refused after the device opens releases the device and its queue"
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = dt });
     var path: [64]u8 = undefined;
     const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // a chip's first load can leave Metal's own one-time objects holding the device: the count starts after it
     try std.testing.expectError(error.UnsupportedTimeStepLimit, Model.load(a, io, dir, false));
+    const held = mtl.objc.msg(usize, device.id, "retainCount", .{});
+    {
+        const pool = mtl.objc.Pool.push();
+        defer pool.pop();
+        for (0..4) |_| try std.testing.expectError(error.UnsupportedTimeStepLimit, Model.load(a, io, dir, false));
+    }
+    // the queue holds its device, so the device's count covers both
     try std.testing.expectEqual(held, mtl.objc.msg(usize, device.id, "retainCount", .{}));
 }

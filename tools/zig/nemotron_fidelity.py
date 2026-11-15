@@ -1,12 +1,4 @@
-"""Native Nemotron teacher-forced NLL and top-1 vs stock mlx-lm; mlx-lm's own row/chunk spread is the floor.
-
-The native runs each fixture twice: prompt rows (fused_rows a forward) and decode rows (one a forward). Every position
-whose native top-1 differs from mlx-lm serial is listed with mlx-lm's margin (its top-1's lead over the native's token,
-in logits and in bf16 ulps at that logit). mlx-lm's own chunk32 and full runs against its serial run are the floor:
-they flip near-ties too. The run fails on a non-finite logit; on a differing token whose margin is above the largest at
-which mlx-lm's own runs flip on that fixture (or --tie-ulps, if larger); on more differing tokens than twice mlx-lm's
-own count plus 2; or on a native NLL further from mlx-lm serial than --nll-spread times mlx-lm's own spread (floored
-at 0.002 nats)."""
+"""Native Nemotron teacher-forced NLL and top-1 vs stock mlx-lm; mlx-lm's own row/chunk spread is the floor."""
 from __future__ import annotations
 
 import argparse
@@ -26,6 +18,15 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 from bench_openai import PROMPTS
+
+ABOUT = """\
+The native runs each fixture twice: prompt rows (fused_rows a forward) and decode rows (one a forward). Every position
+whose native top-1 differs from mlx-lm serial is listed with mlx-lm's margin (its top-1's lead over the native's token,
+in logits and in bf16 ulps at that logit). mlx-lm's own chunk32 and full runs against its serial run are the floor:
+they flip near-ties too. The run fails on a non-finite logit; on a differing token whose margin is above the largest at
+which mlx-lm's own runs flip on that fixture (or --tie-ulps, if larger); on more differing tokens than twice mlx-lm's
+own count plus 2; or on a native NLL further from mlx-lm serial than --nll-spread times mlx-lm's own spread (floored
+at 0.002 nats)."""
 
 
 def forward(model, ids, width, vocab):
@@ -104,7 +105,7 @@ def pins(model, weights):
 
 
 def main():
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description=ABOUT, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("model", type=Path)
     p.add_argument("output", type=Path)
     p.add_argument("--native", type=Path, default=ROOT / "zig-out/bin/tf-nemotron-forward")

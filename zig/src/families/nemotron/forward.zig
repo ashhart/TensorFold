@@ -67,8 +67,7 @@ pub fn ints8(values: []const i32) [8]i32 {
 /// A stage of a forward a test tool can look at (tf-nemotron-forward --stages): each names the buffer just written.
 pub const Point = enum { h_in, x_in, in_proj, conv, scan, gnorm, qkv, attn, gate, route_idx, route_wt, shared, into, experts, combine, mixer_out, h_out, x_out };
 
-/// A test tool's copy of each stage's output (bytes from offset 0 of `src`); null in the engine, which then encodes
-/// nothing more.
+/// A test tool's copy of each stage's output (bytes from offset 0 of `src`); null in the engine.
 pub const Tap = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque, f: Forward, e: *Enc, p: Point, src: Buffer, bytes: usize) void };
 
 pub const Forward = struct {
