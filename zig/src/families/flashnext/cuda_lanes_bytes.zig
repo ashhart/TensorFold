@@ -43,6 +43,6 @@ pub const worlds = struct {
 pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, rank: u32, _: u32) !u64 {
     if (rank != 0) return 0;
     const v = @import("qwen_vision");
-    const c = ((try v.Settings.read(a, io, dir)) orelse return error.NoVisionTower).tower;
+    const c = ((try v.Settings.read(a, io, dir)) orelse return 0).tower; // no tower: open refuses --vision by name
     return v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches);
 }
