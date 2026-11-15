@@ -75,6 +75,8 @@ pub const Kernels = struct {
     index_select: mtl.Pipeline,
     index_scores_nax: mtl.Pipeline, // a prompt chunk's index scores on the tensor units (glm_index_nax.metal)
     index_decode: mtl.Pipeline, // and decode rows' (a row's heads as the op's rows)
+    select_mark: mtl.Pipeline, // decode rows' key lists past CAP blocks: the blocks at or above a sampled floor (glm_select.metal)
+    select_merge: mtl.Pipeline, // and the selection among them, glm_index_select's bytes
     exp_f32: mtl.Pipeline,
     streams: mtl.Pipeline,
     copy_u32: mtl.Pipeline,
@@ -231,7 +233,7 @@ pub fn visitSources(gpa: std.mem.Allocator, device: mtl.Device, visitor: anytype
 
 fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: anytype) !void {
     k.wide = null;
-    var jobs: [generated.len + 23]Job = undefined;
+    var jobs: [generated.len + 24]Job = undefined;
     inline for (generated, 0..) |g, i| {
         const src = comptime kernelOf(g.key);
         const FT = @FieldType(Kernels, g.field);
@@ -324,6 +326,8 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     defer gpa.free(comb_src);
     if (std.mem.eql(u8, comb_src, comb.source)) return error.KernelCompile; // the generated combine changed: its edit no longer applies
     jobs[generated.len + 22] = .{ .device = device, .source = comb_src, .names = comb.functions, .out = @as(*[1]mtl.Pipeline, &k.combine_0) };
+    var select_out: [2]mtl.Pipeline = undefined;
+    jobs[generated.len + 23] = .{ .device = device, .source = sources.glm_select, .names = &.{ "glm_select_mark", "glm_select_merge" }, .out = &select_out };
 
     if (comptime @TypeOf(visitor) != void) {
         for (jobs) |j| try visitor.raw("glm", j.names[0], j.source);
@@ -365,4 +369,6 @@ fn assemble(gpa: std.mem.Allocator, device: mtl.Device, k: *Kernels, visitor: an
     k.sparse_combine = sparse_out[2];
     k.index_scores_nax = index_out[0];
     k.index_decode = index_out[1];
+    k.select_mark = select_out[0];
+    k.select_merge = select_out[1];
 }
