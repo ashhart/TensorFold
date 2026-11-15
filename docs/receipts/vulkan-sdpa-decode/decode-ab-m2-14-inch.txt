@@ -1,0 +1,24 @@
+decab 14-inch-M2-Max 2026-11-15T14:35:51Z kernel 7.3.0-2-20261110.1-lab-ARCH arms cmb cat gpu-timeouts=0
+arm cmb sha d9bffbf285d5d7a1
+arm cat sha 3cdc4f5ac2eafc81
+RUN cmb u24 rc 0 ms_per_token=10.672 tok_s=93.70 tok_hash=fc93d24775b1d909 
+RUN cat u24 rc 0 ms_per_token=10.781 tok_s=92.75 tok_hash=fc93d24775b1d909 
+RUN cmb d1024 rc 0 ms_per_token=12.813 tok_s=78.05 tok_hash=3efb3759184db87e 
+RUN cat d1024 rc 0 ms_per_token=11.328 tok_s=88.28 tok_hash=3efb3759184db87e 
+RUN cmb d6173 rc 0 ms_per_token=24.3GPU-TIMEOUTS after=0 delta=0
+eda74f07707 
+RUN cat d6173 rc 0 ms_per_token=18.023 tok_s=55.48 tok_hash=fc0ededa74f07707 
+RUN cat u24 rc 0 ms_per_token=10.383 tok_s=96.31 tok_hash=fc93d24775b1d909 
+RUN cmb u24 rc 0 ms_per_token=10.125 tok_s=98.77 tok_hash=fc93d24775b1d909 
+RUN cat d1024 rc 0 ms_per_token=11.531 tok_s=86.72 tok_hash=3efb3759184db87e 
+RUN cmb d1024 rc 0 ms_per_token=12.961 tok_s=77.15 tok_hash=3efb3759184db87e 
+RUN cat d6173 rc 0 ms_per_token=17.820 tok_s=56.12 tok_hash=fc0ededa74f07707 
+RUN cmb d6173 rc 0 ms_per_token=24.156 tok_s=41.40 tok_hash=fc0ededa74f07707 
+RUN cmb u24 rc 0 ms_per_token=10.555 tok_s=94.74 tok_hash=fc93d24775b1d909 
+RUN cat u24 rc 0 ms_per_token=10.922 tok_s=91.56 tok_hash=fc93d24775b1d909 
+RUN cmb d1024 rc 0 ms_per_token=13.117 tok_s=76.24 tok_hash=3efb3759184db87e 
+RUN cat d1024 rc 0 ms_per_token=12.141 tok_s=82.37 tok_hash=3efb3759184db87e 
+RUN cmb d6173 rc 0 ms_per_token=23.563 tok_s=42.44 tok_hash=fc0ededa74f07707 
+RUN cat d6173 rc 0 ms_per_token=17.719 tok_s=56.44 tok_hash=fc0ededa74f07707 
+gpu-timeouts=0
+VERDICT decab DONE decab-20261115T143551Z
