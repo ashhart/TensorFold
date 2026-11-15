@@ -10,6 +10,7 @@ import { allowedProviders, projectDefaultModel } from '../lib/policy'
 import { modelDisplayName, providerModelGroups } from '../lib/provider-accounts'
 import type { KanbanPhaseModel, Project, ProjectKanbanSettings, Provider, Room, Ticket, TicketExecutionMode, TicketStatus, TicketWorkOptions } from '../lib/types'
 import { resolveTicketDependencies } from '../../shared/ticket-dependencies'
+import { TicketDetailsButton, TicketArchiveButton } from './board/TicketDetails'
 
 const EXEC_MODES: { id: TicketExecutionMode; label: string; icon: IconName; desc: string }[] = [
   { id: 'solo', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Solo") }, icon: 'cpu', get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "One agent on the configured model") } },
@@ -229,7 +230,8 @@ function Card({
       className={clsx('group mb-2 rounded-xl border border-line bg-card p-3 shadow-card transition-colors hover:border-line-strong', t.threadId ? 'cursor-pointer' : activeRun ? 'cursor-default' : 'cursor-grab active:cursor-grabbing')}
     >
       <div className="flex items-start justify-between gap-2">
-        <div className="text-[13px] font-medium leading-snug text-ink">{t.title}</div>
+        <div className="min-w-0 flex-1 break-words text-[13px] font-medium leading-snug text-ink">{t.title}</div>
+        <TicketDetailsButton ticket={t} />
         <button onClick={(e) => { e.stopPropagation(); deleteTicket(t.id) }} className="shrink-0 text-ink-3 opacity-0 transition-opacity hover:text-danger group-hover:opacity-100" aria-label={tx("Archive ticket")}><Icon name="archive" size={13} /></button>
       </div>
       {t.body && <p className="mt-1 line-clamp-3 text-[13px] leading-snug text-ink-3">{t.body}</p>}
@@ -452,6 +454,7 @@ export function Board({ projectId }: { projectId: string }) {
         <div className="flex min-w-0 items-center gap-2">
           <Button variant={kanbanOpen ? 'default' : 'ghost'} size="sm" icon="settings" onClick={() => setKanbanOpen((open) => !open)}>
             {tx("Kanban settings")}</Button>
+          <TicketArchiveButton projectId={projectId} />
           <div className="hidden min-w-0 text-[13px] text-ink-3 md:block">
             {modelMode === 'single' ? tx("One model · {value0}", { value0: selectionLabel(singleModel, modelProviders) }) : tx("Phased models · Draft, ticket review, build, work review, final gate")}
           </div>
