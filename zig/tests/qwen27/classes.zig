@@ -68,7 +68,10 @@ fn time(m: *q.model.Model, c: Class, ls: []const Linear, rows: u32, reps: usize)
     const f = &m.frame;
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (0..reps) |_| for (ls) |l| try m.kernels.quant(e, l, source(f, c), null, f.get(.dims), f.get(.logits), rows);
+    for (0..reps) |_| for (ls) |l| {
+        try m.kernels.quant(e, l, source(f, c), null, f.get(.dims), f.get(.logits), rows);
+        e.barrier();
+    };
     e.end();
     cb.commit();
     cb.wait();
