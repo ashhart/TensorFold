@@ -211,6 +211,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
     store.threads.unshift(thread); persistThreads()
     sendToRenderer('thread:update', thread)
   }
+  const timelineBaseline = thread.timeline.length
   ticket.threadId = thread.id
   ticket.status = 'in_progress'
   ticket.runState = 'running'
@@ -396,7 +397,8 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       markUndrainedCues(t, controller.signal.aborted ? 'canceled' : 'run ended')
       aborters.delete(t.id)
       runLease.release()
-      const failed = t.timeline.some((i) => i.kind === 'error')
+      const runTimeline = t.timeline.slice(timelineBaseline)
+      const failed = runTimeline.some((i) => i.kind === 'error')
       const interrupted = controller.signal.aborted
       t.status = failed ? 'error' : 'idle'; t.updatedAt = Date.now()
       // When the run was aborted/paused (no completion), park the ticket without
@@ -406,7 +408,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       ticket.runState = settled.runState
       ticket.status = settled.status
       ticket.updatedAt = Date.now()
-      const summary = summarizeTicketWorkerOutcome(ticket, t, phase, failed, input.source?.seat ?? model)
+      const summary = summarizeTicketWorkerOutcome(ticket, { ...t, timeline: runTimeline }, phase, failed, input.source?.seat ?? model)
       if (ticket.execution) {
         ticket.execution = settleTicketExecution(ticket.execution, {
           outcome: { phase, failed, interrupted },
