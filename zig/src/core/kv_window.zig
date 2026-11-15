@@ -31,10 +31,11 @@ pub fn first(g: Geometry, c: u32) u32 {
     return lo - lo % g.a;
 }
 
-/// Pages a stream's window holds at most, for chunks of `chunk` rows and `drafts` rows past them.
+/// Pages a window needs at most, for chunks of `chunk` rows and `drafts` past them: held, and retired unsettled.
 pub fn promise(g: Geometry, chunk: u32, drafts: u32) usize {
     const live = g.w - 1 + g.a - 1 + chunk + drafts;
-    return g.bands * ((live + g.rows - 1) / g.rows + 1);
+    const retired = (chunk + drafts + g.a - 1) / g.rows + 1; // one step's: first() moves a forward's rows and a tile
+    return g.bands * ((live + g.rows - 1) / g.rows + 1 + retired);
 }
 
 /// Where a band's ids reach the device: logical pages from `from` of band `band` (`kv.retirement.none`: never read).
@@ -46,7 +47,7 @@ pub const Tables = struct {
 /// A band's pages a keep retains: logical pages from `base`, the last partial when the keep is inside it.
 pub const Band = struct { base: u32, ids: []u32 };
 
-/// One stream's window pages: a lease whose ids are page-major (`ids[j * bands + b]`), retired from the front.
+/// One stream's window pages, page-major (`ids[j * bands + b]`); it must not move while credits point at its lease.
 pub const Window = struct {
     lease: kv.Lease = .{},
     g: Geometry,
@@ -57,10 +58,10 @@ pub const Window = struct {
         return @intCast(w.lease.ids.items.len / w.g.bands);
     }
 
-    /// Before a forward to row `end - 1` from committed `k`: pages below `first(k)` retire and settle; cover `end`.
+    /// Before forward `token` over rows [k, end): retire pages below `first(k)` under `token`, then cover `end`.
     pub fn step(w: *Window, pool: *kv.Pool, k: u32, end: u32, token: u64, t: Tables) !void {
         const low = @min(first(w.g, k) / w.g.rows, w.pages());
-        errdefer kv.retirement.settle(pool, token) catch {}; // retired pages never stay pending: one stream, their readers are queued
+        // the caller settles `token` after that forward's work (a later one if it never runs), before the next step
         if (low > w.low) { // a retry passes retired entries by and writes their tables again
             for (w.low..low) |j| for (0..w.g.bands) |b| {
                 const i = j * w.g.bands + b;
@@ -69,7 +70,6 @@ pub const Window = struct {
             try w.reach(t, w.low, low);
             w.low = low;
         }
-        try kv.retirement.settle(pool, token);
         const need = (end + w.g.rows - 1) / w.g.rows;
         const had = w.pages();
         if (need <= had) return;
@@ -109,7 +109,8 @@ pub const Window = struct {
             for (ids, base..) |*id, j| id.* = w.lease.ids.items[j * w.g.bands + b];
             o.* = .{ .base = base, .ids = ids };
             made += 1;
-            if (std.mem.indexOfScalar(u32, ids, kv.retirement.none) != null) return error.WindowPagesGone; // a retire that failed midway
+            // a hole: a retire that failed midway
+            if (std.mem.indexOfScalar(u32, ids, kv.retirement.none) != null) return error.WindowPagesGone;
         }
     }
 
