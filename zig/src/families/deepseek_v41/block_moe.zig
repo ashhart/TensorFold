@@ -142,7 +142,7 @@ pub fn moe(e: *E, L: u32) !void {
     const ex = e.cfg.expertsOf(L);
     const slots: i64 = ex.topk + 1;
     const Et: i64 = ex.count + 1;
-    const I: i64 = (try @import("partition.zig").share(e.cfg.expert_width, e.o.rank, e.o.world)).len;
+    const I: i64 = (try @import("partition.zig").expertShare(e.cfg, e.o.rank, e.o.world)).len;
     const P = n * slots;
     const rows: i64 = if (backbone) e.o.expert_rows else e.o.dspark_rows;
     const sc: []const u8 = if (backbone) "s.ex" else "s.dx";

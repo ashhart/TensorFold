@@ -13,10 +13,36 @@ fn defaultPack(a: std.mem.Allocator) !Pack {
     return p;
 }
 
+/// A group in the field layout main pinned (before the form union), so the digest compares values, not types.
+fn legacyGroup(g: plan.GroupPlan) Legacy.Group {
+    const f = g.form.exl3;
+    return .{ .proj = g.proj, .prefix = g.prefix, .split = g.split, .full = f.full, .part = f.part, .marker = f.marker, .slice = g.slice };
+}
+
+const Legacy = struct {
+    const Group = struct { proj: @import("names.zig").Proj, prefix: []const u8, split: @import("core").exl3_layout.Split, full: @import("core").exl3_layout.Group, part: @import("core").exl3_layout.Part, marker: ?[]const u8, slice: u32 };
+    const Experts = struct { proj: @import("names.zig").ExpertProj, parts: []@import("core").exl3_layout.Part, prefixes: [][]const u8, layout: @import("core").exl3_layout.Layout };
+    const Layer = struct { index: u32, prefix: []const u8, mode: @import("config.zig").Mode, groups: []Group, natives: []plan.NativePlan, experts: [3]Experts, gate_up_mismatch: u32 };
+    const Dspark = struct { main_proj: Group, natives: []plan.NativePlan, confidence: ?plan.NativePlan };
+};
+
 fn fingerprint(p: *const plan.Plan, hash: *std.crypto.hash.sha2.Sha256) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const layers = try a.alloc(Legacy.Layer, p.layers.len);
+    for (p.layers, layers) |l, *o| {
+        const groups = try a.alloc(Legacy.Group, l.groups.len);
+        for (l.groups, groups) |g, *x| x.* = legacyGroup(g);
+        var ex: [3]Legacy.Experts = undefined;
+        for (l.experts, &ex) |e, *x| x.* = .{ .proj = e.proj, .parts = e.form.exl3.parts, .prefixes = e.form.exl3.prefixes, .layout = e.form.exl3.layout };
+        o.* = .{ .index = l.index, .prefix = l.prefix, .mode = l.mode, .groups = groups, .natives = l.natives, .experts = ex, .gate_up_mismatch = l.gate_up_mismatch };
+    }
+    const head: ?Legacy.Group = if (p.head) |h| legacyGroup(h) else null;
+    const dspark: ?Legacy.Dspark = if (p.dspark) |d| .{ .main_proj = legacyGroup(d.main_proj), .natives = d.natives, .confidence = d.confidence } else null;
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
-    try std.json.Stringify.value(.{ .rank = p.rank, .world = p.world, .layers = p.layers, .top = p.top, .head = p.head, .dspark = p.dspark, .leftovers = p.leftovers }, .{}, &out.writer);
+    try std.json.Stringify.value(.{ .rank = p.rank, .world = p.world, .layers = layers, .top = p.top, .head = head, .dspark = dspark, .leftovers = p.leftovers }, .{}, &out.writer);
     hash.update(out.written());
 }
 

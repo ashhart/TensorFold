@@ -126,7 +126,7 @@ pub const Builder = struct {
     fn group(b: *Builder, base: []const u8, g: plan.GroupPlan) !void {
         var img: stage.GroupImage = if (b.metadata_only) .{ .trellis = &.{}, .suh = &.{}, .svh = &.{} } else try stage.group(b.gpa, b.io, b.pack, g);
         defer img.deinit(b.gpa);
-        const p = g.part.group;
+        const p = g.form.exl3.part.group;
         var nb: [160]u8 = undefined;
         try b.put(try std.fmt.bufPrint(&nb, "{s}.trellis", .{base}), .i16, &.{ p.k_tiles, p.n_tiles, p.words }, try b.copy(img.trellis));
         try b.put(try std.fmt.bufPrint(&nb, "{s}.suh", .{base}), .f16, &.{p.k()}, try b.copy(img.suh));
@@ -137,7 +137,7 @@ pub const Builder = struct {
     fn experts(b: *Builder, base: []const u8, x: *const plan.ExpertsPlan) !void {
         var img: stage.ExpertsImage = if (b.metadata_only) .{ .trellis = &.{}, .suh = &.{}, .svh = &.{}, .k2 = &.{}, .offsets = &.{} } else try stage.experts(b.gpa, b.io, b.pack, x);
         defer img.deinit(b.gpa);
-        const l = &x.layout;
+        const l = &x.form.exl3.layout;
         const e = l.count();
         var nb: [160]u8 = undefined;
         if (l.kind == .stack) {
