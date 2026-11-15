@@ -203,6 +203,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     all.dependOn(step);
     @import("release_version.zig").tests(b, step);
     @import("environment.zig").tests(b, step);
+    @import("machine.zig").tests(b, step);
     const flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/build/cuda_release_flags.zig"),
         .target = b.graph.host,
