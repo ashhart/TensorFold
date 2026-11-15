@@ -26,6 +26,10 @@ pub fn prepareWith(t: anytype, flag: usize, clock: anytype) !void {
     const through = t.seq;
     if (through <= t.submitted.load(.acquire)) return;
     try check(t);
+    if (t.local) {
+        t.submitted.store(through, .release);
+        return;
+    }
     const until = (try clock.now()) +| timeout_ns;
     try t.ep.writeSignalFromUntil(t.peer, 0, 0, 0, flag, through, until);
     while (true) {
@@ -61,6 +65,7 @@ const Fake = struct {
     stop: std.atomic.Value(bool) = .init(false),
     quitting: std.atomic.Value(bool) = .init(false),
     peer: u32 = 1,
+    local: bool = false,
     ep: *FakeEndpoint,
     peer_word: u64 = 3,
     gpu_deadline: @import("tp_deadline.zig").State = .{},
@@ -139,4 +144,19 @@ test "transport, clock and shutdown failures leave the GPU batch unsubmitted" {
     try std.testing.expectError(error.TpPeerFailed, prepareWith(&t, 64, &clock));
     try std.testing.expectEqual(@as(u64, 3), t.submitted.load(.acquire));
     try std.testing.expect(t.gpu_deadline.pending == null);
+}
+
+test "local submission completes without an endpoint call or peer readiness" {
+    var ep: FakeEndpoint = .{ .broken = true };
+    var t: Fake = .{ .ep = &ep, .local = true };
+    var clock: FakeClock = .{ .t = &t, .times = &.{} };
+    try prepareWith(&t, 64, &clock);
+    try std.testing.expectEqual(t.seq, t.submitted.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), ep.calls);
+    try std.testing.expectEqual(@as(usize, 0), clock.at);
+    t.seq += 1;
+    t.failed.store(true, .release);
+    try std.testing.expectError(error.TpPeerFailed, prepareWith(&t, 64, &clock));
+    try std.testing.expectEqual(t.seq - 1, t.submitted.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), ep.calls);
 }
