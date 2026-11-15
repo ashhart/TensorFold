@@ -159,6 +159,8 @@ pub const uocr_decoder = @embedFile("uocr/decoder.metal");
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
+/// A decode window's fused KDA step, appended to kda_rows' source too: its arithmetic, rows' independent parts at once.
+pub const glm_kda_window = @embedFile("glm_kda_window.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
 pub const glm_ep = @embedFile("glm_ep.metal");
 /// A prompt chunk's sparse MLA attention on the tensor units (nax.h inlined at load).
