@@ -544,6 +544,7 @@ pub const Drafter = struct {
                 const it = items[at];
                 const l = d.lanes.get(it.stream) orelse return error.DraftStreamUnknown;
                 if (it.depth == 0 or it.depth >= block_rows or it.position == 0) return error.DraftDepth;
+                if (it.pending >= cfg.vocab) return error.InvalidGemmaToken; // gemma_embed reads row id unchecked
                 const anchor = it.position - 1;
                 if (l.end != anchor or anchor + block_rows > l.capacity + block_rows) return error.DraftContextGap;
                 if (rows + it.depth + 1 > hold_rows) break;

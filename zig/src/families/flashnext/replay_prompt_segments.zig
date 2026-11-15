@@ -51,6 +51,7 @@ pub fn bindMarks(p: *Prompt, m: *const Model, mk: [MARKS]i32, li: usize, rows_at
 }
 
 pub fn prep(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const u32, pos: usize, hist: [2]i64) !void {
+    if (!Model.inVocab(tokens)) return error.TokenOutsideVocabulary;
     const b = &p.b;
     const rows = tokens.len;
     @memcpy(b.ids.b.slice(u32, rows), tokens);

@@ -235,6 +235,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const ids = s.prompt();
         try limits.check(ids.len, s.max_new, self.o.capacity);
+        for (ids) |id| if (id >= self.m.config.vocab) return error.TokenOutsideVocabulary; // no kernel bounds an id
         if (s.isCancelled()) return error.Cancelled;
         const rows_needed = @min(self.o.capacity, ids.len + s.max_new + max_lanes + 1); // the reply and a widest window past it
         try self.drain();
@@ -348,10 +349,11 @@ pub const Metal = struct {
     }
 
     /// A host token into a fresh ring slot (no command in flight reads a fresh slot).
-    fn feedSlot(self: *Metal, feed: be.Feed) u64 {
+    fn feedSlot(self: *Metal, feed: be.Feed) !u64 {
         return switch (feed) {
             .handle => |h| h,
             .value => |v| blk: {
+                if (v >= self.m.config.vocab) return error.TokenOutsideVocabulary;
                 const h = self.take(1);
                 self.tokens.slice(u32, ring)[h % ring] = v;
                 break :blk h;
@@ -363,7 +365,7 @@ pub const Metal = struct {
         const self: *Metal = @ptrCast(@alignCast(ptr));
         const c = try self.cacheOf(s);
         self.settle(c);
-        const in = self.feedSlot(feed);
+        const in = try self.feedSlot(feed);
         const out = self.take(1);
         if (c.len + 1 > c.kv[0].capacity) return error.ContextFull;
         try kv_pages.grow(c, c.len + 1);
@@ -428,6 +430,9 @@ pub const Metal = struct {
             c.rows = rows;
             total += rows;
         }
+        // the staged ids are in fresh ring slots only this verify's forward would read: refused before it is encoded
+        for (windows) |w| if (w.pending >= self.m.config.vocab) return error.TokenOutsideVocabulary;
+        for (windows) |w| for (w.tokens) |t| if (t >= self.m.config.vocab) return error.TokenOutsideVocabulary;
         if (total > self.scratch.rows) return error.WindowTooWide;
         var replayed: usize = 0;
         for (segs[0..windows.len]) |g| replayed += g.cache.replay;
@@ -521,9 +526,10 @@ pub const Metal = struct {
             if (r.rows) |rows| {
                 jobs[i].kept = rows.len;
                 jobs[i].path = rows;
+                for (r.follow[0..rows.len]) |t| if (t >= self.m.config.vocab) return error.TokenOutsideVocabulary;
                 @memcpy(c.follow.slice(u32, rows.len), r.follow[0..rows.len]);
             } else {
-                jobs[i].token = self.feedSlot(r.first orelse return error.NoFirstToken);
+                jobs[i].token = try self.feedSlot(r.first orelse return error.NoFirstToken);
             }
         }
         const All = struct {

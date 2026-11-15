@@ -378,6 +378,7 @@ pub const Engine = struct {
         const P: u32 = @intCast(prompt.len);
         if (e.ep != null and e.sampling != null and e.sampling.?.temperature > 0) return error.SampledPeerUnsupported; // the backend's refusal, before any state moves or the peer hears of it
         if (prompt.len == 0) return error.EmptyPrompt;
+        for (prompt) |t| if (t >= c.vocab) return error.TokenOutsideVocabulary; // the embed reads w[id] unchecked
         const d: u32 = @intCast(if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1));
         if (prompt.len + max_tokens + d + 1 > e.s.cap) return error.ContextFull;
         const pool = mtl.objc.Pool.push();

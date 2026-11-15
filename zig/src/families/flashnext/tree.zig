@@ -402,9 +402,20 @@ fn parse(a: std.mem.Allocator, text: []const u8) ![]const Entry {
             l.* = try a.alloc(u32, k);
             for (l.*) |*v| v.* = try std.fmt.parseInt(u32, it.next() orelse return error.BadFeed, 10);
         }
+        for (lists[1]) |g| if (g >= replay.VOCAB) return error.BadFeed; // fz_tree_feed puts them in window ids, embedded unchecked
         e.* = .{ .prompt = lists[0], .guesses = lists[1] };
     }
     return out;
+}
+
+test "token ids: a tree feed's guess past the vocabulary is refused when the feed is read" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const feed = "1\n2 5 6\n2 7 {d}\n";
+    const ok = try parse(arena.allocator(), std.fmt.comptimePrint(feed, .{replay.VOCAB - 1}));
+    try std.testing.expectEqualSlices(u32, &.{ 7, replay.VOCAB - 1 }, ok[0].guesses);
+    try std.testing.expectError(error.BadFeed, parse(arena.allocator(), std.fmt.comptimePrint(feed, .{replay.VOCAB})));
+    try std.testing.expectError(error.BadFeed, parse(arena.allocator(), "2\n1 5\n1 7\n1 5\n1 4294967295\n"));
 }
 
 test "a two-branch tree: the chain's rows, then the branch from the root" {
