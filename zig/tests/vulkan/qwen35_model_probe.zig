@@ -411,7 +411,7 @@ pub fn main(init: std.process.Init) !u8 {
         .status = if (match_a and match_b and ids_equal and logits_equal) "ok" else "mismatch",
         .steps = expected.len,
         .execution_mode = if (opts.teacher_forced) teacher_forced_mode else free_running_mode,
-        .prefill_schedule = if (opts.sequential_prefill) "rowwise" else "chunk32",
+        .prefill_schedule = if (opts.sequential_prefill) "rowwise" else "chunked",
         .context_cap = opts.context,
         .prompt_chunks = if (opts.sequential_prefill) prompt.len else chunkCount(prompt.len),
         .prefill_chunk_rows = if (opts.sequential_prefill) 1 else engine_mod.max_prefill_rows,
@@ -450,7 +450,7 @@ pub fn main(init: std.process.Init) !u8 {
     return if (match_a and match_b and ids_equal and logits_equal) 0 else 1;
 }
 
-// Greedy: prefill (32-row chunks; --sequential-prefill per token = boundary evidence); ids_out.len argreduce draws.
+// Greedy: prefill (max_prefill_rows chunks; --sequential-prefill per token = boundary evidence); ids_out.len argreduce draws.
 fn greedyRun(e: *Engine, teacher_forced: bool, sequential: bool, prompt: []const u32, expected: []const u32, ids_out: []u32, rows_out: []u8, row_len: usize) !void {
     if (sequential) {
         for (prompt) |tok| try e.prefill(&.{tok});
