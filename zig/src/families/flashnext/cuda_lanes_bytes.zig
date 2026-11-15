@@ -42,6 +42,6 @@ pub const worlds = struct {
 /// The tower's weights and one call's scratch, which rank zero holds beside the text weights with --vision.
 pub fn visionBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
     const v = @import("qwen_vision");
-    const c = ((try v.Settings.read(a, io, dir)) orelse return error.NoVisionTower).tower;
+    const c = ((try v.Settings.read(a, io, dir)) orelse return 0).tower; // no tower: open refuses --vision by name
     return v.Tower.weightBytes(c) + v.Tower.scratchBytes(c, v.max_patches);
 }

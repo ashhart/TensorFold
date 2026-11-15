@@ -343,7 +343,7 @@ fn features(r: *Rig, model: []const u8) !void {
         return error.TestFailed;
     };
     defer cfg.deinit(gpa);
-    var w = try lfm2.weights.Weights.load(gpa, io, r.gpu.d, model, &cfg);
+    var w = try lfm2.weights.Weights.load(gpa, io, r.gpu.d, model, &cfg, true);
     defer w.deinit(gpa);
     var v = try vision.Vision.init(gpa, r.gpu.d, &cfg, &(w.vision orelse return error.NoVisionTower));
     defer v.deinit();

@@ -8,6 +8,7 @@ pub fn open(err: anyerror) ?[]const u8 {
         error.FlashNextRanksOnCapturedGlue => "--tp 2 runs Flash Next's own glue, not a captured set: set TENSORFOLD_CUDA_KERNELS=native, or serve on one GPU",
         error.BadFlashNextKvPages, error.BadFlashNextPageTest, error.FlashNextPagesUnsupported, error.UnsupportedCheckpoint => explain(err),
         error.UnsupportedLearningFormat, error.TrainingOnCapturedGlue => explain(err),
+        error.VisionWithoutTower => @import("engine_api").visionWords("this Flash Next checkpoint", err),
         else => null,
     };
 }

@@ -344,7 +344,9 @@ fn models(a: Allocator, v: ?Value, probs: *Problems) ![]Model {
         if (str(o.get("mla"))) |split| {
             if (std.mem.eql(u8, split, "heads")) m.mla = .heads else if (std.mem.eql(u8, split, "streams")) m.mla = .streams else if (!std.mem.eql(u8, split, "auto")) probs.add("models.{s}.mla: \"heads\", \"streams\" or \"auto\"", .{id});
         }
-        if (o.get("vision")) |b| m.vision = b == .bool and b.bool;
+        if (o.get("vision")) |b| {
+            if (b == .bool) m.vision = b.bool else probs.add("models.{s}.vision: true or false", .{id});
+        }
         if (o.get("memory")) |mem| if (mem == .object) if (num(mem.object.get("margin_gb"))) |g| {
             m.margin = @intFromFloat(g * @as(f64, @floatFromInt(node.gib)));
         };

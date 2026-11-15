@@ -159,6 +159,9 @@ that read images: GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4
 [31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images) and Step-5-Preview on one
 Mac, GLM-5.3-Flash on [CUDA ranks](recipes/glm-5.3-flash-cuda.md#requests) and Nemotron 3.5 Super VL on CUDA. Other
 native engines refuse the flag at startup.
+On CUDA and HIP a tower loads only with `--vision`, d1-3B's pictures included; a checkpoint with a tower starts text-only
+without it. `--vision` on a checkpoint without a tower is refused at startup as "--vision given but this <model>
+checkpoint has no vision tower" (core's gate, `zig/src/core/engine_vision.zig`), on Qwen3.5 HIP too.
 The CLI accepts explicit image budgets from 16 to 262,144 tokens; each engine still applies its own limits and memory admission.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
