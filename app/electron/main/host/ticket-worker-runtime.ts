@@ -16,6 +16,7 @@ import { summarizeTicketWorkerOutcome } from './ticket-helpers'
 import { modelRouteAccountLabel, modelRouteAutoFailoverEnabled, modelRouteFailoverText, modelRouteResetPolicy, modelRouter, resolveProjectProvider, runtimeProviderWithFreshModels, ticketWorkOptionsWithProjectRoute } from './provider-runtime'
 import { resolveWorkspaceCwd } from './workspace'
 import { lexicalLocalWorkspaceKey, type WorkspaceMutationGuard } from './workspace-mutation-guard'
+import { sendToRenderer } from './renderer-events'
 
 export interface TicketWorkerSource {
   roomId?: string | null
@@ -208,6 +209,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   aborters.set(thread.id, controller)
   if (isNewThread) {
     store.threads.unshift(thread); persistThreads()
+    sendToRenderer('thread:update', thread)
   }
   ticket.threadId = thread.id
   ticket.status = 'in_progress'
