@@ -204,7 +204,7 @@ pub const Boot = struct {
             return e;
         };
         std.log.info("dsv41 metal: Engram tables checked against the release ({d} sampled rows{s})", .{ ck.samples, if (full) " and every byte" else "" });
-        const cap = try environment.read(u32, "TF_DSV41_ENGRAM_CACHE", 65536);
+        const cap = try environment.read(u32, "TF_DSV41_ENGRAM_CACHE", 4194304);
         b.rows = try er.Rows.open(b.a, rows_dir, 0, 1, b.eng.layer_ids, cap);
         std.log.info("dsv41 metal: Engram rows from {s} ({d} records a layer cached)", .{ rows_dir, cap });
         return .{ .a = b.a, .host = &b.eng, .source = b.rows.?.source(), .stats = &b.rows.?.stats };
