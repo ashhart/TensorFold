@@ -500,15 +500,17 @@ const Tile = struct {
     }
 };
 
-/// A projection's codes ([n, k/8], row layout) rewritten into its tiles and any row copy; scales and biases kept.
+/// A projection's codes ([n, k/8], row layout) rewritten into any tiles and any row copy; scales and biases kept.
 pub fn retile(lin: Linear, words: []const u32) void {
     const per = lin.k / 8;
     const groups = lin.k / 64;
-    const tiled = lin.tiles.?.w.slice(u32, lin.n * per);
-    for (0..lin.n) |n| for (0..groups) |g| {
-        const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
-        @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
-    };
+    if (lin.tiles) |t| { // without tensor units a 4/64 projection has rows only (`Builder.tiled`)
+        const tiled = t.w.slice(u32, lin.n * per);
+        for (0..lin.n) |n| for (0..groups) |g| {
+            const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
+            @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
+        };
+    }
     if (lin.rows) |r| {
         const own: [*]u32 = @ptrCast(@alignCast(r.w.contents() + r.w_off));
         if (own != words.ptr) @memcpy(own[0 .. lin.n * per], words[0 .. lin.n * per]);
