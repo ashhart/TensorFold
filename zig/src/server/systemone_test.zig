@@ -204,7 +204,7 @@ test "System One refuses in the goldens' words, before any scoring" {
     const pictured = "{\"state\": \"x\", \"images\": [\"data:image/png;base64,AA\"], \"questions\": {\"q\": {\"type\": \"noul\", \"instructions\": \"i\"}}}";
     var cx: errors.Cx = .{ .a = a };
     try std.testing.expectError(error.Refused, systemone.reply(srv, &cx, (try json.parse(a, pictured)).ok));
-    try std.testing.expectEqualStrings("this checkpoint has no vision tower", cx.message);
+    try std.testing.expectEqualStrings(systemone.no_pictures, cx.message);
     head.window = 8;
     try std.testing.expectError(error.Refused, systemone.reply(srv, &cx, (try json.parse(a, answered[0].body)).ok));
     try std.testing.expectEqualStrings("a decision sequence exceeds the 8-token context", cx.message);
