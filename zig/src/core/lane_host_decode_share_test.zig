@@ -74,6 +74,75 @@ test "the chunk cap is 512 rows beside a live decoder under the flag, on a chunk
     try std.testing.expectEqual(@as(u32, fill.decode_cap_rows), fill.capRows(&host));
 }
 
+test "an engine's default decode-share arms without the flag; the flag and the env beat it" {
+    clearShareEnv();
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const defaulted = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .default_decode_share = 0.25 });
+    try std.testing.expectEqual(@as(f64, 0.75), defaulted.share.p); // the engine's default, as --decode-share 0.25
+    try std.testing.expect(defaulted.decode_cap); // the engine opted in, so it offers the cap
+    const plain = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    try std.testing.expectEqual(@as(f64, 1), plain.share.p); // no flag, no default: whole prompts
+    try std.testing.expect(!plain.decode_cap);
+    const flagged = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .decode_share = 0.1, .default_decode_share = 0.25 });
+    try std.testing.expectEqual(@as(f64, 0.9), flagged.share.p); // the flag wins over the engine's default
+    try std.testing.expect(flagged.decode_cap);
+    _ = env.setenv(share_env, "0.1", 1);
+    defer clearShareEnv();
+    const envd = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .default_decode_share = 0.25 });
+    try std.testing.expectEqual(@as(f64, 0.1), envd.share.p); // the env beats the engine's default
+    try std.testing.expect(!envd.decode_cap); // and the env still never opts a family into the cap
+}
+
+test "an engine's default keeps the env's row budget, as the flag does" {
+    clearShareEnv();
+    _ = env.setenv("TENSORFOLD_PREFILL_BUDGET", "256", 1);
+    defer _ = env.unsetenv("TENSORFOLD_PREFILL_BUDGET");
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const defaulted = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .default_decode_share = 0.25 });
+    try std.testing.expectEqual(@as(f64, 0.75), defaulted.share.p);
+    try std.testing.expectEqual(@as(u64, 256), defaulted.share.rows); // the budget survives the engine's default
+    try std.testing.expect(defaulted.decode_cap);
+}
+
+test "the chunk cap is 512 rows beside a live decoder under an engine's default, on a chunk-invariant family only" {
+    clearShareEnv();
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .default_decode_share = 0.25 }); // no flag
+    var s = try lanes.Stream.init(gpa, .{ .id = "g", .prompt = &.{ 3, 1, 4, 1 }, .max_new = 8, .eos = &.{96} });
+    defer s.deinit(gpa);
+    try core.addStream(&s);
+    defer core.backend.release(&s);
+    try std.testing.expectEqual(@as(u32, fill.decode_cap_rows), fill.capRows(&host)); // the engine's opt-in caps like the flag
+    core.backend.chunk_invariant = false; // a gated-off family ignores the hint entirely
+    try std.testing.expectEqual(@as(u32, 0), fill.capRows(&host));
+    core.backend.chunk_invariant = true;
+    s.paused = true;
+    try std.testing.expectEqual(@as(u32, 0), fill.capRows(&host)); // nothing decoding: the engine's own cut
+    host.share.p = 1; // a default of 0 (whole prompts): the cap never fires
+    try std.testing.expectEqual(@as(u32, 0), fill.capRows(&host));
+}
+
 test "an env share keeps its time-only meaning: it never caps chunks" {
     const gpa = std.testing.allocator;
     _ = env.setenv(share_env, "0.1", 1);
