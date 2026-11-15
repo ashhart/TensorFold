@@ -206,11 +206,11 @@ func parseCommand(_ cmd: String, _ p: Params) throws -> Command {
         return .drag(try p.point("from"), try p.point("to"))
     case "scroll":
         let at = try p.target()
-        let dx = Int((try p.number("dx") ?? 0).rounded())
-        let dy = Int((try p.number("dy") ?? 0).rounded())
+        let dx = (try p.number("dx") ?? 0).rounded()
+        let dy = (try p.number("dy") ?? 0).rounded()
         guard dx != 0 || dy != 0 else { throw badRequest("scroll needs a non-zero dx or dy.") }
-        guard abs(dx) <= maxScrollLines, abs(dy) <= maxScrollLines else { throw badRequest("scroll is limited to \(maxScrollLines) lines per call.") }
-        return .scroll(at, dx: dx, dy: dy)
+        guard abs(dx) <= Double(maxScrollLines), abs(dy) <= Double(maxScrollLines) else { throw badRequest("scroll is limited to \(maxScrollLines) lines per call.") }
+        return .scroll(at, dx: Int(dx), dy: Int(dy))
     case "type":
         guard let text = try p.string("text"), !text.isEmpty else { throw badRequest("type needs non-empty text.") }
         guard text.count <= maxTypeCharacters else { throw badRequest("type is limited to \(maxTypeCharacters) characters per call.") }
