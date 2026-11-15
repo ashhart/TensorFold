@@ -39,15 +39,6 @@ pub const State = struct {
     }
 };
 
-var enabled_cache: ?bool = null;
-
-/// TF_DSV41_ENGRAM_LOOKAHEAD=0 stages every chunk's rows before its GPU work, as before.
-fn enabled() bool {
-    if (enabled_cache == null)
-        enabled_cache = @import("sys").environment.read(bool, "TF_DSV41_ENGRAM_LOOKAHEAD", true) catch unreachable;
-    return enabled_cache.?;
-}
-
 fn state(m: *Model, slot: u32) !*State {
     if (slot >= m.look.len) return error.InvalidLaneSlot;
     if (m.look[slot]) |s| return s;
@@ -94,7 +85,7 @@ fn workInner(m: *Model, s: *State) !void {
 
 /// The chunk after the next forward's, so that forward can read its rows while its GPU work runs.
 pub fn hint(m: *Model, slot: u32, tokens: []const u32) void {
-    if (m.stream == null or tokens.len < min_rows or !enabled()) return;
+    if (m.stream == null or tokens.len < min_rows) return;
     const s = state(m, slot) catch return;
     s.join();
     s.tokens.clearRetainingCapacity();

@@ -75,8 +75,3 @@ pub fn step(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
 pub fn whole(ptr: *anyopaque, s: *Stream) anyerror!void {
     while (!try step(ptr, s, 0)) {}
 }
-
-/// TF_DSV41_PREFILL_INTERLEAVE: 0 runs each prompt whole (other streams stop for it); else by chunks.
-pub fn interleaveOn() bool {
-    return @import("sys").environment.read(bool, "TF_DSV41_PREFILL_INTERLEAVE", true) catch unreachable;
-}

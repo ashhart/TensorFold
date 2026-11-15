@@ -59,12 +59,9 @@ These controls use the shared parser. Empty or whitespace-only values keep the d
 | Variable | Accepted explicit value and default |
 | --- | --- |
 | `TF_DSV41_EXL3_FMA_TILES` | `0`, `1`, `2` or `4`; default `2`. Zero disables column tiling; dispatch still respects the projection's geometry. |
-| `TF_DSV41_EXL3_FMA_TILE_GROUPS` | Whole u32 threadgroup threshold; default `400`. Small grids keep one column tile. |
 | `TF_DSV41_BATCH_MAX` | Whole row count `1` through `8`; default `4`. |
 | `TF_DSV41_BATCH_ATTN` | `0` or `1`; default `1`. Zero restores the per-slot attention chain. |
 | `TF_DSV41_MTP_DRAFTS` | `0` or `1`; default `0`. Enables the trained Metal drafter without requiring lookup drafts; `0` disables it. |
-| `TF_DSV41_PREFILL_INTERLEAVE` | `0` or `1`; default `1`. Zero runs each prompt without yielding between chunks. |
-| `TF_DSV41_ENGRAM_LOOKAHEAD` | `0` or `1`; default `1`. Zero stages Engram rows inline. |
 | `TF_DSV41_CONE` | `0`, `1` or `2`; default `2`. Zero uses the full forward, one uses one replay program, two uses layer groups. |
 | `TF_DSV41_CONE_PARK` | Whole count `0` through `3`; default `3`. Other prompts' pending encoder runs retained beside the active run. |
 

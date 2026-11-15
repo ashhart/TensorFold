@@ -88,7 +88,6 @@ pub fn load() exl3.Knobs {
         .funnel = !present("TF_DSV41_EXL3_FUNNEL"),
         .row_invariant = !present("TF_DSV41_NO_ROW_INVARIANT"),
         .fma_tiles = fmaTiles(),
-        .fma_tile_groups = @import("sys").environment.read(u32, "TF_DSV41_EXL3_FMA_TILE_GROUPS", 400) catch unreachable,
         .fma_dense_h8 = enabled("TF_DSV41_EXL3_FMA_DENSE_H8", true),
         .fma_dense_multi = multiRows(),
         .fma_dense_multi_ceil = enabled("TF_DSV41_EXL3_FMA_DENSE_MULTI_CEIL", true),

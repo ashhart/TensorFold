@@ -137,13 +137,15 @@ pub const Backend = struct {
         if (b.pen_row.len > 0) b.gpa.free(b.pen_row);
     }
 
-    /// The lane vtable; `prefill_step` (one chunk a call, decode rounds between) unless TF_DSV41_PREFILL_INTERLEAVE=0.
+    /// The lane vtable; `prefill_step` runs one chunk a call, with decode rounds between.
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .penalties = true, .vtable = if (pass.interleaveOn()) &vtable_stepped else &vtable_whole };
+        return .{ .ptr = b, .penalties = true, .vtable = &vtable };
     }
 
-    const vtable_whole: be.Backend.VTable = .{
+    const vtable: be.Backend.VTable = .{
         .prefill = prefill,
+        .prefill_step = prefill_step,
+        .reports_fill = true,
         .first = firstFn,
         .queue = queue,
         .read = read,
@@ -152,12 +154,6 @@ pub const Backend = struct {
         .draft = draft,
         .tree = tree,
         .release = release,
-    };
-    const vtable_stepped: be.Backend.VTable = blk: {
-        var v = vtable_whole;
-        v.prefill_step = prefill_step;
-        v.reports_fill = true;
-        break :blk v;
     };
 
     /// A window of any width runs exactly as its slot's own forward; the lane core may bundle streams freely.
