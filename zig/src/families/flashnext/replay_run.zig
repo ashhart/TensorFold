@@ -145,6 +145,7 @@ pub const Run = struct {
     pub fn finishEncoding(r: *Run, cb: mtl.CommandBuffer) !mtl.CommandBuffer {
         if (r.fsr) |s| return s.commands.end(r.enc);
         r.enc.end();
+        if (r.tp) |tp| try tp.prepareSubmit();
         return cb;
     }
 

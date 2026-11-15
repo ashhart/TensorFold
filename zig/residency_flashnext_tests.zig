@@ -46,6 +46,8 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             defer tp.one.deinit();
             tp.pick_tmp = try record.device().buffer(64, 0);
             defer tp.pick_tmp.deinit();
+            tp.partial = try record.device().buffer(64, 0);
+            defer tp.partial.deinit();
             run.tp = &tp;
             var engine: Engine = undefined;
             engine.r = &run;

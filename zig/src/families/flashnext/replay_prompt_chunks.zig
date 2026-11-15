@@ -225,6 +225,7 @@ pub fn chunkPair(p: *Prompt, m: *Model, gpa: std.mem.Allocator, tokens: []const 
     var hooks: Hooks = .{ .m = m, .segs = &segs, .pair = &pr };
     if (tp.trace) std.debug.print("TP rank{d} chunk {d}: rows {d} at {d} (pos {d}), state slot {d}\n", .{ k, pr.call, rows, at, m.pos + at, a });
     m.gpu_seconds += try segments.run(r.device, &.{r.queue}, LAYERS, if (r.serial) .serial else .concurrent, &hooks);
+    if (tp.failed.load(.acquire)) return error.TpLinkFailed;
     if (tp.trace) std.debug.print("TP rank{d} chunk {d}: GPU done, gave_up {d}\n", .{ k, pr.call, tp.gaveUp() });
     const t = &m.t;
     var pick: u32 = undefined;
