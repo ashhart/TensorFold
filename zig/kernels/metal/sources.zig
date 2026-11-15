@@ -150,6 +150,9 @@ pub const core_qwen_vision = vision_glue ++ @embedFile("core/qwen_vision.metal")
 pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
 /// MOSS-Image: the prefill attention template, then its transformer's and encoder's steps (gemms: core_qwen_vision).
 pub const moss_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("moss_image.metal") ++ @embedFile("moss_image_encoder.metal");
+/// Unlimited-OCR-2: its image encoder's and decoder's own steps (projections: core_qwen_vision).
+pub const uocr = @embedFile("uocr/vision.metal");
+pub const uocr_decoder = @embedFile("uocr/decoder.metal");
 /// MOSS-Image's image decoder: its own float32 steps, without a template.
 pub const moss_image_decoder = @embedFile("moss_image_decoder.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
