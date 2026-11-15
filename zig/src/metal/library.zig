@@ -2,6 +2,7 @@
 const std = @import("std");
 const objc = @import("objc.zig");
 const platform = @import("sys");
+const metal4 = @import("metal4.zig");
 const types = @import("types.zig");
 const Device = @import("device.zig").Device;
 
@@ -135,7 +136,7 @@ pub const Pipeline = struct {
         objc.msg(void, desc, "setComputeFunction:", .{func});
         objc.msg(void, desc, "setSupportIndirectCommandBuffers:", .{indirect});
         // the kernel's name on the pipeline, for the Metal 4 timeline only (TF_METAL4_TIMELINE): nothing else reads it
-        if (timelineOn()) {
+        if (metal4.enabled and timelineOn()) {
             const label = objc.string(name);
             defer objc.release(label);
             objc.msg(void, desc, "setLabel:", .{label});

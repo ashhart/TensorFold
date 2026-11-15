@@ -53,6 +53,9 @@ pub const serves = engines.serves;
 
 pub const std_options = engines.std_options;
 
+/// Read by the Metal wrapper at compile time: Metal 4 only in a binary whose engines use it.
+pub const tf_metal4 = engines.metal4;
+
 pub fn main(init: std.process.Init) !u8 {
     const entry = std.Io.Clock.awake.now(init.io).toNanoseconds();
     const gpa = init.gpa;
