@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "model": "local-model",
+  "asserted_by_user": true,
+  "source": "User-approved fictional lab handbook, revision 1",
+  "facts": [
+    {
+      "subject": "Quillmoor Labs",
+      "relation": "headquarters",
+      "answer": "Sheffield",
+      "text": "Quillmoor Labs is headquartered in Sheffield.",
+      "evidence": "This is a fictional example. The operator attests to the claim, not the controller.",
+      "questions": [
+        "Where is Quillmoor Labs headquartered?",
+        "What city is the headquarters of Quillmoor Labs in?",
+        "Which city contains Quillmoor Labs headquarters?"
+      ],
+      "near_misses": [
+        "Where is the Quillmoor Labs marketing team based?",
+        "Where is the unrelated Brackenforth Labs headquartered?"
+      ]
+    }
+  ],
+  "anchors": [
+    "What is two plus three?",
+    "Name the capital of Japan."
+  ]
+}

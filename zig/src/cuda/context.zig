@@ -28,6 +28,15 @@ pub const Context = struct {
                 std.log.err("{s}", .{why});
                 return error.WrongGpu;
             }
+        } else if (@import("kernels.zig").target_sms.len > 0) {
+            const actual_sm = try d.capability(ordinal);
+            var gpu_name: [256]u8 = undefined;
+            var message: [1024]u8 = undefined;
+            if (@import("kernels.zig").supports(actual_sm) == false) {
+                const gpu = d.deviceName(ordinal, &gpu_name) catch "unknown NVIDIA GPU";
+                std.log.err("{s}", .{releaseRefusal(gpu, actual_sm, ordinal, @import("kernels.zig").target_sms, &message)});
+                return error.WrongGpu;
+            }
         }
         var dev: abi.Device = 0;
         try d.check(d.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");
@@ -118,3 +127,12 @@ pub const Context = struct {
         return m;
     }
 };
+
+/// The release refusal is composed before retaining a context or loading any module.
+pub fn releaseRefusal(name: []const u8, capability: u32, ordinal: c_int, sms: []const u32, buffer: []u8) []const u8 {
+    var w = std.Io.Writer.fixed(buffer);
+    w.print("CUDA device {d} ({s}) has compute capability {d}.{d} (sm_{d}); this build has kernels for SMs [", .{ ordinal, name, capability / 10, capability % 10, capability }) catch return "this build has no kernels for the selected GPU";
+    for (sms, 0..) |sm, i| w.print("{s}{d}", .{ if (i == 0) "" else ",", sm }) catch break;
+    w.writeAll("]: use a build with kernels for this GPU") catch {};
+    return w.buffered();
+}

@@ -46,6 +46,28 @@ inline float __shfl_xor_sync(unsigned, float v, int o) {
   mask = o;
   return shuffle(v, [](int l) { return l ^ mask; });
 }
+// the warp votes glm_index_decode.cuh takes: every lane of the warp calls them, as on the device
+inline unsigned __ballot_sync(unsigned, int pred) {
+  const int t = (int)threadIdx.x, l = t & 31, base = t - l;
+  emu::xbuf[t] = pred ? 1u : 0u;
+  warp_sync();
+  unsigned m = 0;
+  for (int i = 0; i < 32; i++) m |= emu::xbuf[base + i] ? 1u << i : 0u;
+  warp_sync();
+  return m;
+}
+inline int __any_sync(unsigned mask, int pred) { return __ballot_sync(mask, pred) != 0; }
+inline unsigned __match_any_sync(unsigned, int v) {
+  const int t = (int)threadIdx.x, l = t & 31, base = t - l;
+  emu::xbuf[t] = (uint32_t)v;
+  warp_sync();
+  unsigned m = 0;
+  for (int i = 0; i < 32; i++) m |= emu::xbuf[base + i] == (uint32_t)v ? 1u << i : 0u;
+  warp_sync();
+  return m;
+}
+inline int __popc(unsigned x) { return __builtin_popcount(x); }
+inline int __ffs(int x) { return __builtin_ffs(x); }
 inline int atomicAdd(int* p, int v) { return std::atomic_ref<int>(*p).fetch_add(v); }
 inline int atomicMax(int* p, int v) {
   std::atomic_ref<int> a(*p);

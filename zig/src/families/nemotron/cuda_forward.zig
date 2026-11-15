@@ -44,6 +44,9 @@ pub const Marks = struct {
     }
 };
 
+/// A multi-stream window's batched draw: device slabs for rules, positions and tokens, its host words, its mode.
+pub const Batch = struct { rules: u64, meta: u64, tokens: u64, host_rules: []const u8, host_meta: []const i32, sampled: bool };
+
 pub const Forward = struct {
     c: Config,
     w: *const weights.Weights,
@@ -53,6 +56,7 @@ pub const Forward = struct {
     max_len: usize,
     nch: usize,
     sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
+    batch: ?*const Batch = null, // a shared window's batched draw (null: a stream at a time)
     dump: ?*Dump = null,
     side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
@@ -130,6 +134,37 @@ pub const Forward = struct {
     /// Engine._forward: rows tokens at meta's position; every row samples its next token into `sampled`.
     pub fn window(f: *const Forward, rows: usize) !void {
         try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .slot = f.slot, .untaught = f.untaught }});
+    }
+
+    /// Every stream's rows drawn in one pass when all share a mode: the same rule, seed and position a row.
+    fn drawSegs(f: *const Forward, segs: []const Seg) !void {
+        const c = f.c;
+        const b = f.b;
+        if (segs.len == 1) return f.sample(b.logits, segs[0].rows, segs[0].b.meta, segs[0].b.sampled, segs[0].sampled, segs[0].b.rule);
+        const bat = f.batch orelse {
+            for (segs) |s| try f.sample(b.logits + s.row0 * @as(u64, c.vocab) * 2, s.rows, s.b.meta, s.b.sampled, s.sampled, s.b.rule);
+            return;
+        };
+        var total: usize = 0;
+        var sampled: usize = 0;
+        for (segs) |s| {
+            total += s.rows;
+            sampled += @intFromBool(s.sampled);
+        }
+        // the batch was built from the same streams' modes (cuda_shared_draw.batch), its rules and positions uploaded
+        if (sampled != (if (bat.sampled) segs.len else 0)) return error.BadWindow;
+        if (bat.sampled) {
+            try f.ops.drawRows(b.logits, c.vocab, bat.rules, bat.meta, bat.tokens, total, null);
+        } else try f.ops.torch().argmax(b.logits, c.vocab, c.vocab, bat.tokens, total);
+        var g: kern.ScatterRows = std.mem.zeroes(kern.ScatterRows);
+        var row0: usize = 0;
+        for (segs, 0..) |s, k| {
+            g.tok[k] = s.b.sampled;
+            g.rows[k] = @intCast(s.rows);
+            g.row0[k] = @intCast(row0);
+            row0 += s.rows;
+        }
+        try f.ops.scatterRows(g, bat.tokens, 0, total);
     }
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
@@ -239,7 +274,7 @@ pub const Forward = struct {
         try o.dense(b.y, b.xs, f.w.head, b.logits, rows);
         try f.mark(.head);
         for (segs) |s| if (s.mask.bits != 0) try o.grammarMask(b.logits + s.row0 * @as(u64, c.vocab) * 2, c.vocab, s.mask.bits, s.mask.words, s.rows);
-        for (segs) |s| try f.sample(b.logits + s.row0 * @as(u64, c.vocab) * 2, s.rows, s.b.meta, s.b.sampled, s.sampled, s.b.rule);
+        try f.drawSegs(segs);
         try f.mark(.sample);
         if (f.dump) |d| try d.tail(f.ops, b.logits, b.sampled, rows, c.vocab);
     }

@@ -1,4 +1,4 @@
-//! macOS memory pressure as the lane host acts on it: a rise takes effect at once, a fall only after a calm spell.
+//! OS memory pressure as the lane host acts on it: a rise takes effect at once, a fall only after a calm spell.
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
@@ -10,7 +10,7 @@ pub fn ofKernel(v: u32) Level {
     return if (v >= 4) .critical else if (v >= 2) .warning else .normal;
 }
 
-/// Where readings come from: the kernel's sysctl, or a test's fake (null: no reading, taken as normal).
+/// Where readings come from: the kernel's metrics, or a test's fake (null: no reading, taken as normal).
 pub const Source = struct {
     ctx: ?*anyopaque = null,
     read: *const fn (ctx: ?*anyopaque) ?Level,
@@ -45,6 +45,16 @@ pub const Settings = struct {
         const p = std.fmt.parseInt(u8, std.mem.trim(u8, percent_text orelse "", " \t"), 10) catch default_percent;
         return .{ .on = !off, .percent = if (p <= 100) p else default_percent };
     }
+
+    /// Linux is experimental and explicitly enabled; macOS keeps its existing default and switch behavior.
+    pub fn forOs(os: std.Target.Os.Tag, switch_text: ?[]const u8, percent_text: ?[]const u8) ?Settings {
+        const s = fromText(switch_text, percent_text);
+        if (!s.on) return null;
+        if (os == .macos) return s;
+        if (os != .linux) return null;
+        const text = std.mem.trim(u8, switch_text orelse "", " \t");
+        return if (std.mem.eql(u8, text, "1") or std.ascii.eqlIgnoreCase(text, "on")) s else null;
+    }
 };
 
 pub const Governor = struct {
@@ -57,11 +67,11 @@ pub const Governor = struct {
     read_at: ?i96 = null,
     calm_since: ?i96 = null, // the first reading below `level` in the current calm spell
 
-    /// The lane host's governor on a Mac where the kernel reads (null: off, a test, or another OS).
+    /// The shared governor where kernel metrics are available; Linux requires explicit enablement.
     pub fn fromEnv() ?Governor {
-        if (builtin.is_test or builtin.os.tag != .macos) return null; // host tests give their own source
-        const s = Settings.fromText(platform.getenv("TENSORFOLD_MEMORY_PRESSURE"), platform.getenv("TENSORFOLD_PRESSURE_CACHE_PERCENT"));
-        if (!s.on or Source.kernel.read(null) == null) return null;
+        if (builtin.is_test) return null; // host tests give their own source
+        const s = Settings.forOs(builtin.os.tag, platform.getenv("TENSORFOLD_MEMORY_PRESSURE"), platform.getenv("TENSORFOLD_PRESSURE_CACHE_PERCENT")) orelse return null;
+        if (Source.kernel.read(null) == null) return null;
         return .{ .source = Source.kernel, .percent = s.percent };
     }
 

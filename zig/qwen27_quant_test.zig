@@ -256,3 +256,99 @@ test "qwen27 quant: non-reg prompt key opts in only above 16 rows" {
         try t.expectEqual(@as(usize, if (rows > 16) 2 else 1), r.launches[0].grid.height);
     };
 }
+
+fn rawMatrix(r: *mtl.Record, n: u32, bits: u8, group: u32) projection.Linear {
+    var p = matrix(r, n);
+    p.raw = .{ .w = r.virtual(), .scales = r.virtual(), .biases = r.virtual(), .n = n, .k = p.k, .bits = bits, .group = group };
+    return p;
+}
+
+/// Cache decisions only: the recording boundary cannot run the chip's one-time twin byte comparison.
+fn twins(k: *quant.Kernels, p: projection.Linear) !void {
+    try k.twins.put(a, .{ p.n, p.k }, false);
+    try k.pair_twins.put(a, .{ p.n, p.k }, false);
+    if (p.raw) |raw| try k.bit_twins.put(a, .{ raw.bits, p.n, p.k, p.gn }, false);
+    for (p.runs) |run| try twins(k, run.linear);
+}
+
+test "qwen27 quant: independent q/kv and qkv/zba raw writes have one caller barrier" {
+    for ([_][2]u32{ .{ 8192, 1024 }, .{ 12288, 6240 } }) |widths| {
+        for ([_]u8{ 4, 8 }) |bits| for ([_]u32{ 32, 64 }) |group| {
+            var r = mtl.Record{ .tensor_units = false };
+            var k = quant.Kernels{ .allocator = a, .device = r.device() };
+            defer k.deinit();
+            const left = rawMatrix(&r, widths[0], bits, group);
+            const right = rawMatrix(&r, widths[1], bits, group);
+            try twins(&k, left);
+            try twins(&k, right);
+            const input = quant.Ref{ .buffer = r.virtual() };
+            const q_out = quant.Ref{ .buffer = r.virtual(), .offset = 64 };
+            const kv_out = quant.Ref{ .buffer = r.virtual(), .offset = 128 };
+            for ([_]u32{ 1, 8, 128, 129 }) |rows| {
+                r.count = 0;
+                r.barriers = 0;
+                const e = r.encoder();
+                try k.quant(e, left, input, null, input, q_out, rows);
+                const middle = r.count;
+                try k.quant(e, right, input, null, input, kv_out, rows);
+                e.barrier();
+                try t.expect(middle > 0 and r.count > middle);
+                for (r.launches[0..r.count], 0..) |l, i| {
+                    try t.expectEqual(@as(usize, 0), l.barriers);
+                    try t.expectEqual(input.buffer.id, l.input.?.id);
+                    try t.expectEqual(if (i < middle) q_out.buffer.id else kv_out.buffer.id, l.output.?.id);
+                }
+                try t.expectEqual(@as(usize, 1), r.barriers);
+            }
+        };
+    }
+}
+
+test "qwen27 quant: mixed raw columns remain unordered until the caller barrier" {
+    for ([_]u32{ 32, 64 }) |group| {
+        var r = mtl.Record{ .tensor_units = false };
+        var k = quant.Kernels{ .allocator = a, .device = r.device() };
+        defer k.deinit();
+        const members = [_]projection.Run{
+            .{ .linear = rawMatrix(&r, 512, 4, group), .first = 0 },
+            .{ .linear = rawMatrix(&r, 512, 8, group), .first = 512 },
+        };
+        var mixed = matrix(&r, 1024);
+        mixed.runs = &members;
+        try twins(&k, mixed);
+        const x = quant.Ref{ .buffer = r.virtual() };
+        const y = quant.Ref{ .buffer = r.virtual(), .offset = 64 };
+        try k.quant(r.encoder(), mixed, x, null, x, y, 129);
+        try t.expectEqual(@as(usize, 4), r.count);
+        for (r.launches[0..r.count], 0..) |l, i| {
+            try t.expectEqual(@as(usize, 0), l.barriers);
+            try t.expectEqual(y.buffer.id, l.output.?.id);
+            try t.expectEqual(64 + (i % 2) * 128 * 1024 * 2 + (i / 2) * 512 * 2, l.output.?.offset);
+        }
+        r.encoder().barrier();
+        try t.expectEqual(@as(usize, 1), r.barriers);
+    }
+}
+
+test "qwen27 quant: norm and MLP compile XS only on tensor units and pad only its grid" {
+    var r: mtl.Record = .{};
+    var k = quant.Kernels{ .allocator = a, .device = r.device(), .raw_tiles = false };
+    defer k.deinit();
+    const ref = quant.Ref{ .buffer = r.virtual() };
+    for ([_]bool{ false, true, false }) |units| {
+        r.tensor_units = units;
+        for ([_]u32{ 1, 7, 16, 17 }) |rows| {
+            r.count = 0;
+            try k.norm(r.encoder(), ref, null, ref, ref, ref, ref, ref, ref, 512, rows);
+            try k.norm(r.encoder(), ref, ref, ref, ref, ref, ref, ref, ref, 512, rows);
+            try k.mlp(r.encoder(), ref, ref, ref, ref, ref, 1024, rows);
+            try t.expectEqual(@as(usize, 3), r.count);
+            for (r.launches[0..r.count]) |l| {
+                try t.expectEqual(@as(?bool, units), l.xs);
+                try t.expectEqual(@as(usize, if (units) quant.padded(rows) else rows), l.grid.height);
+            }
+        }
+    }
+    try t.expectEqual(@as(u32, 6), k.cache.count());
+    try t.expectEqual(@as(usize, 6), r.libraries);
+}
