@@ -135,6 +135,13 @@ pub fn ruleOf(s: lanes.Sampling, position: u32, vocab: u32) Rule {
     };
 }
 
+/// A keyed MTP draft's rule: the stream's at `position`, drawn at half its temperature (flatter head, sharper draft).
+pub fn draftRule(s: lanes.Sampling, position: u32, vocab: u32) Rule {
+    var r = ruleOf(s, position, vocab);
+    r.inv_t *= 2;
+    return r;
+}
+
 /// The standalone pass's rules at `position`: `n` rules, positions advancing by one.
 pub fn rulesFor(p: lanes.Sampling, position: u32, vocab: u32, n: u32) Draws {
     var d: Draws = .{};
