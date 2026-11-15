@@ -103,6 +103,9 @@ pub fn run(gpu: check.Gpu) !void {
     defer g.deinit();
     var lane = try cuda.qmmf.Lane.load(gpu.d, (try gpu.ctx.capability()) / 10);
     defer lane.unload();
+    // the engine's lane: qmmf's BF16 prompt tiles loaded, as TF_FLASHNEXT_PROMPT_BF16 leaves it (a copy, one module)
+    var served = lane;
+    try served.loadPrompt(gpu.d);
     var t = try tk.TileKernels.load(gpu.d);
     defer t.unload();
 
@@ -116,7 +119,7 @@ pub fn run(gpu: check.Gpu) !void {
     var c: Chain = .{
         .r = &r,
         .g = &g,
-        .lane = &lane,
+        .lane = &served,
         .t = &t,
         .wdown = cuda.modelopt.bf16Weight(try r.dev(std.mem.sliceAsBytes(pd)), n_down, wide),
         .wup = cuda.modelopt.bf16Weight(try r.dev(std.mem.sliceAsBytes(pu)), wide, low),
@@ -133,28 +136,35 @@ pub fn run(gpu: check.Gpu) !void {
         .xsm = try r.out(most * (dims / 32) * 4),
         .spart = try r.out(8 * most * n_down * 4),
         .rows = most,
-        .sms = lane.prompt_sms,
+        .sms = t.sms,
     };
     // the streams' 256-column square sums, as the writeback leaves them for the read-out
     try g.hcWriteback(r.s, dh, 0, dpss, 0, 0, 0, 0, most * dims, most, dims, streams, 0, 1, 1, 1);
 
-    // SM counts of 1, the device's and 4,096 take each down tile the engine can pick
-    const counts = [_]usize{ 64, 65, 193, 255, 256, 767, 768, 769, 1000, 1024, 1536, 2053, 3072 };
+    // the five launches on the plain lane and on the engine's; SM counts of 1, the device's and 4,096 take each tile
+    const counts = [_]usize{ 64, 65, 193, 255, 256, 511, 512, 767, 768, 769, 1000, 1024, 1025, 1536, 2053, 3072 };
     for (counts) |m| {
         c.rows = m;
-        try c.poison();
-        try c.five();
-        const want = try c.outputs(a);
-        for ([_]usize{ 1, lane.prompt_sms, 4096 }) |sms| {
+        var wants: [2][]u8 = undefined;
+        for ([_]*const cuda.qmmf.Lane{ &lane, &served }, &wants) |l, *want| {
+            c.lane = l;
+            try c.poison();
+            try c.five();
+            want.* = try c.outputs(a);
+        }
+        try check.sameBytes("the five launches on the engine's lane against the plain lane", wants[1], wants[0]);
+        const want = wants[1];
+        for ([_]usize{ 1, t.sms, 4096 }) |sms| {
             c.sms = sms;
             try c.poison();
             try c.fused();
             try check.sameBytes("fused read-out", try c.outputs(a), want);
         }
-        check.pass("readout-fused: {d} rows, down tiles of {d}, {d} and {d} rows: every output byte equals the five launches'", .{ m, 16 * tk.hcn_down_mt[tiles.pickDown(m, 1)], 16 * tk.hcn_down_mt[tiles.pickDown(m, lane.prompt_sms)], 16 * tk.hcn_down_mt[tiles.pickDown(m, 4096)] });
+        check.pass("readout-fused: {d} rows, down tiles of {d}, {d} and {d} rows: every output byte equals the five launches'", .{ m, 16 * tk.hcn_down_mt[tiles.pickDown(m, 1)], 16 * tk.hcn_down_mt[tiles.pickDown(m, t.sms)], 16 * tk.hcn_down_mt[tiles.pickDown(m, 4096)] });
     }
 
-    c.sms = lane.prompt_sms;
+    c.sms = t.sms;
+    c.lane = &served;
     var start = try cuda.Event.init(gpu.d, true);
     defer start.deinit();
     var end = try cuda.Event.init(gpu.d, true);

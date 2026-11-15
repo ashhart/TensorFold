@@ -145,7 +145,7 @@ pub fn readoutFused(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Sc
     const act = s.act + r0 * low * 2;
     const xs_act = s.xs_act + r0 * (low / 32) * 4;
     const inj = if (hc_w.has_inj == 1) s.inj + r0 * streams * 2 else act;
-    const di = pickDown(n, k.native_lane.prompt_sms);
+    const di = pickDown(n, k.tiles.sms);
     try fusedDown(k.tiles.hcn_down[di], tk.hcn_down_mt[di], stream, h, pss, hc_w.scale.ptr, down, s.hc_part, n, eps);
     try tri.hcReduceAct(s.hc_part, act, xs_act, inj, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
     try fusedUpMix(k.tiles.hcn_up, stream, act, up, h, pss, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, eps);
