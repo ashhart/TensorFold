@@ -39,7 +39,7 @@ pub const Buffer = struct {
     }
 
     pub fn deinit(self: Buffer) void {
-        metal4.forget(self.id);
+        if (comptime metal4.enabled) metal4.forget(self.id);
         objc.release(self.id);
     }
 };
@@ -100,6 +100,7 @@ pub const Device = struct {
 
     /// A queue taking `queue`'s calls through Metal 4, or error.Unsupported; TF_METAL4_TIMELINE=n stamps n rounds.
     pub fn queue4(self: Device) Error!command.Queue {
+        if (comptime !metal4.enabled) return error.Unsupported;
         if (!self.hasMetal4()) return error.Unsupported;
         const rounds = platform.environment.read(u32, "TF_METAL4_TIMELINE", 0) catch 0;
         const q = metal4.State.open(self.id, rounds) orelse return error.Unsupported;
