@@ -12,11 +12,20 @@ pub const page = std.heap.page_size_min;
 /// A byte range of one checkpoint file.
 pub const Range = struct { file: u32, offset: u64, len: u64 };
 
-/// The ranges rank `r` reads: a column split's own rows, everything else whole (row splits are gathered after mapping).
+/// Rank `r`'s ranges: a column split's own rows, the rest whole (row splits gather after mapping), and file headers.
 pub fn needs(a: Allocator, p: *const plan_mod.Plan, c: checkpoint.Checkpoint, r: u32) ![]Range {
     var out: std.ArrayList(Range) = .empty;
+    defer out.deinit(a);
+    const Coverage = struct { read: bool = false, whole: bool = true };
+    const coverage = try a.alloc(Coverage, c.files.len);
+    defer a.free(coverage);
+    @memset(coverage, .{});
     for (c.tensors, 0..) |t, i| {
-        if (p.bytesOn(t, i, r) == 0) continue;
+        const file = &coverage[t.file];
+        if (p.bytesOn(t, i, r) == 0) {
+            if (t.bytes != 0) file.whole = false;
+            continue;
+        }
         var rg: Range = .{ .file = t.file, .offset = t.start, .len = t.bytes };
         if (p.place[i].kind == .column) {
             const st = p.stages[p.place[i].stage];
@@ -25,7 +34,19 @@ pub fn needs(a: Allocator, p: *const plan_mod.Plan, c: checkpoint.Checkpoint, r:
             rg.offset += t.shape[0] * mine.begin / p.opts.slices * row_bytes;
             rg.len = t.shape[0] * mine.len() / p.opts.slices * row_bytes;
         }
+        if (rg.len == 0) {
+            file.whole = false;
+            continue;
+        }
+        file.read = true;
+        if (rg.len != t.bytes) file.whole = false;
         try out.append(a, rg);
+    }
+    // a file whose every tensor is read whole comes whole, gaps too, so the manifest's hash can check it
+    for (c.files, coverage, 0..) |file, cover, i| {
+        if (!cover.read) continue;
+        const len = if (cover.whole) file.size else file.header_bytes;
+        if (len != 0) try out.append(a, .{ .file = @intCast(i), .offset = 0, .len = len });
     }
     std.mem.sort(Range, out.items, {}, struct {
         fn less(_: void, x: Range, y: Range) bool {
@@ -33,6 +54,7 @@ pub fn needs(a: Allocator, p: *const plan_mod.Plan, c: checkpoint.Checkpoint, r:
         }
     }.less);
     var merged: std.ArrayList(Range) = .empty;
+    errdefer merged.deinit(a);
     for (out.items) |rg| {
         if (merged.items.len > 0) {
             const last = &merged.items[merged.items.len - 1];
