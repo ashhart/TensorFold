@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek-V4.1 on Metal: a cold prompt's first chunk now reads its Engram rows while the GPU runs the layers before each Engram layer, instead of reading them all before the chunk starts. Replies are unchanged. On an M5 Ultra, cold prompts start about 0.3 s sooner at 2K tokens, 0.55 s at 8K and 0.8 s at 32K.
+- DeepSeek-V4.1 on Metal: a cold prompt's first chunk now reads its Engram rows while the GPU runs the layers before each Engram layer, instead of reading them all before the chunk starts. Replies are unchanged. On an M5 Ultra, cold prompts start about 0.3 s sooner at 2K tokens, 0.55 s at 8K and 0.8 s at 30K (#3318).
 - Qwen3.8-27B on Metal (M1-M4): projections no longer barrier internally, and XS sums compile out before tensor units, with the same tokens (#2913, #2900).
 
 - HIP on gfx1151: a plain prompt of 1 or 2 rows takes the 2-row K-parallel tile, with byte-identical output (#3273). Thanks to @AbrahamCete.
@@ -56,8 +58,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - Server: with thinking off, the reasoning effort a request names reaches the chat template (GLM's head follows it), and the reply reports it; a server's own `--reasoning-effort` no longer changes a thinking-off prompt (#3017, fixes #1911). Thanks to @ss-cong for the report.
 
 - Tests: host tests drive 200 refused, cancelled or failed requests down each lane-host path they reach (refusal at admission, cancels while queued and mid-request, backend errors, no lane memory, and a mix) and check none strands a lane, page or slot (#3015, for #2135).
-- DeepSeek-V4.1 on Metal: a cold prompt's first chunk now reads its Engram rows while the GPU runs the layers before each Engram layer, instead of reading them all before the chunk starts. Replies are unchanged. On an M5 Ultra, cold prompts start about 0.3 s sooner at 2K tokens, 0.55 s at 8K and 0.8 s at 32K.
-- DeepSeek-V4.1 on Metal: a cold prompt's first chunk now reads its Engram rows while the GPU runs the layers before each Engram layer, instead of reading them all before the chunk starts. Replies are unchanged. On an M5 Ultra, cold prompts start about 0.3 s sooner at 2K tokens, 0.55 s at 8K and 0.8 s at 30K (#3318).
 
 - Tests: the cluster bring-up test of a stopped peer checks the membership's real promise instead of a two-second wall bound that failed on busy CI runners (#3310).
 
