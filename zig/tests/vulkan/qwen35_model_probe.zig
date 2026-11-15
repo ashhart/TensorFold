@@ -1,4 +1,4 @@
-// Qwen3.5-2B: context 1-7168 (256 default); 2 exact-ID runs, lowest ties; exits 0/1/2/124; teacher-forced per-step.
+// Qwen3.5-2B: context 1-8192 (256 default); 2 exact-ID runs, lowest ties; exits 0/1/2/124; teacher-forced per-step.
 const std = @import("std");
 const q35v = @import("qwen35_vulkan");
 const engine_mod = q35v.engine;
@@ -18,7 +18,7 @@ const usage = "usage: tf-qwen35-model [--vendor ID] [--timeout-ms MS] [--context
     "  --help            show this text and exit without opening a loader or device\n" ++
     "  --vendor ID       refuse a device whose Vulkan vendorID differs (decimal or 0x hex; no default)\n" ++
     "  --timeout-ms MS   bound on every fence wait, 1 to 300000 (default 10000); a timeout ends the process\n" ++
-    "  --context N       KV context capacity to request, 1 to 7168 (default 256)\n" ++
+    "  --context N       KV context capacity to request, 1 to 8192 (default 256)\n" ++
     "  --teacher-forced  feed each scored step's oracle id as the next input (labelled per-step mode; default off)\n" ++
     "  --sequential-prefill  prefill one prompt token per Engine.prefill call (test-only; default is the canonical whole-prompt 64-row chunking)\n";
 
@@ -232,10 +232,12 @@ fn bundle() engine_mod.ShaderBundle {
         .attention = .{
             .rope_bf16 = &q35s.rope_bf16,
             .sdpa_rows_bf16 = &q35s.sdpa_rows_bf16,
+            .sdpa_rows_bf16_long = &q35s.sdpa_rows_bf16_long,
             .gate_bf16 = &q35s.gate_bf16,
             .rope_f32 = &q35s.rope_f32,
             .rope_f32_kcache = &q35s.rope_f32_kcache,
             .sdpa_rows_f32q = &q35s.sdpa_rows_f32q,
+            .sdpa_rows_f32q_long = &q35s.sdpa_rows_f32q_long,
             .gate_f32 = &q35s.gate_f32,
         },
         .gdn = .{
@@ -510,15 +512,15 @@ test "parseArgs context and mode flags keep the anchor default and bound the con
     try testing.expect(!plain.teacher_forced);
     try testing.expect(!plain.sequential_prefill);
 
-    // the boundary sizes the corpus runs: 33, 65, 7105 all parse
-    for ([_][]const u8{ "33", "65", "7105", "7168" }) |n| {
+    // the boundary sizes the corpus runs: 33, 65, 8129 all parse
+    for ([_][]const u8{ "33", "65", "8129", "8192" }) |n| {
         const o = parseArgs(&.{ "--context", n, "--teacher-forced", "--sequential-prefill", "/m", "/i", "/o", "/out" }).?;
         try testing.expect(o.teacher_forced);
         try testing.expect(o.sequential_prefill);
     }
     // one past the backend's capacity is refused at the CLI, no device
-    try testing.expectEqual(@as(usize, 7168), q35v.backend.max_capacity);
-    try testing.expect(parseArgs(&.{ "--context", "7169", "/m", "/i", "/o", "/out" }) == null);
+    try testing.expectEqual(@as(usize, 8192), q35v.backend.max_capacity);
+    try testing.expect(parseArgs(&.{ "--context", "8193", "/m", "/i", "/o", "/out" }) == null);
     try testing.expect(parseArgs(&.{ "--context", "0", "/m", "/i", "/o", "/out" }) == null);
     try testing.expect(parseArgs(&.{ "--context", "-1", "/m", "/i", "/o", "/out" }) == null);
     try testing.expect(parseArgs(&.{ "--context", "abc", "/m", "/i", "/o", "/out" }) == null);
@@ -533,7 +535,7 @@ test "chunkCount spans the canonical 64-row chunks without a configurable size" 
     try testing.expectEqual(@as(usize, 2), chunkCount(65)); // boundary: two chunks
     try testing.expectEqual(@as(usize, 2), chunkCount(128));
     try testing.expectEqual(@as(usize, 3), chunkCount(129)); // boundary: three chunks
-    try testing.expectEqual(@as(usize, 112), chunkCount(7168)); // full context
+    try testing.expectEqual(@as(usize, 128), chunkCount(8192)); // full context
 }
 
 test "parseNpy takes exactly a v1 LE u32 rank-1 array" {

@@ -123,10 +123,18 @@ shared float s_sum[SIMD];
 
 // Probs overwrite scores in one f32 stream; normalize reads and writes only its own strided slots.
 
-// The host guard enforces kStreamKeys; larger contexts fall through to the same bit-exact composition.
+// kStreamKeys caps the shared stream; -DSTREAM_GLOBAL moves scores to coherent binding 4 for longer contexts.
 const uint kStreamKeys = 7168u;
-shared float s_qrow[SDPA_DIM];
+#ifdef STREAM_GLOBAL
+layout(set = 0, binding = 4, std430) coherent buffer Stream {
+  float values[];
+} stream_data;
+#define STREAM(i) stream_data.values[stream_base + i]
+#else
+#define STREAM(i) s_stream[i]
 shared float s_stream[kStreamKeys];
+#endif
+shared float s_qrow[SDPA_DIM];
 shared float s_tree[256];
 #endif
 
@@ -198,6 +206,10 @@ void main() {
   uint k_batch = params.rhs_offset + batch * params.lhs_size;
   uint v_batch = params.aux_offset + batch * params.rhs_size;
   uint o_batch = params.output_offset + batch * params.out_strides[3];
+#ifdef STREAM_GLOBAL
+  // Workgroups run (8 heads, rows): row * 8 + head names this row-head's matrix_k-word (total-keys) score region.
+  const uint stream_base = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * params.matrix_k;
+#endif
 #ifdef SDPA_ROWS
   // Multi-token verification uses workgroup (head, row) and the row's causal bound.
 
@@ -241,15 +253,18 @@ void main() {
         accumulator += s_qrow[d + i] * kv[i];
       }
     }
-    s_stream[key] = 1.0 * accumulator;
+    STREAM(key) = 1.0 * accumulator;
   }
+#ifdef STREAM_GLOBAL
+  memoryBarrierBuffer();
+#endif
   barrier();
 
   // Row max: strided scan then the 256-lane binary tree.
   if (thread < 256u) {
     float local_max = uintBitsToFloat(0xff800000u);
     for (uint index = thread; index < key_end; index += 256u) {
-      float next = s_stream[index];
+      float next = STREAM(index);
       if (isnan(next) || next > local_max) {
         local_max = next;
       }
@@ -270,7 +285,7 @@ void main() {
   if (thread < 256u) {
     float local_sum = 0.0;
     for (uint index = thread; index < key_end; index += 256u) {
-      local_sum += exp(s_stream[index] - row_max);
+      local_sum += exp(STREAM(index) - row_max);
     }
     s_tree[thread] = local_sum;
   }
@@ -287,9 +302,12 @@ void main() {
   // Recompute probs from stored f32 scores, as softmax_suffix.comp's normalize pass does.
   if (thread < 256u) {
     for (uint index = thread; index < key_end; index += 256u) {
-      s_stream[index] = exp(s_stream[index] - row_max) * normalizer;
+      STREAM(index) = exp(STREAM(index) - row_max) * normalizer;
     }
   }
+#ifdef STREAM_GLOBAL
+  memoryBarrierBuffer();
+#endif
   barrier();
 
   // Output dimension d accumulates keys in ascending order over 16-wide tiles with exact-zero tail padding.
@@ -311,11 +329,11 @@ void main() {
             value_data.values[v_base + (key + index) * params.in_strides[2]]);
       }
       for (uint index = 0u; index < 16u; ++index) {
-        accumulator += s_stream[key + index] * vv[index];
+        accumulator += STREAM(key + index) * vv[index];
       }
     }
     for (uint index = 0u; index < 16u; ++index) {
-      float prob = key < key_end ? s_stream[key] : 0.0;
+      float prob = key < key_end ? STREAM(key) : 0.0;
       float value16 = key < key_end ? bf16_load(
           value_data.values[v_batch +
               kv_head * params.in_strides[1] +

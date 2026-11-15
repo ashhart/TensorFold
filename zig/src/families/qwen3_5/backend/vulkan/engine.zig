@@ -18,8 +18,9 @@ pub fn chunkEnd(done: usize, total: usize) usize {
 
 // The staged-transfer buffer: 8 MiB so the load's ~27k tensors stream in large chunks instead of one 64 KiB fence each.
 pub const staging_bytes: u64 = 8 << 20;
-// The 16 MiB scratch arena holds persistent windows (~2.6 MB) and worst-layer prefill transients (~11.1 MB at 64 rows).
-pub const arena_bytes: u64 = 16 << 20;
+// The 32 MiB scratch arena holds persistent windows (~2.6 MB), worst-layer prefill transients (~11.1 MB at 64 rows),
+// and the long-attention f32 score stream (16 MiB at capacity 8192).
+pub const arena_bytes: u64 = 32 << 20;
 
 // Step errors include dispatch.Error; Timeout exits 124 and InFlight exits 1 inside `vk.orExit`, before teardown.
 pub const Error = vk.dispatch.Error ||
@@ -80,7 +81,7 @@ pub const Engine = struct {
     base_mark: u64,
     poisoned: bool,
 
-    // Pinned-model admission runs inside the weights load before GPU work; SDPA arm limit is 7168; probe uses 256.
+    // Pinned-model admission runs inside the weights load before GPU work; the arm's visible-key cap is 8192; probe uses 256.
     pub fn init(
         gpa: Allocator,
         io: std.Io,
@@ -355,17 +356,17 @@ test "the canonical cut ends every whole-request length at 64-row boundaries" {
 }
 
 test "the plan admits whole requests up to the capacity ceiling and refuses one past" {
-    const cap: usize = 7168;
-    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 7105, 7168 }) |len| {
+    const cap: usize = state.max_capacity;
+    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 8129, 8192 }) |len| {
         try planFor(cap, 0, len, 1); // a prompt-only request always fits at or under the ceiling
     }
-    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7169, 1)); // one past the ceiling
-    try planFor(cap, 0, 7168, 1); // exact fit prompt + one draw reads a written row
-    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7168, 2)); // one past with a decode
-    try planFor(cap, 0, 7105, 64); // the frozen long case ends at exactly 7168 writes
-    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 7106, 64));
+    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 8193, 1)); // one past the ceiling
+    try planFor(cap, 0, 8192, 1); // exact fit prompt + one draw reads a written row
+    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 8192, 2)); // one past with a decode
+    try planFor(cap, 0, 8129, 64); // the frozen long case ends at exactly 8192 writes
+    try testing.expectError(error.ContextTooLong, planFor(cap, 0, 8130, 64));
     try testing.expectError(error.ContextTooLong, planFor(cap + 1, 0, 1, 1));
-    try planFor(cap, 0, 7167, 2); // 7167 + 2 - 1 = 7168: exact fit
+    try planFor(cap, 0, 8191, 2); // 8191 + 2 - 1 = 8192: exact fit
 }
 
 test "the wide store policy covers exactly layers 0-3 of the 24-layer model" {
@@ -385,7 +386,9 @@ test "the arena holds the persistent windows plus the worst transient layer" {
     const full = 4 * rows * (2 * 8 * 256 + 5 * 8 * 256 + 3 * 2 * 256);
     // the MLP in f32: gate + up + act
     const mlp = 12 * pinned.intermediate * rows;
-    const worst = @max(linear, @max(full, mlp));
+    // the long-attention f32 score stream rides the full-attention layer's scratch window: 8 heads x rows x capacity
+    const stream = 4 * 8 * rows * state.max_capacity;
+    const worst = @max(linear, @max(full + stream, mlp));
     try testing.expect(worst > 0);
     try testing.expectEqual(fwd.actKind(0), vk.tensor.Kind.f32); // the wide layers the buffers size for
     try testing.expectEqual(fwd.actKind(fwd.wide_layers), vk.tensor.Kind.bf16); // the first narrow layer

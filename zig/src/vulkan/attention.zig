@@ -26,19 +26,22 @@ pub const rotary_pairs: u64 = 32;
 pub const theta: f32 = 1e7;
 /// head_dim^-1/2 as the oracle passes it: e.setValue(1.0 / 16.0, 3).
 pub const scale: f32 = 1.0 / 16.0;
-// bf16 stages kStreamKeys f32 slots; long prefixes refuse, not truncate; p1/p2 is not wired.
-pub const max_visible_keys: u64 = 7168;
-/// s_qrow (256) + s_stream (7168) + s_tree (256) f32 words.
+// Totals past shared_stream_keys run the -DSTREAM_GLOBAL images with the f32 score stream; longer prefixes refuse, not truncate.
+pub const max_visible_keys: u64 = 8192;
+/// kStreamKeys: s_qrow (256) + s_stream (7168) + s_tree (256) fit shared memory; the stream arm stages scores past it.
+pub const shared_stream_keys: u64 = 7168;
 const sdpa_shared_bytes: u64 = 30720;
 
 // The compiled shader images Attention runs; every field is a real SPIR-V image of the named variant.
 pub const Shaders = struct {
     rope_bf16: []align(4) const u8,
     sdpa_rows_bf16: []align(4) const u8,
+    sdpa_rows_bf16_long: []align(4) const u8,
     gate_bf16: []align(4) const u8,
     rope_f32: []align(4) const u8,
     rope_f32_kcache: []align(4) const u8,
     sdpa_rows_f32q: []align(4) const u8,
+    sdpa_rows_f32q_long: []align(4) const u8,
     gate_f32: []align(4) const u8,
 };
 
@@ -59,10 +62,12 @@ pub const Attention = struct {
     ops: *Ops,
     rope_bf16: dispatch.Pipeline,
     sdpa_bf16: dispatch.Pipeline,
+    sdpa_bf16_long: dispatch.Pipeline,
     gate_bf16: dispatch.Pipeline,
     rope_f32: dispatch.Pipeline,
     rope_f32_kcache: dispatch.Pipeline,
     sdpa_f32q: dispatch.Pipeline,
+    sdpa_f32q_long: dispatch.Pipeline,
     gate_f32: dispatch.Pipeline,
     // The i32 base position is read by each rope dispatch; setBasePosition writes it between operations.
     offsets: Buffer,
@@ -76,10 +81,12 @@ pub const Attention = struct {
             .ops = ops,
             .rope_bf16 = undefined,
             .sdpa_bf16 = undefined,
+            .sdpa_bf16_long = undefined,
             .gate_bf16 = undefined,
             .rope_f32 = undefined,
             .rope_f32_kcache = undefined,
             .sdpa_f32q = undefined,
+            .sdpa_f32q_long = undefined,
             .gate_f32 = undefined,
             .offsets = try Buffer.init(dev, .device, 4),
         };
@@ -89,6 +96,8 @@ pub const Attention = struct {
         errdefer a.rope_bf16.deinit();
         a.sdpa_bf16 = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_bf16, .{ .bindings = 4, .push_bytes = params.push_bytes, .writes = 1 << 3 });
         errdefer a.sdpa_bf16.deinit();
+        a.sdpa_bf16_long = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_bf16_long, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = (1 << 3) | (1 << 4) });
+        errdefer a.sdpa_bf16_long.deinit();
         a.gate_bf16 = try dispatch.Pipeline.init(dev, shaders.gate_bf16, .{ .bindings = 3, .push_bytes = gate_push_bytes, .writes = 1 << 2 });
         errdefer a.gate_bf16.deinit();
         a.rope_f32 = try dispatch.Pipeline.init(dev, shaders.rope_f32, .{ .bindings = 3, .push_bytes = params.push_bytes, .writes = 1 << 1 });
@@ -97,6 +106,8 @@ pub const Attention = struct {
         errdefer a.rope_f32_kcache.deinit();
         a.sdpa_f32q = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_f32q, .{ .bindings = 4, .push_bytes = params.push_bytes, .writes = 1 << 3 });
         errdefer a.sdpa_f32q.deinit();
+        a.sdpa_f32q_long = try dispatch.Pipeline.init(dev, shaders.sdpa_rows_f32q_long, .{ .bindings = 5, .push_bytes = params.push_bytes, .writes = (1 << 3) | (1 << 4) });
+        errdefer a.sdpa_f32q_long.deinit();
         a.gate_f32 = try dispatch.Pipeline.init(dev, shaders.gate_f32, .{ .bindings = 3, .push_bytes = gate_push_bytes, .writes = 1 << 2 });
         return a;
     }
@@ -105,10 +116,12 @@ pub const Attention = struct {
     pub fn deinit(a: *Attention) void {
         a.rope_bf16.deinit();
         a.sdpa_bf16.deinit();
+        a.sdpa_bf16_long.deinit();
         a.gate_bf16.deinit();
         a.rope_f32.deinit();
         a.rope_f32_kcache.deinit();
         a.sdpa_f32q.deinit();
+        a.sdpa_f32q_long.deinit();
         a.gate_f32.deinit();
         a.offsets.deinit();
     }
@@ -168,12 +181,21 @@ pub const Attention = struct {
     }
 
     // SDPA scales q once, streams f32 scores; Metal scales per-score in 128-key chunks. No bit-exact/performance claim.
-    pub fn attend(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
-        const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements);
+    // Past shared_stream_keys the stream view stages f32 scores; the long image indexes one total_keys region per workgroup.
+    pub fn attend(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, stream: ?View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
+        const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements, if (stream) |s| s.elements else 0);
         if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
         if (y.overlaps(queries) or y.overlaps(cache_keys) or y.overlaps(cache_values)) return error.Aliased;
-        const pipe = if (queries.kind == .f32) &a.sdpa_f32q else &a.sdpa_bf16;
-        try pipe.bind(&.{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind() });
+        const long = plan.total_keys > shared_stream_keys;
+        var bindings: [5]dispatch.Binding = .{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind(), undefined };
+        const pipe = if (long) blk: {
+            const s = stream orelse return error.Invalid;
+            if (s.kind != .f32) return error.Invalid;
+            if (s.overlaps(y) or s.overlaps(queries) or s.overlaps(cache_keys) or s.overlaps(cache_values)) return error.Aliased;
+            bindings[4] = s.bind();
+            break :blk if (queries.kind == .f32) &a.sdpa_f32q_long else &a.sdpa_bf16_long;
+        } else if (queries.kind == .f32) &a.sdpa_f32q else &a.sdpa_bf16;
+        try pipe.bind(if (long) bindings[0..5] else bindings[0..4]);
         var p: params.Params = .{
             .matrix_m = @intCast(query_heads), // repeats = 8/2 = 4
             .matrix_n = @intCast(kv_heads),
@@ -276,7 +298,7 @@ pub fn vCopyPlan(rows: u64, capacity: u64, v_elements: u64) Error!VCopyPlan {
 // Causal SDPA row r sees prefix+r+1 keys, including its own; later keys are unread. Pure and host-tested.
 pub const AttendPlan = struct { rows: u32, total_keys: u32 };
 
-pub fn attendPlan(prefix: u64, rows: u64, capacity: u64, q_elements: u64, y_elements: u64, k_elements: u64, v_elements: u64) Error!AttendPlan {
+pub fn attendPlan(prefix: u64, rows: u64, capacity: u64, q_elements: u64, y_elements: u64, k_elements: u64, v_elements: u64, stream_elements: u64) Error!AttendPlan {
     if (rows == 0 or rows > std.math.maxInt(u32)) return error.Invalid;
     const total = std.math.add(u64, prefix, rows) catch return error.TooLarge;
     if (capacity == 0 or total > capacity) return error.OutOfRange;
@@ -286,6 +308,7 @@ pub fn attendPlan(prefix: u64, rows: u64, capacity: u64, q_elements: u64, y_elem
     const cache_elems = kv_heads *| capacity *| head_dim;
     if (k_elements != cache_elems or v_elements != cache_elems) return error.Invalid;
     if (capacity *| head_dim > std.math.maxInt(u32)) return error.TooLarge;
+    if (total > shared_stream_keys and stream_elements < rows *| query_heads *| total) return error.Invalid;
     return .{ .rows = @intCast(rows), .total_keys = try ops_mod.cast32(total) };
 }
 
@@ -320,14 +343,19 @@ test "ropePlan derives the word count and refuses torn or foreign shapes" {
 
 test "attendPlan keeps the causal prefix and refuses long or torn contexts" {
     // rows > 1: each row's visible count is prefix + row + 1.
-    const plan = try attendPlan(100, 3, 128, 3 * 8 * 256, 3 * 8 * 256, 2 * 128 * 256, 2 * 128 * 256);
+    const plan = try attendPlan(100, 3, 128, 3 * 8 * 256, 3 * 8 * 256, 2 * 128 * 256, 2 * 128 * 256, 0);
     try testing.expectEqual(@as(u32, 103), plan.total_keys);
     try testing.expectEqual(@as(u32, 3), plan.rows);
-    try testing.expectError(error.OutOfRange, attendPlan(126, 3, 128, 3 * 2048, 3 * 2048, 2 * 128 * 256, 2 * 128 * 256));
-    try testing.expectError(error.ContextTooLong, attendPlan(max_visible_keys, 1, max_visible_keys + 1, 2048, 2048, 2 * (max_visible_keys + 1) * 256, 2 * (max_visible_keys + 1) * 256));
-    try testing.expectError(error.Invalid, attendPlan(0, 3, 128, 2 * 2048, 3 * 2048, 2 * 128 * 256, 2 * 128 * 256));
-    try testing.expectError(error.Invalid, attendPlan(0, 3, 128, 3 * 2048, 3 * 2048, 2 * 127 * 256, 2 * 128 * 256));
-    try testing.expectError(error.TooLarge, attendPlan(0, 1, 1 << 25, 2048, 2048, 2 * (1 << 25) * 256, 2 * (1 << 25) * 256));
+    try testing.expectError(error.OutOfRange, attendPlan(126, 3, 128, 3 * 2048, 3 * 2048, 2 * 128 * 256, 2 * 128 * 256, 0));
+    try testing.expectError(error.ContextTooLong, attendPlan(max_visible_keys, 1, max_visible_keys + 1, 2048, 2048, 2 * (max_visible_keys + 1) * 256, 2 * (max_visible_keys + 1) * 256, 0));
+    try testing.expectError(error.Invalid, attendPlan(0, 3, 128, 2 * 2048, 3 * 2048, 2 * 128 * 256, 2 * 128 * 256, 0));
+    try testing.expectError(error.Invalid, attendPlan(0, 3, 128, 3 * 2048, 3 * 2048, 2 * 127 * 256, 2 * 128 * 256, 0));
+    try testing.expectError(error.TooLarge, attendPlan(0, 1, 1 << 25, 2048, 2048, 2 * (1 << 25) * 256, 2 * (1 << 25) * 256, 0));
+    // Past the shared stream the f32 stream view must cover 8 * rows * total keys.
+    try testing.expectEqual(@as(u32, 7169), (try attendPlan(7168, 1, 8192, 2048, 2048, 2 * 8192 * 256, 2 * 8192 * 256, 8 * 7169)).total_keys);
+    try testing.expectError(error.Invalid, attendPlan(7168, 1, 8192, 2048, 2048, 2 * 8192 * 256, 2 * 8192 * 256, 8 * 7169 - 1));
+    try testing.expectEqual(@as(u32, 8192), (try attendPlan(8191, 1, 8192, 2048, 2048, 2 * 8192 * 256, 2 * 8192 * 256, 8 * 8192)).total_keys);
+    try testing.expectError(error.ContextTooLong, attendPlan(max_visible_keys, 2, max_visible_keys + 2, 2 * 2048, 2 * 2048, 2 * (max_visible_keys + 2) * 256, 2 * (max_visible_keys + 2) * 256, 8 * 2 * (max_visible_keys + 2)));
 }
 
 test "vCopyPlan refuses rows past capacity and caches past u32 offsets" {

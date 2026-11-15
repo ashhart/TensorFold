@@ -15,8 +15,8 @@ pub const Error = vk.runtime.Error || error{ContextTooLong};
 pub const full_layers: usize = pinned.layers / 4;
 pub const linear_layers: usize = pinned.layers - full_layers;
 
-// SDPA shared memory admits visible prefixes up to 7168 keys.
-pub const max_capacity: usize = 7168;
+// The shared-memory stream serves visible prefixes to 7168 keys; the -DSTREAM_GLOBAL arm extends the cap to 8192.
+pub const max_capacity: usize = 8192;
 
 pub const kv_heads: usize = pinned.kv_heads; // 2
 pub const head_dim: usize = pinned.head_dim; // 256

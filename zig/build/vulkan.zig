@@ -121,20 +121,24 @@ pub const stage2_shaders_src =
 pub const stage3_variants = [_]ShaderVariant{
     .{ .name = "rope_bf16", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DUSE_BF16", "-DORACLE_QWEN35" } },
     .{ .name = "sdpa_rows_bf16", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
+    .{ .name = "sdpa_rows_bf16_long", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DSDPA_DIM=256", "-DSDPA_ROWS", "-DSTREAM_GLOBAL" } },
     .{ .name = "gate_bf16", .src = "zig/kernels/vulkan/attention_gate.comp", .defines = &.{} },
     .{ .name = "rope_f32", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{"-DORACLE_QWEN35"} },
     .{ .name = "rope_f32_kcache", .src = "zig/kernels/vulkan/fast_rope.comp", .defines = &.{ "-DORACLE_QWEN35", "-DACT_OUT_BF16" } },
     .{ .name = "sdpa_rows_f32q", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DF32_Q", "-DF32_OUT", "-DSDPA_DIM=256", "-DSDPA_ROWS" } },
+    .{ .name = "sdpa_rows_f32q_long", .src = "zig/kernels/vulkan/sdpa_decode_native.comp", .defines = &.{ "-DBF16_IO", "-DF32_Q", "-DF32_OUT", "-DSDPA_DIM=256", "-DSDPA_ROWS", "-DSTREAM_GLOBAL" } },
     .{ .name = "gate_f32", .src = "zig/kernels/vulkan/attention_gate.comp", .defines = &.{"-DACT_F32"} },
 };
 
 pub const stage3_shaders_src =
     \\pub const rope_bf16 align(4) = @embedFile("rope_bf16.spv").*;
     \\pub const sdpa_rows_bf16 align(4) = @embedFile("sdpa_rows_bf16.spv").*;
+    \\pub const sdpa_rows_bf16_long align(4) = @embedFile("sdpa_rows_bf16_long.spv").*;
     \\pub const gate_bf16 align(4) = @embedFile("gate_bf16.spv").*;
     \\pub const rope_f32 align(4) = @embedFile("rope_f32.spv").*;
     \\pub const rope_f32_kcache align(4) = @embedFile("rope_f32_kcache.spv").*;
     \\pub const sdpa_rows_f32q align(4) = @embedFile("sdpa_rows_f32q.spv").*;
+    \\pub const sdpa_rows_f32q_long align(4) = @embedFile("sdpa_rows_f32q_long.spv").*;
     \\pub const gate_f32 align(4) = @embedFile("gate_f32.spv").*;
 ;
 

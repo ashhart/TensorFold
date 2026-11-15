@@ -108,10 +108,12 @@ fn bundle() fam.engine.ShaderBundle {
         .attention = .{
             .rope_bf16 = &sh.rope_bf16,
             .sdpa_rows_bf16 = &sh.sdpa_rows_bf16,
+            .sdpa_rows_bf16_long = &sh.sdpa_rows_bf16_long,
             .gate_bf16 = &sh.gate_bf16,
             .rope_f32 = &sh.rope_f32,
             .rope_f32_kcache = &sh.rope_f32_kcache,
             .sdpa_rows_f32q = &sh.sdpa_rows_f32q,
+            .sdpa_rows_f32q_long = &sh.sdpa_rows_f32q_long,
             .gate_f32 = &sh.gate_f32,
         },
         .gdn = .{
@@ -266,7 +268,7 @@ test "the pinned checkpoint's wide native window clamps by default, and an expli
     defer arena.deinit();
     const a = arena.allocator();
     var problem: []const u8 = "";
-    // config.json names 262144 (the pinned checkpoint's): a default open serves the arm's 7168.
+    // config.json names 262144 (the pinned checkpoint's): a default open serves the arm's 8192.
     try std.testing.expectEqual(@as(usize, fam.backend.max_capacity), try contextFor(a, .{ .dir = "d", .model_type = "qwen3_5" }, 262144, &problem));
     try std.testing.expectError(error.Refused, contextFor(a, .{ .dir = "d", .model_type = "qwen3_5", .context = 262144 }, 262144, &problem));
 }

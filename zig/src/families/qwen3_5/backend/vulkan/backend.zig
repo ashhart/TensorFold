@@ -213,11 +213,11 @@ test "prompt validation bounds: whole requests to the ceiling, never past, real 
     var oov_last: [65]u32 = @splat(7);
     oov_last[oov_last.len - 1] = pinned.vocab; // valid length, OOV beyond the first chunk
     try std.testing.expect(!validPrompt(&oov_last));
-    const over: [max_capacity + 1]u32 = @splat(7); // 7169 ids: one past the ceiling
+    const over: [max_capacity + 1]u32 = @splat(7); // 8193 ids: one past the ceiling
     try std.testing.expect(!validPrompt(&over));
-    const at_cap: [max_capacity]u32 = @splat(7); // 7168 ids: exactly the ceiling
+    const at_cap: [max_capacity]u32 = @splat(7); // 8192 ids: exactly the ceiling
     try std.testing.expect(validPrompt(&at_cap));
-    const buf: [7168]u32 = @splat(7);
+    const buf: [8192]u32 = @splat(7);
     for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 7105 }) |len| {
         try std.testing.expect(validPrompt(buf[0..len]));
     }
@@ -225,12 +225,12 @@ test "prompt validation bounds: whole requests to the ceiling, never past, real 
 
 test "the whole-request plan gates exact fit and one past, with checked arithmetic" {
     const cap: usize = max_capacity;
-    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 7105, 7168 }) |len| {
+    for ([_]usize{ 1, 31, 32, 33, 63, 64, 65, 8129, 8192 }) |len| {
         try engine_mod.planFor(cap, 0, len, 1); // prompt-only: last draw reads a written row
     }
-    try engine_mod.planFor(cap, 0, 7167, 2); // 7167 rows + 1 decode = exact fit
-    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 7168, 2)); // one past
-    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 7169, 1));
+    try engine_mod.planFor(cap, 0, 8191, 2); // 8191 rows + 1 decode = exact fit
+    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 8192, 2)); // one past
+    try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, 0, 8193, 1));
     try std.testing.expectError(error.UnsupportedPrompt, engine_mod.planFor(cap, 0, 0, 1)); // empty
     try std.testing.expectError(error.UnsupportedPrompt, engine_mod.planFor(cap, 0, 1, 0));
     try std.testing.expectError(error.ContextTooLong, engine_mod.planFor(cap, std.math.maxInt(u64) - 2, 2, 2)); // checked add refuses, never wraps

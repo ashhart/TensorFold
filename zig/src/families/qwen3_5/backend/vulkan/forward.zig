@@ -100,7 +100,12 @@ pub const Core = struct {
         try vk.orExit(c.acc.attn.ropeQueries(c.cmds, queries, qn, rows, c.timeout_ns));
         try vk.orExit(c.acc.attn.cacheKV(c.cmds, s.keysFor(slot), s.valuesFor(slot), kn, v, rows, base, s.capacity, c.timeout_ns));
         const y = try c.scratch.alloc(act, q.elements);
-        try vk.orExit(c.acc.attn.attend(c.cmds, y, queries, s.keysFor(slot), s.valuesFor(slot), base, rows, s.capacity, c.timeout_ns));
+        // Past the shared-memory stream cap, scores stage in an f32 scratch stream: 8 query heads x rows x total keys.
+        const stream: ?View = if (base + rows > vk.attention.shared_stream_keys)
+            try c.scratch.alloc(.f32, rows * pinned.query_heads * (base + rows))
+        else
+            null;
+        try vk.orExit(c.acc.attn.attend(c.cmds, y, queries, s.keysFor(slot), s.valuesFor(slot), stream, base, rows, s.capacity, c.timeout_ns));
         const mix = try c.scratch.alloc(act, rows * hidden);
         try vk.orExit(c.acc.attn.gateOutput(c.cmds, mix, y, qraw, rows, c.timeout_ns));
         try c.project(r_out, mix, layer.o);

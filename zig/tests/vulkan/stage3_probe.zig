@@ -96,10 +96,12 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     var attn = try vk.Attention.init(&dev, .{
         .rope_bf16 = &shaders.rope_bf16,
         .sdpa_rows_bf16 = &shaders.sdpa_rows_bf16,
+        .sdpa_rows_bf16_long = &shaders.sdpa_rows_bf16_long,
         .gate_bf16 = &shaders.gate_bf16,
         .rope_f32 = &shaders.rope_f32,
         .rope_f32_kcache = &shaders.rope_f32_kcache,
         .sdpa_rows_f32q = &shaders.sdpa_rows_f32q,
+        .sdpa_rows_f32q_long = &shaders.sdpa_rows_f32q_long,
         .gate_f32 = &shaders.gate_f32,
     }, &ops);
     defer attn.deinit();
@@ -301,7 +303,7 @@ fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
 
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, ybuf, 0, staging, std.mem.sliceAsBytes(y_init), timeout));
-        try vk.orExit(attn.attend(cmds, y_view, rotated_view, keys_view, values_view, ac.prefix, rows, cc.capacity, timeout));
+        try vk.orExit(attn.attend(cmds, y_view, rotated_view, keys_view, values_view, null, ac.prefix, rows, cc.capacity, timeout));
         try fetch(cmds, staging, ybuf, std.mem.sliceAsBytes(ybits), timeout);
         if (first) |x| {
             if (std.mem.indexOfDiff(u16, x, ybits)) |at| {
@@ -340,7 +342,7 @@ fn attendGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds:
             const q_row_view = try vk.tensor.View.init(&rotated, .bf16, row_byte_offset, qrow_elems);
             const y_row_view = try vk.tensor.View.init(&ybuf, .bf16, row_byte_offset, qrow_elems);
             try vk.orExit(vk.upload(cmds, ybuf, 0, staging, std.mem.sliceAsBytes(y_init), timeout));
-            try vk.orExit(attn.attend(cmds, y_row_view, q_row_view, alt_view, values_view, ac.prefix + @as(u64, @intCast(r)), 1, cc.capacity, timeout));
+            try vk.orExit(attn.attend(cmds, y_row_view, q_row_view, alt_view, values_view, null, ac.prefix + @as(u64, @intCast(r)), 1, cc.capacity, timeout));
             try vk.orExit(vk.download(cmds, ybuf, row_byte_offset, staging, std.mem.sliceAsBytes(y_row_bits), timeout));
             const baseline_row = first.?[r * @as(usize, @intCast(qrow_elems)) ..][0..@intCast(qrow_elems)];
             if (std.mem.indexOfDiff(u16, baseline_row, y_row_bits)) |at| {

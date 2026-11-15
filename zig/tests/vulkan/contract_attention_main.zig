@@ -1,4 +1,4 @@
-// The attention gate checks rope_bf16 and sdpa_rows_bf16: decode=1, prefill<=32, keys=1..7168; exits 0/1/2/124.
+// The attention gate checks rope_bf16 and sdpa_rows_bf16(+_long): decode=1, prefill<=64, keys=1..8192; exits 0/1/2/124.
 const std = @import("std");
 const vk = @import("vulkan");
 const shaders = @import("stage3_shaders");
@@ -25,7 +25,7 @@ const Elapsed = struct {
 const repeats = 3;
 // Large FINITE bf16 planted over non-visible keys: an uncausal read turns the output huge and fails every check.
 const finite_poison: u16 = 0x7f7f;
-/// 1 MiB: the 7168-key cache buffers (7.3 MB each) upload in few chunks.
+/// 1 MiB: the 8192-key cache buffers (8.4 MB each) upload in few chunks.
 const staging_bytes = 1 << 20;
 
 pub fn main(init: std.process.Init) !u8 {
@@ -99,10 +99,12 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
     var attn = try vk.Attention.init(&dev, .{
         .rope_bf16 = &shaders.rope_bf16,
         .sdpa_rows_bf16 = &shaders.sdpa_rows_bf16,
+        .sdpa_rows_bf16_long = &shaders.sdpa_rows_bf16_long,
         .gate_bf16 = &shaders.gate_bf16,
         .rope_f32 = &shaders.rope_f32,
         .rope_f32_kcache = &shaders.rope_f32_kcache,
         .sdpa_rows_f32q = &shaders.sdpa_rows_f32q,
+        .sdpa_rows_f32q_long = &shaders.sdpa_rows_f32q_long,
         .gate_f32 = &shaders.gate_f32,
     }, &ops);
     defer attn.deinit();
@@ -122,6 +124,14 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
 }
 
 fn upload16(dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u16, timeout: u64) !vk.Buffer {
+    var b = try vk.Buffer.init(dev, .device, std.mem.sliceAsBytes(shell).len);
+    errdefer b.deinit();
+    try vk.orExit(vk.upload(cmds, b, 0, staging, std.mem.sliceAsBytes(shell), timeout));
+    return b;
+}
+
+// The long arm's f32 score stream: zero-filled, the kernel writes every word before reading it.
+fn upload32(dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u32, timeout: u64) !vk.Buffer {
     var b = try vk.Buffer.init(dev, .device, std.mem.sliceAsBytes(shell).len);
     errdefer b.deinit();
     try vk.orExit(vk.upload(cmds, b, 0, staging, std.mem.sliceAsBytes(shell), timeout));
@@ -230,6 +240,18 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     defer keys.deinit();
     var values = try upload16(dev, cmds, staging, f.v_bits, timeout);
     defer values.deinit();
+    // Long cases stage scores in an f32 stream: 8 heads x rows x total keys words, zero-filled once (write-before-read).
+    const total_keys = ca.capacityOf(case);
+    var stream_buf: ?vk.Buffer = null;
+    defer if (stream_buf) |*b| b.deinit();
+    const stream_words: u64 = fx.heads * case.rows * total_keys;
+    if (total_keys > ca.shared_stream_keys) {
+        const zeros = try a.alloc(u32, @intCast(stream_words));
+        defer a.free(zeros);
+        @memset(zeros, 0);
+        stream_buf = try upload32(dev, cmds, staging, zeros, timeout);
+    }
+    const stream_view: ?vk.tensor.View = if (stream_buf) |*b| try vk.tensor.View.init(b, .f32, 0, stream_words) else null;
     // Poison every output word so missing writes cannot inherit a reference.
     const out_len: usize = @intCast(case.rows * row_elems);
     const out_shell = try a.alloc(u16, out_len + fx.tail);
@@ -248,7 +270,7 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
     const bits = full_bits[0..out_len];
     for (0..repeats) |rep| {
         try vk.orExit(vk.upload(cmds, out, 0, staging, std.mem.sliceAsBytes(out_shell), timeout));
-        try vk.orExit(attn.attend(cmds, y_view, q_view, keys_view, values_view, case.prefix, case.rows, f.capacity, timeout));
+        try vk.orExit(attn.attend(cmds, y_view, q_view, keys_view, values_view, stream_view, case.prefix, case.rows, f.capacity, timeout));
         try fetch(cmds, staging, out, std.mem.sliceAsBytes(full_bits), timeout);
         for (full_bits[out_len..]) |g_elem| {
             if (g_elem != fx.poison16) {
@@ -288,8 +310,11 @@ fn sdpaGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmds: *
         defer a.free(one_bits);
         for (0..@intCast(case.rows)) |r| {
             const q_row = try q_view.slice(@intCast(r * row_elems), @intCast(row_elems));
+            // A row decoded alone gets its own total; long totals slice the front of the same stream buffer.
+            const row_total = case.prefix + @as(u64, r) + 1;
+            const row_stream: ?vk.tensor.View = if (row_total > ca.shared_stream_keys) try stream_view.?.slice(0, fx.heads * row_total) else null;
             try vk.orExit(vk.upload(cmds, one, 0, staging, std.mem.sliceAsBytes(one_shell), timeout));
-            try vk.orExit(attn.attend(cmds, one_view, q_row, keys_view, values_view, case.prefix + @as(u64, r), 1, f.capacity, timeout));
+            try vk.orExit(attn.attend(cmds, one_view, q_row, keys_view, values_view, row_stream, case.prefix + @as(u64, r), 1, f.capacity, timeout));
             try fetch(cmds, staging, one, std.mem.sliceAsBytes(one_bits), timeout);
             if (std.mem.indexOfDiff(u16, one_bits, bits[@intCast(r * row_elems)..][0..one_len])) |at| {
                 std.debug.print("FAIL sdpa case=\"{s}\": row {d} decoded alone differs at element {d}\n", .{ case.name, r, at });

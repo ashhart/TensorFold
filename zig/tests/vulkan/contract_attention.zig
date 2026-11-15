@@ -1,4 +1,4 @@
-// Host-only rope/SDPA contract vs f64; fixture caps at 8 keys; shader SDPA uses 256 lanes and 7168-key limit.
+// Host-only rope/SDPA contract vs f64; fixture caps at 8 keys; shader SDPA uses 256 lanes and the 8192-key ceiling.
 const std = @import("std");
 const contract = @import("contract");
 const c = contract.spec;
@@ -13,7 +13,8 @@ pub const tree_levels: u64 = 8; // log2(lanes) binary-tree levels
 pub const dot_terms: u64 = fx.head_dim; // 256 ascending-d score FMAs
 pub const key_tile: u64 = 16; // 16-key output tiles / load batches
 pub const key_stride: u64 = 1024; // threads striding the score scan
-pub const max_visible_keys: u64 = 7168; // kStreamKeys: the shared-memory stream
+pub const max_visible_keys: u64 = 8192; // the arm's ceiling: attendPlan refuses past it
+pub const shared_stream_keys: u64 = 7168; // kStreamKeys: the shared-memory stream; totals past it ride the f32 stream
 
 // For n keys, denominator depth is ceil(n/256)+8: 256 lanes, 8 tree levels, and 36 at n=7168.
 pub fn softmaxDepth(n: u64) u64 {
@@ -64,7 +65,7 @@ pub fn visibleKeys(case: SdpaCase, r: u64) u64 {
     return case.prefix + r + 1;
 }
 
-// Cases test n=1,15/16/17,255/256/257,1023/1024/1025,7167/7168 and rows 17/32 at 1024/7168 limits.
+// Cases test n=1,15/16/17,255/256/257,1023/1024/1025,7167/7168,7169/8192 and rows 17/32/64 at the 1024/7168/8192 limits.
 pub const served_cases = [_]SdpaCase{
     .{ .name = "decode n=1", .rows = 1, .prefix = 0 },
     .{ .name = "decode n=16 tile", .rows = 1, .prefix = 15 },
@@ -76,9 +77,12 @@ pub const served_cases = [_]SdpaCase{
     .{ .name = "decode n=1025 stride+1", .rows = 1, .prefix = 1024 },
     .{ .name = "decode n=7167 stream-1", .rows = 1, .prefix = 7166 },
     .{ .name = "decode n=7168 stream", .rows = 1, .prefix = 7167 },
+    .{ .name = "decode n=7169 long stream", .rows = 1, .prefix = 7168 },
+    .{ .name = "decode n=8192 long stream", .rows = 1, .prefix = 8191 },
     .{ .name = "prefill rows64 n1..64", .rows = 64, .prefix = 0 },
     .{ .name = "prefill rows17 across 1024", .rows = 17, .prefix = 1007 },
     .{ .name = "prefill rows64 to 7168", .rows = 64, .prefix = 7104 },
+    .{ .name = "prefill rows64 to 8192", .rows = 64, .prefix = 8128 },
 };
 
 // Attend f64 dots/max/softmax/output for n=prefix+r+1 in (kv_head,capacity,head_dim); matches fx.Attend.init order.
@@ -96,7 +100,7 @@ pub fn attendRef(
     const row_elems: usize = @intCast(fx.heads * fx.head_dim);
     const cap: usize = @intCast(capacity);
     const kh_span: usize = @intCast(fx.heads / fx.kv_heads); // repeats: 8/2
-    // Per-(row, head) score scratch; capacity <= 7168 (attendPlan's bound).
+    // Per-(row, head) score scratch; capacity <= 8192 (attendPlan's bound).
     const scores = try a.alloc(f64, cap);
     defer a.free(scores);
     for (0..@intCast(case.rows)) |r| {
@@ -230,7 +234,8 @@ test "softmax depth is the shader's chain plus tree, never the plain key sum" {
     try testing.expectEqual(@as(u64, 12), softmaxDepth(1024));
     try testing.expectEqual(@as(u64, 13), softmaxDepth(1025));
     try testing.expectEqual(@as(u64, 36), softmaxDepth(7168));
-    // The point of the derivation: 36, not 7168.
+    try testing.expectEqual(@as(u64, 40), softmaxDepth(8192));
+    // The point of the derivation: 40, not 8192.
     try testing.expect(softmaxDepth(max_visible_keys) < max_visible_keys / 100);
 }
 
@@ -240,7 +245,8 @@ test "sdpaBound covers a planted wrong finite and grows with the honest depths" 
     try testing.expect(b1 > 0);
     try testing.expect(sdpaBound(257, m, 1) > sdpaBound(256, m, 1)); // chain edge
     try testing.expect(sdpaBound(7168, m, 1) > sdpaBound(1025, m, 1)); // output depth
-    try testing.expect(sdpaBound(7168, m, 1) < 1 << 20); // 2^31 plants are refused
+    try testing.expect(sdpaBound(8192, m, 1) > sdpaBound(7168, m, 1)); // output depth at the ceiling
+    try testing.expect(sdpaBound(8192, m, 1) < 1 << 20); // 2^31 plants are refused
     try testing.expect(sdpaBound(1, .{}, 0) > 0); // finite on zeros
 }
 
@@ -278,12 +284,12 @@ test "served cases stay inside the engine's shapes and hit every reduction edge"
     for (served_cases) |case| {
         try testing.expect(case.rows == 1 or case.rows <= 64); // decode rows 1, prefill <= max_prefill_rows (64)
         const capacity = capacityOf(case);
-        try testing.expect(capacity <= max_visible_keys); // kStreamKeys
+        try testing.expect(capacity <= max_visible_keys); // the arm's ceiling
         try testing.expectEqual(visibleKeys(case, case.rows - 1), capacity); // exact fit
         try testing.expect(visibleKeys(case, 0) >= 1);
     }
     // The named edges all appear as some decode case's single-row count.
-    const decode_edges = [_]u64{ 1, 16, 17, 256, 257, 1024, 1025, 7168 };
+    const decode_edges = [_]u64{ 1, 16, 17, 256, 257, 1024, 1025, 7168, 7169, 8192 };
     for (decode_edges) |n| {
         var found = false;
         for (served_cases) |case| {
@@ -291,9 +297,14 @@ test "served cases stay inside the engine's shapes and hit every reduction edge"
         }
         try testing.expect(found); // every claimed edge is actually served
     }
-    // Multi-row prefill crosses the 1024 stride and fills 7168.
-    try testing.expect(served_cases[11].prefix < key_stride and capacityOf(served_cases[11]) >= key_stride);
+    // Multi-row prefill crosses the 1024 stride and fills 7168 and 8192.
+    try testing.expect(served_cases[13].prefix < key_stride and capacityOf(served_cases[13]) >= key_stride);
     try testing.expectEqual(max_visible_keys, capacityOf(served_cases[served_cases.len - 1]));
+    var long_count: usize = 0;
+    for (served_cases) |case| {
+        if (capacityOf(case) > shared_stream_keys) long_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 3), long_count); // the 7169/8192 decodes and the row-64 prefill to 8192 ride the long arm
 }
 
 test "sdpa checkers accept the honest bf16 output and refuse planted ones" {
@@ -334,4 +345,10 @@ test "depth derivation is pinned to the shader source this contract reads" {
     try testing.expect(std.mem.indexOf(u8, src, "params.matrix_k - params.dims + row + 1u") != null);
     // The shared-memory bound that caps the served context.
     try testing.expect(std.mem.indexOf(u8, src, "kStreamKeys = 7168u") != null);
+    // The long arm: binding 4 replaces the shared stream, one total_keys region per workgroup.
+    try testing.expect(std.mem.indexOf(u8, src, "#define STREAM(i) s_stream[i]") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "#define STREAM(i) stream_data.values[stream_base + i]") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "coherent buffer Stream") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x") != null);
+    try testing.expect(std.mem.indexOf(u8, src, "memoryBarrierBuffer()") != null);
 }
