@@ -103,29 +103,33 @@ pub const Model = struct {
     }
 };
 
-/// A VL checkpoint's text tensors pack into their own buffer, without the tower and projector no Metal kernel runs.
+/// A VL checkpoint's text tensors, wrapped (`language_model.`) or bare (`model.`), pack without tower and projector.
 pub fn addShard(c: *ckpt.Checkpoint, device: mtl.Device, path: [:0]const u8, kind: cfg.Kind) !void {
     if (kind == .text) return c.addFile(device, path, "");
-    try c.addFileSplit(device, path, "", "language_model.", never);
+    // both namespaces metal_weights.load accepts; a shard holding both is still refused there (MixedNamespaces)
+    for ([_][]const u8{ "language_model.", "model." }) |text| try c.addFileSplit(device, path, "", text, never);
 }
 
 fn never(_: []const u8, _: usize) bool {
     return false;
 }
 
-test "an LFM3-VL shard holds its language model only; a text shard holds everything as before" {
+test "an LFM3-VL shard, wrapped or bare, holds its language model only; a text shard holds everything as before" {
     if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
+    inline for (.{ "language_model.model.embed_tokens.weight", "model.embed_tokens.weight" }) |name|
+        try textOnly(device, name);
+}
+
+/// A shard in LFM3-VL's order (text tensor `name`, multi_modal_projector., vision_tower.) read both ways.
+fn textOnly(device: mtl.Device, comptime name: []const u8) !void {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    // LFM3-VL's order: language_model.model., then multi_modal_projector. and vision_tower.
-    const header =
-        \\{"language_model.model.a":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]},
-        \\ "multi_modal_projector.p":{"dtype":"U8","shape":[1024],"data_offsets":[4,1028]},
-        \\ "vision_tower.x":{"dtype":"U8","shape":[4096],"data_offsets":[1028,5124]}}
-    ;
+    const header = "{\"" ++ name ++ "\":{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[0,4]}," ++
+        "\"multi_modal_projector.p\":{\"dtype\":\"U8\",\"shape\":[1024],\"data_offsets\":[4,1028]}," ++
+        "\"vision_tower.x\":{\"dtype\":\"U8\",\"shape\":[4096],\"data_offsets\":[1028,5124]}}";
     var data: [8 + header.len + 5124]u8 = undefined;
     std.mem.writeInt(u64, data[0..8], header.len, .little);
     @memcpy(data[8..][0..header.len], header);
@@ -142,6 +146,5 @@ test "an LFM3-VL shard holds its language model only; a text shard holds everyth
     try addShard(&text, device, path, .vision_language);
     try std.testing.expectEqual(@as(usize, 4), text.residentBytes());
     try std.testing.expect(!text.has("vision_tower.x") and !text.has("multi_modal_projector.p"));
-    const name = "language_model.model.a";
     try std.testing.expectEqualSlices(u16, (try all.get(name)).host(u16), (try text.get(name)).host(u16));
 }
