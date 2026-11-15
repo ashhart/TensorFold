@@ -317,6 +317,16 @@ pub const Rule = struct {
                 const granted: i64 = if (w.granted) |g| g else r.most_drafts;
                 o.* = if (r.granted_depth) inner else try r.headDepth(w, @min(inner, granted + r.k.draft_slack), probe);
             }
+            // Offloaded shared rounds pay for the widest active chain; avoid uneven head depths.
+            if (r.rate_guard and out.len > 1) {
+                var min_active: i64 = std.math.maxInt(i64);
+                for (out) |d| if (d > 0) {
+                    min_active = @min(min_active, d);
+                };
+                for (out) |*d| if (d.* > 0) {
+                    d.* = min_active;
+                };
+            }
             if (r.granted_depth) capPass(out, r.batch_rows);
             if (r.granted_depth and r.k.hold_costs.len > 0) try r.payHolds(whos, sampled, out);
             return;

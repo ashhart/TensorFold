@@ -220,6 +220,30 @@ test "rate guard and granted depths both bound lone and shared drafts" {
     try std.testing.expectEqualSlices(i64, &.{ 0, 0 }, &out);
 }
 
+test "rate-guarded shared drafts balance active depths without reviving forced streams" {
+    const empty: Table = .{};
+    var rule = sharedRule(&empty, true);
+    rule.most_drafts = 6;
+    defer rule.deinit();
+    var sa: ?State = null;
+    var sb: ?State = null;
+    defer if (sa) |*s| s.deinit(std.testing.allocator);
+    defer if (sb) |*s| s.deinit(std.testing.allocator);
+    var a = try primed(&rule, &sa, 30);
+    var b = try primed(&rule, &sb, 30);
+    a.granted = 1;
+    b.granted = 3;
+    var whos = [_]Who{ a, b };
+    var out: [2]i64 = undefined;
+    var unused: u8 = 0;
+    const probe: Probe = .{ .ptr = &unused, .copy = never_copy.copy };
+    try rule.budgets(&whos, probe, false, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 3, 3 }, &out);
+    whos[0].forced = true;
+    try rule.budgets(&whos, probe, false, &out);
+    try std.testing.expectEqualSlices(i64, &.{ 0, 5 }, &out);
+}
+
 test "rate decisions do not reset zero-grant probes" {
     const empty: Table = .{};
     var rule = sharedRule(&empty, true);

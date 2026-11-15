@@ -202,7 +202,9 @@ Exact-head TP=1/TP=2 greedy and seeded token-hash receipts remain required befor
 Only an EXL3 pack with offloaded experts and an MTP head enables the core's plain-versus-drafted rate guard.
 Other Flash Next formats retain their existing draft policy. Each stream learns from completed-round tokens and
 times, excluding its first prefill-to-decode round. A shared round runs plain only when every stream prefers it;
-otherwise the streams draft together. Bounded probes let drafting recover after plain rounds have won.
+otherwise the streams draft together, with active head depths bounded to the smallest active depth in that round.
+This reduces uneven shared rounds but can limit a stream that could use a deeper chain. Zero-depth streams stay zero.
+Bounded probes let drafting recover after plain rounds have won.
 
 A plain round can omit the head's hidden rows until a probe needs them. Retained deferred head rows are flushed
 before drafting again or saving a snapshot. The core still owns verification and token draws; exact-head

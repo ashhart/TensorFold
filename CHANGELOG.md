@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Flash Next EXL3 with offloaded experts and an MTP head uses completed-round token rates to choose plain or drafted rounds, with bounded probes; transitions that combine a prior window and a new proposal do not enter either rate. Other formats retain their existing draft policy (#1446).
+- Flash Next EXL3 with offloaded experts and an MTP head uses completed-round token rates to choose plain or drafted rounds, with bounded probes; transitions that combine a prior window and a new proposal do not enter either rate. Shared active drafts use a common bounded depth to reduce uneven rounds; other formats retain their existing draft policy (#1446).
 
 - Flash Next EXL3 pool auto-sizing protects an explicitly requested prompt-cache budget from optional expert-line growth (#1446).
 
