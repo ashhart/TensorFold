@@ -330,7 +330,7 @@ fn expertsMma(x: *const Px, e: mtl.ComputeEncoder, o: u32, table: ex.Ref) !void 
     try cut(x, .xe_plan);
     xm.up(xp, e, cv(xm.Ref, s.xcodes), cv(xm.Ref, s.xscales), table, route, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.act), call);
     try cut(x, .xe_up);
-    xm.down(xp, e, cv(xm.Ref, s.act), table, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.eout), call);
+    xm.down(xp, e, cv(xm.Ref, s.act), cv(xm.Ref, s.xdq), table, cv(xm.Ref, s.xtiles), cv(xm.Ref, s.eout), call);
     try cut(x, .xe_down);
     ex.combine(&x.p.experts, e, cv(ex.Ref, s.eout), route, cv(ex.Ref, s.ones), cv(ex.Ref, x.at(s.yr, o, 4 * H)), true, dcall);
 }
