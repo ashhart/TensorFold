@@ -1,0 +1,29 @@
+2026-11-15 16:05:06 lpk-h serve kh 5c82ef28a6+fp8load ctx 131072 args: -- --parallel 1 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 16:06:24 lpk-h health after 76 s
+2026-11-15 16:11:26 lpk-h suite lp rc=0 : RESULT corpus  RESULT lp exit 0
+2026-11-15 16:11:32 lpk-h serve END
+2026-11-15 16:11:32 lpk-b serve kb 5c82ef28a6 ctx 131072 args: -- --parallel 1 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 16:12:47 lpk-b health after 72 s
+2026-11-15 16:17:54 lpk-b suite lp rc=0 : RESULT corpus  RESULT lp exit 0
+2026-11-15 16:18:00 lpk-b serve END
+2026-11-15 16:18:00 exk-h serve kh 5c82ef28a6+fp8load ctx 40960 args: -- --parallel 4 --kv-cache fp8
+2026-11-15 16:18:57 exk-h health after 54 s
+2026-11-15 16:30:01 exk-h suite ex rc=0 : RESULT golden exit 0 RESULT conc rc=0 RESULT resume exit 0
+2026-11-15 16:30:07 exk-h serve END
+2026-11-15 16:30:08 kv-b1 serve kb 5c82ef28a6 ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 16:31:37 kv-b1 health after 87 s
+2026-11-15 16:42:23 kv-b1 suite kv rc=0 : RESULT nodraft rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill32768 rc=0 RESULT prefill65536 rc=0
+2026-11-15 16:42:29 kv-b1 serve END
+2026-11-15 16:42:29 kv-h1 serve kh 5c82ef28a6+fp8load ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 16:44:05 kv-h1 health after 93 s
+2026-11-15 16:54:32 kv-h1 suite kv rc=0 : RESULT nodraft rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill32768 rc=0 RESULT prefill65536 rc=0
+2026-11-15 16:54:37 kv-h1 serve END
+2026-11-15 16:54:38 kv-h2 serve kh 5c82ef28a6+fp8load ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 16:55:43 kv-h2 health after 63 s
+2026-11-15 17:06:07 kv-h2 suite kv rc=0 : RESULT nodraft rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill32768 rc=0 RESULT prefill65536 rc=0
+2026-11-15 17:06:13 kv-h2 serve END
+2026-11-15 17:06:13 kv-b2 serve kb 5c82ef28a6 ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+2026-11-15 17:07:22 kv-b2 health after 67 s
+2026-11-15 17:18:05 kv-b2 suite kv rc=0 : RESULT nodraft rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill32768 rc=0 RESULT prefill65536 rc=0
+2026-11-15 17:18:11 kv-b2 serve END
+2026-11-15 17:18:11 chain queue-kv.txt END

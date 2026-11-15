@@ -1,0 +1,117 @@
+INFO limits fatbins: images built by nvcc 13.3, checked against nvcc 13.3's records
+PASS limits sm_80 glm_glue tf_glm_chunks_16: 64 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_86 glm_glue tf_glm_chunks_16: 64 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_89 glm_glue tf_glm_chunks_16: 64 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_120 glm_glue tf_glm_chunks_16: 123 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_121 glm_glue tf_glm_chunks_16: 123 registers, 0 static shared bytes, bound 256 (record current)
+RECORD glm_glue tf_glm_chunks_16: .usage = .{ .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 123, .static = 0, .bound = 256 }, .{ .regs = 123, .static = 0, .bound = 256 }, }
+PASS limits sm_80 glm_glue tf_glm_chunks_32: 150 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_86 glm_glue tf_glm_chunks_32: 150 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_89 glm_glue tf_glm_chunks_32: 150 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_120 glm_glue tf_glm_chunks_32: 128 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_121 glm_glue tf_glm_chunks_32: 128 registers, 0 static shared bytes, bound 256 (record current)
+RECORD glm_glue tf_glm_chunks_32: .usage = .{ .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 150, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, .{ .regs = 128, .static = 0, .bound = 256 }, }
+PASS limits sm_80 glm_glue tf_glm_chunks_16_fp8: 156 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_86 glm_glue tf_glm_chunks_16_fp8: 156 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_89 glm_glue tf_glm_chunks_16_fp8: 147 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_120 glm_glue tf_glm_chunks_16_fp8: 125 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_121 glm_glue tf_glm_chunks_16_fp8: 125 registers, 0 static shared bytes, bound 256 (record current)
+RECORD glm_glue tf_glm_chunks_16_fp8: .usage = .{ .{ .regs = 156, .static = 0, .bound = 256 }, .{ .regs = 156, .static = 0, .bound = 256 }, .{ .regs = 147, .static = 0, .bound = 256 }, .{ .regs = 125, .static = 0, .bound = 256 }, .{ .regs = 125, .static = 0, .bound = 256 }, }
+PASS limits sm_80 glm_glue tf_glm_chunks_32_fp8: 198 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_86 glm_glue tf_glm_chunks_32_fp8: 198 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_89 glm_glue tf_glm_chunks_32_fp8: 204 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_120 glm_glue tf_glm_chunks_32_fp8: 163 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_121 glm_glue tf_glm_chunks_32_fp8: 163 registers, 0 static shared bytes, bound 256 (record current)
+RECORD glm_glue tf_glm_chunks_32_fp8: .usage = .{ .{ .regs = 198, .static = 0, .bound = 256 }, .{ .regs = 198, .static = 0, .bound = 256 }, .{ .regs = 204, .static = 0, .bound = 256 }, .{ .regs = 163, .static = 0, .bound = 256 }, .{ .regs = 163, .static = 0, .bound = 256 }, }
+PASS limits sm_80 mla tf_mla_chunks_r16: 76 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_86 mla tf_mla_chunks_r16: 76 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_89 mla tf_mla_chunks_r16: 76 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_120 mla tf_mla_chunks_r16: 126 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_121 mla tf_mla_chunks_r16: 126 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_80 mla tf_mla_chunks_split_r16: 74 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_86 mla tf_mla_chunks_split_r16: 79 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_89 mla tf_mla_chunks_split_r16: 79 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_120 mla tf_mla_chunks_split_r16: 120 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_121 mla tf_mla_chunks_split_r16: 120 registers, 0 static shared bytes, bound 256 (record current)
+PASS limits sm_80 mla tf_mla_merge_part: 30 registers, 0 static shared bytes, bound 128 (record current)
+PASS limits sm_86 mla tf_mla_merge_part: 31 registers, 0 static shared bytes, bound 128 (record current)
+PASS limits sm_89 mla tf_mla_merge_part: 31 registers, 0 static shared bytes, bound 128 (record current)
+PASS limits sm_120 mla tf_mla_merge_part: 34 registers, 0 static shared bytes, bound 128 (record current)
+PASS limits sm_121 mla tf_mla_merge_part: 34 registers, 0 static shared bytes, bound 128 (record current)
+PASS limits sm_80 mla tf_mla_absorb_q_128: 56 registers, 512 static shared bytes, bound 128 (record current)
+PASS limits sm_86 mla tf_mla_absorb_q_128: 56 registers, 512 static shared bytes, bound 128 (record current)
+PASS limits sm_89 mla tf_mla_absorb_q_128: 56 registers, 512 static shared bytes, bound 128 (record current)
+PASS limits sm_120 mla tf_mla_absorb_q_128: 56 registers, 512 static shared bytes, bound 128 (record current)
+PASS limits sm_121 mla tf_mla_absorb_q_128: 56 registers, 512 static shared bytes, bound 128 (record current)
+PASS limits sm_80 mla tf_mla_expand_v_128: 96 registers, 128 static shared bytes, bound 128 (record current)
+PASS limits sm_86 mla tf_mla_expand_v_128: 96 registers, 128 static shared bytes, bound 128 (record current)
+PASS limits sm_89 mla tf_mla_expand_v_128: 96 registers, 128 static shared bytes, bound 128 (record current)
+PASS limits sm_120 mla tf_mla_expand_v_128: 96 registers, 128 static shared bytes, bound 128 (record current)
+PASS limits sm_121 mla tf_mla_expand_v_128: 96 registers, 128 static shared bytes, bound 128 (record current)
+PASS limits sm_80 mla tf_mla_rope: 26 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_86 mla tf_mla_rope: 26 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_89 mla tf_mla_rope: 26 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_120 mla tf_mla_rope: 22 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_121 mla tf_mla_rope: 22 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_80 mla tf_mla_gate: 16 registers, 0 static shared bytes, bound 0 (record current)
+PASS limits sm_86 mla tf_mla_gate: 16 registers, 0 static shared bytes, bound 0 (record current)
+PASS limits sm_89 mla tf_mla_gate: 16 registers, 0 static shared bytes, bound 0 (record current)
+PASS limits sm_120 mla tf_mla_gate: 12 registers, 0 static shared bytes, bound 0 (record current)
+PASS limits sm_121 mla tf_mla_gate: 12 registers, 0 static shared bytes, bound 0 (record current)
+FAIL kernel-contract-limits: 834 problems
+FAIL kernel-contract-limits: TestFailed
+# stale records by image:
+    338 exl3_linear
+     60 qwen4_hc
+     50 qwen4_ple
+     47 flashnext_batch
+     32 qmmf
+     25 qwen4_projection
+     25 qwen4_gdn
+     15 qwen35
+     12 qwen35_kv8
+     10 nvfp4_experts_tile
+     10 glm_glue
+     10 exl3_experts
+      9 window_pages
+      8 tree
+      5 _ZN20tf_prefill_attention22hpattn_p256_ids_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi:
+      5 _ZN20tf_prefill_attention20hpattn8_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifi:
+      5 _ZN20tf_prefill_attention19hpattn_whole_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifi:
+      5 _ZN20tf_prefill_attention18hpattn_p256_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi:
+      5 _ZN20tf_prefill_attention14hpattn8_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16PKhS5_PKfS7_PS1_iiiiifiPKixi:
+      5 _ZN20tf_prefill_attention13hpattn_kernelILi256ELi8ELi2ELi2EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifiPKixi:
+      5 tf_q36m_norm_rope:
+      5 tf_q36m_attn_tree:
+      5 tf_q36m_attn_rows:
+      5 tf_q36m_attn:
+      5 tf_q35_norm_shift:
+      5 tf_q35_head_norm_shift:
+      5 tf_q35_attn_rows_whole:
+      5 tf_q35_attn_rows8_whole:
+      5 tf_q35_attn_partial_whole:
+      5 tf_q35_attn_partial8_whole:
+      5 tf_moe_router_tiles:
+      5 tf_js_widen:
+      5 tf_js_span_sums:
+      5 tf_js_span_means:
+      5 tf_js_softmax_rows:
+      5 tf_js_round:
+      5 tf_js_option_summary:
+      5 tf_js_logits:
+      5 tf_js_lex_sums:
+      5 tf_js_layer_norm:
+      5 tf_js_gelu:
+      5 tf_js_combine:
+      5 tf_js_broadcast:
+      5 tf_js_add:
+      5 moe
+      5 l2pf
+      5 l2pace
+      5 flashnext_mtp
+      4 window
+      2 tf_q35_attn_rows8_mt2:
+      2 paging
+      2 norms
+      2 df_sumn:
+      1 lane_gemv

@@ -1,0 +1,10 @@
+count drafts: 512 tokens, 5aaa45283ec628ce6e08fbaaf89ef618a0d01b58dbcb9dc17596d70bb034323c, 10.9 s, 4.830188679245283 a round
+count plain: 512 tokens, 5aaa45283ec628ce6e08fbaaf89ef618a0d01b58dbcb9dc17596d70bb034323c, 23.5 s, 1.0019569471624266 a round
+PASS count: drafts and plain equal
+prose drafts: 512 tokens, 0d8280fe4ee6236b269ddbd19e70747cb48ec96f3cbea29ccf052516bac83cf3, 17.0 s, 1.9844961240310077 a round
+prose plain: 512 tokens, 0d8280fe4ee6236b269ddbd19e70747cb48ec96f3cbea29ccf052516bac83cf3, 23.9 s, 1.0019569471624266 a round
+PASS prose: drafts and plain equal
+code drafts: 512 tokens, eba1e4d831d203438ca4f8fad81bde59f54cdc19e045523654d7f00d266f9473, 13.6 s, 3.103030303030303 a round
+code plain: 512 tokens, eba1e4d831d203438ca4f8fad81bde59f54cdc19e045523654d7f00d266f9473, 23.8 s, 1.0019569471624266 a round
+PASS code: drafts and plain equal
+exit 0

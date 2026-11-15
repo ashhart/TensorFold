@@ -1,0 +1,7 @@
+base: 5c82ef28a6c8ea2094563266e47d1b7b3051b129 (main, tree kb)
+head: the base plus this pull request's kernel commit (tree kh); the runs' build had its new comment on two lines, since folded into one, and glm_glue's SASS for all five SMs is the same either way
+head's kernel and engine sources are the base's plus zig/kernels/cuda/common/mla.cuh; the two register-record files changed after the build and reach only the contract tests
+build (git archive of each tree, empty .zig-cache): zig build -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=121 && zig build native -Dnvcc=/usr/local/cuda/bin/nvcc -Dtp-nvcc=/usr/local/cuda/bin/nvcc
+Zig 0.17.0; nvcc release 13.5, V13.5.37; driver 580.178.04 (CUDA 13.0); NCCL 2.30.7
+tensorfold-native sha256, the same file on both ranks: base 79d25c56593b9033b30a58e1dee2c415b646eaab16da3ee3065a3308d11d7860, head 78d8ffcb036ab4edc77d2db34433a27539c722db2789f077886913ddd0893753
+checkpoint: nvidia/GLM-5.3-Flash-FP4-Local at 76348ddb2be2e35e39ecfc00e75dc07703f4f3d5

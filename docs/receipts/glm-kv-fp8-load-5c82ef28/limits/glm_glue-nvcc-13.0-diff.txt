@@ -1,0 +1,42 @@
+# cuobjdump -res-usage of glm_glue alone (tools/res.sh, nvcc 13.0, sm 80,86,89,120,121): base (<) against head (>), every kernel
+240
+10c10
+< sm_120 tf_glm_chunks_16_fp8: REG:64 STACK:0 LOCAL:0
+---
+> sm_120 tf_glm_chunks_16_fp8: REG:126 STACK:0 LOCAL:0
+12c12
+< sm_120 tf_glm_chunks_32_fp8: REG:130 STACK:0 LOCAL:0
+---
+> sm_120 tf_glm_chunks_32_fp8: REG:159 STACK:0 LOCAL:0
+58c58
+< sm_121 tf_glm_chunks_16_fp8: REG:64 STACK:0 LOCAL:0
+---
+> sm_121 tf_glm_chunks_16_fp8: REG:126 STACK:0 LOCAL:0
+60c60
+< sm_121 tf_glm_chunks_32_fp8: REG:130 STACK:0 LOCAL:0
+---
+> sm_121 tf_glm_chunks_32_fp8: REG:159 STACK:0 LOCAL:0
+106c106
+< sm_80 tf_glm_chunks_16_fp8: REG:64 STACK:0 LOCAL:0
+---
+> sm_80 tf_glm_chunks_16_fp8: REG:156 STACK:0 LOCAL:0
+108c108
+< sm_80 tf_glm_chunks_32_fp8: REG:128 STACK:0 LOCAL:0
+---
+> sm_80 tf_glm_chunks_32_fp8: REG:198 STACK:0 LOCAL:0
+154c154
+< sm_86 tf_glm_chunks_16_fp8: REG:64 STACK:0 LOCAL:0
+---
+> sm_86 tf_glm_chunks_16_fp8: REG:156 STACK:0 LOCAL:0
+156c156
+< sm_86 tf_glm_chunks_32_fp8: REG:128 STACK:0 LOCAL:0
+---
+> sm_86 tf_glm_chunks_32_fp8: REG:198 STACK:0 LOCAL:0
+202c202
+< sm_89 tf_glm_chunks_16_fp8: REG:64 STACK:0 LOCAL:0
+---
+> sm_89 tf_glm_chunks_16_fp8: REG:147 STACK:0 LOCAL:0
+204c204
+< sm_89 tf_glm_chunks_32_fp8: REG:127 STACK:0 LOCAL:0
+---
+> sm_89 tf_glm_chunks_32_fp8: REG:204 STACK:0 LOCAL:0
