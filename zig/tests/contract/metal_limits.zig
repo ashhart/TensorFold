@@ -211,6 +211,7 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         } else return error.UnknownLaunch;
         frags = true;
     } else if (std.mem.startsWith(u8, d.name, "dsv41 gate gemm ")) {
+        if (!assemble) return undefined;
         // The router gate's own prefill block, including the fp32-destination twins the pack needs.
         text = sources.deepseek_v41_gate_gemm;
         frags = true;
