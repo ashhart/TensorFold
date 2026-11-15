@@ -583,7 +583,6 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
 }
-
 fn info(gpu: check.Gpu) !void {
     var name_buf: [256]u8 = undefined;
     const name = try gpu.ctx.name(&name_buf);
@@ -595,7 +594,6 @@ fn info(gpu: check.Gpu) !void {
         cuda.kernels.available,
     });
 }
-
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {
     for (flags) |f| if (std.mem.eql(u8, f, name)) return true;
     return false;
