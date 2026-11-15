@@ -15,8 +15,7 @@ const f = ev.f;
 const str = trail.str;
 const int = trail.int;
 
-/// The stream windows of a shared round in one forward, then each verified, committed and drafted on its own.
-/// `ask` is the engine's private draft call, passed in so it stays private to the engine.
+/// A shared round's windows in one forward, each verified, committed and drafted alone; `ask` drafts their heads.
 pub fn run(e: *Engine, entries: []*Stream, comptime ask: anytype) !void {
     return if (e.cfg.plain_guard) runPriced(e, entries, true, ask) else runPriced(e, entries, false, ask);
 }
