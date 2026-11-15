@@ -33,6 +33,9 @@ pub const shared_stream_keys: u64 = 7168;
 const sdpa_shared_bytes: u64 = 30720;
 /// Longest prefill chunk the tiled path takes (forward.zig max_prefill_rows) and the scratch its scores need.
 const tile_max_rows: u32 = 64;
+/// A 1-row decode over at least this many keys takes the tiled path too: the decode kernel runs 8 workgroups (one per head) and
+/// walks every key in one of them, so it leaves the GPU idle on long prefixes. Below it the single dispatch wins.
+const decode_tile_keys: u64 = 512;
 const score_scratch_words: u64 = query_heads * tile_max_rows * max_visible_keys;
 
 // The compiled shader images Attention runs; every field is a real SPIR-V image of the named variant.
@@ -224,7 +227,7 @@ pub const Attention = struct {
         const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements, if (stream) |s| s.elements else 0);
         if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
         if (y.overlaps(queries) or y.overlaps(cache_keys) or y.overlaps(cache_values)) return error.Aliased;
-        if (plan.rows > 1 and plan.rows <= tile_max_rows) return a.attendTiled(cmds, y, queries, cache_keys, cache_values, plan, capacity, timeout_ns);
+        if (plan.rows <= tile_max_rows and (plan.rows > 1 or plan.total_keys >= decode_tile_keys)) return a.attendTiled(cmds, y, queries, cache_keys, cache_values, plan, capacity, timeout_ns);
         const long = plan.total_keys > shared_stream_keys;
         var bindings: [5]dispatch.Binding = .{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind(), undefined };
         const pipe = if (long) blk: {
@@ -250,8 +253,8 @@ pub const Attention = struct {
         try pipe.run(cmds, std.mem.asBytes(&p), .{ @intCast(query_heads), groups_x, 1 }, timeout_ns);
     }
 
-    // Prefill chunks of 2..tile_max_rows rows: scores, row softmax and P*V as three tiled dispatches over an f32 score scratch.
-    // Each dot and each key sum keeps the decode kernel's accumulation order, so the output is bit-identical to it.
+    // Chunks of 2..tile_max_rows rows, and 1-row decodes over decode_tile_keys or more keys: scores, row softmax and P*V as three
+    // tiled dispatches over an f32 score scratch. Each dot and each key sum keeps the decode kernel's accumulation order, so the output is bit-identical to it.
     fn attendTiled(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, plan: AttendPlan, capacity: u64, timeout_ns: u64) Error!void {
         var p: params.Params = .{
             .matrix_m = @intCast(query_heads),
