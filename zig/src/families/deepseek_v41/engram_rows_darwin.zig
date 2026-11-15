@@ -23,7 +23,7 @@ const F_NOCACHE: i32 = 48; // sys/fcntl.h: turn data caching off/on
 const F_RDAHEAD: i32 = 45; // sys/fcntl.h: turn read-ahead off/on
 const AT_FDCWD: i32 = -2; // fcntl.h: the process's working directory
 
-pub const Stats = struct { hits: u64 = 0, waited: u64 = 0, misses: u64 = 0, issued: u64 = 0, reads: u64 = 0, bytes: u64 = 0, wait_ns: u64 = 0 };
+pub const Stats = struct { hits: u64 = 0, waited: u64 = 0, misses: u64 = 0, issued: u64 = 0, reads: u64 = 0, bytes: u64 = 0, wait_ns: u64 = 0, decode_ns: u64 = 0, settle_ns: u64 = 0 };
 
 pub const Rows = struct {
     gpa: std.mem.Allocator,
@@ -288,35 +288,50 @@ pub const Rows = struct {
 
     /// Finished batches into the caches (bulk reads past cap / 4 read through).
     pub fn settle(r: anytype, li: ?usize) void {
-        // the pool's workers write `left` / `failed`: settled under its lock (the batches' list stays put)
-        if (r.pool) |p| p.lock();
-        defer if (r.pool) |p| p.unlock();
-        for (r.batches.items) |*b| {
-            if (!b.in_use or b.left > 0) continue;
-            const t = &r.tables[b.table];
-            const keep = !b.failed and b.rows.len <= r.cap / 4;
-            // a settle on another table never drops it: segments read layer 1 then 14, so the next 14 batch sees both
-            if (!keep and !b.failed and !b.read and (b.unread < 1 or li != b.table)) {
-                if (li == b.table) b.unread += 1;
+        var from: usize = 0;
+        while (from < r.batches.items.len) {
+            // found under the pool's lock (workers write `left`, `failed`), settled without it while reads go on
+            var found: [64]u32 = undefined;
+            var failed: [64]bool = undefined;
+            var n: usize = 0;
+            if (r.pool) |p| p.lock();
+            while (from < r.batches.items.len and n < found.len) : (from += 1) {
+                const b = &r.batches.items[from];
+                if (!b.in_use or b.left > 0) continue;
+                found[n] = @intCast(from);
+                failed[n] = b.failed;
+                n += 1;
+            }
+            if (r.pool) |p| p.unlock();
+            for (found[0..n], failed[0..n]) |bi, bad| r.settleOne(&r.batches.items[bi], bad, li);
+        }
+    }
+
+    /// A finished batch into the cache, or read through (a bulk batch once read; a failed one at once).
+    fn settleOne(r: anytype, b: *Batch, bad: bool, li: ?usize) void {
+        const t = &r.tables[b.table];
+        const keep = !bad and b.rows.len <= r.cap / 4;
+        // a settle on another table never drops it: segments read layer 1 then 14, so the next 14 batch sees both
+        if (!keep and !bad and !b.read and (b.unread < 1 or li != b.table)) {
+            if (li == b.table) b.unread += 1;
+            return;
+        }
+        for (b.rows, 0..) |x, k| {
+            if (!keep) {
+                t.drop(x);
                 continue;
             }
-            for (b.rows, 0..) |x, k| {
-                if (!keep) {
-                    t.drop(x);
-                    continue;
-                }
-                const s = t.take();
-                @memcpy(t.recs[s * row_bytes ..][0..row_bytes], b.record(k, t.h.lo));
-                t.ids[s] = x;
-                t.front(s);
-                // the entry is this batch's (a row is in one batch at most; evictions only remove ready entries)
-                t.map.getPtr(x).?.* = .{ .ready = s };
-            }
-            r.gpa.free(b.rows);
-            r.gpa.free(b.ext);
-            r.gpa.free(b.buf);
-            b.in_use = false;
+            const s = t.take();
+            @memcpy(t.recs[s * row_bytes ..][0..row_bytes], b.record(k, t.h.lo));
+            t.ids[s] = x;
+            t.front(s);
+            // the entry is this batch's (a row is in one batch at most; evictions only remove ready entries)
+            t.map.getPtr(x).?.* = .{ .ready = s };
         }
+        r.gpa.free(b.rows);
+        r.gpa.free(b.ext);
+        r.gpa.free(b.buf);
+        b.in_use = false;
     }
 
     /// Layer `li`'s rows `idx` (global row ids this rank owns, any order, duplicates allowed) as bf16 [idx.len, dim].
@@ -367,15 +382,39 @@ pub const Rows = struct {
                 r.recs.items[k] = b.record(std.sort.binarySearch(u64, b.rows, x, orderU64).?, t.h.lo).ptr;
             },
         };
-        // every position: its record's values through the table (scale byte of each 32 values, then the e4m3 byte)
-        for (idx, 0..) |i, p| {
-            const rec = r.recs.items[std.sort.binarySearch(u64, u, @as(u64, @intCast(i)), orderU64).?];
-            const o = out[p * dim ..][0..dim];
-            for (o, 0..) |*v, j| v.* = r.lut[@as(usize, rec[values + j / 32]) << 8 | rec[j]];
-        }
+        const t1 = nowNs();
+        decodeAll(r.lut, idx, u, r.recs.items, dim, out);
+        const t2 = nowNs();
         r.settle(li);
+        r.stats.decode_ns += t2 - t1;
+        r.stats.settle_ns += nowNs() - t2;
     }
 };
+
+/// Positions a decode thread takes at least; fewer positions decode on the calling thread.
+const decode_share = 1024;
+const decode_threads = 8;
+
+/// Every position's record values through the table, on up to `decode_threads` threads (each its own positions).
+fn decodeAll(lut: *const [65536]u16, idx: []const i64, u: []const u64, recs: []const [*]const u8, dim: usize, out: []u16) void {
+    const n = @min(decode_threads, idx.len / decode_share);
+    if (n < 2) return decode(lut, idx, u, recs, dim, out, 0, idx.len);
+    var threads: [decode_threads]?std.Thread = @splat(null);
+    const per = (idx.len + n - 1) / n;
+    for (1..n) |k| threads[k] = std.Thread.spawn(.{ .stack_size = 64 << 10 }, decode, .{ lut, idx, u, recs, dim, out, k * per, @min(idx.len, (k + 1) * per) }) catch null;
+    decode(lut, idx, u, recs, dim, out, 0, per);
+    // a thread that could not start: its positions on this thread
+    for (1..n) |k| if (threads[k]) |t| t.join() else decode(lut, idx, u, recs, dim, out, k * per, @min(idx.len, (k + 1) * per));
+}
+
+/// Positions [p0, p1): each one's record (by the sorted unique rows `u`) through the table, scale byte, then code.
+fn decode(lut: *const [65536]u16, idx: []const i64, u: []const u64, recs: []const [*]const u8, dim: usize, out: []u16, p0: usize, p1: usize) void {
+    for (idx[p0..p1], p0..) |i, p| {
+        const rec = recs[std.sort.binarySearch(u64, u, @as(u64, @intCast(i)), orderU64).?];
+        const o = out[p * dim ..][0..dim];
+        for (o, 0..) |*v, j| v.* = lut[@as(usize, rec[values + j / 32]) << 8 | rec[j]];
+    }
+}
 
 fn orderU64(a: u64, b: u64) std.math.Order {
     return std.math.order(a, b);
