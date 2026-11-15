@@ -1,0 +1,8 @@
+commit 44f3e600ae (tree as run; the branch head adds only this receipt)
+Apple M5 Ultra, macOS 27.2.1, Zig 0.17.0
+command: TF_DSV41_UNITS_BATCHES=16 zig build test-dsv41-metal
+exit 0; 1138 PASS lines, no FAIL
+
+PASS dsv41 metal units rule: 2785 safe rows exact in 6 orders of every sum; 415 rows past the bound, 1793 sums rounding in some order
+PASS dsv41 metal units near the bound, up (act_quant codes): safe 61481856 sums (72935 rows within 0.1% of it), tensor unit vs exact 0, chain vs exact 0; past the bound 5627008 sums, tensor unit vs chain 86750
+PASS dsv41 metal units near the bound, down (dprep halves): safe 57755648 sums (894086 rows within 0.1% of it), tensor unit vs exact 0, chain vs exact 0; past the bound 9353216 sums, tensor unit vs chain 103364
