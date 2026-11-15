@@ -37,6 +37,8 @@ pub const Chunks = struct {
     rig: rig_.Rig,
     f: cuda.Function,
     wrong_table: bool = false,
+    regions: bool = false, // TF_GLM_KV_SPLIT: the latent region, its table and stride; control: the pooled table's rows
+    step: usize = pages.page_bytes,
     merge: cuda.Function,
     form: Form,
     shape: c.Shape = undefined,
@@ -77,7 +79,14 @@ pub const Chunks = struct {
             16 => if (self.form.sparse) spec(.{ .hb = 16, .sparse = true }) else spec(.{ .hb = 16, .sparse = false }),
             else => if (self.form.sparse) spec(.{ .hb = 32, .sparse = true }) else spec(.{ .hb = 32, .sparse = false }),
         };
-        if (self.wrong_table) declared.name = switch (self.form.hb) {
+        if (self.regions) declared.name = switch (self.form.hb) {
+            16 => if (self.form.sparse) "cuda glm tf_glm_chunks_16 sparse on two regions out of order, with tf_glm_merge" else "cuda glm tf_glm_chunks_16 dense on two regions out of order, with tf_glm_merge",
+            else => if (self.form.sparse) "cuda glm tf_glm_chunks_32 sparse on two regions out of order, with tf_glm_merge" else "cuda glm tf_glm_chunks_32 dense on two regions out of order, with tf_glm_merge",
+        };
+        if (self.wrong_table and self.regions) declared.name = switch (self.form.hb) {
+            16 => if (self.form.sparse) "control: GLM chunks16 sparse in two regions takes rows from the pooled table" else "control: GLM chunks16 dense in two regions takes the pooled table",
+            else => if (self.form.sparse) "control: GLM chunks32 sparse in two regions takes rows from the pooled table" else "control: GLM chunks32 dense in two regions takes the pooled table",
+        } else if (self.wrong_table) declared.name = switch (self.form.hb) {
             16 => if (self.form.sparse) "control: GLM chunks16 sparse uses swapped page rows" else "control: GLM chunks16 dense uses a swapped table",
             else => if (self.form.sparse) "control: GLM chunks32 sparse uses swapped page rows" else "control: GLM chunks32 dense uses a swapped table",
         };
@@ -127,11 +136,16 @@ pub const Chunks = struct {
         const arena = try a.alloc(u8, (n_pages + 3) * pages.page_bytes);
         defer a.free(arena);
         @memset(arena, 0);
+        const geo: pages.Geometry = .{ .regions = self.regions, .n = n_pages + 3 };
+        self.step = geo.latStride();
         for (0..span) |t| {
-            const at = pages.part_bytes + @as(usize, @intCast(self.ids[t / pages.rows_a_page])) * pages.page_bytes + (t % pages.rows_a_page) * lw * 2;
+            const at = geo.latAt() + @as(usize, @intCast(self.ids[t / pages.rows_a_page])) * self.step + (t % pages.rows_a_page) * lw * 2;
             @memcpy(arena[at..][0 .. lw * 2], std.mem.sliceAsBytes(self.cache[t * lw ..][0..lw]));
         }
-        const page_rows = pages.page_bytes / (lw * 2);
+        const page_rows = self.step / (lw * 2);
+        // a regions control: each token's row from the pooled table (every entry differs), in the latent unit
+        const rows_ids = if (self.regions and self.wrong_table) try pages.otherTable(a, rng, self.ids) else self.ids;
+        defer if (rows_ids.ptr != self.ids.ptr) a.free(rows_ids);
         const tok = try a.alloc(i32, if (self.form.sparse) shape.rows * shape.k else 1);
         defer a.free(tok);
         const cnt = try a.alloc(i32, shape.rows);
@@ -139,19 +153,19 @@ pub const Chunks = struct {
         @memset(tok, 0);
         @memset(cnt, @intCast(shape.k));
         if (self.form.sparse) for (tok, self.keys) |*v, t| { // as the token lists hold them: a token's row in the pages
-            v.* = @intCast(@as(usize, @intCast(self.ids[t / pages.rows_a_page])) * page_rows + t % pages.rows_a_page);
+            v.* = @intCast(@as(usize, @intCast(rows_ids[t / pages.rows_a_page])) * page_rows + t % pages.rows_a_page);
         };
-        if (self.wrong_table and self.form.sparse) for (tok) |*v| {
+        if (self.wrong_table and self.form.sparse and !self.regions) for (tok) |*v| {
             const row: usize = @intCast(v.*);
             v.* = @intCast(((row / page_rows + 1) % (n_pages + 3)) * page_rows + row % page_rows);
         };
         const p: i32 = @intCast(self.at);
         self.in[0] = try self.rig.input(std.mem.sliceAsBytes(self.q));
-        self.in[1] = try self.rig.input(arena) + pages.part_bytes;
+        self.in[1] = try self.rig.input(arena) + geo.latAt();
         self.in[2] = try self.rig.input(std.mem.sliceAsBytes(tok));
         self.in[3] = try self.rig.input(std.mem.sliceAsBytes(cnt));
         self.pos = try self.rig.input(std.mem.asBytes(&p));
-        self.pt = try pages.uploadTable(&self.rig, self.ids, self.wrong_table);
+        self.pt = if (self.regions and self.wrong_table and !self.form.sparse) try self.rig.input(std.mem.sliceAsBytes(rows_ids)) else try pages.uploadTable(&self.rig, self.ids, self.wrong_table and !self.regions);
         const n = self.nch * shape.rows * heads;
         self.parts = .{ try self.rig.scratch(n * lw * 4), try self.rig.scratch(n * 4), try self.rig.scratch(n * 4) };
         self.out = try self.rig.output(shape.rows * heads * lw * 2);
@@ -162,7 +176,7 @@ pub const Chunks = struct {
         const rows: i64 = @intCast(self.shape.rows);
         const w: i64 = if (self.form.sparse) @intCast(self.shape.k) else 0;
         var a: cuda.Args = .{};
-        inline for (.{ self.in[0], self.in[1], self.pos, self.in[2], self.in[3], self.parts[0], self.parts[1], self.parts[2], rows, @as(i64, heads), w, @as(f32, @floatCast(scale)), @as(c_int, @intFromBool(self.form.sparse)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);
+        inline for (.{ self.in[0], self.in[1], self.pos, self.in[2], self.in[3], self.parts[0], self.parts[1], self.parts[2], rows, @as(i64, heads), w, @as(f32, @floatCast(scale)), @as(c_int, @intFromBool(self.form.sparse)), self.pt, @as(i64, @intCast(self.step)) }) |v| a.add(v);
         const shared = if (self.form.hb == 32) glm.glue.chunksSmem(32) else glm.glue.chunksSmem(16);
         try cuda.launch.launch(self.f, .{ .grid = .{ .x = @intCast(self.shape.rows), .y = (heads + self.form.hb - 1) / self.form.hb, .z = @intCast(self.nch) }, .block = .{ .x = 256 }, .shared = shared }, self.rig.s, &a);
         var m: cuda.Args = .{};

@@ -21,6 +21,7 @@ const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
 /// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
 const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
+const words = [_][:0]const u8{"TF_GLM_KV_SPLIT"};
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -58,12 +59,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
     for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
+    for (words) |name| try t.expectEqual(e.Kind.word, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len + words.len, n);
 }
 
 test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
@@ -175,4 +177,10 @@ test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify ro
     const most = e.rule(@import("cuda_env.zig").ceiling_switch).max;
     try t.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
     try t.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
+}
+test "GLM strict env: TF_GLM_KV_SPLIT takes 0, off, 1 or on at GLM's open, and refuses the rest by name" {
+    for (words) |name| {
+        for ([_][]const u8{ "0", "off", "1", "on" }) |raw| try check(name, raw, true);
+        for ([_][]const u8{ "ON", "true", "yes", "2", " 1", "on " }) |raw| try check(name, raw, false);
+    }
 }

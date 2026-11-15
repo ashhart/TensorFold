@@ -46,6 +46,7 @@ pub const Caches = struct {
     pt: u64 = 0, // on pages: the stream's table (i32 page ids), lc and pk then this cache's place in page 0; 0: rows
     ps: u64 = 0, // on pages: bytes from one page to the next
     pks: u64 = 0, // TF_GLM_KV_HOST: the pooled keys' own page stride (their pages on the device); 0: ps
+    pkt: u64 = 0, // TF_GLM_KV_SPLIT: the pooled keys' own table (pt is then the latent rows' alone); 0: pt
 };
 
 /// The block's scratch for up to `rows` rows.
@@ -128,13 +129,7 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
     const set = k.set;
     const ix = l.index;
     const kw_rows = ix.d + ix.heads;
-    var v = s; // the scratch from row r0
-    v.lat += r0 * l.lw * 2;
-    v.ikr += r0 * kw_rows * 2;
-    v.igr += r0 * ix.d * 4;
-    v.qa += r0 * l.heads * l.lw * 2;
-    v.ol += r0 * l.heads * l.lw * 2;
-    v.qi += r0 * ix.heads * ix.d * 2;
+    const v = rowScratch(l, s, r0);
     try writeKeys(k, stream, l, c, v, rows, pos);
     const t, const tk = try tables(l, c);
     const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
@@ -148,7 +143,7 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
         stamp.end();
     }
     if (sparseRows(l, host_pos, rows)) {
-        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
+        try sparse.selectTokensProfile(set, k.ops, stream, v.qi, v.ikr + ix.d * 2, kw_rows, c.pk, tk, t, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
         const stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
         if (c.pks != 0) if (kv_host.active) |*g| { // host rows: gather the picks into device slots, attend there
@@ -157,6 +152,67 @@ pub fn attend(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, 
         };
         try latent.sparseAttentionFormat(set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, rows, l.heads, l.lw, scale);
     }
+}
+
+/// The scratch from row r0 (the token lists and partials stay at the front).
+fn rowScratch(l: Layer, s: Scratch, r0: usize) Scratch {
+    const ix = l.index;
+    var v = s;
+    v.lat += r0 * l.lw * 2;
+    v.ikr += r0 * (ix.d + ix.heads) * 2;
+    v.igr += r0 * ix.d * 4;
+    v.qa += r0 * l.heads * l.lw * 2;
+    v.ol += r0 * l.heads * l.lw * 2;
+    v.qi += r0 * ix.heads * ix.d * 2;
+    return v;
+}
+
+/// TF_GLM_KV_SPLIT, a rank without the latent rows: attend's writes (its latent rows to the trash), its token lists.
+pub fn attendNone(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, r0: usize, rows: usize, pos: u64, host_pos: usize) !void {
+    const ix = l.index;
+    const v = rowScratch(l, s, r0);
+    try writeKeys(k, stream, l, c, v, rows, pos);
+    if (!sparseRows(l, host_pos, rows)) return;
+    const t, const tk = try tables(l, c); // every rank picks (a split selection gathers every rank's rows)
+    try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, v.ikr + ix.d * 2, ix.d + ix.heads, c.pk, tk, t, pos, host_pos, rows, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, k.split, k.prof);
+}
+
+/// TF_GLM_KV_SPLIT, the owner: attend's attention alone for another rank's `heads` heads, queries `qa` into `ol`.
+pub fn attendPeer(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64, host_pos: usize, nch: usize, part_rows: usize, qa: u64, ol: u64, heads: usize) !void {
+    const t, _ = try tables(l, c);
+    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+    var p = l;
+    p.heads = heads;
+    var v = s; // its token lists, made by this rank's own pass of the same rows, are the scratch's first rows
+    v.qa = qa;
+    v.ol = ol;
+    // the partials hold this rank's heads: a wider share (TP=3's 22 against 21) takes fewer rows a call
+    const fit = if (heads <= l.heads) rows else @max(1, rows * l.heads / heads);
+    if (host_pos < l.dense_limit) {
+        const stamp = prof.span(k.prof, stream, .mla);
+        defer stamp.end();
+        try denseAttention(k, stream, p, c, v, pos, rows, nch, if (heads <= l.heads) part_rows else @max(1, part_rows * l.heads / heads), scale);
+    }
+    if (!sparseRows(l, host_pos, rows)) return;
+    const stamp = prof.span(k.prof, stream, .mla);
+    defer stamp.end();
+    var r0: usize = 0;
+    while (r0 < rows) : (r0 += fit) {
+        const n = @min(fit, rows - r0);
+        const q = r0 * heads * l.lw * 2;
+        try latent.sparseAttentionBlock(k.set, stream, qa + q, c.lc, c.ls, t, v.tokens + r0 * sparse.width * 4, v.counts + r0 * 4, sparse.width, v.partials, ol + q, n, heads, l.lw, scale, latent.headBlock(rows));
+    }
+}
+
+/// TF_GLM_KV_SPLIT, the owner: attendLastRow's attention for another rank's `heads` heads, after its own pass.
+pub fn lastRowPeer(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64, host_pos: usize, nch: usize, qa: u64, ol: u64, heads: usize) !void {
+    const t, _ = try tables(l, c);
+    const at = if (rows > 1) s.at else pos; // the last row's position, as the own pass put it
+    const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(l.qk), -0.5));
+    const stamp = prof.span(k.prof, stream, .mla);
+    defer stamp.end();
+    if (host_pos < l.dense_limit) try latent.attentionFormat(k.set, stream, qa, c.lc, c.ls, .{ .pt = c.pt, .ps = c.ps }, at, s.partials, ol, s.dummy, 1, heads, l.lw, nch, scale, latent.headBlock(rows));
+    if (sparseRows(l, host_pos, rows)) try latent.sparseAttentionFormat(k.set, stream, qa, c.lc, c.ls, t, s.tokens, s.counts, sparse.width, s.partials, ol, 1, heads, l.lw, scale);
 }
 
 /// A prompt MTP chunk's block: every row's caches, then the last row's attention and o_proj partial into `out` row 0.
@@ -172,7 +228,7 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
     stamp = prof.span(k.prof, stream, .index_update);
     try sparse.indexUpdate(k.set, stream, s.ikr, kw_rows, s.igr, ix.ln_w, ix.ln_b, ix.ape, c.ik, c.ig, c.pk, tk, pos, rows);
     stamp.end();
-    try attendLastRow(k, stream, l, c, s, rows, pos, host_pos, nch, t, tk);
+    try attendLastRow(k, stream, l, c, s, rows, pos, host_pos, nch);
     const pstamp = prof.span(k.prof, stream, .projections);
     defer pstamp.end();
     const off = (rows - 1) * l.heads * l.lw * 2;
@@ -181,7 +237,8 @@ pub fn blockLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scr
 }
 
 /// A chunk's last row attending over caches already written: its own query, causal limit and token list.
-fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64, host_pos: usize, nch: usize, t: latent.Table, tk: latent.Table) !void {
+pub fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64, host_pos: usize, nch: usize) !void {
+    const t, const tk = try tables(l, c);
     const ix = l.index;
     const r0 = rows - 1;
     var v = s; // the scratch from the last row (its token lists and partials stay at the front)
@@ -205,7 +262,7 @@ fn attendLastRow(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratc
     }
     if (sparseRows(l, host_pos, rows)) {
         // one row at host_pos + r0: the same pool bucket, score columns and token list its block computed for it
-        try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
+        try sparse.selectTokensProfile(k.set, k.ops, stream, v.qi, s.ikr + r0 * (ix.d + ix.heads) * 2 + ix.d * 2, ix.d + ix.heads, c.pk, tk, t, at, host_pos + r0, 1, ix.heads, ix.d, c.pk_rows - 2, v.select, v.tokens, v.counts, null, k.prof);
         var stamp = prof.span(k.prof, stream, .mla);
         defer stamp.end();
         try latent.sparseAttentionFormat(k.set, stream, v.qa, c.lc, c.ls, t, v.tokens, v.counts, sparse.width, v.partials, v.ol, 1, l.heads, l.lw, scale);
@@ -232,14 +289,15 @@ fn denseAttention(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scrat
     }
 }
 
-/// A cache's tables: latent rows `t`, and pooled keys `tk` (on their own device pages under TF_GLM_KV_HOST).
+/// A cache's tables: latent rows `t`, pooled keys `tk` (TF_GLM_KV_HOST: own pages; TF_GLM_KV_SPLIT: own table too).
 fn tables(l: Layer, c: Caches) !struct { latent.Table, latent.Table } {
     if (c.ps % (l.lw * 2) != 0) return error.LatentShape; // pages whole latent rows apart (the token lists' unit)
+    if (c.pkt != 0 and c.pks == 0) return error.LatentShape; // a region of pooled keys has its own stride
     const t: latent.Table = .{ .pt = c.pt, .ps = c.ps, .page_rows = c.ps / (l.lw * 2) };
-    return .{ t, .{ .pt = c.pt, .ps = if (c.pks != 0) c.pks else c.ps, .page_rows = t.page_rows } };
+    return .{ t, .{ .pt = if (c.pkt != 0) c.pkt else c.pt, .ps = if (c.pks != 0) c.pks else c.ps, .page_rows = t.page_rows } };
 }
 
-fn writeKeys(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64) !void {
+pub fn writeKeys(k: Kernels, stream: cuda.Stream, l: Layer, c: Caches, s: Scratch, rows: usize, pos: u64) !void {
     const set = k.set;
     const ix = l.index;
     const kw_rows = ix.d + ix.heads;

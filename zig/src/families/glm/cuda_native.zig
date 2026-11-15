@@ -53,6 +53,7 @@ pub const Options = struct {
     drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
     mtp_confidence: ?f64 = null, // --mtp-confidence: rank 0's lanes stop an MTP chain where its chance falls under it
     learn_conversations: bool = false, // --learn-conversations: refused with TF_GLM_REQUEST_STARTS=1 (cuda_env)
+    keeps: bool = false, // the server keeps prompt states: a prompt cache (--prompt-cache-gib, 16 unset) or a disk tier
 };
 /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, Apache-2.0 weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
@@ -243,6 +244,8 @@ fn openRank(a: StartArgs, set: ranks.Settings) !Loaded {
     // TF_KV_SHARE keeps prompts as the pool's pages: refused before the weights load, every rank told (startup)
     if (a.share > 0 and !set.pages) return error.GlmShareNeedsPages;
     if (@import("cuda_kv_host.zig").onHost() and !set.pages) return error.GlmKvHostNeedsPages;
+    try startup.sharing(set.kv_split, a.share);
+    try startup.keeping(set.kv_split, o.keeps);
     cuda.memory_receipt.emit(@intCast(p.rank), .load_begin, true); // the four phases tools/memory_receipts.py reads
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
@@ -332,7 +335,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     try @import("cuda_roce_multi.zig").open(gpa, io, ctx.d, &own.group, set.roce_multi); // three ranks or more, likewise
     errdefer if (own.group.multi) |m| m.deinit(m.ctx);
     own.e.installGroup(&own.group);
-    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
+    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try follow.linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
     try @import("cuda_prompt_logprobs.zig").prepare(own.e);
     own.e.snap_setup = .{ .ptr = own, .run = readySnapshots };
@@ -368,7 +371,7 @@ fn finishRank(a: OpenArgs) !Loaded {
     // Rank 0 alone reads these: TF_GLM_PROMPT_STEPS=0 passes prompts whole, TF_GLM_SHARED=0 runs windows alone.
     const steps = try @import("sys").environment.value(bool, "TF_GLM_PROMPT_STEPS", ranks.environment("TF_GLM_PROMPT_STEPS"), true);
     const shared = try @import("sys").environment.value(bool, "TF_GLM_SHARED", ranks.environment("TF_GLM_SHARED"), true);
-    own.link.asleep = cuda.tp_watch.open(); // the other ranks begin asleep (follow): the first step wakes them
+    own.link.lead(cuda.tp_watch.open(), p.world); // the other ranks begin asleep (follow): the first step wakes them
     own.lanes = .{ .x = .{ .e = own.e, .link = &own.link }, .whole = !steps, .alone = !shared, .mtp_confidence = o.mtp_confidence };
     const extra: u64 = (if (o.drafter != null) dflash.ring_bytes else 0) + if (own.e.images) |v| v.streamBytes() else @as(usize, 0);
     own.layout = if (set.pages) try pages_mod.layout(gpa, own.e, extra) else null;
@@ -440,6 +443,7 @@ pub fn snap_save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaq
     _ = owner;
     const e: *engine.Engine = @ptrCast(@alignCast(ptr));
     if (e.pos() != at) return error.NotAtMark;
+    if (e.settings.kv_split) return error.KvSplitKeeps; // refused at start; never a state of rows another rank holds
     const k = try e.gpa.create(engine.Kept);
     errdefer e.gpa.destroy(k);
     k.* = .{ .id = try e.keepState(), .at = at, .below = @import("cuda_prompt_cuts.zig").below(e.cur.cuts.items, at) };
@@ -529,7 +533,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         ),
         error.NotModelOpt, error.UnsupportedQuant => "GLM-5.3-Flash on CUDA reads ModelOpt NVFP4 and MIXED_PRECISION checkpoints (the log names what config.json has)",
         error.UnreadableFormat => "a projection is stored in a format GLM-5.3-Flash on CUDA does not read (the log names its module, recipe and tensors)",
-        else => null,
+        else => startup.explain(err), // TF_GLM_KV_SPLIT's refusals
     };
 }
 
@@ -572,8 +576,7 @@ test "TF_KV_PAGES with --kv-cache fp8: auto and off keep windows at every rank c
         try std.testing.expect(!try paging("0", w, true));
         for ([_][]const u8{ "on", "1", "all" }) |v| try std.testing.expectError(error.Fp8OnPages, paging(v, w, true));
     }
-    try std.testing.expect(explain(null, error.Fp8OnPages) != null);
-    try std.testing.expect(explain(null, error.GlmKvHostNeedsPages) != null);
+    for ([_]anyerror{ error.Fp8OnPages, error.GlmKvHostNeedsPages, error.KvSplitNeedsRanks, error.KvSplitNeedsPages, error.KvSplitOnHost, error.KvSplitShare, error.KvSplitKeeps, error.KvSplitRoom, error.ClassTooSmall, error.ResidueMismatch, error.BadClasses }) |e| try std.testing.expect(explain(null, e) != null);
 }
 
 test "the plan's window, the context and a verify window, takes the pages of a stream's table at that capacity" {
@@ -581,17 +584,4 @@ test "the plan's window, the context and a verify window, takes the pages of a s
     for ([_]usize{ 8192, 8191, 245_760, 524_288 - 33, 524_288 - 32, 524_288 - 31, 1_048_576, 2_097_152, 2_097_152 + 1 }) |context| {
         try std.testing.expectEqual(pages_mod.tableLen(capacity(context)), l.pages(context + window_rows));
     }
-}
-
-// Enough words for every offered frame pair and image, even with a small text context.
-pub fn linkCapacity(cap: usize, media: ?images_mod.Limits) !usize {
-    const lim = media orelse return cap;
-    const frames: usize = (@as(usize, lim.max_frames) + 1) / 2;
-    const pairs = std.math.mul(usize, frames, lim.max_videos) catch return error.TooManyImages;
-    const spans = std.math.add(usize, pairs, lim.max_images) catch return error.TooManyImages;
-    const words = std.math.mul(usize, spans, 3) catch return error.TooManyImages;
-    return @max(cap, words);
-}
-test "a small text context still sizes the link for every offered media span" {
-    try std.testing.expectEqual(@as(usize, 792), try linkCapacity(64, .{ .image_tokens = 2048, .max_images = 8, .video_tokens = 4096, .max_videos = 2, .max_frames = 256 }));
 }
