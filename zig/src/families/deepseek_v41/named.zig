@@ -9,7 +9,22 @@ const Pack = @import("pack.zig").Pack;
 const DType = @import("pack.zig").DType;
 const Io = std.Io;
 
-pub const Kind = enum { f32, bf16, f16, i16 };
+pub const Kind = enum {
+    f32,
+    bf16,
+    f16,
+    i16,
+    /// the release's stored bytes: FP8 codes, E2M1 pairs, E8M0 scales
+    u8,
+
+    pub fn size(k: Kind) usize {
+        return switch (k) {
+            .f32 => 4,
+            .bf16, .f16, .i16 => 2,
+            .u8 => 1,
+        };
+    }
+};
 
 /// One tensor the forward holds: its name (`L2.attn.wq_a.trellis`, `embed`), element kind, shape and bytes.
 pub const Named = struct {
@@ -122,8 +137,9 @@ pub const Builder = struct {
         return d;
     }
 
-    /// A group's part as `<base>.trellis`, `.suh`, `.svh`.
+    /// A group's part as `<base>.trellis`, `.suh`, `.svh`; a release group's as `<base>.w` and (FP8) `<base>.s`.
     fn group(b: *Builder, base: []const u8, g: plan.GroupPlan) !void {
+        if (g.form != .exl3) return b.releaseGroup(base, g.form);
         var img: stage.GroupImage = if (b.metadata_only) .{ .trellis = &.{}, .suh = &.{}, .svh = &.{} } else try stage.group(b.gpa, b.io, b.pack, g);
         defer img.deinit(b.gpa);
         const p = g.form.exl3.part.group;
@@ -131,6 +147,33 @@ pub const Builder = struct {
         try b.put(try std.fmt.bufPrint(&nb, "{s}.trellis", .{base}), .i16, &.{ p.k_tiles, p.n_tiles, p.words }, try b.copy(img.trellis));
         try b.put(try std.fmt.bufPrint(&nb, "{s}.suh", .{base}), .f16, &.{p.k()}, try b.copy(img.suh));
         try b.put(try std.fmt.bufPrint(&nb, "{s}.svh", .{base}), .f16, &.{p.n()}, try b.copy(img.svh));
+    }
+
+    /// A release group: FP8 codes [rows][cols] u8 and block scales [rows/32][cols/32] u8, or BF16 [rows][cols].
+    fn releaseGroup(b: *Builder, base: []const u8, form: plan.Form) !void {
+        const sr = @import("stage_release.zig");
+        var img: sr.GroupImage = if (b.metadata_only) .{ .w = &.{}, .s = &.{} } else try sr.group(b.gpa, b.io, b.pack, form);
+        defer if (!b.metadata_only) img.deinit(b.gpa);
+        var nb: [160]u8 = undefined;
+        switch (form) {
+            .fp8_block => |f| {
+                try b.put(try std.fmt.bufPrint(&nb, "{s}.w", .{base}), .u8, &.{ f.rows.len, f.cols.len }, try b.copy(img.w));
+                try b.put(try std.fmt.bufPrint(&nb, "{s}.s", .{base}), .u8, &.{ f.rows.len / 32, f.cols.len / 32 }, try b.copy(img.s));
+            },
+            .bf16 => |f| try b.put(try std.fmt.bufPrint(&nb, "{s}.w", .{base}), .bf16, &.{ f.rows.len, f.cols.len }, try b.copy(img.w)),
+            .exl3 => unreachable,
+        }
+    }
+
+    /// Release experts, the rank's ids in slot order: `<base>.w` [E][rows][cols/2] E2M1, `<base>.s` [E][rows][cols/32].
+    fn releaseExperts(b: *Builder, base: []const u8, block: []const u8, x: *const plan.ExpertsPlan) !void {
+        const sr = @import("stage_release.zig");
+        const f = x.form.mxfp4;
+        var img: sr.GroupImage = if (b.metadata_only) .{ .w = &.{}, .s = &.{} } else try sr.experts(b.gpa, b.io, b.pack, block, x);
+        defer if (!b.metadata_only) img.deinit(b.gpa);
+        var nb: [160]u8 = undefined;
+        try b.put(try std.fmt.bufPrint(&nb, "{s}.w", .{base}), .u8, &.{ f.ids.len, f.rows.len, f.cols.len / 2 }, try b.copy(img.w));
+        try b.put(try std.fmt.bufPrint(&nb, "{s}.s", .{base}), .u8, &.{ f.ids.len, f.rows.len, f.cols.len / 32 }, try b.copy(img.s));
     }
 
     /// A routed projection: `.trellis` [E, kt, nt, words] (stack) or `.data` (ragged), `.suh` [E, K], `.svh` [E, N].
@@ -218,7 +261,10 @@ pub const Builder = struct {
             try b.native(try std.fmt.bufPrint(&nb, "L{d}.{s}", .{ l.index, rule.name }), rule, v, rank, world, heads, &pending);
         }
         if (pending != null) return error.EngramHalf;
-        for (&l.experts, [_][]const u8{ "w1", "w2", "w3" }) |*x, w| try b.experts(try std.fmt.bufPrint(&nb, "L{d}.moe.{s}", .{ l.index, w }), x);
+        for (&l.experts, [_][]const u8{ "w1", "w2", "w3" }) |*x, w| {
+            const base = try std.fmt.bufPrint(&nb, "L{d}.moe.{s}", .{ l.index, w });
+            if (x.form == .mxfp4) try b.releaseExperts(base, l.prefix, x) else try b.experts(base, x);
+        }
     }
 
     /// The vocabulary rows (bf16), the final norm (fp32) and the head's part.
