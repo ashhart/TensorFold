@@ -251,6 +251,7 @@ export function pickTicketUserPatch(input: unknown): Partial<Ticket> {
   if (Object.prototype.hasOwnProperty.call(patch, 'dependsOn')) assertStringList(patch.dependsOn, 'dependsOn', 64, 256)
   if (Object.prototype.hasOwnProperty.call(patch, 'dependencyFailurePolicy')) assertEnum(patch.dependencyFailurePolicy, TICKET_DEPENDENCY_FAILURE_POLICIES, 'dependencyFailurePolicy')
   if (Object.prototype.hasOwnProperty.call(patch, 'order') && (typeof patch.order !== 'number' || !Number.isFinite(patch.order))) throw new Error('order must be a finite number.')
+  if (patch.status === 'ready') patch.assignee = null
   return patch
 }
 

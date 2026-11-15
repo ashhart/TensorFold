@@ -50,7 +50,7 @@ assert.deepEqual(steer, { id: 'steer-1', tick: 5, kind: 'user', seat: 'you', tar
 assert.equal(steerRoom.events.at(-1), steer)
 assert.throws(() => appendRoomSteeringEvent({ ...steerRoom, state: 'ready' }, 'wait', () => 'x'), /Start the room/)
 
-assert.deepEqual({ ...pickTicketUserPatch({ status: 'ready', roomId: 'room-1' }) }, { status: 'ready', roomId: 'room-1' })
+assert.deepEqual({ ...pickTicketUserPatch({ status: 'ready', roomId: 'room-1' }) }, { status: 'ready', roomId: 'room-1', assignee: null })
 for (const field of ['threadId', 'runState', 'startedAt', 'execution', 'evidence', 'assignee', 'orchestratorHostId']) {
   assert.throws(() => pickTicketUserPatch({ [field]: null }), new RegExp(`${field} cannot be changed`))
 }
