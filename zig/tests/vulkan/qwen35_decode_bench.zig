@@ -1,8 +1,18 @@
-// Probe decode throughput: prefill the prompt, then `n` greedy tokens with readback after 8 warm-up tokens.
+// Probe decode throughput: prefill, then `arg` (default 128) greedy tokens with readback after 8 warm-up tokens.
 const std = @import("std");
 const Engine = @import("qwen35_vulkan").engine.Engine;
 
-pub fn run(io: std.Io, engine: *Engine, prompt: []const u32, n: usize) !void {
+/// Prints one DECODE-BENCH line and returns the probe's exit code.
+pub fn run(io: std.Io, engine: *Engine, prompt: []const u32, arg: []const u8) u8 {
+    const n = std.fmt.parseInt(usize, arg, 10) catch 128;
+    bench(io, engine, prompt, n) catch |e| {
+        std.debug.print("FAIL decode bench: {s}\n", .{@errorName(e)});
+        return 1;
+    };
+    return 0;
+}
+
+fn bench(io: std.Io, engine: *Engine, prompt: []const u32, n: usize) !void {
     try engine.prefill(prompt);
     var tok = try engine.draw();
     var tok_hash: u64 = 1469598103934665603;
