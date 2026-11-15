@@ -31,6 +31,18 @@ env:
   TRANSFORMERS_OFFLINE: '1'
 
 jobs:
+  computer-use-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    container:
+      image: swift:6.2.3-noble@sha256:6dd90eb2359663a2cde8f03e9951f488b23134b3b8fce20e9dcb6cada75dd803
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Test the shared computer-use parser and key table on Linux
+        run: swift test --package-path app/native/computer-use/ComputerUseChecks
+
   desktop:
     runs-on: macos-15
     timeout-minutes: 20

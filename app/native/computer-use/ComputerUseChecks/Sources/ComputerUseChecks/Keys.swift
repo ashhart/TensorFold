@@ -1,6 +1,9 @@
+import Foundation
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
-struct Modifier: Equatable {
+struct Modifier: Equatable, Sendable {
     let flag: CGEventFlags
     // nil for fn: a lone fn press can open the emoji picker or dictation, so it only sets the flag.
     let keyCode: CGKeyCode?

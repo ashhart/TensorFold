@@ -1,5 +1,8 @@
-import CoreGraphics
+import CoreFoundation
 import Foundation
+#if canImport(CoreGraphics)
+import CoreGraphics
+#endif
 
 struct HelperError: Error {
     let code: String
