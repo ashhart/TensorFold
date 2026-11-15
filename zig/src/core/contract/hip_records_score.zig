@@ -12,27 +12,27 @@ fn shortScore(comptime symbol: []const u8, usage: [limits.rdna.len]U) Record {
 
 pub const records = [4]Record{
     shortScore("tf_plan_score2_f16", .{
-        .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 43, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
     }),
     shortScore("tf_plan_score2_bf16", .{
-        .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 43, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
     }),
     shortScore("tf_plan_score2_act_f16", .{
-        .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 43, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
     }),
     shortScore("tf_plan_score2_act_bf16", .{
-        .{ .vgprs = 31, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 32, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
-        .{ .vgprs = 31, .sgprs = 30, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 44, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        .{ .vgprs = 32, .sgprs = 43, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
     }),
 };

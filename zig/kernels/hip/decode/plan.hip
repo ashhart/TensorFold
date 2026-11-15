@@ -62,6 +62,89 @@ constexpr int kMaxGroup = 16;
 // Keys a wave scores on long spans and on short ones: their loads go out together, each head's query read once.
 constexpr int kScoreKeys = 4;
 constexpr int kScoreKeysShort = 2;
+// Steps of its waves' keys a long-span block walks at d = 256 (launches/plan.zig's score_steps).
+constexpr int kScoreSteps = 8;
+
+// load() of a 16-bit cache element as a global load: a flat load also counts on lgkmcnt, which LDS reads wait on.
+__device__ __forceinline__ float cache_load(const void* p, int kind, long long i) {
+    const uint16_t bits = ((const __attribute__((address_space(1))) uint16_t*)p)[i];
+    return kind == 1 ? __half2float(__ushort_as_half(bits)) : bf16_to_float(bits);
+}
+
+// A wave's KEYS keys from key0 at d = 256 into k, lane l taking elements l + 32 i; keys past `visible` are not loaded.
+template <int KEYS>
+__device__ __forceinline__ void score_fetch(float (&k)[KEYS][8], const void* keys, int kind, const unsigned* pages,
+                                            unsigned pool, int kv, int key0, int visible, int lane) {
+#pragma unroll
+    for (int j = 0; j < KEYS; ++j) {
+        if (key0 + j >= visible) break;
+        const long long base = page_at(pages, pool, kv, key0 + j, 256);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) k[j][i] = cache_load(keys, kind, base + lane + i * 32);
+    }
+}
+
+// Lane 0's KEYS scores of a head from `at`: one store when `whole` (16-byte aligned rows, span a multiple of KEYS).
+template <int KEYS>
+__device__ __forceinline__ void score_store(float* at, const float (&sc)[KEYS], bool whole, int key0, int span) {
+    if (whole && KEYS == 4) {
+        *reinterpret_cast<float4*>(at) = make_float4(sc[0], sc[1 % KEYS], sc[2 % KEYS], sc[3 % KEYS]);
+    } else if (whole && KEYS == 2) {
+        *reinterpret_cast<float2*>(at) = make_float2(sc[0], sc[1 % KEYS]);
+    } else {
+        for (int j = 0; j < KEYS; ++j) if (key0 + j < span) at[j] = sc[j];
+    }
+}
+
+// plan_score_body's sums at d = 256, no element tests: a block walks STEPS steps, each step's keys loaded a step early.
+template <int KEYS, int KIND, int STEPS>
+__device__ __forceinline__ void plan_score_d256(const float* qs, float* __restrict__ rows, int span, int group,
+                                                int visible, int lane, float scale, const void* keys,
+                                                const unsigned* pages, unsigned pool, int kv) {
+    const int stride = (blockDim.x >> 5) * KEYS;  // keys a step of the block
+    const int first = blockIdx.x * STEPS * stride + (threadIdx.x >> 5) * KEYS;
+    const bool whole = (span % KEYS) == 0 && (reinterpret_cast<unsigned long long>(rows) & 15) == 0;
+    float kreg[KEYS][8] = {};
+    score_fetch<KEYS>(kreg, keys, KIND, pages, pool, kv, first, visible, lane);
+#pragma unroll 1
+    for (int step = 0; step < STEPS; ++step) {
+        const int key0 = first + step * stride;
+        if (key0 >= span) break;  // the same for the whole wave
+        float next[KEYS][8] = {};
+        score_fetch<KEYS>(next, keys, KIND, pages, pool, kv, step + 1 < STEPS ? key0 + stride : span, visible, lane);
+        if (key0 >= visible) {  // the wave's keys are all past the row's: -INFINITY wherever the span has them
+            float none[KEYS];
+            for (int j = 0; j < KEYS; ++j) none[j] = -INFINITY;
+            for (int g = 0; lane == 0 && g < group; ++g) {
+                score_store<KEYS>(rows + key0 + static_cast<long long>(g) * span, none, whole, key0, span);
+            }
+        } else {
+#pragma unroll
+            for (int g = 0; g < kMaxGroup; ++g) {
+                if (g < group) {  // the same for the whole block, so every lane reaches the folds
+                    float qv[8];
+#pragma unroll
+                    for (int i = 0; i < 8; ++i) qv[i] = qs[g * 256 + lane + i * 32];
+                    float dot[KEYS];
+#pragma unroll
+                    for (int j = 0; j < KEYS; ++j) {
+                        float partial = 0.f;
+#pragma unroll
+                        for (int i = 0; i < 8; ++i) partial += qv[i] * kreg[j][i];
+                        dot[j] = wave_sum_dpp(partial);
+                    }
+                    if (lane == 0) {
+                        float sc[KEYS];
+#pragma unroll
+                        for (int j = 0; j < KEYS; ++j) sc[j] = key0 + j < visible ? dot[j] * scale : -INFINITY;
+                        score_store<KEYS>(rows + key0 + static_cast<long long>(g) * span, sc, whole, key0, span);
+                    }
+                }
+            }
+        }
+        __builtin_memcpy(kreg, next, sizeof(kreg));
+    }
+}
 
 // score_keys over a plan's rows: a warp scores KEYS keys for each of the block's heads; q fp32 or of kind QKIND.
 template <int KEYS, int KIND, int QKIND = 0>
@@ -81,6 +164,13 @@ __device__ void plan_score_body(const void* __restrict__ q, float* __restrict__ 
     __syncthreads();
     const int visible = min(plan.pos[batch] + 1, span);
     const int lane = threadIdx.x & 31;
+    if (d == 256) {  // the checkpoints' head size
+        const unsigned long long* desc = plan_desc(plan, plan.slot[batch]);
+        float* rows = scores + (static_cast<long long>(batch) * heads + head0) * span;
+        plan_score_d256<KEYS, KIND, KEYS == kScoreKeys ? kScoreSteps : 1>(qs, rows, span, group, visible, lane, scale,
+            reinterpret_cast<const void*>(desc[plan_first(layer)]), plan_pages(plan, desc), plan.pool, head0 / (heads / kv_heads));
+        return;
+    }
     const int key0 = (blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5)) * KEYS;
     float kreg[KEYS][8] = {};
     if (key0 < visible) {
