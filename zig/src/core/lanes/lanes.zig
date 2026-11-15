@@ -72,6 +72,7 @@ test {
     _ = @import("open_trace_test.zig");
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
+    _ = @import("gpu_draw_test.zig");
     _ = @import("drafted_test.zig");
     _ = @import("drafter_depth_sweep_test.zig");
     _ = @import("drafted_chances_test.zig");
