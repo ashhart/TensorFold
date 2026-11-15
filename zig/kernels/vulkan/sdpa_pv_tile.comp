@@ -1,7 +1,7 @@
 // Prefill attention output for one kv head, tiled: a workgroup sums 16 queries (4 query heads x 4 rows) over 16 value
 // dimensions, so every V tile is read once for 16 queries instead of once per (head, row) workgroup.
 // Per-output order is sdpa_decode_native.comp's: ascending key, probability * widened bf16 V, one RNE store.
-// A key past a row's causal bound has probability 0 and adds an exact zero.
+// The accumulation skips keys past a row's causal bound: a zeroed probability times a non-finite future V is NaN.
 // The last pass of the three-kernel prefill SDPA: sdpa_scores_tile, sdpa_softmax_rows, sdpa_pv_tile.
 
 #version 460
@@ -85,6 +85,8 @@ void main() {
   uint d0 = gl_WorkGroupID.x * DT;
   uint first_key = params.matrix_k - rows;
   uint block_end = first_key + min(row0 + rows_per_block, rows);
+  // Only this row's visible keys multiply in: a past-bound probability is 0, and 0 times a future NaN is NaN.
+  uint bound = first_key + row0 + ty % rows_per_block + 1u;
 
   float acc = 0.0;
   for (uint k0 = 0u; k0 < block_end; k0 += KC) {
@@ -114,7 +116,7 @@ void main() {
     }
     barrier();
     for (uint kk = 0u; kk < KC; ++kk) {
-      acc += s_p[ty * KC + kk] * s_v[kk * DT + tx];
+      if (k0 + kk < bound) acc += s_p[ty * KC + kk] * s_v[kk * DT + tx];
     }
     barrier();
   }
