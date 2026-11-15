@@ -98,9 +98,9 @@ pub const Metal = struct {
         m.warm = t;
     }
 
-    /// The server's idle ticker target (null without a residency owner).
+    /// The server's ticker target (null without a residency owner): idle ticks, and probes while a long prompt runs.
     pub fn keepalive(m: *Metal) ?api.keepalive.Target {
-        return if (m.warm != null) .{ .ctx = &m.warm.?, .tick = mtl.keepalive.Target.tick } else null;
+        return if (m.warm != null) .{ .ctx = &m.warm.?, .tick = mtl.keepalive.Target.tick, .probe = mtl.keepalive.Target.busy } else null;
     }
 
     /// The lanes' view: one slot a stream, rows of 16 a forward, the release's DSpark shape on one device.
