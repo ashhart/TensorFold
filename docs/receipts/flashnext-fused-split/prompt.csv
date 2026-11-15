@@ -1,0 +1,145 @@
+arm,measure,prompt_tokens,phase,value,unit,cached_tokens,cache_state,qualified,token_sha256
+M1,bench_cache cold,2048,first,0.9644,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+M1,bench_cache cold,2048,repeated,0.9484,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+M1,bench_cache cold,2048,concurrent,0.9502,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+M1,bench_cache cold,8192,first,4.4166,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+M1,bench_cache cold,8192,repeated,3.4291,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+M1,bench_cache cold,8192,concurrent,3.4353,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+M1,bench_cache cold,32768,first,14.853,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+M1,bench_cache cold,32768,repeated,14.3125,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+M1,bench_cache cold,32768,concurrent,14.3139,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+M1,bench_cache cold,65536,first,29.3868,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+M1,bench_cache cold,65536,repeated,29.385,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+M1,bench_cache cold,65536,concurrent,29.4431,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+M1,ttft.py cold8k-off median of 3,,,4.029,s,,,,
+M1,ttft.py cold16k-off median of 3,,,7.996,s,,,,
+M1,one stream code t0.0 drafted,,,72.43,tok/s,,,True,
+M1,one stream code t0.0 plain,,,26.9,tok/s,,,True,
+M1,one stream code t1.0 drafted,,,70.13,tok/s,,,True,
+M1,one stream code t1.0 plain,,,26.75,tok/s,,,True,
+M1,one stream chat t0.0 drafted,,,46.45,tok/s,,,True,
+M1,one stream chat t0.0 plain,,,27.03,tok/s,,,True,
+M1,one stream chat t1.0 drafted,,,44.34,tok/s,,,True,
+M1,one stream chat t1.0 plain,,,26.96,tok/s,,,True,
+M1,"model, decode boot",,,72.71,GiB,,,,
+M1,"model, prompt boot",,,76.16,GiB,,,,
+F1,bench_cache cold,2048,first,0.9647,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+F1,bench_cache cold,2048,repeated,0.9494,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+F1,bench_cache cold,2048,concurrent,0.9504,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+F1,bench_cache cold,8192,first,3.4392,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+F1,bench_cache cold,8192,repeated,3.4278,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+F1,bench_cache cold,8192,concurrent,3.4277,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+F1,bench_cache cold,32768,first,14.2815,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+F1,bench_cache cold,32768,repeated,14.3339,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+F1,bench_cache cold,32768,concurrent,14.3476,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+F1,bench_cache cold,65536,first,29.3959,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+F1,bench_cache cold,65536,repeated,29.4087,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+F1,bench_cache cold,65536,concurrent,29.4545,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+F1,ttft.py cold8k-off median of 3,,,4.01,s,,,,
+F1,ttft.py cold16k-off median of 3,,,8.005,s,,,,
+F1,one stream code t0.0 drafted,,,72.99,tok/s,,,True,
+F1,one stream code t0.0 plain,,,27.13,tok/s,,,True,
+F1,one stream code t1.0 drafted,,,70.34,tok/s,,,True,
+F1,one stream code t1.0 plain,,,26.96,tok/s,,,True,
+F1,one stream chat t0.0 drafted,,,46.83,tok/s,,,True,
+F1,one stream chat t0.0 plain,,,27.07,tok/s,,,True,
+F1,one stream chat t1.0 drafted,,,44.67,tok/s,,,True,
+F1,one stream chat t1.0 plain,,,27.04,tok/s,,,True,
+F1,"model, decode boot",,,72.71,GiB,,,,
+F1,"model, prompt boot",,,76.16,GiB,,,,
+U1,bench_cache cold,2048,first,0.9689,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+U1,bench_cache cold,2048,repeated,0.9471,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+U1,bench_cache cold,2048,concurrent,0.9496,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+U1,bench_cache cold,8192,first,3.438,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+U1,bench_cache cold,8192,repeated,3.4272,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+U1,bench_cache cold,8192,concurrent,3.4204,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+U1,bench_cache cold,32768,first,14.3392,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+U1,bench_cache cold,32768,repeated,14.2963,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+U1,bench_cache cold,32768,concurrent,14.3539,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+U1,bench_cache cold,65536,first,29.3858,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+U1,bench_cache cold,65536,repeated,29.4298,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+U1,bench_cache cold,65536,concurrent,29.4634,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+U1,ttft.py cold8k-off median of 3,,,4.017,s,,,,
+U1,ttft.py cold16k-off median of 3,,,8.0,s,,,,
+U1,one stream code t0.0 drafted,,,72.37,tok/s,,,True,
+U1,one stream code t0.0 plain,,,26.92,tok/s,,,True,
+U1,one stream code t1.0 drafted,,,70.07,tok/s,,,True,
+U1,one stream code t1.0 plain,,,26.89,tok/s,,,True,
+U1,one stream chat t0.0 drafted,,,46.62,tok/s,,,True,
+U1,one stream chat t0.0 plain,,,26.96,tok/s,,,True,
+U1,one stream chat t1.0 drafted,,,44.56,tok/s,,,True,
+U1,one stream chat t1.0 plain,,,26.84,tok/s,,,True,
+U1,"model, decode boot",,,72.71,GiB,,,,
+U1,"model, prompt boot",,,76.16,GiB,,,,
+M2,bench_cache cold,2048,first,0.9767,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+M2,bench_cache cold,2048,repeated,0.9647,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+M2,bench_cache cold,2048,concurrent,0.9641,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+M2,bench_cache cold,8192,first,3.469,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+M2,bench_cache cold,8192,repeated,3.4632,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+M2,bench_cache cold,8192,concurrent,3.4764,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+M2,bench_cache cold,32768,first,14.4409,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+M2,bench_cache cold,32768,repeated,14.4604,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+M2,bench_cache cold,32768,concurrent,14.4967,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+M2,bench_cache cold,65536,first,29.744,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+M2,bench_cache cold,65536,repeated,29.7455,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+M2,bench_cache cold,65536,concurrent,29.8054,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+M2,ttft.py cold8k-off median of 3,,,4.063,s,,,,
+M2,ttft.py cold16k-off median of 3,,,8.088,s,,,,
+M2,one stream code t0.0 drafted,,,71.6,tok/s,,,True,
+M2,one stream code t0.0 plain,,,26.5,tok/s,,,True,
+M2,one stream code t1.0 drafted,,,69.49,tok/s,,,True,
+M2,one stream code t1.0 plain,,,26.48,tok/s,,,True,
+M2,one stream chat t0.0 drafted,,,45.88,tok/s,,,True,
+M2,one stream chat t0.0 plain,,,26.58,tok/s,,,True,
+M2,one stream chat t1.0 drafted,,,43.98,tok/s,,,True,
+M2,one stream chat t1.0 plain,,,26.48,tok/s,,,True,
+M2,"model, decode boot",,,72.71,GiB,,,,
+M2,"model, prompt boot",,,76.16,GiB,,,,
+U2,bench_cache cold,2048,first,0.968,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+U2,bench_cache cold,2048,repeated,0.9519,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+U2,bench_cache cold,2048,concurrent,0.9516,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+U2,bench_cache cold,8192,first,3.4357,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+U2,bench_cache cold,8192,repeated,3.4294,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+U2,bench_cache cold,8192,concurrent,3.4247,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+U2,bench_cache cold,32768,first,14.3082,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+U2,bench_cache cold,32768,repeated,14.2937,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+U2,bench_cache cold,32768,concurrent,14.3761,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+U2,bench_cache cold,65536,first,29.3622,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+U2,bench_cache cold,65536,repeated,29.4023,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+U2,bench_cache cold,65536,concurrent,29.434,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+U2,ttft.py cold8k-off median of 3,,,3.989,s,,,,
+U2,ttft.py cold16k-off median of 3,,,7.974,s,,,,
+U2,one stream code t0.0 drafted,,,72.53,tok/s,,,True,
+U2,one stream code t0.0 plain,,,26.97,tok/s,,,True,
+U2,one stream code t1.0 drafted,,,70.37,tok/s,,,True,
+U2,one stream code t1.0 plain,,,26.86,tok/s,,,True,
+U2,one stream chat t0.0 drafted,,,46.64,tok/s,,,True,
+U2,one stream chat t0.0 plain,,,26.95,tok/s,,,True,
+U2,one stream chat t1.0 drafted,,,44.56,tok/s,,,True,
+U2,one stream chat t1.0 plain,,,26.85,tok/s,,,True,
+U2,"model, decode boot",,,72.71,GiB,,,,
+U2,"model, prompt boot",,,76.16,GiB,,,,
+F2,bench_cache cold,2048,first,0.9668,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+F2,bench_cache cold,2048,repeated,0.9533,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+F2,bench_cache cold,2048,concurrent,0.9508,ttft_s,0,cold,True,640ab28c8347867d78cef1fa11b509c7030c9e100563353eaacda4ec1e4a9733
+F2,bench_cache cold,8192,first,3.4355,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+F2,bench_cache cold,8192,repeated,3.4383,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+F2,bench_cache cold,8192,concurrent,3.4425,ttft_s,0,cold,True,d13ce46a5a663a6795188c606bea8516cb99e884bea6f2bc56008d3c56f707f7
+F2,bench_cache cold,32768,first,14.2891,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+F2,bench_cache cold,32768,repeated,14.3172,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+F2,bench_cache cold,32768,concurrent,14.3778,ttft_s,0,cold,True,c032d8511c2c6c72ba4a6a45dfc781bc547bccf72e6de4dc3ef6708a3f3fb491
+F2,bench_cache cold,65536,first,29.4307,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+F2,bench_cache cold,65536,repeated,29.448,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+F2,bench_cache cold,65536,concurrent,29.5142,ttft_s,0,cold,True,a12b96a1862d7dbf7e99b6549deaf7059707bd0f8baf06bad40490dc18e53a5b
+F2,ttft.py cold8k-off median of 3,,,3.972,s,,,,
+F2,ttft.py cold16k-off median of 3,,,7.962,s,,,,
+F2,one stream code t0.0 drafted,,,72.47,tok/s,,,True,
+F2,one stream code t0.0 plain,,,27.03,tok/s,,,True,
+F2,one stream code t1.0 drafted,,,70.18,tok/s,,,True,
+F2,one stream code t1.0 plain,,,27.01,tok/s,,,True,
+F2,one stream chat t0.0 drafted,,,46.57,tok/s,,,True,
+F2,one stream chat t0.0 plain,,,27.06,tok/s,,,True,
+F2,one stream chat t1.0 drafted,,,44.52,tok/s,,,True,
+F2,one stream chat t1.0 plain,,,27.02,tok/s,,,True,
+F2,"model, decode boot",,,72.71,GiB,,,,
+F2,"model, prompt boot",,,76.16,GiB,,,,
