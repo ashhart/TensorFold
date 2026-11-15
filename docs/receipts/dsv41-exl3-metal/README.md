@@ -364,31 +364,47 @@ tracing, not controlled performance measurements. The fused boundary's contract 
 
 Environment: M5 Ultra (64 GPU cores, 256 GiB), macOS 27.0 (26A428), Xcode 27.1, Metal compiler 32023.921, Zig 0.17.0,
 checkpoint `deepseek-ai/DeepSeek-V4.1-Flash-1017` at `1bae0e1088993b9b82de08f59de5be5a34e42170` as an EAQ v1 EXL3 2.9 bpw pack with the
-original Engram shards; the M4 Pro (48 GiB) ran only the kernel contract. Two source trees are named. `efdf7a464e` is the tree
-the kernel contract, the parent comparison and the cold and decode receipts ran on. `e9e06ee0b1` differs from it by one diagnostic
-log line that now reads the registered drafter switch through the registry; build, profiles, the 128-token comparison and served
-checks were repeated on it. Both were synced from the commit.
+original Engram shards; the M4 Pro (48 GiB, no tensor units) ran the kernel contract and the device-free checks. The code of the
+head commit `a80eddd9a6` is the tree every result below names unless another tree is stated. Three earlier trees contributed:
+`efdf7a464e` (the parent comparison, the cold prompt and decode comparison against the parent), `e9e06ee0b1` (the first drafter-log
+change) and `dd80dd7164` (the settings sweep and the first resumed and 128k runs). `a80eddd9a6` differs from `dd80dd7164` by one
+commit that removes three settings the sweep showed no benefit for; the code was then rebuilt and every M5 qualification below
+except the sweep was repeated on it.
 
-- Build and test corpus on `e9e06ee0b1` (reported counts exclude cached work): **977/977 steps; 3631 of 3691 tests passed, 60 skipped**.
-  On `efdf7a464e` the same command reported 977/977 steps and 4760 of 4845 tests, 85 skipped. The device-free CUDA host
-  subset passes **345/345 steps, 131 tests** on both.
-- Kernel contract on `efdf7a464e`, M5 Ultra: `--only dsv41` **102 kernels pass gates 1-4**, 237 controls red as planted, 0 missed;
-  `--only exl3` **296 kernels pass**, 1186 controls red as planted, 0 limit problems. On the M4 Pro: dsv41 94 and exl3 35 pass.
-  The six dsv41 offline M1/M2 limit problems (`xp_quant`, `fp4pack`, `fp4rt`, `hcmix`, `hcpost`, `joinpost`) are identical at the
-  parent `bec140d545` (89 kernels pass there), so this delta does not introduce them. The unfiltered contract aborts in
-  `metal_lfm3_attention_sums.zig:39` (integer overflow in `valuesDepth`), a file this delta does not touch, so it was not completed.
-  The exhaustive rotary sweep covers 302,008,320 cases.
-- Strict one-, two- and four-row profiles return identical grouped and ungrouped logits. On `efdf7a464e` the first run, after the
-  build had evicted the file cache, read 7,700,480 / 7,782,400 / 15,450,112 bytes (96 / 97 / 193 page-ins) and failed the residency
-  gate; two reruns pass. On `e9e06ee0b1` the first run and two reruns all pass with 0 bytes and 0 page-ins. The gate measures
-  cache temperature at execution time; a warm pass does not prove that every Engram table page is resident.
-- The unchanged full 128-token comparison, on both trees: band ratio **0.967305** (clear at 1.05), mean KL 0.042165,
-  worst-row KL 0.832581, five teacher argmax differences; execution residency passes with 0 bytes and 0 page-ins in these warm runs.
-- Served checks on `e9e06ee0b1`: 41 full-hash replies, cancellation, two idle unload/reload cycles (loaded
-  226,961,267,936 / 222,896,394,376 bytes, parked 145,507,672 / 149,276,040), trained-only lookup0 with 367 proposals.
-- Parent against `efdf7a464e`, same machine, 4096 workspace rows and prefill step 4096 in both arms, 64 tokens, three repetitions.
-  Solo, serial and concurrent hashes are equal inside each build. Tokens differ between the builds in long greedy decodes because
-  the arithmetic changed (the parent fails the band at 1.855), so `tools/bench_exl3_compare.py` refuses the pair and this is an
+- Build and test corpus on `a80eddd9a6`, M5 Ultra, `zig build test test-golden dev-tools native tf-dsv41-run
+  test-deepseek-v41-lifetime -Dcpu=apple_m1 -Doptimize=ReleaseSafe`: exit 0, **977/977 steps; 11392 of 11503 tests passed, 111 skipped**.
+  `zig build test-cuda-host`: 345/345 steps, 131 tests.
+- Kernel contract, M5 Ultra: `--only dsv41` **102 kernels pass gates 1-4**, 237 controls red as planted, 0 missed; `--only exl3`
+  **296 kernels pass**, 1186 controls red as planted, 0 limit problems. The six dsv41 offline M1/M2 limit problems (`xp_quant`, `fp4pack`,
+  `fp4rt`, `hcmix`, `hcpost`, `joinpost`) are identical at the parent `bec140d545` (89 kernels pass there). The unfiltered contract
+  aborts in `metal_lfm3_attention_sums.zig:39` (integer overflow in `valuesDepth`), a file this delta does not touch, so it was not
+  completed. The exhaustive rotary sweep covers 302,008,320 cases.
+- M4 Pro (no tensor units), the same build and test command plus `tf-kernel-contract` with `-j4`: exit 0, **979/979 steps; 11874 of
+  11984 tests passed, 110 skipped**; `test-cuda-host` 345/345 steps, 131 tests. Kernel contract: `--only dsv41` 94 kernels pass,
+  203 controls red as planted, 0 missed, the same six limit problems; `--only exl3` 35 kernels pass, 142 controls, 0 limit problems.
+- The pull-request workflow's device-free steps, run locally on `a80eddd9a6` with `-Dfixed-cpu`: the bench, build-option and
+  flashnext unittests (90, 5 and 8 tests), `test-server-security test-pull-security`, `fuzz-cortheon`, `test-kernel-contract`,
+  `test-golden` and `test` all exit 0. `check-release-paths` fails with `file exists in modules 'tokenizer' and 'tokenizer0'`
+  (`zig/src/core/tokenizer/tokenizer.zig:1`); it fails the same way at the parent `bec140d545` and passes on `main`, so it is inherited.
+- Strict one-, two- and four-row profiles return identical grouped and ungrouped logits and read 0 bytes with 0 page-ins in all
+  three runs (a first run and two warm reruns). The gate measures cache temperature at execution time; on `efdf7a464e` a first run
+  right after a build read 7.7 to 15.5 MB and failed it, then passed. A warm pass does not prove every Engram page is resident.
+- The unchanged full 128-token comparison: band ratio **0.967305** (limit 1.10, clear at 1.05), mean KL 0.042165, worst-row KL
+  0.832581, five teacher argmax differences; the parent's ratio is 1.855.
+- Served checks: 33 plain, drafted and shared replies with equal full hashes, 41 completed responses, a cancelled 8192-token
+  request, two idle unload/reload cycles (loaded 226,960,252,128 and 222,895,034,360 bytes; parked 144,491,864 and 148,014,472),
+  trained-only lookup0 with 367 proposals. Greedy decode with drafts 95.2 tok/s against 52.5 plain, sampled 94.3 against 52.2.
+- Resumed against fresh, `bench_cache.py --require-cold --require-reuse`, `--prompt-cache-gib 8`, a fresh server for each size:
+  the first request is cold and the next three reuse the cache (8064 of 8192 tokens; 32640 of 32768). Every reply has the token hash of
+  the cold run (`d782a1946504` and `7424b0c34a8e`, equal to the parent's cold replies). A 2048-token prompt is below the
+  cache's reuse size (`cached_tokens` is 0), so that size has no resumed arm.
+- 128k, one lane, context 131072, 131008 prompt tokens, cold: first-token latency **56.1 s** for this head against **119.7 s** for
+  the parent, reply hashes equal (`db79fedfbfc5`); decode at that depth 45.9 against 36.3 tok/s. The parent was measured once, in the
+  run that accompanied `dd80dd7164`; its server exits with a leaked-allocation report from its own allocator at shutdown.
+- Parent against this tree, same machine, 4096 workspace rows and prefill step 4096 in both arms, 64 tokens, three repetitions,
+  measured on `efdf7a464e`; the default arm of the settings table below, on `dd80dd7164`, reproduces these cells within 2%. Solo,
+  serial and concurrent hashes are equal inside each build. Tokens differ between the builds in long greedy decodes because the
+  arithmetic changed (the parent fails the band at 1.855), so `tools/bench_exl3_compare.py` refuses the pair and this is an
   observation, not a no-slowdown qualification:
 
 | Cell | Parent tok/s | This tree tok/s |
@@ -400,21 +416,55 @@ checks were repeated on it. Both were synced from the commit.
 | long TTFT max, 1 / 4 streams | 12.34 s / 48.87 s | 6.53 s / 26.47 s |
 
 - Cold prompt speed and decode, `bench_cache.py --require-cold` and `bench_openai.py`, context 70000, one lane, `--prompt-cache-gib 0`,
-  prefill step 4096 in both arms, one request per size with 16 reply tokens. The 16-token replies are token-equal between the builds
-  at every size; 256-token greedy decodes are not (both public prompts differ):
+  prefill step 4096 in both arms, one request per size with 16 reply tokens. The 16-token replies are token-equal between the
+  builds at every size; 256-token greedy decodes are not (both public prompts differ). The 2048 row of this head follows the decode
+  run on the same server, as the parent's did; a cold first request on a fresh server measured 3.48 s:
 
-| Cold prompt tokens | Parent TTFT | This tree TTFT |
+| Cold prompt tokens | Parent TTFT | This head TTFT |
 |---|---|---|
 | 2048 | 1.98 s | 1.81 s |
-| 8192 | 6.86 s | 3.95 s |
+| 8192 | 6.86 s | 3.94 s |
 | 32768 | 28.06 s | 13.79 s |
-| 65536 | 57.39 s | 27.14 s |
+| 65536 | 57.39 s | 27.16 s |
 
-  Greedy decode over 256 tokens, median of three: 40.23 / 40.22 tok/s for the parent against 52.02 / 51.98 for this tree
+  Greedy decode over 256 tokens, median of three: 40.23 / 40.22 tok/s for the parent against 52.37 / 52.35 for this head
   (code and chat prompts).
 
+#### Settings evidence
+
+Every new setting was measured on `dd80dd7164` with the others at their defaults: `bench_concurrent.py` with 64 tokens, three
+repetitions, temperature 0, 1 and 4 streams, `--alone --serial`, short and long prompts, and one cold 8192-token request, aggregate
+decode tok/s. All 13 non-default arms were exact: 0 unequal or failed cells and the same cold reply hash. The default arm ran first, so
+its numbers are about 1% low against arms that changed nothing (compare `TILES=4`, `BATCH_MAX=8`). Each cell is one run of three
+repetitions; the arms kept below differ by 4% or more from the default in a cell where they act.
+
+| Arm | short, 1 | short, 4 | long, 1 | long, 4 | cold 8192 TTFT |
+|---|---|---|---|---|---|
+| default | 52.4 | 59.0 | 49.0 | 10.9 | 3.94 s |
+| `EXL3_FMA_TILES=0` | 44.2 (-15.6%) | 48.9 (-17.1%) | 41.8 (-14.7%) | 10.7 (-1.8%) | 3.89 s (-1.2%) |
+| `EXL3_FMA_TILES=1` | 50.3 (-4.0%) | 56.0 (-5.1%) | 47.6 (-2.9%) | 11.0 (+0.9%) | 3.90 s (-1.1%) |
+| `EXL3_FMA_TILES=4` | 52.3 (-0.2%) | 59.2 (+0.3%) | 48.9 (-0.2%) | 11.1 (+1.8%) | 3.89 s (-1.2%) |
+| `EXL3_FMA_TILE_GROUPS=0` | 51.9 (-1.0%) | 59.2 (+0.3%) | 48.8 (-0.4%) | 11.1 (+1.8%) | 3.90 s (-1.1%) |
+| `EXL3_FMA_TILE_GROUPS=4294967295` | 50.7 (-3.2%) | 56.1 (-4.9%) | 47.6 (-2.9%) | 11.0 (+0.9%) | 3.90 s (-1.1%) |
+| `BATCH_MAX=1` | 52.8 (+0.8%) | 39.7 (-32.7%) | 49.5 (+1.0%) | 10.2 (-6.4%) | 3.90 s (-1.1%) |
+| `BATCH_MAX=8` | 52.9 (+1.0%) | 59.2 (+0.3%) | 49.5 (+1.0%) | 11.1 (+1.8%) | 3.90 s (-1.1%) |
+| `BATCH_ATTN=0` | 52.9 (+1.0%) | 55.0 (-6.8%) | 49.5 (+1.0%) | 11.0 (+0.9%) | 3.90 s (-1.1%) |
+| `PREFILL_INTERLEAVE=0` | 52.9 (+1.0%) | 59.1 (+0.2%) | 49.5 (+1.0%) | 11.2 (+2.8%) | 3.89 s (-1.2%) |
+| `ENGRAM_LOOKAHEAD=0` | 52.8 (+0.8%) | 59.2 (+0.3%) | 49.4 (+0.8%) | 11.1 (+1.8%) | 3.90 s (-1.1%) |
+| `CONE=0` | 52.8 (+0.8%) | 59.2 (+0.3%) | 49.4 (+0.8%) | 6.7 (-38.5%) | 6.49 s (+64.7%) |
+| `CONE=1` | 52.8 (+0.8%) | 59.2 (+0.3%) | 49.5 (+1.0%) | 10.5 (-3.7%) | 4.25 s (+7.9%) |
+| `CONE_PARK=0` | 52.9 (+1.0%) | 59.2 (+0.3%) | 49.4 (+0.8%) | 10.4 (-4.6%) | 3.90 s (-1.1%) |
+
+Kept, with the arm that shows the benefit: `TF_DSV41_EXL3_FMA_TILES` (0 and 1 are slower), `TF_DSV41_BATCH_MAX` (1 is 33% slower with four
+short streams), `TF_DSV41_BATCH_ATTN` (0 is 7% slower), `TF_DSV41_CONE` (0 and 1 are slower, 0 by 38% on four long prompts and 65% in
+cold TTFT) and `TF_DSV41_CONE_PARK` (0 is 5% slower on four long prompts; the weakest of the five). Removed, because no arm
+was slower: `TF_DSV41_EXL3_FMA_TILE_GROUPS` (the threshold stays 400; its only slower arm turns tiling off, which `TILES=1` already
+does), `TF_DSV41_PREFILL_INTERLEAVE` and `TF_DSV41_ENGRAM_LOOKAHEAD` (both behaviors are now always on). The nine
+`TF_DSV41_NO_FUSE_*` fusion switches were removed earlier for the same reason: a fusion is taken when its shape and pipeline checks
+admit it. `TF_DSV41_MTP_DRAFTS` already existed in the parent and is only registered here.
+
 Still open: the parent's review gates (code provenance and copy rule, integration), ATC coverage (the board is incomplete),
-runtime on M1, M2 and M3 chips, 128k and the native window, a comparison against `mlx_lm`, and a source-matched no-slowdown
+runtime on M1, M2 and M3 chips, the native window, a comparison against `mlx_lm`, and a source-matched no-slowdown
 comparator against the parent.
 
 
