@@ -1,6 +1,8 @@
 # Exactness: main, and the branch with TF_FLASHNEXT_FUSED_SPLIT set to 1, unset and blank
 
-Each arm boots once with the prompt cache on (concurrent, golden, drafts, turns, cache) and once with `--prompt-cache-gib 0` (fresh, drafts, serve_check). Check 1 is drafted against `"draft": false`, check 2 resumed against fresh, check 3 concurrent against solo.
+Each arm boots once with the prompt cache on (concurrent, golden, drafts, turns, cache) and once with
+`--prompt-cache-gib 0` (fresh, drafts, serve_check). Check 1 is drafted against `"draft": false`, check 2 resumed against
+fresh, check 3 concurrent against solo.
 
 | check | measure | main | fs-on | fs-unset | fs-blank |
 |---|---|---|---|---|---|
