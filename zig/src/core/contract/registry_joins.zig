@@ -15,6 +15,7 @@ pub const cuda_after = @import("registry_media.zig").cuda ++
     @import("nvfp4_experts32_records.zig").cuda ++
     @import("experts_bf16_records.zig").cuda ++
     @import("lane_half_records.zig").cuda ++
+    @import("lane_fused_records.zig").cuda ++
     @import("pocket_records.zig").cuda ++
     @import("minimax_cuda_records.zig").cuda ++
     @import("moss_image_cuda_records.zig").cuda ++
