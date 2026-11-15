@@ -1572,8 +1572,8 @@ A chat completion or completion with `"execution_witness": true` carries a top-l
 whole reply, or on a stream's finish chunk (not on the separate usage chunk). It is read just before the engine takes
 the request and again once the reply ends; the request keeps the engine from parking in between. The witness is
 read-scoped, so a scoped key needs `read` beside `inference` to ask (else 403 `insufficient_scope`); a full or `[admin]`
-key may always ask. Only these two routes carry the binding: `/v1/responses` and `/v1/messages` (and its
-`count_tokens`) rebuild the request and answer a true `execution_witness` with HTTP 400.
+key may always ask. Only these two routes carry the binding: `/v1/responses`, `/v1/messages` (and its `count_tokens`),
+`/api/chat` and `/api/generate` rebuild the request and answer a true `execution_witness` with HTTP 400.
 
 | Field | Meaning |
 | --- | --- |

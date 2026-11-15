@@ -331,7 +331,7 @@ test "execution witness reply: a key without read is refused before the engine; 
     try t.expectEqual(@as(u32, 7), engine.calls.load(.acquire));
 }
 
-test "execution witness reply: Responses and Messages refuse a true field by name, before the engine" {
+test "execution witness reply: Responses, Messages and Ollama refuse a true field by name, before the engine" {
     var c = try fixture.Checkpoint.init();
     defer c.deinit();
     var engine: fixture.Engine = .{};
@@ -342,7 +342,12 @@ test "execution witness reply: Responses and Messages refuse a true field by nam
     defer arena.deinit();
     const a = arena.allocator();
     const responses = "{\"model\":\"m\",\"input\":\"hi\",\"max_output_tokens\":16,\"execution_witness\":true}";
-    const routes = [_][2][]const u8{ .{ "/v1/responses", responses }, .{ "/v1/messages", chat_body }, .{ "/v1/messages/count_tokens", chat_body } };
+    const ollama_chat = "{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"stream\":false,\"execution_witness\":true}";
+    const ollama_generate = "{\"model\":\"m\",\"prompt\":\"hi\",\"stream\":false,\"execution_witness\":true}";
+    const routes = [_][2][]const u8{
+        .{ "/v1/responses", responses }, .{ "/v1/messages", chat_body },        .{ "/v1/messages/count_tokens", chat_body },
+        .{ "/api/chat", ollama_chat },   .{ "/api/generate", ollama_generate },
+    };
     for (routes) |route| {
         const refused = try h.ask(a, "POST", route[0], "", "localhost", route[1]);
         try expectStatus(refused, 400);
@@ -353,5 +358,5 @@ test "execution witness reply: Responses and Messages refuse a true field by nam
         const without = try std.mem.replaceOwned(u8, a, route[1], ",\"execution_witness\":true", "");
         try expectStatus(try h.ask(a, "POST", route[0], "", "localhost", without), 200);
     }
-    try t.expectEqual(@as(u32, 2), engine.calls.load(.acquire));
+    try t.expectEqual(@as(u32, 4), engine.calls.load(.acquire));
 }
