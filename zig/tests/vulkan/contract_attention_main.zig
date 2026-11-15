@@ -461,8 +461,8 @@ fn sdpaTileGate(a: std.mem.Allocator, clock: Elapsed, dev: *const vk.Device, cmd
     }
     std.debug.print("MILESTONE sdpa-tile elapsed_ms={d} case=\"{s}\" {s} rows={d} prefix={d} poison_from={d} capacity={d}: " ++
         "tiled byte-identical to per-row decode, {d} finite rows finite, {d} plant rows non-finite{s}\n", .{
-        clock.ms(),      case.name, arm, case.rows, case.prefix, case.poison_from, case.capacity,
-        finite,          plant_rows, if (case.zero_qk) ", row 0 exactly 1.0" else "",
+        clock.ms(), case.name,  arm,                                             case.rows, case.prefix, case.poison_from, case.capacity,
+        finite,     plant_rows, if (case.zero_qk) ", row 0 exactly 1.0" else "",
     });
     return true;
 }
