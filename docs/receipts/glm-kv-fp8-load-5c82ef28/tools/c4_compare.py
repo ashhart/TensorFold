@@ -29,6 +29,12 @@ def main():
             h = statistics.median(vals[lb] for lb in head)
             print(f"| {key[0]}, temperature {key[1]:g}, {name} | " + " | ".join(f"{vals[lb]:.1f}" for lb in labels)
                   + f" | {b:.1f} | {h:.1f} | {(h / b - 1) * 100:+.1f}% |")
+    for key in runs[labels[0]]:
+        shas = {lb: sorted(e["token_sha256"] for r in runs[lb][key]["reps"] for e in r["evidence"]) for lb in labels}
+        same = len({tuple(v) for v in shas.values()}) == 1
+        print(f"replies {key[0]}, temperature {key[1]:g}: {len(shas[labels[0]])} a launch, "
+              f"{len(set().union(*map(set, shas.values())))} distinct token sha256, "
+              + ("the same multiset in every launch" if same else "launches DIFFER"))
 
 
 if __name__ == "__main__":

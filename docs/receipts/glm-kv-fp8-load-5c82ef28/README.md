@@ -73,8 +73,9 @@ At the widest admitted stream count, `tools/suite-c4.sh` at `--context 40960 --p
 | chat, temperature 1, steady | 59.9 | 61.5 | 61.3 | 61.0 | 60.5 | 61.4 | +1.6% |
 
 Every head launch is faster than every base launch in every row. The 12 greedy replies of each prompt have one token
-sha256 across all four launches, and the sampled replies the same multiset. Every launch's ranks exited 0 after SIGINT
-with 0 device bytes held after cleanup (`*/memory-rank*.json`).
+sha256 across all four launches, and the sampled replies the same multiset (each reply's `token_sha256` is in
+`c4.json` under `cells[].reps[].evidence[]`; `tools/c4_compare.py` prints the check). Every launch's ranks exited 0
+after SIGINT with 0 device bytes held after cleanup (`*/memory-rank*.json`).
 
 ## Kernel limits
 
