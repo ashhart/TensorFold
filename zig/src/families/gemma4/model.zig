@@ -161,12 +161,15 @@ pub const Model = struct {
         if (m.config.geo.unified()) {
             try vision_unified.addTensors(&m.checkpoint, m.device, files);
             if (!vision_unified.present(&m.checkpoint)) return error.NoGemmaVision;
-            m.vision = .{ .embedder = try vision_unified.Embedder.load(m.gpa, m.device, &m.checkpoint, m.config.geo.hidden, m.pipes(m.config.widths.vision.bits), m.config.widths.vision) };
+            // bound first: a failed load must leave m.vision null, not a tag with no embedder behind it
+            const e = try vision_unified.Embedder.load(m.gpa, m.device, &m.checkpoint, m.config.geo.hidden, m.pipes(m.config.widths.vision.bits), m.config.widths.vision);
+            m.vision = .{ .embedder = e };
             return;
         }
         try vision.addTensors(&m.checkpoint, m.device, files);
         if (!vision.present(&m.checkpoint)) return error.NoGemmaVision;
-        m.vision = .{ .encoder = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.pipes(m.config.widths.vision.bits), m.config.widths.vision, m.config.geo.hidden) };
+        const v = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.pipes(m.config.widths.vision.bits), m.config.widths.vision, m.config.geo.hidden);
+        m.vision = .{ .encoder = v };
     }
 
     /// The drafter's taps, in its feature order: each a layer whose output (layer scalar applied) it reads.
@@ -195,3 +198,33 @@ pub const Model = struct {
         m.gpa.destroy(m);
     }
 };
+
+test "a tower that fails to load leaves the model without one, so deinit frees nothing that was never made" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // the name vision_unified.present() looks for, so loadVision reaches Embedder.load
+    const header =
+        \\{"vision_embedder.patch_dense.weight":{"dtype":"BF16","shape":[2],"data_offsets":[0,4]}}
+    ;
+    var data: [8 + header.len + 4]u8 = @splat(0);
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "model.safetensors", .data = &data });
+    const dir = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer gpa.free(dir);
+    var m: Model = undefined;
+    m.gpa = gpa;
+    m.device = device;
+    m.checkpoint = ckpt.Checkpoint.init(gpa);
+    defer m.checkpoint.deinit();
+    m.vision = null;
+    m.config = .{ .geo = cfg.unified12b, .context = 1 };
+    m.config.geo.hidden = vision_unified.width + 1; // a width the embedder cannot project to: Embedder.load refuses it
+    for (&m.mm) |*p| p.* = @as(affine_mm.Pipes, undefined); // never read: the refusal comes first
+    try std.testing.expectError(error.UnexpectedGemmaVisionTensor, m.loadVision(std.testing.io, dir));
+    try std.testing.expect(m.vision == null);
+}
