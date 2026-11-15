@@ -147,6 +147,7 @@ pub fn load(w: *Weights, d: *const cuda.Driver, io: std.Io, cfg: *const @import(
     @import("core").checkpoint.cache.files(io, pack.dir, pack.files.items);
 }
 fn admitGroup(pack: *const @import("pack.zig").Pack, io: std.Io, group: @import("plan.zig").GroupPlan) !void {
+    if (group.form != .exl3) return; // release forms: dtypes, shapes and 32-blocks checked when planned (plan_release.zig)
     try admitWidth(try pack.codebook(io, group.prefix), group.form.exl3.part.group.k2());
     if (std.mem.indexOfScalar(u32, &cuda.qlinear.block.dense.linear_k2s, group.form.exl3.part.group.k2()) == null)
         return error.UnsupportedCudaWidth;
@@ -157,9 +158,12 @@ pub fn admitPlan(io: std.Io, cfg: *const @import("config.zig").Config, pack: *co
     if (plan.leftovers.len != 0 or pack.missing != 0) return error.UnclaimedTensor;
     for (plan.layers) |layer| {
         for (layer.groups) |group| try admitGroup(pack, io, group);
-        for (layer.experts) |projection| for (projection.form.exl3.prefixes, projection.form.exl3.parts) |prefix, part| {
-            try admitWidth(try pack.codebook(io, prefix), part.group.k2());
-            try admitExpertWidths(part.group.k2(), part.group.k2());
+        for (layer.experts) |projection| switch (projection.form) {
+            .exl3 => |x| for (x.prefixes, x.parts) |prefix, part| {
+                try admitWidth(try pack.codebook(io, prefix), part.group.k2());
+                try admitExpertWidths(part.group.k2(), part.group.k2());
+            },
+            .mxfp4 => {},
         };
     }
     if (plan.head) |group| try admitGroup(pack, io, group);
