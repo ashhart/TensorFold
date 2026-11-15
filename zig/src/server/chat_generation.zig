@@ -263,8 +263,13 @@ pub const Generation = struct {
             };
             // a client's cancel came first: the reply ends "cancelled", not at a deadline that passes afterwards
             if (g.deadline_ns) |d| if (!g.deadline_hit and !g.cancel_sent and g.reason == null and nowNs(g.srv.io) >= d) {
-                g.deadline_hit = true;
-                g.srv.engine.cancel(g.id); // the engine ends the stream: its tokens and usage stay whole
+                m.mutex.lockUncancelable(m.io);
+                const ended_first = m.finished; // still draining a reply the engine already ended: it keeps that end
+                m.mutex.unlock(m.io);
+                if (ended_first) g.deadline_ns = null else {
+                    g.deadline_hit = true;
+                    g.srv.engine.cancel(g.id); // the engine ends the stream: its tokens and usage stay whole
+                }
             };
             if (chunk == null and @hasDecl(Gone, "beat")) {
                 // queueing and a long prefill send nothing: a client that times out a silent stream would leave
