@@ -20,6 +20,13 @@ CHUNKINGS = ([1], [3], [2, 5, 1])
 WORDS = ["Fib", "onacci", " adds", " the", " two", " before", " it", "."]
 
 
+class SpeculativeReceipt(unittest.TestCase):
+    def test_keeps_round_metrics(self):
+        reply = bench_stream.Collector(0)
+        reply.speculative = {"rounds": 3, "tokens_per_round": 2.5}
+        self.assertEqual(reply.speculative, reply.receipt()["speculative"])
+
+
 def content(*words, choice=0):
     return [(choice, "content", w) for w in words]
 

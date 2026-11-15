@@ -36,6 +36,7 @@ pub const chip = cuda_device.chip;
 pub const deviceName = cuda_device.deviceName;
 /// `capabilities --json`'s "p2p": NVML's GPUs and pairs on a host with two or more; null otherwise.
 pub const p2p = cuda.p2p_report.compact;
+pub const kernelSupport = cuda_device.kernelSupport;
 const getenv = cuda_device.getenv;
 const setting = cuda_device.setting;
 const windows = @import("cuda_window.zig");

@@ -189,6 +189,7 @@ const linux_host = [_][]const u8{
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
+    "test-lane-strand-host",
     "test-lfm2-load-host",
     "test-living-shards-host",
     "test-merge",

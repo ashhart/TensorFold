@@ -28,6 +28,9 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
+Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
+CUDA candidate bytes, parity and served/speed qualification are pending.
+
 ## The table
 
 Each cell is one of these:
@@ -342,7 +345,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | nemotron | +5.9 % (2 streams), +13.3 % (8 streams) | [#1783] |
     | qwen3_5 (27B, DFlash2) | +3.5..+5.0 % decode | [#1783] |
-    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439] |
+    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439]; large-prompt a/b pair prepared, device gate pending (#2911) |
     | gemma4 (31B), spark25 | level | [#1783] |
 
 12. **Residual add plus norm in one launch.** The residual add and the next RMS norm run as one kernel, which saves a

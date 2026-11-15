@@ -105,9 +105,14 @@ pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, ke
 
 /// One lesson for the facts `told` (kept[f]: fact f had enough clean answers), or null; `siblings`: all facts told.
 pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, document: bool, siblings: []const []const u8, supplied: []const []const u8, gone: anytype) !?Plan {
+    return withRecall(srv, cx, teacher, told, kept, document, siblings, supplied, .{}, gone);
+}
+
+/// A request's held-out recall prompts are reserved before any examples are written.
+pub fn withRecall(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, document: bool, siblings: []const []const u8, supplied: []const []const u8, reserved: @import("slide_reserved.zig").Reserved, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
-    var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .document = document, .siblings = siblings };
+    var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .document = document, .siblings = siblings, .reserved = reserved };
     var count: u32 = 0;
     const language = try languageOf(srv, cx, told[0], gone);
     for (told, kept, 0..) |fact, *k, f| {
@@ -199,7 +204,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         .unasked = parts.unasked.items,
         .steps = steps,
     };
-    return .{ .questions = parts.all.items, .full = full, .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
+    return .{ .questions = parts.all.items, .full = try reserved.clean(a, full), .facts = told, .held = parts.held.items, .probes = parts.probes.items, .checks = checks.items, .thinks = parts.thinks, .document = document, .stale = .{ .keep = stale_keep.items, .bank = stale_bank.items } };
 }
 
 pub const Parts = @import("slide_lesson_parts.zig").Parts;
@@ -243,6 +248,7 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
             const n = j.nears[i];
+            if (try j.parts.reserved.question(j.srv, &jcx, n.q)) return;
             if (untold.protected(n.q)) return; // only ever checked, never trained
             if (n.judge and try slide_take.answered(j.srv, &jcx, j.fact, n.q, j.parts.document, j.gone)) return;
             if (n.siblings and try siblingAnswers(j.srv, &jcx, j.parts.siblings, j.fact, n.q, j.parts.document, j.gone)) {
@@ -298,7 +304,7 @@ pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usi
     const written = try wording.questions(a, asked.content, probes);
     const qs = try supplied_questions.ahead(a, supplied, written);
     if (supplied.len > 0) log.line("slide: {d} questions supplied with \"{s}\"", .{ supplied.len, fact });
-    var got: Got = .{ .entity = try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings };
+    var got: Got = .{ .entity = try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings, .reserved = parts.reserved };
     var phrase: []const u8 = "";
     if (got.entity) {
         const said = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.fact_subject_prompt, .{fact}), 16, gone);
@@ -373,7 +379,10 @@ pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usi
     try parts.own.appendSlice(a, told.items);
     log.line("slide: {d} questions kept for: {s} ({s})", .{ refs.items.len, fact, try std.mem.join(a, " | ", told.items) });
     if (qs.len < min_probes) log.line("slide: the questions came back as: {s}", .{asked.content});
-    if (pairs.items.len < min_probes) return false;
+    if (pairs.items.len < min_probes) {
+        if (got.reserved_dropped) return cx.refuse(@import("slide_reserved.zig").refusal);
+        return false;
+    }
     try parts.all.appendSlice(a, refs.items);
     // the two most typical wordings held out, so a vague one ("Which dog do I have?") never decides recall
     const n = pairs.items.len;
@@ -457,6 +466,7 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
     const wordings = try wording.questions(a, more.content, count);
     if (wordings.len == 0) log.line("slide: no more wordings came back: {s}", .{more.content});
     for (wordings) |q| {
+        if (try parts.reserved.question(srv, cx, q)) continue;
         if ((try seen.getOrPut(a, q)).found_existing) continue;
         const personal = !parts.document and (!wording.firstPerson(q) or wording.someoneElse(fact, q));
         const why: ?[]const u8 = if (personal or !units.sameScript(fact, q)) "is not the user asking about themselves" else if (wording.gives(fact, asked_all, answered_all, q)) "gives the fact away" else if (!try judged(srv, cx, fact, q, parts.document, gone)) "is not answered by the fact" else if (try siblingAnswers(srv, cx, parts.siblings, fact, q, parts.document, gone)) "is another fact's" else null;

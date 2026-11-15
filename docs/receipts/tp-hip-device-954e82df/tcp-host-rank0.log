@@ -1,0 +1,18 @@
+PASS tcp-host rank 0/2: 400 all-gathers (1 B to 4 MiB), 796 fp32 and bf16 sums, 100 exchanges, send/recv and variable all-gathers bit-exact over loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":16,"p50_us":2.25,"p90_us":2.44,"gb_s_p50":0.01}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":16,"p50_us":2.21,"p90_us":2.29,"gb_s_p50":0.01}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":4096,"p50_us":3.02,"p90_us":3.23,"gb_s_p50":1.36}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":4096,"p50_us":2.58,"p90_us":2.77,"gb_s_p50":1.59}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":8192,"p50_us":3.56,"p90_us":3.84,"gb_s_p50":2.30}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":8192,"p50_us":2.69,"p90_us":2.93,"gb_s_p50":3.05}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":32768,"p50_us":7.06,"p90_us":7.23,"gb_s_p50":4.64}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":32768,"p50_us":3.73,"p90_us":3.95,"gb_s_p50":8.78}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":131072,"p50_us":23.64,"p90_us":24.15,"gb_s_p50":5.54}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":131072,"p50_us":10.45,"p90_us":10.81,"gb_s_p50":12.54}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":262144,"p50_us":44.75,"p90_us":45.72,"gb_s_p50":5.86}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":262144,"p50_us":17.77,"p90_us":18.20,"gb_s_p50":14.75}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":1048576,"p50_us":170.18,"p90_us":172.11,"gb_s_p50":6.16}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":1048576,"p50_us":62.45,"p90_us":67.17,"gb_s_p50":16.79}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"all_gather","bytes":4194304,"p50_us":728.44,"p90_us":749.46,"gb_s_p50":5.76}
+RESULT {"backend":"tcp-host","link":"loopback on one host (127.0.0.1), MTU 65536, Ryzen AI Max+ 395","world":2,"call":"exchange","bytes":4194304,"p50_us":278.99,"p90_us":288.45,"gb_s_p50":15.03}
+exit 0
