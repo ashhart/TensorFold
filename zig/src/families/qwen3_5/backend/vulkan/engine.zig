@@ -11,7 +11,7 @@ const View = vk.tensor.View;
 
 pub const max_prefill_rows = fwd.max_prefill_rows;
 
-// Chunk cut = min(done+32,total), pure, host-tested; totals 32/33/63/64/65 cut at 32 / 32,33 / 32,63 / 32,64 / 32,64,65
+// Chunk cut = min(done+64,total), pure, host-tested; totals 64/65/127/128/129 cut at 64 / 64,65 / 64,127 / 64,128 / 64,128,129
 pub fn chunkEnd(done: usize, total: usize) usize {
     return @min(done +| max_prefill_rows, total);
 }
@@ -169,7 +169,7 @@ pub const Engine = struct {
         e.poisoned = false;
     }
 
-    // Check ids/bounds, commit 32-row chunks. Failure poisons (partial RNN state never reused); refusals touch nothing.
+    // Check ids/bounds, commit 64-row chunks. Failure poisons (partial RNN state never reused); refusals touch nothing.
     pub fn prefill(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0) return error.UnsupportedPrompt;
@@ -183,7 +183,7 @@ pub const Engine = struct {
         }
     }
 
-    // One forward chunk has 1..32 checked rows; its logits give the next-token distribution after the chunk.
+    // One forward chunk has 1..64 checked rows; its logits give the next-token distribution after the chunk.
     pub fn prefillChunk(e: *Engine, tokens: []const u32) Error!void {
         if (e.poisoned) return error.Poisoned;
         if (tokens.len == 0 or tokens.len > max_prefill_rows) return error.UnsupportedPrompt;

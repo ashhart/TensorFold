@@ -20,7 +20,7 @@ const usage = "usage: tf-qwen35-model [--vendor ID] [--timeout-ms MS] [--context
     "  --timeout-ms MS   bound on every fence wait, 1 to 300000 (default 10000); a timeout ends the process\n" ++
     "  --context N       KV context capacity to request, 1 to 7168 (default 256)\n" ++
     "  --teacher-forced  feed each scored step's oracle id as the next input (labelled per-step mode; default off)\n" ++
-    "  --sequential-prefill  prefill one prompt token per Engine.prefill call (test-only; default is the canonical whole-prompt 32-row chunking)\n";
+    "  --sequential-prefill  prefill one prompt token per Engine.prefill call (test-only; default is the canonical whole-prompt 64-row chunking)\n";
 
 const Elapsed = struct {
     io: std.Io,
@@ -76,7 +76,7 @@ pub fn parseArgs(args: []const []const u8) ?Options {
     return o;
 }
 
-// Canonical prefill chunking: how many 32-row chunks `rows` spans; pure, host-tested; the chunk size is the engine's.
+// Canonical prefill chunking: how many 64-row chunks `rows` spans; pure, host-tested; the chunk size is the engine's.
 pub fn chunkCount(rows: usize) usize {
     return (rows + engine_mod.max_prefill_rows - 1) / engine_mod.max_prefill_rows;
 }
