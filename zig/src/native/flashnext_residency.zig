@@ -17,7 +17,8 @@ fn probeWarm(ctx: *const anyopaque) mtl.CommandBuffer {
 }
 
 fn attach(h: anytype, io: std.Io, buffers: []const mtl.Buffer, label: []const u8) !void {
-    h.resident = try Resident.holdUnder(h.gpa, io, h.eng.r.device, h.eng.r.queue, buffers, label, if (h.load_limit > 0) h.load_limit else null);
+    // Keep the pair's explicit residency request independent of command-queue attachment.
+    h.resident = try Resident.holdUnderOptions(h.gpa, io, h.eng.r.device, h.eng.r.queue, buffers, label, if (h.load_limit > 0) h.load_limit else null, .{ .queue_attach = h.eng.r.tp == null });
     if (h.resident) |*r| {
         h.warm = r.target();
         h.eng.r.follow = r.follow();

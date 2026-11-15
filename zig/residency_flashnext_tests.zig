@@ -28,8 +28,8 @@ fn waiting(_: *anyopaque) bool {
     return false;
 }
 
-test "residency owner Flash Next: both native inventories cover initial pools and TP buffers and follow lazy allocations" {
-    for ([_]bool{ false, true }) |shared| {
+test "residency owner Flash Next: paired and single native inventories retain requested residency and lazy cache allocations" {
+    for ([_]bool{ false, true }) |shared| for ([_]bool{ false, true }) |paired| {
         var record: mtl.Record = .{ .gpa = a };
         defer record.deinit();
         {
@@ -40,15 +40,16 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             }
             _ = try run.buffer(64);
             var tp: fz.Tp2 = undefined;
-            tp.wbuf = try record.device().buffer(64, 0);
-            defer tp.wbuf.deinit();
-            tp.one = try record.device().buffer(64, 0);
-            defer tp.one.deinit();
-            tp.pick_tmp = try record.device().buffer(64, 0);
-            defer tp.pick_tmp.deinit();
-            tp.partial = try record.device().buffer(64, 0);
-            defer tp.partial.deinit();
-            run.tp = &tp;
+            var tp_buffers: [4]?mtl.Buffer = @splat(null);
+            defer for (tp_buffers) |maybe| if (maybe) |buffer| buffer.deinit();
+            if (paired) {
+                for (&tp_buffers) |*buffer| buffer.* = try record.device().buffer(64, 0);
+                tp.wbuf = tp_buffers[0].?;
+                tp.one = tp_buffers[1].?;
+                tp.pick_tmp = tp_buffers[2].?;
+                tp.partial = tp_buffers[3].?;
+                run.tp = &tp;
+            }
             var engine: Engine = undefined;
             engine.r = &run;
             engine.snap_pool = .{ .max = 1024, .last = 64 };
@@ -70,6 +71,11 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             var h: Host = .{ .eng = &engine, .back = &back, .vis = &vision };
             if (shared) try residency.holdShared(&h) else try residency.hold(&h);
             defer if (shared) residency.dropShared(&h) else residency.drop(&h);
+            try std.testing.expectEqual(!paired, h.resident.?.queue_attached);
+            try std.testing.expectEqual(!paired, record.attached);
+            try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_adds);
+            try std.testing.expectEqual(@as(usize, 0), record.queue_removes);
+            try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
             try record.checkInitial();
             try record.check();
             mtl.keepalive.Target.tick(&h.warm);
@@ -91,7 +97,10 @@ test "residency owner Flash Next: both native inventories cover initial pools an
             try record.check();
         }
         try record.allFreed();
-    }
+        try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_adds);
+        try std.testing.expectEqual(@as(usize, if (paired) 0 else 1), record.queue_removes);
+        try std.testing.expectEqual(@as(usize, 1), record.residency_requests);
+    };
 }
 
 test "residency owner Flash Next: failed runner publication frees its new Metal buffer" {
@@ -168,7 +177,6 @@ test "Flash Next cleanup: failed open joins a follower holding borrowed residenc
     buffer.deinit();
     try record.allFreed();
 }
-
 
 test "Flash Next vision memory: tower startup refuses before compilation or factory work" {
     var record: mtl.Record = .{ .gpa = a };
