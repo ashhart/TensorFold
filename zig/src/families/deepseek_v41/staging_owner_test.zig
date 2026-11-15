@@ -58,6 +58,27 @@ test "Draft state: DSpark statics hand out their own region without a context dr
     try std.testing.expectError(error.Statics, dev.statics(2, 1, 1));
     try std.testing.expectError(error.Statics, dev.statics(0, 4, 1));
 }
+test "Draft state: DSpark statics regions after the first start int64-aligned for an odd int32 count" {
+    // passes of up to 12 slots (block 5, window 128): 13 or 14 live asks split [0,7), [7,..), staging in region 7
+    const lay = @import("dspark_emit.zig").Layout.of(12, 5, 128);
+    const n64: usize = @intCast(lay.len64);
+    const n32: usize = @intCast(lay.len32);
+    try std.testing.expect(n32 % 2 == 1);
+    const Dev = @import("dspark_dev.zig").Dev;
+    var d = mock.init();
+    var dev: Dev = undefined;
+    dev.regions = 16;
+    dev.region_bytes = Dev.regionBytes(n64, n32);
+    const bytes = try std.testing.allocator.alignedAlloc(u8, .@"16", dev.region_bytes * dev.regions);
+    defer std.testing.allocator.free(bytes);
+    dev.stage = .{ .d = &d, .bytes = bytes };
+    for (0..dev.regions) |g| {
+        const sv = try dev.statics(g, n64, n32);
+        try std.testing.expectEqual(@as(usize, 0), @intFromPtr(sv[0].ptr) % @alignOf(i64));
+        try std.testing.expectEqual(n64, sv[0].len);
+        try std.testing.expectEqual(n32, sv[1].len);
+    }
+}
 test "Draft state: prefill teardown releases the second microbatch and workspace owners" {
     var d = mock.init();
     var buffers: [6]cuda.DeviceBuffer = undefined;
