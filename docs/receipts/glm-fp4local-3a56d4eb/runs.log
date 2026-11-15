@@ -1,9 +1,9 @@
 2026-11-15 12:24:37 ex-head serve head 3a56d4eb92 ctx 40960 args: -- --parallel 4
 2026-11-15 12:26:13 ex-head health after 93 s
-2026-11-15 12:37:18 ex-head suite ex rc=0 : RESULT golden exit 0 RESULT conc rc=0 RESULT resume exit 0 
+2026-11-15 12:37:18 ex-head suite ex rc=0 : RESULT golden exit 0 RESULT conc rc=0 RESULT resume exit 0
 2026-11-15 12:37:25 ex-head serve END
 2026-11-15 12:38:35 sp-head serve head 3a56d4eb92 ctx 131072 args: -- --parallel 4 --prompt-cache-gib 0
 2026-11-15 12:39:50 sp-head health after 73 s
-2026-11-15 12:54:10 sp-head suite sp rc=0 : RESULT nodraft rc=0 RESULT drafted rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill9600 rc=0 RESULT prefill32768 rc=0 RESULT prefill38400 rc=0 RESULT prefill65536 rc=0 
+2026-11-15 12:54:10 sp-head suite sp rc=0 : RESULT nodraft rc=0 RESULT drafted rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill9600 rc=0 RESULT prefill32768 rc=0 RESULT prefill38400 rc=0 RESULT prefill65536 rc=0
 2026-11-15 12:54:16 sp-head serve END
 2026-11-15 12:54:16 chain queue-sp.txt END
