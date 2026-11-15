@@ -23,6 +23,7 @@ pub const Plan = struct {
     stream: *Stream,
     position: u64, // the stream's cache length when the round started
     kind: Kind,
+    rate_chain: bool = true, // rate-guard mode that produced this window, before the next budget changes it
     held: u32 = 0, // head drafts the backend holds
     tokens: []const u32 = &.{}, // drafts known on the host (forced, copied, tree)
     forced: []const u32 = &.{},
@@ -58,6 +59,7 @@ pub const Copy = struct { tokens: []const u32 = &.{}, recalled: bool = false };
 pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
     const a = e.arena.allocator();
     var p: Plan = .{ .stream = s, .position = s.cache_len, .kind = .none };
+    if (e.cfg.rate_guard) p.rate_chain = if (s.depth) |*d| d.rate.chain else true;
     if (e.backend.proposals() and s.proposal_depth == 0) s.dropHeld(e.gpa);
     const queued = s.next;
     s.next = null;

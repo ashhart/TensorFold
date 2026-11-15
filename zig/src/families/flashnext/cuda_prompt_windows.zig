@@ -11,7 +11,8 @@ const Seq = prompt.Seq;
 
 /// A drafted window on one GPU as a graph (one chunk, scores left on the device, no media or adds); true once run.
 pub fn forwardGraph(e: *Engine, comptime Tri: type, p: *batch.Pass(Tri), seq: *Seq, ids: []const u32, hooks: batch.Hooks) !bool {
-    if (!window_graph.enabled() or hooks.logits != .all or hooks.host_logits or hooks.moe_add != null) return false;
+    if (!window_graph.admits(p.m.layers, p.m.dplan) or hooks.logits != .all or
+        hooks.host_logits or hooks.moe_add != null) return false;
     if (ids.len > @import("cuda_mtp.zig").max_rows or ids.len > p.s.cap or e.collective != null or seq.media != null or p.m.pocket != null) return false;
     const key = window_graph.Key.init(seq, seq.fed, ids.len, p.s, p.seq.scores, @intFromPtr(p.m.layers.ptr), hooks);
     try window_graph.stageWindow(p, ids, seq.fed);
@@ -70,7 +71,9 @@ pub fn windows(e: *Engine, comptime Tri: type, tri: Tri, wins: []const Window, o
     const media = for (wins) |w| {
         if (w.seq.media != null) break true;
     } else false;
-    if (window_graph.enabled() and reads == .none and p.m.pocket == null and e.collective == null and !media) {
+    if (window_graph.admits(p.m.layers, p.m.dplan) and reads == .none and
+        p.m.pocket == null and e.collective == null and !media)
+    {
         // on one GPU: staged, then the pass as a graph keyed by every lane's buffers
         const attn = @import("cuda_batch_lanes.zig").useAttn(&p, ids.len);
         const key = window_graph.SharedKey.init(lanes, s, scores, @intFromPtr(p.m.layers.ptr), out, attn);

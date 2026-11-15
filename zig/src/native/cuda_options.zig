@@ -10,6 +10,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
     if (@hasField(F.Options, "lanes_fixed")) opts.lanes_fixed = o.lanes_fixed;
     if (@hasField(F.Options, "one_stream")) opts.one_stream = o.lanes == 1;
+    if (@hasField(F.Options, "prompt_cache_bytes")) opts.prompt_cache_bytes = if (o.keep == 0 or o.prompt_cache_gib == null) 0 else @import("cuda_memory.zig").cacheBytes(o.prompt_cache_gib, std.math.maxInt(u64), 0);
     if (@hasField(F.Options, "rank")) {
         opts.tp = @intCast(o.tp);
         opts.rank = @intCast(o.rank);
@@ -78,6 +79,18 @@ test "native family options forward lane counts and fixedness only when declared
     try std.testing.expectEqual(@as(u32, 7), counted.lanes);
     try std.testing.expectEqual(@as(u32, 7), fixed.lanes);
     try std.testing.expect(fixed.lanes_fixed);
+}
+
+test "explicit prompt cache reaches families that budget their expert pools" {
+    const F = struct {
+        pub const Options = struct { prompt_cache_bytes: u64 = 0 };
+    };
+    var opts: F.Options = .{};
+    var why: []const u8 = "";
+    try std.testing.expect(set(F, .{ .dir = "", .model_type = "qwen4_exp", .prompt_cache_gib = 2 }, &opts, &why));
+    try std.testing.expectEqual(@as(u64, 2 << 30), opts.prompt_cache_bytes);
+    try std.testing.expect(set(F, .{ .dir = "", .model_type = "qwen4_exp", .prompt_cache_gib = 2, .keep = 0 }, &opts, &why));
+    try std.testing.expectEqual(@as(u64, 0), opts.prompt_cache_bytes);
 }
 
 test "prompt precision: family options receive both explicit int8 and default bf16" {
