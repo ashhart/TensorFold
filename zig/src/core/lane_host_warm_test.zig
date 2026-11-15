@@ -3,6 +3,7 @@ const std = @import("std");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
+const prompt_cache = @import("prompt_cache.zig");
 const Reason = api.Reason;
 const Id = api.Id;
 const Event = api.Event;
@@ -372,4 +373,14 @@ test "a kept warm end supersedes its history at either lookahead and regeneratio
         try std.testing.expectEqual(@as(?u32, 0), got.cached);
         try std.testing.expect(got.same);
     }
+}
+
+test "a host advertises warm turns only beside a kept-state store" {
+    var host: LaneHost = undefined;
+    host.info_ = .{};
+    host.advertiseCache(null);
+    try std.testing.expect(!host.info_.prompt_cache and !host.info_.warm_turns);
+    var store: prompt_cache.Store = undefined;
+    host.advertiseCache(&store);
+    try std.testing.expect(host.info_.prompt_cache and host.info_.warm_turns);
 }
