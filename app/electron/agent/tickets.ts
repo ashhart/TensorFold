@@ -236,8 +236,8 @@ export interface TicketReviewGateState {
 
 export function ticketReviewGateState(ticket: Ticket): TicketReviewGateState {
   const evidence = meaningfulTicketEvidence(ticket)
-  const builder = newestEvidence(evidence.filter(isBuilderEvidence))
-  const review = newestReviewDecisionAfterBuilder(evidence)
+  const builder = newestBuilderEvidence(evidence)
+  const review = newestReviewDecisionAfterBuilder(evidence, builder)
   return {
     hasBuilderEvidence: !!builder,
     builderEvidenceBy: builder?.createdBy ?? null,
@@ -263,19 +263,30 @@ function newestEvidence(items: TicketEvidence[]): TicketEvidence | null {
   }, null)
 }
 
-function newestReviewDecisionAfterBuilder(evidence: TicketEvidence[]): TicketEvidence | null {
+function newestReviewDecisionAfterBuilder(evidence: TicketEvidence[], builder: TicketEvidence | null): TicketEvidence | null {
   const canSkip = !evidence.some(isCodeChangeEvidence)
   const decision = newestEvidence(evidence.filter((item) =>
     isReviewPassEvidence(item) || canSkip && isReviewSkipEvidence(item)
     || hasReviewerSignal(item) && isBlockingReviewEvidence(item),
   ))
   if (!decision || !(isReviewPassEvidence(decision) || canSkip && isReviewSkipEvidence(decision))) return null
-  const builder = newestBuilderEvidenceBefore(evidence, decision)
-  return builder && !sameEvidenceCreator(builder, decision) ? decision : null
+  return builder && builder.createdAt < decision.createdAt && !sameEvidenceCreator(builder, decision) ? decision : null
 }
 
-function newestBuilderEvidenceBefore(evidence: TicketEvidence[], item: TicketEvidence): TicketEvidence | null {
-  return newestEvidence(evidence.filter((candidate) => isBuilderEvidence(candidate) && candidate.createdAt < item.createdAt))
+function newestBuilderEvidence(evidence: TicketEvidence[]): TicketEvidence | null {
+  const reviewBatches = new Set(evidence.filter((item) => item.kind === 'review')
+    .map(reviewBatchKey).filter((key): key is string => key !== null))
+  return newestEvidence(evidence.filter((item) => {
+    if (!isBuilderEvidence(item)) return false
+    const verification = item.kind === 'test' || item.kind === 'command'
+    const batch = reviewBatchKey(item)
+    return !verification || isCodeChangeEvidence(item) || batch === null || !reviewBatches.has(batch)
+  }))
+}
+
+function reviewBatchKey(item: TicketEvidence): string | null {
+  if (!item.ref?.startsWith('thread:') || item.ref.length === 'thread:'.length) return null
+  return JSON.stringify([item.createdAt, item.createdBy ?? null, item.ref])
 }
 
 function sameEvidenceCreator(a: TicketEvidence, b: TicketEvidence): boolean {
