@@ -1,5 +1,6 @@
 //! The CUDA Qwen3.5 family's refusals in words: its open's, then a running engine's requests'.
 const decide = @import("cuda_decide.zig");
+const sm110_modes = @import("cuda_sm110_modes.zig");
 
 /// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
 pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
@@ -13,7 +14,7 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.QwenYarnNoLearner => "--slide: the learner's attention ropes without YaRN; serve without --slide, or without --rope-yarn and a YaRN config",
         error.BadQwenKvPages => "TF_QWEN_KV_PAGES takes the positions a page holds (a whole number; 0 or unset: a window each)",
         error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
-        else => null,
+        else => sm110_modes.explain(err),
     };
     return switch (err) {
         error.InvalidQwenPrompt => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
