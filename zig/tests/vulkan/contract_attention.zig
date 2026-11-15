@@ -85,6 +85,28 @@ pub const served_cases = [_]SdpaCase{
     .{ .name = "prefill rows64 to 8192", .rows = 64, .prefix = 8128 },
 };
 
+/// A tiled prefill case with non-finite V planted from `poison_from` on: rows whose window ends before it stay finite.
+pub const TileCase = struct {
+    name: []const u8,
+    rows: u64,
+    prefix: u64,
+    capacity: u64,
+    poison_from: u64,
+    zero_qk: bool = false, // the review's repro: zero Q/K, V0 = 1, V1 = NaN, row 0 exactly 1.0
+};
+
+// Plants sit past row 0's bound but inside the loaded chunk the PV tile reads; poison cycles NaN, +inf, -inf.
+pub const tile_cases = [_]TileCase{
+    .{ .name = "tile 2 rows V1 NaN", .rows = 2, .prefix = 0, .capacity = 2, .poison_from = 1, .zero_qk = true },
+    .{ .name = "tile 17 rows poison tail", .rows = 17, .prefix = 5, .capacity = 100, .poison_from = 19 },
+    .{ .name = "tile 64 rows poison second half", .rows = 64, .prefix = 0, .capacity = 80, .poison_from = 32 },
+};
+
+/// Rows 0..finiteRows-1 see only finite V; later rows legitimately read the plants and may go non-finite.
+pub fn finiteRows(case: TileCase) u64 {
+    return case.poison_from - case.prefix;
+}
+
 // Attend f64 dots/max/softmax/output for n=prefix+r+1 in (kv_head,capacity,head_dim); matches fx.Attend.init order.
 pub fn attendRef(
     a: std.mem.Allocator,
@@ -305,6 +327,17 @@ test "served cases stay inside the engine's shapes and hit every reduction edge"
         if (capacityOf(case) > shared_stream_keys) long_count += 1;
     }
     try testing.expectEqual(@as(usize, 3), long_count); // the 7169/8192 decodes and the row-64 prefill to 8192 ride the long arm
+}
+
+test "tile poison cases plant past row 0, inside the chunk, with capacity room and a finite leading row" {
+    for (tile_cases) |case| {
+        try testing.expect(case.rows >= 2 and case.rows <= 64); // the tiled path serves rows 2..tile_max_rows
+        const total = case.prefix + case.rows;
+        try testing.expect(case.capacity >= total); // attendPlan's fit; the tail past total is never loaded
+        try testing.expect(case.poison_from > case.prefix and case.poison_from < total); // future for row 0, loaded by the tile
+        try testing.expect(finiteRows(case) >= 1); // a leading row must come out finite
+    }
+    try testing.expect(tile_cases[0].zero_qk); // the review's two-row repro is an explicit case
 }
 
 test "sdpa checkers accept the honest bf16 output and refuse planted ones" {
