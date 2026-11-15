@@ -167,3 +167,9 @@ zig/src/families/flashnext/cuda_round_graph.zig	7fa3a54e93c81de36cf3962d0a68eb72
 zig/src/families/flashnext/cuda_rows.zig	735fc8915036e47d09f533f4e5948e5fc4b61556172ebe2c6bfdaad3e0373216	raw	main dfd9ac5ef4 (#2585: TF_FLASHNEXT_* read through platform/environment.zig, malformed text refused at startup; valid values keep their meaning)
 zig/src/families/flashnext/cuda_select_main.zig	5c012c2d59fa6dd573424fce7b6d8b162a06cb9f6103530a0fc0b03dbdb17bd3	raw
 zig/src/families/flashnext/cuda_snap.zig	bbc66ed7e1aed820b4b60c148b1bbe47b2a5c7e7240c7da7f0bd8504080a6b56	raw	main 4f6017ced (prompt cache marks kept inside the pass), #1953: the prompt cache ladder's values
+zig/src/families/qwen27/attention.zig	2fce3087ee3079ac2f06e43c7b6a6fc148ee05bf89b0cfc30ab2120f8d42ab3f	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/families/qwen27/attention_memory.zig	0602a104408a18917c6407feaef3b67bed741739e4762a3d5e972bb874d5865e	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/families/qwen27/attention_plan.zig	b905bedc98a5864c7ff3ac98b17d44a5b98170ec5c6b7b5954480415fa0f133c	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/families/qwen27/decode_round.zig	43f5826f6913e4964a4158184392a1b9567a27e2cb11b40cf48f11c0b16633de	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/native/qwen27_prompt_rows.zig	5e137f7966c0b725994bc613266be2d83a47800b211dcb7b742455066ed33887	raw	#2916 (solo prompt frames; decode and shared limits retained)
+zig/src/native/qwen27_slots.zig	40984d6b608f156add25400ad52ae86aa25c1eacca828972794909fef096cd7f	raw	#2916 (solo prompt frames; decode and shared limits retained)
