@@ -364,14 +364,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ engine.vendorId(), want });
         return 1;
     };
-    if (std.c.getenv("TF_VK_DECODE_BENCH")) |env| {
-        const n = std.fmt.parseInt(usize, std.mem.span(env), 10) catch 128;
-        decode_bench.run(init.io, engine, prompt, n) catch |e| {
-            std.debug.print("FAIL decode bench: {s}\n", .{@errorName(e)});
-            return 1;
-        };
-        return 0;
-    }
+    if (std.c.getenv("TF_VK_DECODE_BENCH")) |env| return decode_bench.run(init.io, engine, prompt, std.mem.span(env));
 
     const row_len: usize = @intCast(engine.logitsLen());
     const rows_a = try a.alloc(u8, expected.len * row_len);
