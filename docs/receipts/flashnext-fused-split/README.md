@@ -10,9 +10,15 @@ cluster's slice order, so the outputs keep the cluster kernel's bits. The server
 - Main: `41a72fd2578dfbdd73b25663da78d5fc0047bd95`, the base every speed, prompt and exactness arm below ran on.
 - Branch: commit `4df765a1c806158f40bdc3a57c0036fe2048bb2d`, that main plus this pull request's four commits before
   this receipt (the change, the earlier receipt, the contract's launch records and the host-test step).
-- Main has since moved to `964174ea05879e6dde1de1198a3aae3ef8b46a3b`, which the branch merges at `120123a6c4`. Its 29
-  files are DeepSeek-V4.1 and Qwen3.8-27B on Metal, their records and their tests, and none is a file this change
-  touches, so the files the arms measured are byte-identical at that merge and the arms describe it too. The five-SM
+- Main has since moved, and the branch merges it twice: `964174ea05879e6dde1de1198a3aae3ef8b46a3b` at `120123a6c4`,
+  then `d2b37227a8b4431a71d87bf093786aadcfa35b62` at `1e24f2692a`. Of the 111 files main changed between `41a72fd257`
+  and `d2b37227a8`, two are files this change touches, `CHANGELOG.md` (other changes' entries) and
+  `docs/environment.md` (another setting's row), and both merged without a conflict. Three are on a Flash Next CUDA
+  request's path: `zig/kernels/cuda/common/fp_pairs.cuh`, which `qmmf.cu` includes, gains `fp4pair_nz5`, which only
+  `nvfp4_experts32.cu` calls, and `zig/src/core/lane_host.zig` and `lane_host_end.zig` add a cancelled request's work
+  to the load ledger's counters, which launches nothing and changes no token. The rest belong to other families,
+  Metal, the pull commands, tests, tools, docs, or server features these boots did not use (image URLs, `--slide`,
+  `--compact-memory`). So no file of the fused split-K path moved, and the arms describe both merges. The five-SM
   limits run below was built from `120123a6c4`.
 - Both images were built the same way from their own commit: `zig build -Dnvcc=/usr/local/cuda/bin/nvcc
   -Doptimize=fast fatbins install native` in `nvcr.io/nvidia/pytorch:26.07-py3` (nvcc 13.3, V13.3.73), Zig 0.17.0.
