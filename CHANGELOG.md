@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Cluster: a pull plan asks for each file's safetensors header, and a file read in full is fetched whole, so its manifest hash is checked (#3095).
+
 - Tests: the macOS dashboard test no longer looks for a paged prefix cache tile the page never had; the paged store publishes no status (#3094).
 
 - Docs: the Flash Next CUDA recipe's two-GB10 section lists both RDMA devices of each ConnectX-7 port in `NCCL_IB_HCA` (`rocep1s0f0` and `roceP2p1s0f0` for the first port), with `NCCL_IB_ADDR_RANGE` covering both. A GB10 reaches its port over two PCIe links, and one device alone carries about 112 of the port's 200 Gb/s. On two GB10s joined by one cable this made cold 2,048 to 32,768-token prompts at `--tp 2` 26.5% to 28.1% faster (1,147 to 1,469 tokens/s at 8,192, NCCL 2.32.3), with decode speed and tokens unchanged (#2969). Thanks to @swbiggart.
