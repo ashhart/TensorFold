@@ -439,6 +439,33 @@ test "a prompt takes the K-parallel tiles by rows and by items, then the 128-row
     try std.testing.expect(std.mem.endsWith(u8, v.select(envOn("gfx1030", true, true, false), .mlx, .routed, .prefill, shape).?.id, "kp1"));
 }
 
+test "gfx1151 takes the 2-row K-parallel tile for a plain prompt of 1 or 2 rows, the 1-row tile for 1 row of 2-bit or 3-bit codes" {
+    const r = kernelsOn("gfx1151");
+    var shape: Shape = .{ .m = 1, .n = 4096, .k = 4096, .bits = 4, .group = 64, .fp16 = false };
+    // from 2 rows up every width takes the same tiles, with the matrix cores on or off
+    const plain = [_]struct { u32, []const u8 }{ .{ 2, "kp3" }, .{ 3, "kp1" }, .{ 4, "kp1" }, .{ 5, "kp2" }, .{ 32, "kp2" } };
+    for ([_]bool{ true, false }) |matrix_on| for (registry.widths) |bits| {
+        const env = envOn("gfx1151", true, true, matrix_on);
+        shape.bits = bits;
+        // one row: the 1-row tile is ahead on 2-bit and 3-bit codes, the 2-row tile from 4-bit up (measured on gfx1151)
+        shape.m = 1;
+        try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, if (bits <= 3) "kp0" else "kp3"));
+        for (plain) |p| {
+            shape.m = p[0];
+            try std.testing.expect(std.mem.endsWith(u8, r.select(env, .mlx, .project, .prefill, shape).?.id, p[1]));
+        }
+    };
+    // with the dot2 GEMM tiles switched off the reference tile still runs
+    shape.bits = 4;
+    shape.m = 2;
+    try std.testing.expect(std.mem.endsWith(u8, r.select(envOn("gfx1151", true, false, false), .mlx, .project, .prefill, shape).?.id, "block"));
+    // the other GPUs' tables keep the 1-row tile at 1 and 2 rows, whatever the width
+    for ([_][]const u8{ "gfx1030", "gfx1100", "gfx1201" }) |gfx| for (registry.widths) |bits| for ([_]u32{ 1, 2 }) |m| {
+        shape = .{ .m = m, .n = 4096, .k = 4096, .bits = bits, .group = 64, .fp16 = Caps.of(gfx).?.act != .bf16 };
+        try std.testing.expect(std.mem.endsWith(u8, kernelsOn(gfx).select(envOn(gfx, true, true, false), .mlx, .project, .prefill, shape).?.id, "kp0"));
+    };
+}
+
 test "a routed prompt past its pairs per item leaves the K-parallel tiles for the 128-row tile" {
     const tuning = @import("../tuning/tuning.zig");
     const bounded = comptime blk: {

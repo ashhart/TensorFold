@@ -15,6 +15,7 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },
+    .{ .name = "TF_GLM_DSEL", .default = true },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};

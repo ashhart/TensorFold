@@ -42,6 +42,13 @@ pub const Snaps = extern struct {
     pub const max = 16;
 };
 
+/// A batched draft's rows: each part's `a` (wa bytes a row) and `b` (wb bytes a row), its start and row count.
+pub const GatherRows = extern struct { a: [8]u64 = @splat(0), b: [8]u64 = @splat(0), rows: [8]c_int = @splat(0), row0: [8]c_int = @splat(0), wa: c_int = 0, wb: c_int = 0 };
+/// A span's last row: each part's source rows, moved to the destination rows in part order.
+pub const LastRows = extern struct { a: [8]u64 = @splat(0), b: [8]u64 = @splat(0) };
+/// A level's rows: each part's token and probability destinations, its start and row count, the level's words.
+pub const ScatterRows = extern struct { tok: [8]u64 = @splat(0), prob: [8]u64 = @splat(0), rows: [8]c_int = @splat(0), row0: [8]c_int = @splat(0), tok_at: c_int = 0, prob_at: c_int = 0 };
+
 pub const Kernels = struct {
     d: *const cuda.Driver,
     mods: [21]cuda.Module,
@@ -64,6 +71,9 @@ pub const Kernels = struct {
     add_row: cuda.Function,
     add_bf16: cuda.Function,
     splice_rows: cuda.Function, // an image prompt's rows take the vision tower's features (Bolt)
+    gather_rows: cuda.Function, // a batched draft's rows from each part into the head's rows
+    gather_last: cuda.Function, // a batched draft's last rows moved down, in order
+    scatter_rows: cuda.Function, // a level's tokens and probabilities to each part's buffers
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
@@ -101,6 +111,9 @@ pub const Kernels = struct {
         k.add_row = try k.mods[7].function("tf_add_row");
         k.add_bf16 = try k.mods[7].function("tf_add_bf16");
         k.splice_rows = try k.mods[7].function("tf_splice_rows");
+        k.gather_rows = try k.mods[7].function("tf_nemo_gather_rows");
+        k.gather_last = try k.mods[7].function("tf_nemo_gather_last");
+        k.scatter_rows = try k.mods[7].function("tf_nemo_scatter_rows");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..20]);
@@ -239,6 +252,16 @@ pub const Ops = struct {
         return o.k.draws.draw(o.s, logits, vocab, rule, meta, offset, out, rows, ids, prob);
     }
 
+    /// sample.cu's rows draw: row r under rule[r] at position meta[r] + 1, one launch (or a row a launch).
+    pub fn drawRows(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, out: u64, rows: usize, scratch: ?u64) !void {
+        return o.k.draws.drawRows(o.s, logits, vocab, rule, meta, out, rows, scratch);
+    }
+
+    /// sample.cu's rows draw at an offset: row r under rule[r], columns mapped by `ids` (null: the whole head).
+    pub fn drawIdsRows(o: Ops, logits: u64, vocab: usize, rule: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
+        return o.k.draws.drawIdsRows(o.s, logits, vocab, rule, meta, offset, out, rows, ids, prob);
+    }
+
     /// sample.cu: `rows` bf16 logits rows' disallowed tokens -inf, their bits `words` words a row at `bits`.
     pub fn grammarMask(o: Ops, logits: u64, vocab: usize, bits: u64, words: usize, rows: usize) !void {
         var a: cuda.Args = .{};
@@ -252,6 +275,34 @@ pub const Ops = struct {
     /// sample.cu's logprob rows on this stream: each row's words for its pick, `k` best tokens and rank if `rank`.
     pub fn logprobRows(o: Ops, logits: u64, vocab: usize, picks: u64, k: u8, rank: bool, out: u64, rows: usize) !void {
         return o.k.draws.logprobRows(o.s, logits, vocab, picks, k, rank, out, rows);
+    }
+
+    /// A batched draft's rows: each part's rows of `g`'s sources into dst_a and dst_b, one launch.
+    pub fn gatherRows(o: Ops, g: GatherRows, dst_a: u64, dst_b: u64, rows: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(g);
+        a.add(dst_a);
+        a.add(dst_b);
+        try o.go(o.k.gather_rows, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// A batched draft's last rows moved to the destination rows, ascending, one block.
+    pub fn gatherLast(o: Ops, g: LastRows, dst_a: u64, dst_b: u64, wa: usize, wb: usize, n: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(g);
+        a.add(dst_a);
+        a.add(dst_b);
+        for ([_]usize{ wa, wb, n }) |v| a.add(@as(c_int, @intCast(v)));
+        try o.go(o.k.gather_last, .{ 1, 1, 1 }, 256, 0, &a);
+    }
+
+    /// A level's tokens and probabilities to each part's buffers, one launch.
+    pub fn scatterRows(o: Ops, g: ScatterRows, tok: u64, prob: u64, rows: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(tok);
+        a.add(prob);
+        a.add(g);
+        try o.go(o.k.scatter_rows, .{ rows, 1, 1 }, 32, 0, &a);
     }
 
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
