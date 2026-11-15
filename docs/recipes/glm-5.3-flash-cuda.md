@@ -47,12 +47,12 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
-- `--kv-cache fp8` is an opt-in FP8 latent cache ([1.1.2](../../CHANGELOG.md#112)); BF16 remains the default. It is
-  lossy, so its replies differ from the BF16 cache's. On FP4-Local at TP=2 on two GB10
-  ([receipt](../receipts/glm-kv-fp8-3a56d4eb/README.md)), teacher-forced over 360,418 positions, it keeps the mean NLL
-  within 0.06% and the best token at 95.5% of positions, a KL over the top 20 of 0.016 where NVFP4 against FP4-Local
-  is 0.043. Drafted, concurrent and resumed replies equal plain, alone and cold ones. A token's cache is about a third
-  smaller, and cold prompts are 3 to 5% slower. Other checkpoints, rank counts and GPUs are not qualified.
+- `--kv-cache fp8` is an opt-in FP8 latent cache ([1.1.2](../../CHANGELOG.md#112)); BF16 remains the default and the
+  only qualified cache. FP8 is lossy, so its replies differ from the BF16 cache's, and a mode that changes tokens is
+  not qualified. A diagnostic receipt on FP4-Local at TP=2 on two GB10
+  ([receipt](../receipts/glm-kv-fp8-3a56d4eb/README.md)) measures how far it moves: teacher-forced over 360,418
+  positions, the mean NLL within 0.06% and the best token the same at 95.5% of positions, a KL over the top 20 of
+  0.016 where NVFP4 against FP4-Local is 0.043; a token's cache about a third smaller; cold prompts 3 to 5% slower.
 - `TF_GLM_HOST_CACHE=1` on every rank keeps kept prompt states in pinned host memory instead of on the card, so a
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
