@@ -69,6 +69,8 @@ pub const Draws = struct {
     topk_merge_fn: Function,
     /// tf_draw_rows; null in a kernel set built before it, where drawRows falls back to one launch a row.
     draw_rows_fn: ?Function = null,
+    /// tf_draw_ids_rows: rows under per-row rules at an offset, columns mapped by IDS (null: whole head).
+    draw_ids_rows_fn: ?Function = null,
     /// tf_draw_slice_top and tf_draw_rows_finish: a window's rows over slices (null: one block a row).
     slices: ?[2]Function = null,
     /// tf_penalize_rows; null in a kernel set built before it, where penalties are not offered.
@@ -83,7 +85,7 @@ pub const Draws = struct {
     pub const topk_slice = 4096;
 
     pub fn resolve(mod: Module) !Draws {
-        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .slices = slicesOf(mod), .penalize_fn = mod.function("tf_penalize_rows") catch null };
+        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge"), .draw_rows_fn = mod.function("tf_draw_rows") catch null, .draw_ids_rows_fn = mod.function("tf_draw_ids_rows") catch null, .slices = slicesOf(mod), .penalize_fn = mod.function("tf_penalize_rows") catch null };
     }
 
     fn slicesOf(mod: Module) ?[2]Function {
@@ -165,6 +167,17 @@ pub const Draws = struct {
         a.add(meta);
         a.add(out);
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// `rows` logits rows, row r under rule[r] at position meta[r] + 1 + offset, columns mapped by `ids` (null: head).
+    pub fn drawIdsRows(d: *const Draws, s: Stream, logits: u64, vocab: usize, rule_ptr: u64, meta: u64, offset: usize, out: u64, rows: usize, ids: ?u64, prob: ?u64) !void {
+        if (rows == 0) return;
+        if (d.draw_ids_rows_fn) |f| {
+            var a: launch_.Args = .{};
+            inline for (.{ logits, @as(u32, @intCast(vocab)), rule_ptr, meta, int(offset), out, ids orelse 0, prob orelse 0 }) |v| a.add(v);
+            return launch_.launch(f, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
+        }
+        for (0..rows) |i| try d.draw(s, logits + i * vocab * 2, vocab, rule_ptr + i * @sizeOf(Rule), meta + i * 4, offset, out + i * 4, 1, ids, if (prob) |p| p + i * 4 else null);
     }
 
     /// `n` entries at `entries` (n rows, n tokens, then n fp32 amounts): each takes its amount from its row's logit.

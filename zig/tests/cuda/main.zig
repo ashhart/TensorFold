@@ -13,6 +13,7 @@ const libs_tests = @import("libs_tests.zig");
 const rank_scatter_tests = @import("rank_scatter_tests.zig");
 const roce_gather_tests = @import("roce_gather_tests.zig");
 const sample_tests = @import("sample_tests.zig");
+const nemotron_draw_tests = @import("nemotron_draw_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const window_profile = @import("window_profile.zig");
 const tree_accept = @import("tree_accept.zig");
@@ -170,8 +171,7 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
     return rest[i];
 }
 
-/// The contract glue's device path, compiled with the runner: the device reaches prepare through the vtable.
-fn compileContractGlue() !void {
+fn compileContractGlue() !void { // the contract glue's device path, built with the runner: prepare through the vtable
     const cores = std.Thread.getCpuCount() catch 1;
     if (cores != 0) return;
     var g: glue_contract.Glue = undefined;
@@ -302,6 +302,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-contract")) return exl3_contract.run(gpu);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
+    if (std.mem.eql(u8, cmd, "nemotron-draws")) return nemotron_draw_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "topk")) return sample_tests.topk(gpu);
     if (std.mem.eql(u8, cmd, "q35-argmax")) return sample_tests.q35Argmax(gpu);
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
