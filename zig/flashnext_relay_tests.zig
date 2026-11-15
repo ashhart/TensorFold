@@ -116,6 +116,7 @@ const Fixture = struct {
     }
 
     fn run(f: *Fixture) !void {
+        if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest;
         const monitor: ?std.Thread = if (f.mode == .silent)
             try std.Thread.spawn(.{}, Handoff.watch, .{&f.handoff})
         else
