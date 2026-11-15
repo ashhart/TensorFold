@@ -99,6 +99,7 @@ const JOBS = 1024;
 pub const Tp2 = struct {
     pub const handoff_module = @import("tp_handoff.zig");
     pub const relay_module = relay;
+    pub const stats_module = @import("tp_stats.zig");
     pub const shader = source;
     pub const QueueJob = Job;
     owned: @import("owned.zig").Owner(mtl) = .{},
@@ -140,10 +141,8 @@ pub const Tp2 = struct {
     request_gate: @import("tp_request_gate.zig").Gate = .{},
     trace: bool = false, // TF_TP_TRACE: log every job the host serves
     local: bool = false, // TF_TP_LOCAL: serve jobs locally to time the GPU alone; replies are wrong
-    stats: bool = false, // TF_TP_STATS: the host's time from a job's post to its serve, every 4096 jobs
-    held_ns: u64 = 0,
-    held_max: u64 = 0,
-    held_kind: [5][2]u64 = @splat(.{ 0, 0 }), // by job kind: total ticks, jobs
+    stats: bool = false, // TF_TP_STATS: host-held, release gap, send and peer arrival times by reply
+    stats_state: stats_module.State = .{},
     /// Metal aliases the endpoint window; count it once beside staging, tiny buffers and the host queue.
     pub fn startupBytes() usize {
         return WINDOW + (32 << 20) + PART + 48 + @sizeOf(Tp2) + JOBS * @sizeOf(Job);
@@ -473,19 +472,8 @@ pub const Tp2 = struct {
         return @ptrCast(@alignCast(t.win.ptr + off));
     }
 
-    pub fn recordStats(t: *Tp2, seq: u64, job: Job, seen: u64) void {
-        if (!t.stats) return;
-        const held = platform.c.mach_absolute_time() - seen;
-        t.held_ns += held;
-        t.held_max = @max(t.held_max, held);
-        t.held_kind[@backingInt(job.kind)][0] += held;
-        t.held_kind[@backingInt(job.kind)][1] += 1;
-        if (seq % 4096 != 0) return;
-        std.debug.print("TP rank{d} jobs to {d}: host held {d:.1} us a job, max {d:.1} us\n", .{ t.rank, seq, @as(f64, @floatFromInt(t.held_ns)) / 4096.0 / 24.0, @as(f64, @floatFromInt(t.held_max)) / 24.0 });
-        for (t.held_kind, 0..) |hk, kk| if (hk[1] > 0) std.debug.print("TP rank{d}   {s}: {d:.1} us a job ({d} jobs)\n", .{ t.rank, @tagName(@as(@TypeOf(job.kind), @fromBackingInt(@intCast(kk)))), @as(f64, @floatFromInt(hk[0])) / @as(f64, @floatFromInt(hk[1])) / 24.0, hk[1] });
-        t.held_ns = 0;
-        t.held_max = 0;
-        t.held_kind = @splat(.{ 0, 0 });
+    pub fn finishStats(t: *Tp2) void {
+        if (t.stats) t.stats_state.finishReply(t.rank, platform.c.mach_absolute_time());
     }
 };
 

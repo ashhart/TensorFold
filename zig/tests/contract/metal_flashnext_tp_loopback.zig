@@ -52,8 +52,7 @@ const Loop = struct {
     trace: bool = false,
     local: bool = false,
     stats: bool = false,
-
-    pub fn recordStats(_: *Loop, _: u64, _: tp.QueueJob, _: u64) void {}
+    stats_state: tp.stats_module.State = .{},
 
     pub fn word64(l: *Loop, off: usize) *u64 {
         return @ptrCast(@alignCast(l.ep.win.ptr + off));

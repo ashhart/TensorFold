@@ -53,6 +53,7 @@ const Host = struct {
     trace: bool = false,
     local: bool = false,
     stats: bool = false,
+    stats_state: @import("src/families/flashnext/tp_stats.zig").State = .{},
 
     pub fn word64(t: *Host, off: usize) *u64 {
         std.debug.assert(off == 8);
@@ -76,10 +77,6 @@ const Host = struct {
 
     pub fn sendNow(_: *Host, _: anytype, _: usize, _: u64) !void {
         return error.UnexpectedSend;
-    }
-
-    pub fn recordStats(t: *Host, _: u64, _: Job, _: u64) void {
-        t.stop.store(true, .release);
     }
 };
 
@@ -157,6 +154,26 @@ fn arrival(mode: Mode) !void {
 
 test "relay late peer word releases once with the complete job epoch" {
     try arrival(.late);
+}
+
+test "relay stats record a full-width job through the timed publication path" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var f: Fixture = undefined;
+    try f.init(arena.allocator(), .late);
+    defer f.handoff.deinit();
+    f.host.stats = true;
+    try f.run();
+    const reply = f.host.stats_state.takeReply(@import("sys").c.mach_absolute_time());
+    try std.testing.expectEqual(epoch, reply.first);
+    try std.testing.expectEqual(epoch, reply.last);
+    try std.testing.expectEqual(@as(u64, 1), reply.held.count);
+    try std.testing.expectEqual(@as(u64, 1), reply.kinds[0].send.count);
+    try std.testing.expectEqual(@as(u64, 1), reply.kinds[0].arrival.count);
+    try std.testing.expectEqual(@as(u64, 0), reply.kinds[0].release_to_post.count);
+    try std.testing.expectEqual(@as(u64, 0), f.host.stats_state.takeReply(@import("sys").c.mach_absolute_time()).held.count);
+    try std.testing.expectEqual(epoch, f.handoff.ready.slice(u64, 1)[0]);
+    try std.testing.expectEqual(@as(usize, 1), f.handoff.landed.setCount());
 }
 
 test "relay stale peer word does not release the next job" {

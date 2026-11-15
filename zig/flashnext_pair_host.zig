@@ -3,6 +3,7 @@ const relay = @import("flashnext_relay_tests.zig");
 
 test {
     _ = relay;
+    _ = @import("src/families/flashnext/tp_stats.zig");
     _ = @import("src/families/flashnext/tp_submit.zig");
     _ = @import("src/families/flashnext/tp_request.zig");
     _ = @import("src/families/flashnext/tp_request_gate.zig");

@@ -73,6 +73,14 @@ pub const Handoff = struct {
     }
 
     pub fn publish(h: *Handoff, seq: u64) bool {
+        return h.publishWithStamp(seq, {});
+    }
+
+    pub fn publishTimed(h: *Handoff, seq: u64, released: *u64) bool {
+        return h.publishWithStamp(seq, released);
+    }
+
+    inline fn publishWithStamp(h: *Handoff, seq: u64, released: anytype) bool {
         h.acquire();
         defer h.lock.unlock();
         if (h.failed.load(.acquire)) return false;
@@ -85,6 +93,7 @@ pub const Handoff = struct {
             return false;
         };
         h.ready.slice(u64, 1)[0] = seq;
+        if (comptime @TypeOf(released) != void) released.* = platform.c.mach_absolute_time();
         h.landed.set(seq);
         h.deadline.clear();
         return true;
