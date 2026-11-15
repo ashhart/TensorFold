@@ -36,6 +36,12 @@ in 302.1 s, and rank 0 reported `model 96.11 GiB; 1 stream at once, 3.16 GiB eac
 left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 ([#1040](https://github.com/ashhart/TensorFold/issues/1040)).
 
+FP4-Local takes the same commands with its own name: `tensorfold pull
+nvidia/GLM-5.3-Flash-FP4-Local@76348ddb2be2e35e39ecfc00e75dc07703f4f3d5`, then `nvidia/GLM-5.3-Flash-FP4-Local` on every
+rank. Its [receipt on `main`](../receipts/glm-fp4local-3a56d4eb/README.md) (`3a56d4eb92`, two GB10 at TP=2) has drafted
+replies equal to plain, concurrent to alone and resumed to cold, 90.2 GiB of model a rank, 23.9 tok/s plain and 34 to 42
+drafted at one stream, and about 1,430 prompt tokens a second from 2,048 to 65,536 tokens.
+
 ## Requests
 
 - `--vision` on every rank reads images and video: rank 0's tower encodes them and sends their rows and spans to the
