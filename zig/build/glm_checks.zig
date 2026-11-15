@@ -29,6 +29,14 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         "tf-glm-rows-speed",
         "GLM-5.3-Flash one-row decode products at the checkpoints' shapes: GPU time a launch, GB/s, a token by class",
     ).dependOn(&b.addInstallArtifact(speed, .{}).step);
+    const index = b.addExecutable(.{ .name = "tf-glm-index-speed", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_index_speed.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } },
+    }) });
+    b.step("tf-glm-index-speed", "GLM-5.3-Flash's decode indexer and sparse attention at long positions: GPU time a launch").dependOn(&b.addInstallArtifact(index, .{}).step);
 }
 
 /// tf-glm-sample-check and test-glm-sampling: the real GLM sampler against its host reference, no checkpoint.
