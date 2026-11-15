@@ -101,9 +101,9 @@ fn plantCancel(f: *fx.Fixture, act_f32: bool) !void {
     const w_row = try f.a.alloc(u32, s.n * s.k / 8);
     defer f.a.free(w_row);
     @memset(w_row, 0);
-    w_row[0] = 0x11111118;
-    for (1..16) |j| w_row[j] = 0x11111111;
-    w_row[64] = 0x00000008;
+    for (0..8) |j| w_row[j] = 0x88888888;
+    for (8..16) |j| w_row[j] = 0x11111111;
+    for (64..72) |j| w_row[j] = 0x88888888;
     const scales_row = try f.a.alloc(u16, s.n * (s.k / param_group));
     defer f.a.free(scales_row);
     @memset(scales_row, 0x3f80);
