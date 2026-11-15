@@ -37,6 +37,16 @@ async function main() {
     await writeFile(path.join(paths.sourceDir, 'main.swift'), 'print("hi")\n')
     await writeFile(path.join(paths.sourceDir, 'Keys.swift'), 'let a = 1\n')
     await writeFile(path.join(paths.sourceDir, 'README.txt'), 'not a source\n')
+    const checks = path.join(paths.sourceDir, 'ComputerUseChecks')
+    const shared = path.join(checks, 'Sources', 'ComputerUseChecks')
+    await mkdir(shared, { recursive: true })
+    await mkdir(path.join(checks, 'Tests', 'ComputerUseChecksTests'), { recursive: true })
+    await mkdir(path.join(checks, '.build'), { recursive: true })
+    await writeFile(path.join(shared, 'Protocol.swift'), 'let request = 1\n')
+    await writeFile(path.join(shared, 'Platform.swift'), 'let platform = 1\n')
+    await writeFile(path.join(checks, 'Package.swift'), '// package manifest, not helper source\n')
+    await writeFile(path.join(checks, 'Tests', 'ComputerUseChecksTests', 'ProtocolTests.swift'), '#error("tests must not ship")\n')
+    await writeFile(path.join(checks, '.build', 'Generated.swift'), '#error("build artifacts must not ship")\n')
 
     assert.deepEqual(swiftcArgs(['a.swift'], 'out').slice(0, 9), ['swiftc', '-O', '-swift-version', '5', '-module-name', 'TensorFoldComputer', '-target', 'arm64-apple-macos13.0', '-framework'])
     assert.equal(parseSelfTest('{"ok":true,"checks":12}\n'), 12)
@@ -59,7 +69,11 @@ async function main() {
     assert.equal(first.compiles(), 1)
     const compile = first.calls.find((call) => call.args[0] === 'swiftc')
     assert.equal(compile.cwd, paths.sourceDir)
-    assert.deepEqual(compile.args.slice(-2), ['Keys.swift', 'main.swift'], 'sources go by sorted relative name')
+    assert.deepEqual(compile.args.slice(-4), [
+      'ComputerUseChecks/Sources/ComputerUseChecks/Platform.swift',
+      'ComputerUseChecks/Sources/ComputerUseChecks/Protocol.swift',
+      'Keys.swift', 'main.swift',
+    ], 'shared sources compile by relative name, without the package manifest, tests or artifacts')
     assert.ok(!compile.args.some((arg) => arg.endsWith('README.txt')))
     assert.equal(await readFile(paths.binary, 'utf8'), 'fake helper binary')
     assert.equal((await stat(paths.binary)).mode & 0o777, 0o755)
@@ -73,6 +87,13 @@ async function main() {
     assert.equal(second.compiles(), 0)
     assert.equal(second.calls.filter((call) => call.command === 'xcrun').length, 0)
     assert.equal(second.calls.filter((call) => call.args[0] === '--self-test').length, 1)
+
+    await writeFile(path.join(shared, 'Protocol.swift'), 'let request = 2\n')
+    const sharedEdit = toolchain()
+    assert.equal((await build({ root, run: sharedEdit.run, log: () => {} })).compiled, true, 'shared parser edits invalidate the cache')
+    await writeFile(path.join(checks, 'Tests', 'ComputerUseChecksTests', 'ProtocolTests.swift'), '#error("edited test must not ship")\n')
+    const testEdit = toolchain()
+    assert.equal((await build({ root, run: testEdit.run, log: () => {} })).compiled, false, 'test-only edits do not change the helper')
 
     // An edited source, a new source, a replaced binary and --force each rebuild.
     await writeFile(path.join(paths.sourceDir, 'Keys.swift'), 'let a = 2\n')
@@ -104,7 +125,7 @@ async function main() {
     await assert.rejects(() => buildComputerHelper({ root, run: toolchain().run, platform: 'linux', log: () => {} }), /only on macOS/)
 
     await rm(paths.sourceDir, { recursive: true, force: true })
-    await mkdir(paths.sourceDir)
+    await mkdir(shared, { recursive: true })
     await assert.rejects(() => build({ root, run: toolchain().run, log: () => {} }), /No Swift sources/)
   } finally {
     await rm(root, { recursive: true, force: true })
