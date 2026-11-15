@@ -9,8 +9,8 @@ direct RoCE link, Ubuntu 24.04.5, driver 580.178.04, Zig 0.17.0, nvcc 13.5, NCCL
 ## Scope
 
 `--kv-cache fp8` keeps GLM's 512-wide latent rows as E4M3 codes with an FP32 scale a row; the rotary and index keys stay
-BF16. Since 1.1.2 the recipe has said its native quality and device qualification are pending. This measures both on
-FP4-Local at TP=2, with every other setting default:
+BF16. It changes tokens against the BF16 cache (all three golden replies differ), so it is not a qualified mode; this
+receipt is diagnostic evidence of how far it moves, on FP4-Local at TP=2, with every other setting default:
 
 - Fidelity, teacher-forced: one binary and checkpoint, the BF16 cache against the FP8 cache, top-20 prompt logprobs at
   every position of 30 sequences (360,418 scored positions) from 2,048 to 65,536 tokens. A prompt pass writes its
