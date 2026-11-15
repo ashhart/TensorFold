@@ -396,6 +396,7 @@ fn fixture(gpa: std.mem.Allocator, tmp: *std.testing.TmpDir) ![:0]u8 {
 }
 
 test "full and selected checkpoint views retain data, ownership and relative offsets" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a host Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const gpa = std.testing.allocator;
@@ -427,6 +428,7 @@ test "a split checkpoint keeps later tensors in the file, packs the rest, and st
     const log_level = std.testing.log_level;
     std.testing.log_level = .err;
     defer std.testing.log_level = log_level;
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a host Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const gpa = std.testing.allocator;
