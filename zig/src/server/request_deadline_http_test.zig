@@ -55,6 +55,7 @@ const Script = struct {
     done: std.atomic.Value(bool) = .init(false),
     submitted: bool = false,
     cancelled: bool = false,
+    linger_ms: u32 = 0, // after ending by itself, submit returns this late: the server first reads past the deadline
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
@@ -69,6 +70,7 @@ const Script = struct {
         sink.event(sink.ctx, id, &.{ .prefilled = 0 });
         sink.event(sink.ctx, id, &.{ .tokens = &.{ 'a', 'b', 'c' } });
         if (!s.hangs) s.end(&.{ 'd', 'e' }, .stop);
+        if (s.linger_ms > 0) std.Io.sleep(std.testing.io, .fromMilliseconds(s.linger_ms), .awake) catch {};
     }
     fn end(s: *Script, tokens: []const u32, reason: api.Reason) void {
         s.mutex.lockUncancelable(std.testing.io);
@@ -100,6 +102,7 @@ const Script = struct {
 
 const Reply = struct {
     a: Allocator,
+    slow: bool = false, // the first streamed event takes 100 ms to write
     status: ?u16 = null,
     whole: ?json.Value = null,
     events: std.ArrayList(json.Value) = .empty,
@@ -109,6 +112,7 @@ const Reply = struct {
     fn open(_: *anyopaque, _: usize) error{Closed}!void {}
     fn event(ctx: *anyopaque, value: ?json.Value) error{Closed}!void {
         const r: *Reply = @ptrCast(@alignCast(ctx));
+        if (r.slow and r.events.items.len == 0) std.Io.sleep(std.testing.io, .fromMilliseconds(100), .awake) catch {};
         if (value) |v| r.events.append(r.a, v) catch return error.Closed;
     }
     fn reply(ctx: *anyopaque, status_code: u16, value: json.Value) void {
@@ -133,7 +137,7 @@ fn post(a: Allocator, s: *Script, c: Case, max_tokens: u32, extra: []const u8) !
     const text = try std.fmt.allocPrint(a, "{{\"model\":\"m\",{s},\"max_tokens\":{d},\"stream\":{},\"return_token_ids\":true{s}}}", .{ input, max_tokens, c.stream, extra });
     const body = (try json.parse(a, text)).ok;
     var conn = Conn{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a };
-    var response = Reply{ .a = a };
+    var response = Reply{ .a = a, .slow = s.linger_ms > 0 };
     const dog = try std.Thread.spawn(.{}, Script.watchdog, .{s});
     openai.run(srv, a, response.out(), .{ .conn = &conn }, c.chat, body);
     s.done.store(true, .release);
@@ -232,4 +236,18 @@ test "request deadline: HTTP a late EOS, stop string or token cap after the dead
         try std.testing.expectEqual(4, got.tokens);
         try std.testing.expectEqualStrings(x.ids, got.ids);
     };
+}
+
+test "request deadline: HTTP a reply the engine ended before the deadline keeps finish stop when the server reads it late" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (cases) |c| {
+        var s: Script = .{ .hangs = false, .linger_ms = 100 };
+        const got = try post(a, &s, c, 100, ",\"deadline_s\":0.05");
+        try std.testing.expect(!s.cancelled);
+        try std.testing.expectEqualStrings("stop", got.finish);
+        try std.testing.expectEqualStrings("abcde", got.text);
+        try std.testing.expectEqualStrings("[97, 98, 99, 100, 101]", got.ids);
+    }
 }
