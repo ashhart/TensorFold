@@ -95,9 +95,9 @@ its path.
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_READOUT_ROWS` (default 64, `0` never) is the rows from which the hyper-connection read-out takes the prompt
   tiles. Same bits either way; `128` keeps 16-stream decode rounds on the row kernels, up to 7% quicker on a GB10.
-- `TF_FLASHNEXT_READOUT_FUSED=1` (default off) runs a prompt pass's BF16 hyper-connection read-out, from 768 rows, on two
-  fused tiles that form the normed rows on chip. Same bits; cold prompts of 8k to 64k tokens 2.8% to 3.5% quicker on a
-  GB10 with the NVFP4 checkpoint. Metal, HIP and an MLX affine read-out refuse it by name.
+- `TF_FLASHNEXT_READOUT_FUSED=1` (default off) runs a prompt pass's BF16 hyper-connection read-out, from 768 rows, on
+  two fused tiles that form the normed rows on chip. Same bits; cold prompts of 8k to 64k tokens 2.8% to 3.5% quicker
+  on a GB10 with the NVFP4 checkpoint. Metal, HIP and an MLX affine read-out refuse it by name.
 - `TF_FLASHNEXT_CHUNK` (1 to 16,384, default 3,072) caps the rows of one prompt pass. Every pass reads the weights
   of every expert its rows route to, so fewer, larger passes cost less a token; but a pass runs to its end, so a
   stream decoding during a pass waits up to the whole pass for its next token. See

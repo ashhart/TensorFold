@@ -7,8 +7,9 @@ Unset or blank is main's chain.
 
 ## Source and environment
 
-- Main: `41a72fd2578dfbdd73b25663da78d5fc0047bd95`. Branch: this pull request at `ee13555c8ef095aaeb9da4786b62af1cdf405dbb`,
-  its commits merged with that main; the commits after it change only this receipt, the changelog line and the docs.
+- Main: `41a72fd2578dfbdd73b25663da78d5fc0047bd95`. Branch: this pull request at
+  `ee13555c8ef095aaeb9da4786b62af1cdf405dbb`, its commits merged with that main; the commits after it change only this
+  receipt, the changelog line and the docs.
 - Each image built the same way from its own commit: the recipe's Zig base image with `tensorfold-native`, its tools
   and the fatbins, nvcc 13.3.
 - One NVIDIA GB10 (sm_121), Zig 0.17.0, CUDA 13.3.
