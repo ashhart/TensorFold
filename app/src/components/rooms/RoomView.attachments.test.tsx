@@ -20,6 +20,7 @@ new Function('require', 'module', 'exports', ts.transpileModule(readFileSync(pat
 const roomHelpers = helperModule.exports
 const components = new Proxy({}, { get: (_target, name) => name === '__esModule' ? true : () => null })
 const AttachmentChips = () => null
+const RoomWorktree = () => null
 let startCalls: any[] = [], rejectStart = false
 const store: any = {
   rooms: ['A', 'B'].map((id) => ({ id, name: id, projectId: 'p', seats: [{ id: 'seat', name: 'Builder', providerId: 'provider', model: 'model' }], events: [], state: 'idle', problem: '', memory: [] })),
@@ -40,6 +41,7 @@ const imports: Record<string, unknown> = {
   '../../lib/policy': { allowedProviders: () => [] }, '../../lib/voice': { speakText() {} },
   './helpers': roomHelpers, './RoomPanels': components, './RoomGitBanner': components,
   './RoomTimeline': components, './RoomPlans': components,
+  './RoomWorktree': { RoomWorktree },
 }
 const loaded = { exports: {} as any }
 new Function('require', 'module', 'exports', ts.transpileModule(readFileSync(path.join(__dirname, 'RoomView.tsx'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports, `Reviewed import ${id}`); return imports[id] }, loaded, loaded.exports)
@@ -90,3 +92,8 @@ const removedId = chips(node).props.items[0].id
 chips(node).props.onRemove(removedId); release?.(); await settle(); node = render()
 assert.equal(chips(node), undefined)
 console.log('room files retain independent failures, block incomplete submission, retain failed launch inputs, and reject stale scope/removal completions')
+
+store.rightPanelHidden = false
+store.rooms[0].workspaceCwd = '/workspace/rooms/First room/code'
+node = render('A')
+assert.equal(all(node, (entry) => entry.type === RoomWorktree)[0]?.props.room.id, 'A', 'Room health must expose the open room worktree')
