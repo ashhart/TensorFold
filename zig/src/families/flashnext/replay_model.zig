@@ -111,7 +111,8 @@ pub const Model = struct {
 
     pub fn grouped(m: *Model, h: Buf, out: Buf) !void {
         const t = &m.t;
-        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(&m.r.enc, h, t.inj_m, out, t.ssp, t.rows, m.r.rows); // TP: each rank's rows' branches
+        // Merge expert rows from both ranks.
+        if (m.r.tp) |tp| return if (m.r.skip & TP_CLASS == 0) tp.combine(&m.r.enc, h, t.inj_m, out, t.ssp, t.rows, m.r.rows);
         try m.r.call("q4_hc_norm_grouped#[10240]", &.{ h, t.inj_m, t.ydown, t.wts, t.lg }, &.{ out, t.ssp });
     }
 
@@ -260,7 +261,7 @@ pub const Model = struct {
             cur = 1 - cur;
             try m.hcProject(t.h[cur], L.ahc, "qa_hc_down@ahc", "qa_hc_up@ahc", t.inj_a);
             var plain = false; // speed-up mode's DeltaNet exchange made the stream update
-            if (L.linear and r.tp != null) { // TP: this Mac's 8 key heads and 24 value heads, then one partial-sum exchange
+            if (L.linear and r.tp != null) { // This rank's key/value heads, followed by a partial exchange.
                 const tp = r.tp.?;
                 const k0: usize = tp.rank;
                 if (!r.fused_xsum) try r.call("lane_qmm_xsum#[2560]", &.{ t.mixed, t.mdims }, &.{t.xs});
@@ -278,7 +279,8 @@ pub const Model = struct {
                 const pn = tp.partNext();
                 const part: Buf = .{ .b = pn.b, .off = pn.off };
                 const po = try L.out.recorded();
-                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, po.wq, po.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 }); // one kernel at every width: drafted == plain
+                // One kernel at every width preserves drafted/plain equality.
+                try split.laneTiles(r, "lane_qmm_bytes_grouped@gdn.out", &.{ t.gout, t.xs, po.wq, po.sbt, t.mdims }, part, &.{.{ 0, 80 }}, 8, .{ 96 * k0, 96 });
                 if (r.skip & TP_CLASS == 0) { // the partials' sum and the stream update in the exchange's launch
                     tp.plain(&r.enc, t.h[cur], t.inj_a, t.h[1 - cur], t.ssp, t.rows, rows);
                     plain = true;

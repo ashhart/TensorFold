@@ -3,7 +3,7 @@ const std = @import("std");
 const runtime = @import("metal.zig");
 const cache_fit = runtime.ResidencySet;
 
-/// macOS unwires GPU memory after ~1-2 s idle and a request re-wires it all: keepalive ticks use the set.
+/// Keepalive ticks use the residency set while the model is idle.
 pub const Resident = Owner(runtime);
 pub const Fields = @import("resident_fields.zig").Fields;
 pub const fields = Fields(runtime);

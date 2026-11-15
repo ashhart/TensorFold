@@ -177,7 +177,7 @@ pub const ComputeEncoder = struct {
             const b = bound[1];
             const out = @as([*]u32, @ptrCast(@alignCast(b.b.contents() + b.off)));
             for (0..grid.width / 1024) |i| out[i] = if (wrong == 0) 7 else 9;
-        } else if (std.mem.eql(u8, pipe.name, "fz_argmax_join")) { // the two-launch argmax: one group a row (dispatchGroups)
+        } else if (std.mem.eql(u8, pipe.name, "fz_argmax_join")) { // one group per row
             const b = bound[1];
             const out = @as([*]u32, @ptrCast(@alignCast(b.b.contents() + b.off)));
             for (0..grid.width) |i| out[i] = if (wrong == 0) 7 else 9;

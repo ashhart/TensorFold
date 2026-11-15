@@ -93,7 +93,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.copy_long = 6;
     e.segments = window.ssd_experts == null and !window.ple_on_ssd and window.fsr_trace == null;
     e.mark_taps = true;
-    e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
+    // Rank 1 follows rank 0's pair threshold.
+    e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN);
     e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
     e.passed = null;
     e.snap_pool = .{ .load_limit = load_limit };
@@ -142,7 +143,8 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     r.event = try r.ownResource(try device.event());
     if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
     r.sel = try Select.init(r, MAXR);
-    if (r.tp == null and !std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_ATTN2") orelse @as([*:0]const u8, "on")), "off")) { // two heads a threadgroup, checked
+    // Use two heads per threadgroup after the single-rank load check.
+    if (r.tp == null and !std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_ATTN2") orelse @as([*:0]const u8, "on")), "off")) {
         r.attn2 = try @import("attn2.zig").init(r, "q4_attn_parts#[24, 256]");
         r.attn2_mtp = try @import("attn2.zig").init(r, "mtp:q4_attn_parts#[24, 256]");
     }
@@ -322,7 +324,7 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
     };
     {
         const ids_all = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
-        const keep = if (platform.c.getenv("FZ_DRAFT_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else ids_all; // dev
+        const keep = if (platform.c.getenv("FZ_DRAFT_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else ids_all;
         const ids_n = @max(64, @min(ids_all, keep) / 64 * 64); // FZ_DRAFT_N: the head scores the first ids only
         const ids = try r.load("mtp.draft_ids");
         const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
@@ -413,16 +415,16 @@ fn finishLoad(context: Construction, r: *Run) !*Engine {
         std.log.info("flash next: grouped experts from {d} rows", .{r.gx.?.min_rows});
     }
     if (r.sb_index) std.log.info("flash next: {d} expert tensors' scales and biases indexed, at most {d} pairs each", .{ r.sbix.count(), r.sb_pairs });
-    if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // dev: knock-outs by Run.class bit
+    if (platform.c.getenv("FZ_SKIP")) |v| r.skip = try std.fmt.parseInt(u32, std.mem.span(v), 10); // class skip
     // GPU-gated lanes at this probability product: 0.4 without tensor units (FZ_GATE=tau sets it, FZ_GATE=off none)
     const gate_tau: ?[]const u8 = if (platform.c.getenv("FZ_GATE")) |v| std.mem.span(v) else if (!r.device.tensorUnits()) "0.4" else null;
     if (r.tp == null) if (gate_tau) |v| if (!std.mem.eql(u8, v, "off")) {
         const tau = try std.fmt.parseFloat(f32, v);
-        const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else @import("gate.zig").WMAX; // dev
+        const width = if (platform.c.getenv("FZ_GATE_ROWS")) |w| try std.fmt.parseInt(usize, std.mem.span(w), 10) else @import("gate.zig").WMAX;
         e.gate = try @import("gate.zig").init(r, tau, m.mtp.ids_n, width);
         std.log.info("flash next: gated lanes, up to {d} rows while the drafts' probability stays >= {d}", .{ width, tau });
     };
-    if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // dev: a,b (the branch from FZ_FEED) or a,k,sib (head siblings)
+    if (r.tp == null) if (platform.c.getenv("FZ_TREE")) |v| { // FZ_FEED branch or head siblings
         var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
         const a = try std.fmt.parseInt(usize, it.next() orelse "0", 10);
         const b = try std.fmt.parseInt(usize, it.next() orelse "0", 10);

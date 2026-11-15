@@ -264,7 +264,7 @@ pub const Host = struct {
             h.live_generated = 0;
             const idle = h.queued.items.len == 0;
             h.unlock();
-            if (idle and h.cache != null) { // the next turn's save finds its pages touched, unless a request comes first
+            if (idle and h.cache != null) { // touch saved pages unless a request arrives first
                 const t0 = h.now();
                 const got = h.eng.snap_pool.ready(h.eng.r.device, fx.NEXT_TURN, .{ .ctx = h, .check = waiting }, h.cache.?.room());
                 if (got.cap > 0) std.log.info("prompt cache: readied {d} of {d} MiB for the next save in {d:.1} ms", .{ got.touched >> 20, got.cap >> 20, ms(h.now() - t0) });
@@ -301,7 +301,8 @@ pub const Host = struct {
         fn marked(ctx: *anyopaque, at: usize) void {
             const c: *Ctx = @ptrCast(@alignCast(ctx));
             const t0 = c.h.now();
-            if (c.h.cache) |*store| if (store.keep(c.job.key, @intCast(at), null, c.job.request.chunks, &.{})) c.h.saved.append(c.h.gpa, @intCast(at)) catch {}; // held here: rank 1 keeps its copy
+            // Keep this copy while rank 1 retains its state.
+            if (c.h.cache) |*store| if (store.keep(c.job.key, @intCast(at), null, c.job.request.chunks, &.{})) c.h.saved.append(c.h.gpa, @intCast(at)) catch {};
             c.job.keep_ns += c.h.now() - t0;
         }
 
@@ -344,7 +345,7 @@ pub const Host = struct {
     fn serve(h: *Host, job: *Job) void {
         if (job.request.structure != null) return @import("flashnext_constraint.zig").serve(h, job);
         var fin: Fin = .{};
-        defer h.finish(job, fin.reason, fin.stats, fin.message); // after every defer below: they read the job and its request
+        defer h.finish(job, fin.reason, fin.stats, fin.message); // last defer: cleanup still reads the request
         const r = job.request;
         job.began = h.now();
         if (h.eng.followsPeer()) {
@@ -372,7 +373,7 @@ pub const Host = struct {
         const kept0 = if (h.cache) |*store| store.counts.kept else 0;
         const t_begin = h.now();
         h.prompt = r.prompt; // a learned state read back in `begin` is named by these tokens
-        job.key = if (r.images.len > 0) images.key(arena.allocator(), r) catch r.prompt else r.prompt; // a state fits its frame alone
+        job.key = if (r.images.len > 0) images.key(arena.allocator(), r) catch r.prompt else r.prompt;
         if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= h.eng.r.window.capacity) {
             plan = store.beginUser(arena.allocator(), job.key, r.history_len, r.rewind_len, r.user_end, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
@@ -402,7 +403,7 @@ pub const Host = struct {
         const res = h.eng.generateFrom(r.prompt, plan.from, plan.marks, r.max_tokens, r.eos, depth, budget, out) catch |e| retry: {
             if (e == error.PeerNotResumed) { // rank 1 lacks this state: both Macs read the prompt from the start
                 std.log.warn("speed-up mode: rank 1 could not resume at {d}; reading the prompt from the start", .{plan.from});
-                if (h.cache) |*store| store.forget(r.prompt, plan.from, &.{}); // so later prompts do not ask rank 1 for it again
+                if (h.cache) |*store| store.forget(r.prompt, plan.from, &.{}); // prevent later peer resume requests
                 job.cached = 0;
                 break :retry h.eng.generateFrom(r.prompt, 0, plan.marks, r.max_tokens, r.eos, depth, budget, out) catch |e2| {
                     if (!job.prefill_sent) emit(job, .{ .prefilled = 0 });
@@ -433,7 +434,7 @@ pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, dai
 
 const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
 
-/// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
+/// Load and warm a Flash Next checkpoint, with optional pair settings and an admitted prompt-cache budget.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8) !*Host {
     return openConfigured(gpa, io, dir, dump, window, speed_up, cache_gib, over_cap, learn, vision, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null, why));
 }
@@ -474,7 +475,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, dir: []const u8, eng: *fx.Engine, 
     h.warm = .{ .queue = eng.r.queue };
     h.info_.structures = eng.r.tp == null;
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
-    // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
+    // The engine's buffers share the residency set used by idle keepalive ticks.
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
     errdefer @import("flashnext_residency.zig").unwind(h);
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call

@@ -343,7 +343,7 @@ test "write2Signal refuses a bad flag before posting anything, over ConnectX as 
         try std.testing.expectEqual(@as(usize, 0), Fake.n); // nothing posted, and nothing pending to flush
         @memset(ep.memory[8192..][0..11], 0);
         try std.testing.expectError(error.Unaligned, r.write2Signal(0, 8192, "head!", "body..", 20, 9));
-        try std.testing.expect(std.mem.allEqual(u8, ep.memory[8192..][0..11], 0)); // nothing written to the local window
+        try std.testing.expect(std.mem.allEqual(u8, ep.memory[8192..][0..11], 0)); // local bytes stay unchanged
     }
 }
 

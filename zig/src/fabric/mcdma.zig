@@ -273,7 +273,7 @@ pub const Endpoint = struct {
 
     /// MCDMA's first reason the link to `peer` went down, into `buf`; null while it is up or the library cannot say.
     pub fn peerStatus(self: *Endpoint, peer: u32, buf: []u8) ?[]const u8 {
-        return self.reason(self.portFor(peer) catch return null, buf); // an atomic load in MCDMA: a waiting rank may poll it
+        return self.reason(self.portFor(peer) catch return null, buf); // MCDMA reads atomically
     }
 
     fn reason(self: *const Endpoint, port: *const Port, buf: []u8) ?[]const u8 {
@@ -439,10 +439,10 @@ pub const Endpoint = struct {
         const self = of(ptr);
         const total = head.len + body.len;
         const room = abi.ws_room;
-        if (total == 0) return signal(ptr, peer, flag, value); // the library takes a zero-length write-and-signal as a dead peer
+        if (total == 0) return signal(ptr, peer, flag, value); // no empty fused message
         if (!self.in(offset, total) or !self.in(flag, 8)) return error.OutOfBounds; // before any path writes or posts
         if (flag % 8 != 0) return error.Unaligned;
-        if (peer == self.config.rank or total + room > self.config.staging_bytes or self.overRoce(peer)) { // ConnectX: no fused message
+        if (peer == self.config.rank or total + room > self.config.staging_bytes or self.overRoce(peer)) {
             try write2(ptr, peer, offset, head, body);
             return signal(ptr, peer, flag, value);
         }
