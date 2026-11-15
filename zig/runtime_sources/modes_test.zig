@@ -9,6 +9,7 @@ const fused = @import("../src/families/gemma4/fused_lane.zig");
 const gemma = @import("../src/families/gemma4/kernels.zig");
 const moss = @import("../src/families/moss_image/kernels.zig");
 const h3 = @import("../src/families/h3/source.zig");
+const xm = @import("../src/families/deepseek_v41/metal/experts_mma.zig");
 const t = std.testing;
 
 fn group(e: Entry) ?usize {
@@ -21,6 +22,7 @@ fn group(e: Entry) ?usize {
     }
     if (std.mem.eql(u8, e.family, "vision-image") and std.mem.startsWith(u8, e.name, "moss_image")) return 4;
     if (std.mem.eql(u8, e.family, "h3")) return 5;
+    if (std.mem.eql(u8, e.family, "deepseek-v41") and std.mem.eql(u8, e.name, "expert-mma-units")) return 6;
     return null;
 }
 
@@ -30,7 +32,7 @@ test "Metal runtime source modes: every restricted entry agrees with its loader 
         defer arena.deinit();
         const device = mtl.Device{ .units = generation >= 17, .gen = generation };
         const set = try root.generate(arena.allocator(), device.units, generation);
-        const allowed = [_]bool{ lfm2.optionalAvailable(device), llama.available(device), fused.available(device), gemma.draftAvailable(device), moss.available(device), h3.available(device) };
+        const allowed = [_]bool{ lfm2.optionalAvailable(device), llama.available(device), fused.available(device), gemma.draftAvailable(device), moss.available(device), h3.available(device), xm.units(device) };
         var counts: [allowed.len]usize = @splat(0);
         var dense: usize = 0;
         for (set.entries.items) |e| {
