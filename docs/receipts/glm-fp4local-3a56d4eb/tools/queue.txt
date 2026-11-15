@@ -1,0 +1,2 @@
+head ex-head ex 40960 -- --parallel 4
+head sp-head sp 131072 -- --parallel 4 --prompt-cache-gib 0
