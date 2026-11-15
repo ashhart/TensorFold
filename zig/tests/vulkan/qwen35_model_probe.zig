@@ -363,6 +363,36 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ engine.vendorId(), want });
         return 1;
     };
+    if (std.c.getenv("TF_VK_DECODE_BENCH")) |env| {
+        // Decode throughput: prefill the prompt, then `n` greedy tokens with readback, after 8 warm-up tokens.
+        const n = std.fmt.parseInt(usize, std.mem.span(env), 10) catch 128;
+        engine.prefill(prompt) catch |e| {
+            std.debug.print("FAIL bench prefill: {s}\n", .{@errorName(e)});
+            return 1;
+        };
+        var tok = engine.draw() catch |e| {
+            std.debug.print("FAIL bench draw: {s}\n", .{@errorName(e)});
+            return 1;
+        };
+        var tok_hash: u64 = 1469598103934665603;
+        var t0: i64 = 0;
+        for (0..8 + n) |i| {
+            if (i == 8) t0 = clock.ms();
+            engine.decode(tok) catch |e| {
+                std.debug.print("FAIL bench decode {d}: {s}\n", .{ i, @errorName(e) });
+                return 1;
+            };
+            tok = engine.draw() catch |e| {
+                std.debug.print("FAIL bench draw {d}: {s}\n", .{ i, @errorName(e) });
+                return 1;
+            };
+            tok_hash = (tok_hash ^ tok) *% 1099511628211;
+        }
+        const wall_ms: f64 = @floatFromInt(clock.ms() - t0);
+        const per = wall_ms / @as(f64, @floatFromInt(n));
+        std.debug.print("DECODE-BENCH prompt={d} tokens={d} ms_per_token={d:.3} tok_s={d:.2} tok_hash={x}\n", .{ prompt.len, n, per, 1000.0 / per, tok_hash });
+        return 0;
+    }
 
     const row_len: usize = @intCast(engine.logitsLen());
     const rows_a = try a.alloc(u8, expected.len * row_len);
