@@ -8,6 +8,9 @@ const Timeline = @import("metal4_timeline.zig").Timeline;
 const Id = objc.Id;
 const heap = std.heap.c_allocator;
 
+/// In only where the root declares `tf_metal4 = true` (the DeepSeek server) and in tests; elsewhere compiled out.
+pub const enabled = @import("builtin").is_test or (@hasDecl(@import("root"), "tf_metal4") and @import("root").tf_metal4);
+
 pub const stage_dispatch: usize = 1 << 27;
 pub const stage_blit: usize = 1 << 28;
 const queue_stages = stage_dispatch | stage_blit;
@@ -291,10 +294,12 @@ const Table = struct {
 /// Queues whose buffers Buffer.deinit must hand back.
 var registry: [8]std.atomic.Value(?*State) = @splat(.init(null));
 var registered: std.atomic.Value(u32) = .init(0);
+/// Set when the first Metal 4 queue opens (never cleared): until then a buffer's release skips the registry.
+var any_queue: bool = false;
 
 /// A buffer's owner let it go: queues that bound it release it from their sets once their work in flight is done.
 pub fn forget(buffer: Id) void {
-    if (registered.load(.acquire) == 0) return;
+    if (!any_queue or registered.load(.acquire) == 0) return;
     for (&registry) |*r| if (r.load(.acquire)) |q| q.drop(buffer);
 }
 
@@ -353,6 +358,7 @@ pub const State = struct {
         if (timeline_rounds > 0) q.timeline = Timeline.init(device, timeline_rounds);
         for (&registry) |*r| if (r.cmpxchgStrong(null, q, .acq_rel, .acquire) == null) {
             _ = registered.fetchAdd(1, .acq_rel);
+            any_queue = true;
             break;
         };
         return q;
