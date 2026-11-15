@@ -2,6 +2,8 @@
 const std = @import("std");
 const rule = @import("gpu_rule.zig");
 const full = @import("gpu_full.zig");
+// Main's pre-selection full sampler, frozen so candidate helper changes cannot move the reference.
+const reference_full = @import("gpu_draw_full_reference_test.zig");
 const select = @import("gpu_select.zig");
 const Sampling = @import("sampling.zig").Sampling;
 const Cand = rule.Cand;
@@ -65,25 +67,18 @@ fn refSample(logits: []const f32, s: ?Sampling, position: u32, ids: ?[]const u32
     return if (ids) |map| map[pick] else pick;
 }
 
-/// Main's gpu_full.plan before selection: the whole row sorted, its place top_k - 1 and its first 1,024.
+/// Main's full-vocabulary plan, using the frozen planner and its own nucleus, mass and extension.
 fn refPlan(logits: []const f32, s: Sampling) !full.Plan {
-    const r = rule.rule(s);
-    const order = try a.alloc(Cand, logits.len);
-    defer a.free(order);
-    var m = -std.math.inf(f32);
-    for (order, logits, 0..) |*c, l, i| {
-        c.* = .{ .v = l * r.inv_t, .i = @intCast(i) };
-        m = @max(m, c.v);
-    }
-    std.mem.sort(Cand, order, {}, rule.better);
-    var p = full.Plan{ .inv_t = r.inv_t, .m = m, .lo = @max(m + r.min_log, m - full.never) };
-    if (s.top_k != 0 and s.top_k < logits.len) p.top = .{ .key = rule.key(order[s.top_k - 1].v), .id = order[s.top_k - 1].i };
-    if (r.top_p > 0.0 and r.top_p < 1.0) p.cut = full.nucleus(logits, p, order[0..@min(order.len, rule.candidates)], r.top_p);
-    return p;
+    const p = try reference_full.plan(a, logits, s);
+    return .{ .inv_t = p.inv_t, .m = p.m, .lo = p.lo, .top = .{ .key = p.top.key, .id = p.top.id }, .cut = .{ .key = p.cut.key, .id = p.cut.id } };
+}
+
+fn comparePlans(want: full.Plan, got: full.Plan) error{PlanMismatch}!void {
+    if (!std.mem.eql(u8, std.mem.asBytes(&want), std.mem.asBytes(&got))) return error.PlanMismatch;
 }
 
 fn refDraw(logits: []const f32, s: Sampling, position: u32, ids: ?[]const u32) !u32 {
-    if (full.fullVocabulary(s)) return full.race(logits, try refPlan(logits, s), s.seed, position, ids);
+    if (reference_full.fullVocabulary(s)) return reference_full.sample(a, logits, s, position, ids);
     return refSample(logits, s, position, ids, rule.better);
 }
 
@@ -150,7 +145,9 @@ fn mismatches(comptime planted: bool) !usize {
             differ += @intFromBool(try refDraw(row, s, position, ids) != try full.draw(a, row, s, position, ids));
             const pw = try refPlan(row, s);
             const pg = try full.plan(a, row, s);
-            differ += @intFromBool(!std.mem.eql(u8, std.mem.asBytes(&pw), std.mem.asBytes(&pg)));
+            comparePlans(pw, pg) catch {
+                differ += 1;
+            };
         }
     };
     return differ;
@@ -162,6 +159,22 @@ test "gpu draw: selection picks main's token for every row kind, edge setting, s
 
 test "gpu draw: the planted control, ties broken the other way, is caught" {
     try t.expect(try mismatches(true) > 0);
+}
+
+test "gpu draw: a missing top-p cut fails the frozen full-vocabulary comparison" {
+    const row = [_]f32{ 0, 0, 0, 0 };
+    const s: Sampling = .{ .seed = 0, .temperature = 1, .top_k = 0, .top_p = 0.5 };
+    const want = try refPlan(&row, s);
+    try t.expectEqual(@as(u32, 0x80000000), want.cut.key);
+    try t.expectEqual(@as(u32, 1), want.cut.id);
+    var missing_cut = try full.plan(a, &row, s);
+    try comparePlans(want, missing_cut);
+    missing_cut.cut = full.end;
+    try t.expectError(error.PlanMismatch, comparePlans(want, missing_cut));
+    const plain = try refDraw(&row, s, 0, null);
+    const broken = full.race(&row, missing_cut, s.seed, 0, null);
+    try t.expectEqual(@as(u32, 0), plain);
+    try t.expectEqual(@as(u32, 3), broken);
 }
 
 test "gpu draw: top and nth equal the full sort's places, NaNs, infinities and signed zeros included" {
