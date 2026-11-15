@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Metrics: every queued request carries one wait reason decided on the admission path, and DeepSeek-V4.1 names its own (`kv_pool`, `memory_floor`, `prefill_concurrent`). `/metrics` gains `requests_waiting_by_reason`, `request_refusals_total` and `request_failures_total` by code and `restore_fallbacks_total`, and `/v1/load` gains `waiting_by_reason` and `refusals`; replies are unchanged (#3014, for #2135). Thanks to @devopsfortunato for the design.
+
 - Tests: the Qwen3.8-27B reply-end keep test names its history, as the keep pin added on 10 Nov requires, and `test-qwen27-reply-cache-host` now runs it (#3012).
 
 - Lanes: shared rounds price a plain (undrafted) round apart from drafted rows, from trial rounds whose first is a dropped warm-up, and fit row costs from plain and drafted widths, so only how many drafts a round asks for changes; on gfx1151 with Qwen3.6-35B-A3B and MTP it is level with main with tokens unchanged, and opt-in `TF_SHARED_PRICE_LOG=1` prints each shared round's prices (#2687, refs #2605).
