@@ -200,3 +200,59 @@ test "benchmark group: a delayed Metal peer retains the startup wait without a n
         try std.testing.expectEqual(@as(u32, 0), Clock.calls.load(.monotonic));
     }
 }
+
+test "benchmark group: acknowledged outgoing HELLO cannot hang when the peer dies before its own HELLO" {
+    const Clock = struct {
+        var calls: usize = 0;
+        var table: std.Io.VTable = undefined;
+        fn now(ctx: ?*anyopaque, kind: std.Io.Clock) std.Io.Timestamp {
+            if (kind == .awake) {
+                defer calls += 1;
+                return .{ .nanoseconds = @as(i96, @intCast(calls)) * 60 * std.time.ns_per_s };
+            }
+            return std.testing.io.vtable.now(ctx, kind);
+        }
+        fn io() std.Io {
+            calls = 0;
+            table = std.testing.io.vtable.*;
+            table.now = now;
+            return .{ .userdata = std.testing.io.userdata, .vtable = &table };
+        }
+    };
+    const Device = struct {
+        pub fn name(_: @This()) [*:0]const u8 {
+            return "Apple Test GPU";
+        }
+    };
+    const Link = struct {
+        bytes: [8192]u8 align(8) = @splat(0),
+        local_rank: u32,
+        acknowledged: bool = false,
+        sent: bool = false,
+        pub fn size(_: *@This()) u32 {
+            return 2;
+        }
+        pub fn rank(x: *@This()) u32 {
+            return x.local_rank;
+        }
+        pub fn window(x: *@This()) []u8 {
+            return &x.bytes;
+        }
+        pub fn write2Signal(x: *@This(), peer: u32, _: usize, _: []const u8, _: []const u8, _: usize, _: u64) !void {
+            try expect(peer == 1 - x.local_rank);
+            x.sent = true;
+        }
+        pub fn flush(x: *@This()) !void {
+            try expect(x.sent);
+            x.acknowledged = true;
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (0..2) |rank| {
+        var link: Link = .{ .local_rank = @intCast(rank) };
+        try std.testing.expectError(error.TpStartupPeerSilent, g.metalWithTimeout(arena.allocator(), Clock.io(), Device{}, &link, 4096, 64, 2, 60 * std.time.ns_per_s));
+        try expect(link.acknowledged and Clock.calls == 2);
+        try expect(std.mem.allEqual(u8, link.bytes[64..72], 0));
+    }
+}

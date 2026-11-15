@@ -423,9 +423,8 @@ pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_toke
             break;
         }
     }
-    for (&cbs) |*c| if (c.*) |cb| {
-        cb.wait();
-        c.* = null;
+    @import("engine_drain.zig").drain(&cbs, r.tp) catch |err| {
+        if (failed == null) failed = err;
     };
     r.event_value = base + round + 1;
     if (failed) |err| return err;

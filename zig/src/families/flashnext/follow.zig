@@ -52,7 +52,9 @@ pub fn send(e: *Engine, tp: *fz.Tp2, prompt: []const u32, from: usize, marks: []
 /// logged, this Mac's states kept at its marks; tf-flashnext-run passes its own); null once rank 0 closes.
 pub fn one(e: *Engine, out: ?engine.Out) !?engine.Result {
     const tp = e.r.tp orelse return error.NotSpeedUpMode;
-    const req = tp.waitRequest() orelse return null;
+    const req = (try tp.waitRequest()) orelse return null;
+    tp.request_gate.begin();
+    defer tp.request_gate.end();
     var head: [16]u32 = undefined;
     @memcpy(std.mem.asBytes(&head), req.head[0..64]);
     if (head[0] == 0) return null;

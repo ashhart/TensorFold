@@ -137,6 +137,7 @@ pub const Tp2 = struct {
     stop: std.atomic.Value(bool) = .init(false),
     quitting: std.atomic.Value(bool) = .init(false), // served rank 1: end the wait for the next request
     failed: std.atomic.Value(bool) = .init(false),
+    request_gate: @import("tp_request_gate.zig").Gate = .{},
     trace: bool = false, // TF_TP_TRACE: log every job the host serves
     local: bool = false, // TF_TP_LOCAL: serve jobs locally to time the GPU alone; replies are wrong
     stats: bool = false, // TF_TP_STATS: the host's time from a job's post to its serve, every 4096 jobs
@@ -193,7 +194,12 @@ pub const Tp2 = struct {
         t.local = platform.c.getenv("TF_TP_LOCAL") != null;
         t.stats = platform.c.getenv("TF_TP_STATS") != null;
         // both ranks up before the first round: a word each way
-        t.benchmark_group = try @import("core").benchmark_group.metal(gpa, io, device, rd, FLAGS + 4096, HELLO, 2);
+        {
+            const budget = 60 * std.time.ns_per_s;
+            rd.setDeadline((try fabric.words.checkedNowNs()) +| budget);
+            defer rd.setDeadline(0);
+            t.benchmark_group = try @import("core").benchmark_group.metalWithTimeout(gpa, io, device, rd, FLAGS + 4096, HELLO, 2, budget);
+        }
         errdefer if (t.benchmark_group) |b| gpa.free(b);
         t.monitor = try std.Thread.spawn(.{}, Handoff.watch, .{&t.handoff});
         errdefer {
@@ -418,17 +424,13 @@ pub const Tp2 = struct {
     }
 
     /// Rank 1 waits for the next request, probing transport while idle; null once shutdown ends the wait.
-    pub fn waitRequest(t: *Tp2) ?struct { head: *const [64]u8, tokens: [*]const u32 } {
+    pub fn waitRequest(t: *Tp2) !?struct { head: *const [64]u8, tokens: [*]const u32 } {
         t.req += 1;
-        var spins: usize = 0;
-        while (@atomicLoad(u64, t.word64(REQ_FLAG), .acquire) < t.req) {
-            if (t.quitting.load(.acquire)) return null;
-            spins += 1;
-            if (spins > 100_000) { // idle: back off
-                const ts: platform.c.timespec = .{ .sec = 0, .nsec = 50_000 };
-                _ = platform.c.nanosleep(&ts, null);
-            } else std.atomic.spinLoopHint();
-        }
+        const ready = @import("tp_request.zig").wait(t, REQ_FLAG, ACK_FLAG + 8) catch |err| {
+            t.handoff.fail(t.seq, err);
+            return error.TpLinkFailed;
+        };
+        if (!ready) return null;
         return .{ .head = @ptrCast(t.win.ptr + REQ), .tokens = @ptrCast(@alignCast(t.win.ptr + REQ + 64)) };
     }
 

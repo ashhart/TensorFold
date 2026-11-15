@@ -42,6 +42,12 @@ pub fn drop(h: anytype) void {
     h.warm = .{ .queue = h.eng.r.queue };
 }
 
+/// Join a failed open's follower before releasing the callbacks and memory it borrows.
+pub fn unwind(h: anytype) void {
+    @import("flashnext_follow.zig").stop(h);
+    drop(h);
+}
+
 pub fn holdShared(h: anytype) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);

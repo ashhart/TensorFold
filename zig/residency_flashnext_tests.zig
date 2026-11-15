@@ -109,6 +109,67 @@ test "residency owner Flash Next: failed runner publication frees its new Metal 
     try record.allFreed();
 }
 
+test "Flash Next cleanup: failed open joins a follower holding borrowed residency and Host callbacks" {
+    const FakeEngine = struct {
+        r: *fz.Run,
+        snap_pool: @FieldType(Engine, "snap_pool") = .{},
+        stopped: std.atomic.Value(bool) = .init(false),
+        pub fn stopFollowing(e: *@This()) void {
+            e.stopped.store(true, .release);
+        }
+    };
+    const Opening = struct {
+        gpa: std.mem.Allocator = a,
+        io: std.Io = std.testing.io,
+        eng: *FakeEngine,
+        vis: ?*Vision = null,
+        load_limit: u64 = 0,
+        resident: ?mtl.resident.Resident = null,
+        warm: mtl.keepalive.Target = undefined,
+        follower: ?std.Thread = null,
+        borrowed: std.atomic.Value(bool) = .init(false),
+        used_live: *bool,
+        buffer: mtl.Buffer,
+
+        fn follow(h: *@This()) void {
+            const allocation = h.eng.r.follow.?;
+            const probe = h.eng.r.warm_probe.?;
+            h.borrowed.store(true, .release);
+            while (!h.eng.stopped.load(.acquire)) std.Thread.yield() catch {};
+            if (h.resident == null or h.eng.r.follow == null or h.eng.r.warm_probe == null) return;
+            allocation.join(allocation.ctx, h.buffer);
+            probe.run(probe.ctx).wait();
+            allocation.leave(allocation.ctx, h.buffer);
+            h.used_live.* = true;
+        }
+
+        fn fail(eng: *FakeEngine, buffer: mtl.Buffer, used_live: *bool) !void {
+            const h = try a.create(@This());
+            errdefer a.destroy(h);
+            h.* = .{ .eng = eng, .buffer = buffer, .used_live = used_live };
+            try residency.hold(h);
+            errdefer residency.unwind(h);
+            h.follower = try std.Thread.spawn(.{}, follow, .{h});
+            while (!h.borrowed.load(.acquire)) std.Thread.yield() catch {};
+            return error.InjectedHostStartFailure;
+        }
+    };
+    var record: mtl.Record = .{ .gpa = a };
+    defer record.deinit();
+    var run: fz.Run = .{ .arena = a, .device = record.device(), .queue = record.queue() };
+    var eng: FakeEngine = .{ .r = &run };
+    const buffer = try record.device().buffer(64, mtl.ResourceOptions.shared);
+    var used_live = false;
+    try std.testing.expectError(error.InjectedHostStartFailure, Opening.fail(&eng, buffer, &used_live));
+    try std.testing.expect(used_live);
+    try std.testing.expect(eng.stopped.load(.acquire));
+    try std.testing.expect(run.follow == null and run.warm_probe == null and eng.snap_pool.follow == null);
+    try std.testing.expectEqual(@as(usize, 1), record.uses);
+    buffer.deinit();
+    try record.allFreed();
+}
+
+
 test "Flash Next vision memory: tower startup refuses before compilation or factory work" {
     var record: mtl.Record = .{ .gpa = a };
     defer record.deinit();
