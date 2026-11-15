@@ -27,3 +27,20 @@
 2026-11-15 17:18:05 kv-b2 suite kv rc=0 : RESULT nodraft rc=0 RESULT prefill2048 rc=0 RESULT prefill8192 rc=0 RESULT prefill32768 rc=0 RESULT prefill65536 rc=0
 2026-11-15 17:18:11 kv-b2 serve END
 2026-11-15 17:18:11 chain queue-kv.txt END
+2026-11-15 18:43:09 c4-b1 serve kb 5c82ef28a6 ctx 40960 args: -- --parallel 4 --kv-cache fp8
+2026-11-15 18:44:36 c4-b1 health after 85 s
+2026-11-15 18:47:27 c4-b1 suite c4 rc=0 : RESULT c4 rc=0
+2026-11-15 18:47:34 c4-b1 serve END
+2026-11-15 18:47:34 c4-h1 serve kh 5c82ef28a6+fp8load ctx 40960 args: -- --parallel 4 --kv-cache fp8
+2026-11-15 18:48:37 c4-h1 health after 60 s
+2026-11-15 18:51:23 c4-h1 suite c4 rc=0 : RESULT c4 rc=0
+2026-11-15 18:51:29 c4-h1 serve END
+2026-11-15 18:51:29 c4-h2 serve kh 5c82ef28a6+fp8load ctx 40960 args: -- --parallel 4 --kv-cache fp8
+2026-11-15 18:52:38 c4-h2 health after 66 s
+2026-11-15 18:55:23 c4-h2 suite c4 rc=0 : RESULT c4 rc=0
+2026-11-15 18:55:29 c4-h2 serve END
+2026-11-15 18:55:29 c4-b2 serve kb 5c82ef28a6 ctx 40960 args: -- --parallel 4 --kv-cache fp8
+2026-11-15 18:56:23 c4-b2 health after 51 s
+2026-11-15 18:59:11 c4-b2 suite c4 rc=0 : RESULT c4 rc=0
+2026-11-15 18:59:18 c4-b2 serve END
+2026-11-15 18:59:18 chain queue-c4.txt END

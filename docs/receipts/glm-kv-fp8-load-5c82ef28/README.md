@@ -55,8 +55,26 @@ kv-h2 kv-b2` prints:
 From 8,192 tokens up, every head launch is faster than every base launch. The teacher-forced runs agree: 302 s for the
 head against 306 s for the base (`lpk-*/check-lp.log`; each position also returns 20 logprobs). For scale,
 `glm-kv-fp8-3a56d4eb` measured the BF16 cache's cold prompts at 5.69, 22.88 and 45.84 s at 8,192, 32,768 and 65,536
-tokens on an earlier binary; the FP8 cache's are now 5.72, 22.54 and 45.12. Every launch's ranks exited 0 after SIGINT
-with 0 bytes held after cleanup (`*/memory-rank*.json`).
+tokens on an earlier binary; the FP8 cache's are now 5.72, 22.54 and 45.12.
+
+At the widest admitted stream count, `tools/suite-c4.sh` at `--context 40960 --parallel 4 --kv-cache fp8` runs
+`bench_concurrent.py --levels 4 --tokens 256 --reps 3 --temperatures 0,1` (drafted), alternated base, head, head, base
+(`c4-*`). `python3 tools/c4_compare.py . c4-b1 c4-h1 c4-h2 c4-b2` prints:
+
+| 4 streams, tok/s | c4-b1 | c4-h1 | c4-h2 | c4-b2 | base median | head median | change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| code, temperature 0, aggregate | 107.6 | 112.4 | 112.5 | 110.3 | 108.9 | 112.5 | +3.2% |
+| code, temperature 0, steady | 111.7 | 116.9 | 117.0 | 114.6 | 113.2 | 117.0 | +3.4% |
+| chat, temperature 0, aggregate | 85.5 | 90.1 | 90.4 | 87.3 | 86.4 | 90.2 | +4.5% |
+| chat, temperature 0, steady | 90.9 | 96.0 | 96.3 | 92.7 | 91.8 | 96.2 | +4.7% |
+| code, temperature 1, aggregate | 64.6 | 66.0 | 66.4 | 65.1 | 64.8 | 66.2 | +2.1% |
+| code, temperature 1, steady | 70.2 | 71.3 | 71.9 | 70.2 | 70.2 | 71.6 | +2.0% |
+| chat, temperature 1, aggregate | 56.3 | 57.9 | 57.7 | 57.0 | 56.6 | 57.8 | +2.0% |
+| chat, temperature 1, steady | 59.9 | 61.5 | 61.3 | 61.0 | 60.5 | 61.4 | +1.6% |
+
+Every head launch is faster than every base launch in every row. The 12 greedy replies of each prompt have one token
+sha256 across all four launches, and the sampled replies the same multiset. Every launch's ranks exited 0 after SIGINT
+with 0 device bytes held after cleanup (`*/memory-rank*.json`).
 
 ## Kernel limits
 
@@ -64,19 +82,23 @@ with 0 bytes held after cleanup (`*/memory-rank*.json`).
 13.0, both kernels' records are current on all five SMs, and the run's 18 stale records are all other images'
 (`flashnext_mtp`, `exl3_experts`, `qwen35`); with nvcc 13.3 likewise, its 834 stale records all other kernels' (in
 `glm_glue`, `tf_glm_router_tile` and `tf_glm_top1_sums`). The shared MLA image's chunk kernels and GLM's BF16 chunk
-kernels are current with both. `tools/res.sh` reads the same counts from `cuobjdump -res-usage` of `glm_glue` alone;
+kernels are current with both. The GPU contract on GB10 with the head build (`limits/contract-nvcc-13.5.txt`): 652
+kernels pass gates 1 to 4, 0 fail, and 419 of 419 planted controls are red, exit 1 on 918 limit problems, all from
+the build's nvcc 13.5, for which these and other kernels (unchanged ones such as `tf_glm_lat_write_fp8` among them)
+have no record. `tools/res.sh` reads the same counts from `cuobjdump -res-usage` of `glm_glue` alone;
 base against head, only the two FP8 chunk kernels change among its 240 kernel-and-SM entries
 (`limits/glm_glue-nvcc-13.0-diff.txt`).
 
 ## Files
 
-- `lpk-b/`, `lpk-h/`, `exk-h/`, `kv-b1/`, `kv-h1/`, `kv-h2/`, `kv-b2/`: each launch's raw results, the clients' logs,
-  both ranks' server logs and memory receipts, and the host's free memory before the launch and at ready.
+- `lpk-b/`, `lpk-h/`, `exk-h/`, `kv-b1/`, `kv-h1/`, `kv-h2/`, `kv-b2/`, `c4-b1/`, `c4-h1/`, `c4-h2/`, `c4-b2/`: each
+  launch's raw results, the clients' logs, both ranks' server logs and memory receipts, and the host's free memory
+  before the launch and at ready.
 - `rows-sha256.txt`: the teacher-forced row files' sha256, with `glm-kv-fp8-3a56d4eb`'s FP8 run.
 - `limits/`: the limits runs' lines for both kernels, the shared MLA image and the stale records; the base against head
-  `cuobjdump` diff of `glm_glue`.
+  `cuobjdump` diff of `glm_glue`; the GPU contract's summary.
 - `tools/`: `build.sh`, `fl-env.sh` (documentation addresses), `run.sh`, `rank.sh`, `stop.sh`, `chain.sh` and
-  `queue.txt` (the seven launches in order; `kb` is the base tree, `kh` the head); `suite-lp.sh`, `suite-ex.sh`,
-  `suite-kv.sh`; `mktexts.py`, `mkcorpus.py`; `kvload_compare.py`; `res.sh`.
+  `queue.txt` (the eleven launches in order; `kb` is the base tree, `kh` the head); `suite-lp.sh`, `suite-ex.sh`,
+  `suite-kv.sh`, `suite-c4.sh`; `mktexts.py`, `mkcorpus.py`; `kvload_compare.py`, `c4_compare.py`; `res.sh`.
 - `corpus/`: the sequences' plan and the texts' and ids' sha256. `commit.txt`, `inputs.txt` (each client and fixture the
   suites read, by sha256 and origin), `runs.log`. `SHA256SUMS` covers every file here except itself.

@@ -5,3 +5,7 @@ kb kv-b1 kv 131072 -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
 kh kv-h1 kv 131072 -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
 kh kv-h2 kv 131072 -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
 kb kv-b2 kv 131072 -- --parallel 4 --prompt-cache-gib 0 --kv-cache fp8
+kb c4-b1 c4 40960 -- --parallel 4 --kv-cache fp8
+kh c4-h1 c4 40960 -- --parallel 4 --kv-cache fp8
+kh c4-h2 c4 40960 -- --parallel 4 --kv-cache fp8
+kb c4-b2 c4 40960 -- --parallel 4 --kv-cache fp8

@@ -1,0 +1,15 @@
+# tf-cuda-test kernel-contract on GB10 (sm_121), head build with nvcc 13.5 (/usr/local/cuda), exit 1
+SUMMARY 652 kernels: 652 pass gates 1-4, 0 fail, 8 known findings; 419 controls: 419 red as planted, 0 missed; 918 limit problems; gates 3346782 ms, limits 758300 ms
+FAIL limits: 1580 registered CUDA launches against sm_80/86/89/120/121, 183 problems
+# live lines: 735 in all, 163 with no record for this compiler; glm_glue:
+FAIL limits live glm_glue tf_glm_router_tile: 128 threads launched, the driver allows 128; 37 registers, 0 + 27648 shared bytes (recorded 0, 0)
+FAIL limits live glm_glue tf_glm_rmsnorm_4096_f32w: 256 threads launched, the driver allows 256; 36 registers, 32 + 0 shared bytes (recorded 37, 32)
+FAIL limits live glm_glue tf_glm_hc_finish_f32w: 256 threads launched, the driver allows 256; 62 registers, 48 + 0 shared bytes (recorded 76, 48)
+FAIL limits live glm_glue tf_glm_select_rows_wide: 1024 threads launched, the driver allows 1024; 61 registers, 1296 + 0 shared bytes (recorded 62, 1296)
+FAIL limits live glm_glue tf_glm_dsel_scan: 256 threads launched, the driver allows 256; 40 registers, 1040 + 0 shared bytes (recorded 45, 1040)
+FAIL limits live glm_glue tf_glm_chunks_16: 256 threads launched, the driver allows 256; 122 registers, 0 + 83328 shared bytes (recorded 123, 0)
+FAIL limits live glm_glue tf_glm_chunks_32: 256 threads launched, the driver allows 256; 130 registers, 0 + 101120 shared bytes (recorded 128, 0)
+FAIL limits live glm_glue tf_glm_top1_sums: 1024 threads launched, the driver allows 1024; 43 registers, 8192 + 0 shared bytes (recorded 0, 0)
+FAIL limits live glm_glue tf_glm_lat_write_fp8: 512 threads launched, the driver allows 512; 25 registers, 64 + 0 shared bytes (recorded 0, 0)
+FAIL limits live glm_glue tf_glm_chunks_16_fp8: 256 threads launched, the driver allows 256; 125 registers, 0 + 83328 shared bytes (recorded 0, 0)
+FAIL limits live glm_glue tf_glm_chunks_32_fp8: 256 threads launched, the driver allows 256; 162 registers, 0 + 101120 shared bytes (recorded 0, 0)
