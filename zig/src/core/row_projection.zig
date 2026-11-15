@@ -205,6 +205,7 @@ test "a strided call writes rows at least a matrix wide" {
 }
 
 test "row dispatch selects wide contiguous and strided pipelines from four rows" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
     var p: Pipelines = undefined;
     p.wide = true;
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
@@ -225,6 +226,7 @@ test "row dispatch selects wide contiguous and strided pipelines from four rows"
 }
 
 test "row dispatch without tensor units keeps main's pipelines at every row count" {
+    if (comptime @import("builtin").os.tag != .macos) return error.SkipZigTest; // Metal pipelines exist only on macOS
     var p: Pipelines = undefined;
     p.wide = false;
     inline for (.{ "plain", "relu2", "strided", "wide_plain", "wide_relu2", "wide_strided" }, 1..) |field, tag| {
