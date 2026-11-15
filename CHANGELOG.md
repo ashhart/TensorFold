@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Spark 2.5 and MiniMax-M3 on CUDA: the last layer of a prompt runs only on the rows something reads (the final rows, plus DSpark's drafter rows for MiniMax), as Qwen's already did; tokens unchanged (#3122).
+
 - Server: an image URL's host lookup stops at 3 seconds (or the request's deadline, if sooner) even when the system resolver keeps retrying, at most 64 lookups run at once, and a refused connection falls through to the host's next checked address (#3127).
 
 - Living Weights: a fact graph write the OS refuses names its cause, for example "ShardWrite (ISDIR)" (#3126).
