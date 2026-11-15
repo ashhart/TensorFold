@@ -209,20 +209,22 @@ pub const Product = struct {
 
     pub fn reference(_: *Product, _: []f64, _: []f64) !void {}
 
-    /// Downloads every fused output, so the fused arm pays the same host copy the lean arm pays.
-    fn landed(self: *Product) !void {
-        for (self.outs[0..self.parts], self.ws[0..self.parts]) |out, w| {
-            _ = try self.rig.bytes(out, self.rows_n * w.n * 2);
+    /// The lean twin of run(): the separate launches and a synchronize, with no host copy.
+    fn replacedSync(self: *Product) !void {
+        var at: usize = 0;
+        for (self.ws[0..self.parts]) |w| {
+            try self.prompt.matmulTile(self.rig.s, self.x, self.k, self.rows_n, w, self.base + at, .bf16, .lean);
+            at += self.rows_n * w.n * 2;
         }
+        try self.rig.s.synchronize();
     }
 
-    /// One round of an arm: the launches plus the output download both arms pay.
+    /// One round of an arm: the launches and a synchronize only, so neither arm pays a host copy.
     fn round(self: *Product, fused: bool, io: std.Io) !i96 {
         const start = gpu_check.now(io);
         if (fused) {
             try self.run();
-            try self.landed();
-        } else _ = try self.replaced();
+        } else try self.replacedSync();
         return gpu_check.now(io) - start;
     }
 };
