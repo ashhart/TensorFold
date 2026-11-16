@@ -396,17 +396,17 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `c.len` into `c`, kept: the final rows of the last of them.
     pub fn prompt(e: *Engine, c: *cache.Caches, tokens: []const u32) !forward.Out {
-        return e.promptMarked(c, tokens, null);
+        return e.promptMarked(c, tokens, &.{});
     }
 
-    /// `prompt`, the state before `mark`'s row written aside (forward.Mark).
-    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, mark: ?forward.Mark) !forward.Out {
+    /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
+    pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
         if (e.stopped) return error.GroupStopped;
         // the staging is reused: the last forward's uploads must have left it
         try e.stream.synchronize();
         e.host.used = 0;
         e.arena.reset();
-        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .mark = mark }};
+        const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .marks = marks }};
         const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
         const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);
         c.len += tokens.len;

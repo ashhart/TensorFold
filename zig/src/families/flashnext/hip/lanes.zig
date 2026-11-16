@@ -32,6 +32,9 @@ pub const Fill = struct {
     kept0: u64 = 0,
 };
 
+/// A kept row inside a prompt chunk (forward.Mark): its position, the n-gram history there and its side buffer.
+pub const Marked = struct { at: usize, history: [2]i64, side: u64 };
+
 pub const Lane = struct {
     caches: cache.Caches,
     /// The head's caches (none on a rank that does not draft).
@@ -69,8 +72,8 @@ pub const Fx = struct {
     /// The kept prompt states (null: no reuse), and the slot the next one takes on every rank.
     store: ?pc.Store = null,
     next_slot: u32 = 0,
-    /// A kept row inside the prompt chunk running (forward.Mark): its position, n-gram history and side buffer.
-    marked: ?struct { at: usize, history: [2]i64, side: u64 } = null,
+    /// The kept row inside the prompt chunk being saved (forward.Mark): its position, n-gram history and side buffer.
+    marked: ?Marked = null,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
@@ -162,9 +165,10 @@ pub const Fx = struct {
         };
     }
 
-    /// A kept row's side buffer (forward.Mark): the window snapshots, free while a prompt fills; null if too small.
-    fn sideBuffer(c: *const cache.Caches) ?u64 {
-        return if (c.window.len >= c.layout.restBytes()) c.window.base() else null;
+    /// Kept row `i`'s side buffer (forward.Mark): its part of the window snapshots, free while a prompt fills, or null.
+    fn sideBuffer(c: *const cache.Caches, i: usize) ?u64 {
+        const at = i * std.mem.alignForward(usize, c.layout.restBytes(), 256);
+        return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
     }
 
     fn free(f: *Fx, l: *Lane) void {
@@ -289,17 +293,24 @@ pub const Fx = struct {
         // the idle chunk alone, the shorter one while other streams decode between chunks (both on the 64-row grid)
         const chunk: usize = if (f.decoding(lane)) e.o.policy.fill_rows else e.o.chunk;
         var to = @min(stop, at + chunk);
-        // a kept row with prompt rows past it: the chunk goes on and writes the row's state aside, the same bytes
-        var kept: ?forward.Mark = null;
+        // the chunk goes on through each kept row its side buffers hold, writing the row's state aside (the same bytes)
+        var marks: [cache.max_window]forward.Mark = undefined;
+        var held: [cache.max_window]Marked = undefined;
+        var n_marks: usize = 0;
+        var taken = fill.next; // the stops the chunk's marks take, a duplicate's too
         if (to == stop and stop > at and stop < prompt.len and f.link == null and f.store != null) {
-            const past = if (fill.next + 1 < fill.count) fill.stops[fill.next + 1] else prompt.len;
-            const end = @min(past, at + chunk);
-            // no room for the side buffer: the chunk stops at the row as before
-            if (end > stop) if (sideBuffer(&lane.caches)) |side| {
-                kept = .{ .row = stop - at, .side = side };
-                f.marked = .{ .at = stop, .history = ngram.after(lane.caches.history, prompt[at..stop]), .side = side };
-                to = end;
-            };
+            const end = @min(prompt.len, at + chunk);
+            var j = fill.next;
+            while (j < fill.count and fill.stops[j] < end and n_marks < marks.len) : (j += 1) {
+                const row = fill.stops[j];
+                if (n_marks > 0 and row <= held[n_marks - 1].at) continue; // a duplicate: kept once
+                const side = sideBuffer(&lane.caches, n_marks) orelse break;
+                marks[n_marks] = .{ .row = row - at, .side = side };
+                held[n_marks] = .{ .at = row, .history = ngram.after(lane.caches.history, prompt[at..row]), .side = side };
+                n_marks += 1;
+            }
+            taken = j;
+            to = if (j < fill.count and fill.stops[j] < end) fill.stops[j] else end;
         }
         defer f.marked = null; // a failed chunk's too
         const last = to == prompt.len;
@@ -309,7 +320,7 @@ pub const Fx = struct {
             try f.msg.appendSlice(f.gpa, prompt[at..to]);
             try f.send(f.msg.items);
         }
-        const out = try e.promptMarked(&lane.caches, prompt[at..to], kept);
+        const out = try e.promptMarked(&lane.caches, prompt[at..to], marks[0..n_marks]);
         const rows = to - at;
         const row_bytes = m.dims.wide() * m.act.size();
         if (lane.head) |*hc| {
@@ -321,11 +332,12 @@ pub const Fx = struct {
             }
         }
         fill.at = to;
-        if (kept != null) {
-            if (f.store) |*st| _ = st.keep(prompt, @intCast(f.marked.?.at), lane, &.{}, &.{});
-            f.marked = null; // a kept row at the chunk's end next saves the live caches
-            fill.next += 1;
+        for (held[0..n_marks]) |mk| {
+            f.marked = mk;
+            if (f.store) |*st| _ = st.keep(prompt, @intCast(mk.at), lane, &.{}, &.{});
         }
+        f.marked = null; // a kept row at the chunk's end next saves the live caches
+        fill.next = taken;
         if (fill.next < fill.count and to == fill.stops[fill.next]) {
             if (f.store) |*st| _ = st.keep(prompt, @intCast(to), lane, &.{}, &.{});
             fill.next += 1;

@@ -48,10 +48,10 @@ pub fn at(t: Tensor, n: usize) Tensor {
 }
 
 /// One call's rows: their tokens, the position of the first, and whether they are a window (else a prompt's).
-pub const Call = struct { tokens: []const u32, pos: usize, window: bool, mark: ?Mark = null };
+pub const Call = struct { tokens: []const u32, pos: usize, window: bool, marks: []const Mark = &.{} };
 
 /// One stream's rows in a forward: its caches, its tokens and the position of its first row.
-pub const Seg = struct { c: *cache.Caches, tokens: []const u32, pos: usize, mark: ?Mark = null };
+pub const Seg = struct { c: *cache.Caches, tokens: []const u32, pos: usize, marks: []const Mark = &.{} };
 
 /// A kept row inside a prompt chunk (a multiple of 64): its linear and n-gram state to `side`, as a chunk ending there.
 pub const Mark = struct { row: usize, side: u64 };
@@ -321,7 +321,7 @@ fn ple(
             tail,
             o.stream,
         );
-        if (call.mark) |mk| try hip.raw.copy(
+        for (call.marks) |mk| try hip.raw.copy(
             .{ .r = host.d, .ptr = @ptrFromInt(c.sideTail(mk.side)), .len = tail },
             0,
             cin + mk.row * d.wide() * m.act.size(),
@@ -369,7 +369,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
                     host,
                     g.c,
                     at(h, off * d.wide()),
-                    .{ .tokens = g.tokens, .pos = g.pos, .window = window, .mark = g.mark },
+                    .{ .tokens = g.tokens, .pos = g.pos, .window = window, .marks = g.marks },
                     cin,
                     in,
                     off,
