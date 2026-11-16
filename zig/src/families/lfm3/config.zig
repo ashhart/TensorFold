@@ -357,11 +357,27 @@ fn equalQuant(a: Quant, b: Quant) bool {
 }
 
 /// The backends a decoder of this admission runs on.
-pub const Backend = enum { metal, cuda };
+pub const Backend = enum { metal, cuda, xpu };
 
-/// Whether `backend` serves this checkpoint's scheme: ModelOpt NVFP4 is CUDA's only, so Metal refuses it by name.
+/// Whether `backend` serves this checkpoint's scheme: ModelOpt NVFP4 is CUDA's only, Metal and XPU refuse it by name.
 pub fn servedOn(config: *const Config, backend: Backend) !void {
-    if (config.scheme == .modelopt_nvfp4 and backend == .metal) return error.Lfm3ModeloptNvfp4NotOnMetal;
+    if (config.scheme != .modelopt_nvfp4) return;
+    return switch (backend) {
+        .cuda => {},
+        .metal => error.Lfm3ModeloptNvfp4NotOnMetal,
+        .xpu => error.Lfm3ModeloptNvfp4NotOnXpu,
+    };
+}
+
+/// A refusal of `servedOn` worded for the server's problem line; null for any other error.
+pub fn servedProblem(err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.Lfm3ModeloptNvfp4NotOnMetal => "Lfm3ModeloptNvfp4NotOnMetal: LFM3's ModelOpt NVFP4 export is served on CUDA; " ++
+            "Metal serves LFM3's MLX affine exports (4, 6 or 8 bits)",
+        error.Lfm3ModeloptNvfp4NotOnXpu => "Lfm3ModeloptNvfp4NotOnXpu: LFM3's ModelOpt NVFP4 export is served on CUDA; " ++
+            "the Intel GPU engine reads LFM3 in MLX affine 4-bit, group 64",
+        else => null,
+    };
 }
 
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
