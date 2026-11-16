@@ -94,6 +94,8 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
     }
     try out.print("\nMemory is the weights and any drafter the engine keeps, plus a {d} GiB margin; context and caches take more.\n", .{sys.memory_policy.margin >> 30});
     try out.writeAll("Speed is one stream with drafts as shipped: measured on that chip, or estimated from another by memory bandwidth.\n");
+    try out.writeAll("Quality is the share of TensorFold Web's 228-item quality suite the checkpoint gets right (greedy, thinking off);\n" ++
+        "each score's receipt is in docs/receipts/quality-suite, and - is not rated yet.\n");
     if (!opts.all and shown < rows.len) try out.print("{d} more need more memory, two machines or the other backend: tensorfold models --all\n", .{rows.len - shown});
     try printCached(out, root, listed);
     return 0;
@@ -125,11 +127,14 @@ fn printMachine(out: *std.Io.Writer, mc: *const Machine) !void {
 fn printRows(a: Allocator, out: *std.Io.Writer, rows: []const Row, mc: *const Machine, install: bool) !void {
     var width: usize = 0;
     for (rows) |r| width = @max(width, r.e.title.len + 2 + r.e.format.len);
+    try out.splatByteAll(' ', width + 4);
+    try out.print("    memory  quality  {s}\n", .{if (install) "speed, one stream" else "why not here"});
     for (rows) |r| {
         const name = try std.fmt.allocPrint(a, "{s}, {s}", .{ r.e.title, r.e.format });
         try out.print("  {s}", .{name});
         try out.splatByteAll(' ', width - name.len + 2);
         try out.print("{d:>6.1} GiB  ", .{gibs(r.need)});
+        if (r.e.quality) |q| try out.print("{d:>6.0}%  ", .{share(q) * 100}) else try out.writeAll("      -  ");
         switch (r.fit) {
             .too_big => try out.writeAll("more than the GPU may hold"),
             .pair => try out.writeAll("served by two machines"),
@@ -225,7 +230,13 @@ fn diskOf(a: Allocator, io: std.Io, root: []const u8, env: ?*const std.process.E
 }
 
 const JsonMachine = struct { chip: []const u8, backend: []const u8, gpu_cores: u32, gpus: u32, memory_bytes: u64, gpu_limit_bytes: u64, unified: bool, bandwidth_bytes_per_second: u64 };
-const JsonEntry = struct { title: []const u8, format: []const u8, repo: []const u8, revision: ?[]const u8, drafter: ?[]const u8, need_bytes: u64, download_bytes: u64, fit: []const u8, tok_s: ?f64, tok_s_measured: ?bool, tok_s_from: ?[]const u8, on_disk: bool, install: []const u8, recipe: []const u8 };
+const JsonQuality = struct { passed: u16, items: u16, share: f64, digest: []const u8, receipt: []const u8 };
+const JsonEntry = struct { title: []const u8, format: []const u8, repo: []const u8, revision: ?[]const u8, drafter: ?[]const u8, need_bytes: u64, download_bytes: u64, fit: []const u8, tok_s: ?f64, tok_s_measured: ?bool, tok_s_from: ?[]const u8, quality: ?JsonQuality, on_disk: bool, install: []const u8, recipe: []const u8 };
+
+/// The share of graded quality items passed, 0 to 1.
+fn share(q: catalog.Quality) f64 {
+    return @as(f64, @floatFromInt(q.passed)) / @as(f64, @floatFromInt(q.items));
+}
 
 /// `{"schema": 1, "models": [...]}` as before (the cache), plus this machine and every catalog entry against it.
 fn printJson(a: Allocator, out: *std.Io.Writer, listed: []const Listed, mc: *const Machine, rows: []const Row) !u8 {
@@ -242,6 +253,7 @@ fn printJson(a: Allocator, out: *std.Io.Writer, listed: []const Listed, mc: *con
         .tok_s = if (r.speed) |s| @round(s.tok_s * 10) / 10 else null,
         .tok_s_measured = if (r.speed) |s| s.measured else null,
         .tok_s_from = if (r.speed) |s| s.from else null,
+        .quality = if (r.e.quality) |q| .{ .passed = q.passed, .items = q.items, .share = @round(share(q) * 1000) / 1000, .digest = catalog.quality_digest, .receipt = q.receipt } else null,
         .on_disk = r.disk == .yes,
         .install = try installLine(a, r.e),
         .recipe = r.e.recipe,
@@ -337,6 +349,10 @@ test "an M5 Max lists what fits largest first, measured and estimated speeds, an
     try std.testing.expect(has(text, "Models that fit this Mac, largest first:"));
     try std.testing.expect(has(text, "Qwen3.8-27B, MLX 4-bit + DFlash2"));
     try std.testing.expect(has(text, "64 tok/s, measured on M5 Max"));
+    try std.testing.expect(has(text, "    memory  quality  speed, one stream\n"));
+    try std.testing.expect(has(text, "19.3 GiB      84%  263 tok/s, measured on M5 Max")); // Lightning's receipt: 192 of 228
+    try std.testing.expect(has(text, "GiB        -  speed not measured yet")); // an unrated, unmeasured checkpoint
+    try std.testing.expect(has(text, "Quality is the share of TensorFold Web's 228-item quality suite"));
     try std.testing.expect(has(text, "tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit && tensorfold pull z-lab/Qwen3.8-27B-DFlash2"));
     try std.testing.expect(has(text, "est. from M5 Ultra"));
     try std.testing.expect(std.mem.indexOf(u8, text, "MLX 6-bit + MTP") == null); // 147 GiB of Flash Next does not fit
@@ -413,6 +429,18 @@ test "models --json keeps schema 1's cached checkpoints and adds the machine and
     const items = parsed.value.object.get("catalog").?.array.items;
     try std.testing.expectEqual(catalog.entries.len, items.len);
     try std.testing.expectEqualStrings("fits", items[0].object.get("fit").?.string);
+    var rated: usize = 0;
+    for (items) |item| switch (item.object.get("quality").?) {
+        .null => {},
+        .object => |q| {
+            rated += 1;
+            try std.testing.expectEqualStrings(catalog.quality_digest, q.get("digest").?.string);
+            if (std.mem.eql(u8, item.object.get("repo").?.string, "TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"))
+                try std.testing.expectEqual(@as(i64, 192), q.get("passed").?.integer);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(rated > 0 and rated < items.len);
 
     var none: std.Io.Writer.Allocating = .init(a);
     const missing = try std.fs.path.join(a, &.{ root, "missing" });

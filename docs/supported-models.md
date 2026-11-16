@@ -12,7 +12,7 @@ use its native section and the current [changes](../CHANGELOG.md) together.
 Hardware below records the documented scope, not an unmeasured minimum. Context, parallel requests, prompt caches
 and drafters need memory beyond the weights. `tensorfold info REPO` reports the checkpoint's memory floor.
 `tensorfold models` lists this table's chat checkpoints that fit your machine, largest first, with the memory each
-needs and a rough one-stream speed; `tensorfold models --all` adds the rest and what each needs.
+needs, a quality score and a rough one-stream speed; `tensorfold models --all` adds the rest and what each needs.
 Where no RAM capacity is published, inspect that floor before serving a large checkpoint.
 CUDA release images include sm_80, sm_86, sm_120 and sm_121. The A100 (sm_80) has kernel-check evidence
 ([#846](https://github.com/ashhart/TensorFold/pull/846)), but no served checkpoint on record, so it is not model-qualified.
@@ -85,8 +85,9 @@ Large files come down in pieces over up to 16 connections, and an interrupted pu
 It refuses a checkpoint whose `model_type` has no native family, and fetches the 27B's DFlash2 drafter for `--drafter`. `info` shows one checkpoint's family, format, context and memory floor.
 `models` reads this machine's chip, memory, GPU limit and memory bandwidth, then lists the chat checkpoints from [Pick a model](#pick-a-model) that fit, largest first.
 Each line gives the memory the engine keeps (weights, any drafter and a 2 GiB margin; context and caches take more) and a one-stream speed with drafts as shipped: measured on this chip, or `~` estimated from a measurement on another chip of the same backend, scaled by memory bandwidth.
+Quality is the share of TensorFold Web's 228-item quality suite the checkpoint answers right, greedy with thinking off, measured once a checkpoint with `tools/quality_suite.py`; each score's receipt is in [quality receipts](receipts/quality-suite/README.md), and `-` means not rated yet.
 The line under it installs the checkpoint. `--all` also lists what needs more memory, two machines or the other backend. Last come the cached checkpoints with a model type it knows.
-`models --json` prints one document for programs: `schema` 1 and `models`, each cached checkpoint's `repo`, `family` and `model_type` (`family` is a display title and `model_type` is the key to match on), plus `machine` and `catalog`, each entry's `need_bytes`, `fit`, `tok_s` (null when unmeasured), `on_disk` and `install`.
+`models --json` prints one document for programs: `schema` 1 and `models`, each cached checkpoint's `repo`, `family` and `model_type` (`family` is a display title and `model_type` is the key to match on), plus `machine` and `catalog`, each entry's `need_bytes`, `fit`, `tok_s` (null when unmeasured), `quality` (passed, items, share, suite digest and receipt; null when unrated), `on_disk` and `install`.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 `rm REPO` removes a cached checkpoint with all its snapshots, blobs and refs, and then the repo's folder.
 `rm REPO@REVISION` removes one snapshot, named by a ref such as `main` or by its commit, and the refs that name it. Blobs another snapshot still links to stay.
