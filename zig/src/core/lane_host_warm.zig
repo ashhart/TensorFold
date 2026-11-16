@@ -15,7 +15,7 @@ pub fn pass(h: *LaneHost, job: *Job, began: i96) bool {
         return h.cancel(job);
     };
     h.prefilled(job, began);
-    if (h.cache) |store| if (keepsEnd(store, job)) job.keep(&job.stream, @intCast(job.request.prompt.len)); // remote if it resumed one
+    if (h.cache) |store| if (keepsEnd(store, job)) job.keep(&job.stream, @intCast(job.request.prompt.len), false); // remote if it resumed one
     be.release(&job.stream);
     h.remove(job);
     h.finish(job, .length, "");

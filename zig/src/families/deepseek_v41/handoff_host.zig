@@ -1,4 +1,4 @@
-//! Module root of the host-only hand-off checks: the library, its protocol-2 adapter, the CUDA export and their tests.
+//! Module root of the host-only hand-off checks: library, tests, protocol-2 adapter and the CUDA export glue.
 pub const handoff = @import("handoff/handoff.zig");
 pub const p2 = @import("handoff/p2.zig");
 pub const cuda_export = @import("cuda_export.zig");
@@ -9,5 +9,6 @@ test {
     _ = @import("handoff/tests.zig");
     _ = @import("cuda_export_test.zig");
     _ = @import("handoff_file_test.zig");
+    _ = @import("handoff_http_test.zig");
     _ = @import("cuda_export_serve_test.zig");
 }

@@ -39,8 +39,8 @@ pub const Http = struct {
     }
 };
 
-/// TF_PREFILL_TIMEOUT_S, else 60 s and a second per 400 tokens sent.
-fn seconds(tokens: usize) u64 {
+/// TF_PREFILL_TIMEOUT_S, else 60 s and a second per 400 tokens sent (the trigger's, and a pull over HTTP's).
+pub fn seconds(tokens: usize) u64 {
     return @import("sys").environment.read(u64, "TF_PREFILL_TIMEOUT_S", 60 + tokens / 400) catch 60 + tokens / 400;
 }
 

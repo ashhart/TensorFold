@@ -45,6 +45,8 @@ pub const Seen = struct {
     at: u32 = 0,
     remote: bool = false,
     marks: usize = 0,
+    snap_at: u32 = 0,
+    first_mark: u32 = 0,
     hooked: bool = false,
     prefilled: ?u32 = null,
     tokens: usize = 0,
@@ -62,7 +64,7 @@ pub const Seen = struct {
         const kept: []const *pc.Entry = if (x.store) |st| st.entries.items else &.{};
         var borrowed: u32 = 0;
         for (kept) |e| borrowed += e.borrowers;
-        x.* = .{ .restoring = s.reuse.saved != null, .at = s.reuse.at, .remote = s.reuse.remote, .marks = s.reuse.marks.len, .hooked = s.reuse.hook != null, .store = x.store, .borrowed = borrowed, .refuse = x.refuse, .inherit = x.inherit };
+        x.* = .{ .restoring = s.reuse.saved != null, .at = s.reuse.at, .remote = s.reuse.remote, .marks = s.reuse.marks.len, .snap_at = s.reuse.snap_at, .first_mark = if (s.reuse.marks.len > 0) s.reuse.marks[0] else 0, .hooked = s.reuse.hook != null, .store = x.store, .borrowed = borrowed, .refuse = x.refuse, .inherit = x.inherit };
         if (x.inherit) s.reuse.remote = true;
         if (!x.refuse or !s.reuse.pulled) return;
         s.reuse_failed = true; // the pass prefills from token 0 with reuse.remote still set, as on the Mac
@@ -122,11 +124,9 @@ pub const Exp = struct {
         return .{ .ptr = e, .snapshots = .{ .ptr = e, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } }, .exported = exported, .failed = failed };
     }
 };
-
 fn run(peer: *Peer, request: *const api.Request) !Seen {
     return runAs(peer, request, null);
 }
-
 fn runAs(peer: *Peer, request: *const api.Request, exp: ?*Exp) !Seen {
     return runWith(peer, request, exp, null);
 }

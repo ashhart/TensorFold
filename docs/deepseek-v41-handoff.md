@@ -1,8 +1,12 @@
 # DeepSeek-V4.1 prefill hand-off (CUDA to Metal)
 
-A GB10 pair prefills a prompt; a Mac decodes it. The hand-off is the state a prefill leaves behind, in a neutral
-bf16/f32 form that is converted to the Metal engine's own cache layout on arrival.
-The library is `zig/src/families/deepseek_v41/handoff/`; it is host-only and independent of the transport.
+A GB10 pair prefills a prompt; a Mac decodes it. The hand-off is the state a prefill leaves behind, carried by MKVH
+protocol 2 (recurrent layers of named parts) and converted to the Metal engine's own cache layout
+on arrival. The library is `zig/src/families/deepseek_v41/handoff/`; it is host-only and independent of the transport.
+
+A hand-off prefix is **outside the exactness contract**: it is opt-in (`--prefill-from`), labelled remote, never kept as a
+native state, and the Metal engine re-quantises some of it (below). Decode after an import is not bit-identical to a
+Mac-only prefill, and is not claimed to be.
 
 ## What travels
 
@@ -32,7 +36,7 @@ index keys as 132 bytes (128 e4m3 and a power-of-two fp32 scale). The Metal engi
 | engine | window | pool row | index key |
 |---|---|---|---|
 | release lane (`metal/kv.zig`) | bf16, mirrored over `window + 16` slots | bf16 | 68 B (E2M1 + E8M0, 32-blocks) |
-| served lane (the EXL3 Metal lane) | 528 B (fp8 e4m3 + UE8M0, 32-blocks), slot `pos % 128` | 288 B (E2M1 + E4M3, 16-blocks) | 68 B |
+| served lane (`metal_kv_state.zig`) | 528 B (fp8 e4m3 + UE8M0, 32-blocks), slot `pos % 128` | 288 B (E2M1 + E4M3, 16-blocks) | 68 B |
 
 So the conversion is not a memcpy. CUDA fp8 decodes to bf16 exactly (a product of an e4m3 value and a power of two), the
 neutral form loses nothing, and the importer packs it with scalar mirrors of each Metal packer (`fp4.zig`). The loss is
@@ -48,6 +52,7 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
   the cut and a follower started with `TF_DSV41_PRODUCE_LINK=NAME` (an `mcdma-rpcd` listen link of its own host) reads
   its pages and exports them under the same hand-off id, so a pair with a cable per host exports one shard a link.
   A pool that is not split exports whole from rank 0; `--mcdma-produce http` exports a replicated pool only.
+  The Mac pulls one link (shard 0 over `--mcdma-link NAME`), so it takes the hand-off of a pool that is not split.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
   Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
   decoder layers' rings (the last 127 positions the replay wrote). The window's oldest position of those layers was never
@@ -64,14 +69,6 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
   `Import.complete()` fails (`Incomplete`) until every part has landed.
 * The decoder builds the shape itself: `upto` from the prompt it pulls, `shards` from its link set, the drafter rows
   `min(upto, 128)` or 0. `p2.check` compares a manifest with that plan exactly.
-
-## Assumptions that the library cannot prove
-
-* The Metal engines compute the same normed, roped, compressed row as CUDA for the same tokens, to bf16 noise. The
-  library converts layouts; it does not make two engines agree. A first comparison run measures it.
-* The drafter ring of a position is `p % 128`-indexed on both sides. A wrong drafter ring only lowers draft acceptance.
-* A ratio-2 carry is the projection of position `upto-1`; only the odd-`upto` case occupies a slot on Metal (the other is
-  reset: kv 0, score `-inf`).
 
 ## Producing on the GB10
 
@@ -104,11 +101,55 @@ it. So is a prompt run in pieces between decode rounds (`TF_DSV41_PREFILL_PIECES
 after its last piece and the decoder replay and before the last token's window, and the other streams keep decoding while the
 pieces run. A split pool (`TF_DSV41_KV_SPLIT=1`) is exported by shard, each rank on its own link (Shards above).
 
+## Assumptions that the library cannot prove
+
+* The Metal engines compute the same normed, roped, compressed row as CUDA for the same tokens, to bf16 noise. The
+  library converts layouts; it does not make two engines agree. A first comparison run measures it.
+* The drafter ring of a position is `p % 128`-indexed on both sides. A wrong drafter ring only lowers draft acceptance.
+* A ratio-2 carry is the projection of position `upto-1`; only the odd-`upto` case occupies a slot on Metal (the other is
+  reset: kv 0, score `-inf`).
+
+## The Mac side
+
+`serve --prefill-from URL --mcdma-link NAME` on the DeepSeek V4.1 Metal lane (`native/deepseek_v41_remote.zig`, modelled
+on the Qwen3.8-27B pull) gives the lane host a `lane_remote.Source`: `wants` is the shared prefix policy
+(`TF_PREFILL_MIN`, `TF_PREFILL_CHUNK`), `fill` asks the GB10 over HTTP, pulls protocol 2 into a **blank Snapshot**
+(`Model.snapshotBlank`: zeroed `storage`, `live` and taps) through `landing.Landing` (the Packed layout over the Snapshot's own
+host slices, so nothing is staged), seals it (`Model.snapshotSeal`: position, the Engram record of the last three tokens'
+compressed ids, taps with no rows) and returns `{ saved, at }`. `Backend.prefill` restores it with `snapshotRestore` and
+prefills the tail, exactly as for a kept prompt state. `drop` frees the Snapshot; `TF_PREFILL_KEEP` decides whether states
+built on it are kept (marked remote). The drafter's rings are not in a Snapshot (the lane holds them in a state of its own), so
+`ring` parts are read and dropped; the drafter has no conditioning rows until local forwards fill the taps, which can lower
+draft acceptance and nothing else.
+
+### Without a network
+
+`TF_DSV41_HANDOFF_CHECK=roundtrip` (the Metal lane's own prefill exported through `export_metal.zig`, written as a hand-off
+file, landed through the same sink) or `TF_DSV41_HANDOFF_CHECK=<file>` (a `blob.zig` file: tokens, protocol 2 manifest, parts
+in delivery order; a synthetic one from `synth.zig`, or a producer's parts dumped) runs at load. With
+`TF_DSV41_HANDOFF_TOKENS=<ids>` (the full prompt; the file covers its first `upto` tokens, at least one more must follow) and
+`TF_DSV41_HANDOFF_STEPS=N` (default 16) it prefills locally, restores the native snapshot as a control (must be exact),
+lands the hand-off in a blank Snapshot, then compares the next N logit rows (the reference's tokens fed to both): top-1
+agreement and NRMS, and the free-running token streams. Agreement is reported, not required.
+
+A file may also be a producer's stream, `<id>.mkvh2` (`TF_DSV41_HANDOFF_DUMP` on the GB10 pair): its `<id>.tokens.json` beside it
+gives the exported prefix's ids, and the stream is replayed through the decoder's checks for this checkpoint's name
+(`blob.fromStream`) before it is landed; `TF_DSV41_HANDOFF_FILE` takes the same. `TF_DSV41_HANDOFF_UPTO=N` sets a round trip's
+prefix (default the last whole 128 below the prompt), for an odd one, where the carries matter. `TF_DSV41_HANDOFF_BISECT=1`
+also takes each part kind alone (window rings, carries, pool rows, index keys) from the hand-off and the rest from the local
+prefill, compares the logits as above, and prints the landed rows' relative RMS error against the local prefill's per part
+and per layer.
+
+`TF_DSV41_HANDOFF_DUMP=<path>` keeps the round trip's file (a path ending in `.mkvh2` keeps it as a producer's stream instead,
+the body `GET /v1/handoff/<id>` serves, for the checkpoint's own name: a fake producer can serve it to the HTTP decoder); `TF_DSV41_HANDOFF_FILE=<path>` serves such a file as the lane
+host's remote source (instead of `--prefill-from`): a request whose prompt extends the file's tokens gets that prefix landed
+from it, through the lane's own `wants` / `fill` / restore / `drop` path and keep rule, and any other prompt is prefilled here.
+
 ## Over plain HTTP
 
-With no ConnectX link between the pair and the decoder, the hand-off travels over the LAN on the ports the servers already
-have. It is the same stream a link carries, so nothing in the library changes: the manifest and the part checks are the
-ones the `.mkvh2` file replay uses.
+With no ConnectX link between the pair and the Mac, the hand-off travels over the LAN on the ports the servers already
+have. It is the same stream a link carries, so nothing in the library changes: the manifest, the part checks and the landing
+are the ones `TF_DSV41_HANDOFF_FILE` uses.
 
 **Producer** (the GB10 pair's rank 0, an export profile as above): `dsv41-serve ... --mcdma-produce http`. `http` is a reserved
 link name: no mcdma-rpcd, no listen daemon. Each export is held as for a link (`TF_PRODUCE_HELD_GIB`, 120 s) and the server
@@ -126,13 +167,41 @@ answers, on its own port and behind its own API keys (`--api-key`, `--api-key-fi
 
 The body is not encrypted: it is a state derived from the prompt. Keep the pair's port on a trusted LAN, and use a key.
 
-The producer logs `handoff: exports are served over HTTP, GET /v1/handoff/<id> on this server's port` at start
-and `handoff <id>: N tokens, P parts, M MiB of bf16 rows; read back R ms, built B ms` per export.
+**Decoder** (the Mac): `serve ... --prefill-from http://PRODUCER:PORT --mcdma-link http`. A request whose prompt is long enough
+(`TF_PREFILL_MIN`, `TF_PREFILL_CHUNK`) triggers the export with the same `POST /v1/completions` + `kv_transfer_params`, then
+`GET /v1/handoff/<id>` is read frame by frame straight into the landing (`handoff_file.pullFrom`: the manifest must be for this
+checkpoint, prompt and shard, every frame arrives in order and checksummed, nothing may follow the last; the export is never held
+whole here), the copy on the producer is deleted, and the Mac prefills the tail and decodes. `TF_PREFILL_API_KEY_FILE`'s key is
+sent on all three requests. `TF_PREFILL_TIMEOUT_S` (default 60 s plus 1 s per 400 tokens) bounds the trigger and, separately,
+the transfer. Any failure (the producer down, a 401, a 404, a cut stream, a wrong checkpoint or prompt, a bad checksum, a
+timeout) is logged and that prompt is prefilled on the Mac; a checkpoint, prompt or protocol mismatch also turns remote prefill
+off for the rest of the run, as over a link. The result is labelled remote as ever and is outside the exactness contract.
+
+The pair, then the Mac (names and paths are placeholders):
+
+```
+# each Spark: the export profile (replicated KV, whole-prompt prefill, paged pool), rank 1 as ever `tf-dsv41 follow`
+export TF_EXPERIMENTAL=deepseek TF_DSV41_POOL_TOKENS=65536   # plus the pair's usual TF_TP_* and TF_DSV41_* settings
+unset TF_DSV41_PREFILL_PIECES TF_DSV41_KV_SPLIT
+# rank 0 only: the serve line gains one flag (and a key)
+tensorfold-dsv41 serve $MODEL --host 0.0.0.0 --port 8000 --name DeepSeek-V4.1-Flash-TF --no-thinking \
+    --mcdma-produce http --api-key-file $KEYFILE
+# the Mac
+TF_PREFILL_API_KEY_FILE=$KEYFILE tensorfold-native serve $PACK --engram-stream-dir $ENGRAM --chat-template $PACK/chat_template.jinja \
+    --prefill-from http://PRODUCER:8000 --mcdma-link http --prompt-cache-gib 4
+```
+
+Both ends must load the same checkpoint files: the manifest's model name is the hash of `config.json` and
+`model.safetensors.index.json`. The producer logs `handoff: exports are served over HTTP, GET /v1/handoff/<id> on this server's port` at start
+and `handoff <id>: N tokens, P parts, M MiB of bf16 rows; read back R ms, built B ms` per export; the Mac's reply says what happened in its `tensorfold` block:
+`"exact_mode": "remote_prefix"`, `remote_prefix` and `pulled_prefix` in tokens, as over a link. A failed pull logs
+`remote prefill failed (REASON); the prompt is prefilled here` once per request and the reply has none of those fields.
 
 ## Tests
 
-`zig build test-dsv41-handoff` (host only; includes the export glue over a synthetic engine snapshot, the file round trip and
-the producer's held-export bookkeeping with its readers): codec exhaustively against independent tables, packers against independent
+`zig build test-dsv41-handoff` (host only; includes the export glue over a synthetic engine snapshot, the file round trip, the
+producer's held-export bookkeeping with its readers, and the HTTP decoder against a loopback fake producer: a whole fetch
+landed in a Snapshot's buffers, 401, 404, 409, a cut stream, a wrong checkpoint or prompt, a producer that never answers): codec exhaustively against independent tables, packers against independent
 f64 references, plan partitions, export-to-import round trips for both Metal layouts (replicated, split 2 and 3 shards,
 short, odd and even `upto`), protocol 2 end to end over the fake link, and layout guards that fail when an engine's
 constants change. `zig build test-handoff-routes-host` runs `GET`/`DELETE /v1/handoff/<id>` over real sockets (the whole stream under

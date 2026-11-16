@@ -332,3 +332,13 @@ test "Metal gathers only selected FP8 rows with rowwise scales and gates each mH
     }
     try std.testing.expectEqualSlices(u16, hidden.slice(u16, 8), masked_output.slice(u16, 8));
 }
+
+test "a restored prefix's Engram record is its last three compressed ids, newest first" {
+    var bytes: [hash.raw_vocab * 4]u8 = undefined;
+    for (0..hash.raw_vocab) |t| std.mem.writeInt(u32, bytes[t * 4 ..][0..4], @intCast(t + 1000), .little);
+    const map = hash.TokenMap{ .bytes = &bytes };
+    const toks = [_]u32{ 5, 6, 7, 8, 9 };
+    try std.testing.expectEqualSlices(u32, &.{ 1008, 1007, 1006, 3 }, &(try hash.resumeRecord(map, &toks, 4)));
+    try std.testing.expectEqualSlices(u32, &.{ 1005, 0, 0, 1 }, &(try hash.resumeRecord(map, &toks, 1)));
+    try std.testing.expectError(error.InvalidPrefix, hash.resumeRecord(map, &toks, 6));
+}

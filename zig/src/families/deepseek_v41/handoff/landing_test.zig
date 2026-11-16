@@ -8,6 +8,8 @@ const im = @import("import.zig");
 const blob = @import("blob.zig");
 const landing = @import("landing.zig");
 const s = @import("synth.zig");
+const fixture = @import("../handoff_file_test.zig");
+const fabric = @import("fabric");
 
 const capacity: u32 = 1024;
 
@@ -73,4 +75,37 @@ test "a hand-off file refuses a corrupt header, a short body and tokens that do 
     const other = try arena.dupe(u8, file);
     other[20] ^= 1; // the first token
     try std.testing.expectError(error.BadBlob, blob.Blob.parse(arena, other));
+}
+
+test "a producer's stream becomes a Blob that lands as the stream's own parts do, and a stream for another prompt is refused" {
+    var fx = try fixture.Fixture.make(300, 128);
+    defer fx.deinit();
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var reason: fabric.decoder.Reason = .{};
+    const b = try blob.fromStream(arena, fx.bytes, .{ .model = "dsv41-test", .tokens = fx.tokens, .protocol = 2 }, &reason);
+    try std.testing.expectEqual(@as(u64, 300), b.manifest.prompt_tokens);
+
+    const via = try target(arena);
+    var l: landing.Landing = undefined;
+    try l.init(arena, 300, .{ .@"packed" = via });
+    defer l.deinit();
+    try b.feed(l.decoderSink());
+    _ = try l.complete();
+    try std.testing.expectEqual(@as(u32, 3), l.dropped);
+
+    const direct = try target(arena);
+    var imp = try im.Import.init(arena, .{ .upto = 300 }, .{ .@"packed" = direct }, .{});
+    for (fx.built.exp.layers, fx.built.exp.sources) |layer, src| if (layer.index < g.release.layers) for (layer.parts, src.parts) |part, bytes| {
+        const dtype: plan.Dtype = if (part.dtype == .float32) .f32 else .bf16;
+        try imp.put(0, layer.index, part.name, dtype, part.shape[0], part.shape[1], bytes);
+    };
+    _ = try imp.complete();
+    try std.testing.expectEqualSlices(u8, direct.live, via.live);
+    try std.testing.expectEqualSlices(u8, direct.storage, via.storage);
+
+    var other = try arena.dupe(u32, fx.tokens);
+    other[3] += 1;
+    try std.testing.expectError(error.Mismatch, blob.fromStream(arena, fx.bytes, .{ .model = "dsv41-test", .tokens = other, .protocol = 2 }, &reason));
 }

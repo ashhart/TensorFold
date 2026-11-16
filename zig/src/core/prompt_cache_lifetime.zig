@@ -27,6 +27,14 @@ pub fn release(s: *pc.Store, e: *pc.Entry) void {
     collect(s);
 }
 
+/// The longest state `prompt` resumes, in RAM or on disk as a lookup's, borrowed: resumed or release reports it.
+pub fn borrow(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
+    const ram = s.find(prompt, starts, spans);
+    const e = pc.rows.read.recall(s, prompt, born, starts, spans, @import("prompt_cache_recall.zig").recall(s, prompt, born, starts, spans, ram)) orelse return null;
+    e.borrowers += 1;
+    return e;
+}
+
 /// A completed restore updates reuse history; a refusal expires the exact borrowed state.
 pub fn resumedWithReason(s: *pc.Store, e: *pc.Entry, prompt: []const u32, failure: ?anyerror) void {
     if (std.mem.indexOfScalar(*pc.Entry, s.entries.items, e) == null) return;
@@ -45,12 +53,4 @@ pub fn resumedWithReason(s: *pc.Store, e: *pc.Entry, prompt: []const u32, failur
     const last = s.gpa.dupe(u32, prompt) catch return;
     if (e.own.len == 0 or e.last.ptr != e.own.ptr) s.gpa.free(e.last); // the first `last` is the tokens' copy
     e.last = last;
-}
-
-/// The longest state `prompt` resumes, in RAM or on disk as a lookup's, borrowed: resumed or release reports it.
-pub fn borrow(s: *pc.Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span) ?*pc.Entry {
-    const ram = s.find(prompt, starts, spans);
-    const e = pc.rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, ram)) orelse return null;
-    e.borrowers += 1;
-    return e;
 }

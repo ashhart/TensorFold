@@ -5,6 +5,7 @@ const manifest = fabric.manifest;
 const plan = @import("plan.zig");
 const ex = @import("export.zig");
 const p2 = @import("p2.zig");
+const file = @import("../handoff_file.zig");
 
 pub const magic = "DSV41HOF";
 pub const version: u32 = 1;
@@ -68,3 +69,29 @@ pub const Blob = struct {
         };
     }
 };
+
+/// A producer's `.mkvh2` stream replayed through the decoder's checks (`expect` supplies name and tokens) as a Blob.
+pub fn fromStream(arena: std.mem.Allocator, bytes: []const u8, expect: fabric.decoder.Expect, reason: *fabric.decoder.Reason) !Blob {
+    const Entry = struct { layer: u32, part: u64, bytes: []const u8 };
+    const Recorder = struct {
+        arena: std.mem.Allocator,
+        entries: std.ArrayList(Entry) = .empty,
+
+        fn put(ptr: *anyopaque, layer: *const manifest.Layer, row_start: u64, rows: u64, data: []const u8) anyerror!void {
+            const r: *@This() = @ptrCast(@alignCast(ptr));
+            if (layer.kind != .recurrent or rows != 1 or row_start >= layer.parts.len) return error.BadPart;
+            try r.entries.append(r.arena, .{ .layer = layer.index, .part = row_start, .bytes = try r.arena.dupe(u8, data) });
+        }
+    };
+    var rec: Recorder = .{ .arena = arena };
+    const got = try file.pull(arena, bytes, expect, .{ .ptr = &rec, .put_fn = Recorder.put }, reason);
+    var out: std.ArrayList(u8) = .empty;
+    for (got.manifest.layers) |l| for (l.parts, 0..) |p, i| {
+        const e = for (rec.entries.items) |e| {
+            if (e.layer == l.index and e.part == i) break e;
+        } else return error.BadBlob;
+        if (e.bytes.len != p.bytes()) return error.BadBlob;
+        try out.appendSlice(arena, e.bytes);
+    };
+    return .{ .tokens = try arena.dupe(u32, expect.tokens), .manifest = got.manifest, .data = out.items };
+}
