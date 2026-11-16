@@ -151,7 +151,9 @@ pub const Engine = struct {
         errdefer gpa.destroy(backend);
         backend.* = .{ .d = d, .lib = lib, .comm = comm, .rank = tg.rank, .world = tg.world, .owner = o.owner };
         const kb = @import("cuda_kda_block.zig");
-        kb.pad_to = if (o.settings.kda_pad) kb.padWidth(c.kda_heads, world) else 0; // read once: rowWidth reads only this
+        var uneven = false; // a rank's row width is its head count mod 8 (384 a head, plus 256)
+        for (0..world) |q| uneven = uneven or (try shard.Share.of(&c, q, world)).kda.len() % 8 != 0;
+        kb.pad_to = if (ranks.kdaPadded(o.settings, uneven)) kb.padWidth(c.kda_heads, world) else 0; // rowWidth reads only this
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);
         for (spans, 0..) |*sp, q| sp.* = (try shard.Share.of(&c, q, world)).vocab;

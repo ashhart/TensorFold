@@ -212,7 +212,7 @@ test "ranks with different TF_GLM_MM choices disagree" {
     try std.testing.expect(mismatch(&all) != null);
 }
 
-test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm, and all ranks must agree" {
+test "TF_GLM_KDA_PAD: unset by default, 1 or 0, refused otherwise and without glm_mm, and all ranks must agree" {
     const Reader = struct {
         fn on(key: [:0]const u8) ?[]const u8 {
             return if (std.mem.eql(u8, key, "TF_GLM_KDA_PAD")) "1" else null;
@@ -228,10 +228,10 @@ test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm
         }
     };
     var problem: []const u8 = "";
-    try std.testing.expect(!(try Settings.read(&fake, &problem)).kda_pad);
-    try std.testing.expect(!(try Settings.read(Reader.off, &problem)).kda_pad);
+    try std.testing.expectEqual(@as(?bool, null), (try Settings.read(&fake, &problem)).kda_pad);
+    try std.testing.expectEqual(@as(?bool, false), (try Settings.read(Reader.off, &problem)).kda_pad);
     const padded = try Settings.read(Reader.on, &problem);
-    try std.testing.expect(padded.kda_pad);
+    try std.testing.expectEqual(@as(?bool, true), padded.kda_pad);
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.yes, &problem));
     try std.testing.expectEqualStrings("TF_GLM_KDA_PAD: 0 or 1", problem);
     try std.testing.expectError(error.BadSetting, Settings.read(Reader.untiled, &problem));
@@ -239,6 +239,18 @@ test "TF_GLM_KDA_PAD: 0 by default, 1 or 0, refused otherwise and without glm_mm
     const h: [32]u8 = @splat(0);
     const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, h), Fingerprint.of(2, 1, padded, 8192, true, h, h, h) };
     try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
+}
+
+test "the KDA input pads by default on glm_mm where a rank's heads are not 8-aligned (TP=3's 22/21/21), else as set" {
+    const c = @import("config.zig").Config{};
+    for ([_]usize{ 1, 2, 3, 4, 5, 8 }) |world| {
+        var uneven = false;
+        for (0..world) |q| uneven = uneven or (try @import("cuda_shard.zig").Share.of(&c, q, world)).kda.len() % 8 != 0;
+        try std.testing.expectEqual(world == 3 or world == 5, ranks.kdaPadded(.{}, uneven));
+        try std.testing.expect(!ranks.kdaPadded(.{ .kda_pad = false }, uneven));
+        try std.testing.expect(ranks.kdaPadded(.{ .kda_pad = true }, uneven));
+        try std.testing.expect(!ranks.kdaPadded(.{ .tiled = false }, uneven));
+    }
 }
 
 test "TF_GLM_PROMPT_TAIL: unset or empty, 0 or 1, refused otherwise" {
