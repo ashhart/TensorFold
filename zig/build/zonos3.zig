@@ -8,7 +8,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 }
 
 pub fn install(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) void {
-    const tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "zonos3", .module = module(b, target, optimize, cuda, core) } } });
+    const tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/zonos3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = core }, .{ .name = "cuda", .module = cuda }, .{ .name = "zonos3", .module = module(b, target, optimize, cuda, core) } } });
     const exe = b.addExecutable(.{ .name = "zonos3-generate", .root_module = tool });
     b.step("zonos3-generate", "ZONOS3 Mini's backbone on CUDA against the reference's dumps").dependOn(&b.addInstallArtifact(exe, .{}).step);
 }

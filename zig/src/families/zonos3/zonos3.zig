@@ -6,16 +6,20 @@ pub const generation = @import("generation.zig");
 pub const weights = @import("cuda/weights.zig");
 pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
+pub const codec = @import("cuda/codec.zig");
+pub const codec_weights = @import("cuda/codec_weights.zig");
 
 pub const Engine = engine.Engine;
 pub const Options = engine.Options;
 pub const Probe = engine.Probe;
 pub const Replace = engine.Replace;
 pub const Sampling = sampler.Sampling;
+pub const Codec = codec.Codec;
 
 test {
     _ = config;
     _ = npy;
     _ = sampler;
     _ = generation;
+    _ = codec_weights;
 }
