@@ -14,6 +14,9 @@ const weight_first = "mm_kernel<";
 /// Kernels that write weights: they wait but let no dependent in early (qmmf and glm_mm read weights first).
 const writers = [_][]const u8{ "glm_mm_tile4", "glm_mm_tile6", "glm_mm_tile8", "glm_mm_tile16", "tf_glm_nvfp4_amax", "tf_glm_nvfp4_quantize", "tf_glm_quantize4" };
 
+const open_c = "/" ++ "*"; // a C block comment's ends, spelled apart
+const close_c = "*" ++ "/";
+
 const Problem = struct { name: []const u8, why: []const u8 };
 
 fn ident(c: u8) bool {
@@ -24,7 +27,7 @@ fn ident(c: u8) bool {
 fn skip(s: []const u8, k: usize) ?usize {
     const rest = s[k..];
     if (std.mem.startsWith(u8, rest, "//")) return std.mem.indexOfScalarPos(u8, s, k, '\n') orelse s.len;
-    if (std.mem.startsWith(u8, rest, "/*")) return if (std.mem.indexOfPos(u8, s, k + 2, "*/")) |e| e + 2 else s.len;
+    if (std.mem.startsWith(u8, rest, open_c)) return if (std.mem.indexOfPos(u8, s, k + 2, close_c)) |e| e + 2 else s.len;
     if (rest.len > 0 and (rest[0] == '"' or rest[0] == '\'')) {
         var e = k + 1;
         while (e < s.len and s[e] != rest[0]) e += if (s[e] == '\\') 2 else 1;
@@ -141,8 +144,8 @@ test "GLM kernels: late, conditional and missing waits fail; a macro body and a 
     try std.testing.expectEqual(@as(usize, 0), try problemsIn("extern \"C\" __global__ void glm_mm_tile4(int* x) {\n  // the tiles\n  glm_pdl::enter_weights();\n  x[0] = 1;\n}\n"));
     try std.testing.expectEqual(@as(usize, 1), try problemsIn("extern \"C\" __global__ void glm_mm_tile6(int* x) {\n  glm_pdl::enter();\n  x[0] = 1;\n}\n"));
     try std.testing.expectEqual(@as(usize, 0), try problemsIn("template __global__ void k<1>(int*);\n"));
-    try std.testing.expectEqual(@as(usize, 1), try problemsIn("__global__ void tf_glm_d(int* x) /* shape; */ { x[0] = 1; }\n"));
+    try std.testing.expectEqual(@as(usize, 1), try problemsIn("__global__ void tf_glm_d(int* x) " ++ open_c ++ " shape; " ++ close_c ++ " { x[0] = 1; }\n"));
     try std.testing.expectEqual(@as(usize, 1), try problemsIn("__global__ void tf_glm_e(int* x) // shape; rows\n{\n  x[0] = 1;\n}\n"));
-    try std.testing.expectEqual(@as(usize, 1), try problemsIn("__global__ void tf_glm_f(int* x /* output); */) { x[0] = 1; }\n"));
+    try std.testing.expectEqual(@as(usize, 1), try problemsIn("__global__ void tf_glm_f(int* x " ++ open_c ++ " output); " ++ close_c ++ ") { x[0] = 1; }\n"));
     try std.testing.expectEqual(@as(usize, 0), try problemsIn("__global__ void tf_glm_g(int* x) {\n  glm_pdl::enter();\n  asm volatile(\"{ .reg .u32 r; }\" ::: \"memory\");\n}\n"));
 }
