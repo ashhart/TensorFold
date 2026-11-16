@@ -144,6 +144,7 @@ test {
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
     _ = @import("logprob_parts_test.zig");
+    _ = @import("completion_echo_test.zig");
     _ = @import("limit_pins_test.zig");
     _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
@@ -162,6 +163,7 @@ test {
     _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
+    _ = @import("completion_fim_test.zig");
     _ = @import("cancel_ids.zig");
     _ = @import("cancel_route_test.zig");
     _ = @import("hf_eos_http_test.zig");

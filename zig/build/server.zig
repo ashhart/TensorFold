@@ -95,8 +95,8 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     b.step("test-thinking-tail-host", "Finished calls before a think close, whole and streamed without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"thinking tail:"} })).step);
     const environment = b.step("test-environment-report-host", "Named environment discovery, new registry rows and startup reporting");
     environment.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "capability audit: environment", "stable profile:", "profile line:" } })).step);
-    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:" } }));
-    b.step("test-logprob-offers-host", "Logprob refusals before submission, and entries with tools, stops, reasoning and Responses").dependOn(&logprobs.step);
+    const logprobs = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{ "logprobs_test", "logprob combinations:", "completions echo:" } }));
+    b.step("test-logprob-offers-host", "Logprob refusals before submission, entries with tools, stops, reasoning and Responses, and echo").dependOn(&logprobs.step);
     const limits = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"limit pins:"} }));
     b.step("test-limit-pins-host", "Documented request and flag limits pinned at their bounds").dependOn(&limits.step);
     const deps = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"flag deps:"} }));
@@ -138,6 +138,9 @@ pub fn toolHostTests(b: *std.Build, parser: *std.Build.Module, server: *std.Buil
     deepseek.has_side_effects = true;
     all.dependOn(&deepseek.step);
     b.step("test-server-deepseek-chat-host", "Native DeepSeek prompt goldens, provenance and missing-template HTTP refusal").dependOn(&deepseek.step);
+    const fim = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"completions suffix:"} }));
+    fim.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
+    b.step("test-completions-fim-host", "Completions' suffix: FIM prompts and end tokens through a real HfText, and TF_TOKENIZER_DIRS' tokenizers").dependOn(&fim.step);
     const quoted = b.addRunArtifact(b.addTest(.{ .root_module = server, .filters = &.{"quoted markers:"} }));
     quoted.has_side_effects = true; // reads TF_TOKENIZER_DIRS on every run
     b.step("test-quoted-markers-host", "Quoted added-token spellings through the chat route with TF_TOKENIZER_DIRS' tokenizers").dependOn(&quoted.step);

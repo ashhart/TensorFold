@@ -4,6 +4,10 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `/v1/completions` takes OpenAI's `suffix` for fill-in-the-middle code completion: the server writes the prompt from the tokenizer's own `<|fim_prefix|>`, `<|fim_suffix|>` and `<|fim_middle|>` tokens (Qwen3.5 and Qwen3.8 have them), reads the code as plain text and ends the reply at `<|fim_pad|>`, `<|endoftext|>` or the model's end tokens; models without FIM tokens refuse `suffix` by name, and requests without it are unchanged (#3528).
+
+- Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name (#3526).
+
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.

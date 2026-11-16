@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "144"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"suffix is not supported by this model: its tokenizer has no fill-in-the-middle tokens\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

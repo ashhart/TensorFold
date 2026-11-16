@@ -20,12 +20,8 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
         const text = r.object.get("token").?.string;
         t.* = .{ .string = text };
         lp.* = r.object.get("logprob").?;
-        const alts = try json.newObject(a);
-        for (r.object.get("top_logprobs").?.array) |alt| {
-            const got = try alts.getOrPut(a, alt.object.get("token").?.string);
-            if (!got.found_existing) got.value_ptr.* = alt.object.get("logprob").?;
-        }
-        top.* = .{ .object = alts };
+        const alts = r.object.get("top_logprobs").?;
+        top.* = if (alts == .array) try byText(a, alts.array) else .null; // an echoed prompt's first token has no row
         at.* = try json.intValue(a, offset.*);
         offset.* += reply_text.charCount(text);
     }
@@ -37,14 +33,25 @@ pub fn legacy(a: Allocator, rows: Value, offset: *usize) Allocator.Error!Value {
     return .{ .object = out };
 }
 
+/// Alternatives as the legacy form keys them, each text to its logprob; of two that decode alike, the first.
+fn byText(a: Allocator, alternatives: []const Value) Allocator.Error!Value {
+    const alts = try json.newObject(a);
+    for (alternatives) |alt| {
+        const got = try alts.getOrPut(a, alt.object.get("token").?.string);
+        if (!got.found_existing) got.value_ptr.* = alt.object.get("logprob").?;
+    }
+    return .{ .object = alts };
+}
+
 /// vLLM's ``prompt_logprobs``: null, then ``{id: {logprob, rank, decoded_token}}`` a token, the prompt token first.
-pub fn promptValue(srv: *Server, a: Allocator, rows: []const api.LogprobRow) Allocator.Error!Value {
+pub fn promptValue(srv: *Server, a: Allocator, rows: []const api.LogprobRow, limit: u8) Allocator.Error!Value {
     const out = try a.alloc(Value, rows.len + 1);
     out[0] = .null;
     for (out[1..], rows) |*slot, r| {
         const o = try json.newObject(a);
         try promptEntry(srv, a, o, r.token, r.logprob, r.rank);
-        for (r.ids[0..r.count], r.logprobs[0..r.count], 1..) |id, lp, rank| if (id != r.token) try promptEntry(srv, a, o, id, lp, rank);
+        const n = @min(r.count, limit); // the engine may hold more for echo's count
+        for (r.ids[0..n], r.logprobs[0..n], 1..) |id, lp, rank| if (id != r.token) try promptEntry(srv, a, o, id, lp, rank);
         slot.* = .{ .object = o };
     }
     return .{ .array = out };
