@@ -223,8 +223,9 @@ On HIP, `serve --drafter DIR` runs the DFlash2 drafter over the dense checkpoint
 drafter's layers into a ring beside each stream's caches, budgeted before the streams are sized, and the
 drafter's chains reach the round loop through the lane core's drafter wrapper. It runs on one rank at 4 bits:
 `--drafter` with `--tp` above 1 and `--drafter-bits 0` are refused before any load, and the other HIP families
-(the sparse `qwen3_5_moe` among them) refuse `--drafter` by name. Prompts reach the drafter whole, as their
-prompt pass ends. Without `--drafter` the engine still drafts on its own: the model's MTP head where the
+(the sparse `qwen3_5_moe` among them) refuse `--drafter` by name, as BF16 checkpoints do: the engine times no
+BF16 windows to price the drafter's rounds. Prompts reach the drafter whole, as their prompt pass ends.
+Without `--drafter` the engine still drafts on its own: the model's MTP head where the
 checkpoint has one, and copies from the stream's own context. `TensorFold/Qwen3.8-27B-MLX-4bit` has no MTP
 head, so on HIP it then drafts copies only. `--mtp-drafts 0` stops the MTP head's drafts alone; `--no-drafts`
 turns every draft off (the drafter is not loaded) and decodes plain.
