@@ -417,7 +417,7 @@ pub const Backend = struct {
                 };
                 break :blk ones[k .. k + 1];
             } else r.follow;
-            try b.drafts.append(b.gpa, .{ .slot = try b.slotOf(r.stream), .prompt = r.rows == null, .follow = follow, .depth = r.depth });
+            try b.drafts.append(b.gpa, .{ .slot = try b.slotOf(r.stream), .prompt = r.rows == null, .follow = follow, .depth = r.depth, .sampling = r.stream.sampling, .position = @intCast(r.position) });
         }
         try b.sl.checkDrafts(b.drafts.items); // before rank 1 hears of them: it must never fail where rank 0 did not
         try mirror.draftWords(&b.words, b.gpa, b.drafts.items);

@@ -71,7 +71,9 @@ pub fn drafts(x: *const fwd.Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pic
     const c = x.c;
     const D = c.hidden;
     fwd.rms(x, e, out, x.w.mtp.?.norm, x.sc.m_hn, rows, D, D, D, c.eps);
-    fwd.headWith(x, e, x.w.draft_head orelse x.w.head, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, true);
+    var y = x.*; // coupled drafts race with the target's keyed draws at their tokens' positions; else argmax
+    y.draws = x.draft_draws;
+    fwd.headWith(&y, e, x.w.draft_head orelse x.w.head, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, y.draws == null);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).

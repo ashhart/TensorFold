@@ -21,7 +21,21 @@ const ring_len = 64;
 pub const Win = struct { slot: u32, pending: u32, held: u32, tokens: []const u32 };
 
 /// One stream's head: it absorbs the prompt's last row or the last window's first rows (a next token each), drafts.
-pub const Draft = struct { slot: u32, prompt: bool, follow: []const u32, depth: u32 };
+/// `sampling`/`position`: the stream's draw and where its first draft lands (coupled drafts race at those keyed draws).
+pub const Draft = struct { slot: u32, prompt: bool, follow: []const u32, depth: u32, sampling: ?lanes.Sampling = null, position: u32 = 0 };
+
+/// The draft rows' rules at `level` for the streams in `order` (row i is order[i]'s): a sampled stream's keyed draw at
+/// its drafted token's position, so its draft is the token its verify row draws when the two heads agree; else argmax.
+fn draftDraws(reqs: []const Draft, order: []const u32, level: u32, vocab: u32) fwd.Draws {
+    const Rule = @import("draw_rule.zig").Rule;
+    var d: fwd.Draws = .{};
+    for (order) |k| {
+        const r = reqs[k];
+        d.rules[d.n] = if (r.sampling) |p| (if (p.temperature > 0) fwd.ruleOf(p, r.position + level, vocab) else Rule.greedy(vocab)) else Rule.greedy(vocab);
+        d.n += 1;
+    }
+    return d;
+}
 
 pub const Slot = struct {
     s: st.State,
@@ -469,7 +483,13 @@ pub const Slots = struct {
         x.s = lasts[0].s;
         x.segs = lasts[0..drafting];
         mtp.finish(&x, enc, sl.lasts, sl.rows, drafting, 0, true);
-        const y = e.ctx();
+        var y = e.ctx();
+        var dd: fwd.Draws = .{};
+        const coupled = e.draft_coupled and e.ep == null; // one Mac: the pair's mirror carries no draw rules
+        if (coupled) {
+            dd = draftDraws(reqs, order[0..drafting], 0, e.draft_vocab);
+            y.draft_draws = &dd;
+        }
         mtp.drafts(&y, enc, e.sc.m_x, drafting, sl.picks);
         sl.hold(enc, order[0..drafting], reqs, 0);
         var level: u32 = 1;
@@ -483,6 +503,7 @@ pub const Slots = struct {
             x.s = segs[0].s;
             x.segs = segs[0..n];
             mtp.layer(&x, enc, e.sc.m_x, sl.picks, n, 0); // the level before's outputs, a prefix
+            if (coupled) dd = draftDraws(reqs, order[0..n], level, e.draft_vocab); // copied at encode (setBytes)
             mtp.drafts(&y, enc, e.sc.m_x, n, sl.picks);
             sl.hold(enc, order[0..n], reqs, level);
         }

@@ -100,6 +100,7 @@ pub const Engine = struct {
     gpu: [2]f64 = .{ 0, 0 }, // the last command buffer's GPU start and end (host seconds)
     fused_route: bool = true, // GLM_ROUTE=0: the Python family's cast, router and top-k launches
     draft_vocab: u32 = 154880, // GLM_DRAFT_VOCAB: the MTP head drafts from the vocabulary's first this many tokens
+    draft_coupled: bool = true, // GLM_DRAFT_COUPLED (0: off): a sampled stream's MTP drafts race at their tokens' keyed draws
     committed: u64 = 0, // when the last command buffer was committed (mach ticks)
 
     /// Checkpoint `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers; GLM_EP=settings: half the experts.
@@ -123,6 +124,7 @@ pub const Engine = struct {
         e.gpu = .{ 0, 0 };
         e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (platform.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
+        e.draft_coupled = if (platform.c.getenv("GLM_DRAFT_COUPLED")) |v| v[0] != '0' else true;
         e.committed = 0;
         e.ep = null;
         e.pr = null;
