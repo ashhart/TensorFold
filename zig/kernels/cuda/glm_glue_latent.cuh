@@ -88,15 +88,15 @@ __device__ __forceinline__ void expand(const __nv_bfloat16* ol, const float (&w)
 
 // main's absorb loop, for decode windows: thread (k0, nq) holds 8 columns' weights for 8 inputs, 16-byte loads.
 __device__ __forceinline__ void absorb_main(const __nv_bfloat16* q, const __nv_bfloat16* wk, __nv_bfloat16* qa,
-                                            int64_t r0, int64_t end, int64_t heads, int64_t h) {
+                                            int64_t rows, int64_t heads, int64_t rb) {
   constexpr int D = 256, LW = 512;
   __shared__ float smem[128];
   const int t = threadIdx.x, k0 = t >> 2, nq = t & 3, warp = t >> 5;
-  const int64_t n0 = (int64_t)blockIdx.y * 32 + nq * 8;
+  const int64_t h = blockIdx.x, n0 = (int64_t)blockIdx.y * 32 + nq * 8, r0 = blockIdx.z * rb;
   float w[8][8];
   for (int rep = 0; rep < 8; ++rep)
     for (int j = 0; j < 8; ++j) w[rep][j] = bf(wk[(h * D + k0 + 32 * rep) * LW + n0 + j]);
-  for (int64_t r = r0; r < end; ++r) {
+  for (int64_t r = r0; r < r0 + rb && r < rows; ++r) {
     float qv[8];
     for (int rep = 0; rep < 8; ++rep) qv[rep] = bf(q[(r * heads + h) * D + k0 + 32 * rep]);
     for (int j = 0; j < 8; ++j) {
@@ -117,15 +117,15 @@ __device__ __forceinline__ void absorb_main(const __nv_bfloat16* q, const __nv_b
 
 // main's expand loop, for decode windows: thread (lane, warp) holds 8 inputs' weights of 8 outputs, lanes xor 16 .. 1.
 __device__ __forceinline__ void expand_main(const __nv_bfloat16* ol, const __nv_bfloat16* wv, __nv_bfloat16* out,
-                                            int64_t r0, int64_t end, int64_t heads, int64_t h) {
+                                            int64_t rows, int64_t heads, int64_t rb) {
   constexpr int DV = 256, LW = 512;
   __shared__ float smem[32];
   const int t = threadIdx.x, lane = t & 31, warp = t >> 5, kb = (warp & 1) * 256 + lane * 8, nb = warp >> 1;
-  const int64_t n0 = (int64_t)blockIdx.y * 16;
+  const int64_t h = blockIdx.x, n0 = (int64_t)blockIdx.y * 16, r0 = blockIdx.z * rb;
   float w[8][8];
   for (int rep = 0; rep < 8; ++rep)
     for (int j = 0; j < 8; ++j) w[rep][j] = bf(wv[(h * DV + n0 + nb + 2 * rep) * LW + kb + j]);
-  for (int64_t r = r0; r < end; ++r) {
+  for (int64_t r = r0; r < r0 + rb && r < rows; ++r) {
     float o[8];
     for (int j = 0; j < 8; ++j) o[j] = bf(ol[(r * heads + h) * LW + kb + j]);
     for (int rep = 0; rep < 8; ++rep) {
@@ -156,7 +156,7 @@ extern "C" __global__ void __launch_bounds__(128)
   const int t = threadIdx.x, g = t & 3;
   const int64_t h = blockIdx.x, col = (int64_t)blockIdx.y * 32 + (t >> 2), r0 = blockIdx.z * rb;
   const int64_t end = min(r0 + rb, rows);
-  if (rb < 64) return glm_latent_rows::absorb_main(q, wk, qa, r0, end, heads, h);  // decode: weights from DRAM
+  if (rb < 64) return glm_latent_rows::absorb_main(q, wk, qa, rows, heads, rb);  // decode: weights from DRAM
   float w[8][8];  // [i][rep]: input 8g + i + 32 rep of output col
   for (int i = 0; i < 8; ++i)
     for (int rep = 0; rep < 8; ++rep) w[i][rep] = bf(wk[(h * D + 8 * g + i + 32 * rep) * LW + col]);
@@ -172,7 +172,7 @@ extern "C" __global__ void __launch_bounds__(128)
   const int t = threadIdx.x, c = t & 3, half = (t >> 2) & 1;
   const int64_t h = blockIdx.x, n = (int64_t)blockIdx.y * 16 + (t >> 3), r0 = blockIdx.z * rb;
   const int64_t end = min(r0 + rb, rows);
-  if (rb < 64) return glm_latent_rows::expand_main(ol, wv, out, r0, end, heads, h);  // decode: weights from DRAM
+  if (rb < 64) return glm_latent_rows::expand_main(ol, wv, out, rows, heads, rb);  // decode: weights from DRAM
   float w[8][8];  // [m][j]: input half * 256 + (4m + c) * 8 + j of output n
   for (int m = 0; m < 8; ++m) {
     const uint4 u = __ldg(reinterpret_cast<const uint4*>(wv + (h * DV + n) * LW + half * 256 + (4 * m + c) * 8));

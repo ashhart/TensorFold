@@ -14,9 +14,9 @@ const Twin = struct {
 };
 
 const twins = [_]Twin{
-    // absorb_q<D> at GLM's D = 256: R = D / 32 is 8, q rows D apart, qa rows LW apart
-    .{ .mla = "absorb_q", .glm_file = "zig/kernels/cuda/glm_glue_latent.cuh", .glm = "tf_glm_absorb_q", .from = "__shared__", .subs = &.{ .{ "R", "8" }, .{ "qs", "D" }, .{ "qaw", "LW" } } },
-    .{ .mla = "expand_v", .glm_file = "zig/kernels/cuda/glm_glue_latent.cuh", .glm = "tf_glm_expand_v", .from = "__shared__" },
+    // absorb_q<D> at GLM's D = 256 against its decode loop: R = D / 32 is 8, q rows D apart, qa rows LW apart
+    .{ .mla = "absorb_q", .glm_file = "zig/kernels/cuda/glm_glue_latent.cuh", .glm = "absorb_main", .from = "__shared__", .subs = &.{ .{ "R", "8" }, .{ "qs", "D" }, .{ "qaw", "LW" } } },
+    .{ .mla = "expand_v", .glm_file = "zig/kernels/cuda/glm_glue_latent.cuh", .glm = "expand_main", .from = "__shared__" },
     // tf_glm_merge's chunk loop; the copy keeps o, m and l in fp32 where GLM writes bf16(o / l)
     .{ .mla = "merge_part", .glm_file = "zig/kernels/cuda/glm_glue_attn.cuh", .glm = "tf_glm_merge", .from = "const int k0", .to = "m = nm ; }" },
 };

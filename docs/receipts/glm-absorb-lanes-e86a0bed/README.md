@@ -21,6 +21,7 @@ are what a decode window's cold kv_b read needs. Every output keeps its bits.
 | Check | Result |
 | --- | --- |
 | Kernel, main against head, random inputs, rows 1 to 70, 100, 127 to 129, 1000, 2047, 2048, 4096 (`bits/latent_eq.out`) | 78 sizes, both kernels byte-identical |
+| The same after the decode loops became main's kernel bodies token for token (`bits/latent_eq_main_loops.out`) | 78 sizes, both kernels byte-identical |
 | Replies after each cold prompt, 4 launches (`fa-*`) | one token sha256 a prompt size across base and head |
 | Golden count, prose, code: drafted = plain (`fe-h`, `fe-b`) | PASS on both, the same token sha256 `ba28cfb7`, `dae7e2a5`, `db45a54e` |
 | Concurrent, 12 cells: replies = alone, alone = `"draft": false` (`fe-*/check-conc.log`) | PASS on both, 0 unequal |
@@ -48,9 +49,11 @@ blocks take the same time on both sides, and a 2,048-row prompt block's pair of 
 
 Both kernels are registered (`zig/tests/cuda/contract_glm_latent.zig`): gates 1 to 4 against float64 at decode and
 prompt shapes, a next-head control for each that gate 3 must report red, and records for nvcc 13.0 and 13.3 on
-sm_80/86/89/120/121 (96 registers, 2,560 and 4,224 static shared bytes, bound 128; the 13.0 fatbin audit marks them
-current on all five). On GB10 with the runner built by nvcc 13.3 (`contract-13.3.txt`): `(filtered) SUMMARY 2
-kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems`, exit 0.
+sm_80/86/89/120/121 (2,560 and 4,224 static shared bytes, bound 128; `expand_v` 96 registers on all five, `absorb_q`
+111, 113, 113, 96 and 96 since its decode loop became main's kernel body token for token, the same with 13.0 and
+13.3). On GB10 with the runner built by nvcc 13.3 (`contract-13.3.txt`, before that change): `(filtered) SUMMARY 2
+kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems`, exit
+0; rerun after it, the same summary with the live limits current (96 registers on sm_121).
 
 ## Files
 

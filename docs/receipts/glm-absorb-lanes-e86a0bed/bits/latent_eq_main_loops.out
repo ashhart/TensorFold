@@ -1,0 +1,10 @@
+rows    64 absorb same expand same  main 0.342 ms branch 0.246 ms
+rows   127 absorb same expand same  main 0.661 ms branch 0.424 ms
+rows   128 absorb same expand same  main 0.668 ms branch 0.430 ms
+rows   129 absorb same expand same  main 0.676 ms branch 0.430 ms
+rows  1000 absorb same expand same  main 4.926 ms branch 2.877 ms
+rows  2047 absorb same expand same  main 9.981 ms branch 5.860 ms
+rows  2048 absorb same expand same  main 9.989 ms branch 6.090 ms
+rows  4096 absorb same expand same  main 19.886 ms branch 11.923 ms
+78 sizes, 0 differ; no error
+eq rc=0
