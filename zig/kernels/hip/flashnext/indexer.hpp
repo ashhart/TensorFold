@@ -125,7 +125,7 @@ __device__ int fn_scan(int v, int* waves, int* total) {
     return x - v + (wave > 0 ? waves[wave - 1] : 0);
 }
 
-// Keys a select thread holds in registers (a row's blocks in contiguous runs): rows of more blocks take the global path.
+// Keys a select thread holds in registers (a row's blocks in contiguous runs): wider rows take the global path.
 constexpr int kSelectHeld = 32;
 
 // tf_fn_idx_select's search for the cut, from a thread's `held` keys (runs of blocks [lo, lo + held)): each pass a
