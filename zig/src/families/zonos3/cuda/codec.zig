@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const kern = @import("codec_kernels.zig");
 const wts = @import("codec_weights.zig");
+const stage_layer = @import("codec_layers.zig");
 
 const Buf = cuda.DeviceBuffer;
 const W = wts.width;
@@ -177,20 +178,7 @@ pub const Codec = struct {
     }
 
     fn layer(c: *Codec, shape: wts.StageShape, L: wts.Layer, kv: [2]u64, x: u64, rows: usize, pos0: usize) !void {
-        const k = &c.k;
-        const s = c.stream;
-        const d = shape.d;
-        try k.layernorm(s, x, L.n1w, L.n1b, c.n, d, 1e-5, rows);
-        try k.linear(s, L.qkv, 0, c.n, d, d, 3 * d, c.big, 3 * d, rows);
-        try k.attnPrep(s, c.big, d, pos0, kv[0], kv[1], rows);
-        try k.attention(s, c.big, d, kv[0], kv[1], pos0, shape.ctx, c.att, rows);
-        try k.linear(s, L.attn_out, 0, c.att, d, d, d, c.o_, d, rows);
-        try k.addScaled(s, x, c.o_, L.attn_scale, d, rows);
-        try k.layernorm(s, x, L.n2w, L.n2b, c.n, d, 1e-5, rows);
-        try k.linear(s, L.ffn0, 0, c.n, d, d, shape.ff, c.big, shape.ff, rows);
-        try k.gelu(s, c.big, rows * shape.ff);
-        try k.linear(s, L.ffn1, 0, c.big, shape.ff, shape.ff, d, c.o_, d, rows);
-        try k.addScaled(s, x, c.o_, L.ffn_scale, d, rows);
+        try stage_layer.layer(&c.k, c.stream, .{ .n = c.n, .o = c.o_, .att = c.att, .big = c.big }, shape, L, kv, x, rows, pos0);
     }
 
     fn pass(c: *Codec, codes: []const [10]i32, probe: ?Probe) !void {
