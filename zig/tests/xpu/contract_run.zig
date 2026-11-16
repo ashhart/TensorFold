@@ -8,6 +8,7 @@ const norm_k = @import("contract_norm.zig");
 const swiglu_k = @import("contract_swiglu.zig");
 const argmax_k = @import("contract_argmax.zig");
 const embed_k = @import("contract_embed.zig");
+const tp_k = @import("contract_tp.zig");
 const controls_k = @import("contract_controls.zig");
 
 const g = core.gates;
@@ -51,6 +52,10 @@ pub fn main(init: std.process.Init) !u8 {
     var embed = try embed_k.Embed.init(a, &dev);
     defer embed.deinit();
     try kernels.append(a, embed.kernel());
+    var tps: [std.enums.values(tp_k.Which).len]tp_k.Tp = undefined;
+    for (&tps, std.enums.values(tp_k.Which)) |*x, w| x.* = try tp_k.Tp.init(a, &dev, w);
+    defer for (&tps) |*x| x.deinit();
+    for (&tps) |*x| try kernels.append(a, x.kernel());
     var controls: [std.enums.values(controls_k.Which).len]controls_k.Control = undefined;
     for (&controls, std.enums.values(controls_k.Which)) |*x, w| x.* = try controls_k.Control.init(a, &dev, w);
     defer for (&controls) |*x| x.deinit();
