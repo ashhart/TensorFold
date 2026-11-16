@@ -1,4 +1,4 @@
-base af9777b4945a head 2fc30ddf1196; 4 files changed under zig/kernels; Build cuda_13.0.r13.0/compiler.36424714_0
+base e7e24243d63e head 042028b62b0c; 4 files changed under zig/kernels; Build cuda_13.0.r13.0/compiler.36424714_0
 lfm3: in one catalog only
 contract_controls: 465 functions over sm_120,sm_121,sm_80,sm_86,sm_89; changed 0 added 15 removed 0
     sm_80 tf_ctl_pattn_128
