@@ -69,17 +69,18 @@ Each table rate is total output tokens divided by the synchronized group's wall 
 
 | Temperature | Streams | No head tok/s | DFlash2 tok/s | No head tokens/round | DFlash2 tokens/round |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 0 | 1 | 174.4 | 231.7 | 1.01 | 2.94 |
-| 0 | 2 | 220.2 | 293.2 | 1.04 | 2.78 |
-| 0 | 4 | 304.2 | 338.1 | 1.04 | 2.61 |
-| 0.7 | 1 | 166.0 | 191.1 | 1.01 | 2.56 |
-| 0.7 | 2 | 208.5 | 259.2 | 1.02 | 2.61 |
-| 0.7 | 4 | 278.6 | 273.8 | 1.03 | 2.44 |
+| 0 | 1 | 174.6 | 233.0 | 1.01 | 2.98 |
+| 0 | 2 | 221.4 | 289.7 | 1.04 | 2.74 |
+| 0 | 4 | 305.2 | 330.3 | 1.04 | 2.59 |
+| 0.7 | 1 | 166.0 | 193.7 | 1.01 | 2.64 |
+| 0.7 | 2 | 208.8 | 258.2 | 1.02 | 2.63 |
+| 0.7 | 4 | 278.7 | 280.7 | 1.03 | 2.50 |
 
-Four sampled streams took 1.8% longer with the head, with separated process ranges.
+Four sampled streams were nearly flat in the final repeat, with overlapping process ranges.
+An earlier balanced run took 1.8% longer with the head, with separated ranges, so this cell has no reliable gain.
 The head is optional; these prompts do not establish a speedup on every workload.
-Ready physical footprint was 22.32 GiB without the head and 22.72-22.73 GiB with it;
-peak footprint during the measured processes was 23.04-23.10 and 23.97 GiB respectively.
+Ready physical footprint was 22.32-22.32 GiB without the head and 22.72-22.72 GiB with it;
+peak footprint during the measured processes was 23.04-23.09 and 23.96-23.96 GiB respectively.
 
 All 110 cold replies in the balanced matrix kept complete token arrays and messages equal to solo plain execution.
 Additional checks covered the new binary without a head, first-token and reply logprobs, full-vocabulary sampling,
