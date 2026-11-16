@@ -4,7 +4,7 @@ const sys = @import("sys.zig");
 
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat, hub };
-pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel };
+pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path, parallel, names };
 /// The release from which the server refuses the rank aliases: the one after the release that first ships the flags.
 pub const alias_retire = "1.4.0";
 pub const Rule = struct {
@@ -84,6 +84,7 @@ pub const rules = [_]Rule{
     .{ .name = "TENSORFOLD_UNIFIED_HOST_COUNTS", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (an integrated GPU on Linux: 1 counts /proc/meminfo, 0 the CUDA pool)" },
     .{ .name = "TF_ROCE_GID_INDEX", .scope = .cuda, .kind = .u32, .forms = "a whole GID index from 0 to 2147483647" },
     .{ .name = "TF_QWEN35_CHUNK_SOLO", .scope = .cuda, .kind = .size, .forms = "a solo prompt pass's rows, 4096 (off) or 8192" },
+    .{ .name = "TF_ROCE_HCA", .scope = .cuda, .kind = .names, .max = 2, .forms = "one or two RDMA device names, comma-separated (the RoCE all-gather stripes over at most two)" },
     .{ .name = "TF_GEMMA4_CHUNK_SOLO", .scope = .gemma4, .kind = .size, .forms = "a solo prompt pass's rows, a multiple of 512 up to 4096" },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "whole prompt rows a chunk, 1 through 1024 (checked when a Drama 3 checkpoint opens)" },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .scope = .drama3, .kind = .u32, .trim = " ", .forms = "kept reference states, 0 (off) through 16 (checked when a Drama 3 checkpoint opens)" },
@@ -318,6 +319,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         return n;
     }
     if (r.kind == .toggle) return toggle(r, text) orelse error.InvalidEnvironment;
+    if (r.kind == .names) return try nameCount(r, text);
     // a path travels as 0, its text read by `path`; the file itself is its reader's to check
     if (r.kind == .path) return if (for (text) |ch| {
         if (ch < 0x20 or ch == 0x7f) break true;
@@ -351,6 +353,15 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (r.kind == .prompt and (n < 128 or n > 2048 or n % 16 != 0)) return error.InvalidEnvironment;
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
     return n;
+}
+
+/// A comma-separated list's nonblank entries, from one to the row's `max`, without control characters: their count.
+fn nameCount(r: Rule, text: []const u8) Error!u64 {
+    for (text) |ch| if (ch < 0x20 or ch == 0x7f) return error.InvalidEnvironment;
+    var n: u64 = 0;
+    var it = std.mem.tokenizeScalar(u8, text, ',');
+    while (it.next()) |w| n += @intFromBool(std.mem.trim(u8, w, " ").len != 0);
+    return if (n == 0 or n > r.max) error.InvalidEnvironment else n;
 }
 
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
@@ -431,6 +442,14 @@ pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     std.debug.assert(rule(name).kind == .path);
     _ = (try parse(name, raw)) orelse return null;
     return std.mem.trim(u8, raw.?, rule(name).trim);
+}
+
+/// A `.names` setting's text from the process, or null when unset or blank; a malformed list is logged and refused.
+pub fn list(name: [:0]const u8) Error!?[:0]const u8 {
+    std.debug.assert(rule(name).kind == .names);
+    const raw = sys.getenv(name) orelse return null;
+    _ = (try checked(name, raw)) orelse return null;
+    return raw;
 }
 
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
