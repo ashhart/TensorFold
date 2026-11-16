@@ -39,7 +39,7 @@ const usage =
     \\  scores-b <aot dir> [--reps N]   _scores_b against _scores (Triton AOT set): bits and time, mixed 131K / short rows
     \\  topk-b <aot dir> [--reps N]     TF_DSV41_INDEX_BOUND's top-k twins (topk_b.cu, _dtopk_b) against topk_cuda.cu /
     \\                                  _dtopk: every output byte and time, mixed 154K / short rows (fatbins + AOT set)
-    \\  release-bench [reps] [name]  release FP8/BF16 projections at the world-4 shapes, 1-2048 rows: GB/s, TFLOPS
+    \\  release-bench [reps] [name]  release projections and experts at the world-4 shapes, 1-2048 rows: GB/s, TFLOPS
     \\  router-eps         the router's weight denominator sum + eps: zero sums at 0 and 1e-20, ordinary bytes equal
     \\  all <fixtures>     every case directory under <fixtures> by its manifest's "kind"
     \\
