@@ -45,8 +45,8 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
-| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/voices` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
 `/v1/imprint`, another method, or a suffix alias such as `/alt/completions` that the server answers for a full key. The route
@@ -99,6 +99,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | Served model ID and any configured aliases (both servers); native entries carry [capabilities](#model-capabilities) |
+| `GET /v1/models/{id}` | One served ID or alias: the entry `/v1/models` lists for it, or 404 `model_not_found` (native server; see [One model](#one-model)) |
 | `GET /health` | Liveness, the served model, the queue and live rates; open with keys (see [Health](#health)) |
 | `GET /memory`, `GET /v1/memory` | Native read-only memory snapshot ([memory diagnostics](memory-diagnostics.md)) |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
@@ -150,6 +151,16 @@ including false, and no callback details or addresses are exposed.
 Discovery and boolean request checks use the same loaded flag reader. Publication enables no feature.
 Flags describe the engine; request combinations, context, template and format constraints still apply.
 greedy_only and plain_only describe restrictions, and context_fitted says the context was limited to memory.
+
+## One model
+
+`GET /v1/models/{id}` (or `/models/{id}`) is OpenAI's retrieve-model route on the native server. For the served name or
+one of its `--alias` names it returns the object `GET /v1/models` lists for that id, capabilities included. The id is
+percent-decoded once, so `org/name` may be sent as written or as `org%2Fname`; an id holding a `%` that starts no hex
+pair is matched as written. Any other id answers 404 with `"code": "model_not_found"`, `"type": "invalid_request_error"`,
+`"param": "model"` and the decoded id in the message. A path that ends in `/models` still lists every model; send an
+id ending in `/models` as `org%2Fmodels`. Keys and [key scopes](#key-scopes) apply as they do to `GET /v1/models`.
+The Python 0.6.6 server, the other server that lists models, has no such route.
 
 ## Decisions
 

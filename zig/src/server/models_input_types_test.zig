@@ -9,9 +9,9 @@ const messages = @import("messages.zig");
 const images = @import("images.zig");
 const t = std.testing;
 
-const Wire = struct {
+pub const Wire = struct {
     out: std.Io.Writer.Allocating,
-    fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
+    pub fn write(ctx: *anyopaque, bytes: []const u8) error{Closed}!void {
         const self: *Wire = @ptrCast(@alignCast(ctx));
         self.out.writer.writeAll(bytes) catch return error.Closed;
     }
@@ -41,7 +41,7 @@ fn noTemplate(_: *anyopaque) []const u8 {
 }
 
 /// A server with only discovery's and media's fields set: no engine, model or tokenizer.
-fn server(vision: ?api.Vision, video_decoder: bool) Server {
+pub fn server(vision: ?api.Vision, video_decoder: bool) Server {
     var srv: Server = undefined;
     srv.io = t.io;
     srv.info = .{ .vision = vision };
@@ -57,7 +57,7 @@ fn server(vision: ?api.Vision, video_decoder: bool) Server {
 }
 
 /// GET /v1/models' `data`, as a client reads it.
-fn listed(a: std.mem.Allocator, srv: *Server) ![]json.Value {
+pub fn listed(a: std.mem.Allocator, srv: *Server) ![]json.Value {
     var wire: Wire = .{ .out = .init(a) };
     var conn: Conn = .{ .fd = -1, .peer = "", .buf = &.{}, .gpa = a, .version = "HTTP/1.1", .method = "GET", .write_hooks = .{ .ctx = &wire, .write = Wire.write } };
     try @import("status_routes.zig").models(srv, &conn, a);

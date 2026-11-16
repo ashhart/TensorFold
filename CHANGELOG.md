@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models`.
+
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.
