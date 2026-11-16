@@ -374,7 +374,7 @@ export function CommandCentre() {
     const initial = Object.fromEntries(readinessProviderEntries.map((entry) => [entry.key, { status: 'checking' as const }]))
     setReadinessProviderProbes(initial)
     for (const entry of readinessProviderEntries) {
-      api.getModelReadiness({ providerId: entry.providerId, accountId: entry.accountId })
+      api.getModelReadiness({ providerId: entry.providerId, accountId: entry.accountId, checkEndpoint: true })
         .then((value) => {
           if (!cancelled) setReadinessProviderProbes((current) => ({ ...current, [entry.key]: { status: 'ok', value } }))
         })
