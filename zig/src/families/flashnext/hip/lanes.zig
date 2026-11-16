@@ -159,9 +159,10 @@ pub const Fx = struct {
         return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
     }
 
-    /// A kept row's side buffer (forward.Mark): the window snapshots, free while a prompt fills; null if too small.
-    fn sideBuffer(c: *const cache.Caches) ?u64 {
-        return if (c.window.len >= c.layout.restBytes()) c.window.base() else null;
+    /// Kept row `i`'s side buffer (forward.Mark): its part of the window snapshots, free while a prompt fills, or null.
+    fn sideBuffer(c: *const cache.Caches, i: usize) ?u64 {
+        const at = i * std.mem.alignForward(usize, c.layout.restBytes(), 256);
+        return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
     }
 
     fn free(f: *Fx, l: *Lane) void {
