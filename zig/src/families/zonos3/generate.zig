@@ -3,6 +3,7 @@ const std = @import("std");
 const z3 = @import("zonos3");
 const cuda = @import("cuda");
 const core = @import("core");
+const encoder_checks = @import("check_encoder.zig");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -13,6 +14,8 @@ const usage =
     \\       zonos3-generate --model LM_DIR --frames-check GEN_DIR [--max-frames 2000]
     \\       zonos3-generate --codec-check DUMP_DIR --generator GENERATOR.pt --head HEAD.pt
     \\       zonos3-generate --encoder-check DUMP_DIR --generator GENERATOR.pt
+    \\       zonos3-generate --features-check DUMP_DIR
+    \\       zonos3-generate --teacher-check DUMP_DIR --teacher TEACHER_DIR
     \\       zonos3-generate --checkpoint RELEASE_DIR --text "..." --wav OUT.wav [--voice-embedding E.npy | --voice-codes C.npy]
     \\                       [--seed 0] [--temperature 0.75] [--top-k 80] [--top-p 0.69] [--max-frames 2000] [--decoder ID]
     \\                       [--silence-frames 3] [--reference GEN_DIR]
@@ -28,11 +31,12 @@ const usage =
     \\Zyphra/ZONOS3-Mini. With --reference the prompt rows, frames and audio are compared with GEN_DIR's (dump_rows.py).
     \\--encoder-check encodes DUMP_DIR/audio.npy (44.1 kHz, one lane) and compares the acoustic branch's captures with
     \\the reference's (tools/dump_golden.py codec-encoder, a CUDA bf16 run, so the match is to bf16 rounding).
-    \\The last stderr line is "RESULT zonos3 <check|frames|codec|encoder|speech> ...".
+    \\--features-check computes the SSL teacher's input features of DUMP_DIR/lane.0.teacher_audio.npy on the host and
+    \\compares them with DUMP_DIR/lane.0.ssl.features.npy. The last stderr line is "RESULT zonos3 <mode> ...".
     \\
 ;
 
-const Check = struct {
+pub const Check = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     ctx: *anyopaque,
@@ -47,7 +51,7 @@ const Check = struct {
     prefix: bool = false,
     floor: f64 = 0.9999,
 
-    fn probe(ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, width: usize) anyerror!void {
+    pub fn probe(ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, width: usize) anyerror!void {
         const c: *Check = @ptrCast(@alignCast(ctx));
         var nb: [96]u8 = undefined;
         const path = try std.fs.path.join(c.gpa, &.{ c.dir, try std.fmt.bufPrint(&nb, "{s}.npy", .{name}) });
@@ -150,7 +154,7 @@ fn loadPrompt(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
     }
 }
 
-fn nowNs(io: std.Io) i128 {
+pub fn nowNs(io: std.Io) i128 {
     return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
 }
 
@@ -250,7 +254,7 @@ const Speak = struct {
     silence_frames: usize = 3,
 };
 
-fn readNpy(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !struct { bytes: []u8, arr: z3.npy.Array } {
+pub fn readNpy(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !struct { bytes: []u8, arr: z3.npy.Array } {
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28));
     return .{ .bytes = bytes, .arr = try z3.npy.parse(bytes) };
 }
@@ -361,41 +365,6 @@ fn speak(gpa: std.mem.Allocator, io: std.Io, a: Speak) !u8 {
     return if (std.mem.eql(u8, verdict, "FAIL")) 1 else 0;
 }
 
-fn encoderCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []const u8) !u8 {
-    const path = try std.fs.path.join(gpa, &.{ dir, "audio.npy" });
-    defer gpa.free(path);
-    const f = try readNpy(gpa, io, path);
-    defer gpa.free(f.bytes);
-    const audio = try f.arr.floats(gpa);
-    defer gpa.free(audio);
-    var driver = try cuda.Driver.open();
-    defer driver.close();
-    var ctx = try cuda.Context.init(&driver, 0);
-    defer ctx.deinit();
-    var stream = try cuda.Stream.init(&driver, true);
-    defer stream.deinit();
-    const t_load = nowNs(io);
-    const enc = try z3.encoder.Encoder.create(gpa, io, &driver, stream, generator);
-    defer enc.destroy();
-    const Enc = struct {
-        fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
-            try @as(*z3.encoder.Encoder, @ptrCast(@alignCast(c))).download(ptr, out);
-        }
-    };
-    // the reference ran in bf16: a row's cosine against it, not fp32 rounding
-    var c: Check = .{ .gpa = gpa, .io = io, .ctx = enc, .get = Enc.get, .dir = dir, .prefix = true, .floor = 0.99 };
-    std.debug.print("zonos3 encoder check: {d} samples, {d} MiB of weights, loaded in {d:.1} s\n", .{ audio.len, enc.w.bytes >> 20, @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9 });
-    const lane = audio[0..@min(audio.len, z3.encoder.lane_frames * z3.encoder.frame_samples)];
-    _ = try enc.acoustic(lane, .{ .ctx = &c, .f = Check.probe });
-    const t0 = nowNs(io);
-    const frames = try enc.acoustic(lane, null);
-    try stream.synchronize();
-    const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
-    const pass = c.fails == 0 and c.n > 0 and c.missing == 0;
-    std.debug.print("RESULT zonos3 encoder {s} probes={d} low={d} missing={d} worst_row_cos={d:.6} frames={d} encode_s={d:.3}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, frames, seconds });
-    return if (pass) 0 else 1;
-}
-
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = std.heap.c_allocator;
@@ -406,6 +375,9 @@ pub fn main(init: std.process.Init) !u8 {
     var frames_check: ?[]const u8 = null;
     var codec_check: ?[]const u8 = null;
     var encoder_check: ?[]const u8 = null;
+    var features_check: ?[]const u8 = null;
+    var teacher_check: ?[]const u8 = null;
+    var teacher_dir: []const u8 = "";
     var generator: []const u8 = "";
     var head: []const u8 = "";
     var sp: Speak = .{};
@@ -415,17 +387,19 @@ pub fn main(init: std.process.Init) !u8 {
     while (i + 1 < argv.len) : (i += 2) {
         const k = argv[i];
         const v = argv[i + 1];
-        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--encoder-check")) encoder_check = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--checkpoint")) sp.checkpoint = v else if (std.mem.eql(u8, k, "--text")) sp.text = v else if (std.mem.eql(u8, k, "--wav")) sp.wav = v else if (std.mem.eql(u8, k, "--voice-embedding")) sp.embedding = v else if (std.mem.eql(u8, k, "--voice-codes")) sp.codes = v else if (std.mem.eql(u8, k, "--decoder")) sp.decoder = v else if (std.mem.eql(u8, k, "--reference")) sp.reference = v else if (std.mem.eql(u8, k, "--seed")) sp.sampling.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--temperature")) sp.sampling.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) sp.sampling.top_k = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) sp.sampling.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--silence-frames")) sp.silence_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
+        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--encoder-check")) encoder_check = v else if (std.mem.eql(u8, k, "--features-check")) features_check = v else if (std.mem.eql(u8, k, "--teacher-check")) teacher_check = v else if (std.mem.eql(u8, k, "--teacher")) teacher_dir = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--checkpoint")) sp.checkpoint = v else if (std.mem.eql(u8, k, "--text")) sp.text = v else if (std.mem.eql(u8, k, "--wav")) sp.wav = v else if (std.mem.eql(u8, k, "--voice-embedding")) sp.embedding = v else if (std.mem.eql(u8, k, "--voice-codes")) sp.codes = v else if (std.mem.eql(u8, k, "--decoder")) sp.decoder = v else if (std.mem.eql(u8, k, "--reference")) sp.reference = v else if (std.mem.eql(u8, k, "--seed")) sp.sampling.seed = try std.fmt.parseInt(u64, v, 10) else if (std.mem.eql(u8, k, "--temperature")) sp.sampling.temperature = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--top-k")) sp.sampling.top_k = try std.fmt.parseInt(u32, v, 10) else if (std.mem.eql(u8, k, "--top-p")) sp.sampling.top_p = try std.fmt.parseFloat(f32, v) else if (std.mem.eql(u8, k, "--silence-frames")) sp.silence_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
             std.debug.print("unknown flag {s}\n{s}", .{ k, usage });
             return 2;
         }
     }
+    if (teacher_check) |dir| return if (i == argv.len and teacher_dir.len > 0) encoder_checks.teacher(gpa, io, dir, teacher_dir) else 2;
+    if (features_check) |dir| return if (i == argv.len) encoder_checks.features(gpa, io, dir) else 2;
     if (encoder_check) |dir| {
         if (i != argv.len or generator.len == 0) {
             std.debug.print("{s}", .{usage});
             return 2;
         }
-        return encoderCheck(gpa, io, dir, generator);
+        return encoder_checks.acoustic(gpa, io, dir, generator);
     }
     if (codec_check) |dir| {
         if (i != argv.len or generator.len == 0 or head.len == 0) {

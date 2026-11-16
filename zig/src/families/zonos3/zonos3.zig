@@ -5,6 +5,7 @@ pub const sampler = @import("sampler.zig");
 pub const generation = @import("generation.zig");
 pub const prompt = @import("prompt.zig");
 pub const speech = @import("speech.zig");
+pub const features = @import("features.zig");
 pub const release = @import("release.zig");
 pub const voices = @import("voices.zig");
 pub const request = @import("request.zig");
@@ -14,6 +15,7 @@ pub const engine = @import("cuda/engine.zig");
 pub const codec = @import("cuda/codec.zig");
 pub const codec_weights = @import("cuda/codec_weights.zig");
 pub const encoder = @import("cuda/encoder.zig");
+pub const teacher = @import("cuda/teacher.zig");
 
 pub const Engine = engine.Engine;
 pub const Options = engine.Options;
@@ -29,6 +31,7 @@ test {
     _ = generation;
     _ = prompt;
     _ = speech;
+    _ = features;
     _ = release;
     _ = voices;
     _ = codec_weights;
