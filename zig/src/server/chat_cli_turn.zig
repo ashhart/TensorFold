@@ -20,12 +20,14 @@ pub const Show = struct { thinking: bool = false, terminal: bool = false };
 /// A finished reply: its answer, whether it stopped at its token limit, and whether reasoning came.
 pub const Finished = struct { content: []const u8, cut: bool, reasoned: bool };
 
+/// Refused, failed or never sent: why, whether the server could not be reached, and a refusal's HTTP status.
+pub const Failure = struct { reason: []const u8, connect: bool = false, status: u16 = 0 };
+
 pub const Ended = union(enum) {
     finished: Finished,
     /// A stop signal ended it; the answer printed so far.
     stopped: []const u8,
-    /// Refused, failed or never sent; ``connect`` when the server could not be reached.
-    failed: struct { reason: []const u8, connect: bool = false },
+    failed: Failure,
 };
 
 /// The streamed request: the model, the messages, then the settings the chat was given.
@@ -45,13 +47,14 @@ pub fn body(a: Allocator, s: Settings, history: *const History, user: []const u8
 }
 
 /// One streamed turn to ``url``, the chat route, printed to ``out`` as it arrives; a stop signal ends it ``stopped``.
-pub fn run(a: Allocator, io: std.Io, url: []const u8, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
+pub fn run(a: Allocator, io: std.Io, url: []const u8, key: ?[]const u8, request: []u8, out: *std.Io.Writer, show: Show) !Ended {
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
     client.connection_pool.free_size = 0;
     defer client.deinit();
     var printer: Printer = .{ .io = io, .out = out, .show = show };
     var r: reply.Reply = .{ .a = a, .sink = printer.sink() };
-    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .body = request, .reply = &r };
+    const bearer = if (key) |k| try std.fmt.allocPrint(a, "Bearer {s}", .{k}) else null;
+    var x: Exchange = .{ .a = a, .io = io, .client = &client, .uri = try std.Uri.parse(url), .bearer = bearer, .body = request, .reply = &r };
     const ended = stream.bounded(io, null, Exchange.run, &x);
     printer.end();
     switch (ended) {
@@ -59,7 +62,7 @@ pub fn run(a: Allocator, io: std.Io, url: []const u8, request: []u8, out: *std.I
         .unavailable => return .{ .failed = .{ .reason = "could not start the request" } },
         .finished => {},
     }
-    if (x.failure) |f| return .{ .failed = .{ .reason = try x.reason(f, url), .connect = f == .connect } };
+    if (x.failure) |f| return .{ .failed = .{ .reason = try x.reason(f, url), .connect = f == .connect, .status = x.status } };
     if (r.failure) |why| return .{ .failed = .{ .reason = why } };
     if (!r.complete()) return .{ .failed = .{ .reason = "the server closed the stream before the reply finished" } };
     return .{ .finished = .{ .content = r.content.items, .cut = std.mem.eql(u8, r.finish orelse "", "length"), .reasoned = r.reasoned } };
@@ -73,6 +76,8 @@ const Exchange = struct {
     io: std.Io,
     client: *std.http.Client,
     uri: std.Uri,
+    /// ``Bearer KEY``, when the server wants a key.
+    bearer: ?[]const u8,
     body: []u8,
     reply: *reply.Reply,
     status: u16 = 0,
@@ -82,10 +87,11 @@ const Exchange = struct {
     done: std.atomic.Value(bool) = .init(false),
 
     fn run(x: *Exchange) void {
+        const auth: std.http.Client.Request.Headers.Value = if (x.bearer) |b| .{ .override = b } else .omit;
         var req = x.client.request(.POST, x.uri, .{
             .keep_alive = false,
             .redirect_behavior = .unhandled,
-            .headers = .{ .content_type = .{ .override = "application/json" }, .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = user_agent } },
+            .headers = .{ .authorization = auth, .content_type = .{ .override = "application/json" }, .accept_encoding = .{ .override = "identity" }, .user_agent = .{ .override = user_agent } },
             .extra_headers = &.{.{ .name = "accept", .value = "text/event-stream" }},
         }) catch {
             x.failure = .connect;
