@@ -3,6 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <stdint.h>
+#include "glm_pdl.cuh"
 
 namespace tf_glm_quant {
 
@@ -36,6 +37,7 @@ using tf_glm_quant::widen8;
 // experts._quantize's per-expert scale, a block per expert: g[e] = clamp_min(amax |w[e]| * fp32(1 / 2688), 1e-30).
 extern "C" __global__ void tf_glm_nvfp4_amax(
         const __nv_bfloat16* __restrict__ w, long long per, float* __restrict__ g) {
+    glm_pdl::enter_weights();
     const uint4* src = reinterpret_cast<const uint4*>(w + blockIdx.x * per);
     float m = 0.0f;
     for (long long i = threadIdx.x; i < per / 8; i += blockDim.x) {
@@ -59,6 +61,7 @@ extern "C" __global__ void tf_glm_nvfp4_amax(
 extern "C" __global__ void tf_glm_nvfp4_quantize(const __nv_bfloat16* __restrict__ w, const float* __restrict__ g,
                                                  long long per, long long total, uint8_t* __restrict__ codes,
                                                  uint8_t* __restrict__ scales) {
+    glm_pdl::enter_weights();
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= total) return;
     const float ge = g[i / per];
@@ -90,6 +93,7 @@ extern "C" __global__ void tf_glm_nvfp4_quantize(const __nv_bfloat16* __restrict
 extern "C" __global__ void tf_glm_quantize4(const __nv_bfloat16* __restrict__ w, long long groups,
                                             int32_t* __restrict__ words, __nv_bfloat16* __restrict__ scales,
                                             __nv_bfloat16* __restrict__ biases) {
+    glm_pdl::enter_weights();
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= groups) return;
     const uint4* src = reinterpret_cast<const uint4*>(w) + 8 * i;
