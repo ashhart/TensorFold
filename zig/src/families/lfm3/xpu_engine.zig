@@ -33,6 +33,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.c = try cfg.Config.read(gpa, io, dir);
         errdefer e.c.deinit();
+        try cfg.servedOn(&e.c, .xpu); // before the device: ModelOpt NVFP4 is CUDA's
         if (e.c.kind != .text) return error.UnsupportedFormat;
         const q = e.c.quant.global;
         if (q.bits != 4 or q.group != 64 or e.c.quant.modules.count() != 0) return error.UnsupportedFormat;
