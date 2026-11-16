@@ -16,7 +16,7 @@ const compiled = ts.transpileModule(printed, { compilerOptions: { target: ts.Scr
 async function scenario(roomScoped: boolean, rendererAvailable = true) {
   const provider = { id: 'synthetic', name: 'Synthetic', kind: 'local', models: ['fixture'], baseUrl: 'http://127.0.0.1:9897/v1' }
   const project = { id: 'project', cwd: '/workspace/project', updatedAt: 1 }
-  const room = { id: 'room', projectId: project.id, workspaceCwd: '/workspace/room-code', updatedAt: 1 }
+  const room = { id: 'room', projectId: project.id, workspaceCwd: '/workspace/room-code', seats: [], updatedAt: 1 }
   const ticket: any = {
     id: 'ticket', projectId: project.id, roomId: roomScoped ? room.id : null, title: 'Synthetic ticket', body: '',
     type: 'task', status: 'ready', priority: 'medium', effort: 'small', tags: [], order: 0, createdAt: 1, updatedAt: 1,
@@ -30,6 +30,7 @@ async function scenario(roomScoped: boolean, rendererAvailable = true) {
     runAgent: () => new Promise<void>((resolve) => { finishRun = resolve }),
     assertProviderEndpoint() {}, auditPreview: String, auditEvent: async () => {}, requireSecurityRole() {},
     normalizeTicketCapabilities, startTicketExecution, settleTicketExecution, ticketStateAfterRun, ticketWorkPrompt,
+    captureAgentReasoningEffort: () => 'low',
     restrictTicketToolContext: (context: unknown) => context,
     ensureRoomWorktree: async () => room.workspaceCwd,
     requireTicketDependenciesReady() {}, inspectGitRepository: async () => ({ branch: 'fixture' }),
