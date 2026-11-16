@@ -203,17 +203,21 @@ fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []
     try codec.decode(codes, probe);
     const pcm = try codec.finish(gpa, probe);
     gpa.free(pcm);
-    // the same frames in uneven chunks, then timed whole
+    // the same frames in uneven chunks, the settled samples taken after each, then timed whole
     try codec.reset();
+    var settled: std.ArrayList(f32) = .empty;
+    defer settled.deinit(gpa);
     var at: usize = 0;
     var step: usize = 1;
     while (at < codes.len) : (step = step * 2 + 1) {
         const n = @min(step, codes.len - at);
         try codec.decode(codes[at..][0..n], null);
         at += n;
+        const part = try codec.emit(gpa, at == codes.len, null);
+        defer gpa.free(part);
+        try settled.appendSlice(gpa, part);
     }
-    const chunked = try codec.finish(gpa, null);
-    defer gpa.free(chunked);
+    const chunked = settled.items;
     try codec.reset();
     const t0 = nowNs(io);
     try codec.decode(codes, null);

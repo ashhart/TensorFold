@@ -37,6 +37,7 @@ pub const Codec = struct {
     w: *wts.Weights,
     bufs: std.ArrayList(Buf),
     frames: usize = 0, // code frames decoded
+    emitted: usize = 0, // samples handed out
     // state
     sem_hist: [wts.sem_blocks]u64, // [W][6]
     head_hist: [wts.head_blocks]u64,
@@ -68,6 +69,7 @@ pub const Codec = struct {
         c.d = d;
         c.stream = stream;
         c.frames = 0;
+        c.emitted = 0;
         c.bufs = .empty;
         for (&c.kv) |*layers| layers.* = &.{};
         c.k = try kern.Kernels.load(d);
@@ -147,6 +149,7 @@ pub const Codec = struct {
         try b.fill8(0, c.stream.handle);
         try c.stream.synchronize();
         c.frames = 0;
+        c.emitted = 0;
     }
 
     /// The next code frames (every code below 4096). Under a probe they must fit one pass.
@@ -239,25 +242,40 @@ pub const Codec = struct {
         c.frames += t;
     }
 
-    /// Every decoded frame's samples to the host (frames * 2940, caller frees): the request's whole audio.
-    pub fn finish(c: *Codec, gpa: std.mem.Allocator, probe: ?Probe) ![]f32 {
+    /// The samples no later frame can change, from where the last call stopped (caller frees); `final` adds the rest.
+    /// After F frames 2940 F - 1470 samples are settled: the centered iSTFT, the mixer and the resampler look ahead.
+    pub fn emit(c: *Codec, gpa: std.mem.Allocator, final: bool, probe: ?Probe) ![]f32 {
         const k = &c.k;
         const s = c.stream;
-        const total = c.frames * internal_frame;
-        const samples = c.frames * frame_samples;
-        if (c.frames == 0) return gpa.alloc(f32, 0);
+        const cap = c.o.max_frames * internal_frame;
+        const total = c.frames * internal_frame; // internal samples the decoded frames cover
+        const end = if (final) c.frames * frame_samples else (c.frames * frame_samples) -| (frame_samples / 2);
+        if (end <= c.emitted) return gpa.alloc(f32, 0);
+        // output [emitted, end) reads the mix from the first block's start to the last block's taps, 63 more a branch
+        const m0 = (wts.resample_in * (c.emitted / wts.resample_out)) -| 17;
+        const m1 = @min(total, wts.resample_in * ((end - 1) / wts.resample_out) + wts.resample_taps - 17);
+        const b0 = m0 -| 63;
+        const b1 = @min(total, m1 + 63);
+        // before the end, samples past the decoded frames are never read; at the end they read as zero
+        const bound = if (final) total else cap;
         for (wts.n_ffts, 0..) |n, b| {
-            const out = c.branches + b * total * 4;
-            try k.ola(s, c.spec_frames[b], c.w.win2[b], c.frames * head_rate, n, wts.hop, 0, total, out);
-            if (probe) |p| try p.f(p.ctx, if (b == 0) "s0" else "s1", out, 1, total);
+            const out = c.branches + (b * cap + b0) * 4;
+            try k.ola(s, c.spec_frames[b], c.w.win2[b], c.frames * head_rate, n, wts.hop, b0, b1 - b0, out);
+            if (probe) |p| try p.f(p.ctx, if (b == 0) "s0" else "s1", out, 1, b1 - b0);
         }
-        try k.mix(s, c.branches, total, c.w.mixer, 0, total, c.mixed);
-        if (probe) |p| try p.f(p.ctx, "mixer", c.mixed, 1, total);
-        try k.resample(s, c.mixed, total, c.w.resampler, 0, samples, c.audio);
-        if (probe) |p| try p.f(p.ctx, "audio", c.audio, 1, samples);
-        const pcm = try gpa.alloc(f32, samples);
+        try k.mix(s, c.branches, cap, bound, c.w.mixer, m0, m1 - m0, c.mixed + m0 * 4);
+        if (probe) |p| try p.f(p.ctx, "mixer", c.mixed + m0 * 4, 1, m1 - m0);
+        try k.resample(s, c.mixed, bound, c.w.resampler, c.emitted, end - c.emitted, c.audio);
+        if (probe) |p| try p.f(p.ctx, "audio", c.audio, 1, end - c.emitted);
+        const pcm = try gpa.alloc(f32, end - c.emitted);
         errdefer gpa.free(pcm);
         try c.download(c.audio, std.mem.sliceAsBytes(pcm));
+        c.emitted = end;
         return pcm;
+    }
+
+    /// Every decoded frame's samples not yet emitted (caller frees): after no emit, the request's whole audio.
+    pub fn finish(c: *Codec, gpa: std.mem.Allocator, probe: ?Probe) ![]f32 {
+        return c.emit(gpa, true, probe);
     }
 };

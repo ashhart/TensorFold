@@ -1,4 +1,4 @@
-//! Native speech from one ZONOS3 Mini family on CUDA: one request at a time, its audio decoded whole at the end.
+//! Native speech from one ZONOS3 Mini family on CUDA: one request at a time, streamed in chunks or decoded at the end.
 const std = @import("std");
 const api = @import("engine_api");
 const z3 = @import("zonos3");
@@ -59,6 +59,40 @@ const Guarded = struct {
 
     pub fn lastLogits(g: Guarded, out: *[cfg.head_rows]f32) !void {
         try g.h.e.lastLogits(out);
+    }
+};
+
+/// Frames a streamed chunk waits for after `spoken` generated frames went out: 1, 2, 4, 8, then 15 (a second).
+pub fn chunkFrames(spoken: usize) usize {
+    return @min(15, 1 + spoken);
+}
+
+/// A request's audio as its rows arrive: streamed requests decode in growing chunks, the rest once at the end.
+const Audio = struct {
+    h: *Host,
+    job: Job,
+    prefill: []const [W]i32,
+    decoded: usize = 0, // frames handed to the codec
+    samples: usize = 0, // samples in the request's buffer
+
+    pub fn row(s: *Audio, rows: []const [W]i32, eos_frame: ?usize, finished: bool) !void {
+        const h = s.h;
+        const r = s.job.request;
+        if (!finished and !r.stream) return;
+        const all = try z3.speech.frames(h.gpa, s.prefill, rows, eos_frame);
+        defer h.gpa.free(all);
+        const waiting = (s.prefill.len -| s.decoded) + chunkFrames(s.decoded -| s.prefill.len);
+        if (!finished and all.len - s.decoded < waiting) return;
+        try h.codec.decode(all[s.decoded..], null);
+        s.decoded = all.len;
+        const pcm = try h.codec.emit(h.gpa, finished, null);
+        defer h.gpa.free(pcm);
+        if (pcm.len > r.pcm.len - s.samples) return error.AudioOverflow;
+        for (pcm) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
+        z3.speech.output(pcm, h.rel.headroom_db);
+        @memcpy(r.pcm[s.samples..][0..pcm.len], pcm);
+        s.samples += pcm.len;
+        if (r.stream and pcm.len > 0) s.job.sink.event(s.job.sink.ctx, s.job.id, &.{ .audio = s.samples });
     }
 };
 
@@ -190,7 +224,7 @@ const Host = struct {
         }
     }
 
-    /// One request: its prompt rows, frames to the end of audio or the budget, then the whole audio into its buffer.
+    /// One request: its prompt rows, then frames to the end of audio or the budget, their audio into its buffer.
     fn serve(h: *Host, job: Job, samples: *usize) !api.Reason {
         const r = job.request;
         const gpa = h.gpa;
@@ -210,20 +244,11 @@ const Host = struct {
         }
         const sampling: z3.Sampling = .{ .temperature = r.temperature, .top_k = r.top_k, .top_p = r.top_p, .seed = r.seed };
         try h.e.reset();
-        const made = try z3.generation.generate(gpa, Guarded{ .h = h }, r.frames, @as([]const z3.Replace, replaced[0..n]), sampling, r.max_frames);
-        defer gpa.free(made.rows);
-        const frames = try z3.speech.frames(gpa, r.frames[r.frames.len - layout.prefill ..], made.rows, made.eos_frame);
-        defer gpa.free(frames);
         try h.codec.reset();
-        try h.codec.decode(frames, null);
-        const pcm = try h.codec.finish(gpa, null);
-        defer gpa.free(pcm);
-        if (pcm.len > r.pcm.len) return error.AudioOverflow;
-        for (pcm) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
-        z3.speech.output(pcm, h.rel.headroom_db);
-        @memcpy(r.pcm[0..pcm.len], pcm);
-        samples.* = pcm.len;
-        if (r.stream) job.sink.event(job.sink.ctx, job.id, &.{ .audio = pcm.len });
+        var audio: Audio = .{ .h = h, .job = job, .prefill = r.frames[r.frames.len - layout.prefill ..] };
+        const made = try z3.generation.generateWatched(gpa, Guarded{ .h = h }, r.frames, @as([]const z3.Replace, replaced[0..n]), sampling, r.max_frames, &audio);
+        defer gpa.free(made.rows);
+        samples.* = audio.samples;
         return if (made.eos_frame != null) .stop else .length;
     }
 
@@ -299,6 +324,15 @@ test "budget: the release's frame budget where the context holds it, the rest fo
     try t.expectError(error.BadZonosContext, budget(32769, null));
     try t.expectError(error.BadZonosFrames, budget(4096, 4096));
     try t.expectError(error.BadZonosFrames, budget(4096, 5));
+}
+
+test "chunkFrames: a streamed reply's chunks double to a second" {
+    const t = std.testing;
+    var spoken: usize = 0;
+    for ([_]usize{ 1, 2, 4, 8, 15, 15 }) |want| {
+        try t.expectEqual(want, chunkFrames(spoken));
+        spoken += want;
+    }
 }
 
 test "Layout: the condition rows sit before the text and the silence rows after it" {
