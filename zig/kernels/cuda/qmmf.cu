@@ -65,7 +65,10 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
         const __nv_bfloat16* __restrict__ x, const unsigned char* __restrict__ w, const uint8_t* __restrict__ bs,
         float scale, void* __restrict__ out, float* __restrict__ part, int M, int N, int K, int SK, int npad, int ldx,
         int group) {
+    qmm_frag::grid_launch();  // a dependent launch: the body waits after its prologue's weight loads
+#define TF_QMMF_WFIRST
 #include "qmmf_body.cuh"
+#undef TF_QMMF_WFIRST
 }
 
 // The shared down has one K slice; only the output address changes from the existing BF16-weight product.
@@ -85,6 +88,8 @@ TF_SHARED_DOWN(tf_qmmf_shared64, 64, 64)
 template <bool F32>
 __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__ out, long long total, int SK,
                               float scale) {
+    qmm_frag::grid_launch();
+    qmm_frag::grid_wait();
     const long long i = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= total) return;
     float acc = part[i];

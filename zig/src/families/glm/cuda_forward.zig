@@ -65,6 +65,7 @@ pub const Modules = struct {
             n += 1;
         }
         m.lane = try cuda.qmmf.Lane.load(d, @intCast(try ctx.attribute(.compute_capability_major)));
+        m.lane.pdl = @import("cuda_pdl.zig").on();
         errdefer m.lane.unload();
         m.prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer m.prompt.unload();
