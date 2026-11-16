@@ -122,22 +122,23 @@ test "CED: the encoder pass + the decoder pass are the whole segment's calls, la
             try testing.expectEqual(n, x.arg.t.shape[0]);
             try testing.expectEqual(n, y.arg.t.shape[0]);
         }
-        // no comp_wkv in the decoder (the encoder stored layer 20's rows); every boundary in place
-        var in_place: usize = 0;
+        // No repeated compressor: short CUDA boundaries use a spare; the wide site owns all four streams.
+        var boundaries: usize = 0;
         for (dec) |c| {
             for (c.args) |x| if (x.arg == .t and x.arg.t.role == .weight) try testing.expect(std.mem.indexOf(u8, x.arg.t.role.weight, "comp_wkv") == null);
             if (std.mem.eql(u8, c.name, "_site") and named(c, "POST_ON").?.b) {
                 try testing.expectEqualStrings(roleOf(named(c, "X").?), roleOf(named(c, "XOUT").?));
                 try testing.expect(!named(c, "SPLIT").?.b);
-                in_place += 1;
+                boundaries += 1;
             }
             if (std.mem.eql(u8, c.name, "tf_dsv41_mhc_cuda_v1.run") and c.args[2].arg.t.role != .empty) {
-                try testing.expectEqualStrings(roleOf(c.args[0].arg), roleOf(c.args[1].arg));
-                in_place += 1;
+                const same_streams = std.mem.eql(u8, roleOf(c.args[0].arg), roleOf(c.args[1].arg));
+                try testing.expectEqual(c.args[19].arg.i != 0, same_streams);
+                boundaries += 1;
             }
             if (std.mem.eql(u8, c.name, "_fused")) try testing.expectEqualStrings("w.lo", roleOf(named(c, "LO").?));
         }
-        try testing.expect(in_place >= 2 * dec_layers.len - 1);
+        try testing.expect(boundaries >= 2 * dec_layers.len - 1);
     };
 }
 
@@ -223,4 +224,37 @@ test "CED: the decoder pass writes the tail's DSpark taps (layers 37-39, rows 0 
         };
         try testing.expect(reads >= 1);
     }
+}
+
+test "CED: short decoder boundaries keep every reader on the old streams and hand off the new buffer" {
+    for ([_]?block.Pool{ null, poolOf(false), poolOf(true) }) |pool| for ([_]i64{ 1, 9, 16 }) |n| for ([_]i64{ 0, 1000 }) |start| for ([_]bool{ false, true }) |r1| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const cfg: Config = .{};
+        var w = try widths(a);
+        var layers: [25]u32 = undefined;
+        for (&layers, 0..) |*l, i| l.* = @intCast(i);
+        const dec_layers = layers[try ced.decoderStart(&cfg)..];
+        const o: block.Options = .{ .limit = limit, .rope_rows = limit + 2048, .pool = pool, .r1 = r1 };
+        const dec = try bp.emitReplay(a, &cfg, &w, o, dec_layers, n, start, .decoder);
+        var current: u1 = 0;
+        var boundaries: usize = 0;
+        for (dec) |c| {
+            if (!std.mem.eql(u8, c.name, "tf_dsv41_mhc_cuda_v1.run") or c.args[19].arg.i != 0) continue;
+            const input = roleOf(c.args[0].arg);
+            const output = roleOf(c.args[1].arg);
+            try testing.expectEqualStrings(if (current == 0) "w.x0" else "w.x1", input);
+            if (std.mem.eql(u8, input, output)) {
+                std.debug.print("boundary {d} writes its input {s} at {d} rows\n", .{ boundaries, input, n });
+                return error.TestUnexpectedResult;
+            }
+            try testing.expectEqualStrings(if (current == 0) "w.x1" else "w.x0", output);
+            try testing.expectEqual(n, c.args[0].arg.t.shape[0]);
+            try testing.expectEqualDeep(c.args[0].arg.t.shape, c.args[1].arg.t.shape);
+            current = 1 - current;
+            boundaries += 1;
+        }
+        try testing.expectEqual(2 * dec_layers.len - 1, boundaries);
+    };
 }
