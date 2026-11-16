@@ -29,7 +29,8 @@ pub const Import = struct {
     layout: metal.Layout,
     opts: Options,
     known: std.AutoHashMapUnmanaged(Key, bool) = .empty,
-    remaining: usize = 0,
+    /// parts not yet landed; shards' parts may land from several threads (`put` of different shards never overlap)
+    remaining: std.atomic.Value(usize) = .init(0),
     ds_landed: bool = false,
 
     /// `shape.shard` is ignored (a decoder pulls every shard); `shape.shards` / `split` / `ds_rows` say what will come.
@@ -47,7 +48,7 @@ pub const Import = struct {
             defer gpa.free(list);
             for (list) |spec| try im.known.put(gpa, .{ .shard = s, .layer = spec.layer, .kind = spec.kind, .first_page = spec.first_page }, false);
         }
-        im.remaining = im.known.count();
+        im.remaining.store(im.known.count(), .monotonic);
         return im;
     }
 
@@ -67,7 +68,7 @@ pub const Import = struct {
         if (slot.*) return error.Duplicate;
         try im.apply(sh, spec, bytes);
         slot.* = true;
-        im.remaining -= 1;
+        _ = im.remaining.fetchSub(1, .acq_rel);
     }
 
     fn apply(im: *Import, sh: plan.Shape, spec: plan.Spec, bytes: []const u8) Error!void {
@@ -114,7 +115,7 @@ pub const Import = struct {
     }
 
     pub fn complete(im: *const Import) Error!Result {
-        if (im.remaining != 0) return error.Incomplete;
+        if (im.remaining.load(.acquire) != 0) return error.Incomplete;
         const upto = im.shape.upto;
         const landed = im.ds_landed;
         return .{ .upto = upto, .ds_first = if (landed) upto - im.shape.ds_rows else upto, .ds_end = upto, .drafter_dropped = im.shape.ds_rows > 0 and !landed };

@@ -41,7 +41,9 @@ pub const Pull = struct {
     remote: ps.Remote,
     /// the connect daemon's mailbox and its client, mapped again when the daemon restarts (`remote.client` is its own)
     link: *fabric.relink.Relink,
-    http: *trigger.Http, // the trigger's, for what the producer's reply said it had cached
+    /// a KV_SPLIT pair's other producers' links, mapped again the same way (`remote.peers` are their clients)
+    more: []fabric.relink.Relink = &.{},
+    http: *trigger.Http,
     route: Route = .{},
     pulls: u64 = 0,
     ns: u64 = 0,
@@ -51,6 +53,8 @@ pub const Pull = struct {
     linked: bool = true,
     /// the gate wait of the pull under way, for its phases
     waited_ns: u64 = 0,
+    /// the links' generations when the pull began, to tell whether one re-linked while the producer prefilled
+    gens: u64 = 0,
 
     pub fn source(p: *Pull) api.LaneHost.Remote.Source {
         return .{ .ptr = p, .wants = wants, .fill = fill, .drop = drop, .running = &p.running, .measured = measured };
@@ -75,12 +79,13 @@ pub const Pull = struct {
 
     /// The pull, the gate held: the link (mapped again if the daemon restarted), the trigger, the stream, the landing.
     pub fn run(p: *Pull, prompt: []const u32, cached: u64, upto: u64, gone: *const std.atomic.Value(bool), outcome: *Outcome) !?Filled {
-        const event = p.link.renew(fabric.words.nowNs()) catch |err| {
+        const event = p.renewLinks() catch |err| {
             if (p.linked) std.log.warn("remote prefill: the link is not usable ({s}); prompts are prefilled here", .{@errorName(err)});
             p.linked = false;
             outcome.* = .down;
             return null;
         };
+        p.gens = p.generations();
         if (event == .reopened) std.log.info("remote prefill: the connect daemon's mailbox was replaced; the link was re-opened", .{});
         if (!p.linked) std.log.info("remote prefill: the link is back", .{});
         p.linked = true;
@@ -92,7 +97,7 @@ pub const Pull = struct {
         const snap = try p.model.snapshotBlank();
         errdefer p.model.snapshotDrop(snap);
         var landing: ho.landing.Landing = undefined;
-        try landing.init(p.gpa, at, .{ .@"packed" = packedOf(p.model, snap) });
+        try landing.initShards(p.gpa, at, @intCast(1 + p.remote.peers.len), .{ .@"packed" = packedOf(p.model, snap) });
         defer landing.deinit();
         p.http.limit_s = p.route.deadlineS(upto);
         p.http.gone = gone;
@@ -104,6 +109,7 @@ pub const Pull = struct {
             p.settle(err);
             return err;
         };
+        const pulled_ns = fabric.words.nowNs() - t0;
         _ = landing.complete() catch return error.PartialState;
         try p.model.snapshotSeal(snap, prompt, at);
         const took = fabric.words.nowNs() - t0;
@@ -111,7 +117,33 @@ pub const Pull = struct {
         p.ns += took;
         p.route.observePull(at, p.http.cached, took);
         outcome.* = .ok;
+        if (p.remote.peers.len > 0) std.log.info("remote prefill: {d} tokens pulled over {d} links in {d:.0} ms", .{ at, 1 + p.remote.peers.len, @as(f64, @floatFromInt(pulled_ns)) / 1e6 });
         return .{ .saved = snap, .at = at, .phases = .{ .queue_ns = p.waited_ns, .trigger_ns = p.remote.trigger_ns, .pull_ns = took -| p.remote.trigger_ns, .land_ns = landing.land_ns, .bytes = p.remote.bytes } };
+    }
+
+    /// Every link of the pull usable again: a restarted daemon's mailbox mapped, a producer's new generation made.
+    fn renewLinks(p: *Pull) !fabric.relink.Event {
+        const now = fabric.words.nowNs();
+        var event = try p.link.renew(now);
+        for (p.more) |*r| if ((try r.renew(now)) == .reopened) {
+            event = .reopened;
+        };
+        return event;
+    }
+
+    /// The links' generations summed: a link made afresh raises it (a mapping a new daemon replaced is its own event).
+    fn generations(p: *const Pull) u64 {
+        var sum: u64 = p.remote.client.generation;
+        for (p.remote.peers) |c| sum +%= c.generation;
+        return sum;
+    }
+
+    /// `Remote.renew`: a link may have re-linked during the producer's prefill (minutes at long prompts).
+    fn renewAfterTrigger(ptr: *anyopaque) anyerror!void {
+        const p: *Pull = @ptrCast(@alignCast(ptr));
+        const event = try p.renewLinks();
+        if (event == .reopened or p.generations() != p.gens) std.log.info("remote prefill: a link was re-made while the GB10 prefilled; the pull uses the new one", .{});
+        p.gens = p.generations();
     }
 
     /// A mismatch no retry mends (the checkpoint, the prompt's tokens, the protocol) turns remote prefill off for good.
@@ -245,6 +277,9 @@ pub fn refusal(f: Flags, drafter: bool) ?[]const u8 {
 /// A served link: the connect daemon's mailbox, its client, the HTTP trigger and the pull, as long as the server runs.
 pub const Link = struct {
     relink: fabric.relink.Relink,
+    /// a KV_SPLIT pair's other producers' links (`--mcdma-link a,b`): shard k is `more[k - 1]`, client `peers[k - 1]`
+    more: []fabric.relink.Relink = &.{},
+    peers: []*fabric.mailbox.Client = &.{},
     http: trigger.Http,
     pull: Pull,
 
@@ -254,13 +289,31 @@ pub const Link = struct {
         errdefer gpa.destroy(l);
         const rules = try policy();
         const gate = try Route.fromEnv();
-        try l.relink.open(f.link.?, fabric.words.native, 30 * std.time.ns_per_s);
+        var names = std.mem.splitScalar(u8, f.link.?, ',');
+        try l.relink.open(names.first(), fabric.words.native, 30 * std.time.ns_per_s);
         errdefer l.relink.close();
+        l.more = &.{};
+        l.peers = &.{};
+        var opened: usize = 0;
+        errdefer {
+            for (l.more[0..opened]) |*x| x.close();
+            gpa.free(l.more);
+            gpa.free(l.peers);
+        }
+        const extra = std.mem.count(u8, f.link.?, ",");
+        if (extra > 0) {
+            l.more = try gpa.alloc(fabric.relink.Relink, extra);
+            l.peers = try gpa.alloc(*fabric.mailbox.Client, extra);
+            while (names.next()) |name| : (opened += 1) {
+                try l.more[opened].open(name, fabric.words.native, 30 * std.time.ns_per_s);
+                l.peers[opened] = &l.more[opened].client;
+            }
+        }
         const base = std.mem.trimEnd(u8, f.url.?, "/");
         const key = try q27.apiKey(gpa, io);
         errdefer if (key) |k| gpa.free(k);
         l.http = .{ .gpa = gpa, .io = io, .url = try std.fmt.allocPrint(gpa, "{s}/v1/completions", .{base}), .model = "", .closing = &l.pull.closing, .key = key };
-        l.pull = .{ .gpa = gpa, .io = io, .model = m, .route = gate, .link = &l.relink, .http = &l.http, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.relink.client, .trigger = l.http.trigger(), .model = id, .protocol = fabric.wire.recurrent_version } };
+        l.pull = .{ .gpa = gpa, .io = io, .model = m, .route = gate, .link = &l.relink, .more = l.more, .http = &l.http, .remote = .{ .gpa = gpa, .policy = rules, .client = &l.relink.client, .peers = l.peers, .trigger = l.http.trigger(), .renew = .{ .ptr = &l.pull, .renew_fn = Pull.renewAfterTrigger }, .model = id, .protocol = fabric.wire.recurrent_version } };
         return l;
     }
 
@@ -275,6 +328,9 @@ pub const Link = struct {
             gpa.free(k);
         }
         l.relink.close();
+        for (l.more) |*x| x.close();
+        gpa.free(l.more);
+        gpa.free(l.peers);
         gpa.destroy(l);
     }
 };

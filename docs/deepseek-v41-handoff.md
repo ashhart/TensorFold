@@ -45,14 +45,15 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
 
 ## Shards
 
-* **Replicated KV**: one producer, `tp_size 1`, the rank-0 view.
+* **Replicated KV (default)**: one producer, `tp_size 1`, the rank-0 view. Works with `prefill_source.Remote` as is.
 * **KV_SPLIT**: logical page `pg` lives on rank `pg % world`. Each rank exports a shard (`tp_rank`, `tp_size = world`):
   shard 0 carries `swa`, `carry`, `ring` and its pages, others only their `comp`/`ixk` pages. The decoder pulls every
   shard into one import. Rank 0's `--mcdma-produce LINK` exports shard 0; rank 0 sends each follower an `op_export` at
   the cut and a follower started with `TF_DSV41_PRODUCE_LINK=NAME` (an `mcdma-rpcd` listen link of its own host) reads
-  its pages and exports them under the same hand-off id, so a pair with a cable per host exports one shard a link.
-  A pool that is not split exports whole from rank 0; `--mcdma-produce http` exports a replicated pool only.
-  The Mac pulls one link (shard 0 over `--mcdma-link NAME`), so it takes the hand-off of a pool that is not split.
+  its pages and exports them under the same hand-off id. The Mac names every link, shard 0 first:
+  `--mcdma-link A,B`. It opens the links, triggers the producer once and pulls the shards in parallel, one thread and one
+  link each, into one landing, so a pair with a cable per producer pulls at the sum of the links.
+  A pool that is not split exports whole from rank 0 as before; `--mcdma-produce http` exports a replicated pool only.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
   Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
   decoder layers' rings (the last 127 positions the replay wrote). The window's oldest position of those layers was never

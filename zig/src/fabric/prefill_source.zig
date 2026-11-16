@@ -43,6 +43,8 @@ pub const StateSink = struct {
     put_fn: *const fn (ptr: *anyopaque, layer: *const manifest.Layer, row_start: u64, rows: u64, bytes: []const u8) anyerror!void,
     commit_fn: *const fn (ptr: *anyopaque, upto: u64, provenance: Provenance) void,
     abort_fn: *const fn (ptr: *anyopaque) void,
+    /// Shard `k`'s sink when several producers fill the state at once; null: one producer's export only.
+    shard_fn: ?*const fn (ptr: *anyopaque, shard: u32) decoder.Sink = null,
 };
 
 /// A provider the lane engine asks before Backend.prefill; the engine owns the stream and the caches throughout.
@@ -75,11 +77,24 @@ pub const Trigger = struct {
     start_fn: *const fn (ptr: *anyopaque, handoff: [16]u8, tokens: []const u32) anyerror!void,
 };
 
+/// Makes every link usable again once the producer's prefill is over: a daemon may have re-linked while it ran.
+pub const Renew = struct {
+    ptr: *anyopaque,
+    /// error.LinkDown: a link is not up yet (the pull waits for it); any other error ends the fill
+    renew_fn: *const fn (ptr: *anyopaque) anyerror!void,
+};
+
+/// How long a pull waits for a link that dropped during the producer's prefill to come back (a re-link takes seconds).
+pub const link_wait_ns = 30 * std.time.ns_per_s;
+const link_poll_ns = 100 * std.time.ns_per_ms;
+
 /// The fabric's source: one handoff at a time per link, pulled with the decoder into the stream's caches.
 pub const Remote = struct {
     gpa: std.mem.Allocator,
     policy: Policy,
     client: *mailbox.Client,
+    /// The other producers of a KV_SPLIT export: `client` is shard 0's link, `peers[k - 1]` shard k's.
+    peers: []const *mailbox.Client = &.{},
     trigger: Trigger,
     model: []const u8,
     protocol: u16 = 1, // 2 to take a producer's recurrent state (MKVH protocol 2); 1 refuses such an export
@@ -91,14 +106,34 @@ pub const Remote = struct {
     /// the last fill's trigger exchange (the producer's prefill) in ns, and the payload bytes it pulled
     trigger_ns: u64 = 0,
     bytes: u64 = 0,
+    /// called between the trigger and the pull, when set
+    renew: ?Renew = null,
+    /// the longest wait for a link to come back after the trigger
+    link_wait_ns: u64 = link_wait_ns,
 
     pub fn source(r: *Remote) PrefillSource {
         return .{ .ptr = r, .vtable = &.{ .offer = offerFn, .fill = fillFn } };
     }
 
+    /// `renew` until every link answers; only a link that is not up yet is waited for, for `link_wait_ns`.
+    fn renewLinks(r: *Remote) !void {
+        const rn = r.renew orelse return;
+        const deadline = words.nowNs() +| r.link_wait_ns;
+        while (true) {
+            rn.renew_fn(rn.ptr) catch |err| {
+                if (err != error.LinkDown or words.nowNs() >= deadline) return err;
+                if (r.abort) |gone| if (gone.load(.acquire)) return err;
+                words.pause(link_poll_ns);
+                continue;
+            };
+            return;
+        }
+    }
+
     fn offerFn(ptr: *anyopaque, prompt: []const u32, cached: u64) ?Offer {
         const r: *Remote = @ptrCast(@alignCast(ptr));
         if (r.busy or r.client.poisoned) return null;
+        for (r.peers) |c| if (c.poisoned) return null;
         const n = r.policy.upto(prompt.len, cached) orelse return null;
         return .{ .upto = n, .provenance = .remote };
     }
@@ -116,13 +151,63 @@ pub const Remote = struct {
         const began = words.nowNs();
         try r.trigger.start_fn(r.trigger.ptr, id, prompt[0..@intCast(o.upto + 1)]);
         r.trigger_ns = words.nowNs() - began;
-        var arena: std.heap.ArenaAllocator = .init(r.gpa);
-        defer arena.deinit();
-        const pass: decoder.Sink = .{ .ptr = sink.ptr, .put_fn = sink.put_fn };
-        const got = try decoder.pull(arena.allocator(), r.client, id, .{ .model = r.model, .tokens = tokens, .protocol = r.protocol, .abort = r.abort }, pass, &r.reason);
-        if (got.manifest.first_token != 0) return error.PartialPrefix;
-        r.bytes = got.bytes;
+        try r.renewLinks();
+        if (r.peers.len > 0) {
+            try r.pullShards(id, tokens, sink);
+        } else {
+            var arena: std.heap.ArenaAllocator = .init(r.gpa);
+            defer arena.deinit();
+            const pass: decoder.Sink = .{ .ptr = sink.ptr, .put_fn = sink.put_fn };
+            const got = try decoder.pull(arena.allocator(), r.client, id, .{ .model = r.model, .tokens = tokens, .protocol = r.protocol, .abort = r.abort }, pass, &r.reason);
+            if (got.manifest.first_token != 0) return error.PartialPrefix;
+            r.bytes = got.bytes;
+        }
         sink.commit_fn(sink.ptr, o.upto, .remote);
+    }
+
+    /// One shard's pull on its own link; the thread's result and the producer's reason stay in the job.
+    const Job = struct {
+        client: *mailbox.Client,
+        id: [16]u8,
+        expect: decoder.Expect,
+        sink: decoder.Sink,
+        arena: std.heap.ArenaAllocator,
+        reason: decoder.Reason = .{},
+        result: anyerror!decoder.Pulled = error.NotRun,
+
+        fn run(j: *Job) void {
+            j.result = decoder.pull(j.arena.allocator(), j.client, j.id, j.expect, j.sink, &j.reason);
+        }
+    };
+
+    /// Every shard's export pulled at once, each over its own link into its own sink; the first failure is returned.
+    fn pullShards(r: *Remote, id: [16]u8, tokens: []const u32, sink: StateSink) !void {
+        const shard_fn = sink.shard_fn orelse return error.SinkNotSharded;
+        const n: u32 = @intCast(1 + r.peers.len);
+        const jobs = try r.gpa.alloc(Job, n);
+        defer r.gpa.free(jobs);
+        var made: usize = 0;
+        defer for (jobs[0..made]) |*j| j.arena.deinit();
+        for (jobs, 0..) |*j, k| {
+            const expect: decoder.Expect = .{ .model = r.model, .tokens = tokens, .protocol = r.protocol, .tp_rank = k, .tp_size = n, .abort = r.abort };
+            j.* = .{ .client = if (k == 0) r.client else r.peers[k - 1], .id = id, .expect = expect, .sink = shard_fn(sink.ptr, @intCast(k)), .arena = .init(r.gpa) };
+            made += 1;
+        }
+        const threads = try r.gpa.alloc(?std.Thread, n);
+        defer r.gpa.free(threads);
+        @memset(threads, null);
+        for (jobs[1..], threads[1..]) |*j, *t| t.* = std.Thread.spawn(.{}, Job.run, .{j}) catch null;
+        jobs[0].run();
+        for (jobs[1..], threads[1..]) |*j, t| if (t) |th| th.join() else j.run();
+        r.bytes = 0;
+        for (jobs) |*j| {
+            const got = j.result catch |err| {
+                r.reason = j.reason;
+                return err;
+            };
+            if (got.manifest.first_token != 0) return error.PartialPrefix;
+            r.bytes += got.bytes;
+        }
     }
 };
 
