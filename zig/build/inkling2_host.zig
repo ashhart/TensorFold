@@ -7,6 +7,6 @@ fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
 
 pub fn tests(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, target, .Debug, "zig/src/families/inkling2/host_test.zig") }));
-    b.step("test-inkling2-host", "Inkling 2 family package: config parsing and its refusals, safetensors headers, weight map and layer plan").dependOn(&run.step);
+    b.step("test-inkling2-host", "Inkling 2 family package: config, weight map, layer plan and refusals").dependOn(&run.step);
     test_step.dependOn(&run.step);
 }
