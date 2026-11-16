@@ -191,7 +191,6 @@ pub const Embed = struct {
         @memset(mag, 0);
     }
 
-    /// Every output bit-equal to float64's value at the rounding points (a dropped or moved point leaves it).
     /// The replaced kernel's bytes: tf_embed_rows_affine on the stored table, first held to float64 by `verify`.
     pub fn replaced(self: *Embed) ![]const u8 {
         const k = self.k;
@@ -207,6 +206,7 @@ pub const Embed = struct {
         return std.mem.sliceAsBytes(want);
     }
 
+    /// Every output bit-equal to float64's value at the rounding points (a dropped or moved point leaves it).
     pub fn check(self: *Embed, _: g.Gate) !?[]const u8 {
         const n = self.count();
         const out = try self.arena.?.allocator().alloc(u16, n);
