@@ -121,6 +121,8 @@ pub const Weights = struct {
     embed_b: Ref,
     final_norm: Ref,
     owned: std.ArrayList(mtl.Buffer) = .empty,
+    /// Bytes the row path's aliases save: the per-member copies (`mlxCopy`) main also made without tensor units.
+    aliased: u64 = 0,
 
     pub fn deinit(w: *Weights, gpa: std.mem.Allocator) void {
         for (w.owned.items) |b| b.deinit();
@@ -178,6 +180,14 @@ fn mlxCopy(gpa: std.mem.Allocator, device: mtl.Device, r: Src, owned: *std.Array
     @memcpy(dst[bb_at..][0..b.bytes], b.host(u8)[0..b.bytes]);
     try owned.append(gpa, out);
     return .{ .w = .{ .buf = out }, .s = .{ .buf = out, .off = sb_at }, .b = .{ .buf = out, .off = bb_at }, .n = @intCast(w.shape[0]), .k = @intCast(k), .bits = width.bits };
+}
+
+/// The bytes `mlxCopy` allocates for a member: its three tensors at 256-byte offsets in one buffer.
+fn copyBytes(r: Src, prefix: []const u8, member: []const u8) !u64 {
+    var buf: [3][160]u8 = undefined;
+    const ns = try names3(&buf, prefix, member);
+    const sb_at = std.mem.alignForward(usize, (try r.meta(ns[0])).bytes, 256);
+    return sb_at + std.mem.alignForward(usize, (try r.meta(ns[1])).bytes, 256) + (try r.meta(ns[2])).bytes;
 }
 
 /// A member's rows of a row-path pack as core/affine_mm reads it: the same bytes, no copy (no tensor units).
@@ -339,6 +349,7 @@ pub fn packRows(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayLis
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, geo: cfg.Geometry, ws: *const cfg.widths.Widths) !Weights {
     var w: Weights = undefined;
     w.owned = .empty;
+    w.aliased = 0;
     errdefer w.deinit(gpa);
     var stage = ckpt.Stage{ .device = device };
     defer stage.deinit();
@@ -361,6 +372,9 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
             try mlxStack(r, &l.gate_up, pre, &glu, lw[4..6], l.mlx[4..6]);
             l.mlx[6] = mlxAlias(l.down, 0, l.down.n);
             if (cfg.global(i)) l.mlx[2] = l.mlx[1]; // global layers have no v_proj: k stands in, never read
+            for (cfg.widths.module_names) |member| if (!(cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj"))) {
+                w.aliased += try copyBytes(r, pre, member);
+            };
         } else for (&l.mlx, cfg.widths.module_names, lw) |*x, member, width| {
             // global layers have no v_proj: k stands in, never read
             x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, r, &w.owned, pre, member, width);
@@ -510,6 +524,7 @@ test "load: linears staged once, row-path prompt views alias the pack's bytes, a
         for (members, views) |m, v| {
             const copy = try mlxCopy(gpa, device, r, &owned, pre, m, cfg.widths.fast);
             try std.testing.expectEqual(copy.n, v.n);
+            try std.testing.expectEqual(@as(u64, copy.w.buf.length()), try copyBytes(r, pre, m)); // what `aliased` counts
             for ([_][2]Ref{ .{ v.w, copy.w }, .{ v.s, copy.s }, .{ v.b, copy.b } }, [_]usize{ 512, 32, 32 }) |pair, n|
                 try std.testing.expectEqualSlices(u8, (pair[1].buf.contents() + pair[1].off)[0..n], (pair[0].buf.contents() + pair[0].off)[0..n]);
         }
