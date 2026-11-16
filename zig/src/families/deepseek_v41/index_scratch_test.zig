@@ -137,3 +137,29 @@ test "index scratch: TBO-B materialisation missing from full-row endpoints is pl
     try t.expect(!short.sizes.contains("L.k4~b~ix.stream"));
     try t.expectEqual(ws.planBytes(&short), try fp.workspaceBytes(&f, 2048));
 }
+
+test "prefill plan: segments of 18..32 rows write the spare streams within the planned roles" {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg: Config = .{};
+    var w: block.Widths = .{};
+    try check.parseDense(a, &w, @embedFile("fixtures/dense-k2.txt"));
+    try check.parseExperts(a, &w, @embedFile("fixtures/expert-k2.txt"));
+    var layers: [25]u32 = undefined;
+    for (&layers, 0..) |*l, i| l.* = @intCast(i);
+    const o: block.Options = .{ .gm_v2 = .one, .limit = 299008, .rope_rows = 301056, .index_budget = 64 << 20, .taps = true };
+    var f = @import("forward.zig").Forward.init(a, &cfg, &w, o, undefined, undefined);
+    f.layers = &layers;
+    var state: fp.State = .{ .mode = .full };
+    f.prefill_state = &state;
+    var p: buffers.Plan = .{ .a = a };
+    try fp.planPrograms(&f, &p, 2048, &layers);
+    // an out-of-place boundary (rows <= split_rows) writes "w.x<1 - cur>": the plan must size it for those rows
+    var n: i64 = 18;
+    while (n <= bp.split_rows) : (n += 1) for ([_]i64{ 0, 4096 }) |start| {
+        var tmp = std.heap.ArenaAllocator.init(t.allocator);
+        defer tmp.deinit();
+        try covered(tmp.allocator(), try bp.emitPrefill(tmp.allocator(), &cfg, &w, o, &layers, n, start, true), &p, &p);
+    };
+}

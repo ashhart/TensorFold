@@ -150,8 +150,11 @@ pub fn plan(f: *Forward, p: *buffers.Plan, rows: u32) !void {
 
 /// The forward's prefill programs at `rows` (`plan` without the workspace).
 pub fn planPrograms(f: *Forward, p: *buffers.Plan, rows: u32, layers: []const u32) !void {
-    const sizes = [_]u32{ rows, 17, 16 };
-    for (sizes[if (rows > 17) 0 else 1..]) |n| {
+    // the largest segment, the largest whose boundaries write the spare streams (sizes "w.x<1 - cur>"), the short ones
+    const split: u32 = @intCast(block_prefill.split_rows);
+    const sizes = [_]u32{ rows, split, 17, 16 };
+    for (sizes, 0..) |n, i| {
+        if (n > rows or (i > 0 and n == rows) or (i == 1 and split <= 17)) continue;
         const top = try lastStart(f, layers, n, .whole);
         for ([_]i64{ 0, top }) |start| {
             var ea = std.heap.ArenaAllocator.init(f.gpa);
