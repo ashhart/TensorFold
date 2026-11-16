@@ -546,6 +546,7 @@ pub fn main() !void {
     all.pairs += try @import("glm_rows_kda.zig").fusedCheck(&g.p, device, queue);
     all.pairs += try batch.sharedGluCheck(&g);
     all.pairs += try @import("glm_rows_moe.zig").check(&g);
+    all.pairs += try @import("glm_rows_moe.zig").checkUnique(&g);
     all.values += try @import("glm_rows_kda.zig").bf16Check(&g.p, device, queue, &all.worst);
     all.values += try @import("glm_rows_kda.zig").embedCheck(&g.p, device, queue, &all.worst);
     const cl = try @import("glm_rows_classes.zig").check(&g.p, device, queue);

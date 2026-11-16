@@ -170,6 +170,75 @@ template <int BITS, int SBITS, bool GLU, int RPS = 4, int KC = 0> // RPS columns
   }
 }
 
+// glm_moe_rows by unique expert, for windows of 2+ rows: z below ucount[0] is the route's z-th picked expert (uids), and
+// simdgroup m its m-th pick (umem, GLM_MAXR a list; -1 past them); z = slots is the shared expert, simdgroup m row m.
+// One threadgroup's simdgroups read the same expert's RPS columns together, so an expert's weights come from memory
+// once for every row that picked it instead of once a pick. Each pick's sums are glm_moe_rows's (the same call), so
+// its bits are too. Grid ((n + RPS - 1) / RPS, slots + 1), threadgroup 32 x rows.
+#define GLM_MAXR 16
+template <int BITS, int SBITS, bool GLU, int RPS = 4>
+[[max_total_threads_per_threadgroup(32 * GLM_MAXR)]]
+[[kernel]] void glm_moe_rows_u(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+                               const device bfloat* S [[buffer(2)]], const device bfloat* B [[buffer(3)]],
+                               constant GlmPickDims& d [[buffer(4)]], device bfloat* OUT [[buffer(5)]],
+                               const device int* uids [[buffer(6)]], const device uint32_t* W2 [[buffer(7)]],
+                               const device bfloat* S2 [[buffer(8)]], const device bfloat* B2 [[buffer(9)]],
+                               const device bfloat* X2 [[buffer(10)]], const device uint32_t* SW [[buffer(11)]],
+                               const device bfloat* SS [[buffer(12)]], const device bfloat* SB [[buffer(13)]],
+                               device bfloat* OUT2 [[buffer(14)]], const device int* umem [[buffer(15)]],
+                               const device int* ucount [[buffer(16)]],
+                               uint sg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                               uint nsg [[simdgroups_per_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  const int row0 = int(tg.x) * RPS;
+  if (row0 >= d.n) return;
+  const int z = int(tg.y);
+  const int m = int(sg);
+  const int cols = metal::min(RPS, d.n - row0);
+  const int K = d.k;
+  const size_t kg = size_t(K / d.group);
+  if (z < d.slots) {
+    if (z >= ucount[0]) return;
+    const int pick = umem[z * GLM_MAXR + m];
+    if (pick < 0) return;
+    device bfloat* out = OUT + size_t(pick) * d.ldo + row0;
+    const size_t at = size_t(uids[z]) * d.n + row0;
+    const size_t kb = size_t(K) * BITS / 8;
+    const device bfloat* x = X + size_t(pick / d.repeat) * K;
+    float acc[1][RPS];
+    tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W + at * kb, S + at * kg, B + at * kg, x, K, d.group, lane,
+                                    acc);
+    if (GLU) {
+      float up[1][RPS];
+      tf_rp_rows<RPS, 1, BITS, false>((const device uint8_t*)W2 + at * kb, S2 + at * kg, B2 + at * kg, x, K, d.group,
+                                      lane, up);
+      if (lane == 0)
+        for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
+    } else if (lane == 0) {
+      for (int j = 0; j < cols; j++) out[j] = bfloat(acc[0][j]);
+    }
+    return;
+  }
+  const int r = m;
+  if (r >= int(nsg)) return;
+  const size_t skb = size_t(K) * SBITS / 8;
+  const device bfloat* x = X2 + size_t(r) * K;
+  device bfloat* out = OUT2 + size_t(r) * d.n + row0;
+  const device uint8_t* gw = (const device uint8_t*)SW + size_t(row0) * skb;
+  const device bfloat* gs = SS + size_t(row0) * kg;
+  const device bfloat* gb = SB + size_t(row0) * kg;
+  float acc[1][RPS];
+  tf_rp_rows<RPS, 1, SBITS, false>(gw, gs, gb, x, K, d.group, lane, acc);
+  if (GLU) {
+    const size_t up_at = size_t(d.n);
+    float up[1][RPS];
+    tf_rp_rows<RPS, 1, SBITS, false>(gw + up_at * skb, gs + up_at * kg, gb + up_at * kg, x, K, d.group, lane, up);
+    if (lane == 0)
+      for (int j = 0; j < cols; j++) out[j] = glm_rows_glu(acc[0][j], up[0][j], d.lim);
+  } else if (lane == 0) {
+    for (int j = 0; j < cols; j++) out[j] = bfloat(acc[0][j]);
+  }
+}
+
 // Expert e's sorted pairs: GLU x row order[i] / repeat to out row i, else x row i to row order[i]; grid (n / 8, e).
 template <int BITS, bool GLU>
 [[kernel]] void glm_rows_sorted(const device bfloat* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
@@ -326,7 +395,11 @@ GLM_ROWS_AT(8)
   template [[host_name("glm_moe_rows_q" #B "_s8")]] [[kernel]]                                                         \
       decltype(glm_moe_rows<B, 8, false>) glm_moe_rows<B, 8, false>;                                                   \
   template [[host_name("glm_moe_rows_glu_q" #B "_s8")]] [[kernel]]                                                     \
-      decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;
+      decltype(glm_moe_rows<B, 8, true>) glm_moe_rows<B, 8, true>;                                                     \
+  template [[host_name("glm_moe_rows_u_q" #B "_s8")]] [[kernel]]                                                       \
+      decltype(glm_moe_rows_u<B, 8, false>) glm_moe_rows_u<B, 8, false>;                                               \
+  template [[host_name("glm_moe_rows_glu_u_q" #B "_s8")]] [[kernel]]                                                   \
+      decltype(glm_moe_rows_u<B, 8, true>) glm_moe_rows_u<B, 8, true>;
 GLM_MOE_AT(2)
 GLM_MOE_AT(3)
 GLM_MOE_AT(4)
