@@ -191,6 +191,7 @@ pub const Prompt = struct {
         const x = p.px(env, slot, a, b);
         const bb = &p.b;
         try g.embed(&env.p.glue, ch.e, env.model.top.embed, bb.ids, bb.streams[0], bb.pres[0], rows, c.hidden, c.vocab);
+        ch.e.barrier();
         for (0..p.d) |i| {
             const w = &env.model.layers[i];
             if (w.layer != i) return error.LayerOrder;
@@ -215,6 +216,7 @@ pub const Prompt = struct {
         const H = c.hidden;
         g.scatter(&env.p.glue, e, x.at(bb.streams[at], b - m, 8 * H), whole(tail.x), dest, m, 8 * H, 1);
         g.scatter(&env.p.glue, e, x.at(bb.pres[at], b - m, 16), whole(tail.pre), dest, m, 16, 1);
+        e.barrier();
     }
 
     /// The decoder layers d.. over their cone (every row if `full`) from the tail; the last rows' head and taps.
@@ -257,7 +259,7 @@ pub const Prompt = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = env.queue.commandBuffer();
-        const e = cb.compute(.serial);
+        const e = cb.compute(.concurrent);
         const done = p.decoderPass(env, slot, tail, e, a, b);
         e.end();
         try done;
@@ -281,6 +283,7 @@ pub const Prompt = struct {
             g.scatter(&env.p.glue, e, plus(whole(tail.x), @as(usize, span[0]) * 8 * H), bb.streams[0], dest, span[2], 8 * H, 1);
             g.scatter(&env.p.glue, e, plus(whole(tail.pre), @as(usize, span[0]) * 16), bb.pres[0], dest, span[2], 16, 1);
         }
+        e.barrier();
         const T: u32 = @intCast(c.dspark_targets.len);
         var ran: u32 = p.d;
         for (p.d..c.layers) |li| {
@@ -310,8 +313,11 @@ pub const Prompt = struct {
                 const hn = plus(bb.hfn, @as(usize, h0 - (n - p.head)) * H * 2);
                 const lg = plus(bb.logits, @as(usize, h0 - (n - p.head)) * c.vocab * 4);
                 cl.hcpre(env.p, e, x.at(bb.streams[last], h0, 8 * H), x.at(bb.pres[last], h0, 16), hr, b - h0, H);
+                e.barrier();
                 g.rmsnorm(&env.p.glue, e, hr, env.model.top.norm, hn, b - h0, H, c.eps);
+                e.barrier();
                 try g.mv(&env.p.glue, e, hn, env.model.top.head, lg, b - h0, H, c.vocab, true);
+                e.barrier();
             }
         }
     }
@@ -392,10 +398,14 @@ pub const Prompt = struct {
         const call = forward.engramCall(x.c, rows);
         if (w.wkv.k != call.cols * eng.head or w.wkv.n != call.n) return error.BadEngramShape;
         try eng.encodeAq(ep, e, cv(eng.Ref, b.rows[li]), cv(eng.Ref, b.emb), call);
+        e.barrier();
         const mma = pipelines.fp8_mma;
         try mma.encode(&x.p.mma, e, cv(mma.Ref, b.emb), cv(mma.Ref, w.wkv.w), cv(mma.Ref, w.wkv.s), cv(mma.Ref, b.ekv), .{ .k = w.wkv.k, .n = w.wkv.n, .rows = rows, .out = .bf16 });
+        e.barrier();
         try eng.encodeGate(ep, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, w.q), cv(eng.Ref, w.k), cv(eng.Ref, b.mask), cv(eng.Ref, b.gate), call);
+        e.barrier();
         try eng.encodeAdd(ep, e, cv(eng.Ref, streams), cv(eng.Ref, b.ekv), cv(eng.Ref, b.gate), cv(eng.Ref, streams), call);
+        e.barrier();
     }
 };
 
@@ -411,7 +421,7 @@ const Chunk = struct {
 
     fn open(ch: *Chunk, q: mtl.Queue) void {
         ch.cbs[ch.n] = q.commandBuffer();
-        ch.e = ch.cbs[ch.n].compute(.serial);
+        ch.e = ch.cbs[ch.n].compute(.concurrent);
         ch.n += 1;
         ch.live = true;
     }
