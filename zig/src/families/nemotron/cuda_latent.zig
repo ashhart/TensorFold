@@ -87,12 +87,13 @@ pub fn partFloats(c: Config, rows: usize) usize {
 
 /// TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD into `c`: both or neither; a world must hold whole shares.
 pub fn place(c: *Config) !void {
-    const r = std.c.getenv("TF_NEMOTRON_RANK");
-    const w = std.c.getenv("TF_NEMOTRON_WORLD");
+    const env = @import("sys").environment;
+    const r = try env.read(?u64, "TF_NEMOTRON_RANK", null);
+    const w = try env.read(?u64, "TF_NEMOTRON_WORLD", null);
     if (r == null and w == null) return;
     if (r == null or w == null) return error.NoRank;
-    c.rank = std.fmt.parseInt(usize, std.mem.span(r.?), 10) catch return error.NoRank;
-    c.world = std.fmt.parseInt(usize, std.mem.span(w.?), 10) catch return error.NoRank;
+    c.rank = @intCast(r.?);
+    c.world = @intCast(w.?);
     if (c.world < 1 or c.rank >= c.world) return error.NoRank;
     if (c.world == 1) return;
     if (c.latent == 0) {
