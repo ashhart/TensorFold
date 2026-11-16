@@ -274,6 +274,31 @@ pub const Copy = struct {
         }
     }
 
+    /// `len` device bytes at `src` into image bytes from `off`, queued on `stream`: no host copy (a link's buffer).
+    pub fn fromDevice(c: Copy, off: u64, src: u64, len: u64, stream: cuda.abi.Stream) !void {
+        const arena = c.pool.arena orelse return error.NoSnapshotRoom;
+        const end = off + len;
+        for (c.segs) |s| {
+            const lo = @max(off, s.img);
+            const hi = @min(end, s.img + s.len);
+            if (lo >= hi) continue;
+            const at = switch (s.from) {
+                .words => return error.SnapshotShape, // the words go with the seal, from the host
+                .zeros => continue,
+                .lease => |x| x + (lo - s.img),
+            };
+            if (at + (hi - lo) > c.lease.ids.items.len * pages.page) return error.SnapshotSize;
+            var done: u64 = 0;
+            while (done < hi - lo) {
+                const x = at + done;
+                const n = @min(hi - lo - done, pages.page - x % pages.page);
+                const dev = arena.ptr() + @as(u64, c.lease.ids.items[@intCast(x / pages.page)]) * pages.page + x % pages.page;
+                try c.d.check(c.d.api.cuMemcpyDtoDAsync_v2(dev, src + (lo - off) + done, @intCast(n), stream), "cuMemcpyDtoDAsync");
+                done += n;
+            }
+        }
+    }
+
     /// Lease bytes from `at`, a page at a time (each page is a run of the snapshot arena).
     fn leased(c: Copy, at: u64, host: []u8, out: bool) !void {
         const arena = c.pool.arena orelse return error.NoSnapshotRoom;
