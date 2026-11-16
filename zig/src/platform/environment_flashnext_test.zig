@@ -33,13 +33,13 @@ fn check(name: []const u8, raw: []const u8, valid: bool) !void {
     try t.expect(std.mem.endsWith(u8, why.?, e.rule(name).forms));
 }
 
-test "Flash Next strict env: the table holds all 29 settings: 20 switches, 7 integers, 1 real, 1 structured" {
+test "Flash Next strict env: the table holds all 31 settings: 20 switches, 9 integers, 1 real, 1 structured" {
     var counts: [4]usize = @splat(0);
     for (e.rules) |r| if (r.scope == .flashnext) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_FLASHNEXT_"));
         counts[@backingInt(group(r))] += 1;
     };
-    try t.expectEqual([4]usize{ 20, 7, 1, 1 }, counts);
+    try t.expectEqual([4]usize{ 20, 9, 1, 1 }, counts);
 }
 
 test "Flash Next strict env: unset and blank settings both read as the caller's default" {
@@ -64,10 +64,20 @@ test "Flash Next strict env: every switch keeps exactly 0 and 1 and refuses the 
 
 test "Flash Next strict env: every count keeps its whole numbers and refuses junk, negatives, overflow" {
     for (e.rules) |r| if (r.scope == .flashnext and group(r) == .integers) {
-        for ([_][]const u8{ "0", "7", "007" }) |raw| try check(r.name, raw, true);
+        try check(r.name, "0", r.min == 0);
+        for ([_][]const u8{ "7", "007" }) |raw| try check(r.name, raw, true);
         try t.expectEqual(@as(u64, 7), try e.value(u64, r.name, "007", 0));
         for ([_][]const u8{ "-1", "1.5", "abc", "18446744073709551616" }) |raw| try check(r.name, raw, false);
     };
+}
+
+test "Flash Next strict env: chunk rows take 1 to 16384 and refuse the rest by name" {
+    const chunk = "TF_FLASHNEXT_CHUNK";
+    const solo = "TF_FLASHNEXT_CHUNK_SOLO";
+    for ([_][]const u8{ "1", "1536", "16384" }) |raw| try check(chunk, raw, true);
+    for ([_][]const u8{ "1", "8192", "16384" }) |raw| try check(solo, raw, true);
+    for ([_][]const u8{ "0", "16385", "4k", "-1" }) |raw| try check(chunk, raw, false);
+    for ([_][]const u8{ "16385", "4k", "-1" }) |raw| try check(solo, raw, false);
 }
 
 test "Flash Next strict env: the page test keeps 0 in the table while its reader refuses it, blank reads unset" {

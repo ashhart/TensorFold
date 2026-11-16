@@ -96,7 +96,7 @@ Direct family readers also refuse malformed values when called without the serve
 
 ## Flash Next
 
-Flash Next checks these 29 settings when its engine loads, before any device or checkpoint work: a malformed value
+Flash Next checks these 31 settings when its engine loads, before any device or checkpoint work: a malformed value
 stops the start with the variable, the supplied text and the accepted forms.
 
 | Variable | Accepted explicit value |
@@ -126,6 +126,8 @@ stops the start with the variable, the supplied text and the accepted forms.
 | `TF_FLASHNEXT_GREEDY_WIDE` | Whole round width; default 4 |
 | `TF_FLASHNEXT_WINDOW_ROWS` | Whole row count; default the shared round's rows, capped by them |
 | `TF_FLASHNEXT_READOUT_ROWS` | Whole row count; default 64; `0` never takes the tiles |
+| `TF_FLASHNEXT_CHUNK` | Whole prompt rows a pass, 1 through 16384; default 1536 |
+| `TF_FLASHNEXT_CHUNK_SOLO` | Whole prompt rows a pass with no stream decoding, from the chunk `TF_FLASHNEXT_CHUNK` resolves to through 16384; unset or blank is the larger of that chunk and 8192 on a server of one stream, and that chunk elsewhere |
 | `TF_FLASHNEXT_FACT_ROWS` | Whole row count; default 64; `0` never takes the tiles |
 | `TF_FLASHNEXT_KV_PAGE_TEST` | Whole page size the kernels take: whole blocks of the indexer's ratio up to the window; unset or blank leaves the plain caches |
 | `TF_FLASHNEXT_CONFIDENCE` | Finite number, negative values included; default -0.4, the chain's own stop |
@@ -133,6 +135,11 @@ stops the start with the variable, the supplied text and the accepted forms.
 
 An on-by-default switch keeps the same kernels and bits as off; only the launch count changes.
 The two row counts and the two draft counts keep their existing clamps after parsing.
+The two chunk settings keep their cross-setting rule in the family, which the table cannot state on its own: the family
+checks a solo chunk reaches at least the chunk `TF_FLASHNEXT_CHUNK` resolves to, and its refusal names that setting and
+the rows it must reach. An unset or blank solo chunk is the larger of that chunk and 8192 on a server of one stream
+(`--parallel 1` on one rank), and that chunk elsewhere, where solo passes are off. An empty or whitespace-only value of
+either setting takes the unset default above, like every other setting here.
 
 ## Existing lenient switches
 
