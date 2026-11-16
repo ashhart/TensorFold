@@ -220,11 +220,16 @@ fn promptCacheBytes(flag: ?f64, shared: bool, room: u64, streams: u64) u64 {
 
 test promptCacheBytes {
     const g: u64 = 1 << 30;
-    try std.testing.expectEqual(@as(u64, 16 * g), promptCacheBytes(null, false, 20 * g, 16 * g)); // a card: host RAM is apart
-    try std.testing.expectEqual(@as(u64, 4 * g), promptCacheBytes(null, true, 20 * g, 16 * g)); // shared: what the streams leave
-    try std.testing.expectEqual(@as(u64, 16 * g), promptCacheBytes(null, true, 40 * g, 8 * g)); // shared, roomy: the default
-    try std.testing.expectEqual(@as(u64, 0), promptCacheBytes(null, true, 16 * g, 16 * g)); // nothing left: no cache
-    try std.testing.expectEqual(@as(u64, 12 * g), promptCacheBytes(12.0, true, 16 * g, 16 * g)); // the flag wins
+    // a card: host RAM is apart
+    try std.testing.expectEqual(@as(u64, 16 * g), promptCacheBytes(null, false, 20 * g, 16 * g));
+    // shared: what the streams leave
+    try std.testing.expectEqual(@as(u64, 4 * g), promptCacheBytes(null, true, 20 * g, 16 * g));
+    // shared, roomy: the default
+    try std.testing.expectEqual(@as(u64, 16 * g), promptCacheBytes(null, true, 40 * g, 8 * g));
+    // nothing left: no cache
+    try std.testing.expectEqual(@as(u64, 0), promptCacheBytes(null, true, 16 * g, 16 * g));
+    // the flag wins
+    try std.testing.expectEqual(@as(u64, 12 * g), promptCacheBytes(12.0, true, 16 * g, 16 * g));
 }
 
 /// Rank 0's lanes over `p.e` for `streams` streams, with the server's startup line.
