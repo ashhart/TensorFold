@@ -48,7 +48,7 @@ zig/kernels/cuda/nvfp4_experts.cu	cb54357e2c06252cc594cd1223401170dadefd995b0c67
 zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a2c328303d111	raw
 zig/kernels/cuda/prefill_attention.cu	905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged)
 zig/kernels/cuda/prefill_attention_rows.cuh	21975248a7ec9efd199a28324bba837e7b78f066a63b426ab26587cba38fda5e	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
-zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de62f7474255a	raw
+zig/kernels/cuda/probe.cu	94a3118894b3066e0f0f6fc1cfc3c03828d291077cb26c437b62fcc9b177a210	raw	glm-pdl-order's slow writer, planted early reader and glm_pdl::enter() reader
 zig/kernels/cuda/prompt16.cu	2da3c4ea23de0fa9b2536db0fa66f07bb2d5b45db36c2f9cb321e039ebeac7c2	raw	#3252: the lean gate/up SwiGLU pair launch for a dense MLP prompt
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
 zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb9a8df3f0780129dcb675a	raw
