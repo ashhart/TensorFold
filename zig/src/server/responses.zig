@@ -81,27 +81,45 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator) void {
 /// POST /v1/responses as routed: a background response keeps `held`, the route's counts and lease, until it ends.
 pub fn postGated(srv: *Server, conn: *Conn, a: Allocator, held: ?*request_gate.Held) void {
     var cx: Cx = .{ .a = a };
-    const raw = switch (http_body.read(conn, a, http_body.limit) catch return) {
-        .ok => |b| b,
-        .refused => |m| return refuse(conn, a, m, 400, null),
-    };
-    const body = switch (json.parse(a, if (raw.len == 0) "{}" else raw) catch return) {
-        .ok => |v| v,
-        .err => return refuse(conn, a, "the request body is not JSON", 400, null),
-    };
-    // a restricted key is stateless here: checked before any stored conversation is read
-    if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why|
-        return @import("auth_scope_reply.zig").deny(conn, false, why);
-    if (body.get("previous_response_id")) |p| if (p == .string and srv.background_jobs.running(srv.io, p.string, conn.key_digest))
-        return refuse(conn, a, "previous_response_id names a background response still in progress: poll it until it ends", 400, "previous_response_id");
-    const history: store_mod.History = .{ .store = &srv.store, .io = srv.io, .owner = conn.key_digest };
-    const t = translate_mod.translate(&cx, body, history) catch return refuse(conn, a, cx.message, 400, null);
-    if (t.background) return background.create(srv, conn, a, body, t, held);
-    switch (turn(srv, a, conn, &cx, body, t, @import("responses_sink.zig").sse(conn), .{})) {
+    const r = request(srv, conn, a, &cx) orelse return;
+    if (r.t.background) return background.create(srv, conn, a, r.body, r.t, held);
+    switch (turn(srv, a, conn, &cx, r.body, r.t, @import("responses_sink.zig").sse(conn), .{})) {
         .streamed => {},
-        .refused => |r| routes.sendValue(conn, a, r.status, r.payload),
+        .refused => |x| routes.sendValue(conn, a, x.status, x.payload),
         .whole => |final| routes.sendValue(conn, a, 200, final),
     }
+}
+
+pub const Request = struct { body: Value, t: translate_mod.Request };
+
+/// A POST body read, held to its key's scope and translated as the chat request it runs as; null once refused.
+pub fn request(srv: *Server, conn: *Conn, a: Allocator, cx: *Cx) ?Request {
+    const raw = switch (http_body.read(conn, a, http_body.limit) catch return null) {
+        .ok => |b| b,
+        .refused => |m| return untranslated(conn, a, m),
+    };
+    const body = switch (json.parse(a, if (raw.len == 0) "{}" else raw) catch return null) {
+        .ok => |v| v,
+        .err => return untranslated(conn, a, "the request body is not JSON"),
+    };
+    // a restricted key is stateless here: checked before any stored conversation is read
+    if (@import("auth_scope.zig").responseDenial(conn.key_scopes, body)) |why| {
+        @import("auth_scope_reply.zig").deny(conn, false, why);
+        return null;
+    }
+    if (body.get("previous_response_id")) |p| if (p == .string and srv.background_jobs.running(srv.io, p.string, conn.key_digest)) {
+        refuse(conn, a, "previous_response_id names a background response still in progress: poll it until it ends", 400, "previous_response_id");
+        return null;
+    };
+    const history: store_mod.History = .{ .store = &srv.store, .io = srv.io, .owner = conn.key_digest };
+    const t = translate_mod.translate(cx, body, history) catch return untranslated(conn, a, cx.message);
+    return .{ .body = body, .t = t };
+}
+
+/// The 400 for a body that never became a chat request.
+fn untranslated(conn: *Conn, a: Allocator, message: []const u8) ?Request {
+    refuse(conn, a, message, 400, null);
+    return null;
 }
 
 /// How a turn ended, for its transport to answer.
@@ -125,14 +143,7 @@ pub const TurnOptions = struct {
 /// One translated Responses request run as its chat completion, its events sent through ``sink``.
 pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: translate_mod.Request, sink: Sink, opts: TurnOptions) Outcome {
     const base = opts.base orelse (newBase(srv, a, body, t) catch return .{ .streamed = null });
-    if (!(@import("logprobs.zig").offered(srv, a) catch false)) {
-        if (t.rows_if_offered) {
-            _ = t.chat.object.orderedRemove("logprobs");
-        } else if (json.truthyField(t.chat, "logprobs")) {
-            const payload = refusal(a, "logprobs are not supported by this model or backend", null) catch return .{ .streamed = null };
-            return .{ .refused = .{ .status = 400, .payload = payload } };
-        }
-    }
+    if (unofferedLogprobs(srv, a, t) catch return .{ .streamed = null }) |payload| return .{ .refused = .{ .status = 400, .payload = payload } };
     // a reply with tools gets its rows once its calls are parsed: each item's done events wait for them
     const late = json.truthyField(t.chat, "logprobs") and json.truthyField(t.chat, "tools");
     var reply: Reply = .{ .srv = srv, .a = a, .sink = sink, .base = base, .streaming = t.stream, .keep = t.store, .added = t.added, .cx = cx, .owner = conn.key_digest, .call_ids = .{ .key = &srv.tool_ids, .body = t.chat }, .whole_history = opts.whole_history, .late_rows = late };
@@ -144,6 +155,17 @@ pub fn turn(srv: *Server, a: Allocator, conn: *Conn, cx: *Cx, body: Value, t: tr
     const status = out.status orelse return .{ .streamed = null };
     if (status != 200) return .{ .refused = .{ .status = status, .payload = out.payload } };
     return .{ .whole = reply.completion(out.payload) catch return .{ .streamed = null } };
+}
+
+/// Logprobs on a model without them: rows only an include asked for are dropped, an explicit ask is refused.
+pub fn unofferedLogprobs(srv: *Server, a: Allocator, t: translate_mod.Request) !?Value {
+    if (@import("logprobs.zig").offered(srv, a) catch false) return null;
+    if (t.rows_if_offered) {
+        _ = t.chat.object.orderedRemove("logprobs");
+        return null;
+    }
+    if (!json.truthyField(t.chat, "logprobs")) return null;
+    return try refusal(a, "logprobs are not supported by this model or backend", null);
 }
 
 /// A ``generate: false`` turn: created, in progress, then completed with no output and ``prompt_tokens`` of input.

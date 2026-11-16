@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "160"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"background responses are not supported: send the request and wait for it\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
+   "interim": ""
+  }
+ ]
+}

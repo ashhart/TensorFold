@@ -14,16 +14,16 @@ const Allocator = std.mem.Allocator;
 pub const PrepareResult = union(enum) {
     /// Rendered and checked: the caller reads ``prompt_len`` and must hand it to ``srv.release``.
     prepared: chat.Prepared,
-    /// The whole error reply ``runNamed`` would send before its run.
-    refused: struct { status: u16, payload: Value },
+    /// The whole error reply ``runNamed`` would send before its run, and the kind of refusal it is.
+    refused: struct { status: u16, payload: Value, kind: errors.Kind = .request },
     /// The client left while it was prepared.
     cancelled,
 };
 
 /// ``plan`` then ``chat.prepare``: images, template fields and the context window, checked as a real turn checks them.
-pub fn prepare(srv: *Server, a: Allocator, gone: openai.Gone, raw: Value, format: ?[]const u8, client_thinking: bool) PrepareResult {
+pub fn prepare(srv: *Server, a: Allocator, gone: openai.Gone, raw: Value, format: ?[]const u8, client_thinking: bool, skip_request_log: bool) PrepareResult {
     const id = ids.make(a, "chatcmpl-", 32) catch return outOfMemory(a);
-    var cx: Cx = .{ .a = a };
+    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
     var p = openai.plan(srv, &cx, true, raw, format, client_thinking) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         return refusal(a, id, &cx, cx.status());
@@ -52,5 +52,5 @@ fn refusal(a: Allocator, id: []const u8, cx: *const Cx, status: u16) PrepareResu
         log.line("{s}", .{log.refused(&buf, id, cx.message)});
     }
     const body = openai.errorBody(a, cx, "messages") catch return .{ .refused = .{ .status = 500, .payload = .null } };
-    return .{ .refused = .{ .status = status, .payload = openai.wrapError(a, body) catch .null } };
+    return .{ .refused = .{ .status = status, .payload = openai.wrapError(a, body) catch .null, .kind = cx.kind } };
 }
