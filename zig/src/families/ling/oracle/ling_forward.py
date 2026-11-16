@@ -99,7 +99,17 @@ class Model:
         y = out / torch.sqrt((out * out).mean(-1, keepdim=True) + self.eps) * w * torch.sigmoid(gate)
         return self.lin(r(y).reshape(T, H * dk), p + "o_proj")
 
-    def mla(self, x, p):
+    def mla(self, x, p, pos0=0):
+        """One MLA layer. x is the pre-normed residual [T, hidden].
+
+        pos0 is the absolute index of row 0, used only for RoPE angles.
+        mla(x, pos0) attends only over the rows it is given, so with pos0 > 0 it is
+        that chunk as if it were the whole prompt, placed at pos0. It is not the same
+        rows taken out of a longer prompt (those also attend to the earlier tokens).
+        Metal-vs-reference therefore runs on whole prompts from pos0=0. Whole-vs-chunks
+        and resume-vs-fresh are Metal against Metal. Do not compare a Metal chunk
+        with mla(chunk, pos0).
+        """
         c, r, ck = self.c, self.r, self.ck
         T, H = x.shape[0], c["num_attention_heads"]
         nope, rope, dv, lw = c["qk_nope_head_dim"], c["qk_rope_head_dim"], c["v_head_dim"], c["kv_lora_rank"]
@@ -108,7 +118,7 @@ class Model:
         lat = self.norm(kv[:, :lw], ck.t(p + "kv_a_layernorm.weight"))
         kvb = self.lin(lat, p + "kv_b_proj").view(T, H, nope + dv)
         inv = 1.0 / c["rope_theta"] ** (torch.arange(0, rope, 2, dtype=torch.float64) / rope)
-        ang = torch.arange(T, dtype=torch.float64)[:, None] * inv
+        ang = (pos0 + torch.arange(T, dtype=torch.float64))[:, None] * inv
         cos, sin = torch.cos(ang), torch.sin(ang)
 
         def rot(z):  # GPT-J pairs (rope_interleave), out in halves as HF's interleave helper writes them
@@ -181,6 +191,14 @@ class Model:
         return self.norm(x, ck.t(p + "final_layernorm.weight")) @ ck.lin("lm_head").T
 
 
+def one_mla(ck, c, x, layer, r, pos0=0):
+    """One MLA layer's output [T, hidden] from its pre-normed input x. Same Model.mla, not a second copy.
+
+    pos0 is for RoPE only; see Model.mla. Do not compare a Metal chunk to one_mla(..., pos0=n).
+    """
+    return Model(ck, c, r).mla(x, f"model.layers.{layer}.attention.", pos0)
+
+
 def main():
     a = argparse.ArgumentParser(description=__doc__)
     a.add_argument("ckpt", help="a ling-synth directory (config.json, model.safetensors) or a sharded checkpoint's")
@@ -189,11 +207,35 @@ def main():
     a.add_argument("--picks", help="route on these picks (i32 [MoE layers][tokens][top_k], the graph's) instead")
     a.add_argument("--mtp", help="also the MTP layer's logits (float64, bf16 points) and its own picks, to this file")
     a.add_argument("--ids", help="these tokens (i32, ling-lanes' OUT.ids) instead of the fixed walk; --tokens follows")
+    a.add_argument("--mla-layer", type=int, metavar="I", help="write one MLA layer's output from --acts instead of full-decoder logits")
+    a.add_argument("--pos0", type=int, default=0, help="RoPE origin of row 0 of --acts; attention is still only over these rows")
+    a.add_argument("--acts", help="float64 [T, hidden] pre-normed input for --mla-layer")
     o = a.parse_args()
     c = json.load(open(os.path.join(o.ckpt, "config.json")))
     one = os.path.join(o.ckpt, "model.safetensors")
     ck = Ckpt(one if os.path.exists(one) else o.ckpt)
     V = c["vocab_size"]
+    if o.mla_layer is not None:
+        if not o.acts:
+            a.error("--mla-layer needs --acts")
+        i = o.mla_layer
+        stem = f"model.layers.{i}.attention.kv_a_proj_with_mqa"
+        if not any(k == stem or k.startswith(stem + ".") for k in ck.keys):
+            a.error(f"layer {i} has no {stem} in the checkpoint: not an MLA layer, or the index is not in this file")
+        hidden = c["hidden_size"]
+        raw = torch.frombuffer(bytearray(open(o.acts, "rb").read()), dtype=torch.float64)
+        if raw.numel() % hidden != 0:
+            a.error(f"--acts length {raw.numel()} is not a multiple of hidden {hidden}")
+        x = raw.view(-1, hidden)
+        T = x.shape[0]
+        with torch.no_grad():
+            y64 = one_mla(ck, c, x, i, lambda z: z, o.pos0)
+            ybf = one_mla(ck, c, x, i, bf16, o.pos0)
+        with open(o.out, "wb") as f:
+            f.write(b"TFLINGA1" + struct.pack("<4I", T, hidden, i, o.pos0))
+            f.write(y64.contiguous().numpy().tobytes() + ybf.contiguous().numpy().tobytes())
+        print("mla layer", i, "tokens", T, "pos0", o.pos0, "rms", y64.pow(2).mean().sqrt().item())
+        return
     if o.ids:
         ids = torch.frombuffer(bytearray(open(o.ids, "rb").read()), dtype=torch.int32).long()
     else:
