@@ -1,10 +1,12 @@
+import { mkAutomation, computeNextRun } from './automation-definition'
+import { evaluateRunCompletion } from './automation-completion'
+import { deliverAutomationResult } from './automation-delivery'
+import { captureBotConfig } from '../../../shared/bot-policy'
 import { selectedResponseLocale } from '../../agent/response-language'
 import { estimateTokens } from '../../agent/compaction'
-import { personalMessageDraftEvent } from '../../agent/tool-labels'
-import { emailDraftEvent } from '../../agent/email-connector'
 import { assertRoutineSources, personalRoutinePrompt, routineSourceRevision } from './personal-routine-context'
 import { randomUUID } from 'node:crypto'
-import { automationTick, completionEvaluationRequest, evaluateCompletion, gateAutomationRun, snapshotAutomationPermissions, EMPTY_LEASE, type CompletionPolicy, type CompletionVerdict, type SchedulableAutomation, type SchedulerLease } from '../../agent/automation-scheduler'
+import { automationTick, gateAutomationRun, snapshotAutomationPermissions, EMPTY_LEASE, type SchedulableAutomation, type SchedulerLease } from '../../agent/automation-scheduler'
 import { runAgent } from '../../agent/loop'
 import { streamChat } from '../../agent/openai'
 import { ensureTensorFoldStudioStylePrompt } from '../../agent/prompt-style'
@@ -22,17 +24,7 @@ import { handle } from './ipc'
 import { persistAutomations } from './persistence'
 import { resolveWorkspaceCwd } from './workspace'
 import { sanitizeAutomationCreateInput, sanitizeAutomationUpdatePatch, validateAutomationProviderRoute } from './automation-patch-policy'
-import { nextDailyAutomationRun, normalizeAutomationTimeZone } from '../../../shared/automation-time'
-import {
-  modelRouteAccountLabel,
-  modelRouteAutoFailoverEnabled,
-  modelRouteResetPolicy,
-  modelRouter,
-  rememberModelRouteHistory,
-  routeHandoffPreview,
-  runtimeProviderWithFreshModels,
-  selectedProviderAccountId,
-} from './provider-runtime'
+import { modelRouteAccountLabel, modelRouteAutoFailoverEnabled, modelRouteResetPolicy, modelRouter, rememberModelRouteHistory, routeHandoffPreview, runtimeProviderWithFreshModels, selectedProviderAccountId } from './provider-runtime'
 
 export interface AutomationRunSource {
   trigger?: 'manual' | 'schedule' | 'webhook' | 'connector'
@@ -98,55 +90,6 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     }
   }
 
-  function mkAutomation(p: Partial<Automation>): Automation {
-    return {
-      id: randomUUID(),
-      name: p.name || 'Untitled automation',
-      prompt: p.prompt || '',
-      scheduleKind: p.scheduleKind || 'manual',
-      everyMinutes: p.everyMinutes ?? 60,
-      atHour: p.atHour ?? 9,
-      atMinute: p.atMinute ?? 0,
-      ...(p.timeZone !== undefined ? { timeZone: normalizeAutomationTimeZone(p.timeZone) } : {}),
-      providerId: p.providerId ?? store.settings?.activeProviderId ?? null,
-      providerAccountId: p.providerAccountId ?? store.settings?.activeProviderAccountId ?? null,
-      model: p.model ?? store.settings?.activeModel ?? null,
-      mode: p.mode || 'chat',
-      cwd: p.cwd ?? store.settings?.defaultCwd ?? null,
-      deliverTo: p.deliverTo || 'inbox',
-      ...(p.deliveryTarget ? { deliveryTarget: { ...p.deliveryTarget } } : {}),
-      ...(p.previewOnly !== undefined ? { previewOnly: p.previewOnly } : {}),
-      ...(p.botId ? { botId: p.botId } : {}),
-      ...(p.sourceScope ? { sourceScope: p.sourceScope.map(scope => ({ ...scope })) } : {}),
-      ...(p.routineKind ? { routineKind: p.routineKind } : {}),
-      enabled: p.enabled ?? false,
-      lastRunAt: null,
-      nextRunAt: null,
-      lastStatus: null,
-      runs: [],
-      // Industrial fields (VST-038) carried through on create so a template / NL-built draft
-      // keeps its misfire policy, risk gating, and completion policy.
-      ...(p.misfire ? { misfire: p.misfire } : {}),
-      ...(p.requiredRisks ? { requiredRisks: p.requiredRisks } : {}),
-      ...(p.acknowledgedRisks ? { acknowledgedRisks: p.acknowledgedRisks } : {}),
-      ...(p.completionPolicy ? { completionPolicy: p.completionPolicy } : {}),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    }
-  }
-
-  function computeNextRun(a: Automation, from = Date.now()): number | null {
-    if (!a.enabled || a.scheduleKind === 'manual') return null
-    if (a.scheduleKind === 'interval') {
-      const step = Math.max(1, a.everyMinutes) * 60_000
-      const base = a.lastRunAt ?? from
-      let next = base + step
-      if (next <= from) next = from + step
-      return next
-    }
-    return nextDailyAutomationRun(a.atHour, a.atMinute, Math.max(from, a.lastRunAt ?? from), a.timeZone)
-  }
-
   function touchAutomation(a: Automation) {
     try { a.nextRunAt = computeNextRun(a); a.scheduleError = null }
     catch (error) { a.nextRunAt = null; a.scheduleError = error instanceof Error ? error.message : 'Fix this automation schedule before it can run.' }
@@ -156,50 +99,6 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   }
 
   // The automation's completion policy as the kernel expects it (default: one pass, done).
-  function completionPolicyOf(a: Automation): CompletionPolicy {
-    const p = a.completionPolicy
-    if (!p) return { type: 'none', version: 0 }
-    return p
-  }
-
-  // Ask a fresh READ-ONLY model call to judge whether the run met its objective, using the
-  // run's own output as the transcript excerpt (VST-038). Only 'ai_evaluated' policies call
-  // a model; the rest decide deterministically. A model/parse failure degrades to
-  // needs_review — never a false "complete".
-  async function evaluateRunCompletion(a: Automation, run: AutomationRun, provider: Provider | null, model: string | null, signal: AbortSignal, assertRequestAllowed?: () => void): Promise<{ verdict: CompletionVerdict; reason: string } | undefined> {
-    const policy = completionPolicyOf(a)
-    if (policy.type === 'none') return undefined
-    let aiVerdict: CompletionVerdict | undefined
-    const request = completionEvaluationRequest(policy, (run.output || '').slice(-4000))
-    if (request && provider && model) {
-      try {
-        assertRequestAllowed?.()
-        let out = ''
-        for await (const ch of streamChat({
-          provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model,
-          messages: [
-            { role: 'system', content: ensureTensorFoldStudioStylePrompt('You judge whether an automation met its objective. Reply with exactly one word.') },
-            { role: 'user', content: request.prompt },
-          ],
-          temperature: 0, approvalMode: 'readonly', tools: [], signal, assertRequestAllowed,
-        })) {
-          if (ch.type === 'content') out += ch.text
-        }
-        const word = out.toLowerCase().match(/\b(complete|continue|needs_review|needs review)\b/)?.[1]
-        aiVerdict = word === 'complete' ? 'complete' : word === 'continue' ? 'continue' : word ? 'needs_review' : undefined
-      } catch {
-        aiVerdict = undefined // fall through to the kernel, which yields needs_review below
-      }
-    }
-    const result = evaluateCompletion(policy, {
-      iterations: 1,
-      signals: [],
-      aiVerdict: policy.type === 'ai_evaluated' ? (aiVerdict ?? 'needs_review') : undefined,
-      runPolicyVersion: run.permissions?.completionPolicyVersion,
-    })
-    return { verdict: result.verdict, reason: result.reason }
-  }
-
   async function runAutomation(a: Automation, source: AutomationRunSource = {}): Promise<void> {
     if (runningAutomations.has(a.id)) return
     const definition = structuredClone(a)
@@ -257,6 +156,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
     try {
       assertRoutineSources(definition, store.settings)
+      const capturedBot = definition.routineKind ? captureBotConfig(store.settings.agentPresets.find((bot) => bot.id === definition.botId)!, store.settings.providers) : undefined
+      const runReasoningEffort = () => capturedBot?.reasoningEffort ?? store.settings.reasoningEffort
       const context = baseProvider && definition.model ? deps.effectiveContextLimit(baseProvider, definition.model, requestedProviderAccountId) : 0
       const reserve = Math.min(2_048, Math.floor(context / 3))
       const maxCharacters = Math.max(0, (context - reserve - 512) * 4)
@@ -293,7 +194,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
         requestedAccountId: requestedProviderAccountId,
         allowFailover: !definition.routineKind && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
         contextLimit: deps.effectiveContextLimit(routeBaseProvider, model, requestedProviderAccountId),
-        reasoningEffort: store.settings.reasoningEffort,
+        reasoningEffort: runReasoningEffort(),
         budget: definition.scheduleKind,
         source: 'automation_initial_route',
       })
@@ -352,7 +253,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
           for await (const ch of streamChat({
             provider: route.provider, baseUrl: route.provider.baseUrl, apiKey: route.provider.apiKey, model: route.model,
             messages,
-            temperature: store.settings.temperature, reasoningEffort: store.settings.reasoningEffort, approvalMode: 'readonly', tools: [], cwd: definition.routineKind ? undefined : definition.cwd || store.settings.defaultCwd || undefined, signal: controller.signal, assertRequestAllowed: definition.routineKind ? assertScopedRequest : undefined,
+            temperature: store.settings.temperature, reasoningEffort: runReasoningEffort(), approvalMode: 'readonly', tools: [], cwd: definition.routineKind ? undefined : definition.cwd || store.settings.defaultCwd || undefined, signal: controller.signal, assertRequestAllowed: definition.routineKind ? assertScopedRequest : undefined,
           })) {
             if (ch.type === 'content') out += ch.text
             beatAutomationJob()
@@ -371,7 +272,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
         await runAgent({
         responseLocale: selectedResponseLocale(store.settings.uiPreferences),
           thread, provider: route.provider, model: route.model, approvalMode: 'readonly', temperature: store.settings.temperature,
-          reasoningEffort: store.settings.reasoningEffort, autoCompact: store.settings.autoCompact, contextLimit: deps.effectiveContextLimit(route.provider, route.model),
+          reasoningEffort: runReasoningEffort(), autoCompact: store.settings.autoCompact, contextLimit: deps.effectiveContextLimit(route.provider, route.model),
           toolContext: deps.fullToolContext({ thread, provider: route.provider, model: route.model, signal: controller.signal }) as any,
           maxSteps: 12,
           maxWallMs: 10 * 60_000,
@@ -400,7 +301,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
           error: err,
           allowFailover: !definition.routineKind && modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId),
           contextLimit: deps.effectiveContextLimit(latestBaseProvider, activeRoute.model, activeRoute.providerAccountId),
-          reasoningEffort: store.settings.reasoningEffort,
+          reasoningEffort: runReasoningEffort(),
           budget: definition.scheduleKind,
           source: 'automation_recovery',
         })
@@ -452,33 +353,14 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       // run's output as the transcript excerpt to a fresh, read-only model call and record
       // its one-word verdict; deterministic policies evaluate without a model. The version
       // guard forces needs_review if the policy was edited after this run started.
-      run.completion = await evaluateRunCompletion(definition, run, provider, model, controller.signal, definition.routineKind ? () => assertRoutineRequest(provider ?? undefined) : undefined)
+      run.completion = await evaluateRunCompletion(definition, run, provider, model, controller.signal, definition.routineKind ? () => assertRoutineRequest(provider ?? undefined) : undefined, capturedBot?.reasoningEffort)
       if ((a.completionPolicy?.version ?? 0) !== (definition.completionPolicy?.version ?? 0)) run.completion = { verdict: 'needs_review', reason: 'Completion policy changed during this run; review the result.' }
       assertRoutineRequest(provider ?? undefined)
       if (controller.signal.aborted) throw new Error('Automation cancelled before completion.')
       run.status = 'ok'
       a.lastStatus = 'ok'
       deps.finishJob(job, 'completed')
-      run.deliveryStatus = 'inbox'
-      if (definition.deliverTo !== 'inbox' && !definition.previewOnly) {
-        const target = definition.deliveryTarget
-        if (!target || target.connectorId !== definition.deliverTo || !target.recipient.trim() || (target.connectorId !== 'telegram' && !target.accountId)) {
-          // Existing addressless definitions remain safe/local until a user chooses a
-          // destination. Successful generation is not a claim of message delivery.
-          run.deliveryStatus = 'blocked'
-          run.deliveryError = 'Choose an exact account and recipient before reviewing external delivery; this result remains in the inbox.'
-        } else {
-          const event = target.connectorId === 'email'
-            ? emailDraftEvent({ to: target.recipient, subject: target.subject || `${definition.name} result`, body: run.output, mode: 'send' })
-            : personalMessageDraftEvent({ connectorId: target.connectorId, target: target.recipient, body: run.output, accountId: target.accountId ?? undefined })
-          event.approvalId = `automation-${a.id}-${run.id}`
-          event.payload = { ...event.payload, accountId: target.accountId, automationId: a.id, runId: run.id }
-          event.payloadKeys = [...event.payloadKeys, 'accountId', 'automationId', 'runId']
-          await deps.rememberConnectorEvents([event])
-          run.deliveryEventId = event.id
-          run.deliveryStatus = 'pending_approval'
-        }
-      }
+      await deliverAutomationResult(definition, run, a.id, deps.rememberConnectorEvents)
 
     } catch (e: any) {
       const settlement = automationRunError(e, controller.signal.aborted)

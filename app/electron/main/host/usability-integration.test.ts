@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import ts from 'typescript'
+import { botRunReasoningEffort } from '../../../shared/bot-reasoning'
 
 // Execute the production asynchronous recovery callback with inert host adapters.
 // This isolates the routing authority seam without starting an app/model/runtime.
 function recoveryHandler(environment: Record<string, unknown>) {
-  const source = readFileSync('electron/main/host/thread-runtime.ts', 'utf8')
+  environment = { botRunReasoningEffort, ...environment }
+  const source = readFileSync('electron/main/host/thread-run-settlement.ts', 'utf8')
   const file = ts.createSourceFile('thread-runtime.ts', source, ts.ScriptTarget.ES2022, true)
   let callback = ''
   const visit = (node: ts.Node) => {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'catch' && node.expression.expression.getText(file) === 'runWithRoute(activeRoute)') callback = node.arguments[0].getText(file)
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'catch' && node.expression.expression.getText(file) === 'pending') callback = node.arguments[0].getText(file)
     ts.forEachChild(node, visit)
   }
   visit(file); assert.ok(callback, 'The actual route-recovery callback is reviewed')
@@ -45,7 +47,8 @@ console.log('Actual route-recovery callback binds retry authority to current run
 
 const { RunRecoveryTracker } = await import('../../agent/run-recovery/tracker')
 function delegatedHandler(environment: Record<string, unknown>) {
-  const source = readFileSync('electron/main/host/thread-runtime.ts', 'utf8'), ast = ts.createSourceFile('runtime.ts', source, ts.ScriptTarget.ES2022, true)
+  environment = { botRunReasoningEffort, ...environment }
+  const source = readFileSync('electron/main/host/thread-run-execution.ts', 'utf8'), ast = ts.createSourceFile('runtime.ts', source, ts.ScriptTarget.ES2022, true)
   let body = ''
   const visit = (node: ts.Node) => { if (ts.isIfStatement(node) && node.expression.getText(ast) === "thread.engine === 'omp'") body = node.thenStatement.getText(ast); ts.forEachChild(node, visit) }
   visit(ast); assert.ok(body)
@@ -217,7 +220,7 @@ await assert.rejects(reviewing, /changed/); assert.throws(() => assertRecoveryAl
 console.log('Actual main outcome-review callback refuses wrong/active/draining runs and stale persistence completion, preserves history and cannot authorize a newer uncertain run.')
 
 const { buildAgentRunContract, buildAgentRunReceipt, buildEventReceipt } = await import('../../agent/run-contract')
-const runtimeSource = readFileSync('electron/main/host/thread-runtime.ts', 'utf8')
+const runtimeSource = readFileSync('electron/main/host/thread-run-settlement.ts', 'utf8')
 const receiptStart = runtimeSource.indexOf('const recoveryPaused = thread.runRecovery'), receiptEnd = runtimeSource.indexOf('receipt.eventReceipts.push(turnReceipt, jobReceipt, savedReceipt)', receiptStart)
 assert.ok(receiptStart > 0 && receiptEnd > receiptStart)
 const receiptFragment = runtimeSource.slice(receiptStart, receiptEnd) + 'return { receipt, turnReceipt, jobReceipt, savedReceipt };'
