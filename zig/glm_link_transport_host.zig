@@ -100,6 +100,8 @@ const Recording = struct {
 test "GLM link transport: waited uploads and unwaited puts carry zero, 48 and 49 ids byte for byte" {
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
     d.api.cuLaunchKernel = Recording.launch;
+    d.api.cuLaunchKernelEx = @import("glm").pdl.forwardEx(Recording.launch);
+    d.func_name = null;
     d.api.cuMemcpyHtoDAsync_v2 = Recording.upload;
     d.api.cuMemHostAlloc = Recording.hostAlloc;
     d.api.cuMemFreeHost = Recording.hostFree;

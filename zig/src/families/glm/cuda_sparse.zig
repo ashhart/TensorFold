@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const latent = @import("cuda_latent.zig");
 
@@ -66,21 +67,21 @@ pub fn decodeSelect(
     if (g > 0) {
         var sa: cuda.Args = .{};
         inline for (.{ scores, @as(i64, @intCast(np)), at, @as(c_int, topk_pools), @as(c_int, dsel_target), bits, @as(i64, @intCast(words)) }) |v| sa.add(v);
-        try cuda.launch.launch(set.glue.dsel_scan, .{ .grid = .{ .x = @intCast(g), .y = @intCast(rows) }, .block = .{ .x = dsel_scan_threads } }, stream, &sa);
+        try cuda_pdl.launch(set.glue.dsel_scan, .{ .grid = .{ .x = @intCast(g), .y = @intCast(rows) }, .block = .{ .x = dsel_scan_threads } }, stream, &sa);
     }
     var ma: cuda.Args = .{};
     inline for (.{ scores, pools, @as(i64, @intCast(np)), at, @as(c_int, topk_pools), bits, @as(i64, @intCast(words)), path }) |v| ma.add(v);
-    try cuda.launch.launch(set.glue.dsel_merge, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = dsel_merge_threads } }, stream, &ma);
+    try cuda_pdl.launch(set.glue.dsel_merge, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = dsel_merge_threads } }, stream, &ma);
 }
 
 /// sparse.index_update: the window's LayerNormed index keys and gates into ik and ig at pos, completed pools into pk.
 pub fn indexUpdate(set: glue.Set, stream: cuda.Stream, k_raw: u64, k_stride: usize, gate: u64, ln_w: u64, ln_b: u64, ape: u64, ik: u64, ig: u64, pk: u64, t: latent.Table, pos: u64, rows: usize) !void {
     var a: cuda.Args = .{};
     inline for (.{ k_raw, @as(i64, @intCast(k_stride)), gate, ln_w, ln_b, ik, ig, pos, @as(f32, 1e-6) }) |v| a.add(v);
-    try cuda.launch.launch(set.glue.index_write, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
+    try cuda_pdl.launch(set.glue.index_write, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 32 } }, stream, &a);
     var b: cuda.Args = .{};
     inline for (.{ ik, ig, ape, pk, pos, @as(i64, @intCast(rows)), t.pt, @as(i64, @intCast(t.ps)) }) |v| b.add(v);
-    try cuda.launch.launch(set.glue.pool_keys, .{ .grid = .{ .x = @intCast(rows / 4 + 2) }, .block = .{ .x = 32 } }, stream, &b);
+    try cuda_pdl.launch(set.glue.pool_keys, .{ .grid = .{ .x = @intCast(rows / 4 + 2) }, .block = .{ .x = 32 } }, stream, &b);
 }
 
 /// sparse.pool_bucket: visible pools for rows pos .. pos + rows - 1, a power of two (at least 1024), at most `np_max`.
@@ -143,7 +144,7 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
             args.add(pos);
             args.add(@as(c_int, @intCast(a)));
             args.add(s.at);
-            try cuda.launch.launch(add, .{ .grid = .{}, .block = .{ .x = 32 } }, stream, &args);
+            try cuda_pdl.launch(add, .{ .grid = .{}, .block = .{ .x = 32 } }, stream, &args);
             at = s.at;
         }
         const nb = cdiv(scoreColumns(host_pos + a, n, np_max), 64);
@@ -153,7 +154,7 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
         if (d != 128 or heads > 32) return error.IndexShape;
         const quick = if (set.index) |k| if (k.takes(rows, np_max, pk, t.ps)) k else null else null;
         var stamp = prof.span(profile, stream, .index_score);
-        if (quick) |k| try k.scores(stream, qi + a * heads * d * 2, wts + a * w_stride * 2, w_stride, pk, s.scores, at, n, np_max, nb, scale, headScale(heads), heads, t.pt, t.ps) else try cuda.launch.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast(cdiv(nb, loop)) }, .block = .{ .x = 128 } }, stream, &sa);
+        if (quick) |k| try k.scores(stream, qi + a * heads * d * 2, wts + a * w_stride * 2, w_stride, pk, s.scores, at, n, np_max, nb, scale, headScale(heads), heads, t.pt, t.ps) else try cuda_pdl.launch(set.glue.scores, .{ .grid = .{ .x = @intCast(n), .y = @intCast(cdiv(nb, loop)) }, .block = .{ .x = 128 } }, stream, &sa);
         stamp.end();
         stamp = prof.span(profile, stream, .index_select);
         if (quick) |k| if (k.select) {
@@ -169,7 +170,7 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
         }
         var sel: cuda.Args = .{};
         inline for (.{ s.scores, s.pools + a * topk_pools * 8, @as(i64, @intCast(np_max)), at, @as(c_int, topk_pools) }) |v| sel.add(v);
-        try cuda.launch.launch(if (wide) set.glue.select_rows_wide else set.glue.select_rows, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = if (wide) 1024 else 128 } }, stream, &sel);
+        try cuda_pdl.launch(if (wide) set.glue.select_rows_wide else set.glue.select_rows, .{ .grid = .{ .x = @intCast(n) }, .block = .{ .x = if (wide) 1024 else 128 } }, stream, &sel);
         stamp.end();
     }
     const stamp = prof.span(profile, stream, .index_select);
@@ -187,7 +188,7 @@ pub fn selectTokensProfile(set: glue.Set, ops: cuda.Module, stream: cuda.Stream,
     args.add(counts);
     args.add(t.pt);
     args.add(@as(i64, @intCast(t.page_rows)));
-    try cuda.launch.launch(assemble, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
+    try cuda_pdl.launch(assemble, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
 }
 
 test "sparse.py's sizing rules" {
