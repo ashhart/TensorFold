@@ -481,6 +481,11 @@ pub const Engine = struct {
         return e.pool.lease(e.gpa, slot, e.stream, e.eos, e.o.capacity, e);
     }
 
+    /// The first stream's caches made now (at load) rather than by the first prompt; later slots on their first lease.
+    pub fn makeFirstSlot(e: *Engine) !void {
+        try e.pool.make(e.gpa, 0, e.o.capacity, e);
+    }
+
     /// A finished stream's caches back to their slot.
     pub fn unlease(e: *Engine, c: cache.Caches) void {
         e.pool.unlease(c);
