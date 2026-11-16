@@ -18,6 +18,8 @@ pub const Host = struct {
     staging: hip.HostBuffer,
     /// Bytes of `staging` this forward used: the stream is synchronized before a forward starts again.
     used: usize = 0,
+    /// The end `stage` may write to: below the span a forward still in flight uploads from (Engine.prompt).
+    limit: usize = std.math.maxInt(usize),
     tables: *tables.Tables,
 
     /// `bytes` copied through the staging into fresh arena memory, queued on the stream.
@@ -143,6 +145,8 @@ pub const Staged = struct {
     biases: usize = 0,
     /// Blocks a window's scores walk: all its caches can hold, so the launch is the same at any position.
     bound: usize = 0,
+    /// The n-gram row ids `run` gathers before the n-gram layer (stage's `later`); the host's allocator, `run` frees.
+    later: ?[][ngram.heads]u32 = null,
 };
 
 /// The staged inputs on the device: token ids (one a stream), positions, ends, complete blocks, n-gram rows.
@@ -160,6 +164,11 @@ pub const Inputs = struct {
 
 /// Every host input of a forward of `segs` written into the staging, n-gram rows hashed and gathered: no launch.
 pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool) !Staged {
+    return stageWith(m, host, segs, window, false);
+}
+
+/// `stage`, with the n-gram gather left to `run` when `later` (behind the layers before the n-gram one); same bytes.
+pub fn stageWith(m: *const model.Model, host: *Host, segs: []const Seg, window: bool, later: bool) !Staged {
     const d = m.dims;
     const t = host.tables;
     if (d.ple_dim / t.rows.dims != ngram.heads) return error.UnsupportedNgramHeads;
@@ -182,7 +191,7 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
         used = std.mem.alignForward(usize, used + f[1], 16);
     }
     s.len = used;
-    if (s.from + used > host.staging.bytes.len) return error.StagingTooSmall;
+    if (s.from + used > @min(host.staging.bytes.len, host.limit)) return error.StagingTooSmall;
     const span = host.staging.bytes[s.from..][0..used];
     const ints = struct {
         fn of(b: []u8, off: usize, n: usize) []i32 {
@@ -195,7 +204,8 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
     const complete = ints(span, s.complete, rows);
     for (ints(span, s.local, n16), 0..) |*x, i| x.* = @intCast(i);
     const hashed = try host.gpa.alloc([ngram.heads]u32, rows);
-    defer host.gpa.free(hashed);
+    var kept = false;
+    defer if (!kept) host.gpa.free(hashed);
     var row: usize = 0;
     for (segs) |g| {
         const n = g.tokens.len;
@@ -209,6 +219,16 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
         t.hasher.ids(g.c.history, g.tokens, hashed[row..][0..n]);
         row += n;
     }
+    // a window's scores walk every block its caches hold: the launch is the same at any position
+    if (window) for (segs) |g| {
+        s.bound = @max(s.bound, g.c.layout.cap / d.index_ratio);
+    };
+    host.used = s.from + used;
+    if (later and !window and m.ple.layer > 0) {
+        s.later = hashed;
+        kept = true;
+        return s;
+    }
     const flat: []const u32 = @as([*]const u32, @ptrCast(hashed.ptr))[0..n16];
     try t.gather(
         flat,
@@ -216,12 +236,23 @@ pub fn stage(m: *const model.Model, host: *Host, segs: []const Seg, window: bool
         span[s.scales..][0 .. n16 * t.tableBytes()],
         span[s.biases..][0 .. n16 * t.tableBytes()],
     );
-    // a window's scores walk every block its caches hold: the launch is the same at any position
-    if (window) for (segs) |g| {
-        s.bound = @max(s.bound, g.c.layout.cap / d.index_ratio);
-    };
-    host.used = s.from + used;
     return s;
+}
+
+/// A `later` stage's n-gram rows gathered and uploaded behind `send`'s inputs, the bytes a whole send writes.
+fn gatherLater(o: Ops, host: *Host, s: Staged, in: Inputs, ids: [][ngram.heads]u32) !void {
+    if (o.stream == hip.counting) return;
+    const t = host.tables;
+    const n16 = ids.len * ngram.heads;
+    const span = host.staging.bytes[s.from..][0..s.len];
+    const flat: []const u32 = @as([*]const u32, @ptrCast(ids.ptr))[0..n16];
+    try t.gather(
+        flat,
+        span[s.words..][0 .. n16 * t.wordBytes()],
+        span[s.scales..][0 .. n16 * t.tableBytes()],
+        span[s.biases..][0 .. n16 * t.tableBytes()],
+    );
+    try hip.runtime.check(host.d.api.hipMemcpyHtoDAsync(@ptrFromInt(in.words), span[s.words..].ptr, s.len - s.words, o.stream));
 }
 
 /// The staged span up to fresh arena memory in one copy, queued on the stream (inside a graph when one records).
@@ -230,7 +261,7 @@ pub fn send(o: Ops, host: *Host, s: Staged) !Inputs {
     if (o.stream != hip.counting) try hip.runtime.check(host.d.api.hipMemcpyHtoDAsync(
         @ptrFromInt(dst),
         host.staging.bytes[s.from..].ptr,
-        s.len,
+        if (s.later != null) s.words else s.len,
         o.stream,
     ));
     return .{
@@ -340,6 +371,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
     const d = m.dims;
     var rows: usize = 0;
     for (segs) |g| rows += g.tokens.len;
+    defer if (staged.later) |ids| host.gpa.free(ids);
     const in = try send(o, host, staged);
     const dev_ids = in.ids;
     const dev_pos = in.pos;
@@ -361,6 +393,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
         const mark = o.arena.mark();
         defer o.arena.release(mark);
         if (i == m.ple.layer) {
+            if (staged.later) |ids| try gatherLater(o, host, staged, in, ids);
             var off: usize = 0;
             for (segs, cins[0..segs.len]) |g, cin| {
                 try ple(
