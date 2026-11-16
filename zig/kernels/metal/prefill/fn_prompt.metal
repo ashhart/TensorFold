@@ -1,5 +1,4 @@
-// Flash Next prompt chunks: hyper-connection pieces in prefill_hc's arithmetic, router rows, top-k, the expert sort
-// (count, offsets, slots), row gathers and scatters, and the activation. Compiled after the gate/up header (simd_topk_all).
+// Flash Next prompt chunks: prefill_hc pieces, router rows, top-k, expert sort, gathers/scatters, activation.
 inline float pf_bsig(float x) { return float(bfloat(1.0f / (1.0f + metal::exp(-x)))); }
 inline float pf_bsilu(float x) { return float(bfloat(x / (1.0f + metal::exp(-x)))); }
 inline float pf_rinv(const device float* ssp, int r, int s, int nt, int streams, int dims, float eps) {
@@ -125,8 +124,7 @@ inline float pf_rinv(const device float* ssp, int r, int s, int nt, int streams,
   T[i] = S[i];
 }
 
-// DeltaNet over a prompt chunk in three launches with q4_gdn_step's arithmetic: every row's conv, norms and gates at
-// once; the recurrence, each simdgroup alone over its four state rows; every row's gated RMS norm at once.
+// DeltaNet prompt chunk in 3 launches (q4_gdn_step): conv/norms/gates, per-simdgroup recurrence, gated RMS norm.
 inline float pf_fsig(float x) { return 1.0f / (1.0f + metal::exp(-x)); }
 inline float pf_log1p(float x) {
   const float u = 1.0f + x;
@@ -134,8 +132,7 @@ inline float pf_log1p(float x) {
 }
 inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x)); }
 
-// Threadgroup (group, r): 128 channels of row r, groups 0..15 q heads, 16..31 k heads, 32..79 v heads. Conv + SiLU,
-// the q/k L2 norms, the v head's gates; the conv window after the last row into CSO.
+// Threadgroup (group,r): 128 channels; groups 0..15 q, 16..31 k, 32..79 v. Conv+SiLU, q/k L2, v gates; conv to CSO.
 [[kernel]] void pf_gdn_pre(const device bfloat* P [[buffer(0)]], const device bfloat* CS [[buffer(1)]],
     const device bfloat* CW [[buffer(2)]], const device bfloat* ALOG [[buffer(3)]], const device bfloat* DT [[buffer(4)]],
     const constant int& R [[buffer(5)]], device float* QN [[buffer(6)]], device float* KN [[buffer(7)]],
@@ -197,9 +194,7 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
   (isq ? QN : KN)[(size_t(r) * NK + hk) * DK + t] = x[t] * inv_s;
 }
 
-// Four threadgroups a value head: simdgroup s of threadgroup (hv, quarter) owns state row dv = 32 quarter + s (lane l
-// its columns 4 l .. 4 l + 3) through every row with no barrier, the next row's inputs loading while this one computes;
-// YS gets bf16-rounded outputs, SO the state after the last row.
+// 4 threadgroups/head: simdgroup s of (hv,quarter) owns state row dv=32*quarter+s; YS bf16 outputs, SO final state.
 [[kernel]] void pf_gdn_scan(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
     const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
     const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
@@ -250,10 +245,7 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
   for (int i = 0; i < 4; i++) SO[(size_t(hv) * DV + dv) * DK + lane * 4 + i] = state[i];
 }
 
-// The recurrence with four state rows a simdgroup (dv = 32 part + 4 s + i, lane l columns 4 l .. 4 l + 3) and both
-// reductions of a row at once: Sk = S k and Sq = S q from the state before the row, then delta = (v - g Sk) beta,
-// out = g Sq + delta (k . q), S = g S + delta k^T (the same fp32 terms as pf_gdn_scan, in another order). Threadgroup
-// (hv, part) of 8 simdgroups covers 32 state rows; the next row's inputs load while this one computes.
+// Recurrence, 4 state rows/simdgroup: delta=(v-g S k)*beta, out=g S q+delta(k.q), S=g S+delta k^T; 8 simdgroups.
 [[kernel]] void pf_gdn_scan4(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
     const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
     const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],
@@ -315,9 +307,7 @@ inline float pf_softplus(float x) { return x > 20.0f ? x : pf_log1p(metal::exp(x
     for (int c = 0; c < 4; c++) SO[(size_t(hv) * DV + dv0 + i) * DK + lane * 4 + c] = S[i][c];
 }
 
-// pf_gdn_scan4's arithmetic with a state row over 16 lanes (8 columns each, so each reduction is one shuffle step
-// shorter) and 8 rows a simdgroup: lanes 16 hl .. 16 hl + 15 hold rows 2 i + hl. Threadgroup (hv, part) of 8 simdgroups
-// covers 64 state rows, two a head.
+// pf_gdn_scan4 arithmetic: one row over 16 lanes, 8 rows per simdgroup; 8 simdgroups cover 64 rows, two per head.
 [[kernel]] void pf_gdn_scan8(const device float* QN [[buffer(0)]], const device float* KN [[buffer(1)]],
     const device float* V [[buffer(2)]], const device float* G [[buffer(3)]], const device float* BETA [[buffer(4)]],
     const device float* SIN [[buffer(5)]], const constant int& R [[buffer(6)]], device float* YS [[buffer(7)]],

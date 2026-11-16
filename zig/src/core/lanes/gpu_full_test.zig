@@ -1,4 +1,4 @@
-//! tf_sample_full against tf_gpu_sample's rule: the tail it reaches, its nucleus and top_k past 1,024, where both agree.
+//! tf_sample_full vs tf_gpu_sample's rule: tail reached, nucleus and top_k past 1,024, where both agree.
 const std = @import("std");
 const full = @import("gpu_full.zig");
 const rule = @import("gpu_rule.zig");

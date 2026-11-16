@@ -5,7 +5,7 @@ const stagger = @import("../../core/stagger.zig");
 
 pub const Settings = struct { rank: u32, library: []const u8, links: []const fabric.mcdma.Link };
 
-/// The settings file read through JSON values: a typed parse links compiler-rt's quad floats, and with them its memcpy over libSystem's.
+/// Settings file read through JSON: a typed parse links compiler-rt's quad floats and its memcpy over libSystem's.
 pub fn read(gpa: std.mem.Allocator, bytes: []const u8) !Settings {
     const root = try std.json.parseFromSliceLeaky(std.json.Value, gpa, bytes, .{ .allocate = .alloc_always });
     if (root != .object) return error.BadTpSettings;
@@ -39,7 +39,7 @@ pub fn read(gpa: std.mem.Allocator, bytes: []const u8) !Settings {
     return .{ .rank = try int(u32, root.object, "rank", null), .library = try text(gpa, root.object, "library"), .links = links };
 }
 
-/// Rows each Mac takes before a prompt call splits across the pair (FZ_PAIR_MIN): positive and a u32 (the request head's word), else `default`.
+/// Rows each Mac takes before a prompt call splits (FZ_PAIR_MIN): a positive u32, else `default`.
 pub fn pairMin(env: ?[]const u8, default: u32) u32 {
     const v = std.fmt.parseInt(u32, env orelse return default, 10) catch return default;
     return if (v > 0) v else default;

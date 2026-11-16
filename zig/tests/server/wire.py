@@ -49,7 +49,7 @@ def _response(reader: Any) -> dict[str, Any]:
 
 def exchange(port: int, raws: list[Any], *, half_close: bool = False, timeout: float = 15.0,
              leave_after_events: int | None = None) -> dict[str, Any]:
-    """Each request in turn on one connection (a callable gets the replies so far; b"" reads one more), then whether it closed."""
+    # Each request on one connection (a callable gets replies so far; b"" reads one more), then whether it closed.
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     reader = sock.makefile("rb")
     replies: list[dict[str, Any]] = []

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""CPU test for the capture's manifest step, no GPU and no model: a fake Triton cache and a launch dump
-go through tools/zig/triton_aot_manifest.py and tools/zig/triton_aot_pack.py, and the kernel set's entries are
-checked. Usage: python3 -B test_aot_manifest.py"""
+
+# CPU test of manifest step (no GPU): fake cache + launch dump via triton_aot. Run: python3 -B test_aot_manifest.py.
 
 from __future__ import annotations
 

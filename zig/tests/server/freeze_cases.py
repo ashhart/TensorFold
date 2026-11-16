@@ -1,4 +1,4 @@
-"""Freeze the server-parity corpus for the Zig golden check: every case's raw bytes, per phase, as golden/cases.json the Zig checker walks without Python."""
+# Freeze server-parity corpus for the Zig golden check: raw bytes per case/phase as golden/cases.json (no Python).
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def main() -> int:
         ],
     })
 
-    # the responses group's id-following requests stay templates: the id comes from an earlier reply, resolved here into templates with markers
+    # The responses group's id-following requests stay templates; the id comes from an earlier reply, resolved here.
     doc = {"steps": steps}
     (GOLDEN / "cases.json").write_text(json.dumps(doc))
     print(f"{sum(len(s.get('cases', [])) + sum(len(t.get('cases', [])) for t in s.get('then', [])) for s in steps)} cases frozen to {GOLDEN / 'cases.json'}")
