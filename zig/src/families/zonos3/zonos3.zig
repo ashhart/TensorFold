@@ -13,6 +13,7 @@ pub const kernels = @import("cuda/kernels.zig");
 pub const engine = @import("cuda/engine.zig");
 pub const codec = @import("cuda/codec.zig");
 pub const codec_weights = @import("cuda/codec_weights.zig");
+pub const encoder = @import("cuda/encoder.zig");
 
 pub const Engine = engine.Engine;
 pub const Options = engine.Options;
