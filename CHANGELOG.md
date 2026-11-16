@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Qwen3.5 on CUDA: the dense family plans each rank's share of the 27B for tensor parallelism (host only), and `--tp` above 1 is refused by name until ranks serve (#3383). Thanks to @Nipale-ai.
+
 - Prompt cache: radix pages carry their reuse identity, and a request's chunk start is decided from it, so pages are only reused where they were written for the same request shape (#2888). Thanks to @laudney.
 
 - Tests: the Metal device test `tf-flashnext-run` is built from five source files under 600 lines instead of one of 1,690; its modes and settings are unchanged (#3504).
