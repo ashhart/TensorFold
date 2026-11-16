@@ -192,7 +192,7 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     }
     defer for (&attends) |*w| w.deinit();
     for (&attends) |*w| try kernels.append(a, w.kernel());
-    // d = 256 (the Qwen checkpoints): each head group on short and long spans, q fp32 and in the kind; then the control
+    // d = 256 (the Qwen checkpoints): each head group, short and long spans, q fp32 and in the kind; two controls
     var qwen_walks: [walk_k.qwen_count]walk_k.Walk = undefined;
     for (&qwen_walks, 0..) |*w, i| w.* = .qwenAt(a, &r, s, &l, i);
     defer for (&qwen_walks) |*w| w.deinit();

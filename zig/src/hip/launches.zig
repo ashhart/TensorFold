@@ -121,6 +121,8 @@ pub const Launcher = struct {
         score_act: [2]Function,
         score2: [2]Function, // the same at two keys a warp, for short spans
         score2_act: [2]Function,
+        score256: [2]Function, // d 256 on long spans, kScoreSteps steps a block
+        score256_act: [2]Function,
         sum_act: Function,
         attend: [2]Function,
         apply: [2]Function,
@@ -213,6 +215,8 @@ pub const Launcher = struct {
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .score2 = .{ try pl.function("tf_plan_score2_f16"), try pl.function("tf_plan_score2_bf16") },
             .score2_act = .{ try pl.function("tf_plan_score2_act_f16"), try pl.function("tf_plan_score2_act_bf16") },
+            .score256 = .{ try pl.function("tf_plan_score256_f16"), try pl.function("tf_plan_score256_bf16") },
+            .score256_act = .{ try pl.function("tf_plan_score256_act_f16"), try pl.function("tf_plan_score256_act_bf16") },
             .sum_act = try pl.function("tf_sum_partials_act"),
             .attend = .{ try pl.function("tf_plan_attend_f16"), try pl.function("tf_plan_attend_bf16") },
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },

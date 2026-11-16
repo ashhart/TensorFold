@@ -1,4 +1,4 @@
-//! The planned decode walk's d = 256 cases (the Qwen checkpoints' attention) under the contract, and their control.
+//! The planned decode walk's d = 256 cases (the Qwen checkpoints) under the contract; tf_plan_score256_*'s controls.
 const std = @import("std");
 const hip = @import("hip");
 const core = @import("core");
@@ -8,10 +8,10 @@ const c = core.contract.spec;
 
 /// Spans the long-span score takes from (launches/plan.zig's score_span).
 const long_span = 16384;
-/// Steps a long-span score block walks at d = 256 (launches/plan.zig's score_steps, plan.hip's kScoreSteps).
+/// Steps a tf_plan_score256_* block walks (launches/plan.zig's score_steps, plan.hip's kScoreSteps).
 const steps = 8;
 
-/// Query heads over KV heads on short spans (two keys a wave) or long ones (four, eight steps a block).
+/// Query heads over KV heads on short spans (tf_plan_score2_*) or long ones (tf_plan_score256_*, eight steps a block).
 pub const Case = struct { heads: usize, kv: usize, long: bool, served: []const c.Shape };
 
 /// served[0] takes gates 1-2 (16 heads whole vector stores, 24 the scalar tail), gate 4 the largest; one has 8 rows.
@@ -38,7 +38,7 @@ pub const cases = [_]Case{
     } },
 };
 
-/// The case the control runs: 16 heads over 2 on long spans.
+/// The case the controls run: 16 heads over 2 on long spans.
 pub const control_case = 1;
 
 /// Each case's registrations, q fp32 and in the cache's kind [case][act][bf16].
@@ -50,6 +50,16 @@ const names = blk: {
         const kind = if (bf == 1) "bf16" else "fp16";
         const what = if (act == 1) "q and rows " ++ kind else kind ++ " cache";
         t[i][act][bf] = std.fmt.comptimePrint("hip planned decode walk {s} d 256, {d} heads over {d}, {s} spans ({s})", .{ call, x.heads, x.kv, span, what });
+    };
+    break :blk t;
+};
+
+/// The controls' names [act][bf16], one for each tf_plan_score256_* kernel.
+const control_names = blk: {
+    var t: [2][2][]const u8 = undefined;
+    for (0..2) |act| for (0..2) |bf| {
+        const kernel = std.fmt.comptimePrint("tf_plan_score256_{s}{s}", .{ if (act == 1) "act_" else "", if (bf == 1) "bf16" else "f16" });
+        t[act][bf] = "control: hip planned decode walk d 256, " ++ kernel ++ "'s grid counted for 16 steps a block";
     };
     break :blk t;
 };
@@ -69,7 +79,7 @@ pub fn spec(i: usize, k: kit.Kind, act: bool, fault: Fault, depth: *const fn (c.
         .served = x.served,
     };
     if (act) s.replaces = "tf_cast, planCausal and tf_cast";
-    if (fault == .steps) s.name = "control: hip planned decode walk d 256, its long-span score grid counted for 16 steps a block";
+    if (fault == .steps) s.name = control_names[@intFromBool(act)][@intFromBool(k == .bf16)];
     return s;
 }
 
@@ -89,8 +99,8 @@ pub fn visible(r: usize, k: usize) usize {
     return std.math.clamp(cut, 1, k);
 }
 
-/// The control's walk: planCausal's four launches at d = 256 (q fp32), the score grid for 2 * steps steps a block.
-pub fn faulty(l: *const hip.Launcher, st: hip.Stream, q: u64, out: u64, scratch: [3]u64, p: hip.launches.PlanRef, heads: usize, kv: usize, span: usize, scale: f32, kind: kit.Kind) !void {
+/// A control: planCausalAs's four launches at d = 256 (q and rows fp32, or the kind with `act`), 2 * steps a block.
+pub fn faulty(l: *const hip.Launcher, st: hip.Stream, q: u64, out: u64, scratch: [3]u64, p: hip.launches.PlanRef, heads: usize, kv: usize, span: usize, scale: f32, kind: kit.Kind, act: bool) !void {
     const which: usize = @intCast(@backingInt(kind) - 1);
     const rows: u32 = @intCast(p.rows);
     const tiles: c_int = @intCast((span + 127) / 128);
@@ -104,7 +114,8 @@ pub fn faulty(l: *const hip.Launcher, st: hip.Stream, q: u64, out: u64, scratch:
     try a.add(@as(c_int, 0));
     const blocks: u32 = @intCast((span + 4 * 4 * 2 * steps - 1) / (4 * 4 * 2 * steps));
     const lds: u32 = @intCast(heads / kv * 256 * 4);
-    try hip.launch.launch(l.plan.score[which], .{ .grid = .{ .x = blocks, .y = @intCast(kv), .z = rows }, .block = .{ .x = 128 }, .shared = lds }, st, &a);
+    const score = if (act) l.plan.score256_act else l.plan.score256;
+    try hip.launch.launch(score[which], .{ .grid = .{ .x = blocks, .y = @intCast(kv), .z = rows }, .block = .{ .x = 128 }, .shared = lds }, st, &a);
     var b: hip.launch.Args = .{};
     try b.add(scratch[0]);
     try b.add(scratch[1]);
@@ -123,5 +134,6 @@ pub fn faulty(l: *const hip.Launcher, st: hip.Stream, q: u64, out: u64, scratch:
     try f.add(out);
     try f.add(tiles);
     try f.add(fixed[3]);
-    try hip.launch.launch(l.sum_partials, .{ .grid = .{ .x = @intCast(heads), .y = rows }, .block = .{ .x = 256 } }, st, &f);
+    if (act) try f.add(@as(c_int, @backingInt(kind)));
+    try hip.launch.launch(if (act) l.plan.sum_act else l.sum_partials, .{ .grid = .{ .x = @intCast(heads), .y = rows }, .block = .{ .x = 256 } }, st, &f);
 }
