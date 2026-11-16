@@ -10,6 +10,7 @@ pub const Http = struct {
     model: []const u8,
     closing: ?*const std.atomic.Value(bool) = null, // the server stops: an exchange under way is cut off
     key: ?[]const u8 = null, // TF_PREFILL_API_KEY_FILE's key, sent as a Bearer token to a GB10 started with --api-key
+    cached: u64 = 0, // the last reply's usage.prompt_tokens_details.cached_tokens: what the GB10 did not compute (0: none said)
 
     pub fn trigger(h: *Http) fabric.prefill_source.Trigger {
         return .{ .ptr = h, .start_fn = start };
@@ -21,6 +22,7 @@ pub const Http = struct {
         const body = try request(h.gpa, h.model, handoff, tokens);
         defer h.gpa.free(body);
         var x: Exchange = .{ .h = h, .body = body };
+        h.cached = 0;
         const deadline = fabric.words.nowNs() + seconds(tokens.len) * std.time.ns_per_s;
         var future = h.io.concurrent(Exchange.run, .{&x}) catch return error.TriggerUnavailable;
         while (!x.done.load(.acquire)) {
@@ -35,7 +37,8 @@ pub const Http = struct {
             };
         }
         future.await(h.io);
-        return x.result;
+        try x.result;
+        h.cached = x.cached;
     }
 };
 
@@ -50,6 +53,7 @@ const Exchange = struct {
     body: []u8,
     done: std.atomic.Value(bool) = .init(false),
     result: anyerror!void = {},
+    cached: u64 = 0,
 
     fn run(x: *Exchange) void {
         defer x.done.store(true, .release);
@@ -83,9 +87,28 @@ const Exchange = struct {
         var transfer: [16 << 10]u8 = undefined;
         const r = resp.reader(&transfer);
         const reply = try r.allocRemaining(h.gpa, .limited(1 << 20));
-        h.gpa.free(reply);
+        defer h.gpa.free(reply);
+        x.cached = cachedIn(h.gpa, reply);
     }
 };
+
+/// The reply's usage.prompt_tokens_details.cached_tokens, 0 when the reply has none or is not JSON.
+pub fn cachedIn(gpa: std.mem.Allocator, reply: []const u8) u64 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, reply, .{}) catch return 0;
+    defer parsed.deinit();
+    const usage = if (parsed.value == .object) parsed.value.object.get("usage") orelse return 0 else return 0;
+    const details = if (usage == .object) usage.object.get("prompt_tokens_details") orelse return 0 else return 0;
+    const n = if (details == .object) details.object.get("cached_tokens") orelse return 0 else return 0;
+    return if (n == .integer and n.integer > 0) @intCast(n.integer) else 0;
+}
+
+test "the producer's cached tokens come from the reply's usage, and are 0 when it says none" {
+    const gpa = std.testing.allocator;
+    try std.testing.expectEqual(@as(u64, 15872), cachedIn(gpa, "{\"usage\": {\"prompt_tokens\": 16000, \"prompt_tokens_details\": {\"cached_tokens\": 15872}}}"));
+    try std.testing.expectEqual(@as(u64, 0), cachedIn(gpa, "{\"usage\": {\"prompt_tokens\": 16000}}"));
+    try std.testing.expectEqual(@as(u64, 0), cachedIn(gpa, "{\"usage\": {\"prompt_tokens_details\": {\"cached_tokens\": null}}}"));
+    try std.testing.expectEqual(@as(u64, 0), cachedIn(gpa, "not json"));
+}
 
 /// The request's JSON: the prefix's ids, one greedy token and the handoff MCDMA reads (no model field: the default).
 pub fn request(gpa: std.mem.Allocator, model: []const u8, handoff: [16]u8, tokens: []const u32) ![]u8 {

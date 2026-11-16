@@ -460,6 +460,7 @@ pub const LaneHost = struct {
         load.credit(h, job);
         h.unlock();
         rows_host.prefilled(h, job.request.prompt.len - job.stream.cached, done - began);
+        remote.prefilled(h, job, done - began);
         job.reported();
         if (h.cache) |store| {
             store.report(job.request.prompt.len, remote.cachedOwn(job), store.counts.kept - job.kept0);
@@ -591,8 +592,6 @@ test {
     _ = @import("lane_host_decode_share_test.zig");
     _ = @import("lane_host_srpt.zig");
     _ = @import("lane_host_env.zig");
-}
-test {
     _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_tests.zig");
     _ = @import("lane_host_fetch.zig");
