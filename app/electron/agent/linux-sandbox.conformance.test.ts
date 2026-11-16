@@ -87,6 +87,22 @@ if (process.platform !== 'linux') {
     assert.notEqual(repoint.code, 0, 'the worktree pointer stays read-only')
     assert.match(readFileSync(path.join(innerWorktree, '.git'), 'utf8'), /^gitdir: \.\.\/\.git\/worktrees\/inner/, 'the pointer was not rewritten')
 
+    // A worktree inside the workspace whose shared directory resolves outside it is refused.
+    const sharedWorktree = path.join(cwd, 'shared-worktree')
+    const sharedGitdir = path.join(cwd, '.git', 'worktrees', 'shared')
+    const outsideShared = path.join(root, 'elsewhere-shared', '.git')
+    mkdirSync(path.join(outsideShared, 'hooks'), { recursive: true })
+    mkdirSync(sharedGitdir, { recursive: true })
+    mkdirSync(sharedWorktree, { recursive: true })
+    writeFileSync(path.join(sharedWorktree, '.git'), 'gitdir: ../.git/worktrees/shared\n')
+    writeFileSync(path.join(sharedGitdir, 'commondir'), `${path.relative(sharedGitdir, outsideShared)}\n`)
+    const refusedShared = await runSandboxedCommand('printf should-not-run', { cwd, profile: 'build-test' })
+    assert.equal(refusedShared.code, 126, 'a worktree with an outside shared directory is refused')
+    assert.match(refusedShared.stderr, /shared git directory is outside the workspace/)
+    rmSync(sharedWorktree, { recursive: true, force: true })
+    rmSync(path.join(cwd, '.git', 'worktrees', 'shared'), { recursive: true, force: true })
+    rmSync(path.join(root, 'elsewhere-shared'), { recursive: true, force: true })
+
     // A worktree outside the workspace is refused before the command runs.
     const outsideWorktree = path.join(root, 'outside-worktree')
     mkdirSync(path.join(root, 'elsewhere', '.git', 'worktrees', 'outside'), { recursive: true })
@@ -112,7 +128,7 @@ if (process.platform !== 'linux') {
     assert.notEqual(cancelled.code, 0, 'cancelled command did not report success')
     assert.ok(Date.now() - started < 10_000, 'cancellation stops the sandboxed command promptly')
 
-    console.log('CONFORMANCE: passed (filesystem, git controls, placeholders, nested repositories, worktree pinning and refusal, network and cancellation enforced)')
+    console.log('CONFORMANCE: passed (filesystem, git controls, placeholders, nested repositories, worktree pinning and refusal, shared-directory refusal, network and cancellation enforced)')
   } finally {
     server.close()
     rmSync(root, { recursive: true, force: true })
