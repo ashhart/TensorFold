@@ -69,6 +69,8 @@ pub const Engine = struct {
     weights: loader.Weights,
     tables: tables.Tables,
     host: forward.Host,
+    /// Where the last forward's staged span starts (its end is `host.used`): the next prompt stages past it.
+    stage_from: usize = 0,
     qk: [2]hip.DeviceBuffer,
     arena: hip.Arena,
     drawer: serve.draw.Drawer,
@@ -404,13 +406,31 @@ pub const Engine = struct {
     /// `prompt`, the state before each of `marks`' rows written aside (forward.Mark, rows ascending).
     pub fn promptMarked(e: *Engine, c: *cache.Caches, tokens: []const u32, marks: []const forward.Mark) !forward.Out {
         if (e.stopped) return error.GroupStopped;
-        // the staging is reused: the last forward's uploads must have left it
-        try e.stream.synchronize();
-        e.host.used = 0;
-        e.arena.reset();
+        // the next chunk staged while the last forward runs, in staging that forward's uploads no longer read
         const segs = [_]forward.Seg{.{ .c = c, .tokens = tokens, .pos = c.len, .marks = marks }};
-        const staged = try forward.stage(&e.weights.model, &e.host, &segs, false);
-        const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged);
+        const len = e.host.staging.bytes.len;
+        const half = len / 2;
+        var staged: ?forward.Staged = null;
+        // with the GPU idle no forward hides the gather: it waits for the layers before the n-gram layer instead
+        const idle = try e.stream.done();
+        if (e.host.used <= half) {
+            e.host.used = half; // the last forward's span is in [stage_from, used): below half
+            e.host.limit = len;
+            staged = forward.stageWith(&e.weights.model, &e.host, &segs, false, idle) catch |err| if (err == error.StagingTooSmall) null else return err;
+        } else if (e.stage_from >= half) {
+            e.host.used = 0;
+            e.host.limit = e.stage_from;
+            staged = forward.stageWith(&e.weights.model, &e.host, &segs, false, idle) catch |err| if (err == error.StagingTooSmall) null else return err;
+        }
+        try e.stream.synchronize();
+        e.host.limit = len;
+        e.arena.reset();
+        if (staged == null) {
+            e.host.used = 0;
+            staged = try forward.stageWith(&e.weights.model, &e.host, &segs, false, true);
+        }
+        e.stage_from = staged.?.from;
+        const out = try forward.run(e.ops(&e.arena), &e.weights.model, &e.host, &segs, false, staged.?);
         c.len += tokens.len;
         return out;
     }
@@ -439,6 +459,8 @@ pub const Engine = struct {
         };
         try e.stream.synchronize();
         e.host.used = 0;
+        e.host.limit = e.host.staging.bytes.len;
+        e.stage_from = 0;
         e.arena.reset();
         const staged = try forward.stage(&e.weights.model, &e.host, segs, true);
         // a window's plan words are written here, outside the graph its round may replay, which copies them up
