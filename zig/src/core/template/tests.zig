@@ -96,6 +96,12 @@ const probes = [_]struct { []const u8, ?[]const u8, ?[]const u8 }{
     .{ "{{ ['b', 'a'] | sort | join }}{{ [{'n': 'b'}, {'n': 'a'}] | sort(attribute='n') | map(attribute='n') | join }}{{ [{'n': 1}] | map(attribute='m', default='d') | join }}", "ababd", null },
     .{ "{% for x in 'ab' %}{{ x }}{{ loop.index0 }}{% endfor %}|{% for k in {'p': 1, 'q': 2} %}{{ k }}{% endfor %}|{% for x in none %}{% endfor %}", null, null },
     .{ "{%- for m in messages -%}\n    {%- set content = m.content | trim -%}\n    {{- '<' + m.role + '>' + content -}}\n{%- endfor %}\nx", "<user>Hi<assistant>Hello<user>Byex", null },
+    .{ "{{ '0.5'|float }}|{{ 3|float }}|{{ 'abc'|float }}|{{ 'abc'|float(2.5) }}|{{ true|float }}|{{ ' 7 '|float }}|{{ none|float }}|{{ 0.9|float }}|{{ '1e3'|float }}|{{ ''|float }}|{{ '0x10'|float }}", "0.5|3.0|0.0|2.5|1.0|7.0|0.0|0.9|1000.0|0.0|0.0", null },
+    .{ "{{ '1_0'|float }}|{{ '1__0'|float }}|{{ '_1'|float }}|{{ '1_'|float }}|{{ '1_0.5_5'|float }}|{{ [1]|float }}|{{ {}|float(7) }}|{{ 'x'|float(default=2.5) }}", "10.0|0.0|0.0|0.0|10.55|0.0|7|2.5", null },
+    .{ "{{ '1.'|float }}|{{ '.5'|float }}|{{ '+3'|float }}|{{ '-0'|float }}|{{ 'inf'|float }}|{{ 'nan'|float }}|{{ '1e'|float }}|{{ '1e1_0'|float }}|{{ '1_.5'|float }}", "1.0|0.5|3.0|-0.0|inf|nan|0.0|10000000000.0|0.0", null },
+    .{ "{{ 1|float(2, 3) }}", null, null },
+    .{ "{{ 1|float(boolean=true) }}", null, null },
+    .{ "{{ undefined_name|float }}", null, null },
 };
 
 test "feature probes match Python jinja2" {
