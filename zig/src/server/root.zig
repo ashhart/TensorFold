@@ -57,6 +57,7 @@ test {
     _ = @import("json");
     _ = @import("std_options.zig");
     _ = @import("fields.zig");
+    _ = @import("reply_code.zig");
     _ = @import("reply_text.zig");
     _ = @import("reply_incremental_test.zig");
     _ = @import("tool_parse.zig");
@@ -158,6 +159,7 @@ test {
     _ = @import("thinking_reserve_test.zig");
     _ = @import("loop_stop_test.zig");
     _ = @import("late_system_test.zig");
+    _ = @import("tool_prose_code_http_test.zig");
     _ = @import("compact.zig");
     _ = @import("compact_test.zig");
     _ = @import("private_files_test.zig");
