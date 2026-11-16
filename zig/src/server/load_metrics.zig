@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
 const ledger = api.load_ledger;
+const reasons = ledger.reasons;
 const Allocator = std.mem.Allocator;
 const Value = json.Value;
 
@@ -27,7 +28,17 @@ pub fn render(w: *std.Io.Writer, s: ledger.Snapshot, id: Identity) !void {
     try family(w, "http_requests_active", "gauge", "Model requests from the end of their headers to the end of their reply, by route group.");
     for (std.enums.values(ledger.RouteGroup)) |g|
         try w.print("{s}http_requests_active{{route=\"{s}\"}} {d}\n", .{ prefix, @tagName(g), s.active(g) });
+    try family(w, "request_refusals_total", "counter", "Requests refused with a client code: capacity, the engine's invalid_request, admission.");
+    for (std.enums.values(reasons.Refusal)) |x|
+        try w.print("{s}request_refusals_total{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), s.refusals[@backingInt(x)] });
+    try family(w, "request_failures_total", "counter", "Requests that ended failed with no refusal code, by fixed reason.");
+    for (std.enums.values(reasons.Failure)) |x|
+        try w.print("{s}request_failures_total{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), s.failed(x) });
     if (s.requests) |r| {
+        try family(w, "requests_waiting_by_reason", "gauge", "Queued requests by the one wait reason each holds; they sum to requests_waiting.");
+        for (std.enums.values(reasons.Wait)) |x|
+            try w.print("{s}requests_waiting_by_reason{{reason=\"{s}\"}} {d}\n", .{ prefix, @tagName(x), r.waiting_by_reason[@backingInt(x)] });
+        try gauge(w, "restore_fallbacks_total", "counter", "Requests whose saved prefix could not be restored: they prefilled from zero and were served.", r.restore_fallbacks);
         try gauge(w, "waiting_prompt_tokens", "gauge", "Prompt tokens of the queued requests, before any kept prefix restores part of them.", r.waiting_prompt_tokens);
         if (r.filling_left) |left| try gauge(w, "filling_prompt_tokens_left", "gauge", "Prompt tokens still to prefill in the foreground passes filling now.", left);
         try gauge(w, "requests_started_total", "counter", "Requests the engine accepted into its queue.", r.started);
@@ -70,9 +81,15 @@ pub fn object(a: Allocator, s: ledger.Snapshot, now_s: f64, model: []const u8) A
     const http = try json.newObject(a);
     for (std.enums.values(ledger.RouteGroup)) |g| try http.put(a, @tagName(g), try json.intValue(a, s.active(g)));
     try o.put(a, "http_active", .{ .object = http });
+    const refusals = try json.newObject(a);
+    for (std.enums.values(reasons.Refusal)) |x| try refusals.put(a, @tagName(x), try json.intValue(a, s.refusals[@backingInt(x)]));
+    try o.put(a, "refusals", .{ .object = refusals });
     if (s.requests) |r| {
         try o.put(a, "running", try json.intValue(a, r.running));
         try o.put(a, "waiting", try json.intValue(a, r.waiting));
+        const by_reason = try json.newObject(a);
+        for (std.enums.values(reasons.Wait)) |x| try by_reason.put(a, @tagName(x), try json.intValue(a, r.waiting_by_reason[@backingInt(x)]));
+        try o.put(a, "waiting_by_reason", .{ .object = by_reason });
         try o.put(a, "requests_started", try json.intValue(a, r.started));
         try o.put(a, "requests_requeued", try json.intValue(a, r.requeued));
         try o.put(a, "background_yields", try json.intValue(a, r.yields));

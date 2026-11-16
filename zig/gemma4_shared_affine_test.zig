@@ -109,8 +109,8 @@ test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_lane_projection, &hash, .{});
-        // 66155d5ee's bytes (8-bit lane codes and producer sums, Refs #2502, under the metal_lane_q8 contract)
-        try std.testing.expectEqualStrings("159f39224b5bb60fd2ced301496d91662d2958056bd291d13d8a5db5186dd41a", &std.fmt.bytesToHex(hash, .lower));
+        // Packed affine lanes with producer sums and independent prompt row blocks.
+        try std.testing.expectEqualStrings("7befe2028dae5036541f311f230a02d5652e634450ef16dc66dce6e15e935277", &std.fmt.bytesToHex(hash, .lower));
     }
 }
 test "released lane parameters and conservative scratch size" {

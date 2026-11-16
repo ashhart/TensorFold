@@ -1,4 +1,4 @@
-//! The reg kernel, every output byte: 1-16 rows against the cooperative one, 129-2048 rows against 128-row dispatches.
+//! Each lane width's output bytes: reg against cooperative, whole prompts against short dispatches.
 const std = @import("std");
 const mtl = @import("metal");
 const lane = @import("core_lane");
@@ -117,6 +117,15 @@ pub fn main(init: std.process.Init) !void {
     if (!device.tensorUnits()) return error.TensorUnitsRequired;
     const queue = try device.queue();
     defer queue.deinit();
+    const args = try init.minimal.args.toSlice(a);
+    const only_long = args.len == 2 and std.mem.eql(u8, args[1], "--lane-long-only");
+    if (args.len > 1 and !only_long) return error.BadArguments;
+    if (only_long) {
+        var random = std.Random.DefaultPrng.init(0x7e9);
+        const checked = try @import("core_lane_long.zig").check(a, device, queue, random.random());
+        std.debug.print("LANE LONG CHECK PASS cases={d}: every byte equals main's frozen 16-row kernel\n", .{checked});
+        return;
+    }
     const order = try lane.RegOrder.init(device);
     defer order.deinit();
     var prng = std.Random.DefaultPrng.init(0x7e9);
@@ -187,4 +196,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("REG CHECK PASS cases={d}: every output byte equals the cooperative kernel's\n", .{cases});
     const long = try longCheck(a, device, queue, order, rng);
     std.debug.print("LONG CHECK PASS cases={d}: one dispatch of up to {d} rows equals {d}-row dispatches byte for byte\n", .{ long, lane.max_reg_rows, lane.reg_rows });
+    const wide = try @import("core_lane_long.zig").check(a, device, queue, rng);
+    std.debug.print("LANE LONG CHECK PASS cases={d}: every byte equals main's frozen 16-row kernel\n", .{wide});
 }

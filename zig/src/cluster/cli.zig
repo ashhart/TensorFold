@@ -386,9 +386,8 @@ fn describe(env: Env, c: config.Config, p: Prepared) !void {
 
 /// Bring this node up over MCDMA and hold: `hold_ns`, then goodbye (serve), or null until a node says goodbye (node).
 fn hostRun(env: Env, p: Prepared, probed: node.Inventory, hold_ns: ?u64) !u8 {
-    // membership knows a node by its unique name in the file, not its probed hardware id, which nodes on a host share
+    // membership knows a node by its unique name in the file (its id is the name's), not its probed hardware id
     var inv = probed;
-    inv.id = node.idFrom(p.spec.names[p.spec.rank]);
     inv.name = .of(p.spec.names[p.spec.rank]);
     try env.out.flush();
     var diag: bringup.Diag = .{};

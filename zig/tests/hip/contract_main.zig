@@ -298,10 +298,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&routers) |*x| try kernels.append(a, x.kernel());
     // the few-row matrix-core tiles run on gfx11's matrix cores only
     const matrix = if (hip.Caps.of(arch)) |v| v.matrix == .wmma11 else false;
-    var items: [item_k.cases.len]item_k.Item = undefined;
-    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
+    // the last one is the few-row passes' control, on its case's geometry
+    var items: [item_k.cases.len + 1]item_k.Item = undefined;
+    for (&items, 0..) |*x, i| x.* = .init(a, &r, s, &l, @min(i, item_k.control.index));
     defer for (&items) |*x| x.deinit();
-    if (matrix) for (&items) |*x| try kernels.append(a, x.kernel());
+    if (matrix) {
+        items[item_k.cases.len].planted = try ctl.function(item_k.control.symbol);
+        for (&items) |*x| try kernels.append(a, x.kernel());
+    }
     var embeds: [4]embed_k.Embed = undefined;
     var nembeds: usize = 0;
     defer for (embeds[0..nembeds]) |*x| x.deinit();

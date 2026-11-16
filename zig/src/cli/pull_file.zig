@@ -137,6 +137,8 @@ fn snapshotPathOk(path: []const u8) bool {
     while (it.next()) |c| {
         if (c.len == 0 or c[c.len - 1] == '.' or c[c.len - 1] == ' ') return false;
         if (std.mem.eql(u8, c, ".") or std.mem.eql(u8, c, "..")) return false;
+        // TensorFold's own names in a model folder (snapshot, save marker, put-back copies) never come from a hub
+        if (std.ascii.startsWithIgnoreCase(c, ".tensorfold") or std.ascii.endsWithIgnoreCase(c, ".tensorfold-rollback")) return false;
     }
     return true;
 }
@@ -181,6 +183,18 @@ test "security: remote snapshot paths are portable and cannot escape on Windows"
         "deep/weights/",
     }) |path| {
         try std.testing.expect(!snapshotPathOk(path));
+    }
+}
+
+test "security: a hub repository cannot plant TensorFold's own snapshot, marker or put-back files" {
+    const planted = [_][]const u8{
+        ".tensorfold-original/SHA256SUMS", ".tensorfold-original/graphs",     ".tensorfold-original.partial/config.json",
+        ".tensorfold-save-pending",        "config.json.tensorfold-rollback", "nested/.TensorFold-Original/graphs",
+        ".tensorfold-benchmark/run.json",  ".TENSORFOLD-SAVE-PENDING",
+    };
+    for (planted) |path| try std.testing.expect(!snapshotPathOk(path));
+    for ([_][]const u8{ ".gitattributes", "tensorfold/config.json", "model.tensorfold.safetensors", "a.tensorfold-rollback.txt" }) |path| {
+        try std.testing.expect(snapshotPathOk(path));
     }
 }
 

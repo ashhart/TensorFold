@@ -316,10 +316,12 @@ pub fn load(
     }
     _ = arena.reset(.retain_capacity);
     const head = try l.proj(tensors.lm_head);
+    const embed = try l.proj(tensors.embed);
+    if (embed.rows() != c.vocab) return error.UnexpectedTensor; // an id below the vocabulary must name a row
     w.model = .{
         .dims = dims,
         .act = o.act,
-        .embed = try l.put(try l.proj(tensors.embed), false),
+        .embed = try l.put(embed, false),
         .blocks = w.blocks,
         .norm_f = try l.float(tensors.norm_f, null),
         .head = try l.put(try l.rows(head, &.{c.vocab}), false),

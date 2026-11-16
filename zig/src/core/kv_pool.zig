@@ -98,7 +98,7 @@ pub const Budget = struct {
     engine_paged: bool = false,
     /// Parts per million of the cache that kept states hold as pool pages (TF_KV_SHARE): made pages past the windows.
     kept_ppm: u32 = 0,
-    /// TF_KV_SHARE with a slot a state (GLM): the cache is its slots, `snaps` at most, and the rest is made pages.
+    /// TF_KV_SHARE with a slot a state (GLM): `snaps` slots at most, where an asked cache goes; the rest made pages.
     slots_only: bool = false,
     /// --prompt-cache-gib named the cache: it comes before every window but the engine's own, which take the rest.
     asked: bool = false,
@@ -131,8 +131,10 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const cache = @min(b.cache, left -| held(l, b, fit, windows(l, b, left) - 1));
-    const taken = @min(b.cache, left -| held(l, b, fit, 0)) - cache; // what the windows past the engine's own took
+    const first: u64 = if (b.slots_only and !b.asked) split(@min(b.cache, left -| held(l, b, fit, 0)), l.snap_bytes, b.snaps).snaps * l.snap_bytes else 0; // TF_KV_SHARE's slots, where an asked cache goes
+    const rest = left - first; // what the windows past the engine's own and the rest of the cache share
+    const cache = first + @min(b.cache - first, rest -| held(l, b, fit, windows(l, b, rest) - 1));
+    const taken = first + @min(b.cache - first, rest -| held(l, b, fit, 0)) - cache; // what the windows past the engine's own took
     const kept = if (b.slots_only) cache - split(cache, l.snap_bytes, b.snaps).snaps * l.snap_bytes else cache / 1_000_000 * b.kept_ppm + cache % 1_000_000 * b.kept_ppm / 1_000_000; // the cache's share as pages
     const c = split(cache - kept, l.snap_bytes, b.snaps);
     left -= c.snaps * l.snap_bytes + c.copied;
@@ -174,7 +176,7 @@ fn windows(l: Layout, b: Budget, rest: u64) u64 {
     if (!b.engine_paged or b.window == 0 or b.asked) return 1; // an asked cache comes before all but the engine's own
     const own = ownPages(l, b);
     const room = @min(b.lanes, 1 + (b.room - own) / (own + l.fixed_bytes)); // a window and a fixed part each
-    return if (own == 0) room else @min(room, 1 + rest / own); // `rest`: past the engine's own window and every fixed part
+    return if (own == 0) room else @min(room, 1 + rest / own); // `rest`: past the engine's own window, every fixed part and TF_KV_SHARE's slots
 }
 
 /// The bytes of the engine's own window as pages, set aside first when its rows are pages (0 when it has a window).

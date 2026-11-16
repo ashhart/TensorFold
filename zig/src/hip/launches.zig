@@ -10,6 +10,7 @@ const Stream = @import("stream.zig").Stream;
 const caps = @import("caps.zig");
 const affine = @import("launches/affine.zig");
 pub const dense = @import("launches/dense.zig");
+pub const item = @import("launches/matrix_item.zig");
 
 const util = @import("launches/util.zig");
 

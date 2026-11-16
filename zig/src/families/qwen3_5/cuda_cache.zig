@@ -137,8 +137,8 @@ pub const Cache = struct {
     /// Positions the newest forward wrote up to: a tap ring holds them until the next forward, whatever `keep` lands.
     written: usize = 0,
     logits: []u16,
-    /// The newest verify window, until its path is kept: where it started, its rows.
-    last: ?struct { start: usize, rows: usize } = null,
+    /// The newest verify window, until its path is kept: where it started, its rows, and whether it copied `before`.
+    last: ?struct { start: usize, rows: usize, undo: bool = true } = null,
     /// Kept rows (rows 0..pend-1 of `pbuf`) the state does not hold yet: recorded slot scans replay them.
     pend: c_int = 0,
     /// The pending heads (pendBytes), allocated at the first deferred keep.
@@ -252,8 +252,8 @@ pub const Cache = struct {
     }
 
     /// Publish a completed forward's metadata, including one-row slots that already advanced in place.
-    pub fn advanced(self: *Cache, rows: usize, record: bool) void {
-        self.last = if (record) .{ .start = self.len, .rows = rows } else null;
+    pub fn advanced(self: *Cache, rows: usize, record: bool, undo: bool) void {
+        self.last = if (record) .{ .start = self.len, .rows = rows, .undo = undo } else null;
         self.len += rows;
         self.written = self.len;
     }
@@ -302,6 +302,7 @@ pub const Cache = struct {
         const last = self.last orelse return error.NothingToKeep;
         if (path.len == 0) {
             if (last.rows == 1) {
+                if (!last.undo) return error.QwenNoRollbackCopy;
                 try recurrent.mark(self, true);
                 try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
             }

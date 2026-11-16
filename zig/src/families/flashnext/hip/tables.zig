@@ -1,9 +1,13 @@
 //! The n-gram tables in host memory (the checkpoint's mapped shards): a window's rows gathered for the device.
 const std = @import("std");
+const builtin = @import("builtin");
 const core = @import("core");
 const config = @import("../config.zig");
 const tensors = @import("tensors.zig");
 const ngram = @import("ngram.zig");
+const host_pages = @import("../host_pages.zig");
+/// The parked workers a gather spreads over: no backend in them, so the CUDA n-gram reader shares them.
+const pool = @import("../host_pool.zig");
 
 /// One shard's packed rows and their group tables, as mapped.
 pub const Shard = struct { words: []const u8, scales: []const u8, biases: []const u8 };
@@ -11,9 +15,9 @@ pub const Shard = struct { words: []const u8, scales: []const u8, biases: []cons
 /// A gather copies the checkpoint's rows in id order: a staging too small, or a row past the last shard.
 const Error = error{ StagingTooSmall, NgramRowOutOfRange };
 
-/// Threads a gather takes at most, and rows a thread takes at least before the gather spreads.
-const max_workers = 8;
-const rows_per_worker = 256;
+/// Parts a gather spreads over at most, and rows a part takes before the gather stops adding parts.
+const max_parts = 32;
+const rows_per_part = 2;
 
 /// The shards' rows as mapped: what a gather reads, apart from the hasher that names the rows.
 pub const Rows = struct {
@@ -72,7 +76,7 @@ pub const Rows = struct {
         return .{ .shard = s, .row = at - r.starts[s] };
     }
 
-    /// Every byte a gather reads: the pages a checkpoint release over the weights must leave mapped.
+    /// Every byte a gather reads (a shard's three arrays): the pages a checkpoint release over the weights keeps.
     pub fn spans(r: *const Rows, a: std.mem.Allocator) ![]const []const u8 {
         const out = try a.alloc([]const u8, r.shards.len * 3);
         for (r.shards, 0..) |s, i| {
@@ -83,67 +87,105 @@ pub const Rows = struct {
         return out;
     }
 
-    /// Each id's packed words, scales and biases copied into the three staging slices, in id order.
-    pub fn gather(r: *const Rows, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
+    /// Each id's packed words, scales and biases into the staging slices in id order; `w`'s parts warm first.
+    pub fn gather(r: *const Rows, w: *Workers, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
         const wb = r.wordBytes();
         const tb = r.tableBytes();
         if (words.len < ids.len * wb or scales.len < ids.len * tb or biases.len < ids.len * tb)
             return error.StagingTooSmall;
-        const workers = @min(max_workers, @max(1, ids.len / rows_per_worker));
-        const per = (ids.len + workers - 1) / workers;
-        var results: [max_workers]Error!void = @splat({});
-        var threads: [max_workers]?std.Thread = @splat(null);
-        for (1..workers) |w| {
-            const last = @min(ids.len, (w + 1) * per);
-            const job = .{ &results[w], r, ids, words, scales, biases, w * per, last };
-            threads[w] = std.Thread.spawn(.{}, run, job) catch null;
-        }
-        run(&results[0], r, ids, words, scales, biases, 0, @min(ids.len, per));
-        for (1..workers) |w| {
-            const last = @min(ids.len, (w + 1) * per);
-            if (threads[w]) |th| th.join() else run(&results[w], r, ids, words, scales, biases, w * per, last);
-        }
-        for (results[0..workers]) |res| try res;
+        const parts = @min(max_parts, @max(1, ids.len / rows_per_part));
+        const call: Parts = .{
+            .r = r,
+            .w = w,
+            .ids = ids,
+            .words = words,
+            .scales = scales,
+            .biases = biases,
+            .per = (ids.len + parts - 1) / parts,
+        };
+        // a gather of pages asked for before is a copy alone: the caller takes every part, waking no worker
+        const p = if (w.cold(r, ids)) w.pool else null;
+        const run = p orelse {
+            for (0..parts) |i| try call.part(i);
+            return;
+        };
+        try run.run(parts, .{ .ctx = &call, .run = Parts.task });
     }
 };
 
-/// Ids [first, last) into their staging rows: every thread copies its own rows, so no two write one.
-fn run(
-    out: *Error!void,
-    r: *const Rows,
-    ids: []const u32,
-    words: []u8,
-    scales: []u8,
-    biases: []u8,
-    first: usize,
-    last: usize,
-) void {
-    out.* = gatherRows(r, ids, words, scales, biases, first, last);
-}
+/// The parked workers a gather spreads its page faults over (none: the caller gathers alone) and the pages it warms.
+pub const Workers = struct {
+    pool: ?*pool.Pool = null,
+    warmer: host_pages.Warmer = .{},
 
-fn gatherRows(
+    /// Whether a row of `ids` holds a page no gather asked for yet (a warm gather copies alone, waking no worker).
+    pub fn cold(w: *Workers, r: *const Rows, ids: []const u32) bool {
+        for (ids) |id| {
+            const at = r.locate(id) catch continue;
+            const sh = r.shards[at.shard];
+            const wb = r.wordBytes();
+            const tb = r.tableBytes();
+            const region = at.shard * 3;
+            if (w.warmer.cold(region, sh.words[at.row * wb ..][0..wb])) return true;
+            if (w.warmer.cold(region + 1, sh.scales[at.row * tb ..][0..tb])) return true;
+            if (w.warmer.cold(region + 2, sh.biases[at.row * tb ..][0..tb])) return true;
+        }
+        return false;
+    }
+};
+
+/// One gather in parts of `per` ids: a part asks for its rows' pages, then copies them into its own staging rows.
+const Parts = struct {
     r: *const Rows,
+    w: *Workers,
     ids: []const u32,
     words: []u8,
     scales: []u8,
     biases: []u8,
-    first: usize,
-    last: usize,
-) Error!void {
-    const wb = r.wordBytes();
-    const tb = r.tableBytes();
-    for (ids[first..last], first..) |id, i| {
-        const at = try r.locate(id);
-        const sh = r.shards[at.shard];
-        @memcpy(words[i * wb ..][0..wb], sh.words[at.row * wb ..][0..wb]);
-        @memcpy(scales[i * tb ..][0..tb], sh.scales[at.row * tb ..][0..tb]);
-        @memcpy(biases[i * tb ..][0..tb], sh.biases[at.row * tb ..][0..tb]);
+    per: usize,
+
+    fn task(ctx: *const anyopaque, i: usize) anyerror!void {
+        const self: *const Parts = @ptrCast(@alignCast(ctx));
+        return self.part(i);
     }
-}
+
+    fn part(self: *const Parts, i: usize) Error!void {
+        const first = @min(self.ids.len, i * self.per);
+        const last = @min(self.ids.len, first + self.per);
+        const wb = self.r.wordBytes();
+        const tb = self.r.tableBytes();
+        // every page of the part is asked for before its first byte is read: the reads wait together, not one by one
+        for (self.ids[first..last]) |id| self.ask(id);
+        for (self.ids[first..last], first..) |id, n| {
+            const at = try self.r.locate(id);
+            const sh = self.r.shards[at.shard];
+            @memcpy(self.words[n * wb ..][0..wb], sh.words[at.row * wb ..][0..wb]);
+            @memcpy(self.scales[n * tb ..][0..tb], sh.scales[at.row * tb ..][0..tb]);
+            @memcpy(self.biases[n * tb ..][0..tb], sh.biases[at.row * tb ..][0..tb]);
+        }
+    }
+
+    /// Row `id`'s three pages, best effort: a row past the last shard is refused by the copy.
+    fn ask(self: *const Parts, id: u32) void {
+        const at = self.r.locate(id) catch return;
+        const sh = self.r.shards[at.shard];
+        const wb = self.r.wordBytes();
+        const tb = self.r.tableBytes();
+        // a shard's words, scales and biases are its three warmer regions, in this order
+        const region = at.shard * 3;
+        self.w.warmer.warm(region, sh.words[at.row * wb ..][0..wb]);
+        self.w.warmer.warm(region + 1, sh.scales[at.row * tb ..][0..tb]);
+        self.w.warmer.warm(region + 2, sh.biases[at.row * tb ..][0..tb]);
+    }
+};
 
 pub const Tables = struct {
     rows: Rows,
     hasher: ngram.Hasher,
+    /// The gather's parked workers and its pages' advice; freed on deinit.
+    workers: Workers,
+    /// The spans the warmer covers, on the arena `init` was given.
+    live: []const []const u8,
 
     pub fn wordBytes(t: Tables) usize {
         return t.rows.wordBytes();
@@ -153,10 +195,11 @@ pub const Tables = struct {
         return t.rows.tableBytes();
     }
 
-    /// The tables of the PLE layer `layer` from the mapped checkpoint; the shards' rows as the reference splits them.
+    /// The tables of PLE layer `layer` as the reference splits them, with the gather's workers and page advice.
     pub fn init(
         a: std.mem.Allocator,
         ck: *core.checkpoint.Checkpoint,
+        io: std.Io,
         c: *const config.Config,
         layer: usize,
         spelling: []const u8,
@@ -192,24 +235,40 @@ pub const Tables = struct {
         const dims = c.ple_dim / heads;
         if (shards[0].words.len != (starts[1] - starts[0]) * dims * spec.?.bits / 8) return error.UnexpectedNgramTable;
         const sizes = Rows.split(starts);
-        return .{
-            .rows = .{
-                .shards = shards,
-                .starts = starts,
-                .wide = sizes.wide,
-                .narrow = sizes.narrow,
-                .extra = sizes.extra,
-                .dims = dims,
-                .bits = spec.?.bits,
-                .group = spec.?.group,
-            },
-            .hasher = try ngram.Hasher.init(c),
+        var r: Rows = .{
+            .shards = shards,
+            .starts = starts,
+            .wide = sizes.wide,
+            .narrow = sizes.narrow,
+            .extra = sizes.extra,
+            .dims = dims,
+            .bits = spec.?.bits,
+            .group = spec.?.group,
         };
+        const live = try r.spans(a);
+        errdefer a.free(live);
+        var t: Tables = .{
+            .rows = r,
+            .hasher = try ngram.Hasher.init(c),
+            .workers = .{ .warmer = try host_pages.Warmer.init(a, live) },
+            .live = live,
+        };
+        errdefer t.workers.warmer.deinit(a);
+        t.workers.pool = try pool.Pool.create(a, io);
+        return t;
+    }
+
+    /// The parked workers freed and the advice's pages forgotten.
+    pub fn deinit(t: *Tables, a: std.mem.Allocator) void {
+        if (t.workers.pool) |p| p.destroy();
+        t.workers.warmer.deinit(a);
+        a.free(t.live);
+        t.* = undefined;
     }
 
     /// Each id's packed words, scales and biases copied into the three staging slices, in id order.
-    pub fn gather(t: *const Tables, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
-        return t.rows.gather(ids, words, scales, biases);
+    pub fn gather(t: *Tables, ids: []const u32, words: []u8, scales: []u8, biases: []u8) !void {
+        return t.rows.gather(&t.workers, ids, words, scales, biases);
     }
 
     /// Every byte a gather reads at runtime: the pages a checkpoint release must leave mapped.
@@ -245,13 +304,23 @@ const Fake = struct {
     starts: []usize,
     arrays: [3][]u8,
     rows: Rows,
+    /// The gather's parked workers (a pool over `io`) and the page advice over `spans`.
+    workers: Workers,
+    spans: []const []const u8,
 
     fn init(a: std.mem.Allocator, sizes: []const usize, dims: usize, bits: u8, group: usize) !Fake {
+        return initOn(a, sizes, dims, bits, group, null);
+    }
+
+    /// The same shards gathered by `threads` parked workers (null: the caller alone, as without a pool).
+    fn initOn(a: std.mem.Allocator, sizes: []const usize, dims: usize, bits: u8, group: usize, threads: ?std.Io) !Fake {
         var f: Fake = .{
             .shards = try a.alloc(Shard, sizes.len),
             .starts = try a.alloc(usize, sizes.len + 1),
             .arrays = .{ &.{}, &.{}, &.{} },
             .rows = undefined,
+            .workers = undefined,
+            .spans = &.{},
         };
         const wb = dims * bits / 8;
         const tb = dims / group * 2;
@@ -281,16 +350,22 @@ const Fake = struct {
             .bits = bits,
             .group = group,
         };
+        f.spans = try f.rows.spans(a);
+        f.workers = .{ .warmer = try host_pages.Warmer.init(a, f.spans) };
+        if (threads) |io| f.workers.pool = try pool.Pool.create(a, io);
         return f;
     }
 
     fn deinit(f: *Fake, a: std.mem.Allocator) void {
+        if (f.workers.pool) |p| p.destroy();
+        f.workers.warmer.deinit(a);
         for (f.arrays) |arr| a.free(arr);
+        a.free(f.spans);
         a.free(f.shards);
         a.free(f.starts);
     }
 
-    fn gathered(f: *const Fake, a: std.mem.Allocator, ids: []const u32) !Staging {
+    fn gathered(f: *Fake, a: std.mem.Allocator, ids: []const u32) !Staging {
         const s: Staging = .{
             .words = try a.alloc(u8, ids.len * f.rows.wordBytes()),
             .scales = try a.alloc(u8, ids.len * f.rows.tableBytes()),
@@ -299,7 +374,7 @@ const Fake = struct {
         @memset(s.words, 0);
         @memset(s.scales, 0);
         @memset(s.biases, 0);
-        try f.rows.gather(ids, s.words, s.scales, s.biases);
+        try f.rows.gather(&f.workers, ids, s.words, s.scales, s.biases);
         return s;
     }
 
@@ -400,9 +475,78 @@ test "gather: rows copied by several threads equal one thread's, and a bad row o
     past[0] = @intCast(f.starts[sizes.len]);
     const small = try a.alloc(u8, ids.len * f.rows.wordBytes());
     defer a.free(small);
-    try std.testing.expectError(error.NgramRowOutOfRange, f.rows.gather(&past, small, want_scales, want_biases));
+    try std.testing.expectError(error.NgramRowOutOfRange, f.rows.gather(&f.workers, &past, small, want_scales, want_biases));
     const short = small[0 .. small.len - 1];
-    try std.testing.expectError(error.StagingTooSmall, f.rows.gather(&ids, short, want_scales, want_biases));
+    try std.testing.expectError(error.StagingTooSmall, f.rows.gather(&f.workers, &ids, short, want_scales, want_biases));
+}
+
+test "gather: the parked pool's parts copy the same bytes as one thread for every id count" {
+    const a = std.testing.allocator;
+    var sizes: [48]usize = @splat(120);
+    for (sizes[0..4]) |*s| s.* = 121;
+    var total: usize = 0;
+    for (sizes) |n| total += n;
+    var all: [8193]u32 = undefined;
+    for (&all, 0..) |*id, i| id.* = @intCast((i * 7919) % total);
+    var one = try Fake.init(a, &sizes, 160, 4, 32);
+    defer one.deinit(a);
+    var many = try Fake.initOn(a, &sizes, 160, 4, 32, std.testing.io);
+    defer many.deinit(a);
+    for ([_]usize{ 0, 1, 16, 17, 256, 4096, 8192 }) |n| {
+        const ids = all[0..n];
+        // the pool's copy, with a fresh seen set each call so every row's pages are asked for
+        many.workers.warmer.deinit(a);
+        many.workers.warmer = try host_pages.Warmer.init(a, many.spans);
+        const got = try many.gathered(a, ids);
+        defer got.deinit(a);
+        // one thread's, on a warmer that never asks
+        const want = try a.alloc(u8, n * one.rows.wordBytes());
+        defer a.free(want);
+        const want_scales = try a.alloc(u8, n * one.rows.tableBytes());
+        defer a.free(want_scales);
+        const want_biases = try a.alloc(u8, n * one.rows.tableBytes());
+        defer a.free(want_biases);
+        try searchedGather(&one.rows, ids, want, want_scales, want_biases);
+        try std.testing.expectEqualSlices(u8, want, got.words);
+        try std.testing.expectEqualSlices(u8, want_scales, got.scales);
+        try std.testing.expectEqualSlices(u8, want_biases, got.biases);
+    }
+    try std.testing.expectEqual(@as(usize, max_parts - 1), many.workers.pool.?.spawned);
+}
+
+test "gather: a cold call wakes the pool and the same ids gathered again stay on the caller" {
+    const a = std.testing.allocator;
+    var sizes: [4]usize = @splat(300);
+    var ids: [64]u32 = undefined;
+    for (&ids, 0..) |*id, i| id.* = @intCast(i * 7919 % 1200);
+    var f = try Fake.initOn(a, &sizes, 160, 4, 32, std.testing.io);
+    defer f.deinit(a);
+    var got: Fake.Staging = .{
+        .words = try a.alloc(u8, ids.len * f.rows.wordBytes()),
+        .scales = try a.alloc(u8, ids.len * f.rows.tableBytes()),
+        .biases = try a.alloc(u8, ids.len * f.rows.tableBytes()),
+    };
+    defer got.deinit(a);
+    const want = try a.alloc(u8, ids.len * f.rows.wordBytes());
+    defer a.free(want);
+    const want_scales = try a.alloc(u8, ids.len * f.rows.tableBytes());
+    defer a.free(want_scales);
+    const want_biases = try a.alloc(u8, ids.len * f.rows.tableBytes());
+    defer a.free(want_biases);
+    try searchedGather(&f.rows, &ids, want, want_scales, want_biases);
+    try std.testing.expect(f.workers.cold(&f.rows, &ids));
+    try f.rows.gather(&f.workers, &ids, got.words, got.scales, got.biases);
+    try std.testing.expect(!f.workers.cold(&f.rows, &ids));
+    try std.testing.expectEqualSlices(u8, want, got.words);
+    try std.testing.expectEqualSlices(u8, want_scales, got.scales);
+    try std.testing.expectEqualSlices(u8, want_biases, got.biases);
+    const cold_calls = f.workers.pool.?.calls.load(.monotonic);
+    try std.testing.expect(cold_calls >= 1);
+    try f.rows.gather(&f.workers, &ids, got.words, got.scales, got.biases);
+    try std.testing.expectEqualSlices(u8, want, got.words);
+    try std.testing.expectEqualSlices(u8, want_scales, got.scales);
+    try std.testing.expectEqualSlices(u8, want_biases, got.biases);
+    try std.testing.expectEqual(cold_calls, f.workers.pool.?.calls.load(.monotonic));
 }
 
 test "spans: one byte range for each of the three tensors of every shard" {

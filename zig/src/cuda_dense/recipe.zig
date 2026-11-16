@@ -1,5 +1,7 @@
-//! A dense decoder's recipe contract: its geometry, the decls the engine reads, and the attention launch shape.
+//! A dense decoder's recipe contract: its geometry, the decls the engine reads, its tower, and the attention shape.
 const std = @import("std");
+const cuda = @import("cuda");
+const lanes = @import("lanes");
 
 /// A dense GQA decoder's sizes, read from its checkpoint's config before the weights load.
 pub const Geometry = struct {
@@ -96,7 +98,78 @@ fn absent(comptime R: type, comptime name: []const u8) void {
 pub fn check(comptime R: type) void {
     const required = .{ "name", "model_type", "formats", "default_context", "Weights", "Kernels", "geometry", "load", "weightBytes", "embed", "layer", "final", "head" };
     inline for (required) |name| need(R, name);
-    inline for (.{ "post_embed", "Tower", "scores", "propose" }) |name| absent(R, name);
+    inline for (.{ "post_embed", "scores", "propose" }) |name| absent(R, name);
+    if (towerOf(R)) |T| checkTower(T);
+}
+
+/// The recipe's image tower: its `Tower` decl, null when it has none or sets it null (a text-only recipe).
+pub fn towerOf(comptime R: type) ?type {
+    if (!@hasDecl(R, "Tower")) return null;
+    const T: ?type = R.Tower;
+    return T;
+}
+
+/// A tower stage's capture: called after the stage's launches with its device rows [rows, width] bf16 on the stream.
+pub const Tap = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque, stage: []const u8, rows: u64, n: usize, width: usize) anyerror!void };
+
+/// One image of a request, as the lane host gives it: pixels, grid, its first prompt row and its token count.
+pub const Image = lanes.stream.Image;
+
+/// The tower contract at compile time: a compile error naming the first decl that is missing or of another shape.
+pub fn checkTower(comptime T: type) void {
+    if (comptime towerProblem(T)) |why| @compileError(why);
+}
+
+/// The first way `T` misses the tower contract, null when it meets it (checkTower's test hook).
+pub fn towerProblem(comptime T: type) ?[]const u8 {
+    if (@typeInfo(T) != .@"struct") return "a cuda_dense Tower is a struct";
+    if (!@hasDecl(T, "Limits")) return "a cuda_dense Tower declares Limits";
+    inline for (.{ "image_tokens", "max_images" }) |f|
+        if (!@hasField(T.Limits, f) or @FieldType(T.Limits, f) != u32) return "a cuda_dense Tower's Limits has " ++ f ++ ": u32";
+    if (!@hasDecl(T, "default_image_tokens") or @TypeOf(T.default_image_tokens) != u32) return "a cuda_dense Tower declares default_image_tokens: u32";
+    const A = std.mem.Allocator;
+    const sigs = .{
+        .{ "open", .{ A, std.Io, *const cuda.Context, cuda.Stream, []const u8, T.Limits }, *T, true },
+        .{ "openBytes", .{ A, std.Io, []const u8 }, u64, true },
+        .{ "weightBytes", .{ A, std.Io, []const u8 }, u64, true },
+        .{ "prepare", .{ *T, A, []const u8, u32 }, null, true },
+        // encode writes exactly image.tokens rows [tokens, width] bf16 at out, as many as the lane's rows hold
+        .{ "encode", .{ *T, cuda.Stream, *const Image, u64, ?Tap }, void, true },
+        .{ "explain", .{anyerror}, ?[]const u8, false },
+        .{ "deinit", .{*T}, void, false },
+    };
+    inline for (sigs) |sg| if (signatureProblem(T, sg[0], sg[1], sg[2], sg[3])) |why| return why;
+    const P = payload(@typeInfo(@TypeOf(T.prepare)).@"fn".return_type.?);
+    inline for (.{ "pixels", "gh", "gw", "tokens", "hash" }) |f|
+        if (@typeInfo(P) != .@"struct" or !@hasField(P, f)) return "a cuda_dense Tower's prepare returns pixels, gh, gw, tokens and hash";
+    if (!@hasField(T, "marks")) return "a cuda_dense Tower has the field marks";
+    inline for (.{ "open", "image", "close" }) |f|
+        if (!@hasField(@FieldType(T, "marks"), f) or @FieldType(@FieldType(T, "marks"), f) != u32) return "a cuda_dense Tower's marks has " ++ f ++ ": u32";
+    const fields = .{ .{ "mark_ids", [3]u32 }, .{ "limits", T.Limits }, .{ "width", usize } };
+    inline for (fields) |f| if (!@hasField(T, f[0]) or @FieldType(T, f[0]) != f[1]) return "a cuda_dense Tower has the field " ++ f[0] ++ ": " ++ @typeName(f[1]);
+    return null;
+}
+
+fn payload(comptime R: type) type {
+    return switch (@typeInfo(R)) {
+        .error_union => |e| e.payload,
+        else => R,
+    };
+}
+
+/// Whether `T.name` takes `params` and returns `Ret` (null: any), as an error union when `fallible`, else bare.
+fn signatureProblem(comptime T: type, comptime name: []const u8, comptime params: anytype, comptime Ret: ?type, comptime fallible: bool) ?[]const u8 {
+    const why = "a cuda_dense Tower declares " ++ name ++ " of the contract's signature (recipe.zig)";
+    if (!@hasDecl(T, name)) return why;
+    const info = @typeInfo(@TypeOf(@field(T, name)));
+    if (info != .@"fn") return why;
+    const f = info.@"fn";
+    if (f.param_types.len != params.len) return why;
+    inline for (f.param_types, params) |p, want| if (p != want) return why;
+    const ret = f.return_type orelse return why;
+    if ((@typeInfo(ret) == .error_union) != fallible) return why;
+    if (Ret) |r| if (payload(ret) != r) return why;
+    return null;
 }
 
 fn shapeOf(heads: usize, kv_heads: usize, head_dim: usize) !Shape {

@@ -26,7 +26,7 @@ pub const Choices = struct { matrix: Matrix = .auto, stream: bool = true, gemm: 
 
 /// quant/mlx.hpp's GroupTable, Routing and Affine as the kernels take them by value.
 pub const GroupTable = extern struct { p: u64, kind: c_int };
-pub const Routing = extern struct { items: u64 = 0, members: u64 = 0, x_div: c_int = 1, first: c_int = 0 };
+pub const Routing = extern struct { items: u64 = 0, members: u64 = 0, x_div: c_int = 1, first: c_int = 0, few: c_int = 0 };
 pub const Arg = extern struct {
     x: u64,
     words: u64,
@@ -49,7 +49,7 @@ pub const StreamSides = stream_layout.StreamSides;
 pub const Side = struct { words: u64, scale: u64, bias: u64, n: c_int, out: u64 };
 
 comptime {
-    std.debug.assert(@sizeOf(GroupTable) == 16 and @sizeOf(Routing) == 24 and @sizeOf(Arg) == 112 and @sizeOf(StreamSides) == 184);
+    std.debug.assert(@sizeOf(GroupTable) == 16 and @sizeOf(Routing) == 32 and @sizeOf(Arg) == 120 and @sizeOf(StreamSides) == 184);
 }
 
 /// Everything a launch needs beside the kernels.
@@ -457,7 +457,10 @@ pub const Kernels = struct {
     pub fn prefillLaunch(k: *const Kernels, r: *const runtime.Runtime, a: Arg, s: abi.Stream, items: c_int, pairs: c_int, expert_rows: c_int) Error!void {
         const op: registry.Op = if (a.route.items != 0) .routed else .project;
         const e = k.choose(op, .prefill, prefillShape(a, items, pairs, expert_rows)) orelse return refuse("prefill shape");
-        try e.launch(k, .{ .r = r, .s = s, .arg = a, .items = items });
+        var arg = a;
+        // this GPU's cut for a tile with K-parallel passes for items of few rows
+        if (k.reg.rowOf(e)) |row| arg.route.few = @intCast(row.few_rows);
+        try e.launch(k, .{ .r = r, .s = s, .arg = arg, .items = items });
     }
 
     /// The product a prompt launch asks the registry about; a routed plan's pairs, and its average rows per expert.

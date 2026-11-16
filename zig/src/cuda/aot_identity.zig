@@ -3,13 +3,19 @@ const std = @import("std");
 const aot = @import("aot.zig");
 
 pub fn hash(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    var h = std.hash.Wyhash.init(0x616f74);
+    try write(&h, a, io, dir);
+    return h.final();
+}
+
+/// The manifest's text, then each cubin it names by its SHA-256, into any hasher with `update(bytes)`.
+pub fn write(h: anytype, a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     const path = try std.fs.path.join(a, &.{ dir, "aot.json" });
     defer a.free(path);
     const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 24));
     defer a.free(text);
     const parsed = try aot.parseSpecs(a, text);
     defer parsed.deinit();
-    var h = std.hash.Wyhash.init(0x616f74);
     h.update(text);
     for (parsed.value.kernels) |k| {
         const cubin = try std.fmt.allocPrint(a, "{s}/cubins/{s}.cubin", .{ dir, k.hash });
@@ -17,7 +23,6 @@ pub fn hash(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
         const digest = try @import("sys").file_identity.hash(io, cubin, 1 << 26);
         h.update(&digest);
     }
-    return h.final();
 }
 
 test "persistence identity: captured CUDA cubin replacement moves an unchanged manifest key" {

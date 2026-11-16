@@ -215,6 +215,7 @@ pub const Backend = struct {
             count += 1;
         }
         if (count == 0) return;
+        for (tokens[0..count]) |id| if (id >= c.vocab) return error.BadInputToken;
         var device = try hip.DeviceBuffer.fromHost(&h.e.r, std.mem.sliceAsBytes(tokens[0..count]));
         defer device.free();
         const logits = try @import("mtp.zig").logits(compute, hidden, device.base(), count);

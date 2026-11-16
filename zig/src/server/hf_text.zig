@@ -111,7 +111,7 @@ pub const HfText = struct {
             };
             t.overridden = true;
         } else try t.readTemplates(io, a, dir, config);
-        if (template_override == null) t.source = @import("hf_text_parse.zig").template(model_config) orelse t.source;
+        if (template_override == null) t.source = @import("hf_text_parse.zig").builtIn(model_config, t.source) orelse t.source;
         // DeepSeek-V4.x releases ship encoding.py, not Jinja: a checkpoint's Jinja is a third party's (--chat-template)
         if (t.native_deepseek) {
             t.unread_template = t.source.len > 0 or t.tool_source.len > 0;
@@ -336,12 +336,12 @@ pub const HfText = struct {
     fn encodeMaskedFn(ctx: *anyopaque, a: Allocator, s: []const u8, spans: []const model_text.Span, problem: *[]const u8) model_text.Error![]u32 {
         return self(ctx).tok.encodeMasked(a, s, spans) catch |err| {
             if (err == error.OutOfMemory) return error.OutOfMemory;
-            problem.* = if (err == error.UnsafeNormalizedAddedTokenMask)
-                "normalized added tokens cannot be matched safely through this normalizer with request text"
-            else if (err == error.UnsafeAddedTokenMask)
-                "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely"
-            else
-                "the tokenizer cannot encode this prompt with request byte provenance";
+            problem.* = switch (err) {
+                error.UnsafeNormalizedAddedTokenMask => "normalized added tokens cannot be matched safely through this normalizer with request text",
+                error.UnsafeAddedTokenMask => "request text tokenizes to an added-token id in this tokenizer; the prompt cannot be encoded safely",
+                error.RegexBudget => "the tokenizer's split pattern needs more work on this prompt than a prompt of its length is allowed",
+                else => "the tokenizer cannot encode this prompt with request byte provenance",
+            };
             return error.Template;
         };
     }

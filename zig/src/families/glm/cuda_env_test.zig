@@ -15,9 +15,12 @@ const switches = [_]Name{
     .{ .name = "TF_GLM_PDL", .default = true },
     .{ .name = "TF_GLM_PROMPT_STEPS", .default = true },
     .{ .name = "TF_GLM_SHARED", .default = true },
+    .{ .name = "TF_GLM_DSEL", .default = true },
 };
 const counts = [_][:0]const u8{"TF_GLM_DFLASH2_LOG"};
 const reals = [_][:0]const u8{"TF_GLM_DRAFT_CONFIDENCE"};
+/// The window GLM may serve past config.json's: GLM's raisedCeiling reads it at the open, after these rows' check.
+const windows = [_][:0]const u8{"TF_GLM_CONTEXT_CEILING"};
 
 /// The row by name without `rule`, so a missing row fails an assertion instead of panicking.
 fn row(name: []const u8) !e.Rule {
@@ -54,12 +57,13 @@ test "GLM strict env: every GLM reader's name is a glm row, and the glm scope ho
     for (switches) |s| try t.expectEqual(e.Kind.flag, (try row(s.name)).kind);
     for (counts) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     for (reals) |name| try t.expectEqual(e.Kind.real, (try row(name)).kind);
+    for (windows) |name| try t.expectEqual(e.Kind.u64, (try row(name)).kind);
     var n: usize = 0;
     for (e.rules) |r| if (r.scope == .glm) {
         try t.expect(std.mem.startsWith(u8, r.name, "TF_GLM_"));
         n += 1;
     };
-    try t.expectEqual(switches.len + counts.len + reals.len, n);
+    try t.expectEqual(switches.len + counts.len + reals.len + windows.len, n);
 }
 
 test "GLM strict env: switches keep unset, blank, 0 and 1, and refuse words and padded digits by name" {
@@ -136,4 +140,39 @@ test "GLM strict env: the DFlash2 cut is a finite chance from 0 to 1, read as a 
     _ = env.setenv("TF_GLM_DRAFT_CONFIDENCE", "1.5", 1);
     try t.expectError(error.InvalidEnvironment, confidence());
     try t.expectError(error.InvalidEnvironment, @import("cuda_env.zig").startup());
+}
+
+test "GLM strict env: the context ceiling is a whole token count from 1 to 2147483616; unset or blank keeps config.json's" {
+    for (windows) |name| {
+        _ = try row(name);
+        for ([_]?[]const u8{ null, "", " \t" }) |raw| {
+            try t.expectEqual(@as(?u64, null), try e.value(?u64, name, raw, null));
+            if (raw) |v| try check(name, v, true);
+        }
+        for ([_][]const u8{ "1", "2097152", "2147483616" }) |raw| {
+            try t.expectEqual(@as(?u64, try std.fmt.parseInt(u64, raw, 10)), try e.value(?u64, name, raw, null));
+            try check(name, raw, true);
+        }
+        for ([_][]const u8{ "0", "2147483617", "+2097152", " 2097152", "2097152 ", "2M", "0x200000", "2097152.0" }) |raw| try check(name, raw, false);
+    }
+}
+
+test "GLM strict env: the open's check refuses a malformed ceiling before ranks, NCCL or weights" {
+    const startup = @import("cuda_env.zig").startup;
+    const name = "TF_GLM_CONTEXT_CEILING";
+    _ = try row(name);
+    _ = env.unsetenv(name);
+    defer _ = env.unsetenv(name);
+    try startup();
+    _ = env.setenv(name, "2097152", 1);
+    try startup();
+    _ = env.setenv(name, "2M", 1);
+    try t.expectError(error.InvalidEnvironment, startup());
+}
+
+test "TF_GLM_CONTEXT_CEILING's largest window is the last whose slots, verify rows included, keep i32 positions" {
+    const capacity = @import("cuda_native.zig").capacity;
+    const most = e.rule(@import("cuda_env.zig").ceiling_switch).max;
+    try t.expect(capacity(@intCast(most)) <= @as(usize, std.math.maxInt(i32)) + 1);
+    try t.expect(capacity(@intCast(most + 1)) > @as(usize, std.math.maxInt(i32)) + 1);
 }

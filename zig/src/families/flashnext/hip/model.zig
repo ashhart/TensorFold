@@ -146,6 +146,8 @@ pub const Model = struct {
     head: Projection,
     ple: Ple,
     mtp: ?Head = null,
+    /// The cache slots' DeltaNet plans (null: the per-row snapshot path, which keeps the state a row).
+    gdn: ?*@import("gdn_replay.zig").Slots = null,
 };
 
 test "a rank's dimensions: heads, value heads and the vocabulary split, the kv heads held two ranks a head" {

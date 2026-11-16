@@ -397,6 +397,36 @@ test "qwen27 window: priced siblings match exhaustive expected accepted tokens p
     try std.testing.expectError(error.BadDraftCosts, selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 6, .costs = &invalid }));
 }
 
+test "qwen27 window: lone callback retains the lane's wide sibling candidates" {
+    const a = std.testing.allocator;
+    var store = try fixtures.Store.init(a);
+    defer store.deinit();
+    var graph = try store.graph(a);
+    defer graph.deinit();
+    graph.config.topk = 16;
+    var fake: Fake = .{};
+    var lattice = try Fake.lattice(&fake, 1, undefined, .{ .handle = 1, .rows = 2, .width = graph.config.rank, .stride = graph.config.rank, .dtype = .bf16 }, graph.config);
+    defer lattice.deinit();
+    const model = @import("runtime_model.zig").Model;
+    const prices: [16]f64 = @splat(1);
+    const options = model.loneSelection(15);
+    var serial = try selector.propose(a, &graph, lattice, 3, 2, options);
+    defer serial.deinit();
+    var lane = try selector.propose(a, &graph, lattice, 3, 2, model.selection(.{ .context = null, .pending = 3, .nodes = 15, .costs = &prices }));
+    defer lane.deinit();
+    var legacy = try selector.propose(a, &graph, lattice, 3, 2, .{ .nodes = 15 });
+    defer legacy.deinit();
+    try std.testing.expectEqualSlices(u32, lane.tokens, serial.tokens);
+    try std.testing.expectEqualSlices(i32, lane.parents, serial.parents);
+    try std.testing.expectEqualSlices(f64, lane.scores, serial.scores);
+    var roots: usize = 0;
+    var old_roots: usize = 0;
+    for (serial.parents) |parent| roots += @intFromBool(parent == -1);
+    for (legacy.parents) |parent| old_roots += @intFromBool(parent == -1);
+    try std.testing.expectEqual(@as(usize, 15), roots);
+    try std.testing.expectEqual(@as(usize, 4), old_roots);
+}
+
 test "qwen27 window: common-core proposals retain candidates for calibrated window pricing" {
     const a = std.testing.allocator;
     var store = try fixtures.Store.init(a);

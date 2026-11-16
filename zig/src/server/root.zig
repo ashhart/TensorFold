@@ -28,6 +28,7 @@ test {
     _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
     _ = @import("admission_cli.zig");
+    _ = @import("connection_cli.zig");
     _ = @import("request_admission_test.zig");
     _ = @import("request_admission_http_test.zig");
     _ = @import("vision_markers_test.zig");
@@ -42,6 +43,7 @@ test {
     _ = @import("idle_unload.zig");
     _ = @import("idle_unload_test.zig");
     _ = @import("wait_reason_test.zig");
+    _ = @import("wait_reason_ledger_test.zig");
     _ = @import("name_priority_http_test.zig");
     _ = @import("ws_frame.zig");
     _ = @import("ws_upgrade.zig");
@@ -55,6 +57,7 @@ test {
     _ = @import("std_options.zig");
     _ = @import("fields.zig");
     _ = @import("reply_text.zig");
+    _ = @import("reply_incremental_test.zig");
     _ = @import("tool_parse.zig");
     _ = @import("tool_lfm2.zig");
     _ = @import("tool_lfm2_stream_test.zig");
@@ -75,6 +78,9 @@ test {
     _ = @import("cli.zig");
     _ = @import("cli_test.zig");
     _ = @import("cli_profile_test.zig");
+    _ = @import("compact_at_cli_test.zig");
+    _ = @import("toml_flat_test.zig");
+    _ = @import("cli_config_test.zig");
     _ = @import("unix_socket_cli_test.zig");
     _ = @import("effort_cli_audit_test.zig");
     _ = @import("live.zig");
@@ -82,6 +88,7 @@ test {
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
+    _ = @import("models_input_types_test.zig");
     _ = @import("speech.zig");
     _ = @import("images_generations.zig");
     _ = @import("drama_cfg.zig");
@@ -110,8 +117,10 @@ test {
     _ = @import("messages.zig");
     _ = @import("pdf.zig");
     _ = @import("pdf_flags_test.zig");
+    _ = @import("jpeg_out.zig");
     _ = @import("images.zig");
     _ = @import("images_video_marker_test.zig");
+    _ = @import("chat_ocr_test.zig");
     _ = @import("image_key.zig");
     _ = @import("image_pieces.zig");
     _ = @import("image_reuse_test.zig");
@@ -134,6 +143,7 @@ test {
     _ = @import("tool_dsml_messages_test.zig");
     _ = @import("tool_single_stream_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("logprob_parts_test.zig");
     _ = @import("limit_pins_test.zig");
     _ = @import("flag_deps_test.zig");
     _ = @import("think_split_test.zig");
@@ -148,10 +158,14 @@ test {
     _ = @import("late_system_test.zig");
     _ = @import("compact.zig");
     _ = @import("compact_test.zig");
+    _ = @import("private_files_test.zig");
     _ = @import("compact_auto_test.zig");
     _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
+    _ = @import("cancel_ids.zig");
+    _ = @import("cancel_route_test.zig");
     _ = @import("hf_eos_http_test.zig");
+    _ = @import("token_stream_test.zig");
     _ = @import("reply_gpu_seconds_test.zig");
     _ = @import("spark_wire.zig");
     _ = @import("spark_wire_test.zig");
@@ -194,6 +208,7 @@ test {
     _ = @import("slide_recheck.zig");
     _ = @import("slide_forget.zig");
     _ = @import("slide_forget_test.zig");
+    _ = @import("slide_write_cause_test.zig");
     _ = @import("slide_forget_many_test.zig");
     _ = @import("slide_supplied.zig");
     _ = @import("slide_questions_test.zig");
@@ -278,9 +293,20 @@ test {
     _ = @import("models_idle_audit_test.zig");
     _ = @import("penalty_request_test.zig");
     _ = @import("deepseek_fixture_test.zig");
+    _ = @import("uocr_chat_test.zig");
 }
 
 test {
     _ = @import("request_starts_turns_test.zig");
     _ = @import("thinking_request_test.zig");
+    _ = @import("ocr/types_test.zig");
+    _ = @import("ocr/geometry_test.zig");
+    _ = @import("ocr/markdown_test.zig");
+    _ = @import("ocr/budget_test.zig");
+    _ = @import("ocr/mistral_test.zig");
+    _ = @import("ocr/mistral_sdk_test.zig");
+    _ = @import("ocr/run_test.zig");
+    _ = @import("ocr/size_test.zig");
+    _ = @import("ocr/prompt_ids_test.zig");
+    _ = @import("ollama_e2e_test.zig");
 }

@@ -206,6 +206,9 @@ pub fn store(gpa: Allocator, io: std.Io, dir: []const u8, want: Shape, c: Costs,
     return path;
 }
 
+/// TF_DSV41_DRAFT_PLAIN_STREAMS' largest value: the most slots a server runs (TF_DSV41_SLOTS).
+pub const max_plain_streams = 16;
+
 /// The depth's knobs (TF_DSV41_DEPTH, _DRAFT_DEPTH, _DRAFT_SKIP, _DEPTH_JOINT, _DEPTH_FAIR, _DEPTH_HOST_MS, rows cap).
 pub fn depthSettings(get: *const fn ([*:0]const u8) ?[]const u8) !depth.Settings {
     var s: depth.Settings = .{};
@@ -225,6 +228,10 @@ pub fn depthSettings(get: *const fn ([*:0]const u8) ?[]const u8) !depth.Settings
     s.fair = try float(get("TF_DSV41_DEPTH_FAIR"), joint.fair, 0.0, 4.0);
     s.host_ms = try float(get("TF_DSV41_DEPTH_HOST_MS"), joint.host_ms, 0.0, 100.0);
     if (trimmed(get("TF_DSV41_GRAPH_ROWS_MAX"))) |v| s.max_rows = @max(1, @min(try std.fmt.parseInt(u64, v, 10), costs_mod.max_rows));
+    if (trimmed(get("TF_DSV41_DRAFT_PLAIN_STREAMS"))) |v| {
+        s.plain_streams = std.fmt.parseInt(usize, v, 10) catch return error.DraftPlainStreams;
+        if (s.plain_streams > max_plain_streams) return error.DraftPlainStreams;
+    }
     return s;
 }
 
@@ -243,6 +250,11 @@ fn float(raw: ?[]const u8, default: f64, lo: f64, hi: f64) !f64 {
 
 pub fn env(name: [*:0]const u8) ?[]const u8 {
     return if (std.c.getenv(name)) |v| std.mem.span(v) else null;
+}
+
+/// TF_DSV41_DRAFT_PLAIN_STREAMS as depthSettings reads it (set and non-blank).
+pub fn plainStreamsSet() bool {
+    return trimmed(env("TF_DSV41_DRAFT_PLAIN_STREAMS")) != null;
 }
 
 fn trimmed(v: ?[]const u8) ?[]const u8 {

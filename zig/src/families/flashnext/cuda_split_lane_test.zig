@@ -178,26 +178,30 @@ test "split out lane gathers full BF16 inputs and disjoint FP32 outputs without 
         Rec.n = 0;
         try std.testing.expectEqual(@as(usize, 1), try split_lane.out(&p, x_at, 0x20, &lw));
         const calls = recorded();
-        try std.testing.expect(calls.len == 7 or calls.len == 8);
+        // one row: the gathered rows go straight to the product and the gathered outputs land in part, no copy
+        const one = n == 1;
+        const copies: usize = if (one) 0 else 4;
+        try std.testing.expect(calls.len == 3 + copies or calls.len == 4 + copies);
         try std.testing.expectEqual(Call{ .kind = .gather, .a = .{ x_at, @intCast(r.s.rank_gather), @intCast(n * out_k / 2), @backingInt(nccl.DataType.bf16), 0, 0 } }, calls[0]);
-        for (0..2) |peer| {
+        if (!one) for (0..2) |peer| {
             const c = calls[1 + peer];
             try std.testing.expectEqual(copy_id, c.f);
             try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.rank_gather + peer * n * out_k), out_k / 2, @intCast(r.s.rank_input + peer * out_k), out_k, out_k / 2, 0 }, &c.a);
-        }
-        const q = calls[3];
+        };
+        const q = calls[1 + copies / 2];
         try std.testing.expectEqual(qmmf_id, q.f);
-        try std.testing.expectEqual(@as(i64, @intCast(r.s.rank_input)), q.a[0]);
+        try std.testing.expectEqual(@as(i64, @intCast(if (one) r.s.rank_gather else r.s.rank_input)), q.a[0]);
         try std.testing.expectEqual(@as(i64, 1280 * 1_000_000 + 6144), q.a[4]);
         try std.testing.expectEqual(@as(i64, out_k), q.a[5]);
-        const at = calls.len - 3;
-        try std.testing.expectEqual(Call{ .kind = .gather, .a = .{ @intCast(r.s.rank_output), @intCast(r.s.rank_result), @intCast(n * dims / 2), @backingInt(nccl.DataType.f32), 0, 0 } }, calls[at]);
-        for (0..2) |peer| {
+        const at = calls.len - 1 - copies / 2;
+        try std.testing.expectEqual(Call{ .kind = .gather, .a = .{ @intCast(r.s.rank_output), @intCast(if (one) part_at else r.s.rank_result), @intCast(n * dims / 2), @backingInt(nccl.DataType.f32), 0, 0 } }, calls[at]);
+        if (!one) for (0..2) |peer| {
             const c = calls[at + 1 + peer];
             try std.testing.expectEqual(copy_id, c.f);
             try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.rank_result + peer * n * dims * 2), dims, @intCast(part_at + peer * dims * 2), dims * 2, dims, 0 }, &c.a);
-        }
+        };
         for (calls) |c| try std.testing.expect(c.kind != .sum and c.kind != .memset);
+        if (one) for (calls) |c| try std.testing.expect(c.f != copy_id);
     };
 }
 
@@ -271,7 +275,7 @@ test "shared expert composition keeps whole direct slots and split full-K output
     };
     // the lane's 128-row tile loaded (from qmmf.prompt_rows rows): the whole down still goes direct at 512 rows
     r.k.native_lane.prompt = @splat(@splat(cuda.Function{ .d = &r.d, .handle = @ptrFromInt(prompt_id) }));
-    for ([_]bool{ false, true }) |split| for ([_]usize{ 64, 512 }) |n| for (0..2) |rank| {
+    for ([_]bool{ false, true }) |split| for ([_]usize{ 1, 64, 512 }) |n| for (0..2) |rank| {
         r.c.rank = rank;
         var native: @import("cuda_mixed_experts.zig").Owned = undefined;
         native.rank = rank;
@@ -307,14 +311,17 @@ test "shared expert composition keeps whole direct slots and split full-K output
                     gather_at = i;
                 };
                 const at = gather_at orelse return error.TestExpectedGather;
-                try std.testing.expectEqual(at + 5, Rec.n);
+                // one row: the gathered rows are the down projection's input as they land, no copy
+                const one = n == 1;
+                try std.testing.expectEqual(at + @as(usize, if (one) 3 else 5), Rec.n);
                 try std.testing.expectEqual(Call{ .kind = .gather, .a = .{ @intCast(r.s.shared_act), @intCast(r.s.rank_gather), @intCast(n * width), @backingInt(nccl.DataType.bf16), 0, 0 } }, recorded()[at]);
-                for (0..2) |peer| {
+                if (!one) for (0..2) |peer| {
                     const copy = recorded()[at + 1 + peer];
                     try std.testing.expectEqual(copy_id, copy.f);
                     try std.testing.expectEqualSlices(i64, &.{ @intCast(r.s.rank_gather + peer * n * width * 2), @intCast(width), @intCast(r.s.rank_input + peer * width * 2), wt.moe_w, @intCast(width), 0 }, &copy.a);
-                }
-                try std.testing.expectEqual(@as(i64, @intCast(r.s.rank_input)), down.a[0]);
+                };
+                if (one) for (recorded()[at..][0..2]) |c| try std.testing.expect(c.f != copy_id);
+                try std.testing.expectEqual(@as(i64, @intCast(if (one) r.s.rank_gather else r.s.rank_input)), down.a[0]);
                 try std.testing.expectEqual(@as(i64, @intCast(r.s.shared_out)), down.a[1]);
                 for (recorded()) |c| try std.testing.expect(c.f != strided_id and c.kind != .sum);
             } else try std.testing.expectEqual(@as(usize, 0x600), last.f);

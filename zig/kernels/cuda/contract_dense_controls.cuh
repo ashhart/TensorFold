@@ -50,3 +50,17 @@ extern "C" __global__ void __launch_bounds__(64) tf_ctl_dots_qkv_rope(const floa
                                                                       __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KV, int H, int HK) {
     tf_dots::qkv_rope<false>(ACC, BIAS, INV, POS, Q, KV, H, HK);
 }
+
+// dots.mocr's vision rotary with cos and sin rounded to bf16 first (the text rotary's points, not HF's fp32 freqs).
+#include "dots_vision.cuh"
+extern "C" __global__ void __launch_bounds__(64)
+    tf_ctl_dots_vision_rope(__nv_bfloat16* __restrict__ QKV, const int* __restrict__ HW, const float* __restrict__ INV,
+                            int n) {
+    if (static_cast<int>(blockIdx.x) < n) tf_dots_vision::rope<false>(QKV, HW, INV);
+}
+
+// dots.mocr's patch bias from the fp32 accumulator, rounded once (tf_vit_bias' order, not HIP's second rounding).
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ctl_dots_patch_bias(const float* Y, const __nv_bfloat16* __restrict__ B, __nv_bfloat16* O, int rows, int N) {
+    if (static_cast<int>(blockIdx.x) < rows) tf_dots_vision::patch_bias(Y, B, O, N);
+}

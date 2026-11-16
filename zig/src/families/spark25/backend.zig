@@ -246,7 +246,7 @@ pub const Spark = struct {
     fn plan(x: *Spark, s: *Stream, adopt: *std.ArrayList(u32)) !kp.Plan {
         const pr = x.prompts orelse return .{};
         x.pending = null;
-        return pr.plan(x.gpa, &x.pool.?, s.prompt(), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
+        return pr.plan(x.gpa, &x.pool.?, .of(s.prompt()), s.history_len, s.shared_prefixes, @ptrCast(s), adopt);
     }
 
     /// A new lane's table starts with the kept pages, held once more by its lease (rows below `from`, never written).
@@ -325,7 +325,7 @@ pub const Spark = struct {
     /// TF_KV_SHARE: at mark `at` the store takes the lane's pages and rings; pages it held already replace the lane's.
     fn keepPages(x: *Spark, pr: kp.Prompts, s: *Stream, l: *Lane, at: usize) !void {
         var map: Map = .{ .x = x, .slot = l.slot };
-        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, s.prompt(), at, @ptrCast(s), fwd.page_tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
+        if (try pr.keepPages(x.gpa, &x.pool.?, &l.lease, .of(s.prompt()), at, @ptrCast(s), fwd.page_tokens, .{ .ctx = &map, .write = Map.write })) l.kept += 1;
     }
 
     /// One chunk from `l.fill` to the next grid line or mark. `_: u32` keeps its grid.
@@ -339,7 +339,8 @@ pub const Spark = struct {
             end = mk;
         };
         const done = end == p.len;
-        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done));
+        // the last layer's rows nothing reads stop at their cache writes (an earlier chunk's head is off)
+        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, end - at - 1, @intFromBool(done), @import("prompt_tail.zig").first(end - at, done));
         if (done) try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(l.last, x.m.s.logits, cfg.vocab * 2, x.s.handle), "cuMemcpyDtoDAsync");
         s.fill_at.store(@intCast(end), .monotonic);
         l.fill = if (done) null else end;
@@ -398,7 +399,7 @@ pub const Spark = struct {
         const t = try x.value(feed);
         if (position != l.len + 1) return error.PositionMismatch;
         try x.reach(l, l.len + 1);
-        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1);
+        try x.m.forward(x.k, x.s, &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{t} }}, false, 0, 1, null);
         l.len += 1;
         const h = x.next;
         try x.drawRows(l, x.m.s.logits, 0, 1, position, x.handle(), 0);
@@ -434,7 +435,7 @@ pub const Spark = struct {
             total += l.rows.items.len;
         }
         if (total > round_rows) return error.RoundTooWide;
-        try x.m.forward(x.k, x.s, chains, false, 0, total);
+        try x.m.forward(x.k, x.s, chains, false, 0, total, null);
         var at: usize = 0;
         for (windows, 0..) |w, i| {
             const l = x.lanes.getPtr(w.stream).?;

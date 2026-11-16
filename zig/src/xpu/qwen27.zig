@@ -78,6 +78,8 @@ pub const isAttention = shape.isAttention;
 pub var dump_dir: ?[]const u8 = null;
 pub var verbose = false;
 pub var dump_h: ?c_int = null;
+/// The layer-63 prompt tail (xpu/prompt_tail.zig); the tail test turns it off to compare the full layer.
+pub var prompt_tail_on = true;
 /// W4A8 study (XPU_A8): prompt GEMM inputs quantized to int8 and back in place; 128 per group, "token" per row.
 pub var a8_group: u32 = 0;
 /// K/V cache study (XPU_KV8): 1 rotates q, k, v by Hadamard, 2 quantizes k, v to int8 per head, 3 both.
@@ -416,7 +418,7 @@ pub const Runner = struct {
     /// One decoded token in; the next one's logits kept.
     pub fn step(r: *Runner, token: u32) !void {
         if (r.pos + 1 > r.context) return error.ContextFull;
-        const id: i32 = @intCast(token);
+        const id: i32 = @bitCast(token); // an id past i32 turns negative, which forward refuses
         r.last = @intCast((try forward(&r.d, &r.model, &r.acts, &.{id}, r.pos, .{ .taps = r.taps_on })).?);
         r.pos += 1;
         if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, 1);
@@ -586,5 +588,6 @@ test "every open starts from the process's options, and a second runner is refus
 }
 
 test {
+    _ = @import("prompt_tail.zig");
     _ = @import("runner_drain_test.zig");
 }

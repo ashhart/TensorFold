@@ -222,7 +222,13 @@ test "three ranks gather in rank order and agree" {
     var outs: [3][3][32]u8 = undefined;
     var errs: [3]?anyerror = @splat(null);
     var threads: [2]std.Thread = undefined;
-    for (0..2) |i| threads[i] = try std.Thread.spawn(.{}, testRank, .{ Config{ .world = 3, .rank = @intCast(i + 1), .link_port = l.port, .connect_timeout_ns = 5 * std.time.ns_per_s }, &outs[i + 1], &errs[i + 1] });
+    var started: usize = 0;
+    // the ranks write to this frame: every return first joins the started ones (their deadlines bound it)
+    defer for (threads[0..started]) |t| t.join();
+    for (0..2) |i| {
+        threads[i] = try std.Thread.spawn(.{}, testRank, .{ Config{ .world = 3, .rank = @intCast(i + 1), .link_port = l.port, .connect_timeout_ns = 5 * std.time.ns_per_s }, &outs[i + 1], &errs[i + 1] });
+        started = i + 1;
+    }
     var b = try Bootstrap.acceptOn(l.fd, 3, 5 * std.time.ns_per_s);
     defer b.close();
     var id: [32]u8 = undefined;
@@ -232,6 +238,7 @@ test "three ranks gather in rank order and agree" {
     const all = try b.allGather(&.{0}, &buf, &blobs);
     try b.agree("same", "settings");
     for (threads) |t| t.join();
+    started = 0; // joined above, so a failed check below does not join them again
     for (errs) |e| try std.testing.expect(e == null);
     try std.testing.expectEqual(@as(usize, 3), all.len);
     try std.testing.expectEqualSlices(u8, &.{ 2, 2, 2 }, all[2]);

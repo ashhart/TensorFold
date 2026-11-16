@@ -54,14 +54,14 @@ fn ensure(e: *Engine, c: *Cache, before: bool, bytes: usize, reuse_pending: bool
     if (before) c.before = b else c.log = b;
 }
 
-pub fn prepare(e: *Engine, c: *Cache, rows: usize, record: bool) !void {
+pub fn prepare(e: *Engine, c: *Cache, rows: usize, record: bool, undo: bool) !void {
     const pool = c.owner orelse return;
     if (pool != &e.rec_scratch) return error.ForeignRecurrentQueue;
     if (!record) return release(c); // its scratch stays for another window until idle or the cap frees it
     const n = try common.rowClass(rows, @import("cuda_engine.zig").most_window);
     if (rows > 1) clear(c, true);
     try ensure(e, c, false, e.g.logBytes(n), rows == 1);
-    if (rows == 1) try ensure(e, c, true, e.g.stateBytes(), false);
+    if (rows == 1 and undo) try ensure(e, c, true, e.g.stateBytes(), false);
 }
 
 pub fn mark(c: *Cache, before: bool) !void {

@@ -1,11 +1,11 @@
-//! Speed-up mode's split projections on one Mac's GPU: recorded lane kernels over a tile map (fp32 partials over an input-group range), the DeltaNet step over half the heads.
+//! Speed-up split projections on one GPU: lane kernels over a tile map (fp32 partials), DeltaNet over half the heads.
 const std = @import("std");
 const mtl = @import("metal");
 const replay = @import("replay.zig");
 const Run = replay.Run;
 const Buf = replay.Buf;
 
-/// TP: a recorded lane projection over this Mac's output tiles only, in one dispatch: a copy of the kernel whose tile index goes through `ranges` ({first tile, count} pairs), with `sk` K slices; `groups` ({first, count}) cuts the sum to those input groups and writes fp32 partials. The recorded SK and no group cut keep its sums.
+/// TP: lane projection over this Mac's tiles: `ranges`, `sk` K slices, `groups` cut sum to groups (fp32 partials).
 pub fn laneTiles(r: *Run, role: []const u8, ins: []const Buf, y: Buf, ranges: []const [2]usize, sk: usize, groups: ?[2]usize) !void {
     if (r.skip & Run.class(role) != 0) return;
     if (r.lane_new) { // core lane over the same tiles and K slices: the same sums
@@ -38,7 +38,7 @@ fn swap(a: std.mem.Allocator, text: []const u8, from: []const u8, to: []const u8
     return std.mem.replaceOwned(u8, a, text, from, to);
 }
 
-/// TP: the recorded DeltaNet step over value heads [24 rank, 24 rank + 24) only (rank 1 runs a copy of the kernel whose head index starts at 24); every other index the kernel derives from the head, at the full layout.
+/// TP: DeltaNet step over value heads [24*rank,24*rank+24) (rank 1 copy starts at 24); other indices at full layout.
 pub fn gdnHeads(r: *Run, role: []const u8, as_rows: usize, ins: []const Buf, outs: []const Buf, rank: u32) !void {
     if (r.skip & Run.class(role) != 0) return;
     if (r.gdn_pipe) |pipe| return replay.gdn_step.step(r, pipe, ins, outs, 24 * rank, 24);

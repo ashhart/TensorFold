@@ -15,6 +15,15 @@ pub fn requestStartsAlone(learn_conversations: bool) !void {
     if (on and try kp.sharing() > 0) return error.GlmRequestStartsWithSharedKv;
 }
 
+/// TF_GLM_CONTEXT_CEILING: --context past config.json's window, as the attention has no rotary positions to stretch.
+pub const ceiling_switch = "TF_GLM_CONTEXT_CEILING";
+
+/// The window TF_GLM_CONTEXT_CEILING raises --context's ceiling to, read once the open has checked every .glm row.
+pub fn raisedCeiling() !?u64 {
+    try startup();
+    return try environment.value(?u64, ceiling_switch, environment.Process.get(.{}, ceiling_switch), null);
+}
+
 test {
     _ = @import("cuda_env_test.zig");
 }

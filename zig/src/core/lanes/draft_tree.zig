@@ -19,10 +19,13 @@ const lp_words = 3 + 2 * lp_top;
 /// Where a row's words hold its candidates: `words` u32 a row, ids from `ids`, f32 logits from `logits`.
 pub const Layout = struct { words: usize = lp_words, ids: usize = 2, logits: usize = 2 + lp_top };
 
+/// A backend's rows apart (HIP's downloads): ids and f32 logits `topk` a row, f32 selector projections `rank` a row.
+pub const Apart = struct { ids: []const u32, logits: []const f32, projected: []const f32 };
+
 /// A hold's rows: each row's logprob words (ids, then logits at lp_top), its selector projection, the codebooks.
 pub const Candidates = struct {
-    words: []const u8,
-    projected: []const u8,
+    words: []const u8 = &.{},
+    projected: []const u8 = &.{}, // bf16 (rows, rank), or DSpine's table
     topk: usize,
     rank: usize,
     predecessor: []const u16, // (vocab, rank) bf16
@@ -33,31 +36,41 @@ pub const Candidates = struct {
     // DSpine: `projected` holds f32 [row][sender][candidate] logits, the sender the row before's candidate (or pending)
     table: bool = false,
     layout: Layout = .{}, // CUDA's topkRows words; another backend gives its own
+    apart: ?Apart = null, // the rows apart instead of `words` and `projected`
 };
 
 /// Row `r`'s logits after `pred` from the table: its sender's row (row 0: any, all hold the pending token's).
 fn tableRow(c: Candidates, r: usize, pred: u32) ?[]align(1) const f32 {
-    const previous = if (r > 0) ids(c, r - 1)[c.layout.ids..][0..c.topk] else ids(c, 0)[0..0];
-    const s = if (r == 0) 0 else for (previous, 0..) |id, j| {
-        if (id == pred) break j;
+    const s = if (r == 0) 0 else for (0..c.topk) |j| {
+        if (idAt(c, r - 1, j) == pred) break j;
     } else return null;
     return std.mem.bytesAsSlice(f32, c.projected[(r * c.topk + s) * c.topk * 4 ..][0 .. c.topk * 4]);
 }
 
 /// Row `r`'s candidate j's score after `pred`: its table logit, or unary logit plus `weight` x the selector edge.
 fn score(c: Candidates, r: usize, pred: u32, row: ?[]align(1) const f32, j: usize, weight: f64) f64 {
-    const w = ids(c, r);
-    const unary: f64 = @as(f32, @bitCast(w[c.layout.logits + j]));
+    const unary: f64 = logitAt(c, r, j);
     if (c.table) return if (row) |t| t[j] else unary;
-    const hp = std.mem.bytesAsSlice(u16, c.projected[r * c.rank * 2 ..][0 .. c.rank * 2]);
-    if (weight == 1) { // choice's f32 sums
+    const id = idAt(c, r, j);
+    if (c.apart) |a| return selected(c, pred, id, a.projected[r * c.rank ..][0..c.rank], unary, weight);
+    return selected(c, pred, id, std.mem.bytesAsSlice(u16, c.projected[r * c.rank * 2 ..][0 .. c.rank * 2]), unary, weight);
+}
+
+/// `unary` + `weight` x the selector edge pred . hp . successor(id), `hp` bf16 or f32: choice's f32 sums at weight 1.
+fn selected(c: Candidates, pred: u32, id: u32, hp: anytype, unary: f64, weight: f64) f64 {
+    if (weight == 1) {
         var edge: f32 = 0;
-        for (0..c.rank) |k| edge += bf32(c.predecessor[pred * c.rank + k]) * bf32(hp[k]) * bf32(c.successor[w[c.layout.ids + j] * c.rank + k]);
+        for (0..c.rank) |k| edge += bf32(c.predecessor[pred * c.rank + k]) * wide(hp[k]) * bf32(c.successor[id * c.rank + k]);
         return @as(f32, @floatCast(unary)) + edge;
     }
     var edge: f64 = 0; // chancesAfter's f64 sums
-    for (0..c.rank) |k| edge += bf16(c.predecessor[pred * c.rank + k]) * bf16(hp[k]) * bf16(c.successor[w[c.layout.ids + j] * c.rank + k]);
+    for (0..c.rank) |k| edge += bf16(c.predecessor[pred * c.rank + k]) * @as(f64, wide(hp[k])) * bf16(c.successor[id * c.rank + k]);
     return unary + weight * edge;
+}
+
+/// A selector projection's value: a bf16 pattern widened, or an f32 as it is.
+fn wide(h: anytype) f32 {
+    return if (@TypeOf(h) == u16) bf32(h) else h;
 }
 
 /// A candidate's score as the target's draw sees it: its logit at the stream's temperature plus the draw's noise.
@@ -115,10 +128,9 @@ fn bf32(h: u16) f32 {
 
 /// Row `r`'s `rank`th candidate after `pred`: unary logit + pred . projected . successor, ties to the earlier one.
 fn choice(c: Candidates, r: usize, pred: u32, rank: usize) u32 {
-    const w = ids(c, r);
     const row = if (c.table) tableRow(c, r, pred) else null;
     var scores: [lp_top]f32 = undefined;
-    for (0..c.topk) |j| scores[j] = @floatCast(drawn(c, r, w[c.layout.ids + j], score(c, r, pred, row, j, 1)));
+    for (0..c.topk) |j| scores[j] = @floatCast(drawn(c, r, idAt(c, r, j), score(c, r, pred, row, j, 1)));
     var taken: [lp_top]bool = @splat(false);
     var pick: usize = 0;
     for (0..rank + 1) |_| {
@@ -130,7 +142,7 @@ fn choice(c: Candidates, r: usize, pred: u32, rank: usize) u32 {
         };
         taken[pick] = true;
     }
-    return w[c.layout.ids + pick];
+    return idAt(c, r, pick);
 }
 
 /// The path through the rows' candidates: each row's best after the one before.
@@ -154,13 +166,24 @@ fn ids(c: Candidates, r: usize) []align(1) const u32 {
     return std.mem.bytesAsSlice(u32, c.words[r * c.layout.words * 4 ..][0 .. c.layout.words * 4]);
 }
 
+/// Row `r`'s candidate j's id: from its words, or from the rows apart.
+fn idAt(c: Candidates, r: usize, j: usize) u32 {
+    if (c.apart) |a| return a.ids[r * c.topk + j];
+    return ids(c, r)[c.layout.ids + j];
+}
+
+/// Row `r`'s candidate j's unary logit: from its words, or from the rows apart.
+fn logitAt(c: Candidates, r: usize, j: usize) f32 {
+    if (c.apart) |a| return a.logits[r * c.topk + j];
+    return @bitCast(ids(c, r)[c.layout.logits + j]);
+}
+
 /// Row `r`'s candidates after `pred` as log-chances: softmax of (unary + edge x selector) / scale.
 fn chancesAfter(c: Candidates, r: usize, pred: u32, out: *[lp_top]f64) void {
-    const w = ids(c, r);
     const row = if (c.table) tableRow(c, r, pred) else null;
     var most: f64 = -std.math.inf(f64);
     for (0..c.topk) |j| {
-        out[j] = drawn(c, r, w[c.layout.ids + j], score(c, r, pred, row, j, edge_weight)) / @as(f64, if (c.table) 1 else scale);
+        out[j] = drawn(c, r, idAt(c, r, j), score(c, r, pred, row, j, edge_weight)) / @as(f64, if (c.table) 1 else scale);
         most = @max(most, out[j]);
     }
     var total: f64 = 0;
@@ -191,10 +214,9 @@ pub fn grow(comptime most_window: usize, c: Candidates, pending: u32, rows: usiz
                     return v[a] > v[b] or (v[a] == v[b] and a < b);
                 }
             }.more);
-            const w = ids(c, row);
             for (order[0..@min(branch, c.topk)]) |j| {
                 if (!std.math.isFinite(lc[j]) or n_open == open.len) break;
-                open[n_open] = .{ .cost = path - lc[j], .parent = parent, .token = w[c.layout.ids + j], .row = row, .own = lc[j] };
+                open[n_open] = .{ .cost = path - lc[j], .parent = parent, .token = idAt(c, row, j), .row = row, .own = lc[j] };
                 n_open += 1;
             }
         }
@@ -286,4 +308,49 @@ test "DSpine table: each row's pick follows its sender's row; unary logits alone
     c.rank = 0;
     chain(c, 7, &out);
     try std.testing.expectEqualSlices(u32, &.{ 10, 20 }, &out);
+}
+
+test "rows apart walk as their words do: a chain, the planner's lanes and a grown tree, greedy and sampled" {
+    // two rows of four candidates over a vocab of 8, rank 2, a selector that reorders them
+    const rank = 2;
+    var words: [2 * lp_words * 4]u8 = @splat(0);
+    const w = std.mem.bytesAsSlice(u32, &words);
+    var ids_apart: [8]u32 = undefined;
+    var logits_apart: [8]f32 = undefined;
+    const unary = [2][4]f32{ .{ 3, 2.5, 0, -1 }, .{ 2, 1.5, -5, 1 } };
+    for (0..2) |r| for (0..4) |j| {
+        ids_apart[r * 4 + j] = @intCast(4 * r + j);
+        logits_apart[r * 4 + j] = unary[r][j];
+        w[r * lp_words + 2 + j] = ids_apart[r * 4 + j];
+        w[r * lp_words + 2 + lp_top + j] = @bitCast(unary[r][j]);
+    };
+    const hp = [_]u16{ 0x3f80, 0xbfc0, 0x4000, 0x3f00 }; // 1, -1.5, 2, 0.5
+    var hp_apart: [4]f32 = undefined;
+    for (hp, &hp_apart) |h, *x| x.* = bf32(h);
+    var books: [8 * rank]u16 = undefined;
+    for (&books, 0..) |*b, i| b.* = @truncate(@as(u32, @bitCast(@as(f32, @floatFromInt(i % 5)) * 0.5 - 1)) >> 16);
+    const lanes_shape: shape.Shape = .{ .parents = @constCast(&[_]i32{ -1, -1, 0 }), .depths = @constCast(&[_]u8{ 0, 0, 1 }), .ranks = @constCast(&[_]u8{ 0, 1, 0 }), .expected = 0 };
+    for ([_]?Sampling{ null, .{ .seed = 3, .temperature = 0.8 } }) |sampling| {
+        const a: Candidates = .{ .words = &words, .projected = std.mem.sliceAsBytes(&hp), .topk = 4, .rank = rank, .predecessor = &books, .successor = &books, .sampling = sampling, .position = 9 };
+        var b = a;
+        b.words = &.{};
+        b.projected = &.{};
+        b.apart = .{ .ids = &ids_apart, .logits = &logits_apart, .projected = &hp_apart };
+        var x: [3]u32 = undefined;
+        var y: [3]u32 = undefined;
+        chain(a, 6, x[0..2]);
+        chain(b, 6, y[0..2]);
+        try std.testing.expectEqualSlices(u32, x[0..2], y[0..2]);
+        try lanesOf(a, 6, 2, &lanes_shape, &x);
+        try lanesOf(b, 6, 2, &lanes_shape, &y);
+        try std.testing.expectEqualSlices(u32, &x, &y);
+        var tokens: [2][6]u32 = undefined;
+        var parents: [2][6]i32 = undefined;
+        var own: [2][6]f64 = undefined;
+        const n = grow(64, a, 6, 2, 6, &tokens[0], &parents[0], &own[0]);
+        try std.testing.expectEqual(n, grow(64, b, 6, 2, 6, &tokens[1], &parents[1], &own[1]));
+        try std.testing.expectEqualSlices(u32, tokens[0][0..n], tokens[1][0..n]);
+        try std.testing.expectEqualSlices(i32, parents[0][0..n], parents[1][0..n]);
+        try std.testing.expectEqualSlices(f64, own[0][0..n], own[1][0..n]);
+    }
 }

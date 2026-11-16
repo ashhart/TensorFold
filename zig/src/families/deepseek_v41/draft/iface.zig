@@ -46,7 +46,25 @@ pub const Target = struct {
         replays: ?*const fn (ptr: *anyopaque, list: []const Final) anyerror!void = null,
         /// Engram reads ahead of the next window (TF_DSV41_ENGRAM_WARM); reads only, window bits are unaffected.
         warm: ?*const fn (ptr: *anyopaque, asks: []const Warm) void = null,
+        /// After `prefill`: the prompt rows the slot took from kept state (its first row computed is this one).
+        resumed: ?*const fn (ptr: *anyopaque, slot: u32) u64 = null,
+        /// Committed rows' taps for positions [start, start + rows), in order; null: not kept. null fn: none kept.
+        history: ?*const fn (ptr: *anyopaque, slot: u32, start: u64, rows: u32) ?Taps = null,
     };
+
+    /// The target keeps committed rows' taps, so the drafter may take a plain round's rows later (`history`).
+    pub fn keepsHistory(t: Target) bool {
+        return t.vtable.history != null;
+    }
+
+    pub fn history(t: Target, slot: u32, start: u64, rows: u32) ?Taps {
+        return if (t.vtable.history) |f| f(t.ptr, slot, start, rows) else null;
+    }
+
+    /// The prompt rows the slot's last `prefill` took from kept state (0: none, or a target that keeps none).
+    pub fn resumedRows(t: Target, slot: u32) u64 {
+        return if (t.vtable.resumed) |f| f(t.ptr, slot) else 0;
+    }
 
     /// A slot's whole prompt whose rows but the last are in (its `finish` / `tail` follows).
     pub const Final = struct { slot: u32, ids: []const u32 };

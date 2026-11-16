@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const api = @import("engine_api");
 const engine = @import("engine.zig");
 const lane = @import("../lane.zig");
+const score = @import("../score.zig");
 const folder = @import("../head.zig");
 
 const Engine = engine.Engine;
@@ -16,7 +17,7 @@ pub const model_type = "qwen3";
 pub const formats: []const []const u8 = &.{"bf16"};
 /// The window when neither --context nor the checkpoint's config names one (the Qwen3 8B serving default).
 pub const default_context: i64 = 32768;
-/// An embedding engine writes no reply text, so no reasoning block (Info.reasoning).
+/// A prompt-only engine writes no reply text, so no reasoning block (Info.reasoning).
 pub const reasoning = false;
 pub const drafter_refusal = "--drafter: Qwen3 dense checkpoints have no drafts to train; serve without --drafter";
 pub const record_refusal = "--record: qwen3 checkpoints give no rows to record on CUDA yet";
@@ -45,6 +46,8 @@ const Owned = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     startup: []const u8,
+    /// The checkpoint folder, kept for the reranker's head rows.
+    dir: []const u8,
 };
 
 /// The context this thread's CUDA calls go to: open's thread at startup, the lane host's thread at rounds.
@@ -78,6 +81,7 @@ fn release(ptr: *anyopaque) void {
     o.p.deinit();
     o.e.deinit();
     o.gpa.free(o.startup);
+    o.gpa.free(o.dir);
     o.gpa.destroy(o);
 }
 
@@ -99,6 +103,18 @@ fn gibs(bytes: usize) f64 {
 
 fn scratchOf(e: *Engine, window: usize) anyerror!usize {
     return e.scratchBytes(window);
+}
+
+/// Whether a reranker's yes or no token is past the vocabulary's rows: its head row would not exist.
+fn labelOutside(l: api.Rerank, vocab: usize) bool {
+    return l.yes >= vocab or l.no >= vocab;
+}
+
+test "a reranker's labels must both be rows of the vocabulary" {
+    try std.testing.expect(!labelOutside(.{ .yes = 9693, .no = 2152 }, 151669));
+    try std.testing.expect(!labelOutside(.{ .yes = 0, .no = 2 }, 3));
+    try std.testing.expect(labelOutside(.{ .yes = 3, .no = 0 }, 3));
+    try std.testing.expect(labelOutside(.{ .yes = 0, .no = 3 }, 3));
 }
 
 /// The engine for `o.dir` on `device`, its head from the folder and its window from the memory budget.
@@ -134,13 +150,9 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
         return refuse(a, problem, "{s}{d}: this machine has {d} CUDA device{s} (0 to {d})", .{ named, device, count, if (count == 1) "" else "s", count - 1 });
     }
     const head = try folder.headOf(a, io, o.dir, "CUDA", problem);
-    const normalize = switch (head) {
-        .embedding => |h| h.normalize,
-        .rerank => return refuse(a, problem, "{s} is a Qwen3 reranker (1_LogitScore): the CUDA engine serves Qwen3 embedding checkpoints so far", .{o.dir}),
-    };
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
-    own.* = .{ .gpa = gpa, .e = undefined, .p = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .startup = undefined };
+    own.* = .{ .gpa = gpa, .e = undefined, .p = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .startup = undefined, .dir = undefined };
     own.e = Engine.load(gpa, io, o.dir, @intCast(device)) catch |err| {
         problem.* = libs.explain(err) orelse try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} ({s})", .{ o.dir, @errorName(err) });
         return error.Refused;
@@ -168,16 +180,40 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
     };
     e.size(window) catch |err|
         return refuse(a, problem, "the native CUDA engine cannot allocate its scratch ({s})", .{@errorName(err)});
+    const normalize = switch (head) {
+        .embedding => |h| h.normalize,
+        .rerank => false,
+    };
+    const labels: ?api.Rerank = switch (head) {
+        .embedding => null,
+        .rerank => |l| l,
+    };
+    if (labels) |l| if (labelOutside(l, e.m.spec.vocab))
+        return refuse(a, problem, "1_LogitScore/config.json: tokens {d} and {d} are not both in this {d}-token vocabulary", .{ l.yes, l.no, e.m.spec.vocab });
+    own.dir = try gpa.dupe(u8, o.dir);
+    errdefer gpa.free(own.dir);
     own.p = Prompt.init(gpa, e, normalize);
     errdefer own.p.deinit();
+    if (labels) |l| {
+        own.p.heads = score.Heads.of(&e.m, io, own.dir);
+        own.p.table.score = Prompt.scoreLabels;
+        own.p.table.decide = Prompt.decideLabels;
+        // both label rows read at load: a bad head fails startup, and the first request reads nothing
+        for ([_]u32{ l.yes, l.no }) |id| _ = own.p.heads.?.row(gpa, id) catch |err|
+            return refuse(a, problem, "the native CUDA engine cannot read lm_head row {d} ({s})", .{ id, @errorName(err) });
+    }
     own.cfg = try lanes.Config.init(gpa, .{}, 1, 0);
     errdefer own.cfg.deinit(gpa);
     own.clock = .{ .io = io };
     own.core = lanes.Engine.init(gpa, &own.cfg, own.p.backend(), own.clock.clock());
     errdefer own.core.deinit();
     const shrunk: []const u8 = if (window < asked) " (shrunk from the asked window to fit the budget)" else "";
-    own.startup = try std.fmt.allocPrint(gpa, "CUDA sm{d} device {d}: qwen3 embedding, model {d:.2} GiB; {d}-token passes{s}, {d:.2} GiB scratch, of {d:.1} GiB left after a {d:.1} GiB reserve; {s}", .{
-        cap, device, gibs(e.weights), window, shrunk, gibs(e.scratchBytes(window) catch 0), gibs(room), gibs(pool.reserve), if (normalize) "vectors unit-normed" else "vectors as pooled",
+    own.startup = try std.fmt.allocPrint(gpa, "CUDA sm{d} device {d}: qwen3 {s}, model {d:.2} GiB; {d}-token passes{s}, {d:.2} GiB scratch, of {d:.1} GiB left after a {d:.1} GiB reserve; {s}", .{
+        cap, device, if (head == .rerank) "reranker" else "embedding", gibs(e.weights), window, shrunk, gibs(e.scratchBytes(window) catch 0), gibs(room), gibs(pool.reserve),
+        switch (head) {
+            .embedding => |h| if (h.normalize) "vectors unit-normed" else "vectors as pooled",
+            .rerank => "label scores from lm_head rows read at load, on the host",
+        },
     });
     errdefer gpa.free(own.startup);
     const spec = e.m.spec;
@@ -185,7 +221,9 @@ fn openEngine(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, device: u32
         .lanes = 1,
         .context_window = @intCast(window),
         .text_generation = false,
-        .embeddings = .{ .dimensions = @intCast(spec.hidden), .vocabulary = @intCast(spec.vocab), .max_batch_tokens = @intCast(window), .max_inputs = @intCast(engine.max_inputs), .mrl_min = @min(32, @as(u32, @intCast(spec.hidden))) },
+        .embeddings = if (head == .rerank) null else .{ .dimensions = @intCast(spec.hidden), .vocabulary = @intCast(spec.vocab), .max_batch_tokens = @intCast(window), .max_inputs = @intCast(engine.max_inputs), .mrl_min = @min(32, @as(u32, @intCast(spec.hidden))) },
+        .decides = head == .rerank,
+        .rerank = labels,
         .reasoning = reasoning,
         .startup = own.startup,
     });

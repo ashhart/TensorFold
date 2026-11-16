@@ -8,6 +8,7 @@ const weights = @import("cuda_draft_weights.zig");
 pub const tree = @import("cuda_draft_tree.zig");
 const profile = @import("cuda_startup_profile.zig");
 pub const precision = @import("cuda_draft_precision.zig");
+const draft_prior = @import("draft_prior.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -439,7 +440,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -545,9 +546,6 @@ pub fn copyMatch(g: anytype, kind: Config.Kind) i64 {
 pub fn factsCopyMatch(d: anytype) i64 {
     return copyMatch(d.e.g, d.c.kind);
 }
-
-/// Acceptance by depth until a stream has its own (the reference's chat text: measured, see the commit).
-const prior = [_]f64{ 0.75, 0.65, 0.58, 0.52, 0.47, 0.43, 0.4, 0.37, 0.35, 0.33, 0.31, 0.29, 0.28, 0.27, 0.26 };
 
 /// TF_TIMING=1: each call's wall time on stderr.
 pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {

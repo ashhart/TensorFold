@@ -5,12 +5,19 @@ const iface = @import("iface.zig");
 const costs = @import("costs.zig");
 const Policy = @import("policy.zig").Policy;
 const Spec = @import("spec.zig").Spec;
-pub fn init(gpa: std.mem.Allocator, target: iface.Target, pass: iface.Pass, prices: costs.Costs, opts: ln.Options) !*ln.Lanes {
+pub fn init(gpa: std.mem.Allocator, target: iface.Target, pass: iface.Pass, prices: costs.Costs, opts_in: ln.Options) !*ln.Lanes {
+    var opts = opts_in;
     const b = opts.shape.block;
     const c = opts.shape.candidates;
     if (b == 0 or b > ln.max_block or c == 0 or c > 1024 or opts.slots == 0 or opts.slots > 16 or opts.siblings > @import("tree.zig").max_siblings) return error.BadOptions;
     const x = try gpa.create(ln.Lanes);
     errdefer gpa.destroy(x);
+    const set = blk: {
+        var s = opts.depth;
+        if (!@import("calib_env.zig").plainStreamsSet() and s.plain_streams == 0) s.plain_streams = opts.plain_streams_default;
+        break :blk s;
+    };
+    opts.depth = set;
     var policy = try Policy.init(gpa, prices, opts);
     errdefer policy.deinit();
     const drafts = try gpa.alloc(u32, opts.slots * b);

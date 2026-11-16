@@ -1,4 +1,4 @@
-//! Owned HIP device bytes; sync copies and fills check ranges and use the null stream, so synchronize before mixing in non-blocking streams.
+//! Owned HIP device bytes; sync copies/fills check ranges and use the null stream: sync before mixing streams.
 const abi = @import("abi.zig");
 const runtime = @import("runtime.zig");
 const std = @import("std");

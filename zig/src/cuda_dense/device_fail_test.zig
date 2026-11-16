@@ -7,18 +7,21 @@ const draws = @import("draws.zig");
 const Geometry = @import("recipe.zig").Geometry;
 const t = std.testing;
 
-const Fake = struct {
-    const queue: cuda.abi.Stream = @ptrFromInt(0x1800);
+pub const Fake = struct {
+    pub const queue: cuda.abi.Stream = @ptrFromInt(0x1800);
     const base: u64 = 0x100000;
     var mem: [4096]u8 = undefined; // device bytes from `base` on, for downloads
     var next: u64 = 0x200000;
-    var live: usize = 0;
-    var pending = false;
+    pub var live: usize = 0;
+    pub var pending = false;
     var freed_pending: usize = 0;
-    var proofs: usize = 0;
+    pub var proofs: usize = 0;
     var fail_wait = false;
     var argmax: usize = 0;
     var drawn: usize = 0;
+    pub const Copy = struct { dst: u64, src: u64, len: usize };
+    pub var copies: [8]Copy = undefined; // the device-to-device copies, in order
+    pub var copied: usize = 0;
     fn reset() void {
         live = 0;
         pending = false;
@@ -27,6 +30,7 @@ const Fake = struct {
         fail_wait = false;
         argmax = 0;
         drawn = 0;
+        copied = 0;
     }
     fn alloc(out: *u64, len: usize) callconv(.c) c_int {
         out.* = next;
@@ -52,6 +56,12 @@ const Fake = struct {
         return 0;
     }
     fn copy(_: u64, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        pending = true;
+        return 0;
+    }
+    fn dtod(dst: u64, src: u64, len: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+        if (copied < copies.len) copies[copied] = .{ .dst = dst, .src = src, .len = len };
+        copied += 1;
         pending = true;
         return 0;
     }
@@ -95,7 +105,7 @@ const Fake = struct {
         out.* = 0;
         return 0;
     }
-    fn driver() cuda.Driver {
+    pub fn driver() cuda.Driver {
         reset();
         var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
         d.api.cuMemAlloc_v2 = alloc;
@@ -104,6 +114,7 @@ const Fake = struct {
         d.api.cuMemHostAlloc = host;
         d.api.cuMemFreeHost = hostFree;
         d.api.cuMemcpyHtoDAsync_v2 = copy;
+        d.api.cuMemcpyDtoDAsync_v2 = dtod;
         d.api.cuStreamSynchronize = wait;
         d.api.cuCtxSynchronize = context;
         d.api.cuEventCreate = event;
@@ -120,7 +131,7 @@ const Fake = struct {
 
 const tiny: Geometry = .{ .hidden = 256, .layers = 2, .heads = 4, .kv_heads = 2, .head_dim = 64, .vocab = 512, .eps = 1e-6, .context = 4096, .acc = 512, .wide = 1024, .mid = 512, .theta = 1e4 };
 
-fn lane() cuda.qmmf.Lane {
+pub fn lane() cuda.qmmf.Lane {
     var l: cuda.qmmf.Lane = undefined;
     l.clusters = false; // partBytes reads the tile plan alone
     return l;

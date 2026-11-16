@@ -6,6 +6,20 @@ const hip = @import("hip");
 /// A message's first word: rank 0 decides every match, eviction, page and slot, and a rank only applies it.
 pub const Op = enum(u32) { stop, prefill, fill, verify, keep, release, pages, snap, copy };
 
+/// A message's step once it holds the words that step reads; the family checks its own prefill, verify and keep.
+pub fn step(m: []const u32) error{LinkFailed}!Op {
+    if (m.len == 0) return error.LinkFailed;
+    const op = std.enums.fromInt(Op, m[0]) orelse return error.LinkFailed;
+    const need: usize = switch (op) {
+        .stop, .prefill, .verify, .keep => 1,
+        .release => 2,
+        .fill, .snap, .copy => 3,
+        .pages => 4,
+    };
+    if (m.len < need or (op == .pages and m[3] > m.len - 4)) return error.LinkFailed;
+    return op;
+}
+
 /// The prefill message's snapshot slot when the pass starts from nothing.
 pub const no_snapshot: u32 = std.math.maxInt(u32);
 
@@ -150,8 +164,7 @@ pub fn Follower(comptime F: type) type {
             while (true) {
                 try link.recv(w.gpa, &msg);
                 const m = msg.items;
-                if (m.len == 0) return error.LinkFailed;
-                switch (@as(Op, @fromBackingInt(m[0]))) {
+                switch (try step(m)) {
                     .stop => return,
                     // prefill, verify and keep are the family's own words: it reads the message whole
                     .prefill => try F.prefill(w.f, w, m),
@@ -235,4 +248,25 @@ test "a sender sends nothing once its family stopped the group" {
     try std.testing.expectError(error.GroupStopped, s.fill(1, 16));
     try std.testing.expectError(error.GroupStopped, s.stop());
     try std.testing.expectEqual(@as(usize, 1), r.sent.items.len);
+}
+
+test "security: a step from the link is refused unless its message holds the words it reads" {
+    const t = std.testing;
+    try t.expectError(error.LinkFailed, step(&.{}));
+    try t.expectError(error.LinkFailed, step(&.{9}));
+    try t.expectError(error.LinkFailed, step(&.{0xffff_ffff}));
+    try t.expectEqual(Op.stop, try step(&.{0}));
+    for ([_]Op{ .fill, .snap, .copy }) |op| {
+        try t.expectError(error.LinkFailed, step(&.{ @backingInt(op), 1 }));
+        try t.expectEqual(op, try step(&.{ @backingInt(op), 1, 2 }));
+    }
+    try t.expectError(error.LinkFailed, step(&.{@backingInt(Op.release)}));
+    try t.expectEqual(Op.release, try step(&.{ @backingInt(Op.release), 1 }));
+    // pages: id, first, count, then that many ids
+    const pages = @backingInt(Op.pages);
+    try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0 }));
+    try t.expectEqual(Op.pages, try step(&.{ pages, 1, 0, 0 }));
+    try t.expectEqual(Op.pages, try step(&.{ pages, 1, 0, 2, 7, 8 }));
+    try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0, 3, 7, 8 }));
+    try t.expectError(error.LinkFailed, step(&.{ pages, 1, 0, 0xffff_ffff, 7 }));
 }

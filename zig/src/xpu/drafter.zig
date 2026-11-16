@@ -212,6 +212,7 @@ pub const Drafter = struct {
             .pi_host = pi_host,
             .pscr = try d.alloc_(rows * D * 4),
         };
+        if (@min(dr.pred.len, dr.succ.len) < q.VOCAB * RANK * 2) return error.UnexpectedShape; // edge reads a row a token id
         dr.ckpt = c;
         const stage = try d.alloc_(800 << 20);
         defer d.g.free(stage);
@@ -490,6 +491,7 @@ pub const Drafter = struct {
         const S: u32 = @intCast(items.len);
         const R = S * L;
         if (S == 0 or S > MAXS or R > MAXB or L > MAXL) return error.TooManyRows;
+        for (items) |it| if (it.pending >= q.VOCAB) return error.InvalidQwenToken; // embed and the codebooks read row id unchecked
         const one = S == 1;
         var tokens: [MAXB]i32 = undefined;
         for (items, 0..) |it, b| {

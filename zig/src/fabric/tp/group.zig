@@ -16,6 +16,8 @@ pub const Backend = struct {
     world: u32,
     /// The family's group once it is up (serving): gathers then take its size rule. Null: plain NCCL calls.
     group: ?*cuda.tp_group.Group = null,
+    /// The group that owns `comm` from the start (aborts go through it); null: the caller owns it and aborts it.
+    owner: ?*cuda.tp_group.Group = null,
     aborted: std.atomic.Value(bool) = .init(false),
     /// The underlying error of the calling thread's last failed call (`Error` is a fixed set; the family reads this).
     last: ?anyerror = null,
@@ -122,11 +124,11 @@ pub const Backend = struct {
         };
     }
 
-    /// Any thread; only the first acts. The group aborts; with none, only later calls stop (T1: the mesh owns comms).
+    /// Any thread; only the first acts. The owner (or the routing group) aborts; with neither, only later calls stop.
     fn abort(ptr: *anyopaque) void {
         const b = of(ptr);
         if (b.aborted.swap(true, .acq_rel)) return;
-        if (b.group) |g| g.abort();
+        if (b.owner orelse b.group) |g| g.abort();
     }
 };
 
@@ -146,6 +148,7 @@ const Fake = struct {
     var wired: struct { s: cuda.abi.Stream, mine: DevicePtr, all: DevicePtr, bytes: usize } = undefined;
     var abort_inside: ?*Backend = null; // a fake NCCL call that another thread aborts while it is pending
     var aborts: usize = 0;
+    var destroys: usize = 0;
     var fail = false;
     fn allGather(s: DevicePtr, r: DevicePtr, count: usize, t: cuda.nccl.DataType, _: cuda.nccl.Comm, st: coll.Stream) callconv(.c) cuda.nccl.Result {
         gathers[n] = .{ .s = s, .r = r, .count = count, .t = t, .st = st };
@@ -158,6 +161,10 @@ const Fake = struct {
     }
     fn commAbort(_: cuda.nccl.Comm) callconv(.c) cuda.nccl.Result {
         aborts += 1;
+        return 0;
+    }
+    fn commDestroy(_: cuda.nccl.Comm) callconv(.c) cuda.nccl.Result {
+        destroys += 1;
         return 0;
     }
     fn fits(_: *anyopaque, bytes: usize) bool {
@@ -175,6 +182,7 @@ const Fake = struct {
         n = 0;
         multi = 0;
         aborts = 0;
+        destroys = 0;
         fail = false;
         abort_inside = null;
     }
@@ -286,4 +294,25 @@ test "a call another thread aborts while it is pending ends as Aborted, not as a
     try testing.expectEqual(@as(usize, 1), Fake.aborts);
     // the group's own failed call after its abort: Aborted, not NCCL's error (lib.check's fatal stop outside tests)
     try testing.expectError(error.Aborted, g.allGather(.{ .d = undefined, .handle = test_stream }, 0x100, 0x200, 16));
+}
+
+test "with an owner and no routing group, abort aborts the owner's communicator once and its destroy then does nothing" {
+    Fake.reset();
+    const lib = fakeLib();
+    var owner: cuda.tp_group.Group = .{ .lib = fakeLib(), .comm = null, .rank = 0, .world = 2 };
+    owner.lib.api.ncclCommDestroy = Fake.commDestroy;
+    var b: Backend = .{ .d = undefined, .lib = &lib, .comm = null, .rank = 0, .world = 2, .owner = &owner };
+    const c = b.collective();
+    c.abort();
+    c.abort();
+    try testing.expectEqual(@as(usize, 1), Fake.aborts);
+    owner.destroyComm();
+    try testing.expectEqual(@as(usize, 0), Fake.destroys);
+    try testing.expectError(error.Aborted, c.allGather(0x100, 0x200, 4, .f32, test_stream));
+    // the routing group installed later is the same group: one abort still
+    Fake.reset();
+    var g: cuda.tp_group.Group = .{ .lib = fakeLib(), .comm = null, .rank = 0, .world = 2 };
+    var bg: Backend = .{ .d = undefined, .lib = &lib, .comm = null, .rank = 0, .world = 2, .owner = &g, .group = &g };
+    bg.collective().abort();
+    try testing.expectEqual(@as(usize, 1), Fake.aborts);
 }

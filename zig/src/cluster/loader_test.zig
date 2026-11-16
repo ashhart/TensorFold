@@ -29,7 +29,7 @@ fn shards(a: std.mem.Allocator, dir: std.Io.Dir) !struct { files: [2][]u8, ck: c
         try dir.writeFile(io, .{ .sub_path = names[i], .data = bytes });
         var sha: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &sha, .{});
-        files[i] = .{ .name = names[i], .size = bytes.len, .sha256 = sha };
+        files[i] = .{ .name = names[i], .size = bytes.len, .header_bytes = 8 + std.mem.readInt(u64, bytes[0..8], .little), .sha256 = sha };
         try tensors.appendSlice(a, try checkpoint.parseHeader(a, @intCast(i), bytes));
     }
     return .{ .files = .{ one, two }, .ck = .{ .files = try a.dupe(checkpoint.File, &files), .tensors = tensors.items } };
@@ -57,10 +57,11 @@ const Seen = struct {
     }
 };
 
-/// A peer that reads its own copy; `corrupt` flips a byte after hashing, as a bad link would.
+/// A peer that reads its own copy; `corrupt` flips a byte after hashing (a bad link), `lying` before it (a bad peer).
 const Peer = struct {
     files: [2][]const u8,
     corrupt: bool = false,
+    lying: bool = false,
     calls: u32 = 0,
     fn source(p: *Peer) loader.Source {
         return .{ .ptr = p, .pull = pull };
@@ -69,6 +70,7 @@ const Peer = struct {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         p.calls += 1;
         @memcpy(out, p.files[file][@intCast(offset)..][0..out.len]);
+        if (p.lying) out[0] ^= 0xff;
         var sha: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(out, &sha, .{});
         if (p.corrupt) out[0] ^= 0xff;
@@ -140,16 +142,175 @@ test "a missing shard is pulled from a peer, checked chunk by chunk, and not pul
     const p = try plan.plan(a, sh.ck, &s, &nodes, .{ .context = 16 });
     const ranges = try loader.needs(a, &p, sh.ck, 1);
     var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
-    try std.testing.expectError(error.MissingShard, loader.load(io, a, dst.dir, .{ .files = sh.ck.files }, ranges, null, seen.sink(), null));
+    // this rank reads part of the second file, so the copy stays held in part: allowed here, refused by default
+    const o: loader.Options = .{ .files = sh.ck.files, .chunk = 4096, .unverified = true };
+    try std.testing.expectError(error.MissingShard, loader.load(io, a, dst.dir, o, ranges, null, seen.sink(), null));
     var bad: Peer = .{ .files = .{ sh.files[0], sh.files[1] }, .corrupt = true };
-    try std.testing.expectError(error.HashMismatch, loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, ranges, bad.source(), seen.sink(), null));
+    try std.testing.expectError(error.HashMismatch, loader.load(io, a, dst.dir, o, ranges, bad.source(), seen.sink(), null));
     var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
-    var rep = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, ranges, peer.source(), seen.sink(), null);
+    var rep = try loader.load(io, a, dst.dir, o, ranges, peer.source(), seen.sink(), null);
     defer rep.release(a);
     try std.testing.expect(rep.pulled == 1 and rep.local == 1 and rep.pulled_bytes > 0 and rep.pulled_bytes < sh.files[1].len);
     const calls = peer.calls;
-    var again = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, ranges, peer.source(), seen.sink(), null);
+    var again = try loader.load(io, a, dst.dir, o, ranges, peer.source(), seen.sink(), null);
     defer again.release(a);
     try std.testing.expectEqual(calls, peer.calls);
     try std.testing.expectEqual(@as(u64, 0), again.pulled_bytes);
+}
+
+/// A sink that takes whatever bytes it is handed, to show what a load would have mapped.
+const Any = struct {
+    ranges: u32 = 0,
+    fn sink(s: *Any) loader.Sink {
+        return .{ .ptr = s, .run = run };
+    }
+    fn run(ptr: *anyopaque, _: loader.Range, _: u64, _: []align(loader.page) const u8) anyerror!void {
+        const s: *Any = @ptrCast(@alignCast(ptr));
+        s.ranges += 1;
+    }
+};
+
+test "security: a file pulled whole is checked against the manifest, whatever hash its sender gave" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src_dir = std.testing.tmpDir(.{});
+    defer src_dir.cleanup();
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    const sh = try shards(a, src_dir.dir);
+    try dst.dir.writeFile(io, .{ .sub_path = names[0], .data = sh.files[0] });
+    const nodes = [_]node.Inventory{.{ .id = 1, .gpu_limit = node.gib }};
+    const shape = tiny();
+    const p = try plan.plan(a, sh.ck, &shape, &nodes, .{ .context = 16 });
+    for (sh.ck.tensors, 0..) |t, i| if (t.file == 0) {
+        p.place[i].kind = .skip;
+    };
+    const all = try loader.needs(a, &p, sh.ck, 0);
+    try std.testing.expectEqual(@as(usize, 1), all.len);
+    try std.testing.expectEqualDeep(loader.Range{ .file = 1, .offset = 0, .len = sh.files[1].len }, all[0]);
+    const record = ".tensorfold/" ++ names[1] ++ ".ranges";
+
+    // a peer whose chunks match the hashes it sends, and whose bytes are not the checkpoint's
+    var liar: Peer = .{ .files = .{ sh.files[0], sh.files[1] }, .lying = true };
+    var any: Any = .{};
+    try std.testing.expectError(error.HashMismatch, loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, all, liar.source(), any.sink(), null));
+    try std.testing.expectEqual(@as(u32, 0), any.ranges);
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, names[1], .{}));
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, record, .{}));
+
+    // an honest peer afterwards: the file is pulled again, checked, and kept as a plain whole file
+    var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
+    var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
+    var rep = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, all, peer.source(), seen.sink(), null);
+    defer rep.release(a);
+    try std.testing.expect(rep.pulled == 1 and rep.hashed == 1 and rep.unverified_bytes == 0);
+    try std.testing.expectEqual(@as(u64, sh.files[1].len), rep.pulled_bytes);
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, record, .{}));
+    const calls = peer.calls;
+    var again = try loader.load(io, a, dst.dir, .{ .files = sh.ck.files, .chunk = 4096 }, all, peer.source(), seen.sink(), null);
+    defer again.release(a);
+    try std.testing.expect(again.local == 1 and again.pulled == 0 and peer.calls == calls);
+}
+
+test "security: a file that would stay held in part is refused before a byte is pulled, unless that is allowed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var src_dir = std.testing.tmpDir(.{});
+    defer src_dir.cleanup();
+    var dst = std.testing.tmpDir(.{});
+    defer dst.cleanup();
+    const sh = try shards(a, src_dir.dir);
+    const part = [_]loader.Range{.{ .file = 1, .offset = 0, .len = 4096 }};
+    var peer: Peer = .{ .files = .{ sh.files[0], sh.files[1] } };
+    var seen: Seen = .{ .a = a, .files = .{ sh.files[0], sh.files[1] } };
+    // the manifest has this file's hash and a part cannot be checked against it: nothing is asked of the peer
+    const strict: loader.Options = .{ .files = sh.ck.files, .chunk = 4096 };
+    try std.testing.expectError(error.UnverifiedShard, loader.load(io, a, dst.dir, strict, &part, peer.source(), seen.sink(), null));
+    try std.testing.expectEqual(@as(u32, 0), peer.calls);
+    try std.testing.expectError(error.FileNotFound, dst.dir.statFile(io, names[1], .{}));
+    // allowed by name, the bytes are mapped and counted, on this run and on a later one that pulls nothing
+    var allowing = strict;
+    allowing.unverified = true;
+    var rep = try loader.load(io, a, dst.dir, allowing, &part, peer.source(), seen.sink(), null);
+    defer rep.release(a);
+    try std.testing.expect(rep.pulled == 1 and rep.hashed == 0);
+    try std.testing.expectEqual(@as(u64, 4096), rep.unverified_bytes);
+    var again = try loader.load(io, a, dst.dir, allowing, &part, peer.source(), seen.sink(), null);
+    defer again.release(a);
+    try std.testing.expect(again.pulled_bytes == 0 and again.unverified_bytes == 4096);
+    // and the copy on disk is still refused to a load that did not allow it
+    try std.testing.expectError(error.UnverifiedShard, loader.load(io, a, dst.dir, strict, &part, peer.source(), seen.sink(), null));
+}
+
+/// A real header with gaps before, between and after its two tensors.
+fn gapped(a: std.mem.Allocator, dir: std.Io.Dir) !checkpoint.Checkpoint {
+    const header =
+        \\{"a":{"dtype":"U8","shape":[4],"data_offsets":[3,7]},"b":{"dtype":"U8","shape":[4],"data_offsets":[12,16]}}
+    ;
+    const bytes = try a.alloc(u8, 8 + header.len + 23);
+    std.mem.writeInt(u64, bytes[0..8], header.len, .little);
+    @memcpy(bytes[8..][0..header.len], header);
+    @memset(bytes[8 + header.len ..], 17);
+    try dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = bytes });
+    return checkpoint.load(io, a, try dir.realPathFileAlloc(io, ".", a));
+}
+
+test "a plan reading every tensor includes the header and all file gaps" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ck = try gapped(a, tmp.dir);
+    const nodes = [_]node.Inventory{.{ .id = 1, .gpu_limit = node.gib }};
+    const shape = tiny();
+    const p = try plan.plan(a, ck, &shape, &nodes, .{ .context = 16 });
+    const ranges = try loader.needs(a, &p, ck, 0);
+    try std.testing.expectEqual(@as(usize, 1), ranges.len);
+    try std.testing.expectEqualDeep(loader.Range{ .file = 0, .offset = 0, .len = ck.files[0].size }, ranges[0]);
+}
+
+test "a partial plan includes the header without gaps or unselected tensors" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ck = try gapped(a, tmp.dir);
+    const nodes = [_]node.Inventory{.{ .id = 1, .gpu_limit = node.gib }};
+    const shape = tiny();
+    const p = try plan.plan(a, ck, &shape, &nodes, .{ .context = 16 });
+    for (0..ck.tensors.len) |keep| {
+        for (p.place, 0..) |*place, i| place.kind = if (i == keep) .replicate else .skip;
+        const ranges = try loader.needs(a, &p, ck, 0);
+        try std.testing.expectEqual(@as(usize, 2), ranges.len);
+        try std.testing.expectEqualDeep(loader.Range{ .file = 0, .offset = 0, .len = ck.files[0].header_bytes }, ranges[0]);
+        const t = ck.tensors[keep];
+        try std.testing.expectEqualDeep(loader.Range{ .file = 0, .offset = t.start, .len = t.bytes }, ranges[1]);
+    }
+    for (p.place) |*place| place.kind = .skip;
+    try std.testing.expectEqual(@as(usize, 0), (try loader.needs(a, &p, ck, 0)).len);
+}
+
+test "column slices keep the header without upgrading a partial payload to a whole file" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ck = try gapped(a, tmp.dir);
+    const nodes = [_]node.Inventory{ .{ .id = 1, .gpu_limit = node.gib }, .{ .id = 2, .gpu_limit = node.gib } };
+    const shape = tiny();
+    const p = try plan.plan(a, ck, &shape, &nodes, .{ .context = 16 });
+    for (p.place) |*place| place.kind = .column;
+    for (0..2) |rank| {
+        const ranges = try loader.needs(a, &p, ck, @intCast(rank));
+        try std.testing.expectEqual(@as(usize, 3), ranges.len);
+        try std.testing.expectEqualDeep(loader.Range{ .file = 0, .offset = 0, .len = ck.files[0].header_bytes }, ranges[0]);
+        for (ck.tensors, ranges[1..]) |t, range| {
+            try std.testing.expectEqualDeep(loader.Range{ .file = 0, .offset = t.start + rank * 2, .len = 2 }, range);
+        }
+    }
 }

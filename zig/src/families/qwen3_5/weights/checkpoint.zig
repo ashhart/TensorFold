@@ -96,7 +96,9 @@ pub const Checkpoint = struct {
     /// The output head, or null when it is the embedding (`tie_word_embeddings`).
     pub fn head(c: *const Checkpoint, a: std.mem.Allocator) !?host.Projection {
         if (c.config.tied) return null;
-        return try projection.projection(a, &c.main, c.names.head);
+        const p = try projection.projection(a, &c.main, c.names.head);
+        if (p.rows() != c.spec().vocab) return error.UnexpectedTensor;
+        return p;
     }
 
     /// Drops the mapped pages of layer `index` once it is uploaded (null: the embedding, norm and head).

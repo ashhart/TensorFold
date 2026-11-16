@@ -21,6 +21,23 @@ const sched_host = @import("sched_host.zig");
 const serve_line = @import("serve_line.zig");
 const round_graph = @import("round_graph.zig");
 
+/// The accepted settings of this rank; logging does not change the model or session.
+pub fn logStartup(m: *model.Model, pieces_floor: bool) void {
+    const comm: serve_line.Comm = if (m.session.roce != null or m.session.roce_multi != null)
+        .roce
+    else if (m.session.mail != null) .mailbox else .nccl;
+    const graphs = if (round_graph.current()) |rg| rg.split or rg.gate else |_| false;
+    serve_line.print(serve_line.resolved(pieces_floor, comm, graphs, m.f.opts.branches, startupEnv), startupLine);
+}
+
+fn startupEnv(name: [:0]const u8) ?[]const u8 {
+    return @import("sys").environment.Process.get(.{}, name);
+}
+
+fn startupLine(text: []const u8) void {
+    std.log.info("{s}", .{text});
+}
+
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false }};
 
@@ -152,19 +169,7 @@ pub const Served = struct {
                 std.log.info("dsv41 rounds: {s}", .{sh.describe(&buf)});
             }
         } else std.log.info("dsv41 rounds: whole prompts at admission (TF_DSV41_PREFILL_PIECES=1: the reference server's pieces between decode rounds)", .{});
-        // The settings a repeated-prompt A/B compares, resolved once; printing them changes nothing.
-        const serve_settings = serve_line.resolved(
-            if (s.sched) |sh| sh.p.s.floor != null else false,
-            std.c.getenv("TF_DSV41_PIECES_FLOOR") != null,
-            m.session.roce != null or m.session.roce_multi != null,
-            std.c.getenv("TF_ROCE") != null,
-            if (round_graph.current()) |rg| rg.split or rg.gate else |_| false,
-            std.c.getenv("TF_DSV41_ROUND_GRAPH") != null,
-            m.f.opts.branches,
-            std.c.getenv("TF_DSV41_BRANCHES") != null,
-        );
-        var serve_buf: [160]u8 = undefined;
-        std.log.info("{s}", .{serve_line.line(&serve_buf, serve_settings)});
+        logStartup(m, if (s.sched) |sh| sh.p.s.floor != null else false);
         s.lookup = null;
         const ls = try lookup.Settings.fromEnv();
         if (ls.plan) {

@@ -56,6 +56,7 @@ pub const Metal = struct {
     owners: [max_streams]?*lanes.Stream = @splat(null), // the stream each runner slot holds
     contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
     draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
+    serial_copy_match: i64 = 5, // the lone callback's suffix rule, chosen once with its serving policy
     release_hook: ?Release = null,
     checkpoint_hook: ?lanes.stream.MarkHook = null, // unplanned prompt states only when the cache has room
     grow: ?Grow = null,
@@ -112,7 +113,7 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = slots.slotResumeEnv() };
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .tensor_units = tensor_units, .window = window, .copies = copies, .nodes = @import("qwen27_window.zig").nodes(window, copies), .ops = ops, .picks = picks, .kept = kept, .draft_slots = try draftSlots(), .slot_resume = try slots.slotResumeEnv() };
         b.pass_profile = platform.c.getenv("TF_Q27_PASS_PROFILE") != null;
         errdefer b.freeContexts();
         if (draft) |d| {

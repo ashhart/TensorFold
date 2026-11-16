@@ -46,10 +46,10 @@ fn projections(s: *Set) !void {
         try s.fragments("core-lane", "prepared", try lane.source(s.a, l));
     };
     const attention = @import("../src/core/shared_attention.zig");
-    for (std.enums.values(attention.Rope)) |rope| for (std.enums.values(attention.Output)) |out| {
-        const text = try attention.source(s.a, .{ .query_heads = 8, .kv_heads = 2, .head_dim = 128, .rotary_dim = 64, .capacity = 4096, .rope = rope, .output = out });
+    for (std.enums.values(attention.Output)) |out| {
+        const text = try attention.source(s.a, .{ .query_heads = 8, .kv_heads = 2, .head_dim = 128, .capacity = 4096, .output = out });
         try s.add("core", "shared-attention", text, .{ .language = mtl.CompileOptions.mlx().language, .math_functions = .precise });
-    };
+    }
     const route = @import("../src/core/moe_route.zig");
     for ([_]route.Shape{ .{ .hidden = 4096, .experts = 288, .topk = 8 }, .{ .hidden = 4096, .experts = 128, .topk = 8, .out_bf16 = true }, .{ .hidden = 6144, .experts = 128, .topk = 4 } }) |shape|
         try s.raw("core", "route", try route.source(s.a, shape));

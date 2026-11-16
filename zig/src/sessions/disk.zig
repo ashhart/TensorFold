@@ -152,9 +152,9 @@ pub const Disk = struct {
         errdefer gpa.destroy(d);
         var name_buf: [64]u8 = undefined;
         const sub = try std.fmt.bufPrint(&name_buf, "{x}/rank{d}", .{ opts.compat[0..8], opts.rank });
-        var root = try Io.Dir.cwd().createDirPathOpen(io, opts.root, .{});
+        var root = try Io.Dir.cwd().createDirPathOpen(io, opts.root, .{ .permissions = @import("disk_namespace.zig").private });
         defer root.close(io);
-        const dir = try root.createDirPathOpen(io, sub, .{ .open_options = .{ .iterate = true } });
+        const dir = try root.createDirPathOpen(io, sub, .{ .open_options = .{ .iterate = true }, .permissions = @import("disk_namespace.zig").private });
         errdefer dir.close(io);
         try @import("disk_namespace.zig").prepare(dir, io, opts.fresh_start);
         d.* = .{ .gpa = gpa, .io = io, .opts = opts, .dir = dir, .staging = try Staging.init(gpa, io, @max(2, opts.staging), up(opts.chunk)), .lanes = undefined };
@@ -190,7 +190,7 @@ pub const Disk = struct {
     }
 
     fn openFile(d: *Disk, name: [:0]const u8, write: bool) !struct { fd: linux.fd_t, direct: bool } {
-        var flags: linux.O = .{ .ACCMODE = if (write) .WRONLY else .RDONLY, .CLOEXEC = true };
+        var flags: linux.O = .{ .ACCMODE = if (write) .WRONLY else .RDONLY, .CLOEXEC = true, .NOFOLLOW = true };
         if (write) {
             flags.CREAT = true;
             flags.TRUNC = true;
@@ -198,10 +198,10 @@ pub const Disk = struct {
         if (d.opts.direct) {
             var f2 = flags;
             f2.DIRECT = true;
-            const rc = linux.openat(d.dir.handle, name, f2, 0o644);
+            const rc = linux.openat(d.dir.handle, name, f2, 0o600);
             if (linux.errno(rc) == .SUCCESS) return .{ .fd = @intCast(rc), .direct = true };
         }
-        const rc = linux.openat(d.dir.handle, name, flags, 0o644);
+        const rc = linux.openat(d.dir.handle, name, flags, 0o600);
         if (linux.errno(rc) != .SUCCESS) return if (linux.errno(rc) == .NOENT) error.FileNotFound else error.OpenFailed;
         return .{ .fd = @intCast(rc), .direct = false };
     }
@@ -289,7 +289,7 @@ pub const Disk = struct {
         const hn = std.mem.readInt(u32, buf[12..16], .little);
         if (up(hn) > buf.len) return error.BadHeader;
         if (hn > 4096) try lanes_mod.preadAll(fd, buf[4096..up(hn)], 4096);
-        return Layout.decode(d.gpa, buf[0..up(hn)]);
+        return Layout.decode(d.gpa, buf[0..up(hn)], d.staging.size);
     }
 
     /// Reads pages [lo, hi) of one restore file into the sink, each chunk checked first; blobs too when want_blobs.

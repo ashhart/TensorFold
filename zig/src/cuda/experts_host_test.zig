@@ -38,3 +38,18 @@ test "the clamp-after order: exl3 takes it on both paths, every other format ref
         try std.testing.expectError(error.OptionNotBuilt, g.prompt(s, .up, in, l, p, 0, 1, 1, 64, -1));
     };
 }
+
+test "bf16 experts refuse dims or widths off the 32-wide blocks before any launch" {
+    const b: experts.Bf16Experts = undefined; // never reached: the refusal comes first
+    const g: Grouped = .{ .bf16 = &b };
+    const s: Stream = undefined;
+    const p: Plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0, .hist = 0 };
+    const in: experts.Rows = .{ .x = 0, .stride = 64 };
+    for ([_][2]usize{ .{ 48, 64 }, .{ 64, 48 }, .{ 2688, 1880 } }) |wd| {
+        const l: Layer = .{ .format = .bf16, .up = 0, .down = 0, .width = wd[0], .dims = wd[1], .experts = 2, .relu2 = true };
+        for ([_]experts.Epi{ .up, .down_f32, .down_bf16 }) |epi| {
+            try std.testing.expectError(error.UnexpectedShape, g.decode(s, epi, in, l, p, 0, 1, 1, 16, -1));
+            try std.testing.expectError(error.UnexpectedShape, g.prompt(s, epi, in, l, p, 0, 1, 1, 64, -1));
+        }
+    }
+}

@@ -340,7 +340,7 @@ fn rest(a: std.mem.Allocator, r: *fixture.Rig, junk: mtl.Buffer, n: usize) !void
     const Args = struct { r: *fixture.Rig, rows: u32, head: mtl.Buffer, logits: mtl.Buffer, ew: mtl.Buffer, es: mtl.Buffer, ex: mtl.Buffer, ekv: mtl.Buffer, k: u32, n: u32 };
     const F = struct {
         fn headMv(x: Args, e: mtl.ComputeEncoder) !void {
-            pkg.pipelines.glue.mv(&x.r.p.glue, e, x.r.s.hn, .{ .buf = x.head }, .{ .buf = x.logits }, x.rows, x.r.c.hidden, x.r.c.vocab, true);
+            try pkg.pipelines.glue.mv(&x.r.p.glue, e, x.r.s.hn, .{ .buf = x.head }, .{ .buf = x.logits }, x.rows, x.r.c.hidden, x.r.c.vocab, true);
         }
         fn wkv(x: Args, e: mtl.ComputeEncoder) !void {
             const fp8 = pkg.pipelines.fp8;

@@ -1,4 +1,4 @@
-//! Qwen3 dense embedding checkpoints on the native CUDA server: the flags its family does not take, then its open.
+//! Qwen3 dense embedding and reranker checkpoints on the native CUDA server: the family's flag refusals, then its open.
 const std = @import("std");
 const api = @import("engine_api");
 const qwen3 = @import("qwen3_cuda");

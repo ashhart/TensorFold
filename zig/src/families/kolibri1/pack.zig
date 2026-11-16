@@ -49,11 +49,6 @@ pub fn widen(gpa: std.mem.Allocator, t: Tensor) ![]f32 {
     return out;
 }
 
-/// fp32 values of a tensor whose bytes may sit at any offset of the mapped file.
-fn floats(dst: []f32, t: Tensor) void {
-    for (dst, 0..) |*o, i| o.* = @bitCast(std.mem.readInt(u32, t.bytes[4 * i ..][0..4], .little));
-}
-
 /// Row-stacked block-FP8 parts as one projection: codes and scales concatenated by rows, then packed.
 fn linear(gpa: std.mem.Allocator, parts: []const names.Fp8) !Linear {
     const k = parts[0].w.dim(1);
@@ -73,7 +68,7 @@ fn linear(gpa: std.mem.Allocator, parts: []const names.Fp8) !Linear {
     for (parts) |p| {
         @memcpy(codes[at..][0..p.w.bytes.len], p.w.bytes);
         at += p.w.bytes.len;
-        floats(inv[sat..][0..p.s.numel()], p.s);
+        try core.quant.fp8.widen(p.s, inv[sat..][0..p.s.numel()], false);
         sat += p.s.numel();
     }
     const npad = fp8.padded(n);
@@ -98,9 +93,9 @@ fn experts(gpa: std.mem.Allocator, l: *Layer, ex: []const names.Expert, c: Confi
     for (ex, 0..) |e, i| {
         try fx8.packGateUp(gpa, l.up[i * one / 2 ..][0 .. one / 2], e.gate.w.bytes, e.up.w.bytes, ni, d);
         fx8.packOne(l.down[i * one / 4 ..][0 .. one / 4], e.down.w.bytes, d, ni);
-        floats(l.up_scale[2 * i * sb ..][0..sb], e.gate.s);
-        floats(l.up_scale[(2 * i + 1) * sb ..][0..sb], e.up.s);
-        floats(l.down_scale[i * sb ..][0..sb], e.down.s);
+        try core.quant.fp8.widen(e.gate.s, l.up_scale[2 * i * sb ..][0..sb], false);
+        try core.quant.fp8.widen(e.up.s, l.up_scale[(2 * i + 1) * sb ..][0..sb], false);
+        try core.quant.fp8.widen(e.down.s, l.down_scale[i * sb ..][0..sb], false);
     }
 }
 

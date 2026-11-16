@@ -17,7 +17,11 @@ pub const TimedTarget = struct {
         return .{ .ptr = t, .vtable = &vtable };
     }
 
-    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm };
+    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .resumed = resumed };
+
+    fn resumed(p: *anyopaque, slot: u32) u64 {
+        return self(p).inner.resumedRows(slot);
+    }
 
     fn admit(p: *anyopaque, slot: u32, max_new: u64) void {
         self(p).inner.admit(slot, max_new);

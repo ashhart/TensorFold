@@ -411,10 +411,12 @@ pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoi
         if (c.ple[i]) ple = try l.ple(i);
     }
     _ = arena.reset(.retain_capacity);
+    const embed = try l.proj(tensors.embed);
+    if (embed.rows() != c.vocab) return error.UnexpectedShape; // `proj` checks MLX tables alone; a float table is read by id too
     w.model = .{
         .dims = dims,
         .act = act,
-        .embed = try l.put(try l.proj(tensors.embed), false),
+        .embed = try l.put(embed, false),
         .layers = w.layers,
         .mix = try l.hc(tensors.mixer, false),
         .head = try l.put(try l.rows(head, &.{c.vocab}), false),

@@ -502,6 +502,7 @@ pub const Engine = struct {
         e.prompts.reset();
         const ids = e.ids.slice(u32)[0 .. end - pos0];
         @memcpy(ids, prompt[pos0..end]);
+        for (ids) |t| if (t >= e.model().spec.vocab) return error.InvalidQwenToken; // no kernel bounds an id
         try e.ids_dev.uploadAsync(0, e.ids.view(0, 4 * ids.len), e.stream);
         var p: Poll = undefined;
         const rows = try fwd.span(e.ops(&e.prompts), e.model(), caches, e.ids_dev.base(), end - pos0, pos0, e.poll(cancel, end - pos0, &p));
@@ -518,6 +519,7 @@ pub const Engine = struct {
         e.prompts.reset();
         const ids = e.ids.slice(u32)[0..len];
         @memcpy(ids, prompt[pos0..]);
+        for (ids) |t| if (t >= m.spec.vocab) return error.InvalidQwenToken; // no kernel bounds an id
         try e.ids_dev.uploadAsync(0, e.ids.view(0, 4 * ids.len), e.stream);
         const o = e.ops(&e.prompts);
         var p: Poll = undefined;

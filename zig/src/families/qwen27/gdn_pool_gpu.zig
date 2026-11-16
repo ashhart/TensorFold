@@ -12,7 +12,7 @@ const Kernels = @import("gdn_library.zig").Kernels;
 
 pub const PromptMarks = @import("gdn_marks_gpu.zig").Bank;
 
-const Field = enum { state, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
+const Field = enum { state, history, next_history, qkv, query, key, value, decay, mixing, snapshots, recurrent };
 
 pub const Metadata = struct {
     parents: Ref,
@@ -310,7 +310,6 @@ pub const Pool = struct {
             .value = try pool.layerSpan(.value, layer),
             .decay = try pool.layerSpan(.decay, layer),
             .mixing = try pool.layerSpan(.mixing, layer),
-            .tails = try refSpan(.{ .buffer = pool.get(.tails) }, bytes.tails),
             .snapshots = try refSpan(.{ .buffer = pool.get(.snapshots) }, bytes.snapshots),
             .recurrent = try refSpan(.{ .buffer = pool.get(.recurrent) }, bytes.value),
             .output = try refSpan(refs.output, bytes.value),

@@ -43,6 +43,13 @@ pub fn refused(comptime F: type, o: api.Open) ?[]const u8 {
     return null;
 }
 
+/// A run's MTP floor: the flag, else the family's `mtp_confidence_rdna3_5` on one RDNA 3.5 GPU, else `fallback`.
+pub fn confidenceFloor(comptime F: type, o: api.Open, rdna3_5_alone: bool, fallback: f64) f64 {
+    if (o.mtp_confidence) |c| return c;
+    if (comptime !@hasDecl(F, "mtp_confidence_rdna3_5")) return fallback;
+    return if (rdna3_5_alone) F.mtp_confidence_rdna3_5 else fallback;
+}
+
 /// The family's offer, or the empty one (text, the host's defaults) when its Loaded carries none.
 pub fn offerOf(loaded: anytype) Offer {
     return if (comptime @hasField(@TypeOf(loaded), "offer")) loaded.offer else .{};

@@ -36,6 +36,7 @@ pub const chip = cuda_device.chip;
 pub const deviceName = cuda_device.deviceName;
 /// `capabilities --json`'s "p2p": NVML's GPUs and pairs on a host with two or more; null otherwise.
 pub const p2p = cuda.p2p_report.compact;
+pub const kernelSupport = cuda_device.kernelSupport;
 const getenv = cuda_device.getenv;
 const setting = cuda_device.setting;
 const windows = @import("cuda_window.zig");
@@ -181,18 +182,22 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     }
     // a family whose rope can stretch (Qwen's YaRN, from its config or --rope-yarn) names its own ceiling
-    const native = if (comptime @hasDecl(F, "contextCeiling")) F.contextCeiling(a, io, o.dir, o.rope_yarn) catch |e| {
+    const own = if (comptime @hasDecl(F, "contextCeiling")) F.contextCeiling(a, io, o.dir, o.rope_yarn) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "{s} ({s}): YaRN takes rope_type yarn, factor, original_max_position_embeddings and their product as max_position_embeddings, and --rope-yarn a factor from 1 matching it", .{ if (o.rope_yarn != null) "--rope-yarn" else "the checkpoint's rope scaling", @errorName(e) });
         return null;
     } else modelContext(a, io, o.dir);
+    // a family with no positions to stretch (GLM-5.3-Flash) raises it with a row of its own, read at its open
+    const raised = windows.familyCeiling(F, problem) catch return null;
+    const native: i64 = if (raised.window) |n| @intCast(n) else own;
     const window = contextWindow(o.context, native, F.default_context) catch |e| {
         problem.* = switch (e) {
             error.Negative => try std.fmt.allocPrint(a, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
             error.NoNative => "--context 0 asks for the model's window, and its config.json names none: give a token count",
-            error.PastNative => try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
+            error.PastNative => if (raised.window != null) try windows.pastCeiling(a, o.context.?, native, raised.switch_name) else try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ o.context.?, native }),
         };
         return null;
     };
+    if (raised.window != null and window > own) std.log.info("{s}", .{try windows.pastTrained(a, window, own, raised.switch_name)});
     if (o.slide) {
         // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
@@ -556,6 +561,7 @@ test "Flash Next takes --vision at family admission" {
 }
 test {
     _ = @import("cuda_health_test.zig");
+    _ = @import("cuda_ceiling_test.zig");
     _ = @import("cuda_vision_offer.zig");
     _ = @import("cuda_ledger.zig");
     _ = kv_pages;

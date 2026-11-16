@@ -142,6 +142,7 @@ pub fn verify(e: *Engine, rows: []const Rows, reqs: []const draw.Request, out: [
     var total: usize = 0;
     for (rows, 0..) |r, i| {
         if (r.pos + r.tokens.len > r.caches.covered()) return error.ContextFull;
+        for (r.tokens) |t| if (t >= m.spec.vocab) return error.InvalidQwenToken; // no kernel bounds an id
         st.wins[i] = .{ .desc = r.caches.desc.base(), .pos = r.pos, .tokens = r.tokens, .shift = r.shift };
         total += r.tokens.len;
     }

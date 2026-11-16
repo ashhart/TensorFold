@@ -11,6 +11,8 @@ pub const folder_name = ".tensorfold-original";
 const partial_name = folder_name ++ ".partial"; // a snapshot being made; the next attempt starts it again
 const manifest_name = "SHA256SUMS"; // `shasum -a 256 -c SHA256SUMS` inside the snapshot checks it by hand
 const graphs_name = "graphs"; // the fact graph files --slide servers kept for the folder, one absolute path a line
+/// Beside a fact graph: the folders that learned from it, one absolute path a line; a snapshot's own list can lie.
+pub const taught_suffix = ".folders";
 const put_back_suffix = ".tensorfold-rollback"; // a file being put back, renamed over its name once whole
 
 /// A file a lesson may write: a safetensors file, the shard index or config.json.
@@ -26,6 +28,7 @@ pub const Options = struct {
     tamper: ?*const fn ([:0]const u8) void = null, // tests: a kept or put-back file changed before it is checked
     uncloned: ?*const fn ([:0]const u8) bool = null, // tests: the files this file system will not clone
     checked: bool = false, // this process made or checked the snapshot already: a later lesson reuses it unread
+    graph_gone: ?*const fn ([]const u8) void = null, // tests: a removed fact graph's folders file, before it goes
 };
 
 /// A snapshot made now (`made`) or found (`checked`: hashed now), its files, bytes, clones and seconds; `taught` too.
@@ -45,9 +48,15 @@ pub const Restored = struct {
     bytes: u64 = 0,
     cloned: usize = 0,
     removed: []const []const u8 = &.{},
-    graphs: []const []const u8 = &.{},
+    /// Fact graphs removed; `err` is why the folders file beside one stayed.
+    graphs: []const Graph = &.{},
+    /// Fact graphs the snapshot lists that stayed: nothing beside them names this folder, or (`err`) it was unreadable.
+    left: []const Graph = &.{},
     seconds: f64 = 0,
 };
+
+/// A fact graph a rollback removed or left, and the error from the folders file beside it.
+pub const Graph = struct { path: []const u8, err: ?anyerror = null };
 
 /// A process's hold on a model folder, gone when it is released or the process ends.
 pub const Hold = struct {
@@ -117,7 +126,7 @@ fn keepFiles(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocat
             why.* = try std.fmt.allocPrint(a, text, .{ snap, name, manifest_name, dir });
             return error.Damaged;
         }
-        if (graph) |g| try noteGraph(a, io, snap, g);
+        if (graph) |g| try noteGraph(a, io, snap, g, dir);
         var out: Kept = .{ .checked = !o.checked, .files = entries.len };
         for (entries) |e| out.bytes += (try Io.Dir.cwd().statFile(io, try join(a, snap, e.name), .{})).size;
         out.seconds = since(io, t0);
@@ -168,7 +177,7 @@ fn keepFiles(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocat
         try text.print(a, "{s}  {s}\n", .{ &hex, name });
     }
     try files.writeWhole(a, try join(a, part, manifest_name), text.items);
-    if (graph) |g| try noteGraph(a, io, part, g);
+    if (graph) |g| try noteGraph(a, io, part, g, dir);
     files.rename(try a.dupeSentinel(u8, part, 0), try a.dupeSentinel(u8, snap, 0)) catch return error.SnapshotFolder;
     files.syncDir(a, dir);
     out.seconds = since(io, t0);
@@ -241,7 +250,7 @@ fn rollbackFiles(io: Io, dir: []const u8, o: Options, a: Allocator, why: *[]cons
         return error.NotRestored;
     }
     out.removed = try removeAdded(a, io, dir, entries);
-    out.graphs = try removeGraphs(a, io, snap);
+    try removeGraphs(a, io, snap, dir, o, &out);
     files.syncDir(a, dir);
     out.seconds = since(io, t0);
     return out;
@@ -413,40 +422,76 @@ fn lessonFile(name: []const u8) bool {
     return true;
 }
 
-/// The fact graph files the snapshot lists, removed where they still read as one (a JSON object with facts and next).
-fn removeGraphs(a: Allocator, io: Io, snap: []const u8) ![]const []const u8 {
+/// The fact graphs the snapshot lists, removed where they still read as one and their own folders file names `dir`.
+fn removeGraphs(a: Allocator, io: Io, snap: []const u8, dir: []const u8, o: Options, out: *Restored) !void {
     const at = try join(a, snap, graphs_name);
     const list = Io.Dir.cwd().readFileAlloc(io, at, a, .limited(1 << 20)) catch |e| switch (e) {
-        error.FileNotFound => return &.{},
+        error.FileNotFound => return,
         else => return e,
     };
-    var gone: std.ArrayList([]const u8) = .empty;
+    const home = try Io.Dir.cwd().realPathFileAlloc(io, dir, a);
+    var gone: std.ArrayList(Graph) = .empty;
+    var left: std.ArrayList(Graph) = .empty;
     var lines = std.mem.splitScalar(u8, list, '\n');
     while (lines.next()) |path| {
         if (!std.fs.path.isAbsolute(path)) continue;
         const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch continue;
         const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch continue;
         if (v != .object or v.object.get("facts") == null or v.object.get("next") == null) continue;
+        // the snapshot's list sits in the folder, which a copied repository fills: the graph's side decides
+        const taught = try std.mem.concat(a, u8, &.{ path, taught_suffix });
+        // the files are back already: a folders file that cannot be read names no folder, and the graph stays
+        const folders = lineList(a, io, taught) catch |e| {
+            try left.append(a, .{ .path = path, .err = e });
+            continue;
+        };
+        if (!inLines(home, folders)) {
+            try left.append(a, .{ .path = path });
+            continue;
+        }
         if (platform.c.unlink(try a.dupeSentinel(u8, path, 0)) != 0) return error.RemoveFailed;
-        try gone.append(a, path);
+        if (o.graph_gone) |hook| hook(taught);
+        // its folders go with it, or a graph made later at this path would take them on; one left is only reported
+        const stayed: ?anyerror = if (Io.Dir.cwd().deleteFile(io, taught)) null else |e| switch (e) {
+            error.FileNotFound => null,
+            else => e,
+        };
+        try gone.append(a, .{ .path = path, .err = stayed });
     }
-    return gone.items;
+    out.graphs = gone.items;
+    out.left = left.items;
 }
 
-/// `graph`, made absolute, listed once in the snapshot's graphs file.
-fn noteGraph(a: Allocator, io: Io, snap: []const u8, graph: []const u8) !void {
+/// A list file's text, empty when there is none.
+fn lineList(a: Allocator, io: Io, file: []const u8) ![]const u8 {
+    return Io.Dir.cwd().readFileAlloc(io, file, a, .limited(1 << 20)) catch |e| switch (e) {
+        error.FileNotFound => "",
+        else => return e,
+    };
+}
+
+/// Whether `line` is one of the lines of `list`.
+fn inLines(line: []const u8, list: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, list, '\n');
+    while (lines.next()) |l| if (std.mem.eql(u8, l, line)) return true;
+    return false;
+}
+
+/// `graph`, made absolute, listed once in the snapshot's graphs file, and `dir` once in the graph's folders file.
+fn noteGraph(a: Allocator, io: Io, snap: []const u8, graph: []const u8, dir: []const u8) !void {
     const path = if (std.fs.path.isAbsolute(graph)) graph else blk: {
         const here = try Io.Dir.cwd().realPathFileAlloc(io, ".", a);
         break :blk try std.fs.path.join(a, &.{ here, graph });
     };
     const file = try join(a, snap, graphs_name);
-    const old = Io.Dir.cwd().readFileAlloc(io, file, a, .limited(1 << 20)) catch |e| switch (e) {
-        error.FileNotFound => "",
-        else => return e,
-    };
-    var lines = std.mem.splitScalar(u8, old, '\n');
-    while (lines.next()) |line| if (std.mem.eql(u8, line, path)) return;
-    try files.writeWhole(a, file, try std.mem.concat(a, u8, &.{ old, path, "\n" }));
+    const old = try lineList(a, io, file);
+    if (!inLines(path, old)) try files.writeWhole(a, file, try std.mem.concat(a, u8, &.{ old, path, "\n" }));
+    const home = try Io.Dir.cwd().realPathFileAlloc(io, dir, a);
+    const taught = try std.mem.concat(a, u8, &.{ path, taught_suffix });
+    const folders = try lineList(a, io, taught);
+    if (inLines(home, folders)) return;
+    if (std.fs.path.dirname(path)) |parent| try Io.Dir.cwd().createDirPath(io, parent);
+    try files.writeWhole(a, taught, try std.mem.concat(a, u8, &.{ folders, home, "\n" }));
 }
 
 const teach_fix = "free some space, or teach a copy on APFS, Btrfs or XFS";

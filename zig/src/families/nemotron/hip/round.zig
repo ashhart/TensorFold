@@ -57,13 +57,15 @@ pub const Plan = struct {
     /// Pages a head of a pool slot holds, and the words of a descriptor before its page table.
     pool: u32,
     pages: u32,
+    /// Rows of the embedding table: `send` refuses a token at or past it.
+    vocab: usize,
 
     /// Device bytes a plan of `rows` rows over `slots` streams holds.
     pub fn deviceBytes(rows: usize, slots: usize) usize {
         return 4 * Layout.of(rows, slots).words;
     }
 
-    pub fn init(d: *const hip.Runtime, pool: *const pages.Pool, rows: usize, slots: usize) !Plan {
+    pub fn init(d: *const hip.Runtime, pool: *const pages.Pool, rows: usize, slots: usize, vocab: usize) !Plan {
         const bytes = deviceBytes(rows, slots);
         var host = try hip.HostBuffer.alloc(d, bytes);
         errdefer host.free();
@@ -74,6 +76,7 @@ pub const Plan = struct {
             .slots = slots,
             .pool = @intCast(pool.count),
             .pages = @intCast(pages.header_words + 2 * pool.keys.len),
+            .vocab = vocab,
         };
     }
 
@@ -89,6 +92,7 @@ pub const Plan = struct {
         for (windows) |w| {
             total += w.tokens.len;
             visible = @max(visible, w.pos + w.tokens.len);
+            for (w.tokens) |t| if (t >= p.vocab) return error.TokenOutsideVocabulary; // no kernel bounds an id
         }
         if (windows.len == 0 or windows.len > p.slots or total == 0 or total > p.rows) return error.WindowTooWide;
         const l = Layout.of(total, windows.len);
@@ -256,4 +260,10 @@ test "the layout keeps the descriptors on even words" {
     try std.testing.expect(l.desc % 2 == 0);
     try std.testing.expectEqual(@as(usize, 3 * 5 + 3 + 3), l.count + 3);
     try std.testing.expectEqual(l.desc + 6, l.words);
+}
+
+test "security: a round refuses a token at or past the vocabulary before its plan is written" {
+    var p: Plan = .{ .host = undefined, .dev = undefined, .rows = 4, .slots = 1, .pool = 0, .pages = 0, .vocab = 8 };
+    const win: Window = .{ .s = undefined, .pos = 0, .tokens = &.{ 7, 8 } };
+    try std.testing.expectError(error.TokenOutsideVocabulary, p.send(&.{win}, 4096, undefined));
 }

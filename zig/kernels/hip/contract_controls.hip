@@ -7,6 +7,7 @@
 
 #include "attention/prefill.hpp"
 #include "quant/dense_tiles.hpp"
+#include "quant/mlx_tiles.hpp"
 #include "tiles/wmma12_gemm_k32_ref.hpp"
 
 __device__ __forceinline__ float tf_ctl_x(const uint16_t* x, int64_t i) {
@@ -194,6 +195,18 @@ tf_ctl_fa_paged_unmasked_bf16(const float* q, const hip_bfloat16* k, const hip_b
                               int count) {
     fa_dot2<hip_bfloat16, true, true, false, false>(q, k, v, out, qlen, span, heads, kv_heads, d, scale, q_pos0, 0, 0,
                                                     0, 0, 0, 0, table, count);
+}
+
+// Gate 3: the routed item tile's few-row passes stop after a wave's first, leaving the block's other columns unwritten.
+struct TfCtlItemFewOnePass {
+    using Dot = tf::rocm::DotBF16;
+    using Epi = tf::rocm::GemmOut<tf::rocm::DotBF16>;
+    static constexpr bool every_pass = false;
+};
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_item_few_one_pass(tf::rocm::Affine a) {
+    using namespace tf::rocm;
+    wmma_item_tile<MlxDecoder<4>, BF16Act, WmmaBF16, GemmOut<WmmaBF16>, 4, TfCtlItemFewOnePass>(a);
 }
 
 // Gate 3: the big block loading its operands without the stores' swizzle, and without its K loop's barriers.

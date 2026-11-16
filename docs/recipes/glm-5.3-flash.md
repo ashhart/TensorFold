@@ -42,8 +42,8 @@ tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --tp 2 --rank 0 --master 
 ```
 
 Rank 1 starts first and rank 0 serves HTTP. Use the same context and drafting settings on both ranks.
-The optional `incoai/GLM-5.3-Flash-DFlash2` model has CC BY-NC-ND 4.0 terms; pull it on both ranks only
-when those terms fit the intended use. The CLI uses it automatically once it has been pulled.
+The optional `incoai/GLM-5.3-Flash-DFlash2` model is Apache-2.0; pull it on both ranks to use it.
+The CLI uses it automatically once it has been pulled.
 Without it, the engine uses MTP drafts; `--drafter none` explicitly selects MTP-only drafting.
 Give both ranks the same drafter setting. `--no-drafts` disables all drafting for the serial reference.
 A checkpoint with neither an MTP head nor a supplied DFlash2 model is refused unless drafts are disabled.

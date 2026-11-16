@@ -1,6 +1,10 @@
 //! The real CUDA prompt cancellation hook needs no device to name the last completed prefix.
 const std = @import("std");
+const cuda = @import("cuda");
 const lanes = @import("lanes");
+const E = @import("cuda_engine.zig");
+const prefill = @import("cuda_prefill.zig");
+const readout = @import("cuda_readout.zig");
 const t = std.testing;
 
 pub fn cancelled(comptime Lanes: type, backend: anytype) !void {
@@ -38,9 +42,16 @@ pub fn cancelled(comptime Lanes: type, backend: anytype) !void {
 
 /// Lanes' parts a stepped pass touches, with a forward that records each cut's rows and nothing on a device.
 const Fake = struct {
-    const prefill = @import("cuda_prefill.zig");
     const reuse = @import("cuda_reuse.zig");
-    const Cache = struct { untaught: bool = false, delta: i32 = 0, len: usize = 0, written: usize = 0 };
+    const Cache = struct {
+        untaught: bool = false,
+        delta: i32 = 0,
+        len: usize = 0,
+        written: usize = 0,
+        pub fn reset(_: *Cache, e: *Engine) !void {
+            if (e.reset_fails) return error.FakeReset;
+        }
+    };
     const Plan = struct { from: usize, marks: []u32 };
     const Prefix = struct {
         pub fn open(_: *Prefix, _: []const u32, _: usize, _: u32, _: []const u32) !?struct { cache: *Cache, plan: Plan } {
@@ -53,9 +64,25 @@ const Fake = struct {
     };
     const Engine = struct {
         rows: std.ArrayList(usize) = .empty,
-        pub fn forward(e: *Engine, parts: anytype, ids: []const u32, _: anytype) !void {
-            try t.expectEqual(parts[0].rows, ids.len);
+        x: u64 = 0,
+        stream: cuda.Stream = .{ .d = undefined, .handle = null },
+        whole_calls: usize = 0,
+        whole_rows: usize = 0,
+        piece_calls: usize = 0,
+        piece_rows: usize = 0,
+        reset_fails: bool = false,
+        pub fn forward(e: *Engine, parts: anytype, ids: []const u32, keep: E.Keep) !void {
+            var rows: usize = 0;
+            inline for (parts) |p| rows += p.rows;
+            try t.expectEqual(rows, ids.len);
             try e.rows.append(t.allocator, ids.len);
+            if (keep == .rows) {
+                e.piece_calls += 1;
+                e.piece_rows += rows;
+            } else {
+                e.whole_calls += 1;
+                e.whole_rows += rows;
+            }
         }
     };
     gpa: std.mem.Allocator = t.allocator,
@@ -65,6 +92,8 @@ const Fake = struct {
     vision: ?*@import("cuda_vision.zig").Vision = null,
     prefix: ?*Prefix = null,
     pages: ?*Pages = null,
+    readout: readout.Side = .{},
+    restore_ok: bool = true,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *Cache) = .empty,
     seen: std.AutoHashMapUnmanaged(*lanes.Stream, []reuse.Seen) = .empty,
     fills: std.AutoHashMapUnmanaged(*lanes.Stream, prefill.Fill) = .empty,
@@ -78,13 +107,16 @@ const Fake = struct {
     pub fn cacheOf(f: *Fake, s: *lanes.Stream) !*Cache {
         return f.caches.get(s) orelse error.UnknownQwenStream;
     }
-    pub fn restoreKept(_: *Fake, _: *Cache, _: *anyopaque, _: []const reuse.Seen) !void {}
+    pub fn restoreKept(f: *Fake, _: *Cache, _: *anyopaque, _: []const reuse.Seen) !void {
+        if (!f.restore_ok) return error.FakeRestore;
+    }
     fn deinit(f: *Fake) void {
         var it = f.seen.valueIterator();
         while (it.next()) |v| f.gpa.free(v.*);
         f.seen.deinit(f.gpa);
         f.caches.deinit(f.gpa);
         f.fills.deinit(f.gpa);
+        f.readout.open.deinit(f.gpa);
     }
 };
 
@@ -99,7 +131,7 @@ fn pass(prompt: []const u32, chunks: []const u32, caps: []const u32, ends: *std.
     var i: usize = 0;
     while (true) : (i += 1) {
         const cap = caps[i % caps.len];
-        const done = try Fake.prefill.step(&f, &s, cap);
+        const done = try prefill.step(&f, &s, cap);
         try t.expectEqual(i + 1, e.rows.items.len);
         if (cap > 0) try t.expect(e.rows.items[i] <= @max(128, cap));
         if (done) break;
@@ -170,7 +202,7 @@ fn marks() !void {
             .reuse = .{ .hook = .{ .ptr = &probe, .at = Probe.kept }, .marks = &want },
         });
         defer s.deinit(t.allocator);
-        while (!try Fake.prefill.step(&f, &s, cap)) {}
+        while (!try prefill.step(&f, &s, cap)) {}
         if (cap > 0) try t.expect(std.mem.indexOfScalar(usize, e.rows.items, 512) != null); // the cap cut at 1024 too
         try t.expectEqualSlices(u32, &.{m}, probe.at[0..probe.n]);
     }
@@ -187,4 +219,98 @@ fn policy() !void {
     try pass(prompt, &.{}, &.{1000}, &ends); // TOKENS=1000: 896-row steps
     const want = [_]usize{ 896, 1792, 2688, 3584, m, m + 896, m + 1792, m + 2688, m + 3584, 2 * m, 2 * m + 100 };
     try t.expectEqualSlices(usize, &want, ends.items);
+}
+
+const ReadoutProbe = struct {
+    opened: usize = 0,
+    pieces: usize = 0,
+    rows: usize = 0,
+
+    fn open(ctx: *anyopaque, _: *const lanes.readout.Spec, _: []const u32) anyerror!*readout.Readout.State {
+        const p: *@This() = @ptrCast(@alignCast(ctx));
+        p.opened += 1;
+        return @ptrCast(@alignCast(ctx));
+    }
+
+    fn consume(ctx: *anyopaque, _: *readout.Readout.State, _: u64, _: usize, count: usize, _: cuda.Stream) anyerror!void {
+        const p: *@This() = @ptrCast(@alignCast(ctx));
+        p.pieces += 1;
+        p.rows += count;
+    }
+
+    fn finish(_: *anyopaque, _: *readout.Readout.State, _: []u16) anyerror!void {}
+
+    fn close(_: *anyopaque, _: *readout.Readout.State) void {}
+};
+
+/// A text stream runs its whole pass and hits its mark; a readout stream runs its pieces and no whole pass.
+pub fn whole() !void {
+    const Hook = struct {
+        calls: usize = 0,
+        at: u32 = 0,
+        fn kept(ctx: *anyopaque, _: *lanes.Stream, mark: u32) void {
+            const p: *@This() = @ptrCast(@alignCast(ctx));
+            p.calls += 1;
+            p.at = mark;
+        }
+    };
+    var eng: Fake.Engine = .{};
+    defer eng.rows.deinit(t.allocator);
+    var toks: [E.max_rows + 8]u32 = undefined;
+    for (&toks, 0..) |*x, i| x.* = @intCast(i % 7);
+    var fake: Fake = .{ .e = &eng, .capacity = toks.len + 1 };
+    defer fake.deinit();
+    const keep = [_]u32{E.max_rows};
+    var hook: Hook = .{};
+    var text = try lanes.Stream.init(t.allocator, .{ .id = "text", .prompt = &toks, .max_new = 1, .reuse = .{ .marks = &keep, .hook = .{ .ptr = &hook, .at = Hook.kept } } });
+    defer text.deinit(t.allocator);
+    try prefill.whole(&fake, &text);
+    try t.expectEqual(@as(usize, 2), fake.e.whole_calls);
+    try t.expectEqual(toks.len, fake.e.whole_rows);
+    try t.expectEqual(@as(usize, 0), fake.e.piece_calls);
+    try t.expectEqual(@as(usize, 1), hook.calls);
+    try t.expectEqual(@as(u32, E.max_rows), hook.at);
+    try t.expectEqual(@as(u32, @intCast(toks.len)), text.fill_at.load(.monotonic));
+
+    const spec: lanes.readout.Spec = .{ .question_spans = &.{}, .question_types = &.{}, .option_spans = &.{}, .option_question = &.{}, .logits = &.{} };
+    var rtoks: [2 * readout.piece_rows]u32 = undefined;
+    for (&rtoks, 0..) |*x, i| x.* = @intCast(i % 5);
+    var probe: ReadoutProbe = .{};
+    const vtable: readout.Readout.VTable = .{ .open = ReadoutProbe.open, .consume = ReadoutProbe.consume, .finish = ReadoutProbe.finish, .close = ReadoutProbe.close };
+    const info: lanes.readout.Info = .{ .max_rows = E.max_rows, .max_questions = 1, .max_options = 1 };
+    fake.readout.readout = .{ .ctx = &probe, .info = info, .vtable = &vtable };
+    var rd = try lanes.Stream.init(t.allocator, .{ .id = "readout", .prompt = &rtoks, .max_new = 0, .drafts = false, .readout = &spec });
+    defer rd.deinit(t.allocator);
+    const whole_calls = fake.e.whole_calls;
+    try prefill.whole(&fake, &rd);
+    try t.expectEqual(whole_calls, fake.e.whole_calls);
+    try t.expectEqual(@as(usize, 2), fake.e.piece_calls);
+    try t.expectEqual(rtoks.len, fake.e.piece_rows);
+    try t.expectEqual(@as(usize, 1), probe.opened);
+    try t.expectEqual(@as(usize, 2), probe.pieces);
+    try t.expectEqual(rtoks.len, probe.rows);
+    try t.expectEqual(@as(usize, 1), hook.calls);
+    try t.expectEqual(@as(u32, @intCast(rtoks.len)), rd.fill_at.load(.monotonic));
+}
+
+test "Qwen whole prefill: a text stream runs its pass once and a readout only its pieces" {
+    try whole();
+}
+
+/// A failed restore resets the cache under `try`: a reset error leaves opening instead of filling from row 0.
+pub fn reset() !void {
+    var eng: Fake.Engine = .{ .reset_fails = true };
+    defer eng.rows.deinit(t.allocator);
+    var fake: Fake = .{ .e = &eng, .restore_ok = false };
+    defer fake.deinit();
+    var toks: [3 * E.max_rows]u32 = @splat(3);
+    var saved: u8 = 0;
+    var s = try lanes.Stream.init(t.allocator, .{ .id = "reset", .prompt = &toks, .max_new = 1, .reuse = .{ .saved = @ptrCast(&saved), .at = @intCast(E.max_rows) } });
+    defer s.deinit(t.allocator);
+    try t.expectError(error.FakeReset, prefill.step(&fake, &s, 0));
+    try t.expectEqual(@as(usize, 0), eng.whole_calls + eng.piece_calls);
+}
+
+test "Qwen prefill opening: a failed reset propagates out of the opening" {
+    try reset();
 }

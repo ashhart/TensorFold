@@ -43,32 +43,59 @@ test "qwen27 rows: a decoder arriving between chunks caps the next one and leavi
     var b: Backend = .{ .owners = .{ &prompt, null, null } };
     defer b.fills.deinit(a);
     try b.fills.put(a, &prompt, true);
-    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
     b.owners[1] = &other;
     try b.fills.put(a, &other, true);
-    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
     try std.testing.expect(b.fills.remove(&other));
-    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt, 0));
     other.paused = true;
-    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
     other.paused = false;
-    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt, 0));
     other.finished = true;
-    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
     other.finished = false;
     for ([_]usize{ 16, 128, 256, 512, 1024, 2048 }) |capacity| {
         b.chunk = capacity;
-        try std.testing.expectEqual(@min(capacity, @as(usize, 512)), policy.choose(&b, &prompt));
+        try std.testing.expectEqual(@min(capacity, @as(usize, 512)), policy.choose(&b, &prompt, 0));
     }
     b.chunk = 2048;
     b.owners[1] = null;
     b.owners[2] = &other;
     b.runner.slots = 2;
-    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
     b.runner.slots = 3;
-    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt, 0));
     b.owners[2] = null;
-    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt));
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 0));
+}
+
+fn never(_: *anyopaque) bool {
+    return false;
+}
+
+test "qwen27 rows: a background pass narrows its chunks with depth and a foreground one does not" {
+    var prompt = try Stream.init(a, .{ .id = "prompt", .prompt = &.{ 1, 2 }, .max_new = 4, .drafts = false });
+    defer prompt.deinit(a);
+    var b: Backend = .{ .owners = .{ &prompt, null, null } };
+    defer b.fills.deinit(a);
+    try b.fills.put(a, &prompt, true);
+    try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, 120000)); // a foreground pass
+    prompt.yield_check = .{ .ptr = &b, .check = never };
+    for ([_]usize{ 0, 16384 }) |at| try std.testing.expectEqual(@as(usize, 2048), policy.choose(&b, &prompt, at));
+    try std.testing.expectEqual(@as(usize, 1664), policy.choose(&b, &prompt, 20000)); // 1677, a whole 128 rows
+    try std.testing.expectEqual(@as(usize, 1024), policy.choose(&b, &prompt, 32768));
+    try std.testing.expectEqual(@as(usize, 256), policy.choose(&b, &prompt, 131072));
+    try std.testing.expectEqual(@as(usize, 256), policy.choose(&b, &prompt, 262144)); // never below 256
+    b.chunk = 128; // nor wider than the chunk
+    try std.testing.expectEqual(@as(usize, 128), policy.choose(&b, &prompt, 131072));
+    b.chunk = 2048;
+    var other = try Stream.init(a, .{ .id = "other", .prompt = &.{ 1, 2 }, .max_new = 4, .drafts = false });
+    defer other.deinit(a);
+    b.owners[1] = &other; // a decoder beside it caps the chunk first
+    try std.testing.expectEqual(@as(usize, 512), policy.choose(&b, &prompt, 20000));
+    try std.testing.expectEqual(@as(usize, 256), policy.choose(&b, &prompt, 131072));
 }
 
 const floor = @import("native/qwen27_prompt_floor.zig");

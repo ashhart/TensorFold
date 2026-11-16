@@ -75,7 +75,7 @@ __device__ __forceinline__ void q35_slots(Geo geo, const __nv_bfloat16* q, const
             }
         }
     }
-    if (sg.rows == 1)
+    if (sg.rows == 1 && sg.before != 0)
 #pragma unroll
         for (int r = 0; r < R; ++r)
 #pragma unroll

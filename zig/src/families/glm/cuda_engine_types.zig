@@ -45,4 +45,5 @@ pub const Options = struct {
     settings: ranks.Settings,
     vision: ?images_mod.Limits = null, // --vision's limits (null: off): every rank must hold the rows rank 0 sends
     drafter: bool = false, // DFlash2 loads after rank agreement
+    owner: ?*cuda.tp_group.Group = null, // the communicator's owner, which the backend aborts (null: the caller's own)
 };

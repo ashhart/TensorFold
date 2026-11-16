@@ -8,7 +8,8 @@ const ranks = flash.rank_engine;
 
 pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []const u8) !void {
     const context = 256;
-    const chunk = 32;
+    // TF_FLASHNEXT_CHUNK's rows a pass: past 64 a pass takes the expert exchange, at most 64 the all-reduce
+    const chunk = try prompt.chunkRows();
     const source = try std.Io.Dir.cwd().readFileAlloc(gpu.io, ids_path, gpu.gpa, .limited(1 << 20));
     defer gpu.gpa.free(source);
     var ids: std.ArrayList(u32) = .empty;
@@ -48,6 +49,7 @@ pub fn run(gpu: check.Gpu, dir: []const u8, rank: usize, port: u16, ids_path: []
     defer session.drop(&first);
     try session.forward(flash.Tri, tri, &first, ids.items, .{});
     check.pass("two-rank prompt completed ({d} tokens)", .{ids.items.len});
+    std.debug.print("LOGITS {x:0>16}\n", .{std.hash.Wyhash.hash(0, first.logits)});
     for (0..prompt.vocabulary) |i| {
         const value: f32 = @bitCast(@as(u32, std.mem.readInt(u16, first.logits[i * 2 ..][0..2], .little)) << 16);
         try check.expect(std.math.isFinite(value), "finite initial logits at {d}", .{i});

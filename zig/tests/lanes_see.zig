@@ -1,4 +1,4 @@
-//! Shared context, data masks and lane-local rotary positions on small synthetic buffers only.
+//! Shared context and data masks on small synthetic buffers only.
 const std = @import("std");
 const mtl = @import("metal");
 const shared = @import("shared_attention");
@@ -41,30 +41,6 @@ fn guards(b: mtl.Buffer) !void {
     for (b.contents()[b.length() - pad .. b.length()]) |x| if (x != 0xa5) return error.GuardOverwrite;
 }
 
-fn checkRope(s: shared.Shape, input: []const u16, output: []const u16, positions: []const u32, freq: []const f32, heads: usize) !void {
-    for (0..positions.len) |r| for (0..heads) |h| for (0..s.head_dim) |d| {
-        const at = (r * heads + h) * s.head_dim + d;
-        if (d >= s.rotary_dim) {
-            if (input[at] != output[at]) return error.RopeTailChanged;
-            continue;
-        }
-        const pair = if (s.rope == .interleaved) d / 2 else d % (s.rotary_dim / 2);
-        const first = if (s.rope == .interleaved) pair * 2 else pair;
-        const second = if (s.rope == .interleaved) first + 1 else first + s.rotary_dim / 2;
-        const base = at - d;
-        const x: f64 = fromBf(input[base + first]);
-        const y: f64 = fromBf(input[base + second]);
-        const angle: f32 = @as(f32, @floatFromInt(positions[r])) * freq[pair];
-        const c = @cos(@as(f64, angle));
-        const sn = @sin(@as(f64, angle));
-        const high = if (s.rope == .interleaved) d % 2 != 0 else d >= s.rotary_dim / 2;
-        const want = if (high) x * sn + y * c else x * c - y * sn;
-        const got: f64 = fromBf(output[at]);
-        // One final bf16 cast; allow its rounding and the fp32 trig/FMA rounding only.
-        if (@abs(got - want) > 0.004 * @abs(want) + 0.00001) return error.RopeMismatch;
-    };
-}
-
 fn cpuAttention(s: shared.Shape, q: []const u16, k: []const u16, v: []const u16, mask: []const u8, keys: usize, row: usize, head: usize, scale: f32, out: []f64) !void {
     const scores = try a.alloc(f64, keys);
     defer a.free(scores);
@@ -96,12 +72,12 @@ fn outputValue(b: mtl.Buffer, index: usize, output: shared.Output) f32 {
     return if (output == .f32) values(b, f32, index + 1)[index] else fromBf(values(b, u16, index + 1)[index]);
 }
 
-const Counts = struct { ordinary: usize = 0, bf16_values: usize = 0, max_error: f64 = 0, max_fraction: f64 = 0, cases: usize = 0, rows: usize = 0, cpu_values: usize = 0, rope_values: usize = 0, prompt_bytes: usize = 0 };
+const Counts = struct { ordinary: usize = 0, bf16_values: usize = 0, max_error: f64 = 0, max_fraction: f64 = 0, cases: usize = 0, rows: usize = 0, cpu_values: usize = 0, prompt_bytes: usize = 0 };
 
-fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]usize, mode: shared.Rope, output: shared.Output, counts: *Counts) !void {
+fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [3]usize, output: shared.Output, counts: *Counts) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const s = shared.Shape{ .query_heads = dims[0], .kv_heads = dims[1], .head_dim = dims[2], .rotary_dim = dims[3], .rope = mode, .capacity = prompt + n * 4, .output = output };
+    const s = shared.Shape{ .query_heads = dims[0], .kv_heads = dims[1], .head_dim = dims[2], .capacity = prompt + n * 4, .output = output };
     const p = try shared.Attention.init(a, device, s);
     defer p.deinit();
     var c = try kv.Cache.init(a, .{ .lanes = n, .prompt_capacity = prompt, .round_capacity = 4, .kv_heads = s.kv_heads, .head_dim = s.head_dim });
@@ -117,37 +93,20 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
     const max_rows = @max(n, prompt);
     const raw_k = try buffer(device, max_rows * width * 2);
     defer raw_k.deinit();
-    const prepared_k = try buffer(device, max_rows * width * 2);
-    defer prepared_k.deinit();
     const raw_v = try buffer(device, max_rows * width * 2);
     defer raw_v.deinit();
-    const positions = try buffer(device, max_rows * 4);
-    defer positions.deinit();
-    const frequencies = try buffer(device, @max(s.rotary_dim / 2 * 4, 4));
-    defer frequencies.deinit();
-    const freq = values(frequencies, f32, @max(s.rotary_dim / 2, 1));
-    for (freq, 0..) |*v, d| v.* = 1.0 / @as(f32, @floatFromInt(1 + d * 7));
 
     if (prompt > 0) {
         const raw = values(raw_k, u16, prompt * width);
         const val = values(raw_v, u16, prompt * width);
-        const pos = values(positions, u32, prompt);
         for (raw, 0..) |*v, i| v.* = data(i, 1);
         for (val, 0..) |*v, i| v.* = data(i, 2);
-        for (pos, 0..) |*v, i| v.* = @intCast(i);
-        const cb = queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try p.rotate(e, prompt, s.kv_heads, ref(raw_k, 0), ref(positions, 0), ref(frequencies, 0), ref(prepared_k, 0));
-        e.end();
-        try finish(cb);
-        try checkRope(s, raw, values(prepared_k, u16, prompt * width), pos, freq, s.kv_heads);
-        counts.rope_values += prompt * width;
-        @memcpy(values(ck, u16, prompt * width), values(prepared_k, u16, prompt * width));
+        @memcpy(values(ck, u16, prompt * width), raw);
         @memcpy(values(cv, u16, prompt * width), val);
         const ids = try a.alloc(u32, prompt);
         defer a.free(ids);
         for (ids, 0..) |*v, i| v.* = @intCast(10 + i);
-        try c.appendPrompt(ids, values(prepared_k, u16, prompt * width), val);
+        try c.appendPrompt(ids, raw, val);
     }
     const prompt_k = try a.dupe(u16, values(ck, u16, prompt * width));
     defer a.free(prompt_k);
@@ -160,11 +119,9 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
         var slots: [16]u32 = undefined;
         var owners: [16]usize = undefined;
         var used: usize = 0;
-        const pos = values(positions, u32, n);
         for (0..n) |lane| if (active & (@as(u16, 1) << @intCast(lane)) != 0) {
             owners[used] = lane;
             slots[used] = @intCast(try c.slot(ticket, lane));
-            pos[used] = ticket.positions[lane];
             for (0..width) |d| {
                 values(raw_k, u16, n * width)[used * width + d] = data(d, 3 + round * 17 + lane);
                 values(raw_v, u16, n * width)[used * width + d] = data(d, 5 + round * 19 + lane);
@@ -173,26 +130,20 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
         };
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        try p.rotate(e, used, s.kv_heads, ref(raw_k, 0), ref(positions, 0), ref(frequencies, 0), ref(prepared_k, 0));
-        e.barrier();
-        try p.appendKv(e, slots[0..used], ref(prepared_k, 0), ref(raw_v, 0), ref(ck, 0), ref(cv, 0));
+        try p.appendKv(e, slots[0..used], ref(raw_k, 0), ref(raw_v, 0), ref(ck, 0), ref(cv, 0));
         e.end();
         try finish(cb);
-        try checkRope(s, values(raw_k, u16, used * width), values(prepared_k, u16, used * width), pos[0..used], freq, s.kv_heads);
-        counts.rope_values += used * width;
-        for (0..used) |i| try c.put(ticket, owners[i], @intCast(100 + round * 16 + owners[i]), values(prepared_k, u16, used * width)[i * width ..][0..width], values(raw_v, u16, used * width)[i * width ..][0..width]);
+        for (0..used) |i| try c.put(ticket, owners[i], @intCast(100 + round * 16 + owners[i]), values(raw_k, u16, used * width)[i * width ..][0..width], values(raw_v, u16, used * width)[i * width ..][0..width]);
         try std.testing.expectEqualSlices(u16, prompt_k, values(ck, u16, prompt * width));
         try std.testing.expectEqualSlices(u16, prompt_v, values(cv, u16, prompt * width));
         for (0..used) |i| {
             const off = @as(usize, slots[i]) * width;
-            try std.testing.expectEqualSlices(u16, values(prepared_k, u16, used * width)[i * width ..][0..width], values(ck, u16, s.capacity * width)[off..][0..width]);
+            try std.testing.expectEqualSlices(u16, values(raw_k, u16, used * width)[i * width ..][0..width], values(ck, u16, s.capacity * width)[off..][0..width]);
             try std.testing.expectEqualSlices(u16, values(raw_v, u16, used * width)[i * width ..][0..width], values(cv, u16, s.capacity * width)[off..][0..width]);
         }
         if (round < 2) try c.commit(ticket) else last = ticket;
     }
     const view = try c.current(last);
-    const raw_q = try buffer(device, n * qwidth * 2);
-    defer raw_q.deinit();
     const q = try buffer(device, n * qwidth * 2);
     defer q.deinit();
     const masks = try buffer(device, n * view.keys);
@@ -202,10 +153,7 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
     defer out.deinit();
     const serial = try buffer(device, n * qwidth * elem);
     defer serial.deinit();
-    const raw = values(raw_q, u16, n * qwidth);
-    for (raw, 0..) |*v, i| v.* = data(i, 73);
-    const qp = values(positions, u32, n);
-    @memcpy(qp, last.positions[0..n]);
+    for (values(q, u16, n * qwidth), 0..) |*v, i| v.* = data(i, 73);
     const mask = values(masks, u8, n * view.keys);
     try c.visibility(view, n, mask);
     if (n > 1) {
@@ -219,15 +167,11 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
     const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(s.head_dim)));
     const cb = queue.commandBuffer();
     const e = cb.compute(.serial);
-    try p.rotate(e, n, s.query_heads, ref(raw_q, 0), ref(positions, 0), ref(frequencies, 0), ref(q, 0));
-    e.barrier();
     try p.encode(e, n, view.keys, view.keys, scale, ref(q, 0), ref(ck, 0), ref(cv, 0), ref(masks, 0), ref(out, 0));
     for (0..n) |row| try p.encode(e, 1, view.keys, view.keys, scale, ref(q, row * qwidth * 2), ref(ck, 0), ref(cv, 0), ref(masks, row * view.keys), ref(serial, row * qwidth * elem));
     if (n == 1) try p.ordinary(e, view.keys, scale, ref(q, 0), ref(ck, 0), ref(cv, 0), ref(serial, 0));
     e.end();
     try finish(cb);
-    try checkRope(s, raw, values(q, u16, n * qwidth), qp, freq, s.query_heads);
-    counts.rope_values += n * qwidth;
     try std.testing.expectEqualSlices(u8, out.contents()[pad..][0 .. n * qwidth * elem], serial.contents()[pad..][0 .. n * qwidth * elem]);
     const expected = try a.alloc(f64, s.head_dim);
     defer a.free(expected);
@@ -259,12 +203,12 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
         try std.testing.expectEqual(fromBf(values(cv, u16, s.capacity * width)[((last.base + n - 1) * s.kv_heads + kh) * s.head_dim + d]), outputValue(out, head * s.head_dim + d, output));
         try std.testing.expectEqual(@as(f32, 0), outputValue(out, ((n - 1) * s.query_heads + head) * s.head_dim + d, output));
     };
-    for ([_]mtl.Buffer{ ck, cv, raw_k, prepared_k, raw_v, positions, frequencies, raw_q, q, masks, out, serial }) |b| try guards(b);
+    for ([_]mtl.Buffer{ ck, cv, raw_k, raw_v, q, masks, out, serial }) |b| try guards(b);
     if (n == 1) counts.ordinary += 1;
     counts.prompt_bytes += prompt * width * 4;
     counts.rows += n;
     counts.cases += 1;
-    std.debug.print("PASS N{d} P{d} QH{d}/KVH{d} D{d} RoPE{d} {s} {s}: data masks, peer-current visibility, serial-row equality, prompt unchanged\n", .{ n, prompt, s.query_heads, s.kv_heads, s.head_dim, s.rotary_dim, @tagName(mode), @tagName(output) });
+    std.debug.print("PASS N{d} P{d} QH{d}/KVH{d} D{d} {s}: data masks, peer-current visibility, serial-row equality, prompt unchanged\n", .{ n, prompt, s.query_heads, s.kv_heads, s.head_dim, @tagName(output) });
 }
 
 /// Compare split attention to serial attention and fp64 at draft shapes and trained-block masks.
@@ -272,7 +216,7 @@ fn splitCase(device: mtl.Device, queue: mtl.Queue, keys: usize, counts: *Counts)
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const rows = 16;
-    const s = shared.Shape{ .query_heads = 32, .kv_heads = 8, .head_dim = 128, .rotary_dim = 128, .capacity = 2064, .output = .f32 };
+    const s = shared.Shape{ .query_heads = 32, .kv_heads = 8, .head_dim = 128, .capacity = 2064, .output = .f32 };
     const p = try shared.Attention.init(a, device, s);
     defer p.deinit();
     const qw = s.query_heads * s.head_dim;
@@ -339,14 +283,14 @@ pub fn main(_: std.process.Init) !void {
     const queue = try device.queue();
     defer queue.deinit();
     var counts: Counts = .{};
-    for ([_][4]usize{ .{ 2, 1, 32, 0 }, .{ 4, 2, 64, 32 }, .{ 8, 2, 128, 128 }, .{ 2, 2, 256, 64 } }) |dims| for ([_]shared.Rope{ .split_half, .interleaved }) |mode| for (1..17) |n| {
-        try run(device, queue, n, if (n % 3 == 0) 0 else if (n % 3 == 1) 5 else 33, dims, mode, .f32, &counts);
+    for ([_][3]usize{ .{ 2, 1, 32 }, .{ 4, 2, 64 }, .{ 8, 2, 128 }, .{ 2, 2, 256 } }) |dims| for (1..17) |n| {
+        try run(device, queue, n, if (n % 3 == 0) 0 else if (n % 3 == 1) 5 else 33, dims, .f32, &counts);
     };
-    for ([_][4]usize{ .{ 2, 1, 32, 0 }, .{ 4, 2, 64, 32 }, .{ 8, 2, 128, 128 }, .{ 2, 2, 256, 64 } }) |dims| for ([_]shared.Rope{ .split_half, .interleaved }) |mode| {
-        for ([_]usize{ 0, 1, 33 }) |prompt| try run(device, queue, 1, prompt, dims, mode, .f32, &counts);
-        try run(device, queue, 1, 5, dims, mode, .bf16, &counts);
-        try run(device, queue, 8, 5, dims, mode, .bf16, &counts);
-    };
+    for ([_][3]usize{ .{ 2, 1, 32 }, .{ 4, 2, 64 }, .{ 8, 2, 128 }, .{ 2, 2, 256 } }) |dims| {
+        for ([_]usize{ 0, 1, 33 }) |prompt| try run(device, queue, 1, prompt, dims, .f32, &counts);
+        try run(device, queue, 1, 5, dims, .bf16, &counts);
+        try run(device, queue, 8, 5, dims, .bf16, &counts);
+    }
     for ([_]usize{ 300, 1100, 2063 }) |keys| try splitCase(device, queue, keys, &counts);
-    std.debug.print("PASS {d} cases, {d} ordinary N=1 comparisons, {d} batch/serial rows, {d} fp32 CPU attention values, {d} bf16 values, {d} RoPE values, {d} prompt bytes preserved, max fp32 error {d:.9}, max bound fraction {d:.6}\n", .{ counts.cases, counts.ordinary, counts.rows, counts.cpu_values, counts.bf16_values, counts.rope_values, counts.prompt_bytes, counts.max_error, counts.max_fraction });
+    std.debug.print("PASS {d} cases, {d} ordinary N=1 comparisons, {d} batch/serial rows, {d} fp32 CPU attention values, {d} bf16 values, {d} prompt bytes preserved, max fp32 error {d:.9}, max bound fraction {d:.6}\n", .{ counts.cases, counts.ordinary, counts.rows, counts.cpu_values, counts.bf16_values, counts.prompt_bytes, counts.max_error, counts.max_fraction });
 }

@@ -165,6 +165,14 @@ test "the geometry limits: the attention's head size and groups, and the row ker
     try std.testing.expectEqual(Geometry.widths, geometry(s));
 }
 
+test "the published Qwen3 sizes, embedding and reranker alike, are within the geometry limits" {
+    const sizes = [_][3]usize{ .{ 1024, 3072, 16 }, .{ 2560, 9728, 32 }, .{ 4096, 12288, 32 } }; // hidden, inter, q heads
+    for (sizes) |z| {
+        const spec: config.Spec = .{ .layers = 28, .hidden = z[0], .heads = z[2], .kv_heads = 8, .head_dim = 128, .inter = z[1], .vocab = 151669, .eps = 1e-6, .theta = 1e6, .max_positions = 40960, .tied = z[0] < 4096 };
+        try std.testing.expectEqual(Geometry.ok, geometry(spec));
+    }
+}
+
 /// The shared operators one pass runs, over one stream.
 pub const Lm = struct {
     d: *const Driver,
@@ -221,11 +229,11 @@ pub const Lm = struct {
         lm.g.deinit();
     }
 
-    /// Every input's final-normed last row into the block's `rows`, inputs independent and ending at `ends`.
-    pub fn forward(lm: *Lm, m: *const weights.Model, a: Addrs, cap: usize, ends: []const u32) !void {
+    /// Every input's final-normed last row into `rows`: after a shared `trunk` of rows, inputs end at `ends`.
+    pub fn forward(lm: *Lm, m: *const weights.Model, a: Addrs, cap: usize, trunk: usize, ends: []const u32) !void {
         const s = m.spec;
         try lm.emb.bf16(lm.s, a.ids, m.embed, a.x, ends[ends.len - 1], s.hidden);
-        for (m.layers, 0..) |*l, i| try layerRows(lm, m, l, a, cap, ends, ends[ends.len - 1], i == 0);
+        for (m.layers, 0..) |*l, i| try layerRows(lm, m, l, a, cap, trunk, ends, ends[ends.len - 1], i == 0);
         for (ends, 0..) |e, i| {
             // the last layer's residual add and the final norm, for the one row an input pools
             const row = (e - 1) * s.hidden * 2;
@@ -255,7 +263,7 @@ pub const Lm = struct {
 };
 
 /// One decoder layer over every row; `first` is layer 0, whose residual is the embedding rows themselves.
-fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, ends: []const u32, total: usize, first: bool) !void {
+fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, trunk: usize, ends: []const u32, total: usize, first: bool) !void {
     const s = m.spec;
     const qw = s.heads * s.head_dim;
     const kvw = s.kv_heads * s.head_dim;
@@ -265,10 +273,12 @@ fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs
     try lm.g.run(lm.s, a.normed, l.q, a.q, total, qw, s.hidden);
     try lm.g.run(lm.s, a.normed, l.k, a.k, total, kvw, s.hidden);
     try lm.g.run(lm.s, a.normed, l.v, a.v, total, kvw, s.hidden);
-    var begin: usize = 0;
+    // the trunk's keys stay in the cache's first rows; each input after it attends to them and its own, from there
+    if (trunk > 0) try attention(lm, m, l, a, cap, 0, trunk, 0);
+    var begin: usize = trunk;
     for (ends) |e| {
         defer begin = e;
-        try attention(lm, m, l, a, cap, begin, e);
+        try attention(lm, m, l, a, cap, begin, e, trunk);
     }
     try lm.g.run(lm.s, a.attn, l.o, a.z, total, s.hidden, qw);
     try lm.nm.addRmsH(lm.s, a.z, a.x, l.post_norm, .f32, a.x, a.normed, null, total, s.hidden, eps);
@@ -279,8 +289,8 @@ fn layerRows(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs
     try lm.g.run(lm.s, a.gate, l.down, a.z, total, s.hidden, s.inter);
 }
 
-/// One input's rows [begin, end): QK norm, RoPE and the cache write, then causal attention over that cache alone.
-fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, begin: usize, end: usize) !void {
+/// Rows [begin, end) standing at positions from `at`: QK norm, RoPE and the cache write, then causal attention.
+fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs, cap: usize, begin: usize, end: usize, at: usize) !void {
     const s = m.spec;
     const hd = s.head_dim;
     const qw = s.heads * hd;
@@ -300,8 +310,8 @@ fn attention(lm: *Lm, m: *const weights.Model, l: *const weights.Layer, a: Addrs
         const hd64: i64 = @intCast(hd);
         const src: cuda.qk_rows.Src = .{ .q = a.q + (begin + p) * qw * 2, .q_ld = ld, .q_hs = hd64, .k = a.k + k, .k_ld = kld, .k_hs = hd64, .v = a.v + k, .v_ld = kld, .v_hs = hd64 };
         const dst: cuda.qk_rows.Out = .{ .q = out, .k = a.kb, .v = a.kb + attn_rows * kvw * 2, .kc = a.kc, .vc = a.vc, .len = cap };
-        // a block's first row stands at position p: the position table is the meta the chunks read, shifted too
-        const pos = a.pos + 4 * p;
+        // a block's first row stands at position at + p: the position table is the meta the chunks read, shifted too
+        const pos = a.pos + 4 * (at + p);
         try lm.qk.rowsFrom(lm.s, src, heads, shape, pos, null, dst, rows);
         try lm.chunks(s, dst.q, a, pos, rows, nch, scale);
         try lm.merge(s, out, a, pos, rows, nch);

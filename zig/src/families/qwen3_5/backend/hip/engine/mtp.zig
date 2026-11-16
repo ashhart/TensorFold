@@ -70,7 +70,8 @@ pub const Head = struct {
         const kv_heads = ka.n / s.head_dim;
         const full = if (w.head) |hp| try bridge.projection(hp) else model.head;
         var narrow = full;
-        narrow.n = @min(full.n, draft_vocab);
+        // a greedy chain's drafts go back into the embedding on the device, where the host cannot check them
+        narrow.n = @min(full.n, draft_vocab, model.embed.n);
         const none: hip.DeviceBuffer = .{ .r = d, .ptr = null, .len = 0 };
         return .{
             .gpa = gpa,
@@ -177,6 +178,7 @@ pub const Head = struct {
         var most: usize = 0;
         var cut = false;
         for (jobs) |j| {
+            if (j.token >= m.spec.vocab) return error.InvalidQwenToken; // no kernel bounds an id
             most = @max(most, @min(j.depth, max_depth, j.out.len));
             cut = cut or j.stop_under > 0.0;
         }

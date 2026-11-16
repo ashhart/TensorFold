@@ -1,4 +1,4 @@
-//! M5 byte-lane sources retain their launch envelopes before and after removing code staging.
+//! Byte-lane launch envelopes; the standalone sums compiled for M1/M2 even when tensor ops cannot.
 const M = @import("limits.zig").MetalLaunch;
 pub const Bad = enum { none, group, stride };
 pub const Source = struct { name: []const u8, n: usize, k: usize, sk: usize, group: usize = 64, sums: bool = false, pf: usize = 1, f32_out: bool = false, bad: Bad = .none };
@@ -35,7 +35,24 @@ pub const records = blk: {
         const groups: usize = @max(@as(usize, s.sk) -| 1, @as(usize, 1));
         const threads: usize = if (sum) 256 else 32 * s.sk;
         const memory: usize = if (sum) 0 else groups * 16 * 32 * 4;
-        out[i] = .{ .name = s.name, .threads = @intCast(threads), .tg_memory = @intCast(memory), .offline = false };
+        out[i] = .{ .name = s.name, .threads = @intCast(threads), .tg_memory = @intCast(memory), .m1 = if (sum) 1024 else 0, .m2 = if (sum) 1024 else 0, .offline = sum };
     }
     break :blk out;
 };
+
+test "byte lane records: standalone sums have measured offline limits; tensor ops stay unmeasured" {
+    const std = @import("std");
+    var count: usize = 0;
+    for (records) |r| {
+        const sum = std.mem.endsWith(u8, r.name, "tf_lane_sums");
+        try std.testing.expectEqual(sum, r.offline);
+        try std.testing.expectEqual(@as(u32, if (sum) 1024 else 0), r.m1);
+        try std.testing.expectEqual(r.m1, r.m2);
+        if (sum) {
+            count += 1;
+            try std.testing.expectEqual(@as(u32, 256), r.threads);
+            try std.testing.expectEqual(@as(u32, 0), r.tg_memory);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), count);
+}

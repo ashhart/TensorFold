@@ -54,7 +54,6 @@ inline void tf_delta_gdn_pre_body(device const bfloat* projection,
     device bfloat* value,
     device float* decay,
     device bfloat* mixing,
-    device bfloat* tails,
     uint3 group,
     uint lane) {
   const uint row = group.z, head = group.y;
@@ -78,11 +77,6 @@ inline void tf_delta_gdn_pre_body(device const bfloat* projection,
     activated[part] = float(bfloat(rounded * sigmoid));
     if (STEP) {
       for (uint tap = 0; tap < keep; ++tap) next_history[(row_slot[row] * keep + tap) * channels + channel] = bfloat(inputs[tap + 1]);
-    } else {
-      for (uint tap = 0; tap < keep; ++tap) {
-        const uint source = windows[row * p.taps + tap + 1];
-        tails[(row * keep + tap) * channels + channel] = source < keep ? history[(row_slot[row] * keep + source) * channels + channel] : projection[(source - keep) * channels + channel];
-      }
     }
   }
   if (head < 2 * p.nk) {
@@ -126,11 +120,10 @@ kernel void tf_delta_gdn_pre(device const bfloat* projection [[buffer(0)]],
                         device bfloat* value [[buffer(12)]],
                         device float* decay [[buffer(13)]],
                         device bfloat* mixing [[buffer(14)]],
-                        device bfloat* tails [[buffer(15)]],
                         uint3 group [[threadgroup_position_in_grid]],
                         uint lane [[thread_index_in_simdgroup]]) {
-  if (p.dk == 128 && p.dv == 128) tf_delta_gdn_pre_body<4, false>(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, tails, group, lane);
-  else tf_delta_gdn_pre_body<0, false>(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, tails, group, lane);
+  if (p.dk == 128 && p.dv == 128) tf_delta_gdn_pre_body<4, false>(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, group, lane);
+  else tf_delta_gdn_pre_body<0, false>(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, group, lane);
 }
 
 // tf_delta_gdn_pre_body<4, true> over 4 simdgroups a head; each lane's 4 squares summed in order before simd_sum.
@@ -206,7 +199,7 @@ kernel void tf_delta_gdn_pre_step(device const bfloat* projection [[buffer(0)]],
                         uint lane [[thread_index_in_simdgroup]]) {
   threadgroup float shared[129];
   if (p.dk == 128 && p.dv == 128) tf_delta_gdn_pre_step4(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, shared, group, sg, lane);
-  else if (sg == 0) tf_delta_gdn_pre_body<0, true>(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, nullptr, group, lane);
+  else if (sg == 0) tf_delta_gdn_pre_body<0, true>(projection, a, b, history, weights, decay_weight, time_bias, windows, row_slot, p, query, key, value, decay, mixing, group, lane);
 }
 // One tree node from its parent's state: tf_delta_delta_update and tf_delta_delta_read as the snapshot path runs them.
 inline float4 tf_delta_tree_node(float4 parent_state, device const bfloat* query, device const bfloat* key, device const bfloat* value,

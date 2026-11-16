@@ -4,6 +4,32 @@ const check = @import("draft_sources_check.zig").check;
 const present = @import("draft_sources_check.zig").present;
 const std = @import("std");
 
+test "qwen27 window: weak serial copies stay off while a confident continuation remains eligible" {
+    const a = std.testing.allocator;
+    const policy = @import("qwen27_window.zig");
+    const minimum = policy.serialCopyMatch(true, 16, null);
+    try std.testing.expectEqual((tf.lanes.proposer.Params{}).confident_match, minimum);
+    for ([_]u32{ 16, 32, 64 }) |width| {
+        try std.testing.expectEqual(@as(i64, 5), policy.serialCopyMatch(false, width, null));
+        try std.testing.expectEqual(@as(i64, 5), policy.serialCopyMatch(true, width, "0"));
+        try std.testing.expectEqual(@as(i64, 5), policy.serialCopyMatch(true, width, "1"));
+    }
+    var history: [65]u32 = undefined;
+    for (history[0..32], 0..) |*token, i| token.* = @intCast(i + 10);
+    history[32] = 999;
+    @memcpy(history[33..], history[0..32]);
+    var legacy = try tf.lanes.SuffixLookup.init(a, .{ .min_match = 5 });
+    defer legacy.deinit();
+    var strict = try tf.lanes.SuffixLookup.init(a, .{ .min_match = minimum });
+    defer strict.deinit();
+    // The former five-token rule takes this short repeated fragment; the default requires a long match.
+    try std.testing.expect((try legacy.propose(history[0..42], 16)).len > 0);
+    try std.testing.expectEqual(@as(usize, 0), (try strict.propose(history[0..42], 16)).len);
+    const copied = try strict.propose(history[0..57], 16);
+    try std.testing.expect(copied.len >= 8 and strict.last_confident);
+    try std.testing.expectEqualSlices(u32, history[24..32], copied[0..8]);
+}
+
 test "draft sources: Metal Nemotron follows the loaded MTP head" {
     var b: tf.nemotron.backend.Metal = undefined;
     b.costs = .{};

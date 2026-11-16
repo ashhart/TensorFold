@@ -136,12 +136,7 @@ pub const Generation = struct {
         const e = pick.compute(.concurrent);
         var ended = false;
         errdefer if (!ended) e.end();
-        const logits = g.runner.model.frame.get(.logits);
-        const width: u32 = @intCast(g.runner.model.config.vocab);
-        const shape = try g.matcher.encode(e, .{ .buf = logits.buffer, .off = logits.offset }, ids, parents, width, budget, eos);
-        const result = @import("core").tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
-        try g.commit.taps(e, result, .{ .buf = g.runner.taps.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = g.runner.taps.width, .capacity = g.runner.taps.capacity, .planes = @intCast(g.runner.taps.count) });
-        try g.commit.head(e, result, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = shape.rows, .width = width, .stride = width });
+        const shape = try g.encodeAccept(e, ids, parents, budget, eos);
         e.end();
         ended = true;
         pick.commit();
@@ -152,6 +147,7 @@ pub const Generation = struct {
         const k = keep.compute(.concurrent);
         var kept = false;
         errdefer if (!kept) k.end();
+        const result = @import("core").tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
         try g.runner.keepDevice(round, k, g.commit, result);
         k.end();
         kept = true;
@@ -160,6 +156,50 @@ pub const Generation = struct {
         if (gpuFailed(pick, "a draft round's picks")) return error.DraftKeepGpuFailure;
         const accepted = try g.matcher.read(shape);
         // committed without a wait: the drafter must not read or write what the keep writes until finishKeep
+        return g.publish(round, accepted, keep);
+    }
+    fn encodeAccept(g: *Generation, e: mtl.ComputeEncoder, ids: []const u32, parents: []const i32, budget: u32, eos: []const u32) !@import("core").tree_round.Match {
+        const logits = g.runner.model.frame.get(.logits);
+        const width: u32 = @intCast(g.runner.model.config.vocab);
+        const shape = try g.matcher.encode(e, .{ .buf = logits.buffer, .off = logits.offset }, ids, parents, width, budget, eos);
+        const result = @import("core").tree_commit_gpu.Ref{ .buf = g.matcher.buffers[4] };
+        try g.commit.taps(e, result, .{ .buf = g.runner.taps.buffer }, .{ .buf = g.taps }, .{ .rows = shape.rows, .width = g.runner.taps.width, .capacity = g.runner.taps.capacity, .planes = @intCast(g.runner.taps.count) });
+        try g.commit.head(e, result, .{ .buf = logits.buffer, .off = logits.offset }, .{ .rows = shape.rows, .width = width, .stride = width });
+        return shape;
+    }
+    const Tail = struct {
+        g: *Generation,
+        round: *const Round,
+        ids: []const u32,
+        parents: []const i32,
+        budget: u32,
+        eos: []const u32,
+        shape: ?@import("core").tree_round.Match = null,
+        keep: ?mtl.CommandBuffer = null,
+        fn deinit(t: *Tail) void {
+            if (t.keep) |cb| cb.release();
+        }
+        fn encode(ptr: *anyopaque, e: mtl.ComputeEncoder) !void {
+            const t: *Tail = @ptrCast(@alignCast(ptr));
+            try t.g.runner.taps.complete();
+            t.shape = try t.g.encodeAccept(e, t.ids, t.parents, t.budget, t.eos);
+            const cb = t.g.runner.model.queue.commandBuffer();
+            const k = cb.compute(.concurrent);
+            var ended = false;
+            errdefer if (!ended) k.end();
+            try t.g.runner.prepareDeviceKeep(t.round, k, t.g.commit, .{ .buf = t.g.matcher.buffers[4] });
+            k.end();
+            ended = true;
+            t.keep = cb.retain();
+        }
+    };
+    fn acceptReady(g: *Generation, round: *const Round, shape: @import("core").tree_round.Match, keep: mtl.CommandBuffer) !@import("core").tree_round.Decoded {
+        errdefer g.runner.failed = true;
+        try g.runner.checkDeviceKeep(round);
+        const accepted = try g.matcher.read(shape);
+        return g.publish(round, accepted, keep);
+    }
+    fn publish(g: *Generation, round: *const Round, accepted: @import("core").tree_round.Decoded, keep: mtl.CommandBuffer) !@import("core").tree_round.Decoded {
         keep.commit();
         g.keep = keep.retain();
         try g.runner.completeDeviceKeep(round, accepted.path);
@@ -176,6 +216,13 @@ pub const Generation = struct {
     }
     /// `extend`: a copy from the context shares the tree's agreeing nodes and adds up to `extra` rows past them.
     pub fn runRound(g: *Generation, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32) !Result {
+        return g.roundImpl(remaining, nodes, eos, already_delivered, extend, extra, false);
+    }
+    /// The lane's full candidate tree and dependent picks after the verify head's barrier, before its existing wait.
+    pub fn runRoundTail(g: *Generation, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32) !Result {
+        return g.roundImpl(remaining, nodes, eos, already_delivered, extend, extra, true);
+    }
+    fn roundImpl(g: *Generation, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32, fused: bool) !Result {
         if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != g.runner.offsets[0] or g.draft.committed_end == 0 or nodes == 0 or nodes > 15 or eos.len > 16) return error.BadDraftOptions;
         for (eos) |token| if (token >= g.runner.model.config.vocab) return error.BadDraftOptions;
         if (remaining == 0) return .{ .tokens = try g.allocator.alloc(u32, 0), .rounds = 0, .verified = 0, .matched = 0 };
@@ -189,7 +236,8 @@ pub const Generation = struct {
         const available = g.runner.capacity - g.runner.offsets[0];
         if (available == 0) return error.ContextFull;
         const offered: u32 = @intCast(@min(nodes, available - 1));
-        var tree = if (g.proposer) |proposer| try proposer.call(proposer.ptr, pending, offered) else try g.draft.propose(pending, offered);
+        const selection = if (fused) Draft.loneSelection(offered) else @import("selector.zig").Options{ .nodes = offered };
+        var tree = if (g.proposer) |proposer| try proposer.call(proposer.ptr, pending, offered) else try g.draft.proposeOptions(pending, selection);
         defer tree.deinit();
         const drafted = try tree.verifyParents(g.allocator);
         defer g.allocator.free(drafted);
@@ -220,8 +268,17 @@ pub const Generation = struct {
         defer round.deinit();
         errdefer g.finishKeep() catch {};
         try g.finishKeep();
+        var tail: Tail = .{ .g = g, .round = &round, .ids = ids, .parents = parents, .budget = remaining, .eos = eos };
+        defer tail.deinit();
+        if (fused) {
+            if (g.runner.tail != null) return error.BadVerifyTail;
+            g.runner.tail = .{ .ptr = &tail, .encode = Tail.encode };
+        }
+        defer if (fused) {
+            g.runner.tail = null;
+        };
         try g.runner.verifyHead(&round, .all);
-        const accepted = try g.accept(&round, ids, parents, remaining, eos);
+        const accepted = if (fused) try g.acceptReady(&round, tail.shape orelse return error.MissingRoundPicks, tail.keep orelse return error.MissingRoundKeep) else try g.accept(&round, ids, parents, remaining, eos);
         g.pending = accepted.pending;
         if (accepted.path.len == 0 or accepted.tokens.len == 0 or accepted.tokens.len > @min(@import("core").tree_round.max_rows, remaining)) return error.EmptyAcceptedDraft;
         var landed: u32 = 0;

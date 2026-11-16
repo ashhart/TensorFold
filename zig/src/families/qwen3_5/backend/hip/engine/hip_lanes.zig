@@ -267,6 +267,7 @@ pub const Hip = struct {
     pub fn begin(h: *Hip, s: *lanes.Stream) !*Lane {
         const prompt = s.prompt();
         if (prompt.len == 0 or prompt.len + s.max_new + 1 > h.e.o.capacity) return error.PromptTooLong;
+        for (prompt) |t| if (t >= h.e.model().spec.vocab) return error.InvalidQwenToken; // before the other ranks hear it
         const gop = try h.streams.map.getOrPut(h.gpa, s);
         if (gop.found_existing) h.free(gop.value_ptr.*);
         errdefer h.streams.map.removeByPtr(gop.key_ptr);

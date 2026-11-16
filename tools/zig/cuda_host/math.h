@@ -19,5 +19,6 @@ template<class T> __host__ __device__ bool isfinite(T);
 #define M_2_SQRTPI 1.12837916709551257390
 #define M_SQRT1_2 0.70710678118654752440
 __host__ __device__ float erff(float); __host__ __device__ float rintf(float);
+__host__ __device__ float ldexpf(float,int);
 __host__ __device__ double pow(double,double); __host__ __device__ double sin(double); __host__ __device__ double cos(double);
 template<class T> __host__ __device__ bool signbit(T);

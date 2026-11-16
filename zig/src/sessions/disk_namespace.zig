@@ -4,9 +4,14 @@ const std = @import("std");
 const Io = std.Io;
 const linux = std.os.linux;
 
+/// The tier holds prompt tokens and their state: its folders are the owner's alone.
+pub const private: Io.File.Permissions = if (@hasDecl(Io.File.Permissions, "fromMode")) .fromMode(0o700) else .default_dir;
+
 pub fn prepare(dir: Io.Dir, io: Io, fresh: bool) !void {
     // The directory descriptor holds this advisory exclusive lock until Disk.close closes it.
     if (linux.errno(linux.flock(dir.handle, 2 | 4)) != .SUCCESS) return error.SessionNamespaceBusy;
+    // a folder an earlier version made may be readable by others; this one is ours alone
+    dir.setPermissions(io, private) catch {};
     if (!fresh) return;
     var it = dir.iterate();
     while (try it.next(io)) |entry| try discard(dir, io, entry);

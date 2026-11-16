@@ -139,6 +139,21 @@ test "GLM warm peers: failure at every posting closes only an opened group and s
     };
 }
 
+test "GLM warm peers: a split warm-up of four ranks or more that NCCL fails at its group's end refuses split by name first; fewer ranks, ring and gather do not" {
+    for (2..9) |world| for (0..world) |rank| for ([_]warm.Peers{ .every, .neighbours, .gather }) |peers| {
+        const g = Fake.group(rank, world);
+        Fake.reset();
+        warm.refused_rank = null;
+        try Fake.run(&g, peers);
+        try t.expectEqual(@as(?usize, null), warm.refused_rank);
+        Fake.reset();
+        if (peers == .gather) Fake.fail = 0 else Fake.end_fails = true;
+        try t.expectError(error.NcclFailed, Fake.run(&g, peers));
+        try t.expectEqual(if (peers == .every and world >= 4) @as(?usize, rank) else null, warm.refused_rank);
+    };
+    warm.refused_rank = null;
+}
+
 test "GLM warm peers: one rank does nothing and malformed placement refuses before NCCL" {
     Fake.reset();
     var g = Fake.group(0, 1);

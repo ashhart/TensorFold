@@ -74,6 +74,11 @@ test "actual target widths and snapshot bytes preserve FP32 state" {
     try std.testing.expectEqual(@as(usize, 4 * 786432 * 4), sizes.state);
     try std.testing.expectEqual(@as(usize, 48 * 4), sizes.a_log);
     try std.testing.expectEqual(@as(usize, 48 * 2), sizes.dt);
+    try std.testing.expectEqual(@as(usize, 8 * shape.qkv * 2), sizes.qkv);
+    try std.testing.expectEqual(@as(usize, 8 * shape.c.k_heads * shape.c.dk * 2), sizes.query);
+    try std.testing.expectEqual(@as(usize, 8 * shape.value * 2), sizes.value);
+    try std.testing.expectEqual(@as(usize, 4 * shape.conv * 2), sizes.history);
+    try std.testing.expect(!@hasField(abi.Bytes, "tails"));
 }
 
 test "wrong shape flags and dimensions refuse before an encoder exists" {
@@ -188,4 +193,15 @@ test "cross-stream conv rows and a broken retained path refuse before encoding" 
     plan.windows[12] = 0;
     plan.kept_rows[0] = 1;
     try std.testing.expectError(error.BadGdnPoolPlan, @import("gdn_pool.zig").validatePlan(shape, 2, 32, plan));
+}
+
+// Prompt-tail scratch is three BF16 taps per conv channel and row; live state and logs stay unchanged.
+test "GDN prompt budget releases only the unused conv tails at 2048 rows" {
+    const shape = try abi.Shape.init(config());
+    const b = try @import("gdn_pool.zig").Budget.init(shape, 48, 1, 2048);
+    const released = (shape.c.conv_kernel - 1) * shape.qkv * @sizeOf(u16) * b.rows;
+    try std.testing.expectEqual(@as(usize, 125829120), released);
+    try std.testing.expectEqual(@as(usize, 578813952) - released, b.scratch);
+    try std.testing.expectEqual(@as(usize, 4941545472) - released, b.totalBytes());
+    try std.testing.expectEqual(@as(usize, 11), b.allocationSizes().len);
 }

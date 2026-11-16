@@ -86,6 +86,10 @@ pub const Policy = struct {
             try asks.append(arena, .{ .slot = st.?.slot, .conf = conf, .most = main, .first = st.?.held[0], .position = st.?.start });
             try at.append(arena, i);
         }
+        if (p.depth.set.plain_streams > 0 and windows.len >= p.depth.set.plain_streams) {
+            for (at.items) |i| out[i] = .{ .count = 0 };
+            return;
+        }
         if (asks.items.len == 0) return;
         const single = alone and asks.items.len == 1 and other_windows == 0;
         if (single) {

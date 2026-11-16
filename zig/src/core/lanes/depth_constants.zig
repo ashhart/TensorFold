@@ -12,5 +12,6 @@ pub const Constants = struct {
     grant_slack: i64 = 1, // granted depths: drafts past a grant that verified every draft the stream held
     short_slack: i64 = 0, // granted depths: drafts past a grant that left some of them unverified
     copy_first: bool = false, // a copy ahead takes the next round whole: the head drafts none for it (else one)
+    floor_rates: bool = false, // under a confidence floor a greedy stream keeps its rates' depth too (else it drafts the most)
     hold_costs: []const @import("hold_price.zig").HoldCost = &.{}, // a drafter's own hold pass by blocks and depth: granted holds must pay for it
 };

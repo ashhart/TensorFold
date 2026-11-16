@@ -245,11 +245,11 @@ const max_buffers = 16;
 /// Layers lo .. hi of the forward, the embedding before layer 0 and the head after the last.
 fn encodeRange(x: *const Ctx, e: mtl.ComputeEncoder, m: Model, b: *const Bufs, lo: usize, hi: usize) !void {
     if (lo == 0) {
-        encodeEmbed(x, e, m, b);
+        try encodeEmbed(x, e, m, b);
         e.barrier();
     }
     for (lo..hi) |i| try encodeLayer(x, e, m, b, i);
-    if (hi == m.layers.len) encodeHead(x, e, m, b);
+    if (hi == m.layers.len) try encodeHead(x, e, m, b);
 }
 
 test "a round's command buffers: one layer, then four even parts of the rest" {

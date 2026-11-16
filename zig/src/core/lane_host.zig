@@ -89,7 +89,7 @@ pub const LaneHost = struct {
     decode_cap: bool = false, // --decode-share given by flag (the env never opts in): a chunk-invariant family may cap
     prefix: @import("lane_host_prefix.zig").Wait = .{}, // a request's wait for a cut another prompt is filling
     finals: std.ArrayList(usize) = .empty,
-    pressure: ?@import("memory_pressure.zig").Governor = null, // macOS memory pressure (lane_host_pressure.zig); null: off
+    pressure: ?@import("memory_pressure.zig").Governor = null, // OS memory pressure (lane_host_pressure.zig); null: off
     activity: ?@import("lane_activity.zig").Activity = null, // owned work scopes for a backend's watchdog; null: off
     failure: ?@import("lane_activity.zig").Failure = null, // hears a round's or request's error; null: off
     load: load.State = .{}, // this host's part of the server's load ledger (lane_host_load.zig)
@@ -301,6 +301,7 @@ pub const LaneHost = struct {
     }
 
     pub fn finish(h: *LaneHost, job: *Job, reason: Reason, message: []const u8) void {
+        if (reason == .cancelled) load.progress(h, job);
         h.lock();
         h.memory_lanes = null; // a lane may have freed: the next admission asks the backend for memory again
         ledger.release(h, job); // its stream's caches are already freed (reaped, discarded or released)
@@ -358,11 +359,13 @@ pub const LaneHost = struct {
         };
         if (ledger.never(h, h.queued.items[at])) { // past the whole budget alone: no release will ever make it fit
             const job = h.queued.orderedRemove(at);
+            h.load.failures[@backingInt(load.Failure.prompt_too_large)] += 1;
             h.unlock();
             h.finish(job, .failed, ledger.too_big);
             return .failed;
         }
         if (!ledger.promise(h, h.queued.items[at])) { // bytes before any stream: the job stays queued, nothing taken
+            h.queued.items[at].wait_reason = .ledger_bytes;
             h.unlock();
             return .none;
         }

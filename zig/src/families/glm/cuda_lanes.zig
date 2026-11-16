@@ -103,7 +103,6 @@ pub const Lanes = struct {
             .allocate_shared_drafts = drafting and !block, // cut chances would price a block's stream at none
             .exact_width = if (drafting) max_rows else 1,
             .first_copy_rows = 4, // a first copy starts narrow; it grows as its tokens land
-            .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
             .speculate_early = false,
@@ -117,6 +116,7 @@ pub const Lanes = struct {
             .shared_costs = if (block) &copy_policy.shared_costs else &.{}, // DFlash2's shared rounds keep main's prices
             .window_costs_lone = costs != null, // timed windows are one stream's: shared rounds keep the rule they had
             .shared_drafts = if (block) 0 else shared_head_drafts,
+            .floor_rates = !block, // a chain's step costs a forward: --mtp-confidence cuts the rates' depth, not max_drafts
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
             .max_streams = if (sharing) engine.max_shared else 1,

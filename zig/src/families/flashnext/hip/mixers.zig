@@ -4,6 +4,7 @@ const hip = @import("hip");
 const model = @import("model.zig");
 const cache = @import("cache.zig");
 const forward = @import("forward.zig");
+const gdn = @import("gdn_replay.zig");
 
 const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
@@ -35,6 +36,8 @@ pub fn linear(
         for (&outs, [_]model.Projection{ l.qkv, l.z, l.a, l.b }) |*t, p| t.* = try o.project(x, p, rows, false);
     }
     const qkv, const z, const a, const b = outs;
+    // a window on the plan path: every row of it through the stream's plan, no state snapshot a row
+    if (window) if (m.gdn) |s| return gdn.linear(o, m, l, segs, index, qkv, z, a, b, rows, s);
     const q = try o.arena.of(f32, rows * kw);
     const k = try o.arena.of(f32, rows * kw);
     const v = try o.arena.of(f32, rows * vw);

@@ -61,7 +61,8 @@ pub const Group = struct {
         g.multi = null;
     }
 
-    fn destroyComm(g: *Group) void {
+    /// Once only, and never after an abort: an owner's unwind and its abort share `aborted`.
+    pub fn destroyComm(g: *Group) void {
         if (!g.aborted.swap(true, .acq_rel)) _ = g.lib.api.ncclCommDestroy(g.comm);
     }
 

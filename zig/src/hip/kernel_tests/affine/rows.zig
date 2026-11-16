@@ -394,6 +394,55 @@ fn tiers(t: *Rig) !usize {
     return ran;
 }
 
+/// The tiles a table may give a plain prompt of 1 or 2 rows, and the 128-row dot2 tile whose bytes they keep.
+const few_row_tiles = [_][]const u8{ "mlx.project.prefill.kp0", "mlx.project.prefill.kp3", "mlx.project.prefill.gemm" };
+
+fn named(p: *const prod.Product, id: []const u8) ?*const Entry {
+    for (p.rig.kernels.reg.entries) |*e| if (std.mem.eql(u8, e.id, id) and prod.takes(p, e)) return e;
+    return null;
+}
+
+/// One plain product through each of `few_row_tiles` by id, whatever the GPU's table picks: launches unlike the first.
+fn fewRowProduct(t: *Rig, c: shapes.Case) !usize {
+    var p = try prod.Product.init(t, c);
+    defer p.deinit();
+    var out = try Buffer.alloc(t.base, p.outBytes(false));
+    defer out.free();
+    var bad: usize = 0;
+    for ([_]bool{ false, true }) |rounded| {
+        const len = p.outBytes(rounded);
+        try out.fill8(0xA5, null);
+        const unwritten = try prod.digestOf(out, len);
+        var want: u64 = 0;
+        for (few_row_tiles, 0..) |id, i| {
+            const e = named(&p, id) orelse return error.NoTile;
+            try out.fill8(0xA5, null);
+            try prod.launchEntry(&p, e, out, rounded, 0, 0);
+            try t.base.stream.synchronize();
+            const got = try prod.digestOf(out, len);
+            if (i == 0) want = got;
+            if (got == want and got != unwritten) continue;
+            std.debug.print("  {s} rounded {}: {x:0>16}, {s} wrote {x:0>16}, an unwritten output is {x:0>16}\n", .{ id, rounded, got, few_row_tiles[0], want, unwritten });
+            bad += 1;
+        }
+    }
+    return bad;
+}
+
+/// Every width and group at 1 and 2 rows, on the shapes `tiers` runs: n off every block width, k short or long.
+fn fewRowTiers(t: *Rig) !usize {
+    var ran: usize = 0;
+    for (shapes.widths) |bits| for (shapes.groups) |group| for ([_]usize{ 1, 2 }) |m| {
+        const ks = [_]usize{ 3 * @as(usize, group), if (group == 32) 2080 else 1024 };
+        for (ks, [_]usize{ 97, 288 }) |k, n| {
+            const bad = try fewRowProduct(t, .{ .name = "few rows", .path = .prefill, .rows = m, .n = n, .k = k, .bits = bits, .group = group });
+            try base.expect(bad == 0, "few rows m{d} n{d} k{d} b{d} g{d}: {d} launches write other bytes than the 1-row tile, or none", .{ m, n, k, bits, group, bad });
+            ran += 1;
+        }
+    };
+    return ran;
+}
+
 /// Decode: the rows of a lane round's launch against each row alone, plain products and routed plans.
 pub fn decode(t: *Rig) !void {
     var rng: data.Rng = .{ .state = 0x9E3779B97F4A7C15 };
@@ -424,4 +473,13 @@ test "a prompt row writes the same bytes in every tile, dense and routed, every 
     defer b.close();
     var rig = Rig.open(b);
     try prefill(&rig);
+}
+
+test "a plain prompt of 1 or 2 rows writes the same bytes on the 1-row and 2-row K-parallel tiles and the 128-row tile, fp32 and rounded" {
+    const b = try base.Rig.open(1 << 20);
+    defer b.close();
+    var rig = Rig.open(b);
+    const ran = try fewRowTiers(&rig);
+    std.debug.print("FEW ROWS {d} products on {d} tiles each, fp32 and out16\n", .{ ran, few_row_tiles.len });
+    try base.expect(ran == 2 * 2 * shapes.widths.len * shapes.groups.len, "few rows: only {d} products ran", .{ran});
 }

@@ -104,6 +104,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     defer out.stop();
     out.start(srv.io, 5000) catch |e| return out.fail(&cx, e);
     const gone = &out;
+    const reserved = @import("slide_reserved.zig").Reserved.init(srv, &cx, recall) catch |e| return out.fail(&cx, e);
     const facts = found.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
     if (facts.len == 0) {
         out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
@@ -133,7 +134,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
         const gave = if (document or correcting) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        var plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, gone) catch |e| {
+        var plan = (teach.withRecall(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, reserved, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;
@@ -308,7 +309,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 };
                 committed = true;
                 // a diagnostic: every kept lesson taken out again, to see the facts before it come back as they were
-                if (std.c.getenv("TF_SLIDE_TAKE_OUT_CHECK") != null) {
+                if (srv.config.slide_take_out_check) { // TF_SLIDE_TAKE_OUT_CHECK, read at start
                     takeOut(srv, a, &out, id, "taken out to check that a take-out puts the facts before it back (TF_SLIDE_TAKE_OUT_CHECK)");
                     afterTakeOut(srv, cx, o, id, before, &.{}, gone);
                     asked_after = true;

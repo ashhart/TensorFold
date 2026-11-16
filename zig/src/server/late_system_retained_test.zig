@@ -1,6 +1,7 @@
 const std = @import("std");
 const server = @import("root.zig");
 const json = server.json;
+const api = @import("engine_api");
 const fixtures = @import("late_system_test.zig");
 const DropLate = fixtures.DropLate;
 const Capture = fixtures.Capture;
@@ -170,4 +171,151 @@ test "stream content and tool calls occur exactly once across all chunks" {
     try expectStreamMatchesWhole(lookup_reply);
     try expectStreamMatchesWhole("Checking." ++ lookup_reply ++ vault_reply);
     try expectStreamMatchesWhole("\nChecking." ++ vault_reply);
+}
+
+const malformed_reply = "<tool_call>{\"arguments\":{}}</tool_call>";
+
+/// Runs one reply as a whole reply and a stream, then checks the kept-call block on both.
+fn expectKept(reply: []const u8, unoffered: usize, malformed: usize, names: []const []const u8) !void {
+    return expectKeptWith(prose_chat ++ "}", reply, unoffered, malformed, names);
+}
+
+fn expectKeptWith(body: []const u8, reply: []const u8, unoffered: usize, malformed: usize, names: []const []const u8) !void {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = reply };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const whole = try exchange(srv, "/v1/chat/completions", body);
+    defer std.testing.allocator.free(whole.body);
+    try expectCounts((try json.parse(a, whole.body)).ok.get("tensorfold").?.get("kept_tool_calls").?, unoffered, malformed, names);
+    const streamed = try exchange(srv, "/v1/chat/completions", try std.mem.concat(a, u8, &.{ body[0 .. body.len - 1], ",\"stream\":true}" }));
+    defer std.testing.allocator.free(streamed.body);
+    var found: ?json.Value = null;
+    var finishes: usize = 0;
+    var lines = std.mem.splitScalar(u8, streamed.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trimEnd(u8, line["data: ".len..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const chunk = (try json.parse(a, data)).ok;
+        const choices = chunk.get("choices").?.array;
+        if (choices.len == 0) continue;
+        if (choices[0].get("finish_reason").? != .null) finishes += 1;
+        if (chunk.get("tensorfold")) |tf| if (tf.get("kept_tool_calls")) |kept| {
+            try std.testing.expect(found == null);
+            try std.testing.expect(choices[0].get("finish_reason").? != .null);
+            found = kept;
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 1), finishes);
+    try expectCounts(found orelse return error.NoKeptToolCalls, unoffered, malformed, names);
+}
+
+fn expectCounts(kept: json.Value, unoffered: usize, malformed: usize, names: []const []const u8) !void {
+    try std.testing.expectEqual(@as(i64, @intCast(unoffered)), kept.get("unoffered").?.int64());
+    try std.testing.expectEqual(@as(i64, @intCast(malformed)), kept.get("malformed").?.int64());
+    if (names.len == 0) {
+        try std.testing.expect(kept.get("unoffered_names") == null);
+        return;
+    }
+    const got = kept.get("unoffered_names").?.array;
+    try std.testing.expectEqual(names.len, got.len);
+    for (names, got) |want, v| try std.testing.expectEqualStrings(want, v.string);
+}
+
+test "tool visibility HTTP: kept calls split into unoffered and malformed on whole replies and streams" {
+    try expectKept(vault_reply, 1, 0, &.{"vault_list"});
+    try expectKept(malformed_reply, 0, 1, &.{});
+    try expectKept(vault_reply ++ "\n" ++ malformed_reply, 1, 1, &.{"vault_list"});
+}
+
+test "tool visibility HTTP: a clean reply has no kept-call fields" {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = "hi" };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const whole = try exchange(srv, "/v1/chat/completions", prose_chat ++ "}");
+    defer std.testing.allocator.free(whole.body);
+    try std.testing.expect((try json.parse(a, whole.body)).ok.get("tensorfold").?.get("kept_tool_calls") == null);
+    const streamed = try exchange(srv, "/v1/chat/completions", prose_chat ++ ",\"stream\":true}");
+    defer std.testing.allocator.free(streamed.body);
+    var lines = std.mem.splitScalar(u8, streamed.body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "data: ")) continue;
+        const data = std.mem.trimEnd(u8, line["data: ".len..], "\r");
+        if (std.mem.eql(u8, data, "[DONE]")) continue;
+        const chunk = (try json.parse(a, data)).ok;
+        if (chunk.get("tensorfold")) |tf| try std.testing.expect(tf.get("kept_tool_calls") == null);
+    }
+}
+
+test "tool visibility HTTP: kept-call names cap at eight and 64 bytes" {
+    var long_name: [108]u8 = undefined;
+    @memcpy(long_name[0..8], "unknown_");
+    @memset(long_name[8..], 'a');
+    var cut: [64]u8 = undefined;
+    @memcpy(cut[0..8], "unknown_");
+    @memset(cut[8..], 'a');
+    var reply: std.ArrayList(u8) = .empty;
+    var line: [256]u8 = undefined;
+    try reply.appendSlice(std.testing.allocator, try std.fmt.bufPrint(&line, "<tool_call>{{\"name\":\"{s}\",\"arguments\":{{}}}}</tool_call>\n", .{long_name[0..]}));
+    for (0..9) |i| try reply.appendSlice(std.testing.allocator, try std.fmt.bufPrint(&line, "<tool_call>{{\"name\":\"tool_{d}\",\"arguments\":{{}}}}</tool_call>\n", .{i}));
+    defer reply.deinit(std.testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const roomy = try std.mem.replaceOwned(u8, a, prose_chat, "\"max_tokens\":256", "\"max_tokens\":2048");
+    var expected: [8][]const u8 = .{ cut[0..], "tool_0", "tool_1", "tool_2", "tool_3", "tool_4", "tool_5", "tool_6" };
+    try expectKeptWith(try std.mem.concat(a, u8, &.{ roomy, "}" }), reply.items, 10, 0, &expected);
+}
+
+test "tool visibility HTTP: metrics count kept unoffered and malformed calls" {
+    var text: DropLate = .{};
+    var backend: Capture = .{ .reply = vault_reply };
+    defer std.testing.allocator.free(backend.prompt);
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, backend.engine(), text.text(), .{
+        .served_name = "m",
+        .model_ids = &.{"m"},
+        .enable_thinking = false,
+        .use_drafts = false,
+    }, null);
+    defer srv.deinit();
+    const first = try exchange(srv, "/v1/chat/completions", prose_chat ++ "}");
+    defer std.testing.allocator.free(first.body);
+    backend.reply = malformed_reply;
+    const second = try exchange(srv, "/v1/chat/completions", prose_chat ++ "}");
+    defer std.testing.allocator.free(second.body);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try srv.metrics.render(std.testing.io, &out.writer, .{}, &.{}, .{}, null, 0);
+    try std.testing.expectEqual(@as(?u64, 1), metricValue(out.written(), "kept_tool_calls_unoffered_total"));
+    try std.testing.expectEqual(@as(?u64, 1), metricValue(out.written(), "kept_tool_calls_malformed_total"));
+}
+
+fn metricValue(body: []const u8, comptime name: []const u8) ?u64 {
+    const full = "tensorfold:" ++ name;
+    var lines = std.mem.splitScalar(u8, body, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, full ++ " ")) continue;
+        return std.fmt.parseUnsigned(u64, line[full.len + 1 ..], 10) catch null;
+    }
+    return null;
 }

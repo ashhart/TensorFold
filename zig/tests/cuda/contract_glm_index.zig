@@ -7,6 +7,7 @@ const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 const pages = @import("contract_glm_pages.zig");
 const select = @import("contract_glm_select.zig");
+const dsel = @import("contract_glm_dsel.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -329,22 +330,28 @@ pub const Tokens = struct {
     }
 };
 
-/// The index scores and the decode select, registered together so the runner keeps one entry for GLM's index.
+/// The index scores and the decode selects (and the decode select's control), one runner entry for GLM's index.
 pub const Index = struct {
     scores: Scores,
     select: select.Select,
+    dsel: dsel.Dsel,
+    dsel_short: dsel.Dsel,
 
     pub fn init(gpu: check.Gpu, s: cuda.Stream, fns: glm.glue.Kernels) Index {
-        return .{ .scores = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores }, .select = .{ .rig = .{ .gpu = gpu, .s = s }, .wide = fns.select_rows_wide, .narrow = fns.select_rows } };
+        return .{ .scores = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fns.scores }, .select = .{ .rig = .{ .gpu = gpu, .s = s }, .wide = fns.select_rows_wide, .narrow = fns.select_rows }, .dsel = .{ .base = .{ .rig = .{ .gpu = gpu, .s = s }, .wide = fns.select_rows_wide, .narrow = fns.select_rows }, .fns = fns }, .dsel_short = .{ .base = .{ .rig = .{ .gpu = gpu, .s = s }, .wide = fns.select_rows_wide, .narrow = fns.select_rows }, .fns = fns, .short = true } };
     }
 
     /// After init's value sits at its final address: each kernel's context points into it.
     pub fn append(self: *Index, a: std.mem.Allocator, kernels: *std.ArrayList(g.Kernel)) !void {
         try kernels.append(a, self.scores.kernel());
         try kernels.append(a, self.select.kernel());
+        try kernels.append(a, self.dsel.kernel());
+        try kernels.append(a, self.dsel_short.kernel());
     }
 
     pub fn deinit(self: *Index) void {
+        self.dsel_short.deinit();
+        self.dsel.deinit();
         self.select.deinit();
         self.scores.deinit();
     }

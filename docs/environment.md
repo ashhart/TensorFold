@@ -7,6 +7,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 
 | Variable | Accepted explicit value |
 | --- | --- |
+| `TF_CACHE_EVICT` | `main` (default) or `decayed_resume`. The opt-in gives recently resumed RAM snapshots bounded recency credit, within the same cache budget. It changes victim choice, not stored state or token arithmetic. Paged stores keep their own policy. Blank keeps `main`; other values are refused at server startup. |
 | `TENSORFOLD_VIDEO_TOKENS` | Nonnegative whole video-token budget; default 16384; stored as an unsigned 64-bit count |
 | `TENSORFOLD_MAX_PDF_PAGES` | Whole count 1 through 4294967295, capped by `--vision-max-images`; default min(16, image limit) |
 | `TENSORFOLD_PRESSURE_CACHE_PERCENT` | Whole percentage 0 through 100; default 50 |
@@ -16,6 +17,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TENSORFOLD_RESTORE_PREFETCH_MS` | Whole unsigned 64-bit milliseconds, capped at 1099511627776; default 30000 |
 | `TENSORFOLD_TOOL_ID_KEY_FILE` | The path of the file that holds the key for tool-call ids ([API](api.md#messages-and-tools)). The file must be a regular file, not a link, that only its owner can read or write (`chmod 600`), with 32 to 4096 bytes in it, and the path must not contain control characters. When this is unset, each server process makes its own random key. If the file is wrong, the server does not start; the message names this setting but never shows the path or what the file holds |
 | `TF_STARTUP_RECEIPT` | Exactly `0` or `1`; default off. `1` writes the startup and first completion receipts |
+| `TF_SHARED_PRICE_LOG` | Exactly `0` or `1`; default off. `1` logs, at an engine's first priced shared round, the load-time shared forward costs and head steps, then one `shared price: round` line a priced shared round: its trial flag, rows, time, each stream's drafts and next depth, the plain and row prices and each stream's acceptance estimates |
 | `TF_CUDA_DEVICE` | Whole ordinal 0 through 4294967295, or empty; default 0 |
 | `TF_CUDA_SEGMENTS` | Whole count 1 through 4, or empty; default 1 |
 | `TENSORFOLD_CUDA_KERNELS` | A path without control characters, used as given: a captured kernel set's folder, or `native` for the engine's own kernels. Unset uses the binary's bundled set for the GPU when it has one, else the engine's own kernels. A family that runs only on the engine's own kernels (Qwen3 among them) refuses any other value; Qwen3 reads a blank value as unset |
@@ -33,6 +35,8 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DRAFT_NODES` | Whole native-size nonnegative count, capped by the drafter's window; zero disables trees |
 | `TF_QMMF_HALF_BELOW` | Whole native-size nonnegative block count; zero disables half tiles; default 96 |
 | `TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS` | Exactly `0` or `1`, checked when the CUDA backend starts; default off ([profiles](profiles.md)) |
+| `TF_PROMPT_INTERMEDIATE` | Exactly `0` or `1`, checked when the CUDA backend starts; default off. `1` keeps Flash Next's ladder of intermediate prompt-cache checkpoints under a long prompt's history |
+| `TENSORFOLD_LFM2_KV_PAGES` | Exactly `0` or `1`, checked when the CUDA backend starts; unset leases pool pages ([profiles](profiles.md)) |
 | `TF_HEAD_GEOMETRY` | Whole native-size nonnegative geometry count in the head benchmark |
 | `TF_ROCE_GID_INDEX` | Whole index 0 through 2147483647; unset searches for a RoCE v2 IPv4 GID |
 | `TF_GEMMA4_CHUNK_SOLO` | Gemma 4 on CUDA: a multiple of 512 from 512 through 4096; unset, empty or 512 is off. Checked when the model loads, with the family's own message |
@@ -40,22 +44,35 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_DRAMA_REFERENCE_CACHE` | Drama 3 on CUDA: kept reference states, 0 (off) through 16; default 0. Checked when the checkpoint opens, with its own message |
 | `TF_GLM_HOST_CACHE` | Exactly `0` or `1`; default off (kept GLM states on the device) |
 | `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
-| `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing) |
+| `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing). On, a prompt step is one chunk, with no pair or solo steps, so its prompt timings are of that shape |
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
 | `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM matmuls use dependent launches) |
 | `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
 | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
+| `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |
 | `TF_GLM_DFLASH2_LOG` | Whole unsigned 64-bit count of DFlash2 rounds whose drafts are logged; default 0 |
 | `TF_GLM_DRAFT_CONFIDENCE` | Finite number 0 through 1 where a DFlash2 chain's chance product stops it; default 0.7 |
+| `TF_GLM_CONTEXT_CEILING` | GLM-5.3-Flash on CUDA: whole token count 1 through 2147483616, the window `--context` may ask for and `--context 0` serves, in place of config.json's 1048576; read at GLM's open. Past that length the model's quality is the operator's to check. Unset keeps config.json's window |
 | `TF_PROMPT_ROWS` | Native serving: a multiple of 16 from 128 through 2048; unset keeps the chip/family default |
 | `TF_ANE_COLUMNS` | Whole u32 count; zero disables the experimental share; default zero |
 | `TF_FLASHNEXT_SCALE_INDEX` | Flash Next on Metal before tensor units: exactly `0` or `1`; `1` has the 4-bit expert kernels read each group's scale and bias through a 16-bit index into its tensor's table of pairs, the same values with fewer weight bytes; default 0 |
 | `TF_FLASHNEXT_GROUPED_ROWS` | Flash Next on Metal without tensor units: `0`, or the rows (`1` through `32`) from which a decode window runs its 4-bit experts grouped by expert, with the same output bits; default 5; ignored with `--ssd-experts` and in speed-up mode |
+| `TF_QWEN27_SLOT_RESUME` | Qwen3.8-27B on Metal: exactly `0` or `1`; `0` stops slot 0 resuming a later prompt; unset or blank keeps it on |
+| `TF_QWEN27_METAL_KV_PAGES` | Qwen3.8-27B on Metal: exactly `0` or `1`; `1` puts keys and values in core-pool pages (refused on Macs with tensor units); unset or blank is `0` |
+| `TF_QWEN35_METAL_KV_PAGES` | Qwen 3.5 on Metal: exactly `0` or `1`; `1` puts the streams' keys and values in core-pool pages; unset or blank is `0` |
 | `GLM_EHPROJ_NAX` | GLM-5.3-Flash on Metal: exactly `0` or `1`; `0` serves the MTP head's prompt eh_proj on the scalar kernel; default 1, the tile kernel where it builds |
+| `TF_DSV41_SMALL` | DeepSeek-V4.1 on Metal: exactly `0` or `1`; `1` reads the checkpoint's config at its own small shapes (the served smoke test's tiny model); default 0 |
+| `TF_DSV41_ASSETS` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the Engram token map; unset or blank reads it beside the checkpoint |
+| `TF_DSV41_ENGRAM_DIR` | DeepSeek-V4.1 on Metal: a directory path without control characters that holds the packed Engram tables; unset or blank takes the checkpoint's `engram_table_dir` |
+| `TF_DSV41_CALIB_FILE` | DeepSeek-V4.1 on Metal: a cost table file (JSON: `verify`, each window's ms by its rows from 1, and `draft`, the drafter pass's ms) that prices draft depth instead of the built-in table. Measure it on the machine that serves; pricing never changes a token. Unset: the built-in table. |
+| `TF_DSV41_ENGRAM_VERIFY` | DeepSeek-V4.1 on Metal: exactly `sample` or `full`; `full` also checks every byte of the Engram tables against their manifest at boot; default `sample` |
+| `TF_DSV41_ENGRAM_CACHE` | DeepSeek-V4.1 on Metal: whole u32 count of Engram records a layer kept cached; default 65536 |
 | `XPU_A8_BITS` | Exactly `4` or `8`, for the XPU quantization study; unset keeps the study's existing setting |
 | `LFM3_FUSE` | Whole u32 fusion mask; default 7 |
 | `TF_SLIDE_POCKET_KEY` | Exactly `auto`, `reply`, `subject` or `both`; default `auto` |
 | `TF_SLIDE_FIT_GIB` | Whole native-size nonnegative GiB count; default 4 |
+| `TF_SLIDE_TAKE_OUT_CHECK` | Exactly `0` or `1`, read once when the server starts with `--slide`; `1` takes every kept lesson out again to check that the facts before it come back as they were; default off |
+| `TF_SLIDE_TAP_CHECK` | Exactly `0` or `1`; `1` checks a pass's tapped rows against a fresh run's; default off |
 | `TF_SLIDE_POCKET_DUMP` | A directory path without control characters, used as given; each lesson's read rows are written there for offline study. Unset or blank writes none |
 | `TF_SLIDE_FORGET_FAIL` | Whole u32 fact index, zero off; only checked in a slide-test-hooks build |
 
@@ -127,7 +144,6 @@ The two row counts and the two draft counts keep their existing clamps after par
 These settings retain their existing boolean policies rather than gaining new aliases or refusals:
 
 - `TF_GRAPH_CACHE`: exact `0` or case-insensitive `off` disables graphs; every other value leaves the family's settings unchanged.
-- `TF_QWEN27_SLOT_RESUME`: exact `0` disables resume; every other value keeps it enabled.
 - Kolibri pages: exact `TENSORFOLD_KOLIBRI_KV_PAGES=0` disables requested pages; other text keeps the option unchanged.
 - Dory pages: unset or exact `TENSORFOLD_DORY_KV_PAGES=0` uses windows; every other present value selects pages.
 - `TF_SLIDE_EDIT`, `TF_SLIDE_PROBE` and `TF_SLIDE_ROUTED` select modes by presence, even empty or `0`; probe wins over edit.

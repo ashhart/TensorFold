@@ -18,12 +18,26 @@ pub const Activation = struct {
 
 /// Macro nesting limit; Python's own frame budget runs out earlier, so this only guards the stack.
 const max_depth = 400;
+/// A render's steps, stack and scratch bytes; only a template written to exhaust the server reaches one of them.
+pub const Limits = struct { steps: u64 = 50_000_000, stack: usize = 4 << 20, bytes: usize = 1 << 30 };
 
 pub const Ctx = struct {
     rt: v.Rt,
     vars: *const v.Map,
     out: *v.Buffer,
     depth: usize = 0,
+    limits: Limits = .{},
+    steps: u64 = 0,
+    /// The stack where the render began; frames differ too much in size for a count of levels to bound it.
+    base: usize = 0,
+
+    /// One more statement list or loop-filter test: a step of the render, taken only while the stack has room.
+    fn enter(c: *Ctx) Error!void {
+        c.steps += 1;
+        if (c.steps > c.limits.steps) return c.rt.fail("the chat template ran more than {d} steps", .{c.limits.steps});
+        if (c.base == 0) c.base = @frameAddress();
+        if (c.base -| @frameAddress() > c.limits.stack) return c.rt.fail("the chat template recursed more than {d} KiB of stack deep", .{c.limits.stack >> 10});
+    }
 
     fn resolve(c: *Ctx, name: []const u8) Error!Value {
         if (c.vars.get(name)) |x| return x;
@@ -113,6 +127,7 @@ fn assignByName(c: *Ctx, act: *Activation, t: ast.Target, x: Value) Error!void {
 }
 
 fn exec(c: *Ctx, act: *Activation, body: []const ast.Stmt) Error!Flow {
+    try c.enter();
     for (body) |st| switch (st) {
         .output => |pieces| for (pieces) |pc| switch (pc) {
             .text => |t| try c.out.literal(c.rt.a, t),
@@ -163,6 +178,7 @@ fn execFor(c: *Ctx, act: *Activation, f: *const ast.For) Error!void {
         const tf = try enter(c, act, f.test_frame);
         var kept: std.ArrayList(Value) = .empty;
         for (items) |item| {
+            try c.enter(); // the filter runs no statement list, so each item it tests is a step of its own
             try assignByName(c, tf, f.target, item);
             if (v.truthy(try eval(c, tf, t))) try kept.append(c.rt.a, item);
         }
@@ -383,7 +399,9 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         return .{ .list = try l.list.concat(rt.a, r.list) };
     if (op == .mul and (l == .str or l == .list or r == .str or r == .list) and (isNum(l) or isNum(r)) and l != .float and r != .float) {
         const seq = if (isNum(l)) r else l;
-        const n = @max(0, intOf(if (isNum(l)) l else r));
+        // an empty sequence stays empty at any count, and the loops below would still count it out
+        const empty = if (seq == .str) seq.str.s.len == 0 else seq.list.items.len == 0;
+        const n = if (empty) 0 else @max(0, intOf(if (isNum(l)) l else r));
         if (seq == .str) {
             var out: v.Buffer = .{};
             for (0..@intCast(n)) |_| try out.append(rt.a, seq.str);

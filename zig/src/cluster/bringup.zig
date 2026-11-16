@@ -94,8 +94,17 @@ pub const Live = struct {
     seen: usize = 0,
     culprit: Culprit = .{},
 
+    /// `inv.name` is this node's name in the file; its id is the name's, so each node checks the others by `names`.
     pub fn init(gpa: Allocator, inv: node.Inventory, t: transport.Transport, names: []const []const u8, plan: u64, opts: Options) Live {
-        return .{ .m = membership.Membership.init(gpa, opts.membership, inv, opts.incarnation), .t = t, .names = names, .plan = plan, .opts = opts };
+        var me = inv;
+        me.id = node.idFrom(inv.name.str());
+        var l: Live = .{ .m = membership.Membership.init(gpa, opts.membership, me, opts.incarnation), .t = t, .names = names, .plan = plan, .opts = opts };
+        var at: [transport.max_links]?node.NodeId = @splat(null);
+        for (names, 0..) |name, i| {
+            if (i < at.len and !std.mem.eql(u8, name, inv.name.str())) at[i] = node.idFrom(name);
+        }
+        l.m.roster = at;
+        return l;
     }
 
     pub fn deinit(l: *Live) void {
@@ -109,6 +118,10 @@ pub const Live = struct {
         while (true) {
             const now = words.nowNs();
             l.m.step(now, l.t, null) catch |err| return mapStep(err);
+            if (l.m.stranger) |s| {
+                l.culprit = .{ .name = s.name, .expected = if (s.link < n) l.names[s.link] else "" };
+                return error.WrongPeer;
+            }
             if (l.m.me.plan != l.plan and l.m.settled() and l.m.ids.items.len == n) {
                 try l.checkPeers();
                 l.m.setPlan(l.plan);

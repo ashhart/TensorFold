@@ -15,6 +15,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, host_tests: *std.B
     b.step("test-video-library-host", "Video candidate order with a recording opener, without real libraries").dependOn(&run.step);
     host_tests.dependOn(&run.step);
     const cross = b.step("check-video-layout-linux", "Compile the Linux video probe and stub without execution");
+    const exports = b.step("check-video-exports-linux", "Link a planted Linux stub as `video` links; read its exports");
     inline for (.{ .aarch64, .x86_64 }) |arch| {
         const linux = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .linux, .abi = .gnu });
         const probe = layoutProbe(b, linux);
@@ -25,6 +26,15 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, host_tests: *std.B
         const lib = b.addLibrary(.{ .name = "tfvideo", .linkage = .dynamic, .root_module = stub });
         _ = lib.getEmittedBin();
         cross.dependOn(&lib.step);
+        const planted = b.createModule(.{ .target = linux, .link_libc = true });
+        for ([_][]const u8{ "zig/tests/tfvideo_stub.c", "zig/tests/tfvideo_planted.c" }) |c|
+            planted.addCSourceFile(.{ .file = b.path(c), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        const scripted = b.addLibrary(.{ .name = "tfvideo", .linkage = .dynamic, .root_module = planted });
+        scripted.link_gc_sections = false;
+        exportOnlyTfVideo(b, scripted);
+        const check = b.addSystemCommand(&.{ "python3", "tools/zig/check_tfvideo_exports.py" });
+        check.addArtifactArg(scripted);
+        exports.dependOn(&check.step);
     }
     if (b.graph.host.result.os.tag == .linux) {
         const layout = b.addSystemCommand(&.{ "python3", "tools/zig/test_tfvideo_layout.py", "--probe" });
@@ -56,6 +66,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, host_tests: *std.B
     }) |a| mod.addObjectFile(root.path(b, b.pathJoin(&.{ "lib", a })));
     mod.linkSystemLibrary("m", .{});
     const lib = b.addLibrary(.{ .name = "tfvideo", .linkage = .dynamic, .root_module = mod });
+    exportOnlyTfVideo(b, lib);
     step.dependOn(&b.addInstallArtifact(lib, .{ .dest_dir = .{ .override = .{ .custom = "native/lib" } } }).step);
 }
 
@@ -63,4 +74,10 @@ fn layoutProbe(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Step.
     const root = b.createModule(.{ .root_source_file = b.path("zig/tests/tfvideo_layout.zig"), .target = target, .link_libc = true });
     root.addImport("tfvideo", b.createModule(.{ .root_source_file = b.path("zig/src/core/tfvideo.zig"), .target = target, .link_libc = true }));
     return b.addExecutable(.{ .name = "tfvideo-layout", .root_module = root });
+}
+
+/// ELF exports only tf_video_*: FFmpeg's x86_64 assembly then reaches its C tables PC-relative inside the library.
+fn exportOnlyTfVideo(b: *std.Build, lib: *std.Build.Step.Compile) void {
+    if (lib.rootModuleTarget().ofmt != .elf) return;
+    lib.setVersionScript(b.addWriteFiles().add("tfvideo.map", "{ global: tf_video_*; local: *; };\n"));
 }

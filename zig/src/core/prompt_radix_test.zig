@@ -84,7 +84,7 @@ fn seq(comptime n: usize, from: u32) [n]u32 {
 /// A pass over `prompt` as a backend runs it: begin, then a keep at each mark, the stream taking the tree's pages.
 fn pass(f: *Fake, s: *Store, a: Allocator, prompt: []const u32, history: u32, shared: []const u32, mine: *std.ArrayList(u32)) !Plan {
     mine.clearRetainingCapacity();
-    const plan = try s.begin(a, prompt, history, shared, null, mine);
+    const plan = try s.begin(a, .of(prompt), history, shared, null, mine);
     var fresh: [32]u32 = undefined;
     const more = (prompt.len + 3) / 4 - mine.items.len;
     f.lane(fresh[0..more]);
@@ -92,7 +92,7 @@ fn pass(f: *Fake, s: *Store, a: Allocator, prompt: []const u32, history: u32, sh
     for (plan.marks) |m| {
         var path: [32]u32 = undefined;
         const n = m / 4;
-        const kept = s.keep(prompt, m, null, mine.items[0..n], path[0..n]);
+        const kept = s.keep(.of(prompt), m, null, mine.items[0..n], path[0..n]);
         for (path[0..kept.shared], 0..) |id, i| if (mine.items[i] != id) {
             f.refs[id] += 1;
             f.refs[mine.items[i]] -= 1;
@@ -148,10 +148,10 @@ test "marks: the history, the stable prefix, shared blocks and the last page, ap
     var prev = seq(30, 0);
     prev[28] = 77;
     // history 41 floors to 40, the prefix shared with the last prompt ends at 28, a block at 12, the last page at 44
-    try std.testing.expectEqualSlices(u32, &.{ 12, 28, 40 }, try s.marks(a, &prompt, 0, 41, &.{12}, &prev));
-    try std.testing.expectEqualSlices(u32, &.{40}, try s.marks(a, &prompt, 28, 41, &.{12}, &prev));
-    try std.testing.expectEqualSlices(u32, &.{44}, try s.marks(a, &prompt, 0, 0, &.{}, &.{})); // no history: the last page
-    try std.testing.expectEqualSlices(u32, &.{40}, try s.marks(a, &prompt, 0, 41, &.{36}, &.{})); // a block next to the history
+    try std.testing.expectEqualSlices(u32, &.{ 12, 28, 40 }, try s.marks(a, .of(&prompt), 0, 41, &.{12}, &prev));
+    try std.testing.expectEqualSlices(u32, &.{40}, try s.marks(a, .of(&prompt), 28, 41, &.{12}, &prev));
+    try std.testing.expectEqualSlices(u32, &.{44}, try s.marks(a, .of(&prompt), 0, 0, &.{}, &.{})); // no history: the last page
+    try std.testing.expectEqualSlices(u32, &.{40}, try s.marks(a, .of(&prompt), 0, 41, &.{36}, &.{})); // a block next to the history
 }
 
 test "a shared cut outlives the conversation that made it, and a state its conversation moved past goes first" {
@@ -178,8 +178,8 @@ test "a shared cut outlives the conversation that made it, and a state its conve
     f.leave(mine.items);
     try std.testing.expectEqual(@as(u32, 16), plan.from);
     try std.testing.expectEqual(@as(usize, 3), s.tree.snaps);
-    try std.testing.expectEqual(@as(u32, 16), s.find(&p1).?.end);
-    try std.testing.expectEqual(@as(u32, 64), s.find(&p2).?.end);
+    try std.testing.expectEqual(@as(u32, 16), s.find(.of(&p1)).?.end);
+    try std.testing.expectEqual(@as(u32, 64), s.find(.of(&p2)).?.end);
     try std.testing.expectEqual(@as(u64, 1), s.tree.counts.evicted);
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
@@ -205,9 +205,9 @@ test "an entry that was resumed outlives one that was not, though it is older" {
     const third = seq(24, 200);
     _ = try pass(&f, &s, a, &third, 20, &.{}, &mine);
     f.leave(mine.items);
-    try std.testing.expect(s.find(&again) != null);
-    try std.testing.expect(s.find(&seq(26, 100)) == null);
-    try std.testing.expect(s.find(&seq(26, 200)) != null);
+    try std.testing.expect(s.find(.of(&again)) != null);
+    try std.testing.expect(s.find(.of(&seq(26, 100))) == null);
+    try std.testing.expect(s.find(.of(&seq(26, 200))) != null);
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
 
@@ -237,7 +237,7 @@ test "a state past the limits is refused, and a failed copy keeps no state" {
     // the same state again takes no second copy
     var path: [5]u32 = undefined;
     const held = [_]u32{ 0, 1, 2, 3, 4 };
-    _ = s.keep(&t, 20, null, &held, &path);
+    _ = s.keep(.of(&t), 20, null, &held, &path);
     try std.testing.expectEqual(@as(usize, 1), f.live);
     // a restore that fails drops the entry and the pass starts from the start
     f.fail_restore = true;
@@ -270,13 +270,13 @@ test "reclaim frees the pages of the least valuable leaf nobody holds, and spare
     try std.testing.expectEqual(@as(usize, 0), Fake.available(&f));
     try std.testing.expect(s.reclaim(3));
     try std.testing.expectEqual(@as(usize, 1), s.tree.snaps);
-    try std.testing.expect(s.find(&seq(26, 0)) == null);
+    try std.testing.expect(s.find(.of(&seq(26, 0))) == null);
     for (y_pages) |id| f.refs[id] += 1; // a stream holds the other's pages
     try std.testing.expect(!s.reclaim(100));
     try std.testing.expectEqual(@as(usize, 1), s.tree.snaps);
     for (y_pages) |id| f.refs[id] -= 1;
     s.limit(.{ .pages = 40, .snaps = 0 });
-    try std.testing.expectEqual(@as(usize, 0), s.tree.held_pages);
+    try std.testing.expectEqual(@as(usize, 0), s.tree.heldPages());
     try std.testing.expectEqual(@as(usize, 0), f.live);
 }
 
@@ -333,7 +333,7 @@ fn goldenRun(a: Allocator, f: *Fake, s: *Store, out: *std.ArrayList(Row)) !void 
     for (passes) |p| {
         const plan = try pass(f, s, a, p.prompt, p.history, p.shared, &mine);
         const c = s.tree.counts;
-        try out.append(a, .{ .from = plan.from, .marks = plan.marks, .snaps = s.tree.snaps, .pages = s.tree.held_pages, .bytes = s.tree.held(), .hits = c.hits, .misses = c.misses, .kept = c.kept, .evicted = c.evicted, .refused = c.refused });
+        try out.append(a, .{ .from = plan.from, .marks = plan.marks, .snaps = s.tree.snaps, .pages = s.tree.heldPages(), .bytes = s.tree.held(), .hits = c.hits, .misses = c.misses, .kept = c.kept, .evicted = c.evicted, .refused = c.refused });
         f.leave(mine.items);
     }
 }
@@ -390,8 +390,8 @@ test "lookahead 1: a state resumes when the token past it repeats, and not when 
     plan = try pass(&f, &s, a, &t3, 28, &.{}, &mine);
     try std.testing.expectEqual(@as(u32, 0), plan.from);
     f.leave(mine.items);
-    try std.testing.expectEqual(@as(u32, 20), s.find(&seq(21, 0)).?.end); // its lookahead, the one token to prefill
-    try std.testing.expect(s.find(&seq(20, 0)) == null); // no token past the state: nothing to resume
+    try std.testing.expectEqual(@as(u32, 20), s.find(.of(&seq(21, 0))).?.end); // its lookahead, the one token to prefill
+    try std.testing.expect(s.find(.of(&seq(20, 0))) == null); // no token past the state: nothing to resume
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
 
@@ -412,7 +412,7 @@ fn sharedAfter(branch: usize, lookahead: u32) !usize {
     var own: [5]u32 = undefined;
     f.lane(&own);
     var path: [5]u32 = undefined;
-    const kept = s.keep(&second, 20, null, &own, &path);
+    const kept = s.keep(.of(&second), 20, null, &own, &path);
     f.leave(&own);
     try std.testing.expect(kept.held);
     try std.testing.expectEqual(s.tree.snaps, f.live);
@@ -440,7 +440,7 @@ test "planned: marks and resumes sit on the grid, never on a page between" {
     defer s.deinit();
     s.limit(.{ .pages = 40, .snaps = 8 });
     // a page store would cut at 12 and 40; the grid of 8 moves the block's cut to 8, the tail joins the history's 40
-    try std.testing.expectEqualSlices(u32, &.{ 8, 40 }, try s.marks(a, &seq(48, 0), 0, 41, &.{12}, &.{}));
+    try std.testing.expectEqualSlices(u32, &.{ 8, 40 }, try s.marks(a, .of(&seq(48, 0)), 0, 41, &.{12}, &.{}));
     var mine: std.ArrayList(u32) = .empty;
     var plan = try pass(&f, &s, a, &seq(24, 0), 20, &.{}, &mine);
     try std.testing.expectEqualSlices(u32, &.{16}, plan.marks); // history 20, its grid point 16
@@ -461,11 +461,19 @@ test "planned: a keep off the grid is refused, one on it kept" {
     defer f.leave(&own);
     var path: [4]u32 = undefined;
     const prompt = seq(24, 0);
-    try std.testing.expect(!s.keep(&prompt, 12, null, own[0..3], path[0..3]).held);
+    try std.testing.expect(!s.keep(.of(&prompt), 12, null, own[0..3], path[0..3]).held);
     try std.testing.expectEqual(@as(usize, 0), s.tree.snaps);
-    try std.testing.expect(s.keep(&prompt, 16, null, &own, &path).held);
+    try std.testing.expect(s.keep(.of(&prompt), 16, null, &own, &path).held);
     try std.testing.expectEqual(@as(usize, 1), s.tree.snaps);
 }
+
+/// Resume points at a multiple of `n`, as the tree's walks ask.
+const Step = struct {
+    n: u32,
+    pub fn ok(st: Step, at: u32) bool {
+        return at % st.n == 0;
+    }
+};
 
 test "the tree's deepest state is the deepest at a multiple of the step it is asked for" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -479,8 +487,8 @@ test "the tree's deepest state is the deepest at a multiple of the step it is as
     const prompt = seq(24, 0);
     _ = try pass(&f, &s, a, &prompt, 12, &.{}, &mine); // a state at 12, off a grid of 8
     f.leave(mine.items);
-    try std.testing.expectEqual(@as(u32, 12), s.tree.deepest(&prompt, 20, 4).?.end);
-    try std.testing.expect(s.tree.deepest(&prompt, 20, 8) == null);
+    try std.testing.expectEqual(@as(u32, 12), s.tree.deepest(.{ .tokens = &prompt }, 20, Step{ .n = 4 }).?.end);
+    try std.testing.expect(s.tree.deepest(.{ .tokens = &prompt }, 20, Step{ .n = 8 }) == null);
 }
 
 test "GLM's shape, a grid of four pages and lookahead 1: a chat resumes at its history's grid point, sharing its pages" {
@@ -502,7 +510,7 @@ test "GLM's shape, a grid of four pages and lookahead 1: a chat resumes at its h
     try std.testing.expectEqualSlices(u32, &.{48}, plan.marks);
     f.leave(mine.items);
     try std.testing.expectEqual(@as(usize, 2), s.tree.snaps);
-    try std.testing.expectEqual(@as(usize, 12), s.tree.held_pages);
+    try std.testing.expectEqual(@as(usize, 12), s.tree.heldPages());
     try std.testing.expectEqual(s.tree.snaps, f.live);
 }
 

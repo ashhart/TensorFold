@@ -424,13 +424,13 @@ const Store = struct {
     fn reclaim(ctx: *anyopaque, want: usize) bool {
         return of(ctx).store.reclaim(want);
     }
-    fn begin(ctx: *anyopaque, prompt: []const u32, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!kp.Plan {
+    fn begin(ctx: *anyopaque, q: kp.Query, history_len: u32, shared: []const u32, owner: *anyopaque, adopt: *std.ArrayList(u32)) anyerror!kp.Plan {
         const x = of(ctx);
-        const plan = try x.store.begin(x.gpa, prompt, history_len, shared, owner, adopt);
+        const plan = try x.store.begin(x.gpa, .{ .key = q.key, .prompt_len = q.prompt_len }, history_len, shared, owner, adopt);
         return .{ .from = plan.from, .marks = plan.marks };
     }
-    fn keep(ctx: *anyopaque, prompt: []const u32, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
-        return of(ctx).store.keep(prompt, at, owner, mine, path).shared;
+    fn keep(ctx: *anyopaque, q: kp.Query, at: u32, owner: *anyopaque, mine: []const u32, path: []u32) usize {
+        return of(ctx).store.keep(.{ .key = q.key, .prompt_len = q.prompt_len }, at, owner, mine, path).shared;
     }
     fn report(_: *anyopaque, _: usize, _: u32, _: u64) void {}
     fn free(ctx: *anyopaque, marks: []const u32) void {
@@ -460,7 +460,7 @@ test "TF_KV_SHARE: a pass's pages below its mark go to the shared store, and a l
     var a: [3000]u32 = undefined;
     for (&a, 1..) |*t, i| t.* = @intCast(i);
     // a cold pass: a mark on the grid below its end, where the tree takes the pages below it and the state
-    const cold = try prompts.begin(&a, 0, &.{}, &owner, &adopt);
+    const cold = try prompts.begin(.of(&a), 0, &.{}, &owner, &adopt);
     defer prompts.free(cold.marks);
     try std.testing.expectEqualSlices(u32, &.{2048}, cold.marks);
     try expect(cold.from == 0 and owner.pending == null and adopt.items.len == 0);
@@ -474,7 +474,7 @@ test "TF_KV_SHARE: a pass's pages below its mark go to the shared store, and a l
     // the same 2,049 tokens, another tail: the pass resumes at 2,048 on the tree's pages, its state pending
     var b = a;
     for (b[2049..]) |*t| t.* += 10_000;
-    const warm = try prompts.begin(&b, 0, &.{}, &owner, &adopt);
+    const warm = try prompts.begin(.of(&b), 0, &.{}, &owner, &adopt);
     defer prompts.free(warm.marks);
     try expectEqual(@as(u32, 2048), warm.from);
     try expectEqual(@as(u32, 2048), owner.pending.?.at);
@@ -487,14 +487,14 @@ test "TF_KV_SHARE: a pass's pages below its mark go to the shared store, and a l
     var c = a;
     for (c[2048..]) |*t| t.* += 10_000;
     owner = .{};
-    const miss = try prompts.begin(&c, 0, &.{}, &owner, &adopt);
+    const miss = try prompts.begin(.of(&c), 0, &.{}, &owner, &adopt);
     defer prompts.free(miss.marks);
     try expect(miss.from == 0 and owner.pending == null and adopt.items.len == 0);
     // a stream that needs the tree's pages: its promise evicts the state, and the pages are the stream's
     _ = try p.openWith(0, c.len, 100, &.{}); // 7 pages: the 4 free and 3 of the tree's
     try expectEqual(@as(usize, 0), states.live);
     p.close(0);
-    const gone = try prompts.begin(&a, 0, &.{}, &owner, &adopt);
+    const gone = try prompts.begin(.of(&a), 0, &.{}, &owner, &adopt);
     defer prompts.free(gone.marks);
     try expect(gone.from == 0 and owner.pending == null and adopt.items.len == 0);
     try expect(p.pool.idle() and p.pool.census().free == 8);
@@ -529,4 +529,10 @@ test "every host allocation failure while making the pages leaves no device buff
             try expectEqual(@as(usize, 0), F.live);
         }
     }.run, .{});
+}
+
+test "capacity keeps a verify window past the context and a multiple of 64" {
+    try expectEqual(@as(usize, 8256), native.capacity(8192));
+    try expectEqual(@as(usize, 330624), native.capacity(330529));
+    try expect(native.capacity(330529) % 64 == 0);
 }
