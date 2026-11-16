@@ -9,22 +9,23 @@ const plan = @import("../launches/plan.zig");
 const DeviceBuffer = @import("../memory.zig").DeviceBuffer;
 
 const page = 64;
-const d = 256;
 
-/// The digest of every case's output on an architecture whose bits were recorded.
-const pins = [_]struct { arch: []const u8, digest: u64 }{
-    .{ .arch = "gfx1151", .digest = 0x0adb33378a143b95 },
+/// The digests of every case's output on an architecture whose bits were recorded: the d 256 cases, then d 128.
+const pins = [_]struct { arch: []const u8, digest: [2]u64 }{
+    .{ .arch = "gfx1151", .digest = .{ 0x0adb33378a143b95, 0xd551aaf3c605ae2f } },
 };
 
-/// A round of rows at `pos` over one slot's `span` keys, q fp32 or, with `act`, in the cache's kind.
-const Case = struct { heads: usize, kv_heads: usize, span: usize, pos: []const i32, act: bool };
+/// A round of rows at `pos` over one slot's `span` keys of `d`, q fp32 or, with `act`, in the cache's kind.
+const Case = struct { heads: usize, kv_heads: usize, d: usize, span: usize, pos: []const i32, act: bool };
 
-/// The long-span score (four keys a warp) and the short one (two), each with q fp32 and in the cache's kind.
+/// d 256: tf_plan_score256_* (long span), tf_plan_score2_* (short); d 128 (Nemotron's heads): tf_plan_score_*.
 const cases = [_]Case{
-    .{ .heads = 16, .kv_heads = 2, .span = 16384, .pos = &.{ 16383, 9001 }, .act = false },
-    .{ .heads = 16, .kv_heads = 2, .span = 16384, .pos = &.{ 16383, 9001 }, .act = true },
-    .{ .heads = 24, .kv_heads = 4, .span = 1024, .pos = &.{ 1023, 300, 37 }, .act = false },
-    .{ .heads = 24, .kv_heads = 4, .span = 1024, .pos = &.{ 1023, 300, 37 }, .act = true },
+    .{ .heads = 16, .kv_heads = 2, .d = 256, .span = 16384, .pos = &.{ 16383, 9001 }, .act = false },
+    .{ .heads = 16, .kv_heads = 2, .d = 256, .span = 16384, .pos = &.{ 16383, 9001 }, .act = true },
+    .{ .heads = 24, .kv_heads = 4, .d = 256, .span = 1024, .pos = &.{ 1023, 300, 37 }, .act = false },
+    .{ .heads = 24, .kv_heads = 4, .d = 256, .span = 1024, .pos = &.{ 1023, 300, 37 }, .act = true },
+    .{ .heads = 32, .kv_heads = 2, .d = 128, .span = 16384, .pos = &.{ 16383, 9001 }, .act = false },
+    .{ .heads = 32, .kv_heads = 2, .d = 128, .span = 16384, .pos = &.{ 16383, 9001 }, .act = true },
 };
 
 fn mix(x: u32) u32 {
@@ -85,6 +86,7 @@ fn poisoned(t: *Rig, bytes: usize) !DeviceBuffer {
 
 /// One case's scores, stats, partials and output folded into `h`; `patterns` gathers the scores' NaN bit patterns.
 fn run(t: *Rig, c: Case, h: u64, patterns: *std.AutoHashMap(u32, void)) !u64 {
+    const d = c.d;
     const count = c.span / page;
     const rows = c.pos.len;
     const k = try gpa.alloc(u16, c.kv_heads * c.span * d);
@@ -148,7 +150,7 @@ fn run(t: *Rig, c: Case, h: u64, patterns: *std.AutoHashMap(u32, void)) !u64 {
     var out = try poisoned(t, rows * c.heads * d * @as(usize, if (c.act) 2 else 4));
     defer out.free();
     const p: plan.PlanRef = .{ .rows = rows, .slots = 1, .args = .{ .pos = at(dev_pos), .slot = at(slot), .first = at(dev_first), .count = at(dev_count), .desc = at(descs), .pages = words, .pool = @intCast(count) } };
-    const scale: f32 = 1 / @sqrt(@as(f32, d));
+    const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
     try t.on.planCausalAs(at(q), at(out), at(scores), at(stats), at(partials), p, 0, c.heads, c.kv_heads, d, c.span, scale, t.kind(), c.act, t.stream.handle);
     try t.stream.synchronize();
     var x = h;
@@ -161,7 +163,7 @@ fn run(t: *Rig, c: Case, h: u64, patterns: *std.AutoHashMap(u32, void)) !u64 {
     return x;
 }
 
-test "the planned decode walk writes its pinned bits on NaN- and inf-poisoned keys and queries, long and short spans" {
+test "the planned decode walk writes its pinned bits on NaN- and inf-poisoned keys and queries, d 256 and 128" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     if (!t.bf16) return error.SkipZigTest;
@@ -170,10 +172,16 @@ test "the planned decode walk writes its pinned bits on NaN- and inf-poisoned ke
     } else return error.SkipZigTest;
     var patterns = std.AutoHashMap(u32, void).init(gpa);
     defer patterns.deinit();
-    var h: u64 = 0xcbf29ce484222325;
-    for (cases) |c| h = try run(t, c, h, &patterns);
-    // NaNs of many payloads reach the scores, so the digest shows which payload each fold keeps
+    // one digest a head size: each takes its own score kernels, so a change to one shows in its own digest
+    var h: [2]u64 = @splat(0xcbf29ce484222325);
+    for (cases) |c| {
+        const i = @intFromBool(c.d == 128);
+        h[i] = try run(t, c, h[i], &patterns);
+    }
+    // NaNs of many payloads reach the scores, so the digests show which payload each fold keeps
     try std.testing.expect(patterns.count() >= 64);
-    if (h != want) std.debug.print("planned walk NaN digest on {s}: 0x{x:0>16} ({d} NaN patterns in the scores)\n", .{ kernels.arch, h, patterns.count() });
-    try std.testing.expectEqual(want, h);
+    for (want, h, [_]usize{ 256, 128 }) |w, x, d| {
+        if (x != w) std.debug.print("planned walk NaN digest at d {d} on {s}: 0x{x:0>16} ({d} NaN patterns in the scores)\n", .{ d, kernels.arch, x, patterns.count() });
+    }
+    try std.testing.expectEqualSlices(u64, &want, &h);
 }

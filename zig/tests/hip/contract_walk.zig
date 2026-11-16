@@ -6,8 +6,8 @@ const rig_ = @import("contract_rig.zig");
 const kit = @import("contract_kit.zig");
 pub const w256 = @import("contract_walk256.zig");
 
-/// The d = 256 registrations: q fp32 and in the cache's kind for each case, then the control.
-pub const qwen_count = 2 * w256.cases.len + 1;
+/// The d = 256 registrations: q fp32 and in the cache's kind for each case, then the two controls (q fp32, q in kind).
+pub const qwen_count = 2 * w256.cases.len + 2;
 
 const contract = core.contract;
 const c = contract.spec;
@@ -111,15 +111,15 @@ pub const Walk = struct {
         return .{ .rig = .{ .a = a, .r = rt, .s = s }, .l = l, .k = kit.act(), .arena = .init(a) };
     }
 
-    /// Registration i of `qwen_count`: each case with q fp32 and in the cache's kind, then the control.
+    /// Registration i of `qwen_count`: each case with q fp32 and in the cache's kind, then the controls likewise.
     pub fn qwenAt(a: std.mem.Allocator, rt: *const hip.Runtime, s: hip.Stream, l: *const hip.Launcher, i: usize) Walk {
         var w = init(a, rt, s, l);
-        const control = i == 2 * w256.cases.len;
+        const control = i >= 2 * w256.cases.len;
         const case = if (control) w256.control_case else i / 2;
         w.d = 256;
         w.group = w256.cases[case].heads / w256.cases[case].kv;
         w.qwen = case;
-        w.act = !control and i % 2 == 1;
+        w.act = i % 2 == 1;
         w.fault = if (control) .steps else .none;
         return w;
     }
@@ -249,7 +249,7 @@ pub const Walk = struct {
         const d = self.d;
         const scale: f32 = 1 / @sqrt(@as(f32, @floatFromInt(d)));
         if (self.fault == .steps) {
-            try w256.faulty(self.l, self.rig.s, self.qd, self.out, self.scratch, self.plan, s.n, self.kv(), s.k, scale, self.k);
+            try w256.faulty(self.l, self.rig.s, self.qd, self.out, self.scratch, self.plan, s.n, self.kv(), s.k, scale, self.k, self.act);
             return self.rig.s.synchronize();
         }
         if (self.attend) {
