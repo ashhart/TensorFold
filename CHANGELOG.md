@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Nemotron on Metal without tensor units skips the lane tiles no kernel reads, with the Linear layout and MTP allocation order kept; replies are unchanged on M5 and M3 Ultra (#3375). Thanks to @jschmied.
+
 - Flint on Metal: `--drafter` takes the published `incoai/Flint-DFlash2` draft model, through the DFlash2 runtime the 27B uses; every reply equals drafts off, and greedy decode on an M5 Ultra goes from 174.6 to 233.0 tok/s at one stream and 221.4 to 289.7 at two (#3511).
 
 - Docs: `docs/api.md` documents the Ollama-compatible routes (`/api/tags`, `/api/ps`, `/api/version`, `/api/show`, `/api/chat`, `/api/generate`, `/api/embed`): what each takes and refuses, the NDJSON replies, and how each differs from its OpenAI-style route (#3496).
