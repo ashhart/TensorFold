@@ -208,11 +208,11 @@ pub const Drafter = struct {
         return x.taps[0..x.n_taps];
     }
 
-    /// Chains of the release's serving depth, every stream's step in one pass.
+    /// Chains of the release's serving depth, every stream's step in one pass, capped by the rule in shared rounds.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
         const costs: []const lanes.config.Cost = if (x.timed) &x.costs else &.{};
-        return .{ .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes(), .window_costs = costs, .lane_costs = costs };
+        return .{ .limit_shared_drafts = true, .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes(), .window_costs = costs, .lane_costs = costs };
     }
 
     fn openFn(ptr: *anyopaque, s: *Stream) anyerror!void {
