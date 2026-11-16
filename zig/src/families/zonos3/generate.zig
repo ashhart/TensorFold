@@ -8,10 +8,13 @@ const D = cfg.dim;
 
 const usage =
     \\usage: zonos3-generate --model LM_DIR --check DUMP_DIR [--max-rows 64] [--max-ctx 4096]
+    \\       zonos3-generate --model LM_DIR --frames-check GEN_DIR [--max-frames 2000]
     \\
     \\--check runs DUMP_DIR/input_ids.npy (prompt rows [n, 11]) with DUMP_DIR/input_ids.cond.json through the backbone
     \\and compares every sublayer with the reference's .npy captures (tools/dump_golden.py lm of Zyphra/ZONOS3-Mini).
-    \\The last stderr line is "RESULT zonos3 check PASS|FAIL ...".
+    \\--frames-check generates greedily (temperature 0, the other sampling defaults) after GEN_DIR's prompt and compares
+    \\the frames with GEN_DIR/rows.npy, the reference's generation of the same request.
+    \\The last stderr line is "RESULT zonos3 check PASS|FAIL ..." or "RESULT zonos3 frames PASS|FAIL ...".
     \\
 ;
 
@@ -119,6 +122,32 @@ fn loadPrompt(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8
     }
 }
 
+fn nowNs(io: std.Io) i128 {
+    return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
+}
+
+fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u8, prompt: []const [W]i32, replaced: []const z3.Replace, max_frames: usize) !u8 {
+    const path = try std.fs.path.join(gpa, &.{ dir, "rows.npy" });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28));
+    defer gpa.free(bytes);
+    const arr = try z3.npy.parse(bytes);
+    if (arr.rank != 2 or arr.shape[1] != W) return error.BadReferenceRows;
+    const want = try arr.ints(gpa);
+    defer gpa.free(want);
+    const t0 = nowNs(io);
+    const r = try z3.generation.generate(gpa, e, prompt, replaced, .{ .temperature = 0 }, max_frames);
+    defer gpa.free(r.rows);
+    const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
+    const n = @min(r.rows.len, arr.shape[0]);
+    var same: usize = 0;
+    while (same < n and std.mem.eql(i32, &r.rows[same], want[same * W ..][0..W])) same += 1;
+    const pass = same == arr.shape[0] and r.rows.len == arr.shape[0];
+    if (!pass and same < n) std.debug.print("first difference at frame {d}: mine {any} reference {any}\n", .{ same, r.rows[same], want[same * W ..][0..W] });
+    std.debug.print("RESULT zonos3 frames {s} identical={d} mine={d} reference={d} eos_frame={?d} prompt_rows={d} seconds={d:.3} frames_per_s={d:.1}\n", .{ if (pass) "PASS" else "FAIL", same, r.rows.len, arr.shape[0], r.eos_frame, prompt.len, seconds, @as(f64, @floatFromInt(r.rows.len)) / seconds });
+    return if (pass) 0 else 1;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = std.heap.c_allocator;
@@ -126,21 +155,23 @@ pub fn main(init: std.process.Init) !u8 {
     const argv = try init.minimal.args.toSlice(arena);
     var model: []const u8 = "";
     var check: ?[]const u8 = null;
+    var frames_check: ?[]const u8 = null;
+    var max_frames: usize = 2000;
     var opts: z3.Options = .{};
     var i: usize = 1;
     while (i + 1 < argv.len) : (i += 2) {
         const k = argv[i];
         const v = argv[i + 1];
-        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
+        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
             std.debug.print("unknown flag {s}\n{s}", .{ k, usage });
             return 2;
         }
     }
-    const dir = check orelse {
+    const dir = check orelse frames_check orelse {
         std.debug.print("{s}", .{usage});
         return 2;
     };
-    if (model.len == 0 or i != argv.len) {
+    if (model.len == 0 or i != argv.len or (check != null and frames_check != null)) {
         std.debug.print("{s}", .{usage});
         return 2;
     }
@@ -149,6 +180,7 @@ pub fn main(init: std.process.Init) !u8 {
     var rows: [][W]i32 = &.{};
     var replaced: std.ArrayList(z3.Replace) = .empty;
     try loadPrompt(gpa, io, e, dir, &rows, &replaced);
+    if (frames_check != null) return framesCheck(gpa, io, e, dir, rows, replaced.items, max_frames);
     var c: Check = .{ .gpa = gpa, .io = io, .e = e, .dir = dir };
     std.debug.print("zonos3 check: {d} prompt rows, {d} replaced, {d} MiB of weights\n", .{ rows.len, replaced.items.len, e.w.bytes >> 20 });
     try e.run(rows, replaced.items, .{ .ctx = &c, .f = Check.probe });
