@@ -23,6 +23,23 @@ pub const Key = struct {
     cuts: ?@import("release_shard.zig").Cuts = null,
 };
 
+/// The key of rank `rank` of `world`: the checkpoint's format and, for the release, its cuts on the mesh.
+pub fn keyFor(c: *const @import("config.zig").Config, rank: u32, world: u32, blocks: []const u32, dspark: bool) !Key {
+    const cuts = if (c.format == .release_fp8) try @import("release_shard.zig").Cuts.of(c, rank, world) else null;
+    return .{ .rank = rank, .world = world, .o_groups = c.o_groups, .blocks = blocks, .dspark = dspark, .format = c.format, .cuts = cuts };
+}
+
+test "a serving key carries the release format and its rank's cuts; EXL3 keys keep the defaults" {
+    var c: @import("config.zig").Config = .{};
+    const exl3 = try keyFor(&c, 1, 4, &.{ 0, 1 }, false);
+    try std.testing.expectEqual(@import("config.zig").Format.exl3, exl3.format);
+    try std.testing.expect(exl3.cuts == null);
+    c.format = .release_fp8;
+    const rel = try keyFor(&c, 1, 4, &.{ 0, 1 }, false);
+    try std.testing.expectEqual(@import("config.zig").Format.release_fp8, rel.format);
+    try std.testing.expectEqualDeep(try @import("release_shard.zig").Cuts.of(&c, 1, 4), rel.cuts.?);
+}
+
 /// The builders' source, so a change to how images are made never reads an old folder.
 const sources = [_][]const u8{ @embedFile("named.zig"), @embedFile("plan.zig"), @embedFile("partition.zig"), @embedFile("stage.zig"), @embedFile("pack.zig"), @embedFile("projection.zig"), @embedFile("names.zig"), @embedFile("plan_release.zig"), @embedFile("stage_release.zig"), @embedFile("release_shard.zig"), @import("core").exl3_layout.source_bytes, @import("prepare.zig").source_bytes };
 
