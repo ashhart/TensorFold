@@ -73,6 +73,13 @@ pub fn budget(gpa: Allocator, io: std.Io, ctx: Context) !Pool {
     return p.pool;
 }
 
+/// Whether `ctx`'s budget counts the host's pages: an integrated GPU without a carve-out shares them with host buffers.
+pub fn sharesHost(gpa: Allocator, io: std.Io, ctx: Context) bool {
+    const integrated = (ctx.attribute(.integrated) catch return false) != 0;
+    const card = ctx.memInfo() catch return false;
+    return sourceOf(integrated, .{ .total = card.total, .available = card.free }, vramBytes(gpa, io, ctx)) == .host;
+}
+
 /// Where a budget's count comes from: a discrete card, an integrated GPU's firmware carve-out, or the host's pages.
 pub const Source = enum { card, carve_out, host };
 
