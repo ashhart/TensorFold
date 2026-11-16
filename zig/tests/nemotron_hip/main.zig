@@ -5,6 +5,7 @@ const nem = @import("nemotron");
 
 const gen = @import("gen.zig");
 const replay = @import("replay.zig");
+const invariance = @import("invariance.zig");
 
 const Tensor = hip.ops.Tensor;
 
@@ -12,7 +13,7 @@ const Tensor = hip.ops.Tensor;
 pub const std_options: std.Options = .{ .signal_stack_size = null };
 
 const usage = "usage: tf-nemotron-hip-test load <model dir> [--capacity N] [--rows N] [--no-mtp] [--tp W " ++
-    "--rank R]\n" ++ gen.usage ++ replay.usage;
+    "--rank R]\n" ++ gen.usage ++ replay.usage ++ invariance.usage;
 
 const Args = struct {
     dir: []const u8 = "",
@@ -283,6 +284,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "rounds")) return run(gen.rounds, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "trace")) return run(gen.trace, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "replay")) return run(replay.replay, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "invariance")) return run(invariance.run, init, args[2..]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "load")) {
         std.debug.print(usage, .{});
         return 2;
