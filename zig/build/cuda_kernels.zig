@@ -200,6 +200,7 @@ pub const kernels = [_]Kernel{
     .{ .name = "drama3_codec", .flags = &.{"-O3"} },
     .{ .name = "zonos3", .flags = glue }, // ours: ZONOS3 Mini's fp32 row kernels over bf16 weights
     .{ .name = "zonos3_codec", .flags = glue }, // ours: ZONOS3's codec decoder in fp32
+    .{ .name = "zonos3_encoder", .flags = glue }, // ours: ZONOS3's codec encoder front end in fp32
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.
