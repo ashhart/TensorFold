@@ -88,31 +88,16 @@ pub fn linear(
             const st = g.c.linearAt(index);
             const conv_bytes = (d.conv - 1) * ch * 4;
             const next = try o.arena.take(conv_bytes);
-            try o.l.tf_gdn_prompt_prep(
-                @ptrFromInt(forward.at(qkv, at_row * ch).ptr),
-                @backingInt(m.act),
-                @ptrFromInt(l.conv),
-                @ptrFromInt(st.conv),
-                @ptrFromInt(next),
-                @ptrFromInt(q + at_row * kw * 4),
-                @ptrFromInt(k + at_row * kw * 4),
-                @ptrFromInt(v + at_row * vw * 4),
-                @ptrFromInt(m.qk.q),
-                @ptrFromInt(m.qk.k),
-                m.qk.eps,
-                @intCast(n),
-                @intCast(kw),
-                @intCast(vw),
-                @intCast(d.conv),
-                @ptrFromInt(forward.at(a, at_row * d.value_heads).ptr),
-                @ptrFromInt(forward.at(b, at_row * d.value_heads).ptr),
-                @ptrFromInt(l.a_log),
-                @ptrFromInt(l.dt_bias),
-                @ptrFromInt(gate + at_row * d.value_heads * 4),
-                @ptrFromInt(beta + at_row * d.value_heads * 4),
-                @intCast(d.value_heads),
-                o.stream,
-            );
+            // a kept row inside the chunk: the prep to it, its conv state aside, then on (two chunks' launches)
+            var from: usize = 0;
+            var state = st.conv;
+            if (g.mark) |mk| {
+                const side = g.c.sideLinear(mk.side, index).conv;
+                try gdnPrep(o, m, l, qkv, a, b, q, k, v, gate, beta, at_row, mk.row, st.conv, side);
+                from = mk.row;
+                state = side;
+            }
+            try gdnPrep(o, m, l, qkv, a, b, q, k, v, gate, beta, at_row + from, n - from, state, next);
             if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(@ptrFromInt(st.conv), @ptrFromInt(next), conv_bytes, o.stream));
             at_row += n;
         }
@@ -126,7 +111,16 @@ pub fn linear(
         const out = mixed + off * ch * 4;
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
-        try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, next, n, ch, d.conv, null);
+        // a kept row inside the chunk: the conv to it, its state aside, then on (the sums of two chunks split there)
+        var from: usize = 0;
+        var state = st.conv;
+        if (g.mark) |mk| {
+            const side = g.c.sideLinear(mk.side, index).conv;
+            try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, side, mk.row, ch, d.conv, null);
+            from = mk.row;
+            state = side;
+        }
+        try o.convPrefill(forward.at(qkv, (off + from) * ch), l.conv, state, out + from * ch * 4, next, n - from, ch, d.conv, null);
         if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
             @ptrFromInt(st.conv),
             @ptrFromInt(next),
@@ -161,6 +155,55 @@ pub fn linear(
     return recur(o, m, l, segs, index, q, k, v, gate, beta, z, rows, false);
 }
 
+/// tf_gdn_prompt_prep over `n` rows from `row`: conv from `state` (its next state to `next`), split, q/k norms, gates.
+fn gdnPrep(
+    o: Ops,
+    m: *const model.Model,
+    l: model.Linear,
+    qkv: Tensor,
+    a: Tensor,
+    b: Tensor,
+    q: u64,
+    k: u64,
+    v: u64,
+    gate: u64,
+    beta: u64,
+    row: usize,
+    n: usize,
+    state: u64,
+    next: u64,
+) !void {
+    const d = m.dims;
+    const ch = d.convWidth();
+    const kw = d.key_heads * d.key_dim;
+    const vw = d.value_heads * d.value_dim;
+    try o.l.tf_gdn_prompt_prep(
+        @ptrFromInt(forward.at(qkv, row * ch).ptr),
+        @backingInt(m.act),
+        @ptrFromInt(l.conv),
+        @ptrFromInt(state),
+        @ptrFromInt(next),
+        @ptrFromInt(q + row * kw * 4),
+        @ptrFromInt(k + row * kw * 4),
+        @ptrFromInt(v + row * vw * 4),
+        @ptrFromInt(m.qk.q),
+        @ptrFromInt(m.qk.k),
+        m.qk.eps,
+        @intCast(n),
+        @intCast(kw),
+        @intCast(vw),
+        @intCast(d.conv),
+        @ptrFromInt(forward.at(a, row * d.value_heads).ptr),
+        @ptrFromInt(forward.at(b, row * d.value_heads).ptr),
+        @ptrFromInt(l.a_log),
+        @ptrFromInt(l.dt_bias),
+        @ptrFromInt(gate + row * d.value_heads * 4),
+        @ptrFromInt(beta + row * d.value_heads * 4),
+        @intCast(d.value_heads),
+        o.stream,
+    );
+}
+
 /// The delta rule a stream at a time (a window's rows each with its state kept aside), the gated norm, the out product.
 fn recur(
     o: Ops,
@@ -185,15 +228,45 @@ fn recur(
     for (segs) |g| {
         const n = g.tokens.len;
         const snaps: ?u64 = if (window) g.c.snapshot(index, 0).state else null;
+        var from: usize = 0;
+        if (g.mark) |mk| {
+            // a kept row inside the chunk: the rule to it, its state aside, the rule on from there
+            const st = g.c.linearAt(index).state;
+            const part = o.arena.mark();
+            try o.gatedDelta(
+                q + off * kw * 4,
+                k + off * kw * 4,
+                v + off * vw * 4,
+                gate + off * d.value_heads * 4,
+                beta + off * d.value_heads * 4,
+                st,
+                y + off * vw * 4,
+                mk.row,
+                d.key_heads,
+                d.value_heads,
+                d.key_dim,
+                d.value_dim,
+                null,
+            );
+            o.arena.release(part); // its scratch: the next launches on the stream run after it
+            if (o.stream != hip.counting) try hip.runtime.check(o.l.r.api.hipMemcpyDtoDAsync(
+                @ptrFromInt(g.c.sideLinear(mk.side, index).state),
+                @ptrFromInt(st),
+                g.c.layout.state_bytes,
+                o.stream,
+            ));
+            from = mk.row;
+        }
+        const r0 = off + from;
         try o.gatedDelta(
-            q + off * kw * 4,
-            k + off * kw * 4,
-            v + off * vw * 4,
-            gate + off * d.value_heads * 4,
-            beta + off * d.value_heads * 4,
+            q + r0 * kw * 4,
+            k + r0 * kw * 4,
+            v + r0 * vw * 4,
+            gate + r0 * d.value_heads * 4,
+            beta + r0 * d.value_heads * 4,
             g.c.linearAt(index).state,
-            y + off * vw * 4,
-            n,
+            y + r0 * vw * 4,
+            n - from,
             d.key_heads,
             d.value_heads,
             d.key_dim,
