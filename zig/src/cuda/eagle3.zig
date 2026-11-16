@@ -80,7 +80,7 @@ pub const Eagle3 = struct {
     caches: std.ArrayList(DeviceBuffer) = .empty,
     host: []i32, // [3, pass_rows] staging: tokens, positions, slots
 
-    const Scratch = struct { ids: u64, pos: u64, slot: u64, picks: u64, cat: u64, e: u64, st: u64, f: u64, z: u64, a: u64, qkv: u64, q: u64, k: u64, v: u64, att: u64, gu: u64, act: u64, part: u64, logits: u64 };
+    const Scratch = struct { tin: u64, ids: u64, pos: u64, slot: u64, picks: u64, cat: u64, e: u64, st: u64, f: u64, z: u64, a: u64, qkv: u64, q: u64, k: u64, v: u64, att: u64, gu: u64, act: u64, part: u64, logits: u64 };
 
     pub fn init(gpa: std.mem.Allocator, d: *const Driver, s: Stream, dims: Dims, w: Weights, ops: Ops) !Eagle3 {
         if (dims.head_dim != 128 or dims.hidden % 64 != 0 or dims.ffn % 64 != 0 or dims.chain == 0) return error.Eagle3Shape;
@@ -90,6 +90,7 @@ pub const Eagle3 = struct {
         const h = dims.hidden;
         const wide = @max(dims.taps * h, @max(3 * dims.att(), 2 * dims.ffn));
         x.x = .{
+            .tin = try x.alloc(n * dims.taps * h * 2),
             .ids = try x.alloc(n * 4),
             .pos = try x.alloc(n * 4),
             .slot = try x.alloc(n * 4),
@@ -220,21 +221,43 @@ pub const Eagle3 = struct {
         }
     }
 
-    /// Context rows from tapped rows `taps` [rows.len, taps * hidden] bf16; each slot's last row's output kept.
-    pub fn absorb(x: *Eagle3, rows: []const Row, taps: u64) !void {
+    /// One stream's kept rows and its tapped rows [rows.len, taps * hidden] bf16 (a target's buffer).
+    pub const Part = struct { rows: []const Row, taps: u64 };
+
+    /// Every part's rows in as few passes as fit (weights read once a pass), taps staged; each slot's last output kept.
+    pub fn absorbMany(x: *Eagle3, parts: []const Part) !void {
         const dm = x.dims;
         if (x.slots == 0) return error.NoCaches;
-        var at: usize = 0;
-        while (at < rows.len) {
-            const n = @min(pass_rows, rows.len - at);
-            const part = rows[at..][0..n];
-            for (part) |r| if (r.slot >= x.slots) return error.NoSuchDraftSlot;
-            try x.stage(part);
-            try x.pass(n, taps + at * dm.taps * dm.hidden * 2, dm.taps * dm.hidden, true);
-            for (part, 0..) |r, i| if (i + 1 == n or part[i + 1].slot != r.slot)
-                try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(x.out + r.slot * dm.hidden * 2, x.x.a + i * dm.hidden * 2, dm.hidden * 2, x.s.handle), "cuMemcpyDtoDAsync");
-            at += n;
+        const row = dm.taps * dm.hidden * 2;
+        var batch: [pass_rows]Row = undefined;
+        var n: usize = 0;
+        for (parts) |p| {
+            var at: usize = 0;
+            while (at < p.rows.len) {
+                const take = @min(pass_rows - n, p.rows.len - at);
+                for (p.rows[at..][0..take], batch[n..][0..take]) |r, *b| {
+                    if (r.slot >= x.slots) return error.NoSuchDraftSlot;
+                    b.* = r;
+                }
+                try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(x.x.tin + n * row, p.taps + at * row, take * row, x.s.handle), "cuMemcpyDtoDAsync");
+                n += take;
+                at += take;
+                if (n == pass_rows) {
+                    try x.absorbPass(batch[0..n]);
+                    n = 0;
+                }
+            }
         }
+        if (n > 0) try x.absorbPass(batch[0..n]);
+    }
+
+    fn absorbPass(x: *Eagle3, rows: []const Row) !void {
+        const dm = x.dims;
+        const n = rows.len;
+        try x.stage(rows);
+        try x.pass(n, x.x.tin, dm.taps * dm.hidden, true);
+        for (rows, 0..) |r, i| if (i + 1 == n or rows[i + 1].slot != r.slot)
+            try x.d.check(x.d.api.cuMemcpyDtoDAsync_v2(x.out + r.slot * dm.hidden * 2, x.x.a + i * dm.hidden * 2, dm.hidden * 2, x.s.handle), "cuMemcpyDtoDAsync");
     }
 
     /// `steps` draft-vocabulary indices for each item (slot, last absorbed position) into out[item]; a sync a step.
