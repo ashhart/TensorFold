@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name.
+- Server: `/v1/completions` takes OpenAI's legacy `echo`: the prompt's text, and with `logprobs` each prompt token's entry (`null` for the first), ahead of the reply's unchanged entries, for evaluation harnesses that score a prompt; `max_tokens: 0` with `echo` returns the prompt alone, and engines without `prompt_logprobs` refuse `echo` by name (#3526).
 
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
