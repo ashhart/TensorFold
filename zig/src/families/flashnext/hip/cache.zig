@@ -206,19 +206,24 @@ pub const Pool = struct {
         cap: usize,
         maker: anytype,
     ) !Caches {
-        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
-        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
+        try p.make(gpa, slot, cap, maker);
         const held = &p.slots.items[slot];
-        if (held.* == null) {
-            held.* = try maker.caches(cap);
-            held.*.?.id = slot;
-            p.made.items[slot] = buffersOf(&held.*.?);
-        }
         try s.synchronize();
         try held.*.?.reset(eos);
         const c = held.*.?;
         held.* = null;
         return c;
+    }
+
+    /// Slot `slot`'s caches made if not yet: by its first lease, or ahead of it (at load).
+    pub fn make(p: *Pool, gpa: std.mem.Allocator, slot: u32, cap: usize, maker: anytype) !void {
+        while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
+        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
+        const held = &p.slots.items[slot];
+        if (held.* != null) return;
+        held.* = try maker.caches(cap);
+        held.*.?.id = slot;
+        p.made.items[slot] = buffersOf(&held.*.?);
     }
 
     /// A finished stream's caches back to their slot.
