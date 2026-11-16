@@ -72,6 +72,16 @@ pub fn hexSha(text: []const u8) bool {
     return true;
 }
 
+/// A branch, tag or sha as one URL path segment: letters, digits, '-', '_' and '.', never "..".
+pub fn revisionOk(text: []const u8) bool {
+    if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
+    for (text) |ch| {
+        const ok = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 /// The cached snapshot serving `repo`: refs/main's revision, else the newest snapshot with a config.json.
 pub fn cachedSnapshot(a: Allocator, io: std.Io, hub: []const u8, repo: []const u8) !?[]const u8 {
     const dir_name = try repoDirName(a, repo);

@@ -48,6 +48,7 @@ const usage =
     \\       tensorfold models
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
+    \\       tensorfold rm REPO[@REVISION] [--yes] [--dry-run]
     \\       tensorfold lanes MODEL PROMPTS.json [--solo] [--max-tokens N] [--no-drafts] [sampling as run] [--report PATH]
     \\                (every prompt through the lane core at once, or one at a time with --solo)
     \\       tensorfold cluster init|check|status

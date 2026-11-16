@@ -9,6 +9,7 @@ const blobName = single.blobName;
 const fileStat = single.fileStat;
 const downloadRetrying = single.downloadRetrying;
 const linkIntoSnapshot = single.linkIntoSnapshot;
+const revisionOk = hub.revisionOk;
 
 pub const GiB: u64 = 1 << 30;
 
@@ -183,16 +184,6 @@ pub fn resolveRevision(a: Allocator, client: *std.http.Client, out: *std.Io.Writ
     // The sha names the snapshot dir and is written to refs/main: only a 40-hex git sha is a path.
     if (!hub.hexSha(sha.string)) return error.BadHubJson;
     return try a.dupe(u8, sha.string);
-}
-
-/// A branch, tag or sha as one URL path segment: letters, digits, '-', '_' and '.', never "..".
-fn revisionOk(text: []const u8) bool {
-    if (text.len == 0 or std.mem.indexOf(u8, text, "..") != null) return false;
-    for (text) |ch| {
-        const ok = std.ascii.isAlphanumeric(ch) or ch == '-' or ch == '_' or ch == '.';
-        if (!ok) return false;
-    }
-    return true;
 }
 
 /// The revision's files: path, size and the sha256 the hub states for LFS objects.
