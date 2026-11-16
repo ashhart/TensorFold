@@ -96,6 +96,17 @@ On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WIND
 Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
 You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
 
+To talk to a model in the terminal in one command, `tensorfold chat MODEL` starts the server itself, streams each
+reply and stops the server when the chat ends; `/help` lists the chat's commands, and `/bye` or Ctrl-D ends it:
+
+```sh
+tensorfold chat mlx-community/Qwen3.5-2B-MLX-4bit
+```
+
+With the server above still running, `tensorfold chat --url http://127.0.0.1:8080` chats with it instead, and
+`echo "Say hello." | tensorfold chat --url http://127.0.0.1:8080` prints one reply for a script.
+See [the chat command](docs/chat.md) for its flags and the serve flags it passes on.
+
 `tensorfold web [ARGS...]` opens TensorFold Web, a small local web app for picking, running and chatting with models.
 If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
 See [the web launcher](docs/web.md) for manual installation and unattended use.
