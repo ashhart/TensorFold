@@ -13,16 +13,18 @@ const n: usize = 16;
 fn rows(rnd: std.Random, out: []f32) void {
     for (0..n) |r| {
         const row = out[r * C ..][0..C];
-        const kind = r % 4;
+        const kind = r % 5;
         for (row, 0..) |*v, c| {
             const x: f64 = switch (kind) {
                 0 => rnd.floatNorm(f64) * 2.0,
                 1 => rnd.floatNorm(f64) * 3.0 + (if (c == r * 97) @as(f64, 14) else 0),
                 2 => @floor(rnd.floatNorm(f64) * 4.0) / 2.0, // coarse: ties everywhere
-                else => if (c % 3 == 0) 1.5 else -2.0, // flat bands
+                3 => if (c % 3 == 0) 1.5 else -2.0, // flat bands
+                else => 20.0 + @as(f64, @floatFromInt((c * 7919) % 4096)) * 0x1p-18, // apart only below bf16's bits
             };
             const b: u32 = @bitCast(@as(f32, @floatCast(x)));
-            v.* = @bitCast(b & 0xFFFF_0000); // bf16-valued, as kit_logits leaves them
+            // bf16-valued as kit_logits leaves EXL3's logits (rows 2-3), full fp32 as the release's head writes
+            v.* = @bitCast(if (kind == 2 or kind == 3) b & 0xFFFF_0000 else b);
         }
     }
 }

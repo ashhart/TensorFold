@@ -204,5 +204,5 @@ pub fn final(s: *Seg) !void {
         defer e.n = n;
         try e.upstream("head", try e.view(.{ .buf = "w.out" }, .bf16, &.{ m, D }, &.{ D, 1 }, a * D * 2), D, V, try e.view(.{ .buf = "w.logits" }, .f32, &.{ m, V }, &.{ V, 1 }, a * V * 4));
     }
-    try e.glue("kit_logits", &.{try e.buf("w.logits", .{}, .f32, &.{ n, V })});
+    if (e.o.format != .release_fp8) try e.glue("kit_logits", &.{try e.buf("w.logits", .{}, .f32, &.{ n, V })});
 }

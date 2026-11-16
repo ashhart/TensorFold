@@ -1,8 +1,8 @@
-// Row top-k of bf16-valued fp32 logits on the device: value descending, ties by lower column (torch.topk of keys).
+// Row top-k of fp32 logits on the device: value descending, ties by lower column (torch.topk of keys).
 
-// keys = (mono(bits(x + 0.0)) & -65536) | (65535 - col): unique in a row (C <= 65,536), so any exact select matches.
+// keys = mono(bits(x + 0.0)) << 16 | (65535 - col): every value bit, unique in a row (C <= 65,536), exact selects.
 
-// One CTA a row: 4-pass 8-bit radix select of the k-th key, gather k winners, bitonic sort; cols int64, vals fp32.
+// One CTA a row: 6-pass 8-bit radix select of the k-th key, gather k winners, bitonic sort; cols int64, vals fp32.
 
 #include <cstdint>
 
@@ -10,19 +10,19 @@ namespace dsv41_topk_keys {
 
 constexpr int NT = 1024, KMAX = 1024, COLS = 1 << 16;
 
-__device__ __forceinline__ uint32_t ukey(float x, int col) {
+__device__ __forceinline__ uint64_t ukey(float x, int col) {
     int b = __float_as_int(x + 0.0f);                  // -0.0 + 0.0 = +0.0
     const int mono = b >= 0 ? b : (b ^ 0x7FFFFFFF);
-    const int key = (mono & -COLS) | (COLS - 1 - col);
-    return static_cast<uint32_t>(key) ^ 0x80000000u;   // signed order as unsigned
+    const uint32_t v = static_cast<uint32_t>(mono) ^ 0x80000000u;   // signed order as unsigned
+    return (static_cast<uint64_t>(v) << 16) | static_cast<uint32_t>(COLS - 1 - col);
 }
 
 __global__ void __launch_bounds__(NT) topk_kernel(const float* __restrict__ lg, long long ld, int C, int k,
                                                   float* __restrict__ vals, long long* __restrict__ cols) {
     __shared__ int hist[256];
-    __shared__ uint32_t s_prefix, s_mask;
+    __shared__ uint64_t s_prefix, s_mask;
     __shared__ int s_need, s_n;
-    __shared__ uint32_t key_sh[KMAX];
+    __shared__ uint64_t key_sh[KMAX];
     __shared__ int col_sh[KMAX];
     const int tid = threadIdx.x;
     const float* row = lg + (long long)blockIdx.x * ld;
@@ -30,12 +30,12 @@ __global__ void __launch_bounds__(NT) topk_kernel(const float* __restrict__ lg, 
     // radix select: the k-th largest key, 8 bits a pass from the top
     if (tid == 0) { s_prefix = 0; s_mask = 0; s_need = k; }
     __syncthreads();
-    for (int shift = 24; shift >= 0; shift -= 8) {
+    for (int shift = 40; shift >= 0; shift -= 8) {
         if (tid < 256) hist[tid] = 0;
         __syncthreads();
-        const uint32_t prefix = s_prefix, mask = s_mask;
+        const uint64_t prefix = s_prefix, mask = s_mask;
         for (int c = tid; c < C; c += NT) {
-            const uint32_t u = ukey(row[c], c);
+            const uint64_t u = ukey(row[c], c);
             if ((u & mask) == prefix) atomicAdd(&hist[(u >> shift) & 255], 1);
         }
         __syncthreads();
@@ -43,18 +43,18 @@ __global__ void __launch_bounds__(NT) topk_kernel(const float* __restrict__ lg, 
             int need = s_need, d = 255;
             for (; d > 0 && hist[d] < need; --d) need -= hist[d];
             s_need = need;
-            s_prefix = prefix | ((uint32_t)d << shift);
-            s_mask = mask | (255u << shift);
+            s_prefix = prefix | ((uint64_t)d << shift);
+            s_mask = mask | ((uint64_t)255 << shift);
         }
         __syncthreads();
     }
-    const uint32_t kth = s_prefix;                     // the k-th largest key itself (keys are unique)
+    const uint64_t kth = s_prefix;                     // the k-th largest key itself (keys are unique)
 
     // the winners (> kth, and kth): exactly k, in any order
     if (tid == 0) s_n = 0;
     __syncthreads();
     for (int c = tid; c < C; c += NT) {
-        const uint32_t u = ukey(row[c], c);
+        const uint64_t u = ukey(row[c], c);
         if (u >= kth) {
             const int at = atomicAdd(&s_n, 1);
             key_sh[at] = u;
@@ -74,7 +74,7 @@ __global__ void __launch_bounds__(NT) topk_kernel(const float* __restrict__ lg, 
                 const int j = i ^ stride;
                 if (j > i) {
                     const bool desc = (i & size) == 0;
-                    const uint32_t a = key_sh[i], b = key_sh[j];
+                    const uint64_t a = key_sh[i], b = key_sh[j];
                     if (desc ? a < b : a > b) {
                         key_sh[i] = b; key_sh[j] = a;
                         const int t = col_sh[i]; col_sh[i] = col_sh[j]; col_sh[j] = t;

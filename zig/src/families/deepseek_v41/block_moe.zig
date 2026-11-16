@@ -315,5 +315,6 @@ pub fn finish(e: *E) !void {
     const V: i64 = (try @import("partition.zig").share(e.cfg.vocab, e.o.rank, e.o.world)).len;
     const logits = try e.buf("w.logits", .{}, .f32, &.{ e.n, V });
     try e.upstream("head", try e.buf("w.out", .{}, .bf16, &.{ e.n, D }), D, V, logits);
-    try e.glue("kit_logits", &.{logits});
+    // the EXL3 kit rounds logits to bf16; the release keeps the reference's FP32 logits (D§5.5)
+    if (e.o.format != .release_fp8) try e.glue("kit_logits", &.{logits});
 }
