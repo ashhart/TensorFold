@@ -48,10 +48,13 @@ pub fn at(t: Tensor, n: usize) Tensor {
 }
 
 /// One call's rows: their tokens, the position of the first, and whether they are a window (else a prompt's).
-pub const Call = struct { tokens: []const u32, pos: usize, window: bool };
+pub const Call = struct { tokens: []const u32, pos: usize, window: bool, mark: ?Mark = null };
 
 /// One stream's rows in a forward: its caches, its tokens and the position of its first row.
-pub const Seg = struct { c: *cache.Caches, tokens: []const u32, pos: usize };
+pub const Seg = struct { c: *cache.Caches, tokens: []const u32, pos: usize, mark: ?Mark = null };
+
+/// A kept row inside a prompt chunk (a multiple of 64): its linear and n-gram state to `side`, as a chunk ending there.
+pub const Mark = struct { row: usize, side: u64 };
 
 /// The final mixer's rows (rows, hidden) for the head, and the residual streams (rows, wide) before it.
 pub const Out = struct { mixed: Tensor, streams: Tensor };
@@ -318,6 +321,13 @@ fn ple(
             tail,
             o.stream,
         );
+        if (call.mark) |mk| try hip.raw.copy(
+            .{ .r = host.d, .ptr = @ptrFromInt(c.sideTail(mk.side)), .len = tail },
+            0,
+            cin + mk.row * d.wide() * m.act.size(),
+            tail,
+            o.stream,
+        );
         c.history = ngram.after(c.history, call.tokens);
     }
 }
@@ -359,7 +369,7 @@ pub fn run(ops: Ops, m: *const model.Model, host: *Host, segs: []const Seg, wind
                     host,
                     g.c,
                     at(h, off * d.wide()),
-                    .{ .tokens = g.tokens, .pos = g.pos, .window = window },
+                    .{ .tokens = g.tokens, .pos = g.pos, .window = window, .mark = g.mark },
                     cin,
                     in,
                     off,

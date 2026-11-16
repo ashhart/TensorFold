@@ -63,6 +63,11 @@ pub const Layout = struct {
         return l.conv_bytes + l.state_bytes;
     }
 
+    /// Device bytes of the caches past the sparse layers (linear, then the n-gram tail); also a side buffer's size.
+    pub fn restBytes(l: Layout) usize {
+        return l.linear * l.linearBytes() + l.tail_bytes;
+    }
+
     /// Device bytes of a stream's caches at `cap` positions.
     pub fn bytes(l: Layout) usize {
         return l.sparse * l.sparseBytes() + l.linear * l.linearBytes() + l.tail_bytes;
@@ -173,6 +178,19 @@ pub const Caches = struct {
         const l = c.layout;
         const at = c.mem.base() + l.sparse * l.sparseBytes() + c.slot[layer] * l.linearBytes();
         return .{ .conv = at, .state = at + l.conv_bytes };
+    }
+
+    /// Linear layer `layer`'s conv and state in a side buffer at `side` laid out as the caches past the sparse layers.
+    pub fn sideLinear(c: *const Caches, side: u64, layer: usize) LinearView {
+        const l = c.layout;
+        const at = side + c.slot[layer] * l.linearBytes();
+        return .{ .conv = at, .state = at + l.conv_bytes };
+    }
+
+    /// The n-gram tail in such a side buffer.
+    pub fn sideTail(c: *const Caches, side: u64) u64 {
+        const l = c.layout;
+        return side + l.linear * l.linearBytes();
     }
 
     /// The n-gram conv's tail rows (act dtype, (tail_rows, W)).

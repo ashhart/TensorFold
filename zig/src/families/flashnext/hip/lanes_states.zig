@@ -24,15 +24,11 @@ pub fn bytes(ptr: *anyopaque, at: u32) u64 {
 pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
     const f = Fx.of(ptr);
     const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-    const saved = try snapshot.save(
-        f.gpa,
-        &f.e.driver,
-        f.e.stream,
-        &lane.caches,
-        if (lane.head) |*h| h else null,
-        at,
-        f.e.cfg.index_ratio,
-    );
+    const head = if (lane.head) |*h| h else null;
+    const saved = if (f.marked) |mk| if (mk.at == at)
+        try snapshot.saveMarked(f.gpa, &f.e.driver, f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio, mk.side, mk.history)
+    else
+        return error.SnapshotNotAtMark else try snapshot.save(f.gpa, &f.e.driver, f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio);
     saved.slot = f.next_slot;
     f.next_slot += 1;
     if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
