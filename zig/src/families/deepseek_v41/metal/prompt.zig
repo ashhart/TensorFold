@@ -44,6 +44,8 @@ pub const Opts = struct {
     ix_rows: u32 = 64,
     /// every decoder layer on every row (the reference the cone must equal)
     full: bool = false,
+    /// opt-in TF_DSV41_PREFILL=replay: decoder layers d.. run only the trailing kept rows (128)
+    replay: bool = false,
     /// routed experts on the decode row kernels instead of the grouped kernels (the reference for them)
     expert_loop: bool = false,
     /// a cold chunk of seg_min rows or more runs its first Engram span on its first seg % of rows first (0: one run)
@@ -66,8 +68,9 @@ pub fn keptOf(c: *const Config, o: Opts) u32 {
     return @max(o.kept, kv.windowSlots(c) - c.window + 1);
 }
 
-/// The tail rows a slot keeps: the decoder's first layer's input cone.
+/// The tail rows a slot keeps: the decoder's first layer's input cone (or `keptOf` under replay).
 pub fn tailRows(c: *const Config, o: Opts) !u32 {
+    if (o.replay and !o.full) return keptOf(c, o);
     return ced.suffixRows(c, keptOf(c, o));
 }
 
@@ -219,7 +222,7 @@ pub const Prompt = struct {
     /// Commits the chunk [a, b) reading input set `set` (its ids written; its Engram rows too unless `late`).
     fn encoderChunk(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, a: u32, b: u32, set: usize, late: ?Late) !Chunk {
         const c = env.c;
-        try p.s.writeRows(c, a, b - a, tail.cap);
+        try p.s.writeRows(c, a, b - a, tail.cap, 0);
         p.imageFlags(a, b);
         p.b.use(set);
         var ch: Chunk = .{};
@@ -319,9 +322,10 @@ pub const Prompt = struct {
         p.taps = @min(p.o.taps_rows, n - f);
         const st = p.keyStart(c, n, f, p.d);
         if (n - st > tail.cap or st < f) return error.TailShort;
+        const wmin: u32 = if (p.o.replay and !p.o.full and st > f) st else 0;
         var a = st;
         while (a < n) : (a = @min(n, a + p.o.chunk)) {
-            try p.decoderChunk(env, slot, tail, a, @min(n, a + p.o.chunk));
+            try p.decoderChunk(env, slot, tail, a, @min(n, a + p.o.chunk), wmin);
         }
         tail.done = n;
     }
@@ -329,11 +333,13 @@ pub const Prompt = struct {
     /// The first position layer L's window keys (k) or whole rows (o) start at, for a prompt ending at n.
     fn keyStart(p: *const Prompt, c: *const Config, n: u32, f: u32, L: u32) u32 {
         if (p.o.full) return f;
+        if (p.o.replay) return @max(f, n -| keptOf(c, p.o));
         return @max(f, n -| (p.outRows(c, L) + c.window - 1));
     }
 
     fn outStart(p: *const Prompt, c: *const Config, n: u32, f: u32, L: u32) u32 {
         if (p.o.full) return f;
+        if (p.o.replay) return @max(f, n -| keptOf(c, p.o));
         return @max(f, n -| p.outRows(c, L));
     }
 
@@ -341,14 +347,14 @@ pub const Prompt = struct {
         return ced.layerRows(c, keptOf(c, p.o), L) catch unreachable;
     }
 
-    fn decoderChunk(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, a: u32, b: u32) !void {
-        try p.s.writeRows(env.c, a, b - a, tail.cap);
+    fn decoderChunk(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, a: u32, b: u32, wmin: u32) !void {
+        try p.s.writeRows(env.c, a, b - a, tail.cap, wmin);
         p.imageFlags(a, b);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = env.queue.commandBuffer();
         const e = cb.compute(.serial);
-        const done = p.decoderPass(env, slot, tail, e, a, b);
+        const done = p.decoderPass(env, slot, tail, e, a, b, wmin);
         e.end();
         try done;
         const tc = mtl.clock.seconds();
@@ -357,7 +363,7 @@ pub const Prompt = struct {
         p.prof.dec_late_s += cb.gpuStart() - tc;
     }
 
-    fn decoderPass(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, e: mtl.ComputeEncoder, a: u32, b: u32) !void {
+    fn decoderPass(p: *Prompt, env: Env, slot: *const kv.Slot, tail: *const Tail, e: mtl.ComputeEncoder, a: u32, b: u32, wmin: u32) !void {
         const c = env.c;
         const n = tail.end;
         const f = tail.done;
@@ -390,7 +396,7 @@ pub const Prompt = struct {
                 if (t0 < b) g.hcmean(&env.p.glue, e, x.at(bb.streams[at], t0, 8 * H), plus(bb.taps, (@as(usize, t0 - (n - p.taps)) * T + t) * H * 2), b - t0, H, T * H);
                 if (b == n) g.hcmean(&env.p.glue, e, x.at(bb.streams[at], n - 1, 8 * H), .{ .buf = slot.taps.?, .off = t * H * 2 }, 1, H, T * H);
             }
-            try pl.encode(&x, e, w, p.io(at), .{ .k = ka, .o = oa, .compress = false });
+            try pl.encode(&x, e, w, p.io(at), .{ .k = ka, .o = oa, .wmin = wmin, .compress = false });
             p.keys[li] += b - ka;
             p.outs[li] += b - oa;
             ran = L + 1;
@@ -544,5 +550,6 @@ test "the cone's rows by layer under the release config: kept 128, the ring's sp
     try std.testing.expectEqual(@as(u32, 128), keptOf(&c, o));
     try std.testing.expectEqual(@as(u32, 17), keptOf(&c, .{ .kept = 1 }));
     try std.testing.expectEqual(@as(u32, 128 + 20 * 127), try tailRows(&c, o));
+    try std.testing.expectEqual(@as(u32, 128), try tailRows(&c, .{ .replay = true }));
     try std.testing.expectEqual(@as(u32, 20), try check(&c));
 }

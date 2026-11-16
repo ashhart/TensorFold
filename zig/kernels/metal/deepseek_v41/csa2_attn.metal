@@ -418,7 +418,7 @@ template <typename T>
   }
   TfAccN<TF_ATTN_PH> s;
   tf_attn_zero(s);
-  const int lo = max(m.pos - int(TF_ATTN_WIN) + 1, 0);
+  const int lo = max(max(m.pos - int(TF_ATTN_WIN) + 1, 0), m.p1);
   const device uint4* wk = W + ulong(m.wofs + lo - m.wbase) * (TF_ATTN_D / 8) + 2 * lane;
   for (int t = lo; t <= m.pos; ++t, wk += TF_ATTN_D / 8) tf_attn_pkey(s, q, TfKey{wk[0], wk[1]}, scale, lane);
   const device int4* ix = (const device int4*)(I + ulong(r) * TF_ATTN_SEL);

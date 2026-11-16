@@ -112,8 +112,9 @@ pub const Boot = struct {
         errdefer b.closeEngram();
         const r = b.w.report();
         std.log.info("dsv41 metal: {d} layers, {d} shards ({d} MiB mapped, {d} MiB copied), {d} slots of {d} positions, DSpark {s}", .{ c.layers, r.shards, r.shard_bytes >> 20, r.arena_bytes >> 20, o.slots, limit, if (b.ds != null) "on" else "off" });
+        const replay = (try environment.read(u32, "TF_DSV41_PREFILL", 0)) == 1;
         const env: target_.Env = .{ .device = b.device, .queue = b.queue, .c = c, .p = &b.p, .tables = &b.tables, .s = &b.s, .model = b.w.view(), .lookup = lookup, .vision = if (b.vw) |*w| .{ .kit = &b.kit.?, .w = w } else null };
-        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .identity = try identity(a, io, dir, b.device, b.ds != null) });
+        return serve.Metal.open(a, .{ .env = env, .top = &b.w.top, .dspark = if (b.ds) |*w| w else null, .owner = .{ .ctx = b, .close = close }, .resident = if (b.w.resident) |*wr| wr else null, .images = if (b.vw != null) .{ .io = io, .tokens = o.image_tokens, .count = o.max_images } else null }, .{ .slots = o.slots, .limit = limit, .drafts = o.drafts, .cache_bytes = o.cache_bytes, .prompt = .{ .replay = replay }, .steps = o.steps, .decode_share = o.decode_share, .gpu_chain = try environment.read(bool, "TF_DSV41_MARKOV_GPU", true), .narrow = blocks.narrow, .identity = try identity(a, io, dir, b.device, b.ds != null) });
     }
 
     /// The tower's kernels and weights, and each layer's image routing bias attached to the backbone's layers.
