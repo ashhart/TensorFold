@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const kda = cuda.kda;
 const b16 = @import("cuda_b16.zig");
@@ -124,7 +125,7 @@ fn columns(set: glue.Set, stream: cuda.Stream, src: u64, cols: usize, dst: u64, 
     a.add(@as(c_longlong, @intCast(stride * 2)));
     a.add(@as(c_int, @intCast(rows)));
     a.add(@as(c_int, @intCast(cols * 2)));
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
+    try cuda_pdl.launch(f, .{ .grid = .{ .x = @intCast((rows * cols * 2 + 255) / 256) }, .block = .{ .x = 256 } }, stream, &a);
 }
 
 /// The chain over `rows` projected rows (s.p, s.ka, s.kg) on one sequence's conv window and recurrent state.

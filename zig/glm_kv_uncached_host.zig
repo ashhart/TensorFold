@@ -38,6 +38,8 @@ test "GLM host KV uncached: a 32-row call invalidates every old cached layer bef
     var d: cuda.Driver = .{ .lib = undefined, .api = undefined };
     d.api.cuModuleGetFunction = Recording.function;
     d.api.cuLaunchKernel = Recording.launch;
+    d.api.cuLaunchKernelEx = @import("glm").pdl.forwardEx(Recording.launch);
+    d.func_name = null;
     d.api.cuMemsetD32Async = Recording.set;
     var n: u32 = 0;
     var g: Gather = undefined;
