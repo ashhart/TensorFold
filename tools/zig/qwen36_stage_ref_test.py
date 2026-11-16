@@ -4,9 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import mlx.core as mx
+try:
+    import mlx.core as mx
+    from mlx_lm.models.gated_delta import gated_delta_ops
+except ImportError:
+    raise unittest.SkipTest("mlx and mlx_lm are not installed")
 import numpy as np
-from mlx_lm.models.gated_delta import gated_delta_ops
 
 from qwen36_f64 import Checkpoint, Model, delta_rule, rms
 from qwen36_stage_ref import Dump, bf16, measure, stage_names, step
