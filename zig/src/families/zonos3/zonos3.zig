@@ -29,5 +29,6 @@ test {
     _ = prompt;
     _ = speech;
     _ = release;
+    _ = voices;
     _ = codec_weights;
 }

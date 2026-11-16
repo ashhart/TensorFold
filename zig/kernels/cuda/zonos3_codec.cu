@@ -209,21 +209,22 @@ extern "C" __global__ void zc_ola(const float* __restrict__ frames, const float*
   out[i] = s / e;
 }
 
-// The mixer: out[i] = sum_b sum_j w[b][j] s_b[n0 + i + j - 63], zero outside [0, total); s rows are `total` apart.
-extern "C" __global__ void zc_mix(const float* __restrict__ s, long long total, const float* __restrict__ w,
-                                  long long n0, long long count, float* __restrict__ out) {
+// The mixer: out[i] = sum_b sum_j w[b][j] s_b[n0 + i + j - 63], zero outside [0, total); s rows are `stride` apart.
+extern "C" __global__ void zc_mix(const float* __restrict__ s, long long stride, long long total,
+                                  const float* __restrict__ w, long long n0, long long count,
+                                  float* __restrict__ out) {
   const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= count) return;
   float a = 0.f;
   for (int b = 0; b < 2; ++b)
     for (int j = 0; j < 127; ++j) {
       const long long p = n0 + i + j - 63;
-      if (p >= 0 && p < total) a = fmaf(w[b * 127 + j], s[(size_t)b * total + p], a);
+      if (p >= 0 && p < total) a = fmaf(w[b * 127 + j], s[(size_t)b * stride + p], a);
     }
   out[i] = a;
 }
 
-// 44160 to 44100 Hz: output m = 735 q + c is sum_j kernel[c][j] x[736 q + j - 17], zero outside [0, total).
+// 44160 to 44100 Hz: output m0 + i = 735 q + c is sum_j kernel[c][j] x[736 q + j - 17], zero outside [0, total).
 extern "C" __global__ void zc_resample(const float* __restrict__ x, long long total, const float* __restrict__ kernel,
                                        long long m0, long long count, float* __restrict__ out) {
   const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
