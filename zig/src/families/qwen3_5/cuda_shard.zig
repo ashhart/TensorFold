@@ -33,19 +33,20 @@ pub const Shape = struct {
     v_heads: usize, // linear-attention value heads
 };
 
-/// One rank's spans, each in its weight's own rows (a row-split weight's are columns); even shares, no rank larger.
+/// One rank's spans: rows of the weights it cuts, or where its part sits in a gathered input (o, out, mlp).
 pub const Share = struct {
     rank: usize,
     world: usize,
     q: Span, // q_proj rows: whole query heads, each head's q and gate rows together
     kv: Span, // k_proj and v_proj rows: whole KV heads; past kv_heads ranks one head is kept by its query ranks
-    o: Span, // o_proj columns (k): the attention width of the same query heads
+    o: Span, // where this rank's query heads sit in o_proj's gathered input (k); o_proj is cut by `hidden`
     qkv: [3]Span, // in_proj_qkv rows: its q, k and v segments each cut evenly, at their offsets
     z: Span, // in_proj_z rows: whole value heads
     heads: Span, // in_proj_a and in_proj_b rows, A_log and dt_bias: the same value heads
-    out: Span, // out_proj columns (k): the value heads of z
-    mlp: Span, // gate_proj and up_proj rows, and down_proj columns
+    out: Span, // where this rank's value heads sit in out_proj's gathered input (k); out_proj is cut by `hidden`
+    mlp: Span, // gate_proj and up_proj rows; and where this rank's rows sit in down_proj's gathered input (k)
     vocab: Span, // lm_head rows
+    hidden: Span, // o_proj, out_proj and down_proj rows (n): hidden over the world, each reading its whole k
 
     /// Rank `rank` of `world`; refused where a count does not split evenly or a cut would leave the 128-tiles.
     pub fn of(s: Shape, rank: usize, world: usize) Error!Share {
@@ -57,6 +58,7 @@ pub const Share = struct {
         const v = try evenly(s.v_heads, rank, world);
         const mlp = try tiles(s.intermediate, rank, world);
         const vocab = try tiles(s.vocab, rank, world);
+        const hidden = try tiles(s.hidden, rank, world);
         const keys = s.k_heads * dk;
         return .{
             .rank = rank,
@@ -70,6 +72,7 @@ pub const Share = struct {
             .out = scale(v, dk),
             .mlp = mlp,
             .vocab = vocab,
+            .hidden = hidden,
         };
     }
 
@@ -114,7 +117,7 @@ fn shift(s: Span, by: usize) Span {
 }
 
 /// The 27B's widths (cuda_geometry.zig's test of them): 24 query heads over 4 KV heads, 48 value heads over 16.
-const qwen27: Shape = .{ .hidden = 5120, .intermediate = 17408, .vocab = 248320, .q_heads = 24, .kv_heads = 4, .k_heads = 16, .v_heads = 48 };
+pub const qwen27: Shape = .{ .hidden = 5120, .intermediate = 17408, .vocab = 248320, .q_heads = 24, .kv_heads = 4, .k_heads = 16, .v_heads = 48 };
 
 test "TP=2 halves every weight of the 27B: whole heads, 2,048-wide qkv segments cut at 1,024, the vocabulary at 124,160" {
     const r0 = try Share.of(qwen27, 0, 2);
@@ -138,6 +141,8 @@ test "TP=2 halves every weight of the 27B: whole heads, 2,048-wide qkv segments 
     try std.testing.expectEqual(Span{ .lo = 8704, .hi = 17408 }, r1.mlp);
     try std.testing.expectEqual(Span{ .lo = 0, .hi = 124160 }, r0.vocab); // 970 of 1,940 tiles
     try std.testing.expectEqual(Span{ .lo = 124160, .hi = 248320 }, r1.vocab);
+    try std.testing.expectEqual(Span{ .lo = 0, .hi = 2560 }, r0.hidden); // 20 of 40 tiles
+    try std.testing.expectEqual(Span{ .lo = 2560, .hi = 5120 }, r1.hidden);
 }
 
 test "TP=1 keeps every weight whole" {
@@ -146,6 +151,7 @@ test "TP=1 keeps every weight whole" {
     try std.testing.expectEqual(Span{ .lo = 0, .hi = 1024 }, r.kv);
     try std.testing.expectEqual([3]Span{ .{ .lo = 0, .hi = 2048 }, .{ .lo = 2048, .hi = 4096 }, .{ .lo = 4096, .hi = 10240 } }, r.qkv);
     try std.testing.expectEqual(Span{ .lo = 0, .hi = 248320 }, r.vocab);
+    try std.testing.expectEqual(Span{ .lo = 0, .hi = 5120 }, r.hidden);
 }
 
 test "TP=4 takes a KV head and 6 query heads a rank; TP=8 keeps each KV head on two ranks and refuses the head's tiles" {
@@ -154,6 +160,7 @@ test "TP=4 takes a KV head and 6 query heads a rank; TP=8 keeps each KV head on 
     try std.testing.expectEqual(Span{ .lo = 768, .hi = 1024 }, r3.kv);
     try std.testing.expectEqual(Span{ .lo = 13056, .hi = 17408 }, r3.mlp);
     try std.testing.expectEqual(Span{ .lo = 186240, .hi = 248320 }, r3.vocab);
+    try std.testing.expectEqual(Span{ .lo = 3840, .hi = 5120 }, r3.hidden);
     // 1,940 vocabulary tiles do not split by 8: refused on the head, the last width read
     try std.testing.expectError(error.NotOnTiles, Share.of(qwen27, 5, 8));
     var wide = qwen27;
@@ -162,6 +169,7 @@ test "TP=4 takes a KV head and 6 query heads a rank; TP=8 keeps each KV head on 
     try std.testing.expectEqual(Span{ .lo = 7680, .hi = 9216 }, r5.q);
     try std.testing.expectEqual(Span{ .lo = 512, .hi = 768 }, r5.kv); // KV head 2, kept by ranks 4 and 5
     try std.testing.expectEqual(Span{ .lo = 1280, .hi = 1536 }, r5.qkv[0]); // key heads 10 and 11 of 16
+    try std.testing.expectEqual(Span{ .lo = 3200, .hi = 3840 }, r5.hidden); // 5 of 40 tiles a rank
 }
 
 test "a width or a half off the 128-tiles is refused by name, never rounded" {
@@ -177,6 +185,10 @@ test "a width or a half off the 128-tiles is refused by name, never rounded" {
     s = qwen27;
     s.vocab = 248320 + 1;
     try std.testing.expectError(error.NotOnTiles, Share.of(s, 0, 2));
+    s = qwen27;
+    s.hidden = 41 * 128; // on the tiles, but 41 tiles do not halve: o_proj's rows would be cut inside a tile
+    try std.testing.expectError(error.NotOnTiles, Share.of(s, 0, 2));
+    _ = try Share.of(s, 0, 1);
 }
 
 test "heads that do not split, and ranks that are not there, are refused" {
@@ -209,4 +221,19 @@ test "a rank keeps the key head of each of its value heads and the KV head of ea
             try std.testing.expect(kv_head * head_dim >= p.kv.lo and (kv_head + 1) * head_dim <= p.kv.hi);
         }
     };
+}
+
+test "the ranks' hidden spans tile the hidden width in whole 128-tiles, in rank order" {
+    var s = qwen27;
+    s.vocab = 248832; // 1,944 tiles split by 8 too
+    for ([_]usize{ 1, 2, 4, 8 }) |world| {
+        var next: usize = 0;
+        for (0..world) |rank| {
+            const h = (try Share.of(s, rank, world)).hidden;
+            try std.testing.expectEqual(next, h.lo);
+            try std.testing.expect(h.len() % unit == 0 and h.len() > 0);
+            next = h.hi;
+        }
+        try std.testing.expectEqual(s.hidden, next);
+    }
 }
