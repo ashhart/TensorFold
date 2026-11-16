@@ -5,6 +5,7 @@ const E = @import("cuda_engine.zig");
 const warm = @import("cuda_warm.zig");
 const profile = @import("cuda_startup_profile.zig");
 const costs = @import("cuda_window_costs.zig");
+const platform = @import("sys");
 pub const file_identity = @import("cuda_cost_identity.zig");
 pub const Kind = enum { dflash, mtp };
 
@@ -38,7 +39,7 @@ pub fn identity(l: anytype, d: anytype, reserved: ?*E.Cache) !costs.Keys {
     const checkpoint = std.fmt.bytesToHex(stamp, .lower);
     const target_hex = std.fmt.bytesToHex(target, .lower);
     const parts = [_][]const u8{ "qwen35-cuda/wall-chain-greedy-v2", gpu, release, geometry, policy, taps, @tagName(l.cost_kind), draft, facts, &checkpoint, &target_hex };
-    const trace = if (@import("sys").getenv("TF_COST_KEY_TRACE")) |v| std.mem.eql(u8, v, "1") else false;
+    const trace = try platform.environment.read(bool, "TF_COST_KEY_TRACE", false);
     if (trace) {
         const names = [_][]const u8{ "profile", "gpu", "driver", "geometry", "policy", "target-taps", "draft-kind", "draft-config", "draft-facts", "draft-checkpoint", "target-checkpoint" };
         for (names, parts) |name_, bytes| tracePart(name_, bytes);
@@ -149,4 +150,10 @@ fn tracePart(name: []const u8, bytes: []const u8) void {
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
     std.log.info("window cost key part {s} {s}", .{ name, hex[0..12] });
+}
+
+test "TF_COST_KEY_TRACE: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_COST_KEY_TRACE", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_COST_KEY_TRACE", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_COST_KEY_TRACE", "on"));
 }
