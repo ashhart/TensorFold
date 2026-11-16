@@ -103,6 +103,8 @@ test "GLM load prices: an oversized NCCL setting disables the cache without reje
     e.checkpoint_digest = @splat(1);
     e.share.world = 2;
     e.m.experts.nvfp4.warps = 4;
+    e.m.mm.pdl = true;
+    e.m.dsel = true;
     e.drafter = null;
     var shape: [512]u8 = undefined;
     var name: [256]u8 = undefined;
