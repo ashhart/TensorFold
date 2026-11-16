@@ -22,7 +22,7 @@ pub const Generation = struct {
     keep: ?mtl.CommandBuffer = null, // the last round's cache and state commit, running behind the drafter
     pending: ?u32 = null, // runRound's next token as the last accept picked it; anything else that moves the target clears it
     pub fn init(a: std.mem.Allocator, runner: *Runner, draft: *Draft) !Generation {
-        if (runner.model != draft.backend.target or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
+        if (&runner.model.checkpoint != draft.backend.target.checkpoint or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
         runner.capture_taps = true;
         try runner.taps.use(runner.model.device, draft.graph.config.tapIds());
         const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;

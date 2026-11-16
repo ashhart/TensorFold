@@ -31,6 +31,7 @@ pub const Drafted = struct {
     firsts: std.ArrayList(u32) = .empty,
     /// The target reads held drafts from the drafter itself (Window.held), so windows without fillers pass as they are.
     held_on_target: bool = false,
+    first_rows: bool = false,
 
     /// The wrapper, with the target told the drafter's taps before any forward.
     pub fn init(gpa: Allocator, target: be.Backend, drafter: dr.Drafter) !Drafted {
@@ -71,7 +72,7 @@ pub const Drafted = struct {
     };
     pub fn backend(x: *Drafted) be.Backend {
         const planned = if (x.drafter.proposal_head) |service| service.mode != .legacy and x.drafter.vtable.hold_planned != null and x.drafter.vtable.clear_proposals != null else false;
-        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null) };
+        return .{ .proposal_head = x.drafter.proposal_head, .ptr = x, .round_observer = x.target.round_observer, .first_before_draft = x.target.first_before_draft, .penalties = x.target.penalties, .chunk_invariant = x.target.chunk_invariant, .vtable = vtableFor(planned, x.target.vtable.prefill_step != null and x.target.vtable.reports_fill and x.target.vtable.features != null, x.target.vtable.cancel_prefill != null, x.first_rows) };
     }
 
     const cancellable: [4]be.Backend.VTable = blk: {
@@ -80,7 +81,14 @@ pub const Drafted = struct {
         break :blk tables;
     };
 
-    fn vtableFor(planned: bool, steps: bool, cancels: bool) *const be.Backend.VTable {
+    const row_tables: [8]be.Backend.VTable = blk: {
+        var tables = [_]be.Backend.VTable{ legacy_vtable, planned_vtable, stepped_legacy, stepped_planned, cancellable[0], cancellable[1], cancellable[2], cancellable[3] };
+        for (&tables) |*v| v.first_row = firstRow;
+        break :blk tables;
+    };
+
+    fn vtableFor(planned: bool, steps: bool, cancels: bool, rows: bool) *const be.Backend.VTable {
+        if (rows) return &row_tables[@as(usize, @intFromBool(cancels)) * 4 + @as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (cancels) return &cancellable[@as(usize, @intFromBool(steps)) * 2 + @intFromBool(planned)];
         if (steps) return if (planned) &stepped_planned else &stepped_legacy;
         return if (planned) &planned_vtable else &legacy_vtable;
@@ -204,6 +212,10 @@ pub const Drafted = struct {
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         return self(ptr).target.first(s, position);
+    }
+
+    fn firstRow(ptr: *anyopaque, s: *Stream) anyerror!@import("logprob.zig").Row {
+        return self(ptr).target.firstRow(s);
     }
 
     fn firstMasked(ptr: *anyopaque, s: *Stream, position: u64, mask: []const u32) anyerror!u64 {

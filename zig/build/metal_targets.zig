@@ -154,6 +154,9 @@ pub fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
     embed_host.dependOn(&embed_air.step);
     embed_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine, .filters = &.{"embedding"} })).step);
     embed_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines, .filters = &.{"Qwen3 Metal"} })).step);
+    const flint_draft_host = b.step("test-flint-draft-host", "Flint draft config, taps and first-token metadata without devices");
+    for ([_]*std.Build.Module{ engine, api.import_table.get("lanes").? }) |module|
+        flint_draft_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = module, .filters = &.{"Flint DFlash2"} })).step);
     b.step("test-native", "The Metal engines module's host-side tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engines })).step);
     const reuse = b.addExecutable(.{ .name = "tf-flashnext-reuse", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/flashnext_reuse.zig"),
