@@ -55,7 +55,7 @@ function productionElement(file: string, tag: string, wrapper?: string) {
 }
 const renderThreadComposer = productionElement('../Thread.tsx', 'Composer', 'BotComposerSettings')
 const provider: Provider = { id: 'fixture', name: 'Fixture', kind: 'local', baseUrl: 'http://127.0.0.1', apiKey: '', models: ['fixture'] }
-function composer(bot: BotThreadConfig | undefined, effort: ReasoningEffortSetting) {
+function composer(bot: BotThreadConfig | undefined, effort: ReasoningEffortSetting, roomWorkerEffort?: ReasoningEffortSetting) {
   const thread = { id: 'captured-bot-fixture', bot }
   function Composer() {
     return React.createElement(picker.ModelPickerMenu, {
@@ -65,10 +65,10 @@ function composer(bot: BotThreadConfig | undefined, effort: ReasoningEffortSetti
       detail: metadata.effortDisplayLabel(provider, 'fixture', effort), disabled: !!bot,
     })
   }
-  return renderThreadComposer({ thread, Composer, BotComposerSettings: context.BotComposerSettings })
+  return renderThreadComposer({ thread, roomWorkerEffort, Composer, BotComposerSettings: context.BotComposerSettings })
 }
 const bot = (reasoningEffort?: ReasoningEffortSetting) => ({ reasoningEffort } as BotThreadConfig)
-const markup = (captured: BotThreadConfig | undefined, global: ReasoningEffortSetting) => renderToStaticMarkup(composer(captured, global))
+const markup = (captured: BotThreadConfig | undefined, global: ReasoningEffortSetting, room?: ReasoningEffortSetting) => renderToStaticMarkup(composer(captured, global, room))
 assert.match(markup(bot('low'), 'high'), />Low<\/span>/, 'the real thread/provider/picker wiring displays captured Low, not global High')
 assert.match(markup(bot('high'), 'low'), />High<\/span>/, 'captured High remains independent of global Low')
 assert.match(markup(bot(), 'high'), />High<\/span>/, 'a legacy bot without captured effort displays its global fallback')
@@ -79,4 +79,7 @@ assert.match(markup(captured, 'medium'), />Low<\/span>/, 'changing the app setti
 const siblings = renderToStaticMarkup(React.createElement(React.Fragment, null, composer(captured, 'high'), composer(undefined, 'high')))
 assert.equal((siblings.match(/>Low<\/span>/g) ?? []).length, 1)
 assert.equal((siblings.match(/>High<\/span>/g) ?? []).length, 1, 'a captured value cannot leak into an adjacent ordinary composer')
+assert.match(markup(undefined, 'high', 'low'), />Low<\/span>/, 'the real worker composer displays captured Low instead of app High')
+assert.match(markup(undefined, 'low', 'high'), />High<\/span>/, 'captured Room effort stays independent from app Low')
+assert.match(markup(undefined, 'high'), />High<\/span>/, 'a completed worker returns to the ordinary app fallback')
 console.log('Bot composer checks passed: captured/legacy/global badges, actual parent wiring and sibling isolation.')
