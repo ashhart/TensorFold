@@ -74,6 +74,7 @@ pub const Metal = struct {
             .limit = m.opt.limit,
             .world = 1,
             .prefill_step = m.opt.prompt.chunk,
+            .solo_prefill_step = m.opt.prompt.solo_chunk,
             .forward_rows = pipelines.max_rows,
             .shape = shape,
             .target = targetFn,

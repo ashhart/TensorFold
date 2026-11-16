@@ -11,7 +11,8 @@ pub fn prefillStep(ptr: *anyopaque, s: *Stream, max_rows: u32) anyerror!bool {
     errdefer ln.Lanes.release(x, s);
     if (s.isCancelled()) return error.Cancelled;
     const ids = s.prompt();
-    const rows: u64 = @max(1, if (max_rows > 0) max_rows else x.opts.step_rows);
+    const step = if (x.streams.count() <= 1 and x.opts.solo_step_rows > x.opts.step_rows) x.opts.solo_step_rows else x.opts.step_rows;
+    const rows: u64 = @max(1, if (max_rows > 0) max_rows else step);
     try x.settle();
     if (ids.len - st.len > rows) {
         try x.target.piece(st.slot, ids, st.len, st.len + rows, false);

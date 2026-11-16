@@ -175,12 +175,25 @@ pub const Target = struct {
         return if (slot < t.slots.len) t.slots[slot].resumed else 0;
     }
 
+    /// Whether `slot` is the only active or filling slot on this target.
+    fn soloSlot(t: *const Target, slot: u32) bool {
+        for (t.slots, 0..) |*s, i| if (i != slot and (s.live or s.filling)) return false;
+        return true;
+    }
+
+    /// Widen active chunk rows to `solo_chunk` while `slot` runs alone; narrow back when any other slot is active.
+    pub fn updateChunk(t: *Target, slot: u32) void {
+        const o = t.opt.prompt;
+        t.pr.active_chunk = if (t.soloSlot(slot) and o.solo_chunk > o.chunk) o.solo_chunk else o.chunk;
+    }
+
     fn prefill(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling, draw: u64) anyerror!u32 {
         const t = self(ptr);
         const st = try t.startPrompt(slot, ids);
         const s = st.s;
         const n: u32 = @intCast(ids.len);
         if (st.hit) |e| if (e.ids.len == n) return t.endPrompt(s, e.logits.?, smp, draw);
+        t.updateChunk(slot);
         t.pr.run(t.promptEnv(), &s.kv, &s.tail, s.hist.items) catch |e| return t.fail(e);
         return t.endPrompt(s, null, smp, draw);
     }

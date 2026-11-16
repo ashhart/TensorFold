@@ -26,6 +26,7 @@ pub const Options = struct {
     plain_streams_default: usize = 0, // depth.plain_streams when TF_DSV41_DRAFT_PLAIN_STREAMS is unset
     steps: bool = false, // prompts a step at a time between rounds (lane_steps.zig), for a target with pieces
     step_rows: u32 = 0, // a step's rows when the host sets no cap (the target's prompt chunk)
+    solo_step_rows: u32 = 0, // wider step's rows when a single stream is open (0: keep step_rows)
 };
 
 /// A stream's slot and what the backend holds for it between rounds.

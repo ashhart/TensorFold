@@ -36,6 +36,7 @@ pub fn piece(ptr: *anyopaque, slot: u32, ids: []const u32, start: u64, end: u64,
     if (start == end and save and start == s.tail.end) return;
     if (start != s.tail.end or end <= start or end >= ids.len) return error.NotAChain;
     if (start > s.resumed) t.stats.most_between = @max(t.stats.most_between, t.stats.launches - s.mark);
+    t.updateChunk(slot);
     t.pr.encode(t.promptEnv(), &s.kv, &s.tail, s.hist.items, @intCast(end)) catch |e| return t.fail(e);
     t.stats.pieces += 1;
     s.mark = t.stats.launches;
@@ -52,6 +53,7 @@ pub fn finish(ptr: *anyopaque, slot: u32, ids: []const u32, smp: ?lanes.Sampling
         return t.endPrompt(s, s.hit.items, smp, draw);
     }
     const env = t.promptEnv();
+    t.updateChunk(slot);
     t.pr.encode(env, &s.kv, &s.tail, s.hist.items, n) catch |e| return t.fail(e);
     t.pr.finish(env, &s.kv, &s.tail) catch |e| return t.fail(e);
     t.pr.report(n - s.resumed, prompt.now() - s.began);

@@ -242,3 +242,36 @@ test "dsv41 metal steps: two prompts' pieces taking turns at the same positions 
     }
     try testing.expectEqual(@as(usize, 0), bad);
 }
+
+test "dsv41 metal steps: solo_chunk widens solo chunks and narrows back when another slot opens" {
+    const p = try ff.ids(gpa, &fs.config(), 300, 82);
+    defer gpa.free(p);
+    const want = try reference(p);
+    defer want.free();
+    const m = try fs.open(gpa, io, seed, .{ .slots = 2, .drafts = false, .chunk = 64, .solo_chunk = 128 });
+    defer fs.close(m);
+    const tg = m.t.target();
+    _ = try tg.begin(0, p);
+    try tg.piece(0, p, 0, 128, false);
+    const solo_active = m.t.pr.active_chunk;
+    try testing.expectEqual(@as(u32, 128), solo_active);
+    // opening a second slot narrows slot 0 back to busy chunk on the next step
+    _ = try tg.begin(1, p);
+    try tg.piece(0, p, 128, 192, false);
+    const busy_active = m.t.pr.active_chunk;
+    try testing.expectEqual(@as(u32, 64), busy_active);
+    tg.release(1);
+    const first = try tg.finish(0, p, null, p.len);
+    const solo_after_release = m.t.pr.active_chunk;
+    try testing.expectEqual(@as(u32, 128), solo_after_release);
+    const st = try stateBytes(&m.t.slots[0]);
+    defer gpa.free(st);
+    var toks: [n_decode]u32 = undefined;
+    try decode(tg, 0, p.len, first, &toks);
+    const sd = diff(st, want.state);
+    const eq = std.mem.eql(u32, &toks, &want.toks);
+    say(sd == 0 and eq, "(e) solo_chunk 128 -> busy 64 -> solo 128: {d} state bytes differ, tokens {s}", .{ sd, if (eq) "equal" else "differ" });
+    try testing.expectEqual(@as(usize, 0), sd);
+    try testing.expect(eq);
+    tg.release(0);
+}

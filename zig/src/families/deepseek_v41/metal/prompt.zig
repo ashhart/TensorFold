@@ -29,6 +29,8 @@ pub const Scratch = ps.Scratch;
 pub const Opts = struct {
     /// rows a chunk carries (encoder and decoder passes alike)
     chunk: u32 = 4096,
+    /// wider chunk used while a single slot is active alone (`0`: keep `chunk`)
+    solo_chunk: u32 = 0,
     /// the cone's kept rows: the last layer's outputs the head and drafting read (at least the ring's spare rows + 1)
     kept: u32 = 128,
     /// logits rows and DSpark tap rows at the prompt's end
@@ -88,6 +90,8 @@ const Stage = struct { tail: *const Tail, a: u32, b: u32, set: usize };
 
 pub const Prompt = struct {
     o: Opts,
+    max_chunk: u32,
+    active_chunk: u32,
     d: u32,
     s: Scratch,
     b: Bufs,
@@ -107,9 +111,10 @@ pub const Prompt = struct {
         const d = try check(c);
         if (o.chunk == 0 or o.head_rows == 0 or o.head_rows > keptOf(c, o) or o.taps_rows > c.window) return error.BadRows;
         if (c.layers > 64) return error.TooManyLayers;
-        var s = try Scratch.init(device, c, o.chunk, o.ix_rows, limit);
+        const max_chunk = @max(o.chunk, o.solo_chunk);
+        var s = try Scratch.init(device, c, max_chunk, o.ix_rows, limit);
         errdefer s.deinit();
-        return .{ .o = o, .d = d, .s = s, .b = try Bufs.init(device, c, o.chunk, o.head_rows, o.taps_rows) };
+        return .{ .o = o, .max_chunk = max_chunk, .active_chunk = o.chunk, .d = d, .s = s, .b = try Bufs.init(device, c, max_chunk, o.head_rows, o.taps_rows) };
     }
 
     pub fn deinit(p: *Prompt) void {
@@ -191,9 +196,9 @@ pub const Prompt = struct {
         }
     }
 
-    /// The end of the chunk starting at `a`: `chunk` rows, at most `upto`.
+    /// The end of the chunk starting at `a`: `active_chunk` rows, at most `upto`.
     fn chunkEnd(p: *const Prompt, a: u32, upto: u32) !u32 {
-        return @min(upto, a + p.o.chunk);
+        return @min(upto, a + p.active_chunk);
     }
 
     /// Commits the chunk [a, b) reading input set `set` (prepared); the caller waits on the command buffer.
@@ -255,8 +260,8 @@ pub const Prompt = struct {
         const st = p.keyStart(c, n, f, p.d);
         if (n - st > tail.cap or st < f) return error.TailShort;
         var a = st;
-        while (a < n) : (a = @min(n, a + p.o.chunk)) {
-            try p.decoderChunk(env, slot, tail, a, @min(n, a + p.o.chunk));
+        while (a < n) : (a = @min(n, a + p.active_chunk)) {
+            try p.decoderChunk(env, slot, tail, a, @min(n, a + p.active_chunk));
         }
         tail.done = n;
     }
