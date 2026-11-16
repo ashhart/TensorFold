@@ -1,4 +1,4 @@
-base b4f1bf263c7d head cde825799da3; 4 files changed under zig/kernels; Build cuda_13.2.r13.2/compiler.37953736_0
+base e7e24243d63e head 042028b62b0c; 4 files changed under zig/kernels; Build cuda_13.2.r13.2/compiler.37953736_0
 lfm3: in one catalog only
 contract_controls: 465 functions over sm_120,sm_121,sm_80,sm_86,sm_89; changed 0 added 15 removed 0
     sm_80 tf_ctl_pattn_128
@@ -14,4 +14,4 @@ prefill_attention: 75 functions over sm_120,sm_121,sm_80,sm_86,sm_89; changed 0 
     sm_121 _ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi4ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix
 images 2 functions 540 differing 20
 control fp4pair constant: could not plant (pattern found 0, images 2)
-control warp_sum order: 36 functions changed in 1 of 1 images
+control warp_sum order: 35 functions changed in 1 of 1 images
