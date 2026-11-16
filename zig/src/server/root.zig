@@ -284,6 +284,18 @@ test {
 }
 
 test {
+    _ = @import("chat_cli_args.zig");
+    _ = @import("chat_cli_history.zig");
+    _ = @import("chat_cli_reply.zig");
+    _ = @import("chat_cli_turn.zig");
+    // the chat's own serve child and its runs against fakes use POSIX signals and processes, as the benchmark's do
+    if (comptime @import("builtin").os.tag != .windows) {
+        _ = @import("chat_cli_child.zig");
+        _ = @import("chat_cli_test.zig");
+    }
+}
+
+test {
     _ = @import("slide_retention_test.zig");
     _ = @import("slide_shrink_test.zig");
     _ = @import("slide_correction_test.zig");
