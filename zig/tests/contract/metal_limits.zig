@@ -189,6 +189,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
         const body = @import("ling_metal").route;
         return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
     }
+    if (std.mem.startsWith(u8, d.name, "metal ling mla ")) {
+        if (!assemble) return undefined;
+        const body = @import("ling_metal").mla;
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = body };
+    }
     if (std.mem.startsWith(u8, d.name, "nemotron paged ")) {
         if (!assemble) return undefined;
         return pagedLaunch(a, device, d, fun);

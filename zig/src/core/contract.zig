@@ -48,6 +48,7 @@ test {
     _ = @import("contract/metal_pair_records.zig");
     _ = @import("contract/affine_gather_records.zig");
     _ = @import("contract/flint_records.zig");
+    _ = @import("contract/ling_mla_records.zig");
     _ = spec;
     _ = gates;
     _ = rows;
