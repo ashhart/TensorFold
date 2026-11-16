@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: the GLM-5.3-Flash recipe records the FP8 latent cache's diagnostics on FP4-Local at TP=2 on two GB10s, with its bytes a token and fixed per-stream state, and says it is not qualified (#3432). Thanks to @laudney.
+
 - KV pool: a window's pages go back to the pool once their readers are done, and a step retires under the forward's token, leaving the settle to its caller; no served path calls it yet (#3353, part of #2444). Thanks to @jschmied.
 
 - Qwen3.8-27B: `serve` drafts with DFlash2 by itself when `z-lab/Qwen3.8-27B-DFlash2` is already in the Hugging Face cache, and one line names it; nothing is downloaded, a drafter that does not open leaves the target serving alone, and `--drafter none` serves without it. The target checks every drafted token, so replies are the same tokens; the benchmark passes the drafter it chose before (#3204, fixes #3173).
