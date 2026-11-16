@@ -290,6 +290,29 @@ mx.set_cache_limit(8 * 2**30)                                       # the server
 # ... per request: run, then mx.clear_cache()
 ```
 
+## Long agent sessions
+
+When the client sends earlier turns' reasoning back, the chat template keeps all of it in the prompt, so an agent's
+prompt grows with its thinking as well as its messages and tool results. In one omp session on an M5 Ultra (native
+server, the 4-bit checkpoint, thinking on), about 330K of the prompt's 494K tokens were earlier reasoning.
+Past about 300K tokens the model starts to repeat itself: filler words were 2-3% of a reply's words at 334-356K,
+about 15% near 390K and 20-50% past 410K, and the looping turns then go back into the prompt and are copied.
+The build is not the cause: at a 458K-token prompt, release 1.2.9 and a build with the later GLM decode changes
+gave byte-identical greedy replies, and a recall test over 22,000 similar records found 9 of 11.
+
+`TF_GLM_CLEAR_THINKING=1`, or a request's `chat_template_kwargs.clear_thinking: true`, drops only the reasoning
+before the last user message, so an autonomous tool loop keeps most of it. To keep a long session's prompt to its
+messages and tool results, have the client stop sending reasoning back. omp sends it by default to servers on
+loopback or private addresses; set this in the provider's `compat` in `~/.omp/agent/models.yml`:
+
+```json
+"compat": { "replayReasoningContent": false }
+```
+
+The next request renders the previous reply without its reasoning, so the server resumes from the previous
+request's prompt and prefills that reply again. A session that is already long renders shorter once, at the cost of
+one cold prefill.
+
 ## Responses and exactness
 
 When thinking is disabled, the server closes the template's open think block so the response reaches
