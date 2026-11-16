@@ -165,10 +165,21 @@ pub const Ops = struct {
         try o.k.tree.run(o.s, q, kn, vn, rows, sc, out, n, h, hk, d, ng, scale);
     }
 
-    /// x [m, D] bf16 times rows [n, D] bf16 into fp32 [m, n] (the router and the head).
+    /// x [m, D] bf16 times rows [n, D] bf16 into fp32 [m, n] (the router and the head); rounds 16 rows a launch.
     pub fn dense(o: Ops, x: u64, x_stride: usize, rows: u64, out: u64, m: usize, d: usize, n: usize) !void {
-        try o.k.dense.rows(o.s, x, x_stride, rows, out, n, m, n, d);
+        // a prompt chunk (past split_rows) and a narrow round keep one launch
+        if (m <= tile or m > split_rows) return o.k.dense.rows(o.s, x, x_stride, rows, out, n, m, n, d);
+        var at: usize = 0; // the 32-row tile runs the 128k-row head 5x slower than two 16-row ones (nsys, GB10)
+        while (at < m) : (at += tile) {
+            const take = @min(tile, m - at);
+            try o.k.dense.rows(o.s, x + at * x_stride * 2, x_stride, rows, out + at * n * 4, n, take, n, d);
+        }
     }
+
+    /// The tile a round's rows launch in: dense_rows.cu sums each row in one order whatever the tile.
+    pub const tile = 16;
+    /// Rows up to a round's (fwd.round_rows) split into tiles; a prompt chunk keeps one launch.
+    pub const split_rows = 64;
 
     /// Each row's top-k experts by sigmoid logit + bias, unnormalised sigmoid weights, then the shared expert's slot.
     pub fn topk(o: Ops, logits: u64, bias: u64, pick: u64, wts: u64, rows: usize, ne: usize, k: usize) !void {
