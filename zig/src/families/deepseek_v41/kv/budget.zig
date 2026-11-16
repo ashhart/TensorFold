@@ -273,6 +273,8 @@ pub const Measured = struct {
     rank: u32,
     avail_gib: f64,
     terms: Serve,
+    /// bytes of the pool the display carveout will hold (TF_CUDA_CARVEOUT=1): outside MemAvailable, so not charged
+    carved: u64 = 0,
 };
 
 pub const Result = struct {
@@ -283,6 +285,8 @@ pub const Result = struct {
     avail_gib: f64,
     pool_tokens: u64,
     pool_gib: f64,
+    /// the part of pool_gib in the display carveout; the floor is charged pool_gib less it
+    carved_gib: f64 = 0,
     bytes_a_token: f64,
     split: bool,
     growth: f64,
@@ -297,12 +301,19 @@ pub const Result = struct {
         var a: [32]u8 = undefined;
         var b: [32]u8 = undefined;
         var c: [32]u8 = undefined;
-        if (r.ok) return std.fmt.bufPrint(buf, "rank {d} pool {s} tokens = {d:.2} GiB ({d:.0} B a token{s}); predicted worst MemAvailable {d:.2} GiB (hard floor {s})", .{
-            r.rank, grouped(&a, r.pool_tokens), r.pool_gib, r.bytes_a_token, if (r.split) ", split KV" else "", r.worst, pyFloat(&b, r.hard),
+        var e: [64]u8 = undefined;
+        if (r.ok) return std.fmt.bufPrint(buf, "rank {d} pool {s} tokens = {d:.2} GiB ({d:.0} B a token{s}{s}); predicted worst MemAvailable {d:.2} GiB (hard floor {s})", .{
+            r.rank, grouped(&a, r.pool_tokens), r.pool_gib, r.bytes_a_token, if (r.split) ", split KV" else "", r.held(&e, ", {d:.2} GiB of it in the display carveout"), r.worst, pyFloat(&b, r.hard),
         }) catch buf;
-        return std.fmt.bufPrint(buf, "rank {d}: a {d:.2} GiB pool leaves {d:.2} GiB at the worst measured serving point (MemAvailable {d:.2} now - boot growth {d:.2} - serving dip {d:.2}), under the {s} GiB hard floor (TF_DSV41_FLOOR_HARD_GIB); the largest pool that fits: {s} tokens ({s} in whole pages; TF_DSV41_POOL_TOKENS; " ++ growth_env ++ " / " ++ dip_env ++ " override the measured terms)", .{
-            r.rank, r.pool_gib, r.worst, r.avail_gib, r.growth, r.dip, pyFloat(&a, r.hard), grouped(&b, r.largest), grouped(&c, r.largest_paged),
+        return std.fmt.bufPrint(buf, "rank {d}: a {d:.2} GiB pool{s} leaves {d:.2} GiB at the worst measured serving point (MemAvailable {d:.2} now - boot growth {d:.2} - serving dip {d:.2}), under the {s} GiB hard floor (TF_DSV41_FLOOR_HARD_GIB); the largest pool that fits: {s} tokens ({s} in whole pages; TF_DSV41_POOL_TOKENS; " ++ growth_env ++ " / " ++ dip_env ++ " override the measured terms)", .{
+            r.rank, r.pool_gib, r.held(&e, " ({d:.2} GiB of it in the display carveout)"), r.worst, r.avail_gib, r.growth, r.dip, pyFloat(&a, r.hard), grouped(&b, r.largest), grouped(&c, r.largest_paged),
         }) catch buf;
+    }
+
+    /// `form` with the carveout's GiB when it holds part of the pool, else nothing.
+    fn held(r: Result, buf: *[64]u8, comptime form: []const u8) []const u8 {
+        if (r.carved_gib <= 0) return "";
+        return std.fmt.bufPrint(buf, form, .{r.carved_gib}) catch "";
     }
 };
 
@@ -317,14 +328,17 @@ pub fn worstAt(avail_gib: f64, pool_gib: f64, terms: Serve) f64 {
     return avail_gib - pool_gib - terms.growth - terms.dip;
 }
 
-/// Load-time check: MemAvailable - pool (split-aware) - growth - worst dip >= hard floor; after Boot, if it applies.
+/// Load-time check: MemAvailable - pool (split-aware, less what the carveout holds) - growth - worst dip >= hard floor.
 pub fn serveCheck(k: Knobs, m: Measured, layout: sessions.Layout, world: u32, pool_tokens: u64) Result {
     const per = tokenBytes(layout, world);
-    const pool_gib = @as(f64, @floatFromInt(poolBytes(layout, world, pool_tokens))) / GiB;
-    const worst = worstAt(m.avail_gib, pool_gib, m.terms);
+    const bytes = poolBytes(layout, world, pool_tokens);
+    const pool_gib = @as(f64, @floatFromInt(bytes)) / GiB;
+    const carved_gib = @as(f64, @floatFromInt(@min(m.carved, bytes))) / GiB;
+    const worst = worstAt(m.avail_gib, pool_gib - carved_gib, m.terms);
     var split = false;
     for (layout.families) |f| split = split or (f.split and world > 1);
-    const largest = largestPool(m.avail_gib, m.terms, k.hard_gib, per);
+    // the carveout's bytes are room the device part of a larger pool does not use
+    const largest = largestPool(m.avail_gib + carved_gib, m.terms, k.hard_gib, per);
     const step = @as(u64, layout.page) * (if (split) world else 1);
     return .{
         .rank = m.rank,
@@ -333,6 +347,7 @@ pub fn serveCheck(k: Knobs, m: Measured, layout: sessions.Layout, world: u32, po
         .avail_gib = m.avail_gib,
         .pool_tokens = pool_tokens,
         .pool_gib = pool_gib,
+        .carved_gib = carved_gib,
         .bytes_a_token = per,
         .split = split,
         .growth = m.terms.growth,
@@ -448,6 +463,28 @@ test "the measured boot check: the reference's served and middle-profile goldens
     try std.testing.expectEqualStrings("rank 1 pool 3,000,000 tokens = 2.96 GiB (1060 B a token, split KV); predicted worst MemAvailable 4.04 GiB (hard floor 4.0)", ok);
     // a nothing-fits rank: no room, no pool
     try std.testing.expectEqual(@as(u64, 0), largestPool(8.0, Serve.measured(1), 4.0, 1060));
+}
+
+test "the measured boot check charges the pool less what the display carveout holds" {
+    var sl = try layout_mod.Layout.fromConfig(layout_mod.Release{}, .{ .split = true });
+    const spl = sl.pool();
+    const k: Knobs = .{};
+    var buf: [512]u8 = undefined;
+    // the refused worker above (split 3.5M, worst 3.54): 1 GiB of its pool in the carveout lifts the worst point 1 GiB
+    const r = serveCheck(k, .{ .rank = 1, .avail_gib = 12.9, .terms = Serve.measured(1), .carved = 1 << 30 }, spl, 2, 3_500_000);
+    try std.testing.expect(r.ok);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.5447932481765747 + 1.0), r.worst, 1e-12);
+    try std.testing.expectEqual(@as(f64, 1.0), r.carved_gib);
+    try std.testing.expectEqual(@as(u64, 4_051_855), r.largest); // int(4.0 GiB / 1,060): the carveout's GiB is room
+    try std.testing.expect(std.mem.indexOf(u8, r.message(&buf), "(1060 B a token, split KV, 1.00 GiB of it in the display carveout)") != null);
+    // a carveout larger than the pool holds all of it: nothing is charged
+    const all = serveCheck(k, .{ .rank = 1, .avail_gib = 12.9, .terms = Serve.measured(1), .carved = 64 << 30 }, spl, 2, 3_500_000);
+    try std.testing.expectEqual(all.pool_gib, all.carved_gib);
+    try std.testing.expectApproxEqAbs(@as(f64, 12.9 - 1.7 - 4.2), all.worst, 1e-12);
+    // a refusal names the carved part
+    const tight = serveCheck(k, .{ .rank = 1, .avail_gib = 9.0, .terms = Serve.measured(1), .carved = 1 << 30 }, spl, 2, 3_500_000);
+    try std.testing.expect(!tight.ok);
+    try std.testing.expect(std.mem.indexOf(u8, tight.message(&buf), "a 3.46 GiB pool (1.00 GiB of it in the display carveout) leaves") != null);
 }
 
 test "the measured check's knobs: growth / dip overrides, TF_DSV41_BOOT_MEASURED, MemAvailable" {

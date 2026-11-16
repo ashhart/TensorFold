@@ -110,6 +110,8 @@ pub const Model = struct {
     progress: @import("round_progress.zig").Progress,
     /// the boot check's figures before the pool, for its measured end (kv_state.afterBoot)
     boot_check: ?kvs.Boot = null,
+    /// TF_CUDA_CARVEOUT=1: the display carveout the KV pool's family tensors go to first; closed after the pool
+    carve: ?*cuda.Carveout = null,
     slot_set: ?*slots_mod.SlotSet = null,
     rows: ?*batch.Batch = null,
     /// DSpark drafts over several live slots (TF_DSV41_SLOT_DRAFTS=1 with TF_DSV41_SLOTS > 1, dspark_slots.zig)
@@ -158,6 +160,7 @@ pub const Model = struct {
         m.sampler = null;
         m.dev_arena = null;
         m.supervisor = null;
+        m.carve = null;
         m.arena = std.heap.ArenaAllocator.init(gpa);
         errdefer if (!keep_owner) m.arena.deinit();
         const a = m.arena.allocator();
@@ -320,15 +323,19 @@ pub const Model = struct {
         }
         try @import("serve_knobs_apply.zig").apply(&m.f, a, io, m.tcfg.rank);
         m.slots = try slots_mod.countFromEnv();
-        if (try kvs.optionsFromEnv(@intCast(m.f.opts.limit), world)) |ko_| {
+        const pool_opts = try kvs.optionsFromEnv(@intCast(m.f.opts.limit), world);
+        // TF_CUDA_CARVEOUT=1: the pool's family tensors in the display carveout first; refused without a pool
+        m.carve = try kvs.openCarveout(gpa, &m.driver, pool_opts != null, @import("sys").environment.Process{});
+        if (pool_opts) |ko_| {
             var ko = ko_;
             ko.slots = m.slots;
+            ko.carve = m.carve;
             // the long-prompt stream scratch the buffer plan will hold (not in the measured terms)
             ko.resident = if ((try longpf.lazyEnv())) 0 else @import("serve_knobs.zig").streamScratch(&m.cfg, m.f.opts.limit, m.f.opts.prefill_rows);
             // TF_DSV41_PF_4K / _PF_TBO: the prefill workspace a long prompt allocates, priced on top of the worst point
             if (o.own_prefill) ko.workspace = try @import("forward_prefill.zig").workspaceBytes(&m.f, @intCast(m.f.opts.prefill_rows));
             tr.step("forward", cuda.usage(false));
-            m.boot_check = try kvs.bootCheck(&m.ctx, &m.cfg, ko, m.tcfg.rank, world);
+            m.boot_check = try kvs.bootCheck(gpa, &m.ctx, &m.cfg, ko, m.tcfg.rank, world);
             m.f.kv = try kvs.Kv.init(gpa, &m.driver, &m.ctx, &m.cfg, ko, &m.runner, comm);
             m.f.opts.pool = try m.f.kv.?.options();
             tr.step("kv pool", cuda.usage(false));
@@ -513,6 +520,7 @@ pub const Model = struct {
         if (m.sampler) |x| x.deinit();
         if (m.sessions) |x| x.deinitAfterDrain();
         if (m.f.kv) |k| k.deinitAfterDrain();
+        if (m.carve) |c| kvs.closeCarveout(gpa, c); // the pool gave its spans back above
         m.f.deinitAfterDrain();
         if (m.l2pf) |p| {
             m.runner.l2pf = null;

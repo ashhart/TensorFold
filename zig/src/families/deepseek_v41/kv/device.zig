@@ -37,18 +37,23 @@ pub const DevicePool = struct {
     compute: cuda.Stream,
     next_fence: u64 = 0,
     staging: ?cuda.copy_source.Buffer = null,
+    /// TF_CUDA_CARVEOUT=1: the display carveout the family tensors were taken from first, and the bytes it holds
+    carve: ?*cuda.Carveout = null,
+    carved: u64 = 0,
 
-    /// Allocates every family's tensor (zeroed) and the tables for `slots` slots of up to `max_pages` pages.
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, ctx: *const cuda.Context, pool: *Pool, compute: cuda.Stream, slots: u32, max_pages: u32) !DevicePool {
+    /// Allocates every family's tensor (zeroed), from `carve` first when it is given, and the tables for `slots` slots.
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, ctx: *const cuda.Context, pool: *Pool, compute: cuda.Stream, slots: u32, max_pages: u32, carve: ?*cuda.Carveout) !DevicePool {
         const fams = pool.layout.families;
         const t = try gpa.alloc(cuda.DeviceBuffer, fams.len);
         errdefer gpa.free(t);
         var made: usize = 0;
-        errdefer for (t[0..made]) |*b| b.free();
+        errdefer for (t[0..made]) |*b| drop(carve, b);
+        var carved: u64 = 0;
         for (fams, 0..) |f, i| {
-            t[i] = try cuda.DeviceBuffer.alloc(d, @as(usize, pool.familyTensorPages(f)) * f.pageBytes(pool.page));
+            const len = tensorLen(pool, f);
+            t[i] = (if (carve) |c| try c.take(len) else null) orelse try cuda.DeviceBuffer.alloc(d, len);
             made += 1;
-            try t[i].fill8(0, compute.handle);
+            if (t[i].borrowed) carved += len else try t[i].fill8(0, compute.handle);
         }
         const n = @as(usize, slots) * max_pages;
         var table = try cuda.DeviceBuffer.alloc(d, n * 4);
@@ -74,7 +79,31 @@ pub const DevicePool = struct {
         }
         // fills ran on the compute stream (a legacy-stream memset races later uploads): sync before any use
         try compute.synchronize();
-        return .{ .gpa = gpa, .d = d, .ctx = ctx, .pool = pool, .tensors = t, .table = table, .local = local, .host_table = ht, .host_local = hl, .pts = max_pages, .slots = slots, .io = io, .events = ev, .compute = compute };
+        // a carveout span is zeroed on the legacy stream, which the compute stream does not wait for
+        if (carved > 0) try d.synchronize();
+        return .{ .gpa = gpa, .d = d, .ctx = ctx, .pool = pool, .tensors = t, .table = table, .local = local, .host_table = ht, .host_local = hl, .pts = max_pages, .slots = slots, .io = io, .events = ev, .compute = compute, .carve = carve, .carved = carved };
+    }
+
+    /// A family's device tensor in bytes: its pages (familyTensorPages) of its page size.
+    fn tensorLen(pool: *const Pool, f: sessions.Family) usize {
+        return @as(usize, pool.familyTensorPages(f)) * f.pageBytes(pool.page);
+    }
+
+    /// Bytes of `pool` that `init` would place in `carve`: its first-fit placement, run on a copy of the spans.
+    pub fn carvedBytes(pool: *const Pool, carve: ?*const cuda.Carveout) u64 {
+        const c = carve orelse return 0;
+        var spans = c.spans;
+        var n: u64 = 0;
+        for (pool.layout.families) |f| {
+            const len = tensorLen(pool, f);
+            if (spans.take(len) != null) n += len;
+        }
+        return n;
+    }
+
+    /// A family tensor back where it came from: its span to the carveout, or its allocation to the driver.
+    fn drop(carve: ?*cuda.Carveout, b: *cuda.DeviceBuffer) void {
+        if (b.borrowed) carve.?.give(b.*) else b.free();
     }
 
     pub fn close(p: *DevicePool) !void {
@@ -84,7 +113,7 @@ pub const DevicePool = struct {
     }
     pub fn deinit(p: *DevicePool) void {
         if (p.staging) |*h| h.free();
-        for (p.tensors) |*b| b.free();
+        for (p.tensors) |*b| drop(p.carve, b);
         p.gpa.free(p.tensors);
         p.table.free();
         p.local.free();
@@ -212,3 +241,27 @@ pub const DevicePool = struct {
         try p.io.synchronize();
     }
 };
+
+test "the pool's families go to the display carveout first-fit, in family order, and the spans are not touched" {
+    const t = std.testing;
+    const fams = [_]sessions.Family{
+        .{ .name = "comp.L2", .ratio = 1, .row_bytes = 584, .split = true },
+        .{ .name = "index_k.L2", .ratio = 1, .row_bytes = 132, .split = true },
+        .{ .name = "comp.L8", .ratio = 1, .row_bytes = 584, .split = true },
+        .{ .name = "index_k.L8", .ratio = 1, .row_bytes = 132, .split = true },
+    };
+    var pool = try Pool.init(t.allocator, .{ .families = &fams }, 16 * 256, 2, 0);
+    defer pool.deinit();
+    // rank 0 of two: 8 local pages + the local null + the discard page = 10 pages a family tensor
+    const comp: u64 = 10 * 256 * 584;
+    const ik: u64 = 10 * 256 * 132;
+    try t.expectEqual(@as(u64, 0), DevicePool.carvedBytes(&pool, null));
+    var c: cuda.Carveout = .{ .d = undefined, .fd = -1, .handle = 0, .host = undefined, .dev = 0, .flags = 0, .spans = .{ .size = comp + ik + ik + 4096 } };
+    // comp.L2 and index_k.L2 fit; comp.L8 does not and goes to device memory; index_k.L8 takes the room after them
+    try t.expectEqual(comp + ik + ik, DevicePool.carvedBytes(&pool, &c));
+    try t.expectEqual(@as(usize, 0), c.spans.n);
+    c.spans = .{ .size = 2 * comp + 2 * ik };
+    try t.expectEqual(2 * comp + 2 * ik, DevicePool.carvedBytes(&pool, &c));
+    c.spans = .{ .size = ik - 1 };
+    try t.expectEqual(@as(u64, 0), DevicePool.carvedBytes(&pool, &c));
+}
