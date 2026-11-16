@@ -37,17 +37,24 @@ static void quant_row(local const half *hl, int K, global char *A8, global float
 static void out_rows(local const half *hl, int K, global half *H, int t, int rot, int gs, global char *A8,
                      global float *SA, int MS, global half *AHI, global half *ALO);
 
-// Row sums of an fp16 row in local memory, written to [row, K / gs]: one subgroup per group of gs, fixed order.
+// Row sums of an fp16 row in local memory to [row, Q27_GSTRIDE(K / gs)]: one subgroup per group of gs, fixed order.
 static void rowsums(local const half *hl, int K, global half *AHI, global half *ALO, long row, int gs) {
   const int lane = get_sub_group_local_id(), nsg = get_num_sub_groups(), per = gs / 16;
-  for (int g = get_sub_group_id(); g < K / gs; g += nsg) {
+  const int ng = K / gs, gp = Q27_GSTRIDE(ng);
+  for (int g = get_sub_group_id(); g < ng; g += nsg) {
     float s = 0.0f;
     for (int k = 0; k < per; k++) s += (float)hl[g * gs + lane * per + k];
     s = sub_group_reduce_add(s) * (1.0f / gs);
     if (lane == 0) {
       const half hi = convert_half_rte(s * ASC);
-      AHI[row * (K / gs) + g] = hi;
-      ALO[row * (K / gs) + g] = convert_half_rte(s * ASC - (float)hi);
+      AHI[row * gp + g] = hi;
+      ALO[row * gp + g] = convert_half_rte(s * ASC - (float)hi);
+    }
+  }
+  if (lane == 0) {
+    for (int g = ng + get_sub_group_id(); g < gp; g += nsg) {
+      AHI[row * gp + g] = 0.0h;
+      ALO[row * gp + g] = 0.0h;
     }
   }
 }
@@ -100,13 +107,14 @@ KERNEL(256) void dense_rows(global const half *H, global const half *W, global h
   local float red[16 * 16 * 16];
   const int K = Q27_D, KS = K / 16;
   const int m0 = get_group_id(0) * 16, n0 = get_group_id(1) * 16, sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  const bool col_ok = (n0 + lane) < (2 * Q27_GV);
   float8 acc0 = 0.0f, acc1 = 0.0f;
-  global const uint *wr = (global const uint *)(W + (long)(n0 + lane) * K);
+  global const uint *wr = (global const uint *)(W + (long)(col_ok ? (n0 + lane) : 0) * K);
   for (int k = sg * KS; k < (sg + 1) * KS; k += 16) {
     short8 a0, a1;
     intel_sub_group_2d_block_read_16b_8r16x1c((global void *)H, K * 2, T, K * 2, (int2)(k, m0), (private ushort *)&a0);
     intel_sub_group_2d_block_read_16b_8r16x1c((global void *)H, K * 2, T, K * 2, (int2)(k, m0 + 8), (private ushort *)&a1);
-    const int8 bb = as_int8(vload8(0, wr + k / 2));
+    const int8 bb = col_ok ? as_int8(vload8(0, wr + k / 2)) : (int8)(0);
     acc0 = intel_sub_group_f16_f16_matrix_mad_k16(a0, bb, acc0);
     acc1 = intel_sub_group_f16_f16_matrix_mad_k16(a1, bb, acc1);
   }
@@ -117,7 +125,7 @@ KERNEL(256) void dense_rows(global const half *H, global const half *W, global h
   barrier(CLK_LOCAL_MEM_FENCE);
   float v = 0.0f;
   for (int s = 0; s < 16; s++) v += red[(s * 16 + sg) * 16 + lane];
-  if (m0 + sg < T) P[(long)(m0 + sg) * ldp + c0 + n0 + lane] = convert_half_rte(v);
+  if (m0 + sg < T && col_ok) P[(long)(m0 + sg) * ldp + c0 + n0 + lane] = convert_half_rte(v);
 }
 
 // x ← bf16(x + r) (if R), h = fp16(bf16(rms(x)·w)) and its row sums; one group of 512 per row, fixed order.
@@ -264,6 +272,7 @@ KERNEL(256) void gdn_pre_rows(global const half *P, global const half *CIN, glob
   // Grid (⌈T/8⌉, 5): 8 rows and 16 heads per group; the window slides through registers, same bits as row by row.
   const int t0 = get_group_id(0) * 8, sg = get_sub_group_id(), lane = get_sub_group_local_id(), lid = get_local_id(0);
   const int head = get_group_id(1) * 16 + sg;
+  if (head >= NCONV / 128) return;
   // subgroup block reads and writes: element i of the lane is channel 128 head + 16 i + lane
 #define ROW8(r) as_half8((r) < 3 ? intel_sub_group_block_read_us8((global const ushort *)(CIN + (r) * NCONV + head * 128)) \
                                  : intel_sub_group_block_read_us8((global const ushort *)(P + (long)((r) - 3) * Q27_GDN_IN + head * 128)))

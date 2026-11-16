@@ -72,8 +72,8 @@ pub fn main() !void {
     var worst: [2]f64 = .{ 0, 0 };
     for ([_]u32{ M, 1 }, 0..) |rows, path| {
         const mp: u32 = (rows + 7) / 8 * 8;
-        const ahi = try d.alloc_(mp * GC * 2);
-        const alo = try d.alloc_(mp * GC * 2);
+        const ahi = try d.alloc_(mp * fwd.gStride(GC) * 2);
+        const alo = try d.alloc_(mp * fwd.gStride(GC) * 2);
         const out = try d.alloc_(rows * N * 2);
         try d.launch(rowsum, .{ .x = (mp + 15) / 16, .y = GC }, .{ da, ahi, alo, @as(i32, @intCast(rows)), @as(i32, @intCast(mp)), @as(i32, K), @as(i32, GC) });
         try fwd.gemm(&d, pscr, da, ahi, alo, proj, out, rows);

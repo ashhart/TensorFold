@@ -241,25 +241,34 @@ W4S3_KERNEL(w4s3_prompt, 32, 16, 2, 8, 32, READ32, 1, 1)
 W4S3_SPLIT_KERNEL(w4s3_dsplit, 16, 32, 1, 4, 16, READ16)
 
 // --- Bias by DPAS (dpb family): sum_g Asum[g, m]*b[g, n] as a small GEMM of depth K / GSZ, Asum split in hi/lo fp16.
+#define GSTRIDE(g) (max(32, ((int)(g) + 7) & ~7))
+
 kernel void rowsum_hl(global const half *A, global half *Ahi, global half *Alo, int M, int Mp, int K, int G) {
-  const int m = get_global_id(0), g = get_global_id(1);
+  const int m = get_global_id(0), g = get_global_id(1), gp = GSTRIDE(G);
   if (m >= Mp) return;
   float s = 0.0f;
   if (m < M)
     for (int k = 0; k < GSZ; k++) s += (float)A[(long)m * K + g * GSZ + k];
   s *= 1.0f / GSZ;
   const half hi = convert_half_rte(s * ASC);
-  Ahi[(long)m * G + g] = hi;
-  Alo[(long)m * G + g] = convert_half_rte(s * ASC - (float)hi);
+  Ahi[(long)m * gp + g] = hi;
+  Alo[(long)m * gp + g] = convert_half_rte(s * ASC - (float)hi);
+  if (g == 0) {
+    for (int z = G; z < gp; z++) {
+      Ahi[(long)m * gp + z] = 0.0h;
+      Alo[(long)m * gp + z] = 0.0h;
+    }
+  }
 }
 
 // --- s4dpb family: fixed K slices summed from 0, then the bias by DPAS on the total; same bits for any partitioning.
 #define BIAS_TILE(tot, i, j)                                                                                         \
   for (int st = 0; st < (G + 15) / 16; st++) {                                                                       \
+    const int gp_ = GSTRIDE(G);                                                                                      \
     ushort8 ah, al;                                                                                                  \
     uint8 bb;                                                                                                        \
-    intel_sub_group_2d_block_read_16b_8r16x1c((global void *)Ahi, G * 2, M, G * 2, (int2)(16 * st, m0 + 8 * (i)), (private ushort *)&ah); \
-    intel_sub_group_2d_block_read_16b_8r16x1c((global void *)Alo, G * 2, M, G * 2, (int2)(16 * st, m0 + 8 * (i)), (private ushort *)&al); \
+    intel_sub_group_2d_block_read_16b_8r16x1c((global void *)Ahi, gp_ * 2, M, gp_ * 2, (int2)(16 * st, m0 + 8 * (i)), (private ushort *)&ah); \
+    intel_sub_group_2d_block_read_16b_8r16x1c((global void *)Alo, gp_ * 2, M, gp_ * 2, (int2)(16 * st, m0 + 8 * (i)), (private ushort *)&al); \
     intel_sub_group_2d_block_read_transform_16b_16r16x1c((global void *)Bg, N * 2, G, N * 2, (int2)(n0 + 16 * (j), 16 * st), (private uint *)&bb); \
     tot = intel_sub_group_f16_f16_matrix_mad_k16(as_short8(ah), as_int8(bb), tot);                                  \
     tot = intel_sub_group_f16_f16_matrix_mad_k16(as_short8(al), as_int8(bb), tot);                                  \
@@ -307,11 +316,11 @@ kernel void rowsum_hl(global const half *A, global half *Ahi, global half *Alo, 
     local float8 buf[SLICES][TI][TJ][16];                                                                            \
     const int sg = get_sub_group_id(), lane = get_sub_group_local_id();                                             \
     const int m0 = get_group_id(0) * SG_M, n0 = get_group_id(1) * SG_N;                                             \
-    const int per = G / SLICES;                                                                                      \
+    const int g0 = (sg * G) / SLICES, g1 = ((sg + 1) * G) / SLICES;                                                  \
     float8 acc[TI][TJ];                                                                                              \
     for (int i = 0; i < TI; i++)                                                                                     \
       for (int j = 0; j < TJ; j++) acc[i][j] = 0.0f;                                                                 \
-    for (int g = sg * per; g < (sg + 1) * per; g++) GROUP_STEP_B(SG_M, SG_N, R, READ_A, 2, 0, g, acc)                \
+    for (int g = g0; g < g1; g++) GROUP_STEP_B(SG_M, SG_N, R, READ_A, 2, 0, g, acc)                                  \
     for (int i = 0; i < TI; i++)                                                                                     \
       for (int j = 0; j < TJ; j++) buf[sg][i][j][lane] = acc[i][j];                                                  \
     barrier(CLK_LOCAL_MEM_FENCE);                                                                                    \

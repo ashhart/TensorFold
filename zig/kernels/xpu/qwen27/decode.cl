@@ -373,9 +373,9 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
   const int tq = lane % 8, hq = 2 * g + lane / 8;
   const int qpos = p0 + t0 + tq;
   const bool qok = t0 + tq < T;
-  global const float *KS = (global const float *)(KC + (long)cap * 1024), *VS = (global const float *)(VC + (long)cap * 1024);
+  global const float *KS = (global const float *)(KC + (long)cap * Q27_KVROW), *VS = (global const float *)(VC + (long)cap * Q27_KVROW);
   if (qk && kh == 0) {                                 // the lane's query, Q in int8
-    global const ushort *qrow = Q + ((long)(t0 + tq) * 24 + hk * 6 + hq) * 256;
+    global const ushort *qrow = Q + ((long)(t0 + tq) * Q27_AQ + hk * 6 + hq) * 256;
     float mq = 0.0f;
     if (qok)
       for (int e = 0; e < 16; e++) {
@@ -409,7 +409,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
         __attribute__((opencl_unroll_hint))
         for (int h2 = 0; h2 < 2; h2++) {
           ushort ka[32];                               // 32 keys × 32 bytes: 4 A tiles of 8 keys
-          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256, nkeys, 4 * 256,
+          intel_sub_group_2d_block_read_16b_32r16x1c((global void *)(KC + hk * 256), 256, nkeys, Q27_AKV * 256,
                                                      (int2)(ds * 16, kb + h2 * 32), ka);
           __attribute__((opencl_unroll_hint))
           for (int b = 0; b < 4; b++) {
@@ -422,7 +422,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       float ksc[4];                                    // scales of the 64 keys, 4 per lane
       for (int c = 0; c < 4; c++) {
         const int key = kb + c * 16 + lane;
-        ksc[c] = key < nkeys ? KS[(long)key * 4 + hk] : 0.0f;
+        ksc[c] = key < nkeys ? KS[(long)key * Q27_AKV + hk] : 0.0f;
       }
       float8 s[8];
       float mx = -INFINITY;
@@ -443,7 +443,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       float vsc[4];
       for (int c = 0; c < 4; c++) {
         const int key = kb + c * 16 + lane;
-        vsc[c] = key < nkeys ? VS[(long)key * 4 + hk] : 0.0f;
+        vsc[c] = key < nkeys ? VS[(long)key * Q27_AKV + hk] : 0.0f;
       }
       float sum = 0.0f;
       local ushort *pt = P + (hq * 8) * 128 + tq * 16;
@@ -479,7 +479,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
       __attribute__((opencl_unroll_hint))
       for (int dt = 0; dt < 2; dt++) {
         uint w8[8];                                    // lane: dimension 16 (2 sg + dt) + lane; word j: keys 4j … 4j + 3
-        intel_sub_group_2d_block_read_transform_8b_32r16x1c((global void *)(VC + hk * 256), 256, nkeys, 4 * 256,
+        intel_sub_group_2d_block_read_transform_8b_32r16x1c((global void *)(VC + hk * 256), 256, nkeys, Q27_AKV * 256,
                                                             (int2)((sg * 2 + dt) * 16, k0 + c2 * 32), w8);
         __attribute__((opencl_unroll_hint))
         for (int hc = 0; hc < 2; hc++) {               // 16 keys: 8 fp16 pairs (keys 2j, 2j + 1), int8 → fp16 exact
@@ -508,7 +508,7 @@ kernel void attn_prompt8(global const ushort *Q, global const char *KC, global c
     for (int r = 0; r < 8; r++) {
       if (t0 + r >= T) break;
       const float inv = A[i * 8 + r];
-      global ushort *dst = O + ((long)(t0 + r) * 24 + hk * 6 + i) * 256 + sg * 32 + lane;
+      global ushort *dst = O + ((long)(t0 + r) * Q27_AQ + hk * 6 + i) * 256 + sg * 32 + lane;
       dst[0] = f2bf(o[i][0][r] * inv);
       dst[16] = f2bf(o[i][1][r] * inv);
     }
