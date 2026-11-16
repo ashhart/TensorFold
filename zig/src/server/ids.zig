@@ -8,12 +8,16 @@ const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
 
 /// ``prefix`` then ``n`` random lowercase hex digits.
 pub fn make(a: Allocator, prefix: []const u8, n: usize) Allocator.Error![]const u8 {
+    return fill(try a.alloc(u8, prefix.len + n), prefix);
+}
+
+/// ``out`` as ``prefix`` then random lowercase hex digits to its end, at most 64 of them.
+pub fn fill(out: []u8, prefix: []const u8) []const u8 {
     var bytes: [32]u8 = undefined;
     log.io().random(&bytes);
-    const out = try a.alloc(u8, prefix.len + n);
     @memcpy(out[0..prefix.len], prefix);
     const digits = "0123456789abcdef";
-    for (0..n) |i| out[prefix.len + i] = digits[(bytes[i / 2] >> @intCast(4 * (1 - i % 2))) & 0xf];
+    for (0..out.len - prefix.len) |i| out[prefix.len + i] = digits[(bytes[i / 2] >> @intCast(4 * (1 - i % 2))) & 0xf];
     return out;
 }
 

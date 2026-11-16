@@ -13,6 +13,7 @@ TIMES = re.compile(rb'"(tokens_per_second|seconds|prefill_seconds|time_to_first_
 BUCKET = re.compile(rb'^tensorfold:\w+_bucket\{le="(?!\+Inf)[^"]*"\} \d+\n', re.M)
 SUMS = re.compile(rb"^(tensorfold:\w+_sum) \S+$", re.M)
 FOOTPRINT = re.compile(rb"^(tensorfold:process_footprint_bytes) \d+$", re.M)
+SERVER_ID = re.compile(r"(?:req_|chatcmpl-|cmpl-|resp_)[0-9a-f]{32}")
 
 
 def request(method: str, path: str, body: Any = None, headers: dict[str, str] | None = None,
@@ -77,7 +78,7 @@ def exchange(port: int, raws: list[Any], *, half_close: bool = False, timeout: f
 
 
 def normal(reply: dict[str, Any]) -> dict[str, Any]:
-    """A reply with ids, timestamps and timings replaced, and Server and Date dropped."""
+    """A reply with ids, timestamps and timings replaced, and Server, Date and a server-made X-Request-Id dropped."""
     seen: dict[bytes, bytes] = {}
 
     def name(m: re.Match[bytes]) -> bytes:
@@ -88,7 +89,8 @@ def normal(reply: dict[str, Any]) -> dict[str, Any]:
     body = TIMES.sub(rb'"\1": <t>', body)
     body = SUMS.sub(rb"\1 <sum>", FOOTPRINT.sub(rb"\1 <n>", BUCKET.sub(b"", body)))
     headers = [(k, "<len>" if k.lower() == "content-length" and varied else v)
-               for k, v in reply["headers"] if k.lower() not in ("server", "date")]
+               for k, v in reply["headers"] if k.lower() not in ("server", "date")
+               and not (k.lower() == "x-request-id" and SERVER_ID.fullmatch(v))]
     return {"status": reply["status"], "headers": headers, "body": body.decode("utf-8", "replace"),
             "interim": reply["interim"].decode("latin-1")}
 
