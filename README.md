@@ -75,6 +75,10 @@ With the server above still running, `tensorfold chat --url http://127.0.0.1:808
 `echo "Say hello." | tensorfold chat --url http://127.0.0.1:8080` prints one reply for a script.
 See [the chat command](docs/chat.md) for its flags and the serve flags it passes on.
 
+`tensorfold mcp` lets an AI coding assistant such as Claude Code, Codex or Cursor describe this machine, list and
+download models, and start and stop local servers through Model Context Protocol tools. Add it to Claude Code with
+`claude mcp add tensorfold -- tensorfold mcp`. [The MCP guide](docs/mcp.md) covers the tools and other clients.
+
 ## Docs
 
 - [Run guide](docs/run-guide.md): platform setup, requests, parallel requests, exact decoding, context compaction,

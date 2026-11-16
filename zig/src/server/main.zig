@@ -22,6 +22,7 @@ const web_cli = @import("web_cli.zig");
 const chat_cli = @import("chat_cli.zig");
 const launch_cli = @import("launch_cli.zig");
 const device_cli = @import("device_cli.zig");
+const mcp = @import("mcp.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--config FILE.toml] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--cors-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--log-json]" ++
@@ -73,7 +74,7 @@ pub fn main(init: std.process.Init) !u8 {
     // help and a bare run lead with what this machine runs: the saved profile, or a quick scan with no driver
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h") or std.mem.eql(u8, argv[1], "help"))) {
         try std.Io.File.stdout().writeStreamingAll(io, device_cli.summary(init));
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | log [list|show ID|follow] [PATH] | slide rollback FOLDER | web [ARGS...] | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | serve --router [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | log [list|show ID|follow] [PATH] | slide rollback FOLDER | web [ARGS...] | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | serve --router [flags] | benchmark MODEL [flags] | chat [MODEL] [flags] | mcp\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "device")) return device_cli.main(init, argv[2..]);
@@ -102,6 +103,10 @@ pub fn main(init: std.process.Init) !u8 {
     }
     // the checkpoint commands need no model, GPU or driver either
     if (argv.len >= 2 and checkpoint_cli.wants(@ptrCast(argv[1..]))) return checkpoint_cli.main(init, argv[1..]);
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "mcp")) {
+        log.init(io, true); // stdout carries protocol messages only, so no [tensorfold] line may reach it
+        return mcp.main(init, argv[2..], @import("build_options").version, &engines.capabilities);
+    }
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "slide")) return slide_cli.main(init, argv[2..]);
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
@@ -124,7 +129,7 @@ pub fn main(init: std.process.Init) !u8 {
     // a chat with a running server works on every platform; chat_cli.zig refuses its own serve child on Windows
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "chat")) return chat_cli.main(init, argv[2..]);
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("{s}usage: tensorfold-native capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | log [list|show ID|follow] [PATH] | slide rollback FOLDER | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | serve --router [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n", .{if (argv.len < 2) device_cli.summary(init) else ""});
+        std.debug.print("{s}usage: tensorfold-native capabilities --json | device [--json] [--rescan] | models [--json] | info MODEL | pull REPO[@REVISION] | rm REPO[@REVISION] | log [list|show ID|follow] [PATH] | slide rollback FOLDER | launch <agent> [args...] | slide audit [flags] | serve MODEL [flags] | serve --router [flags] | benchmark MODEL [flags] | chat [MODEL] [flags] | mcp\n", .{if (argv.len < 2) device_cli.summary(init) else ""});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
