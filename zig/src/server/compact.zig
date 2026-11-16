@@ -75,7 +75,8 @@ fn threshold(window: i64, f: f64) i64 {
     return @intFromFloat(t);
 }
 
-fn over(prompt: usize, max_out: i64, window: i64, at: CompactAt) bool {
+/// Whether a prompt and the reply it asks for pass the --compact-at threshold, so its run compacts first.
+pub fn over(prompt: usize, max_out: i64, window: i64, at: CompactAt) bool {
     const sum = @as(i64, @intCast(prompt)) + @max(0, max_out);
     return switch (at) {
         .auto => sum > window - reserveInWindow(window, at),
@@ -83,7 +84,8 @@ fn over(prompt: usize, max_out: i64, window: i64, at: CompactAt) bool {
     };
 }
 
-fn wanted(srv: *Server, input: chat.Input) i64 {
+/// The reply tokens a request asks for, else the server's default.
+pub fn wanted(srv: *Server, input: chat.Input) i64 {
     if (input.max_tokens) |m| if (m != 0) return m;
     return srv.config.default_max_tokens;
 }

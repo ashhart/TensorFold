@@ -277,8 +277,16 @@ fn latin1(a: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out.toOwnedSlice(a);
 }
 
-/// wire.normal: ids first-seen to <idN>, stamps and timings replaced, Server and Date dropped.
+/// wire.normal: ids first-seen to <idN>, stamps and timings replaced, Server, Date, server X-Request-Id dropped.
 pub const Normal = struct { status: []const u8, headers: []const u8, body: []const u8, interim: []const u8 };
+
+/// An X-Request-Id the server made: `(req_|chatcmpl-|cmpl-|resp_)[0-9a-f]{32}`; a client's echoed id is compared.
+fn serverId(value: []const u8) bool {
+    for ([_][]const u8{ "req_", "chatcmpl-", "cmpl-", "resp_" }) |p| {
+        if (std.mem.startsWith(u8, value, p) and value.len == p.len + 32 and hexAt(value, p.len, 32)) return true;
+    }
+    return false;
+}
 
 /// Validate the native full digest before comparing its legacy fields with the frozen Python wire.
 fn subTokenSha256(a: std.mem.Allocator, body: []const u8) ![]u8 {
@@ -316,6 +324,7 @@ pub fn normalize(a: std.mem.Allocator, r: *const Reply) !Normal {
     var head: std.ArrayList(u8) = .empty;
     for (r.headers.items) |h| {
         if (std.ascii.eqlIgnoreCase(h.name, "server") or std.ascii.eqlIgnoreCase(h.name, "date")) continue;
+        if (std.ascii.eqlIgnoreCase(h.name, "x-request-id") and serverId(h.value)) continue;
         try head.appendSlice(a, h.name);
         try head.appendSlice(a, ": ");
         if (std.ascii.eqlIgnoreCase(h.name, "content-length") and varied) try head.appendSlice(a, "<len>") else try head.appendSlice(a, h.value);

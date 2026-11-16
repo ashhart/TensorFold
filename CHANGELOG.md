@@ -4,6 +4,12 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Server: `POST /v1/responses/input_tokens` answers `{"object": "response.input_tokens", "input_tokens": N}` for the body `POST /v1/responses` takes, N being the prompt that request would prefill (instructions, tools, items and a stored `previous_response_id` included), with nothing generated; a body `/v1/responses` refuses gets the same error, and a request whose prompt the run rewrites first (`--compact-at` compaction, a `--cortheon` turn) is refused by name (#3537).
+
+- Server: every reply carries `X-Request-Id`, streamed replies too: a client's own id of 1 to 128 printable ASCII characters comes back and ends each of the request's log lines, and otherwise the server's id for the request, the `chatcmpl-`, `cmpl-` or `resp_` id `POST /v1/requests/{id}/cancel` takes, else a new `req_` id; no request is refused for it and bodies are unchanged (#3536).
+
+- Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
+
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.

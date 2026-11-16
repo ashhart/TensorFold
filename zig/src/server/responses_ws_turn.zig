@@ -154,7 +154,7 @@ fn respond(s: *Session, a: Allocator, body: Value, lane: []const u8, history: *S
 /// ``generate: false``: the turn's own checks and prompt count, then three events and no engine run.
 fn warm(s: *Session, a: Allocator, cx: *Cx, body: Value, t: translate_mod.Request, out: *events.Lane, opts: responses.TurnOptions) Done {
     const gone: openai.Gone = .{ .conn = s.conn };
-    switch (@import("openai_prepare.zig").prepare(s.srv, a, gone, t.chat, t.format, true)) {
+    switch (@import("openai_prepare.zig").prepare(s.srv, a, gone, t.chat, t.format, true, false)) {
         .cancelled => return .{ .status = 0 },
         .refused => |r| return refuse(s, out.stream_id, Problem.fromPayload(r.status, r.payload)),
         .prepared => |p| {

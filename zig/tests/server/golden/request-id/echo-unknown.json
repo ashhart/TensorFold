@@ -1,0 +1,24 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 404 Not Found",
+   "headers": [
+    [
+     "X-Request-Id",
+     "client-trace-4"
+    ],
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "44"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"unknown path /nope\"}}",
+   "interim": ""
+  }
+ ]
+}

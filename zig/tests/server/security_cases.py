@@ -52,6 +52,8 @@ def full_key_cases():
         ("full-put", [raw("PUT", "/v1/models", headers=env)]),
         ("full-future", [raw("GET", "/future/private", headers=bare)]),
         ("full-then-none", [raw("GET", "/v1/models", headers=file), raw("DELETE", "/v1/responses/resp_missing")]),
+        ("full-model-id", [raw("GET", "/v1/models/fake-alias", headers=cli)]),
+        ("model-id-none", [raw("GET", "/v1/models/fake-model")]),
     ]
     return [{"group": "keys", "name": name, "raws": [{"b64": base64.b64encode(r).decode()} for r in raws], "opts": {}}
             for name, raws in items]
@@ -66,6 +68,9 @@ def scope_cases():
         ("read-chat", [raw("POST", "/v1/chat/completions", chat, read)]),
         ("read-messages", [raw("POST", "/v1/messages", {"max_tokens": 2, "messages": chat["messages"]}, read)]),
         ("read-models", [raw("GET", "/v1/models", headers=read)]),
+        ("read-model-id", [raw("GET", "/v1/models/fake-model", headers=read)]),
+        ("app-model-id", [raw("GET", "/models/fake-alias", headers=app)]),
+        ("app-model-suffix", [raw("GET", "/v1/models/fake-model/models", headers=app)]),
         ("app-metrics", [raw("GET", "/metrics", headers=app)]),
         ("app-chat", [raw("POST", "/v1/chat/completions", chat, app)]),
         ("app-alias", [raw("POST", "/alt/completions", {"prompt": "x @script=plain"}, app)]),
@@ -78,6 +83,42 @@ def scope_cases():
         ("ops-slide-graph", [raw("DELETE", "/v1/slide/graph", headers=ops)]),
     ]
     return [{"group": "scopes", "name": name, "raws": [{"b64": base64.b64encode(r).decode()} for r in raws], "opts": {}}
+            for name, raws in items]
+
+
+def model_cases():
+    """One model's entry by its served name or an alias, raw or percent-escaped; any other id is a 404."""
+    items = [
+        ("served", "/v1/models/fake-model"),
+        ("alias", "/v1/models/fake-alias"),
+        ("bare", "/models/fake-model"),
+        ("slash-raw", "/v1/models/example-org/fake-model"),
+        ("slash-escaped", "/v1/models/example-org%2Ffake-model"),
+        ("slash-escaped-lower", "/models/example-org%2ffake-model/?x=1"),
+        ("unknown", "/v1/models/missing"),
+        ("unknown-escaped", "/v1/models/example-org%2Fmissing"),
+        ("suffix-lists", "/v1/models/fake-model/models"),
+    ]
+    return [{"group": "models", "name": name, "raws": [{"b64": base64.b64encode(raw("GET", path)).decode()}], "opts": {}}
+            for name, path in items]
+
+
+def request_id_cases():
+    """A client's valid X-Request-Id comes back on its reply, streamed or not; any other is replaced by the server's."""
+    chat = {"model": "fake-model", "messages": [{"role": "user", "content": "Hi @script=plain"}], "max_tokens": 4}
+    items = [
+        ("echo-models", [raw("GET", "/v1/models", headers=(("X-Request-Id", "client-trace-1"),))]),
+        ("echo-stream", [raw("POST", "/v1/chat/completions", {**chat, "stream": True}, (("x-request-id", "client-trace-2"),))]),
+        ("echo-refused", [raw("POST", "/v1/chat/completions", {"model": "fake-model"}, (("X-Request-Id", "client-trace-3"),))]),
+        ("echo-unknown", [raw("GET", "/nope", headers=(("X-Request-Id", "client-trace-4"),))]),
+        ("echo-longest", [raw("GET", "/health", headers=(("X-Request-Id", "k" * 128),))]),
+        ("too-long", [raw("GET", "/health", headers=(("X-Request-Id", "k" * 129),))]),
+        ("spaced", [raw("GET", "/health", headers=(("X-Request-Id", "two words"),))]),
+        ("non-ascii", [raw("GET", "/health", headers=(("X-Request-Id", "café"),))]),
+        ("twice", [raw("GET", "/health", headers=(("X-Request-Id", "one"), ("X-Request-Id", "one")))]),
+        ("none", [raw("POST", "/v1/chat/completions", chat)]),
+    ]
+    return [{"group": "request-id", "name": name, "raws": [{"b64": base64.b64encode(r).decode()} for r in raws], "opts": {}}
             for name, raws in items]
 
 
@@ -120,6 +161,9 @@ def steps():
             item = case(stem + ("-with-key" if keyed_request else "-none"), path=path, method="POST", extra=(("x-api-key", "sk-cli"),) if keyed_request else ())
             item["group"] = "keys"
             auth_cases.append(item)
+    unkeyed = case("echo-without-key", path="/v1/models", extra=(("X-Request-Id", "client-trace-5"),))
+    unkeyed["group"] = "request-id"
+    auth_cases.append(unkeyed)
     return [
         {"kind": "serve", "args": ["--api-key", "sk-cli"], "env": {}, "cases": auth_cases, "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": [], "env": {}, "cases": normal, "then": [{"kind": "terminate"}]},
@@ -130,7 +174,9 @@ def steps():
          "key_file": "# keys\nclient: sk-file\nsk-bare\n", "cases": full_key_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--api-key-file", "@KEYFILE@"], "env": {},
          "key_file": "app[inference]: sk-app\nmonitor[read]: sk-read\nops: sk-ops\n", "cases": scope_cases(), "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": ["--alias", "example-org/fake-model"], "env": {}, "cases": model_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": [], "env": {}, "cases": admission_cases("off"), "then": [{"kind": "terminate"}]},
+        {"kind": "serve", "args": [], "env": {}, "cases": request_id_cases(), "then": [{"kind": "terminate"}]},
         {"kind": "serve", "args": ["--max-inflight", "0", "--max-inflight-per-key", "0", "--requests-per-second", "0", "--request-burst", "7"],
          "env": {}, "cases": admission_cases("zero"), "then": [{"kind": "terminate"}]},
     ]

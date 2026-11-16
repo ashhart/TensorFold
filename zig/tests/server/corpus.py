@@ -162,6 +162,13 @@ def response_cases() -> list[tuple[str, str, list[Any]]]:
     return out
 
 
+def input_token_cases() -> list[tuple[str, str, list[Any]]]:
+    """Responses bodies counted, nothing generated: each count is that case's prompt, each refusal its refusal."""
+    counted = {"input-string", "input-stream", "tools", "instructions", "items"}
+    return [("responses", f"input-tokens-{name}", [raws[0].replace(b"POST /v1/responses ", b"POST /v1/responses/input_tokens ", 1)])
+            for _, name, raws in response_cases() if name in counted or name.startswith("refuse-")]
+
+
 def anthropic_cases() -> list[tuple[str, str, list[Any]]]:
     base = {"model": "fake-model", "max_tokens": 64, "messages": say("think")}
     tool = {"name": "lookup", "input_schema": TOOLS[0]["function"]["parameters"], "description": "Search"}

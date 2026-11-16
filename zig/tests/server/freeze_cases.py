@@ -52,6 +52,18 @@ def response_cases_frozen(tokenizer: FakeTokenizer) -> list[dict]:
     return out
 
 
+def input_token_cases_frozen() -> list[dict]:
+    """corpus.input_token_cases, then a stored parent counted and run as its continuation's prompt (a template)."""
+    out = [{"group": group, "name": name, "raws": raw_bytes(raws), "opts": {}} for group, name, raws in corpus.input_token_cases()]
+    body = {"input": "two @script=plain", "previous_response_id": "ZZID0ZZ"}
+    out.append({"group": "responses", "name": "input-tokens-chain", "raws": [
+        {"b64": base64.b64encode(corpus.post("/v1/responses", {"input": "one @script=plain"})).decode()},
+        {"tmpl_b64": base64.b64encode(corpus.post("/v1/responses/input_tokens", body)).decode(), "ids": [0]},
+        {"tmpl_b64": base64.b64encode(corpus.post("/v1/responses", body)).decode(), "ids": [0]},
+    ], "opts": {}})
+    return out
+
+
 def main() -> int:
     tokenizer = FakeTokenizer(json.loads((HERE / "fixtures" / "vocab.json").read_text())["pieces"])
     steps: list[dict] = []
@@ -146,6 +158,9 @@ def main() -> int:
             {"kind": "terminate"},
         ],
     })
+
+    # POST /v1/responses/input_tokens on a server of its own, so the first server's requests and log are as before
+    steps.append({"kind": "serve", "args": [], "env": {}, "cases": input_token_cases_frozen(), "then": [{"kind": "terminate"}]})
 
     # the responses group's id-following requests stay templates: the id comes from an earlier reply, resolved here into templates with markers
     doc = {"steps": steps}

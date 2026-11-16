@@ -1,0 +1,20 @@
+{
+ "closed": "open",
+ "replies": [
+  {
+   "status": "HTTP/1.1 400 Bad Request",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "173"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"metadata must be at most 16 string pairs (keys up to 64 characters, values up to 512)\", \"type\": \"invalid_request_error\", \"param\": null, \"code\": null}}",
+   "interim": ""
+  }
+ ]
+}

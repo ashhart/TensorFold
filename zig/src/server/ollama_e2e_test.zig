@@ -350,7 +350,7 @@ test "ollama HTTP: two requests on one kept-alive connection both answer" {
     );
     const reply = try h.exchange(a, raw);
     try t.expectEqual(@as(usize, 2), std.mem.count(u8, reply, "HTTP/1.1 200"));
-    try t.expect(std.mem.indexOf(u8, reply, "501") == null);
+    try t.expect(std.mem.indexOf(u8, reply, "HTTP/1.1 501") == null); // a status line: a random id may hold the digits
 }
 
 test "ollama HTTP: embed answers in Ollama's shape with an embedding fake" {

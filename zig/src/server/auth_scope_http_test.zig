@@ -38,7 +38,7 @@ const Text = struct {
     }
 };
 
-const Engine = struct {
+pub const Engine = struct {
     calls: std.atomic.Value(u32) = .init(0),
     reads: std.atomic.Value(u32) = .init(0),
     fn engine(e: *Engine) api.Engine {
@@ -66,14 +66,14 @@ const Engine = struct {
     }
 };
 
-const Harness = struct {
+pub const Harness = struct {
     srv: *server.Server = undefined,
     listener: listener.Listener = undefined,
     accept: std.Thread = undefined,
     stop: std.atomic.Value(bool) = .init(false),
     unix_path: ?[:0]const u8 = null,
 
-    fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
+    pub fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
             .served_name = "m",
             .model_ids = &.{"m"},
@@ -87,7 +87,7 @@ const Harness = struct {
         errdefer h.listener.close();
         h.accept = try std.Thread.spawn(.{}, server.Server.serve, .{ h.srv, h.listener, &h.stop });
     }
-    fn deinit(h: *Harness) void {
+    pub fn deinit(h: *Harness) void {
         h.stop.store(true, .release);
         h.accept.join();
         var waited: usize = 0;
@@ -123,7 +123,7 @@ const Harness = struct {
         if (posix.errno(posix.system.connect(fd, &storage.any, len)) != .SUCCESS) return error.Connect;
         return fd;
     }
-    fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
+    pub fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
         const fd = try h.connect();
         defer _ = posix.system.close(fd);
         var sent: usize = 0;
@@ -242,8 +242,10 @@ test "auth scopes HTTP: inference and read are separate grants and full keys kee
     var arena = std.heap.ArenaAllocator.init(t.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
+    for ([_][]const u8{ "/models", "/v1/models", "/v1/models/?x=1", "/v1/models/m", "/models/m/" }) |path| for ([_][]const u8{ "read-secret", "infer-secret" }) |key|
         try expectStatus(try h.ask(a, "GET", path, key, ""), 200);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/other", "read-secret", ""), 404);
+    try expectStatus(try h.ask(a, "GET", "/v1/models/m", "", ""), 401);
     for ([_][]const u8{ "/metrics", "/v1/metrics", "/v1/load", "/memory", "/v1/memory", "/stats", "/dashboard" }) |path| {
         try expectStatus(try h.ask(a, "GET", path, "read-secret", ""), 200);
         try expectStatus(try h.ask(a, "GET", path, "infer-secret", ""), 403);
