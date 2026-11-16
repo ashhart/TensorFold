@@ -247,8 +247,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "native-fp")) return native_fp_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine4-decode")) return affine4_decode_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
-    if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
-    if (std.mem.eql(u8, cmd, "glm-exl3-items")) return @import("glm_exl3_items_tests.zig").run_(gpu);
+    if (std.mem.eql(u8, cmd, "glm-exl3") or std.mem.eql(u8, cmd, "glm-exl3-items")) return glm_exl3_tests.runCmd(gpu, cmd);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return @import("glm_mm_fixed_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
