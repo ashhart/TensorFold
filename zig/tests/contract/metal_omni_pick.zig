@@ -149,12 +149,14 @@ fn finalCheck(p: *Probe, _: k.g.Gate, out: []const u8) !?[]const u8 {
 
 const final_def: k.Def = .{ .prep = finalPrep, .launch = finalLaunch, .count = four, .eval = zeroEval, .check = finalCheck };
 
-// --- om_depth_pick: shape rows the pass's picks, n the codebook's size, k the window's frames; variant 1 sampled
+// --- om_depth_pick: shape rows the pass's picks, n the codebook's size, k the window's frames; variants 1, 2 sampled
 
 const PickArgs = extern struct { p0: i32, hn: i32, penalty: f32, temp: f32, seed: u64, frame: i32, NQ: i32, size: i32, pad: i32 = 0 };
 const penalty: f32 = 1.2;
 const temp: f32 = 0.4;
 const seed: u64 = 1003;
+/// Variant 2's seed: its frame-37 draws reach both ends of the 24-bit range.
+const edge_seed: u64 = 71934;
 const frame = 37;
 const p0 = 4;
 
@@ -163,6 +165,33 @@ fn mix64(z0: u64) u64 {
     z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
     z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
     return z ^ (z >> 31);
+}
+
+fn seedOf(variant: u32) u64 {
+    return if (variant == 2) edge_seed else seed;
+}
+
+/// The 24 bits a (codebook, code) draws its u from.
+fn draw(sd: u64, q: usize, i: usize) u32 {
+    return @intCast(mix64(sd ^ mix64((@as(u64, frame) << 32) ^ (@as(u64, q) << 16) ^ @as(u64, i))) >> 40);
+}
+
+/// The first (codebook, code) whose draw is `want`.
+fn drawAt(sd: u64, want: u32) ?[2]usize {
+    for (0..nq) |q| for (0..size) |i| if (draw(sd, q, i) == want) return .{ q, i };
+    return null;
+}
+
+/// The edge seed's largest draw and its zero draw (a build error if the seed has neither).
+const edge = blk: {
+    @setEvalBranchQuota(8_000_000);
+    break :blk [2][2]usize{ drawAt(edge_seed, 0xffffff).?, drawAt(edge_seed, 0).? };
+};
+
+/// Moves codebook `q` to place `at` of the reveal order.
+fn place(order: []i32, q: usize, at: usize) void {
+    const j = std.mem.indexOfScalar(i32, order, @intCast(q)).?;
+    std.mem.swap(i32, &order[j], &order[at]);
 }
 
 fn pickPrep(p: *Probe, rng: std.Random) !bool {
@@ -183,6 +212,13 @@ fn pickPrep(p: *Probe, rng: std.Random) !bool {
         log[q * size + 70] = c.toBf16(5);
         log[q * size + 90] = c.toBf16(5);
     }
+    if (p.variant == 2) {
+        // both end draws in picked codebooks: the largest on the smallest logit, zero on the largest
+        place(frame_[0..nq], edge[0][0], p0);
+        place(frame_[0..nq], edge[1][0], p0 + 1);
+        log[edge[0][0] * size + edge[0][1]] = c.toBf16(-4);
+        log[edge[1][0] * size + edge[1][1]] = c.toBf16(6);
+    }
     try p.in(0);
     try p.in(2);
     try p.out(1, true);
@@ -199,7 +235,7 @@ fn pickLaunch(p: *Probe, e: mtl.ComputeEncoder) void {
     e.setBuffer(p.refs[2].buf, p.refs[2].off, 2);
     e.setBuffer(codes.buf, codes.off, 3);
     e.setBuffer(masked.buf, masked.off, 4);
-    const a = PickArgs{ .p0 = p0, .hn = k.i32_(s.k), .penalty = penalty, .temp = if (p.variant == 1) temp else 0, .seed = seed, .frame = frame, .NQ = nq, .size = size };
+    const a = PickArgs{ .p0 = p0, .hn = k.i32_(s.k), .penalty = penalty, .temp = if (p.variant != 0) temp else 0, .seed = seedOf(p.variant), .frame = frame, .NQ = nq, .size = size };
     e.setBytes(std.mem.asBytes(&a), 5);
     Probe.go(e, .{ s.rows, 1, 1 }, 256);
 }
@@ -234,10 +270,11 @@ fn pickCheck(p: *Probe, _: k.g.Gate, out: []const u8) !?[]const u8 {
         for (0..size) |i| {
             var v = R.bf16(log[q * size + i]);
             if (seen[i]) v = if (v.v < 0) v.mul(R.of(penalty)) else v.div(R.of(penalty));
-            if (p.variant == 1) {
-                const h = mix64(seed ^ mix64((@as(u64, frame) << 32) ^ (@as(u64, q) << 16) ^ @as(u64, i)));
-                const u = (@as(f64, @floatFromInt(h >> 40)) + 0.5) * (1.0 / 16777216.0);
-                const g = R.of(u).fp(0.5).up(ln, k.fn_ulps).neg().lip(ln, 1 / (-@log(u) * (1 - 1e-6)), k.fn_ulps);
+            if (p.variant != 0) {
+                // u in [0, 1), exact in fp32; at u = 0 the noise is -Inf and the code is never drawn
+                const d = draw(seedOf(p.variant), q, i);
+                const u = @as(f64, @floatFromInt(d)) * (1.0 / 16777216.0);
+                const g = if (d == 0) R.of(std.math.inf(f64)) else R.of(u).up(ln, k.fn_ulps).neg().lip(ln, 1 / (-@log(u) * (1 - 1e-6)), k.fn_ulps);
                 v = v.div(R.of(temp)).sub(g);
             }
             lo[i] = v.lo;
@@ -302,6 +339,7 @@ pub const entries = [_]k.Entry{
     .{ .def = &final_def, .spec = stated("metal lfm3-omni om_argmax_final", pick_rule, &.{ .{ .rows = 1, .n = 125, .k = 1 }, .{ .rows = 1, .n = 3, .k = 1 } }), .file = .rows, .pipe = "om_argmax_final", .control = .{ "if (PV[i] > best || (PV[i] == best && PI[i] < at)) {", "if (PV[i] >= best) {" }, .what = "ties to the last part" },
     .{ .def = &pick_def, .spec = stated("metal lfm3-omni om_depth_pick greedy", pick_rule, &.{ .{ .rows = 4, .n = size, .k = hist_cap }, .{ .rows = 4, .n = size, .k = 3 } }), .file = .gemm, .pipe = "om_depth_pick", .variant = 0, .control = .{ "if (v > best || (v == best && i < at)) {", "if (v > best || (v == best && i > at)) {" }, .what = "ties to the highest id" },
     .{ .def = &pick_def, .spec = stated("metal lfm3-omni om_depth_pick sampled", "a NaN logit is never drawn; equal noised values to the lowest id", &.{ .{ .rows = 4, .n = size, .k = hist_cap }, .{ .rows = 4, .n = size, .k = 0 } }), .file = .gemm, .pipe = "om_depth_pick", .variant = 1, .control = .{ "if (seen[i]) v = v < 0.0f ? v * a.penalty : v / a.penalty;", "if (seen[i]) v = v < 0.0f ? v / a.penalty : v * a.penalty;" }, .what = "inverts the repetition penalty" },
+    .{ .def = &pick_def, .spec = stated("metal lfm3-omni om_depth_pick sampled end draws", "u in [0, 1): the largest draw adds finite noise; a zero draw is never drawn", &.{.{ .rows = 4, .n = size, .k = hist_cap }}), .file = .gemm, .pipe = "om_depth_pick", .variant = 2, .control = .{ "const float u = float(h >> 40) * (1.0f / 16777216.0f);", "const float u = (float(h >> 40) + 0.5f) * (1.0f / 16777216.0f);" }, .what = "lets the largest draw round up to u = 1" },
     .{ .def = &end_def, .spec = stated("metal lfm3-omni om_frame_end pushed", "integer codes: every word as the rule says", &.{ .{ .rows = 1, .n = nq, .k = 17 }, .{ .rows = 1, .n = nq, .k = 63 } }), .file = .gemm, .pipe = "om_frame_end", .variant = 0, .control = .{ "for (int q = 0; q < a.NQ; ++q) HIST[a.slot * a.NQ + q] = CODES[q];", "for (int q = 1; q < a.NQ; ++q) HIST[a.slot * a.NQ + q] = CODES[q];" }, .what = "pushes all but the first code" },
     .{ .def = &end_def, .spec = stated("metal lfm3-omni om_frame_end end of speech", "integer codes: every word as the rule says", &.{.{ .rows = 1, .n = nq, .k = 5 }}), .file = .gemm, .pipe = "om_frame_end", .variant = 1, .control = .{ "for (int q = 0; q < a.NQ; ++q) any |= CODES[q] == a.eos;", "for (int q = 1; q < a.NQ; ++q) any |= CODES[q] == a.eos;" }, .what = "misses an end-of-speech code in codebook 0" },
 };

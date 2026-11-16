@@ -155,7 +155,7 @@ struct PickArgs {
     if (seen[i]) v = v < 0.0f ? v * a.penalty : v / a.penalty;
     if (a.temp > 0.0f) {
       const ulong h = mix64(a.seed ^ mix64(((ulong)a.frame << 32) ^ ((ulong)q << 16) ^ (ulong)i));
-      const float u = (float(h >> 40) + 0.5f) * (1.0f / 16777216.0f);
+      const float u = float(h >> 40) * (1.0f / 16777216.0f);
       v = v / a.temp - precise::log(-precise::log(u));
     }
     better(best, at, v, i);
