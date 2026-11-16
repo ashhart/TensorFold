@@ -9,7 +9,10 @@ test "the block FP8 export parses as its own scheme: FP8 FFN and q/k/v/o in 128 
     try std.testing.expectEqual(c.fp8_width, try config.width("model.layers.2.self_attn.q_proj"));
     try std.testing.expectEqual(@as(usize, 262144), config.context);
     try std.testing.expectError(error.Lfm3Fp8BlockNotOnMetal, c.servedOn(&config, .metal));
+    try std.testing.expectError(error.Lfm3Fp8BlockNotOnXpu, c.servedOn(&config, .xpu));
     try c.servedOn(&config, .cuda);
+    for ([_]anyerror{ error.Lfm3Fp8BlockNotOnMetal, error.Lfm3Fp8BlockNotOnXpu }) |e|
+        try std.testing.expectStringStartsWith(c.servedProblem(e).?, @errorName(e));
 }
 
 test "an FP8 export with another block, static inputs, an extra ignore or a kv-cache scheme is refused" {
