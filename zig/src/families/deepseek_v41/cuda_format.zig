@@ -1,4 +1,4 @@
-//! The CUDA engine's checkpoint format gate: EXL3 at any world, the release's FP8 / MXFP4 weights at world 4 only.
+//! The CUDA format gate: EXL3 at any world; the release at world 4 behind TF_DSV41_RELEASE_PREVIEW=1 (fidelity open).
 
 const std = @import("std");
 const Config = @import("config.zig").Config;
@@ -14,10 +14,14 @@ pub const release_world = 4;
 pub const release_world_problem = "DeepSeek V4.1 CUDA: the release's FP8 and MXFP4 weights run at TF_TP_WORLD=4 " ++
     "(72 GiB a rank); other worlds need the EXL3 pack";
 
-/// The refusal's text for `c` at `world`, null when this engine runs it.
-pub fn problem(c: *const Config, world: u32) ?[]const u8 {
+pub const release_preview_problem = "DeepSeek V4.1 CUDA: the release weights are not admitted yet (the FP32 " ++
+    "compressor and mHC arms and the teacher-forced comparison are open); TF_DSV41_RELEASE_PREVIEW=1 runs them";
+
+/// The refusal's text for `c` at `world` (`preview`: TF_DSV41_RELEASE_PREVIEW=1), null when this engine runs it.
+pub fn problem(c: *const Config, world: u32, preview: bool) ?[]const u8 {
     if (c.format != .release_fp8) return null;
-    return if (world == release_world) null else release_world_problem;
+    if (world != release_world) return release_world_problem;
+    return if (preview) null else release_preview_problem;
 }
 
 /// A release run's boot on this rank: GB10's block-scaled MMA images (else refused by name), its Engram shards on disk.
@@ -52,10 +56,11 @@ pub fn exl3Knob(o: block.Options, l2pf: bool, ex_stacks: bool, forms_inplace: bo
 test "the CUDA gate admits EXL3 at any world and the release at world 4 only, refused by name elsewhere" {
     const a = std.testing.allocator;
     const exl3 = try Config.parse(a, @embedFile("fixtures/config.json"));
-    for ([_]u32{ 1, 2, 3, 4 }) |w| try std.testing.expect(problem(&exl3, w) == null);
+    for ([_]u32{ 1, 2, 3, 4 }) |w| try std.testing.expect(problem(&exl3, w, false) == null);
     const release = try Config.parse(a, @embedFile("fixtures/flash1017-config.json"));
-    try std.testing.expect(problem(&release, 4) == null);
-    for ([_]u32{ 1, 2, 3, 8 }) |w| try std.testing.expectEqualStrings(release_world_problem, problem(&release, w).?);
+    try std.testing.expect(problem(&release, 4, true) == null);
+    try std.testing.expectEqualStrings(release_preview_problem, problem(&release, 4, false).?);
+    for ([_]u32{ 1, 2, 3, 8 }) |w| for ([_]bool{ false, true }) |pv| try std.testing.expectEqualStrings(release_world_problem, problem(&release, w, pv).?);
 }
 
 test "a release run names the EXL3-only knob it refuses" {
