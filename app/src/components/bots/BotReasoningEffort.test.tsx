@@ -24,8 +24,10 @@ const choices = (provider?: Provider, model?: string) => {
   const tree = BotReasoningEffort({ provider, model, value: 'low', onChange() {} })
   return renderToStaticMarkup(tree)
 }
-assert.match(choices(), /Reasoning effort/)
+assert.match(choices(), /Effort/)
+assert.match(renderToStaticMarkup(BotReasoningEffort({ defaultEffort: 'high', onChange() {} })), /Default \(High\)/, 'the inherited option displays the actual app setting')
 for (const value of ['minimal', 'low', 'medium', 'high']) assert.match(choices(), new RegExp(`value="${value}"`))
+for (const value of ['minimal', 'low', 'medium', 'high']) assert.match(choices(gemini), new RegExp(`value="${value}"`), 'a bot with no selected model offers the default effort levels')
 assert.match(choices(gemini, 'gemini-2.5-pro'), /value="dynamic"/)
 assert.match(choices(gemini, 'gemini-2.5-pro'), /value="512"/)
 assert.doesNotMatch(choices(gemini, 'gemini-3-pro'), /value="512"/)
