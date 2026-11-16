@@ -60,6 +60,8 @@ pub const Model = struct {
     s: Scratch,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
     planned: ?usize = null, // a plan: the bytes counted, nothing allocated
+    taps: []const u32 = &.{}, // layers whose normed outputs each forward copies out (a drafter's), in its order
+    tap_rows: u64 = 0, // bf16 [max_rows, taps.len * hidden]: the last forward's rows of those layers
 
     const Scratch = struct { ids: u64, pos: u64, slot: u64, res: u64, x: u64, qkv: u64, q: u64, kn: u64, vn: u64, att: u64, o: u64, part: u64, logits_e: u64, pick: u64, wts: u64, plan: grouped.Plan, act: u64, y: u64, mo: u64, flat: u64, paths: u64, depths: u64, offs: u64, sel: u64, win: u64, tree: u64, ctab: u64 };
 
@@ -533,9 +535,17 @@ pub const Model = struct {
             try o.combine(m.s.y, prompt, wt, m.s.mo, n, sl, c.hidden);
             const after = if (i + 1 < w.layers.len) w.layers[i + 1].input_norm else w.norm;
             try o.addRms(m.s.mo, m.s.res, L.post_moe_norm, after, m.s.x, n, c.hidden, c.eps);
+            if (std.mem.indexOfScalar(u32, m.taps, @intCast(i))) |j| try m.tap(s, j, n); // as the next layer reads it
         }
         for (pick, 0..) |r, j| try m.d.check(m.d.api.cuMemcpyDtoDAsync_v2(m.s.sel + j * c.hidden * 2, m.s.x + r * c.hidden * 2, c.hidden * 2, s.handle), "cuMemcpyDtoDAsync");
         try o.dense(m.s.sel, c.hidden, w.head, out, pick.len, c.hidden, c.vocab);
+    }
+
+    /// The rows' normed outputs of the drafter's tap `j` into column `j` of `tap_rows` (a copy: no kernel).
+    fn tap(m: *Model, s: cuda.Stream, j: usize, n: usize) !void {
+        const row = m.c.hidden * 2;
+        const p: cuda.abi.Memcpy2D = .{ .src = m.s.x, .src_pitch = row, .dst = m.tap_rows + j * row, .dst_pitch = m.taps.len * row, .width = row, .height = n };
+        try m.d.check(m.d.api.cuMemcpy2DAsync_v2(&p, s.handle), "cuMemcpy2DAsync");
     }
 
     /// One stream's one-row step as a CUDA graph: its stream row, paths and offsets fixed; a step writes token and row.
@@ -584,6 +594,23 @@ pub const Model = struct {
     }
 };
 
+test "the ring holds a prompt chunk and a window, in whole key tiles" {
+    try std.testing.expectEqual(@as(usize, 8768), ringSize(prompt_rows, 513));
+    try std.testing.expect(ringSize(prompt_rows, 513) - 513 >= prompt_rows);
+}
+
+test "a page's bytes: the pool's layout and the kernels' stride agree" {
+    const config = @import("config.zig");
+    var why: config.Why = .{};
+    var m: Model = undefined;
+    m.c = try config.parse(std.testing.allocator, config.pinned, &why);
+    m.context = 32768;
+    m.ring = ringSize(prompt_rows, m.c.window);
+    try std.testing.expectEqual(m.pageBytes(), m.layout().pageBytes());
+    try std.testing.expectEqual(@as(u32, 10), m.layout().group().layers);
+test {
+    _ = @import("forward_test.zig");
+}
 test {
     _ = @import("forward_offsets_test.zig");
     _ = @import("forward_rope_test.zig");
