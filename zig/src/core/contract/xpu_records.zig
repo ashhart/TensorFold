@@ -36,6 +36,42 @@ pub const records = [_]Record{
         .launch = .{ .name = "embed", .symbol = "embed", .image = "glue", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
         .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
     },
+    .{
+        .launch = .{ .name = "tp2_allreduce_f16", .symbol = "tp2_allreduce_f16", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp4_allreduce_f16", .symbol = "tp4_allreduce_f16", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp2_rs_f16", .symbol = "tp2_rs_f16", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp4_rs_f16", .symbol = "tp4_rs_f16", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp2_allreduce_bf16", .symbol = "tp2_allreduce_bf16", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp4_allreduce_bf16", .symbol = "tp4_allreduce_bf16", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp2_allreduce_f32", .symbol = "tp2_allreduce_f32", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp4_allreduce_f32", .symbol = "tp4_allreduce_f32", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
+    .{
+        .launch = .{ .name = "tp4_rs_f32", .symbol = "tp4_rs_f32", .image = "tp", .format = glue, .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 },
+        .usage = .{.{ .threads = .{ 256, 1, 1 }, .sub_group = 16, .grf = 256 }},
+    },
 };
 
 /// Gate 5's planted XPU controls: one for each fit rule the audit must fire.
