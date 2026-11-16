@@ -3,6 +3,7 @@
 A GB10 pair prefills a prompt; a Mac decodes it. The hand-off is the state a prefill leaves behind, carried by MKVH
 protocol 2 (recurrent layers of named parts) and converted to the Metal engine's own cache layout
 on arrival. The library is `zig/src/families/deepseek_v41/handoff/`; it is host-only and independent of the transport.
+The operator recipe (hardware, link set-up, launch, troubleshooting, measurements) is [deepseek-v41-disaggregated.md](deepseek-v41-disaggregated.md).
 
 A hand-off prefix is **outside the exactness contract**: it is opt-in (`--prefill-from`), labelled remote, never kept as a
 native state, and the Metal engine re-quantises some of it (below). Decode after an import is not bit-identical to a
@@ -129,7 +130,8 @@ conditioning rows (the taps are filled by local forwards), the drafter can accep
 checks that its name still maps the mailbox it holds and, if not, maps the new one (`fabric/relink.zig`; a refused map is not tried again
 for 1 s, doubling to 30 s), so the Mac follows a daemon that restarted without a restart of its own.
 
-The source decides per prompt (`core/lane_remote_route.zig`, kept by both Mac pulls): `wants` returns a
+The source decides per prompt (`core/lane_remote_route.zig`, kept by both Mac pulls, see
+[the setup page](deepseek-v41-disaggregated.md#several-requests-and-when-a-prompt-goes-to-the-pair-at-all)): `wants` returns a
 verdict, and `queue` passes it the number of streams decoding. The pair takes one pull at a time, kept by a try-lock gate and
 no longer by a mutex held across the pull: a prompt that finds it busy is prefilled on the Mac, unless the pull under way ends
 soon enough that waiting still pays (a wait already begun ends when it stops paying); a stream decoding on the Mac sends the
