@@ -9,7 +9,7 @@ test "dense serving: owned CUDA images retain their reviewed lane and decode byt
     try std.testing.expectEqualStrings("2a9b3989f3baaef5eadb56abfb8520700449bd910f2b00345703c22dbf758b8c", &hash(@embedFile("kernels/cuda/experts.cu")));
     try std.testing.expectEqualStrings("578e9a607f678f0547aaeb312d18252ea0608bad7fe71bb2d5241d28adf31bac", &hash(@embedFile("kernels/cuda/experts_pack.cu")));
     try std.testing.expectEqualStrings("5f325dc6d8134624b30b5e99c5764f75beb3c344b5f949d38bfaa41bc8dfe5dc", &hash(@embedFile("kernels/cuda/experts_prefill.cu")));
-    try std.testing.expectEqualStrings("a9caeec5b270dcab933a5eae0f500d7aabcd31cde156238225ae064ac92ba2e8", &hash(@embedFile("kernels/cuda/gdn.cu")));
+    try std.testing.expectEqualStrings("e5ef9dcce75c478e59e476d2fa8747baee2317bd283b0756f125ea050dad9228", &hash(@embedFile("kernels/cuda/gdn.cu")));
     try std.testing.expectEqualStrings("dba5aae94115571ed48933d80f646fff31b2a7da226569867c74a1dc061d2ca2", &hash(@embedFile("kernels/cuda/lane_gemv.cu")));
     // 191061381's bytes: 82f3dde92 and 191061381 (#2609) add pattn_kernel instances; 94a9a48d6 moves helpers out
     try std.testing.expectEqualStrings("905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
