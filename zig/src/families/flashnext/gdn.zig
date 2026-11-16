@@ -1,5 +1,4 @@
-//! Flash Next's DeltaNet window step on fz_gdn (kernels/metal/decode/fn_gdn.metal): the recorded q4_gdn's arithmetic
-//! with every row's conv, norms and gates at once and the state recurrence free of barriers between rows.
+//! Flash Next DeltaNet window step on fz_gdn: q4_gdn arithmetic, per-row conv/norms/gates, barrier-free recurrence.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
@@ -10,8 +9,7 @@ const Buf = replay.Buf;
 /// Bytes of one window's replay record for one layer: k and v of every row and head (bf16), then four floats each.
 pub const RECORD = 2 * replay.MAXR * 48 * 128 * 2 + replay.MAXR * 48 * 4 * 4;
 
-/// fz_gdn after the recorded kernels' helpers: every row's state stored, or (`kept`) one state a layer kept in place
-/// with the previous window's kept rows replayed into it.
+/// fz_gdn after recorded helpers: all row states stored, or (`kept`) one state/layer in place, prior rows replayed.
 pub fn compile(r: *Run, kept: bool) !mtl.Pipeline {
     const text = try std.mem.concat(r.arena, u8, &.{ r.xnew_header, if (kept) "#define FZ_GDN_REPLAY 1\n" else "#define FZ_GDN_REPLAY 0\n", ks.flashnext_gdn });
     const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
@@ -48,8 +46,7 @@ pub fn step(r: *Run, pipe: mtl.Pipeline, ins: []const Buf, outs: []const Buf, h0
     if (!r.serial) r.enc.barrier();
 }
 
-/// The kept-state step: `ins` as q4_gdn's with its state read and written in place, outputs and conv windows in
-/// `outs`, the previous window's record `prev` (its first ar[0] rows replayed) and this window's `cur`.
+/// Kept-state step: `ins` state in place, outputs/conv in `outs`, `prev` (first ar[0] rows replayed), `cur` now.
 pub fn stepKept(r: *Run, pipe: mtl.Pipeline, ins: []const Buf, outs: []const Buf, prev: Buf, cur: Buf, ar: Buf, h0: u32, heads: usize) void {
     if (r.skip & Run.class("gdn") != 0) return;
     r.enc.setPipeline(pipe);

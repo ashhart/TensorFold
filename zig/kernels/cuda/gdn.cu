@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/kernels/gdn.cu (lines 1-319, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// gdn.cu (src/tensorfold/cuda/kernels), lines 1-319, comments/ATen includes dropped; see zig/tests/cuda/copies.py.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
