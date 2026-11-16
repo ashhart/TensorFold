@@ -52,16 +52,16 @@ pub fn tagOf(w: []const u8) []const u8 {
 }
 
 /// A projection's input: FP8 operands, or the BF16 rows themselves.
-const Src = union(enum) { fp8: Operands, bf16: Arg };
+pub const Src = union(enum) { fp8: Operands, bf16: Arg };
 
 /// One projection of `w` (N x K as the rank holds it) from its operands into y's columns [col, col + n).
-fn project(e: *Emitter, w: []const u8, form: Form, src: Src, m: i64, k: i64, n: i64, y: Arg, col: i64) !void {
+pub fn project(e: *Emitter, w: []const u8, form: Form, src: Src, m: i64, k: i64, n: i64, y: Arg, col: i64) !void {
     const p = try part(e, m, n, k);
     switch (form) {
         .fp8 => try e.ext(ext ++ ".fp8", &.{
-            src.fp8.codes,                                                    src.fp8.scales,
-            try e.weight("{s}.w", .{w}, .u8, &.{ n, k }),                     try e.weight("{s}.s", .{w}, .u8, &.{ @divExact(n, 32), @divExact(k, 32) }),
-            y,                                                                .{ .i = col },
+            src.fp8.codes,                                src.fp8.scales,
+            try e.weight("{s}.w", .{w}, .u8, &.{ n, k }), try e.weight("{s}.s", .{w}, .u8, &.{ @divExact(n, 32), @divExact(k, 32) }),
+            y,                                            .{ .i = col },
             p,
         }),
         .bf16 => try e.ext(ext ++ ".bf16", &.{ src.bf16, try e.weight("{s}.w", .{w}, .bf16, &.{ n, k }), y, .{ .i = col }, p }),

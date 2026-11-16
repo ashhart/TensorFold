@@ -187,7 +187,7 @@ pub fn call(k: *const Kernels, s: cuda.Stream, ext: []const u8, func: []const u8
     }
     if (is(ext, "tf_dsv41_rel_v1")) {
         if (k.rel == null) return error.ReleaseKernelsNotLoaded; // Kernels.loadRelease runs for release checkpoints only
-        return @import("kernels_replay_release.zig").call(k.releaseOps(s), func, args, kwargs);
+        return @import("kernels_replay_release.zig").call(k.releaseOps(s), k.releaseExOps(s), func, args, kwargs);
     }
     if (is(ext, "tensorfold_exl3_linear_v4")) return linearExt(k.linears(s), func, args, kwargs);
     if (is(ext, "tf_dsv41_x3seg_v3")) return segExt(k.linears(s), func, args, kwargs, false);
