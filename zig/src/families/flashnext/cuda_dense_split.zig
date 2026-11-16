@@ -10,6 +10,7 @@ const Cut = @import("cuda_modelopt_experts.zig").Cut;
 const Heads = @import("cuda_heads.zig").Heads;
 const heads_cut = @import("heads_cut.zig");
 const Entry = safetensors.Entry;
+const environment = @import("sys").environment;
 
 comptime {
     // DeltaNet's out_proj and attention's o_proj take the same input width, so one cut serves both
@@ -24,11 +25,11 @@ const deciders = [_][]const u8{
 
 /// TF_FLASHNEXT_SPLIT_DENSE: unset, blank or 1 splits, 0 keeps every dense projection whole.
 pub fn setting(value: ?[]const u8) !bool {
-    return @import("sys").environment.value(bool, "TF_FLASHNEXT_SPLIT_DENSE", value, true) catch return error.BadDenseSplit;
+    return environment.value(bool, "TF_FLASHNEXT_SPLIT_DENSE", value, true);
 }
 
 pub fn enabled() !bool {
-    return setting(@import("sys").environment.rawText("TF_FLASHNEXT_SPLIT_DENSE"));
+    return environment.read(bool, "TF_FLASHNEXT_SPLIT_DENSE", true);
 }
 
 /// At two ranks with the setting on, a checkpoint whose deciders are BF16 splits; world 1 never reads the setting.
@@ -115,8 +116,8 @@ test "the dense split setting is on unless 0 and refuses any other value" {
     // an empty or whitespace-only value is unset, so it keeps the default on, as every other setting here does
     try std.testing.expect(try setting(""));
     try std.testing.expect(try setting(" \t"));
-    try std.testing.expectError(error.BadDenseSplit, setting("2"));
-    try std.testing.expectError(error.BadDenseSplit, setting("on"));
+    try std.testing.expectError(error.InvalidEnvironment, setting("2"));
+    try std.testing.expectError(error.InvalidEnvironment, setting("on"));
 }
 
 test "the dense split applies at two ranks to BF16 layers only, and world 1 never reads the setting" {
@@ -140,7 +141,7 @@ test "the dense split applies at two ranks to BF16 layers only, and world 1 neve
     _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", " \t", 1);
     try std.testing.expect(try applies(&bf16, 2));
     _ = env.setenv("TF_FLASHNEXT_SPLIT_DENSE", "on", 1);
-    try std.testing.expectError(error.BadDenseSplit, applies(&bf16, 2));
+    try std.testing.expectError(error.InvalidEnvironment, applies(&bf16, 2));
     try std.testing.expect(!try applies(&bf16, 1));
     try std.testing.expect(!try appliesDir(std.testing.allocator, std.testing.io, "/nonexistent", 1));
 }

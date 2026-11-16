@@ -1,14 +1,15 @@
 //! Optional vocabulary-column partitioning: each rank retains the checkpoint bits for its own output rows.
 const std = @import("std");
 const Tensor = @import("core").safetensors.Tensor;
+const environment = @import("sys").environment;
 
 /// TF_FLASHNEXT_SHARD_HEAD: unset, blank or 0 keeps the whole output head on each rank, 1 keeps only its half.
 pub fn setting(value: ?[]const u8) !bool {
-    return @import("sys").environment.value(bool, "TF_FLASHNEXT_SHARD_HEAD", value, false) catch return error.BadHeadSharding;
+    return environment.value(bool, "TF_FLASHNEXT_SHARD_HEAD", value, false);
 }
 
 pub fn enabled() !bool {
-    return setting(@import("sys").environment.rawText("TF_FLASHNEXT_SHARD_HEAD"));
+    return environment.read(bool, "TF_FLASHNEXT_SHARD_HEAD", false);
 }
 
 pub fn shard(t: Tensor, world: usize, rank: usize) !Tensor {
@@ -45,8 +46,8 @@ test "head partitions preserve every BF16 byte in global vocabulary order" {
     // an empty or whitespace-only value is unset, so it keeps the default off, as every other setting here does
     try std.testing.expect(!try setting(""));
     try std.testing.expect(!try setting(" \t"));
-    try std.testing.expectError(error.BadHeadSharding, setting("2"));
-    try std.testing.expectError(error.BadHeadSharding, setting("on"));
+    try std.testing.expectError(error.InvalidEnvironment, setting("2"));
+    try std.testing.expectError(error.InvalidEnvironment, setting("on"));
 }
 
 test "head split: the production reader takes its own environment, blank as unset and junk refused" {
@@ -63,5 +64,6 @@ test "head split: the production reader takes its own environment, blank as unse
     _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", " \t", 1);
     try std.testing.expect(!try enabled());
     _ = env.setenv("TF_FLASHNEXT_SHARD_HEAD", "on", 1);
-    try std.testing.expectError(error.BadHeadSharding, enabled());
+    try std.testing.expectError(error.InvalidEnvironment, enabled());
+    try std.testing.expectError(error.InvalidEnvironment, setting("2"));
 }
