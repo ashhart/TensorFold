@@ -1487,3 +1487,65 @@ Connect Claude Code using the ID from `/v1/models`:
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```
+
+## Ollama API
+
+The native server also answers Ollama's `/api/*` routes. They translate onto the same chat and embedding seam as
+OpenAI's routes and use the same bearer key; discovery works with a read key, generation needs an inference key.
+Every path below is dispatched in `zig/src/server/routes.zig` and implemented in `zig/src/server/ollama.zig`.
+
+### Discovery: GET `/api/tags`, GET `/api/ps`, GET `/api/version`, GET and POST `/api/show`
+
+These replies are plain JSON, never streamed, and take no request body of consequence. `GET /api/tags` lists every
+configured model as `{"name":ID,"model":ID}` under `models`, without the `modified_at` and `size` fields some
+Ollama clients show. `GET /api/ps` reports one loaded model, the server's served name,
+under `models`. `GET /api/version` returns `{"version":"..."}` from the server's identity. `/api/show` is reachable
+by both methods; the handler reads and drops any request body (a typical `{"model":"..."}` is ignored) and returns
+`{"modelfile":"","parameters":"","template":...,"details":{}}`, where `template` is the engine's chat-template
+source. `/api/tags` lists what `GET /v1/models` lists; the other three have no OpenAI-style counterpart.
+
+```bash
+curl http://127.0.0.1:8080/api/tags
+curl http://127.0.0.1:8080/api/show -d '{"model":"local-model"}'
+curl http://127.0.0.1:8080/api/ps
+curl http://127.0.0.1:8080/api/version
+```
+
+### POST `/api/chat` and POST `/api/generate`
+
+Both bodies go through the same translation: `messages` (an array) or a `prompt` string (wrapped as one user message),
+optional `system` (prepended as a system message), `format` (`"json"` or a JSON-schema object), `tools` plus optional
+`tool_choice`, a boolean `stream`, and `options`. The client's `model` field is ignored: the served name is always
+used. Supported options are `temperature`, `top_k`, `top_p`, `min_p`, `stop`, `seed`, `presence_penalty` and
+`frequency_penalty`, passed through unchanged; `num_predict` becomes `max_tokens`; `num_ctx` is checked against the
+model's context window and then dropped; `think` becomes `chat_template_kwargs.enable_thinking`. Unknown options,
+`images`, `tool_choice` without `tools`, and non-boolean `stream`/`think` are refused with HTTP 400 naming the field.
+The translated request is forced to carry `return_token_ids: true`.
+
+The reply is newline-delimited JSON (`application/x-ndjson`), not SSE: each chunk is one object. `/api/chat` puts
+text in `message: {"role":"assistant","content":...}`; `/api/generate` puts the same text in `response`. Every line
+carries `model` and an RFC 3339 `created_at`. With `stream: false` there is a single line with `done: true` holding
+the whole answer, `done_reason`, `prompt_eval_count`, `eval_count`, `prompt_eval_duration`, `eval_duration` and
+`token_ids`. With `stream: true` there are `done: false` delta lines followed by one final `done: true` line whose
+content is empty; a stream that fails after it opened ends in an `{"error":"..."}` line instead. Errors before the
+200 head go out in OpenAI's `{"error":{...}}` envelope. Compared with `POST /v1/chat/completions`, the model output
+is flattened from `choices[0].message.content` into `message.content` (or `response`), `created_at` replaces
+`created`, token IDs move from `tensorfold.token_ids` to a top-level `token_ids`, and the framing changes from
+SSE/JSON to NDJSON. Both routes occupy the chat-completions admission group and text kind.
+
+```bash
+curl http://127.0.0.1:8080/api/chat -d '{"model":"local-model","messages":[{"role":"user","content":"H"}],"stream":false,"options":{"temperature":0,"num_predict":8,"seed":1234}}'
+curl http://127.0.0.1:8080/api/generate -d '{"model":"local-model","prompt":"H","stream":false}'
+```
+
+### POST `/api/embed`
+
+The body is the OpenAI embeddings body (`input`, `encoding_format`, `dimensions`). The reply is flattened into
+Ollama's shape: `model` plus an `embeddings` array of value arrays, with `prompt_eval_count` from usage when present.
+There is no `object` field, and the per-embedding `object: "embedding"` wrappers of `POST /v1/embeddings` are gone.
+Like `/v1/embeddings`, it is admitted in the embeddings group; unlike it, the reply is a single JSON object, never
+streamed.
+
+```bash
+curl http://127.0.0.1:8080/api/embed -d '{"model":"local-model","input":"hello"}'
+```
