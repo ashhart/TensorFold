@@ -17,11 +17,11 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Out = enum { f32, bf16 };
 
 /// One row's launch record: `wbase` -1 reads the window as a ring of 128 slots; decode's RoPE row is pos + rope.
-pub const Meta = extern struct { pos: i32, wofs: i32, wbase: i32, cofs: i32, ncomp: i32, rope: i32 = 0, pad: [2]i32 = .{ 0, 0 } };
+pub const Meta = extern struct { pos: i32, wofs: i32, wbase: i32, cofs: i32, ncomp: i32, rope: i32 = 0, p1: i32 = 0, p2: i32 = 0 };
 
 pub const Call = struct { rows: u32, heads: u32, out: Out = .bf16 };
 
-const Args = extern struct { rows: u32, heads: u32, scale: f32, pad: u32 = 0 };
+pub const Args = extern struct { rows: u32, heads: u32, scale: f32, pad: u32 = 0 };
 const dec_names = [_][:0]const u8{ "tf_dsv41_attn_dec_f32", "tf_dsv41_attn_dec_bf16" };
 const pf_names = [_][:0]const u8{ "tf_dsv41_attn_dec_pf_f32", "tf_dsv41_attn_dec_pf_bf16" };
 /// Decode launches of at most this many rows load each step's keys a step ahead (the same math, so the same bits).

@@ -3,7 +3,7 @@ const std = @import("std");
 const ks = @import("kernel_sources").dsv41;
 const Set = @import("set.zig").Set;
 pub fn add(s: *Set) !void {
-    inline for (.{ "fp8_mma", "fp8_rows", "csa2_attn", "topk512", "glue", "glue_tmp", "fused", "fold", "compress", "mv", "cand", "index", "engram", "hc" }) |name|
+    inline for (.{ "fp8_mma", "fp8_rows", "csa2_attn", "topk512", "glue", "glue_rows", "fused", "fold", "compress", "mv", "cand", "index", "engram", "hc" }) |name|
         try s.raw("deepseek-v41", name, @field(ks, name));
     try s.raw("deepseek-v41", "experts", try @import("../src/families/deepseek_v41/metal/experts.zig").source(s.a, "", &.{}));
     try s.raw("deepseek-v41", "expert-mma", try @import("../src/families/deepseek_v41/metal/experts_mma.zig").source(s.a, "", &.{}));

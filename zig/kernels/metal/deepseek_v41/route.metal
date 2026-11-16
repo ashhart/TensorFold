@@ -36,6 +36,7 @@ struct Dsv41RouteArgs {
     float scale;
     float eps;
 };
+static_assert(sizeof(Dsv41RouteArgs) == 16, "Dsv41RouteArgs must mirror metal/glue.zig's RouteArgs");
 
 // One simdgroup a row: the top-k of score plus bias (ties to the lower id), then each picked score over the sum.
 [[kernel]] void tf_dsv41_route_select(const device float* LOGITS [[buffer(0)]], const device float* BIAS [[buffer(1)]],

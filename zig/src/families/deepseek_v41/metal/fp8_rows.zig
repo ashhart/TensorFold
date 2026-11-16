@@ -11,7 +11,10 @@ pub const Out = enum { f32, bf16 };
 /// split 1: a tile is 32 K groups across a simdgroup's lanes; split 4: 8 groups, four columns a simdgroup.
 pub const Call = struct { k: u32, n: u32, rows: u32, split: u32 = 1, out: Out = .f32 };
 
-const Args = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32 };
+pub const Args = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32 };
+comptime {
+    @import("index_mirror.zig").check(Args, sources.dsv41.fp8_rows, "TfDsv41Fp8Args");
+}
 const row_tiers = [_]u32{ 1, 2, 4, 8, 16 };
 /// The one-launch kernels' row tiers.
 const whole_tiers = [_]u32{ 1, 2, 3, 4, 5, 6, 8, 16 };
@@ -116,7 +119,7 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, w: Ref, s: Ref
 /// Launches of one call shape in grid y: the byte strides from one launch's x, weight, scale and output to the next.
 pub const Batch = struct { n: u32 = 1, xs: i64 = 0, ws: i64 = 0, ss: i64 = 0, ys: i64 = 0 };
 
-const WholeArgs = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32, xs: i64, ws: i64, ss: i64, ys: i64 };
+pub const WholeArgs = extern struct { K: u32, N: u32, R: u32, groups: u32, tiles: u32, blocks: u32, xs: i64, ws: i64, ss: i64, ys: i64 };
 
 /// A one-launch block: a (split 1, 4 columns), b (split 4, 4 columns), c (split 4, 8 columns).
 pub const Kind = enum(u2) {

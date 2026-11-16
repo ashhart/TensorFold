@@ -1,0 +1,539 @@
+//! Strict pinned backbone schema and borrowed resident bindings; only expert descriptor tables are owned.
+const std = @import("std");
+const mtl = @import("metal");
+const cp = @import("core").checkpoint_metal;
+const st = @import("core").safetensors;
+const exl3 = @import("core").exl3_projection;
+const load = @import("load.zig");
+
+pub const Tensor = cp.Tensor;
+pub const Matrix = exl3.Matrix;
+
+/// A kept-dense repack stores small matrices as a bf16 weight beside the rotation scales.
+pub const Dense = struct { weight: Tensor, suh: Tensor, svh: Tensor, k: usize, n: usize };
+pub const AnyMatrix = union(enum) { trellis: Matrix, dense: Dense };
+pub const Hc = struct { projection: Tensor, scale: Tensor, base: Tensor };
+pub const Compressor = struct { wkv: AnyMatrix, wgate: ?AnyMatrix, norm: Tensor };
+pub const Indexer = struct { wq_b: AnyMatrix, wk: ?AnyMatrix, weights_proj: Tensor, k_norm: ?Tensor };
+pub const Attention = struct {
+    wq_a: Matrix,
+    wq_b: Matrix,
+    wkv: Matrix,
+    wo_b: Matrix,
+    wo_a: [8]Matrix,
+    /// The eight output-group descriptors of wo_a, for the one indexed decode dispatch.
+    wo_a_descriptors: ?mtl.Buffer = null,
+    /// Wq_a (n 1280) and wkv (n 512) as one indexed call's two-entry table.
+    qkv_descriptors: ?mtl.Buffer = null,
+    sink: Tensor,
+    q_norm: Tensor,
+    kv_norm: Tensor,
+    compressor: ?Compressor,
+    indexer: ?Indexer,
+};
+/// Projection order is w1 (gate), w3 (up), w2 (down), for shared and routed experts alike.
+pub const Moe = struct {
+    gate: Tensor,
+    bias: Tensor,
+    shared: [3]Matrix,
+    descriptors: [3]mtl.Buffer,
+    /// It holds copies of the descriptors, not of any weight, so it costs 96 bytes an expert.
+    fused: ?mtl.Buffer = null,
+    /// The shared expert's gate and up as one indexed dispatch: descriptor 0 is `shared[0]` (w1).
+    shared_fused: ?mtl.Buffer = null,
+    /// The shared down projection's one-descriptor table and a zero pick map, so the shared SwiGLU's prerotate.
+    shared_down: ?mtl.Buffer = null,
+    shared_down_ids: ?mtl.Buffer = null,
+    gate_bf16: ?Tensor = null,
+};
+
+/// `t` as BF16: a host pass over F16 rows (round to nearest even), for the tensor-unit gate GEMM.
+pub fn bf16Of(device: mtl.Device, t: Tensor) !?Tensor {
+    if (t.dtype == .bf16) return null;
+    if (t.dtype != .f16) return null;
+    const n = t.count();
+    const out = try device.buffer(n * 2, mtl.ResourceOptions.shared);
+    const src = t.host(u16);
+    const dst: [*]u16 = @ptrCast(@alignCast(out.contents()));
+    for (dst[0..n], src[0..n]) |*d, c| {
+        const f: f32 = @floatCast(@as(f16, @bitCast(c)));
+        const u: u32 = @bitCast(f);
+        d.* = @intCast((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+    }
+    return Tensor{ .buffer = out, .offset = 0, .bytes = n * 2, .dtype = .bf16, .shape = t.shape, .rank = t.rank };
+}
+
+pub const Engram = struct {
+    /// Null when the tables were not bound (`--engram-stream-dir`): the row source reads them a window at a time.
+    table: ?Tensor,
+    scales: ?Tensor,
+    q_weight: Tensor,
+    k_weight: Tensor,
+    wkv: Matrix,
+    /// True when `table`/`scales` are absent because the tables are streamed rather than resident.
+    streamed: bool = false,
+};
+pub const Layer = struct {
+    attn_norm: Tensor,
+    ffn_norm: Tensor,
+    hc_attn: Hc,
+    hc_ffn: Hc,
+    attn: Attention,
+    moe: Moe,
+    engram: ?Engram,
+};
+/// The pack's next-token drafter: three blocks that are backbone layers.
+pub const Dspark = struct {
+    main_proj: Matrix,
+    main_norm: Tensor,
+    norm: Tensor,
+    blocks: [3]Layer,
+    /// The three blocks' `wkv` as ONE grouped indexed call's three-entry descriptor table.
+    cond_wkv_descriptors: ?mtl.Buffer = null,
+    /// The last stage's Markov pair (`mtp.2.markov_head.embed/head` [vocab, rank] bf16).
+    markov_embed: ?Tensor = null,
+    markov_head: ?Tensor = null,
+};
+pub const Model = struct {
+    embed: Tensor,
+    head: Matrix,
+    norm: Tensor,
+    layers: [40]Layer,
+    /// Whether an attached int8 sidecar was packed pre-rotated.
+    int8_direct: bool = false,
+    dspark: ?Dspark = null,
+
+    /// Checkpoint buffers must outlive this borrowed model and every submitted command using it.
+    pub fn deinit(self: *Model) void {
+        for (&self.layers) |*layer| for (layer.moe.descriptors) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| if (layer.moe.fused) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| if (layer.moe.shared_fused) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| if (layer.moe.shared_down) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| if (layer.moe.shared_down_ids) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| if (layer.attn.wo_a_descriptors) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| if (layer.attn.qkv_descriptors) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| {
+            if (layer.attn.wq_b.int8) |v| v.deinit();
+            if (layer.attn.wo_b.int8) |v| v.deinit();
+            for (&layer.attn.wo_a) |*m| if (m.int8) |v| v.deinit();
+        }
+        if (self.dspark) |*d| for (&d.blocks) |*layer| for (layer.moe.descriptors) |buffer| buffer.deinit();
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.fused) |buffer| buffer.deinit();
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_fused) |buffer| buffer.deinit();
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_down) |buffer| buffer.deinit();
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_down_ids) |buffer| buffer.deinit();
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.attn.wo_a_descriptors) |buffer| buffer.deinit();
+        if (self.dspark) |*d| if (d.cond_wkv_descriptors) |buffer| buffer.deinit();
+        self.* = undefined;
+    }
+    pub fn registerResidency(self: *const Model, set: mtl.ResidencySet) void {
+        for (&self.layers) |*layer| for (layer.moe.descriptors) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| if (layer.moe.fused) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| if (layer.moe.shared_fused) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| if (layer.moe.shared_down) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| if (layer.moe.shared_down_ids) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| if (layer.attn.wo_a_descriptors) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| if (layer.attn.qkv_descriptors) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| {
+            if (layer.attn.wq_b.int8) |v| {
+                set.add(v.weight.buffer);
+                set.add(v.scales.buffer);
+            }
+            if (layer.attn.wo_b.int8) |v| {
+                set.add(v.weight.buffer);
+                set.add(v.scales.buffer);
+            }
+            for (&layer.attn.wo_a) |*m| if (m.int8) |v| {
+                set.add(v.weight.buffer);
+                set.add(v.scales.buffer);
+            };
+        }
+        if (self.dspark) |*d| for (&d.blocks) |*layer| for (layer.moe.descriptors) |buffer| set.add(buffer);
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.fused) |buffer| set.add(buffer);
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_fused) |buffer| set.add(buffer);
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_down) |buffer| set.add(buffer);
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_down_ids) |buffer| set.add(buffer);
+        if (self.dspark) |*d| for (&d.blocks) |*layer| if (layer.attn.wo_a_descriptors) |buffer| set.add(buffer);
+        if (self.dspark) |*d| if (d.cond_wkv_descriptors) |buffer| set.add(buffer);
+    }
+    pub fn residentBytes(_: *const Model) usize {
+        return sizeofDescriptors();
+    }
+};
+
+/// Admission adds these bytes to load.Plan.bytes; no dequantized weights or duplicate projections are allocated.
+pub fn sizeofDescriptors() usize {
+    return 40 * 3 * 384 * @sizeOf(exl3.ExpertDescriptor) + 3 * 3 * 128 * @sizeOf(exl3.ExpertDescriptor) + 40 * 8 * @sizeOf(exl3.ExpertDescriptor) +
+        40 * 2 * 384 * @sizeOf(exl3.ExpertDescriptor) + 3 * 2 * 128 * @sizeOf(exl3.ExpertDescriptor) +
+        40 * @sizeOf(exl3.ExpertDescriptor) + 3 * @sizeOf(exl3.ExpertDescriptor) +
+        40 * 2 * @sizeOf(exl3.ExpertDescriptor) + 3 * @sizeOf(exl3.ExpertDescriptor);
+}
+
+/// One table the fused gate+up dispatch indexes: the gate experts then the up experts, descriptor copies only.
+fn fusedTable(device: mtl.Device, gate: mtl.Buffer, up: mtl.Buffer, count: usize, shared_gate: exl3.Matrix, shared_up: exl3.Matrix) !mtl.Buffer {
+    // The table carries the two shared-expert matrices after the 2E routed entries.
+    const table = try device.buffer((2 * count + 2) * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    const dst: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+    const gate_src: [*]const exl3.ExpertDescriptor = @ptrCast(@alignCast(gate.contents()));
+    const up_src: [*]const exl3.ExpertDescriptor = @ptrCast(@alignCast(up.contents()));
+    @memcpy(dst[0..count], gate_src[0..count]);
+    @memcpy(dst[count .. 2 * count], up_src[0..count]);
+    dst[2 * count] = try exl3.descriptor(shared_gate);
+    dst[2 * count + 1] = try exl3.descriptor(shared_up);
+    return table;
+}
+
+/// The attention's wq_a and wkv as one indexed call's two-entry table.
+fn qkvTable(device: mtl.Device, a: exl3.Matrix, b: exl3.Matrix) !mtl.Buffer {
+    const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    errdefer table.deinit();
+    const dst: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+    dst[0] = try exl3.descriptor(a);
+    dst[1] = try exl3.descriptor(b);
+    return table;
+}
+
+/// The drafter's three blocks and the two tensors the tap path needs.
+fn populateDspark(comptime binding: bool, source: anytype, model: ?*Model) !void {
+    if (!binding) {
+        if (!hasDspark(source)) return;
+    } else {
+        model.?.dspark = @as(Dspark, undefined);
+    }
+    var name: [160]u8 = undefined;
+    var prefix: [128]u8 = undefined;
+    for (0..3) |block| {
+        const out: ?*Layer = if (binding) &model.?.dspark.?.blocks[block] else null;
+        try plain(binding, source, try named(&name, "mtp.{d}.attn_norm.weight", .{block}), .bf16, &.{5120}, if (binding) &out.?.attn_norm else null);
+        try plain(binding, source, try named(&name, "mtp.{d}.ffn_norm.weight", .{block}), .bf16, &.{5120}, if (binding) &out.?.ffn_norm else null);
+        inline for (.{ "attn", "ffn" }) |kind| {
+            const hc: ?*Hc = if (binding) (if (std.mem.eql(u8, kind, "attn")) &out.?.hc_attn else &out.?.hc_ffn) else null;
+            try plain(binding, source, try named(&name, "mtp.{d}.hc_{s}_fn", .{ block, kind }), .f32, &.{ 24, 20480 }, if (binding) &hc.?.projection else null);
+            try plain(binding, source, try named(&name, "mtp.{d}.hc_{s}_scale", .{ block, kind }), .f32, &.{3}, if (binding) &hc.?.scale else null);
+            try plain(binding, source, try named(&name, "mtp.{d}.hc_{s}_base", .{ block, kind }), .f32, &.{24}, if (binding) &hc.?.base else null);
+        }
+        const attn: ?*Attention = if (binding) &out.?.attn else null;
+        inline for (.{ "wq_a", "wq_b", "wkv", "wo_b" }, .{ 5120, 1280, 5120, 8192 }, .{ 1280, 32768, 512, 5120 }) |part, k, n| {
+            try matrix(binding, source, try named(&prefix, "mtp.{d}.attn.{s}", .{ block, part }), k, n, if (binding) &@field(attn.?, part) else null);
+        }
+        for (0..8) |slice| try matrix(binding, source, try named(&prefix, "mtp.{d}.attn.wo_a.slice.{d}", .{ block, slice }), 4096, 1024, if (binding) &attn.?.wo_a[slice] else null);
+        try plain(binding, source, try named(&name, "mtp.{d}.attn.attn_sink", .{block}), .f32, &.{64}, if (binding) &attn.?.sink else null);
+        try plain(binding, source, try named(&name, "mtp.{d}.attn.q_norm.weight", .{block}), .bf16, &.{1280}, if (binding) &attn.?.q_norm else null);
+        try plain(binding, source, try named(&name, "mtp.{d}.attn.kv_norm.weight", .{block}), .bf16, &.{512}, if (binding) &attn.?.kv_norm else null);
+        if (binding) {
+            attn.?.compressor = null;
+            attn.?.indexer = null;
+            out.?.engram = null;
+        }
+        const moe: ?*Moe = if (binding) &out.?.moe else null;
+        {
+            const tensor = try source.get(try named(&name, "mtp.{d}.ffn.gate.weight", .{block}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16) or tensor.rank != 2 or
+                tensor.shape[0] != 128 or tensor.shape[1] != 5120) return error.UnsupportedTensor;
+            if (binding) moe.?.gate = tensor;
+        }
+        {
+            const tensor = try source.get(try named(&name, "mtp.{d}.ffn.gate.bias", .{block}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16 and tensor.dtype != .f32) or tensor.rank != 1 or tensor.shape[0] != 128)
+                return error.UnsupportedTensor;
+            if (binding) moe.?.bias = tensor;
+        }
+        inline for (.{ "w1", "w3", "w2" }, 0..) |part, projection| {
+            const k: usize = if (projection == 2) 2304 else 5120;
+            const n: usize = if (projection == 2) 5120 else 2304;
+            try matrix(binding, source, try named(&prefix, "mtp.{d}.ffn.shared_experts.{s}", .{ block, part }), k, n, if (binding) &moe.?.shared[projection] else null);
+            if (!binding) for (0..128) |expert| try matrix(false, source, try named(&prefix, "mtp.{d}.ffn.experts.{d}.{s}", .{ block, expert, part }), k, n, null);
+        }
+    }
+    try matrix(binding, source, "mtp.0.main_proj", 15360, 5120, if (binding) &model.?.dspark.?.main_proj else null);
+    try plain(binding, source, "mtp.0.main_norm.weight", .bf16, &.{5120}, if (binding) &model.?.dspark.?.main_norm else null);
+    try plain(binding, source, "mtp.2.norm.weight", .bf16, &.{5120}, if (binding) &model.?.dspark.?.norm else null);
+    if (binding) {
+        var emb: Tensor = undefined;
+        var hd: Tensor = undefined;
+        try plain(true, source, "mtp.2.markov_head.embed.weight", .bf16, &.{ 129280, 256 }, &emb);
+        try plain(true, source, "mtp.2.markov_head.head.weight", .f16, &.{ 129280, 256 }, &hd);
+        model.?.dspark.?.markov_embed = emb;
+        model.?.dspark.?.markov_head = hd;
+    } else {
+        try plain(false, source, "mtp.2.markov_head.embed.weight", .bf16, &.{ 129280, 256 }, null);
+        try plain(false, source, "mtp.2.markov_head.head.weight", .f16, &.{ 129280, 256 }, null);
+    }
+}
+
+/// The drafter is optional: a pack without it must still load.
+fn hasDspark(source: anytype) bool {
+    for ([_][]const u8{ "mtp.0.main_proj.trellis", "mtp.2.norm.weight" }) |n| {
+        _ = source.get(n) catch return false;
+    }
+    return true;
+}
+
+/// Every executed tensor is checked using headers only, before checkpoint materialization or model allocation.
+pub fn validate(plan: *const load.Plan, stream: bool) !void {
+    try populate(false, plan, null, stream);
+    try populateDspark(false, plan, null);
+}
+
+/// Bind resident tensors and marker payloads; route descriptors replace redundant host matrix metadata.
+pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, stream: bool) !Model {
+    var model: Model = undefined;
+    try populate(true, checkpoint, &model, stream);
+    var owned: usize = 0;
+    var owned_groups: usize = 0;
+    var owned_qkv: usize = 0;
+    errdefer for (0..owned) |i| model.layers[i / 3].moe.descriptors[i % 3].deinit();
+    errdefer for (0..owned_groups) |i| model.layers[i].attn.wo_a_descriptors.?.deinit();
+    errdefer for (0..owned_qkv) |i| model.layers[i].attn.qkv_descriptors.?.deinit();
+    errdefer for (&model.layers) |*layer| if (layer.moe.fused) |buffer| buffer.deinit();
+    errdefer if (model.dspark) |*d| for (&d.blocks) |*layer| for (layer.moe.descriptors) |buffer| buffer.deinit();
+    errdefer if (model.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.fused) |buffer| buffer.deinit();
+    errdefer if (model.dspark) |*d| for (&d.blocks) |*layer| if (layer.moe.shared_fused) |buffer| buffer.deinit();
+    try populateDspark(true, checkpoint, &model);
+    var dspark_prefix: [128]u8 = undefined;
+    if (model.dspark) |*d| for (&d.blocks, 0..) |*layer, block| {
+        for (0..3) |projection| {
+            const bytes = 128 * @sizeOf(exl3.ExpertDescriptor);
+            const buffer = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            layer.moe.descriptors[projection] = buffer;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(buffer.contents()));
+            for (0..128) |expert| {
+                var m: Matrix = undefined;
+                const k: usize = if (projection == 2) 2304 else 5120;
+                const n: usize = if (projection == 2) 5120 else 2304;
+                const parts = [_][]const u8{ "w1", "w3", "w2" };
+                const part = parts[projection];
+                try matrix(true, checkpoint, try named(&dspark_prefix, "mtp.{d}.ffn.experts.{d}.{s}", .{ block, expert, part }), k, n, &m);
+                out[expert] = try exl3.descriptor(m);
+            }
+        }
+        layer.moe.fused = try fusedTable(device, layer.moe.descriptors[0], layer.moe.descriptors[1], 128, layer.moe.shared[0], layer.moe.shared[1]);
+        // The drafter's shared expert takes the same two-entry gate/up table (its own matrices).
+        {
+            const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer table.deinit();
+            layer.moe.shared_fused = table;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+            out[0] = try exl3.descriptor(layer.moe.shared[0]);
+            out[1] = try exl3.descriptor(layer.moe.shared[1]);
+        }
+        // The shared down's descriptor (one entry) and its zero pick map.
+        {
+            const table = try device.buffer(@sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer table.deinit();
+            layer.moe.shared_down = table;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+            out[0] = try exl3.descriptor(layer.moe.shared[2]);
+            const ids = try device.buffer(8 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer ids.deinit();
+            @memset(ids.contents()[0 .. 8 * 4], 0);
+            layer.moe.shared_down_ids = ids;
+        }
+        // The shared down's descriptor (one entry) and its zero pick map.
+        {
+            const table = try device.buffer(@sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer table.deinit();
+            layer.moe.shared_down = table;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+            out[0] = try exl3.descriptor(layer.moe.shared[2]);
+            const ids = try device.buffer(8 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer ids.deinit();
+            @memset(ids.contents()[0 .. 8 * 4], 0);
+            layer.moe.shared_down_ids = ids;
+        }
+        // THE DRAFTER'S EIGHT wo_a GROUPS AS ONE INDEXED DECODE TABLE -- the trunk's own fused form, same shapes.
+        {
+            const groups = try device.buffer(8 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer groups.deinit();
+            layer.attn.wo_a_descriptors = groups;
+            const table: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(groups.contents()));
+            for (0..8) |slice| table[slice] = try exl3.descriptor(layer.attn.wo_a[slice]);
+        }
+    };
+    // The drafter's three per-block `wkv` in one grouped indexed dispatch's three-entry table.
+    if (model.dspark) |*d| {
+        const table = try device.buffer(3 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer table.deinit();
+        d.cond_wkv_descriptors = table;
+        const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+        for (&d.blocks, 0..) |*layer, block| out[block] = try exl3.descriptor(layer.attn.wkv);
+    }
+    var prefix: [128]u8 = undefined;
+    for (&model.layers, 0..) |*layer, layer_id| {
+        inline for (.{ "w1", "w3", "w2" }, 0..) |part, projection| {
+            const bytes = 384 * @sizeOf(exl3.ExpertDescriptor);
+            const buffer = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            layer.moe.descriptors[projection] = buffer;
+            owned += 1;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(buffer.contents()));
+            for (0..384) |expert| {
+                var m: Matrix = undefined;
+                const k: usize = if (projection == 2) 2304 else 5120;
+                const n: usize = if (projection == 2) 5120 else 2304;
+                try matrix(true, checkpoint, try named(&prefix, "layers.{d}.ffn.experts.{d}.{s}", .{ layer_id, expert, part }), k, n, &m);
+                out[expert] = try exl3.descriptor(m);
+            }
+        }
+        layer.moe.fused = try fusedTable(device, layer.moe.descriptors[0], layer.moe.descriptors[1], 384, layer.moe.shared[0], layer.moe.shared[1]);
+        // The shared expert's gate (w1) and up (w3) as one indexed dispatch's two-entry table.
+        {
+            const table = try device.buffer(2 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer table.deinit();
+            layer.moe.shared_fused = table;
+            const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(table.contents()));
+            out[0] = try exl3.descriptor(layer.moe.shared[0]);
+            out[1] = try exl3.descriptor(layer.moe.shared[1]);
+        }
+        // The eight wo_a output groups as one indexed decode projection's descriptor table.
+        {
+            const groups = try device.buffer(8 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+            errdefer groups.deinit();
+            layer.attn.wo_a_descriptors = groups;
+            owned_groups += 1;
+            const table: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(groups.contents()));
+            for (0..8) |slice| {
+                var m: Matrix = undefined;
+                try matrix(true, checkpoint, try named(&prefix, "layers.{d}.attn.wo_a.slice.{d}", .{ layer_id, slice }), 4096, 1024, &m);
+                table[slice] = try exl3.descriptor(m);
+            }
+        }
+        // The attention's wq_a + wkv in one indexed call's two-entry table.
+        layer.attn.qkv_descriptors = try qkvTable(device, layer.attn.wq_a, layer.attn.wkv);
+        owned_qkv += 1;
+    }
+    return model;
+}
+
+/// A borrowed CPU/GPU matrix view for checkpoint qualification, using the same strict storage contract.
+pub fn lookup(checkpoint: *const cp.Checkpoint, prefix: []const u8, k: usize, n: usize) !Matrix {
+    var out: Matrix = undefined;
+    try matrix(true, checkpoint, prefix, k, n, &out);
+    return out;
+}
+
+const src_ = @import("weights_source.zig");
+const named = src_.named;
+const plainEither = src_.plainEither;
+const plain = src_.plain;
+const has = src_.has;
+const scale = src_.scale;
+const matrixAny = src_.matrixAny;
+const matrix = src_.matrix;
+
+pub const attachInt8 = @import("weights_int8.zig").attachInt8;
+
+fn populate(comptime binding: bool, source: anytype, model: ?*Model, stream: bool) !void {
+    try plain(binding, source, "embed.weight", .bf16, &.{ 129280, 5120 }, if (binding) &model.?.embed else null);
+    try plain(binding, source, "norm.weight", .bf16, &.{5120}, if (binding) &model.?.norm else null);
+    try matrix(binding, source, "head", 5120, 129280, if (binding) &model.?.head else null);
+    var name: [160]u8 = undefined;
+    var prefix: [128]u8 = undefined;
+    for (0..40) |layer| {
+        const out: ?*Layer = if (binding) &model.?.layers[layer] else null;
+        try plain(binding, source, try named(&name, "layers.{d}.attn_norm.weight", .{layer}), .bf16, &.{5120}, if (binding) &out.?.attn_norm else null);
+        try plain(binding, source, try named(&name, "layers.{d}.ffn_norm.weight", .{layer}), .bf16, &.{5120}, if (binding) &out.?.ffn_norm else null);
+        inline for (.{ "attn", "ffn" }) |kind| {
+            const hc: ?*Hc = if (binding) (if (std.mem.eql(u8, kind, "attn")) &out.?.hc_attn else &out.?.hc_ffn) else null;
+            try plain(binding, source, try named(&name, "layers.{d}.hc_{s}_fn", .{ layer, kind }), .f32, &.{ 24, 20480 }, if (binding) &hc.?.projection else null);
+            try plain(binding, source, try named(&name, "layers.{d}.hc_{s}_scale", .{ layer, kind }), .f32, &.{3}, if (binding) &hc.?.scale else null);
+            try plain(binding, source, try named(&name, "layers.{d}.hc_{s}_base", .{ layer, kind }), .f32, &.{24}, if (binding) &hc.?.base else null);
+        }
+        const attn: ?*Attention = if (binding) &out.?.attn else null;
+        inline for (.{ "wq_a", "wq_b", "wkv", "wo_b" }, .{ 5120, 1280, 5120, 8192 }, .{ 1280, 32768, 512, 5120 }) |part, k, n| {
+            try matrix(binding, source, try named(&prefix, "layers.{d}.attn.{s}", .{ layer, part }), k, n, if (binding) &@field(attn.?, part) else null);
+        }
+        for (0..8) |slice| try matrix(binding, source, try named(&prefix, "layers.{d}.attn.wo_a.slice.{d}", .{ layer, slice }), 4096, 1024, if (binding) &attn.?.wo_a[slice] else null);
+        try plain(binding, source, try named(&name, "layers.{d}.attn.attn_sink", .{layer}), .f32, &.{64}, if (binding) &attn.?.sink else null);
+        try plain(binding, source, try named(&name, "layers.{d}.attn.q_norm.weight", .{layer}), .bf16, &.{1280}, if (binding) &attn.?.q_norm else null);
+        try plain(binding, source, try named(&name, "layers.{d}.attn.kv_norm.weight", .{layer}), .bf16, &.{512}, if (binding) &attn.?.kv_norm else null);
+        const owner = layer == 2 or layer == 8 or layer == 14 or layer == 20;
+        if (binding) {
+            attn.?.compressor = if (owner) @as(Compressor, undefined) else null;
+            attn.?.indexer = if (owner or layer == 24 or layer == 28 or layer == 32 or layer == 36)
+                @as(Indexer, undefined)
+            else
+                null;
+        }
+        if (owner) {
+            const compressor: ?*Compressor = if (binding) &attn.?.compressor.? else null;
+            try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.compressor.wkv", .{layer}), 5120, 512, if (binding) &compressor.?.wkv else null);
+            try plain(binding, source, try named(&name, "layers.{d}.attn.compressor.norm.weight", .{layer}), .bf16, &.{512}, if (binding) &compressor.?.norm else null);
+            if (binding) compressor.?.wgate = if (layer < 20) @as(AnyMatrix, undefined) else null;
+            if (layer < 20) try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.compressor.wgate", .{layer}), 5120, 512, if (binding) &compressor.?.wgate.? else null);
+        }
+        if (owner or layer == 24 or layer == 28 or layer == 32 or layer == 36) {
+            const indexer: ?*Indexer = if (binding) &attn.?.indexer.? else null;
+            try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.indexer.wq_b", .{layer}), 1280, 4096, if (binding) &indexer.?.wq_b else null);
+            try plainEither(binding, source, try named(&name, "layers.{d}.attn.indexer.weights_proj.weight", .{layer}), &.{ 32, 5120 }, if (binding) &indexer.?.weights_proj else null);
+            if (binding) {
+                indexer.?.wk = if (owner) @as(AnyMatrix, undefined) else null;
+                indexer.?.k_norm = if (owner) @as(Tensor, undefined) else null;
+            }
+            if (owner) {
+                try matrixAny(binding, source, try named(&prefix, "layers.{d}.attn.indexer.wk", .{layer}), 512, 128, if (binding) &indexer.?.wk.? else null);
+                try plain(binding, source, try named(&name, "layers.{d}.attn.indexer.k_norm.weight", .{layer}), .bf16, &.{128}, if (binding) &indexer.?.k_norm.? else null);
+            }
+        }
+        const moe: ?*Moe = if (binding) &out.?.moe else null;
+        // The released checkpoints store the router gate f16; rank-split repacks store it bf16.
+        if (binding) {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.weight", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16) or tensor.rank != 2 or
+                tensor.shape[0] != 384 or tensor.shape[1] != 5120)
+            {
+                std.log.err("unsupported router gate {s}: {s} {any}", .{ name, @tagName(tensor.dtype), tensor.shape[0..tensor.rank] });
+                return error.UnsupportedTensor;
+            }
+            moe.?.gate = tensor;
+        } else {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.weight", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16) or tensor.rank != 2 or
+                tensor.shape[0] != 384 or tensor.shape[1] != 5120) return error.UnsupportedTensor;
+        }
+        // The bias rides the same three dtypes the route kernel decodes (f32, f16, bf16).
+        if (binding) {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.bias", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16 and tensor.dtype != .f32) or tensor.rank != 1 or tensor.shape[0] != 384)
+                return error.UnsupportedTensor;
+            moe.?.bias = tensor;
+        } else {
+            const tensor = try source.get(try named(&name, "layers.{d}.ffn.gate.bias", .{layer}));
+            if ((tensor.dtype != .f16 and tensor.dtype != .bf16 and tensor.dtype != .f32) or tensor.rank != 1 or tensor.shape[0] != 384)
+                return error.UnsupportedTensor;
+        }
+        inline for (.{ "w1", "w3", "w2" }, 0..) |part, projection| {
+            const k: usize = if (projection == 2) 2304 else 5120;
+            const n: usize = if (projection == 2) 5120 else 2304;
+            try matrix(binding, source, try named(&prefix, "layers.{d}.ffn.shared_experts.{s}", .{ layer, part }), k, n, if (binding) &moe.?.shared[projection] else null);
+            if (!binding) for (0..384) |expert| try matrix(false, source, try named(&prefix, "layers.{d}.ffn.experts.{d}.{s}", .{ layer, expert, part }), k, n, null);
+        }
+        const engram = layer == 1 or layer == 14;
+        if (binding) out.?.engram = if (engram) @as(Engram, undefined) else null;
+        if (engram) {
+            const e: ?*Engram = if (binding) &out.?.engram.? else null;
+            const rows: usize = if (layer == 1) 384006168 else 384016682;
+            if (stream) {
+                // The row source reads these a window at a time from the release's shards; there is no resident view.
+                if (binding) {
+                    e.?.table = null;
+                    e.?.scales = null;
+                    e.?.streamed = true;
+                }
+            } else {
+                var weight_tensor: Tensor = undefined;
+                var scale_tensor: Tensor = undefined;
+                try plain(binding, source, try named(&name, "layers.{d}.engram.embed.weight", .{layer}), .f8_e4m3, &.{ rows, 256 }, if (binding) &weight_tensor else null);
+                try plain(binding, source, try named(&name, "layers.{d}.engram.embed.scale", .{layer}), .f8_e8m0, &.{ rows, 8 }, if (binding) &scale_tensor else null);
+                if (binding) {
+                    e.?.table = weight_tensor;
+                    e.?.scales = scale_tensor;
+                    // Engram is constructed as `undefined`, so the field's default never applies: say it explicitly.
+                    e.?.streamed = false;
+                }
+            }
+            try plainEither(binding, source, try named(&name, "layers.{d}.engram.q_weight", .{layer}), &.{ 4, 5120 }, if (binding) &e.?.q_weight else null);
+            try plainEither(binding, source, try named(&name, "layers.{d}.engram.k_weight", .{layer}), &.{ 4, 5120 }, if (binding) &e.?.k_weight else null);
+            try matrix(binding, source, try named(&prefix, "layers.{d}.engram.wkv", .{layer}), 6144, 25600, if (binding) &e.?.wkv else null);
+        }
+    }
+}

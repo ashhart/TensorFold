@@ -26,7 +26,7 @@ pub const Call = struct {
     w_scale: f32 = 0x1p-6, // softmax_scale * heads^-0.5 for 128 dims, 32 heads: exactly 2^-6, applied in the kernel
 };
 
-const Args = extern struct {
+pub const Args = extern struct {
     rows: u32,
     keys: u32,
     start: u32,
@@ -37,6 +37,9 @@ const Args = extern struct {
     ik_stride: u32,
     mask_stride: u32,
     w_scale: f32,
+    comptime {
+        @import("index_mirror.zig").check(Args, sources.dsv41.index, "TfDsv41IxArgs");
+    }
 };
 
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };

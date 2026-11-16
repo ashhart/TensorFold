@@ -7,7 +7,7 @@ pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 pub const Out = enum { f32, bf16 };
 pub const Call = struct { k: u32, n: u32, rows: u32, out: Out = .f32 };
 
-const Args = extern struct { K: u32, N: u32, R: u32 };
+pub const Args = extern struct { K: u32, N: u32, R: u32 };
 
 /// A threadgroup's rows (the source's TF_RS * 8) and threads (TF_RS * 32); it carries 32 columns.
 pub const row_tile = 32;

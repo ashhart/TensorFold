@@ -78,7 +78,7 @@ fn alias(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.
 
 /// GLM-5.3 (glm_moe_dsa) on EXLR8: a layer on Metal against the fp32 reference forward's tensors.
 pub fn glmTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, engine: *std.Build.Module) void {
-    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
+    const tokenizer = engine.import_table.get("tokenizer") orelse engine.import_table.get("tokenizer0") orelse b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     for ([_][3][]const u8{
         .{ "tf-glm-dsa-layer-check", "zig/tests/glm_dsa_layer_check.zig", "One GLM-5.3 layer on Metal against ref_layer.py's fp32 tensors (MODEL_DIR REF_DIR)" },
         .{ "tf-glm-dsa-tp-check", "zig/tests/glm_dsa_tp_check.zig", "Two ranks of one GLM-5.3 layer on one Mac, summed, against the reference (MODEL_DIR REF_DIR)" },

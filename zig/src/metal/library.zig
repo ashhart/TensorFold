@@ -102,6 +102,28 @@ pub const Pipeline = struct {
         return make(device, library, name, indirect, false);
     }
 
+    /// A pipeline for a function the compiler made *specialisable* (a `template [[host_name(...)]]` entry).
+    pub fn initSpecialized(device: Device, library: Library, name: []const u8) Error!Pipeline {
+        const str = objc.string(name);
+        defer objc.release(str);
+        const values = objc.msg(Id, objc.msg(Id, objc.class("MTLFunctionConstantValues"), "alloc", .{}), "init", .{});
+        defer objc.release(values);
+        var err: ?Id = null;
+        const func = objc.msg(?Id, library.id, "newFunctionWithName:constantValues:error:", .{ str, values, &err }) orelse {
+            std.log.err("specialised function {s}: {s}", .{ name, objc.errorText(err) });
+            return error.NoFunction;
+        };
+        defer objc.release(func);
+        const desc = objc.msg(Id, objc.msg(Id, objc.class("MTLComputePipelineDescriptor"), "alloc", .{}), "init", .{});
+        defer objc.release(desc);
+        objc.msg(void, desc, "setComputeFunction:", .{func});
+        const id = objc.msg(?Id, device.id, "newComputePipelineStateWithDescriptor:options:reflection:error:", .{ desc, @as(usize, 0), @as(?*anyopaque, null), &err });
+        return .{ .id = id orelse {
+            std.log.err("pipeline {s}: {s}", .{ name, objc.errorText(err) });
+            return error.PipelineBuild;
+        } };
+    }
+
     /// `init` for a pipeline the caller can do without: a failed build is logged as info, not as an error.
     pub fn initOptional(device: Device, library: Library, name: []const u8, indirect: bool) Error!Pipeline {
         return make(device, library, name, indirect, true);

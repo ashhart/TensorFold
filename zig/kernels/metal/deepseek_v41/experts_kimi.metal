@@ -30,10 +30,12 @@ struct ExpertPtrs {
   device const uchar* w2p;
   device const uchar* w2s;
 };
+static_assert(sizeof(ExpertPtrs) == 48, "ExpertPtrs must mirror metal/experts.zig's ExpertPtrs");
 
 struct PlanArgs {
   uint pairs, experts, first, last;
 };
+static_assert(sizeof(PlanArgs) == 16, "PlanArgs must mirror metal/experts.zig's PlanArgs");
 
 constant constexpr uint NOWHERE = 0xFFFFFFFFu;
 
@@ -89,6 +91,7 @@ struct XpArgs {
   uint K, N, topk, rows_max;
   float beta, lin;
 };
+static_assert(sizeof(XpArgs) == 24, "XpArgs must mirror metal/experts.zig's XpArgs");
 
 // The slot's activation rows (pairs' rows) staged in threadgroup memory, RP rows at a time.
 template <int RP>

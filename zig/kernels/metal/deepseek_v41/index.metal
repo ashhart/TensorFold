@@ -23,6 +23,7 @@ struct TfDsv41IxArgs {
   uint rows, keys, start, ratio, chunk, out_stride, w_stride, ik_stride, mask_stride;
   float w_scale; // softmax_scale * n_heads^-0.5 (model.py:556, 513): scales each bf16 weight once, in fp32
 };
+static_assert(sizeof(TfDsv41IxArgs) == 40, "TfDsv41IxArgs must mirror metal/index.zig's Args");
 
 // One E2M1 code by its bit fields: 0, 0.5, 1, 1.5, 2, 3, 4, 6 and their negatives (the format has no NaN or infinity).
 static inline float tf_ix_e2m1(const uint c) {

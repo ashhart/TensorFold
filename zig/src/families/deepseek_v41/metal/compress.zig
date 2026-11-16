@@ -32,6 +32,11 @@ pub const Pipelines = struct {
 
 pub const threads = 32;
 
+/// Compress.metal's three argument records, field for field.
+pub const PoolArgs = extern struct { rows: u32, dim: u32 };
+pub const RtArgs = extern struct { blocks: u32, in_stride: u32, out_row: u32 };
+pub const PackArgs = extern struct { blocks: u32, in_stride: u32, code_row: u32, scale_row: u32, scale_off: u32, use_dest: u32 };
+
 fn grid(e: mtl.ComputeEncoder, x: usize, y: usize) void {
     e.dispatchThreads(mtl.Size.of(x, y, 1), mtl.Size.of(threads, 1, 1));
 }
@@ -44,7 +49,7 @@ fn bind(e: mtl.ComputeEncoder, refs: []const Ref) void {
 pub fn pool2(p: *const Pipelines, e: mtl.ComputeEncoder, kv: Ref, score: Ref, state: Ref, pos: Ref, y: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.pool);
     bind(e, &.{ kv, score, state, pos, y });
-    e.setValue([2]u32{ rows, dim }, 5);
+    e.setValue(PoolArgs{ .rows = rows, .dim = dim }, 5);
     grid(e, dim, 1);
 }
 
@@ -52,7 +57,7 @@ pub fn pool2(p: *const Pipelines, e: mtl.ComputeEncoder, kv: Ref, score: Ref, st
 pub fn fp4rt(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, y: Ref, dest: Ref, rows: u32, dim: u32) void {
     e.setPipeline(p.rt);
     bind(e, &.{ x, y, dest });
-    e.setValue([3]u32{ dim / 16, dim, dim }, 3);
+    e.setValue(RtArgs{ .blocks = dim / 16, .in_stride = dim, .out_row = dim }, 3);
     grid(e, dim / 16, rows);
 }
 
@@ -63,6 +68,6 @@ pub const Pack = struct { blocks: u32, in_stride: u32, code_row: u32, scale_row:
 pub fn fp4pack(p: *const Pipelines, e: mtl.ComputeEncoder, x: Ref, codes: Ref, scales: Ref, rows: u32, k: Pack) void {
     e.setPipeline(p.pack);
     bind(e, &.{ x, codes, scales, k.dest orelse x });
-    e.setValue([6]u32{ k.blocks, k.in_stride, k.code_row, k.scale_row, k.scale_off, @intFromBool(k.dest != null) }, 4);
+    e.setValue(PackArgs{ .blocks = k.blocks, .in_stride = k.in_stride, .code_row = k.code_row, .scale_row = k.scale_row, .scale_off = k.scale_off, .use_dest = @intFromBool(k.dest != null) }, 4);
     grid(e, k.blocks, rows);
 }

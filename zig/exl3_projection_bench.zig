@@ -301,7 +301,7 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, args[i], "--repeats")) settings.repeats = v else if (std.mem.eql(u8, args[i], "--warmup")) settings.warmup = v else if (std.mem.eql(u8, args[i], "--prefill")) settings.prefill = v else if (std.mem.eql(u8, args[i], "--shape")) shape_index = v else if (std.mem.eql(u8, args[i], "--qualify-only") and v <= 1) settings.qualify_only = v == 1 else return error.UnknownOption;
     }
     if (settings.repeats == 0 or settings.repeats > 100 or settings.warmup > 100 or
-        settings.prefill == 0 or settings.prefill > 128 or
+        settings.prefill == 0 or settings.prefill > 4096 or
         (shape_index != null and shape_index.? >= shapes.len)) return error.InvalidBenchmarkSettings;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();

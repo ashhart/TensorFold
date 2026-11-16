@@ -12,6 +12,7 @@ using namespace metal;
 struct TfTopk512Args {
   uint width; // scores a row (the row stride)
 };
+static_assert(sizeof(TfTopk512Args) == 4, "TfTopk512Args must mirror metal/glue.zig's TopkArgs");
 
 inline uint tf_topk512_key(uint u) {
   if ((u & 0x7fffffffu) > 0x7f800000u) u = TF_CTL == 1 ? 0x7f800000u : 0xff800000u;

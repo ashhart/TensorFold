@@ -15,6 +15,7 @@ struct TfCandArgs {
   uint blocks; // the row stride of the keyed scratch and of the mask
   uint topk;   // blocks kept, at most 2048
 };
+static_assert(sizeof(TfCandArgs) == 12, "TfCandArgs must mirror metal/cand.zig's Args");
 
 // Order-preserving key of a float's bits: NaN as -inf (control 1: +inf), -0 as +0.
 inline uint tf_cand_key(uint u) {

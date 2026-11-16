@@ -37,6 +37,7 @@ using namespace metal;
 struct TfDsv41Fp8MmaArgs {
   uint K, N, R;
 };
+static_assert(sizeof(TfDsv41Fp8MmaArgs) == 12, "TfDsv41Fp8MmaArgs must mirror metal/fp8_mma.zig's Args");
 
 #ifndef TF_RS
 #define TF_RS 4   // simdgroups a threadgroup, 8 rows each: they share one decoded 32x32 weight block a K group
