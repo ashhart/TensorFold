@@ -58,10 +58,14 @@ export interface ReadinessInput {
 const CONNECT_A_MODEL = 'Please go to Settings and connect a cloud or local model.'
 const LOCAL_SOURCES = ['ollama', 'lmstudio', 'omlx']
 
+// One definition of "plain local HTTP source", shared with the live model-list probe in
+// provider-ipc so the two cannot drift.
+export function isLocalHttpSource(provider: Provider): boolean {
+  return provider.kind === 'local' || (!!provider.source && LOCAL_SOURCES.includes(provider.source))
+}
+
 function httpNeedsKey(provider: Provider): boolean {
-  if (provider.kind === 'local') return false
-  if (provider.source && LOCAL_SOURCES.includes(provider.source)) return false
-  return true
+  return !isLocalHttpSource(provider)
 }
 
 // The single point-of-use guard: is there a usable model for this provider?
