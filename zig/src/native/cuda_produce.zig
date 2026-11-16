@@ -171,6 +171,13 @@ pub const Produce = struct {
     }
 };
 
+/// --mcdma-produce on a CUDA Host during openWith. False: the family refused the link (openWith returns null).
+pub fn attach(h: anytype, comptime F: type, gpa: std.mem.Allocator, loaded: anytype, o: api.Open, a: std.mem.Allocator, io: std.Io, problem: *[]const u8) !bool {
+    const link = o.remote_prefill.produce orelse return true;
+    h.produce = try open(F, gpa, loaded, link, try api.LaneHost.Remote.checkpointId(a, io, o.dir), problem) orelse return false;
+    return true;
+}
+
 /// The producer for Qwen3.8-27B on CUDA, its geometry and cache format checked first; null with `problem` otherwise.
 pub fn open(comptime F: type, gpa: std.mem.Allocator, loaded: anytype, link: []const u8, model: []const u8, problem: *[]const u8) !?*Produce {
     if (comptime F != qwen35.native or builtin.os.tag != .linux) {

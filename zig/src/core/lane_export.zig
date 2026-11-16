@@ -24,12 +24,12 @@ pub const Exporter = struct {
 /// A handoff request needs an exporter, and a prompt with a token past its mark.
 pub fn exportable(h: *const LaneHost, r: *const Request) bool {
     if (r.handoff == null) return true;
-    return h.exporter != null and r.prompt.len >= 2 and r.images.len == 0 and !r.promptOnly();
+    return h.handoff.exporter != null and r.prompt.len >= 2 and r.images.len == 0 and !r.promptOnly();
 }
 
 /// A handoff stream cuts before the prompt's last token (its row stays pending) and exports there; its marks keep.
 pub fn exporting(h: *const LaneHost, job: *Job, reuse: *lanes.stream.Reuse) bool {
-    if (job.request.handoff == null or h.exporter == null) return false;
+    if (job.request.handoff == null or h.handoff.exporter == null) return false;
     job.cut = .{@intCast(job.request.prompt.len - 1)};
     if (reuse.at >= job.cut[0]) below(h, job, reuse); // a restore at the cut leaves no chunk ending there, so no export
     reuse.marks = handoffMarks(h, job, reuse.marks, reuse.at);
@@ -80,7 +80,7 @@ fn handoffMarks(h: *const LaneHost, job: *Job, planned: []const u32, from: u32) 
 fn exportAt(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
     const job: *Job = @ptrCast(@alignCast(ptr));
     if (at != job.cut[0]) return Job.kept(ptr, s, at); // one of the store's marks: kept as for any request
-    const x = job.host.exporter orelse return;
+    const x = job.host.handoff.exporter orelse return;
     const h = job.request.handoff orelse return;
     if (job.exported) return;
     job.exported = true;
@@ -99,7 +99,7 @@ pub fn keeps(job: *const Job, at: u32) bool {
 /// A handoff whose pass ended (or never ran) without its state: the decoder hears so rather than waiting it out.
 pub fn unexported(job: *Job) void {
     const h = job.request.handoff orelse return;
-    const x = job.host.exporter orelse return;
+    const x = job.host.handoff.exporter orelse return;
     if (job.exported or (job.started and !job.stream.finished and job.prefilled == null)) return; // still under way
     job.exported = true;
     x.failed(x.ptr, h, "the prompt pass ended before its state was saved");

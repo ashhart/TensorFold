@@ -85,7 +85,7 @@ pub const Host = struct {
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
     fn keepReply(ptr: *anyopaque, s: *lanes.Stream, slot: u32) void {
         const h = of(ptr);
-        if (h.cache) |*store| keepEnd(store, h.host.keep_remote, h.gpa, s, h.runner.offsets[slot]);
+        if (h.cache) |*store| keepEnd(store, h.host.handoff.keep_remote, h.gpa, s, h.runner.offsets[slot]);
     }
 
     /// A fallback never displaces a kept state or spends the room promised to this pass's later marks.

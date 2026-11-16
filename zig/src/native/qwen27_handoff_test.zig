@@ -144,9 +144,9 @@ fn turn(m: *Mac, peer: *Peer, request: *const api.Request, keep: bool) !Heard {
     defer core.deinit();
     var host = api.LaneHost.init(gpa, t.io, &core, .{ .lanes = 1 });
     host.decoded_rows = true; // as the 27B's served host
-    host.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
+    host.handoff.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     remote.keepRule(.{ .host = &host, .back = &m.back }, keep); // as attach, on --prefill-from
-    host.resume_peek = .{ .ctx = &m.back, .at = slots.resumeAt };
+    host.handoff.resume_peek = .{ .ctx = &m.back, .at = slots.resumeAt };
     const left = m.released.load(.acquire);
     try host.start();
     defer host.stop();
