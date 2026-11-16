@@ -15,6 +15,10 @@ these files, and a host test checks that the two agree.
   the engine commit, the chip, the summary overall and per category, and every item's verdict. A missed item keeps
   the first 200 characters of its reply.
 - **Names.** `REPO.CHIP.json`, with the repository's `/` written as `--`.
+- **One score per checkpoint.** The same weights score within a point or so on either backend. Lightning MLX 4-bit at
+  d9d758fb passed 192 items on an M5 Max (Metal) and 191 on a GB10 (CUDA). The three items that differ are GSM8K
+  problems, where the backends' rounding sends a long greedy calculation down different tokens. The catalog cites
+  the first receipt measured.
 
 Rerun one:
 
