@@ -29,6 +29,7 @@ pub fn operators(f: dk.ops.Functions) void {
     note(f.paced, 32, 0, 1);
     for (f.segments) |fun| note(fun, 256, 0, 1);
     note(f.topk_keys, 1024, 0, 1);
+    note(f.topk_keys_wide, 1024, 0, 1);
     inline for (.{ "swiglu", "add", "add_bf16", "kv_dense", "kv_gather" }) |name| note(@field(f, name), 256, 0, 1);
     if (f.kv_pack) |fun| note(fun, 256, 0, 1);
     if (f.kv_dedup) |row| for (row) |fun| {

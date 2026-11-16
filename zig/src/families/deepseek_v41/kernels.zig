@@ -153,6 +153,11 @@ pub const Kernels = struct {
         k.rel = r;
     }
 
+    /// Whether logits keep every fp32 bit (a release checkpoint, its kernels loaded): top-k takes 48-bit keys.
+    pub fn wideLogits(k: *const Kernels) bool {
+        return k.rel != null;
+    }
+
     /// The release experts' launches on one stream (after `loadRelease`).
     pub fn releaseExOps(k: *const Kernels, s: cuda.Stream) release.ex.Ops {
         return .{ .f = &k.rel.?.ex, .s = s };

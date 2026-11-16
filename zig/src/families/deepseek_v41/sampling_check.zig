@@ -39,7 +39,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer stream.deinit();
     var kernels = try dk.Kernels.load(&ctx);
     defer kernels.deinit();
-    var gpu = try Gpu.init(&driver, stream, &kernels);
+    // the wide keys first (every row: fp32 and bf16-valued); the narrow keys below on the bf16-valued rows only
+    var gpu = try Gpu.init(&driver, stream, &kernels, true);
     defer {
         drainOrExit(stream);
         gpu.deinit();
@@ -80,6 +81,26 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("candidates k {d}: {s}\n", .{ k, if (diff != null) "differ" else "bit-equal" });
         if (diff) |i| std.debug.print("  first at {d}: {x} vs {x}\n", .{ i, got[i], want[i] });
     }
+    // the narrow keys (EXL3's bf16-valued logits): rows of kinds 2 and 3, each row's packed candidates bit for bit
+    gpu.wide = false;
+    for ([_]usize{ 9, 28, 520, 1024 }) |k| {
+        const len = n * 2 * k;
+        const d_out = try dev.vtable.scratch(dev.ptr, 0, 4 * len);
+        const h_out = try ref.vtable.scratch(ref.ptr, 0, 4 * len);
+        try dev.vtable.top(dev.ptr, d_lg.ptr, n, C, k, 64640, d_out);
+        try ref.vtable.top(ref.ptr, h_lg, n, C, k, 64640, h_out);
+        const got = try gpa.alloc(u32, len);
+        defer gpa.free(got);
+        try dev.vtable.download(dev.ptr, d_out, std.mem.sliceAsBytes(got));
+        const want = @as([*]const u32, @ptrFromInt(h_out))[0..len];
+        var differ = false;
+        for (0..n) |r| if (r % 5 == 2 or r % 5 == 3) {
+            differ = differ or !std.mem.eql(u32, got[r * 2 * k ..][0 .. 2 * k], want[r * 2 * k ..][0 .. 2 * k]);
+        };
+        bad += @intFromBool(differ);
+        std.debug.print("candidates (narrow keys, bf16-valued rows) k {d}: {s}\n", .{ k, if (differ) "differ" else "bit-equal" });
+    }
+    gpu.wide = true;
 
     // statistics: max bit-equal, sum within 1e-12 relative
     var picker = try smp.Picker.init(gpa, C);
