@@ -1,0 +1,4 @@
+tensor units, this head: CHUNKS compared 128 differ 0
+simdgroup products (LFM3_OMNI_NAX=0), this head: CHUNKS compared 128 differ 0
+before the change (the rebased head without it): CHUNKS compared 128 differ 128
+before the change, waveform SNR between chunkings: 64 pairs, min 23.0 dB, median 41.2 dB, max 51.6 dB

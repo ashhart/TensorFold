@@ -1,0 +1,94 @@
+{
+ "engine vs bf16": {
+  "name": "engine vs bf16",
+  "utterances": 16,
+  "log-mel cos (min), max abs (max)": [
+   1.0,
+   0.00031
+  ],
+  "speech encoder cos (min)": 0.999991,
+  "projector cos (min)": 0.999898,
+  "prompt ids identical": "16/16",
+  "prefill row cos (median of medians, min of medians, min row)": [
+   0.999822,
+   0.999769,
+   0.965915
+  ],
+  "teacher-forced text top-1": "520/524 (99.2%)",
+  "teacher-forced codes": "18753/21024 (89.2%)",
+  "depth on the reference's states: greedy agreement": "20084/21024 (95.5%)",
+  "depth logits cos (median, min)": [
+   0.999994,
+   0.999889
+  ],
+  "step row cos, teacher-forced (median of medians, min of medians)": [
+   0.999914,
+   0.9999
+  ],
+  "codec SNR dB (median, min)": [
+   37.24,
+   25.09
+  ],
+  "codec lin cos (min)": 0.999938
+ },
+ "engine vs fp32": {
+  "name": "engine vs fp32",
+  "utterances": 16,
+  "log-mel cos (min), max abs (max)": [
+   1.0,
+   0.00031
+  ],
+  "speech encoder cos (min)": 0.999993,
+  "projector cos (min)": 0.999891,
+  "prompt ids identical": "16/16",
+  "prefill row cos (median of medians, min of medians, min row)": [
+   0.999881,
+   0.999837,
+   0.962618
+  ],
+  "teacher-forced text top-1": "460/468 (98.3%)",
+  "teacher-forced codes": "16094/18540 (86.8%)",
+  "depth on the reference's states: greedy agreement": "17126/18540 (92.4%)",
+  "depth logits cos (median, min)": [
+   0.999994,
+   0.99989
+  ],
+  "step row cos, teacher-forced (median of medians, min of medians)": [
+   0.999935,
+   0.999912
+  ],
+  "codec SNR dB (median, min)": [
+   36.16,
+   20.2
+  ],
+  "codec lin cos (min)": 0.999218
+ },
+ "bf16 vs fp32": {
+  "name": "bf16 vs fp32",
+  "utterances": 16,
+  "log-mel identical": "16/16",
+  "speech encoder cos (min)": 0.999994,
+  "projector cos (min)": 0.99992,
+  "prompt ids identical": "16/16",
+  "prefill row cos (median of medians, min of medians)": [
+   0.999882,
+   0.999844
+  ],
+  "teacher-forced text top-1": "464/468 (99.1%)",
+  "teacher-forced codes": "16019/18540 (86.4%)",
+  "depth on the reference's states: greedy agreement": "17143/18540 (92.5%)",
+  "depth logits cos (median, min)": [
+   0.999994,
+   0.999869
+  ],
+  "step row cos, teacher-forced (median of medians, min of medians)": [
+   0.999931,
+   0.999906
+  ],
+  "codec SNR dB (median, min)": [
+   36.41,
+   21.15
+  ],
+  "codec lin cos (min)": 0.999523
+ }
+}

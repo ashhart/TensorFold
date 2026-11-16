@@ -43,8 +43,10 @@ Text is greedy, as the reference's `do_sample=False`; speech frames are sampled 
   three stride-2 convolutions, its 17 LFM2 layers and the projector.
 - The 24-layer LFM3 backbone (gated short conv, full and sliding attention), the prompt in chunks of 512 rows.
 - The depth decoder's three mask passes over a frame's 12 codebook slots, each codebook's pick on the GPU (repetition
-  penalty, greedy or a Gumbel-max draw, exactly a softmax sample).
+  penalty, greedy or a Gumbel-max draw with u in [0, 1), a softmax sample).
 - The Liquid codec's decoder and its spectrum head, the inverse STFT as an fp32 product; overlap-add on the host.
+  Its rows take the tiled product and one-row attention at every chunk size, so a streamed reply's audio is, byte
+  for byte, that of one whole decode.
 - Products of many rows (prompt chunks, the encoder, codec chunks) on the tensor unit through the prefill GEMM's
   blocks (`zig/kernels/metal/prefill/gemm_nax.metal`), fp32 sums; a GPU without tensor units takes a
   simdgroup-matrix product (`LFM3_OMNI_NAX=0` forces it).
@@ -61,10 +63,13 @@ Every op rounds to bf16 where the reference's op rounds. `LFM3_OMNI_PROFILE=1` l
 `tools/lfm3_omni/` holds the checks' clients (Python dev tools, not part of the engine): `make_utterances.sh` makes
 the 16 synthetic spoken turns of `utterances.txt` with macOS voices; `reference_dump.py` and `reference_depth.py` dump
 the reference's stages (transformers with the checkpoint's own code); `parity.sh` runs `lfm3-omni-generate --dump`,
-`--force` and `--depth-check` against them and `summarize_parity.py` prints the table below;
-`speech_chat_client.py` streams turns through the server and times them; `reference_speech.py` does the same with the
-reference runtime; `score_replies.py` scores replies (UTMOS22 strong through SpeechMOS, and the checkpoint's own ASR
-against each reply's text).
+`--force` and `--depth-check` against them and `summarize_parity.py` prints one comparison's table.
+`reference_forced.py` teacher-forces the reference itself on a dump's reply, `reference_codec.py` runs its codec in
+fp32, `precision_table.py` sets the engine against the bf16 and the fp32 reference and the two against each other,
+and `text_misses.py` lists each teacher-forced text miss with both sides' logits. `speech_chat_client.py` streams
+turns through the server and times them; `reference_speech.py` does the same with the reference runtime;
+`score_replies.py` scores replies (UTMOS22 strong through SpeechMOS, and the checkpoint's own ASR against each
+reply's text).
 
 ## Margins
 
@@ -77,41 +82,49 @@ Held to against the reference runtime on the same Mac and the same 16 turns, and
 
 ## Receipt
 
-M5 Ultra (256 GB), macOS 27.0.1, Xcode 27.1; the reference is `transformers` 5.21.0 with the checkpoint's own code on
-PyTorch 2.14.1 (MPS, bf16), on the same Mac. The 16 turns of `tools/lfm3_omni/utterances.txt` (macOS voices), a
-voice-assistant system text, identity codebook order, greedy text and codes:
+The runs, their commands and their files are in [docs/receipts/lfm3-omni-metal](../receipts/lfm3-omni-metal/README.md).
+M5 Ultra (256 GB), macOS 27.0.1, Xcode 27.2 (Metal compiler 32023.921); the reference is `transformers` 5.21.0 with
+the checkpoint's own code on PyTorch 2.14.1 (MPS), on the same Mac, in bf16 and in fp32. The 16 turns of
+`tools/lfm3_omni/utterances.txt` (macOS voices), a voice-assistant system text, identity codebook order, greedy text
+and codes:
 
-| stage | check | Metal vs MPS bf16 |
-| --- | --- | --- |
-| log-mel | cosine (min), max abs | 1.000000, 3.1e-4 |
-| speech encoder | cosine (min of 16) | 0.99999 |
-| projector | cosine (min) | 0.99990 |
-| prompt | token ids | 16/16 identical |
-| backbone prefill | row cosine (median of medians, min of medians) | 0.99982, 0.99977 |
-| text | teacher-forced greedy top-1 | 520/524 (99.2%) |
-| depth decoder | on the reference's own states: greedy agreement, logits cosine median / min | 95.5%, 0.999994 / 0.99989 |
-| codes | teacher-forced through the whole loop | 89.2% |
-| codec | the reference's codes to audio: SNR median (min); spectrum rows cosine (min) | 36.6 dB (25.1 dB); 0.99994 |
+| stage | check | Metal vs MPS bf16 | Metal vs MPS fp32 | MPS bf16 vs MPS fp32 |
+| --- | --- | --- | --- | --- |
+| log-mel | cosine (min), max abs | 1.000000, 3.1e-4 | 1.000000, 3.1e-4 | identical |
+| speech encoder | cosine (min of 16) | 0.999991 | 0.999993 | 0.999994 |
+| projector | cosine (min) | 0.999898 | 0.999891 | 0.999920 |
+| prompt | token ids | 16/16 identical | 16/16 identical | 16/16 identical |
+| backbone prefill | row cosine: median of medians (min of medians) | 0.999822 (0.999769) | 0.999881 (0.999837) | 0.999882 (0.999844) |
+| backbone steps | teacher-forced row cosine: median of medians (min of medians) | 0.999914 (0.999900) | 0.999935 (0.999912) | 0.999931 (0.999906) |
+| text | teacher-forced greedy top-1 | 520/524 (99.2%) | 460/468 (98.3%) | 464/468 (99.1%) |
+| depth decoder | on the reference's states: greedy agreement | 20084/21024 (95.5%) | 17126/18540 (92.4%) | 17143/18540 (92.5%) |
+| depth decoder | logits cosine: median (min) | 0.999994 (0.999889) | 0.999994 (0.999890) | 0.999994 (0.999869) |
+| codes | teacher-forced through the whole loop | 18753/21024 (89.2%) | 16094/18540 (86.8%) | 16019/18540 (86.4%) |
+| codec | the bf16 reference's codes to audio: SNR median (min) | 37.24 dB (25.09 dB) | 36.16 dB (20.20 dB) | 36.41 dB (21.15 dB) |
+| codec | spectrum rows cosine (min) | 0.999938 | 0.999218 | 0.999523 |
 
-Text and code misses are near ties (within 2 bf16 ulps of the reference's pick); 15% of the reference's own greedy
-codebook picks are exact bf16 ties, so free-running codes part after a frame or two. Against MPS fp32 the port sits
-where the reference's own bf16 run sits (encoder 0.999995, prefill rows 0.99988 median, for both).
+The four text misses against the bf16 reference are within 2 bf16 ulps of its pick by its own logits (0, 1, 1 and 2
+ulps; the engine's own logits tie in three of them). Against the fp32 run the port is as near as the reference's own
+bf16 run on the step rows, the depth logits and the codes through the loop, and further on the encoder, the
+projector, the prefill rows, text top-1 (8 misses against 4), the depth decoder's greedy agreement (17 picks of
+18,540) and the codec (0.25 dB in the median): the fp32 bound is not met on those rows.
 
 Replies with the card's audio settings (temperature 0.4, penalty 1.2, seeds 1000 + i, the server and
 `speech_chat_client.py`; the reference through `reference_speech.py`, its first audio being the first sampled frame
-plus that frame's codec decode). Two rounds, the servers and the reference alternated; other services were resident
+plus that frame's codec decode). Two rounds, the server and the reference in turn; other services were resident
 on the Mac but idle (runs paused while its interactive voice service was in use):
 
 | | TensorFold Metal | reference runtime (MPS bf16) |
 | --- | --- | --- |
 | first text, median | 0.034 s | |
-| first audio, median | 0.063 s | 0.172 to 0.191 s |
-| whole reply, median (6.5 s of speech) | 0.67 to 0.68 s | 2.41 to 2.54 s |
-| UTMOS22 strong, median (min) | 4.43 (4.35) | 4.44 (4.15) |
-| speech vs its own text, WER | 1.5% | 1.2% |
+| first audio, median | 0.064 s | 0.171 to 0.175 s |
+| whole reply, median (6.5 s of speech) | 0.655 s | 2.31 to 2.32 s |
+| UTMOS22 strong, median (min) | 4.427 (4.352) | 4.438 (4.149) |
+| speech vs its own text, WER | 1.47% | 1.20% |
 
-WER is the checkpoint's own ASR on each reply's audio against the reply's streamed text.
-
+WER is the checkpoint's own ASR on each reply's audio against the reply's streamed text. Both audio margins are met:
+the UTMOS22 median is 0.011 below the reference's and the WER 0.27 points above. Any chunking of a reply's codes
+through the codec gives the same bytes (five chunkings of each turn, on the tensor units and with `LFM3_OMNI_NAX=0`).
 
 ## Licence
 

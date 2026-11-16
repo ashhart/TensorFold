@@ -1,0 +1,66 @@
+[
+ {
+  "utterance": "u05",
+  "slot": 58,
+  "reference token": 278,
+  "engine token": 671,
+  "engine logits (reference token, its pick)": [
+   15.5,
+   15.6875
+  ],
+  "engine margin, bf16 ulps": 3.0,
+  "reference logits (its pick, engine token)": [
+   15.625,
+   15.625
+  ],
+  "reference margin, bf16 ulps": 0.0
+ },
+ {
+  "utterance": "u06",
+  "slot": 39,
+  "reference token": 6134,
+  "engine token": 3246,
+  "engine logits (reference token, its pick)": [
+   10.75,
+   10.75
+  ],
+  "engine margin, bf16 ulps": 0.0,
+  "reference logits (its pick, engine token)": [
+   10.6875,
+   10.625
+  ],
+  "reference margin, bf16 ulps": 1.0
+ },
+ {
+  "utterance": "u13",
+  "slot": 38,
+  "reference token": 2222,
+  "engine token": 1125,
+  "engine logits (reference token, its pick)": [
+   16.375,
+   16.375
+  ],
+  "engine margin, bf16 ulps": 0.0,
+  "reference logits (its pick, engine token)": [
+   16.375,
+   16.25
+  ],
+  "reference margin, bf16 ulps": 1.0
+ },
+ {
+  "utterance": "u15",
+  "slot": 1,
+  "reference token": 6963,
+  "engine token": 47,
+  "engine logits (reference token, its pick)": [
+   15.4375,
+   15.4375
+  ],
+  "engine margin, bf16 ulps": 0.0,
+  "reference logits (its pick, engine token)": [
+   15.5,
+   15.375
+  ],
+  "reference margin, bf16 ulps": 2.0
+ }
+]
