@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const engine = @import("cuda_engine.zig");
 const prompt_solo = @import("cuda_prompt_solo.zig");
 const prompt_cuts = @import("cuda_prompt_cuts.zig");
@@ -93,7 +94,7 @@ pub const Link = struct {
             a.add(l.buf.ptr);
             a.add(@as(u32, @intCast(16 + ids.len)));
             a.add(w);
-            try cuda.launch.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
+            try cuda_pdl.launch(put, .{ .grid = .{ .x = 1 }, .block = .{ .x = 128 } }, l.stream, &a);
             try l.post(first_bytes);
             if (ids.len > inline_ids) try l.post(64 + ids.len * 4);
             return;

@@ -1,6 +1,8 @@
 // qmm._bmm and qmm._bmm_rows by hand (the BF16 matmuls): out [m][n] = x rows . w rows over K slices.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include "glm_glue_router.cuh"
 #include "common/router_mma.cuh"
 
@@ -286,6 +288,7 @@ __device__ void bmm_tiles(const __nv_bfloat16* x, const __nv_bfloat16* w, void* 
 extern "C" __global__ void __launch_bounds__(256)
     tf_glm_bmm_tile(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, int64_t m, int64_t x_stride,
                     int64_t n, int64_t k, int sk, int f32) {
+  glm_pdl::enter();
   glm_bmm::bmm_tiles<128, 64, 64, 3, 2, 4, true>(x, w, out, m, x_stride, n, k, sk, f32);
 }
 
@@ -293,6 +296,7 @@ extern "C" __global__ void __launch_bounds__(256)
 extern "C" __global__ void __launch_bounds__(256, 2)
     tf_glm_bmm_tile1(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, int64_t m, int64_t x_stride,
                      int64_t n, int64_t k, int sk, int f32) {
+  glm_pdl::enter();
   glm_bmm::bmm_tiles<128, 128, 32, 3, 2, 4, false>(x, w, out, m, x_stride, n, k, sk, f32);
 }
 
@@ -300,6 +304,7 @@ extern "C" __global__ void __launch_bounds__(256, 2)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_router_tile(const __nv_bfloat16* x, const __nv_bfloat16* w, float* part, int64_t rows, int64_t x_stride,
                        int64_t d, int64_t ne, int ks) {
+  glm_pdl::enter();
   tf_router_mma::logits<4, 2, 64, 4, false, true>(x, static_cast<int>(x_stride), w, part, static_cast<int>(rows),
                                                    static_cast<int>(d), static_cast<int>(ne), ks);
 }
@@ -308,6 +313,7 @@ extern "C" __global__ void __launch_bounds__(128)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_bmm_decode(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m,
                       int64_t x_stride, int64_t n, int64_t k, int sk, int f32) {
+  glm_pdl::enter();
   glm_bmm::bmm<16, 64, 64, 1, 4>(x, w, out, part, m, x_stride, n, k, sk, 0, f32);
 }
 
@@ -323,7 +329,7 @@ __device__ __forceinline__ void dec_tile(const __nv_bfloat16* x, const __nv_bflo
 #define TF_GLM_DEC_TILE(name, BN, ST)                                                                              \
   extern "C" __global__ void __launch_bounds__(128)                                                                \
       name(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, float* part, int64_t m, int64_t x_stride,  \
-           int64_t n, int64_t k, int sk, int f32) {                                                                \
+           int64_t n, int64_t k, int sk, int f32) { glm_pdl::enter();                                              \
     glm_bmm::dec_tile<BN, ST>(x, w, out, part, m, x_stride, n, k, sk, f32);                                       \
   }
 TF_GLM_DEC_TILE(tf_glm_bmm_d32s1, 32, 1)
@@ -336,5 +342,6 @@ TF_GLM_DEC_TILE(tf_glm_bmm_d64s2, 64, 2)
 extern "C" __global__ void __launch_bounds__(128)
     tf_glm_bmm_rows(const __nv_bfloat16* x, const __nv_bfloat16* w, void* out, int64_t m, int64_t x_stride,
                     int64_t n, int64_t k, int sk, int f32) {
+  glm_pdl::enter();
   glm_bmm::bmm<128, 64, 32, 2, 2>(x, w, out, nullptr, m, x_stride, n, k, sk, 1, f32);
 }

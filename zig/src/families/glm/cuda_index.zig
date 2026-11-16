@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 
 const sparse = @import("cuda_sparse.zig");
 
@@ -81,7 +82,7 @@ pub const Kernels = struct {
         const g = scoresGrid(rows, nb);
         var a: cuda.Args = .{};
         inline for (.{ qi, wts, @as(i64, @intCast(w_stride)), pk, out, at, @as(i64, @intCast(rows)), @as(i64, @intCast(np)), @as(i64, @intCast(nb)), scale, wscale, @as(i64, @intCast(heads)), @as(c_int, score_tiles), pt, @as(i64, @intCast(ps)) }) |v| a.add(v);
-        try cuda.launch.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
+        try cuda_pdl.launch(k.scores_fn, .{ .grid = .{ .x = g[0], .y = g[1] }, .block = .{ .x = threads } }, s, &a);
     }
 
     /// tf_glm_select_rows' launch: each row's 512 best pools of scores [rows][np] ascending into out [rows][512] int64.
@@ -89,7 +90,7 @@ pub const Kernels = struct {
         const t = tile(np);
         var a: cuda.Args = .{};
         inline for (.{ scores_ptr, out, @as(i64, @intCast(np)), at, @as(c_int, topk), @as(c_int, @intCast(t.cap)), @as(c_int, @intCast(t.target)), path }) |v| a.add(v);
-        try cuda.launch.launch(k.pools_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = pool_threads } }, s, &a);
+        try cuda_pdl.launch(k.pools_fn, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = pool_threads } }, s, &a);
     }
 };
 
@@ -153,6 +154,8 @@ test "GLM index: prompt chunks take the kernels; a decode row, an unaligned key 
     const latent = @import("cuda_latent.zig");
     var d: cuda.Driver = undefined;
     d.api.cuLaunchKernel = Recorded.launch;
+    d.api.cuLaunchKernelEx = @import("cuda_pdl.zig").forwardEx(Recorded.launch);
+    d.func_name = null;
     d.api.cuModuleGetFunction = Recorded.function;
     var ks: glue.Kernels = undefined; // 20 tf_glm_scores, 21 tf_glm_select_rows, 22 its wide form
     ks.scores = .{ .d = &d, .handle = @ptrFromInt(20) };

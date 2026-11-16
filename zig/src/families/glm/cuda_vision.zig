@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const cuda_pdl = @import("cuda_pdl.zig");
 const core = @import("core");
 const formats = @import("cuda_formats.zig");
 const projection = @import("cuda_proj.zig");
@@ -120,7 +121,7 @@ pub const Funcs = struct {
 };
 
 fn launch(r: *const Run, f: cuda.Function, grid: cuda.Dim3, threads: u32, a: *cuda.Args) !void {
-    try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, r.stream, a);
+    try cuda_pdl.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, r.stream, a);
 }
 
 pub const Tower = struct {
