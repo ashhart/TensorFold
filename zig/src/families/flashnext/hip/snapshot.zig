@@ -38,7 +38,8 @@ pub const Saved = struct {
     }
 };
 
-fn copyOut(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usize, gpa: std.mem.Allocator) ![]u8 {
+/// `side`: the part past the sparse layers (the last region) from a side buffer instead (forward.Mark).
+fn copyOut(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usize, side: ?u64, gpa: std.mem.Allocator) ![]u8 {
     var list: std.ArrayList(Region) = .empty;
     defer list.deinit(gpa);
     try regions(c, at, ratio, &list, gpa);
@@ -47,12 +48,9 @@ fn copyOut(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usiz
     const out = try gpa.alloc(u8, n);
     errdefer gpa.free(out);
     var off: usize = 0;
-    for (list.items) |r| {
-        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyDtoH(
-            out[off..].ptr,
-            @ptrFromInt(c.mem.base() + r.offset),
-            r.len,
-        ));
+    for (list.items, 0..) |r, i| {
+        const src = if (side != null and i + 1 == list.items.len) side.? else c.mem.base() + r.offset;
+        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyDtoH(out[off..].ptr, @ptrFromInt(src), r.len));
         off += r.len;
     }
     return out;
@@ -94,12 +92,43 @@ pub fn save(
 ) !*Saved {
     try s.synchronize();
     if (c.len != at) return error.SnapshotNotAtMark;
+    return saveFrom(gpa, d, c, head, at, ratio, null, c.pooled, c.history);
+}
+
+/// The state at `at` inside the last prompt chunk (forward.Mark): rows below it from the caches, the rest from `side`.
+pub fn saveMarked(
+    gpa: std.mem.Allocator,
+    d: *const hip.Runtime,
+    s: hip.Stream,
+    c: *const cache.Caches,
+    head: ?*const cache.Caches,
+    at: usize,
+    ratio: usize,
+    side: u64,
+    history: [2]i64,
+) !*Saved {
+    try s.synchronize();
+    if (c.len <= at) return error.SnapshotNotAtMark;
+    return saveFrom(gpa, d, c, head, at, ratio, side, at / ratio, history);
+}
+
+fn saveFrom(
+    gpa: std.mem.Allocator,
+    d: *const hip.Runtime,
+    c: *const cache.Caches,
+    head: ?*const cache.Caches,
+    at: usize,
+    ratio: usize,
+    side: ?u64,
+    pooled: usize,
+    history: [2]i64,
+) !*Saved {
     const out = try gpa.create(Saved);
     errdefer gpa.destroy(out);
-    const main = try copyOut(d, c, at, ratio, gpa);
+    const main = try copyOut(d, c, at, ratio, side, gpa);
     errdefer gpa.free(main);
-    const h: []u8 = if (head) |x| try copyOut(d, x, at, ratio, gpa) else &.{};
-    out.* = .{ .at = @intCast(at), .pooled = c.pooled, .history = c.history, .main = main, .head = h };
+    const h: []u8 = if (head) |x| try copyOut(d, x, at, ratio, null, gpa) else &.{};
+    out.* = .{ .at = @intCast(at), .pooled = pooled, .history = history, .main = main, .head = h };
     return out;
 }
 
