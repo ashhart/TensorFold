@@ -1,5 +1,4 @@
-//! ZONOS3's frame sampler on the host, the reference's sample_tts for one request: specials masked, a repetition
-//! penalty over each codebook's recent codes, temperature, top-k, top-p and min-p, then one draw a codebook.
+//! ZONOS3's frame sampler on the host: specials masked, repetition penalty, temperature, top-k, top-p, min-p, one draw.
 const std = @import("std");
 const cfg = @import("config.zig");
 
@@ -46,8 +45,7 @@ fn argmax(x: []const f32) usize {
     return best;
 }
 
-/// Frame `frame`'s codes from its logits [codebooks][audio_vocab] (overwritten). `recent` holds the generated rows so
-/// far, oldest first; `stop` is the one special id a codebook may draw.
+/// Frame `frame`'s codes from its logits (overwritten); `recent`: generated rows, oldest first; `stop`: the end id.
 pub fn sample(logits: *[C][V]f32, recent: []const [C]i32, frame: u64, stop: i32, sampling: Sampling) [C]i32 {
     const s = sampling.clamped();
     const window: usize = if (s.repetition_window > 0 and s.repetition_penalty > 1.0 and s.repetition_codebooks > 0) @min(s.repetition_window, recent.len) else 0;

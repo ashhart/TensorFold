@@ -10,8 +10,7 @@ pub const headroom_db: f32 = 3.0;
 /// The limiter's knee, -1 dBFS: samples at or below it pass unchanged.
 pub const knee: f32 = 0.8912509381337456;
 
-/// The frames to decode: the prompt's silence rows `prefill` then `generated`, each codebook's delay removed, up to
-/// the first end-of-audio frame (`eos_frame` counts generated rows) or the last complete frame. Caller frees.
+/// The frames to decode: `prefill` then `generated` rows undelayed, up to the first end of audio or last whole frame.
 pub fn frames(gpa: std.mem.Allocator, prefill: []const [W]i32, generated: []const [W]i32, eos_frame: ?usize) ![][C]i32 {
     const n = prefill.len + generated.len;
     var target: usize = n -| (C - 1);
