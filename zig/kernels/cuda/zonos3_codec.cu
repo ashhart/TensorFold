@@ -1,5 +1,4 @@
-// ours: ZONOS3's codec decoder (ZAC) on CUDA in fp32: causal transformer stages, ConvNeXt blocks and the
-// multi-resolution iSTFT tail. A row or sample depends only on its position, never on how a stream was chunked.
+// ours: ZONOS3's codec decoder on CUDA in fp32; a row or sample depends on its position, never on a stream's chunks.
 #include <math.h>
 #include <stdint.h>
 #include "common/reduce.cuh"
@@ -49,8 +48,7 @@ extern "C" __global__ void __launch_bounds__(256) zc_layernorm(const float* __re
   for (int i = threadIdx.x; i < D; i += blockDim.x) yr[i] = (xr[i] - mean) * inv * w[i] + b[i];
 }
 
-// Rows of [q | k | v] (each D = heads * 64) at positions pos0 + row: q and k rotate in adjacent pairs, in place;
-// the rotated k and v go to the caches' row pos0 + row. A block a (row, head), a thread a pair.
+// Rows [q | k | v] (each D = heads * 64) at pos0 + row: q and k rotate in adjacent pairs; k and v go to the cache row.
 extern "C" __global__ void __launch_bounds__(32) zc_attn_prep(float* __restrict__ qkv, int D, int pos0,
                                                               float* __restrict__ kc, float* __restrict__ vc) {
   const int t = blockIdx.x, h = blockIdx.y, m = threadIdx.x;
@@ -69,8 +67,7 @@ extern "C" __global__ void __launch_bounds__(32) zc_attn_prep(float* __restrict_
   vc[at + 1] = q[2 * D + 1];
 }
 
-// Causal local attention of (row, head) at position p = pos0 + row over cache rows max(0, p - ctx + 1) .. p.
-// Keys go to threads by offset from the window's first row, and the block folds in a fixed order.
+// Causal local attention of (row, head) at p = pos0 + row over cache rows max(0, p - ctx + 1) .. p, in a fixed order.
 extern "C" __global__ void __launch_bounds__(128) zc_attention(const float* __restrict__ qkv, int D,
                                                                const float* __restrict__ kc,
                                                                const float* __restrict__ vc, int pos0, int ctx,
@@ -193,8 +190,7 @@ extern "C" __global__ void zc_spec(float* __restrict__ y, int half) {
   r[half + i] = mag * sinf(ph);
 }
 
-// Centered overlap-add of windowed frames [F][N] at hop: out[i] is sample n0 + i, frames in ascending order, over the
-// window envelope (win2 = window squared) of the same frames.
+// Centered overlap-add of windowed frames [F][N] at hop: out[i] is sample n0 + i over the same frames' window envelope.
 extern "C" __global__ void zc_ola(const float* __restrict__ frames, const float* __restrict__ win2, int F, int N,
                                   int hop, long long n0, long long count, float* __restrict__ out) {
   const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;

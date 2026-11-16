@@ -93,8 +93,7 @@ extern "C" __global__ void __launch_bounds__(256) z3_attnres(const float* __rest
   }
 }
 
-// y[r, n] = sum_k W[n, k] x[r / xrep, k] (+ bias[n]): W bf16 [N, K], K a multiple of 8. A warp an output, x staged
-// in K * 4 bytes of dynamic shared. With picks, row r reads W + picks[r] * pick_stride.
+// y[r, n] = sum_k W[n, k] x[r / xrep, k] (+ bias[n]): bf16 W [N, K], K % 8 == 0; picks move row r's W by picks[r].
 extern "C" __global__ void __launch_bounds__(256) z3_linear(const bf16* __restrict__ W, const float* __restrict__ x,
                                                             int x_stride, int xrep, int K, int N,
                                                             float* __restrict__ y, int y_stride,
@@ -139,8 +138,7 @@ extern "C" __global__ void z3_conv_silu(const float* __restrict__ proj, int ps, 
   state[c * 3 + 2] = s2;
 }
 
-// A row's GDN inputs for head blockIdx.y: l2-normed q (scaled by 128^-1/2) and k in place, decay and beta.
-// conv is [T][3 * 512] (q | k | v); proj rows hold a at a_off + h and b at a_off + 4 + h.
+// GDN inputs of (row, head): q (l2-normed, times 128^-1/2) and k in place in conv [T][q | k | v]; decay and beta.
 extern "C" __global__ void __launch_bounds__(128) z3_gdn_prep(float* __restrict__ conv, const float* __restrict__ proj,
                                                               int ps, int a_off, const bf16* __restrict__ A_log,
                                                               const bf16* __restrict__ dt_bias,
@@ -201,8 +199,7 @@ extern "C" __global__ void __launch_bounds__(128) z3_gated_norm(const float* __r
   y[(size_t)t * 512 + h * 128 + i] = x * inv * b2f(w[i]) * tf_common::silu(proj[(size_t)t * ps + z_off + h * 128 + i]);
 }
 
-// Attention inputs of row blockIdx.x at position pos0 + row: q [16][32] rms-normed, scaled by |temp| and rotated in
-// place; k [4][32] rms-normed and rotated into the cache row, v copied. A warp a head; pairs rotate (2m, 2m + 1).
+// Attention inputs of a row at pos0 + row: q rms-normed, times |temp|, rotated in place; k and v to the caches.
 extern "C" __global__ void __launch_bounds__(512) z3_attn_prep(float* __restrict__ q, const float* __restrict__ kv,
                                                                const bf16* __restrict__ temp, int pos0,
                                                                float* __restrict__ kc, float* __restrict__ vc,
@@ -228,8 +225,7 @@ extern "C" __global__ void __launch_bounds__(512) z3_attn_prep(float* __restrict
   }
 }
 
-// Causal attention of (row blockIdx.x, head blockIdx.y) over cache rows 0 .. pos0 + row, then the head's sigmoid gate.
-// Keys go to threads by index mod 256 and the block folds in a fixed order, so a row's bits depend on its position.
+// Causal attention of (row, head) over cache rows 0 .. pos0 + row, gated; keys by index mod 256, a fixed fold.
 extern "C" __global__ void __launch_bounds__(256) z3_attention(const float* __restrict__ q,
                                                                const float* __restrict__ kc,
                                                                const float* __restrict__ vc,

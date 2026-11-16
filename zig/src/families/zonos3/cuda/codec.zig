@@ -1,5 +1,4 @@
-//! ZONOS3's codec decoder on one GPU: undelayed code frames [n][10] in, 44.1 kHz fp32 samples out. The trunk keeps
-//! its state (ConvNeXt histories, each transformer layer's keys and values), so frames may arrive in any chunks.
+//! ZONOS3's codec decoder on one GPU: code frames [n][10] in any chunks (the trunk keeps its state), 44.1 kHz fp32 out.
 const std = @import("std");
 const cuda = @import("cuda");
 const kern = @import("codec_kernels.zig");
