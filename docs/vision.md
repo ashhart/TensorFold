@@ -30,7 +30,7 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --vision
 tensorfold serve TensorFold/GLM-5.3-Flash-MLX-4bit-MTP --vision
 ```
 
-GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights.
+GLM-5.3-Flash image input is currently MLX-only. CUDA uses the same flag with `--backend cuda` for supported Qwen checkpoints; their vision tower must use floating-point weights. The native server decodes ModelOpt's MXFP8 and NVFP4 tower linears, as `nvidia/Qwen3.8-Flash-Next-FP4-Local` stores its tower, to bf16 on the host while the tower loads, so the tower runs in bf16 as before; a floating-point tower is read as stored, byte for byte, so its rows do not change. The decoded tower uploads as bf16, so its device bytes are a floating-point tower's, and the decode holds one linear on the host at a time.
 
 On a small CUDA card the resident tower and its 4 GiB workspace reserve take a large part of the startup budget. `--vision-offload` (with `--vision`, CUDA only) keeps the tower in host RAM, copies it to the GPU only while an image is encoded, and reserves 2.25 GiB instead. On one RTX 4090 with the Qwen3.8-27B EXL3 3.50bpw pack and DFlash2, the largest window with `--vision` went from 11,922 to 38,686 tokens; a 4,096-token image peaked about 1.3 GB above idle. Each image request pays the copy of the roughly 0.9 GiB tower to the GPU and back.
 MLX also reads per-module quantized tower weights when the checkpoint declares their format.
@@ -390,5 +390,7 @@ budget never has to make room for an image. A request's images go through the to
 replace the `<|image_pad|>` placeholders in the prompt chunks, which rotate at M-RoPE's t, h and w positions
 (interleaved sections 11, 11 and 10), and the reply's rows rotate at their position plus the layout's shift, as
 transformers' `get_rope_index` lays them out. Text-only requests keep their bits. One image holds at most 4,096
-tokens (one tower call); `--vision-image-tokens` bounds a request's images together. JPEG needs libturbojpeg on the
+tokens (one tower call); `--vision-image-tokens` bounds a request's images together. A tower whose linears ModelOpt
+stores as MXFP8 or NVFP4, as the Flash Next FP4 checkpoints store theirs, is decoded to bf16 at load
+(`zig/src/vision/qwen_cuda_weights.zig`; a floating-point tower is read as stored). JPEG needs libturbojpeg on the
 machine (PNG decodes everywhere); video parts are refused.
