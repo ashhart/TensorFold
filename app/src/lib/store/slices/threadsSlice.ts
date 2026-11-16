@@ -421,7 +421,7 @@ export const threadsSlice: Slice = (set, get) => ({
       const next: any = { ...s.settings }
       if (key === 'theme' && ['system', 'light', 'dark'].includes(value)) next.theme = value
       else if (key === 'approvalMode' && ['suggest', 'auto', 'readonly'].includes(value)) next.approvalMode = value
-      else if (key === 'reasoningEffort' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultrathinks', 'ultracode', 'dynamic', '512'].includes(value)) next.reasoningEffort = value
+      else if (key === 'reasoningEffort' && ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultrathink', 'ultracode', 'dynamic', '512'].includes(value)) next.reasoningEffort = value
       else return // unknown key/value — leave the chip pending rather than mark it applied
       // Only mark applied once the save actually lands (saveSettings surfaces its own error).
       try { await s.saveSettings(next) } catch { return }
