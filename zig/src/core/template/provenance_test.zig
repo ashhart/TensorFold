@@ -144,7 +144,7 @@ test "provenance property covers every implemented filter" {
         if (std.mem.eql(u8, name, "replace")) args = &.{ v.Value.literal("SPECIAL"), req };
         try checkValue(&c.rt, try filters.filter(&c, name, input, args, &.{}));
     }
-    try t.expectEqual(@as(usize, 30), filters.implemented.len);
+    try t.expectEqual(@as(usize, 31), filters.implemented.len);
 }
 
 const str_supported = [_][]const u8{ "capitalize", "count", "endswith", "find", "index", "join", "lower", "lstrip", "removeprefix", "removesuffix", "replace", "rfind", "rindex", "rsplit", "rstrip", "split", "startswith", "strip", "upper" };
