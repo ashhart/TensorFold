@@ -87,6 +87,7 @@ test {
     _ = shard_edit;
     _ = lora_merge;
     _ = quant;
+    _ = quant.gptq;
     _ = nvfp4_rows;
     _ = route_ref;
     _ = nvfp4_csf;
