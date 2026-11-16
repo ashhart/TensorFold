@@ -1,11 +1,15 @@
-//! A strict subset of TOML 1.0 for flat settings files: top-level ``key = value`` lines, the rest refused by line.
+//! A strict subset of TOML 1.0 for flat settings files: ``key = value`` lines, at most one ``[[name]]`` table kind.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// A number keeps its text, ready to be a flag's value: no ``_``, and no leading ``+`` on an integer.
 pub const Scalar = union(enum) { string: []const u8, integer: []const u8, float: []const u8, boolean: bool };
 pub const Value = union(enum) { scalar: Scalar, array: []const []const u8 };
-pub const Entry = struct { key: []const u8, line: u32, value: Value };
+/// ``table`` counts the ``[[name]]`` headers before the entry from 1; 0 is the top level.
+pub const Entry = struct { key: []const u8, line: u32, value: Value, table: u32 = 0 };
+
+/// The one ``[[name]]`` array-of-tables header a reader takes; null, the flat reader's, refuses every table.
+pub const Shape = struct { table: ?[]const u8 = null };
 
 /// Why a text was refused and on which line (1-based).
 pub const Problem = struct { line: u32 = 0, message: []const u8 = "" };
@@ -14,6 +18,14 @@ pub const Error = error{ Invalid, OutOfMemory };
 
 /// Top-level ``key = value`` lines in file order; every text this accepts is valid TOML 1.0 with the same meaning.
 pub fn parse(a: Allocator, text: []const u8, problem: *Problem) Error![]const Entry {
+    return (try parseShaped(a, text, .{}, problem)).entries;
+}
+
+/// The entries in file order and the line of each ``[[name]]`` header, the first being table 1.
+pub const Shaped = struct { entries: []const Entry, tables: []const u32 };
+
+/// ``parse`` that also takes ``shape``'s ``[[name]]`` headers, each entry tagged with the table it sits in.
+pub fn parseShaped(a: Allocator, text: []const u8, shape: Shape, problem: *Problem) Error!Shaped {
     var r: Reader = .{ .a = a, .text = text, .problem = problem };
     if (std.mem.startsWith(u8, text, "\xef\xbb\xbf")) return r.fail("a byte order mark is not TOML 1.0: save the file without one");
     if (!std.unicode.utf8ValidateSlice(text)) {
@@ -22,6 +34,8 @@ pub fn parse(a: Allocator, text: []const u8, problem: *Problem) Error![]const En
         return r.fail("invalid UTF-8");
     }
     var out: std.ArrayList(Entry) = .empty;
+    var tables: std.ArrayList(u32) = .empty;
+    var table: u32 = 0;
     while (true) {
         r.blanks();
         if (r.done()) break;
@@ -30,10 +44,16 @@ pub fn parse(a: Allocator, text: []const u8, problem: *Problem) Error![]const En
             try r.comment();
             continue;
         }
-        if (r.peek() == '[') return r.fail("tables are not read: every key is a top-level setting");
+        if (r.peek() == '[') {
+            const name = shape.table orelse return r.fail("tables are not read: every key is a top-level setting");
+            try tables.append(a, r.line);
+            try r.header(name, out.items);
+            table += 1;
+            continue;
+        }
         const line = r.line;
         const key = try r.key();
-        for (out.items) |e| if (std.mem.eql(u8, e.key, key)) return r.fail("key defined twice");
+        for (out.items) |e| if (e.table == table and std.mem.eql(u8, e.key, key)) return r.fail("key defined twice");
         r.blanks();
         if (r.peek() == '.') return r.fail("dotted keys are not read: every key is a top-level setting");
         if (r.peek() != '=') return r.fail("expected '=' after the key");
@@ -43,9 +63,9 @@ pub fn parse(a: Allocator, text: []const u8, problem: *Problem) Error![]const En
         r.blanks();
         if (r.peek() == '#') try r.comment();
         if (!r.done() and !try r.lineEnd()) return r.fail("unexpected text after the value");
-        try out.append(a, .{ .key = key, .line = line, .value = value });
+        try out.append(a, .{ .key = key, .line = line, .value = value, .table = table });
     }
-    return out.items;
+    return .{ .entries = out.items, .tables = tables.items };
 }
 
 const Reader = struct {
@@ -93,6 +113,25 @@ const Reader = struct {
     fn comment(r: *Reader) Error!void {
         while (!r.done() and r.peek() != '\n' and !(r.peek() == '\r' and r.at + 1 < r.text.len and r.text[r.at + 1] == '\n')) : (r.at += 1)
             if (control(r.peek())) return r.fail("a control character in a comment");
+    }
+
+    /// A ``[[name]]`` header, blanks allowed in its brackets, then the rest of its line; any other table is refused.
+    fn header(r: *Reader, name: []const u8, before: []const Entry) Error!void {
+        if (!std.mem.startsWith(u8, r.text[r.at..], "[["))
+            return r.fail(try std.fmt.allocPrint(r.a, "a [table] is not read: each item is a [[{s}]] table", .{name}));
+        r.at += 2;
+        r.blanks();
+        const got = try r.key();
+        r.blanks();
+        if (r.peek() == '.') return r.fail("dotted table names are not read");
+        if (!std.mem.startsWith(u8, r.text[r.at..], "]]")) return r.fail("expected ]] after the table name");
+        r.at += 2;
+        if (!std.mem.eql(u8, got, name))
+            return r.fail(try std.fmt.allocPrint(r.a, "unknown table [[{s}]]: this file reads [[{s}]] tables", .{ got, name }));
+        for (before) |e| if (e.table == 0 and std.mem.eql(u8, e.key, name)) return r.fail("key defined twice");
+        r.blanks();
+        if (r.peek() == '#') try r.comment();
+        if (!r.done() and !try r.lineEnd()) return r.fail("unexpected text after the table header");
     }
 
     fn key(r: *Reader) Error![]const u8 {

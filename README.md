@@ -262,6 +262,7 @@ Large files come down in pieces over up to 16 connections, and an interrupted pu
 It refuses a checkpoint whose `model_type` has no native family, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints with a model type it knows, and `info` shows one checkpoint's family, format, context and memory floor.
 `models --json` prints the same list as one document for programs: `schema` 1, and each checkpoint's `repo`, `family` and `model_type`; `family` is a display title and `model_type` is the key to match on.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
+`tensorfold serve --router` serves every cached checkpoint, or the models a `--router-config` file lists, at one address, each loaded when a request's `model` field names it; see [several models at one address](docs/router.md).
 
 ## Context compaction
 

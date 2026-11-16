@@ -35,8 +35,8 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
         try out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ model, model_type });
         return 1;
     };
-    const flash_metal = @import("builtin").os.tag == .macos and std.mem.eql(u8, model_type, "qwen4_exp");
-    const weights = if (flash_metal) try @import("flashnext_memory").weightBytes(checkpoint, a, io, dir) else try hub.sizeOf(a, io, dir);
+    const flash_metal = flashMetal(model_type);
+    const weights = try weightBytes(a, io, dir, model_type);
     const details = hub.configDetails(a, io, dir);
     defer if (details.modelopt_formats) |formats| {
         for (formats) |format| a.free(format);
@@ -65,9 +65,7 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
     }
     try out.print("weights: {d:.2} GiB ({d} bytes)\n", .{ @as(f64, @floatFromInt(weights)) / GiB, weights });
     if (flash_metal) {
-        const memory = @import("flashnext_memory");
-        const inventory = try memory.weights_plan.read(core.Checkpoint, core.quant.mlx, a, io, dir);
-        const plan = try memory.budget(weights, memory.trained, inventory, 0);
+        const plan = try flashBudget(a, io, dir, weights);
         try out.print("startup budget: {d:.2} GiB (conservative raw/packed text weights, both prompt planes/selectors, KV/state, keepalive and {d} GiB runtime reserve; trained window)\n", .{ @as(f64, @floatFromInt(plan.steady)) / GiB, runtime_margin >> 30 });
         try out.print("cold pack budget: {d:.2} GiB (source pages, one output phase and conversion scratch; skipped with a validated pack; vision and requested storage are additional at load)\n", .{@as(f64, @floatFromInt(plan.building)) / GiB});
     } else try out.print("memory floor: {d:.2} GiB (weights plus a {d:.2} GiB runtime margin)\n", .{
@@ -75,6 +73,32 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
         @as(f64, @floatFromInt(runtime_margin)) / GiB,
     });
     return 0;
+}
+
+/// Flash Next on Metal reports a startup budget in place of the floor.
+fn flashMetal(model_type: []const u8) bool {
+    return @import("builtin").os.tag == .macos and std.mem.eql(u8, model_type, "qwen4_exp");
+}
+
+/// The weights `run` prints for a checkpoint of `model_type`.
+fn weightBytes(a: Allocator, io: std.Io, dir: []const u8, model_type: []const u8) !u64 {
+    return if (flashMetal(model_type)) try @import("flashnext_memory").weightBytes(checkpoint, a, io, dir) else try hub.sizeOf(a, io, dir);
+}
+
+fn flashBudget(a: Allocator, io: std.Io, dir: []const u8, weights: u64) !@import("flashnext_memory").Budget {
+    const flash = @import("flashnext_memory");
+    const inventory = try flash.weights_plan.read(core.Checkpoint, core.quant.mlx, a, io, dir);
+    return flash.budget(weights, flash.trained, inventory, 0);
+}
+
+/// What `run` prints as the floor (the startup budget for Flash Next on Metal) and the weights; null when unreadable.
+pub fn memory(a: Allocator, io: std.Io, dir: []const u8) ?struct { floor: u64, weights: u64 } {
+    const model_type = hub.modelType(a, io, dir);
+    const weights = weightBytes(a, io, dir, model_type) catch return null;
+    if (weights == 0) return null;
+    if (!flashMetal(model_type)) return .{ .floor = weights + runtime_margin, .weights = weights };
+    const plan = flashBudget(a, io, dir, weights) catch return null;
+    return .{ .floor = plan.steady, .weights = weights };
 }
 
 test "info prints family, format, context, weights and floor for a cached checkpoint" {
@@ -134,6 +158,27 @@ fn runConfig(a: Allocator, io: std.Io, config: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out.writer, null, null, dir));
     return out.toOwnedSlice();
+}
+
+test "info prints family: the floor a router reads is the one info prints, and an empty folder has none" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    try std.testing.expect(memory(a, io, dir) == null);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\": \"llama\"}" });
+    const weights: [4096]u8 = @splat('x');
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = &weights });
+    const got = memory(a, io, dir).?;
+    try std.testing.expectEqual(try hub.sizeOf(a, io, dir), got.weights);
+    try std.testing.expectEqual(got.weights + runtime_margin, got.floor);
+    var out: std.Io.Writer.Allocating = .init(a);
+    if (hub.family("llama") == null) return; // a build without the family prints a refusal, not a floor
+    try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out.writer, null, null, dir));
+    try std.testing.expect(has(out.written(), try std.fmt.allocPrint(a, "memory floor: {d:.2} GiB", .{@as(f64, @floatFromInt(got.floor)) / GiB})));
 }
 
 test "info names Bolt and its sorted modelopt formats" {

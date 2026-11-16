@@ -1330,6 +1330,38 @@ server sends the counters described under [Responses](#responses). For memory fi
 [`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
 `tensorfold:process_footprint_bytes`.
 
+## Router
+
+[`tensorfold serve --router`](router.md) forwards each model request to the child its `model` field names and
+relays the child's reply unchanged, head and body, as it arrives. It answers these routes itself:
+
+- `GET /health` (and `GET /`), without a key. With keys configured the body is only `{"status": "ok"}`. Without keys
+  it has `status` (`"ok"`), `router` (`true`), `models` (how many it serves), `max_loaded`, `loaded` (an object for
+  each child that is `loading`, `ready` or `stopping`: its `id`, `state` and `requests_in_progress`) and `version`. While the
+  router stops it answers 503 `{"status": "draining", "requests_in_progress": N}` with `Retry-After`, as a server does.
+- `GET /v1/models` (and `/models`) lists every id and alias, loaded or not, each with a boolean `loaded` last. A ready
+  child's entries are its own `/v1/models` entries, with every field a server gives them; the others have `id`,
+  `object`, `created` and `owned_by` only, since the rest is known once the model loads.
+- `GET /api/tags` lists every id and alias, and `GET /api/ps` the ready children, each as `{"name": ID, "model": ID}`,
+  as a server lists its own names. `GET /api/version` gives the router's release.
+
+Its own refusals come in the route's error shape (OpenAI's error object, Anthropic's typed error, or Ollama's
+`{"error": "..."}`), with these codes:
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `model_required` | The body names no `model` |
+| 404 | `model_not_found` | No id or alias is that name |
+| 404 | `unsupported_route` | A route the router does not serve in this version, named in the message |
+| 502 | `model_server_failed` | The child exited, or closed the connection, before its reply |
+| 503 | `models_busy` | Every loaded child is busy and `--max-loaded` leaves no room, after 5 minutes; `Retry-After: 10` |
+| 503 | `model_too_large` | The model's memory floor is larger than the machine's memory |
+| 503 | `model_load_failed` | Its child exited while loading; the message has the child's last log line |
+| 503 | `model_load_timeout` | Its child was not ready in time |
+| 503 | `server_restarting` | The router is stopping; `Retry-After: 30` |
+
+A child's own replies, errors included, pass through as the child sent them.
+
 ## Cancel a request
 
 `POST /v1/requests/{id}/cancel` (or `/requests/{id}/cancel`) cancels a running or queued request by the id its

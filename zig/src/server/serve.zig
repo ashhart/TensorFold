@@ -45,8 +45,19 @@ pub fn installSignals(keys: bool) void {
     if (keys) auth.installHangup();
 }
 
+/// SIGHUP stops the process as SIGTERM does: a router without keys, whose children must not outlive its terminal.
+pub fn stopOnHangup() void {
+    const stop: posix.Sigaction = .{ .handler = .{ .handler = onStop }, .mask = posix.sigemptyset(), .flags = 0 };
+    posix.sigaction(.HUP, &stop, null);
+}
+
 pub fn stopping() bool {
     return stop_requested.load(.acquire);
+}
+
+/// The signal that asked for the stop, by name, for a shutdown line.
+pub fn stopName() []const u8 {
+    return signalName(stop_signal.load(.acquire));
 }
 
 /// The hard limit macOS reads as unlimited.
@@ -312,7 +323,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     return 0;
 }
 
-fn openTcp(io: std.Io, args: anytype) ?listener_mod.Listener {
+/// The TCP listener on ``args.host`` and ``args.port``; null after printing why it cannot listen.
+pub fn openTcp(io: std.Io, args: anytype) ?listener_mod.Listener {
     const address = resolve(io, args.host, args.port) orelse {
         std.debug.print("tensorfold: cannot resolve --host {s}\n", .{args.host});
         return null;

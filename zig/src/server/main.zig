@@ -64,12 +64,19 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | web [ARGS...] | slide audit [flags] | serve MODEL [flags] | serve --router [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "web")) {
         const options = @import("build_options");
         return web_cli.main(init, argv[2..], .{ .version = options.version, .is_release = options.is_release });
+    }
+    if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve") and @import("router/args.zig").wanted(@ptrCast(argv[2..]))) {
+        // the router runs its children under POSIX signals and process groups; Windows refuses it by name
+        if (comptime @import("builtin").os.tag == .windows) {
+            std.debug.print("tensorfold serve --router is not supported on Windows yet: run tensorfold serve MODEL for each model\n", .{});
+            return 2;
+        } else return @import("router/router.zig").main(init, @ptrCast(argv[2..]), .{ .repos = RouterCheckpoints.repos, .memory = RouterCheckpoints.memory }, @import("build_options").version);
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
         for (argv[2..]) |arg| if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
@@ -101,7 +108,7 @@ pub fn main(init: std.process.Init) !u8 {
     // a chat with a running server works on every platform; chat_cli.zig refuses its own serve child on Windows
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "chat")) return chat_cli.main(init, argv[2..]);
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("usage: tensorfold-native capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n", .{});
+        std.debug.print("usage: tensorfold-native capabilities --json | models [--json] | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | slide audit [flags] | serve MODEL [flags] | serve --router [flags] | benchmark MODEL [flags] | chat [MODEL] [flags]\n", .{});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -273,3 +280,14 @@ fn samplingFlags(args: cli.Args) @import("family_sampling.zig").Flags {
 }
 
 const Closer = @import("idle_unload_closer.zig").Closer;
+
+/// What the router reads through ``tensorfold models`` and ``tensorfold info``, from the checkpoint commands.
+const RouterCheckpoints = struct {
+    fn repos(a: std.mem.Allocator, io: std.Io, env: ?*const std.process.Environ.Map) anyerror![]const []const u8 {
+        return checkpoint_cli.cachedRepos(a, io, env);
+    }
+    fn memory(a: std.mem.Allocator, io: std.Io, dir: []const u8) ?@import("router/catalog.zig").Memory {
+        const m = checkpoint_cli.memory(a, io, dir) orelse return null;
+        return .{ .floor = m.floor, .weights = m.weights };
+    }
+};

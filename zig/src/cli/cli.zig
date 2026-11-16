@@ -18,6 +18,11 @@ const usage =
     \\
 ;
 
+/// The cached checkpoints `models` lists, by repo id: a router's models when it has no config.
+pub const cachedRepos = @import("hub.zig").cachedRepos;
+/// One checkpoint's memory floor and weights as `info` computes them: a router's memory check.
+pub const memory = info.memory;
+
 /// True when argv starts with a checkpoint subcommand.
 pub fn wants(args: []const []const u8) bool {
     if (args.len == 0) return false;

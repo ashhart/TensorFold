@@ -40,7 +40,18 @@ pub const Options = struct {
     /// The child's only API key: TENSORFOLD_API_KEY in its environment and the probes' bearer (none for a benchmark).
     key: ?[]const u8 = null,
     words: Words = .{},
+    /// The child's environment before ``key`` is added, in place of ``environ``'s copy of the parent's.
+    environ: ?*const std.process.Environ.Map = null,
+    /// A second Ctrl-C kills the child, a command's one; false: one of a router's several.
+    guard: bool = true,
+    /// Ends the startup wait early, as a benchmark's stop signal does.
+    stop: ?*const std.atomic.Value(bool) = null,
+    /// Why ``spawn`` gave no child.
+    failure: ?*Failure = null,
 };
+
+/// What ended a ``spawn`` that gave no child: its lock or log, the spawn, an early exit, the timeout or a stop.
+pub const Failure = enum { none, setup, spawn, exited, timeout, stopped };
 
 /// The startup timeout without --startup-timeout: 600 s, plus 6 s per GB of weights past 20 GB, at most 3600 s.
 pub fn startupTimeout(weight_bytes: u64) f64 {
@@ -71,8 +82,13 @@ pub fn argv(a: Allocator, plan: Plan) ![]const []const u8 {
 
 /// The parent's variables without the API key, request log, seed salt and upload token; no live line or update check.
 pub fn environ(a: Allocator, parent: *const std.process.Environ.Map) !std.process.Environ.Map {
+    return environWithout(a, parent, &.{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" });
+}
+
+/// The parent's variables without ``drop``, with no live line, update check or Hugging Face download.
+pub fn environWithout(a: Allocator, parent: *const std.process.Environ.Map, drop: []const []const u8) !std.process.Environ.Map {
     var env = try parent.clone(a);
-    for ([_][]const u8{ "TENSORFOLD_API_KEY", "TENSORFOLD_REQUEST_LOG", "TENSORFOLD_SEED_SALT", "TENSORFOLD_BENCHMARK_TOKEN" }) |k| _ = env.orderedRemove(k);
+    for (drop) |k| _ = env.orderedRemove(k);
     try env.put("TENSORFOLD_NO_LIVE", "1");
     try env.put("TENSORFOLD_NO_UPDATE_CHECK", "1");
     try env.put("HF_HUB_OFFLINE", "1");
@@ -143,6 +159,8 @@ pub const Managed = struct {
     base_url: []const u8 = "",
     reaped: bool = false,
     closed: bool = false,
+    /// The wait status ``exited`` reaped, once it has.
+    status: c_int = 0,
 
     /// Spawns the benchmark's child and waits until it serves its name; null with ``problem`` set, or "" when stopped.
     pub fn start(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, plan: Plan, o: Options, problem: *[]const u8) !?Managed {
@@ -151,17 +169,18 @@ pub const Managed = struct {
 
     /// Spawns ``child_argv`` and waits until it serves ``o.served``; null with ``problem`` set, or "" when stopped.
     pub fn spawn(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, child_argv: []const []const u8, o: Options, problem: *[]const u8) !?Managed {
+        if (o.failure) |f| f.* = .none;
         var rand: [8]u8 = undefined;
         io.random(&rand);
         const log_path = try std.fmt.allocPrint(a, "{s}/.serve-{s}.log", .{ o.bench_dir, std.fmt.bytesToHex(rand, .lower) });
-        var child_env = try environ(a, env);
+        var child_env = if (o.environ) |base_env| try base_env.clone(a) else try environ(a, env);
         if (o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
-        const lock = if (o.lock) lockRun(io, o.bench_dir, problem) orelse return null else null;
+        const lock = if (o.lock) lockRun(io, o.bench_dir, problem) orelse return failed(o, .setup) else null;
         const cwd = std.Io.Dir.cwd();
         const log = cwd.createFile(io, log_path, .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch {
             if (lock) |l| l.close(io);
             problem.* = o.words.log;
-            return null;
+            return failed(o, .setup);
         };
         const group: ?posix.pid_t = if (o.own_group) 0 else null;
         const child = std.process.spawn(io, .{ .argv = child_argv, .environ_map = &child_env, .stdin = .ignore, .stdout = .{ .file = log }, .stderr = .{ .file = log }, .pgid = group }) catch {
@@ -169,12 +188,12 @@ pub const Managed = struct {
             log.close(io);
             if (lock) |l| l.close(io);
             problem.* = o.words.spawn;
-            return null;
+            return failed(o, .spawn);
         };
-        stop_flag.guardChild(child.id.?);
+        if (o.guard) stop_flag.guardChild(child.id.?);
         cwd.deleteFile(io, log_path) catch {};
         var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key };
-        const ok = m.ready(a, o.startup_timeout_s, o.tail, o.words, problem) catch |e| {
+        const ok = m.ready(a, o, problem) catch |e| {
             _ = m.stop();
             return e;
         };
@@ -183,21 +202,28 @@ pub const Managed = struct {
         return null;
     }
 
-    fn ready(m: *Managed, a: Allocator, timeout_s: f64, tail: ?*[]const []const u8, words: Words, problem: *[]const u8) !bool {
+    fn failed(o: Options, why: Failure) ?Managed {
+        if (o.failure) |f| f.* = why;
+        return null;
+    }
+
+    fn ready(m: *Managed, a: Allocator, o: Options, problem: *[]const u8) !bool {
         var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = m.io };
         client.connection_pool.free_size = 0;
         defer client.deinit();
-        const deadline = stream.deadlineAfter(m.io, timeout_s);
+        const deadline = stream.deadlineAfter(m.io, o.startup_timeout_s);
         var port: ?u16 = null;
         var buf: [64 << 10]u8 = undefined;
         while (stream.now(m.io) < deadline) {
-            if (stop_flag.requested() != null) {
+            if (stop_flag.requested() != null or (if (o.stop) |s| s.load(.acquire) else false)) {
                 problem.* = "";
+                _ = failed(o, .stopped);
                 return false;
             }
             if (m.exited()) {
-                problem.* = words.exited;
-                if (tail) |t| t.* = try lastLines(a, m.logEnd(&buf));
+                problem.* = o.words.exited;
+                if (o.tail) |t| t.* = try lastLines(a, m.logEnd(&buf));
+                _ = failed(o, .exited);
                 return false;
             }
             if (port == null) {
@@ -207,7 +233,8 @@ pub const Managed = struct {
             if (port != null and try probe(a, m.io, &client, m.base_url, m.served, m.key)) return true;
             m.io.sleep(.fromMilliseconds(200), .awake) catch {};
         }
-        problem.* = try std.fmt.allocPrint(a, "{s} {d} s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", .{ words.timed_out, timeout_s });
+        problem.* = try std.fmt.allocPrint(a, "{s} {d} s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", .{ o.words.timed_out, o.startup_timeout_s });
+        _ = failed(o, .timeout);
         return false;
     }
 
@@ -264,6 +291,7 @@ pub const Managed = struct {
             const rc = platform.c.waitpid(m.pid, &status, 0);
             if (rc >= 0 or posix.errno(rc) != .INTR) break;
         }
+        m.status = status;
         m.reaped = true;
         return true;
     }
