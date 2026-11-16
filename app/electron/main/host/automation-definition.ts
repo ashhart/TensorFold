@@ -51,4 +51,3 @@ export function computeNextRun(a: Automation, from = Date.now()): number | null 
   }
   return nextDailyAutomationRun(a.atHour, a.atMinute, Math.max(from, a.lastRunAt ?? from), a.timeZone)
 }
-
