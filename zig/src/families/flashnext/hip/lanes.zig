@@ -74,6 +74,8 @@ pub const Fx = struct {
     next_slot: u32 = 0,
     /// The kept row inside the prompt chunk being saved (forward.Mark): its position, n-gram history and side buffer.
     marked: ?Marked = null,
+    /// The last prompt chunk's keeps, saved as the next step begins: its first token goes out first.
+    keeps: ?states.Keeps = null,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
@@ -97,6 +99,7 @@ pub const Fx = struct {
     }
 
     pub fn deinit(f: *Fx) void {
+        f.keeps = null;
         if (f.store) |*st| st.deinit();
         if (f.link != null) f.send(&.{@backingInt(worker.Op.stop)}) catch {};
         f.e.stream.synchronize() catch {};
@@ -133,7 +136,7 @@ pub const Fx = struct {
     }
 
     pub fn backend(f: *Fx) be.Backend {
-        return .{ .ptr = f, .vtable = &.{
+        return .{ .ptr = f, .first_before_draft = true, .vtable = &.{
             .prefill = prefillFn,
             .prefill_step = prefillStepFn,
             .first = firstFn,
@@ -282,6 +285,7 @@ pub const Fx = struct {
     /// One prompt chunk on the 64-row grid; the head absorbs its rows; the last draws the first token. `_: u32`.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, _: u32) anyerror!bool {
         const f = of(ptr);
+        states.settle(f);
         if (s.isCancelled()) return error.Cancelled;
         const lane = if (f.lanes.get(s)) |l| (if (l.fill != null) l else try f.begin(s)) else try f.begin(s);
         const e = f.e;
@@ -332,18 +336,13 @@ pub const Fx = struct {
             }
         }
         fill.at = to;
-        for (held[0..n_marks]) |mk| {
-            f.marked = mk;
-            if (f.store) |*st| _ = st.keep(prompt, @intCast(mk.at), lane, &.{}, &.{});
-        }
-        f.marked = null; // a kept row at the chunk's end next saves the live caches
         fill.next = taken;
-        if (fill.next < fill.count and to == fill.stops[fill.next]) {
-            if (f.store) |*st| _ = st.keep(prompt, @intCast(to), lane, &.{}, &.{});
-            fill.next += 1;
-        }
+        const live = fill.next < fill.count and to == fill.stops[fill.next];
+        if (live) fill.next += 1;
+        f.keeps = .{ .lane = lane, .s = s, .marks = held, .n = n_marks,
+            .live = if (live) to else null, .last = last, .from = fill.from, .kept0 = fill.kept0 };
+        if (!last or f.link != null) states.settle(f); // the other ranks take each keep in step order
         if (!last) return false;
-        if (f.store) |*st| st.report(prompt.len, @intCast(fill.from), st.counts.kept - fill.kept0);
         try hip.raw.copy(lane.streams, 0, out.streams.ptr + (rows - 1) * row_bytes, row_bytes, e.stream.handle);
         if (s.grammar != null and lane.first_row == null) lane.first_row = try f.gpa.alloc(u16, e.cfg.vocab);
         const o = e.ops(&e.arena);
@@ -401,6 +400,7 @@ pub const Fx = struct {
     /// Every window in one forward, each from its stream's kept length; every row drawn at its position.
     fn verifyFn(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const f = of(ptr);
+        states.settle(f);
         const e = f.e;
         const m = &e.weights.model;
         if (windows.len > forward.max_segs) return error.WindowTooWide;
@@ -474,6 +474,7 @@ pub const Fx = struct {
 
     fn keepFn(ptr: *anyopaque, windows: []const be.Window, paths: []const []const u32) anyerror!void {
         const f = of(ptr);
+        states.settle(f);
         for (windows, paths) |w, path| {
             const lane = f.lanes.get(w.stream) orelse return error.UnknownStream;
             for (path, 0..) |r, j| if (r != j) return error.TreesNotBuilt;
@@ -483,7 +484,9 @@ pub const Fx = struct {
 
     /// The head absorbs each stream's kept rows (residual streams and the token after each), then chains its drafts.
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
-        try draft_batch.draft(of(ptr), requests);
+        const f = of(ptr);
+        states.settle(f);
+        try draft_batch.draft(f, requests);
     }
 
     fn heldFn(ptr: *anyopaque, s: *lanes.Stream, _: std.mem.Allocator) anyerror!?lanes.stream.Held {
@@ -493,6 +496,7 @@ pub const Fx = struct {
 
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         const f = of(ptr);
+        states.settle(f);
         const kv = f.lanes.fetchRemove(s) orelse return;
         if (f.link != null) f.send(&.{ @backingInt(worker.Op.release), kv.value.id }) catch {};
         f.free(kv.value);
