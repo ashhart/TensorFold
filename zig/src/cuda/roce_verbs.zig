@@ -125,6 +125,12 @@ pub fn opsCall(comptime T: type, ctx: *Context, offset: usize) T {
     return slot.*;
 }
 
+/// TF_ROCE_HCA through platform/environment.zig (past `max_hcas` names refused by name), else NCCL's NCCL_IB_HCA.
+pub fn hcaSetting() !?[*:0]const u8 {
+    if (try @import("sys").environment.list("TF_ROCE_HCA")) |own| return own.ptr;
+    return std.c.getenv("NCCL_IB_HCA");
+}
+
 /// The HCAs to stripe over, at most two: TF_ROCE_HCA, else NCCL_IB_HCA without "=^" prefixes or ":port" suffixes.
 pub fn hcaNames(given: ?[*:0]const u8, names: *[max_hcas][64]u8, lens: *[max_hcas]usize) !u32 {
     const raw = given orelse return error.NoHca;

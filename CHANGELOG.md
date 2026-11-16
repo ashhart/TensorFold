@@ -493,6 +493,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Lanes: shared rounds price a plain (undrafted) round apart from drafted rows, from trial rounds whose first is a dropped warm-up, and fit row costs from plain and drafted widths, so only how many drafts a round asks for changes; on gfx1151 with Qwen3.6-35B-A3B and MTP it is level with main with tokens unchanged, and opt-in `TF_SHARED_PRICE_LOG=1` prints each shared round's prices (#2687, refs #2605).
 
+- CUDA RoCE all-gather (`TF_ROCE=1`): each peer's stripes go on the HCAs that share its IPv4 /24, the rule `fabric/tp` already uses, so three GB10s cabled port 0 to port 1 in a switchless ConnectX-7 triangle take the RDMA path instead of falling back to NCCL. A switch and two ranks keep their queue pairs, layout and kernel arguments; a `TF_ROCE_HCA` with more than two names is refused by name instead of cut (fixes #3411).
+
 - Docs: strict tools under `tool_choice: "auto"` and `TENSORFOLD_TOOL_GRAMMAR`: what a strict tool's schema holds, what is served unconstrained and what is refused, and the legacy DeepSeek alias (#3235, fixes #3177).
 
 - Qwen 3.5, 3.6 and 3.8 on CUDA: a background prompt fill stops between chunks when a foreground request is waiting, keeps the prefix it has already filled, and resumes from there; replies are unchanged (#2873, part of #2812). Thanks to @tacosta.

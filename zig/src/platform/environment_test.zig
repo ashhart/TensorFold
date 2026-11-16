@@ -17,7 +17,7 @@ const Env = struct {
 test "environment: every strict reader refuses bad text before opening a model, naming value and accepted forms" {
     for (e.rules) |r| {
         try t.expectEqual(@as(?u64, null), try e.parse(r.name, null));
-        const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
+        const bad: []const []const u8 = if (r.kind == .path) &.{ "key\nfile", "key\x1b[2Kfile", "\x7f" } else if (r.kind == .names) &.{ "a,b,c", ",", "1\nwrong" } else if (e.isReal(r.kind)) &.{ "typo", "nan", "-inf", "1\nwrong" } else &.{ "typo", "-1", "18446744073709551616", "1\nwrong" };
         for (bad) |raw| {
             try t.expectError(error.InvalidEnvironment, e.parse(r.name, raw));
             const why = (try e.refusal(a, Env{ .name = r.name, .raw = raw }, all)).?;
@@ -102,6 +102,8 @@ const valid = [_]Case{
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "0", .n = 0 },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .raw = "1", .n = 1 },
     .{ .name = "TF_ROCE_GID_INDEX", .raw = "2147483647", .n = 2147483647 },
+    .{ .name = "TF_ROCE_HCA", .raw = "rocep1s0f0,rocep1s0f1", .n = 2 },
+    .{ .name = "TF_ROCE_HCA", .raw = "=mlx5_0:1", .n = 1 },
     .{ .name = "TF_DRAMA_PREFILL_ROWS", .raw = " 128 ", .n = 128 },
     .{ .name = "TF_DRAMA_REFERENCE_CACHE", .raw = "0", .n = 0 },
     .{ .name = "TF_FLASHNEXT_GROUPED_ROWS", .raw = "0", .n = 0 },
@@ -209,7 +211,7 @@ test "environment: range, enum, whitespace and native prompt geometry refusals a
         .{ "TF_QWEN_KEEP_LATE", "2" },          .{ "TF_TIMING", "2" },
         .{ "TF_NO_TREES", "true" },             .{ "TF_MTP_TREES", "yes" },
         .{ "TF_MTP_BATCH", "off" },             .{ "TF_QWEN_POOL_LOG", "true" },
-        .{ "TF_COST_KEY_TRACE", "on" },
+        .{ "TF_COST_KEY_TRACE", "on" },         .{ "TF_ROCE_HCA", "rocep1s0f0,roceP2p1s0f0,rocep1s0f1" },
     }) |c| try t.expectError(error.InvalidEnvironment, e.parse(c[0], c[1]));
     try t.expectEqual(@as(?u64, null), try e.parse("TF_CUDA_DEVICE", "   "));
     try t.expectEqual(@as(?u64, 0), try e.parse("TF_Q27_COPY_ROWS", "+0"));
