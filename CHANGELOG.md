@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 remote prefill: a pulled hand-off's drafter rings land in the slot when it holds them, and `TF_DSV41_HANDOFF_CHECK=synth` writes a synthetic hand-off for timing (#3599).
+
 - DeepSeek V4.1 remote prefill: `--mcdma-link` takes a comma list of up to eight links and pulls a split hand-off's shards in parallel (#3598).
 
 - DeepSeek V4.1 remote prefill: the Mac prefills only the last prompt token after a pull (`TF_PREFILL_TAIL`, default 1; 0 keeps the chunk rule) (#3597).
