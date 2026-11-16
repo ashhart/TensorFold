@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Server: `POST /v1/responses/input_tokens` answers `{"object": "response.input_tokens", "input_tokens": N}` for the body `POST /v1/responses` takes, N being the prompt that request would prefill (instructions, tools, items and a stored `previous_response_id` included), with nothing generated; a body `/v1/responses` refuses gets the same error, and a request whose prompt the run rewrites first (`--compact-at` compaction, a `--cortheon` turn) is refused by name.
+- Server: `POST /v1/responses/input_tokens` answers `{"object": "response.input_tokens", "input_tokens": N}` for the body `POST /v1/responses` takes, N being the prompt that request would prefill (instructions, tools, items and a stored `previous_response_id` included), with nothing generated; a body `/v1/responses` refuses gets the same error, and a request whose prompt the run rewrites first (`--compact-at` compaction, a `--cortheon` turn) is refused by name (#3537).
 
 - Server: every reply carries `X-Request-Id`, streamed replies too: a client's own id of 1 to 128 printable ASCII characters comes back and ends each of the request's log lines, and otherwise the server's id for the request, the `chatcmpl-`, `cmpl-` or `resp_` id `POST /v1/requests/{id}/cancel` takes, else a new `req_` id; no request is refused for it and bodies are unchanged (#3536).
 
