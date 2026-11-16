@@ -50,6 +50,7 @@ pub const Generation = struct {
     chat: bool = true,
     stops: reply_text.Stops,
     ignore_eos: bool,
+    ends: []const u32, // the request's end tokens: the model's, and a FIM reply's FIM end tokens (completion_fim.zig)
     max_tokens: u32,
     single: bool, // parallel_tool_calls: false: a cut call is no call, so its prose ends as the whole reply's does
     token_ids: bool, // "return_token_ids": the response's tensorfold block carries the reply's token ids
@@ -73,7 +74,7 @@ pub const Generation = struct {
     loop_stop: bool = false, // --loop-guard-stop: the engine ends the reply where the loop guard fires
 
     fn eos(g: *const Generation, t: u32) bool {
-        return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
+        return !g.ignore_eos and std.mem.indexOfScalar(u32, g.ends, t) != null;
     }
 
     /// Close a tool call left open at the model end token, except when another stop condition ended the reply.
@@ -275,7 +276,7 @@ pub const Generation = struct {
         const stopped: ?u32 = if (g.loop_stop) m.stats.loop_period else null;
         const reason = if (stopped != null) @import("loop_stop.zig").finish_reason else ended;
         const finished_ns = nowNs(g.srv.io);
-        const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
+        const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.ends);
         const raw = try g.srv.text.decode(a, content_tokens);
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);

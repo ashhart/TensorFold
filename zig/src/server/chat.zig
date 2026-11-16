@@ -49,6 +49,8 @@ pub const Input = struct {
     echo: bool = false,
     /// ``echo`` with ``max_tokens: 0``: the engine draws one token the reply drops, so the reply is the prompt alone.
     prompt_only: bool = false,
+    /// The reply's end tokens when they are not only the model's: a FIM reply also ends at its FIM end tokens.
+    eos: ?[]const u32 = null,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
     /// The encoded image bytes the request may send; chat's limits unless a route (OCR) sets its own.
@@ -205,7 +207,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .max_tokens = @intCast(@min(limit, std.math.maxInt(u32))),
         .sampling = sampling,
         .penalties = try srv.resolvePenalties(cx, f, instruct),
-        .eos = if (stops_opt.ignore_eos) &.{} else srv.eos,
+        .eos = if (stops_opt.ignore_eos) &.{} else input.eos orelse srv.eos,
         .drafts = drafts,
         .background = background,
         .history_len = @intCast(rendered.history_len),
@@ -285,7 +287,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     srv.release(preparing, null); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = if (input.prompt_only) 0 else request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .asked = input.cancel, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = prepared.reasoning or (srv.text.vtable.format != .kimi and srv.info.capability(.reasoning) and reply_text.isChannel(srv.markers)), .chat = input.prompt == null, .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .ends = request.eos, .max_tokens = if (input.prompt_only) 0 else request.max_tokens, .tools = input.tools, .token_ids = prepared.token_ids, .lp = if (request.logprobs != null) .{ .positions = if (sink) |s| s.tokens != null else false } else null, .loop_stop = request.loop_stop, .single = flag(input.fields, "tool_call_single") orelse false };
     defer srv.noteRequest(prepared.prompt_len, cached_tokens.within(box.cached, prepared.prompt_len), gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds, if (box.stats.prefill_seconds != null) box.stats.queued_seconds else null);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {

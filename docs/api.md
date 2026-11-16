@@ -387,6 +387,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `priority` | `background` yields to foreground requests | Both |
 | `return_token_ids` | The reply's token ids in the response's `tensorfold.token_ids`, the tokens its `token_sha256` hashes | Native |
 | `echo` | `/v1/completions` only: the prompt's text, and with `logprobs` its tokens' entries, ahead of the reply's, described below | Native |
+| `suffix` | `/v1/completions` only: the text after the cursor; the reply is the middle, written with the tokenizer's fill-in-the-middle tokens (see [Fill in the middle](#fill-in-the-middle)) | Native |
 
 `n` must be 1; multiple choices receive HTTP 400.
 
@@ -464,6 +465,21 @@ completes the match. The GLM engine, and Flash Next and Nemotron on two ranks, d
 token or the reply limit; the server returns the reply only up to the match. Where a CUDA engine honors
 `ignore_eos`, end tokens inside the reply are decoded into its text, as on MLX, and `finish_reason` is `length`
 unless a stop string or a tool call ended the reply.
+
+### Fill in the middle
+
+`/v1/completions` takes OpenAI's `suffix` for code completion: `prompt` is the text before the cursor and `suffix`
+the text after it, and the reply is what goes between them, streamed or not. The server writes the model's prompt in
+prefix-suffix-middle order from the tokenizer's own tokens: what the tokenizer puts before any prompt (a
+beginning-of-text token, if it has one), `<|fim_prefix|>`, the prompt, `<|fim_suffix|>`, the suffix, then
+`<|fim_middle|>`. Those are the Qwen spellings, which the Qwen3.5 and Qwen3.8 tokenizers hold as added tokens; a
+tokenizer that holds all three whole serves `suffix`, and these are the only spellings read. The prompt and suffix
+encode as plain text, so an added token spelled in the code stays text rather than becoming a marker. The reply ends
+at the model's own end tokens and at `<|fim_pad|>` and `<|endoftext|>` where the vocabulary has them, which the
+reply's text leaves out like any end token; `ignore_eos: true` turns these off too. An absent, null or empty
+`suffix` leaves the request as it was. A `suffix` that is not a string, a prompt of token ids or a list, a body with
+`messages`, `echo: true` (it would return the fill-in-the-middle prompt) and a model whose tokenizer has no
+fill-in-the-middle tokens return HTTP 400 naming `suffix`. Chat routes ignore the field.
 
 ### Exact incremental token IDs
 
