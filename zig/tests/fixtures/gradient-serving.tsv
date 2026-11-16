@@ -49,7 +49,7 @@ zig/kernels/cuda/nvfp4q.cuh	5fe4fa58568f2293bb72ccfa58b362ba2783b21a781e56946a5a
 zig/kernels/cuda/prefill_attention.cu	905fff2c9018d778557a60ed2c81c24ce220adf5b092c8c32f8a1782963f9f28	raw	main 82f3dde92 (pattn_kernel<64, 8, 4, 8> over paged caches), 94a9a48d6 (helpers to prefill_attention.cuh, SASS unchanged), 191061381 (#2609: two new pattn_kernel instances at two query heads a block, head dims 128 and 64; existing instances unchanged)
 zig/kernels/cuda/prefill_attention_rows.cuh	21975248a7ec9efd199a28324bba837e7b78f066a63b426ab26587cba38fda5e	raw	main 94a9a48d6 (helpers shared with the contract controls, SASS unchanged)
 zig/kernels/cuda/probe.cu	c5a6ca4513311d25282866de2185a056ec9746443a13094db80de62f7474255a	raw
-zig/kernels/cuda/prompt16.cu	972fb2f601da2d64549717d27e642363243b0e2df88cfeffa81452216e160ae4	raw
+zig/kernels/cuda/prompt16.cu	2da3c4ea23de0fa9b2536db0fa66f07bb2d5b45db36c2f9cb321e039ebeac7c2	raw	#3252: the lean gate/up SwiGLU pair launch for a dense MLP prompt
 zig/kernels/cuda/qmm.cu	a55a9d00d9097c5f5bd88c8c538a0481fe13b37badd2e3faf4cdde9c86c9f93d	raw
 zig/kernels/cuda/common/qmm_frag.cuh	418dce9d64df0b8751c8ca982ae3f93c5fc54e4aecb9a8df3f0780129dcb675a	raw
 zig/kernels/cuda/common/router_tiles.cuh	aab559bf104e3f47344deaa9ae10622b6962b8a77b398f572ba974055dfafd3c	raw
@@ -101,7 +101,7 @@ zig/src/cuda/module.zig	1f0a141cf7149a87ad456e96cb1830f0c137ad98af70071721918989
 zig/src/cuda/mxfp8.zig	2bbe9ea41b462f633b68e7a32c06814a28e34dee284383788c0a8f06e8df2af4	raw
 zig/src/cuda/nccl.zig	30abc4b904e675916e9bb8c4701ca3f1e5615472da4a5e09d2476865d81afe65	raw	commits 53abe4556, ba1a9a2bb, 05350da4c, 40dccba55, 6bdb12918, b923e554c, 7c9d845c0, 98a5dc657, 143ed758f, 6636e6964; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/norms.zig	c6ac613ff91b31257b5bce55311d8cf38a785862bfad9eb0c7bf0b2ba7b0df95	raw
-zig/src/cuda/nvfp4.zig	62bd32b4dcc7d4e7f077c2147adf65a1aea7744dda4845b06da72c946e6c5277	raw
+zig/src/cuda/nvfp4.zig	0556e93c12e4eb21db45d0d9d9ee7d4c1c4ab6a32a359b67edfc0b4b7fb90928	raw	#3252: launcher for the lean SwiGLU pair
 zig/src/cuda/qlinear.zig	680c653d110b53e52918bb13f7c54c12ffac4097959319281dc7509c085c062f	raw	commits da01294e0, 7f6f940eb, 4cec0eba1, c360607f0, ba1a9a2bb, b631fe069, 0a2a1c681, aca5a88e2, c12503be2, 7b17d0eb7, d7e44b555, 59be20e24, d40bc9e8b, f1f7f9abd, 3915bceaf, e8eabc82c; series patches 14-runtime-foundation.patch, 25-mimo-02.patch; MiMo-only aliases omitted from this candidate; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/src/cuda/qmmf.zig	760f033510402806cb06e70eec45cfe068bd5cd029315a05c9c8c493c7f12b30	raw	main ec76abd45, c3acc3466, fbf8d960d (BF16 prompt tile, Flash Next only), 6a1feb26e (TF_QMMF_HALF_BELOW refused by name)
 zig/src/cuda/rank_scatter.zig	303fd707713af732dd1d31c6a940dd4eeed44e9b26fe202919da5925654fc212	raw
