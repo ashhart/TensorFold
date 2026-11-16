@@ -104,6 +104,7 @@ pub fn reply(e: *Engine, smp: Sampling, stream: Streaming, sink: Sink, forced: ?
                 si += 1;
                 fc.text_hits += @intFromBool(tok == ref);
                 fc.text_total += 1;
+                if (tok != ref) try noteMiss(e, fc, si - 1, ref, tok);
                 tok = ref;
             }
             st_.text_tokens += 1;
@@ -179,6 +180,16 @@ pub fn reply(e: *Engine, smp: Sampling, stream: Streaming, sink: Sink, forced: ?
         e.prof_n = @splat(0);
         e.g.dispatches = 0;
     }
+}
+
+/// Records a teacher-forced text miss with the engine's logits of the reference's token and of its own pick.
+fn noteMiss(e: *Engine, fc: *Forced, slot: usize, ref: u32, pick: u32) !void {
+    if (fc.n_misses == fc.misses.len) return;
+    const lg = try e.gpa.alloc(f32, cfg.vocab);
+    defer e.gpa.free(lg);
+    try e.textLogits(lg);
+    fc.misses[fc.n_misses] = .{ .slot = slot, .ref = ref, .pick = pick, .ref_logit = lg[ref], .pick_logit = lg[pick] };
+    fc.n_misses += 1;
 }
 
 fn flushCodec(e: *Engine, ola: *OverlapAdd, pending: *std.ArrayList([cfg.codebooks]i32), decoded: *usize, sink: Sink, st_: *Stats, t_req: i128, final: bool) !void {

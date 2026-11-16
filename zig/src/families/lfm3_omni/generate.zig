@@ -251,6 +251,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, a: Args, e: *Engine, tok: *const core
         hidden.deinit(gpa);
     }
     if (forced) |f| std.debug.print("FORCED text {d}/{d} codes {d}/{d} frames {d}/{d}\n", .{ f.text_hits, f.text_total, f.code_hits, f.code_total, f.frame_hits, f.frame_total });
+    if (forced) |f| for (f.misses[0..f.n_misses]) |m| std.debug.print("MISS text slot {d} ref {d} pick {d} ref_logit {d} pick_logit {d}\n", .{ m.slot, m.ref, m.pick, m.ref_logit, m.pick_logit });
     std.debug.print("TEXT {s}\n", .{text});
     std.debug.print("RESULT lfm3-omni OK input_s={d:.2} audio_tokens={d} prompt_rows={d} mel_ms={d:.1} encode_ms={d:.1} prefill_ms={d:.1} first_text_ms={d:.1} first_frame_ms={d:.1} first_pcm_ms={d:.1} text_tokens={d} frames={d} speech_s={d:.2} step_ms={d:.1} depth_ms={d:.1} codec_ms={d:.1} total_ms={d:.1}\n", .{ @as(f64, @floatFromInt(pcm.len)) / 16000.0, st.audio_tokens, st.prompt_rows, st.mel_ms, st.encode_ms, st.prefill_ms, st.first_text_ms, st.first_frame_ms, st.first_pcm_ms, st.text_tokens, st.frames, @as(f64, @floatFromInt(st.samples)) / 24000.0, st.step_ms, st.depth_ms, st.codec_ms, st.total_ms });
 }

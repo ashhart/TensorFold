@@ -43,6 +43,11 @@ pub const Forced = struct {
     code_total: usize = 0,
     frame_hits: usize = 0,
     frame_total: usize = 0,
+    /// The text slots picked differently (the first 32), each with the engine's own logits of the two tokens.
+    misses: [32]Miss = undefined,
+    n_misses: usize = 0,
+
+    pub const Miss = struct { slot: usize, ref: u32, pick: u32, ref_logit: f32, pick_logit: f32 };
 };
 
 pub const Stats = struct {
