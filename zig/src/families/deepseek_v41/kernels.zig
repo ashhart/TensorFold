@@ -215,6 +215,7 @@ test {
     _ = kv_glue;
     _ = release;
     _ = @import("release_split.zig");
+    std.testing.refAllDecls(@import("kernels_replay_release.zig"));
     _ = @import("kernels_shapes.zig");
 }
 

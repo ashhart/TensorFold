@@ -23,6 +23,8 @@ pub const Widths = struct {
     experts: std.AutoHashMapUnmanaged(u32, [2][2]u32) = .empty,
     /// each routed layer's expert K2s present (bit k2 set), gate/up and down: x3gm runs one launch a width present
     gm: std.AutoHashMapUnmanaged(u32, [2]u32) = .empty,
+    /// a release checkpoint's dense projections by weight prefix: FP8 blocks or BF16 (release_dense.zig)
+    release: std.StringHashMapUnmanaged(@import("release_dense.zig").Form) = .empty,
 
     pub fn k2(w: *const Widths, name: []const u8) !u32 {
         return w.dense.get(name) orelse error.NoWidth;
@@ -329,6 +331,10 @@ pub const Emitter = struct {
     }
 
     pub fn fusedNorm(e: *Emitter, tag: []const u8, ps: []const Proj, norm: ?Norm) !void {
+        if (e.o.format == .release_fp8) {
+            if (norm != null) return error.ReleaseRefusesR1; // RMS_FOLD is part of r1, which the release path refuses
+            return @import("release_dense.zig").fused(e, tag, ps);
+        }
         const m: usize = @intCast(e.n);
         const segs = try e.a.alloc(dense.Seg, ps.len);
         for (ps, segs, 0..) |p, *s, i| {
@@ -376,6 +382,7 @@ pub const Emitter = struct {
 
     /// Upstream's rot_in + linear: one projection, its trellis as strips unless one 128-column block.
     pub fn upstream(e: *Emitter, w: []const u8, x: Arg, k: i64, n: i64, y: Arg) !void {
+        if (e.o.format == .release_fp8) return @import("release_dense.zig").upstream(e, w, x, k, n, y);
         const k2: i64 = try e.w.k2(w);
         const xh = try e.buf("L.{s}.xh", .{w}, .f16, &.{ e.n, k });
         try e.ext("tensorfold_exl3_linear_v4.rot_in", &.{ x, try e.weight("{s}.suh", .{w}, .f16, &.{k}), xh });

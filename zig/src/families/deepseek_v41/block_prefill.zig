@@ -120,6 +120,7 @@ pub const Seg = struct {
     /// y = x [m, K] @ W [K, N] (`w`'s prefix): per column block, upstream's rot_in, the W_q unpack, `_gemm`.
     pub fn matmul(s: *Seg, w: []const u8, form: Form, x: Arg, k: i64, n: i64, y: Out) !void {
         const e = s.e;
+        if (e.o.format == .release_fp8) return @import("release_dense.zig").matmul(e, w, x, k, n, y.role, y.dt, y.stride, y.offset);
         const m = e.n;
         // a float projection: one `_plain` launch over the segment's rows, into the same columns of `y`
         if (e.w.plain(w)) return e.plain(.{ .w = w, .x = x, .k = @intCast(k), .n = @intCast(n), .y = try e.view(y.role, y.dt, &.{ m, n }, &.{ y.stride, 1 }, y.offset) });
