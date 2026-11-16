@@ -133,7 +133,7 @@ test "the chunk cap is 512 rows beside a live decoder under an engine's default,
     defer s.deinit(gpa);
     try core.addStream(&s);
     defer core.backend.release(&s);
-    try std.testing.expectEqual(@as(u32, fill.decode_cap_rows), fill.capRows(&host)); // the engine's opt-in caps like the flag
+    try std.testing.expectEqual(@as(u32, fill.decode_cap_rows), fill.capRows(&host)); // the engine caps like the flag
     core.backend.chunk_invariant = false; // a gated-off family ignores the hint entirely
     try std.testing.expectEqual(@as(u32, 0), fill.capRows(&host));
     core.backend.chunk_invariant = true;
