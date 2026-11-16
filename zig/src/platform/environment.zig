@@ -19,6 +19,7 @@ pub const Rule = struct {
     /// A whole number's own bounds inside its kind's; a real kind applies `max` too when it is set.
     min: u64 = 0,
     max: u64 = std.math.maxInt(u64),
+    base: u8 = 10,
     /// When nonempty, the only whole numbers accepted.
     only: []const u64 = &.{},
     /// A `.word` setting's accepted texts; the parsed value is the matching index.
@@ -108,6 +109,13 @@ pub const rules = [_]Rule{
     .{ .name = "XPU_A8_BITS", .scope = .xpu, .kind = .bit_width, .forms = "4 or 8" },
     .{ .name = "XPU_TP", .scope = .xpu, .kind = .u32, .only = &.{ 1, 2, 4 }, .forms = "1, 2 or 4" },
     .{ .name = "XPU_DUMP_H", .scope = .xpu, .kind = .path, .forms = "a file path without control characters" },
+    .{ .name = "XPU_CTX", .scope = .xpu, .kind = .positive, .min = 1, .max = 262144, .forms = "a whole context length from 1 to 262144" },
+    .{ .name = "XPU_MTP", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 disables MTP drafting; default 1)" },
+    .{ .name = "XPU_MTP_DEPTH", .scope = .xpu, .kind = .u32, .min = 1, .max = 15, .forms = "a whole draft depth from 1 to 15 (default 6)" },
+    .{ .name = "XPU_MTP_CONF", .scope = .xpu, .kind = .signed_real, .forms = "a finite cumulative log-probability cut (default -0.4)" },
+    .{ .name = "XPU_VERIFY_TEST", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (1 runs stand-in verify checks)" },
+    .{ .name = "XPU_FLASHNEXT_WARM", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 skips host PLE warmup; 1 forces it)" },
+    .{ .name = "XPU_DEVICE_ID", .scope = .xpu, .kind = .positive, .base = 0, .forms = "a nonzero PCI device id in decimal or 0x hex" },
     .{ .name = "LFM3_FUSE", .scope = .xpu, .kind = .u32, .forms = "a whole fusion mask from 0 to 4294967295" },
     .{ .name = "TF_SLIDE_POCKET_KEY", .scope = .slide, .kind = .word, .words = &.{ "auto", "reply", "subject", "both" }, .forms = "auto, reply, subject or both" },
     .{ .name = "TF_SLIDE_FIT_GIB", .scope = .slide, .kind = .size, .forms = "a whole nonnegative native-size GiB count" },
@@ -303,7 +311,7 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
         const b: []const u8 = if (r.kind == .flag) "1" else "8";
         if (!std.mem.eql(u8, text, a) and !std.mem.eql(u8, text, b)) return error.InvalidEnvironment;
     }
-    const n = std.fmt.parseInt(u64, text, 10) catch return error.InvalidEnvironment;
+    const n = std.fmt.parseInt(u64, text, r.base) catch return error.InvalidEnvironment;
     const max: u64 = switch (r.kind) {
         .u32, .positive, .device => std.math.maxInt(u32),
         .percent => 100,
