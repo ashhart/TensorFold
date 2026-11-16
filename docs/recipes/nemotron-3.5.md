@@ -240,9 +240,9 @@ The native HIP build serves `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-ML
 in groups of 64 with `mtp-4bit.safetensors`) on gfx1151 (AMD Ryzen AI MAX+ 395, Radeon 8060S, 128 GB unified
 LPDDR5X-8000, 512 MiB carve-out + 115 GiB GTT). At `--context 131072 --parallel 4 --prompt-cache-gib 0`, it plans
 17.34 GiB of model weights plus 1.15 GiB per stream (24.42 GiB GTT in use after load), runs 4-row verify windows with
-up to 3 MTP drafts under a 0.30 confidence floor, prefills prompts in 2,048-row chunks (`prefill_step=4096` default
-clamped to the family's chunk width), and replays captured round graphs on lone-stream rounds. `--mtp-drafts`,
-`--mtp-confidence` and mixed-width oQ checkpoints are refused by name on main.
+up to 3 MTP drafts sized by measured costs, prefills prompts in 2,048-row chunks (`prefill_step=4096` default
+clamped to the family's chunk width), and replays captured round graphs on lone-stream rounds. `--mtp-drafts` caps
+the draft count at up to 3. `--mtp-confidence` and mixed-width oQ checkpoints are refused by name on main.
 
 ```bash
 zig build native-hip -Dhip=true -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Doptimize=ReleaseFast
