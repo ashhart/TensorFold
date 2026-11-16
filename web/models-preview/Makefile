@@ -3,7 +3,7 @@ GO ?= go
 GOLANGCI := $(GO) run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
 
 .PHONY: run
-run: ## Serve the page on 0.0.0.0:3000 from ../tensorfold_web/data/models.json (ARGS="-catalog URL")
+run: ## Serve the page on port 3000 (every interface) from ../tensorfold_web/data/models.json (ARGS="-catalog URL")
 	$(GO) run ./cmd/preview $(ARGS)
 
 .PHONY: generate

@@ -24,8 +24,8 @@ templ details(row apiclient.Row) {
 		<div><dt>Sampling</dt><dd>{ text(row.Run.Sampling) }</dd></div>
 		<div><dt>Prompt tokens</dt><dd>{ count(row.Run.PromptTokens) }</dd></div>
 		<div><dt>Prefill</dt><dd>{ rate(row.Run.PrefillTPS) } tok/s</dd></div>
-		<div><dt>Suite</dt><dd class="mono">{ text(row.Run.SuiteID) } { text(row.Run.SuiteDigest) }</dd></div>
-		<div><dt>Receipt</dt><dd><a href={ templ.SafeURL(row.Run.ReceiptURL) } rel="noopener">{ row.Run.ReceiptURL }</a></dd></div>
+		<div><dt>Suite</dt><dd class="mono">{ suite(row.Run) }</dd></div>
+		<div><dt>Receipt</dt><dd><a href={ templ.SafeURL(row.Run.ReceiptURL) } rel="noopener" title={ row.Run.ReceiptURL }>{ receiptPlace(row.Run.ReceiptURL) } ↗</a></dd></div>
 	</dl>
 }
 
@@ -43,7 +43,7 @@ templ unmeasuredRow(item apiclient.Unmeasured) {
 		<td class="mono no-phone">{ dash }</td>
 		<td class="mono no-phone">{ dash }</td>
 		<td class="mono no-phone">{ dash }</td>
-		<td data-label="Status"><span class={ "dot", "dot-" + item.Support.Status }></span>{ statusLabel(item.Support.Status) }</td>
+		<td class="nowrap" data-label="Status"><span class={ "dot", "dot-" + item.Support.Status }></span>{ statusLabel(item.Support.Status) }</td>
 		<td class="small" data-label="Recipe">
 			if item.Support.RecipeURL != nil {
 				<a href={ templ.SafeURL(*item.Support.RecipeURL) } rel="noopener">Recipe ↗</a>

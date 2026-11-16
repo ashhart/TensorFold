@@ -65,13 +65,16 @@ templ runRow(row apiclient.Row, open bool) {
 			<span class="sub">{ scope(row.Run) }</span>
 		</td>
 		<td data-label="TTFT (s)">
-			<span class="mono">{ ttft(row.Run) }</span>
+			<span class="mono nowrap">{ ttft(row.Run) }</span>
 			<span class="sub">{ ttftLabel(row.Run) }</span>
 		</td>
 		<td class="mono" data-label="Context">{ count(row.Run.ContextCapacity) }</td>
 		<td class="mono" data-label="Slots / streams">{ load(row.Run) }</td>
-		<td data-label="Status"><span class={ "dot", "dot-" + row.Status }></span>{ statusLabel(row.Status) }</td>
-		<td class="small" data-label="Date / release">{ dateOrRelease(row.Run) }</td>
+		<td class="nowrap" data-label="Status"><span class={ "dot", "dot-" + row.Status }></span>{ statusLabel(row.Status) }</td>
+		<td class="small" data-label="Date / release">
+			{ dateOrRelease(row.Run) }
+			<a class="sub" href={ templ.SafeURL(row.Run.ReceiptURL) } rel="noopener">receipt ↗</a>
+		</td>
 	</tr>
 	<tr class={ "details", templ.KV("hidden", !open) } data-class:hidden={ hiddenUnless(id) }>
 		<td colspan="8">

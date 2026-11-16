@@ -37,6 +37,7 @@ a { color: inherit; }
 .small { font-size: 13px; color: var(--muted); margin: 0; }
 .mono { font-family: var(--mono); font-size: 13px; }
 .muted { color: var(--faint); }
+.nowrap { white-space: nowrap; }
 
 .site { border-bottom: 1px solid var(--border); background: var(--bg-hero); }
 .site-bar { display: flex; align-items: center; gap: 14px; height: 60px; }

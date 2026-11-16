@@ -15,6 +15,7 @@ templ document(title string) {
 			<meta name="color-scheme" content="dark"/>
 			<meta name="description" content="TensorFold supported models: named models on named hardware, each number linked to its receipt."/>
 			<title>{ title }</title>
+			<link rel="icon" href="data:,"/>
 			<link rel="stylesheet" href={ static.URL(static.CSSFile) }/>
 			<script type="module" src={ static.URL(static.DatastarFile) } nonce={ templ.GetNonce(ctx) }></script>
 		</head>
@@ -89,7 +90,7 @@ templ sourceLine(board apiclient.Board, repoURL string) {
 			Catalog { originLabel(board.Freshness) }, updated { board.Updated }
 			{{ at := readAt(board.Freshness) }}
 			if at != "" {
-				· read { at }
+				{ " · read " + at }
 			}
 		</p>
 		<p class="small">

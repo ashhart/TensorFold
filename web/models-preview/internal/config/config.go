@@ -14,7 +14,7 @@ import (
 
 // Defaults: the repository's own file from web/models-preview; LiveCatalog is its copy on main.
 const (
-	DefaultAddr     = "0.0.0.0:3000"
+	DefaultAddr     = ":3000"
 	DefaultCatalog  = "../tensorfold_web/data/models.json"
 	LiveCatalog     = "https://raw.githubusercontent.com/ashhart/TensorFold/main/web/tensorfold_web/data/models.json"
 	DefaultTTL      = 5 * time.Minute
@@ -24,7 +24,7 @@ const (
 
 // Config is every setting the preview reads.
 type Config struct {
-	// Addr is the listen address; 0.0.0.0 so the LAN and Tailscale reach it.
+	// Addr is the listen address; every interface by default, so the LAN and Tailscale reach it.
 	Addr string
 	// Catalog is a file path or an https URL of models.json.
 	Catalog string

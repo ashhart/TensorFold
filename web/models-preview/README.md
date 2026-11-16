@@ -22,7 +22,7 @@ go run ./cmd/preview -catalog https://raw.githubusercontent.com/ashhart/TensorFo
 | `-catalog` | `CATALOG` | `../tensorfold_web/data/models.json` | a file path or an https URL |
 | `-ttl` | `CATALOG_TTL` | `5m` | how long a fetched copy is used before the URL is asked again |
 | `-cache-dir` | `CATALOG_CACHE_DIR` | the user cache folder | where the last fetched copy is kept |
-| `-addr` | `PREVIEW_ADDR` | `0.0.0.0:3000` | listen address |
+| `-addr` | `PREVIEW_ADDR` | `:3000` | listen address, every interface by default |
 | `-repo-url` | `REPO_URL` | the README's model table | target of "Full list of supported models" |
 
 A file is read on every page load. A URL is fetched with its ETag, reused for the TTL and kept on disk, so a restart

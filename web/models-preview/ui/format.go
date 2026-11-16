@@ -20,6 +20,8 @@ const (
 	thousands = 3
 	// barStep is the bar width granularity (CSS classes .w-0 to .w-100).
 	barStep = 5
+	// receiptMinSegments is owner/repo/blob/ref/file, the shortest GitHub file path.
+	receiptMinSegments = 5
 	// decimal is the base integers print in.
 	decimal = 10
 	// floatBits is the precision of the rates as decoded from JSON.
@@ -94,6 +96,33 @@ func text(value *string) string {
 	return *value
 }
 
+// suite is the suite id and digest, or one dash when the receipt names neither.
+func suite(run apiclient.Run) string {
+	parts := []string{}
+	for _, value := range []*string{run.SuiteID, run.SuiteDigest} {
+		if value != nil && *value != "" {
+			parts = append(parts, *value)
+		}
+	}
+	if len(parts) == 0 {
+		return dash
+	}
+	return strings.Join(parts, " ")
+}
+
+// receiptPlace names a receipt by its repository and file instead of printing the whole address.
+func receiptPlace(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(segments) < receiptMinSegments || segments[2] != "blob" {
+		return parsed.Host + parsed.Path
+	}
+	return segments[0] + "/" + segments[1] + ": " + strings.Join(segments[4:], "/")
+}
+
 // load is "slots / streams": what the server admits and what the client sent.
 func load(run apiclient.Run) string {
 	return count(run.Slots) + " / " + strconv.Itoa(run.Concurrency)
@@ -158,7 +187,7 @@ func dateOrRelease(run apiclient.Run) string {
 	if run.TFVersion != nil {
 		return "v" + strings.TrimPrefix(*run.TFVersion, "v")
 	}
-	return "Receipt"
+	return dash
 }
 
 func statusLabel(status string) string {
