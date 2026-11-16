@@ -71,11 +71,8 @@ pub fn time(x: *be.Kolibri, io: std.Io, out: *[widths.len]Cost) !void {
     var ms: [widths.len]f64 = undefined;
     for (&ms, 0..) |*m, i| m.* = try lanes.cost_rule.fastest(timer, i);
     try lanes.cost_rule.smooth(timer, &ms);
-    const shown = std.c.getenv("TF_TIMING") != null;
-    for (out, widths, ms) |*c, w, m| {
-        c.* = .{ .width = w, .ms = m };
-        if (shown) std.debug.print("[timing] kolibri round {d} rows {d:.2} ms\n", .{ w, m });
-    }
+    for (out, widths, ms) |*c, w, m| c.* = .{ .width = w, .ms = m };
+    std.log.info("Kolibri round costs: 1 row {d:.2} ms, 8 rows {d:.2}, 24 rows {d:.2}, 64 rows {d:.2}", .{ ms[0], ms[5], ms[8], ms[11] });
     for (x.taps.written[0..@min(most, x.taps.written.len)]) |*w| w.* = 0; // no stream wrote these rows
 }
 
