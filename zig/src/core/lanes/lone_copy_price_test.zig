@@ -7,6 +7,9 @@ const fake = @import("fake.zig");
 const be = @import("backend.zig");
 const Proposer = @import("proposer.zig").Proposer;
 const ev = @import("events.zig");
+const win = @import("windows.zig");
+const lone_copy = @import("lone_copy.zig");
+const copy_price = @import("copy_price.zig");
 
 const gpa = std.testing.allocator;
 
@@ -286,4 +289,44 @@ test "lone copy price: copy_guard follows plain_guard unless a family sets it" {
         try std.testing.expectEqual(plain, cfg.plain_guard);
         try std.testing.expectEqual(copy orelse plain, cfg.copy_guard);
     };
+}
+
+test "lone copy price: a head without plain_guard prices copies against its own rounds, not the load-time forward" {
+    var m = hip(true);
+    m.plain_guard = false; // copy_guard alone: the head's depths keep the rule's greedy rounds, plain is never timed
+    const got = try run(m, long_context, .{ .land_from = 0 }, 1, 96);
+    try expectPlain(m, long_context, got, 1, 96);
+    try std.testing.expect(got.rounds * 8 < got.lens[0]); // landing copies stay on, many rows a round
+}
+
+test "lone copy price: copyAhead reads the price the plan takes, backoff probes included, and counts nothing" {
+    var cfg = try cfgs.Config.init(gpa, hip(true), 16, 15);
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: Clock = .{ .target = &target, .times = long_context };
+    var e = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var c: Copier = .{};
+    var s = try sm.Stream.init(gpa, .{ .id = "a", .prompt = prompts[0], .max_new = 96, .proposer = .{ .ptr = &c, .vtable = &Copier.vtable } });
+    defer s.deinit(gpa);
+    // a 90 ms plain round and a 15-row copy of 690 ms at a long context, after eight copies that missed
+    try e.rule.observeCost(0, 90, false, win.who(&s));
+    try copy_price.observeCopy(&e.rule, 15, 690, false, win.who(&s));
+    for (0..8) |_| win.observeCopied(&e, &s, false, 0, 15);
+    var probes: [2]usize = .{ 0, 0 };
+    var found: usize = 0;
+    for (1..41) |take| {
+        _ = e.arena.reset(.retain_capacity);
+        const w = win.who(&s);
+        const ahead = win.copyAhead(&e, &w);
+        try std.testing.expectEqual(ahead, win.copyAhead(&e, &w)); // a second read moves nothing
+        const kept = try lone_copy.rows(&e, &s, try win.copyProposal(&e, &s), true);
+        try std.testing.expectEqual(ahead, kept > 0);
+        if (kept == 0) continue;
+        try std.testing.expect(found < probes.len);
+        probes[found] = take;
+        found += 1;
+    }
+    try std.testing.expectEqualSlices(usize, &.{ 8, 24 }, &probes); // after 8, then 16 more, priced-off copies
 }
