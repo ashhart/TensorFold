@@ -70,7 +70,7 @@ test "handoff: a repeat whose keep at the cut is refused leaks no borrow and no 
     var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
     host.cache = &store;
     var e: Exp = .{ .fake = &fake };
-    host.exporter = e.exporter();
+    host.handoff.exporter = e.exporter();
     var handoff: Reply = .{};
     var chat: Reply = .{};
     // both before the engine thread runs: the chat waits in the queue through the hand-off, protecting the remote copy

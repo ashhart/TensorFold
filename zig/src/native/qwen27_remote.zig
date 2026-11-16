@@ -163,17 +163,17 @@ pub fn attach(h: anytype, io: std.Io, a: std.mem.Allocator, f: Flags, model: []c
         h.link.?.stop(h.gpa);
         h.link = null;
     }
-    h.host.remote = h.link.?.pull.source();
+    h.host.handoff.remote = h.link.?.pull.source();
     keepRule(h, keeps() catch |err| {
         why.* = "TF_PREFILL_KEEP takes 1 (keep states built on a pulled prefix, marked remote) or 0"; // the registry logs it
         return err;
     });
-    h.host.resume_peek = peek;
+    h.host.handoff.resume_peek = peek;
 }
 
 /// TF_PREFILL_KEEP's `keep` on served host `h`: the cache keeps states on a pulled prefix, slot 0 its rows, only so.
 pub fn keepRule(h: anytype, keep: bool) void {
-    h.host.keep_remote = keep;
+    h.host.handoff.keep_remote = keep;
     if (!keep) std.log.info("remote prefill: states built on a pulled prefix are not kept (TF_PREFILL_KEEP=0)", .{});
     h.back.standing.keep_remote = keep; // slot 0 keeps a hand-off's rows for a next turn only so
 }

@@ -23,6 +23,14 @@ pub const Source = struct {
 /// Where the backend resumes a prompt without any copy (slot 0's standing state): its own prefix, as good as cached.
 pub const ResumePeek = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque, prompt: []const u32, spans: []const [2]u32) u32 };
 
+/// Fields LaneHost holds for a remote fill, an exporter, and the keep/resume rules.
+pub const Bind = struct {
+    remote: ?Source = null, // prompt prefixes another machine fills (opt-in)
+    exporter: ?@import("lane_export.zig").Exporter = null, // a handoff request's prompt state, for another machine
+    resume_peek: ?ResumePeek = null, // the backend's own resume point, which a remote prefix must beat
+    keep_remote: bool = false, // TF_PREFILL_KEEP: states built on a remote prefix are kept, marked remote
+};
+
 /// The family's state after `at` prompt tokens, computed by another machine: never kept, never the engine's own.
 pub const Filled = struct { saved: pc.Saved, at: u32 };
 
@@ -59,7 +67,7 @@ fn eligible(r: *const Request) bool {
 
 /// Fills start for queued requests whose remote prefix beats the cache's, at most TF_PREFILL_AHEAD (engine thread).
 pub fn queue(h: *LaneHost) void {
-    const source = h.remote orelse return;
+    const source = h.handoff.remote orelse return;
     var holding: usize = 0;
     for (h.queued.items) |job| holding += @intFromBool(if (job.ticket) |t| t.state.load(.acquire) == Ticket.running or t.filled != null else false);
     for (h.queued.items) |job| {
@@ -69,7 +77,7 @@ pub fn queue(h: *LaneHost) void {
         const r = job.request;
         if (!eligible(r)) continue;
         const kept: u64 = if (h.cache) |store| if (store.find(job.cacheKey(), r.chunks, h.spans(r))) |e| e.at else 0 else 0;
-        const cached = @max(kept, if (h.resume_peek) |p| p.at(p.ctx, r.prompt, h.spans(r)) else 0);
+        const cached = @max(kept, if (h.handoff.resume_peek) |p| p.at(p.ctx, r.prompt, h.spans(r)) else 0);
         if (!source.wants(source.ptr, r.prompt.len, cached)) continue;
         const t = h.gpa.create(Ticket) catch continue;
         t.* = .{ .prompt = h.gpa.dupe(u32, r.prompt) catch {
@@ -147,13 +155,13 @@ pub fn use(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
     if (job.entry) |e| if (h.cache) |store| store.release(e);
     job.entry = null;
     // TF_PREFILL_KEEP: the cache's marks past the prefix keep remote states; else no marks and no hook, nothing kept
-    const marks = if (h.keep_remote) past(reuse.marks, f.at) else &.{};
-    reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .hook = if (h.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
+    const marks = if (h.handoff.keep_remote) past(reuse.marks, f.at) else &.{};
+    reuse.* = .{ .saved = f.saved, .at = f.at, .remote = true, .pulled = true, .marks = marks, .hook = if (h.handoff.keep_remote) .{ .ptr = job, .at = Job.kept } else null };
 }
 
 /// A kept remote state slot 0's state reaches is let go; if a stream takes slot 0 first, the pass starts at 0.
 fn ownFirst(h: *LaneHost, job: *Job, reuse: *lanes.stream.Reuse) void {
-    const p = h.resume_peek orelse return;
+    const p = h.handoff.resume_peek orelse return;
     if (p.at(p.ctx, job.request.prompt, h.spans(job.request)) < reuse.at) return;
     if (job.entry) |e| if (h.cache) |store| store.release(e);
     job.entry = null;
@@ -179,7 +187,7 @@ pub fn drop(job: *Job) void {
     const f = job.remote orelse return;
     job.remote = null;
     if (job.started and job.stream.reuse.saved == f.saved) job.stream.reuse.saved = null;
-    if (job.host.remote) |source| source.drop(source.ptr, f.saved);
+    if (job.host.handoff.remote) |source| source.drop(source.ptr, f.saved);
 }
 
 /// Prompt tokens the engine's own cache supplied: a prefix pulled just now is not one, a kept remote state is.

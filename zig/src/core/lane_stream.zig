@@ -71,7 +71,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
             job.key[0] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(f, std.mem.asBytes(&job.key[0])) & 0x7fff_ffff));
         }
     };
-    if (!memory_active and h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught and (h.keep_remote or !@import("lane_remote.zig").wins(h, job))) reuse = kept(h, job);
+    if (!memory_active and h.cache != null and !r.promptOnly() and r.prompt_logprobs == null and !r.untaught and (h.handoff.keep_remote or !@import("lane_remote.zig").wins(h, job))) reuse = kept(h, job);
     if (!memory_active) @import("lane_remote.zig").use(h, job, &reuse);
     const handoff = !memory_active and @import("lane_export.zig").exporting(h, job, &reuse);
     if (h.proposers) |ps| {

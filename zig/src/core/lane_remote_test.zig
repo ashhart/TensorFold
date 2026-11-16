@@ -148,13 +148,13 @@ pub fn runKeep(peer: *Peer, request: *const api.Request, exp: ?*Exp, cache: ?*pc
     var core = lanes.Engine.init(t.allocator, &cfg, fake.backend(), clock.clock());
     defer core.deinit();
     var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1, .warm_turns = o.warm });
-    host.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
+    host.handoff.remote = .{ .ptr = peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     if (cache) |store| host.cache = store;
-    host.keep_remote = o.keep;
-    host.resume_peek = o.peek;
+    host.handoff.keep_remote = o.keep;
+    host.handoff.resume_peek = o.peek;
     if (exp) |e| {
         e.fake = &fake;
-        host.exporter = e.exporter();
+        host.handoff.exporter = e.exporter();
     }
     try host.start();
     defer host.stop();
@@ -291,7 +291,7 @@ test "remote prefix: a request a closed host refuses starts no remote fill" {
     var host = api.LaneHost.init(t.allocator, t.io, &core, .{ .lanes = 1 });
     var peer: Peer = .{ .at = 4 };
     defer peer.kept.deinit(t.allocator);
-    host.remote = .{ .ptr = &peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
+    host.handoff.remote = .{ .ptr = &peer, .wants = Peer.wants, .fill = Peer.fill, .drop = Peer.drop, .running = &peer.running };
     try host.start();
     host.stop();
     var seen: Seen = .{};

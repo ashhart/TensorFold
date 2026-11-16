@@ -315,7 +315,7 @@ fn producer(root: []const u8, p: *const [700]u32, warm: ?Warm, exp: *Exp, seen: 
     exp.fake = &target;
     var host = LaneHost.init(gpa, t.io, &core, .{ .lanes = 2 });
     host.cache = &store;
-    host.exporter = exp.exporter();
+    host.handoff.exporter = exp.exporter();
     try host.start();
     {
         defer host.stop();

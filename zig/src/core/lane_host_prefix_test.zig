@@ -178,9 +178,9 @@ fn fanout(su: Setup, out: *Run) !void {
     host.cache = &store;
     if (su.wait_ms) |ms| host.prefix.ns = @as(i96, ms) * std.time.ns_per_ms;
     var exports: Exports = .{ .target = &target };
-    if (su.handoff != null) host.exporter = .{ .ptr = &exports, .snapshots = store.family, .exported = Exports.exported, .failed = Exports.failed };
+    if (su.handoff != null) host.handoff.exporter = .{ .ptr = &exports, .snapshots = store.family, .exported = Exports.exported, .failed = Exports.failed };
     if (su.remote_at > 0) try keepRemote(&target, &store, su.remote_at);
-    host.keep_remote = su.remote_at > 0;
+    host.handoff.keep_remote = su.remote_at > 0;
     const e = host.engine();
     var hook = su.hook;
     hook.engine = e;
