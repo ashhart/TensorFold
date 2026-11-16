@@ -266,7 +266,6 @@ pub const FakeStates = struct {
     }
 };
 
-
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
 fn laterBytes(h: *const Host) u64 {
     const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else if (h.sn_mtp) |m| m.slotBytes() else 0;
