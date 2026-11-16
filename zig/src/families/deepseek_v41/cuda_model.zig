@@ -222,7 +222,8 @@ pub const Model = struct {
         so.resident_bytes = try @import("session_budget.zig").agree(&m.session.plan, so.resident_bytes, o.prompt_cache_gib);
         m.cfg = try Config.read(gpa, io, pack_dir);
         // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
-        if (@import("cuda_format.zig").problem(&m.cfg, world)) |text| {
+        const preview = try @import("sys").environment.read(bool, "TF_DSV41_RELEASE_PREVIEW", false);
+        if (@import("cuda_format.zig").problem(&m.cfg, world, preview)) |text| {
             if (!quiet) std.log.err("{s}", .{text});
             return error.UnsupportedCheckpoint;
         }
