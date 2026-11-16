@@ -258,6 +258,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     for (plans, fixed, probs, cuts) |p, *fx, *pr, *mark| {
         const prior = p.stream.draft_chances_cut;
         p.stream.draft_chances_cut = null;
+        errdefer p.stream.draft_chances_cut = prior;
         const n = p.count();
         if (p.kind == .forced or n == 0) {
             fx.* = 1 + @as(u32, @intCast(if (p.kind == .forced) n else 0));
