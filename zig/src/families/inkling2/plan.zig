@@ -2,8 +2,8 @@
 const std = @import("std");
 const config = @import("config.zig");
 
-/// A routed-expert layer's stored format, read from its tensors: ModelOpt NVFP4 (groups of 16) or MXFP8 (groups of 32).
-pub const Precision = enum { nvfp4, mxfp8 };
+/// A routed-expert layer's stored format; EXL3 trellis tensors are checked by their pack adapter.
+pub const Precision = enum { nvfp4, mxfp8, exl3 };
 
 pub const Kind = enum { local, global };
 
