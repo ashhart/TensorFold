@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const ops = @import("ops/ops.zig");
+const kernels = @import("kernels.zig");
+const tuning = @import("tuning/tuning.zig");
 
 const Ops = ops.Ops;
 const Tensor = ops.Tensor;
@@ -65,14 +67,19 @@ pub fn capacity(pairs: usize, experts: usize) usize {
     return @min(pairs, experts) + pairs / @min(TILE, LANE_ROWS);
 }
 
-/// tile_for: the decode tile below BLOCK_FROM rows, the GEMM tile from there; a lane round's rows keep the decode tile.
+/// The fewest rows a prompt pass cuts at the GEMM tile on this build's card: its tuning table's, else BLOCK_FROM.
+pub const card_prompt_from: usize = tuning.promptBlockFrom(kernels.arch) orelse BLOCK_FROM;
+
+/// tile_for: the decode tile below the GEMM tile's start, the GEMM tile from there; a lane round keeps the decode tile.
 pub fn tileFor(o: Ops, rows: usize) usize {
-    return tileOf(rows, o.window);
+    return tileOf(rows, o.window, o.prefill, card_prompt_from);
 }
 
-/// tile_for's rule on its own, for a fixture that plans as serving does.
-pub fn tileOf(rows: usize, window: bool) usize {
-    return if (rows < BLOCK_FROM or window) LANE_ROWS else BLOCK_ROWS;
+/// tile_for's rule on its own, for a fixture that plans as serving does: a prompt pass's tile starts at `prompt_from`.
+pub fn tileOf(rows: usize, window: bool, prefill: bool, prompt_from: usize) usize {
+    // decode and the MTP draft head keep BLOCK_FROM: a card's start is gated on the prompt pass
+    const from = if (prefill) prompt_from else BLOCK_FROM;
+    return if (rows < from or window) LANE_ROWS else BLOCK_ROWS;
 }
 
 /// The stacked shared expert's tile: it holds every row, so a prompt pass never cuts it below the GEMM tile.
@@ -83,17 +90,17 @@ pub fn sharedTileFor(o: Ops, rows: usize) usize {
 /// sharedTileFor's rule on its own, for a fixture that plans as serving does.
 pub fn sharedTileOf(rows: usize, window: bool, prefill: bool) usize {
     // decode and lane rounds keep tile_for's: their launches take m as the most rows an item holds
-    return if (prefill and !window) BLOCK_ROWS else tileOf(rows, window);
+    return if (prefill and !window) BLOCK_ROWS else tileOf(rows, window, prefill, BLOCK_FROM);
 }
 
 /// The routed launches' m before the rows cap it: the most rows a plan's item holds, the shared one's where it stacks.
 pub fn itemRowsFor(o: Ops, rows: usize, shared: bool) usize {
-    return itemRowsOf(rows, o.window, o.prefill, shared);
+    return itemRowsOf(rows, o.window, o.prefill, shared, card_prompt_from);
 }
 
 /// itemRowsFor's rule on its own, for a fixture that plans as serving does.
-pub fn itemRowsOf(rows: usize, window: bool, prefill: bool, shared: bool) usize {
-    const tile = tileOf(rows, window);
+pub fn itemRowsOf(rows: usize, window: bool, prefill: bool, shared: bool, prompt_from: usize) usize {
+    const tile = tileOf(rows, window, prefill, prompt_from);
     return if (shared) @max(tile, sharedTileOf(rows, window, prefill)) else tile;
 }
 
@@ -263,8 +270,8 @@ test "the shared expert takes the GEMM tile in a prompt pass at any row count, t
     round.window = true;
     for ([_]usize{ 2, 33, BLOCK_FROM - 1, BLOCK_FROM, 2048 }) |rows| {
         try std.testing.expectEqual(@as(usize, BLOCK_ROWS), sharedTileFor(prompt, rows));
-        // the routed experts keep tile_for's in the same prompt pass
-        try std.testing.expectEqual(tileFor(o, rows), tileFor(prompt, rows));
+        // on a card that starts the GEMM tile at 64 the routed experts keep tile_for's in the same prompt pass
+        try std.testing.expectEqual(tileFor(o, rows), tileOf(rows, false, true, BLOCK_FROM));
         try std.testing.expectEqual(tileFor(o, rows), sharedTileFor(o, rows));
         try std.testing.expectEqual(@as(usize, LANE_ROWS), sharedTileFor(round, rows));
         // the launches' m holds the plan's largest item: the shared one only where it stacks in a prompt pass
@@ -272,5 +279,30 @@ test "the shared expert takes the GEMM tile in a prompt pass at any row count, t
         try std.testing.expectEqual(tileFor(prompt, rows), itemRowsFor(prompt, rows, false));
         try std.testing.expectEqual(tileFor(o, rows), itemRowsFor(o, rows, true));
         try std.testing.expectEqual(@as(usize, LANE_ROWS), itemRowsFor(round, rows, true));
+        try std.testing.expectEqual(tileOf(rows, false, true, BLOCK_FROM), itemRowsOf(rows, false, true, false, BLOCK_FROM));
+    }
+}
+
+test "a card's start moves a prompt pass's GEMM tile to 33 rows; decode, lane rounds and the MTP draft head keep 64" {
+    // decode and the MTP draft head run with neither switch, a lane round with `window`
+    const o: Ops = .{ .l = undefined, .bf16 = true, .stream = undefined, .arena = undefined };
+    var round = o;
+    round.window = true;
+    for ([_]usize{ 2, 9, 32, 33, 40, 56, 63, 64, 65, 128 }) |rows| {
+        const gemm_at_33: usize = if (rows >= 33) BLOCK_ROWS else LANE_ROWS;
+        const gemm_at_64: usize = if (rows >= BLOCK_FROM) BLOCK_ROWS else LANE_ROWS;
+        // a prompt pass on a card that starts at 33, and on one left at 64
+        try std.testing.expectEqual(gemm_at_33, tileOf(rows, false, true, 33));
+        try std.testing.expectEqual(gemm_at_64, tileOf(rows, false, true, BLOCK_FROM));
+        // whatever the card: decode and the draft head at 64, a lane round at the decode tile
+        try std.testing.expectEqual(gemm_at_64, tileOf(rows, false, false, 33));
+        try std.testing.expectEqual(gemm_at_64, tileFor(o, rows));
+        try std.testing.expectEqual(@as(usize, LANE_ROWS), tileOf(rows, true, true, 33));
+        try std.testing.expectEqual(@as(usize, LANE_ROWS), tileFor(round, rows));
+        // the launches' m follows: the routed tile, or the shared expert's whole item where it stacks in a prompt
+        try std.testing.expectEqual(gemm_at_33, itemRowsOf(rows, false, true, false, 33));
+        try std.testing.expectEqual(@as(usize, BLOCK_ROWS), itemRowsOf(rows, false, true, true, 33));
+        try std.testing.expectEqual(gemm_at_64, itemRowsOf(rows, false, false, true, 33));
+        try std.testing.expectEqual(@as(usize, LANE_ROWS), itemRowsOf(rows, true, true, true, 33));
     }
 }
