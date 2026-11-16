@@ -166,7 +166,7 @@ const DeviceRun = struct {
 
 /// The failed-transport check's host-only forms (fail-fast off, a hold): TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire.
 fn hostOnlyAllowed(cfg: tp.Config) bool {
-    const flag = std.mem.eql(u8, std.mem.span(std.c.getenv("TF_TP_ALLOW_HOST_ONLY") orelse ""), "1");
+    const flag = std.mem.eql(u8, (@import("sys").environment.Process{}).get("TF_TP_ALLOW_HOST_ONLY") orelse "", "1");
     return flag and (cfg.backend != .roce or cfg.roce_wire == .shm);
 }
 

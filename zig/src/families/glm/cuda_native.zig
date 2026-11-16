@@ -134,10 +134,10 @@ pub fn kvPool(p: *anyopaque) ?kv.Source {
 pub const Place = struct { rank: usize, world: usize };
 
 pub fn place() !Place {
-    const r = std.c.getenv("TF_GLM_RANK") orelse return error.NoRank;
-    const w = std.c.getenv("TF_GLM_WORLD") orelse return error.NoRank;
-    const p: Place = .{ .rank = std.fmt.parseInt(usize, std.mem.span(r), 10) catch return error.NoRank, .world = std.fmt.parseInt(usize, std.mem.span(w), 10) catch return error.NoRank };
-    return checked(p);
+    const settings = @import("sys").environment;
+    const r = (try settings.read(?u64, "TF_GLM_RANK", null)) orelse return error.NoRank;
+    const w = (try settings.read(?u64, "TF_GLM_WORLD", null)) orelse return error.NoRank;
+    return checked(.{ .rank = @intCast(r), .world = @intCast(w) });
 }
 
 /// A place the family serves: a rank inside its world, and at most `ranks.max_world` ranks.
@@ -199,7 +199,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     try @import("cuda_env.zig").startup();
     try @import("cuda_env.zig").requestStartsAlone(o.learn_conversations); // before any rank opens
     const p = try place();
-    const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
+    const roce_bytes = try roceBytes((@import("sys").environment.Process{}).get("TF_ROCE_MAX_KB"));
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
     var problem: []const u8 = "";
     var set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
@@ -208,7 +208,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     try @import("cuda_roce_multi.zig").validate(p.world, p.rank, set.roce_multi);
     set.kv8 = o.kv8;
-    if (share_mod.moved(if (std.c.getenv("TF_GLM_KV_SHARE")) |v| std.mem.span(v) else "")) return error.GlmKvShareMoved; // before any rank opens
+    if (share_mod.moved((@import("sys").environment.Process{}).get("TF_GLM_KV_SHARE") orelse "")) return error.GlmKvShareMoved; // before any rank opens
     const share_snaps = try kp.sharing();
     if (share_mod.tooMany(share_snaps)) {
         std.log.err("TF_KV_SHARE={d} asks more kept states than the {d} it keeps: set {d} or fewer", .{ share_snaps, kv.most_snaps, kv.most_snaps });
