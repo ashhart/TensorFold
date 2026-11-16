@@ -12,6 +12,7 @@ const auth_scope = @import("auth_scope.zig");
 const cancel_ids = @import("cancel_ids.zig");
 const openai = @import("openai.zig");
 const responses = @import("responses.zig");
+const responses_count = @import("responses_count.zig");
 const anthropic = @import("anthropic.zig");
 const ollama = @import("ollama.zig");
 const tokens = @import("tokens.zig");
@@ -133,6 +134,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_embedding = std.mem.eql(u8, route, "/v1/embeddings");
     const is_anthropic = anthropic.route(conn.path);
     const is_responses = if (responses.route(route)) |rid| rid.len == 0 else false;
+    const is_input_tokens = responses_count.route(route);
     const is_decisions = std.mem.endsWith(u8, route, "/decisions");
     const is_systemone = std.mem.endsWith(u8, route, "/systemone");
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
@@ -144,12 +146,12 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_ollama_generate = std.mem.eql(u8, route, "/api/generate");
     const is_ollama_embed = std.mem.eql(u8, route, "/api/embed");
     const is_ollama_show = std.mem.eql(u8, route, "/api/show");
-    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !is_ollama_chat and !is_ollama_generate and !is_ollama_embed and !is_ollama_show and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_ocr and !is_rerank and !is_embedding and !is_speech and !is_images and !is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_input_tokens and !is_decisions and !is_systemone and !is_chat and !is_ollama_chat and !is_ollama_generate and !is_ollama_embed and !is_ollama_show and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
-    const group: api.load_ledger.RouteGroup = if (is_chat or is_ollama_chat or is_ollama_generate) .chat_completions else if (is_responses) .responses else if (is_anthropic) .messages else if (is_embedding or is_ollama_embed) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
-    const is_text = is_ocr or is_speech or is_anthropic or is_responses or is_decisions or is_systemone or is_chat or is_ollama_chat or is_ollama_generate or std.mem.endsWith(u8, route, "/completions");
+    const group: api.load_ledger.RouteGroup = if (is_chat or is_ollama_chat or is_ollama_generate) .chat_completions else if (is_responses or is_input_tokens) .responses else if (is_anthropic) .messages else if (is_embedding or is_ollama_embed) .embeddings else if (is_speech) .speech else if (std.mem.endsWith(u8, route, "/completions")) .completions else .other;
+    const is_text = is_ocr or is_speech or is_anthropic or is_responses or is_input_tokens or is_decisions or is_systemone or is_chat or is_ollama_chat or is_ollama_generate or std.mem.endsWith(u8, route, "/completions");
     const kind: request_gate.RouteKind = .{ .text = is_text, .embedding = is_embedding or is_ollama_embed, .rerank = is_rerank, .systemone = is_systemone };
     var entered = request_gate.enter(srv, a, conn.key_digest, group, kind);
     defer entered.held.release();
@@ -167,6 +169,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     if (is_decisions) return decisions.post(srv, conn, a);
     if (is_systemone) return systemone.post(srv, conn, a);
     if (is_anthropic) return anthropic.post(srv, conn, a);
+    if (is_input_tokens) return responses_count.post(srv, conn, a);
     if (is_responses) return responses.post(srv, conn, a);
     if (is_ocr) return @import("ocr/route.zig").post(srv, conn, a);
     openai.post(srv, conn, a, is_chat);

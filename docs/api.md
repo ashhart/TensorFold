@@ -45,7 +45,7 @@ different scopes, or scopes a key the flags or environment already give, is refu
 
 | Scope | Routes |
 | --- | --- |
-| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
+| `inference` | POST `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/responses/input_tokens`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/tokenize`, `/v1/detokenize`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/decisions`, `/v1/systemone`, `/v1/rerank` (also by PUT), `/v1/ocr`, and the same paths without `/v1` where the server has them; GET `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices`; a WebSocket upgrade on GET `/v1/responses` or `/responses` |
 | `read` | GET `/metrics`, `/v1/metrics`, `/v1/load`, `/memory`, `/v1/memory`, `/stats`, `/dashboard`, `/v1/benchmark/manifest`, `/v1/models`, `/models`, `/v1/models/{id}`, `/models/{id}`, `/v1/voices` |
 
 A scoped key reaches nothing else: not the stored Responses (GET or DELETE `/v1/responses/ID`), Recall, Sliding Weights,
@@ -54,8 +54,9 @@ is matched exactly after the query and trailing slashes are cut. A refused route
 `insufficient_scope` (Messages routes: an Anthropic `permission_error`) and closes the connection before the body is read
 or a parked model reloads. The public routes stay public.
 
-The stored Responses belong to the server, not to a key, so a scoped key's `POST /v1/responses` must send `"store": false`
-and no `previous_response_id`, with the whole conversation in `input`; anything else answers 403 naming the field. Over
+The stored Responses belong to the server, not to a key, so a scoped key's `POST /v1/responses` and its
+`/v1/responses/input_tokens` count must send `"store": false` and no `previous_response_id`, with the whole
+conversation in `input`; anything else answers 403 naming the field. Over
 a Responses socket, a `previous_response_id` that the socket's own cache holds is allowed. A request keeps the scopes
 it was accepted with if the file changes while it runs. Scopes are authorization only: every key shares one model,
 its prompt cache and the metrics.
@@ -113,6 +114,7 @@ tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin 
 | `POST /tokenize`, `POST /v1/tokenize` | vLLM's: a `prompt`'s token IDs, or the IDs a chat request's `messages` render to |
 | `POST /detokenize`, `POST /v1/detokenize` | vLLM's: the text of `tokens`, special tokens included |
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
+| `POST /v1/responses/input_tokens` | The prompt tokens the same `/v1/responses` body would prefill; nothing is generated ([counts](#input-token-counts)) |
 | `GET /v1/responses` (WebSocket upgrade) | OpenAI's Responses [WebSocket mode](#websocket-mode): `response.create` events over one socket |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
@@ -1427,6 +1429,18 @@ remote file URLs (`input_file` parts with inline `file_data` run on a model star
 `message.input_image.image_url`, `message.output_text.logprobs`, `reasoning.encrypted_content`,
 `web_search_call.action.sources` and `web_search_call.results`. Any other name, or a value that is not a list of
 strings, is refused.
+
+### Input token counts
+
+`POST /v1/responses/input_tokens` (or `/responses/input_tokens`) is OpenAI's input-token count on the native server.
+It takes the body `POST /v1/responses` takes, translates and renders it the same way, generates nothing, and answers
+`{"object": "response.input_tokens", "input_tokens": N}`: N is the prompt that request would prefill, with its
+`instructions`, tools, items, a `previous_response_id`'s stored conversation and image parts. `stream` changes
+nothing, and the body is not written to `TENSORFOLD_REQUEST_LOG`. A body `/v1/responses` refuses gets the same error
+and status, as a JSON reply even when the body asks for a stream, and API keys and [key scopes](#key-scopes) apply as
+they do there. A request whose prompt the run itself rewrites answers 400 naming the flag: one `--compact-at` would
+compact first, whose prompt holds a note the model has not written yet, and one [Cortheon](cortheon.md) would run as
+its turn under `--cortheon`, whose prompt adds Cortheon's program, tools and research.
 
 ### WebSocket mode
 

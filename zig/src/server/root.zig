@@ -29,6 +29,7 @@ test {
     _ = @import("auth_scope_http_test.zig");
     _ = @import("request_id.zig");
     _ = @import("request_id_test.zig");
+    _ = @import("responses_count_test.zig");
     _ = @import("admission_cli.zig");
     _ = @import("connection_cli.zig");
     _ = @import("request_admission_test.zig");
