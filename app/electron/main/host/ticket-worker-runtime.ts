@@ -6,7 +6,7 @@ import { assertProviderEndpoint, auditPreview } from '../../agent/security'
 import { normalizeTicketCapabilities, settleTicketExecution, startTicketExecution, ticketFileRefs, ticketStateAfterRun, ticketWorkPrompt } from '../../agent/tickets'
 import { restrictTicketToolContext } from '../../agent/ticket-tool-policy'
 import type { JobPatch } from '../../agent/jobs'
-import type { AgentCue, AgentEvent, Job, Project, Provider, Room, Thread, Ticket, TicketWorkOptions, TimelineItem } from '../../agent/types'
+import type { AgentCue, AgentEvent, Job, Project, Provider, ReasoningEffortSetting, Room, Thread, Ticket, TicketWorkOptions, TimelineItem } from '../../agent/types'
 import { store } from '../state'
 import { auditEvent, requireSecurityRole } from './audit'
 import { ensureRoomWorktree } from './room-worktree'
@@ -22,6 +22,7 @@ import { sendToRenderer } from './renderer-events'
 export interface TicketWorkerSource {
   roomId?: string | null
   seat?: string | null
+  reasoningEffort?: ReasoningEffortSetting
   onSettled?: (summary: { codeChanged: boolean; testsPassed: boolean; failed: boolean; jobId?: string | null }) => void
 }
 
@@ -143,7 +144,8 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   if (existingThread && aborters.has(existingThread.id)) throw new Error('Ticket work is already running.')
   const roomSeat = input.source?.roomId === room?.id
     ? room?.seats.find((seat) => seat.name === input.source?.seat) : undefined
-  const reasoningEffort = captureAgentReasoningEffort(roomSeat, store.settings.reasoningEffort)
+  const configuredEffort = input.source?.reasoningEffort === undefined ? roomSeat : input.source
+  const reasoningEffort = captureAgentReasoningEffort(configuredEffort, store.settings.reasoningEffort)
   const configuredWorkspace = room?.workspace ?? project.workspace ?? null
   if (configuredWorkspace?.kind === 'ssh') {
     throw new Error('Local ticket workers do not support SSH workspaces; run this ticket on its remote Orchestrator.')

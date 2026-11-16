@@ -14,7 +14,8 @@ const code = ts.transpileModule(readFileSync(path.join(__dirname, 'ticket-worker
 }).outputText
 const observed: unknown[] = []
 const expected: unknown[] = []
-for (const [global, configured] of [['high', 'low'], ['low', 'high'], ['high', undefined]] as const) {
+for (const [global, configured, sourceEffort] of [['high', 'low', undefined], ['low', 'high', undefined],
+  ['high', undefined, undefined], ['high', 'medium', 'low']] as const) {
   for (const recover of [false, true]) {
     let releaseWorkspace!: (cwd: string) => void
     const workspace = new Promise<string>(resolve => { releaseWorkspace = resolve })
@@ -53,6 +54,7 @@ for (const [global, configured] of [['high', 'low'], ['low', 'high'], ['high', u
       './ticket-helpers': { summarizeTicketWorkerOutcome: () => ({ text: 'Synthetic result', evidence: [],
         codeChanged: false, testsPassed: false, signals: { commands: [], blockers: [], files: [], diffs: [] } }) },
       './workspace-mutation-guard': { lexicalLocalWorkspaceKey },
+      './renderer-events': { sendToRenderer() {} },
       '../../../shared/reasoning-effort': reasoning,
       './provider-runtime': {
         ticketWorkOptionsWithProjectRoute: (_project: any, opts: any) => opts,
@@ -92,7 +94,7 @@ for (const [global, configured] of [['high', 'low'], ['low', 'high'], ['high', u
       applyEventToThread: noop, activeJob: () => null, finishJob: () => finish(),
       markUndrainedCues: noop, effectiveContextLimit: () => 16_384,
     })
-    const pending = runtime.startTicketWork({ ticketId: ticket.id, source: { roomId: 'room', seat: 'Builder' } })
+    const pending = runtime.startTicketWork({ ticketId: ticket.id, source: { roomId: 'room', seat: 'Builder', reasoningEffort: sourceEffort } })
     assert.equal(requests.length, 0, 'workspace preparation genuinely pauses the production launch')
     seat.reasoningEffort = 'medium'
     store.settings.reasoningEffort = 'medium'
@@ -107,7 +109,7 @@ for (const [global, configured] of [['high', 'low'], ['low', 'high'], ['high', u
       })])
     } finally { clearTimeout(timer) }
     assert.equal(requests.length, recover ? 2 : 1, 'the actual worker executes initial and recovery routes')
-    const effort = configured ?? global
+    const effort = sourceEffort ?? configured ?? global
     observed.push({ global, configured, recover, routes: routeEfforts,
       requests: requests.map(request => request.reasoningEffort), captured, settled: ticket.execution?.reasoningEffort })
     expected.push({ global, configured, recover, routes: Array(recover ? 2 : 1).fill(effort),

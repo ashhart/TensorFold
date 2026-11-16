@@ -192,7 +192,8 @@ async function main() {
   }
 
   {
-    const h = buildHarness({ startTicketWork: async () => ({ id: 'unused' }), beforeWorkspace: () => {
+    const workerSources: any[] = []
+    const h = buildHarness({ startTicketWork: async (input) => { workerSources.push(input.source); return { id: 'worker' } }, beforeWorkspace: () => {
       h.store.settings.reasoningEffort = 'medium'
       for (const seat of h.store.rooms[0].seats) seat.reasoningEffort = 'medium'
     } })
@@ -208,6 +209,8 @@ async function main() {
     await h.tool('delegate', { task: 'Review synthetic input', targetSeat: 'Legacy' }, 'Builder')
     assert.deepEqual(h.delegated.map(call => call.reasoningEffort), ['low', 'high', 'xhigh'],
       'actual Room delegation captures origin, target and legacy app effort before workspace awaits')
+    await h.tool('start_ticket_work', { id: 't1', phase: 'build' }, 'Builder')
+    assert.equal(workerSources[0]?.reasoningEffort, 'low', 'ticket workers inherit the same Room run capture')
     console.log('ok - actual Room delegation forwards independent captured efforts')
   }
   console.log('room ticket work launch tests passed')
