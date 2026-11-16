@@ -109,8 +109,8 @@ void main() {
         }
 #else
         for (uint pair = 0u; pair < 4u; ++pair) {
-          wd[at + pair * 8u * 32u] = scale * float((word >> (pair * 8u)) & 0xfu) + bias;
-          wd[at + (pair * 8u + 4u) * 32u] = scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias;
+          wd[at + (pair * 2u) * 32u] = scale * float((word >> (pair * 8u)) & 0xfu) + bias;
+          wd[at + (pair * 2u + 1u) * 32u] = scale * float((word >> (pair * 8u + 4u)) & 0xfu) + bias;
         }
 #endif
       }
@@ -133,8 +133,8 @@ void main() {
               uvec4 x8 = input_x.values[x_at];
               for (uint pair = 0u; pair < 4u; ++pair) {
                 uint x_pair = x8[pair];
-                accumulator += uintBitsToFloat(x_pair << 16u) * wd[(kin + pair * 8u) * 32u + lane];
-                accumulator += uintBitsToFloat(x_pair & 0xffff0000u) * wd[(kin + pair * 8u + 4u) * 32u + lane];
+                accumulator += uintBitsToFloat(x_pair << 16u) * wd[(kin + pair * 2u) * 32u + lane];
+                accumulator += uintBitsToFloat(x_pair & 0xffff0000u) * wd[(kin + pair * 2u + 1u) * 32u + lane];
               }
 #endif
             }

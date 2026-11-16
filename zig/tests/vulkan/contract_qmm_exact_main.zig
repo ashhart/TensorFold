@@ -166,7 +166,7 @@ pub fn main(init: std.process.Init) !u8 {
             std.debug.print("EXACT FAIL {s}: prepare refused\n", .{name});
             continue;
         }
-        if (case.fill == null) try plantCancel(&fixture, case.act_f32);
+        if (std.mem.indexOf(u8, case.name, "cancel") != null) try plantCancel(&fixture, case.act_f32);
         const units: usize = if (case.act_f32) 2 else 1;
         const data_u16 = shape.rows * shape.n * units;
         const ref_out = try init.gpa.alloc(u16, data_u16);
