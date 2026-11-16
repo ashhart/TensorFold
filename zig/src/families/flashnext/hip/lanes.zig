@@ -159,6 +159,11 @@ pub const Fx = struct {
         return if (at + c.layout.restBytes() <= c.window.len) c.window.base() + at else null;
     }
 
+    /// A kept row's side buffer (forward.Mark): the window snapshots, free while a prompt fills; null if too small.
+    fn sideBuffer(c: *const cache.Caches) ?u64 {
+        return if (c.window.len >= c.layout.restBytes()) c.window.base() else null;
+    }
+
     fn free(f: *Fx, l: *Lane) void {
         f.e.stream.synchronize() catch {};
         f.e.unlease(l.caches);
