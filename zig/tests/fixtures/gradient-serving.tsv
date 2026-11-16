@@ -2,7 +2,7 @@ zig/kernels/cuda/affine4_pack.cu	cbc03ae0622574b57ae266091ea9f26888b21b2b1c020a0
 zig/kernels/cuda/ck_lane.cu	652fa9993c0c6905e6564681bcca07dc61c1d7f448e2e91ada377a59174dd5e1	raw	commits c0a58fd30; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
 zig/kernels/cuda/contract_controls.cu	b331c9cd4ce9cbf2183290e1e6f83261b4eecd16d1681ce98053f3cd837fd45b	raw	main cf637beed, 390ef2936, 94a9a48d6 (controls for the LFM2 glue, Liquid conv and head-64 paged attention), 6b81d9bad (P256, IDS, PN declared off)
 zig/kernels/cuda/contract_ctl_router.cuh	9320ff62a3bf4e06cb43f6a630a8cb1d5705471d83df6e965f5297ac2cd59d33	raw
-zig/kernels/cuda/embed_rows.cu	7ec99588b7628578864e3020a01cdc330c209160d25ac30498c3a13708a9ed26	raw
+zig/kernels/cuda/embed_rows.cu	c3cad38db6576728a15e048a45f2c1a571233fc3fedc83d04b75b0d1587ecfea	raw	#3471: Gemma 4 holds its tied embedding once; token rows read the head's 4-bit tiles; replies unchanged
 zig/kernels/cuda/exlr8.cu	0eb19c8965aeb8188efd2b15a5844da860d9bf75364b12b62dd3a2589a89178c	raw
 zig/kernels/cuda/exlr8_dense.cu	7616e7a3bb35a2bb64b53a1ca84ce8be98442a36394dad945b844219f72ec671	raw
 zig/kernels/cuda/experts.cu	2a9b3989f3baaef5eadb56abfb8520700449bd910f2b00345703c22dbf758b8c	raw
@@ -87,7 +87,7 @@ zig/src/cuda/ck.zig	5b247901025d0f001e44c98e022729d007758ffd4719ec34b957c55dcc00
 zig/src/cuda/context.zig	f7c911e93cccd4f89d4a80a8a8786c765a94864a2c22102ff128a018eb55ec1f	raw	commits ac38ad1da, cc50aef49, e9bf05ffd, ef23b5934; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate; #2914 (the release SM refusal before any retain)
 zig/src/cuda/cublaslt.zig	d87f865fc03cf94bdcbe83504f74a6e569d70c10ca792b675122e9eadda26eec	raw	main f1ab10fe98 (Clef's joint schema head on the GPU; a new path), 52375ee098 (#2285: layout_cols, the split-K and reduction algo-config attributes and cublasLtMatmulAlgoConfigGetAttribute for Qwen3 embeddings; existing entries unchanged), #1767 (Linear.initTyped: X and W as bf16, fp16 or fp32 for Idol's denoiser; initEpilogue passes bf16, so existing plans are unchanged)
 zig/src/cuda/driver.zig	f20856bd06afe9365ab9ca1bc39800ccb260ade2704197c033e1344a0c8dd742	raw	commits e9bf05ffd, b923e554c, b2c75a98a; series patches 14-runtime-foundation.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
-zig/src/cuda/embed_rows.zig	09fb2e612f43297c19d2cb77d45139dd98212a20075da0a15069a70544f72f6b	raw
+zig/src/cuda/embed_rows.zig	3fa5e28ab46b4daef2c820b3ad3f7d331bc77f55ea340a7a3cac64b21584c5f4	raw	#3471: Gemma 4 holds its tied embedding once; token rows read the head's 4-bit tiles; replies unchanged
 zig/src/cuda/exlr8.zig	1e2164096ae949a8a9a4903df82c7c0c184a6f5e1ba5ba4423038a42b0633fc6	raw
 zig/src/cuda/experts.zig	8bfc2f15a742cceba87dd7eb8e80f3f1b4e3f7eb323b557eb1bb4bf5a9fed440	raw	main 3768bc0168 (#2843: grouped EXL3 experts launched and sized at the caller's tile and pair count; no kernel source change), #1630 (a bf16 format: its Grouped member, decode and prompt arms and prompt tile; other formats unchanged)
 zig/src/cuda/fp8.zig	a9caf312cb451dc95572b493e69ae211dd1e8b5be5b2c48cae3febd5d9327143	raw	series patches 65-pr-1024.patch; HELD: must be re-qualified by the LW device gates on the 1.1.1 candidate
