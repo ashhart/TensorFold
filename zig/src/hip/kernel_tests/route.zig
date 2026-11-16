@@ -87,54 +87,91 @@ test "the MoE route sorts pairs by expert, stably, into items of at most a tile,
     }
 }
 
-test "a routed prompt plan cuts the routed experts at serving's tile and the stacked shared expert at the GEMM tile" {
+/// Each row's top-k distinct routed experts, half from six hot ones, then the shared one, as tf_moe_select writes them.
+fn drawPicks(rng: *rig.Rng, picks: []i32, routed: usize, top_k: usize) void {
+    const slots = top_k + 1;
+    for (0..picks.len / slots) |r| {
+        const row = picks[r * slots ..][0..slots];
+        for (row[0..top_k], 0..) |*e, k| {
+            const pool: u64 = if (k < top_k / 2) 6 else routed;
+            while (true) {
+                e.* = @intCast(rng.next() % pool);
+                if (std.mem.indexOfScalar(i32, row[0..k], e.*) == null) break;
+            }
+        }
+        row[top_k] = @intCast(routed);
+    }
+}
+
+/// The most rows an item of the plan holds, and how many items the routed experts and the shared one fill.
+const Items = struct { most: usize = 0, routed: usize = 0, shared: usize = 0 };
+
+fn itemsOf(gi: []const i32, capacity: usize, shared: usize) Items {
+    var n: Items = .{};
+    for (0..capacity) |s| {
+        const count: usize = @intCast(@max(gi[s * 3 + 2], 0));
+        if (count == 0) continue;
+        n.most = @max(n.most, count);
+        if (gi[s * 3] == shared) n.shared += 1 else n.routed += 1;
+    }
+    return n;
+}
+
+/// The items the routed experts of `picks` fill at `tile` pairs an item.
+fn cutsAt(picks: []const i32, routed: usize, tile: usize) usize {
+    var n: usize = 0;
+    for (0..routed) |e| n += (std.mem.count(i32, picks, &.{@intCast(e)}) + tile - 1) / tile;
+    return n;
+}
+
+test "a 33 to 63 row prompt plan: every expert whole where the GEMM tile starts at 33, routed 8-row items at 64" {
     const t = try Rig.open(1 << 20);
     defer t.close();
     var o = t.ops(&t.on);
-    o.prefill = true;
     var rng: rig.Rng = .{ .state = 0x3161 };
     const gemm_rows = 128;
     // routed experts, top-k and the prompt's rows: the 35B-A3B's 256 below 64 rows and past, Flash Next's 512
-    for ([_][3]usize{
-        .{ 256, 8, 33 },
-        .{ 256, 8, 40 },
-        .{ 256, 8, 56 },
-        .{ 256, 8, 63 },
-        .{ 256, 8, 64 },
-        .{ 256, 8, 130 },
-        .{ 512, 10, 41 },
-    }) |shape| {
+    for ([_][3]usize{ .{ 256, 8, 33 }, .{ 256, 8, 40 }, .{ 256, 8, 56 }, .{ 256, 8, 63 }, .{ 256, 8, 64 }, .{ 256, 8, 130 }, .{ 512, 10, 41 } }) |shape| {
         const routed = shape[0];
         const top_k = shape[1];
         const rows = shape[2];
         const experts = routed + 1;
         const slots = top_k + 1;
-        // each row's top-k distinct routed experts, then the shared one, as tf_moe_select writes them
         const picks = try gpa.alloc(i32, rows * slots);
         defer gpa.free(picks);
-        for (0..rows) |r| {
-            const row = picks[r * slots ..][0..slots];
-            for (row[0..top_k], 0..) |*e, k| {
-                while (true) {
-                    e.* = @intCast(rng.next() % routed);
-                    if (std.mem.indexOfScalar(i32, row[0..k], e.*) == null) break;
-                }
-            }
-            row[top_k] = @intCast(routed);
-        }
-        // serving's tiles and the capacity moe.run sizes the plan for
-        const tile = moe_plan.tileFor(o, rows);
-        try std.testing.expectEqual(@as(usize, if (rows < 64) 8 else gemm_rows), tile);
+        drawPicks(&rng, picks, routed, top_k);
+        // the hot experts hold more than 8 pairs, so the two starts plan differently below 64 rows
+        const used = cutsAt(picks, routed, rows);
+        try std.testing.expect(cutsAt(picks, routed, 8) > used);
         const capacity = moe_plan.capacity(moe_plan.bucket(rows) * slots, experts);
-        const gi = try expectRoute(t, o, picks, experts, tile, routed, moe_plan.sharedTileFor(o, rows), capacity);
-        defer gpa.free(gi);
-        // the shared expert holds every row: one item below the GEMM tile's rows, never cut below it
-        var shared_items: usize = 0;
-        for (0..capacity) |s| {
-            if (gi[s * 3] != routed or gi[s * 3 + 2] <= 0) continue;
-            shared_items += 1;
-            try std.testing.expectEqual(@as(i32, @intCast(@min(gemm_rows, rows - (shared_items - 1) * gemm_rows))), gi[s * 3 + 2]);
+        // a prompt pass on a card that starts the GEMM tile at 33 (gfx1151) and on one left at 64
+        o.prefill = true;
+        for ([_]usize{ 33, 64 }) |from| {
+            const tile = moe_plan.tileOf(rows, false, true, from);
+            try std.testing.expectEqual(@as(usize, if (rows < from) 8 else gemm_rows), tile);
+            if (from == moe_plan.card_prompt_from) try std.testing.expectEqual(tile, moe_plan.tileFor(o, rows));
+            const gi = try expectRoute(t, o, picks, experts, tile, routed, moe_plan.sharedTileFor(o, rows), capacity);
+            defer gpa.free(gi);
+            const n = itemsOf(gi, capacity, routed);
+            try std.testing.expectEqual(cutsAt(picks, routed, tile), n.routed);
+            // from the start up to 127 rows every routed expert is one item; the shared one is whole on both cards
+            if (rows >= from and rows < gemm_rows) try std.testing.expectEqual(used, n.routed);
+            try std.testing.expectEqual((rows + gemm_rows - 1) / gemm_rows, n.shared);
+            // the launches' m is the most rows an item holds
+            try std.testing.expectEqual(n.most, @min(moe_plan.itemRowsOf(rows, false, true, true, from), rows));
         }
-        try std.testing.expectEqual((rows + gemm_rows - 1) / gemm_rows, shared_items);
+        // decode and the MTP draft head (neither switch) and a lane round keep the 8-row tile below 64, shared too
+        o.prefill = false;
+        for ([_]bool{ false, true }) |window| {
+            o.window = window;
+            const tile = moe_plan.tileFor(o, rows);
+            try std.testing.expectEqual(@as(usize, if (rows < 64 or window) 8 else gemm_rows), tile);
+            try std.testing.expectEqual(tile, moe_plan.sharedTileFor(o, rows));
+            const gi = try expectRoute(t, o, picks, experts, tile, routed, tile, capacity);
+            defer gpa.free(gi);
+            const n = itemsOf(gi, capacity, routed);
+            try std.testing.expectEqual(n.most, @min(moe_plan.itemRowsFor(o, rows, true), rows));
+        }
+        o.window = false;
     }
 }

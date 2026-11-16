@@ -120,7 +120,7 @@ pub const Product = struct {
     fn planExperts(p: *Product, pairs: usize) !void {
         const c = p.c;
         // served: serving's tile, and the capacity it sizes the plan for (one token: an item a slot)
-        const tile = if (c.served) moe.tileOf(c.rows, false) else c.item_rows;
+        const tile = if (c.served) moe.tileOf(c.rows, false, c.path == .prefill, moe.card_prompt_from) else c.item_rows;
         // served: the stacked shared expert (the last id) takes serving's own tile, whole below 64 rows in a prompt
         const shared: ?u32 = if (c.served and c.shared) @intCast(c.experts) else null;
         const shared_tile = if (c.served) moe.sharedTileOf(c.rows, false, c.path == .prefill) else tile;
@@ -158,7 +158,7 @@ pub const Product = struct {
         std.debug.assert(cap == 0 or count <= cap);
         std.debug.assert(!slot_order or count == pairs);
         p.items = @max(count, cap);
-        if (c.served) p.max_rows = @min(moe.itemRowsOf(c.rows, false, c.path == .prefill, shared != null), c.rows);
+        if (c.served) p.max_rows = @min(moe.itemRowsOf(c.rows, false, c.path == .prefill, shared != null, moe.card_prompt_from), c.rows);
         p.plan = try Buffer.fromHost(p.rig.base, items[0 .. p.items * 3]);
         errdefer {
             p.plan.?.free();
