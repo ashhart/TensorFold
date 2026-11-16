@@ -2,7 +2,7 @@
 
 This page describes the native engine. `kolibri1` serves Aleph Alpha's Kolibri-1, a research checkpoint, on one
 NVIDIA GPU through the lane host. It is a draft family: plain decoding and copy drafts from the prompt's own text are
-in; the EAGLE-3 drafter is the next step and is not loaded here.
+in, and `--drafter` loads the published EAGLE-3 drafter (off unless asked).
 
 ## Checkpoint
 
@@ -44,8 +44,8 @@ rounds run eager. Both give a row the same bits.
   stream: at a 32k window 1.29 GiB a stream, at 64k 1.92 GiB. Each sliding layer's ring holds a pass and its window
   (8,768 keys).
 - The prompt cache keeps a stream's state at any row: full layers' keys up to it and each sliding layer's last 512.
-- Drafts: the lane core's copy drafts verify in windows of up to 16 rows. There is no draft head yet, so a request
-  for head drafts and `--drafter` are refused by name.
+- Drafts: the lane core's copy drafts verify in windows of up to 16 rows. `--drafter DIR` adds the EAGLE-3 drafter
+  (below); a request for the model's own draft head is refused by name, as it has none.
 - Refused at load: other quantizations, `norm_topk_prob`, other layer kinds, a config with a vision tower, shapes the
   shared kernels do not take, `--vision`, `--precision` and a captured kernel set (`TENSORFOLD_CUDA_KERNELS`).
 
@@ -82,6 +82,25 @@ GB10, greedy, served by `tensorfold-native` with copy drafts on:
 Cold prompts (`bench_cache.py --require-cold --repeats 3`, `--prompt-cache-gib 0`, median of the cold requests):
 2,048 tokens 0.97 s, 8,192 tokens 3.72 s, 32,768 tokens 16.8 s, 64,000 tokens 37.8 s to the first token.
 
-## Next
+## EAGLE-3 drafter
 
-- The EAGLE-3 drafter through the lane core's drafter interface.
+`--drafter DIR` loads `josch15366/Kolibri-1-EAGLE3-drafter` (revision `6430e5dc74`): one decoder layer over Kolibri's
+layers 45, 48 and 50, a 32,768-token draft vocabulary, bf16. It runs on the shared CUDA operators (no kernels of its
+own) through the lane core's drafter interface, two drafts a round. Every draft is verified by the target, so replies
+are the same tokens as without it, greedy and seeded, at any stream count. `--drafter-bits` takes 0 or 4 (the
+default); both serve the release as published.
+
+Refused at load, by name, before any request is queued: a release of another architecture (the block drafter
+`josch15366/Kolibri-1-block-drafter` is not served on CUDA), a release for another target, a draft vocabulary or
+tensor shape that does not match the release's config, a stream opened before the drafter.
+
+GB10, greedy, 24 prompts of 256 tokens, A-B-B-A servers, the same replies in all four:
+
+| streams | copy drafts, tok/s | with `--drafter`, tok/s | tokens a round |
+| --- | ---: | ---: | ---: |
+| 1 | 52.6 | 67.4 (+28%) | 1.12 -> 1.92 |
+| 4 | 121.7 | 129.9 (+7%) | 1.12 -> 2.14 |
+| 8 | 159.6 | 155.9 (-2%) | 1.12 -> 2.13 |
+
+At 8 streams the drafter is slower: the target verifies three times the rows, and the depth rule does not yet cut the
+drafts there.
