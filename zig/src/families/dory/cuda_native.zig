@@ -155,9 +155,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
 }
 
-fn envOff(name: [*:0]const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
-    return std.mem.eql(u8, std.mem.span(v), "0");
+fn envOff(name: [:0]const u8) bool {
+    const v = (@import("sys").environment.Process{}).get(name) orelse return false;
+    return std.mem.eql(u8, v, "0");
 }
 
 fn gib(b: u64) f64 {
