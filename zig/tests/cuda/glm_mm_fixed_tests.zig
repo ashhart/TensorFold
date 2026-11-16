@@ -132,4 +132,5 @@ pub fn run(gpu: check.Gpu) !void {
     const kernels = try glm.mm.Kernels.load(module);
     for ([_]u8{ 16, 4, 6, 8 }) |bits| for ([_][2]usize{ .{ 64, 512 }, .{ 128, 2048 } }) |dims| try shape(gpu, &kernels, s, bits, dims[0], dims[1]);
     check.pass("glm-mm-fixed: both policies, bf16/4/6/8 bits, FP32/bf16 output, every solo/offset/bucket/tail cell", .{});
+    try @import("glm_mm12_tests.zig").run(gpu, &kernels, s);
 }

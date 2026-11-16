@@ -94,6 +94,11 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
 - `TF_GLM_DENSE_BITS=4` (EXL3 at TP=2, off by default) repacks the BF16 dense layers to 4 bits at load. Decode is
   faster (24.8 to 35.0 tok/s in one user's run), but replies differ from the default, so it is lossy and stays opt-in
   (#1761).
+- Width 12 holds the BF16 dense layers and the head exactly in 12 bits a weight: each weight's sign and mantissa byte
+  and a 4-bit exponent over its 64-input block's window, with the rare block that fits no window kept whole. The
+  matmul decodes the same BF16 values, so replies are the same bytes, from about 23% fewer weight bytes. It is the
+  default on a GB10 (sm_121); `TF_GLM_DENSE_BITS=12` and `TF_GLM_HEAD_BITS=12` name it on other GPUs, and `=16` keeps
+  the BF16 tiles.
 
 ## Verified copy drafts
 

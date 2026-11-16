@@ -48,7 +48,7 @@ test "settings from the environment: the defaults, the choices, and a refusal na
     try std.testing.expectEqual(@as(u32, 2), Fingerprint.of(2, 0, r, 8192, true, @splat(0), @splat(0), hashBytes("/c")).split);
 
     try std.testing.expectError(error.BadSetting, Settings.read(&typo, &problem)); // a typo is refused, not read as bf16
-    try std.testing.expectEqualStrings("TF_GLM_DENSE_BITS: 4, 6, 8 or 16", problem);
+    try std.testing.expectEqualStrings("TF_GLM_DENSE_BITS: 4, 6, 8, 12 or 16", problem);
 }
 
 test "fingerprints: agreeing ranks pass; the first differing field and rank are named" {

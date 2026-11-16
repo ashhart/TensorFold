@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- GLM-5.3-Flash on CUDA: a GB10 holds the BF16 dense layers and the head exactly in 12 bits a weight (a sign and mantissa byte and an exponent nibble over each 64-input block's window), about 23% fewer weight bytes, so decode reads less with the same replies byte for byte. `TF_GLM_DENSE_BITS=12` and `TF_GLM_HEAD_BITS=12` name it on other GPUs; `=16` keeps the BF16 tiles.
+
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.

@@ -165,7 +165,8 @@ pub const Engine = struct {
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .mesh = place, .backend = backend, .collective = backend.collective(), .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
-        const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
+        e.settings = o.settings.exactBits(try ctx.capability()); // unnamed bits on a GB10: bf16 held exactly at 12
+        const has_packs = e.settings.dense_bits != 16 or e.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         const Tile = struct {
             gpa: std.mem.Allocator,
@@ -180,7 +181,7 @@ pub const Engine = struct {
                 if (t.enabled) t.packs.* = try tile.tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
             }
         };
-        const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
+        const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = e.settings.dense_bits, .head = e.settings.head_bits, .packs = &e.packs };
         e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, Tile.apply);
         errdefer e.w.deinit();
         errdefer {

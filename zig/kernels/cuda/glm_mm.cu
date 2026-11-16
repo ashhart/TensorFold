@@ -72,6 +72,42 @@ __device__ __forceinline__ void bpairs(const uint32_t* __restrict__ p, uint32_t 
     }
 }
 
+// BITS 12's exact bf16 pairs: slot = base exponent, one under-window position, flag (0 none, 1 that one, 3 raw block).
+__device__ __forceinline__ void bpairs12(const uint32_t* __restrict__ p, uint32_t slot, const uint32_t* __restrict__ raw,
+                                         int lane, uint32_t (&b)[8]) {
+    const uint32_t flag = slot >> 14;
+    if (flag == 3) {  // a raw block: its four lanes' 16 bf16 each at the slot's index
+        const uint4* q = reinterpret_cast<const uint4*>(raw) + ((size_t)(slot & 0x3FFFu) * 4 + (lane & 3)) * 2;
+        const uint4 u0 = q[0], u1 = q[1];
+        b[0] = u0.x; b[1] = u0.y; b[2] = u0.z; b[3] = u0.w; b[4] = u1.x; b[5] = u1.y; b[6] = u1.z; b[7] = u1.w;
+        return;
+    }
+    const uint32_t base = slot & 0xFFu;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        const uint32_t sm = (p[i >> 1] >> (16 * (i & 1))) & 0xFFFFu;   // values 2i and 2i + 1's sign and mantissa bytes
+        const uint32_t nw = p[4 + (i >> 2)] >> (8 * (i & 3));           // their exponent nibbles (15: exponent 0)
+        const uint32_t n0 = nw & 0xFu, n1 = (nw >> 4) & 0xFu;
+        const uint32_t e0 = n0 == 15u ? 0u : base + n0, e1 = n1 == 15u ? 0u : base + n1;
+        const uint32_t s2 = (sm & 0xFFu) | ((sm & 0xFF00u) << 8);
+        b[i] = ((s2 & 0x00800080u) << 8) | (s2 & 0x007F007Fu) | (e0 << 7) | (e1 << 23);
+    }
+    if (flag == 1) {  // the block's one weight under the window: exponent base minus its nibble, at K position pos
+        const int pos = (slot >> 8) & 0x3F, r = pos & 15, rem = r & 7;
+        const int v = (pos >> 4) * 4 + ((rem & 1) | ((r >> 3) << 1));   // frag_k's inverse: the lane's value at pos
+        if ((lane & 3) == (rem >> 1)) {
+#pragma unroll
+            for (int q = 0; q < 16; ++q) {  // constant indices throughout, so p's words and b stay in registers
+                if (q != v) continue;
+                const uint32_t sm = (p[q >> 2] >> (8 * (q & 3))) & 0xFFu;
+                const uint32_t n = (p[4 + (q >> 3)] >> (4 * (q & 7))) & 0xFu;
+                const uint32_t val = ((sm & 0x80u) << 8) | ((base - n) << 7) | (sm & 0x7Fu);
+                b[q >> 1] = (q & 1) ? ((b[q >> 1] & 0x0000FFFFu) | (val << 16)) : ((b[q >> 1] & 0xFFFF0000u) | val);
+            }
+        }
+    }
+}
+
 template <int BITS, int BM, int WM, int STAGES>
 struct Tile {
     static constexpr int WN = 4, BN = 64, NT = 2, MT = BM / WM / 16, THREADS = WM * WN * 32;
@@ -155,7 +191,15 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
         const __half* ps = reinterpret_cast<const __half*>(p + T::X + T::W);
         uint32_t b[T::NT][8];
 #pragma unroll
-        for (int j = 0; j < T::NT; ++j) bpairs<BITS>(pw + ((wn * T::NT + j) * 32 + lane) * T::WPC, b[j]);
+        for (int j = 0; j < T::NT; ++j) {
+            if constexpr (BITS == 12) {  // the raw blocks follow the slots: N / 8 tiles x KG groups x 16 bytes
+                const uint32_t slot = reinterpret_cast<const uint16_t*>(ps)[(wn * T::NT + j) * 8 + (lane >> 2)];
+                const unsigned char* raw = reinterpret_cast<const unsigned char*>(s) + (size_t)N8 * KG * 16;
+                bpairs12(pw + ((wn * T::NT + j) * 32 + lane) * T::WPC, slot, reinterpret_cast<const uint32_t*>(raw), lane, b[j]);
+            } else {
+                bpairs<BITS>(pw + ((wn * T::NT + j) * 32 + lane) * T::WPC, b[j]);
+            }
+        }
         float d[T::MT][T::NT][4];
 #pragma unroll
         for (int kt = 0; kt < 4; ++kt) {
@@ -177,7 +221,7 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
 #pragma unroll
         for (int j = 0; j < T::NT; ++j) {
             float s0 = 1.0f, s1 = 1.0f;
-            if constexpr (BITS != 16) {
+            if constexpr (BITS != 16 && BITS != 12) {
                 const __half2 h = *reinterpret_cast<const __half2*>(ps + (wn * T::NT + j) * 8 + (lane & 3) * 2);
                 s0 = __low2float(h);
                 s1 = __high2float(h);
@@ -251,6 +295,11 @@ GLM_MM_ALL(4)
 GLM_MM_ALL(6)
 GLM_MM_ALL(8)
 GLM_MM_ALL(16)
+GLM_MM_ALL(12)
+// BITS 12's prompts as glm_mm16_rows: 128-row blocks, row blocks fastest
+extern "C" __global__ void __launch_bounds__(256) glm_mm12_rows(const __nv_bfloat16* __restrict__ x, long long ldx,
+    const uint32_t* __restrict__ w, const __half* __restrict__ s, void* __restrict__ out, float* __restrict__ part,
+    int f32, int M, int N, int K, int SK) { mm_kernel<12, 128, 2, 3, true>(x, ldx, w, s, out, part, f32, M, N, K, SK); }
 
 // -- tiling at load: ops.cu's packed rows and fp16 scales [N][K / 64] -> the tiled chunks and scales ---------------
 template <int BITS>
@@ -292,4 +341,58 @@ extern "C" __global__ void glm_mm_tile16(const __nv_bfloat16* __restrict__ src, 
     const int n = tt * 8 + (lane >> 2);
 #pragma unroll
     for (int v = 0; v < 16; ++v) dst[c * 16 + v] = src[(long long)n * K + g * 64 + frag_k(lane, v)];
+}
+
+// bf16 rows [N][K] -> BITS 12's chunks, slots and raw blocks, a thread a column's 64 inputs; `count`: raw blocks taken
+extern "C" __global__ void glm_mm_tile12(const uint16_t* __restrict__ src, uint32_t* __restrict__ dst, uint16_t* __restrict__ slots,
+                                         uint16_t* __restrict__ raw, int* count, int N, int K, int max_raw) {
+    const int KG = K >> 6, N8 = N >> 3;
+    const long long bi = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (bi >= (long long)N8 * KG * 8) return;
+    const int cc = (int)(bi & 7);
+    const long long tg = bi >> 3;
+    const int g = (int)(tg % KG), tt = (int)(tg / KG);
+    const uint16_t* row = src + (long long)(tt * 8 + cc) * K + g * 64;
+    int top = 0;
+    bool special = false;  // an infinity or NaN keeps its block raw
+    for (int k = 0; k < 64; ++k) {
+        const int e = (row[k] >> 7) & 0xFF;
+        top = max(top, e);
+        special |= e == 255;
+    }
+    const int base = max(top - 14, 1);
+    int under = 0, under_k = 0, under_d = 0;
+    for (int k = 0; k < 64; ++k) {
+        const int e = (row[k] >> 7) & 0xFF;
+        if (e != 0 && e < base) {
+            ++under;
+            under_k = k;
+            under_d = base - e;
+        }
+    }
+    const bool keep_raw = special || under > 1 || (under == 1 && under_d > 15);
+    if (keep_raw) {
+        const int idx = atomicAdd(count, 1);
+        if (idx < max_raw) {  // past max_raw the host keeps the linear's bf16 tiles
+            slots[tg * 8 + cc] = (uint16_t)(0xC000 | idx);
+            for (int t = 0; t < 4; ++t)
+                for (int v = 0; v < 16; ++v) raw[(long long)idx * 64 + t * 16 + v] = row[frag_k(cc * 4 + t, v)];
+        }
+    } else {
+        slots[tg * 8 + cc] = (uint16_t)(base | (under == 1 ? (0x4000 | (under_k << 8)) : 0));
+    }
+    for (int t = 0; t < 4; ++t) {
+        const int lane = cc * 4 + t;
+        uint32_t w[6] = {0u, 0u, 0u, 0u, 0u, 0u};
+        for (int v = 0; v < 16; ++v) {
+            const int k = frag_k(lane, v);
+            const uint32_t x = row[k], e = (x >> 7) & 0xFFu;
+            uint32_t nib = 0;
+            if (!keep_raw) nib = e == 0 ? 15u : (under == 1 && k == under_k) ? (uint32_t)(base - (int)e) : e - (uint32_t)base;
+            w[v >> 2] |= (((x >> 8) & 0x80u) | (x & 0x7Fu)) << (8 * (v & 3));
+            w[4 + (v >> 3)] |= nib << (4 * (v & 7));
+        }
+        uint32_t* d = dst + (tg * 32 + lane) * 6;
+        for (int i = 0; i < 6; ++i) d[i] = w[i];
+    }
 }
