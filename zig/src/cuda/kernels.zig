@@ -206,6 +206,7 @@ pub const drama3_fp8: []const u8 = if (available) &Blob("fatbin_drama3_fp8").byt
 pub const drama3_codec: []const u8 = if (available) &Blob("fatbin_drama3_codec").bytes else &.{};
 pub const drama3_staged_gemv: []const u8 = if (available) &Blob("fatbin_drama3_staged_gemv").bytes else &.{};
 pub const zonos3: []const u8 = if (available) &Blob("fatbin_zonos3").bytes else &.{};
+pub const zonos3_codec: []const u8 = if (available) &Blob("fatbin_zonos3_codec").bytes else &.{};
 pub const gdn_train: []const u8 = if (available) &Blob("fatbin_gdn_train").bytes else &.{};
 pub const train_q4: []const u8 = if (available) &Blob("fatbin_train_q4").bytes else &.{};
 pub const train_attn: []const u8 = if (available) &Blob("fatbin_train_attn").bytes else &.{};
