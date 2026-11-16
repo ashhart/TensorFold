@@ -1,11 +1,12 @@
 import { createRoomRunRuntime } from './room-run-runtime'
+import type { TicketWorkerRuntime } from './ticket-worker-runtime'
 import { reserveRoomStartup, assertLocalTicketGenerationProject, requireActiveRoomForCancel, assertRecordMetadataNotPatched } from './workspace-startup-policy'
 export { reserveRoomStartup, assertLocalTicketGenerationProject, requireActiveRoomForCancel, assertRecordMetadataNotPatched } from './workspace-startup-policy'
 import { registerProjectMemoryIpc } from './project-memory-ipc'
 
 import type { runRoom as typedRunRoom } from '../../agent/rooms'
 
-import type { Attachment, Job, Project, RemoteControlEvent, Room, RoomManualMemoryCommand, RoomMergeResult, Skill, Ticket, TicketWorkOptions, Thread } from '../../agent/types'
+import type { Attachment, Job, Project, RemoteControlEvent, Room, RoomManualMemoryCommand, RoomMergeResult, Skill, Ticket, TicketWorkOptions } from '../../agent/types'
 import type { store as typedStore } from '../state'
 import type { handle as typedHandle } from './ipc'
 import { roomModeDefaults } from '../../agent/room-outcomes'
@@ -27,15 +28,7 @@ export interface WorkspaceRuntimeIpc {
   startRoomRun(roomId: string, problem: string, attachments?: Attachment[]): Promise<{ ok: boolean; room?: Room }>
 }
 
-type StartTicketWork = (input: {
-  ticketId: string
-  opts?: TicketWorkOptions
-  source?: {
-    roomId?: string | null
-    seat?: string | null
-    onSettled?: (summary: { codeChanged: boolean; testsPassed: boolean; failed: boolean; jobId?: string | null }) => void
-  }
-}) => Promise<Thread>
+type StartTicketWork = TicketWorkerRuntime['startTicketWork']
 
 export interface WorkspaceRuntimeIpcDeps {
   store: typeof typedStore
