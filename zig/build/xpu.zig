@@ -41,7 +41,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         c.addArgs(&.{ "-device", device, "-options", b.fmt("{s}{s} -I zig/kernels/xpu/qwen27", .{ if (std.mem.startsWith(u8, k[0], "rows_") or std.mem.eql(u8, k[0], "flashnext")) opts_rows else opts, k[2] }), "-output_no_suffix", "-output", k[0], "-out_dir" });
         c.setCwd(b.path("."));
         c.addFileInput(b.path("zig/kernels/xpu/gemma4/attn_rows_g4.cl"));
-        for ([_][]const u8{ "flashnext.cl", "fn_mixers.cl", "fn_moe_head.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/flashnext/{s}", .{part})));
+        for ([_][]const u8{ "flashnext.cl", "fn_dpas.cl", "fn_mixers.cl", "fn_moe_head.cl" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/flashnext/{s}", .{part})));
         for ([_][]const u8{ "glue.cl", "glue_attn.cl", "glue_quant.cl", "shape.h" }) |part| c.addFileInput(b.path(b.fmt("zig/kernels/xpu/qwen27/{s}", .{part})));
         const dir = c.addOutputDirectoryArg(b.fmt("ocloc-{s}", .{k[0]}));
         _ = files.addCopyFile(dir.path(b, b.fmt("{s}.bin", .{k[0]})), b.fmt("{s}.bin", .{k[0]}));

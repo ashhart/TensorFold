@@ -19,6 +19,9 @@ pub fn main(init: std.process.Init) !void {
     const ctx: usize = try env.read(usize, "XPU_CTX", 16384);
     const want_mtp: bool = try env.read(bool, "XPU_MTP", true);
     const verify_test: bool = try env.read(bool, "XPU_VERIFY_TEST", false);
+    const chunk: u32 = try env.read(u32, "XPU_CHUNK", @intCast(eng.ld.default_solo_rows));
+    const mtp_depth: u32 = try env.read(u32, "XPU_MTP_DEPTH", 6);
+    const mtp_conf: f64 = try env.read(f64, "XPU_MTP_CONF", -0.4);
 
     var bench_lens: std.ArrayList(usize) = .empty;
     defer bench_lens.deinit(gpa);
@@ -34,13 +37,20 @@ pub fn main(init: std.process.Init) !void {
         while (it.next()) |w| try file_ids.append(gpa, try std.fmt.parseInt(u32, w, 10));
     }
 
-    const e = try Engine.init(gpa, io, argv[1], .{ .context = ctx, .tp = tp, .mtp = want_mtp });
+    const e = try Engine.init(gpa, io, argv[1], .{
+        .context = ctx,
+        .tp = tp,
+        .mtp = want_mtp,
+        .solo_rows = chunk,
+        .mtp_drafts = mtp_depth,
+        .mtp_conf = mtp_conf,
+    });
     defer e.deinit();
     e.r.ngram.waitWarm();
 
     std.debug.print(
-        "loaded Qwen3.8-Flash-Next (tp={d}, mtp={}, vram/rank={d:.2} GiB, ple_ram={d:.2} GiB) in {d:.1} s\n",
-        .{ tp, e.head != null, @as(f64, @floatFromInt(e.allocatedBytesPerRank())) / (1 << 30), @as(f64, @floatFromInt(e.r.ngram.total_bytes)) / (1 << 30), e.load_seconds },
+        "loaded Qwen3.8-Flash-Next (tp={d}, chunk={d}, mtp={}, vram/rank={d:.2} GiB, ple_ram={d:.2} GiB) in {d:.1} s\n",
+        .{ tp, e.solo_rows, e.head != null, @as(f64, @floatFromInt(e.allocatedBytesPerRank())) / (1 << 30), @as(f64, @floatFromInt(e.r.ngram.total_bytes)) / (1 << 30), e.load_seconds },
     );
 
     if (bench_lens.items.len > 0) {
@@ -78,28 +88,31 @@ fn runIncrementalSweep(e: *Engine, lens: []const usize, steps: usize) !void {
     var cum_plain_sec: f64 = 0;
     var cum_mtp_sec: f64 = 0;
 
+    const step_cap: usize = e.solo_rows;
     for (lens, 0..) |target_n, idx| {
         std.debug.print("\n=== Bench prompt_len={d} ===\n", .{target_n});
         var t = prev_n;
-        while (t + 64 < target_n) : (t += 64) {
+        while (t + step_cap < target_n) {
+            const n = @min(step_cap, target_n - t);
             const tp0 = eng.nowSec();
-            try e.r.forwardPass(ids[t .. t + 64], true, .none, if (e.r.has_mtp) save_dsts else null);
+            try e.r.forwardPass(ids[t .. t + n], true, .none, if (e.r.has_mtp) save_dsts else null);
             e.m.pos = e.r.cur.pos;
             cum_plain_sec += eng.nowSec() - tp0;
             if (e.r.has_mtp) {
                 const tm0 = eng.nowSec();
-                _ = try e.r.forwardMtp(ids[t + 1 .. t + 65], save_dsts, t, false, false);
+                _ = try e.r.forwardMtp(ids[t + 1 .. t + 1 + n], save_dsts, t, false, false);
                 cum_mtp_sec += eng.nowSec() - tm0;
             }
+            t += n;
         }
-        // Final 64-token chunk `[target_n - 64 .. target_n]`
+        // Final chunk `[t .. target_n]` (<= `e.solo_rows`)
         const tp0 = eng.nowSec();
         try e.r.forwardPass(ids[t..target_n], true, .last, if (e.r.has_mtp) save_dsts else null);
         e.m.pos = e.r.cur.pos;
         const dt_last_plain = eng.nowSec() - tp0;
 
         var dt_last_mtp: f64 = 0;
-        if (e.r.has_mtp) {
+        if (e.r.has_mtp and t + 1 < target_n) {
             const tm0 = eng.nowSec();
             _ = try e.r.forwardMtp(ids[t + 1 .. target_n], save_dsts, t, false, false);
             dt_last_mtp = eng.nowSec() - tm0;
@@ -155,9 +168,10 @@ fn runIncrementalSweep(e: *Engine, lens: []const usize, steps: usize) !void {
 }
 
 fn prefillPlain(e: *Engine, prompt_ids: []const u32) !void {
+    const step: usize = e.solo_rows;
     var t: usize = 0;
     while (t < prompt_ids.len) {
-        const n = @min(@as(usize, 64), prompt_ids.len - t);
+        const n = @min(step, prompt_ids.len - t);
         const last = (t + n == prompt_ids.len);
         try e.r.forwardPass(prompt_ids[t .. t + n], true, if (last) .last else .none, null);
         e.m.pos = e.r.cur.pos;
@@ -230,16 +244,15 @@ fn runVerifyTest(e: *Engine, prompt: []const u32, serial: []const u32) !void {
 
 fn runMtpBench(e: *Engine, prompt: []const u32, serial: []const u32) !void {
     try e.reset();
-    try e.prefillSpan(prompt, 0, prompt.len, 64);
+    try e.prefillSpan(prompt, 0, prompt.len, e.solo_rows);
     var g0: [1]i32 = undefined;
     try e.rowTokens(&g0);
     try runMtpFromReady(e, @intCast(g0[0]), serial);
 }
 
 fn runMtpFromReady(e: *Engine, first_tok: u32, serial: []const u32) !void {
-    const env = @import("sys").environment;
-    const depth: u32 = try env.read(u32, "XPU_MTP_DEPTH", 6);
-    const conf: f64 = try env.read(f64, "XPU_MTP_CONF", -0.4);
+    const depth = e.mtp_drafts;
+    const conf = e.mtp_conf;
 
     var got: std.ArrayList(u32) = .empty;
     defer got.deinit(gpa);
@@ -263,8 +276,8 @@ fn runMtpFromReady(e: *Engine, first_tok: u32, serial: []const u32) !void {
         const d0 = eng.nowSec();
         const nd = if (first_round) blk: {
             first_round = false;
-            break :blk try draftWithConf(e, true, got.items[0], &.{}, 0, depth, conf, &drafts);
-        } else try draftWithConf(e, false, 0, prev_kept[0..prev_kept_n], prev_start, depth, conf, &drafts);
+            break :blk try e.draftFirst(got.items[0], depth, &drafts);
+        } else try e.draftKept(prev_kept[0..prev_kept_n], prev_start, depth, &drafts);
         const d1 = eng.nowSec();
         t_draft += d1 - d0;
 
@@ -320,49 +333,4 @@ fn runMtpFromReady(e: *Engine, first_tok: u32, serial: []const u32) !void {
         },
     );
     if (!same) return error.MtpSerialMismatch;
-}
-
-fn draftWithConf(e: *Engine, is_first: bool, first_tok: u32, follow: []const u32, start: u32, max_d: u32, conf: f64, out: []u32) !usize {
-    if (max_d == 0) return 0;
-    var st: [eng.ld.max_tp]*anyopaque = undefined;
-    const pk0 = if (is_first) blk: {
-        for (0..e.r.tp) |rk| st[rk] = e.r.cur.ranks[rk].last_streams;
-        break :blk (try e.r.forwardMtp(&.{first_tok}, st, e.m.pos - 1, true, true)).?;
-    } else blk: {
-        for (0..e.r.tp) |rk| st[rk] = e.r.cur.ranks[rk].verify_streams;
-        break :blk (try e.r.forwardMtp(follow, st, start, true, true)).?;
-    };
-
-    var prod: f64 = 1.0;
-    var n: usize = 0;
-    var cur = pk0;
-    var mtp_st: [eng.ld.max_tp]*anyopaque = undefined;
-    for (0..e.r.tp) |rk| mtp_st[rk] = e.r.cur.ranks[rk].mtp_out;
-
-    var j: usize = 0;
-    while (j < @min(@as(usize, max_d), 15)) : (j += 1) {
-        var propose = true;
-        var more = true;
-        if (conf > 0) {
-            const low = cur.prob < conf;
-            if (low and j > 0) {
-                propose = false;
-                more = false;
-            } else {
-                more = !low;
-            }
-        } else if (conf < 0) {
-            prod *= cur.prob;
-            if (prod < -conf) {
-                propose = (j == 0);
-                more = false;
-            }
-        }
-        if (!propose) break;
-        out[n] = cur.token;
-        n += 1;
-        if (!more or j + 1 >= @min(@as(usize, max_d), 15)) break;
-        cur = (try e.r.forwardMtp(out[n - 1 .. n], mtp_st, e.m.pos + (n - 1), true, true)).?;
-    }
-    return n;
 }

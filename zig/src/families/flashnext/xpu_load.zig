@@ -1,7 +1,8 @@
-//! Qwen3.8 Flash Next device weight structures and TP={1,2,4} sharded safetensors loader.
+//! Qwen3.8 Flash Next device weight structures and TP={1,2,4} sharded safetensors loader (Xe2 16-col DPAS tile layout).
 const std = @import("std");
 const core = @import("core");
 const ple = @import("xpu_ple.zig");
+const host_pool = @import("host_pool.zig");
 const proposal_table = @import("proposal_table.zig");
 const st = @import("xpu_store.zig");
 
@@ -34,6 +35,9 @@ pub const gdn_taps = st.gdn_taps;
 pub const max_tp = st.max_tp;
 pub const max_verify_rows = st.max_verify_rows;
 pub const chunk_rows = st.chunk_rows;
+pub const default_solo_rows = st.default_solo_rows;
+pub const max_chunk_rows = st.max_chunk_rows;
+pub const attn_tile_rows = st.attn_tile_rows;
 pub const linearLayer = st.linearLayer;
 pub const linearIndex = st.linearIndex;
 pub const attnIndex = st.attnIndex;
@@ -46,8 +50,6 @@ pub const detectDeviceId = st.detectDeviceId;
 pub const Store = st.Store;
 pub const asF32 = st.asF32;
 const Tensor = st.Tensor;
-
-// Device Weight Structures & TP Sharded Loaders
 
 pub const Q4 = struct {
     w: ?*anyopaque = null,
@@ -79,25 +81,21 @@ pub const LayerW = struct {
     mlp_hc: HcW,
     proj: Q4,
     out: Q4,
-    router: *anyopaque, // [513, 2560] bf16
-    // Linear (GDN) weights
+    router: *anyopaque, // [33, 160, 8, 16] i32 packed bf16 pairs for DPAS
     cw: ?*anyopaque = null, // [gdn_conv, 4] bf16
     a_log: ?*anyopaque = null, // [nv] f32
     dt: ?*anyopaque = null, // [nv] f32
     norm: ?*anyopaque = null, // [128] bf16
-    // Sparse Attention (QSA) weights
     q_scale: ?*anyopaque = null, // [256] f32
     k_scale: ?*anyopaque = null, // [256] f32
     i_scale: ?*anyopaque = null, // [128] f32
     ik_scale: ?*anyopaque = null, // [128] f32
-    // Layer 1 PLE weights
     ple_key: Q4 = .{},
     ple_val: Q4 = .{},
     ple_nk: ?*anyopaque = null, // [10240] f32
     ple_nq: ?*anyopaque = null, // [10240] f32
     ple_nc: ?*anyopaque = null, // [10240] f32
     ple_cw: ?*anyopaque = null, // [10240, 4] bf16
-    // Expert-parallel routed experts ([local_e, 640, 2560] / [local_e, 2560, 640]) + TP-sliced shared expert
     routed_gate: Q4,
     routed_up: Q4,
     routed_down: Q4,
@@ -107,23 +105,23 @@ pub const LayerW = struct {
 };
 
 pub const MtpW = struct {
-    norm_e: *anyopaque, // [2560] f32
-    norm_h: *anyopaque, // [10240] f32
-    fc_e: Q4, // [2560, 2560]
-    fc_h: Q4, // [2560, 2560]
+    norm_e: *anyopaque,
+    norm_h: *anyopaque,
+    fc_e: Q4,
+    fc_h: Q4,
     layer: LayerW,
     mixer: HcW,
-    draft: Q4, // [draft_slice_len, 2560]
+    draft: Q4,
     draft_lo: usize,
     draft_len: usize,
 };
 
 pub const RankWeights = struct {
     embed: EmbedW,
-    inv_freq: *anyopaque, // [32] f32
+    inv_freq: *anyopaque,
     layers: [layers_n]LayerW,
     mixer: HcW,
-    head: Q4, // [vocab / tp, 2560]
+    head: Q4,
     mtp: ?MtpW = null,
 };
 
@@ -136,46 +134,94 @@ fn holdTriple(store: *Store, buf: []u8, prefix: []const u8) !struct { w: Tensor,
     return .{ .w = w, .s = s, .b = b };
 }
 
-fn uploadFullQ4(d: *Dev, store: *Store, prefix: []const u8, n: usize, k: usize) !Q4 {
-    var buf: [256]u8 = undefined;
-    const t = try holdTriple(store, &buf, prefix);
-    if (!t.w.is(.u32, &.{ n, k / 8 }) or !t.s.is(.bf16, &.{ n, k / 32 }) or !t.b.is(.bf16, &.{ n, k / 32 })) {
-        return error.UnexpectedTensor;
+pub const PackJob = struct {
+    w_in: []const u8,
+    s_in: []const u8,
+    b_in: []const u8,
+    w_out: []u32,
+    s_out: []u16,
+    b_out: []u16,
+    n: usize,
+    groups: usize,
+    nb_total: usize,
+    per: usize,
+
+    pub fn packRange(j: *const PackJob, nb_lo: usize, nb_hi: usize) void {
+        const groups = j.groups;
+        const words = groups * 4;
+        for (nb_lo..nb_hi) |nb| for (0..groups) |g| {
+            const tg = nb * groups + g;
+            const wp = j.w_out[tg * 64 ..][0..64];
+            const sp = j.s_out[tg * 16 ..][0..16];
+            const bp = j.b_out[tg * 16 ..][0..16];
+            for (0..16) |lane| {
+                const col = nb * 16 + lane;
+                if (col < j.n) {
+                    const wbase = (col * words + g * 4) * 4;
+                    wp[0 + lane] = std.mem.readInt(u32, j.w_in[wbase + 0 ..][0..4], .little);
+                    wp[16 + lane] = std.mem.readInt(u32, j.w_in[wbase + 4 ..][0..4], .little);
+                    wp[32 + lane] = std.mem.readInt(u32, j.w_in[wbase + 8 ..][0..4], .little);
+                    wp[48 + lane] = std.mem.readInt(u32, j.w_in[wbase + 12 ..][0..4], .little);
+                    const sb_off = (col * groups + g) * 2;
+                    sp[lane] = std.mem.readInt(u16, j.s_in[sb_off..][0..2], .little);
+                    bp[lane] = std.mem.readInt(u16, j.b_in[sb_off..][0..2], .little);
+                } else {
+                    wp[0 + lane] = 0;
+                    wp[16 + lane] = 0;
+                    wp[32 + lane] = 0;
+                    wp[48 + lane] = 0;
+                    sp[lane] = 0;
+                    bp[lane] = 0;
+                }
+            }
+        };
     }
-    return .{
-        .w = try d.upload(t.w.bytes),
-        .s = try d.upload(t.s.bytes),
-        .b = try d.upload(t.b.bytes),
-        .n = n,
-        .k = k,
-    };
+
+    fn part(ctx: *const anyopaque, idx: usize) anyerror!void {
+        const j: *const PackJob = @ptrCast(@alignCast(ctx));
+        const lo = @min(j.nb_total, idx * j.per);
+        j.packRange(lo, @min(j.nb_total, lo + j.per));
+    }
+};
+
+/// Pack row-major `[n, k]` Q4 weights into `[ceil(n/16), k/32, 4, 16]` coalesced Xe2 DPAS tile layout and upload.
+fn packAndUploadQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, w_raw: []const u8, s_raw: []const u8, b_raw: []const u8, n: usize, k: usize) !Q4 {
+    if (k == 0 or k % 32 != 0) return error.UnexpectedTensor;
+    const groups = k / 32;
+    const nb_total = (n + 15) / 16;
+    const w_out = try gpa.alloc(u32, nb_total * groups * 64);
+    defer gpa.free(w_out);
+    const s_out = try gpa.alloc(u16, nb_total * groups * 16);
+    defer gpa.free(s_out);
+    const b_out = try gpa.alloc(u16, nb_total * groups * 16);
+    defer gpa.free(b_out);
+    const n_parts = if (pool != null and nb_total >= 128) @min(@as(usize, 32), nb_total / 32) else 1;
+    const job: PackJob = .{ .w_in = w_raw, .s_in = s_raw, .b_in = b_raw, .w_out = w_out, .s_out = s_out, .b_out = b_out, .n = n, .groups = groups, .nb_total = nb_total, .per = (nb_total + n_parts - 1) / n_parts };
+    if (n_parts > 1) try pool.?.run(n_parts, .{ .ctx = &job, .run = PackJob.part }) else job.packRange(0, nb_total);
+    return .{ .w = try d.upload(std.mem.sliceAsBytes(w_out)), .s = try d.upload(std.mem.sliceAsBytes(s_out)), .b = try d.upload(std.mem.sliceAsBytes(b_out)), .n = n, .k = k };
 }
 
-fn uploadRowSliceQ4(d: *Dev, store: *Store, prefix: []const u8, full_n: usize, k: usize, from: usize, len: usize) !Q4 {
+fn uploadFullQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, prefix: []const u8, n: usize, k: usize) !Q4 {
     var buf: [256]u8 = undefined;
     const t = try holdTriple(store, &buf, prefix);
-    if (!t.w.is(.u32, &.{ full_n, k / 8 }) or !t.s.is(.bf16, &.{ full_n, k / 32 }) or !t.b.is(.bf16, &.{ full_n, k / 32 })) {
-        return error.UnexpectedTensor;
-    }
-    if (from + len > full_n) return error.UnexpectedTensor;
+    if (!t.w.is(.u32, &.{ n, k / 8 }) or !t.s.is(.bf16, &.{ n, k / 32 }) or !t.b.is(.bf16, &.{ n, k / 32 })) return error.UnexpectedTensor;
+    return packAndUploadQ4(gpa, pool, d, t.w.bytes, t.s.bytes, t.b.bytes, n, k);
+}
+
+fn uploadRowSliceQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, prefix: []const u8, full_n: usize, k: usize, from: usize, len: usize) !Q4 {
+    var buf: [256]u8 = undefined;
+    const t = try holdTriple(store, &buf, prefix);
+    if (!t.w.is(.u32, &.{ full_n, k / 8 }) or !t.s.is(.bf16, &.{ full_n, k / 32 }) or !t.b.is(.bf16, &.{ full_n, k / 32 }) or from + len > full_n) return error.UnexpectedTensor;
     const wb = (k / 8) * 4;
     const gb = (k / 32) * 2;
-    return .{
-        .w = try d.upload(t.w.bytes[from * wb ..][0 .. len * wb]),
-        .s = try d.upload(t.s.bytes[from * gb ..][0 .. len * gb]),
-        .b = try d.upload(t.b.bytes[from * gb ..][0 .. len * gb]),
-        .n = len,
-        .k = k,
-    };
+    return packAndUploadQ4(gpa, pool, d, t.w.bytes[from * wb ..][0 .. len * wb], t.s.bytes[from * gb ..][0 .. len * gb], t.b.bytes[from * gb ..][0 .. len * gb], len, k);
 }
 
-fn uploadColSliceQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []const u8, n: usize, full_k: usize, col_from: usize, col_len: usize) !Q4 {
+fn uploadColSliceQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, prefix: []const u8, n: usize, full_k: usize, col_from: usize, col_len: usize) !Q4 {
     if (col_from % 32 != 0 or col_len % 32 != 0 or col_from + col_len > full_k) return error.UnexpectedTensor;
     var buf: [256]u8 = undefined;
     const t = try holdTriple(store, &buf, prefix);
-    if (!t.w.is(.u32, &.{ n, full_k / 8 }) or !t.s.is(.bf16, &.{ n, full_k / 32 }) or !t.b.is(.bf16, &.{ n, full_k / 32 })) {
-        return error.UnexpectedTensor;
-    }
+    if (!t.w.is(.u32, &.{ n, full_k / 8 }) or !t.s.is(.bf16, &.{ n, full_k / 32 }) or !t.b.is(.bf16, &.{ n, full_k / 32 })) return error.UnexpectedTensor;
     const full_wb = (full_k / 8) * 4;
     const full_gb = (full_k / 32) * 2;
     const part_wb = (col_len / 8) * 4;
@@ -189,28 +235,17 @@ fn uploadColSliceQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []co
     defer gpa.free(s_host);
     const b_host = try gpa.alloc(u8, n * part_gb);
     defer gpa.free(b_host);
-
     for (0..n) |r| {
         @memcpy(w_host[r * part_wb ..][0..part_wb], t.w.bytes[r * full_wb + woff ..][0..part_wb]);
         @memcpy(s_host[r * part_gb ..][0..part_gb], t.s.bytes[r * full_gb + goff ..][0..part_gb]);
         @memcpy(b_host[r * part_gb ..][0..part_gb], t.b.bytes[r * full_gb + goff ..][0..part_gb]);
     }
-    return .{
-        .w = try d.upload(w_host),
-        .s = try d.upload(s_host),
-        .b = try d.upload(b_host),
-        .n = n,
-        .k = col_len,
-    };
+    return packAndUploadQ4(gpa, pool, d, w_host, s_host, b_host, n, col_len);
 }
 
-const PartSlice = struct {
-    suffix: []const u8,
-    full_n: usize,
-    spans: []const Span,
-};
+const PartSlice = struct { suffix: []const u8, full_n: usize, spans: []const Span };
 
-fn uploadStitchedQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []const u8, k: usize, parts: []const PartSlice) !Q4 {
+fn uploadStitchedQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, prefix: []const u8, k: usize, parts: []const PartSlice) !Q4 {
     var total_n: usize = 0;
     for (parts) |p| for (p.spans) |sp| {
         total_n += sp.len;
@@ -230,9 +265,7 @@ fn uploadStitchedQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []co
     for (parts) |p| {
         const full_name = try std.fmt.bufPrint(&pbuf, "{s}{s}", .{ prefix, p.suffix });
         const t = try holdTriple(store, &buf, full_name);
-        if (!t.w.is(.u32, &.{ p.full_n, k / 8 }) or !t.s.is(.bf16, &.{ p.full_n, k / 32 }) or !t.b.is(.bf16, &.{ p.full_n, k / 32 })) {
-            return error.UnexpectedTensor;
-        }
+        if (!t.w.is(.u32, &.{ p.full_n, k / 8 }) or !t.s.is(.bf16, &.{ p.full_n, k / 32 }) or !t.b.is(.bf16, &.{ p.full_n, k / 32 })) return error.UnexpectedTensor;
         for (p.spans) |sp| {
             if (sp.from + sp.len > p.full_n) return error.UnexpectedTensor;
             @memcpy(w_host[row_at * wb ..][0 .. sp.len * wb], t.w.bytes[sp.from * wb ..][0 .. sp.len * wb]);
@@ -242,33 +275,19 @@ fn uploadStitchedQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []co
         }
     }
     if (row_at != total_n) return error.UnexpectedTensor;
-    return .{
-        .w = try d.upload(w_host),
-        .s = try d.upload(s_host),
-        .b = try d.upload(b_host),
-        .n = total_n,
-        .k = k,
-    };
+    return packAndUploadQ4(gpa, pool, d, w_host, s_host, b_host, total_n, k);
 }
 
-fn uploadRoutedSliceQ4(d: *Dev, store: *Store, prefix: []const u8, n: usize, k: usize, first_e: usize, local_e: usize) !Q4 {
+fn uploadRoutedSliceQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, prefix: []const u8, n: usize, k: usize, first_e: usize, local_e: usize) !Q4 {
     var buf: [256]u8 = undefined;
     const t = try holdTriple(store, &buf, prefix);
-    if (!t.w.is(.u32, &.{ experts_n, n, k / 8 }) or !t.s.is(.bf16, &.{ experts_n, n, k / 32 }) or !t.b.is(.bf16, &.{ experts_n, n, k / 32 })) {
-        return error.UnexpectedTensor;
-    }
+    if (!t.w.is(.u32, &.{ experts_n, n, k / 8 }) or !t.s.is(.bf16, &.{ experts_n, n, k / 32 }) or !t.b.is(.bf16, &.{ experts_n, n, k / 32 })) return error.UnexpectedTensor;
     const e_wb = n * (k / 8) * 4;
     const e_gb = n * (k / 32) * 2;
-    return .{
-        .w = try d.upload(t.w.bytes[first_e * e_wb ..][0 .. local_e * e_wb]),
-        .s = try d.upload(t.s.bytes[first_e * e_gb ..][0 .. local_e * e_gb]),
-        .b = try d.upload(t.b.bytes[first_e * e_gb ..][0 .. local_e * e_gb]),
-        .n = local_e * n,
-        .k = k,
-    };
+    return packAndUploadQ4(gpa, pool, d, t.w.bytes[first_e * e_wb ..][0 .. local_e * e_wb], t.s.bytes[first_e * e_gb ..][0 .. local_e * e_gb], t.b.bytes[first_e * e_gb ..][0 .. local_e * e_gb], local_e * n, k);
 }
 
-fn loadHcW(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []const u8, inject: bool) !HcW {
+fn loadHcW(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, prefix: []const u8, inject: bool) !HcW {
     var buf: [256]u8 = undefined;
     const gamma = try store.hold(try std.fmt.bufPrint(&buf, "{s}.hc_norm.weight", .{prefix}));
     const scale_host = try store.normScale(gpa, gamma);
@@ -277,34 +296,51 @@ fn loadHcW(gpa: std.mem.Allocator, d: *Dev, store: *Store, prefix: []const u8, i
     const scale_dev = try d.upload(std.mem.sliceAsBytes(scale_host));
 
     const down_q = if (inject)
-        try uploadStitchedQ4(gpa, d, store, prefix, wide, &.{
+        try uploadStitchedQ4(gpa, pool, d, store, prefix, wide, &.{
             .{ .suffix = ".input_mix_weight_down", .full_n = low, .spans = &.{.{ .from = 0, .len = low }} },
             .{ .suffix = ".block_inject_weight", .full_n = streams, .spans = &.{.{ .from = 0, .len = streams }} },
         })
     else
-        try uploadFullQ4(d, store, try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down", .{prefix}), low, wide);
+        try uploadFullQ4(gpa, pool, d, store, try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down", .{prefix}), low, wide);
 
-    const up_q = try uploadFullQ4(d, store, try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{prefix}), wide, low);
-    return .{
-        .scale = scale_dev,
-        .down = down_q,
-        .up = up_q,
-        .n_down = if (inject) low + streams else low,
-        .has_inj = @intFromBool(inject),
-    };
+    const up_q = try uploadFullQ4(gpa, pool, d, store, try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up", .{prefix}), wide, low);
+    return .{ .scale = scale_dev, .down = down_q, .up = up_q, .n_down = if (inject) low + streams else low, .has_inj = @intFromBool(inject) };
 }
 
-fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u8, linear: bool, with_ple: bool, shp: TpShape, rk: usize) !LayerW {
+fn packRouterTiles(gpa: std.mem.Allocator, d: *Dev, router_host: []const u16) !*anyopaque {
+    const packed_r = try gpa.alloc(u32, 33 * 160 * 8 * 16);
+    defer gpa.free(packed_r);
+    for (0..33) |nb| {
+        for (0..160) |kb| {
+            const base = (nb * 160 + kb) * 128;
+            for (0..8) |p| {
+                for (0..16) |lane| {
+                    const col = nb * 16 + lane;
+                    if (col < experts_n + 1) {
+                        const r_off = col * dims + kb * 16 + p * 2;
+                        const lo: u32 = router_host[r_off];
+                        const hi: u32 = router_host[r_off + 1];
+                        packed_r[base + p * 16 + lane] = lo | (hi << 16);
+                    } else {
+                        packed_r[base + p * 16 + lane] = 0;
+                    }
+                }
+            }
+        }
+    }
+    return d.upload(std.mem.sliceAsBytes(packed_r));
+}
+
+fn loadLayerRank(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, root: []const u8, linear: bool, with_ple: bool, shp: TpShape, rk: usize) !LayerW {
     var buf: [256]u8 = undefined;
     var pbuf: [256]u8 = undefined;
 
-    const attn_hc = try loadHcW(gpa, d, store, try std.fmt.bufPrint(&pbuf, "{s}.attn_hyper_connection", .{root}), true);
-    const mlp_hc = try loadHcW(gpa, d, store, try std.fmt.bufPrint(&pbuf, "{s}.mlp_hyper_connection", .{root}), true);
+    const attn_hc = try loadHcW(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.attn_hyper_connection", .{root}), true);
+    const mlp_hc = try loadHcW(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.mlp_hyper_connection", .{root}), true);
 
     var mlp_buf: [160]u8 = undefined;
     const mlp_root = try std.fmt.bufPrint(&mlp_buf, "{s}.mlp", .{root});
 
-    // Router [513, 2560] bf16: gate.weight [512, 2560] + shared_expert_gate [1, 2560]
     const router_host = try gpa.alloc(u16, (experts_n + 1) * dims);
     defer gpa.free(router_host);
     const gate_t = try store.hold(try std.fmt.bufPrint(&buf, "{s}.gate.weight", .{mlp_root}));
@@ -319,9 +355,9 @@ fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u
     } else {
         const sg_prefix = try std.fmt.bufPrint(&pbuf, "{s}.shared_expert_gate", .{mlp_root});
         const sg = try holdTriple(store, &buf, sg_prefix);
-        try ple.dequantRow(sg.w.bytes, sg.s.bytes, sg.b.bytes, dims, 0, router_host[experts_n * dims ..][0..dims]);
+        try ple.dequantRow(sg.w.bytes, sg.s.bytes, sg.b.bytes, dims, 0, 1.0, router_host[experts_n * dims ..][0..dims]);
     }
-    const router_dev = try d.upload(std.mem.sliceAsBytes(router_host));
+    const router_dev = try packRouterTiles(gpa, d, router_host);
 
     var lw: LayerW = .{
         .linear = linear,
@@ -344,7 +380,7 @@ fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u
         const lp = try std.fmt.bufPrint(&lp_buf, "{s}.linear_attn", .{root});
         const qk = shp.nk * 128;
         const v = shp.nv * 128;
-        const full_qk = 16 * 128; // 2048
+        const full_qk = 16 * 128;
         const qkv_spans = [_]Span{
             .{ .from = rk * qk, .len = qk },
             .{ .from = full_qk + rk * qk, .len = qk },
@@ -352,13 +388,13 @@ fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u
         };
         const z_spans = [_]Span{.{ .from = rk * v, .len = v }};
         const ba_spans = [_]Span{.{ .from = rk * shp.nv, .len = shp.nv }};
-        lw.proj = try uploadStitchedQ4(gpa, d, store, lp, dims, &.{
+        lw.proj = try uploadStitchedQ4(gpa, pool, d, store, lp, dims, &.{
             .{ .suffix = ".in_proj_qkv", .full_n = 10240, .spans = &qkv_spans },
             .{ .suffix = ".in_proj_z", .full_n = 6144, .spans = &z_spans },
             .{ .suffix = ".in_proj_b", .full_n = 48, .spans = &ba_spans },
             .{ .suffix = ".in_proj_a", .full_n = 48, .spans = &ba_spans },
         });
-        lw.out = try uploadColSliceQ4(gpa, d, store, try std.fmt.bufPrint(&pbuf, "{s}.out_proj", .{lp}), dims, 6144, rk * shp.gdn_vdim, shp.gdn_vdim);
+        lw.out = try uploadColSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.out_proj", .{lp}), dims, 6144, rk * shp.gdn_vdim, shp.gdn_vdim);
 
         const conv_t = try store.hold(try std.fmt.bufPrint(&buf, "{s}.conv1d.weight", .{lp}));
         if (conv_t.dtype != .bf16 or conv_t.dim(0) != 10240 or conv_t.bytes.len != 10240 * gdn_taps * 2) return error.UnexpectedTensor;
@@ -388,18 +424,17 @@ fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u
         const ap = try std.fmt.bufPrint(&ap_buf, "{s}.self_attn", .{root});
         const q_rows = shp.nq * 512;
         const kv_rows = shp.nkv * 256;
-        // Full model has kv_heads = 2: at TP=4, ranks {0,1} share KV head 0 and ranks {2,3} share KV head 1!
         const kv_idx = if (shp.tp == 1) 0 else (rk * 2) / shp.tp;
         const q_spans = [_]Span{.{ .from = rk * q_rows, .len = q_rows }};
         const kv_spans = [_]Span{.{ .from = kv_idx * 256, .len = kv_rows }};
         const idx_spans = [_]Span{.{ .from = 0, .len = 640 }};
-        lw.proj = try uploadStitchedQ4(gpa, d, store, ap, dims, &.{
+        lw.proj = try uploadStitchedQ4(gpa, pool, d, store, ap, dims, &.{
             .{ .suffix = ".q_proj", .full_n = 12288, .spans = &q_spans },
             .{ .suffix = ".k_proj", .full_n = 512, .spans = &kv_spans },
             .{ .suffix = ".v_proj", .full_n = 512, .spans = &kv_spans },
             .{ .suffix = ".indexer.index_qk_proj", .full_n = 640, .spans = &idx_spans },
         });
-        lw.out = try uploadColSliceQ4(gpa, d, store, try std.fmt.bufPrint(&pbuf, "{s}.o_proj", .{ap}), dims, 6144, rk * shp.attn_odim, shp.attn_odim);
+        lw.out = try uploadColSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.o_proj", .{ap}), dims, 6144, rk * shp.attn_odim, shp.attn_odim);
 
         const qn = try store.normScale(gpa, try store.hold(try std.fmt.bufPrint(&buf, "{s}.q_norm.weight", .{ap})));
         defer gpa.free(qn);
@@ -419,8 +454,8 @@ fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u
     if (with_ple) {
         var pp_buf: [160]u8 = undefined;
         const pp = try std.fmt.bufPrint(&pp_buf, "{s}.ple", .{root});
-        lw.ple_key = try uploadFullQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.key_proj", .{pp}), wide, dims);
-        lw.ple_val = try uploadFullQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.value_proj", .{pp}), dims, dims);
+        lw.ple_key = try uploadFullQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.key_proj", .{pp}), wide, dims);
+        lw.ple_val = try uploadFullQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.value_proj", .{pp}), dims, dims);
         const nk = try store.normScale(gpa, try store.hold(try std.fmt.bufPrint(&buf, "{s}.norm_key.weight", .{pp})));
         defer gpa.free(nk);
         const nq = try store.normScale(gpa, try store.hold(try std.fmt.bufPrint(&buf, "{s}.norm_query.weight", .{pp})));
@@ -436,33 +471,25 @@ fn loadLayerRank(gpa: std.mem.Allocator, d: *Dev, store: *Store, root: []const u
         lw.ple_cw = try d.upload(pconv.bytes);
     }
 
-    // Expert-parallel routed experts + TP-sliced shared expert
     const first_e = rk * shp.local_e;
-    lw.routed_gate = try uploadRoutedSliceQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.switch_mlp.gate_proj", .{mlp_root}), moe_w, dims, first_e, shp.local_e);
-    lw.routed_up = try uploadRoutedSliceQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.switch_mlp.up_proj", .{mlp_root}), moe_w, dims, first_e, shp.local_e);
-    lw.routed_down = try uploadRoutedSliceQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.switch_mlp.down_proj", .{mlp_root}), dims, moe_w, first_e, shp.local_e);
+    lw.routed_gate = try uploadRoutedSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.switch_mlp.gate_proj", .{mlp_root}), moe_w, dims, first_e, shp.local_e);
+    lw.routed_up = try uploadRoutedSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.switch_mlp.up_proj", .{mlp_root}), moe_w, dims, first_e, shp.local_e);
+    lw.routed_down = try uploadRoutedSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.switch_mlp.down_proj", .{mlp_root}), dims, moe_w, first_e, shp.local_e);
 
-    lw.shared_gate = try uploadRowSliceQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.shared_expert.gate_proj", .{mlp_root}), moe_w, dims, rk * shp.sh_w, shp.sh_w);
-    lw.shared_up = try uploadRowSliceQ4(d, store, try std.fmt.bufPrint(&pbuf, "{s}.shared_expert.up_proj", .{mlp_root}), moe_w, dims, rk * shp.sh_w, shp.sh_w);
-    lw.shared_down = try uploadColSliceQ4(gpa, d, store, try std.fmt.bufPrint(&pbuf, "{s}.shared_expert.down_proj", .{mlp_root}), dims, moe_w, rk * shp.sh_w, shp.sh_w);
-
+    lw.shared_gate = try uploadRowSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.shared_expert.gate_proj", .{mlp_root}), moe_w, dims, rk * shp.sh_w, shp.sh_w);
+    lw.shared_up = try uploadRowSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.shared_expert.up_proj", .{mlp_root}), moe_w, dims, rk * shp.sh_w, shp.sh_w);
+    lw.shared_down = try uploadColSliceQ4(gpa, pool, d, store, try std.fmt.bufPrint(&pbuf, "{s}.shared_expert.down_proj", .{mlp_root}), dims, moe_w, rk * shp.sh_w, shp.sh_w);
     return lw;
 }
 
 pub fn draftIds(gpa: std.mem.Allocator) ![]u32 {
-    return core.proposal_vocab.legacy.ids(gpa, proposal_table.text, .{
-        .vocab = vocab,
-        .skip_past_vocab = true,
-        .delimiters = " \t\r\n,",
-    });
+    return core.proposal_vocab.legacy.ids(gpa, proposal_table.text, .{ .vocab = vocab, .skip_past_vocab = true, .delimiters = " \t\r\n," });
 }
 
-fn uploadDraftSliceQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, ids: []const u32) !Q4 {
+fn uploadDraftSliceQ4(gpa: std.mem.Allocator, pool: ?*host_pool.Pool, d: *Dev, store: *Store, ids: []const u32) !Q4 {
     var buf: [256]u8 = undefined;
     const t = try holdTriple(store, &buf, "language_model.lm_head");
-    if (!t.w.is(.u32, &.{ vocab, dims / 8 }) or !t.s.is(.bf16, &.{ vocab, dims / 32 }) or !t.b.is(.bf16, &.{ vocab, dims / 32 })) {
-        return error.UnexpectedTensor;
-    }
+    if (!t.w.is(.u32, &.{ vocab, dims / 8 }) or !t.s.is(.bf16, &.{ vocab, dims / 32 }) or !t.b.is(.bf16, &.{ vocab, dims / 32 })) return error.UnexpectedTensor;
     const wb = (dims / 8) * 4;
     const gb = (dims / 32) * 2;
     const w_host = try gpa.alloc(u8, ids.len * wb);
@@ -477,28 +504,18 @@ fn uploadDraftSliceQ4(gpa: std.mem.Allocator, d: *Dev, store: *Store, ids: []con
         @memcpy(s_host[i * gb ..][0..gb], t.s.bytes[row * gb ..][0..gb]);
         @memcpy(b_host[i * gb ..][0..gb], t.b.bytes[row * gb ..][0..gb]);
     }
-    return .{
-        .w = try d.upload(w_host),
-        .s = try d.upload(s_host),
-        .b = try d.upload(b_host),
-        .n = ids.len,
-        .k = dims,
-    };
+    return packAndUploadQ4(gpa, pool, d, w_host, s_host, b_host, ids.len, dims);
 }
 
-/// Load all weights across `devs[0..tp]` in layer order so each safetensors shard is mapped once across all ranks and
-pub fn loadAllRanks(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, devs: []Dev, shp: TpShape, want_mtp: bool, draft_ids: []const u32, out: []RankWeights) !void {
+/// Load all weights across `devs[0..tp]` in layer order into coalesced 16-column Xe2 DPAS tile layout.
+pub fn loadAllRanks(gpa: std.mem.Allocator, io: std.Io, pool: ?*host_pool.Pool, dir: []const u8, devs: []Dev, shp: TpShape, want_mtp: bool, draft_ids: []const u32, out: []RankWeights) !void {
     var store = try Store.open(gpa, io, dir);
     defer store.deinit();
     try store.detectNorms();
 
-    // Inverse RoPE frequencies (rotary_dim = 64, half = 32, theta = 10,000,000)
     var inv: [half]f32 = undefined;
-    for (0..half) |i| {
-        inv[i] = @floatCast(1.0 / std.math.pow(f64, 10_000_000.0, @as(f64, @floatFromInt(2 * i)) / 64.0));
-    }
+    for (0..half) |i| inv[i] = @floatCast(1.0 / std.math.pow(f64, 10_000_000.0, @as(f64, @floatFromInt(2 * i)) / 64.0));
 
-    // 1. Embeddings + inv_freq on all ranks
     {
         var buf: [256]u8 = undefined;
         const ew = try store.hold("language_model.model.embed_tokens.weight");
@@ -510,41 +527,31 @@ pub fn loadAllRanks(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, devs: [
             }
         } else {
             const et = try holdTriple(&store, &buf, "language_model.model.embed_tokens");
-            if (!et.w.is(.u32, &.{ vocab, dims / 8 }) or !et.s.is(.bf16, &.{ vocab, dims / 32 }) or !et.b.is(.bf16, &.{ vocab, dims / 32 })) {
-                return error.UnexpectedTensor;
-            }
+            if (!et.w.is(.u32, &.{ vocab, dims / 8 }) or !et.s.is(.bf16, &.{ vocab, dims / 32 }) or !et.b.is(.bf16, &.{ vocab, dims / 32 })) return error.UnexpectedTensor;
             for (devs, 0..) |*d, rk| {
-                out[rk].embed = .{
-                    .w = try d.upload(et.w.bytes),
-                    .s = try d.upload(et.s.bytes),
-                    .b = try d.upload(et.b.bytes),
-                    .dense = false,
-                };
+                out[rk].embed = .{ .w = try d.upload(et.w.bytes), .s = try d.upload(et.s.bytes), .b = try d.upload(et.b.bytes), .dense = false };
                 out[rk].inv_freq = try d.upload(std.mem.sliceAsBytes(&inv));
             }
         }
         store.release();
     }
 
-    // 2. All 48 decoder layers in order (releases non-PLE shard pages after each layer!)
     for (0..layers_n) |l| {
         var root_buf: [96]u8 = undefined;
         const root = try std.fmt.bufPrint(&root_buf, "language_model.model.layers.{d}", .{l});
         for (devs, 0..) |*d, rk| {
-            out[rk].layers[l] = try loadLayerRank(gpa, d, &store, root, linearLayer(l), l == ple_layer, shp, rk);
+            out[rk].layers[l] = try loadLayerRank(gpa, pool, d, &store, root, linearLayer(l), l == ple_layer, shp, rk);
         }
         store.release();
     }
 
-    // 3. Final hyper-connection mixer + TP-sliced lm_head
     for (devs, 0..) |*d, rk| {
-        out[rk].mixer = try loadHcW(gpa, d, &store, "language_model.model.hyper_connection_mixer", false);
-        out[rk].head = try uploadRowSliceQ4(d, &store, "language_model.lm_head", vocab, dims, rk * shp.vocab_per, shp.vocab_per);
+        out[rk].mixer = try loadHcW(gpa, pool, d, &store, "language_model.model.hyper_connection_mixer", false);
+        out[rk].head = try uploadRowSliceQ4(gpa, pool, d, &store, "language_model.lm_head", vocab, dims, rk * shp.vocab_per, shp.vocab_per);
         out[rk].mtp = null;
     }
     store.release();
 
-    // 4. Optional MTP speculative layer & 79,591-row draft head
     if (want_mtp and store.has("language_model.mtp.pre_fc_norm_embedding.weight")) {
         const ne = try store.normScale(gpa, try store.hold("language_model.mtp.pre_fc_norm_embedding.weight"));
         defer gpa.free(ne);
@@ -557,11 +564,11 @@ pub fn loadAllRanks(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, devs: [
             out[rk].mtp = .{
                 .norm_e = try d.upload(std.mem.sliceAsBytes(ne)),
                 .norm_h = try d.upload(std.mem.sliceAsBytes(nh)),
-                .fc_e = try uploadFullQ4(d, &store, "language_model.mtp.fc_embedding", dims, dims),
-                .fc_h = try uploadFullQ4(d, &store, "language_model.mtp.fc_hidden", dims, dims),
-                .layer = try loadLayerRank(gpa, d, &store, "language_model.mtp.layers.0", false, false, shp, rk),
-                .mixer = try loadHcW(gpa, d, &store, "language_model.mtp.hyper_connection_mixer", false),
-                .draft = try uploadDraftSliceQ4(gpa, d, &store, draft_ids[sl.lo .. sl.lo + sl.len]),
+                .fc_e = try uploadFullQ4(gpa, pool, d, &store, "language_model.mtp.fc_embedding", dims, dims),
+                .fc_h = try uploadFullQ4(gpa, pool, d, &store, "language_model.mtp.fc_hidden", dims, dims),
+                .layer = try loadLayerRank(gpa, pool, d, &store, "language_model.mtp.layers.0", false, false, shp, rk),
+                .mixer = try loadHcW(gpa, pool, d, &store, "language_model.mtp.hyper_connection_mixer", false),
+                .draft = try uploadDraftSliceQ4(gpa, pool, d, &store, draft_ids[sl.lo .. sl.lo + sl.len]),
                 .draft_lo = sl.lo,
                 .draft_len = sl.len,
             };

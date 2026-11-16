@@ -23,6 +23,10 @@ pub const Options = struct {
     context: usize = 16384,
     tp: usize = 4,
     mtp: bool = true,
+    busy_rows: u32 = ld.chunk_rows,
+    solo_rows: u32 = ld.default_solo_rows,
+    mtp_drafts: u32 = 6,
+    mtp_conf: f64 = -0.4,
 };
 
 pub const Engine = struct {
@@ -32,6 +36,10 @@ pub const Engine = struct {
     gpa: std.mem.Allocator,
     r: *fwd.Runner,
     max_len: usize,
+    busy_rows: u32,
+    solo_rows: u32,
+    mtp_drafts: u32,
+    mtp_conf: f64,
     load_seconds: f64,
     head: ?u8 = null,
     own: fwd.Seq = undefined,
@@ -42,11 +50,16 @@ pub const Engine = struct {
         const t0 = nowSec();
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
-        const runner = try fwd.Runner.initTp(gpa, io, dir, o.context, o.tp, o.mtp);
+        const cap_in = @max(@as(usize, o.busy_rows), @as(usize, o.solo_rows));
+        const runner = try fwd.Runner.initTp(gpa, io, dir, o.context, o.tp, o.mtp, cap_in);
         e.* = .{
             .gpa = gpa,
             .r = runner,
             .max_len = o.context,
+            .busy_rows = @intCast(@min(@max(@as(usize, o.busy_rows), 1), runner.chunk_cap)),
+            .solo_rows = @intCast(@min(@max(@as(usize, o.solo_rows), 1), runner.chunk_cap)),
+            .mtp_drafts = @min(@max(o.mtp_drafts, 1), 15),
+            .mtp_conf = o.mtp_conf,
             .load_seconds = nowSec() - t0,
             .head = if (runner.has_mtp) 1 else null,
             .own = runner.own,
@@ -56,6 +69,10 @@ pub const Engine = struct {
         e.seqs[0] = &e.own;
         e.r.bind(&e.own);
         return e;
+    }
+
+    pub fn maxDrafts(e: *const Engine) u32 {
+        return e.mtp_drafts;
     }
 
     pub fn deinit(e: *Engine) void {
@@ -165,7 +182,7 @@ pub const Engine = struct {
     }
 
     pub fn prefillWindows(e: *Engine, head_ids: []const u32, rows: u32) !void {
-        const step = @min(@as(usize, @max(rows, 1)), ld.chunk_rows);
+        const step = @min(@as(usize, @max(rows, 1)), e.r.chunk_cap);
         var t: usize = 0;
         while (t < head_ids.len) {
             const n = @min(step, head_ids.len - t);
@@ -177,7 +194,7 @@ pub const Engine = struct {
 
     pub fn prefillSpan(e: *Engine, prompt: []const u32, from: usize, to: usize, rows: u32) !void {
         if (e.m.pos != from) return error.PositionMismatch;
-        const step = @min(@as(usize, @max(rows, 1)), ld.chunk_rows);
+        const step = @min(@as(usize, @max(rows, 1)), e.r.chunk_cap);
         var save_dsts: [ld.max_tp]*anyopaque = undefined;
         for (0..e.r.tp) |rk| save_dsts[rk] = e.r.acts[rk].prompt_streams;
 
@@ -195,31 +212,65 @@ pub const Engine = struct {
         }
     }
 
-    pub fn draftFirst(e: *Engine, first: u32, depth: u32, out: []u32) !usize {
+    pub fn draftFirstProbs(e: *Engine, first: u32, depth: u32, out: []u32, probs: []f64) !usize {
         var st: [ld.max_tp]*anyopaque = undefined;
         for (0..e.r.tp) |rk| st[rk] = e.r.cur.ranks[rk].last_streams;
-        const pk = try e.r.forwardMtp(&.{first}, st, e.m.pos - 1, true, depth > 0);
-        return e.chainDrafts(pk, depth, out);
+        const pk = try e.r.forwardMtp(&.{first}, st, e.m.pos - 1, depth > 0, depth > 0);
+        return e.chainDraftsProbs(pk, depth, out, probs);
+    }
+
+    pub fn draftKeptProbs(e: *Engine, follow: []const u32, start: u32, depth: u32, out: []u32, probs: []f64) !usize {
+        var st: [ld.max_tp]*anyopaque = undefined;
+        for (0..e.r.tp) |rk| st[rk] = e.r.cur.ranks[rk].verify_streams;
+        const pk = try e.r.forwardMtp(follow, st, start, depth > 0, depth > 0);
+        return e.chainDraftsProbs(pk, depth, out, probs);
+    }
+
+    pub fn draftFirst(e: *Engine, first: u32, depth: u32, out: []u32) !usize {
+        var probs: [16]f64 = undefined;
+        return e.draftFirstProbs(first, depth, out, &probs);
     }
 
     pub fn draftKept(e: *Engine, follow: []const u32, start: u32, depth: u32, out: []u32) !usize {
-        var st: [ld.max_tp]*anyopaque = undefined;
-        for (0..e.r.tp) |rk| st[rk] = e.r.cur.ranks[rk].verify_streams;
-        const pk = try e.r.forwardMtp(follow, st, start, true, depth > 0);
-        return e.chainDrafts(pk, depth, out);
+        var probs: [16]f64 = undefined;
+        return e.draftKeptProbs(follow, start, depth, out, &probs);
     }
 
-    fn chainDrafts(e: *Engine, first: ?fwd.Runner.MtpPick, depth: u32, out: []u32) !usize {
-        if (depth == 0) return 0;
-        const n = @min(@as(usize, depth), out.len);
-        out[0] = first.?.token;
+    fn chainDraftsProbs(e: *Engine, first: ?fwd.Runner.MtpPick, depth: u32, out: []u32, probs: []f64) !usize {
+        const room = e.r.cur.cap -| (e.m.pos + 1);
+        const lim = @min(@min(@as(usize, depth), @as(usize, e.mtp_drafts)), @min(@min(out.len, probs.len), room));
+        if (lim == 0 or first == null) return 0;
+        const conf = e.mtp_conf;
+        var prod: f64 = 1.0;
+        var n: usize = 0;
+        var cur = first.?;
         var mtp_st: [ld.max_tp]*anyopaque = undefined;
         for (0..e.r.tp) |rk| mtp_st[rk] = e.r.cur.ranks[rk].mtp_out;
-        var pos: usize = e.m.pos;
-        for (1..n) |i| {
-            const pk = (try e.r.forwardMtp(out[i - 1 .. i], mtp_st, pos, true, true)).?;
-            out[i] = pk.token;
-            pos += 1;
+        var j: usize = 0;
+        while (j < lim) : (j += 1) {
+            var propose = true;
+            var more = true;
+            if (conf > 0) {
+                const low = cur.prob < conf;
+                if (low and j > 0) {
+                    propose = false;
+                    more = false;
+                } else {
+                    more = !low;
+                }
+            } else if (conf < 0) {
+                prod *= cur.prob;
+                if (prod < -conf) {
+                    propose = (j == 0);
+                    more = false;
+                }
+            }
+            if (!propose) break;
+            out[n] = cur.token;
+            probs[n] = cur.prob;
+            n += 1;
+            if (!more or j + 1 >= lim) break;
+            cur = (try e.r.forwardMtp(out[n - 1 .. n], mtp_st, e.m.pos + (n - 1), true, true)).?;
         }
         return n;
     }
@@ -316,4 +367,49 @@ test "flashnext xpu: PLE n-gram hash resets across EOS boundary" {
     try ple.lastIds(h, &.{ 111, 248044 }, 77, &a);
     try ple.lastIds(h, &.{ 248044, 248044 }, 77, &b);
     try std.testing.expectEqualSlices(i64, &b, &a);
+}
+
+test "flashnext xpu: PackJob packs 16-column coalesced DPAS tiles and zero-pads partial tail columns" {
+    const n: usize = 19;
+    const groups: usize = 2;
+    const nb_total: usize = 2;
+    var w_in: [n * groups * 4]u32 = undefined;
+    var s_in: [n * groups]u16 = undefined;
+    var b_in: [n * groups]u16 = undefined;
+    for (0..n) |col| for (0..groups) |g| {
+        s_in[col * groups + g] = @intCast(col * 10 + g + 1);
+        b_in[col * groups + g] = @intCast(col * 20 + g + 3);
+        for (0..4) |q| w_in[(col * groups + g) * 4 + q] = @intCast((col + 1) * 1000 + g * 100 + q);
+    };
+    var w_out: [nb_total * groups * 64]u32 = @splat(0xdeadbeef);
+    var s_out: [nb_total * groups * 16]u16 = @splat(0xffff);
+    var b_out: [nb_total * groups * 16]u16 = @splat(0xffff);
+    const job: ld.PackJob = .{
+        .w_in = std.mem.sliceAsBytes(&w_in),
+        .s_in = std.mem.sliceAsBytes(&s_in),
+        .b_in = std.mem.sliceAsBytes(&b_in),
+        .w_out = &w_out,
+        .s_out = &s_out,
+        .b_out = &b_out,
+        .n = n,
+        .groups = groups,
+        .nb_total = nb_total,
+        .per = 1,
+    };
+    job.packRange(0, nb_total);
+    for (0..nb_total) |nb| for (0..groups) |g| {
+        const tg = nb * groups + g;
+        for (0..16) |lane| {
+            const col = nb * 16 + lane;
+            if (col < n) {
+                try std.testing.expectEqual(@as(u16, @intCast(col * 10 + g + 1)), s_out[tg * 16 + lane]);
+                try std.testing.expectEqual(@as(u16, @intCast(col * 20 + g + 3)), b_out[tg * 16 + lane]);
+                for (0..4) |q| try std.testing.expectEqual(@as(u32, @intCast((col + 1) * 1000 + g * 100 + q)), w_out[tg * 64 + q * 16 + lane]);
+            } else {
+                try std.testing.expectEqual(@as(u16, 0), s_out[tg * 16 + lane]);
+                try std.testing.expectEqual(@as(u16, 0), b_out[tg * 16 + lane]);
+                for (0..4) |q| try std.testing.expectEqual(@as(u32, 0), w_out[tg * 64 + q * 16 + lane]);
+            }
+        }
+    };
 }

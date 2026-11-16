@@ -47,8 +47,20 @@ pub fn Xpu(comptime S: type) type {
         const Self = @This();
         /// The family's engine has drafted rounds (Nemotron: verifyRows, keepRows, draftKept, draftFirst).
         const has_head = @hasDecl(S.Engine, "verifyRows");
+        const has_probs = @hasDecl(S.Engine, "draftFirstProbs");
+        const has_solo = @hasDecl(S, "soloRows");
         /// A stream's sequence, its held drafts, its last window's unkept rows and where that window started.
-        const Lane = struct { seq: *Seq, held: [max_rows]u32 = undefined, held_n: usize = 0, pending: ?u32 = null, start: u32 = 0 };
+        pub const Lane = struct {
+            seq: *Seq,
+            held: [max_rows]u32 = undefined,
+            probs: [max_rows]f64 = @splat(0),
+            held_n: usize = 0,
+            pending: ?u32 = null,
+            start: u32 = 0,
+            filled: ?usize = null,
+            first_handle: u64 = 0,
+        };
+        const P = if (has_head) @import("xpu_lane_prompt.zig").Prompt(Self, S) else void;
         const Seq = if (has_head) S.Engine.Sequence else void;
         gpa: std.mem.Allocator,
         e: *S.Engine,
@@ -102,17 +114,26 @@ pub fn Xpu(comptime S: type) type {
         }
 
         pub fn backend(self: *Self) be.Backend {
-            return .{ .ptr = self, .vtable = &.{
-                .prefill = prefillFn,
-                .first = firstFn,
-                .queue = queueFn,
-                .read = readFn,
-                .verify = verifyFn,
-                .keep = keepFn,
-                .draft = draftFn,
-                .release = releaseFn,
-                .score = if (@hasDecl(S.Engine, "score")) scoreFn else null,
-            } };
+            return .{
+                .ptr = self,
+                .chunk_invariant = @hasDecl(S, "chunk_invariant") and S.chunk_invariant,
+                .vtable = &.{
+                    .prefill = prefillFn,
+                    .prefill_step = if (has_head) prefillStepFn else null,
+                    .cancel_prefill = if (has_head) cancelPrefillFn else null,
+                    .reports_fill = has_head,
+                    .first = firstFn,
+                    .queue = queueFn,
+                    .read = readFn,
+                    .verify = verifyFn,
+                    .keep = keepFn,
+                    .draft = draftFn,
+                    .tree = if (has_probs) treeFn else null,
+                    .probabilities = if (has_probs) probabilitiesFn else null,
+                    .release = releaseFn,
+                    .score = if (@hasDecl(S.Engine, "score")) scoreFn else null,
+                },
+            };
         }
 
         /// What the round loop reads at setup: one stream; with a head, drafted windows of up to 16 rows.
@@ -126,7 +147,9 @@ pub fn Xpu(comptime S: type) type {
                 .speculate = true,
                 .speculate_early = false,
                 .plain_guard = true, // a round drafts only when its depth beats the decode step on the measured costs
-                .drafts = max_rows - 1,
+                .drafts = if (@hasDecl(S.Engine, "maxDrafts")) S.Engine.maxDrafts(self.e) else max_rows - 1,
+                .draft_probabilities = has_probs,
+                .plain_streams = if (has_probs) 16 else 0,
                 .window_costs = self.costs[0..max_rows],
                 .mtp_step_ms = self.mtp_ms,
                 .hidden_rows = self.streams > 1, // a round's windows of several streams, one after another
@@ -143,7 +166,7 @@ pub fn Xpu(comptime S: type) type {
         }
 
         /// The window's rows drawn: greedy on the device, else each row's logits drawn at its keyed position.
-        fn drawRows(self: *Self, base: usize, rows: usize, sampling: ?lanes.Sampling, positions: []const u64, out: []u32) !void {
+        pub fn drawRows(self: *Self, base: usize, rows: usize, sampling: ?lanes.Sampling, positions: []const u64, out: []u32) !void {
             if (comptime !has_head) unreachable;
             const greedy = if (sampling) |s| s.temperature <= 0 else true;
             if (greedy) {
@@ -194,11 +217,11 @@ pub fn Xpu(comptime S: type) type {
             return @ptrCast(@alignCast(ptr));
         }
 
-        fn stopped(self: *const Self) bool {
+        pub fn stopped(self: *const Self) bool {
             return if (self.halt) |h| h.load(.acquire) else false;
         }
 
-        fn take(self: *Self, token: u32) u64 {
+        pub fn take(self: *Self, token: u32) u64 {
             const h = self.next;
             self.drawn[h % ring] = token;
             self.next += 1;
@@ -242,27 +265,14 @@ pub fn Xpu(comptime S: type) type {
             const ids = s.prompt();
             if (ids.len == 0 or ids.len + s.max_new + 1 > e.max_len) return error.PromptTooLong;
             if (comptime has_head) if (self.drafting()) {
-                // the stream's sequence (the engine's own while free), then the prompt in prompt windows
-                const gop = try self.lane_of.getOrPut(self.gpa, s);
-                if (gop.found_existing) self.dropSeq(gop.value_ptr.seq);
-                const own = self.own_free;
-                gop.value_ptr.* = .{ .seq = if (own) &e.own else e.newSeq() catch |err| {
-                    self.lane_of.removeByPtr(gop.key_ptr);
-                    return err;
-                } };
-                if (own) self.own_free = false;
-                e.bind(gop.value_ptr.seq);
-                try self.prefillPlanned(s, ids);
-                if (s.isCancelled()) return error.Cancelled;
-                var first: [1]u32 = undefined;
-                try self.drawRows(0, 1, s.sampling, &.{ids.len}, &first);
-                _ = self.take(first[0]);
+                const l = try P.open(self, s, ids);
+                while (!try P.step(self, s, l, 0)) {}
                 return;
             };
             try e.reset();
             const head = ids[0 .. ids.len - 1];
             if (head.len > 16) {
-                const window = S.promptRows(e);
+                const window = if (comptime has_solo) S.soloRows(e) else S.promptRows(e);
                 var t: usize = 0;
                 while (t < head.len) : (t += window) {
                     if (s.isCancelled()) return error.Cancelled;
@@ -277,37 +287,24 @@ pub fn Xpu(comptime S: type) type {
             _ = self.take(try self.step(ids[ids.len - 1], s.sampling, ids.len));
         }
 
-        /// A bound sequence's prompt pass: from a kept state if the cache has one, planned chunks, the cache's marks.
-        fn prefillPlanned(self: *Self, s: *lanes.Stream, ids: []const u32) !void {
+        fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream, max_rows_cap: u32) anyerror!bool {
             if (comptime !has_head) unreachable;
-            const e = self.e;
-            const rows = S.promptRows(e);
-            s.cached = 0;
-            var at: u32 = 0;
-            if (s.reuse.saved) |saved| {
-                const snap: *S.Engine.Snapshot = @ptrCast(@alignCast(saved));
-                if (snap.at < ids.len) {
-                    try e.snapRestore(snap);
-                    at = snap.at;
-                    s.cached = at;
-                } else s.reuse_failed = true;
+            const self = of(ptr);
+            if (!self.drafting()) {
+                try prefillFn(ptr, s);
+                return true;
             }
-            if (at == 0) try e.reset();
-            var next: usize = 0;
-            while (at < ids.len) {
-                if (s.isCancelled()) return error.Cancelled;
-                if (self.stopped()) return error.ShuttingDown;
-                while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
-                const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(ids.len);
-                var n = @min(end - at, rows);
-                if (comptime @hasDecl(S.Engine, "copy_only")) for (s.reuse.marks) |m| if (m > at and m < at + n) {
-                    n = m - at; // an unplanned family cuts where the cache keeps a state
-                    break;
-                };
-                try e.prefillSpan(ids, at, at + n, rows);
-                at += n;
-                if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+            if (self.started) |f| {
+                self.started = null;
+                f();
             }
+            const ids = s.prompt();
+            const l = if (self.lane_of.getPtr(s)) |x| (if (x.filled != null) x else try P.open(self, s, ids)) else try P.open(self, s, ids);
+            return P.step(self, s, l, max_rows_cap);
+        }
+
+        fn cancelPrefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
+            if (comptime has_head) P.cancel(of(ptr), s);
         }
 
         // -- the prompt cache's Snapshots: a stream's sequence at a prompt chunk end ---------------------------------
@@ -344,6 +341,11 @@ pub fn Xpu(comptime S: type) type {
         fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
             const self = of(ptr);
             if (position != s.prompt_len) return error.PositionMismatch;
+            if (comptime has_head) if (self.drafting()) {
+                const l = self.lane_of.getPtr(s) orelse return error.UnknownStream;
+                if (l.filled != null) return error.PositionMismatch;
+                return l.first_handle;
+            };
             return self.next - 1;
         }
 
@@ -479,16 +481,42 @@ pub fn Xpu(comptime S: type) type {
                 const depth = @min(r.depth, max_rows - 1);
                 if (r.rows) |path| {
                     for (path, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                    l.held_n = try self.e.draftKept(r.follow[0..path.len], l.start, depth, &l.held);
+                    l.held_n = if (comptime has_probs)
+                        try self.e.draftKeptProbs(r.follow[0..path.len], l.start, depth, &l.held, &l.probs)
+                    else
+                        try self.e.draftKept(r.follow[0..path.len], l.start, depth, &l.held);
                 } else {
                     const first = r.first orelse return error.NoFirstToken;
                     const t = switch (first) {
                         .handle => |h| self.drawn[h % ring],
                         .value => |v| v,
                     };
-                    l.held_n = try self.e.draftFirst(t, depth, &l.held);
+                    l.held_n = if (comptime has_probs)
+                        try self.e.draftFirstProbs(t, depth, &l.held, &l.probs)
+                    else
+                        try self.e.draftFirst(t, depth, &l.held);
                 }
             }
+        }
+
+        fn treeFn(ptr: *anyopaque, s: *lanes.Stream, gpa: std.mem.Allocator) anyerror!?lanes.stream.Held {
+            if (comptime !(has_head and has_probs)) unreachable;
+            const self = of(ptr);
+            const l = self.lane_of.getPtr(s) orelse return error.UnknownStream;
+            return .{ .count = @intCast(l.held_n), .tokens = try gpa.dupe(u32, l.held[0..l.held_n]) };
+        }
+
+        fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
+            if (comptime !(has_head and has_probs)) unreachable;
+            const self = of(ptr);
+            const l = self.lane_of.getPtr(s) orelse return error.UnknownStream;
+            if (out.len > l.held_n) return false;
+            var chance: f64 = 1.0;
+            for (out, l.probs[0..out.len]) |*o, p| {
+                chance *= p;
+                o.* = chance;
+            }
+            return true;
         }
 
         fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
@@ -498,7 +526,7 @@ pub fn Xpu(comptime S: type) type {
         }
 
         /// A stream's sequence back: the engine's own is free again, another is freed.
-        fn dropSeq(self: *Self, seq: *Seq) void {
+        pub fn dropSeq(self: *Self, seq: *Seq) void {
             if (comptime !has_head) return;
             if (seq == &self.e.own) self.own_free = true else self.e.freeSeq(seq);
         }

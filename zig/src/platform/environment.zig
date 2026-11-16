@@ -106,6 +106,8 @@ pub const rules = [_]Rule{
     .{ .name = "XPU_MTP", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 disables MTP drafting; default 1)" },
     .{ .name = "XPU_MTP_DEPTH", .scope = .xpu, .kind = .u32, .min = 1, .max = 15, .forms = "a whole draft depth from 1 to 15 (default 6)" },
     .{ .name = "XPU_MTP_CONF", .scope = .xpu, .kind = .signed_real, .forms = "a finite cumulative log-probability cut (default -0.4)" },
+    .{ .name = "XPU_CHUNK", .scope = .xpu, .kind = .u32, .min = 1, .max = 2048, .forms = "a whole busy prompt row count from 1 to 2048 (default 64)" },
+    .{ .name = "XPU_CHUNK_SOLO", .scope = .xpu, .kind = .u32, .min = 1, .max = 2048, .forms = "a whole solo prompt row count from busy to 2048 (default 2048)" },
     .{ .name = "XPU_VERIFY_TEST", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (1 runs stand-in verify checks)" },
     .{ .name = "XPU_FLASHNEXT_WARM", .scope = .xpu, .kind = .flag, .forms = "0 or 1 (0 skips host PLE warmup; 1 forces it)" },
     .{ .name = "XPU_DEVICE_ID", .scope = .xpu, .kind = .positive, .base = 0, .forms = "a nonzero PCI device id in decimal or 0x hex" },

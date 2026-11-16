@@ -1,4 +1,4 @@
-// Qwen3.8 Flash Next (qwen4_exp) kernels for Intel Xe2 (Level Zero / OpenCL C), supporting TP={1,2,4}. Arithmetic and
+// Qwen3.8 Flash Next (qwen4_exp) kernels for Intel Xe2 (Level Zero / OpenCL C), supporting TP={1,2,4}.
 
 #pragma OPENCL FP_CONTRACT OFF
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
@@ -27,8 +27,6 @@ static inline float wg_sum(float v, local float *red, int nsg) {
   return tot;
 }
 
-// 1. Embeddings, RMSNorm, Stream Add
-
 // MLX affine 4-bit group-32 embedding copied into `copies` streams: out [rows, copies, D] bf16.
 KERNEL(256) void fn_embed_q4(global const int *IDS, global const uint *W, global const ushort *S, global const ushort *B,
                              global ushort *OUT, int D, int copies) {
@@ -37,7 +35,7 @@ KERNEL(256) void fn_embed_q4(global const int *IDS, global const uint *W, global
   const int words = D / 8, groups = D / 32;
   for (int d = get_local_id(0); d < D; d += 256) {
     const uint w = W[id * words + d / 8];
-    const float q = (float)((w >> (4 * (d & 7))) & 0xFu);
+    const float q = (float)((w >> (4 * (d & 7))) & 15u);
     const int g = d / 32;
     const ushort val = to_bf(q * bf(S[id * groups + g]) + bf(B[id * groups + g]));
     for (int s = 0; s < copies; s++) {
@@ -87,52 +85,36 @@ KERNEL(256) void fn_add_streams(global const ushort *E, global const ushort *HS,
   }
 }
 
-// 2. Hyper-Connections (Writeback + Normalize, Down + ReduceAct, Up + Mix)
-
-// Fused hc_writeback + normalize for D=2560, S=4 (WIDE=10240): grid (rows). has_br == 0: mode 0 (no branch added, H
+// Stream-parallel hc_writeback + normalize for D=2560, S=4 (WIDE=10240): grid (4, rows), WG = 256.
 KERNEL(256) void fn_hc_writeback_norm(global ushort *H, global const float *BR, global const ushort *INJ,
                                       global const float *SCALE, global ushort *NORM, float eps, int has_br) {
-  local float red[10][16][4];
-  local float rinv[4];
-  const int r = get_group_id(0), lid = get_local_id(0), sg = get_sub_group_id(), lane = get_sub_group_local_id();
+  local float red[16];
+  const int s = get_group_id(0), r = get_group_id(1), lid = get_local_id(0);
   const int D = 2560;
-  float hv[10][4];
+  const float inj_v = has_br ? bf(INJ[(long)r * 4 + s]) : 0.0f;
+  const long base = (long)r * (4 * D) + (long)s * D;
+  float hv[10];
+  float ss = 0.0f;
   for (int c = 0; c < 10; c++) {
     const int d = c * 256 + lid;
-    const float branch = has_br ? rbf(BR[(long)r * D + d]) : 0.0f;
-    for (int s = 0; s < 4; s++) {
-      const long at = (long)r * (4 * D) + (long)s * D + d;
-      float v = bf(H[at]);
-      if (has_br) {
-        v = rbf(fma(branch, bf(INJ[(long)r * 4 + s]), v));
-        H[at] = to_bf(v);
-      }
-      hv[c][s] = v;
-      const float ss = sub_group_reduce_add(v * v);
-      if (lane == 0) red[c][sg][s] = ss;
+    float v = bf(H[base + d]);
+    if (has_br) {
+      const float branch = rbf(BR[(long)r * D + d]);
+      v = rbf(fma(branch, inj_v, v));
+      H[base + d] = to_bf(v);
     }
+    hv[c] = v;
+    ss = fma(v, v, ss);
   }
-  barrier(CLK_LOCAL_MEM_FENCE);
-  if (lid < 4) {
-    float all = 0.0f;
-    for (int c = 0; c < 10; c++) {
-      float chunk_s = 0.0f;
-      for (int w = 0; w < 16; w++) chunk_s += red[c][w][lid];
-      all += chunk_s;
-    }
-    rinv[lid] = rsqrt(all / (float)D + eps);
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
+  const float tot = wg_sum(ss, red, 16);
+  const float rinv = rsqrt(tot / (float)D + eps);
   for (int c = 0; c < 10; c++) {
     const int d = c * 256 + lid;
-    for (int s = 0; s < 4; s++) {
-      const int col = s * D + d;
-      NORM[(long)r * (4 * D) + col] = to_bf((hv[c][s] * rinv[s]) * SCALE[col]);
-    }
+    NORM[base + d] = to_bf((hv[c] * rinv) * SCALE[s * D + d]);
   }
 }
 
-// Writeback only (without NORM), used before final head or PLE when needed: grid (rows, 10).
+// Writeback only (without NORM), used before final head or Layer 1 PLE: grid (rows, 10), WG = 256.
 KERNEL(256) void fn_hc_writeback_only(global ushort *H, global const float *BR, global const ushort *INJ, int has_br) {
   if (!has_br) return;
   const int r = get_group_id(0), c = get_group_id(1), lid = get_local_id(0);
@@ -145,262 +127,131 @@ KERNEL(256) void fn_hc_writeback_only(global ushort *H, global const float *BR, 
   }
 }
 
-// Helper: 4-bit group-32 dot of up to 16 rows at once for one output row `row_idx` of [N, K]. Each 16-lane subgroup
-static inline void q4g32_dot16_range(global const uint *W, global const ushort *S, global const ushort *B,
-                                     global const ushort *X, int x_stride, int m, long row_idx, int K,
-                                     int wi_begin, int wi_end, float acc[16]) {
-  const int lane = get_sub_group_local_id();
-  const int words = K / 8, groups = K / 32;
-  global const uint *wr = W + row_idx * words;
-  global const ushort *sr = S + row_idx * groups;
-  global const ushort *br = B + row_idx * groups;
-  for (int r = 0; r < m; r++) acc[r] = 0.0f;
-  for (int wi = wi_begin + lane; wi < wi_end; wi += SG) {
-    const uint pk = wr[wi];
-    const int g = wi >> 2;
-    const float sc = bf(sr[g]), bi = bf(br[g]);
-    const float w0 = fma((float)(pk & 15u), sc, bi);
-    const float w1 = fma((float)((pk >> 4) & 15u), sc, bi);
-    const float w2 = fma((float)((pk >> 8) & 15u), sc, bi);
-    const float w3 = fma((float)((pk >> 12) & 15u), sc, bi);
-    const float w4 = fma((float)((pk >> 16) & 15u), sc, bi);
-    const float w5 = fma((float)((pk >> 20) & 15u), sc, bi);
-    const float w6 = fma((float)((pk >> 24) & 15u), sc, bi);
-    const float w7 = fma((float)((pk >> 28) & 15u), sc, bi);
-    for (int r = 0; r < m; r++) {
-      const ushort8 xv8 = vload8(0, X + (long)r * x_stride + wi * 8);
-      acc[r] = fma(bf(xv8.s0), w0, acc[r]);
-      acc[r] = fma(bf(xv8.s1), w1, acc[r]);
-      acc[r] = fma(bf(xv8.s2), w2, acc[r]);
-      acc[r] = fma(bf(xv8.s3), w3, acc[r]);
-      acc[r] = fma(bf(xv8.s4), w4, acc[r]);
-      acc[r] = fma(bf(xv8.s5), w5, acc[r]);
-      acc[r] = fma(bf(xv8.s6), w6, acc[r]);
-      acc[r] = fma(bf(xv8.s7), w7, acc[r]);
+// Two-stage argmax + log-sum-exp over BF16 logits [R, V]: Stage 1 grid (256, R), WG = 256.
+KERNEL(256) void fn_logits_part(global const ushort *L, int V, global float *PV, global int *PI, global float *PS) {
+  local float bv[256], bs[256];
+  local int bi[256];
+  const int lid = get_local_id(0), gid = get_group_id(0), row = get_group_id(1);
+  const int per = (V + 255) / 256, lo = gid * per, hi = min(V, lo + per);
+  float best = -INFINITY;
+  int idx = 0x7fffffff;
+  for (int i = lo + lid; i < hi; i += 256) {
+    const float v = bf(L[(long)row * V + i]);
+    if (v > best) {
+      best = v;
+      idx = i;
     }
   }
-  for (int r = 0; r < m; r++) acc[r] = sub_group_reduce_add(acc[r]);
-}
-
-static inline void q4g32_dot16(global const uint *W, global const ushort *S, global const ushort *B,
-                               global const ushort *X, int x_stride, int m, long row_idx, int K, float acc[16]) {
-  q4g32_dot16_range(W, S, B, X, x_stride, m, row_idx, K, 0, K / 8, acc);
-}
-
-// Hyper-connection down projection + SiLU/inject activation (4-way Split-K for full EU occupancy!): NORM [R, 10240] x
-KERNEL(64) void fn_hc_down_reduce(global const ushort *NORM, global const uint *W, global const ushort *S,
-                                  global const ushort *B, global ushort *ACT, global ushort *INJ,
-                                  int R, int ndn, int has_inj) {
-  local float kpart[4][16];
-  const int col = get_group_id(0);
-  const int r0 = get_group_id(1) * 16;
-  const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
-  if (col >= ndn || r0 >= R) return;
-  const int m = min(16, R - r0);
-  float acc[16];
-  q4g32_dot16_range(W, S, B, NORM + (long)r0 * 10240, 10240, m, col, 10240, sg * 320, (sg + 1) * 320, acc);
-  if (lane == 0) {
-    for (int r = 0; r < m; r++) kpart[sg][r] = acc[r];
+  bv[lid] = best;
+  bi[lid] = idx;
+  barrier(CLK_LOCAL_MEM_FENCE);
+  float gmax = bv[0];
+  int gidx = bi[0];
+  for (int i = 1; i < 256; i++) {
+    if (bv[i] > gmax || (bv[i] == gmax && bi[i] < gidx)) {
+      gmax = bv[i];
+      gidx = bi[i];
+    }
   }
   barrier(CLK_LOCAL_MEM_FENCE);
-  if (sg == 0 && lane < m) {
-    const float sum = kpart[0][lane] + kpart[1][lane] + kpart[2][lane] + kpart[3][lane];
-    const float y = rbf(rbf(sum) * 0.25f);
-    if (col < 320) {
-      ACT[(long)(r0 + lane) * 320 + col] = to_bf(bsilu(y));
-    } else if (has_inj) {
-      INJ[(long)(r0 + lane) * 4 + (col - 320)] = to_bf(2.0f * bsig(y));
-    }
+  float s = 0.0f;
+  if (gmax > -INFINITY) {
+    for (int i = lo + lid; i < hi; i += 256) s += exp(bf(L[(long)row * V + i]) - gmax);
   }
-}
-
-// Hyper-connection up projection + stream sigmoid gating + 4-stream average: ACT [R, 320] x W [10240, 320], gated by
-KERNEL(256) void fn_hc_upmix(global const ushort *ACT, global const ushort *NORM, global const uint *W,
-                             global const ushort *S, global const ushort *B, global ushort *MIXED, int R) {
-  local ushort act_l[16 * 320];
-  const int col = get_group_id(0) * 16 + get_sub_group_id();
-  const int r0 = get_group_id(1) * 16;
-  const int lid = get_local_id(0), lane = get_sub_group_local_id();
-  if (r0 >= R) return;
-  const int m = min(16, R - r0);
-  for (int e = lid; e < m * 320; e += 256) {
-    act_l[e] = ACT[(long)r0 * 320 + e];
-  }
+  bs[lid] = s;
   barrier(CLK_LOCAL_MEM_FENCE);
-  if (col >= 2560) return;
+  if (lid == 0) {
+    float tot = 0.0f;
+    for (int i = 0; i < 256; i++) tot += bs[i];
+    PV[row * 256 + gid] = gmax;
+    PI[row * 256 + gid] = gidx;
+    PS[row * 256 + gid] = tot;
+  }
+}
 
-  float total[16];
-  for (int r = 0; r < m; r++) total[r] = 0.0f;
-  for (int s = 0; s < 4; s++) {
-    const long wrow = (long)s * 2560 + col;
-    global const uint *wr = W + wrow * 40;
-    global const ushort *sr = S + wrow * 10;
-    global const ushort *br = B + wrow * 10;
-    float acc[16];
-    for (int r = 0; r < m; r++) acc[r] = 0.0f;
-    for (int wi = lane; wi < 40; wi += 16) {
-      const uint pk = wr[wi];
-      const int g = wi >> 2;
-      const float sc = bf(sr[g]), bi = bf(br[g]);
-      const float w0 = fma((float)(pk & 15u), sc, bi);
-      const float w1 = fma((float)((pk >> 4) & 15u), sc, bi);
-      const float w2 = fma((float)((pk >> 8) & 15u), sc, bi);
-      const float w3 = fma((float)((pk >> 12) & 15u), sc, bi);
-      const float w4 = fma((float)((pk >> 16) & 15u), sc, bi);
-      const float w5 = fma((float)((pk >> 20) & 15u), sc, bi);
-      const float w6 = fma((float)((pk >> 24) & 15u), sc, bi);
-      const float w7 = fma((float)((pk >> 28) & 15u), sc, bi);
-      for (int r = 0; r < m; r++) {
-        const int base = r * 320 + wi * 8;
-        acc[r] = fma(bf(act_l[base + 0]), w0, acc[r]);
-        acc[r] = fma(bf(act_l[base + 1]), w1, acc[r]);
-        acc[r] = fma(bf(act_l[base + 2]), w2, acc[r]);
-        acc[r] = fma(bf(act_l[base + 3]), w3, acc[r]);
-        acc[r] = fma(bf(act_l[base + 4]), w4, acc[r]);
-        acc[r] = fma(bf(act_l[base + 5]), w5, acc[r]);
-        acc[r] = fma(bf(act_l[base + 6]), w6, acc[r]);
-        acc[r] = fma(bf(act_l[base + 7]), w7, acc[r]);
+// Stage 2: grid (R), WG = 256 -> OUT_TOK[r] = argmax, OUT_BEST[r*4 + 0..2] = (max, lse, id_bits).
+KERNEL(256) void fn_logits_best(global const float *PV, global const int *PI, global const float *PS,
+                                global int *OUT_TOK, global float *OUT_BEST) {
+  local float bv[256], bs[256];
+  local int bi[256];
+  const int lid = get_local_id(0), row = get_group_id(0);
+  bv[lid] = PV[row * 256 + lid];
+  bi[lid] = PI[row * 256 + lid];
+  bs[lid] = PS[row * 256 + lid];
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (lid == 0) {
+    float best = bv[0];
+    int idx = bi[0];
+    for (int i = 1; i < 256; i++) {
+      if (bv[i] > best || (bv[i] == best && bi[i] < idx)) {
+        best = bv[i];
+        idx = bi[i];
       }
     }
-    for (int r = 0; r < m; r++) {
-      const float u = rbf(sub_group_reduce_add(acc[r]));
-      if (lane == 0) {
-        const float nv = bf(NORM[(long)(r0 + r) * 10240 + wrow]);
-        total[r] += rbf(bsig(u) * nv);
+    float sum = 0.0f;
+    if (best > -INFINITY) {
+      for (int i = 0; i < 256; i++) {
+        if (bv[i] > -INFINITY) sum += bs[i] * exp(bv[i] - best);
       }
     }
+    OUT_TOK[row] = idx;
+    OUT_BEST[row * 4 + 0] = best;
+    OUT_BEST[row * 4 + 1] = best + log(sum);
+    OUT_BEST[row * 4 + 2] = as_float(idx);
+    OUT_BEST[row * 4 + 3] = 0.0f;
   }
-  if (lane == 0) {
-    for (int r = 0; r < m; r++) {
-      MIXED[(long)(r0 + r) * 2560 + col] = to_bf(total[r] * 0.25f);
+}
+
+// Top-64 candidates of one BF16 logits row `L + row * V`: Stage 1 keeps top-64 per 256-slice.
+KERNEL(64) void fn_topk64_part(global const ushort *L, int V, int row, global float *TV, global int *TI) {
+  local float sv[64];
+  local int si[64];
+  const int tid = get_local_id(0), gid = get_group_id(0);
+  const int per = (V + 255) / 256, lo = gid * per, hi = min(V, lo + per);
+  float my_v[32];
+  int my_i[32];
+  int cnt = 0;
+  for (int i = lo + tid; i < hi; i += 64) {
+    my_v[cnt] = bf(L[(long)row * V + i]);
+    my_i[cnt] = i;
+    cnt++;
+  }
+  for (int k = 0; k < 64; k++) {
+    float bv = -INFINITY;
+    int bi = 0x7fffffff, bj = -1;
+    for (int j = 0; j < cnt; j++) {
+      if (my_v[j] > bv || (my_v[j] == bv && my_i[j] < bi)) {
+        bv = my_v[j];
+        bi = my_i[j];
+        bj = j;
+      }
+    }
+    sv[tid] = bv;
+    si[tid] = bi;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    float wv = sv[0];
+    int wi = si[0];
+    for (int u = 1; u < 64; u++) {
+      if (sv[u] > wv || (sv[u] == wv && si[u] < wi)) {
+        wv = sv[u];
+        wi = si[u];
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (bj >= 0 && my_i[bj] == wi) my_v[bj] = -INFINITY;
+    if (tid == 0) {
+      TV[gid * 64 + k] = wv;
+      TI[gid * 64 + k] = wi;
     }
   }
 }
 
-// 3. MLX q4g32 Dense Projections (Multi-row Subgroup GEMV & Xe2 BF16 DPAS GEMM)
-
-// Decode / Verify (1..16 rows in a single weight pass!): grid ((N + 15) / 16, (R + 15) / 16), WG = 256.
-KERNEL(256) void fn_qmv4_g32_bf16(global const uint *W, global const ushort *S, global const ushort *B,
-                                  global const ushort *X, global ushort *Y, int K, int N, int R) {
-  const int col = get_group_id(0) * 16 + get_sub_group_id();
-  const int r0 = get_group_id(1) * 16;
-  if (col >= N || r0 >= R) return;
-  const int m = min(16, R - r0);
-  float acc[16];
-  q4g32_dot16(W, S, B, X + (long)r0 * K, K, m, col, K, acc);
-  if (get_sub_group_local_id() == 0) {
-    for (int r = 0; r < m; r++) Y[(long)(r0 + r) * N + col] = to_bf(acc[r]);
-  }
+// Convert BF16 row [V] to FP32 row [V] (for full-vocab host sampling when top_k == 0 or top_k > 64).
+KERNEL(256) void fn_bf16_to_f32(global const ushort *IN, global float *OUT, int N) {
+  const int i = get_global_id(0);
+  if (i < N) OUT[i] = bf(IN[i]);
 }
 
-KERNEL(256) void fn_qmv4_g32_f32(global const uint *W, global const ushort *S, global const ushort *B,
-                                 global const ushort *X, global float *Y, int K, int N, int R) {
-  const int col = get_group_id(0) * 16 + get_sub_group_id();
-  const int r0 = get_group_id(1) * 16;
-  if (col >= N || r0 >= R) return;
-  const int m = min(16, R - r0);
-  float acc[16];
-  q4g32_dot16(W, S, B, X + (long)r0 * K, K, m, col, K, acc);
-  if (get_sub_group_local_id() == 0) {
-    for (int r = 0; r < m; r++) Y[(long)(r0 + r) * N + col] = acc[r];
-  }
-}
-
-// Prompt GEMM on Intel Xe2 BF16 DPAS: Workgroup = 128 threads = 8 subgroups: 2 M-subgroups x 4 N-subgroups = [32 rows
-#define FN_DPAS_GEMM_BODY(STORE_STMT)                                                                            \
-  local ushort xl[32][32];                                                                                       \
-  local float xsl[32];                                                                                           \
-  const int sg = get_sub_group_id(), lane = get_sub_group_local_id(), lid = get_local_id(0);                     \
-  const int sg_m = sg >> 2, sg_n = sg & 3;                                                                       \
-  const int m0 = get_group_id(1) * 32, n0 = get_group_id(0) * 64;                                                \
-  const int col = n0 + sg_n * 16 + lane;                                                                         \
-  const bool col_ok = col < N;                                                                                   \
-  const int words = K / 8, groups = K / 32;                                                                      \
-  const long safe_col = col_ok ? (long)col : 0;                                                                  \
-  global const uint *wc = W + safe_col * words;                                                                  \
-  global const ushort *sc_p = S + safe_col * groups;                                                             \
-  global const ushort *bi_p = B + safe_col * groups;                                                             \
-  float8 acc0 = 0.0f, acc1 = 0.0f;                                                                               \
-  for (int g = 0; g < groups; g++) {                                                                             \
-    for (int e = lid; e < 32 * 8; e += 128) {                                                                    \
-      const int rr = e >> 3, cc = (e & 7) * 4;                                                                   \
-      ushort4 v = (m0 + rr < R) ? vload4(0, X + (long)(m0 + rr) * K + g * 32 + cc) : (ushort4)(0);               \
-      xl[rr][cc + 0] = v.s0; xl[rr][cc + 1] = v.s1; xl[rr][cc + 2] = v.s2; xl[rr][cc + 3] = v.s3;                \
-    }                                                                                                            \
-    barrier(CLK_LOCAL_MEM_FENCE);                                                                                \
-    if (sg < 2) {                                                                                                \
-      for (int rr = sg * 16 + lane; rr < 32; rr += 32) {                                                         \
-        float s = 0.0f;                                                                                          \
-        for (int k = 0; k < 32; k++) s += bf(xl[rr][k]);                                                         \
-        xsl[rr] = s;                                                                                             \
-      }                                                                                                          \
-    }                                                                                                            \
-    const uint4 w4 = col_ok ? vload4(0, wc + g * 4) : (uint4)(0);                                                \
-    const float sc = col_ok ? bf(sc_p[g]) : 0.0f;                                                                \
-    const float bi = col_ok ? bf(bi_p[g]) : 0.0f;                                                                \
-    int8 b0, b1;                                                                                                 \
-    for (int p = 0; p < 8; p++) {                                                                                \
-      const uint w_lo = (p < 4) ? w4.s0 : w4.s1;                                                                 \
-      const int sh = (p & 3) * 8;                                                                                \
-      const ushort q_ev = to_bf((float)((w_lo >> sh) & 15u));                                                    \
-      const ushort q_od = to_bf((float)((w_lo >> (sh + 4)) & 15u));                                              \
-      b0[p] = (int)((uint)q_ev | ((uint)q_od << 16));                                                            \
-      const uint w_hi = (p < 4) ? w4.s2 : w4.s3;                                                                 \
-      const ushort q2_ev = to_bf((float)((w_hi >> sh) & 15u));                                                   \
-      const ushort q2_od = to_bf((float)((w_hi >> (sh + 4)) & 15u));                                             \
-      b1[p] = (int)((uint)q2_ev | ((uint)q2_od << 16));                                                          \
-    }                                                                                                            \
-    barrier(CLK_LOCAL_MEM_FENCE);                                                                                \
-    short8 a0_0, a0_1, a1_0, a1_1;                                                                               \
-    for (int r = 0; r < 8; r++) {                                                                                \
-      a0_0[r] = (short)xl[sg_m * 16 + r][lane];                                                                  \
-      a0_1[r] = (short)xl[sg_m * 16 + r][16 + lane];                                                             \
-      a1_0[r] = (short)xl[sg_m * 16 + 8 + r][lane];                                                              \
-      a1_1[r] = (short)xl[sg_m * 16 + 8 + r][16 + lane];                                                         \
-    }                                                                                                            \
-    float8 d0 = 0.0f, d1 = 0.0f;                                                                                 \
-    d0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a0_0, b0, d0);                                                 \
-    d0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a0_1, b1, d0);                                                 \
-    d1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a1_0, b0, d1);                                                 \
-    d1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a1_1, b1, d1);                                                 \
-    for (int r = 0; r < 8; r++) {                                                                                \
-      acc0[r] = fma(xsl[sg_m * 16 + r], bi, fma(d0[r], sc, acc0[r]));                                            \
-      acc1[r] = fma(xsl[sg_m * 16 + 8 + r], bi, fma(d1[r], sc, acc1[r]));                                        \
-    }                                                                                                            \
-    barrier(CLK_LOCAL_MEM_FENCE);                                                                                \
-  }                                                                                                              \
-  if (col_ok) {                                                                                                  \
-    for (int r = 0; r < 8; r++) {                                                                                \
-      const int row0 = m0 + sg_m * 16 + r;                                                                       \
-      if (row0 < R) { const int row_i = row0; const float val = acc0[r]; const long idx = (long)row0 * N + col; STORE_STMT; } \
-      const int row1 = row0 + 8;                                                                                 \
-      if (row1 < R) { const int row_i = row1; const float val = acc1[r]; const long idx = (long)row1 * N + col; STORE_STMT; } \
-    }                                                                                                            \
-  }
-
-KERNEL(128) void fn_qmm4_g32_dpas_bf16(global const uint *W, global const ushort *S, global const ushort *B,
-                                       global const ushort *X, global ushort *Y, int K, int N, int R) {
-  FN_DPAS_GEMM_BODY({ (void)row_i; Y[idx] = to_bf(val); })
-}
-
-KERNEL(128) void fn_qmm4_g32_dpas_f32(global const uint *W, global const ushort *S, global const ushort *B,
-                                      global const ushort *X, global float *Y, int K, int N, int R) {
-  FN_DPAS_GEMM_BODY({ (void)row_i; Y[idx] = val; })
-}
-
-KERNEL(128) void fn_hc_down_dpas(global const ushort *X, global const uint *W, global const ushort *S,
-                                 global const ushort *B, global ushort *ACT, global ushort *INJ,
-                                 int R, int N, int has_inj) {
-  const int K = 10240;
-  FN_DPAS_GEMM_BODY({
-    (void)idx;
-    const float y = rbf(rbf(val) * 0.25f);
-    if (col < 320) ACT[(long)row_i * 320 + col] = to_bf(bsilu(y));
-    else if (has_inj) INJ[(long)row_i * 4 + (col - 320)] = to_bf(2.0f * bsig(y));
-  })
-}
-
-// 4. Layer 1 Per-Layer N-Gram Embedding (PLE) Gate, Dilated Conv, Shift Window
-
+#include "fn_dpas.cl"
 #include "fn_mixers.cl"
 #include "fn_moe_head.cl"

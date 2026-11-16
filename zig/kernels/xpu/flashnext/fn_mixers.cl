@@ -140,7 +140,7 @@ KERNEL(256) void fn_gdn_front(global const ushort *P, global const ushort *cs, g
   }
 }
 
-// Recurrence over `rows` tokens: 1 subgroup (16 lanes) per (8 V-rows, V-head); each lane holds 8 K-columns (16*8 =
+// Recurrence over `rows` tokens: 1 subgroup (16 lanes) per (8 V-rows, V-head), 8 K-cols/lane. Grid: (16, NV).
 KERNEL(16) void fn_gdn_rows(global const float *qn, global const float *kn, global const float *v,
                             global const float *gb, global const float *state_in, global float *state_out,
                             int rows, global float *ys_out, int NK, int NV) {
@@ -274,29 +274,38 @@ KERNEL(128) void fn_qsa_pool(global const ushort *IKC, global ushort *POOLED, in
   POOLED[(long)b * DI + d] = to_bf(apply_rope(xn, xpn, d, HALF, RATIO * b, INV));
 }
 
-// Score completed blocks past TOP=512: grid (R, (complete_max + 15) / 16), WG = 256 (16 subgroups, 1 block/subgroup).
+// Score blocks past TOP=512: grid ((R + 15) / 16, (complete_max + 63) / 64), WG=256 (64 blocks x 16 queries).
 KERNEL(256) void fn_qsa_scores(global const ushort *IQ, global const ushort *POOLED, int pos0, global float *SC,
-                               int NB) {
-  local float qs[4][128];
-  const int r = get_group_id(0), j = get_group_id(1), lid = get_local_id(0);
+                               int NB, int R) {
+  local ushort qs[16][512];
+  const int r0 = (int)get_group_id(0) * 16, j = (int)get_group_id(1), lid = get_local_id(0);
   const int sg = get_sub_group_id(), lane = get_sub_group_local_id();
-  const int complete = (pos0 + r + 1) / 4;
-  if (complete <= 512 || j * 16 >= complete) return;
-  for (int e = lid; e < 4 * 128; e += 256) qs[e / 128][e % 128] = bf(IQ[(long)r * 512 + e]);
+  if (r0 >= R) return;
+  const int m_rows = min(16, R - r0);
+  const int complete_max = (pos0 + r0 + m_rows) / 4;
+  if (complete_max <= 512 || j * 64 >= complete_max) return;
+  for (int e = lid; e < m_rows * 512; e += 256) qs[e >> 9][e & 511] = IQ[(long)r0 * 512 + e];
   barrier(CLK_LOCAL_MEM_FENCE);
-  const int b = j * 16 + sg;
-  if (b >= complete) return;
   const float scale = sqrt(128.0f);
-  ushort8 kb = vload8(0, POOLED + (long)b * 128 + lane * 8);
-  float k8[8];
-  for (int i = 0; i < 8; i++) k8[i] = bf(kb[i]);
-  float total = 0.0f;
-  for (int h = 0; h < 4; h++) {
-    float part = 0.0f;
-    for (int i = 0; i < 8; i++) part = fma(k8[i], qs[h][lane * 8 + i], part);
-    total += fmax(sub_group_reduce_add(part), 0.0f);
+  for (int bs = 0; bs < 4; bs++) {
+    const int b = j * 64 + bs * 16 + sg;
+    if (b >= complete_max) break;
+    ushort8 kb = vload8(0, POOLED + (long)b * 128 + lane * 8);
+    float k8[8];
+    for (int i = 0; i < 8; i++) k8[i] = bf(kb[i]);
+    for (int rr = 0; rr < m_rows; rr++) {
+      const int r = r0 + rr;
+      const int complete_r = (pos0 + r + 1) / 4;
+      if (complete_r <= 512 || b >= complete_r) continue;
+      float total = 0.0f;
+      for (int h = 0; h < 4; h++) {
+        float part = 0.0f;
+        for (int i = 0; i < 8; i++) part = fma(k8[i], bf(qs[rr][h * 128 + lane * 8 + i]), part);
+        total += fmax(sub_group_reduce_add(part), 0.0f);
+      }
+      if (lane == 0) SC[(long)r * NB + b] = total / scale;
+    }
   }
-  if (lane == 0) SC[(long)r * NB + b] = total / scale;
 }
 
 static inline uint qsa_order_key(float v) {
