@@ -5,6 +5,8 @@ const lanes = @import("lanes");
 const cfg = @import("config.zig");
 const st = @import("state.zig");
 const wts = @import("weights.zig");
+const rows = @import("../../core/row_projection.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
 const Model = @import("model.zig").Model;
 const Glue = @import("model.zig").Glue;
 
@@ -18,6 +20,8 @@ const MArgs = extern struct { rows: u32, n: u32, k: u32, ldy: u32 };
 const Q4Args = extern struct { rows: u32, n0: u32, n1: u32, n2: u32, k: u32, ldy: u32 };
 /// The decode attention's constants (glue.metal's ll_vec_args).
 const VArgs = extern struct { rows: u32, pos: u32, heads: u32, groups: u32, blocks: u32, chunk: u32, first: u32, scale: f32 };
+/// The MLX embedding's constants (glue.metal's ll_affine_args).
+const EArgs = extern struct { rows: u32, width: u32, bits: u32, group: u32 };
 
 const Enc = struct {
     e: mtl.ComputeEncoder,
@@ -37,6 +41,7 @@ const Enc = struct {
     /// y [rows, d.n] (rows `ldy` apart, at byte `out_off`) = x W^T: the GEMM a prompt chunk, the row kernels a window.
     fn dense(x: Enc, d: wts.Dense, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
         const e = x.e;
+        if (d.affine) |w| return x.affine(w, in, out, out_off, n_rows, ldy);
         if (d.int4) |q| {
             if (n_rows <= st.batch_rows) return x.q4Rows(&.{d}, in, out, out_off, n_rows, ldy);
             const ma = MArgs{ .rows = @intCast(n_rows), .n = @intCast(d.n), .k = @intCast(d.k), .ldy = @intCast(ldy) };
@@ -56,6 +61,30 @@ const Enc = struct {
             return;
         }
         x.gemmOn(d, in, out, out_off, n_rows, ldy);
+    }
+
+    /// An MLX affine W in place: the shared row kernels a window, affine_mm's tiles a prompt chunk, both at ldy.
+    fn affine(x: Enc, w: rows.Weights, in: mtl.Buffer, out: mtl.Buffer, out_off: usize, n_rows: usize, ldy: usize) void {
+        const e = x.e;
+        if (n_rows > st.batch_rows) {
+            // each group's input sums, the bias's operand, then the codes on the tensor units
+            const p = x.m.mm.?;
+            const k: u32 = @intCast(w.k);
+            affine_mm.rowSums(e, p, @intCast(w.group), b(in), b(x.s.wq), @intCast(n_rows), k);
+            const q = .{ .w = bo(w.w, w.w_off), .s = bo(w.scales, w.s_off), .b = bo(w.biases, w.b_off), .n = @as(u32, @intCast(w.n)), .k = k };
+            affine_mm.denseBatch(e, p, b(in), b(x.s.wq), q, bo(out, out_off), @intCast(n_rows), 1, .{ .x_row = @intCast(w.k), .y_row = @intCast(ldy) });
+            return;
+        }
+        // validated at load (rows.affine); a forward has rows, and each caller's ldy holds the projection's n
+        const call = rows.callStrided(&x.m.rows.?, w, n_rows, ldy) catch unreachable;
+        e.setPipeline(call.pipeline);
+        e.setBuffer(in, 0, 0);
+        e.setBuffer(w.w, w.w_off, 1);
+        e.setBuffer(w.scales, w.s_off, 2);
+        e.setBuffer(w.biases, w.b_off, 3);
+        e.setValue(call.dims, 4);
+        e.setBuffer(out, out_off, 5);
+        e.dispatchGroups(mtl.Size.of(call.groups, 1, 1), mtl.Size.of(call.threads, 1, 1));
     }
 
     /// Up to three int4 tensors on the same input as one dispatch of the row kernel, their columns side by side.
@@ -151,7 +180,7 @@ pub fn runShared(m: *const Model, s: *st.Scratch, segments: []const Segment, ids
     const cb = m.queue.commandBuffer();
     const x = Enc{ .e = cb.compute(.serial), .m = m, .s = s };
     const W = m.weights;
-    x.glue(.embed, Args{ .rows = nr, .width = @intCast(h) }, &.{ out.ids orelse b(s.ids), bo(W.embed.buf, W.embed.off), A, b(s.resid) }, .{ h, n, 1 }, .{ 256, 1, 1 }, false);
+    embed(x, out.ids orelse b(s.ids), n);
     const normed = Args{ .rows = nr, .width = @intCast(h), .eps = c.eps };
     x.glue(.norm, normed, &.{ b(s.resid), t(W.layers[0].input_norm), A, b(s.x) }, .{ n, 1, 1 }, .{ 256, 1, 1 }, true);
     for (W.layers, 0..) |l, i| try layer(x, segments, l, i, n, if (i + 1 < W.layers.len) W.layers[i + 1].input_norm else null);
@@ -218,6 +247,18 @@ fn pick(x: Enc, logits: mtl.Buffer, d: Draw) void {
         },
     }
     e.dispatchGroups(mtl.Size.of(1, 1, 1), mtl.Size.of(1024, 1, 1));
+}
+
+/// The embedding rows of the `n` token ids at `ids` into the residual: the bf16 table's, or MLX's dequantized ones.
+fn embed(x: Enc, ids: B, n: usize) void {
+    const E = x.m.weights.embed;
+    const h = x.m.config.hidden;
+    const t3: [3]usize = .{ 256, 1, 1 };
+    if (E.affine) |a| {
+        const args = EArgs{ .rows = @intCast(n), .width = @intCast(h), .bits = a.bits, .group = @intCast(a.group) };
+        return x.glue(.embed_affine, args, &.{ ids, bo(a.w, a.w_off), bo(a.scales, a.s_off), bo(a.biases, a.b_off), A, b(x.s.resid) }, .{ h, n, 1 }, t3, false);
+    }
+    x.glue(.embed, Args{ .rows = @intCast(n), .width = @intCast(h) }, &.{ ids, bo(E.buf, E.off), A, b(x.s.resid) }, .{ h, n, 1 }, t3, false);
 }
 
 /// Layer `i` on every segment's rows (s.x their input norm); its last add norms the residual by `next`.

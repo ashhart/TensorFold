@@ -275,7 +275,10 @@ add-norm dropping its residual, a SiLU with gate and up swapped, a rope at the w
 never rescales, a merge dropping each block's scale, a row projection dropping its tail, a GEMM reading its weights
 untransposed and a prompt attention seeing the next key go red at `shapes`, and an argmax never picking a NaN at
 `nonfinite`. The INT4 release's row projections and dequantization have two more: every group taking its row's first
-zero point, and a word's nibbles read in reverse, both red at `shapes`.
+zero point, and a word's nibbles read in reverse, both red at `shapes`. MLX checkpoints add the embedding's dequantized
+rows (`ll_embed_affine` at 4 and 8 bits, its control rounding once where MLX rounds twice) and the shared row kernels'
+strided form and `affine_mm` at the family's four widths with q, k and v side by side at the row's pitch (a control each
+writing every part at its own width, red at `shapes`); `affine_mm`'s 4-bit form keeps its known finding.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and

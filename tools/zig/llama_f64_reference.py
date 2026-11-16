@@ -1,6 +1,7 @@
 """A Llama checkpoint's teacher-forced logits in float64 on the CPU, rounded once to bf16: the exact reference."""
 # usage: llama_f64_reference.py MODEL_DIR tokens.json out.bin [--bf16-points]: raw bf16 [positions, vocab]
 import json
+import math
 import sys
 import time
 
@@ -16,13 +17,26 @@ def bf16_once(x: np.ndarray) -> np.ndarray:
     return (y.view(np.uint32) >> 16).astype(np.uint16)
 
 
+def llama3(inv, rope):
+    """Llama 3's rope on a table, in its dtype: long wavelengths over factor, short kept, blended between."""
+    factor, low, high = rope["factor"], rope["low_freq_factor"], rope["high_freq_factor"]
+    original = rope["original_max_position_embeddings"]
+    wavelength = 2 * math.pi / inv
+    kept = torch.where(wavelength > original / low, inv / factor, inv)
+    smooth = (original / wavelength - low) / (high - low)
+    medium = ~(wavelength < original / high) & ~(wavelength > original / low)
+    return torch.where(medium, (1 - smooth) * kept / factor + smooth * kept, kept)
+
+
 def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
     """`points`: round to bf16 at every one of the reference's rounding points, each operation exact before it."""
     torch.set_num_threads(24)
     cfg = json.load(open(f"{model_dir}/config.json"))
     index = json.load(open(f"{model_dir}/model.safetensors.index.json"))["weight_map"]
-    if cfg.get("rope_scaling") or cfg.get("attention_bias") or cfg.get("mlp_bias") or cfg.get("tie_word_embeddings"):
-        raise SystemExit("only the plain Llama layout: no scaled RoPE, biases or tied head")
+    rope = cfg.get("rope_scaling") or {}
+    scaled = rope.get("rope_type", rope.get("type")) == "llama3"
+    if (rope and not scaled and rope.get("rope_type", rope.get("type")) != "default") or cfg.get("attention_bias") or cfg.get("mlp_bias"):
+        raise SystemExit("only the Llama layout: the default or Llama 3's rope, no biases")
     layers, heads, kv = cfg["num_hidden_layers"], cfg["num_attention_heads"], cfg["num_key_value_heads"]
     dim = cfg.get("head_dim") or cfg["hidden_size"] // heads
     eps, theta = cfg["rms_norm_eps"], float(cfg["rope_theta"])
@@ -30,7 +44,7 @@ def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
     quant = cfg.get("quantization")
     if quant and (quant.get("mode", "affine") != "affine" or quant["bits"] not in (4, 8)):
         raise SystemExit("only MLX affine checkpoints at 4 or 8 bits")
-    packed = cfg.get("quantization_config")
+    packed = None if quant else cfg.get("quantization_config")  # beside an MLX table, mlx_lm's copy of it
     if packed:
         g0 = next(iter(packed["config_groups"].values()))["weights"]
         scheme = (packed.get("format"), g0["num_bits"], g0["symmetric"], g0["strategy"])
@@ -84,10 +98,12 @@ def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
     t0 = time.time()
     with torch.no_grad():
         inv = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=f64) / dim))
+        inv = llama3(inv, rope) if scaled else inv
         angle = torch.outer(torch.arange(n, dtype=f64), inv)
         cos, sin = torch.cat((angle, angle), -1).cos(), torch.cat((angle, angle), -1).sin()
-        if points:  # HF's fp32 angle, its cos and sin rounded to bf16
-            a32 = torch.outer(torch.arange(n, dtype=torch.float32), 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)))
+        if points:  # HF's fp32 table and angle, its cos and sin rounded to bf16
+            inv32 = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+            a32 = torch.outer(torch.arange(n, dtype=torch.float32), llama3(inv32, rope) if scaled else inv32)
             cos, sin = r(torch.cat((a32, a32), -1).cos().to(f64)), r(torch.cat((a32, a32), -1).sin().to(f64))
         x = w("model.embed_tokens.weight", mlx=points)[torch.tensor(ids)]
         mask = torch.full((n, n), float("-inf"), dtype=f64).triu(1)
@@ -106,7 +122,7 @@ def main(model_dir: str, tokens: str, out: str, points: bool = False) -> None:
             x = r(x + r(act @ w(p + "mlp.down_proj.weight").T))
             print(f"layer {i + 1} of {layers}, {time.time() - t0:.0f} s", flush=True)
         h = norm(x, w("model.norm.weight"))
-        head = w("lm_head.weight")
+        head = w("model.embed_tokens.weight" if cfg.get("tie_word_embeddings") else "lm_head.weight")
         with open(out, "wb") as f:
             for s in range(0, n, 64):
                 bf16_once((h[s : s + 64] @ head.T).numpy()).tofile(f)

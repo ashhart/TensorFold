@@ -64,6 +64,15 @@ pub fn requireComplete(functions: []const []const u8) !void {
     };
 }
 
+test "llama contracts: every qualified checkpoint's attention geometry is one the contract registers" {
+    for (cfg.qualified) |q| {
+        const registered = for (geometries) |geo| {
+            if (geo.heads == q.heads and geo.kv_heads == q.kv_heads) break true;
+        } else false;
+        try std.testing.expect(registered);
+    }
+}
+
 test "llama contracts: the roll call wants every pipeline" {
     var all: [pipelines][]const u8 = undefined;
     var i: usize = 0;

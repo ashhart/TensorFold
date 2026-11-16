@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Llama on Metal: the family reads the mainstream configs: Llama 3's scaled RoPE (`rope_type: llama3`, its table transformers' words), tied heads (the head reads the embedding table), `model_type: mistral` without a sliding window, 128-wide heads under a wider hidden (Mistral NeMo and Small), and MLX affine weights at 4 or 8 bits in groups of 32 or 64 with bf16 tables, read in place by the shared row kernels and `affine_mm` (float16 tables are refused by name). Admission compares every field a `qualified` row shares with the config, so a checkpoint is one row; Llama 3.1, 3.2 and 3.3 and Mistral 7B, NeMo and Small have none yet and stay refused until their device check. Nanbeige's replies are unchanged.
+
 - Code: every comment in the engine and its tools is one line within 120 columns, and the multi-line docstrings are one-line comments; no code changed (lean findings 337 to 230) (#3503).
 
 - Flash Next at TP=2 on CUDA: the draft head, head-group and rollback passes replay as CUDA graphs on both ranks, and one-row split lanes skip their interleave copies; with Qwen3.8-Flash-Next NVFP4 and MTP at TP=2 on GB10s, decode is 1.2-1.4% faster and prompts 0.5-2.1% faster, with identical replies (#2837, for #2835).

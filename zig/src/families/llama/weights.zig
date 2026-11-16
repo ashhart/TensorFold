@@ -1,13 +1,16 @@
-//! Llama's checkpoint on Metal: the projections as stored (bf16 [n, k] or an int4 triple), nothing copied.
+//! Llama's checkpoint on Metal: the projections as stored (bf16 [n, k], an int4 or an MLX triple), nothing copied.
 const std = @import("std");
 const mtl = @import("metal");
 const ck = @import("../../core/checkpoint_metal.zig");
+const rows = @import("../../core/row_projection.zig");
+const mlx_affine = @import("../../core/quant/mlx_affine.zig");
 const cfg = @import("config.zig");
+const quant = @import("quant.zig");
 
 pub const Tensor = ck.Tensor;
 
-/// A bf16 [n, k] matrix as the release stores it, at `off` in `buf`; or, with `int4`, the packed words there.
-pub const Dense = struct { buf: mtl.Buffer, off: usize, n: usize, k: usize, int4: ?Int4 = null };
+/// A bf16 [n, k] matrix as the release stores it, at `off` in `buf`; or, with `int4` or `affine`, the codes there.
+pub const Dense = struct { buf: mtl.Buffer, off: usize, n: usize, k: usize, int4: ?Int4 = null, affine: ?rows.Weights = null };
 
 /// compressed-tensors' int4 [n, k]: codes at Dense.buf (i32 [n, k / 8], element 8c + e in bits 4e of word c, + 8).
 pub const Int4 = struct {
@@ -55,7 +58,7 @@ fn requireAs(t: Tensor, dtype: ck.DType, dims: []const usize) error{UnexpectedLl
 }
 
 /// The pack-quantized triple of `prefix ++ suffix` ("q_proj" ...) in place, its weight_shape [n, k].
-fn int4(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
+fn int4(c: anytype, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
     var buf: [256]u8 = undefined;
     const g = cfg.int4_group;
     if (n % 8 != 0 or k % 256 != 0) return error.UnexpectedLlamaTensor;
@@ -83,7 +86,7 @@ fn int4(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usiz
     return .{ .buf = got[0].buffer, .off = got[0].offset, .n = n, .k = k, .int4 = .{ .scales = got[1], .zeros = got[2] } };
 }
 
-fn norm(c: *const ck.Checkpoint, hidden: usize, prefix: []const u8, suffix: []const u8) !Tensor {
+fn norm(c: anytype, hidden: usize, prefix: []const u8, suffix: []const u8) !Tensor {
     var buf: [256]u8 = undefined;
     const n = try name(&buf, prefix, suffix);
     const t = try c.get(n);
@@ -95,7 +98,7 @@ fn norm(c: *const ck.Checkpoint, hidden: usize, prefix: []const u8, suffix: []co
 }
 
 /// The release's bf16 [n, k] matrix in place: k whole 256s for the GEMM's steps, 8-byte aligned for the row kernel.
-fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
+fn dense(c: anytype, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
     var buf: [256]u8 = undefined;
     const full = try name(&buf, prefix, suffix);
     const w = try c.get(full);
@@ -107,25 +110,57 @@ fn dense(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, n: usi
     return .{ .buf = w.buffer, .off = w.offset, .n = n, .k = k };
 }
 
-/// A layer's projection "<prefix><suffix>" as the config's weights store it.
-const Proj = struct {
-    c: *const ck.Checkpoint,
-    weights: cfg.Weights,
-
-    fn get(p: Proj, prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
-        var buf: [128]u8 = undefined;
-        return switch (p.weights) {
-            .bf16 => dense(p.c, prefix, try name(&buf, suffix, ".weight"), n, k),
-            .int4_g32 => int4(p.c, prefix, suffix, n, k),
-        };
+/// MLX's affine triple of `prefix ++ suffix` in place (core/quant/mlx_affine.zig), as the shared row kernels take it.
+fn affine(c: anytype, prefix: []const u8, suffix: []const u8, n: usize, k: usize, width: quant.Width) !Dense {
+    var buf: [256]u8 = undefined;
+    const base = try name(&buf, prefix, suffix);
+    // a float16 conversion's tables would change narrowed to the kernels' bf16: refused by name, not read
+    for ([_][]const u8{ ".scales", ".biases" }) |part| {
+        var tb: [272]u8 = undefined;
+        if ((try c.get(try name(&tb, base, part))).dtype != .bf16) return error.UnsupportedLlamaTables;
     }
-};
+    const triple = try mlx_affine.read(c, base, .{ .n = n, .k = k, .bits = width.bits, .group = width.group });
+    const r = try rows.affine(triple);
+    return .{ .buf = r.w, .off = r.w_off, .n = n, .k = k, .affine = r };
+}
 
-pub fn load(gpa: std.mem.Allocator, c: *const ck.Checkpoint, f: *const cfg.Config) !Weights {
+/// The embedding or head table `base` [vocab, hidden] as stored: MLX's triple, else the bf16 rows (int4 keeps both).
+fn table(c: anytype, weights: cfg.Weights, base: []const u8, n: usize, k: usize) !Dense {
+    if (weights.mlx()) |width| return affine(c, base, "", n, k, width);
+    var buf: [64]u8 = undefined;
+    return dense(c, "", try name(&buf, base, ".weight"), n, k);
+}
+
+/// A tied head reads the embedding table; a stored lm_head beside it would be a second head the config does not name.
+fn tiedHead(c: anytype, embed: Dense) !Dense {
+    return if (c.has("lm_head.weight")) error.LlamaHeadNotTied else embed;
+}
+
+/// A layer's projection "<prefix><suffix>" as the config's weights store it, from checkpoint `C`.
+fn Proj(comptime C: type) type {
+    return struct {
+        c: C,
+        weights: cfg.Weights,
+
+        fn get(p: @This(), prefix: []const u8, suffix: []const u8, n: usize, k: usize) !Dense {
+            var buf: [128]u8 = undefined;
+            if (p.weights.mlx()) |width| return affine(p.c, prefix, suffix, n, k, width);
+            return switch (p.weights) {
+                .bf16 => dense(p.c, prefix, try name(&buf, suffix, ".weight"), n, k),
+                .int4_g32 => int4(p.c, prefix, suffix, n, k),
+                else => unreachable, // the MLX widths returned above
+            };
+        }
+    };
+}
+
+/// The model's tensors from checkpoint `c` (anything with get(name) and has(name), as the Metal checkpoint has).
+pub fn load(gpa: std.mem.Allocator, c: anytype, f: *const cfg.Config) !Weights {
     const h = f.hidden;
+    const embed = try table(c, f.weights, "model.embed_tokens", f.vocab, h);
     var w = Weights{
-        .embed = try dense(c, "model.", "embed_tokens.weight", f.vocab, h),
-        .head = try dense(c, "", "lm_head.weight", f.vocab, h),
+        .embed = embed,
+        .head = if (f.tied) try tiedHead(c, embed) else try table(c, f.weights, "lm_head", f.vocab, h),
         .norm = try norm(c, h, "model.", "norm.weight"),
         .layers = try gpa.alloc(Layer, f.layers),
     };
@@ -137,7 +172,7 @@ pub fn load(gpa: std.mem.Allocator, c: *const ck.Checkpoint, f: *const cfg.Confi
         const a = try name(&ab, p, "self_attn.");
         var mb: [96]u8 = undefined;
         const m = try name(&mb, p, "mlp.");
-        const proj = Proj{ .c = c, .weights = f.weights };
+        const proj = Proj(@TypeOf(c)){ .c = c, .weights = f.weights };
         l.* = .{
             .input_norm = try norm(c, h, p, "input_layernorm.weight"),
             .post_norm = try norm(c, h, p, "post_attention_layernorm.weight"),

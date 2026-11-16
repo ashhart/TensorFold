@@ -8,6 +8,7 @@ const family = tf.llama.contracts;
 pub const Mutation = enum {
     none,
     embed_own_row,
+    embed_affine_one_rounding,
     norm_mean_over_threads,
     add_wrong_sign,
     add_norm_no_residual,
@@ -26,6 +27,7 @@ pub const Mutation = enum {
         return switch (m) {
             .none => "",
             .embed_own_row => "control: metal llama embed, row r reads table row r, not row ids[r]",
+            .embed_affine_one_rounding => "control: metal llama MLX embed, scale * q + bias rounded once, not at MLX's two points",
             .norm_mean_over_threads => "control: metal llama norm, the mean of squares divides by the threads, not the width",
             .add_wrong_sign => "control: metal llama add, the rows are subtracted",
             .add_norm_no_residual => "control: metal llama add_norm, the sum is not written back to the residual",
@@ -57,6 +59,7 @@ pub const Mutation = enum {
         return switch (m) {
             .none => unreachable,
             .embed_own_row => .{ .from = "E[(size_t)ids[p.y] * a.width + p.x]", .to = "E[(size_t)p.y * a.width + p.x]" },
+            .embed_affine_one_rounding => .{ .from = "bfloat(float(bfloat(float(S[g]) * q)) + float(B[g]))", .to = "bfloat(float(S[g]) * q + float(B[g]))" },
             .norm_mean_over_threads => .{ .from = "total / float(a.width) + a.eps);\n  for (uint i = t;", .to = "total / float(n) + a.eps);\n  for (uint i = t;" },
             .add_wrong_sign => .{ .from = "R[i] = bfloat(float(R[i]) + float(X[i]));", .to = "R[i] = bfloat(float(R[i]) - float(X[i]));" },
             .add_norm_no_residual => .{ .from = "        x[t + p * n] = v[p];\n", .to = "" },
@@ -66,7 +69,7 @@ pub const Mutation = enum {
             .decode_no_rescale => .{ .from = "const float rescale = fast::exp(top - peak);", .to = "const float rescale = 1.0f;" },
             .merge_unscaled_mass => .{ .from = "ls[b] * fast::exp(ms[b] - top) : 0.0f;", .to = "ls[b] : 0.0f;" },
             .matvec_drops_tail => .{ .from = "for (uint i = 8 * lane; i < a.k; i += 256) {", .to = "for (uint i = 8 * lane; i + 256 - 8 * lane <= a.k; i += 256) {" },
-            .gemm_untransposed => .{ .from = "gemm_nax<bfloat16_t, false, true, AM, AN", .to = "gemm_nax<bfloat16_t, false, false, AM, AN" },
+            .gemm_untransposed => .{ .from = "TF_GEMM_NAX_KERNEL(ll_gemm_00, bfloat16_t, false, true,", .to = "TF_GEMM_NAX_KERNEL(ll_gemm_00, bfloat16_t, false, false," },
             .prompt_sees_next_key => .{ .from = "col > row ? kMasked", .to = "col > row + 1 ? kMasked" },
             .q4_matvec_first_zero => .{ .from = "z = ll_q4_zero(Z, j, g, groups);", .to = "z = ll_q4_zero(Z, j, 0, groups);" },
             .q4_dequant_reversed_nibbles => .{ .from = "out[e] = bfloat(ll_q4(word, e, z, s));", .to = "out[e] = bfloat(ll_q4(word, 7 - e, z, s));" },

@@ -6,11 +6,13 @@ const cfg = @import("config.zig");
 const ck = @import("../../core/checkpoint_metal.zig");
 const shards = @import("../../core/checkpoint.zig");
 const frags = @import("../../core/frags.zig");
+const rows = @import("../../core/row_projection.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
 const weights = @import("weights.zig");
 const contracts = @import("contracts.zig");
 
-pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant" };
-pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant };
+pub const glue_names = [_][:0]const u8{ "ll_embed", "ll_norm", "ll_add", "ll_add_norm", "ll_prep", "ll_silu_gu", "ll_decode_vec", "ll_merge_vec", "ll_argmax", "ll_matvec_1", "ll_matvec_2", "ll_matvec_4", "ll_matvec_8", "ll_matvec_16", "ll_matvec_32", "ll_q4_matvec_1", "ll_q4_matvec_2", "ll_q4_matvec_4", "ll_q4_matvec_8", "ll_q4_matvec_16", "ll_q4_matvec_32", "ll_q4_dequant", "ll_embed_affine" };
+pub const Glue = enum { embed, norm, add, add_norm, prep, silu_gu, decode_vec, merge_vec, argmax, matvec_1, matvec_2, matvec_4, matvec_8, matvec_16, matvec_32, q4_matvec_1, q4_matvec_2, q4_matvec_4, q4_matvec_8, q4_matvec_16, q4_matvec_32, q4_dequant, embed_affine };
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -30,6 +32,9 @@ pub const Model = struct {
     inv: mtl.Buffer,
     /// The queue is another model's (a drafter's commands behind the served model's, in its residency set).
     shared_queue: bool,
+    /// An MLX checkpoint's projections: the shared row kernels a window, affine_mm at its width a prompt chunk.
+    rows: ?rows.Pipelines,
+    mm: ?affine_mm.Pipes,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         return loadOn(gpa, io, dir, null);
@@ -100,8 +105,32 @@ pub const Model = struct {
         }
         errdefer for (m.gemm) |row| for (row) |p| p.deinit();
         m.inv = try m.device.buffer(cfg.head_dim / 2 * 4, mtl.ResourceOptions.shared);
+        errdefer m.inv.deinit();
         m.config.inverseFrequencies(m.inv.slice(f32, cfg.head_dim / 2));
+        try loadAffine(m, gpa);
         return m;
+    }
+
+    /// The shared MLX affine pipelines an MLX checkpoint's projections run (none for bf16 and int4).
+    fn loadAffine(m: *Model, gpa: std.mem.Allocator) !void {
+        m.rows = null;
+        m.mm = null;
+        const width = m.config.weights.mlx() orelse return;
+        var r = try rows.Pipelines.load(m.device);
+        errdefer r.deinit();
+        const text = try affine_mm.source(m.device, gpa, .{ .bits = width.bits, .group = width.group });
+        defer gpa.free(text);
+        const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
+        defer lib.deinit();
+        var pipes: affine_mm.Pipes = undefined;
+        var made: usize = 0;
+        errdefer for (pipes[0..made]) |p| p.deinit();
+        for (affine_mm.names, 0..) |n, i| {
+            pipes[i] = try mtl.Pipeline.init(m.device, lib, n, false);
+            made += 1;
+        }
+        m.rows = r;
+        m.mm = pipes;
     }
 
     pub fn pipe(m: *const Model, g: Glue) mtl.Pipeline {
@@ -109,6 +138,8 @@ pub const Model = struct {
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.mm) |pipes| for (pipes) |p| p.deinit();
+        if (m.rows) |*r| r.deinit();
         m.inv.deinit();
         for (m.gemm) |row| for (row) |p| p.deinit();
         m.sample_full.deinit();
