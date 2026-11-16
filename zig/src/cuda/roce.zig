@@ -14,6 +14,7 @@ const kernels = @import("kernels.zig");
 const nap = @import("roce_nap.zig");
 const verbs = @import("roce_verbs.zig");
 const layout = @import("roce_layout.zig");
+const roce_pairs = @import("roce_pairs.zig");
 const Layout = layout.Layout;
 const slots = layout.slots;
 const flag_stride = layout.flag_stride;
@@ -96,7 +97,8 @@ pub const Gather = struct {
     f: Function,
     max_bytes: usize,
     peer_addr: [max_peers]u64 = @splat(0), // by peerIndex
-    peer_rkey: [max_peers][verbs.max_hcas]u32 = @splat(@splat(0)),
+    peer_rkey: [max_peers][verbs.max_hcas]u32 = @splat(@splat(0)), // by peerIndex, then stripe
+    plan: roce_pairs.Plan = .{}, // the HCA pair under each stripe to each peer, one rule on every rank (roce_pairs.zig)
     last_seq: u32 = 0,
     running: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
@@ -174,7 +176,7 @@ pub const Gather = struct {
         if (std.mem.indexOfScalar(u32, verdicts, 0)) |r| { // every rank or none, as for every other failure above
             g.teardown();
             gpa.destroy(g);
-            std.log.warn("RoCE all-gather: rank {d} has no RDMA path to every other rank (its log names the peer and the HCA); NCCL carries every gather. Every rank must reach every other on the same HCA index: two on a cable, or a switch; a ring of four has none. TF_ROCE=0 keeps this quiet", .{r});
+            std.log.warn("RoCE all-gather: rank {d} has no RDMA path to every other rank (its log names the peer and the HCA); NCCL carries every gather. Every rank must reach every other: on a switch or a cable the same HCA index, on a switchless mesh the HCA on each peer's /24 (TF_ROCE_HCA naming one function a port); a ring of four has none. TF_ROCE=0 keeps this quiet", .{r});
             return null;
         }
         g.startProxy() catch |e| {
@@ -182,7 +184,7 @@ pub const Gather = struct {
             gpa.destroy(g);
             return e;
         };
-        std.log.info("RoCE all-gather: {d} ranks, {d} HCA(s), shards up to {d} KiB by RDMA writes", .{ g.world, g.n_hca, g.max_bytes >> 10 });
+        std.log.info("RoCE all-gather: {d} ranks, {d} HCA(s), {d} stripe(s) a peer, shards up to {d} KiB by RDMA writes", .{ g.world, g.n_hca, g.plan.stripes, g.max_bytes >> 10 });
         return g;
     }
 
@@ -200,7 +202,7 @@ pub const Gather = struct {
         }
         var names: [verbs.max_hcas][64]u8 = undefined;
         var lens: [verbs.max_hcas]usize = undefined;
-        g.n_hca = try verbs.hcaNames(std.c.getenv("TF_ROCE_HCA") orelse std.c.getenv("NCCL_IB_HCA"), &names, &lens);
+        g.n_hca = try verbs.hcaNames(try verbs.hcaSetting(), &names, &lens);
         g.region = try memory.HostBuffer.allocMapped(d, g.layout.total);
         errdefer g.region.free();
         @memset(g.region.bytes, 0);
@@ -286,17 +288,18 @@ pub const Gather = struct {
         }
     }
 
-    /// Every queue pair to its peer's (the one that peer opened toward this rank, on the same HCA): RTR, then RTS.
+    /// Every stripe's queue pair to its peer's (the one that peer opened toward this rank on its end of the pair).
     fn connect(g: *Gather, all: []const Blob) !void {
+        g.plan = roce_pairs.agreed(all, g.rank);
         for (0..g.world) |r| if (r != g.rank) {
             const p = peerIndex(g.rank, r);
             const me = peerIndex(r, g.rank); // this rank's number in that peer's list
             const peer = &all[r];
             g.peer_addr[p] = peer.addr;
-            for (0..g.n_hca) |h| {
+            for (g.plan.pairs[r].mine[0..g.plan.stripes], g.plan.pairs[r].theirs[0..g.plan.stripes], 0..) |h, t, s| {
                 const x = &g.hcas[h];
-                g.peer_rkey[p][h] = peer.rkey[h];
-                var rtr: verbs.QpAttr = .{ .qp_state = verbs.qps_rtr, .path_mtu = @min(peer.mtu[h], x.mtu), .dest_qp_num = peer.qpn[h][me], .max_dest_rd_atomic = 1, .min_rnr_timer = 12, .ah_attr = .{ .is_global = 1, .dlid = peer.lid[h], .port_num = port_num, .grh = .{ .dgid = peer.gid[h], .sgid_index = @intCast(x.gid_index), .hop_limit = 64 } } };
+                g.peer_rkey[p][s] = peer.rkey[t];
+                var rtr: verbs.QpAttr = .{ .qp_state = verbs.qps_rtr, .path_mtu = @min(peer.mtu[t], x.mtu), .dest_qp_num = peer.qpn[t][me], .max_dest_rd_atomic = 1, .min_rnr_timer = 12, .ah_attr = .{ .is_global = 1, .dlid = peer.lid[t], .port_num = port_num, .grh = .{ .dgid = peer.gid[t], .sgid_index = @intCast(x.gid_index), .hop_limit = 64 } } };
                 if (g.api.ibv_modify_qp(x.qp[p].?, &rtr, verbs.qp_state | verbs.qp_av | verbs.qp_path_mtu | verbs.qp_dest_qpn | verbs.qp_rq_psn | verbs.qp_max_dest_rd_atomic | verbs.qp_min_rnr_timer) != 0) {
                     g.fail("HCA {d}: the queue pair toward rank {d} refused RTR", .{ h, r });
                     return error.PeerRefused;
@@ -310,17 +313,17 @@ pub const Gather = struct {
         };
     }
 
-    /// The connect probe: this rank's token written into each peer's ctrl on every HCA, then each completion.
+    /// The connect probe: this rank's token written into each peer's ctrl on every stripe, then each completion.
     fn probe(g: *Gather) !void {
         const c = g.ctrl();
         var token: u32 = @as(u32, g.rank) + 1;
         for (0..g.world) |r| if (r != g.rank) {
             const p = peerIndex(g.rank, r);
             const me = peerIndex(r, g.rank);
-            for (0..g.n_hca) |h| {
-                const x = &g.hcas[h];
+            for (0..g.plan.stripes) |s| {
+                const x = &g.hcas[g.plan.pairs[r].mine[s]];
                 var sge: verbs.Sge = .{ .addr = @intFromPtr(&token), .length = 4, .lkey = 0 };
-                var wr: verbs.SendWr = .{ .wr_id = r, .sg_list = &sge, .num_sge = 1, .opcode = verbs.wr_rdma_write, .send_flags = verbs.send_signaled | verbs.send_inline, .remote_addr = g.peer_addr[p] + g.layout.ctrl + 4 * (layout.c_probe + me * verbs.max_hcas + h), .rkey = g.peer_rkey[p][h] };
+                var wr: verbs.SendWr = .{ .wr_id = r, .sg_list = &sge, .num_sge = 1, .opcode = verbs.wr_rdma_write, .send_flags = verbs.send_signaled | verbs.send_inline, .remote_addr = g.peer_addr[p] + g.layout.ctrl + 4 * (layout.c_probe + me * verbs.max_hcas + s), .rkey = g.peer_rkey[p][s] };
                 var bad: ?*verbs.SendWr = null;
                 const rc = verbs.opsCall(verbs.PostSend, x.ctx.?, verbs.ops_post_send)(x.qp[p].?, &wr, &bad);
                 if (rc != 0) {
@@ -341,9 +344,9 @@ pub const Gather = struct {
             var missing_hca: usize = 0;
             for (0..g.world) |r| if (r != g.rank) {
                 const p = peerIndex(g.rank, r);
-                for (0..g.n_hca) |h| if (@atomicLoad(u32, &c[layout.c_probe + p * verbs.max_hcas + h], .acquire) != r + 1) {
+                for (0..g.plan.stripes) |s| if (@atomicLoad(u32, &c[layout.c_probe + p * verbs.max_hcas + s], .acquire) != r + 1) {
                     missing = r;
-                    missing_hca = h;
+                    missing_hca = g.plan.pairs[r].mine[s];
                 };
             };
             if (pending == 0 and missing == null) return;
@@ -380,7 +383,7 @@ pub const Gather = struct {
         }
     }
 
-    /// One sequence's shard to every peer: per HCA a stripe, then its flag on the same queue pair, so it lands after.
+    /// One sequence's shard to every peer: a stripe at a time, then its flag on the same queue pair, so it lands after.
     fn post(g: *Gather, seq: u32, nbytes: u32) !void {
         if (nbytes == 0 or nbytes % 16 != 0 or nbytes > g.layout.slot_bytes) {
             g.fail("bad shard size {d} at seq {d}", .{ nbytes, seq });
@@ -392,22 +395,22 @@ pub const Gather = struct {
         const packs = nbytes / 16;
         var seq_copy: u32 = seq;
         var offset: u64 = 0;
-        for (0..g.n_hca) |h| {
-            const x = &g.hcas[h];
-            while (x.outstanding + peers > send_depth / 4) {
+        for (0..g.plan.stripes) |s| {
+            for (0..g.n_hca) |h| if (g.plan.uses(s, h)) while (g.hcas[h].outstanding + peers > send_depth / 4) {
                 try g.drain(h);
                 if (!g.running.load(.monotonic)) return error.ProxyFailed;
-            }
-            var n = packs / g.n_hca;
-            if (h < packs % g.n_hca) n += 1;
+            };
+            var n = packs / g.plan.stripes;
+            if (s < packs % g.plan.stripes) n += 1;
             const bytes: u32 = n * 16;
             for (0..g.world) |r| if (r != g.rank) {
                 const p = peerIndex(g.rank, r);
                 const me = peerIndex(r, g.rank);
+                const x = &g.hcas[g.plan.pairs[r].mine[s]];
                 var flag_sge: verbs.Sge = .{ .addr = @intFromPtr(&seq_copy), .length = 4, .lkey = 0 };
-                var flag: verbs.SendWr = .{ .wr_id = r, .sg_list = &flag_sge, .num_sge = 1, .opcode = verbs.wr_rdma_write, .send_flags = verbs.send_signaled | verbs.send_inline, .remote_addr = g.peer_addr[p] + g.layout.flagAt(slot, me, h, g.n_hca), .rkey = g.peer_rkey[p][h] };
+                var flag: verbs.SendWr = .{ .wr_id = r, .sg_list = &flag_sge, .num_sge = 1, .opcode = verbs.wr_rdma_write, .send_flags = verbs.send_signaled | verbs.send_inline, .remote_addr = g.peer_addr[p] + g.layout.flagAt(slot, me, s, g.plan.stripes), .rkey = g.peer_rkey[p][s] };
                 var data_sge: verbs.Sge = .{ .addr = base + g.layout.send + slot * g.layout.slot_bytes + offset, .length = bytes, .lkey = x.mr.?.lkey };
-                var data: verbs.SendWr = .{ .wr_id = r, .next = &flag, .sg_list = &data_sge, .num_sge = 1, .opcode = verbs.wr_rdma_write, .remote_addr = g.peer_addr[p] + g.layout.recvAt(slot, me) + offset, .rkey = g.peer_rkey[p][h] };
+                var data: verbs.SendWr = .{ .wr_id = r, .next = &flag, .sg_list = &data_sge, .num_sge = 1, .opcode = verbs.wr_rdma_write, .remote_addr = g.peer_addr[p] + g.layout.recvAt(slot, me) + offset, .rkey = g.peer_rkey[p][s] };
                 var bad: ?*verbs.SendWr = null;
                 const first: *verbs.SendWr = if (bytes != 0) &data else &flag;
                 const rc = verbs.opsCall(verbs.PostSend, x.ctx.?, verbs.ops_post_send)(x.qp[p].?, first, &bad);
@@ -493,7 +496,7 @@ pub const Gather = struct {
         a.add(g.counters.ptr);
         a.add(klass);
         a.add(spin_limit);
-        a.add(@as(i32, @intCast(g.n_hca)));
+        a.add(@as(i32, @intCast(g.plan.stripes)));
         a.add(@as(i32, g.world));
         try launch.launch(g.f, .{ .grid = .{ .x = grid }, .block = .{ .x = threads } }, .{ .handle = stream, .d = g.d }, &a);
         g.gathers += 1;
@@ -504,7 +507,7 @@ pub const Gather = struct {
         const c = g.ctrl();
         const bad = @atomicLoad(u32, &c[layout.c_error], .acquire);
         if (bad == 0 and !g.failed.load(.acquire)) return;
-        std.log.err("RoCE all-gather failed (sequence {d}, HCA {d}, rank {d}): {s}", .{ bad, c[layout.c_hca], c[layout.c_peer], std.mem.sliceTo(&g.err, 0) });
+        std.log.err("RoCE all-gather failed (sequence {d}, stripe {d}, rank {d}): {s}", .{ bad, c[layout.c_hca], c[layout.c_peer], std.mem.sliceTo(&g.err, 0) });
         return error.ProxyFailed;
     }
 
@@ -581,20 +584,4 @@ test "RoCE gather: four ranks' slots and flags never overlap and sit in the send
         }
     };
     try std.testing.expect(@sizeOf(Blob) % 8 == 0);
-}
-
-test "RoCE gather: a mesh reaches every rank, a ring of four leaves the far rank out, two on a cable are neighbours" {
-    const Fabric = struct {
-        fn ring(world: usize, rank: usize, peer: usize) bool {
-            return (peer + 1) % world == rank or (rank + 1) % world == peer;
-        }
-        fn mesh(_: usize, _: usize, _: usize) bool {
-            return true;
-        }
-    };
-    for (0..4) |r| try std.testing.expectEqual(@as(?usize, null), firstUnreachable(r, 4, @as(usize, 4), &Fabric.mesh));
-    try std.testing.expectEqual(@as(?usize, 2), firstUnreachable(0, 4, @as(usize, 4), &Fabric.ring));
-    try std.testing.expectEqual(@as(?usize, 3), firstUnreachable(1, 4, @as(usize, 4), &Fabric.ring));
-    try std.testing.expectEqual(@as(?usize, 0), firstUnreachable(2, 4, @as(usize, 4), &Fabric.ring));
-    for (0..2) |r| try std.testing.expectEqual(@as(?usize, null), firstUnreachable(r, 2, @as(usize, 2), &Fabric.ring));
 }
