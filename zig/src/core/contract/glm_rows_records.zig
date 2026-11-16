@@ -1,4 +1,5 @@
-//! GLM-5.3-Flash's decode-window row kernels: each source reserves the 64 threads a group it launches.
+//! GLM-5.3-Flash's decode-window row kernels: each source reserves the threads a group it launches (64; by unique
+//! expert, 32 a window row up to 16 rows).
 const std = @import("std");
 const M = @import("limits.zig").MetalLaunch;
 pub const records = [_]M{
@@ -14,6 +15,18 @@ pub const records = [_]M{
     .{ .name = "glm rows wide q6 glm_rows_wide_q6", .threads = 64, .tg_memory = 0, .reserved = 64 },
     .{ .name = "glm rows q8 glm_rows_q8", .threads = 64, .tg_memory = 0, .reserved = 64 },
     .{ .name = "glm rows wide q8 glm_rows_wide_q8", .threads = 64, .tg_memory = 0, .reserved = 64 },
+    .{ .name = "glm moe rows u q2 glm_moe_rows_u_q2_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u q2 glm_moe_rows_glu_u_q2_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows u q3 glm_moe_rows_u_q3_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u q3 glm_moe_rows_glu_u_q3_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows u q4 glm_moe_rows_u_q4_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u q4 glm_moe_rows_glu_u_q4_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows u q5 glm_moe_rows_u_q5_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u q5 glm_moe_rows_glu_u_q5_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows u q6 glm_moe_rows_u_q6_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u q6 glm_moe_rows_glu_u_q6_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows u q8 glm_moe_rows_u_q8_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
+    .{ .name = "glm moe rows glu u q8 glm_moe_rows_glu_u_q8_s8", .threads = 512, .tg_memory = 0, .reserved = 512 },
 };
 
 test "the GLM row launches fit every Apple family" {
