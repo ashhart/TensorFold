@@ -3,6 +3,7 @@ const std = @import("std");
 const accept = @import("accept.zig");
 const cut = @import("window_cut.zig");
 const lone_costs = @import("lone_costs.zig");
+const lone_copy = @import("lone_copy.zig");
 const alloc = @import("allocate.zig");
 const be = @import("backend.zig");
 const depth = @import("depth.zig");
@@ -77,10 +78,14 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
         var copy: Copy = .{};
         if (copied) |c| copy = c else if (s.drafts) copy = try copyProposal(e, s);
         const extend = !e.cfg.root_copies and e.alone and e.cfg.context_copies and !copy.recalled and queued != null and queued.?.count > 0;
+        // a lone stream's copy priced as its head's drafts are: a prefix, or none and the head's drafts take the round
+        const keep = if (extend) copy.tokens.len else try lone_copy.rows(e, s, copy, true);
+        if (keep == 0) copy = .{};
         if (copy.tokens.len > 0 and !extend) {
             p.kind = .copy;
             p.recalled = copy.recalled;
             p.tokens = try a.dupe(u32, copy.tokens);
+            try cut.prefix(a, &p, @intCast(keep));
         } else if (s.drafts and queued != null) {
             const q = queued.?;
             if (q.tokens) |t| {
@@ -222,7 +227,8 @@ pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {
     const s: *Stream = @ptrCast(@alignCast(w.stream.?));
     if (e.cfg.root_copies) return false;
     const copied = copyProposal(e, s) catch return false;
-    return copied.tokens.len > 0;
+    // a copy its price leaves off takes no round: the head drafts its own depth
+    return (lone_copy.rows(e, s, copied, false) catch copied.tokens.len) > 0;
 }
 
 pub fn probe(e: *Engine) depth.Probe {
@@ -434,7 +440,8 @@ pub fn observeCopied(e: *const Engine, s: *Stream, recalled: bool, kept: usize, 
     if (recalled) {
         if (s.recall) |r| r.observe(@intCast(offered), @intCast(kept), s.rounds);
     } else if (s.proposer) |pr| pr.observe(@intCast(offered), @intCast(kept));
-    if (!e.cfg.own_copy_rates) return;
+    // a lone priced stream keeps the history its copies' chances come from (lanes/lone_copy.zig)
+    if (!e.cfg.own_copy_rates and !lone_copy.enabled(e, s)) return;
     _ = copiedRate(e, s, recalled);
     const i = @intFromBool(recalled);
     s.copied_landed[i] = copy_decay * s.copied_landed[i] + @as(f64, @floatFromInt(kept));

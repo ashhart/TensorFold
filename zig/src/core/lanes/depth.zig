@@ -15,10 +15,14 @@ pub const State = struct {
     plain: ?u64 = null,
     wait: ?u64 = null,
     ms: ?Table = null, // plain_guard: the stream's own round times
+    copy_ms: ?Table = null, // a lone stream's copy rounds' times by copied rows (lanes/lone_copy.zig)
+    copy_plain: ?u64 = null, // copies priced off in a row, and how many before one is tried again
+    copy_wait: ?u64 = null,
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);
         if (st.ms) |*t| t.deinit(gpa);
+        if (st.copy_ms) |*t| t.deinit(gpa);
     }
 };
 
@@ -54,6 +58,7 @@ pub const Rule = struct {
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
+    copy_guard: bool = false, // a lone stream's copies compete with its own plain rounds (Config.copy_guard)
     node_probabilities: bool,
     granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
     confidence_floor: ?f64 = null,
@@ -106,6 +111,10 @@ pub const Rule = struct {
     fn costs(r: *Rule, who: ?Who) !*Table {
         const w = who orelse return &r.round_ms;
         if (!r.plain_guard) return if (w.sampled) &r.round_ms else &r.greedy_ms;
+        return r.ownCosts(w);
+    }
+
+    fn ownCosts(r: *Rule, w: Who) !*Table {
         _ = try r.rates(w);
         const st = &w.state.*.?;
         if (st.ms == null) st.ms = .{};
@@ -156,29 +165,7 @@ pub const Rule = struct {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
             return @max(1, @min(most, want));
         }
-        var best: i64 = 1;
-        var best_rate: f64 = -1.0;
-        if (r.plain_guard) {
-            if (try r.roundCost(0, who)) |plain| {
-                if (plain != 0.0) { // a draft must beat plain by plain_margin: estimates near the line are noise
-                    best = 0;
-                    best_rate = r.k.plain_margin / plain;
-                }
-            }
-        }
-        var expected: f64 = 1.0;
-        var run: f64 = 1.0;
-        var d: i64 = 1;
-        while (d <= most) : (d += 1) {
-            const cost = (try r.roundCost(d, who)) orelse break;
-            const at: usize = @intCast(d - 1);
-            run *= if (at < p.len) p[at] else p[p.len - 1];
-            expected += run;
-            if (expected / cost > best_rate) {
-                best = d;
-                best_rate = expected / cost;
-            }
-        }
+        var best = (try r.bestRows(who, p, most, false)).rows;
         const st = &who.state.*.?;
         st.rounds += 1;
         if (best == 0) return @intFromBool(r.probePlain(st));
@@ -188,14 +175,113 @@ pub const Rule = struct {
         return best;
     }
 
+    /// The rows with the most expected tokens a ms (0: plain) and the best of one or more, from each row's chance.
+    fn bestRows(r: *Rule, who: Who, chances: []const f64, most: i64, comptime copy: bool) !struct { rows: i64, drafted: i64 } {
+        var best: i64 = 1;
+        var best_rate: f64 = -1.0;
+        if (copy or r.plain_guard) {
+            if (try (if (copy) r.copyPlain(who) else r.roundCost(0, who))) |plain| {
+                if (plain != 0.0) { // a draft must beat plain by plain_margin: estimates near the line are noise
+                    best = 0;
+                    best_rate = r.k.plain_margin / plain;
+                }
+            }
+        }
+        var drafted: i64 = 1;
+        var drafted_rate: f64 = -1.0;
+        var expected: f64 = 1.0;
+        var run: f64 = 1.0;
+        var d: i64 = 1;
+        while (d <= most) : (d += 1) {
+            const cost = (if (copy) try r.copyCost(d, who) else try r.roundCost(d, who)) orelse break;
+            const at: usize = @intCast(d - 1);
+            run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
+            expected += run;
+            if (expected / cost > best_rate) {
+                best = d;
+                best_rate = expected / cost;
+            }
+            if (expected / cost > drafted_rate) {
+                drafted = d;
+                drafted_rate = expected / cost;
+            }
+        }
+        return .{ .rows = best, .drafted = drafted };
+    }
+
     /// One draft after `wait` plain rounds in a row; each probe doubles the wait until drafting wins again.
     fn probePlain(r: *Rule, st: *State) bool {
-        st.plain = (st.plain orelse 0) + 1;
-        const wait = st.wait orelse r.k.depth_probe_every;
-        if (st.plain.? < wait) return false;
-        st.plain = 0;
-        st.wait = @min(2 * wait, r.k.plain_wait_most);
+        return r.backoff(&st.plain, &st.wait);
+    }
+
+    /// True on the pass reaching `wait` passes in a row; the count restarts, the wait doubles (to plain_wait_most).
+    fn backoff(r: *const Rule, passes: *?u64, wait: *?u64) bool {
+        passes.* = (passes.* orelse 0) + 1;
+        const w = wait.* orelse r.k.depth_probe_every;
+        if (passes.*.? < w) return false;
+        passes.* = 0;
+        wait.* = @min(2 * w, r.k.plain_wait_most);
         return true;
+    }
+
+    /// A lone copy's best prefix on its stream's own times, none while plain wins bar a backoff probe (`take` counts).
+    pub fn copyRows(r: *Rule, who: Who, chances: []const f64, rows: i64, take: bool) !i64 {
+        if (rows <= 0 or !r.copy_guard or r.family_costs.empty()) return rows;
+        if ((try r.copyPlain(who)) == null) return rows;
+        const best = try r.bestRows(who, chances, rows, true);
+        const st = &who.state.*.?;
+        if (best.rows > 0) {
+            if (take) {
+                st.copy_plain = 0;
+                st.copy_wait = r.k.depth_probe_every;
+            }
+            return best.rows;
+        }
+        const probe = if (take) r.backoff(&st.copy_plain, &st.copy_wait) else (st.copy_plain orelse 0) + 1 >= (st.copy_wait orelse r.k.depth_probe_every);
+        return if (probe) best.drafted else 0;
+    }
+
+    /// A copy as timed, else on the line from plain to its nearest timed copy, else each row as plain's (no head step).
+    fn copyCost(r: *Rule, rows: i64, who: Who) !?f64 {
+        const copies = try r.copyCosts(who);
+        if (copies.get(rows)) |v| return v;
+        const plain = (try r.copyPlain(who)) orelse return null;
+        const n: f64 = @floatFromInt(rows);
+        var near: ?i64 = null;
+        for (copies.slots, 0..) |slot, at| {
+            const d: i64 = @intCast(at);
+            if (slot == null or d == 0) continue;
+            if (near == null or @abs(d - rows) < @abs(near.? - rows)) near = d;
+        }
+        if (near) |d| return plain + n * @max(0.0, (copies.get(d).? - plain) / @as(f64, @floatFromInt(d)));
+        const one = r.family_costs.get(1) orelse return null;
+        const forward = r.family_costs.get(rows + 1) orelse return null;
+        return forward + (n + 1) * @max(0.0, plain - one);
+    }
+
+    /// The plain round a copy must beat: roundCost's under plain_guard, else the stream's own timed one or its forward.
+    fn copyPlain(r: *Rule, who: Who) !?f64 {
+        if (r.plain_guard) return r.roundCost(0, who);
+        return (try r.ownCosts(who)).get(0) orelse r.family_costs.get(1);
+    }
+
+    /// A copies-only stream's plain round into its own times, plain_guard or not (copy_guard prices copies by them).
+    pub fn observePlain(r: *Rule, ms: f64, initializing: bool, who: Who) !void {
+        if (initializing) return;
+        try r.blend(try r.ownCosts(who), 0, ms);
+    }
+
+    fn copyCosts(r: *Rule, who: Who) !*Table {
+        _ = try r.rates(who);
+        const st = &who.state.*.?;
+        if (st.copy_ms == null) st.copy_ms = .{};
+        return &st.copy_ms.?;
+    }
+
+    /// A lone copy round's time by its copied rows; a stream's first round stays out, as in observeCost.
+    pub fn observeCopyCost(r: *Rule, rows: i64, ms: f64, initializing: bool, who: Who) !void {
+        if (rows <= 0 or initializing) return;
+        try r.blend(try r.copyCosts(who), rows, ms);
     }
 
     /// Drafts past a grant: none when it stopped short of the held drafts (the width did not bind), else grant_slack.
