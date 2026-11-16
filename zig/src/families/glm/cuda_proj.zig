@@ -38,6 +38,7 @@ test "a block-FP8 projection is refused before any launch when the call's shape 
     try std.testing.expectError(error.FormatNotLoaded, matmul(set, s, .{ .fp8g = q }, 0, 4096, 0, 0, 1, 64, 4096, true));
     var lane: cuda.qmmf.Lane = undefined;
     lane.clusters = false; // a GPU before sm_90: 64 outputs from 4,096 inputs take K slices summed in memory
+    lane.pdl = false;
     set.linear = .{ .lane = &lane };
     try std.testing.expectError(error.SlicePartialsNotHeld, matmul(set, s, .{ .fp8g = q }, 0, 4096, 0, 0, 1, 64, 4096, true));
     try std.testing.expectError(error.SlicePartialsNotHeld, matmul(set, s, .{ .mxfp8 = cuda.mxfp8.weight(0, 0, 64, 4096) }, 0, 4096, 0, 0, 1, 64, 4096, true));
@@ -46,8 +47,10 @@ test "a block-FP8 projection is refused before any launch when the call's shape 
 test "the loader's check refuses an FP8 projection exactly when matmul would at some row count" {
     var flat: cuda.qmmf.Lane = undefined;
     flat.clusters = false; // a GPU before sm_90
+    flat.pdl = false;
     var gb10: cuda.qmmf.Lane = undefined;
     gb10.clusters = true;
+    gb10.pdl = false;
     // FP4-Local's stored kda q, kv_a and MLA o, a 64-output cut, an lm_head share, and inputs too few for K slices
     const shapes = [_][2]usize{ .{ 8192, 4096 }, .{ 512, 4096 }, .{ 4096, 16384 }, .{ 64, 4096 }, .{ 77440, 4096 }, .{ 64, 512 } };
     for (shapes) |nk| for ([_]*const cuda.qmmf.Lane{ &flat, &gb10 }) |lane| {
