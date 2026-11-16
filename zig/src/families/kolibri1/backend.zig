@@ -157,7 +157,7 @@ pub const Kolibri = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn ops(x: *const Kolibri) kern.Ops {
+    pub fn ops(x: *const Kolibri) kern.Ops {
         return .{ .k = x.k, .s = x.s };
     }
 
