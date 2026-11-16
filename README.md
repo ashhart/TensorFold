@@ -244,6 +244,7 @@ tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 tensorfold models
 tensorfold models --json
 tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
+tensorfold rm TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks what it downloads against the Hub: large files by sha256, small files by their git blob sha1.
@@ -251,6 +252,14 @@ Large files come down in pieces over up to 16 connections, and an interrupted pu
 It refuses a checkpoint whose `model_type` has no native family, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints with a model type it knows, and `info` shows one checkpoint's family, format, context and memory floor.
 `models --json` prints the same list as one document for programs: `schema` 1, and each checkpoint's `repo`, `family` and `model_type`; `family` is a display title and `model_type` is the key to match on.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
+`rm REPO` removes a cached checkpoint with all its snapshots, blobs and refs, and then the repo's folder.
+`rm REPO@REVISION` removes one snapshot, named by a ref such as `main` or by its commit, and the refs that name it. Blobs another snapshot still links to stay.
+Before deleting, it lists each snapshot and the bytes freed, counting a blob two snapshots share once, and asks.
+`--yes` skips the question and is needed when stdin is not a terminal. `--dry-run` only lists.
+It takes a cached repo id, never a path, deletes only inside that repo's cache folder, and removes a link without following it.
+TensorFold's own files inside a snapshot, such as the `--slide` originals in `.tensorfold-original`, go with the snapshot.
+Flash Next packs and the learned, spilled and Recall states under `~/.cache/tensorfold` are shared rather than kept per repo, so they stay.
+Stop a server that serves the checkpoint before removing it.
 
 ## Context compaction
 

@@ -161,7 +161,8 @@ loads and runs exactly as before.
   skip the page cache (`FILE_FLAG_NO_BUFFERING`, as `O_DIRECT` on Linux). `/tmp` is the user's temporary folder and
   `HOME` falls back to `USERPROFILE`.
 - The Hugging Face cache links snapshot files to blobs. Windows allows symlinks only with Developer Mode or elevation,
-  so `pull` falls back to hard links (no extra space).
+  so `pull` falls back to hard links (no extra space). `tensorfold rm` handles those hard links, and the copies
+  huggingface_hub makes without links, the same way as links, and counts each file's bytes once.
 - Checkpoint reads use threads (io_uring is Linux's).
 - Integrated unified-memory GPUs on Windows (such as RTX Spark N1X `sm_121`) admit against the WDDM CUDA device pool
   (`cuMemGetInfo_v2`) while keeping the unified 10% reserve and 4 GiB default floor. A fresh device receipt must check
