@@ -453,6 +453,11 @@ each given one planted fault: the gate reading the next head's column, the plain
 rope without its factor, absorb_q and expand_v reading the next head's weights, the chunks the next head's queries,
 the split chunks reading a rank's page z as chunk z, and the per-rank merge one chunk short).
 
+Beside them, CUDA checks GLM-5.3-Flash's own absorb and expand (`tf_glm_absorb_q`, `tf_glm_expand_v` in
+`glm_glue_latent.cuh`, 256-wide heads, no roped columns) against float64 in decode windows (1, 8 and 32 rows, main's
+loops) and prompt blocks (64, 70 and 200 rows, 64 a block: the sums each thread forms without lane shuffles), with
+two controls reading each head's weights from the next head.
+
 ## CUDA records per nvcc release
 
 nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.

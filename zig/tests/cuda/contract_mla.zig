@@ -2,10 +2,12 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const glm = @import("glm_cuda");
 const check = @import("check.zig");
 const rig_ = @import("contract_rig.zig");
 const proj_k = @import("contract_mla_proj.zig");
 const chunks_k = @import("contract_mla_chunks.zig");
+const latent_k = @import("contract_glm_latent.zig");
 
 const contract = core.contract;
 const c = contract.spec;
@@ -214,9 +216,10 @@ pub const Group = struct {
     rows: [entries.len]Rows = undefined,
     projs: [proj_k.entries.len]proj_k.Proj = undefined,
     chunks: [chunks_k.forms.len]chunks_k.Chunks = undefined,
+    latent: [latent_k.entries.len]latent_k.Proj = undefined, // glm_glue's absorb_q and expand_v, whose sums mla's share
 
-    /// `merge`: glm_glue's tf_glm_merge, which turns the chunk partials into the rows the reference checks.
-    pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, merge: cuda.Function, kernels: *std.ArrayList(g.Kernel)) !*Group {
+    /// `fns`: glm_glue's kernels; tf_glm_merge turns the chunk partials into the rows the reference checks.
+    pub fn create(a: std.mem.Allocator, gpu: check.Gpu, s: cuda.Stream, fns: glm.glue.Kernels, kernels: *std.ArrayList(g.Kernel)) !*Group {
         var mod = try cuda.Module.load(gpu.d, cuda.kernels.mla);
         errdefer mod.unload();
         const fs = [_]cuda.Function{
@@ -233,10 +236,12 @@ pub const Group = struct {
         self.* = .{ .a = a, .mod = mod };
         for (&self.rows, entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = fs[@intFromBool(e.kind == .rope)] };
         for (&self.projs, proj_k.entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = fs[if (e.kind == .absorb) 2 else 3] };
-        for (&self.chunks, chunks_k.forms) |*x, form| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fs[4], .merge = merge, .fault = form.fault, .split = if (form.split) .{ fs[5], fs[6] } else null };
+        for (&self.chunks, chunks_k.forms) |*x, form| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = fs[4], .merge = fns.merge, .fault = form.fault, .split = if (form.split) .{ fs[5], fs[6] } else null };
+        for (&self.latent, latent_k.entries) |*x, e| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .f = if (e.kind == .absorb) fns.absorb_q else fns.expand_v };
         for (&self.rows) |*x| try kernels.append(a, x.kernel());
         for (&self.projs) |*x| try kernels.append(a, x.kernel());
         for (&self.chunks) |*x| try kernels.append(a, x.kernel());
+        for (&self.latent) |*x| try kernels.append(a, x.kernel());
         return self;
     }
 
@@ -244,6 +249,7 @@ pub const Group = struct {
         for (&self.rows) |*x| x.deinit();
         for (&self.projs) |*x| x.deinit();
         for (&self.chunks) |*x| x.deinit();
+        for (&self.latent) |*x| x.deinit();
         self.mod.unload();
         self.a.destroy(self);
     }
