@@ -79,6 +79,7 @@ test {
     _ = @import("root_copy_test.zig");
     _ = @import("drafted_grammar_test.zig");
     _ = @import("windows_grammar_test.zig");
+    _ = @import("windows_chances_test.zig");
     _ = @import("grammar_time_test.zig");
     _ = @import("grammar_parallel_test.zig");
     _ = @import("pricing_test.zig");
