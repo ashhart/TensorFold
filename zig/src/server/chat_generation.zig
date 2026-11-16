@@ -279,8 +279,13 @@ pub const Generation = struct {
         const native = if (g.srv.text.vtable.format == .kimi) try @import("chat_kimi.zig").read(g, content_tokens, true) else null;
         const raw_visible = g.stops.visible(raw, false);
         const visible = if (native) |n| n.content else try @import("tool_minimax.zig").dsml(a, raw_visible, g.tools);
+        const close_at: ?reply_text.Close = if (native == null and g.thinking)
+            try @import("tool_minimax.zig").closeAfterRewrite(a, raw_visible, g.tools, try reply_text.closeWhere(a, reply_text.decodeText, g.srv.text, content_tokens, g.srv.close_id))
+        else
+            null;
+        const call_tail = answerTail(visible, g.srv.markers, close_at);
         // closed before the think split, so a call ending an unclosed think block is the answer
-        const close = if (native != null) "" else try g.closeCall(visible);
+        const close = if (native != null) "" else try g.closeCall(call_tail);
         const text = if (close.len > 0) try std.mem.concat(a, u8, &.{ visible, close }) else visible;
         var content: []const u8 = text;
         var reasoning: ?[]const u8 = null;
@@ -288,9 +293,7 @@ pub const Generation = struct {
             const r = reply_text.pyStrip(n.reasoning);
             reasoning = if (r.len > 0) r else null;
         } else if (g.thinking) {
-            const original_close = try reply_text.closeWhere(a, reply_text.decodeText, g.srv.text, content_tokens, g.srv.close_id);
-            const close_at = try @import("tool_minimax.zig").closeAfterRewrite(a, raw_visible, g.tools, original_close);
-            const split = try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at);
+            const split = try reply_text.splitThinkingAt(a, text, true, g.srv.markers, close_at.?);
             const r = reply_text.pyStrip(split.reasoning);
             reasoning = if (r.len > 0) r else null;
             content = split.answer;
@@ -308,12 +311,17 @@ pub const Generation = struct {
             const sent = g.streamed.text.items;
             const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
             if (rest.len > 0) try g.emit(sink, .{ .string = rest });
-            if (g.calls) |*c| if (close.len > 0 or std.mem.eql(u8, reason, "length")) {
+            if (g.calls) |*c| {
                 // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                 var out: std.ArrayList(Value) = .empty;
-                try c.finishCut(if (g.thinking) content else text, &out); // a cut value sends its held bytes
+                const final_text = if (g.thinking) content else text;
+                if (std.mem.eql(u8, reason, "length")) {
+                    try c.finishCut(final_text, &out);
+                } else if (close.len > 0 or c.streamed) {
+                    try c.finish(final_text, &out);
+                }
                 for (out.items) |d| try g.emit(sink, d);
-            };
+            }
         }
         const prefilled = m.prefilled_ns;
         const decode_s: f64 = if (prefilled) |p| @max(0, seconds(finished_ns - p)) else 0;
@@ -401,3 +409,21 @@ pub const Generation = struct {
         return reply;
     }
 };
+
+/// Answer suffix after a confirmed thinking close, so unclosed fences inside thinking do not block closeCall.
+fn answerTail(visible: []const u8, m: reply_text.Markers, close_at: ?reply_text.Close) []const u8 {
+    const close = close_at orelse return visible;
+    if (m.open.len > 0 and reply_text.findTag(visible, 0, m.open) == null) return visible;
+    const at = switch (close) {
+        .token => |v| v,
+        .pending => return visible,
+        .spelled => blk: {
+            const start = if (m.open.len > 0) reply_text.findTag(visible, 0, m.open).? else 0;
+            break :blk reply_text.findTag(visible, start, m.close) orelse return visible;
+        },
+    };
+    if (at + m.close.len <= visible.len and std.mem.startsWith(u8, visible[at..], m.close)) {
+        return visible[at + m.close.len ..];
+    }
+    return visible;
+}
