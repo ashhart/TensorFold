@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 on Metal: `--prefill-from URL` with `--mcdma-link` pulls a prompt's prefix state from a producer over the hand-off and lands it in the served lane; off unless the flag is given (#3594).
+
 - DeepSeek-V4.1 on CUDA: a split KV pool (`TF_DSV41_KV_SPLIT`) is exported by shard on a `--mcdma-produce` server, each rank on its own link (`TF_DSV41_PRODUCE_LINK` on the followers) (#3567).
 
 - DeepSeek-V4.1 on CUDA: a `--mcdma-produce` server also exports a hand-off request's state under `TF_DSV41_PREFILL=replay` and `TF_DSV41_PREFILL_PIECES`, and converts the snapshot to the protocol's parts off the engine thread (#3566).
