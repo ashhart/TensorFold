@@ -451,19 +451,6 @@ extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_commit_3(__nv_bf
     tf_liquid::liquid_commit<3, 1>(STATE, SNAP, SLOT, ROW, D, state_stride, snap_stride, SS);
 }
 
-// LFM3's 7-tap conv and commit, the same planted faults as the 3-tap pair.
-extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_conv_7(const __nv_bfloat16* P, const __nv_bfloat16* Wc, const __nv_bfloat16* STATE,
-                                                                        const int* SLOT, const int* OFF, __nv_bfloat16* Y, __nv_bfloat16* SNAP,
-                                                                        int SNAP0, int D, long long SS) {
-    tf_liquid::liquid_conv<7, 1>(P, Wc, STATE, SLOT, OFF, Y, SNAP, SNAP0, D, SS);
-}
-
-extern "C" __global__ void __launch_bounds__(256) tf_ctl_liquid_commit_7(__nv_bfloat16* STATE, const __nv_bfloat16* SNAP, const int* SLOT,
-                                                                          const int* ROW, int D, long long state_stride, long long snap_stride,
-                                                                          long long SS) {
-    tf_liquid::liquid_commit<7, 1>(STATE, SNAP, SLOT, ROW, D, state_stride, snap_stride, SS);
-}
-
 // LFM2.5-24B-A2B's router, one planted fault: ties go to the higher expert id.
 #include "lfm2_moe.cuh"
 
@@ -498,20 +485,6 @@ extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_64(const __nv_
     constexpr int skip = 0;
     constexpr bool P256 = false, HPAGED = false, F8 = false, HM = false, IDS = false;
     constexpr int CAP = 0, PTOK = 1, PN = 0;
-    const float *ks = nullptr, *vs = nullptr;
-    const int HO = H;
-    auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
-#include "prefill_attention_rows.cuh"
-}
-// The same fault at head dim 128 (LFM3's 16 query heads over 4).
-extern "C" __global__ void __launch_bounds__(256, 1) tf_ctl_pattn_128(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
-                                                                      const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0,
-                                                                      int W, int H, int HK, int G, float scale, const int* __restrict__ PT, long long PS) {
-    constexpr int D = 128, WARPS = 8, HPC = 4, NS = 8;
-    constexpr bool causal = true;
-    constexpr int skip = 0;
-    constexpr bool HPAGED = false, F8 = false, HM = false;
-    constexpr int CAP = 0, PTOK = 1;
     const float *ks = nullptr, *vs = nullptr;
     const int HO = H;
     auto first_row = [] { return blockIdx.x * 16 * (WARPS / HPC); };
