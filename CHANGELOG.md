@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- CLI: `tensorfold mcp` serves the Model Context Protocol on stdio, so AI coding assistants such as Claude Code, Codex and Cursor can describe this machine, list, describe and download models, and start, list and stop local servers through tools. Each server it starts listens on 127.0.0.1 with its own API key and stops when the session ends ([guide](docs/mcp.md)).
+
 - Server: `tensorfold serve --router` answers for several models at one address, each a `tensorfold serve` child on loopback with a key of its own, started when a request's `model` names it and relayed byte for byte; `--max-loaded`, `--idle-unload` and each model's memory floor bound what stays loaded, and `--router-config FILE.toml` lists the models in `[[models]]` tables (see docs/router.md). Single-model `serve` is unchanged (#3540).
 
 - CLI: `tensorfold chat MODEL` chats with a model in the terminal: it starts `tensorfold serve MODEL` on a free loopback port, streams each reply as it arrives, keeps the conversation, and stops the server when the chat ends (flags after `--` go to serve). That server answers only the chat: it gets a fresh random API key in its environment, which the chat sends with every request. `--url` chats with a server that is already running (the only mode on Windows) and sends it the key in `TENSORFOLD_API_KEY` when that is set. A piped message gets one reply on stdout. `/bye`, `/clear`, `/system` and `/help` work in the chat, and Ctrl-C stops a reply and returns to the prompt. See [the chat command](docs/chat.md) (#3538).

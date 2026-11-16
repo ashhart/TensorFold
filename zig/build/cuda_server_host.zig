@@ -107,5 +107,6 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
             b.step("test-pdf-worker", "The PDF render worker spawned from tensorfold-native, rendering where libpdfium is found").dependOn(&pdf_worker_run.step);
         }
     }
+    @import("mcp_host.zig").add(b, server_tests, native_modules.engines, @import("cuda.zig").checkpointCli(b, host, .debug, false, native_modules.engines, mods.core), step);
     return .{ template, server_tests };
 }

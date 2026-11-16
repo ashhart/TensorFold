@@ -111,6 +111,10 @@ See [the chat command](docs/chat.md) for its flags and the serve flags it passes
 If it needs installing, an interactive release binary offers to install its matching version with `uv` after you say yes.
 See [the web launcher](docs/web.md) for manual installation and unattended use.
 
+`tensorfold mcp` lets an AI coding assistant such as Claude Code, Codex or Cursor describe this machine, list and
+download models, and start and stop local servers through Model Context Protocol tools. Add it to Claude Code with
+`claude mcp add tensorfold -- tensorfold mcp`. [The MCP guide](docs/mcp.md) covers the tools and other clients.
+
 `--parallel N` caps active requests at N; extra requests wait for a free slot.
 Omitting the flag uses `--parallel auto`, which asks for up to eight streams as memory and the engine allow.
 An explicit number is refused if the engine cannot fit that many streams.

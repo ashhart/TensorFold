@@ -1,8 +1,10 @@
 //! The tensorfold checkpoint subcommands: `models` and `info` (pull adds downloading in its own commit).
 const std = @import("std");
 const models = @import("models.zig");
-const info = @import("info.zig");
-const pull = @import("pull.zig");
+/// The commands `tensorfold mcp` answers its tools with, and the cache helpers they share.
+pub const info = @import("info.zig");
+pub const pull = @import("pull.zig");
+pub const hub = @import("hub.zig");
 const plan = @import("plan.zig");
 const pull_exlr8 = @import("pull_exlr8.zig");
 const lora_merge = @import("core").lora_merge;
