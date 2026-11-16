@@ -98,6 +98,28 @@ test "dsv41 metal calib: with TF_DSV41_CALIB unset or blank nothing is timed and
     }
 }
 
+test "dsv41 metal calib: with TF_DSV41_CALIB unset and TF_DSV41_CALIB_FILE set nothing is timed and that file prices the rounds" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "table.json", .data = "{\"verify\":[19.6,24.0],\"draft\":3.1}" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const p = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}/table.json", .{tmp.sub_path});
+    buf[p.len] = 0;
+    const path: [:0]const u8 = buf[0..p.len :0];
+    _ = unsetenv("TF_DSV41_CALIB");
+    _ = setenv("TF_DSV41_CALIB_FILE", path.ptr, 1);
+    defer _ = unsetenv("TF_DSV41_CALIB_FILE");
+    const m = try fs.open(gpa, io, seed, .{});
+    const md = m.model();
+    try testing.expect(md.calib.?.mode == null);
+    try testing.expectEqualStrings(path, md.calib.?.file.?);
+    const s = try Served.open(gpa, io, md, ".", null);
+    defer Served.close(s);
+    try testing.expectEqualSlices(f64, &.{ 19.6, 24.0 }, s.costs.verify);
+    try testing.expectEqual(@as(f64, 3.1), s.costs.draft);
+    try testing.expectEqual(@as(@TypeOf(m.t.stats.prompts), 0), m.t.stats.prompts);
+}
+
 test "dsv41 metal calib: TF_DSV41_CALIB=measure times the table at start and prices the rounds from it" {
     _ = setenv("TF_DSV41_CALIB", "measure", 1);
     defer _ = unsetenv("TF_DSV41_CALIB");
