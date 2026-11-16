@@ -11,6 +11,7 @@ const draft_batch = @import("draft_batch.zig");
 const load = @import("load.zig");
 const worker = @import("worker.zig");
 const snapshot = @import("snapshot.zig");
+const states = @import("lanes_states.zig");
 const pc = @import("engine_api").prompt_cache;
 
 const be = lanes.backend;
@@ -113,77 +114,14 @@ pub const Fx = struct {
             f.gpa,
             .{
                 .ptr = f,
-                .vtable = &.{ .bytes = snapBytes, .save = snapSave, .restore = snapRestore, .drop = snapDrop },
+                .vtable = &.{ .bytes = states.bytes, .save = states.save, .restore = states.restore, .drop = states.drop },
             },
             .{ .lookahead = 1, .planned = true, .grid = 64 },
             budget,
         );
     }
 
-    fn snapBytes(ptr: *anyopaque, at: u32) u64 {
-        const f: *Fx = @ptrCast(@alignCast(ptr));
-        var buf: [64]bool = undefined;
-        const kinds = f.e.kinds(&buf) catch return std.math.maxInt(u64);
-        const main = cache.Layout.of(f.e.weights.model.dims, kinds, 64, f.e.act).stateBytes(at);
-        const head = if (f.e.weights.model.mtp) |h|
-            cache.Layout.of(h.dims, &.{false}, 64, f.e.act).stateBytes(at)
-        else
-            0;
-        return main + head;
-    }
-
-    fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const f = of(ptr);
-        const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const saved = try snapshot.save(
-            f.gpa,
-            &f.e.driver,
-            f.e.stream,
-            &lane.caches,
-            if (lane.head) |*h| h else null,
-            at,
-            f.e.cfg.index_ratio,
-        );
-        saved.slot = f.next_slot;
-        f.next_slot += 1;
-        if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
-        return saved;
-    }
-
-    /// Every rank resumes from the state, or every rank starts the prompt over; a group that cannot do either stops.
-    fn snapRestore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!void {
-        const f = of(ptr);
-        const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
-        const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        // a follower that got the step waits for every rank's word on it: a rank 0 that cannot send stops too
-        if (f.link != null) f.send(&.{ @backingInt(worker.Op.restore), lane.id, s.slot }) catch |err| {
-            f.e.stopped = true;
-            return err;
-        };
-        snapshot.restoreAgreed(
-            f.gpa,
-            &f.e.driver,
-            f.e.stream,
-            s,
-            &lane.caches,
-            if (lane.head) |*h| h else null,
-            f.e.cfg.index_ratio,
-            f.e.eos,
-            f.link,
-        ) catch |err| {
-            if (err == error.GroupStopped) f.e.stopped = true;
-            return err;
-        };
-    }
-
-    fn snapDrop(ptr: *anyopaque, saved: pc.Saved) void {
-        const f: *Fx = @ptrCast(@alignCast(ptr));
-        const s: *snapshot.Saved = @ptrCast(@alignCast(saved));
-        if (f.link != null) f.send(&.{ @backingInt(worker.Op.drop), s.slot }) catch {};
-        snapshot.drop(f.gpa, s);
-    }
-
-    fn send(f: *Fx, words: []const u32) !void {
+    pub fn send(f: *Fx, words: []const u32) !void {
         if (f.e.stopped) return error.GroupStopped;
         if (f.link) |l| try l.send(words);
     }
@@ -230,7 +168,7 @@ pub const Fx = struct {
         f.gpa.destroy(l);
     }
 
-    fn of(ptr: *anyopaque) *Fx {
+    pub fn of(ptr: *anyopaque) *Fx {
         const f: *Fx = @ptrCast(@alignCast(ptr));
         if (bound != f.e) {
             f.e.ctx.makeCurrent() catch |err| std.log.err("hipSetDevice on the lane thread: {s}", .{@errorName(err)});
