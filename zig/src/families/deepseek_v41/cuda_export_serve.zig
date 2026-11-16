@@ -22,7 +22,7 @@ pub const Options = struct {
 };
 
 /// What `save` hands `exported`: the engine's state, read back.
-pub const Saved = struct { cap: cx.Captured };
+pub const Saved = struct { cap: cx.Captured, read_ns: u64 = 0 };
 
 /// One export the producer holds; a reading stream pins it, so expiry or release only marks it `gone` until it closes.
 pub const Held = struct { built: *cx.Built, name: [32]u8, pins: u32 = 0, gone: bool = false };
@@ -40,6 +40,11 @@ pub const Produce = struct {
     held: std.AutoHashMapUnmanaged([16]u8, *Held) = .empty,
     lock: std.atomic.Mutex = .unlocked, // `held`: the engine thread adds, the serving thread releases
     streams: std.atomic.Value(u32) = .init(0), // reads under way (HTTP): the producer stops after them
+    building: std.atomic.Value(u32) = .init(0), // exports converting on their own threads (`exportedBg`)
+    pending: std.AutoHashMapUnmanaged([16]u8, void) = .empty, // their ids, under `lock`: a reader waits for them
+
+    /// The most exports converting at once; one more converts on the caller's thread.
+    pub const max_building: u32 = 2;
 
     /// A producer over `source`: attaches the link when `opts.link` is set, makes the dump dir when `opts.dump` is.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, source: cx.Source, opts: Options, problem: *[]const u8) !*Produce {
@@ -81,7 +86,8 @@ pub const Produce = struct {
             p.serving.stop.store(true, .release);
             t.join();
         }
-        while (p.streams.load(.acquire) > 0) std.Io.sleep(p.io, .fromMilliseconds(1), .awake) catch {};
+        while (p.streams.load(.acquire) > 0 or p.building.load(.acquire) > 0) std.Io.sleep(p.io, .fromMilliseconds(1), .awake) catch {};
+        p.pending.deinit(p.gpa);
         var it = p.held.valueIterator();
         while (it.next()) |h| release(p, h.*);
         p.held.deinit(p.gpa);
@@ -156,6 +162,15 @@ pub const Produce = struct {
         for (done.items) |name| reap(p, name);
     }
 
+    /// The longest a reader waits for an export that is still converting.
+    const read_wait_ms: u32 = 120_000;
+
+    fn isPending(p: *Produce, id: [16]u8) bool {
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        defer p.lock.unlock();
+        return p.pending.contains(id);
+    }
+
     /// One decoder's read of a held export (`GET /v1/handoff/<id>`): replies to OPEN and PULL; pinned until `close`.
     pub const Reading = struct {
         p: *Produce,
@@ -183,6 +198,9 @@ pub const Produce = struct {
     /// The held export under `id`. `NotHeld`: never held, released or expired. `Refused`: it failed (`why` says why).
     pub fn read(p: *Produce, id: [16]u8, why: *[]const u8) error{ NotHeld, Refused, OutOfMemory, Unreadable }!*Reading {
         p.sweep();
+        // an export still converting on its own thread is awaited, not reported missing
+        var waited_ms: u32 = 0;
+        while (p.isPending(id) and waited_ms < read_wait_ms) : (waited_ms += 1) std.Io.sleep(p.io, .fromMilliseconds(1), .awake) catch {};
         const failed_why: ?[]const u8 = if (p.table.get(id)) |e| (if (e == .failed) e.failed else null) else null;
         while (!p.lock.tryLock()) std.atomic.spinLoopHint();
         const held = p.held.get(id) orelse {
@@ -220,12 +238,13 @@ pub const Produce = struct {
 
     /// The engine's state at `at` tokens, read back (the lane host's `snapshots.save` at the cut).
     pub fn save(p: *Produce, at: u64) !*Saved {
+        const t0 = fabric.words.nowNs();
         const cap = try p.source.take(p.source.ptr, p.gpa, at);
         const s = p.gpa.create(Saved) catch |err| {
             p.source.release(cap.ctx);
             return err;
         };
-        s.* = .{ .cap = cap };
+        s.* = .{ .cap = cap, .read_ns = fabric.words.nowNs() - t0 };
         return s;
     }
 
@@ -237,17 +256,52 @@ pub const Produce = struct {
     /// `saved` (now the producer's) is the state after `tokens`, the prompt but its last token: exported under `id`.
     pub fn exported(p: *Produce, id: [16]u8, tokens: []const u32, saved: *Saved) void {
         defer p.drop(saved);
-        p.record(id, tokens, saved.cap.state) catch |err| p.failed(id, @errorName(err));
+        p.record(id, tokens, saved.cap.state, saved.read_ns) catch |err| p.failed(id, @errorName(err));
     }
 
-    fn record(p: *Produce, id: [16]u8, tokens: []const u32, st: cx.State) !void {
+    /// `exported` with the conversion on its own thread (a file-only producer or a full set of converters: inline).
+    pub fn exportedBg(p: *Produce, id: [16]u8, tokens: []const u32, saved: *Saved) void {
+        if ((p.opts.link == null and !p.opts.http) or p.building.load(.acquire) >= max_building) return p.exported(id, tokens, saved);
+        const own = p.gpa.dupe(u32, tokens) catch return p.exported(id, tokens, saved);
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        const put = p.pending.put(p.gpa, id, {});
+        p.lock.unlock();
+        put catch {
+            p.gpa.free(own);
+            return p.exported(id, tokens, saved);
+        };
+        _ = p.building.fetchAdd(1, .acq_rel);
+        const t = std.Thread.spawn(.{}, convert, .{ p, id, own, saved }) catch {
+            p.finishBuild(id);
+            p.gpa.free(own);
+            return p.exported(id, tokens, saved);
+        };
+        t.detach();
+    }
+
+    fn convert(p: *Produce, id: [16]u8, tokens: []u32, saved: *Saved) void {
+        p.exported(id, tokens, saved);
+        p.gpa.free(tokens);
+        p.finishBuild(id);
+    }
+
+    fn finishBuild(p: *Produce, id: [16]u8) void {
+        while (!p.lock.tryLock()) std.atomic.spinLoopHint();
+        _ = p.pending.remove(id);
+        p.lock.unlock();
+        _ = p.building.fetchSub(1, .acq_rel);
+    }
+
+    fn record(p: *Produce, id: [16]u8, tokens: []const u32, st: cx.State, read_ns: u64) !void {
         if (p.opts.http) p.sweep(); // what expired or was released makes room under the cap
+        const t0 = fabric.words.nowNs();
         const built = try cx.build(p.gpa, id, tokens, st);
+        const build_ns = fabric.words.nowNs() - t0;
         var kept = false;
         defer if (!kept) built.deinit(p.gpa);
         var frames: u64 = 0;
         for (built.exp.layers) |l| frames += l.parts.len;
-        log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows", .{ &id, tokens.len, frames, built.bytes >> 20 });
+        log.info("handoff {x}: {d} tokens, {d} parts, {d} MiB of bf16 rows; read back {d} ms, built {d} ms", .{ &id, tokens.len, frames, built.bytes >> 20, read_ns / std.time.ns_per_ms, build_ns / std.time.ns_per_ms });
         if (p.opts.dump != null) try p.dump(built, tokens);
         if (p.opts.link == null and !p.opts.http) return;
         const held = try p.gpa.create(Held);

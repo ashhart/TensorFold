@@ -46,6 +46,10 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
   shard 0 carries `swa`, `carry`, `ring` and its pages, the others only their `comp`/`ixk` pages. The decoder pulls every
   shard into one import.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
+  Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
+  decoder layers' rings (the last 127 positions the replay wrote). The window's oldest position of those layers was never
+  written by the replay (the next token does not read it) and is zero in the export. The drafter's rings of a replay-mode
+  slot stand outside the snapshot and are read at the cut.
 
 ## What a reader does
 
@@ -85,13 +89,17 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
 
 * The export reads rank 0's active slot: its snapshot (`Sessions.snapshot`) and its pool pages, through the same
   `PageStore` the NVMe park uses. A replicated pool holds the same pages and rings on every rank, so no other rank takes
-  part. The raw bytes are converted to the library's bf16 parts when the cut is taken.
+  part. The snapshot's raw bytes are read at the cut, on the engine thread, and converted to the library's bf16 parts on a thread of
+  their own (at most two at a time, a third converts inline), so the decode lanes keep running; a decoder that asks before the
+  parts are done waits for them (`.wait` on a link, a held request over HTTP). The raw bytes are freed when the parts stand.
 * The model name is `LaneHost.Remote.checkpointId` of the checkpoint folder (config and weight index hashed): the
   decoder must serve identical files, or give the manifest's name.
 
 The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`),
-replay prefill, a prompt run in pieces between decode rounds, `TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank),
-a non-default prompt shape, and fp4 comp rows.
+`TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank), a non-default prompt shape, and fp4 comp rows. Replay prefill is
+exported, with `TF_DSV41_PF_4K` and the other knobs that need it. So is a prompt run in pieces between decode rounds
+(`TF_DSV41_PREFILL_PIECES=1`): the cut stands in the prompt's last step, after its last piece and the decoder replay and before
+the last token's window, and the other streams keep decoding while the pieces run.
 
 ## Over plain HTTP
 
@@ -116,7 +124,7 @@ answers, on its own port and behind its own API keys (`--api-key`, `--api-key-fi
 The body is not encrypted: it is a state derived from the prompt. Keep the pair's port on a trusted LAN, and use a key.
 
 The producer logs `handoff: exports are served over HTTP, GET /v1/handoff/<id> on this server's port` at start
-and `handoff <id>: N tokens, P parts, M MiB of bf16 rows` per export.
+and `handoff <id>: N tokens, P parts, M MiB of bf16 rows; read back R ms, built B ms` per export.
 
 ## Tests
 

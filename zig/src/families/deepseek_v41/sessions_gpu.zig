@@ -110,6 +110,8 @@ pub const Sessions = struct {
     agreement: ?graphs.Agreement = null,
     /// full mode: the drafter's rings ride in the snapshot; a restore sets the pass's context start through `ds_set`
     ds_rings: bool = false,
+    /// replay mode with drafts: the drafter's rings, outside the snapshot, read by the hand-off export at the cut
+    drafter_rings: []Piece = &.{},
     ds_set: ?DsSet = null,
 
     pub const DsSet = struct { ctx: *anyopaque, set: *const fn (ctx: *anyopaque, slot: u32, valid: u64) void, get: ?*const fn (*anyopaque, u32) u64 = null };
@@ -129,6 +131,7 @@ pub const Sessions = struct {
         @memset(s.ds_valid, 0);
         // the bounded roles in a fixed order (both ranks); in row mode a slot's bytes are the plan's / S
         var list: std.ArrayList(Piece) = .empty;
+        var rings_out: std.ArrayList(Piece) = .empty;
         var la = std.heap.ArenaAllocator.init(gpa);
         defer la.deinit();
         const layers = try f.backbone(la.allocator());
@@ -150,9 +153,9 @@ pub const Sessions = struct {
             try list.append(na, .{ .role = role, .len = len });
             s.bounded_bytes += len;
         };
-        // full mode with drafts: the drafter's rings; replay mode: the decoder replay rewrites what the drafter reads
+        // full mode with drafts: the drafter's rings; replay mode: the resume's replay rewrites what the drafter reads
         const replay = pf.state(f).mode == .replay;
-        if (!replay and shape.ds_blocks > 0) {
+        if (shape.ds_blocks > 0) {
             const rr: u64 = @intCast(dspark_emit.ringRows(f.cfg));
             for (plan.sizes.keys(), plan.sizes.values()) |role, size| {
                 if (!std.mem.startsWith(u8, role, "s.L")) continue;
@@ -161,16 +164,23 @@ pub const Sessions = struct {
                 const L = std.fmt.parseInt(u32, role["s.L".len .. std.mem.indexOfScalarPos(u8, role, 3, '.') orelse continue], 10) catch continue;
                 if (L < f.cfg.layers) continue;
                 const row: u64 = if (v) 576 else 8;
-                if (size % (rr * row) != 0) return error.Unbound;
+                if (size % (rr * row) != 0) return if (replay) continue else error.Unbound;
                 const ring_slots = size / (rr * row);
-                if (f.runner.addressOf(role) == null) return error.Unbound;
+                if (f.runner.addressOf(role) == null) return if (replay) continue else error.Unbound;
                 const len = size / ring_slots;
-                try list.append(na, .{ .role = try na.dupe(u8, role), .len = len, .stride = if (ring_slots > 1) len else 0 });
+                const ring: Piece = .{ .role = try na.dupe(u8, role), .len = len, .stride = if (ring_slots > 1) len else 0 };
+                if (replay) {
+                    // not in a replay snapshot (the resume's replay rewrites it): only the hand-off export reads it
+                    try rings_out.append(na, ring);
+                    continue;
+                }
+                try list.append(na, ring);
                 s.bounded_bytes += len;
                 s.ds_rings = true;
             }
         }
         s.pieces = list.items;
+        s.drafter_rings = rings_out.items;
         // the snapshot as the RAM tier measures it (kv/sess.zig): replay keeps the rings below the decoder
         var rings: u64 = 0;
         var carries: u64 = 0;
@@ -321,6 +331,13 @@ pub const Sessions = struct {
             at += pc.len;
         }
         return p;
+    }
+
+    /// The active slot's drafter ring `pc` (a `drafter_rings` role) read back; the stream is idle (after `snapshot`).
+    pub fn readDrafterRing(s: *Sessions, pc: Piece, out: []u8) !void {
+        const r = s.f.runner;
+        const addr = (r.addressOf(pc.role) orelse return error.Unbound) + s.cur() * pc.stride;
+        try cuda.DeviceBuffer.download(.{ .d = r.d, .ptr = addr, .len = pc.len }, 0, out[0..pc.len]);
     }
 
     pub fn uploadSnap(s: *Sessions, p: *const Snap) !void {
