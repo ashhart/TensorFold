@@ -31,6 +31,7 @@ import { TurnStatsLine } from './turn/TurnStatsLine'
 import { TurnOutcome } from './turn/TurnOutcome'
 import { QuestionCard } from './user-question/QuestionCard'
 import { BotChatContext } from './bots/BotChatContext'
+import { BotComposerSettings } from './bots/BotComposerSettings'
 import { BrandMark } from './BrandMark'
 import { isBuiltInProvider, isExternalProvider } from '../../shared/provider-trust'
 import { useEngineStatus } from '../lib/engine'
@@ -283,7 +284,9 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
                 onAllow={() => approve(threadId, pendingApproval.callId, 'allow')}
               />
             )}
-            <Composer mode="thread" thread={thread} />
+            <BotComposerSettings bot={thread.bot}>
+              <Composer mode="thread" thread={thread} />
+            </BotComposerSettings>
           </div>
         </div>
       </div>

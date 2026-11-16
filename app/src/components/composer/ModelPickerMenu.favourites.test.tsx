@@ -31,6 +31,7 @@ let preferenceOwner: string | null = null
 let picked: any[] = [], closes = 0, preferenceError: string | null = null
 const jsx = { jsx: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), jsxs: (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) }), Fragment: React.Fragment }
 const imports: Record<string, any> = {
+  '../bots/BotComposerSettings': { useBotComposerSettings: () => undefined },
   '../../lib/preferences/useAuthoredText': { useAuthoredText: () => uiLocale === 'en' ? fixtureText : (source: string, params = {}) => authoredText(uiLocale, source, params) },
   react: { useEffect() {}, useId: () => 'picker-fixture', useState(initial: any) { const index = cursor++; if (!(index in slots)) slots[index] = typeof initial === 'function' ? initial() : initial; return [slots[index], (value: any) => { slots[index] = typeof value === 'function' ? value(slots[index]) : value }] }, useRef(initial: any) { const index = cursor++; if (!(index in slots)) slots[index] = { current: initial }; return slots[index] } },
   'react/jsx-runtime': jsx, clsx: { default: clsx }, '../../lib/icons': { Icon: () => null }, '../../../shared/provider-trust': { isExternalProvider }, '../ui': { Menu: 'menu-fixture' },
