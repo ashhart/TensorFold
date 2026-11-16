@@ -27,6 +27,8 @@ test {
     _ = @import("auth_scope_test.zig");
     _ = @import("family_sampling.zig");
     _ = @import("auth_scope_http_test.zig");
+    _ = @import("request_id.zig");
+    _ = @import("request_id_test.zig");
     _ = @import("admission_cli.zig");
     _ = @import("connection_cli.zig");
     _ = @import("request_admission_test.zig");
@@ -89,6 +91,7 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("models_input_types_test.zig");
+    _ = @import("models_id_test.zig");
     _ = @import("speech.zig");
     _ = @import("images_generations.zig");
     _ = @import("drama_cfg.zig");

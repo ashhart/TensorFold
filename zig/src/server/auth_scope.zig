@@ -73,11 +73,20 @@ pub fn allows(scopes: Scopes, method: []const u8, raw_path: []const u8) bool {
     if (scopes.admin) return true;
     const route = routePath(raw_path);
     if (std.mem.eql(u8, method, "GET")) {
-        if ((scopes.inference or scopes.read) and oneOf(route, &listing)) return true;
+        if ((scopes.inference or scopes.read) and (oneOf(route, &listing) or modelId(route) != null)) return true;
         return scopes.read and oneOf(route, &reading);
     }
     const put = std.mem.eql(u8, method, "PUT") and putRoute(route);
     return scopes.inference and (std.mem.eql(u8, method, "POST") or put) and oneOf(route, &inferring);
+}
+
+/// The id in GET /v1/models/{id} or /models/{id}, still escaped; a path ending in /models stays the listing's alias.
+pub fn modelId(route: []const u8) ?[]const u8 {
+    if (std.mem.endsWith(u8, route, "/models")) return null;
+    for ([_][]const u8{ "/v1/models/", "/models/" }) |head| {
+        if (route.len > head.len and std.mem.startsWith(u8, route, head)) return route[head.len..];
+    }
+    return null;
 }
 
 /// A key that may open a Responses WebSocket: admin, or inference (each create is checked again over the socket).

@@ -111,6 +111,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/api/show")) return ollama.show(srv, conn, a);
     if (std.mem.eql(u8, route, "/api/ps")) return ollama.ps(srv, conn, a);
     if (std.mem.eql(u8, route, "/api/version")) return ollama.version(srv, conn, a);
+    if (auth_scope.modelId(route)) |id| return status.model(srv, conn, a, id) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
 }

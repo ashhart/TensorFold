@@ -70,9 +70,20 @@ pub fn line(comptime fmt: []const u8, args: anytype) void {
         w.print("{s} ", .{utcTime(&t, now())}) catch unreachable;
     }
     w.print("[tensorfold] " ++ fmt, args) catch {}; // a longer line ends where the buffer does
+    if (request_len > 0) w.print(" request_id={s}", .{request_text[0..request_len]}) catch {};
     var escaped: [4 * buf.len + 1]u8 = undefined;
     const text = controlSafe(&escaped, w.buffered());
     if (@import("builtin").is_test) Test.sink.?.call(Test.sink.?.ctx, text) else raw(text);
+}
+
+threadlocal var request_text: [128]u8 = undefined;
+threadlocal var request_len: u8 = 0;
+
+/// The client's X-Request-Id that this thread's lines end with until its next request reads one ("": none).
+pub fn requestId(id: []const u8) void {
+    const n = @min(id.len, request_text.len);
+    @memcpy(request_text[0..n], id[0..n]);
+    request_len = @intCast(n);
 }
 
 /// ``text`` and its newline with every C0, DEL and C1 control as ``\xNN``: a request line cannot drive the terminal.
