@@ -1,4 +1,4 @@
-"""The depth decoder on the reference reply's states: reference_depth.py MODEL DUMP prep|score [DEV] [DTYPE]."""
+"""Depth decoder on a dump's states: reference_depth.py MODEL DUMP prep [DEV DTYPE NAME] | score [REF OTHER OUT]."""
 import json
 import sys
 from pathlib import Path
@@ -12,14 +12,15 @@ AUDIO_OUT = 125032
 
 
 def inputs(d):
-    """The state before each reference frame and its codes, as lfm3-omni-generate --depth-check reads them."""
+    """The state before each reference frame (rounded to bf16, so every precision reads the same) and its codes."""
     seq, sh, codes = np.load(d / "gen_seq.npy"), np.load(d / "step_hidden.npy"), np.load(d / "gen_codes.npy").T
     slots = [j for j in range(1, len(seq)) if seq[j] == AUDIO_OUT][: len(codes)]
-    return np.stack([sh[j - 1] for j in slots]).astype(np.float32), codes[: len(slots)].astype(np.int32)
+    h = torch.from_numpy(np.stack([sh[j - 1] for j in slots]).astype(np.float32))
+    return h.to(torch.bfloat16).float().numpy(), codes[: len(slots)].astype(np.int32)
 
 
-def prep(model_dir, d, dev, dtype):
-    """Writes depth_h.f32 and depth_codes.i32, and the reference's three passes of logits per frame."""
+def prep(model_dir, d, dev, dtype, name="ref_depth.npy"):
+    """Writes depth_h.f32 and depth_codes.i32, and the reference's three passes of logits per frame as NAME."""
     h_all, c_all = inputs(d)
     h_all.tofile(d / "depth_h.f32")
     c_all.tofile(d / "depth_codes.i32")
@@ -37,13 +38,13 @@ def prep(model_dir, d, dev, dtype):
                     ct[0, q] = int(c[q])
                     masked[0, q] = False
             out.append(np.stack(rows))
-    np.save(d / "ref_depth.npy", np.stack(out))
+    np.save(d / name, np.stack(out))
 
 
-def score(d):
-    """Greedy agreement and logits cosine of depth_check.f32 against the reference's passes."""
-    ref = np.load(d / "ref_depth.npy")
-    tf = np.fromfile(d / "depth_check.f32", dtype=np.float32).reshape(ref.shape)
+def score(d, ref_name="ref_depth.npy", other="depth_check.f32", out="depth_parity.json"):
+    """Greedy agreement and logits cosine of OTHER (the engine's raw fp32, or another prep's .npy) against REF."""
+    ref = np.load(d / ref_name)
+    tf = np.load(d / other) if other.endswith(".npy") else np.fromfile(d / other, dtype=np.float32).reshape(ref.shape)
     agree = total = 0
     cos = []
     for p in range(3):
@@ -56,13 +57,13 @@ def score(d):
     r = {"frames": int(ref.shape[0]), "argmax_agree": agree, "scored": total, "rate": round(agree / total, 4),
          "logit_cos_min": round(min(cos), 6), "logit_cos_median": round(float(np.median(cos)), 6)}
     print(json.dumps(r))
-    json.dump(r, open(d / "depth_parity.json", "w"))
+    json.dump(r, open(d / out, "w"))
 
 
 if __name__ == "__main__":
     D = Path(sys.argv[2])
     if sys.argv[3] == "prep":
         dev = sys.argv[4] if len(sys.argv) > 4 else "cuda"
-        prep(sys.argv[1], D, dev, rc.dtype_of(sys.argv[5] if len(sys.argv) > 5 else "bf16"))
+        prep(sys.argv[1], D, dev, rc.dtype_of(sys.argv[5] if len(sys.argv) > 5 else "bf16"), *sys.argv[6:7])
     else:
-        score(D)
+        score(D, *sys.argv[4:7])
