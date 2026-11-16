@@ -20,6 +20,8 @@ const draw = serve.draw;
 
 /// Drawn tokens a handle names, newest last.
 pub const ring = 1024;
+/// The kept states' bounce buffer: one copy's chunk of a state.
+const bounce_bytes = 32 << 20;
 /// Drafts the head holds for a stream at most.
 pub const max_depth = cache.max_window - 1;
 
@@ -76,6 +78,8 @@ pub const Fx = struct {
     marked: ?Marked = null,
     /// The last prompt chunk's keeps, saved as the next step begins: its first token goes out first.
     keeps: ?states.Keeps = null,
+    /// Pinned host memory the kept states' copies pass through (snapshot.Copy), made with the store.
+    bounce: ?hip.HostBuffer = null,
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, streams: usize) !*Fx {
         const f = try gpa.create(Fx);
@@ -101,6 +105,7 @@ pub const Fx = struct {
     pub fn deinit(f: *Fx) void {
         f.keeps = null;
         if (f.store) |*st| st.deinit();
+        if (f.bounce) |*b| b.free();
         if (f.link != null) f.send(&.{@backingInt(worker.Op.stop)}) catch {};
         f.e.stream.synchronize() catch {};
         var it = f.lanes.valueIterator();
@@ -119,6 +124,7 @@ pub const Fx = struct {
     /// Keep prompt states in `budget` host bytes on the prompt kernels' 64-row grid, each a token past its rows.
     pub fn keepPrompts(f: *Fx, budget: u64) void {
         if (budget == 0) return;
+        f.bounce = hip.HostBuffer.alloc(&f.e.driver, bounce_bytes) catch null; // none: the copies pin their pages
         f.store = pc.Store.init(
             f.gpa,
             .{
@@ -128,6 +134,11 @@ pub const Fx = struct {
             .{ .lookahead = 1, .planned = true, .grid = 64 },
             budget,
         );
+    }
+
+    /// How the kept states are copied: through the bounce buffer when there is one.
+    pub fn copy(f: *Fx) snapshot.Copy {
+        return .{ .d = &f.e.driver, .bounce = if (f.bounce) |b| b.bytes else &.{} };
     }
 
     pub fn send(f: *Fx, words: []const u32) !void {

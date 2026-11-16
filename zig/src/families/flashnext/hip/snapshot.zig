@@ -3,6 +3,31 @@ const std = @import("std");
 const hip = @import("hip");
 const cache = @import("cache.zig");
 
+/// The device and the pinned memory a state's copies pass through (empty: none, a big copy pins the pages it reads).
+pub const Copy = struct { d: *const hip.Runtime, bounce: []u8 = &.{} };
+
+/// `dst.len` bytes from device address `src`, through the bounce buffer when there is one.
+fn down(x: Copy, dst: []u8, src: u64) !void {
+    if (x.bounce.len == 0) return hip.runtime.check(x.d.api.hipMemcpyDtoH(dst.ptr, @ptrFromInt(src), dst.len));
+    var k: usize = 0;
+    while (k < dst.len) : (k += x.bounce.len) {
+        const n = @min(x.bounce.len, dst.len - k);
+        try hip.runtime.check(x.d.api.hipMemcpyDtoH(x.bounce.ptr, @ptrFromInt(src + k), n));
+        @memcpy(dst[k..][0..n], x.bounce[0..n]);
+    }
+}
+
+/// `src` to device address `dst`, through the bounce buffer when there is one.
+fn up(x: Copy, dst: u64, src: []const u8) !void {
+    if (x.bounce.len == 0) return hip.runtime.check(x.d.api.hipMemcpyHtoD(@ptrFromInt(dst), @constCast(src.ptr), src.len));
+    var k: usize = 0;
+    while (k < src.len) : (k += x.bounce.len) {
+        const n = @min(x.bounce.len, src.len - k);
+        @memcpy(x.bounce[0..n], src[k..][0..n]);
+        try hip.runtime.check(x.d.api.hipMemcpyHtoD(@ptrFromInt(dst + k), x.bounce.ptr, n));
+    }
+}
+
 /// One span of a cache's device memory a state at `at` holds.
 const Region = struct { offset: usize, len: usize };
 
@@ -39,7 +64,7 @@ pub const Saved = struct {
 };
 
 /// `side`: the part past the sparse layers (the last region) from a side buffer instead (forward.Mark).
-fn copyOut(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usize, side: ?u64, gpa: std.mem.Allocator) ![]u8 {
+fn copyOut(x: Copy, c: *const cache.Caches, at: usize, ratio: usize, side: ?u64, gpa: std.mem.Allocator) ![]u8 {
     var list: std.ArrayList(Region) = .empty;
     defer list.deinit(gpa);
     try regions(c, at, ratio, &list, gpa);
@@ -50,14 +75,14 @@ fn copyOut(d: *const hip.Runtime, c: *const cache.Caches, at: usize, ratio: usiz
     var off: usize = 0;
     for (list.items, 0..) |r, i| {
         const src = if (side != null and i + 1 == list.items.len) side.? else c.mem.base() + r.offset;
-        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyDtoH(out[off..].ptr, @ptrFromInt(src), r.len));
+        if (r.len > 0) try down(x, out[off..][0..r.len], src);
         off += r.len;
     }
     return out;
 }
 
 fn copyIn(
-    d: *const hip.Runtime,
+    x: Copy,
     c: *const cache.Caches,
     at: usize,
     ratio: usize,
@@ -70,11 +95,7 @@ fn copyIn(
     var off: usize = 0;
     for (list.items) |r| {
         if (off + r.len > bytes.len) return error.SnapshotMismatch;
-        if (r.len > 0) try hip.runtime.check(d.api.hipMemcpyHtoD(
-            @ptrFromInt(c.mem.base() + r.offset),
-            @constCast(bytes[off..].ptr),
-            r.len,
-        ));
+        if (r.len > 0) try up(x, c.mem.base() + r.offset, bytes[off..][0..r.len]);
         off += r.len;
     }
     if (off != bytes.len) return error.SnapshotMismatch;
@@ -83,7 +104,7 @@ fn copyIn(
 /// The state of `c` (and the head's `head`) after `at` prompt tokens, copied to host memory; the stream is idle.
 pub fn save(
     gpa: std.mem.Allocator,
-    d: *const hip.Runtime,
+    x: Copy,
     s: hip.Stream,
     c: *const cache.Caches,
     head: ?*const cache.Caches,
@@ -92,13 +113,13 @@ pub fn save(
 ) !*Saved {
     try s.synchronize();
     if (c.len != at) return error.SnapshotNotAtMark;
-    return saveFrom(gpa, d, c, head, at, ratio, null, c.pooled, c.history);
+    return saveFrom(gpa, x, c, head, at, ratio, null, c.pooled, c.history);
 }
 
 /// The state at `at` inside the last prompt chunk (forward.Mark): rows below it from the caches, the rest from `side`.
 pub fn saveMarked(
     gpa: std.mem.Allocator,
-    d: *const hip.Runtime,
+    x: Copy,
     s: hip.Stream,
     c: *const cache.Caches,
     head: ?*const cache.Caches,
@@ -109,12 +130,12 @@ pub fn saveMarked(
 ) !*Saved {
     try s.synchronize();
     if (c.len <= at) return error.SnapshotNotAtMark;
-    return saveFrom(gpa, d, c, head, at, ratio, side, at / ratio, history);
+    return saveFrom(gpa, x, c, head, at, ratio, side, at / ratio, history);
 }
 
 fn saveFrom(
     gpa: std.mem.Allocator,
-    d: *const hip.Runtime,
+    x: Copy,
     c: *const cache.Caches,
     head: ?*const cache.Caches,
     at: usize,
@@ -125,9 +146,9 @@ fn saveFrom(
 ) !*Saved {
     const out = try gpa.create(Saved);
     errdefer gpa.destroy(out);
-    const main = try copyOut(d, c, at, ratio, side, gpa);
+    const main = try copyOut(x, c, at, ratio, side, gpa);
     errdefer gpa.free(main);
-    const h: []u8 = if (head) |x| try copyOut(d, x, at, ratio, null, gpa) else &.{};
+    const h: []u8 = if (head) |hc| try copyOut(x, hc, at, ratio, null, gpa) else &.{};
     out.* = .{ .at = @intCast(at), .pooled = pooled, .history = history, .main = main, .head = h };
     return out;
 }
@@ -135,7 +156,7 @@ fn saveFrom(
 /// `saved` made the live state of `c` and `head`, or a failure part way through that leaves either changed.
 fn restore(
     gpa: std.mem.Allocator,
-    d: *const hip.Runtime,
+    x: Copy,
     s: hip.Stream,
     saved: *const Saved,
     c: *cache.Caches,
@@ -144,8 +165,8 @@ fn restore(
 ) !void {
     try s.synchronize();
     if (saved.at + 1 > c.layout.cap) return error.SnapshotTooLong;
-    try copyIn(d, c, saved.at, ratio, saved.main, gpa);
-    if (head) |h| try copyIn(d, h, saved.at, ratio, saved.head, gpa);
+    try copyIn(x, c, saved.at, ratio, saved.main, gpa);
+    if (head) |h| try copyIn(x, h, saved.at, ratio, saved.head, gpa);
     c.len = saved.at;
     c.pooled = saved.pooled;
     c.history = saved.history;
@@ -158,7 +179,7 @@ fn restore(
 /// `saved` (null: no copy here) restored on every rank or none: all resume from it, or all start over (RestoreRefused).
 pub fn restoreAgreed(
     gpa: std.mem.Allocator,
-    d: *const hip.Runtime,
+    x: Copy,
     s: hip.Stream,
     saved: ?*const Saved,
     c: *cache.Caches,
@@ -167,7 +188,7 @@ pub fn restoreAgreed(
     eos: i64,
     link: ?hip.collective.Link,
 ) !void {
-    const mine = if (saved) |x| restore(gpa, d, s, x, c, head, ratio) else error.UnknownSnapshot;
+    const mine = if (saved) |v| restore(gpa, x, s, v, c, head, ratio) else error.UnknownSnapshot;
     if (hip.collective.everyRank(link, mine)) return;
     // a part-restored rank, and every rank that restored beside one that failed, starts the prompt over from zero
     if (!hip.collective.everyRank(link, fresh(s, c, head, eos))) return error.GroupStopped;

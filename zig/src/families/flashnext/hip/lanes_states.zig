@@ -55,9 +55,9 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
     const lane: *Lane = @ptrCast(@alignCast(owner orelse return error.NoOwner));
     const head = if (lane.head) |*h| h else null;
     const saved = if (f.marked) |mk| if (mk.at == at)
-        try snapshot.saveMarked(f.gpa, &f.e.driver, f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio, mk.side, mk.history)
+        try snapshot.saveMarked(f.gpa, f.copy(), f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio, mk.side, mk.history)
     else
-        return error.SnapshotNotAtMark else try snapshot.save(f.gpa, &f.e.driver, f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio);
+        return error.SnapshotNotAtMark else try snapshot.save(f.gpa, f.copy(), f.e.stream, &lane.caches, head, at, f.e.cfg.index_ratio);
     saved.slot = f.next_slot;
     f.next_slot += 1;
     if (f.link != null) try f.send(&.{ @backingInt(worker.Op.snap), lane.id, saved.slot, at });
@@ -76,7 +76,7 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: pc.Saved) anyerror!vo
     };
     snapshot.restoreAgreed(
         f.gpa,
-        &f.e.driver,
+        f.copy(),
         f.e.stream,
         s,
         &lane.caches,
