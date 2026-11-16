@@ -1,0 +1,81 @@
+package ui
+
+import "github.com/ashhart/TensorFold/web/models-preview/internal/apiclient"
+
+templ table(board apiclient.Board) {
+	<div class="table-scroll">
+		<table class="runs">
+			<thead>
+				<tr>
+					@th(board.Query, apiclient.SortModel, "Model", "")
+					@th(board.Query, apiclient.SortHardware, "Hardware", "")
+					@th(board.Query, apiclient.SortRate, "tok/s", "")
+					@th(board.Query, apiclient.SortTTFT, "TTFT (s)", "")
+					@th(board.Query, apiclient.SortContext, "Context", "")
+					@th(board.Query, apiclient.SortConcurrency, "Concurrency", "slots / streams")
+					@th(board.Query, apiclient.SortStatus, "Status", "")
+					@th(board.Query, apiclient.SortDate, "Date / release", "")
+				</tr>
+			</thead>
+			<tbody>
+				for _, row := range board.Rows {
+					@runRow(row, board.Query.Run == row.Run.ID)
+				}
+				if len(board.Rows) == 0 {
+					<tr><td colspan="8" class="empty">No measured run on this hardware yet.</td></tr>
+				}
+			</tbody>
+			if len(board.Unmeasured) > 0 {
+				<tbody class="unmeasured">
+					<tr class="group">
+						<th colspan="8" scope="colgroup">Supported, not measured yet <span class="small">No number until a receipt exists.</span></th>
+					</tr>
+					for _, item := range board.Unmeasured {
+						@unmeasuredRow(item)
+					}
+				</tbody>
+			}
+		</table>
+	</div>
+}
+
+templ th(query apiclient.BoardQuery, column, label, sub string) {
+	{{ next := sorted(query, column) }}
+	<th scope="col" aria-sort={ ariaSort(query, column) }>
+		<a href={ templ.SafeURL(href(next)) } data-on:click__prevent={ fetch(next) }>{ label } <span class="arrow">{ arrow(query, column) }</span></a>
+		if sub != "" {
+			<span class="th-sub">{ sub }</span>
+		}
+	</th>
+}
+
+templ runRow(row apiclient.Row, open bool) {
+	{{ id := row.Run.ID }}
+	<tr id={ "run-" + id } class="run" data-on:click={ toggle(id) }>
+		<td>
+			<a class="model" href={ templ.SafeURL("/?run=" + id + "#run-" + id) } data-on:click__prevent__stop={ toggle(id) }>{ row.Model.Name }</a>
+			<span class="sub">{ text(row.Run.Note) }</span>
+		</td>
+		<td data-label="Hardware">{ row.Run.Hardware }</td>
+		<td data-label="tok/s">
+			<span class="num">{ rate(row.Run.DecodeTPS) }</span>
+			if row.Run.DecodeTPS != nil {
+				<span class="bar"><span class={ barClass(row.BarPercent) }></span></span>
+			}
+			<span class="sub">{ scope(row.Run) }</span>
+		</td>
+		<td data-label="TTFT (s)">
+			<span class="mono">{ ttft(row.Run) }</span>
+			<span class="sub">{ ttftLabel(row.Run) }</span>
+		</td>
+		<td class="mono" data-label="Context">{ count(row.Run.ContextCapacity) }</td>
+		<td class="mono" data-label="Slots / streams">{ load(row.Run) }</td>
+		<td data-label="Status"><span class={ "dot", "dot-" + row.Status }></span>{ statusLabel(row.Status) }</td>
+		<td class="small" data-label="Date / release">{ dateOrRelease(row.Run) }</td>
+	</tr>
+	<tr class={ "details", templ.KV("hidden", !open) } data-class:hidden={ hiddenUnless(id) }>
+		<td colspan="8">
+			@details(row)
+		</td>
+	</tr>
+}

@@ -1,0 +1,100 @@
+package ui
+
+import (
+	"github.com/ashhart/TensorFold/web/models-preview/internal/apiclient"
+	"github.com/ashhart/TensorFold/web/models-preview/ui/static"
+)
+
+// document is the HTML shell. data-nonce lets Datastar run data-* expressions under the strict nonce CSP.
+templ document(title string) {
+	<!DOCTYPE html>
+	<html lang="en" data-nonce={ templ.GetNonce(ctx) }>
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<meta name="color-scheme" content="dark"/>
+			<meta name="description" content="TensorFold supported models: named models on named hardware, each number linked to its receipt."/>
+			<title>{ title }</title>
+			<link rel="stylesheet" href={ static.URL(static.CSSFile) }/>
+			<script type="module" src={ static.URL(static.DatastarFile) } nonce={ templ.GetNonce(ctx) }></script>
+		</head>
+		<body>
+			<header class="site">
+				<div class="wrap site-bar">
+					<span class="brand"><span class="brand-mark" aria-hidden="true"></span>TensorFold</span>
+					<span class="preview-tag">Preview</span>
+					<nav class="site-nav" aria-label="Site">
+						<span aria-current="page">Supported models</span>
+					</nav>
+				</div>
+			</header>
+			{ children... }
+		</body>
+	</html>
+}
+
+// Page is the supported-models page.
+templ Page(board apiclient.Board, repoURL string) {
+	@document("Supported models · TensorFold") {
+		<main id="main">
+			@hero(repoURL)
+			<div class="wrap">
+				@BoardRoot(board, repoURL)
+			</div>
+		</main>
+	}
+}
+
+// Unavailable is the page when there is no catalog to show.
+templ Unavailable(repoURL string, err error) {
+	@document("Supported models · TensorFold") {
+		<main id="main">
+			@hero(repoURL)
+			<div class="wrap">
+				@Notice(errorMessage(err))
+			</div>
+		</main>
+	}
+}
+
+// Notice is a message in place of the board.
+templ Notice(message string) {
+	<div id="board" class="notice" role="alert">{ message }</div>
+}
+
+templ hero(repoURL string) {
+	<section class="hero">
+		<div class="wrap hero-grid">
+			<div>
+				<p class="eyebrow">Supported models</p>
+				<h1>Inference,<br/>measured on your rig.</h1>
+				<p class="lede">Named models. Named machines. The numbers behind the recipes.</p>
+				<p class="small">Measured on named hardware. Every number links to its receipt.</p>
+			</div>
+			<aside class="hero-side">
+				<p class="small">Explore the measurements</p>
+				<p class="hero-claim">Model × hardware<br/>× configuration.</p>
+				<a class="link-accent" href={ templ.SafeURL(repoURL) } rel="noopener">Full list of supported models ↗</a>
+			</aside>
+		</div>
+	</section>
+}
+
+templ sourceLine(board apiclient.Board, repoURL string) {
+	<footer class="source">
+		if board.Freshness.Stale {
+			<p class="stale" role="status">Showing the last good copy: { board.Freshness.Problem }</p>
+		}
+		<p class="small">
+			Catalog { originLabel(board.Freshness) }, updated { board.Updated }
+			{{ at := readAt(board.Freshness) }}
+			if at != "" {
+				· read { at }
+			}
+		</p>
+		<p class="small">
+			Per stream: one request's decode rate. Total of N: the steady-state sum while all N streams generate, so total ÷ N is each stream's rate.
+			A dash means the receipt does not state the value. <a href={ templ.SafeURL(repoURL) } rel="noopener">Full list of supported models ↗</a>
+		</p>
+	</footer>
+}
