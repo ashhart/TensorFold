@@ -96,6 +96,7 @@ pub const landed_cuda = registry.cuda ++
     @import("glm_kv_pending.zig").records ++
     @import("mla_cuda_records.zig").records ++
     @import("exl3_grouped_records.zig").records ++
+    @import("exl3_routed_half_records.zig").records ++
     @import("proposal_sampling_records.zig").records ++
     @import("flashnext_pages_pending.zig").records ++
     @import("flashnext_heads_records.zig").records ++

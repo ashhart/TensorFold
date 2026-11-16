@@ -20,6 +20,7 @@ const h3_image = struct {
 
 /// The named embedded image; only contract_controls may select the planted controls.
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
+    if (std.mem.eql(u8, name, "exl3_routed_half")) return kk.exl3_routed_half;
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     inline for (.{ "l2pf", "l2pace" }) |n|
         if (std.mem.eql(u8, name, n)) return @field(kk, n);
@@ -37,6 +38,11 @@ pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
 
 /// Gate 5 on this GPU, each record against the loaded function; `only`: the launches so named, no offline audit.
 pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
+    return liveWith(gpu, only, image);
+}
+
+/// The same live launch audit with an explicit image provider for standalone operator fixtures.
+pub fn liveWith(gpu: check.Gpu, only: []const []const u8, comptime resolve: anytype) !usize {
     var n: usize = 0;
     if (only.len == 0) n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
     if (only.len == 0) std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
@@ -65,7 +71,7 @@ pub fn live(gpu: check.Gpu, only: []const []const u8) !usize {
         } else continue;
         if (!control and t.sm < r.launch.min_sm) continue;
         if (!control and at != null and registry.targetDecision(r, t, r.usage[at.?]) != .applicable) continue;
-        const bytes = image(r.launch.image) catch |err| {
+        const bytes = resolve(r.launch.image) catch |err| {
             std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{r.launch.image});
             return err;
         };
@@ -158,6 +164,11 @@ fn keep(a: std.mem.Allocator, line: *std.ArrayList(u8), r: registry.CudaRecord, 
 }
 
 pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
+    try fatbinsFor(gpu, dir, &(registry.all_cuda ++ registry.cuda_controls));
+}
+
+/// The same compiler/target audit over a caller's complete operator record set.
+pub fn fatbinsFor(gpu: check.Gpu, dir: []const u8, selected: []const registry.CudaRecord) !void {
     const a = gpu.gpa;
     var n: usize = 0;
     var said: ?limits.Nvcc = null;
@@ -174,7 +185,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         for (limits.sms) |t| release = release or img.sm == t.sm;
     }
     if (!release and !thor) return error.NoKnownSmInFatbins;
-    for (registry.all_cuda ++ registry.cuda_controls) |r| {
+    for (selected) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         const any_target = for (limits.sms, 0..) |target, index| {
             if (registry.targetDecision(r, target, r.usage[index]) == .applicable) break true;
@@ -271,9 +282,5 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         if (release) std.debug.print("RECORD {s}: .usage = .{{ {s}}}\n", .{ r.launch.name, line.items });
     }
     try check.expect(n == 0, "kernel-contract-limits: {d} problems", .{n});
-    if (thor) {
-        check.pass("kernel-contract-limits: every registered launch fits sm_110 from compiled cubins, every control red", .{});
-    } else {
-        check.pass("kernel-contract-limits: every registered launch fits sm_80, sm_86, sm_89, sm_120 and sm_121, every control red", .{});
-    }
+    check.pass("kernel-contract-limits: {d} selected launch records checked against their compiled target images", .{selected.len});
 }

@@ -1,6 +1,7 @@
 //! Our .cu kernels as fatbins built at build time with each Python extension's nvcc flags, embedded in the binary.
 
 const std = @import("std");
+pub const exl3_routed_half: []const u8 = if (available) &Blob("fatbin_exl3_routed_half").bytes else &.{};
 const options = @import("kernel_options");
 
 fn Blob(comptime import_name: []const u8) type {

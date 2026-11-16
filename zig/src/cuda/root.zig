@@ -78,6 +78,7 @@ pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
 pub const exl3_candidate = @import("exl3_candidate.zig");
 pub const exl3_grouped = @import("exl3_grouped.zig");
+pub const exl3_routed_half = @import("exl3_routed_half.zig");
 
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
@@ -133,6 +134,7 @@ test {
     _ = @import("experts_tile.zig");
     _ = exl3;
     _ = exl3_experts;
+    _ = exl3_routed_half;
     _ = exl3_upload;
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
