@@ -242,8 +242,7 @@ pub const Codec = struct {
         c.frames += t;
     }
 
-    /// The samples no later frame can change, from where the last call stopped (caller frees); `final` adds the rest.
-    /// After F frames 2940 F - 1470 samples are settled: the centered iSTFT, the mixer and the resampler look ahead.
+    /// The samples no later frame can change since the last call (2940 F - 1470 after F frames); `final` adds the rest.
     pub fn emit(c: *Codec, gpa: std.mem.Allocator, final: bool, probe: ?Probe) ![]f32 {
         const k = &c.k;
         const s = c.stream;
