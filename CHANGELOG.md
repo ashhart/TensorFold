@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- Server: every reply carries `X-Request-Id`, streamed replies too: a client's own id of 1 to 128 printable ASCII characters comes back and ends each of the request's log lines, and otherwise the server's id for the request, the `chatcmpl-`, `cmpl-` or `resp_` id `POST /v1/requests/{id}/cancel` takes, else a new `req_` id; no request is refused for it and bodies are unchanged.
+- Server: every reply carries `X-Request-Id`, streamed replies too: a client's own id of 1 to 128 printable ASCII characters comes back and ends each of the request's log lines, and otherwise the server's id for the request, the `chatcmpl-`, `cmpl-` or `resp_` id `POST /v1/requests/{id}/cancel` takes, else a new `req_` id; no request is refused for it and bodies are unchanged (#3536).
 
 - Server: `GET /v1/models/{id}` (and `/models/{id}`) returns the entry `/v1/models` lists for the served name or an alias, the id sent as written or percent-escaped (`org%2Fname`); any other id is a 404 `model_not_found`, and API keys and key scopes treat the route as they treat `/v1/models` (#3535).
 
