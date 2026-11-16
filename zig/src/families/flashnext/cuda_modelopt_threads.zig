@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const experts = @import("cuda_modelopt_experts.zig");
 const ex = cuda.experts.Nvfp4Experts;
 const slice = core.nvfp4_slice;
+const environment = @import("sys").environment;
 
 pub const default_threads = 8;
 pub const max_threads = 32;
@@ -14,14 +15,11 @@ pub const staging_bytes: usize = 192 << 20;
 
 /// TF_FLASHNEXT_LOAD_THREADS: unset, 8; otherwise 1 (loadShape's one-expert loop) to 32 threads, anything else refused.
 pub fn parseThreads(v: ?[]const u8) !usize {
-    const s = v orelse return default_threads;
-    const n = std.fmt.parseInt(usize, s, 10) catch return error.BadLoadThreads;
-    if (n == 0 or n > max_threads) return error.BadLoadThreads;
-    return n;
+    return environment.value(usize, "TF_FLASHNEXT_LOAD_THREADS", v, default_threads);
 }
 
 pub fn configured() !usize {
-    return parseThreads(if (std.c.getenv("TF_FLASHNEXT_LOAD_THREADS")) |v| std.mem.span(v) else null);
+    return environment.read(usize, "TF_FLASHNEXT_LOAD_THREADS", default_threads);
 }
 
 /// A projection's borrowed planes: FP4 codes, plain E4M3 scales or the CSF planes, the global and its bytes.
@@ -281,7 +279,7 @@ test "Flash Next expert loader: TF_FLASHNEXT_LOAD_THREADS takes 1 to 32 and refu
     try std.testing.expectEqual(@as(usize, default_threads), try parseThreads(null));
     try std.testing.expectEqual(@as(usize, 1), try parseThreads("1"));
     try std.testing.expectEqual(@as(usize, max_threads), try parseThreads("32"));
-    for ([_][]const u8{ "0", "33", "-1", "8x", "" }) |bad| try std.testing.expectError(error.BadLoadThreads, parseThreads(bad));
+    for ([_][]const u8{ "0", "33", "-1", "8x", "" }) |bad| try std.testing.expectError(error.InvalidEnvironment, parseThreads(bad));
 }
 
 test {

@@ -71,12 +71,12 @@ pub const Backend = struct {
         var masks = try grammar.Masks.init(e.r.device);
         errdefer masks.deinit(gpa);
         const hidden = try e.r.device.buffer(fz.MAXR * fz.WIDE * 2, fz.opts);
-        const env = struct {
-            fn on(name: [*:0]const u8) bool {
-                return if (std.c.getenv(name)) |v| v[0] == '1' else false;
-            }
-        };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL"), .overlap = if (std.c.getenv("FZ_VERIFY_OVERLAP")) |v| v[0] != '0' else true, .times = RoundTimes.init(), .fence = if (std.c.getenv("FZ_SETTLE_SYNC") == null) mtl.counters.Fence.init(e.r.device) catch null else null };
+        const env = @import("sys").environment;
+        const chain = try env.read(bool, "FZ_BATCH_MTP_CHAIN", false);
+        const serial = try env.read(bool, "FZ_BATCH_MTP_SERIAL", false);
+        const overlap = try env.read(bool, "FZ_VERIFY_OVERLAP", true);
+        const sync = try env.read(?bool, "FZ_SETTLE_SYNC", null);
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = chain, .serial_drafts = serial, .overlap = overlap, .times = RoundTimes.init(), .fence = if (sync == null) mtl.counters.Fence.init(e.r.device) catch null else null };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.

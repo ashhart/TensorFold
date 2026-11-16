@@ -1,5 +1,4 @@
 //! K32 shared expert staging preserves decode dots and scale FMAs; selected only by the Flash Next opt-in.
-const std = @import("std");
 const Module = @import("module.zig").Module;
 const Function = @import("module.zig").Function;
 const Driver = @import("driver.zig").Driver;
@@ -8,13 +7,6 @@ const launch = @import("launch.zig");
 const experts = @import("experts.zig");
 const grouped = @import("grouped.zig");
 pub const Mode = enum { off, up, both };
-pub fn mode(value: ?[]const u8) !Mode {
-    const v = value orelse return .off;
-    if (std.mem.eql(u8, v, "0")) return .off;
-    if (std.mem.eql(u8, v, "1")) return .up;
-    if (std.mem.eql(u8, v, "2")) return .both;
-    return error.BadPromptExpertTile;
-}
 pub const Tile = struct {
     mod: Module,
     fns: [2]Function,

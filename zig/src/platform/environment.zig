@@ -1,7 +1,6 @@
 //! Named environment validation before model, driver and transport work; successful values keep their old semantics.
 const std = @import("std");
 const sys = @import("sys.zig");
-
 pub const Error = error{InvalidEnvironment};
 pub const Scope = enum { common, cuda, metal, xpu, slide, hooks, dsv41, gemma4, drama3, glm, flashnext, nemotron, minimax_m3, chat };
 pub const Kind = enum { u32, u64, size, percent, positive, device, segments, mib, bit_width, word, prompt, flag, toggle, real, positive_real, signed_real, range, path };
@@ -25,11 +24,9 @@ pub const Rule = struct {
     /// False where the old reader took only 0, false and off as off: "no" is refused, not read as off.
     no_word: bool = true,
 };
-
 pub fn isReal(kind: Kind) bool {
     return kind == .real or kind == .positive_real or kind == .signed_real;
 }
-
 pub const rules = [_]Rule{
     .{ .name = "TF_CACHE_EVICT", .scope = .common, .kind = .word, .words = &.{ "main", "decayed_resume" }, .forms = "main or decayed_resume (default main)" },
     .{ .name = "TF_FLASHNEXT_BATCH_DRAWS", .scope = .cuda, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 restores per-stream Flash Next row draws; default 1)" },
@@ -243,20 +240,32 @@ pub const rules = [_]Rule{
     .{ .name = "TF_NEMOTRON_WORLD", .scope = .nemotron, .kind = .u64, .forms = "a whole rank count from 1 to 4294967295 (unset with TF_NEMOTRON_RANK gives one rank)" },
     .{ .name = "TF_MINIMAX_RANK", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank index, 0 or 1 at two ranks (unset with TF_MINIMAX_WORLD gives one rank)" },
     .{ .name = "TF_MINIMAX_WORLD", .scope = .minimax_m3, .kind = .u64, .forms = "a whole rank count, 2 on CUDA (unset with TF_MINIMAX_RANK gives one rank)" },
+    .{ .name = "FZ_BATCH_MTP_CHAIN", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 chains a batch's MTP drafts; default 0)" },
+    .{ .name = "FZ_BATCH_MTP_SERIAL", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (1 gives each stream its own draft buffers; default 0)" },
+    .{ .name = "FZ_VERIFY_OVERLAP", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (0 verifies on a serial encoder; default 1)" },
+    .{ .name = "FZ_SETTLE_SYNC", .scope = .flashnext, .kind = .flag, .blank_default = false, .forms = "0 or 1 (set drops the cross-round fence; default unset)" },
+    .{ .name = "TF_FLASHNEXT_PROMPT_EXPERT_TILE", .scope = .flashnext, .kind = .word, .blank_default = false, .words = &.{ "0", "1", "2" }, .forms = "0, 1 or 2 (off, up, both; default 0)" },
+    .{ .name = "TF_FLASHNEXT_LOAD_THREADS", .scope = .flashnext, .kind = .size, .blank_default = false, .min = 1, .max = 32, .forms = "a whole load-thread count from 1 to 32 (default 8)" },
+    .{ .name = "TF_FLASHNEXT_TEMPERATURE", .scope = .flashnext, .kind = .signed_real, .forms = "a finite sampling temperature (default 1)" },
+    .{ .name = "TF_FLASHNEXT_TOP_P", .scope = .flashnext, .kind = .signed_real, .forms = "a finite nucleus probability (default 0.95)" },
+    .{ .name = "TF_FLASHNEXT_TOP_K", .scope = .flashnext, .kind = .u32, .forms = "a whole top-k count from 0 to 4294967295 (default 20)" },
+    .{ .name = "TF_FLASHNEXT_REPEAT", .scope = .flashnext, .kind = .size, .forms = "a whole decode repeat count (default 1)" },
+    .{ .name = "TF_FLASHNEXT_SEED", .scope = .flashnext, .kind = .u64, .blank_default = false, .forms = "a whole unsigned 64-bit sampling seed (unset keeps sampling off)" },
+    .{ .name = "TF_FLASHNEXT_DRAFT_HEAD", .scope = .flashnext, .kind = .word, .blank_default = false, .words = &.{ "bf16", "affine4" }, .forms = "bf16 or affine4 (default bf16)" },
+    .{ .name = "TF_FLASHNEXT_PLE_IO", .scope = .flashnext, .kind = .word, .blank_default = false, .words = &.{ "mmap", "pread" }, .forms = "mmap or pread (unset picks by platform)" },
+    .{ .name = "TENSORFOLD_CHECKPOINT_SHA256", .scope = .common, .kind = .path, .forms = "64 hex digits of the checkpoint digest" },
+    .{ .name = "TENSORFOLD_PREFILL_SHARE", .scope = .common, .kind = .positive_real, .max = 1, .forms = "a finite share greater than 0 and at most 1 (lane host takes 0.01 to 1)" },
 };
-
 pub fn rule(name: []const u8) Rule {
     for (rules) |r| if (std.mem.eql(u8, name, r.name)) return r;
     @panic("unregistered strict environment parser");
 }
-
 /// A compile error unless `name` has a row, so a strict read can never reach `rule`'s panic at run time.
 pub fn registered(comptime name: []const u8) void {
     @setEvalBranchQuota(20 * rules.len * 64);
     for (rules) |r| if (std.mem.eql(u8, r.name, name)) return;
     @compileError(name ++ " has no row in platform/environment.zig");
 }
-
 /// Null means unset, or blank when the row preserves a legacy blank default, never malformed.
 pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     const r = rule(name);
@@ -302,7 +311,6 @@ pub fn parse(name: []const u8, raw: ?[]const u8) Error!?u64 {
     if (std.mem.eql(u8, name, "TF_ROCE_GID_INDEX") and n > std.math.maxInt(c_int)) return error.InvalidEnvironment;
     return n;
 }
-
 /// A switch: 0 or 1, or the word forms older readers took, in any case; 0 is off.
 fn toggle(r: Rule, text: []const u8) ?u64 {
     if (!r.no_word and std.ascii.eqlIgnoreCase(text, "no")) return null;
@@ -310,7 +318,6 @@ fn toggle(r: Rule, text: []const u8) ?u64 {
         if (std.ascii.eqlIgnoreCase(text, v)) return i / 4;
     return null;
 }
-
 /// Finite only; `.real` is at least 0, `.positive_real` above 0, and a set `max` caps either.
 fn real(r: Rule, text: []const u8) Error!f64 {
     const x = std.fmt.parseFloat(f64, text) catch return error.InvalidEnvironment;
@@ -323,18 +330,15 @@ fn real(r: Rule, text: []const u8) Error!f64 {
     if (r.max != std.math.maxInt(u64) and x > @as(f64, @floatFromInt(r.max))) return error.InvalidEnvironment;
     return x;
 }
-
 /// A `.path` setting's text is never shown: a key pasted into it by mistake would reach the log.
 pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]const u8 {
     if (rule(name).kind == .path) return std.fmt.allocPrint(a, "{s}: expected {s}", .{ name, rule(name).forms });
     return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), rule(name).forms });
 }
-
 /// A registered setting's raw text, for readers that parse it against runtime bounds the table cannot name.
 pub fn rawText(name: [:0]const u8) ?[]const u8 {
     return sys.getenv(name);
 }
-
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.
 fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
     return parse(name, raw) catch {
@@ -342,21 +346,17 @@ fn checked(name: [:0]const u8, raw: ?[]const u8) Error!?u64 {
         return error.InvalidEnvironment;
     };
 }
-
 pub fn check(name: [:0]const u8, raw: ?[]const u8) Error!void {
     _ = try checked(name, raw);
 }
-
 /// One setting in its reader's type: a switch as bool, a real as a float, any other kind as its whole number.
 pub fn value(comptime T: type, name: [:0]const u8, raw: ?[]const u8, default: T) Error!T {
     std.debug.assert(isReal(rule(name).kind) == (@typeInfo(Plain(T)) == .float) and rule(name).kind != .range and rule(name).kind != .path);
     return decode(T, (try checked(name, raw)) orelse return default);
 }
-
 fn Plain(comptime T: type) type {
     return if (@typeInfo(T) == .optional) @typeInfo(T).optional.child else T;
 }
-
 fn decode(comptime T: type, n: u64) T {
     return switch (@typeInfo(T)) {
         .optional => |o| decode(o.child, n),
@@ -365,41 +365,34 @@ fn decode(comptime T: type, n: u64) T {
         else => @intCast(n),
     };
 }
-
 pub fn read(comptime T: type, name: [:0]const u8, default: T) Error!T {
     return value(T, name, sys.getenv(name), default);
 }
-
 /// A `.range` setting's lo and hi, or null when unset or blank.
 pub fn range(name: [:0]const u8, raw: ?[]const u8) Error!?[2]u32 {
     const n = (try checked(name, raw)) orelse return null;
     return .{ @intCast(n >> 32), @truncate(n) };
 }
-
 /// A `.path` setting's text, or null when unset or blank; nothing is logged, so the caller words the refusal.
 pub fn path(name: [:0]const u8, raw: ?[]const u8) Error!?[]const u8 {
     std.debug.assert(rule(name).kind == .path);
     _ = (try parse(name, raw)) orelse return null;
     return std.mem.trim(u8, raw.?, rule(name).trim);
 }
-
 /// One scope's rules in table order, without allocating: the first malformed value is logged and refused.
 pub fn checkScope(scope: Scope, environment: anytype) Error!void {
     for (rules) |r| if (r.scope == scope and !masked(r, environment)) {
         _ = try checked(r.name, environment.get(r.name));
     };
 }
-
 fn masked(r: Rule, environment: anytype) bool {
     return if (r.alias_of) |canonical| environment.get(canonical) != null else false;
 }
-
 /// Every CUDA entry point shares flag precedence, accepted text and diagnostics.
 pub fn device(flag: ?u32, raw: ?[]const u8) Error!u32 {
     if (flag) |n| return n;
     return @intCast((try checked("TF_CUDA_DEVICE", raw)) orelse 0);
 }
-
 pub const Flags = struct {
     cuda: bool = false,
     metal: bool = false,
@@ -417,7 +410,6 @@ pub const Flags = struct {
     device: ?u32 = null,
     segments: ?u32 = null,
     carveout: bool = false,
-
     fn includes(f: Flags, scope: Scope) bool {
         return switch (scope) {
             .common => true,
@@ -437,7 +429,6 @@ pub const Flags = struct {
         };
     }
 };
-
 /// The environment is injectable so the actual startup validator runs against host fixtures without a GPU.
 pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]const u8 {
     for (rules) |r| {
@@ -453,13 +444,11 @@ pub fn refusal(a: std.mem.Allocator, environment: anytype, flags: Flags) !?[]con
     }
     return null;
 }
-
 pub const Process = struct {
     pub fn get(_: Process, name: [:0]const u8) ?[]const u8 {
         return sys.getenv(name);
     }
 };
-
 test {
     _ = @import("environment_test.zig");
     _ = @import("environment_flashnext_test.zig");
