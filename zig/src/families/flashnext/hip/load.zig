@@ -405,12 +405,22 @@ pub fn load(gpa: Allocator, d: *const hip.Runtime, ck: *core.checkpoint.Checkpoi
     const head = try l.proj(tensors.lm_head);
     w.layers = try gpa.alloc(model.Layer, c.layers);
     var ple: ?model.Ple = null;
+    // each layer read past the page cache by threads, the next while one uploads; the n-gram tables stay mapped
+    var direct = core.checkpoint.direct.Layers.init(gpa, ck, try core.checkpoint.loadReaders());
+    defer direct.deinit();
     for (0..c.layers) |i| {
         _ = arena.reset(.retain_capacity);
         var buf: [128]u8 = undefined;
+        var at: [2][136]u8 = undefined;
+        const name = try tensors.layer(&buf, i);
+        if (c.ple[i]) direct.mapped() else try direct.enter(
+            try std.fmt.bufPrint(&at[0], "{s}.", .{name}),
+            if (i + 1 < c.layers and !c.ple[i + 1]) try std.fmt.bufPrint(&at[1], "{s}.", .{try tensors.layer(&buf, i + 1)}) else null,
+        );
         w.layers[i] = try l.layer(try tensors.layer(&buf, i), c, try c.kind(i), false);
         if (c.ple[i]) ple = try l.ple(i);
     }
+    direct.mapped();
     _ = arena.reset(.retain_capacity);
     const embed = try l.proj(tensors.embed);
     if (embed.rows() != c.vocab) return error.UnexpectedShape; // `proj` checks MLX tables alone; a float table is read by id too
