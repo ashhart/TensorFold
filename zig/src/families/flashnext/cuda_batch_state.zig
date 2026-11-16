@@ -53,7 +53,7 @@ pub const attn_lanes: usize = 32;
 pub const lanes_ptrs: usize = (wt.layers_n / 4) * attn_lanes * 4 * 8;
 pub const lanes_bytes: usize = lanes_ptrs + (4 * attn_lanes + att_rows) * 4;
 /// Rows a pass holds at most unless asked for more.
-pub const default_chunk: usize = 1536;
+pub const default_chunk: usize = 3072;
 /// The most rows TF_FLASHNEXT_CHUNK may ask for (the largest measured pass; its scratch is about 13 GiB more).
 pub const max_chunk: usize = 16384;
 const ratio = wt.index_ratio;
