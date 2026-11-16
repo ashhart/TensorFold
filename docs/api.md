@@ -813,6 +813,8 @@ gives the template `clear_thinking` false on every render, and `TF_GLM_CLEAR_THI
 from @MiaAI-Lab's [#236](https://github.com/ashhart/TensorFold/pull/236); any value but 0 or 1 refuses to load. A
 request's `chat_template_kwargs.clear_thinking` (true or false) overrides the server's setting for that request, as the
 model card advises `true` for plain chat; any other value is a 400, and other families' templates never receive it.
+`true` keeps the reasoning after the last user message, so an autonomous tool loop keeps most of it; the
+[GLM-5.3-Flash recipe](recipes/glm-5.3-flash.md#long-agent-sessions) covers long agent sessions.
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
