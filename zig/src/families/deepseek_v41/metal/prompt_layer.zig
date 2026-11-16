@@ -72,8 +72,8 @@ fn cut(x: *const Px, st: Stage) !void {
 /// A layer's streams, row r at position a + r: x [4][hidden] bf16 and pre [4] fp32 in, and the same out.
 pub const Io = struct { x: Ref, pre: Ref, x_out: Ref, pre_out: Ref };
 
-/// Window keys of positions [k, b), everything else for [o, b) (k <= o); `compress`: the KV source's compressor too.
-pub const Rows = struct { k: u32, o: u32, compress: bool = true };
+/// Window keys of positions [k, b), everything else for [o, b) (k <= o); `wmin`: lowest valid window row.
+pub const Rows = struct { k: u32, o: u32, wmin: u32 = 0, compress: bool = true };
 
 fn hc(c: *const Config) cl.Hc {
     return .{ .dim = c.hc_mult * c.hidden, .iters = c.hc_sinkhorn_iters, .eps = c.eps, .hc_eps = c.hc_eps, .alpha = c.hc_post_alpha };
@@ -141,7 +141,7 @@ fn attention(x: *const Px, e: mtl.ComputeEncoder, w: *const weights.Layer, rows:
     // the window: the ring's positions before k, then the keys of [k, b), all at row back + t - a
     const region = &x.slot.regions[l];
     const nw = kv.windowSlots(c);
-    const g0 = k -| back;
+    const g0 = @max(k -| back, rows.wmin);
     if (k > g0) g.scatter(gp, e, plus(whole(region.window), @as(usize, g0 % nw) * D * 2), s.lin, s.metaAt(s.rec.iota + back + g0 - x.a), k - g0, D * 2, 1);
     try x.proj(e, x.at(s.hq, k, 2 * H), w.wkv, x.at(s.kv, k, 2 * D), nk);
     g.rmsnorm(gp, e, x.at(s.kv, k, 2 * D), w.kv_norm, x.at(s.kvn, k, 2 * D), nk, D, c.eps);

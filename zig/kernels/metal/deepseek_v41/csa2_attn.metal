@@ -341,7 +341,7 @@ template <typename T>
   const bool on = r < a.rows && h0 < a.heads;
   const TfAttnMeta m0 = M[r0];
   const int last = M[min(r0 + TF_ATTN_RR, a.rows) - 1].pos;
-  const int lo = max(m0.pos - int(TF_ATTN_WIN) + 1, 0);
+  const int lo = max(max(m0.pos - int(TF_ATTN_WIN) + 1, 0), m0.p1);
   const TfAttnMeta m = on ? M[r] : m0;
   const float scale = (TF_CTL == 5 && ra == 1) ? a.scale * 1.0000001f : a.scale;
   TfQ q;
@@ -358,7 +358,7 @@ template <typename T>
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (!on) continue;
-    const int ja = max(base, max(m.pos - int(TF_ATTN_WIN) + 1, 0)), jb = min(base + int(TF_ATTN_TILE) - 1, m.pos);
+    const int ja = max(base, max(max(m.pos - int(TF_ATTN_WIN) + 1, 0), m.p1)), jb = min(base + int(TF_ATTN_TILE) - 1, m.pos);
     for (int j = ja; j <= jb; j += int(TF_ATTN_KU)) {
       TfKey k[TF_ATTN_KU];
       uint valid = 0;
