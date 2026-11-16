@@ -13,6 +13,7 @@ pub const snap = @import("snap.zig");
 pub const taps = @import("taps.zig");
 pub const backend = @import("backend.zig");
 pub const drafter = @import("drafter.zig");
+pub const row_costs = @import("row_costs.zig");
 pub const native = @import("native.zig");
 
 test {
@@ -25,6 +26,7 @@ test {
     _ = @import("kernels.zig");
     _ = @import("forward.zig");
     _ = @import("rounds.zig");
+    _ = @import("row_costs.zig");
     _ = @import("snap.zig");
     _ = @import("taps.zig");
     _ = @import("backend.zig");

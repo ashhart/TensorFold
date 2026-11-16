@@ -6,6 +6,7 @@ const core = @import("core");
 const be = @import("backend.zig");
 const kern = @import("kernels.zig");
 const wts = @import("weights.zig");
+const row_costs = @import("row_costs.zig");
 
 const dr = lanes.drafter;
 const Stream = lanes.Stream;
@@ -35,6 +36,8 @@ pub const Drafter = struct {
     n_taps: usize,
     depth: u32,
     step_ms: f64 = 0,
+    costs: [row_costs.widths.len]lanes.config.Cost = undefined, // the target's round ms by rows (timed at reserve)
+    timed: bool = false,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
     free: []bool = &.{}, // drafter slot i is free (the last slot times a step and is never a stream's)
     layers: []E.Layer,
@@ -173,6 +176,8 @@ pub const Drafter = struct {
         @memset(x.free, true);
         x.free[streams] = false;
         x.step_ms = try x.time(streams);
+        try row_costs.time(x.kb, x.io, &x.costs); // without them the depth rule cannot trade drafts against rows
+        x.timed = true;
     }
 
     /// One more draft's ms: chains of `depth` and of 1 on the spare slot, the best of three each.
@@ -206,7 +211,8 @@ pub const Drafter = struct {
     /// Chains of the release's serving depth, every stream's step in one pass.
     fn factsFn(ptr: *anyopaque) dr.Facts {
         const x = cast(ptr);
-        return .{ .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes() };
+        const costs: []const lanes.config.Cost = if (x.timed) &x.costs else &.{};
+        return .{ .depth = x.depth, .step_ms = x.step_ms, .batched = true, .stream_bytes = x.e.dims.streamBytes(), .window_costs = costs, .lane_costs = costs };
     }
 
     fn openFn(ptr: *anyopaque, s: *Stream) anyerror!void {
@@ -227,21 +233,32 @@ pub const Drafter = struct {
         const x = cast(ptr);
         var rows: std.ArrayList(E.Row) = .empty;
         defer rows.deinit(x.gpa);
+        var parts: std.ArrayList(E.Eagle3.Part) = .empty;
+        defer parts.deinit(x.gpa);
         const width = x.n_taps * x.e.dims.hidden * 2;
         for (items) |it| {
-            const l = x.lanes.getPtr(it.stream) orelse return error.DraftStreamUnknown;
             const f = it.features;
             if (f.space != .device or f.dtype != .bf16 or f.row_bytes != width or it.rows != null) return error.DraftFeaturesUnsupported;
-            if (f.rows == 0) continue;
             if (it.follow.len < f.rows) return error.DraftFollowShort;
-            rows.clearRetainingCapacity();
-            for (0..f.rows) |i| try rows.append(x.gpa, .{ .slot = l.slot, .pos = @intCast(it.start + i), .token = it.follow[i] });
-            try x.e.absorb(rows.items, f.buffer + f.offset);
+            if (!x.lanes.contains(it.stream)) return error.DraftStreamUnknown;
+        }
+        for (items) |it| { // rows of every stream first: `parts` slices them once they no longer move
+            const l = x.lanes.getPtr(it.stream).?;
+            for (0..it.features.rows) |i| try rows.append(x.gpa, .{ .slot = l.slot, .pos = @intCast(it.start + i), .token = it.follow[i] });
+        }
+        var at: usize = 0;
+        for (items) |it| {
+            const f = it.features;
+            if (f.rows == 0) continue;
+            try parts.append(x.gpa, .{ .rows = rows.items[at..][0..f.rows], .taps = f.buffer + f.offset });
+            at += f.rows;
+            const l = x.lanes.getPtr(it.stream).?;
             l.pos = it.start + f.rows - 1;
             l.token = it.follow[f.rows - 1];
             l.rows = true;
             l.held_len = 0;
         }
+        try x.e.absorbMany(parts.items); // one pass for every stream's rows: the drafter's weights read once
     }
 
     /// Every stream's chain in one pass a step; the drafts read back as target ids.
