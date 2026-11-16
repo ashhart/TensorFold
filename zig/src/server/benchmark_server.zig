@@ -37,6 +37,8 @@ pub const Options = struct {
     lock: bool = true,
     /// The child in a process group of its own, so a terminal's Ctrl-C reaches only this process.
     own_group: bool = false,
+    /// The child's only API key: TENSORFOLD_API_KEY in its environment and the probes' bearer (none for a benchmark).
+    key: ?[]const u8 = null,
     words: Words = .{},
 };
 
@@ -137,6 +139,7 @@ pub const Managed = struct {
     grace_ms: u32,
     served: []const u8 = served_name,
     stuck: []const u8 = (Words{}).stuck,
+    key: ?[]const u8 = null,
     base_url: []const u8 = "",
     reaped: bool = false,
     closed: bool = false,
@@ -152,6 +155,7 @@ pub const Managed = struct {
         io.random(&rand);
         const log_path = try std.fmt.allocPrint(a, "{s}/.serve-{s}.log", .{ o.bench_dir, std.fmt.bytesToHex(rand, .lower) });
         var child_env = try environ(a, env);
+        if (o.key) |k| try child_env.put("TENSORFOLD_API_KEY", k);
         const lock = if (o.lock) lockRun(io, o.bench_dir, problem) orelse return null else null;
         const cwd = std.Io.Dir.cwd();
         const log = cwd.createFile(io, log_path, .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch {
@@ -169,7 +173,7 @@ pub const Managed = struct {
         };
         stop_flag.guardChild(child.id.?);
         cwd.deleteFile(io, log_path) catch {};
-        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck };
+        var m: Managed = .{ .io = io, .pid = child.id.?, .log = log, .lock = lock, .grace_ms = o.grace_ms, .served = o.served, .stuck = o.words.stuck, .key = o.key };
         const ok = m.ready(a, o.startup_timeout_s, o.tail, o.words, problem) catch |e| {
             _ = m.stop();
             return e;
@@ -200,7 +204,7 @@ pub const Managed = struct {
                 port = servingPort(m.logEnd(&buf), m.served);
                 if (port) |p| m.base_url = try std.fmt.allocPrint(a, "http://127.0.0.1:{d}", .{p});
             }
-            if (port != null and try probe(a, m.io, &client, m.base_url, m.served)) return true;
+            if (port != null and try probe(a, m.io, &client, m.base_url, m.served, m.key)) return true;
             m.io.sleep(.fromMilliseconds(200), .awake) catch {};
         }
         problem.* = try std.fmt.allocPrint(a, "{s} {d} s (--startup-timeout, at most 3600); check the checkpoint, GPU memory and backend toolchain", .{ words.timed_out, timeout_s });
@@ -327,23 +331,23 @@ fn namesVariable(text: []const u8) bool {
     return false;
 }
 
-/// Ready: ``/health`` not warming and ok, and ``/v1/models`` lists ``served``.
-pub fn probe(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, served: []const u8) !bool {
-    const health = try getObject(a, io, client, base_url, "/health") orelse return false;
+/// Ready: ``/health`` not warming and ok, and ``/v1/models`` lists ``served``; ``key`` goes as both requests' bearer.
+pub fn probe(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, served: []const u8, key: ?[]const u8) !bool {
+    const health = try getObject(a, io, client, base_url, "/health", key) orelse return false;
     if (health.get("warming")) |w| if (w == .bool and w.bool) return false;
     const status_ok = if (health.get("status")) |s| s == .string and std.mem.eql(u8, s.string, "ok") else false;
     const ok_true = if (health.get("ok")) |o| o == .bool and o.bool else false;
     if (!status_ok and !ok_true) return false;
-    const models = try getObject(a, io, client, base_url, "/v1/models") orelse return false;
+    const models = try getObject(a, io, client, base_url, "/v1/models", key) orelse return false;
     const data = models.get("data") orelse return false;
     if (data != .array) return false;
     for (data.array) |d| if (d.get("id")) |id| if (id == .string and std.mem.eql(u8, id.string, served)) return true;
     return false;
 }
 
-fn getObject(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, route: []const u8) !?json.Value {
+fn getObject(a: Allocator, io: std.Io, client: *std.http.Client, base_url: []const u8, route: []const u8, key: ?[]const u8) !?json.Value {
     const url = try std.mem.concat(a, u8, &.{ base_url, route });
-    const got = stream.fetch(a, io, client, .{ .url = url, .limit = 64 << 10, .timeout_s = 1 });
+    const got = stream.fetch(a, io, client, .{ .url = url, .limit = 64 << 10, .timeout_s = 1, .token = key });
     if (got.failed != .none or got.status < 200 or got.status > 299) return null;
     return switch (try json.parse(a, got.body)) {
         .ok => |v| if (v == .object) v else null,

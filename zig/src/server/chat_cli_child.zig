@@ -19,7 +19,8 @@ pub const words: server.Words = .{
 /// What a start needs: the environment, this executable unless tests name another, and where the log is made.
 pub const Setup = struct { a: Allocator, io: std.Io, environ: *const std.process.Environ.Map, exe: ?[]const u8 = null, log_dir: []const u8 };
 
-pub const Child = struct { managed: server.Managed, served: []const u8 };
+/// The started server, the name it serves and the key every request to it carries.
+pub const Child = struct { managed: server.Managed, served: []const u8, key: []const u8 };
 
 /// The serve child's arguments: the checkpoint, loopback, a free port and the model's own name, then ``extra``.
 pub fn argv(a: Allocator, exe: []const u8, dir: []const u8, served: []const u8, extra: []const []const u8) ![]const []const u8 {
@@ -54,8 +55,15 @@ fn refuse(a: Allocator, problem: *[]const u8, why: []const u8) !?[]const u8 {
     return null;
 }
 
-/// A child ready to start: its command line, the name it will serve and how long it gets to load.
-pub const Plan = struct { argv: []const []const u8, served: []const u8, timeout_s: f64 };
+/// A child ready to start: its command line, the name it will serve, how long it gets to load and its key.
+pub const Plan = struct { argv: []const []const u8, served: []const u8, timeout_s: f64, key: []const u8 };
+
+/// A fresh key for one child, 32 random bytes as hex, so the server answers this chat and no other local user.
+pub fn freshKey(a: Allocator, io: std.Io) ![]const u8 {
+    var raw: [32]u8 = undefined;
+    io.random(&raw);
+    return a.dupe(u8, &std.fmt.bytesToHex(raw, .lower));
+}
 
 /// The plan for ``model_arg``: a cached checkpoint and flags serve takes; null with ``problem`` set.
 pub fn plan(s: Setup, model_arg: []const u8, extra: []const []const u8, startup_timeout: ?f64, problem: *[]const u8) !?Plan {
@@ -63,14 +71,15 @@ pub fn plan(s: Setup, model_arg: []const u8, extra: []const []const u8, startup_
     const exe = s.exe orelse try std.process.executablePathAlloc(s.io, s.a);
     const child_argv = try argv(s.a, exe, dir, hub.servedName("", model_arg, dir), extra);
     const served = try check(s.a, child_argv, problem) orelse return null;
-    return .{ .argv = child_argv, .served = served, .timeout_s = startup_timeout orelse server.startupTimeout(model.weightBytes(s.io, dir)) };
+    const timeout_s = startup_timeout orelse server.startupTimeout(model.weightBytes(s.io, dir));
+    return .{ .argv = child_argv, .served = served, .timeout_s = timeout_s, .key = try freshKey(s.a, s.io) };
 }
 
 /// ``p`` started and ready; null with ``problem`` set ("" when stopped) and ``tail`` the child's last log lines.
 pub fn start(s: Setup, p: Plan, tail: *[]const []const u8, problem: *[]const u8) !?Child {
-    const o: server.Options = .{ .startup_timeout_s = p.timeout_s, .bench_dir = s.log_dir, .tail = tail, .served = p.served, .lock = false, .own_group = true, .words = words };
+    const o: server.Options = .{ .startup_timeout_s = p.timeout_s, .bench_dir = s.log_dir, .tail = tail, .served = p.served, .lock = false, .own_group = true, .key = p.key, .words = words };
     const m = try server.Managed.spawn(s.a, s.io, s.environ, p.argv, o, problem) orelse return null;
-    return .{ .managed = m, .served = p.served };
+    return .{ .managed = m, .served = p.served, .key = p.key };
 }
 
 test "chat CLI: the started server's flags are serve's, checked before a spawn; its address and keys stay the chat's" {
@@ -94,4 +103,14 @@ test "chat CLI: the started server's flags are serve's, checked before a spawn; 
         try std.testing.expect(try check(a, try argv(a, head[0], head[1], "example", c[0]), &problem) == null);
         try std.testing.expectEqualStrings(c[1], problem);
     }
+}
+
+test "chat CLI: each child's key is 64 hex characters of fresh randomness" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const one = try freshKey(a, std.testing.io);
+    const two = try freshKey(a, std.testing.io);
+    try std.testing.expect(one.len == 64 and !std.mem.eql(u8, one, two));
+    for (one) |ch| try std.testing.expect(std.ascii.isDigit(ch) or (ch >= 'a' and ch <= 'f'));
 }
