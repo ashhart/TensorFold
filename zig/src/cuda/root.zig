@@ -32,6 +32,7 @@ pub const cublaslt = @import("cublaslt.zig");
 pub const nccl = @import("nccl.zig");
 pub const roce = @import("roce.zig");
 pub const triton = @import("triton.zig");
+pub const exl3_routed_half = @import("exl3_routed_half.zig");
 pub const aot = @import("aot.zig");
 pub const kernels = @import("kernels.zig");
 pub const qmmf_shared = @import("qmmf_shared.zig");
@@ -78,7 +79,6 @@ pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
 pub const exl3_candidate = @import("exl3_candidate.zig");
 pub const exl3_grouped = @import("exl3_grouped.zig");
-pub const exl3_routed_half = @import("exl3_routed_half.zig");
 
 pub const arena = @import("arena.zig");
 pub const pack = @import("pack.zig");
