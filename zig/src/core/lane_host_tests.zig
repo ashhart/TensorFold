@@ -29,6 +29,9 @@ test {
 
 test {
     _ = @import("lane_activity_test.zig");
+    _ = @import("lane_remote_test.zig");
+    _ = @import("lane_remote_provenance_test.zig");
+    _ = @import("lane_remote_cut_test.zig");
 }
 
 test {

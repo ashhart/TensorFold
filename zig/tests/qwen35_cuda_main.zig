@@ -26,6 +26,9 @@ const usage =
     \\two-chunk prompt, greedy steps, a second stream beside it, drafted windows kept short or rolled back.
     \\       tf-qwen35-cuda <model dir> pipe <out> [fp8]: greedy streams in TF_PIPE_K groups in flight, tokens to <out>
     \\pipe: TF_PIPE_STREAMS, _K (0: no pipelining), _PROMPT, _TOKENS, _DRAFT (prompt-lookup drafts); TF_STAGE_* as stage.
+    \\       tf-qwen35-cuda <model dir> export <ids.json> <at> <out>: #1594 2b, a kept state in hybrid_state's order
+    \\       tf-qwen35-cuda <model dir> tail <seq.json> <k> <out>: bf16 logits after each of seq's last k tokens
+    \\       tf-qwen35-cuda <model dir> export-many <prompts.json> <tail> <dir>: each prompt's state to dir/s<k>.tfhs
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control|int8]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -72,6 +75,11 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         }
         return @import("qwen35_pipe.zig").run(init, a, args[1], args[3], fp8);
+    }
+    if (args.len >= 3 and (std.mem.eql(u8, args[2], "export") or std.mem.eql(u8, args[2], "tail") or std.mem.eql(u8, args[2], "export-many"))) {
+        const code = try @import("qwen35_cuda_export.zig").run(init, a, args);
+        if (code == 2) std.debug.print("{s}", .{usage});
+        return code;
     }
     if (args.len >= 3 and std.mem.eql(u8, args[2], "kl")) {
         if (args.len != 7 and args.len != 8) {

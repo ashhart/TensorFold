@@ -23,6 +23,8 @@ pub const Wait = enum {
     ledger_bytes,
     /// The family's own pool has no room for it now (Info.admit).
     pool_room,
+    /// It waits for a prefix another machine is filling (lane_remote.zig).
+    remote_prefix,
 };
 
 /// A refusal by the code its client sees: the capacity codes, the engine's 400, the admission flags' 429s.
@@ -45,7 +47,7 @@ pub const refusals = std.enums.values(Refusal).len;
 pub const failures = std.enums.values(Failure).len;
 
 test "wait reason ledger: the client codes lead the set, each tag at its own index" {
-    try std.testing.expectEqual(@as(usize, 10), waits);
+    try std.testing.expectEqual(@as(usize, 11), waits);
     for (std.enums.values(Wait), 0..) |r, i| try std.testing.expectEqual(i, @backingInt(r));
     try std.testing.expectEqualStrings("memory_pressure", @tagName(std.enums.values(Wait)[2]));
 }

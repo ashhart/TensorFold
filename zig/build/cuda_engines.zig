@@ -62,10 +62,13 @@ pub fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
-pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module, canon: *std.Build.Module, verbs: *std.Build.Module } {
+pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module, canon: *std.Build.Module, verbs: *std.Build.Module, fabric: *std.Build.Module } {
     const api = qwen35.import_table.get("engine_api").?; // family()'s, so the server and qwen3_5 share one
     const canon = canonModule(b, target, optimize);
     const verbs = @import("tp.zig").verbsModule(b, target, optimize);
+    // the hand-off's producer (#1594 step 2b) and the cluster commands share this one module (one file, one module)
+    const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    fabric.addImport("verbs", verbs);
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
         .target = target,
@@ -93,5 +96,6 @@ pub fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         },
     });
     mod.addImport("qwen4", @import("qwen4.zig").module(b, target, optimize, core));
-    return .{ .api = api, .engines = mod, .canon = canon, .verbs = verbs };
+    mod.addImport("fabric", fabric);
+    return .{ .api = api, .engines = mod, .canon = canon, .verbs = verbs, .fabric = fabric };
 }

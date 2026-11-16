@@ -6,6 +6,28 @@ const pc = @import("engine_api").prompt_cache;
 /// Where a prompt resumes in slot 0: where the slot stands (`here`), back at its rewind point (`back`), or not.
 pub const Resume = union(enum) { none, here: u32, back: u32 };
 
+/// A stream the prompt cache would look up (a lanes.Stream): no images, no prompt logprobs, taught rows.
+pub fn plain(s: anytype) bool {
+    return s.images.len == 0 and s.prompt_logprobs == null and !s.untaught and s.embedding == null;
+}
+
+/// Whether `s`'s rows stand on another machine's prefix (#1594 step 2b): not once a refused copy ran here from 0.
+pub fn leftRemote(s: anytype) bool {
+    return s.reuse.remote and !s.reuse_failed;
+}
+
+/// A pass `r` resumed in slot 0 (`here` or `back`) stands on the record's rows, `remote` or not, and pulled nothing.
+pub fn inherit(reuse: anytype, r: Resume, remote: bool) void {
+    if (r == .none) return; // a pass from 0 or a restore keeps its own origin
+    reuse.remote = remote;
+    reuse.pulled = false;
+}
+
+/// Where a pass from `at` keeps slot 0's rewind point: its history's end, inside its prompt and past `at` (0: none).
+pub fn rewindAt(history_len: u32, at: usize, prompt_len: usize) u32 {
+    return if (history_len > at and history_len < prompt_len) history_len else 0;
+}
+
 /// A stream leaving slot 0: the slot's position, its prompt and context lengths, its landed prompt rows and its end.
 pub const Leaving = struct {
     at: u32,
@@ -13,6 +35,7 @@ pub const Leaving = struct {
     context_len: u32,
     fill_at: u32,
     ended: bool, // finished as a reply does (not cancelled, not failed)
+    remote: bool = false, // its rows stand on another machine's prefix (leftRemote)
 
     /// Whether the slot stands where a fresh pass would: a landed prompt chunk's end, or a reply's end or one short.
     pub fn kept(l: Leaving) bool {
@@ -28,13 +51,39 @@ pub const Standing = struct {
     spans: []modes.Span = &.{},
     rewind_at: u32 = 0, // where the rewind buffer holds slot 0's DeltaNet states and taps (0: none)
     reply: modes.Span = .{ 0, 0 }, // rows of a reply these tokens hold exactly as it was generated (empty: none)
+    remote: bool = false, // these rows stand on another machine's prefix: a pass resuming them does too
     wide: bool = false, // the prompt cache keeps two full-context states: it holds a reply's end beside slot 0
+    keep_remote: bool = false, // TF_PREFILL_KEEP: rows on a pulled prefix may stand for a next turn
 
-    /// Frees the record; `wide`, the cache's size, stays.
+    /// The server's settings alone, no record: `wide` and `keep_remote`.
+    pub fn settings(st: *const Standing) Standing {
+        return .{ .wide = st.wide, .keep_remote = st.keep_remote };
+    }
+
+    /// Frees the record; the settings stay.
     pub fn deinit(st: *Standing, gpa: std.mem.Allocator) void {
         gpa.free(st.tokens);
         gpa.free(st.spans);
-        st.* = .{ .wide = st.wide };
+        st.* = st.settings();
+    }
+
+    /// Whether slot 0 may stand on rows for a next turn: its own, or on a pulled prefix only with TF_PREFILL_KEEP.
+    pub fn keeps(st: *const Standing, remote: bool) bool {
+        return !remote or st.keep_remote;
+    }
+
+    /// What stream `s` leaves in slot 0 at `at` (`stands`: the slot and its drafter stand there, nothing failed).
+    pub fn left(st: *Standing, gpa: std.mem.Allocator, s: anytype, at: u32, stands: bool) void {
+        if (!stands or !plain(s)) return st.deinit(gpa);
+        const ended = s.finished and s.reason != .cancelled and s.reason != .@"error";
+        const l: Leaving = .{ .at = at, .prompt_len = @intCast(s.prompt_len), .context_len = @intCast(s.context.items.len), .fill_at = s.fill_at.load(.monotonic), .ended = ended, .remote = leftRemote(s) };
+        st.leave(gpa, l, s.context.items, s.decode_spans);
+    }
+
+    /// Where `s`'s pass from `at` keeps slot 0's rewind point, by `rewindAt`: none for rows slot 0 would not keep.
+    pub fn point(st: *const Standing, s: anytype, at: usize) u32 {
+        if (!plain(s) or !st.keeps(leftRemote(s))) return 0;
+        return rewindAt(s.history_len, at, s.prompt().len);
     }
 
     /// What `l` left in slot 0 of `context` (its rows' spans `spans`), when a later prompt may resume it; else nothing.
@@ -42,11 +91,11 @@ pub const Standing = struct {
         const rewind = st.rewind_at; // a point this stream's own pass saved
         const reply = st.reply; // a reply the pass resumed past and only extended
         st.deinit(gpa);
-        if (!l.kept() or l.at > context.len) return;
+        if (!l.kept() or l.at > context.len or !st.keeps(l.remote)) return;
         const canonical = (if (l.at <= l.prompt_len) modes.prefix(gpa, spans, l.at) else modes.reply(gpa, spans, l.prompt_len, l.at)) catch return;
         const tokens = gpa.dupe(u32, context[0..l.at]) catch return gpa.free(canonical);
         const own: modes.Span = if (l.at > l.prompt_len) .{ l.prompt_len, l.at } else if (reply[1] <= l.at) reply else .{ 0, 0 };
-        st.* = .{ .tokens = tokens, .spans = canonical, .rewind_at = if (rewind < l.at) rewind else 0, .reply = own, .wide = st.wide };
+        st.* = .{ .tokens = tokens, .spans = canonical, .rewind_at = if (rewind < l.at) rewind else 0, .reply = own, .remote = l.remote, .wide = st.wide, .keep_remote = st.keep_remote };
     }
 
     /// The rewind point a pass resuming slot 0 at `n` keeps while it only extends the slot (0: none).
@@ -62,9 +111,10 @@ pub const Standing = struct {
         };
     }
 
-    /// Uses up the record for a pass that `r` resumes in slot 0, keeping the rewind point and reply it carries.
+    /// Uses up the record for a pass that `r` resumes in slot 0, keeping the rewind point, reply and origin it carries.
     pub fn take(st: *Standing, gpa: std.mem.Allocator, r: Resume) void {
         const kept = st.carried(r);
+        const remote = r != .none and st.remote;
         const reply: modes.Span = switch (r) {
             .here => |n| if (st.reply[1] <= n) st.reply else .{ 0, 0 },
             .back, .none => .{ 0, 0 },
@@ -72,6 +122,7 @@ pub const Standing = struct {
         st.deinit(gpa);
         st.rewind_at = kept;
         st.reply = reply;
+        st.remote = remote;
     }
 
     /// Before `take`: where `ids` (spans `spans`) sends back the reply these tokens hold, as it was generated.
@@ -412,6 +463,7 @@ test "qwen27 resume: a client dropping the reasoning, a cold turn or a pass that
 }
 
 test {
+    _ = @import("qwen27_resume_remote_test.zig");
     _ = @import("qwen27_resume_cache_test.zig");
 }
 

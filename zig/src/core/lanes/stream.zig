@@ -86,6 +86,8 @@ pub const Reuse = struct {
     at: u32 = 0,
     marks: []const u32 = &.{}, // ascending: the pass cuts a chunk at each and calls `hook` there
     hook: ?MarkHook = null,
+    remote: bool = false, // built on another machine's prefix, pulled or kept (#1594 step 2b): not the engine's own
+    pulled: bool = false, // pulled for this stream just now (a fresh remote prefix), not a kept remote state restored
 };
 
 /// Called between prompt chunks, the pass standing at `at` (the GPU done with the chunk that ends there).

@@ -12,6 +12,7 @@ const Wait = @import("wait_reason.zig").Wait;
 pub fn pick(h: *LaneHost) ?usize {
     if (pressure.holds(h)) return hold(h, .memory_pressure); // under memory pressure nothing starts or is read ahead
     if (!h.stale) fetch.queue(h); // disk states read ahead for queued requests, a lane free or not
+    if (!h.stale) @import("lane_remote.zig").queue(h); // remote prefixes beyond the cache's, filled on their own threads
     // a stale device takes no reply: `learn.refuse` ends the queued ones instead
     if (h.stale) return hold(h, .engine_unavailable);
     if (h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) return hold(h, .engine_busy);
@@ -38,6 +39,7 @@ fn passed(h: *LaneHost, job: *const Job) bool {
 fn passedFor(h: *LaneHost, job: *const Job) ?Wait {
     if (prefix.waiting(job)) return .prefix_cut;
     if (fetch.held(h, job)) return .state_read;
+    if (@import("lane_remote.zig").held(job)) return .remote_prefix;
     return null;
 }
 
