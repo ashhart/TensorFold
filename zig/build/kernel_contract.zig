@@ -156,6 +156,19 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     }) });
     b.step("test-ling-kda-gpu", "Ling KDA mixer on this GPU against kda.zig, using k3_kda").dependOn(&b.addRunArtifact(ling_kda_gpu).step);
+    const ling_mla_gpu = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/ling_mla_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "mla", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/mla.zig") }) },
+            .{ .name = "kimi_metallib", .module = kimi_metallib },
+            .{ .name = "ling_metal", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/ling/sources.zig") }) },
+        },
+    }) });
+    b.step("test-ling-mla-gpu", "Ling MLA mixer on this GPU around k3_mla, against mla.zig").dependOn(&b.addRunArtifact(ling_mla_gpu).step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).
