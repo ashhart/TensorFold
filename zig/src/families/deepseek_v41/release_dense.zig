@@ -166,3 +166,24 @@ test "a release group: one round trip a distinct FP8 input, then a launch a proj
     // a prefix the loader did not record is refused by name
     try std.testing.expectError(error.NoReleaseForm, e.upstream("L0.attn.ix_wk", x, @intCast(D), 128, kv));
 }
+
+test "the release head writes FP32 logits and leaves out the EXL3 kit's bf16 rounding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg: @import("config.zig").Config = .{};
+    var w: block.Widths = .{};
+    try w.release.put(a, "head", .bf16);
+    var e: Emitter = .{ .a = a, .cfg = &cfg, .w = &w, .o = .{ .format = .release_fp8, .world = 4 }, .n = 3, .start = 0 };
+    try @import("block_moe.zig").finish(&e);
+    var head: usize = 0;
+    for (e.out.items) |c| {
+        try std.testing.expect(!std.mem.eql(u8, c.name, "glue.kit_logits"));
+        if (!std.mem.eql(u8, c.name, ext ++ ".bf16")) continue;
+        head += 1;
+        try std.testing.expectEqualStrings("head.w", c.args[1].arg.t.role.weight);
+        try std.testing.expectEqualStrings("w.logits", c.args[2].arg.t.role.buf);
+        try std.testing.expectEqual(calls.Dt.f32, c.args[2].arg.t.dt);
+    }
+    try std.testing.expectEqual(@as(usize, 1), head);
+}
