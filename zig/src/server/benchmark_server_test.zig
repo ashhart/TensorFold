@@ -205,6 +205,33 @@ test "an engine's load-limit hint before its error is kept with the error, three
     try lines(&.{ "tensorfold: GLM_LOAD_LIMIT_GB is not a load limit", "error: a", "error: b" }, try server.lastLines(a, "set GLM_LOAD_LIMIT_GB=1\ntensorfold: GLM_LOAD_LIMIT_GB is not a load limit\nerror: a\nerror: b\n"));
 }
 
+test "only a child given a key gets TENSORFOLD_API_KEY and probes with it; the benchmark's child gets neither" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try Setup.init(a, &tmp);
+    try s.env.put("TENSORFOLD_API_KEY", "parent-key");
+    const routes = try healthy(a, "{\"status\": \"ok\"}", ".tensorfold-benchmark");
+    const f = try fake.Fake.start(std.testing.allocator, &routes);
+    defer f.stop();
+    const seen = try std.fs.path.join(a, &.{ s.dir, "key" });
+    const script = try std.mem.concat(a, u8, &.{ "printf '[%s]' \"${TENSORFOLD_API_KEY-unset}\" > ", seen, "; ", try serving(a, f.port, "exec sleep 30") });
+    var problem: []const u8 = "";
+    var plain = (try s.start(script, 10, 10_000, &problem)) orelse return error.TestUnexpectedResult;
+    _ = plain.stop();
+    try std.testing.expectEqualStrings("[unset]", try std.Io.Dir.cwd().readFileAlloc(std.testing.io, seen, a, .limited(256)));
+    const probes = f.count();
+    for (0..probes) |i| try std.testing.expect(f.header(i, "authorization") == null);
+    const sh = try a.dupe([]const u8, &.{ "/bin/sh", "-c", script });
+    var keyed = (try server.Managed.spawn(a, std.testing.io, &s.env, sh, .{ .startup_timeout_s = 10, .bench_dir = s.bench, .key = "child-key" }, &problem)) orelse return error.TestUnexpectedResult;
+    _ = keyed.stop();
+    try std.testing.expectEqualStrings("[child-key]", try std.Io.Dir.cwd().readFileAlloc(std.testing.io, seen, a, .limited(256)));
+    try std.testing.expect(f.count() > probes);
+    for (probes..f.count()) |i| try std.testing.expectEqualStrings("Bearer child-key", f.header(i, "authorization").?);
+}
+
 test "the startup timeout grows with the weights past 20 GB, 6 s per GB from 600 s, to 3600 s" {
     try std.testing.expectEqual(@as(f64, 600), server.startupTimeout(0));
     try std.testing.expectEqual(@as(f64, 600), server.startupTimeout(20_000_000_000));
