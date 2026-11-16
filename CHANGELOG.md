@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 remote prefill: a failing link or pair degrades to local prefill and recovers (`TF_PREFILL_BREAKER`, `TF_PREFILL_COOLDOWN_S`), a request that ends stops its pull, and the reply reports the pull's phases (#3596).
+
 - DeepSeek V4.1 remote prefill: with `--prefill-from`, each prompt is weighed against the pair's load and the predicted pull and Mac prefill times (`TF_PREFILL_ROUTE`, default `auto`; `always` queues every prompt behind the pull as before) (#3595).
 
 - DeepSeek V4.1 on Metal: `--prefill-from URL` with `--mcdma-link` pulls a prompt's prefix state from a producer over the hand-off and lands it in the served lane; off unless the flag is given (#3594).
