@@ -5,6 +5,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 ## Unreleased
 
 - Docs: the GLM-5.3-Flash CUDA recipe's Verified copy drafts section lists, for one checkpoint at TP=2 with `--parallel 4`, the loads that `TF_GLM_COPIES=1` sped up and the ones it slowed, and says the default stays off (#3335). Thanks to @Bizuayeu.
+- Tests: the Qwen 3.8 27B Metal residency fixtures compile again on macOS after the DFlash2 target became a value (#3572).
+- Tests: the kernel contract's Llama `gemm_untransposed` control edits the `TF_GEMM_NAX_KERNEL` instance line again, so its planted fault fails as it should (#3157, thanks @gilby, who found and fixed it first).
+
 - Docs: the GLM-5.3-Flash recipe records the FP8 latent cache's diagnostics on FP4-Local at TP=2 on two GB10s, with its bytes a token and fixed per-stream state, and says it is not qualified (#3432). Thanks to @laudney.
 
 - KV pool: a window's pages go back to the pool once their readers are done, and a step retires under the forward's token, leaving the settle to its caller; no served path calls it yet (#3353, part of #2444). Thanks to @jschmied.
