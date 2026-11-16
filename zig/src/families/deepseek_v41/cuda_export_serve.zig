@@ -17,6 +17,9 @@ pub const Options = struct {
     /// the most export bytes a link holds at once (TF_PRODUCE_HELD_GIB)
     held_bytes: u64 = 32 << 30,
     ttl_ns: u64 = 120 * std.time.ns_per_s,
+    /// KV_SPLIT: this producer is shard `shard` of `shards` (each rank exports its own pool pages on its own link)
+    shard: u32 = 0,
+    shards: u32 = 1,
     /// serve held exports over the server's own HTTP port (`--mcdma-produce http`), same cap and expiry as a link
     http: bool = false,
 };
@@ -74,6 +77,8 @@ pub const Produce = struct {
         errdefer if (p.reg) |*r| r.close();
         log.info("mcdma handoff: attached to the listen daemon on link {s}", .{link});
         p.serving.init(gpa, &p.box, fabric.words.native, &p.table, opts.model);
+        p.serving.responder.tp_rank = opts.shard;
+        p.serving.responder.tp_size = opts.shards;
         errdefer p.serving.deinit();
         p.thread = try std.Thread.spawn(.{}, run, .{p});
         log.info("mcdma handoff: exporting DeepSeek-V4.1 states as MKVH protocol 2 on link {s}", .{link});
@@ -214,7 +219,7 @@ pub const Produce = struct {
         errdefer p.unlease(held);
         const r = try p.gpa.create(Reading);
         errdefer p.gpa.destroy(r);
-        const replies = file.Replies.open(p.gpa, &held.built.exp, p.opts.model, 0, 1) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unreadable;
+        const replies = file.Replies.open(p.gpa, &held.built.exp, p.opts.model, p.opts.shard, p.opts.shards) catch |err| return if (err == error.OutOfMemory) error.OutOfMemory else error.Unreadable;
         r.* = .{ .p = p, .held = held, .replies = replies };
         return r;
     }
@@ -347,7 +352,7 @@ pub const Produce = struct {
             defer f.close(p.io);
             var buf: [64 << 10]u8 = undefined;
             var w = f.writerStreaming(p.io, &buf);
-            try file.write(p.gpa, &w.interface, &built.exp, p.opts.model, 0, 1);
+            try file.write(p.gpa, &w.interface, &built.exp, p.opts.model, p.opts.shard, p.opts.shards);
             try w.interface.flush();
         }
         try cwd.rename(part, cwd, final, p.io);

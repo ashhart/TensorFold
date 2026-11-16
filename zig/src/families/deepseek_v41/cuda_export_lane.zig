@@ -5,6 +5,8 @@ const model = @import("cuda_model.zig");
 const serve = @import("cuda_export_serve.zig");
 const gpu = @import("cuda_export_gpu.zig");
 const cx = @import("cuda_export.zig");
+const split = @import("cuda_export_split.zig");
+const ff = @import("forward_follow.zig");
 const pc = api.prompt_cache;
 const Handoff = api.LaneHost.Export.Handoff;
 const log = std.log.scoped(.dsv41);
@@ -25,6 +27,9 @@ pub const Export = struct {
     gpa: std.mem.Allocator,
     source: gpu.Source,
     produce: *serve.Produce,
+    f: *@import("forward.zig").Forward,
+    /// a KV_SPLIT pool: this export is shard 0 and the followers export theirs (cuda_export_split.zig)
+    split: bool,
 
     /// The exporter for `m`, or null with `problem` set; `link` is a `--mcdma-produce` name or `http`.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, m: *model.Model, link: ?[]const u8, checkpoint: []const u8, problem: *[]const u8) !?*Export {
@@ -41,8 +46,13 @@ pub const Export = struct {
         const http = if (link) |l| std.mem.eql(u8, l, api.LaneHost.Remote.http_link) else false;
         const x = try gpa.create(Export);
         errdefer gpa.destroy(x);
-        x.* = .{ .gpa = gpa, .source = .{ .ss = m.sessions.? }, .produce = undefined };
-        x.produce = try serve.Produce.open(gpa, io, x.source.source(), .{ .link = if (http) null else link, .http = http, .dump = if (dump.len > 0) dump else null, .model = checkpoint, .held_bytes = cap << 30 }, problem);
+        const shards: u32 = if (split.splitOf(m)) m.sessions.?.kx.world else 1;
+        if (shards > 1 and http) {
+            problem.* = "--mcdma-produce http exports a replicated KV pool: unset TF_DSV41_KV_SPLIT, or export on mcdma-rpcd links (one per rank)";
+            return null;
+        }
+        x.* = .{ .gpa = gpa, .source = .{ .ss = m.sessions.? }, .produce = undefined, .f = &m.f, .split = shards > 1 };
+        x.produce = try serve.Produce.open(gpa, io, x.source.source(), .{ .link = if (http) null else link, .http = http, .dump = if (dump.len > 0) dump else null, .model = checkpoint, .held_bytes = cap << 30, .shard = 0, .shards = shards }, problem);
         log.info("dsv41 handoff export: {s}{s}{s}", .{ if (link) |l| l else "no link", if (dump.len > 0) ", files under " else "", dump });
         return x;
     }
@@ -103,10 +113,15 @@ pub const Export = struct {
     }
 
     fn exported(ptr: *anyopaque, h: Handoff, tokens: []const u32, saved: pc.Saved) void {
-        self(ptr).produce.exportedBg(h.id, tokens, @ptrCast(@alignCast(saved)));
+        const x = self(ptr);
+        // the followers read their pages now, at the cut, while this rank converts its own
+        if (x.split) ff.sendExport(x.f, h.id, tokens.len) catch |err| log.warn("handoff {x}: the followers were not asked for their shards ({t})", .{ &h.id, err });
+        x.produce.exportedBg(h.id, tokens, @ptrCast(@alignCast(saved)));
     }
 
     fn failed(ptr: *anyopaque, h: Handoff, why: []const u8) void {
-        self(ptr).produce.failed(h.id, why);
+        const x = self(ptr);
+        x.produce.failed(h.id, why);
+        if (x.split) ff.sendExportFail(x.f, h.id) catch {};
     }
 };

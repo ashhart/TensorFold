@@ -43,8 +43,11 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
 
 * **Replicated KV**: one producer, `tp_size 1`, the rank-0 view.
 * **KV_SPLIT**: logical page `pg` lives on rank `pg % world`. Each rank exports a shard (`tp_rank`, `tp_size = world`):
-  shard 0 carries `swa`, `carry`, `ring` and its pages, the others only their `comp`/`ixk` pages. The decoder pulls every
-  shard into one import.
+  shard 0 carries `swa`, `carry`, `ring` and its pages, others only their `comp`/`ixk` pages. The decoder pulls every
+  shard into one import. Rank 0's `--mcdma-produce LINK` exports shard 0; rank 0 sends each follower an `op_export` at
+  the cut and a follower started with `TF_DSV41_PRODUCE_LINK=NAME` (an `mcdma-rpcd` listen link of its own host) reads
+  its pages and exports them under the same hand-off id, so a pair with a cable per host exports one shard a link.
+  A pool that is not split exports whole from rank 0; `--mcdma-produce http` exports a replicated pool only.
 * The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
   Replay prefill (`TF_DSV41_PREFILL=replay`) is exported: the cut stands after the decoder replay, so the live slot holds the
   decoder layers' rings (the last 127 positions the replay wrote). The window's oldest position of those layers was never
@@ -95,11 +98,11 @@ reply is one token, and the state at the cut goes to the producer (`cuda_export_
 * The model name is `LaneHost.Remote.checkpointId` of the checkpoint folder (config and weight index hashed): the
   decoder must serve identical files, or give the manifest's name.
 
-The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`),
-`TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank), a non-default prompt shape, and fp4 comp rows. Replay prefill is
-exported, with `TF_DSV41_PF_4K` and the other knobs that need it. So is a prompt run in pieces between decode rounds
-(`TF_DSV41_PREFILL_PIECES=1`): the cut stands in the prompt's last step, after its last piece and the decoder replay and before
-the last token's window, and the other streams keep decoding while the pieces run.
+The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`), a
+non-default prompt shape, and fp4 comp rows. Replay prefill is exported, with `TF_DSV41_PF_4K` and the other knobs that need
+it. So is a prompt run in pieces between decode rounds (`TF_DSV41_PREFILL_PIECES=1`): the cut stands in the prompt's last step,
+after its last piece and the decoder replay and before the last token's window, and the other streams keep decoding while the
+pieces run. A split pool (`TF_DSV41_KV_SPLIT=1`) is exported by shard, each rank on its own link (Shards above).
 
 ## Over plain HTTP
 
