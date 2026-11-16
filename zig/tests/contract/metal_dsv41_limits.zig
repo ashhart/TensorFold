@@ -70,6 +70,10 @@ pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch,
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.compress, .pre_m5 = sources.dsv41.compress };
     }
+    if (std.mem.startsWith(u8, d.name, "dsv41 mv mma ")) {
+        if (!assemble) return @as(Launch, undefined);
+        return .{ .decl = d, .function = fun, .here = sources.dsv41.mv_mma, .pre_m5 = sources.dsv41.mv_mma };
+    }
     if (std.mem.startsWith(u8, d.name, "dsv41 mv ")) {
         if (!assemble) return @as(Launch, undefined);
         return .{ .decl = d, .function = fun, .here = sources.dsv41.mv, .pre_m5 = sources.dsv41.mv };
