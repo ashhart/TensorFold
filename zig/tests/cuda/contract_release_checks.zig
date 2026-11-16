@@ -365,4 +365,8 @@ pub fn suite(gpu: check.Gpu, only: []const []const u8) !void {
     var s = try cuda.Stream.init(gpu.d, false);
     defer s.deinit();
     try run(gpu, .{ .f = &f, .s = s });
+    var ex_mod: cuda.Module = undefined;
+    var ex = try @import("contract_release_ex_set.zig").Set.load(gpu.d, &ex_mod) orelse return error.ReleaseImagesNotBuilt;
+    defer ex_mod.unload();
+    try @import("contract_release_ex_checks.zig").run(gpu, .{ .f = &ex, .s = s });
 }

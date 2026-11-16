@@ -75,7 +75,7 @@ pub fn expected(a: std.mem.Allocator, x: []const u16, m: usize, k: usize, rt: bo
 }
 
 /// Compares the device's bytes with the oracle's; null when equal, else where they first differ.
-fn verdict(buf: []u8, got: []const u8, want: []const u8, n: usize) ?[]const u8 {
+pub fn verdict(buf: []u8, got: []const u8, want: []const u8, n: usize) ?[]const u8 {
     const at = std.mem.indexOfDiff(u8, got, want) orelse return null;
     const part = if (at < n) "codes" else if (at < n + n / 32) "scales" else "bf16 values";
     return std.fmt.bufPrint(buf, "{s} differ from the reference at byte {d} ({d} != {d})", .{ part, at, if (at < got.len) got[at] else 0, if (at < want.len) want[at] else 0 }) catch "differ";

@@ -2,6 +2,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 pub const split = @import("release_split.zig").split;
+/// The experts' launches (release_experts.cu).
+pub const ex = @import("kernels_release_ex.zig");
 
 /// Mirrors RelActq: x bf16 rows at byte offset x_off and row stride x_ld (elements); rt optional (0: none).
 pub const Actq = extern struct {

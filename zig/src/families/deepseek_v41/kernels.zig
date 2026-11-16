@@ -66,12 +66,14 @@ pub const lin2_image: []const u8 = &Lin2Blob.bytes;
 pub const release_images = struct {
     pub const proj: []const u8 = &Blob("dsv41_fatbin_dsv41_rel").bytes;
     pub const glue: []const u8 = &Blob("dsv41_fatbin_dsv41_rel_glue").bytes;
+    pub const ex: []const u8 = &Blob("dsv41_fatbin_dsv41_rel_ex").bytes;
 };
 
 /// The release kernels' modules and functions, loaded beside the EXL3 set only for a release_fp8 checkpoint.
 pub const Release = struct {
-    mods: [2]cuda.Module,
+    mods: [3]cuda.Module,
     f: release.Functions,
+    ex: release.ex.Functions,
 
     pub fn unload(r: *Release) void {
         for (&r.mods) |*m| m.unload();
@@ -138,14 +140,22 @@ pub const Kernels = struct {
     pub fn loadRelease(k: *Kernels, ctx: *const cuda.Context) !void {
         if (k.rel != null) return;
         if (try ctx.capability() != 121) return error.DeepSeekReleaseRequiresSm121;
-        if (release_images.proj.len == 0 or release_images.glue.len == 0) return error.ReleaseKernelsNotBuilt;
+        if (release_images.proj.len == 0 or release_images.glue.len == 0 or release_images.ex.len == 0) return error.ReleaseKernelsNotBuilt;
         var r: Release = undefined;
         r.mods[0] = try cuda.Module.load(ctx.d, release_images.proj);
         errdefer r.mods[0].unload();
         r.mods[1] = try cuda.Module.load(ctx.d, release_images.glue);
         errdefer r.mods[1].unload();
+        r.mods[2] = try cuda.Module.load(ctx.d, release_images.ex);
+        errdefer r.mods[2].unload();
         r.f = try release.Functions.resolve(r.mods[0], r.mods[1]);
+        r.ex = try release.ex.Functions.resolve(r.mods[2]);
         k.rel = r;
+    }
+
+    /// The release experts' launches on one stream (after `loadRelease`).
+    pub fn releaseExOps(k: *const Kernels, s: cuda.Stream) release.ex.Ops {
+        return .{ .f = &k.rel.?.ex, .s = s };
     }
 
     /// The release launches on one stream (after `loadRelease`).
@@ -288,7 +298,7 @@ test "DeepSeek release kernels refuse every GPU but sm_121 before loading an ima
         try std.testing.expectEqual(@as(usize, 0), Fake.loads);
     }
     Fake.sm = 121;
-    const built = release_images.proj.len > 0 and release_images.glue.len > 0;
+    const built = release_images.proj.len > 0 and release_images.glue.len > 0 and release_images.ex.len > 0;
     try std.testing.expectError(if (built) error.NotReady else error.ReleaseKernelsNotBuilt, k.loadRelease(&ctx));
     try std.testing.expectEqual(@intFromBool(built), Fake.loads);
     try std.testing.expect(k.rel == null);

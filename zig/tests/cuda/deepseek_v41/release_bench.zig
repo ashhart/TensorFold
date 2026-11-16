@@ -86,4 +86,5 @@ pub fn run(gpu: check.Gpu, k: *dsv41.Kernels, rest: []const [:0]const u8) !void 
             std.debug.print("RESULT {s},{d},{d},{d},{d},{d:.1},{d:.1},{d:.2}\n", .{ sh.name, sh.k, sh.n, split(sh.k, sh.n), m, t * 1e6, bytes / t * 1e-9, flops / t * 1e-12 });
         }
     }
+    if (only == null or std.mem.indexOf(u8, "experts", only.?) != null) try @import("release_ex_bench.zig").run(gpu, k.releaseExOps(s), reps);
 }

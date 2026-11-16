@@ -130,6 +130,19 @@ pub fn release(f: dk.release.Functions) void {
     for (f.warp) |fun| note(fun, r.warp_threads, 0, 1);
     for ([_]cuda.Function{ f.sum, f.actq, f.rms_actq }) |fun| note(fun, r.glue_threads, 0, 1);
 }
+/// The release experts: a CTA grouping, four-warp tiles, and the glue at eight warps.
+pub fn releaseExperts(f: dk.release.ex.Functions) void {
+    const x = dk.release.ex;
+    note(f.group, x.group_threads, x.group_smem, 1);
+    for ([_][3]cuda.Function{ f.gateup, f.down }, [_]u32{ 2, 1 }) |funs, nb| {
+        for ([_]x.Size{ .decode, .prompt }) |size| {
+            const t = x.tile(nb, size);
+            note(funs[@backingInt(size)], t.threads, t.smem, 1);
+        }
+        note(funs[2], x.tile_threads, 0, 1);
+    }
+    for ([_]cuda.Function{ f.combine, f.swiglu }) |fun| note(fun, x.glue_threads, 0, 1);
+}
 pub fn base(image: []const u8, symbol: []const u8) void {
     const std = @import("std");
     for (catalog.entries[0..catalog.count], 0..) |e, i| {
