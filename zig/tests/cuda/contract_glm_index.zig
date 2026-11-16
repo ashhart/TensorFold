@@ -28,7 +28,7 @@ fn scoreDepth(_: c.Shape) usize {
 
 const nan_relu = "relu is fmaxf(x, 0), as Triton's tl.maximum: a NaN dot scores 0 where float64 keeps the NaN";
 
-/// A decode window's served shapes: decodeLoop's 1, 2 and 5 tiles a CTA, as cuda_sparse launches Set.dscore.
+/// A decode window's served shapes: decodeLoop's 2, 4 and 1 tiles a CTA, as cuda_sparse launches Set.dscore.
 const decode_served = [_]c.Shape{ .{ .rows = 8, .n = 4096, .k = dk }, .{ .rows = 16, .n = 51200, .k = dk }, .{ .rows = 4, .n = 131072, .k = dk } };
 
 /// scores: rows x pool columns (k: an index key's width); tokens: rows x K pools a row.
@@ -158,7 +158,7 @@ pub const Scores = struct {
     fn launch(self: *Scores, f: cuda.Function, fast: bool, out: u64) !void {
         const rows = self.shape.rows;
         const nb = if (fast and self.short) self.shape.n / 64 - 1 else self.shape.n / 64;
-        const loop: usize = if (fast and self.decode) glm.index.decodeLoop(self.shape.n / 64) else if (fast) glm.index.score_tiles else if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
+        const loop: usize = if (fast and self.decode) glm.index.decodeLoop(rows, self.shape.n / 64) else if (fast) glm.index.score_tiles else if (rows >= sparse.score_loop_from) sparse.score_loop else 1;
         var a: cuda.Args = .{};
         if (fast) {
             inline for (.{ self.in[0], self.in[1], @as(i64, w_stride), self.in[2], out, self.pos, @as(i64, @intCast(rows)), @as(i64, @intCast(self.shape.n)), @as(i64, @intCast(nb)), self.scale, self.wscale, @as(i64, heads), @as(c_int, @intCast(loop)), self.pt, @as(i64, pages.page_bytes) }) |v| a.add(v);

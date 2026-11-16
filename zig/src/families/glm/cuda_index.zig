@@ -38,9 +38,10 @@ pub const Mode = enum {
     }
 };
 
-/// A decode window's 64-pool tiles a CTA: about 376 CTAs a row group at long context, 1 to score_tiles (speed only).
-pub fn decodeLoop(nb: usize) usize {
-    return @max(1, @min(score_tiles, nb / 376));
+/// A decode window's 64-pool tiles a CTA by its rows and blocks, fit to a sweep on GB10 (speed only).
+pub fn decodeLoop(rows: usize, nb: usize) usize {
+    const want: usize = if (rows <= 4) 1 else if (rows <= 8) 2 else rows / 4 * ((nb + 1023) / 1024);
+    return @max(1, @min(@min(score_tiles, want), @max(1, nb / 32)));
 }
 
 /// glm_index_scores' grid: rows in CTAs of 8, the `nb` pool blocks in runs of score_tiles.
@@ -142,12 +143,16 @@ test "GLM index: the candidate cap follows the pool count and stays in shared me
     try std.testing.expect(tile(1 << 30).cap <= cap_max);
 }
 
-test "GLM index: a decode window's tiles a CTA keep a few hundred CTAs at long context" {
-    try std.testing.expectEqual(@as(usize, 8), decodeLoop(3376)); // 864K: 422 CTAs a row group
-    try std.testing.expectEqual(@as(usize, 2), decodeLoop(800)); // 200K
-    try std.testing.expectEqual(@as(usize, 1), decodeLoop(512)); // 128K and below: a tile a CTA
-    try std.testing.expectEqual(@as(usize, 1), decodeLoop(8));
-    try std.testing.expectEqual(@as(usize, score_tiles), decodeLoop(1 << 20));
+test "GLM index: a decode window's tiles a CTA follow its rows and blocks" {
+    try std.testing.expectEqual(@as(usize, 1), decodeLoop(4, 4064)); // 4 rows at 1M: a tile a CTA
+    try std.testing.expectEqual(@as(usize, 2), decodeLoop(8, 4064));
+    try std.testing.expectEqual(@as(usize, 16), decodeLoop(16, 4064)); // 1M: 1,024 blocks round up
+    try std.testing.expectEqual(@as(usize, 8), decodeLoop(16, 2048)); // 512K
+    try std.testing.expectEqual(@as(usize, score_tiles), decodeLoop(32, 4064));
+    try std.testing.expectEqual(@as(usize, 4), decodeLoop(16, 1024)); // 256K
+    try std.testing.expectEqual(@as(usize, 2), decodeLoop(32, 64)); // 16K: nb / 32 keeps the CTAs
+    try std.testing.expectEqual(@as(usize, 1), decodeLoop(8, 8));
+    try std.testing.expectEqual(@as(usize, score_tiles), decodeLoop(48, 1 << 20));
 }
 
 test "GLM index: decode windows on aligned key caches take the scores kernel" {
