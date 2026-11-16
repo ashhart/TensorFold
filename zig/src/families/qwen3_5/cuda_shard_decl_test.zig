@@ -55,6 +55,7 @@ fn declaredOf(s: cs.Shape, rank: usize, world: usize) anyerror!cs.Share {
     try std.testing.expectEqual(gate, down); // gate_proj, up_proj and down_proj cut one range
     const head: shard.Decl = .{ .kind = .vocab, .unit = cs.unit, .rule = .even };
     const vocab = try span(head, s.vocab, rank, world, error.NotOnTiles);
+    const hidden_rows = try span(tile_rows, s.hidden, rank, world, error.NotOnTiles); // o_proj, out_proj and down_proj rows
     return .{
         .rank = rank,
         .world = world,
@@ -67,6 +68,7 @@ fn declaredOf(s: cs.Shape, rank: usize, world: usize) anyerror!cs.Share {
         .out = out,
         .mlp = gate,
         .vocab = vocab,
+        .hidden = hidden_rows,
     };
 }
 
@@ -80,7 +82,7 @@ fn expectSame(s: cs.Shape, rank: usize, world: usize) !void {
 const qwen27: cs.Shape = .{ .hidden = 5120, .intermediate = 17408, .vocab = 248320, .q_heads = 24, .kv_heads = 4, .k_heads = 16, .v_heads = 48 };
 
 test "the declared shares equal Share.of at every world to 16, its refusals and their order included" {
-    var shapes: [8]cs.Shape = @splat(qwen27);
+    var shapes: [9]cs.Shape = @splat(qwen27);
     shapes[1].hidden = 5120 + 64; // off the tiles: refused first, at every world
     shapes[2].kv_heads = 2; // fewer KV heads than ranks past world 2: kept by their query ranks, or KvHeads
     shapes[3].kv_heads = 3; // 3 does not split over 2 or 4 ranks
@@ -89,6 +91,7 @@ test "the declared shares equal Share.of at every world to 16, its refusals and 
     shapes[6].q_heads = 20; // two axes wrong at once: the query heads refuse first, where 20 does not split
     shapes[6].vocab = 248320 + 64;
     shapes[7].v_heads = 0; // nothing to cut: EmptyShare
+    shapes[8].hidden = 41 * 128; // on the tiles, but 41 tiles do not split past world 1: refused last
     for (&shapes) |*s| {
         for (1..17) |world| for (0..world) |rank| try expectSame(s.*, rank, world);
         try expectSame(s.*, 0, 0);
