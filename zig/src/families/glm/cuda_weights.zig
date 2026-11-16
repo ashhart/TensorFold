@@ -279,20 +279,20 @@ const Loader = struct {
         return cuda.nvfp4.weight(words.ptr, bs, l.global, n, k);
     }
 
-    /// weights.load's mlp for a dense layer: gate and up by the rank's rows, down by its columns (NVFP4 or MXFP8).
+    /// weights.load's mlp for a dense layer: gate and up by the rank's rows, down by its columns, as mlp.held says.
     fn dense(L: *Loader, i: u32) !mlp.Layer {
         const c = &L.w.config;
         const s = L.w.share.dense;
         const d = c.hidden;
-        const mx = !c.exl3 and (try L.get("layers.{d}.mlp.gate_proj.weight", .{i})).dtype == .f8_e4m3; // FP4-Local's
-        const want: formats.Format = if (c.exl3) .bf16 else if (mx) .mxfp8 else .nvfp4;
+        const kind = mlp.held(c.exl3, (try L.get("layers.{d}.mlp.gate_proj.weight", .{i})).dtype);
+        const want: formats.Format = if (kind == .bf16) .bf16 else if (kind == .mxfp8) .mxfp8 else .nvfp4;
         inline for (.{ "gate_proj", "up_proj", "down_proj" }) |x| try L.format("layers.{d}.mlp." ++ x, .{i}, want);
-        const w: mlp.Weights = if (c.exl3) bf16: { // an EXL3 checkpoint keeps its dense layers bf16
+        const w: mlp.Weights = if (kind == .bf16) bf16: {
             inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp." ++ x ++ ".weight", .{i}), s.lo, s.hi, c.dense_inter, .bf16);
             const gu = try L.put("layers.{d}.mlp.gu", .{i});
             try L.cols(try L.get("layers.{d}.mlp.down_proj.weight", .{i}), s.lo, s.hi, .bf16);
             break :bf16 .{ .bf16 = .{ .gu = gu, .down = try L.put("layers.{d}.mlp.down", .{i}) } };
-        } else if (mx) mx8: {
+        } else if (kind == .mxfp8) mx8: {
             const parts = [_]formats.Part{ .{ .rel = "mlp.gate_proj", .rows = .{ s.lo, s.hi } }, .{ .rel = "mlp.up_proj", .rows = .{ s.lo, s.hi } } };
             const gu = try formats.cutProj(L, L.prefix, i, &parts, &.{.mxfp8}, "layers.{d}.mlp.gu");
             const down = try formats.cutProj(L, L.prefix, i, &.{.{ .rel = "mlp.down_proj", .cols = .{ s.lo, s.hi } }}, &.{.mxfp8}, "layers.{d}.mlp.down");
@@ -547,6 +547,7 @@ test {
     _ = @import("cuda_dfloat11.zig");
     _ = @import("cuda_load_ahead.zig");
     _ = @import("cuda_load_pack.zig");
+    _ = @import("cuda_mlp.zig");
 }
 
 test "an empty mixed recipe table cannot make an undeclared NVFP4 projection look declared" {

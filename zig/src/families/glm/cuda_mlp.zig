@@ -1,19 +1,34 @@
 //! GLM-5.3-Flash's dense MLP (layers 0-2), a rank's share of the Python family's mlp_block: gate/up, SwiGLU, down.
 
 const std = @import("std");
+const core = @import("core");
 const cuda = @import("cuda");
 const cuda_pdl = @import("cuda_pdl.zig");
 const glue = @import("cuda_glue.zig");
 const b16 = @import("cuda_b16.zig");
 const projection = @import("cuda_proj.zig");
 
-/// A dense layer's weights: NVFP4 as Fp4Linear holds them, an EXL3 checkpoint's bf16, FP4-Local's MXFP8, or TFQ3.
+/// A dense layer's weights: NVFP4, bf16 as stored by the checkpoint, FP4-Local's MXFP8, or TFQ3.
 pub const Weights = union(enum) {
     nvfp4: struct { gate: cuda.qmmf.Weight, up: cuda.qmmf.Weight, down: cuda.qmmf.Weight },
     bf16: struct { gu: u64, down: u64 }, // [gate | up] rows [2 width][dims], down [dims][width]
     mxfp8: struct { gu: cuda.qmmf.Weight, down: cuda.qmmf.Weight }, // the same two, packed for the lane
     tfq3: struct { gate: cuda.tfq3.DenseWeight, up: cuda.tfq3.DenseWeight, down: cuda.tfq3.DenseWeight },
 };
+
+/// How a dense layer stored as `stored` is held: bf16 (EXL3's, or any left unquantized), e4m3 as MXFP8, else NVFP4.
+pub fn held(exl3: bool, stored: core.checkpoint.DType) std.meta.Tag(Weights) {
+    if (exl3 or stored == .bf16) return .bf16;
+    return if (stored == .f8_e4m3) .mxfp8 else .nvfp4;
+}
+
+test "a dense layer stored bf16 is held bf16 in any checkpoint; e4m3 is MXFP8 and FP4 codes are NVFP4" {
+    const Kind = std.meta.Tag(Weights);
+    try std.testing.expectEqual(Kind.bf16, held(false, .bf16));
+    try std.testing.expectEqual(Kind.bf16, held(true, .bf16));
+    try std.testing.expectEqual(Kind.mxfp8, held(false, .f8_e4m3));
+    try std.testing.expectEqual(Kind.nvfp4, held(false, .u8));
+}
 
 /// One dense layer on a rank: gate and up [width][dims] and down [dims][width].
 pub const Layer = struct { w: Weights, width: usize, dims: usize, limit: f32 };
