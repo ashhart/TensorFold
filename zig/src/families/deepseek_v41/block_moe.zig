@@ -23,7 +23,7 @@ pub fn mhc(e: *E, layer: ?u32, which: []const u8, mode: Mode) !void {
     return mhcInto(e, layer, which, mode, false);
 }
 
-/// `mhc`, writing the streams in place when `in_place` (a run without the second streams buffer: CED's replay).
+/// An mHC site; in-place streams require a kernel whose CTA owns all four streams.
 pub fn mhcInto(e: *E, layer: ?u32, which: []const u8, mode: Mode, in_place: bool) !void {
     // past 16 rows or with TF_DSV41_MHC_PFDEC at the knob's rows: the wide path (block_wide.zig)
     if (e.n > wide.cuda_rows or wide.pfOn(e, mode)) return wide.decode(e, layer, which, mode, in_place);
