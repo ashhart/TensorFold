@@ -43,7 +43,7 @@ Diagnostics quote and escape the supplied text so it cannot create another termi
 | `TF_GLM_VISION_HOST` | Exactly `0` or `1`; default off (GLM vision weights on the device) |
 | `TF_GLM_PROF` | Exactly `0` or `1`; default off (no GLM section timing). On, a prompt step is one chunk, with no pair or solo steps, so its prompt timings are of that shape |
 | `TF_GLM_LINK_WAIT` | Exactly `0` or `1`; default off (short GLM steps go to the other ranks unwaited) |
-| `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM's kernels use dependent launches) |
+| `TF_GLM_PDL` | Exactly `0` or `1`; default on (GLM's kernels and its qmmf linears use dependent launches) |
 | `TF_GLM_PROMPT_STEPS` | Exactly `0` or `1`; default on (GLM prompt passes in chunks); read on rank 0 |
 | `TF_GLM_SHARED` | Exactly `0` or `1`; default on (GLM windows share a forward); read on rank 0 |
 | `TF_GLM_DSEL` | Exactly `0` or `1`; default on (a GLM decode window's DSA select runs on many CTAs; 0 keeps one CTA a row) |
