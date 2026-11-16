@@ -103,7 +103,8 @@ pub const tile_cases = [_]TileCase{
 };
 
 /// 1-row decodes at the routing threshold (decode_tile_keys = 512): the single dispatch and the tiled path must agree byte for byte.
-pub const route_keys = [_]u64{ 511, 512, 513, 1024, 1025, 2048 };
+/// Dense around the boundary: 496 and 512 are 16-aligned controls; 508, 510, 511, 513, 514, 1025 are partial-tile cases.
+pub const route_keys = [_]u64{ 496, 508, 510, 511, 512, 513, 514, 1024, 1025, 2048 };
 
 /// Rows 0..finiteRows-1 see only finite V; later rows legitimately read the plants and may go non-finite.
 pub fn finiteRows(case: TileCase) u64 {
