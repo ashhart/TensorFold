@@ -560,6 +560,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - GLM-5.3-Flash on CUDA with `TF_KV_SHARE` and no `--prompt-cache-gib`: the kept states' slots, `TF_KV_SHARE` at most, now come where an asked cache goes, before the windows past the engine's own, so a room that holds one more whole window no longer keeps fewer states; Jammed XSFP4 at TP=3 on three GB10s keeps all 32 at `TF_KV_SHARE=32` instead of 8, with the same tokens (#3125). Thanks to @Bizuayeu.
 - Metal: Baidu's Unlimited-OCR-2 is served natively from its BF16 release on M5-class Macs: page images through `serve --vision`, the family's chat template built in, its SAM and CLIP image encoders and decoder under the kernel contract; on five reference pages every departure from the release's own reply is a one-step tie (#2074). Thanks to @BobClawblaw.
 
+- TensorFold Web: `data/models.json` lists each model's support by backend and its measured runs apart, each number copied from a linked receipt and labelled per stream or as a steady-state total, with `models.schema.json` and a test that the receipts still carry the numbers. `web/models-preview` serves a supported-models page from that file or its raw GitHub copy, so new numbers need a commit and no site deploy. Thanks to @jayleaton.
 ## 1.2.9
 
 - Flash Next on CUDA: a lone stream draws on its own path again; the batched draws #2927 added now run only when two or more streams share a step, so one sampled stream no longer pays the group's whole-buffer download each step. Tokens are unchanged (#3391, after #2927).
