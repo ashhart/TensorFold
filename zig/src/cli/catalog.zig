@@ -97,7 +97,7 @@ pub const entries = [_]Entry{
     } },
     .{ .title = "Qwen3.6-35B-A3B", .format = "MLX 4-bit + MTP", .repo = "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP", .revision = "81169a9bc511a27c1b4eedb77a2cd98ced431847", .download = 20_877_599_118, .cuda = true, .recipe = "docs/recipes/qwen3.6-moe.md", .speeds = &.{
         .{ .backend = c, .chip = "GB10", .tok_s = 115.7, .src = "docs/recipes/qwen3.6-moe.md" },
-    } },
+    }, .quality = .{ .passed = 204, .items = 228, .receipt = "docs/receipts/quality-suite/TensorFold--Qwen3.6-35B-A3B-MLX-4bit-MTP.gb10.json" } },
     .{ .title = "Qwen3.6-35B-A3B", .format = "NVFP4 + MTP", .repo = "nvidia/Qwen3.6-35B-A3B-NVFP4", .revision = "1355db6a052410cfd62085d94b58866fd0f2c3c5", .download = 23_424_338_320, .resident = tenthsGib(209), .cuda = true, .recipe = "docs/recipes/qwen3.6-moe.md", .speeds = &.{
         .{ .backend = c, .chip = "GB10", .tok_s = 111.8, .src = "docs/recipes/qwen3.6-moe.md" },
     } },
