@@ -13,7 +13,7 @@ test "draft sources: XPU refuses --vision and unsupported --tp before device acc
             try std.testing.expect(std.mem.indexOf(u8, problem, "--vision") != null);
         }
         if (@import("xpu_engine_options").qwen27) {
-            for ([_][]const u8{"qwen3_5"}) |mt| {
+            for ([_][]const u8{ "qwen3_5", "qwen4_exp" }) |mt| {
                 var problem: []const u8 = "";
                 try std.testing.expect(try native.open(a, std.testing.allocator, std.testing.io, .{ .dir = "does-not-exist", .model_type = mt, .tp = 3 }, &problem) == null);
                 try std.testing.expect(std.mem.indexOf(u8, problem, "--tp 1, 2 or 4") != null);

@@ -16,7 +16,7 @@ const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
 pub const serves: []const []const u8 = &.{"--tp"};
-const qwen27_family: []const api.Family = if (has_qwen27) &.{.{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }} else &.{};
+const qwen27_family: []const api.Family = if (has_qwen27) &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q4g32"} } } else &.{};
 const gemma4_family: []const api.Family = if (nem.has_gemma4) &.{.{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} }} else &.{};
 pub const families: []const api.Family = qwen27_family ++ &[_]api.Family{ .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} }, .{ .model_type = "lfm3", .formats = &.{"mlx-q4g64"} } } ++ gemma4_family;
 
@@ -245,9 +245,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     if (comptime has_qwen27) {
         if (std.mem.eql(u8, o.model_type, "qwen3_5")) return openQwen27(a, gpa, io, o, problem);
+        if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return @import("xpu_flashnext.zig").open(a, gpa, io, o, problem);
         const gemma = if (nem.has_gemma4) ", Gemma 4 E4B (gemma4, MLX 4/64)" else "";
-        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128), Nemotron-H (nemotron_h, MLX 4/64){s} and LFM3 (lfm3, MLX 4/64), not {s}", .{ gemma, o.model_type });
-    } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64) and LFM3 (lfm3, MLX 4/64), not {s}: Qwen3.8-27B and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128), Qwen3.8 Flash Next (qwen4_exp, MLX 4/32), Nemotron-H (nemotron_h, MLX 4/64){s} and LFM3 (lfm3, MLX 4/64), not {s}", .{ gemma, o.model_type });
+    } else problem.* = try std.fmt.allocPrint(a, "this XPU build (no DPAS) serves Nemotron-H (nemotron_h, MLX 4/64) and LFM3 (lfm3, MLX 4/64), not {s}: Qwen3.8-27B, Qwen3.8 Flash Next and Gemma 4 E4B need DPAS (-Dxpu-dpas=true)", .{o.model_type});
     return null;
 }
 
