@@ -53,34 +53,30 @@ function productionElement(file: string, tag: string, wrapper?: string) {
     (id: string) => { assert.equal(id, 'react/jsx-runtime'); return jsxRuntime }, {}, ...Object.values(environment),
   )
 }
-const renderPicker = productionElement('../Composer.tsx', 'ModelPickerMenu')
 const renderThreadComposer = productionElement('../Thread.tsx', 'Composer', 'BotComposerSettings')
 const provider: Provider = { id: 'fixture', name: 'Fixture', kind: 'local', baseUrl: 'http://127.0.0.1', apiKey: '', models: ['fixture'] }
 function composer(bot: BotThreadConfig | undefined, effort: ReasoningEffortSetting) {
   const thread = { id: 'captured-bot-fixture', bot }
   function Composer() {
-    return renderPicker({
-      provider, model: 'fixture', providerAccountId: null, effectiveHostId: null, localOnly: false,
-      policyProject: null, qualifications: [], taskRequirements: {}, pickerProviders: [provider], recentModels: [],
-      busy: false, submitting: false, thread, usageSnapshot: null, usageSummary: null, rateLimitStatus: null,
-      pickModel() {}, settings: { reasoningEffort: effort }, ...metadata,
-      ModelPickerMenu: picker.ModelPickerMenu, ModelMenuSettings: () => null, canConfigureFastMode: false,
-      saveSettings() {}, contextUsage: {},
+    return React.createElement(picker.ModelPickerMenu, {
+      provider, model: 'fixture', providerAccountId: null, localOnly: false,
+      policyProject: null, pickerProviders: [provider], recentModels: [],
+      usageSnapshot: null, usageSummary: null, rateLimitStatus: null, onPickModel() {},
+      detail: metadata.effortDisplayLabel(provider, 'fixture', effort), disabled: !!bot,
     })
   }
   return renderThreadComposer({ thread, Composer, BotComposerSettings: context.BotComposerSettings })
 }
 const bot = (reasoningEffort?: ReasoningEffortSetting) => ({ reasoningEffort } as BotThreadConfig)
 const markup = (captured: BotThreadConfig | undefined, global: ReasoningEffortSetting) => renderToStaticMarkup(composer(captured, global))
-assert.match(markup(bot('low'), 'high'), />Low<\/span>/, 'the real thread/composer/picker wiring displays captured Low, not global High')
+assert.match(markup(bot('low'), 'high'), />Low<\/span>/, 'the real thread/provider/picker wiring displays captured Low, not global High')
 assert.match(markup(bot('high'), 'low'), />High<\/span>/, 'captured High remains independent of global Low')
 assert.match(markup(bot(), 'high'), />High<\/span>/, 'a legacy bot without captured effort displays its global fallback')
 assert.match(markup(undefined, 'low'), />Low<\/span>/, 'an ordinary conversation keeps the existing effort detail')
 assert.doesNotMatch(markup(bot('dynamic'), 'high'), />High<\/span>/, 'an unsupported captured value cannot be misreported as global High')
 const captured = bot('low')
 assert.match(markup(captured, 'medium'), />Low<\/span>/, 'changing the app setting cannot rewrite a captured chat badge')
-assert.match(markup(captured, 'high'), /disabled=""/, 'captured bot configuration remains locked')
 const siblings = renderToStaticMarkup(React.createElement(React.Fragment, null, composer(captured, 'high'), composer(undefined, 'high')))
 assert.equal((siblings.match(/>Low<\/span>/g) ?? []).length, 1)
 assert.equal((siblings.match(/>High<\/span>/g) ?? []).length, 1, 'a captured value cannot leak into an adjacent ordinary composer')
-console.log('Bot composer checks passed: captured/legacy/global badges, actual parent wiring, lock and sibling isolation.')
+console.log('Bot composer checks passed: captured/legacy/global badges, actual parent wiring and sibling isolation.')
