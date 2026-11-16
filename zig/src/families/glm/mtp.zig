@@ -65,12 +65,13 @@ pub fn finish(x: *fwd.Ctx, e: mtl.ComputeEncoder, res: Ref, normed: Ref, rows: u
     add(x, e, sc.m_out, sc.branch, sc.m_x, rows * D);
 }
 
-/// Drafts for `rows` pre-norm head outputs at `out`: the head's norm, then the LM head over the draft vocabulary.
+/// Drafts for `rows` pre-norm head outputs at `out`: the head's norm, then the LM head over the draft vocabulary (the
+/// MTP layer's own shared_head.head when the checkpoint stores one: drafts only, every token is verified by lm_head).
 pub fn drafts(x: *const fwd.Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, picks: Ref) void {
     const c = x.c;
     const D = c.hidden;
     fwd.rms(x, e, out, x.w.mtp.?.norm, x.sc.m_hn, rows, D, D, D, c.eps);
-    fwd.headOver(x, e, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, true);
+    fwd.headWith(x, e, x.w.draft_head orelse x.w.head, x.sc.m_hn, x.sc.m_logits.at(@as(usize, x.m_row) * c.vocab * 2), picks, rows, x.draft_vocab, true);
 }
 
 /// One chained draft from `h` (a row of the head's previous output, m_x) and the draft before it (`token`, u32).

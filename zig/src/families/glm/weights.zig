@@ -57,6 +57,7 @@ pub const Weights = struct {
     mtp: ?Mtp = null,
     embed: Affine = undefined,
     head: Affine = undefined,
+    draft_head: ?Affine = null, // layers.45.shared_head.head when stored (one Mac): the MTP drafts' own LM head
     norm: Ref = undefined,
     buffers: std.ArrayList(mtl.Buffer) = .empty,
     bytes: usize = 0,
@@ -524,10 +525,14 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, c: *con
     l.widths = try readWidths(l.arena, dir, c);
     const D: usize = c.hidden;
     const V: usize = c.vocab;
-    try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + affine.bytes(V, D, try l.widths.of("lm_head")) + D * 2 + 8 * 256);
+    const dh_name = prefix ++ "layers.45.shared_head.head"; // a lighter LM head for the MTP drafts (verification keeps lm_head)
+    const dh = c.tp == 1 and c.mtp > 0 and l.names.contains(dh_name ++ ".weight");
+    const dh_bytes = if (dh) affine.bytes(V, D, try l.widths.of(dh_name)) else 0;
+    try l.begin(affine.bytes(V, D, try l.widths.of(prefix ++ "embed_tokens")) + affine.bytes(V, D, try l.widths.of("lm_head")) + dh_bytes + D * 2 + 8 * 256);
     w.embed = try l.mat(.embed, D, prefix ++ "embed_tokens", &.{""}, &.{V}, .{});
     const vp = c.vocabPart(); // TP2: this Mac's half of the head's rows
     w.head = try l.stack(.head, D, "lm_head", &.{""}, &.{vp[0]}, &.{vp[1] - vp[0]}, &.{V}, 1, .{});
+    if (dh) w.draft_head = try l.stack(.head, D, dh_name, &.{""}, &.{0}, &.{V}, &.{V}, 1, .{});
     w.norm = try l.plain(prefix ++ "norm.weight", .{}, .bf16, &.{D});
     for (0..c.run) |i| w.layers[i] = try l.layer(i);
     const has_mtp = c.mtp > 0 and l.names.contains(prefix ++ "layers.45.eh_proj.weight");
