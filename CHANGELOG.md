@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 remote prefill: `--mcdma-link` takes a comma list of up to eight links and pulls a split hand-off's shards in parallel (#3598).
+
 - DeepSeek V4.1 remote prefill: the Mac prefills only the last prompt token after a pull (`TF_PREFILL_TAIL`, default 1; 0 keeps the chunk rule) (#3597).
 
 - DeepSeek V4.1 remote prefill: a failing link or pair degrades to local prefill and recovers (`TF_PREFILL_BREAKER`, `TF_PREFILL_COOLDOWN_S`), a request that ends stops its pull, and the reply reports the pull's phases (#3596).
