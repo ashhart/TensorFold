@@ -193,7 +193,9 @@ __device__ __forceinline__ void mm_kernel(const __nv_bfloat16* __restrict__ x, l
 #pragma unroll
         for (int j = 0; j < T::NT; ++j) {
             if constexpr (BITS == 12) {  // the raw blocks follow the slots: N / 8 tiles x KG groups x 16 bytes
-                const uint32_t slot = reinterpret_cast<const uint16_t*>(ps)[(wn * T::NT + j) * 8 + (lane >> 2)];
+                // a tile past N was never staged: its slot is stale, and a stale raw index would read past the blocks
+                const bool staged = t0 + wn * T::NT + j < N8;
+                const uint32_t slot = staged ? reinterpret_cast<const uint16_t*>(ps)[(wn * T::NT + j) * 8 + (lane >> 2)] : 0u;
                 const unsigned char* raw = reinterpret_cast<const unsigned char*>(s) + (size_t)N8 * KG * 16;
                 bpairs12(pw + ((wn * T::NT + j) * 32 + lane) * T::WPC, slot, reinterpret_cast<const uint32_t*>(raw), lane, b[j]);
             } else {

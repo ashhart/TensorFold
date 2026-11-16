@@ -108,8 +108,13 @@ fn shape(gpu: check.Gpu, modules: *const glm.mm.Kernels, s: cuda.Stream, n: usiz
     const room = (n * k * 2 - sizes[0] - sizes[1]) / glm.mm.raw_bytes;
     try check.expect(want <= room, "glm-mm-12: {d}x{d} plants {d} raw blocks, room for {d}", .{ n, k, want, room });
     try check.expect(raw[0] == want and want >= made.raw, "glm-mm-12: {d}x{d} kept {d} raw blocks, the rule {d}, planted {d}", .{ n, k, raw[0], want, made.raw });
+    // the bytes the load's compaction keeps, in a buffer of that size: a read past them leaves the allocation
+    const held = sizes[0] + sizes[1] + @as(usize, @intCast(raw[0])) * glm.mm.raw_bytes;
+    var exact = try cuda.DeviceBuffer.alloc(gpu.d, held);
+    defer exact.free();
+    try gpu.d.check(gpu.d.api.cuMemcpyDtoDAsync_v2(exact.ptr, t12.ptr, held, s.handle), "cuMemcpyDtoDAsync");
     const w16: glm.mm.Tiled = .{ .w = t16.ptr, .n = n, .k = k };
-    const w12: glm.mm.Tiled = .{ .w = t12.ptr, .s = t12.ptr + sizes[0], .bits = 12, .n = n, .k = k };
+    const w12: glm.mm.Tiled = .{ .w = exact.ptr, .s = exact.ptr + sizes[0], .bits = 12, .n = n, .k = k };
     var part = try cuda.DeviceBuffer.alloc(gpu.d, @max(16, glm.mm.partBytes(pool, w16)));
     defer part.free();
     var o16 = try cuda.DeviceBuffer.alloc(gpu.d, pool * n * 4);
@@ -133,8 +138,9 @@ fn shape(gpu: check.Gpu, modules: *const glm.mm.Kernels, s: cuda.Stream, n: usiz
     };
 }
 
-/// Width 12's shapes: one K slice, two and eight, decode buckets and prompt blocks.
+/// Width 12's shapes: one K slice, two and eight, decode buckets and prompt blocks; the last three end mid-block.
 pub fn run(gpu: check.Gpu, modules: *const glm.mm.Kernels, s: cuda.Stream) !void {
-    for ([_][2]usize{ .{ 64, 512 }, .{ 128, 2048 }, .{ 832, 4096 }, .{ 12288, 512 } }) |dims| try shape(gpu, modules, s, dims[0], dims[1]);
-    check.pass("glm-mm-12: width 12 equals the bf16 tiles' bytes at every bucket, slice, prompt block and escape", .{});
+    for ([_][2]usize{ .{ 64, 512 }, .{ 128, 2048 }, .{ 832, 4096 }, .{ 12288, 512 }, .{ 72, 512 }, .{ 840, 4096 }, .{ 4040, 1024 } }) |dims|
+        try shape(gpu, modules, s, dims[0], dims[1]);
+    check.pass("glm-mm-12: width 12 equals the bf16 tiles' bytes at every bucket, slice, prompt block, escape and edge", .{});
 }
