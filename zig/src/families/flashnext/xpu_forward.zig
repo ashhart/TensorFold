@@ -26,7 +26,6 @@ const ple_layer = ld.ple_layer;
 const ple_tail_n = ld.ple_tail_n;
 const max_tp = ld.max_tp;
 const max_verify_rows = ld.max_verify_rows;
-const chunk_rows = ld.chunk_rows;
 const Dev = ld.Dev;
 const TpShape = ld.TpShape;
 const off = ld.off;
@@ -37,6 +36,7 @@ pub const Runner = struct {
     tp: usize,
     shp: TpShape,
     max_len: usize,
+    chunk_cap: usize,
     eos: i64,
     gpus: [max_tp]ze.Gpu = undefined,
     lists: [max_tp]ze.H = @splat(null),
@@ -59,7 +59,8 @@ pub const Runner = struct {
     cur: *Seq = undefined,
     last_rows: u32 = 0,
 
-    pub fn initTp(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, max_len: usize, tp: usize, want_mtp: bool) !*Runner {
+    pub fn initTp(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, max_len: usize, tp: usize, want_mtp: bool, chunk_cap_in: usize) !*Runner {
+        const chunk_cap = @min(@max(chunk_cap_in, ld.chunk_rows), ld.max_chunk_rows);
         const shp = try TpShape.forTp(tp);
         const r = try gpa.create(Runner);
         errdefer gpa.destroy(r);
@@ -69,6 +70,7 @@ pub const Runner = struct {
             .tp = tp,
             .shp = shp,
             .max_len = max_len,
+            .chunk_cap = chunk_cap,
             .eos = 0,
             .comm = undefined,
             .ngram = undefined,
@@ -84,7 +86,7 @@ pub const Runner = struct {
             r.lists[rk] = r.devs[rk].list;
         }
 
-        r.comm = try tp_mod.TpComm.init(r.gpus[0..tp], &kbin.tp, chunk_rows * dims * 4);
+        r.comm = try tp_mod.TpComm.init(r.gpus[0..tp], &kbin.tp, chunk_cap * dims * 4);
         for (0..tp) |rk| r.devs[rk].g = r.gpus[rk];
 
         r.ngram = try ple.Ngram.init(gpa, io, dir);
@@ -96,13 +98,13 @@ pub const Runner = struct {
         }
         errdefer if (r.draft_ids.len > 0) gpa.free(r.draft_ids);
 
-        try ld.loadAllRanks(gpa, io, dir, r.devs[0..tp], shp, want_mtp, r.draft_ids, r.weights[0..tp]);
+        try ld.loadAllRanks(gpa, io, r.ngram.pool, dir, r.devs[0..tp], shp, want_mtp, r.draft_ids, r.weights[0..tp]);
         for (0..tp) |rk| r.gpus[rk] = r.devs[rk].g;
         r.has_mtp = r.weights[0].mtp != null;
 
         // Allocate shared USM host buffers for async DMA uploads & small token readbacks
-        r.host_ids = try st.allocHostSlice(i32, &r.devs[0], r.gpus[0..tp], chunk_rows);
-        r.host_ple = try st.allocHostSlice(u16, &r.devs[0], r.gpus[0..tp], chunk_rows * dims);
+        r.host_ids = try st.allocHostSlice(i32, &r.devs[0], r.gpus[0..tp], chunk_cap);
+        r.host_ple = try st.allocHostSlice(u16, &r.devs[0], r.gpus[0..tp], chunk_cap * dims);
         r.host_tok = try st.allocHostSlice(i32, &r.devs[0], r.gpus[0..tp], max_verify_rows);
         r.host_best = try st.allocHostSlice(f32, &r.devs[0], r.gpus[0..tp], max_verify_rows * 4);
         r.host_topv = try st.allocHostSlice(f32, &r.devs[0], r.gpus[0..tp], 256 * 64);
@@ -111,7 +113,7 @@ pub const Runner = struct {
         // Allocate per-rank scratch buffers
         const nb_max = @max((max_len + index_ratio - 1) / index_ratio, 64);
         for (0..tp) |rk| {
-            r.acts[rk] = try st.allocRankActs(&r.devs[rk], shp, rk, nb_max, r.draft_ids.len, r.has_mtp);
+            r.acts[rk] = try st.allocRankActs(&r.devs[rk], shp, rk, chunk_cap, nb_max, r.draft_ids.len, r.has_mtp);
         }
         // Make shard_logits and shard_dlogits P2P-resident on Rank 0 for cross-GPU DMA gather!
         if (tp > 1) {
@@ -170,7 +172,7 @@ pub const Runner = struct {
         if (s.win_open) try r.keepRows(s.win_rows);
         try ops.checkIds(ids);
         const rows = ids.len;
-        if (rows == 0 or rows > chunk_rows) return error.WindowTooWide;
+        if (rows == 0 or rows > r.chunk_cap) return error.WindowTooWide;
         if (@as(usize, s.pos) + rows > s.cap) return error.PromptTooLong;
         if (!inplace and rows > max_verify_rows) return error.WindowTooWide;
 
@@ -386,7 +388,6 @@ pub const Runner = struct {
             // Keep last accepted row's streams in `last_streams` as well
             try d.copy(rs.last_streams, off(rs.verify_streams, (k - 1) * wide * 2), wide * 2);
         }
-        try r.syncAll();
 
         if (kept < s.win_rows) {
             var hist = s.win_history;
@@ -404,7 +405,7 @@ pub const Runner = struct {
         if (!r.has_mtp or tokens.len == 0) return null;
         try ops.checkIds(tokens);
         const m = tokens.len;
-        if (m > chunk_rows or mtp_pos0 + m > r.cur.cap) return error.PromptTooLong;
+        if (m > r.chunk_cap or mtp_pos0 + m > r.cur.cap) return error.PromptTooLong;
 
         for (tokens, 0..) |tok, i| r.host_ids[i] = @intCast(tok);
         var br_dst: [max_tp]*anyopaque = undefined;
@@ -426,7 +427,7 @@ pub const Runner = struct {
             try d.launch(d.k.rmsnorm_rows, .{ .x = @intCast(m) }, .{ a.ple_keys, @as(i32, dims), mw.norm_e, a.mixed, eps, @as(i32, dims) });
             try ops.linearBf16(d, mw.fc_e, a.mixed, a.mtp_branch, m);
 
-            // 2. Hidden branch: rmsnorm whole [10240] row -> fc_hidden on `4 * m` rows of [2560] -> ple_gated [m,
+            // 2. Hidden branch: rmsnorm whole [10240] row -> fc_hidden on `4 * m` rows -> ple_gated [m, 10240]
             try d.launch(d.k.rmsnorm_rows, .{ .x = @intCast(m) }, .{ in_streams[rk], @as(i32, wide), mw.norm_h, a.norm, eps, @as(i32, wide) });
             try ops.linearBf16(d, mw.fc_h, a.norm, a.ple_gated, streams * m);
 
