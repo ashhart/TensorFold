@@ -1,0 +1,1434 @@
+{
+ "suite": {
+  "quality": 1,
+  "digest": "d21a62442423"
+ },
+ "protocol": {
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "concurrency": 1,
+  "thinking": "off: chat_template_kwargs.enable_thinking"
+ },
+ "model": "NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
+ "checkpoint": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@82d93699acd3be9e4617c53360fe5b3f5dbeb1b3",
+ "engine": "d6c4cce602eef4aff235625a5325bb617a9674ff",
+ "machine": "NVIDIA GB10",
+ "seconds": 258.2,
+ "quality": {
+  "overall": {
+   "items": 228,
+   "passed": 207,
+   "unscored": 0
+  },
+  "categories": {
+   "gsm8k": {
+    "items": 100,
+    "passed": 96
+   },
+   "mmlu": {
+    "items": 100,
+    "passed": 83
+   },
+   "instructions": {
+    "items": 20,
+    "passed": 20
+   },
+   "long_context": {
+    "items": 8,
+    "passed": 8
+   }
+  }
+ },
+ "items": [
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-3",
+   "passed": true,
+   "read": "540"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-5",
+   "passed": true,
+   "read": "64"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-23",
+   "passed": true,
+   "read": "8"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-54",
+   "passed": true,
+   "read": "40"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-62",
+   "passed": true,
+   "read": "25000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-80",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-83",
+   "passed": true,
+   "read": "600"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-86",
+   "passed": true,
+   "read": "22"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-106",
+   "passed": true,
+   "read": "72"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-118",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-120",
+   "passed": true,
+   "read": "240"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-140",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-157",
+   "passed": true,
+   "read": "80"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-167",
+   "passed": true,
+   "read": "16"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-174",
+   "passed": true,
+   "read": "95"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-189",
+   "passed": true,
+   "read": "34"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-205",
+   "passed": true,
+   "read": "98"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-221",
+   "passed": true,
+   "read": "90"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-278",
+   "passed": true,
+   "read": "40"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-297",
+   "passed": true,
+   "read": "55"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-310",
+   "passed": true,
+   "read": "2050"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-312",
+   "passed": true,
+   "read": "32"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-328",
+   "passed": true,
+   "read": "2"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-340",
+   "passed": false,
+   "read": "3",
+   "text": "Josh starts with 3 balls and adds 1 ball each week. After 4 weeks, he is juggling 3 + 4 = 7 balls. He drops 3 balls, leaving 4. Two are caught by the crowd, but one is lost, so he continues with 4 - 1"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-348",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-355",
+   "passed": true,
+   "read": "34"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-368",
+   "passed": false,
+   "read": "10",
+   "text": "Sara scored 8 points. Erin now has three times as many points as Sara, so Erin has 3 × 8 = 24 points. Since Erin scored 14 points to reach 24, she had 24 − 14 = 10 points before.\n\nAnswer: 10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-381",
+   "passed": true,
+   "read": "67"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-393",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-429",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-436",
+   "passed": true,
+   "read": "15"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-440",
+   "passed": true,
+   "read": "98"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-443",
+   "passed": true,
+   "read": "59"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-462",
+   "passed": true,
+   "read": "71"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-477",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-496",
+   "passed": true,
+   "read": "38"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-519",
+   "passed": true,
+   "read": "280"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-526",
+   "passed": true,
+   "read": "21"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-531",
+   "passed": true,
+   "read": "66"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-537",
+   "passed": true,
+   "read": "188"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-545",
+   "passed": true,
+   "read": "30"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-547",
+   "passed": true,
+   "read": "81"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-549",
+   "passed": true,
+   "read": "398"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-573",
+   "passed": true,
+   "read": "600"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-595",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-603",
+   "passed": true,
+   "read": "1800"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-605",
+   "passed": true,
+   "read": "42"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-612",
+   "passed": true,
+   "read": "30"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-613",
+   "passed": true,
+   "read": "93000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-624",
+   "passed": true,
+   "read": "85"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-645",
+   "passed": true,
+   "read": "48"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-652",
+   "passed": false,
+   "read": "105",
+   "text": "James hires the carriage for 4 hours total (5 PM to 9 PM).  \nHe gets 1 hour free, so he pays for 3 hours.  \n\n- 1st paid hour: $15  \n- 2nd paid hour: $15 × 2 = $30  \n- 3rd paid hour: $30 × 2 = $60  \n\nT"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-669",
+   "passed": true,
+   "read": "132"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-670",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-674",
+   "passed": true,
+   "read": "12"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-687",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-706",
+   "passed": true,
+   "read": "9"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-709",
+   "passed": true,
+   "read": "3000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-717",
+   "passed": true,
+   "read": "5"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-730",
+   "passed": true,
+   "read": "8"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-791",
+   "passed": true,
+   "read": "100"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-804",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-806",
+   "passed": true,
+   "read": "70"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-808",
+   "passed": true,
+   "read": "12"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-822",
+   "passed": true,
+   "read": "1260"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-824",
+   "passed": true,
+   "read": "52"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-840",
+   "passed": true,
+   "read": "16"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-845",
+   "passed": true,
+   "read": "12"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-855",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-857",
+   "passed": true,
+   "read": "14000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-865",
+   "passed": true,
+   "read": "23"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-880",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-902",
+   "passed": true,
+   "read": "8"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-928",
+   "passed": true,
+   "read": "60"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-930",
+   "passed": true,
+   "read": "14"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-993",
+   "passed": true,
+   "read": "11"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-999",
+   "passed": true,
+   "read": "25"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1005",
+   "passed": true,
+   "read": "1490"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1050",
+   "passed": true,
+   "read": "655"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1065",
+   "passed": true,
+   "read": "95"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1079",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1084",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1102",
+   "passed": true,
+   "read": "113"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1108",
+   "passed": true,
+   "read": "38"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1113",
+   "passed": true,
+   "read": "-3"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1118",
+   "passed": true,
+   "read": "5"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1126",
+   "passed": true,
+   "read": "50"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1148",
+   "passed": true,
+   "read": "9"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1150",
+   "passed": true,
+   "read": "21"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1155",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1161",
+   "passed": false,
+   "read": "140",
+   "text": "Abraham starts with 80 square meters.\n\n- He sold half: \\(80 \\times \\frac{1}{2} = 40\\) m² for $50. Remaining: 40 m².\n- He sold another 1/4 of his land: \\(80 \\times \\frac{1}{4} = 20\\) m² for $30. Remain"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1207",
+   "passed": true,
+   "read": "64"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1211",
+   "passed": true,
+   "read": "448"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1233",
+   "passed": true,
+   "read": "81"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1238",
+   "passed": true,
+   "read": "520"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1243",
+   "passed": true,
+   "read": "50"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1246",
+   "passed": true,
+   "read": "3360"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1284",
+   "passed": true,
+   "read": "25"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1303",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1315",
+   "passed": true,
+   "read": "5"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-50",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-161",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-163",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-294",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-502",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-593",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-600",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-631",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-802",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1768",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1839",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1848",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1949",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2171",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2287",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2312",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2348",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2363",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2583",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3041",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3179",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3295",
+   "passed": false,
+   "read": "A",
+   "text": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3652",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3720",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3736",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3858",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-4076",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-4876",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5186",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5393",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5638",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5765",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6138",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6194",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6498",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6558",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6560",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6643",
+   "passed": false,
+   "read": "A",
+   "text": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6760",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6764",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6818",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7345",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7440",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7449",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7739",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7825",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7946",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8248",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8271",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8479",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8500",
+   "passed": false,
+   "read": "D",
+   "text": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8622",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8637",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8678",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8984",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9098",
+   "passed": false,
+   "read": "D",
+   "text": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9137",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9142",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9224",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9300",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9346",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9360",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9388",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9436",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9639",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9861",
+   "passed": false,
+   "read": "D",
+   "text": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9874",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10159",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10172",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10514",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10558",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10921",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10949",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11181",
+   "passed": false,
+   "read": "D",
+   "text": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11309",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11323",
+   "passed": false,
+   "read": "C",
+   "text": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11468",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11525",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11657",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11765",
+   "passed": false,
+   "read": "A",
+   "text": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11789",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11907",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11909",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11942",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12113",
+   "passed": false,
+   "read": "C",
+   "text": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12191",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12215",
+   "passed": false,
+   "read": "A",
+   "text": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12385",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12459",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12505",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12511",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12655",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12758",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12793",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12923",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13001",
+   "passed": false,
+   "read": "B",
+   "text": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13161",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13349",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13568",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-14025",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "instructions",
+   "id": "if-words-50",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-words-120",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-json-city",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-json-list",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-no-comma",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-lowercase",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-uppercase",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-ends-with",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-starts-with",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-bullets-4",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-bullets-3",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-paragraphs-2",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-keyword-3",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-include",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-exclude",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-one-word",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-number-only",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-french",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-title",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-quote",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-room",
+   "passed": true,
+   "read": "31"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-budget",
+   "passed": true,
+   "read": "17"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-year",
+   "passed": true,
+   "read": "1852"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-wells",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-limit",
+   "passed": true,
+   "read": "37"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-staff",
+   "passed": true,
+   "read": "29"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-days",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-houses",
+   "passed": true,
+   "read": "1450"
+  }
+ ],
+ "identity": "the served copy's config.json sha256 and safetensors bytes match this revision on the Hub"
+}

@@ -1,0 +1,1468 @@
+{
+ "suite": {
+  "quality": 1,
+  "digest": "d21a62442423"
+ },
+ "protocol": {
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "concurrency": 1,
+  "thinking": "off: chat_template_kwargs.enable_thinking"
+ },
+ "model": "lfm2.5-24b-a2b-4bit",
+ "checkpoint": "LiquidAI/LFM2.5-24B-A2B-MLX-4bit@667408d494bde191c2cb9dd4f4549827816b9275",
+ "engine": "d6c4cce602eef4aff235625a5325bb617a9674ff",
+ "machine": "Apple M5 Ultra",
+ "seconds": 63.8,
+ "quality": {
+  "overall": {
+   "items": 228,
+   "passed": 173,
+   "unscored": 0
+  },
+  "categories": {
+   "gsm8k": {
+    "items": 100,
+    "passed": 93
+   },
+   "mmlu": {
+    "items": 100,
+    "passed": 58
+   },
+   "instructions": {
+    "items": 20,
+    "passed": 20
+   },
+   "long_context": {
+    "items": 8,
+    "passed": 2
+   }
+  }
+ },
+ "items": [
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-3",
+   "passed": true,
+   "read": "540"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-5",
+   "passed": true,
+   "read": "64"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-23",
+   "passed": true,
+   "read": "8"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-54",
+   "passed": false,
+   "read": "33",
+   "text": "\nThe Doubtfire family originally had 7 adopted kittens.  \n\n- Patchy (the first cat) has now had three times the number of adopted kittens: \\(3 \\times 7 = 21\\).  \n- Trixie (the other cat) has had 12 ki"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-62",
+   "passed": true,
+   "read": "25000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-80",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-83",
+   "passed": true,
+   "read": "600"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-86",
+   "passed": true,
+   "read": "22"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-106",
+   "passed": true,
+   "read": "72"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-118",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-120",
+   "passed": true,
+   "read": "240"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-140",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-157",
+   "passed": true,
+   "read": "80"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-167",
+   "passed": true,
+   "read": "16"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-174",
+   "passed": true,
+   "read": "95"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-189",
+   "passed": true,
+   "read": "34"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-205",
+   "passed": true,
+   "read": "98"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-221",
+   "passed": true,
+   "read": "90"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-278",
+   "passed": true,
+   "read": "40"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-297",
+   "passed": true,
+   "read": "55"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-310",
+   "passed": true,
+   "read": "2050"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-312",
+   "passed": true,
+   "read": "32"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-328",
+   "passed": true,
+   "read": "2"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-340",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-348",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-355",
+   "passed": true,
+   "read": "34"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-368",
+   "passed": false,
+   "read": "10",
+   "text": "\nErin scored 14 points and now has three times more points than Sara, who scored 8.  \nThree times Sara's points is $3 \\times 8 = 24$.  \nThus, Erin's current total is 24 points.  \nSince she scored 14 p"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-381",
+   "passed": true,
+   "read": "67"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-393",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-429",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-436",
+   "passed": true,
+   "read": "15"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-440",
+   "passed": true,
+   "read": "98"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-443",
+   "passed": true,
+   "read": "59"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-462",
+   "passed": true,
+   "read": "71"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-477",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-496",
+   "passed": true,
+   "read": "38"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-519",
+   "passed": true,
+   "read": "280"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-526",
+   "passed": true,
+   "read": "21"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-531",
+   "passed": true,
+   "read": "66"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-537",
+   "passed": true,
+   "read": "188"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-545",
+   "passed": true,
+   "read": "30"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-547",
+   "passed": true,
+   "read": "81"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-549",
+   "passed": true,
+   "read": "398"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-573",
+   "passed": true,
+   "read": "600"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-595",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-603",
+   "passed": false,
+   "read": "1260",
+   "text": "\nRuiz makes 120 lb in 2 h → 60 lb per hour.  \nMarissa’s rate = (3/4)·60 lb/h = 45 lb/h.  \n\nTogether they make 60 + 45 = 105 lb per hour.  \nIn 12 h they produce 105 × 12 = 1260 lb.\n\n**Answer: 1260**"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-605",
+   "passed": true,
+   "read": "42"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-612",
+   "passed": true,
+   "read": "30"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-613",
+   "passed": true,
+   "read": "93000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-624",
+   "passed": true,
+   "read": "85"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-645",
+   "passed": true,
+   "read": "48"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-652",
+   "passed": false,
+   "read": "105",
+   "text": "\nThe rental lasts 4 hours (5 PM–9 PM). He receives 1 free hour, so he pays for 3 hours.  \n- First paid hour: \\$15  \n- Each subsequent hour costs twice the previous: \\$30, \\$60  \n\nTotal cost = 15 + 30 "
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-669",
+   "passed": true,
+   "read": "132"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-670",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-674",
+   "passed": true,
+   "read": "12"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-687",
+   "passed": false,
+   "read": "25.5",
+   "text": "\nLet the age of the twin be \\(T\\) and the age of the triplet be \\(R\\).\n\n- One twin is 7 years older than one triplet: \\(T = R + 7\\).\n- Their combined ages sum to 44: \\(T + R = 44\\).\n\nSubstituting the "
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-706",
+   "passed": true,
+   "read": "9"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-709",
+   "passed": true,
+   "read": "3000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-717",
+   "passed": true,
+   "read": "5"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-730",
+   "passed": true,
+   "read": "8"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-791",
+   "passed": true,
+   "read": "100"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-804",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-806",
+   "passed": true,
+   "read": "70"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-808",
+   "passed": true,
+   "read": "12"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-822",
+   "passed": true,
+   "read": "1260"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-824",
+   "passed": true,
+   "read": "52"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-840",
+   "passed": false,
+   "read": "20",
+   "text": "\nThe original length of each glue stick is 12 mm.\n\n- First stick: \\( \\frac{1}{6} \\) remains → \\(12 \\times \\frac{1}{6}=2\\) mm used, so \\(12-2=10\\) mm unused.  \n- Second stick: \\( \\frac{2}{3} \\) remains"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-845",
+   "passed": true,
+   "read": "12"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-855",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-857",
+   "passed": true,
+   "read": "14000"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-865",
+   "passed": true,
+   "read": "23"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-880",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-902",
+   "passed": true,
+   "read": "8"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-928",
+   "passed": true,
+   "read": "60"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-930",
+   "passed": true,
+   "read": "14"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-993",
+   "passed": true,
+   "read": "11"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-999",
+   "passed": true,
+   "read": "25"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1005",
+   "passed": true,
+   "read": "1490"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1050",
+   "passed": true,
+   "read": "655"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1065",
+   "passed": true,
+   "read": "95"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1079",
+   "passed": true,
+   "read": "10"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1084",
+   "passed": true,
+   "read": "20"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1102",
+   "passed": true,
+   "read": "113"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1108",
+   "passed": true,
+   "read": "38"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1113",
+   "passed": true,
+   "read": "-3"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1118",
+   "passed": true,
+   "read": "5"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1126",
+   "passed": true,
+   "read": "50"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1148",
+   "passed": true,
+   "read": "9"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1150",
+   "passed": true,
+   "read": "21"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1155",
+   "passed": true,
+   "read": "13"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1161",
+   "passed": false,
+   "read": "140",
+   "text": "\nAbraham starts with 80 m².\n\n- He sells half: 40 m² for \\$50 → \\$1.25 per m².  \n- Then he sells a quarter of the original land: 20 m² for \\$30 → \\$1.50 per m².  \n- The remaining land is 80 – 40 – 20 ="
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1207",
+   "passed": true,
+   "read": "64"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1211",
+   "passed": true,
+   "read": "448"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1233",
+   "passed": true,
+   "read": "81"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1238",
+   "passed": true,
+   "read": "520"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1243",
+   "passed": true,
+   "read": "50"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1246",
+   "passed": true,
+   "read": "3360"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1284",
+   "passed": true,
+   "read": "25"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1303",
+   "passed": true,
+   "read": "4"
+  },
+  {
+   "category": "gsm8k",
+   "id": "gsm8k-1315",
+   "passed": true,
+   "read": "5"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-50",
+   "passed": false,
+   "read": "cut at 32 tokens (no single letter)",
+   "text": "\nWe need to evaluate the truth of two statements about group theory.\n\n**Statement 1:** \"Every solvable group is of prime-power order.\"\n\nRecall that"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-161",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-163",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-294",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-502",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-593",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-600",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-631",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-802",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1768",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1839",
+   "passed": false,
+   "read": "cut at 32 tokens (C)",
+   "text": "\nC\n\nExplanation: When a dependent variable has recently exhibited a structural change (e.g., a shift in its underlying economic relationships or behavior), models that are"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1848",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-1949",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2171",
+   "passed": false,
+   "read": "cut at 32 tokens (no single letter)",
+   "text": "\nC</think>\n\nThe problem states that approximately 2 out of 5 seniors go on to attend graduate school. With 750 seniors at the college, we"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2287",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2312",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2348",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2363",
+   "passed": false,
+   "read": "cut at 32 tokens (no single letter)",
+   "text": "\nWe are given:\n\n- Each story (floor) is **14.3 feet** tall.\n- The total height of the building is **185.9"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-2583",
+   "passed": false,
+   "read": "C",
+   "text": "\nC. 76%"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3041",
+   "passed": false,
+   "read": "C",
+   "text": "\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3179",
+   "passed": false,
+   "read": "cut at 32 tokens (A)",
+   "text": "\nA\n\nThe collision theory of reaction rates primarily considers the frequency of collisions between reactant molecules, the energy of the collisions (specifically whether it meets the activation"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3295",
+   "passed": false,
+   "read": "C",
+   "text": "\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3652",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3720",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3736",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-3858",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-4076",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-4876",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5186",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5393",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5638",
+   "passed": false,
+   "read": "cut at 32 tokens (C)",
+   "text": "\nC\n\nIn a well-designed experiment, treatments are carefully planned to ensure that the experimental units are as similar as possible in response to the treatments, minimizing"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-5765",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6138",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6194",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6498",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6558",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6560",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6643",
+   "passed": false,
+   "read": "D",
+   "text": "\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6760",
+   "passed": false,
+   "read": "D",
+   "text": "\nD</think>\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6764",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-6818",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7345",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7440",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7449",
+   "passed": false,
+   "read": "C",
+   "text": "\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7739",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7825",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-7946",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8248",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8271",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8479",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8500",
+   "passed": false,
+   "read": "D",
+   "text": "\nD</think>\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8622",
+   "passed": false,
+   "read": "C",
+   "text": "\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8637",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8678",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-8984",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9098",
+   "passed": false,
+   "read": "C",
+   "text": "\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9137",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9142",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9224",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9300",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9346",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9360",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9388",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9436",
+   "passed": false,
+   "read": "no answer",
+   "text": "\nB</think>"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9639",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9861",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-9874",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10159",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10172",
+   "passed": false,
+   "read": "C",
+   "text": "\nC</think>\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10514",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10558",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10921",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-10949",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11181",
+   "passed": false,
+   "read": "D",
+   "text": "\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11309",
+   "passed": false,
+   "read": "D",
+   "text": "\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11323",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11468",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11525",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11657",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11765",
+   "passed": false,
+   "read": "A",
+   "text": "\nA. liable for battery."
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11789",
+   "passed": false,
+   "read": "B",
+   "text": "\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11907",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11909",
+   "passed": false,
+   "read": "C",
+   "text": "\nC</think>\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-11942",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12113",
+   "passed": false,
+   "read": "C",
+   "text": "\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12191",
+   "passed": false,
+   "read": "C",
+   "text": "\nC</think>\nC"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12215",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12385",
+   "passed": false,
+   "read": "D",
+   "text": "\nD</think>\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12459",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12505",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12511",
+   "passed": true,
+   "read": "A"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12655",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12758",
+   "passed": false,
+   "read": "A",
+   "text": "\nA"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12793",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-12923",
+   "passed": true,
+   "read": "C"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13001",
+   "passed": false,
+   "read": "D",
+   "text": "\nD.</think>D"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13161",
+   "passed": false,
+   "read": "B",
+   "text": "\nB</think>\nB"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13349",
+   "passed": false,
+   "read": "D",
+   "text": "\nD"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-13568",
+   "passed": true,
+   "read": "B"
+  },
+  {
+   "category": "mmlu",
+   "id": "mmlu-14025",
+   "passed": true,
+   "read": "D"
+  },
+  {
+   "category": "instructions",
+   "id": "if-words-50",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-words-120",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-json-city",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-json-list",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-no-comma",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-lowercase",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-uppercase",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-ends-with",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-starts-with",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-bullets-4",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-bullets-3",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-paragraphs-2",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-keyword-3",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-include",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-exclude",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-one-word",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-number-only",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-french",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-title",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "instructions",
+   "id": "if-quote",
+   "passed": true,
+   "read": "all checks"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-room",
+   "passed": false,
+   "read": "cut at 48 tokens (no number)",
+   "text": "We need to read the notes. The question: \"In which room does the council of Harlow Ford meet now? Answer with the number only.\"\n\nWe have a correction note: \"Correction to the earlier notice: the counc"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-budget",
+   "passed": false,
+   "read": "cut at 48 tokens (no number)",
+   "text": "We need to parse the question: \"What is the treatment plant's budget now, in millions of pounds? Answer with the number only.\"\n\nWe have notes about the town of Harlow Ford. The original text says: \"Th"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-year",
+   "passed": false,
+   "read": "cut at 48 tokens (1847)",
+   "text": "We need to answer: \"In which year was the old mill built, according to the latest records?\" The notes mention that the old mill on the Tane was built in 1847 (first note). Then later a later survey of"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-wells",
+   "passed": false,
+   "read": "cut at 48 tokens (6)",
+   "text": "We need to read the notes. The question: \"How many new wells will be drilled? Answer with the number only.\"\n\nThe notes mention: \"The town plans to drill 6 new wells upstream. The plan was later cut"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-limit",
+   "passed": true,
+   "read": "37"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-staff",
+   "passed": true,
+   "read": "29"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-days",
+   "passed": false,
+   "read": "cut at 48 tokens (9)",
+   "text": "We need to read the notes. The question: \"For how many days in all was the river closed to boats? Answer with the number only.\"\n\nWe have the following: \"The river was closed to boats for 9 days in"
+  },
+  {
+   "category": "long_context",
+   "id": "lc-houses",
+   "passed": false,
+   "read": "cut at 48 tokens (1200)",
+   "text": "We need to answer: \"How many houses will the new pipes reach, by the revised figures? Answer with the number only.\"\n\nWe have multiple notes. The question mentions \"The new pipes will reach 1200 houses"
+  }
+ ],
+ "identity": "the served copy's config.json sha256 and safetensors bytes match this revision on the Hub"
+}
