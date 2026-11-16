@@ -262,7 +262,7 @@ def scenarios(rec: Recorder, texts: Texts, turns: int, cancel_after: float) -> N
 
 
 def split(client: Client, out: str, texts: Texts, max_tokens: int) -> int:
-    """System cuts one row before, at and after a fresh pair call's split (rank 0 holds rows up to ceil(L/2)), each resumed by a second conversation."""
+    # Cuts a row before, at and after a pair's split (rank 0 holds up to ceil(L/2)); each resumed by a second chat.
     rec = Recorder(client, out, max_tokens)
     for k, delta in enumerate((-1, 0, 1)):
         user = f"Case {k}. Read the file below and say what it does.\n\n" + texts.get(50 + k, 14_000)[1]
