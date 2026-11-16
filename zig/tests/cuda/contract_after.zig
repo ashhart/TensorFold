@@ -15,7 +15,7 @@ pub fn keep(kernels: *std.ArrayList(g.Kernel), only: []const []const u8) void {
     kernels.shrinkRetainingCapacity(kept);
 }
 
-/// The served, paged, pending, learning, lane and SwiGLU pair suites of a full run.
+/// The served, paged, pending, learning, lane, SwiGLU pair and int4 suites of a full run.
 pub fn suites(gpu: check.Gpu) !void {
     try @import("contract_qwen_served.zig").run(gpu);
     try @import("contract_qwen_pages.zig").run(gpu);
@@ -24,4 +24,5 @@ pub fn suites(gpu: check.Gpu) !void {
     try @import("contract_qwen_learning.zig").numerical(gpu);
     try @import("contract_fn_lanes.zig").run(gpu);
     try @import("contract_prompt_swiglu.zig").run(gpu);
+    try @import("contract_int4.zig").run(gpu);
 }
