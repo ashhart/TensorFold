@@ -7,6 +7,7 @@ pub const pricedBatched = alloc.pricedBatched;
 pub const Constants = @import("depth_constants.zig").Constants;
 pub const HoldCost = @import("hold_price.zig").HoldCost;
 const holdMs = @import("hold_price.zig").holdMs;
+const copy_price = @import("copy_price.zig");
 
 /// A stream's acceptance by depth and probe counters (Python `_depth_state[stream]`).
 pub const State = struct {
@@ -114,7 +115,8 @@ pub const Rule = struct {
         return r.ownCosts(w);
     }
 
-    fn ownCosts(r: *Rule, w: Who) !*Table {
+    /// The stream's own round times by depth (plain_guard's, and a copy's plain price: lanes/copy_price.zig).
+    pub fn ownCosts(r: *Rule, w: Who) !*Table {
         _ = try r.rates(w);
         const st = &w.state.*.?;
         if (st.ms == null) st.ms = .{};
@@ -129,18 +131,22 @@ pub const Rule = struct {
         if (table == &r.greedy_ms) try r.blend(&r.round_ms, drafts, ms); // a greedy round counts for every stream too
     }
 
-    fn blend(r: *Rule, table: *Table, drafts: i64, ms: f64) !void {
+    pub fn blend(r: *Rule, table: *Table, drafts: i64, ms: f64) !void {
         const before = table.get(drafts);
         try table.put(r.gpa, drafts, if (before) |b| b + r.k.cost_rate * (ms - b) else ms);
     }
 
     /// Measured round time when there is one, else the load-time forward cost plus head steps.
     pub fn roundCost(r: *Rule, drafts: i64, who: ?Who) !?f64 {
-        const table = try r.costs(who);
+        return r.roundCostIn(try r.costs(who), drafts, r.plain_guard);
+    }
+
+    /// roundCost on `table`; `with_floor`: an untimed depth also pays the least excess a timed round's row showed.
+    pub fn roundCostIn(r: *const Rule, table: *const Table, drafts: i64, with_floor: bool) ?f64 {
         if (table.get(drafts)) |v| return v;
         const forward = r.family_costs.get(drafts + 1) orelse return null;
         var modeled = forward + r.mtp_step_ms * @as(f64, @floatFromInt(drafts));
-        if (r.plain_guard) {
+        if (with_floor) {
             // untimed: its model plus the least time a row of a timed round took beyond its model
             var least: ?f64 = null;
             for (table.slots, 0..) |slot, d| {
@@ -180,7 +186,7 @@ pub const Rule = struct {
         var best: i64 = 1;
         var best_rate: f64 = -1.0;
         if (copy or r.plain_guard) {
-            if (try (if (copy) r.copyPlain(who) else r.roundCost(0, who))) |plain| {
+            if (try (if (copy) copy_price.plain(r, who) else r.roundCost(0, who))) |plain| {
                 if (plain != 0.0) { // a draft must beat plain by plain_margin: estimates near the line are noise
                     best = 0;
                     best_rate = r.k.plain_margin / plain;
@@ -193,7 +199,7 @@ pub const Rule = struct {
         var run: f64 = 1.0;
         var d: i64 = 1;
         while (d <= most) : (d += 1) {
-            const cost = (if (copy) try r.copyCost(d, who) else try r.roundCost(d, who)) orelse break;
+            const cost = (if (copy) try copy_price.cost(r, d, who) else try r.roundCost(d, who)) orelse break;
             const at: usize = @intCast(d - 1);
             run *= if (at < chances.len) chances[at] else chances[chances.len - 1];
             expected += run;
@@ -227,7 +233,7 @@ pub const Rule = struct {
     /// A lone copy's best prefix on its stream's own times, none while plain wins bar a backoff probe (`take` counts).
     pub fn copyRows(r: *Rule, who: Who, chances: []const f64, rows: i64, take: bool) !i64 {
         if (rows <= 0 or !r.copy_guard or r.family_costs.empty()) return rows;
-        if ((try r.copyPlain(who)) == null) return rows;
+        if ((try copy_price.plain(r, who)) == null) return rows;
         const best = try r.bestRows(who, chances, rows, true);
         const st = &who.state.*.?;
         if (best.rows > 0) {
@@ -239,49 +245,6 @@ pub const Rule = struct {
         }
         const probe = if (take) r.backoff(&st.copy_plain, &st.copy_wait) else (st.copy_plain orelse 0) + 1 >= (st.copy_wait orelse r.k.depth_probe_every);
         return if (probe) best.drafted else 0;
-    }
-
-    /// A copy as timed, else on the line from plain to its nearest timed copy, else each row as plain's (no head step).
-    fn copyCost(r: *Rule, rows: i64, who: Who) !?f64 {
-        const copies = try r.copyCosts(who);
-        if (copies.get(rows)) |v| return v;
-        const plain = (try r.copyPlain(who)) orelse return null;
-        const n: f64 = @floatFromInt(rows);
-        var near: ?i64 = null;
-        for (copies.slots, 0..) |slot, at| {
-            const d: i64 = @intCast(at);
-            if (slot == null or d == 0) continue;
-            if (near == null or @abs(d - rows) < @abs(near.? - rows)) near = d;
-        }
-        if (near) |d| return plain + n * @max(0.0, (copies.get(d).? - plain) / @as(f64, @floatFromInt(d)));
-        const one = r.family_costs.get(1) orelse return null;
-        const forward = r.family_costs.get(rows + 1) orelse return null;
-        return forward + (n + 1) * @max(0.0, plain - one);
-    }
-
-    /// The plain round a copy must beat: roundCost's under plain_guard, else the stream's own timed one or its forward.
-    fn copyPlain(r: *Rule, who: Who) !?f64 {
-        if (r.plain_guard) return r.roundCost(0, who);
-        return (try r.ownCosts(who)).get(0) orelse r.family_costs.get(1);
-    }
-
-    /// A copies-only stream's plain round into its own times, plain_guard or not (copy_guard prices copies by them).
-    pub fn observePlain(r: *Rule, ms: f64, initializing: bool, who: Who) !void {
-        if (initializing) return;
-        try r.blend(try r.ownCosts(who), 0, ms);
-    }
-
-    fn copyCosts(r: *Rule, who: Who) !*Table {
-        _ = try r.rates(who);
-        const st = &who.state.*.?;
-        if (st.copy_ms == null) st.copy_ms = .{};
-        return &st.copy_ms.?;
-    }
-
-    /// A lone copy round's time by its copied rows; a stream's first round stays out, as in observeCost.
-    pub fn observeCopyCost(r: *Rule, rows: i64, ms: f64, initializing: bool, who: Who) !void {
-        if (rows <= 0 or initializing) return;
-        try r.blend(try r.copyCosts(who), rows, ms);
     }
 
     /// Drafts past a grant: none when it stopped short of the held drafts (the width did not bind), else grant_slack.

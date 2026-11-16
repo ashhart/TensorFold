@@ -2,6 +2,7 @@
 const Engine = @import("engine.zig").Engine;
 const Stream = @import("stream.zig").Stream;
 const win = @import("windows.zig");
+const copy_price = @import("copy_price.zig");
 const ev = @import("events.zig");
 const trail = @import("trail.zig");
 const f = ev.f;
@@ -23,14 +24,16 @@ pub fn rows(e: *Engine, s: *Stream, copy: win.Copy, take: bool) !usize {
     return keep;
 }
 
-/// A priced stream's copy round by its rows, and a copies-only stream's plain round (a head's are timed with its own).
+/// A priced stream's copy round by its rows, and its plain and head rounds the head's timing keeps out of its times.
 pub fn time(e: *Engine, s: *Stream, kind: win.Kind, window_rows: usize) !void {
     if (!enabled(e, s)) return;
-    const plain = kind == .none and !e.cfg.family_mtp;
-    if (kind != .copy and !plain) return;
+    // engine.zig's familyRound times a head's and plain rounds into the stream's own times only under plain_guard
+    const own = (kind == .none or kind == .head) and !(e.cfg.family_mtp and e.cfg.plain_guard);
+    if (kind != .copy and !own) return;
     const ms = e.clock.elapsedMs(.cost);
     const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
-    try trail.event(e, &.{ f("ev", trail.str(if (plain) "cost" else "copy-cost")), f("stream", trail.str(s.id)), f("drafts", trail.int(window_rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
-    if (plain) return e.rule.observePlain(ms, first, win.who(s));
-    return e.rule.observeCopyCost(@intCast(window_rows - 1), ms, first, win.who(s));
+    try trail.event(e, &.{ f("ev", trail.str(if (own) "plain-cost" else "copy-cost")), f("stream", trail.str(s.id)), f("drafts", trail.int(window_rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
+    const drafts: i64 = @intCast(window_rows - 1);
+    if (own) return copy_price.observeOwn(&e.rule, drafts, ms, first, win.who(s));
+    return copy_price.observeCopy(&e.rule, drafts, ms, first, win.who(s));
 }
