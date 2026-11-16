@@ -57,20 +57,25 @@ clean-machine install.
 
 ## Linux command sandbox — follow-up branch
 
-The bubblewrap backend is implemented on this branch with the git and worktree gaps closed, and
-remains **opt-in** (`TENSORFOLD_LINUX_SANDBOX=1`) until a maintainer decides otherwise. Nested
-repositories are pinned like the workspace root; a worktree whose gitdir or shared directory lies
-outside the workspace is refused, as is a workspace with no repository, so commands stay fail-closed
-where the profile cannot protect metadata. One deviation from the macOS sandbox profile remains:
+The bubblewrap backend is implemented on this branch and stays **opt-in**
+(`TENSORFOLD_LINUX_SANDBOX=1`) until a maintainer decides otherwise. It pins every repository it
+finds under the workspace — including repositories inside dependency folders and nested worktrees —
+and refuses instead of protecting only some.
 
-1. Creating a brand-new `.git` where none exists cannot be denied; existing repositories pin `.git`
-   against rename and pin `config`, `config.worktree`, `hooks` and `info` read-only.
-2. Nested repositories and submodule gitdirs below the workspace root are not pinned.
-3. A worktree `.git` pointer file is mounted writable, so its external gitdir is not protected.
+Limits, stated rather than hidden:
 
-On this branch the Linux backend is absent entirely, so `run_command` keeps the existing fail-closed
-behavior; the development-only `VONTRA_ALLOW_UNSANDBOXED_COMMANDS=1` escape hatch is unchanged. Details and review
-history: [SANDBOX-REVIEW.md](SANDBOX-REVIEW.md).
+1. A workspace with no repository is refused: bwrap mounts paths and cannot deny creating `.git` by
+   name, so the sandbox requires metadata it can pin.
+2. The walk refuses at 32 directory levels or 50,000 directories rather than silently pinning a
+   subset. A workspace that exceeds either bound keeps commands refused.
+3. Control entries a repository does not have yet (`config.worktree`, `hooks`, `info`) are mounted
+   read-only from empty placeholders, which bwrap creates as empty files or directories inside
+   `.git` on first use. A writable run therefore cannot add or edit them.
+4. A worktree's `.git` pointer file is mounted read-only and its gitdir and shared directory must
+   stay inside the workspace; anything else is refused before a command runs.
+
+The development-only `VONTRA_ALLOW_UNSANDBOXED_COMMANDS=1` escape hatch is unchanged. Details and
+review history: [SANDBOX-REVIEW.md](SANDBOX-REVIEW.md).
 
 ## Connecting to a Mac engine
 

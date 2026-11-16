@@ -41,6 +41,37 @@ try {
 
   process.env.TENSORFOLD_LINUX_SANDBOX = '1'
 
+  // A repository inside a dependency folder and one several levels down are pinned too.
+  const inModules = path.join(cwd, 'node_modules', 'dep')
+  mkdirSync(path.join(inModules, '.git', 'hooks'), { recursive: true })
+  writeFileSync(path.join(inModules, '.git', 'config'), '[core]\n')
+  const deep = path.join(cwd, 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'deep-repo')
+  mkdirSync(path.join(deep, '.git', 'hooks'), { recursive: true })
+  writeFileSync(path.join(deep, '.git', 'config'), '[core]\n')
+  const walked = linuxSandboxArgv(cwd, { allowCwdWrite: true, allowNetwork: false })
+  assert.ok(bind(walked, '--bind', path.join(inModules, '.git')), 'a repository inside node_modules is pinned')
+  assert.ok(bind(walked, '--bind', path.join(deep, '.git')), 'a deeply nested repository is pinned')
+  ok('dependency folders and deep repositories are pinned, not skipped')
+
+  // Beyond the depth bound the walk refuses instead of pinning a subset.
+  let chain = path.join(cwd, 'too-deep')
+  for (let i = 0; i < 34; i++) chain = path.join(chain, `level-${i}`)
+  mkdirSync(chain, { recursive: true })
+  assert.throws(() => linuxSandboxArgv(cwd, { allowCwdWrite: true, allowNetwork: false }), /will not walk below 32 directory levels/)
+  rmSync(path.join(cwd, 'too-deep'), { recursive: true, force: true })
+  ok('a workspace deeper than the walk bound is refused')
+
+  // A worktree inside the workspace is pinned, and its pointer file is frozen read-only.
+  const innerWorktree = path.join(cwd, 'inner-worktree')
+  const innerGitdir = path.join(cwd, '.git', 'worktrees', 'inner')
+  mkdirSync(innerGitdir, { recursive: true })
+  mkdirSync(innerWorktree, { recursive: true })
+  writeFileSync(path.join(innerWorktree, '.git'), 'gitdir: ../.git/worktrees/inner\n')
+  const worktreeArgv = linuxSandboxArgv(cwd, { allowCwdWrite: true, allowNetwork: false })
+  assert.ok(bind(worktreeArgv, '--ro-bind', path.join(innerWorktree, '.git')), 'the worktree pointer is read-only')
+  assert.ok(bind(worktreeArgv, '--bind', innerGitdir), 'the worktree gitdir stays writable for refs and objects')
+  ok('a nested worktree is pinned through its gitdir and its pointer is frozen')
+
   // A worktree whose gitdir lives outside the workspace is refused, and refusal fails closed.
   const outsideWorktree = path.join(root, 'outside-worktree')
   mkdirSync(path.join(root, 'elsewhere', '.git', 'worktrees', 'outside'), { recursive: true })
