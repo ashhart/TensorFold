@@ -119,9 +119,11 @@ on the Qwen3.8-27B pull) gives the lane host a `lane_remote.Source`: `wants` is 
 host slices, so nothing is staged), seals it (`Model.snapshotSeal`: position, the Engram record of the last three tokens'
 compressed ids, taps with no rows) and returns `{ saved, at }`. `Backend.prefill` restores it with `snapshotRestore` and
 prefills the tail, exactly as for a kept prompt state. `drop` frees the Snapshot; `TF_PREFILL_KEEP` decides whether states
-built on it are kept (marked remote). The drafter's rings are not in a Snapshot (the lane holds them in a state of its own), so
-`ring` parts are read and dropped; the drafter has no conditioning rows until local forwards fill the taps, which can lower
-draft acceptance and nothing else.
+built on it are kept (marked remote). The drafter's rings are in the Snapshot's `live` bytes when the slot's cache plan has the three
+DSpark stages (43 layers), and `ring` parts then land there (all three stages or none; a part that is short, repeated or for another
+stage is refused). A producer sends them only in its full-prefill profile with drafts on (`MissingRing` otherwise, and the replay
+profile ships none); a plan without the stages reads and drops them, which `Landing.dropped` counts. Without rings, or without
+conditioning rows (the taps are filled by local forwards), the drafter can accept fewer drafts and nothing else.
 
 `mcdma-rpcd connect` recreates its mailbox at every start, so a mapping taken once keeps the dead object: before each pull the link
 checks that its name still maps the mailbox it holds and, if not, maps the new one (`fabric/relink.zig`; a refused map is not tried again
