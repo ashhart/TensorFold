@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Flash Next at TP=2 on CUDA: the draft head, head-group and rollback passes replay as CUDA graphs on both ranks, and one-row split lanes skip their interleave copies; with Qwen3.8-Flash-Next NVFP4 and MTP at TP=2 on GB10s, decode is 1.2-1.4% faster and prompts 0.5-2.1% faster, with identical replies (#2837, for #2835).
+
 - CI: the no-GPU host tests run as two parallel jobs, `zig` and `zig-b`, and a build check fails if any host check is in both or neither; a local `zig build test-host` still runs all of them (#3474).
 
 - Nemotron 3.5 Bolt on CUDA: the shared expert runs on the side stream in decode windows, as on Super, so decode on a GB10 is 2.9-3.0% faster at one stream and 1.4-2.1% at four, with identical replies (#2847, for #2840).
@@ -180,7 +182,6 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - CI: a newer push to main cancels main's older No GPU run (a landing train pushes one commit a PR, and the train's own run has tested the tree), the nightly keeps its own run, and the app checks run on pushes to main only (#3230).
 
 - Intel XPU: Qwen3.8-27B's prompt `gdn_out` kernel keeps its scale bookkeeping in cheaper exact forms, for 22.6% less kernel time on an Arc Pro B70 (736 to 570 ms over a 32K prompt) with byte-identical outputs, its fallback included (#2921, refs #2859). Thanks to @dinadur.
-- Flash Next at TP=2 on CUDA: the draft head, head-group and rollback passes replay as CUDA graphs on both ranks, and one-row split lanes skip their interleave copies; with Qwen3.8-Flash-Next NVFP4 and MTP at TP=2 on GB10s, decode is 1.2-1.4% faster and prompts 0.5-2.1% faster, with identical replies (#2837, for #2835).
 
 - Intel XPU: Qwen3.8-27B's prompt `gdn_out` kernel keeps its scale bookkeeping in cheaper exact forms, for 22.6% less kernel time on an Arc Pro B70 (734 to 569 ms over a 32K prompt) with byte-identical outputs, its fallback included (#2921, refs #2859). Thanks to @dinadur.
 
