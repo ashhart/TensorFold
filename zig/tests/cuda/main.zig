@@ -34,7 +34,6 @@ const w4a8_tests = @import("w4a8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
 const glm_kda_pad_check = @import("glm_kda_pad_check.zig");
 const glm_vision_tests = @import("glm_vision_tests.zig");
-const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
 const glm_mm_bench = @import("glm_mm_bench.zig");
 const glm_index_check = @import("glm_index_check.zig");
 const carveout_tests = @import("carveout_tests.zig");
@@ -57,10 +56,7 @@ const embed_tests = @import("embed_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
 const contract_tests = @import("contract_tests.zig");
-const gb10_many_contract = @import("contract_gb10_many.zig");
 const qmm_prefill_many_contract = @import("contract_qmm_prefill_many.zig");
-const qmm_prefill_tile22_contract = @import("contract_qmm_prefill_tile22.zig");
-const glue_contract = @import("contract_flashnext_glue.zig");
 const lfm2_attention_tests = @import("lfm2_attention_tests.zig");
 const lfm2_kernel_tests = @import("lfm2_kernel_tests.zig");
 const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
@@ -350,7 +346,7 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
 fn compileContractGlue() !void { // the contract glue's device path, built with the runner: prepare through the vtable
     const cores = std.Thread.getCpuCount() catch 1;
     if (cores != 0) return;
-    var g: glue_contract.Glue = undefined;
+    var g: @import("contract_flashnext_glue.zig").Glue = undefined;
     g.kind = .chain;
     const kernels = [_]@import("core").contract.gates.Kernel{g.kernel()};
     for (kernels) |k| _ = try k.vt.prepare(k.ctx, .{ .rows = 0, .n = 0, .k = 0 }, .random, 0);
@@ -444,7 +440,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "w4a8")) return w4a8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
     if (std.mem.eql(u8, cmd, "glm-kda-pad-split")) return glm_kda_pad_check.run(gpu);
-    if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
+    if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return @import("glm_mm_fixed_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-index-check")) return glm_index_check.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-kv-host-slots")) return glm_kv_host_slots.run(gpu);
@@ -526,9 +522,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu, rest);
-    if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return gb10_many_contract.runAll(gpu);
+    if (std.mem.eql(u8, cmd, "gb10-grouped-contract")) return @import("contract_gb10_many.zig").runAll(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-contract")) return qmm_prefill_many_contract.run(gpu);
-    if (std.mem.eql(u8, cmd, "qmm-prefill-tile22-contract")) return qmm_prefill_tile22_contract.run(gpu);
+    if (std.mem.eql(u8, cmd, "qmm-prefill-tile22-contract")) return @import("contract_qmm_prefill_tile22.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "qmm-prefill-many-bench")) return qmm_prefill_many_contract.bench(gpu);
     if (std.mem.eql(u8, cmd, "prompt-swiglu-contract")) return @import("contract_prompt_swiglu.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "prompt-swiglu-bench")) return @import("contract_prompt_swiglu.zig").bench(gpu);
