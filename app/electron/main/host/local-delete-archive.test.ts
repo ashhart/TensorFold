@@ -96,8 +96,8 @@ assert.match(archive, /controls\.publish\?\.\('ticket'/, 'archive publishes tick
 assert.match(archive, /Restore the active parent project before restoring linked tickets/, 'ticket restore cannot create an active orphan under archived parents')
 assert.match(archive, /Restore the active linked thread in the same project/, 'ticket restore cannot reactivate against an archived or cross-project linked thread')
 
-const threadRuntime = source('./thread-runtime.ts')
-const threadStart = threadRuntime.slice(threadRuntime.indexOf('async function startThreadRun'), threadRuntime.indexOf('\n  function applyEventToThread'))
+const threadRuntime = source('./thread-run-start.ts')
+const threadStart = threadRuntime.slice(threadRuntime.indexOf('async function startThreadRun'), threadRuntime.indexOf('\n  return startThreadRun'))
 assert.match(threadStart, /thread\.archivedAt/, 'thread start rejects archived records')
 assert.match(threadStart, /project\.archivedAt/, 'thread start rejects an archived parent project')
 assert.ok(threadStart.indexOf('reserveStart') < threadStart.indexOf('aborters.set'), 'thread run lease is acquired before its aborter/start reservation')
