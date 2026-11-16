@@ -250,3 +250,6 @@ pub const core_hc_activation = @embedFile("core/hc_activation.metal");
 pub const core_hc_pointwise = @embedFile("core/hc_pointwise.metal");
 
 pub const lfm2_prompt_masked = @import("lfm2/prompt_masked.zig");
+
+/// Qwen3 embeddings' projected-head RMS norm (128-wide Q and K, V unchanged).
+pub const qwen3_heads = @embedFile("qwen3/heads.metal");

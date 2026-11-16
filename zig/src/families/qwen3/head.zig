@@ -5,90 +5,97 @@ const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
 
 pub const Refused = error{Refused};
-
-fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) Refused {
-    problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
-    return error.Refused;
-}
-
-/// The head a checkpoint folder declares.
-pub const Head = union(enum) {
-    /// sentence-transformers last-token pooling, unit-normed when modules.json lists Normalize.
-    embedding: struct { normalize: bool },
-    /// A reranker: `1_LogitScore` names the yes and no tokens its last row's logits score.
-    rerank: api.Rerank,
-};
-
-const pooling_modes = [_][]const u8{
-    "pooling_mode_cls_token",            "pooling_mode_mean_tokens",         "pooling_mode_max_tokens",
-    "pooling_mode_mean_sqrt_len_tokens", "pooling_mode_weightedmean_tokens", "pooling_mode_lasttoken",
-};
-
-/// The head from `1_Pooling/config.json` and `modules.json`, or a refusal naming what the folder lacks and `backend`.
-pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, backend: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!Head {
-    if (try readJson(a, io, dir, "1_LogitScore/config.json", problem)) |v| return .{ .rerank = try labelsOf(a, v, problem) };
-    const pooling = try readJson(a, io, dir, "1_Pooling/config.json", problem) orelse return refuse(
-        a,
-        problem,
-        "qwen3 on {s} serves sentence-transformers embedding checkpoints: {s} has no 1_Pooling/config.json",
-        .{ backend, dir },
-    );
-    if (pooling != .object) return refuse(a, problem, "1_Pooling/config.json is not a JSON object", .{});
-    for (pooling_modes) |mode| {
-        const on = if (pooling.object.get(mode)) |v| v == .bool and v.bool else false;
-        const want = std.mem.eql(u8, mode, "pooling_mode_lasttoken");
-        if (on != want) return refuse(a, problem, "1_Pooling/config.json: {s} is {s}; qwen3 on {s} pools the last token only", .{ mode, if (on) "on" else "off", backend });
-    }
-    // no modules.json: the pooled rows as they are; one that is there must be a list of modules with string types
-    var normalize = false;
-    if (try readJson(a, io, dir, "modules.json", problem)) |mods| {
-        if (mods != .array) return refuse(a, problem, "modules.json is not a JSON list of modules", .{});
-        for (mods.array.items) |m| {
-            const kind = if (m == .object) m.object.get("type") else null;
-            if (kind == null or kind.? != .string) return refuse(a, problem, "modules.json: a module without a string \"type\"", .{});
-            if (std.mem.eql(u8, kind.?.string, "sentence_transformers.models.Normalize")) normalize = true;
+pub const Head = WithApi(api).Head;
+pub const headOf = WithApi(api).headOf;
+pub const fitWindow = WithApi(api).fitWindow;
+/// Shared folder admission with the native host's API (Metal's family module has no server import).
+pub fn WithApi(comptime engine_api: type) type {
+    return struct {
+        fn refuse(a: Allocator, problem: *[]const u8, comptime fmt: []const u8, args: anytype) Refused {
+            problem.* = std.fmt.allocPrint(a, fmt, args) catch fmt;
+            return error.Refused;
         }
-    }
-    return .{ .embedding = .{ .normalize = normalize } };
-}
 
-/// The yes and no tokens `1_LogitScore/config.json` names (the vocabulary bound is checked once the config is read).
-fn labelsOf(a: Allocator, v: std.json.Value, problem: *[]const u8) (Refused || Allocator.Error)!api.Rerank {
-    const name = "1_LogitScore/config.json";
-    if (v != .object) return refuse(a, problem, "{s} is not a JSON object", .{name});
-    var ids: [2]u32 = undefined;
-    for ([_][]const u8{ "true_token_id", "false_token_id" }, &ids) |key, *id| {
-        const x = v.object.get(key) orelse return refuse(a, problem, "{s} has no {s}", .{ name, key });
-        if (x != .integer or x.integer < 0 or x.integer > std.math.maxInt(u32))
-            return refuse(a, problem, "{s}: {s} is not a token id", .{ name, key });
-        id.* = @intCast(x.integer);
-    }
-    if (ids[0] == ids[1]) return refuse(a, problem, "{s} names token {d} for both answers", .{ name, ids[0] });
-    return .{ .yes = ids[0], .no = ids[1] };
-}
+        /// The head a checkpoint folder declares.
+        pub const Head = union(enum) {
+            /// sentence-transformers last-token pooling, unit-normed when modules.json lists Normalize.
+            embedding: struct { normalize: bool },
+            /// A reranker: `1_LogitScore` names the yes and no tokens its last row's logits score.
+            rerank: engine_api.Rerank,
+        };
 
-/// The folder's JSON file `name`, null when it is absent; unreadable or malformed JSON is refused.
-fn readJson(a: Allocator, io: std.Io, dir: []const u8, name: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!?std.json.Value {
-    const path = try std.fs.path.join(a, &.{ dir, name });
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return refuse(a, problem, "{s}: cannot read it ({s})", .{ name, @errorName(err) }),
+        const pooling_modes = [_][]const u8{
+            "pooling_mode_cls_token",            "pooling_mode_mean_tokens",         "pooling_mode_max_tokens",
+            "pooling_mode_mean_sqrt_len_tokens", "pooling_mode_weightedmean_tokens", "pooling_mode_lasttoken",
+        };
+
+        /// Pooling/Normalize metadata, or a refusal naming the missing field and backend.
+        pub fn headOf(a: Allocator, io: std.Io, dir: []const u8, backend: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!@This().Head {
+            if (try readJson(a, io, dir, "1_LogitScore/config.json", problem)) |v| return .{ .rerank = try labelsOf(a, v, problem) };
+            const pooling = try readJson(a, io, dir, "1_Pooling/config.json", problem) orelse return refuse(
+                a,
+                problem,
+                "qwen3 on {s} serves sentence-transformers embedding checkpoints: {s} has no 1_Pooling/config.json",
+                .{ backend, dir },
+            );
+            if (pooling != .object) return refuse(a, problem, "1_Pooling/config.json is not a JSON object", .{});
+            for (pooling_modes) |mode| {
+                const on = if (pooling.object.get(mode)) |v| v == .bool and v.bool else false;
+                const want = std.mem.eql(u8, mode, "pooling_mode_lasttoken");
+                if (on != want) return refuse(a, problem, "1_Pooling/config.json: {s} is {s}; qwen3 on {s} pools the last token only", .{ mode, if (on) "on" else "off", backend });
+            }
+            // Absent modules mean unnormalized rows; present modules must have string types.
+            var normalize = false;
+            if (try readJson(a, io, dir, "modules.json", problem)) |mods| {
+                if (mods != .array) return refuse(a, problem, "modules.json is not a JSON list of modules", .{});
+                for (mods.array.items) |m| {
+                    const kind = if (m == .object) m.object.get("type") else null;
+                    if (kind == null or kind.? != .string) return refuse(a, problem, "modules.json: a module without a string \"type\"", .{});
+                    if (std.mem.eql(u8, kind.?.string, "sentence_transformers.models.Normalize")) normalize = true;
+                }
+            }
+            return .{ .embedding = .{ .normalize = normalize } };
+        }
+
+        /// The yes/no labels from 1_LogitScore; the engine checks their vocabulary bounds.
+        fn labelsOf(a: Allocator, v: std.json.Value, problem: *[]const u8) (Refused || Allocator.Error)!engine_api.Rerank {
+            const name = "1_LogitScore/config.json";
+            if (v != .object) return refuse(a, problem, "{s} is not a JSON object", .{name});
+            var ids: [2]u32 = undefined;
+            for ([_][]const u8{ "true_token_id", "false_token_id" }, &ids) |key, *id| {
+                const x = v.object.get(key) orelse return refuse(a, problem, "{s} has no {s}", .{ name, key });
+                if (x != .integer or x.integer < 0 or x.integer > std.math.maxInt(u32))
+                    return refuse(a, problem, "{s}: {s} is not a token id", .{ name, key });
+                id.* = @intCast(x.integer);
+            }
+            if (ids[0] == ids[1]) return refuse(a, problem, "{s} names token {d} for both answers", .{ name, ids[0] });
+            return .{ .yes = ids[0], .no = ids[1] };
+        }
+
+        /// The folder's JSON file `name`, null when it is absent; unreadable or malformed JSON is refused.
+        fn readJson(a: Allocator, io: std.Io, dir: []const u8, name: []const u8, problem: *[]const u8) (Refused || Allocator.Error)!?std.json.Value {
+            const path = try std.fs.path.join(a, &.{ dir, name });
+            const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 20)) catch |err| switch (err) {
+                error.FileNotFound => return null,
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return refuse(a, problem, "{s}: cannot read it ({s})", .{ name, @errorName(err) }),
+            };
+            return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch |err| switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => refuse(a, problem, "{s} is not valid JSON ({s})", .{ name, @errorName(err) }),
+            };
+        }
+
+        /// The window the budget holds: `asked`, halved while its scratch passes `room`, down to `least`.
+        pub fn fitWindow(asked: usize, room: usize, least: usize, ctx: anytype, bytesFor: fn (@TypeOf(ctx), usize) anyerror!usize) !?usize {
+            var window = asked;
+            while (true) {
+                if (try bytesFor(ctx, window) <= room) return window;
+                if (window <= least) return null;
+                window = @max(window / 2, least);
+            }
+        }
     };
-    return std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch |err| switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => refuse(a, problem, "{s} is not valid JSON ({s})", .{ name, @errorName(err) }),
-    };
-}
-
-/// The window the budget holds: `asked`, halved while its scratch passes `room`, down to `least`.
-pub fn fitWindow(asked: usize, room: usize, least: usize, ctx: anytype, bytesFor: fn (@TypeOf(ctx), usize) anyerror!usize) !?usize {
-    var window = asked;
-    while (true) {
-        if (try bytesFor(ctx, window) <= room) return window;
-        if (window <= least) return null;
-        window = @max(window / 2, least);
-    }
 }
 
 test "the window halves to fit the room, down to the least window" {

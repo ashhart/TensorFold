@@ -381,6 +381,9 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var h3_list: std.ArrayList(*h3_k.H3) = .empty;
     defer for (h3_list.items) |x| x.deinit();
+    var qwen3_heads: @import("metal_qwen3_heads.zig").Suite = .{};
+    defer qwen3_heads.deinit();
+    try qwen3_heads.collect(a, device, queue, &kernels, o.only);
     var llama_set = llama_k.Set{};
     defer llama_set.deinit(a);
     try llama_set.collect(a, device, queue, tensor, &kernels, o.only);
