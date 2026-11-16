@@ -8,6 +8,7 @@ const snap = @import("snap.zig");
 const limits = @import("context.zig");
 const kv = @import("core").kv_pool;
 const kp = @import("core").kv_prompts;
+const tap = @import("taps.zig");
 
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -66,6 +67,7 @@ pub const Kolibri = struct {
     pool: ?kv.Pool = null, // paged: the pages every slot leases (attach)
     prompts: ?kp.Prompts = null, // TF_KV_SHARE: the store keeping prompts as the pool's pages (cuda_prompt_pages.zig)
     pending: ?*const snap.Saved = null, // TF_KV_SHARE: a resumed state's rings, put in once its lane opens
+    taps: tap.Taps = .{}, // a drafter's tapped rows, once it names its layers (prepare_features)
 
     /// The device bytes `init` allocates: a round's logits, the token ring, and each slot's last row and rule.
     pub fn openBytes(vocab: usize, slots: usize) usize {
@@ -123,6 +125,7 @@ pub const Kolibri = struct {
         }
         if (x.pool) |*p| p.deinit();
         x.lanes.deinit(x.gpa);
+        x.taps.deinit(x.gpa);
         for (x.slot_bufs) |*b| b.free();
         x.gpa.free(x.slot_bufs);
         for (x.steps) |*g| if (g.*) |*e| e.exec.deinit();
@@ -138,7 +141,7 @@ pub const Kolibri = struct {
         return .{ .ptr = x, .vtable = &vtable };
     }
 
-    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true };
+    const vtable: be.Backend.VTable = .{ .prefill = prefill, .prefill_step = prefillStep, .cancel_prefill = cancelPrefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true, .prepare_features = prepareFeatures, .features = features };
 
     /// The round loop's facts: no draft head; host copies verified in windows up to 16 rows, streams sharing a forward.
     pub fn facts(x: *const Kolibri) lanes.Model {
@@ -344,7 +347,9 @@ pub const Kolibri = struct {
         for (marks) |mk| if (mk > at and mk < end) {
             end = mk;
         };
-        try x.m.forward(x.ops(), &.{.{ .slot = l.slot, .p0 = at, .tokens = p[at..end] }}, true, null, l.last);
+        const ch: fwd.Chain = .{ .slot = l.slot, .p0 = at, .tokens = p[at..end] };
+        try x.m.forward(x.ops(), &.{ch}, true, null, l.last);
+        try x.taps.kept(x.gpa, x.m, x.s, &.{ch}, true);
         s.fill_at.store(@intCast(end), .monotonic);
         const done = end == p.len;
         l.fill = if (done) null else end;
@@ -417,13 +422,16 @@ pub const Kolibri = struct {
     /// One row at the lane's cache length: the slot's captured graph (captured at its first step), else eager.
     fn step(x: *Kolibri, l: *Lane, token: u32) !u64 {
         try x.reach(l, l.len + 1);
+        const ch: fwd.Chain = .{ .slot = l.slot, .p0 = l.len, .tokens = &.{token} };
         if (!x.graphed) {
-            try x.m.forward(x.ops(), &.{.{ .slot = l.slot, .p0 = l.len, .tokens = &.{token} }}, false, null, x.logits.ptr);
+            try x.m.forward(x.ops(), &.{ch}, false, null, x.logits.ptr);
+            try x.taps.kept(x.gpa, x.m, x.s, &.{ch}, false);
             return x.logits.ptr;
         }
         const g = &x.steps[l.slot];
         if (g.* == null) g.* = try x.m.captureStep(x.ops(), l.slot);
         try x.m.step(x.ops(), &g.*.?, token, l.len);
+        try x.taps.kept(x.gpa, x.m, x.s, &.{ch}, false); // the graph's copies wrote tap_rows' first row
         return g.*.?.logits;
     }
 
@@ -465,6 +473,7 @@ pub const Kolibri = struct {
             defer x.gpa.free(rows);
             for (rows, 0..) |*r, i| r.* = i;
             try x.m.forward(x.ops(), chains, false, rows, logits);
+            try x.taps.kept(x.gpa, x.m, x.s, chains, false);
         }
         var at: usize = 0;
         for (windows, 0..) |w, i| {
@@ -500,6 +509,25 @@ pub const Kolibri = struct {
     /// No draft head is loaded: absorbing is a no-op, and a request for drafts is refused by name.
     fn draft(_: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         for (requests) |r| if (r.depth != 0 or r.lanes != null) return error.NoDraftHead;
+    }
+
+    /// The drafter's layers, before any stream: forwards copy them out from now on (graphs captured again).
+    fn prepareFeatures(ptr: *anyopaque, taps: []const u32) anyerror!void {
+        const x = self(ptr);
+        if (x.lanes.count() != 0) return error.TapsAfterStreams;
+        for (x.steps) |*g| if (g.*) |*e| { // a step captured before copies no taps
+            e.exec.deinit();
+            g.* = null;
+        };
+        try x.taps.prepare(x.m, taps);
+    }
+
+    /// Rows [start, start + count) of the stream's taps, while the target still holds them.
+    fn features(ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!be.Features {
+        const x = self(ptr);
+        if (!std.mem.eql(u32, taps, x.taps.ids[0..x.taps.n])) return error.TapsMismatch;
+        const l = x.lanes.getPtr(s) orelse return error.UnknownStream;
+        return x.taps.view(x.m, l.slot, start, count);
     }
 
     fn dropLane(x: *Kolibri, s: *const Stream) void {

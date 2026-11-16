@@ -9,7 +9,9 @@ pub const tree = @import("tree.zig");
 pub const kernels = @import("kernels.zig");
 pub const forward = @import("forward.zig");
 pub const snap = @import("snap.zig");
+pub const taps = @import("taps.zig");
 pub const backend = @import("backend.zig");
+pub const drafter = @import("drafter.zig");
 pub const native = @import("native.zig");
 
 test {
@@ -21,6 +23,8 @@ test {
     _ = @import("kernels.zig");
     _ = @import("forward.zig");
     _ = @import("snap.zig");
+    _ = @import("taps.zig");
     _ = @import("backend.zig");
+    _ = @import("drafter.zig");
     _ = @import("native.zig");
 }
