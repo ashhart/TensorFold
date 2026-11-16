@@ -173,15 +173,18 @@ test "the ModelOpt NVFP4 export parses as its own scheme: FP4 g16 FFN, bf16 mixe
     try std.testing.expectEqual(c.Scheme.mlx_affine, mlx.scheme);
 }
 
-test "Metal refuses the ModelOpt NVFP4 export by name; CUDA serves it, and both serve the MLX layouts" {
+test "Metal and XPU refuse the ModelOpt NVFP4 export by name; CUDA serves it, and all three serve the MLX layouts" {
     var config = try c.parse(std.testing.allocator, nvfp4);
     defer config.deinit();
     try std.testing.expectError(error.Lfm3ModeloptNvfp4NotOnMetal, c.servedOn(&config, .metal));
+    try std.testing.expectError(error.Lfm3ModeloptNvfp4NotOnXpu, c.servedOn(&config, .xpu));
     try c.servedOn(&config, .cuda);
+    for ([_]anyerror{ error.Lfm3ModeloptNvfp4NotOnMetal, error.Lfm3ModeloptNvfp4NotOnXpu }) |e|
+        try std.testing.expectStringStartsWith(c.servedProblem(e).?, @errorName(e));
+    try std.testing.expect(c.servedProblem(error.FileNotFound) == null);
     var mlx = try c.parse(std.testing.allocator, text);
     defer mlx.deinit();
-    try c.servedOn(&mlx, .metal);
-    try c.servedOn(&mlx, .cuda);
+    for ([_]c.Backend{ .metal, .cuda, .xpu }) |b| try c.servedOn(&mlx, b);
 }
 
 test "an NVFP4 export with another recipe, a missing or extra exclusion, or dynamic inputs is refused" {
