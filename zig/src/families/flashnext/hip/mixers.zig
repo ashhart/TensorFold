@@ -305,11 +305,11 @@ pub fn sparseKeys(
     const di = d.index_dim;
     const width = (d.index_heads + 1) * di;
     const kind = @backingInt(m.act);
-    var outs: [4]Tensor = undefined;
-    if (!try o.projectGroup(x, &.{ s.q, s.k, s.v, s.index }, rows, &outs)) {
-        for (&outs, [_]model.Projection{ s.q, s.k, s.v, s.index }) |*t, p| t.* = try o.project(x, p, rows, false);
-    }
-    _, const keys, const values, const idx = outs;
+    // a prompt's products are separate launches (projectGroup is decode only), so k, v and index keys are the same
+    std.debug.assert(o.prefill);
+    const keys = try o.project(x, s.k, rows, false);
+    const values = try o.project(x, s.v, rows, false);
+    const idx = try o.project(x, s.index, rows, false);
     var off: usize = 0;
     for (segs) |g| {
         const n = g.tokens.len;
