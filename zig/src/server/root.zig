@@ -352,7 +352,7 @@ test {
     if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_voice_http_test.zig"); // over a Unix socket pair
     _ = @import("audio_out.zig");
     _ = @import("flac.zig");
-    _ = @import("speech_format_http_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_format_http_test.zig"); // over a Unix socket pair
     _ = @import("grafana_dashboard_test.zig");
     _ = @import("ocr/types_test.zig");
     _ = @import("ocr/geometry_test.zig");
