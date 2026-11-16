@@ -1,6 +1,8 @@
 // GLM-5.3-Flash DSA indexer: a decode window's top-512 pools of long rows on many CTAs, tf_glm_select_rows' bytes.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include <cuda_runtime.h>
 #include <stdint.h>
 
@@ -193,6 +195,7 @@ struct Merge {
 extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
     tf_glm_dsel_scan(const float* __restrict__ S, int64_t np, const int* __restrict__ pos, int K, int target,
                      uint32_t* __restrict__ bits, int64_t words) {
+  glm_pdl::enter();
   using namespace glm_dsel;
   __shared__ int hist[256];
   __shared__ uint32_t sh_prefix;
@@ -257,6 +260,7 @@ extern "C" __global__ void __launch_bounds__(glm_dsel::T1)
 extern "C" __global__ void __launch_bounds__(glm_dsel::T2)
     tf_glm_dsel_merge(const float* __restrict__ S, int64_t* __restrict__ OUT, int64_t np, const int* __restrict__ pos,
                       int K, const uint32_t* __restrict__ bits, int64_t words, int* __restrict__ PATH) {
+  glm_pdl::enter();
   using namespace glm_dsel;
   __shared__ Merge sm;
   const int64_t r = blockIdx.x;

@@ -1,6 +1,8 @@
 // GLM-5.3-Flash DSA indexer, a prompt chunk's top-K pools in one pass: a sampled floor, the survivors, a radix select.
 #pragma once
 
+#include "glm_pdl.cuh"
+
 #include <cuda_runtime.h>
 #include <stdint.h>
 
@@ -173,6 +175,7 @@ __device__ uint32_t sample_floor(Smem& sm, const float* row, int NP, int TARGET,
 extern "C" __global__ void __launch_bounds__(glm_index::T)
     tf_glm_index_pools(const float* __restrict__ S, int64_t* __restrict__ OUT, int64_t np, const int* __restrict__ pos,
                        int K, int CAP, int TARGET, int* __restrict__ PATH) {
+  glm_pdl::enter();
   using namespace glm_index;
   __shared__ Smem sm;
   CAP = min(CAP, CAP_MAX);

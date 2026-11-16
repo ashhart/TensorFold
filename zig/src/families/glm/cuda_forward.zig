@@ -69,6 +69,7 @@ pub const Modules = struct {
         m.prompt = try cuda.nvfp4.Prompt.load(d);
         errdefer m.prompt.unload();
         m.kda = try kda.Kernels.load(m.mods[0]);
+        m.kda.pdl = @import("cuda_pdl.zig").on();
         m.experts = try experts.Kernels.load(d, m.mods[2], @intCast(try ctx.attribute(.multiprocessor_count)), block32);
         errdefer m.experts.unload();
         m.copy_rows = try m.mods[1].function("tf_glm_copy_rows");

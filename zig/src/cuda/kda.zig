@@ -24,10 +24,12 @@ pub const Kernels = struct {
     prep: cuda.Function,
     step: cuda.Function,
     out: cuda.Function,
+    pdl: bool, // dependent launches (each entry opens with glm_pdl::enter()); the loader's caller opts in
 
     pub fn load(m: cuda.Module) !Kernels {
         var k: Kernels = undefined;
         inline for (.{ "chain", "replay", "replay_layers", "prep", "step", "out" }) |name| @field(k, name) = try m.function("tf_glm_kda_" ++ name);
+        k.pdl = false;
         return k;
     }
 };
@@ -74,14 +76,14 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
         a.add(c.lower);
         for ([_]u64{ w.q, s.k, s.v, s.g, s.b }) |v| a.add(v);
         const grid: cuda.launch.Dim3 = .{ .x = @intCast(rows), .y = @intCast(c.heads) };
-        try cuda.launch.launch(ks.prep, .{ .grid = grid, .block = .{ .x = 512 } }, stream, &a);
+        try cuda.launch.launch(ks.prep, .{ .grid = grid, .block = .{ .x = 512 }, .pdl = ks.pdl }, stream, &a);
         var b: cuda.Args = .{};
         b.add(h);
         for ([_]u64{ c.state_in, w.q, s.k, s.v, s.g, s.b }) |v| b.add(v);
         b.add(@as(c_int, @intCast(rows)));
         b.add(w.y);
         b.add(s.state_out);
-        try cuda.launch.launch(ks.step, .{ .grid = .{ .x = @intCast(c.heads), .y = dv / 4 / 8 }, .block = .{ .x = 8 * 32 } }, stream, &b);
+        try cuda.launch.launch(ks.step, .{ .grid = .{ .x = @intCast(c.heads), .y = dv / 4 / 8 }, .block = .{ .x = 8 * 32 }, .pdl = ks.pdl }, stream, &b);
         var o: cuda.Args = .{};
         o.add(h);
         o.add(w.y);
@@ -90,7 +92,7 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
         o.add(c.norm_w);
         o.add(c.eps);
         o.add(s.out);
-        return cuda.launch.launch(ks.out, .{ .grid = grid, .block = .{ .x = dv } }, stream, &o);
+        return cuda.launch.launch(ks.out, .{ .grid = grid, .block = .{ .x = dv }, .pdl = ks.pdl }, stream, &o);
     }
     var a: cuda.Args = .{};
     a.add(h);
@@ -106,7 +108,7 @@ pub fn chain(ks: *const Kernels, stream: cuda.Stream, c: Chain, rows: usize, s: 
     a.add(c.lower);
     a.add(@as(c_int, @intCast(rows)));
     for ([_]u64{ s.out, s.state_out, s.k, s.v, s.g, s.b }) |v| a.add(v);
-    try cuda.launch.launch(ks.chain, .{ .grid = .{ .x = @intCast(c.heads) }, .block = .{ .x = 1024 } }, stream, &a);
+    try cuda.launch.launch(ks.chain, .{ .grid = .{ .x = @intCast(c.heads) }, .block = .{ .x = 1024 }, .pdl = ks.pdl }, stream, &a);
 }
 
 /// kda.replay: the state after the first `rows` saved rows, from state_in.
@@ -117,7 +119,7 @@ pub fn replay(ks: *const Kernels, stream: cuda.Stream, state_in: u64, k: u64, v:
     for ([_]u64{ state_in, k, v, g, b }) |x| a.add(x);
     a.add(@as(c_int, @intCast(rows)));
     a.add(state_out);
-    try cuda.launch.launch(ks.replay, .{ .grid = .{ .x = @intCast(heads) }, .block = .{ .x = 1024 } }, stream, &a);
+    try cuda.launch.launch(ks.replay, .{ .grid = .{ .x = @intCast(heads) }, .block = .{ .x = 1024 }, .pdl = ks.pdl }, stream, &a);
 }
 
 /// The fixed kernel envelope; strides are elements, never bytes. Refuse before narrowing or launching.
@@ -155,7 +157,7 @@ pub fn replayLayers(ks: *const Kernels, stream: cuda.Stream, s: Replay, rows: us
     a.add(s.b_stride);
     a.add(@as(c_int, @intCast(rows)));
     a.add(s.state_out);
-    try cuda.launch.launch(ks.replay_layers, .{ .grid = .{ .x = @intCast(layers * heads) }, .block = .{ .x = 1024 } }, stream, &a);
+    try cuda.launch.launch(ks.replay_layers, .{ .grid = .{ .x = @intCast(layers * heads) }, .block = .{ .x = 1024 }, .pdl = ks.pdl }, stream, &a);
 }
 
 test {

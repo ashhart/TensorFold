@@ -43,6 +43,7 @@ pub const lane_costs = @import("cuda_lane_costs.zig");
 pub const native = @import("cuda_native.zig");
 pub const snapshots = @import("cuda_snapshots.zig");
 pub const kv_host = @import("cuda_kv_host.zig");
+pub const pdl = @import("cuda_pdl.zig");
 
 test {
     _ = lane_costs;
@@ -60,6 +61,7 @@ test {
     _ = @import("cuda_ranks_roce_test.zig");
     _ = @import("cuda_env.zig");
     _ = @import("cuda_taps_tp_test.zig");
+    _ = @import("cuda_pdl.zig");
     _ = @import("cuda_resolve_test.zig");
     _ = @import("cuda_boundary.zig");
     _ = @import("cuda_roce_multi.zig");
