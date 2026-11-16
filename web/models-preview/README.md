@@ -1,8 +1,8 @@
 # Supported models preview
 
 A runnable preview of the TensorFold "Supported models" page: the fastest single stream recorded on the hardware you
-pick, hardware filters, a sortable table of measured runs, and the supported models that have no measured run yet,
-kept apart with no number. Every number links to its receipt.
+pick or filter to, hardware filters, a sortable table of measured runs, and the supported models that have no measured
+run yet, kept apart with no number. Every number links to its receipt.
 
 The page reads one file, [`../tensorfold_web/data/models.json`](../tensorfold_web/data/models.json), described by
 [`models.schema.json`](../tensorfold_web/data/models.schema.json). Point it at the raw GitHub copy and it follows the

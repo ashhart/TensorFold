@@ -144,7 +144,7 @@ func TestBuildBoard(t *testing.T) {
 		},
 		"filter keeps that class and its unmeasured support": {
 			query: validate.BoardQuery{Hardware: "spark"},
-			rows:  []string{}, unmeasured: []string{"alpha/cuda"}, fastest: "alpha-mac",
+			rows:  []string{}, unmeasured: []string{"alpha/cuda"}, fastest: "",
 		},
 		"an aggregate is never the fastest single stream": {
 			query: validate.BoardQuery{Mine: "pair"},
@@ -204,6 +204,81 @@ func TestBuildBoardStatusAndBars(t *testing.T) {
 	}
 	if board.Query.Mine != "mac" {
 		t.Errorf("the picker opens on %q, want the fastest single stream's class", board.Query.Mine)
+	}
+}
+
+func TestFastestFollowsTheHardwareFilter(t *testing.T) {
+	t.Parallel()
+	withOne := fixture()
+	withOne.Runs = append(withOne.Runs, run("beta-pair-one", "beta", "cuda", "pair", ptr(40.0), services.ScopePerStream, 1))
+	cases := map[string]struct {
+		catalog services.Catalog
+		query   validate.BoardQuery
+		fastest string
+		on      string
+	}{
+		"a filter picks only from its class, not the picked hardware": {
+			catalog: withOne, query: validate.BoardQuery{Hardware: "pair", Mine: "mac"}, fastest: "beta-pair-one", on: "Pair",
+		},
+		"a filtered class with only totals has no fastest single stream": {
+			catalog: fixture(), query: validate.BoardQuery{Hardware: "pair", Mine: "mac"}, fastest: "", on: "Pair",
+		},
+		"a filtered class with no runs has no fastest single stream": {
+			catalog: fixture(), query: validate.BoardQuery{Hardware: "spark", Mine: "mac"}, fastest: "", on: "Spark",
+		},
+		"all hardware keeps the picked hardware": {
+			catalog: withOne, query: validate.BoardQuery{Mine: "pair"}, fastest: "beta-pair-one", on: "Pair",
+		},
+		"all hardware with nothing picked takes the fastest anywhere": {
+			catalog: withOne, query: validate.BoardQuery{}, fastest: "alpha-mac", on: "Mac",
+		},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			board, err := services.BuildBoard(test.catalog, test.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fastest := ""
+			if board.Fastest != nil {
+				fastest = board.Fastest.Run.ID
+			}
+			if fastest != test.fastest {
+				t.Errorf("fastest %q, want %q", fastest, test.fastest)
+			}
+			if board.FastestOn == nil || board.FastestOn.Label != test.on {
+				t.Errorf("the card names %+v, want %q", board.FastestOn, test.on)
+			} else if board.Query.Mine != board.FastestOn.ID {
+				t.Errorf("the picker shows %q, want the card's class %q", board.Query.Mine, board.FastestOn.ID)
+			}
+		})
+	}
+}
+
+func TestTwoSparksNeverShowTheWorkstationFigure(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("../../../tensorfold_web/data/models.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := services.ParseCatalog(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	board, err := services.BuildBoard(catalog, validate.BoardQuery{Hardware: "dgx-spark-2", Mine: "nvidia-workstation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if board.Fastest == nil {
+		return
+	}
+	shown := board.Fastest.Run
+	if shown.HardwareClass != "dgx-spark-2" {
+		t.Errorf("filtered to 2x DGX Spark, the card shows %s from %s", shown.ID, shown.HardwareClass)
+	}
+	if shown.RateScope == nil || *shown.RateScope != services.ScopePerStream {
+		t.Errorf("the card shows %s, which is not a per-stream rate", shown.ID)
 	}
 }
 

@@ -221,16 +221,34 @@ func fetch(query apiclient.BoardQuery) string {
 	return "@get(" + quote(board) + "); window.history.replaceState(null, '', " + quote(href(query)) + ")"
 }
 
+// pickedField is what the picker sets: the filter while one is on, so the card and the table name the same class.
+func pickedField(query apiclient.BoardQuery) string {
+	if query.Hardware != "" {
+		return "hw"
+	}
+	return "mine"
+}
+
 // pick is the hardware picker's Datastar action: the board for the chosen class.
 func pick(query apiclient.BoardQuery) string {
-	query.Mine = ""
+	field := pickedField(query)
+	query.Hardware, query.Mine, query.Run = "", "", ""
 	rest := query.Values().Encode()
 	if rest != "" {
 		rest += "&"
 	}
+	rest += field + "="
 	value := "encodeURIComponent(evt.target.value)"
-	return "@get(" + quote(config.AppRoutes.Board+"?"+rest+"mine=") + " + " + value +
-		"); window.history.replaceState(null, '', " + quote(config.AppRoutes.Home+"?"+rest+"mine=") + " + " + value + ")"
+	return "@get(" + quote(config.AppRoutes.Board+"?"+rest) + " + " + value +
+		"); window.history.replaceState(null, '', " + quote(config.AppRoutes.Home+"?"+rest) + " + " + value + ")"
+}
+
+// fastestOn heads the card with the class its figure comes from.
+func fastestOn(board apiclient.Board) string {
+	if board.FastestOn == nil {
+		return "Fastest single stream"
+	}
+	return "Fastest single stream on " + board.FastestOn.Label
 }
 
 func with(query apiclient.BoardQuery, change func(*apiclient.BoardQuery)) apiclient.BoardQuery {

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"cmp"
+
 	"github.com/ashhart/TensorFold/web/models-preview/internal/apiclient"
 	"github.com/ashhart/TensorFold/web/models-preview/internal/config"
 )
@@ -18,7 +20,7 @@ templ BoardRoot(board apiclient.Board, repoURL string) {
 templ fastest(board apiclient.Board) {
 	<section class="fastest" aria-labelledby="fastest-title">
 		<div class="fastest-body">
-			<p class="small">Fastest single stream recorded on your hardware</p>
+			<p class="small">{ fastestOn(board) }</p>
 			if board.Fastest != nil {
 				<h2 id="fastest-title">{ board.Fastest.Model.Name }</h2>
 				<p class="small">
@@ -26,8 +28,8 @@ templ fastest(board apiclient.Board) {
 					<a href={ templ.SafeURL(board.Fastest.Run.ReceiptURL) } rel="noopener">receipt ↗</a>
 				</p>
 			} else {
-				<h2 id="fastest-title">No single-stream run here yet</h2>
-				<p class="small">Totals of several streams are not compared with single streams.</p>
+				<h2 id="fastest-title">No single-stream rate yet</h2>
+				<p class="small">Runs here report a total of several streams or no rate, and a total is never shown as one stream's.</p>
 			}
 		</div>
 		if board.Fastest != nil {
@@ -35,12 +37,13 @@ templ fastest(board apiclient.Board) {
 		}
 		<form class="picker" method="get" action={ templ.SafeURL(config.AppRoutes.Home) }>
 			<label for="mine" class="small">Your hardware</label>
+			{{ field := pickedField(board.Query) }}
 			for key, value := range board.Query.Values() {
-				if key != "mine" && key != "run" {
+				if key != "mine" && key != "hw" && key != "run" {
 					<input type="hidden" name={ key } value={ value[0] }/>
 				}
 			}
-			<select id="mine" name="mine" data-on:change={ pick(board.Query) }>
+			<select id="mine" name={ field } data-on:change={ pick(board.Query) }>
 				for _, class := range board.Classes {
 					<option value={ class.ID } selected?={ class.ID == board.Query.Mine }>{ class.Label }</option>
 				}
@@ -68,7 +71,7 @@ templ chips(board apiclient.Board) {
 }
 
 templ chip(query apiclient.BoardQuery, class, label string) {
-	{{ next := with(query, func(q *apiclient.BoardQuery) { q.Hardware = class }) }}
+	{{ next := with(query, func(q *apiclient.BoardQuery) { q.Hardware, q.Mine = class, cmp.Or(class, q.Mine) }) }}
 	<a
 		class={ "chip", templ.KV("chip-on", query.Hardware == class) }
 		href={ templ.SafeURL(href(next)) }

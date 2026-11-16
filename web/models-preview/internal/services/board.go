@@ -16,7 +16,9 @@ type Board struct {
 	Rows       []Row               `json:"rows"`
 	Unmeasured []Unmeasured        `json:"unmeasured"`
 	Fastest    *Row                `json:"fastest"`
-	Freshness  Freshness           `json:"freshness"`
+	// FastestOn is the class the card speaks for, named even when it has no single-stream run.
+	FastestOn *HardwareClass `json:"fastest_on"`
+	Freshness Freshness      `json:"freshness"`
 }
 
 // Row is one measured run with what the page shows next to it.
@@ -57,6 +59,8 @@ func BuildBoard(catalog Catalog, query validate.BoardQuery) (Board, error) {
 	board := Board{Updated: catalog.Updated, Classes: catalog.HardwareClasses, Query: query}
 	measured := map[string]bool{}
 	var overall *Row
+	// The card follows the filter; with every hardware shown it follows the picked class.
+	class := cmp.Or(query.Hardware, query.Mine)
 	for _, run := range catalog.Runs {
 		measured[run.ModelID+"/"+run.Backend+"/"+run.HardwareClass] = true
 		model := models[run.ModelID]
@@ -64,7 +68,7 @@ func BuildBoard(catalog Catalog, query validate.BoardQuery) (Board, error) {
 		if support := supportFor(model, run.Backend, run.HardwareClass); support != nil {
 			row.Status = support.Status
 		}
-		if query.Mine != "" && run.HardwareClass == query.Mine && fasterSingleStream(row, board.Fastest) {
+		if class != "" && run.HardwareClass == class && fasterSingleStream(row, board.Fastest) {
 			fastest := row
 			board.Fastest = &fastest
 		}
@@ -77,9 +81,13 @@ func BuildBoard(catalog Catalog, query validate.BoardQuery) (Board, error) {
 		}
 	}
 	// No hardware picked yet: the card opens on the fastest single stream anywhere.
-	if query.Mine == "" && overall != nil {
+	if class == "" && overall != nil {
 		board.Fastest = overall
-		board.Query.Mine = overall.Run.HardwareClass
+		class = overall.Run.HardwareClass
+	}
+	if class != "" {
+		board.Query.Mine = class
+		board.FastestOn = &HardwareClass{ID: class, Label: labels[class]}
 	}
 	scaleBars(board.Rows)
 	slices.SortStableFunc(board.Rows, rowOrder(query))
