@@ -56,6 +56,20 @@ pub const rules = [_]Rule{
     .{ .name = "TF_DSPINE_WINDOW", .scope = .cuda, .kind = .size, .min = 16, .max = 8192, .forms = "a whole row count from 16 to 8192, at most the DSpine drafter's own sliding_window" },
     .{ .name = "TF_DRAFT_NODES", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size node count (capped by the drafter's window)" },
     .{ .name = "TF_QMMF_HALF_BELOW", .scope = .cuda, .kind = .size, .forms = "a whole nonnegative native-size block count (0 disables half tiles)" },
+    // Qwen 3.5 CUDA and HIP settings, read through this table:
+    .{ .name = "TENSORFOLD_MEMORY_RESERVE_GIB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission's floor and the memory's size still bound it)" },
+    .{ .name = "TENSORFOLD_HIP_MEMORY_LIMIT_GB", .scope = .cuda, .kind = .real, .forms = "a finite GiB amount (the HIP admission still fits its byte count in a 64-bit size)" },
+    .{ .name = "TF_QWEN_KEEP_LATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_QWEN_KV_PAGE_TEST", .scope = .cuda, .kind = .size, .min = 1, .max = 2147483647, .forms = "a whole page size from 1 to 2147483647 (unset: off)" },
+    .{ .name = "TF_COST_KEY_TRACE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_TIMING", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_NO_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0; 1 keeps the CUDA drafter's chains only)" },
+    .{ .name = "TF_MTP_TREES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_MTP_BATCH", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 1; 0 keeps one stream at a time)" },
+    .{ .name = "TF_QWEN_POOL_LOG", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
+    .{ .name = "TF_Q27_POCKET_OFF", .scope = .cuda, .kind = .path, .forms = "all, or a list of layer:neuron pairs without control characters (default off)" },
+    .{ .name = "TF_Q27_TAIL", .scope = .cuda, .kind = .word, .words = &.{"off"}, .forms = "off (default: each nudged sequence's tail rows)" },
+    .{ .name = "TF_Q27_GEMM", .scope = .cuda, .kind = .word, .words = &.{"narrow"}, .forms = "narrow (default: 128x128 tiles)" },
     .{ .name = "TENSORFOLD_PROMPT_CACHE_KEEP_OTHERS", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_PROMPT_INTERMEDIATE", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (default 0)" },
     .{ .name = "TENSORFOLD_LFM2_KV_PAGES", .scope = .cuda, .kind = .flag, .forms = "0 or 1 (unset leases pool pages)" },
@@ -308,6 +322,11 @@ fn real(r: Rule, text: []const u8) Error!f64 {
 pub fn describe(a: std.mem.Allocator, name: []const u8, raw: []const u8) ![]const u8 {
     if (rule(name).kind == .path) return std.fmt.allocPrint(a, "{s}: expected {s}", .{ name, rule(name).forms });
     return std.fmt.allocPrint(a, "{s}=\"{f}\": expected {s}", .{ name, std.zig.fmtString(raw), rule(name).forms });
+}
+
+/// A registered setting's raw text, for readers that parse it against runtime bounds the table cannot name.
+pub fn rawText(name: [:0]const u8) ?[]const u8 {
+    return sys.getenv(name);
 }
 
 /// A direct family/tool entry point gets the same refusal even when it has no server problem buffer.

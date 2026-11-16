@@ -172,7 +172,7 @@ pub const Draft = struct {
 
     /// The target's measured window cost, published after the complete reset-cache width sweep.
     pub fn setCost(d: *Draft, rows: u32, ms: f64) void {
-        if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
+        if (platform.environment.read(bool, "TF_TIMING", false) catch false) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
         if (d.n_costs < d.costs.len) {
             d.costs[d.n_costs] = .{ .width = rows, .ms = ms };
             d.n_costs += 1;
@@ -440,7 +440,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .fixed_block = d.c.kind == .dflash2, .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
+        return .{ .fixed_block = d.c.kind == .dflash2, .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &draft_prior.prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = !(platform.environment.read(bool, "TF_NO_TREES", false) catch false), .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_match = factsCopyMatch(d), .tree_nodes = @intCast(if (d.c.block == 16) d.tree_nodes else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -549,7 +549,7 @@ pub fn factsCopyMatch(d: anytype) i64 {
 
 /// TF_TIMING=1: each call's wall time on stderr.
 pub fn timing(what: []const u8, io: std.Io, t0: std.Io.Timestamp) void {
-    if (platform.c.getenv("TF_TIMING") == null) return;
+    if (!(platform.environment.read(bool, "TF_TIMING", false) catch false)) return;
     const now = std.Io.Clock.awake.now(io);
     const ns: f64 = @floatFromInt(t0.durationTo(now).toNanoseconds());
     const at: f64 = @floatFromInt(@mod(now.toNanoseconds(), 1_000_000_000_000));
@@ -590,4 +590,10 @@ test "a drafter config with a zero divisor is refused, and any admitted rank's s
     defer gpa.free(wide);
     const c = try Config.parse(gpa, wide, target);
     try std.testing.expect(Draft.stagedLen(c.rank) >= Draft.hp_at + (c.block - 1) * c.rank * 2);
+}
+
+test "TF_TIMING: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_TIMING", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_TIMING", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_TIMING", "on"));
 }

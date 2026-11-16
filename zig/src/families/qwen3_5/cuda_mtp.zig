@@ -118,10 +118,10 @@ pub const Mtp = struct {
         if (!e.g.moe()) return error.NotRouted;
         const d = try gpa.create(Mtp);
         errdefer gpa.destroy(d);
-        d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = platform.c.getenv("TF_MTP_TREES") != null, .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
+        d.* = .{ .gpa = gpa, .io = io, .e = e, .w = undefined, .mod = undefined, .dmod = undefined, .fns = undefined, .ring_fns = undefined, .scratch = undefined, .capacity = capacity, .depth = default_depth, .trees = try platform.environment.read(bool, "TF_MTP_TREES", false), .tap = .{@intCast(e.g.layers - 1)}, .taps_in = 0, .hin = 0, .hn = 0, .emb = 0, .en = 0, .h = 0, .r = 0, .x = 0, .qraw = 0, .q = 0, .kraw = 0, .kb = 0, .vb = 0, .att = 0, .xs = 0, .logits = 0, .words = 0, .picks = 0, .lane_state = 0, .lane_k = 0, .lane_v = 0, .anc = 0, .ids = 0, .tok = 0, .staged = undefined, .tab = 0 };
         d.depth = try platform.environment.read(u32, "TF_MTP_DRAFTS", default_depth);
         d.depth = @min(@max(d.depth, 1), most_window - 1);
-        if (platform.c.getenv("TF_MTP_BATCH")) |v| d.batch = !std.mem.eql(u8, std.mem.span(v), "0");
+        d.batch = try platform.environment.read(bool, "TF_MTP_BATCH", true);
         d.mod = try cuda.Module.load(e.d, cuda.kernels.qwen36_mtp);
         errdefer d.mod.unload();
         d.dmod = try cuda.Module.load(e.d, cuda.kernels.qwen35_draft);
@@ -160,7 +160,7 @@ pub const Mtp = struct {
     }
 
     pub fn setCost(d: *Mtp, rows: u32, ms: f64) void {
-        if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a draft level {d:.2})\n", .{ rows, ms, d.step_ms });
+        if (platform.environment.read(bool, "TF_TIMING", false) catch false) std.debug.print("[timing] window {d} rows {d:.2} ms (a draft level {d:.2})\n", .{ rows, ms, d.step_ms });
         if (d.n_costs < d.costs.len) {
             d.costs[d.n_costs] = .{ .width = rows, .ms = ms };
             d.n_costs += 1;
@@ -474,7 +474,7 @@ pub const Mtp = struct {
             };
         }
         ctx.held_n = n;
-        if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] lanes {d} levels {d}\n", .{ n, l.levels() });
+        if (platform.environment.read(bool, "TF_TIMING", false) catch false) std.debug.print("[timing] lanes {d} levels {d}\n", .{ n, l.levels() });
     }
 
     // the Drafter contract
@@ -562,3 +562,9 @@ pub const Mtp = struct {
 
 /// Acceptance by depth until a stream has its own (the frozen engine's chains kept about three of four).
 const prior = [_]f64{ 0.7, 0.55, 0.45, 0.4, 0.35, 0.3, 0.3 };
+
+test "TF_MTP_TREES: the platform parses unset, valid and malformed text" {
+    try std.testing.expectEqual(@as(?u64, null), try platform.environment.parse("TF_MTP_TREES", null));
+    try std.testing.expectEqual(@as(?u64, 1), try platform.environment.parse("TF_MTP_TREES", "1"));
+    try std.testing.expectError(error.InvalidEnvironment, platform.environment.parse("TF_MTP_TREES", "on"));
+}
