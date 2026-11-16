@@ -130,8 +130,81 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
         const f32_ok = if (bf16_ok) try sdpaTileGate(a, clock, &dev, &cmds, staging, &attn, case, 0x71e5, timeout, true) else false;
         passed += @intFromBool(bf16_ok and f32_ok);
     }
+    for (ca.route_keys) |keys| {
+        for ([_]bool{ false, true }) |uniform| {
+            total += 1;
+            const bf16_ok = try routeGate(a, &dev, &cmds, staging, &attn, keys, 0x70e7, timeout, false, uniform);
+            const f32_ok = try routeGate(a, &dev, &cmds, staging, &attn, keys, 0x70e7, timeout, true, uniform);
+            passed += @intFromBool(bf16_ok and f32_ok);
+        }
+    }
     std.debug.print("RESULT attention-contract elapsed_ms={d} on \"{s}\": passed={d} total={d}\n", .{ clock.ms(), name, passed, total });
     return passed == total;
+}
+
+// One row decoded over `keys` keys by the single dispatch and by the tiled path: every output element must match byte for byte.
+// uniform data is non-dyadic, so a different f32 summation order shows; dyadic data sums exactly and hides it.
+fn routeGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, keys: u64, seed: u64, timeout: u64, comptime wide: bool, uniform: bool) !bool {
+    const El = if (wide) u32 else u16;
+    const arm: []const u8 = if (wide) "f32" else "bf16";
+    const row_elems: usize = @intCast(fx.heads * fx.head_dim);
+    const cache_elems: usize = @intCast(fx.kv_heads * keys * fx.head_dim);
+    const q_bits = try a.alloc(u16, row_elems);
+    defer a.free(q_bits);
+    const k_bits = try a.alloc(u16, cache_elems);
+    defer a.free(k_bits);
+    const v_bits = try a.alloc(u16, cache_elems);
+    defer a.free(v_bits);
+    var prng = std.Random.DefaultPrng.init(seed ^ keys);
+    const rng = prng.random();
+    for ([_][]u16{ q_bits, k_bits, v_bits }) |bits| {
+        for (bits) |*x| x.* = if (uniform) cx.toBf16(rng.float(f32) * 2 - 1) else fx.sampleDyadic(rng, -5, 3);
+    }
+    var kbuf = try upload16(dev, cmds, staging, k_bits, timeout);
+    defer kbuf.deinit();
+    var vbuf = try upload16(dev, cmds, staging, v_bits, timeout);
+    defer vbuf.deinit();
+    var q = if (wide) wq: {
+        const words = try a.alloc(u32, row_elems);
+        defer a.free(words);
+        for (q_bits, 0..) |bits, i| words[i] = @bitCast(@as(f32, @floatCast(cx.fromBf16(bits))));
+        break :wq try upload32(dev, cmds, staging, words, timeout);
+    } else try upload16(dev, cmds, staging, q_bits, timeout);
+    defer q.deinit();
+    const kind: vk.tensor.Kind = if (wide) .f32 else .bf16;
+    const q_view = try vk.tensor.View.init(&q, kind, 0, @intCast(row_elems));
+    const keys_view = try vk.tensor.View.init(&kbuf, .bf16, 0, @intCast(k_bits.len));
+    const values_view = try vk.tensor.View.init(&vbuf, .bf16, 0, @intCast(v_bits.len));
+    var got: [2][]El = undefined;
+    for ([_]vk.Attention.Path{ .single, .tiled }, 0..) |path, i| {
+        got[i] = try a.alloc(El, row_elems);
+        const shell = try a.alloc(El, row_elems + fx.tail);
+        defer a.free(shell);
+        @memset(shell, if (wide) 0x7fc00000 else fx.poison16);
+        var out = try uploadWords(El, dev, cmds, staging, shell, timeout);
+        defer out.deinit();
+        const y_view = try vk.tensor.View.init(&out, kind, 0, @intCast(row_elems));
+        try vk.orExit(attn.attendOn(path, cmds, y_view, q_view, keys_view, values_view, null, keys - 1, 1, keys, timeout));
+        try fetch(cmds, staging, out, std.mem.sliceAsBytes(got[i]), timeout);
+    }
+    defer a.free(got[0]);
+    defer a.free(got[1]);
+    var mismatched: usize = 0;
+    var first: usize = 0;
+    var max_abs: f64 = 0;
+    for (got[0], got[1], 0..) |s, t, i| {
+        if (s == t) continue;
+        if (mismatched == 0) first = i;
+        mismatched += 1;
+        const sv: f64 = if (wide) @as(f32, @bitCast(s)) else cx.fromBf16(s);
+        const tv: f64 = if (wide) @as(f32, @bitCast(t)) else cx.fromBf16(t);
+        max_abs = @max(max_abs, @abs(sv - tv));
+    }
+    const ok = mismatched == 0;
+    std.debug.print("{s} route keys={d} {s} data={s}: single vs tiled mismatched={d} of {d} first={d} max_abs={e}\n", .{
+        if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", mismatched, row_elems, first, max_abs,
+    });
+    return ok;
 }
 
 fn upload16(dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, shell: []const u16, timeout: u64) !vk.Buffer {

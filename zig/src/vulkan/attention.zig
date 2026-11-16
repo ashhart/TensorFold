@@ -224,10 +224,22 @@ pub const Attention = struct {
 
     // SDPA scales q once, streams f32 scores; Metal scales per-score in 128-key chunks. No bit-exact/performance claim.
     pub fn attend(a: *Attention, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, stream: ?View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
+        return a.attendOn(.auto, cmds, y, queries, cache_keys, cache_values, stream, prefix, rows, capacity, timeout_ns);
+    }
+
+    /// Which dispatch attendOn runs: auto picks by the routing rule; the others force one path so a gate can compare them.
+    pub const Path = enum { auto, single, tiled };
+
+    pub fn attendOn(a: *Attention, path: Path, cmds: *Commands, y: View, queries: View, cache_keys: View, cache_values: View, stream: ?View, prefix: u64, rows: u64, capacity: u64, timeout_ns: u64) Error!void {
         const plan = try attendPlan(prefix, rows, capacity, queries.elements, y.elements, cache_keys.elements, cache_values.elements, if (stream) |s| s.elements else 0);
         if (y.kind != queries.kind or (queries.kind != .bf16 and queries.kind != .f32)) return error.Invalid;
         if (y.overlaps(queries) or y.overlaps(cache_keys) or y.overlaps(cache_values)) return error.Aliased;
-        if (plan.rows <= tile_max_rows and (plan.rows > 1 or plan.total_keys >= decode_tile_keys)) return a.attendTiled(cmds, y, queries, cache_keys, cache_values, plan, capacity, timeout_ns);
+        const routed = plan.rows <= tile_max_rows and (plan.rows > 1 or plan.total_keys >= decode_tile_keys);
+        if (switch (path) {
+            .auto => routed,
+            .single => false,
+            .tiled => plan.rows <= tile_max_rows,
+        }) return a.attendTiled(cmds, y, queries, cache_keys, cache_values, plan, capacity, timeout_ns);
         const long = plan.total_keys > shared_stream_keys;
         var bindings: [5]dispatch.Binding = .{ queries.bind(), cache_keys.bind(), cache_values.bind(), y.bind(), undefined };
         const pipe = if (long) blk: {

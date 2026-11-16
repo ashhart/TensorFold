@@ -102,6 +102,9 @@ pub const tile_cases = [_]TileCase{
     .{ .name = "tile 64 rows poison second half", .rows = 64, .prefix = 0, .capacity = 80, .poison_from = 32 },
 };
 
+/// 1-row decodes at the routing threshold (decode_tile_keys = 512): the single dispatch and the tiled path must agree byte for byte.
+pub const route_keys = [_]u64{ 511, 512, 513, 1024, 1025, 2048 };
+
 /// Rows 0..finiteRows-1 see only finite V; later rows legitimately read the plants and may go non-finite.
 pub fn finiteRows(case: TileCase) u64 {
     return case.poison_from - case.prefix;
