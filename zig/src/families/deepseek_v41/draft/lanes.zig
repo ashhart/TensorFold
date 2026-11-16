@@ -153,6 +153,18 @@ pub const Lanes = struct {
 
     const ingest = @import("lane_ingest.zig").ingest;
 
+    /// A hand-off's export point: the stream's mark hook, called one token before the prompt's end.
+    const Cut = struct {
+        s: *Stream,
+        at: u32,
+
+        fn run(ptr: *anyopaque) void {
+            const c: *Cut = @ptrCast(@alignCast(ptr));
+            const k = c.s.reuse.hook orelse return;
+            k.at(k.ptr, c.s, c.at);
+        }
+    };
+
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
         if (x.streams.get(s) != null) return error.StreamLive;
@@ -174,6 +186,10 @@ pub const Lanes = struct {
         x.policy.depth.reset(slot);
         const ids = s.prompt();
         x.target.admit(slot, s.max_new);
+        var cut: Cut = .{ .s = s, .at = @intCast(ids.len -| 1) };
+        const exporting = ids.len >= 2 and s.reuse.hook != null and std.mem.indexOfScalar(u32, s.reuse.marks, cut.at) != null;
+        if (exporting) x.target.arm(slot, .{ .ptr = &cut, .run = Cut.run });
+        defer if (exporting) x.target.arm(slot, null);
         st.first = try x.target.prefill(slot, ids, s.sampling, ids.len);
         s.cached = @intCast(x.target.resumedRows(slot));
         st.len = ids.len;

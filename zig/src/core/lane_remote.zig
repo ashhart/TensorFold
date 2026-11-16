@@ -26,6 +26,9 @@ pub const ResumePeek = struct { ctx: *anyopaque, at: *const fn (ctx: *anyopaque,
 /// The family's state after `at` prompt tokens, computed by another machine: never kept, never the engine's own.
 pub const Filled = struct { saved: pc.Saved, at: u32 };
 
+/// Link name for the server's own HTTP port, used by `--mcdma-produce http`.
+pub const http_link = "http";
+
 /// serve --prefill-from URL (the GB10 server) and --mcdma-link NAME (mcdma-rpcd's connect link): both, or neither.
 pub const Flags = struct {
     url: ?[]const u8 = null,

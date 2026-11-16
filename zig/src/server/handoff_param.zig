@@ -27,6 +27,26 @@ fn bad(why: *[]const u8, text: []const u8) error{BadHandoff} {
     return error.BadHandoff;
 }
 
+/// The route a decoder reads and releases a held export on: `/v1/handoff/<32 hex digits>`.
+pub const route_prefix = "/v1/handoff/";
+
+/// The id a hand-off route names, or null for any other path: exactly the prefix and 32 hex digits, nothing after.
+pub fn routeId(route: []const u8) ?[16]u8 {
+    if (!std.mem.startsWith(u8, route, route_prefix)) return null;
+    const hex = route[route_prefix.len..];
+    if (hex.len != 32) return null;
+    var id: [16]u8 = undefined;
+    _ = std.fmt.hexToBytes(&id, hex) catch return null;
+    return id;
+}
+
+test "a hand-off route names exactly 32 hex digits and nothing else" {
+    const id = routeId("/v1/handoff/00112233445566778899aabbccddeeff").?;
+    try std.testing.expectEqual(@as(u8, 0xff), id[15]);
+    for ([_][]const u8{ "/v1/handoff/", "/v1/handoff", "/v1/handoff/0011", "/v1/handoff/00112233445566778899aabbccddeeff0", "/v1/handoff/00112233445566778899aabbccddeefg", "/v1/handoff/../etc/passwd", "/v1/handoff/00112233445566778899aabbccddeeff/x", "/handoff/00112233445566778899aabbccddeeff", "/v1/handoff/00112233445566778899aabbccddee%66" }) |bad_route|
+        try std.testing.expectEqual(@as(?[16]u8, null), routeId(bad_route));
+}
+
 test "a handoff is read from kv_transfer_params, and a malformed one is refused by its field" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

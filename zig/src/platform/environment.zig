@@ -43,6 +43,7 @@ pub const rules = [_]Rule{
     .{ .name = "TF_CUDA_DEVICE", .scope = .cuda, .kind = .device, .trim = " ", .forms = "a whole GPU ordinal from 0 to 4294967295, or empty for the default" },
     .{ .name = "TF_CUDA_SEGMENTS", .scope = .cuda, .kind = .segments, .trim = " ", .forms = "a whole number from 1 to 4, or empty for the default" },
     .{ .name = "TF_PRODUCE_HELD_GIB", .scope = .cuda, .kind = .u64, .min = 1, .max = 1024, .forms = "whole GiB from 1 to 1024 of hand-off exports held at once (default 32)" },
+    .{ .name = "TF_DSV41_HANDOFF_DUMP", .scope = .cuda, .kind = .path, .forms = "a directory path without control characters, where a DeepSeek-V4.1 producer writes each hand-off export" },
     .{ .name = "TF_CUDA_CARVEOUT", .scope = .cuda, .kind = .flag, .forms = "0 or 1" },
     .{ .name = "TF_CUDA_CARVEOUT_MIB", .scope = .cuda, .kind = .mib, .forms = "a positive whole MiB count fitting a native byte size, or empty for 1792 MiB" },
     .{ .name = "TF_MTP_DRAFTS", .scope = .cuda, .kind = .u32, .forms = "a whole number from 0 to 4294967295 (clamped to the drafter's window)" },

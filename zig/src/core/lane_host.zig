@@ -180,6 +180,7 @@ pub const LaneHost = struct {
         .imprint = rows_host.ask,
         .drain = rows_host.drain,
         .load = load.attach,
+        .handoff = @import("lane_export.zig").serveHook,
     };
 
     const scored_vtable: Engine.VTable = blk: {

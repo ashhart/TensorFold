@@ -66,9 +66,63 @@ exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served
 * A ratio-2 carry is the projection of position `upto-1`; only the odd-`upto` case occupies a slot on Metal (the other is
   reset: kv 0, score `-inf`).
 
+## Producing on the GB10
+
+`dsv41-serve` exports a prompt's hand-off when a request names one: `kv_transfer_params.mcdma_handoff` with a 32-hex `id`
+and `export_from` 0 on `/v1/chat/completions` or `/v1/completions`. The prompt prefills to its last-but-one token, the
+reply is one token, and the state at the cut goes to the producer (`cuda_export_serve.zig`).
+
+* `--mcdma-produce LINK` attaches to mcdma-rpcd's listen daemon and holds each export until the decoder closes it
+  (`TF_PRODUCE_HELD_GIB`, as for Qwen).
+* `--mcdma-produce http` holds them the same way and serves them on the server's own port, for a Mac with no link
+  ([Over plain HTTP](#over-plain-http)).
+* `TF_DSV41_HANDOFF_DUMP=DIR` also (or instead, with no link) writes each export as `DIR/<id>.mkvh2`, with
+  `<id>.tokens.json` (the prompt ids it covers) beside it, or `<id>.error` with the reason. `<id>.mkvh2` is what the
+  producer's replies are, concatenated: the protocol-2 MANIFEST, then every DATA frame (a 128-byte header and the
+  payload). `handoff_file.pull` replays it through the decoder's checks into any sink, the importer's `p2.ShardSink`
+  included, so a hand-off moves between machines without the link. A file is written whole and renamed, so one that
+  is there is complete.
+
+* The export reads rank 0's active slot: its snapshot (`Sessions.snapshot`) and its pool pages, through the same
+  `PageStore` the NVMe park uses. A replicated pool holds the same pages and rings on every rank, so no other rank takes
+  part. The raw bytes are converted to the library's bf16 parts when the cut is taken.
+* The model name is `LaneHost.Remote.checkpointId` of the checkpoint folder (config and weight index hashed): the
+  decoder must serve identical files, or give the manifest's name.
+
+The engine refuses, at start-up and by name, a configuration it cannot export: no session store (`TF_DSV41_POOL_TOKENS`),
+replay prefill, a prompt run in pieces between decode rounds, `TF_DSV41_KV_SPLIT=1` (half the pages are on the other rank),
+a non-default prompt shape, and fp4 comp rows.
+
+## Over plain HTTP
+
+With no ConnectX link between the pair and the decoder, the hand-off travels over the LAN on the ports the servers already
+have. It is the same stream a link carries, so nothing in the library changes: the manifest and the part checks are the
+ones the `.mkvh2` file replay uses.
+
+**Producer** (the GB10 pair's rank 0, an export profile as above): `dsv41-serve ... --mcdma-produce http`. `http` is a reserved
+link name: no mcdma-rpcd, no listen daemon. Each export is held as for a link (`TF_PRODUCE_HELD_GIB`, 120 s) and the server
+answers, on its own port and behind its own API keys (`--api-key`, `--api-key-file`):
+
+* `GET /v1/handoff/<id>`: HTTP 200, `application/octet-stream`, `Content-Length`, and the producer's replies to a decoder's
+  OPEN and every PULL as one body: the protocol-2 MANIFEST, then each DATA frame (128-byte header, payload, CRC-32). The
+  frames are cut from the held bf16 parts a message at a time through one 4 MiB buffer: no second copy of an export exists.
+  It may be fetched again until it is deleted or expires (a retry is a new GET; there are no ranges).
+* `DELETE /v1/handoff/<id>`: the decoder is done; the export is released at once (HTTP 200, or 404 when none is held).
+* 400 when the id is not exactly 32 hex digits; 404 for an id never exported, deleted, or expired (and from a server that was not
+  started with `--mcdma-produce http`); 409 with the reason when the export failed (the trigger's reply was still one token).
+  A key without the `inference` scope gets 403, no key 401. Only a held export is reachable: the route reads no file and
+  takes no path.
+
+The body is not encrypted: it is a state derived from the prompt. Keep the pair's port on a trusted LAN, and use a key.
+
+The producer logs `handoff: exports are served over HTTP, GET /v1/handoff/<id> on this server's port` at start
+and `handoff <id>: N tokens, P parts, M MiB of bf16 rows` per export.
+
 ## Tests
 
-`zig build test-dsv41-handoff` (host only): codec exhaustively against independent tables, packers against independent
+`zig build test-dsv41-handoff` (host only; includes the export glue over a synthetic engine snapshot, the file round trip and
+the producer's held-export bookkeeping with its readers): codec exhaustively against independent tables, packers against independent
 f64 references, plan partitions, export-to-import round trips for both Metal layouts (replicated, split 2 and 3 shards,
 short, odd and even `upto`), protocol 2 end to end over the fake link, and layout guards that fail when an engine's
-constants change. `compile-dsv41-handoff-aarch64-linux` / `-macos` compile the tests for the targets.
+constants change. `zig build test-handoff-routes-host` runs `GET`/`DELETE /v1/handoff/<id>` over real sockets (the whole stream under
+its `Content-Length`, the key gate and scopes, bad ids, 404 and 409). `compile-dsv41-handoff-aarch64-linux` / `-macos` compile the tests for the targets.

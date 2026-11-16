@@ -40,6 +40,8 @@ pub const GpuTarget = struct {
     ingest_window: u32 = 0,
     /// each slot's next request's reply budget (`admit`, before its prefill): its pool admission's price
     max_new: [16]?u64 = @splat(null),
+    /// each slot's armed export point (`arm`): run once at the next prompt's cut, then cleared
+    cut: [16]?iface.Target.Cut = @splat(null),
     /// the next `begin`'s admission as the round planner decided it (kv/sched.zig); null: priced at `begin`
     admission: ?Planned = null,
     /// releases wait for `settleReleases` (the rounds: after the next round's admissions are decided)
@@ -61,11 +63,16 @@ pub const GpuTarget = struct {
         return .{ .ptr = t, .vtable = &vtable };
     }
 
-    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm };
+    const vtable: iface.Target.VTable = .{ .prefill = prefill, .window = window, .keep = keep, .taps = taps, .release = release, .release_checked = releaseChecked, .available = available, .admit = admit, .begin = begin, .piece = piece, .finish = finish, .tail = tail, .pieces = pieces, .replays = replays, .warm = warm, .arm = arm };
 
     fn admit(p: *anyopaque, slot: u32, max_new: u64) void {
         const t = self_(p);
         if (slot < t.max_new.len) t.max_new[slot] = max_new;
+    }
+
+    fn arm(p: *anyopaque, slot: u32, cut: ?iface.Target.Cut) void {
+        const t = self_(p);
+        if (slot < t.cut.len) t.cut[slot] = cut;
     }
 
     fn self_(p: *anyopaque) *GpuTarget {
@@ -104,6 +111,11 @@ pub const GpuTarget = struct {
             // the decoder replay over the prompt's tail (full mode: nothing)
             try t.f.finishPrompt();
             try t.handTaps(slot);
+            // the slot stands after the prompt's tokens but the last: the hand-off's export point
+            if (slot < t.cut.len) if (t.cut[slot]) |c| {
+                t.cut[slot] = null;
+                c.run(c.ptr);
+            };
             var one: [1]u32 = undefined;
             var out = [_][]u32{&one};
             try window(p, &.{.{ .slot = slot, .start = ids.len - sp.window, .tokens = ids[ids.len - sp.window ..], .parents = null, .draws = &.{draw}, .sampling = sampling }}, &out);
