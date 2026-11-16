@@ -211,7 +211,7 @@ const Wire = struct {
     }
 };
 /// A Response built from chat-completion deltas, in order: reasoning, text, calls; streamed as typed events.
-const Reply = struct {
+pub const Reply = struct {
     srv: *Server,
     owner: ?[32]u8,
     a: Allocator,
@@ -299,7 +299,11 @@ const Reply = struct {
             try r.put(item, "id", .{ .string = ids.derived(r.a, r.call_ids.key, "fc_", 32, call_id) catch return error.Closed });
             try r.put(item, "type", .{ .string = "function_call" });
             try r.put(item, "call_id", .{ .string = call_id });
-            try r.put(item, "name", .{ .string = name });
+            // the engine's flat name is the child's own name plus its group, as the request declared them
+            if (translate_mod.childName(r.a, r.base.get("tools"), name)) |child| {
+                try r.put(item, "name", .{ .string = child.name });
+                try r.put(item, "namespace", .{ .string = child.namespace });
+            } else try r.put(item, "name", .{ .string = name });
             try r.put(item, "arguments", .{ .string = "" });
             try r.put(item, "status", .{ .string = "in_progress" });
         }
@@ -316,7 +320,7 @@ const Reply = struct {
         return item;
     }
 
-    fn close(r: *Reply, status: []const u8) E!void {
+    pub fn close(r: *Reply, status: []const u8) E!void {
         const item = r.current orelse return;
         r.current = null;
         try r.put(item, "status", .{ .string = status });
@@ -384,7 +388,7 @@ const Reply = struct {
     }
 
     /// One chat delta, with its chunk's logprobs (null: none): a channel's entries go with its text, others to items.
-    fn delta(r: *Reply, d: Value, rows: ?Value) E!void {
+    pub fn delta(r: *Reply, d: Value, rows: ?Value) E!void {
         const thought = if (d == .object) textOf(d.get("reasoning_content")) orelse textOf(d.get("reasoning")) else null;
         const content = if (d == .object) textOf(d.get("content")) else null;
         if (thought) |t| try r.write("reasoning", t, if (rows) |v| listOf(v, "reasoning_content") else null);
