@@ -138,6 +138,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // the served family and its engine, for the dots runner
     const dots = native.engines.import_table.get("dots_mocr_cuda").?;
     for ([_]struct { []const u8, *std.Build.Module }{ .{ "dots_mocr_cuda", dots }, .{ "cuda_dense", dots.import_table.get("cuda_dense").? } }) |m| runner.addImport(m[0], m[1]);
+    runner.addImport("dsv41_release", b.createModule(.{ .root_source_file = b.path("zig/src/families/deepseek_v41/kernels_release.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} })); // contract_release.zig's launches
+    const glue_contract = b.createModule(.{ .root_source_file = b.addWriteFiles().add("dsv41_glue_contract.zig", "pub const spec = @import(\"core\").contract.spec;\n"), .imports = &.{.{ .name = "core", .module = mods.core }} });
+    runner.addImport("dsv41_glue_ref", b.createModule(.{ .root_source_file = b.path("zig/tests/contract/dsv41_glue_ref.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "contract", .module = glue_contract }} })); // Metal's round-trip oracle over core's contract
     runner.addImport("moss_image_cuda", b.createModule(.{ .root_source_file = b.path("zig/src/families/moss_image/cuda_kernels.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "cuda", .module = cuda }} }));
     runner.addImport("prompt_pages", b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_prompt_pages.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = mods.api }, .{ .name = "core", .module = mods.core } } })); // TF_KV_SHARE's store, for the pages checks
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
