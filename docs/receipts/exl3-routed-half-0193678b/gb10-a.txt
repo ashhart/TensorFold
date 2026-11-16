@@ -1,0 +1,30 @@
+INFO limits fatbins: images built by nvcc 13.0, checked against nvcc 13.0's records
+PASS limits sm_80 exl3 routed half rotation: 26 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_86 exl3 routed half rotation: 26 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_89 exl3 routed half rotation: 26 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_120 exl3 routed half rotation: 20 registers, 0 static shared bytes, bound 32 (record current)
+PASS limits sm_121 exl3 routed half rotation: 20 registers, 0 static shared bytes, bound 32 (record current)
+RECORD exl3 routed half rotation: .usage = .{ .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 26, .static = 0, .bound = 32 }, .{ .regs = 20, .static = 0, .bound = 32 }, .{ .regs = 20, .static = 0, .bound = 32 }, }
+PASS kernel-contract-limits: 1 selected launch records checked against their compiled target images
+PASS nonfinite cuda exl3 routed half shared 192 experts: 2816 non-finite and 34048 finite outputs match the float64 classes
+PASS repeat cuda exl3 routed half shared 192 experts: five runs byte-identical (73728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda exl3 routed half shared 192 experts: 8 shapes within the float64 bound (worst 0.994 of the bound), 0 edges refused by the kernel
+PASS sums cuda exl3 routed half shared 192 experts: exact sums at k 128, where fp16 sums would miss by infx and bf16 by 2045x
+PASS nonfinite cuda exl3 routed half per-pair 192 experts: 896 non-finite and 35968 finite outputs match the float64 classes
+PASS repeat cuda exl3 routed half per-pair 192 experts: five runs byte-identical (73728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda exl3 routed half per-pair 192 experts: 8 shapes within the float64 bound (worst 0.994 of the bound), 0 edges refused by the kernel
+PASS sums cuda exl3 routed half per-pair 192 experts: exact sums at k 128, where fp16 sums would miss by infx and bf16 by 2045x
+PASS nonfinite cuda exl3 routed half shared 384 experts: 2816 non-finite and 34048 finite outputs match the float64 classes
+PASS repeat cuda exl3 routed half shared 384 experts: five runs byte-identical (73728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda exl3 routed half shared 384 experts: 8 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda exl3 routed half shared 384 experts: exact sums at k 128, where fp16 sums would miss by infx and bf16 by 2045x
+PASS nonfinite cuda exl3 routed half per-pair 384 experts: 896 non-finite and 35968 finite outputs match the float64 classes
+PASS repeat cuda exl3 routed half per-pair 384 experts: five runs byte-identical (73728 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda exl3 routed half per-pair 384 experts: 8 shapes within the float64 bound (worst 0.994 of the bound), 0 edges refused by the kernel
+PASS sums cuda exl3 routed half per-pair 384 experts: exact sums at k 128, where fp16 sums would miss by infx and bf16 by 2045x
+FAIL shapes control exl3 routed half shared widened product: at 8x4608x128 its bytes differ from routed FP16 product before the FP32 rotation's from byte 2
+CONTROL control exl3 routed half shared widened product: red at shapes, as planted
+FAIL shapes control exl3 routed half per-pair widened product: at 8x4608x128 its bytes differ from routed FP16 product before the FP32 rotation's from byte 2
+CONTROL control exl3 routed half per-pair widened product: red at shapes, as planted
+PASS limits live sm_121: 20 registers, 0 static shared bytes, bound 32; 0 problems
+SUMMARY 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems
