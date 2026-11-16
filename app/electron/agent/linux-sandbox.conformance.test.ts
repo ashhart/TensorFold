@@ -64,6 +64,29 @@ if (process.platform !== 'linux') {
     assert.notEqual(nestedConfig.code, 0, 'a nested repository\'s config stays read-only')
     assert.equal(readFileSync(path.join(nested, '.git', 'config'), 'utf8'), '[core]\n')
 
+    // Control files a repository does not have yet cannot be created by a writable run.
+    const newConfig = await runSandboxedCommand('printf pwned > .git/config.worktree', { cwd, profile: 'build-test' })
+    assert.notEqual(newConfig.code, 0, 'a missing control file cannot be created')
+    assert.equal(existsSync(path.join(cwd, '.git', 'config.worktree')), true, 'the placeholder exists but stayed read-only')
+    assert.equal(readFileSync(path.join(cwd, '.git', 'config.worktree'), 'utf8'), '', 'the placeholder was not written')
+
+    // A nested repository inside a dependency folder is pinned by the walk.
+    const inModules = path.join(cwd, 'node_modules', 'dep')
+    mkdirSync(path.join(inModules, '.git', 'hooks'), { recursive: true })
+    writeFileSync(path.join(inModules, '.git', 'config'), '[core]\n')
+    const moduleHook = await runSandboxedCommand('printf pwned > node_modules/dep/.git/hooks/evil', { cwd, profile: 'build-test' })
+    assert.notEqual(moduleHook.code, 0, 'a repository inside node_modules stays pinned')
+
+    // An inner worktree's pointer file is frozen: a run cannot repoint the workspace.
+    const innerWorktree = path.join(cwd, 'inner-worktree')
+    const innerGitdir = path.join(cwd, '.git', 'worktrees', 'inner')
+    mkdirSync(innerGitdir, { recursive: true })
+    mkdirSync(innerWorktree, { recursive: true })
+    writeFileSync(path.join(innerWorktree, '.git'), 'gitdir: ../.git/worktrees/inner\n')
+    const repoint = await runSandboxedCommand('printf "gitdir: /tmp/planted\n" > inner-worktree/.git', { cwd, profile: 'build-test' })
+    assert.notEqual(repoint.code, 0, 'the worktree pointer stays read-only')
+    assert.match(readFileSync(path.join(innerWorktree, '.git'), 'utf8'), /^gitdir: \.\.\/\.git\/worktrees\/inner/, 'the pointer was not rewritten')
+
     // A worktree outside the workspace is refused before the command runs.
     const outsideWorktree = path.join(root, 'outside-worktree')
     mkdirSync(path.join(root, 'elsewhere', '.git', 'worktrees', 'outside'), { recursive: true })
@@ -89,7 +112,7 @@ if (process.platform !== 'linux') {
     assert.notEqual(cancelled.code, 0, 'cancelled command did not report success')
     assert.ok(Date.now() - started < 10_000, 'cancellation stops the sandboxed command promptly')
 
-    console.log('CONFORMANCE: passed (filesystem, git controls, nested repositories, worktree refusal, network and cancellation enforced)')
+    console.log('CONFORMANCE: passed (filesystem, git controls, placeholders, nested repositories, worktree pinning and refusal, network and cancellation enforced)')
   } finally {
     server.close()
     rmSync(root, { recursive: true, force: true })
