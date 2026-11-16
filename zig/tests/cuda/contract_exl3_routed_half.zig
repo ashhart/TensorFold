@@ -18,6 +18,7 @@ fn depth(_: c.Shape) usize {
 const untouched: f64 = @as(f16, @bitCast(@as(u16, 0x3c3c)));
 
 const Case = struct {
+    const vt = g.hooks(Case);
     rig: rig_.Rig,
     shared: bool,
     experts: usize,
@@ -50,7 +51,7 @@ const Case = struct {
             .served = &served,
             .tiles = .{ .{ .size = 8 }, .{ .size = 128, .step = 128, .min = 128 }, .{} },
             .replaces = if (self.control) "routed FP16 product before the FP32 rotation" else null,
-        }, .ctx = self, .vt = &g.hooks(Case), .control = if (self.control) .shapes else null };
+        }, .ctx = self, .vt = &vt, .control = if (self.control) .shapes else null };
     }
 
     pub fn reset(self: *Case) void {
