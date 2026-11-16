@@ -1,10 +1,4 @@
-"""Tiny-shape MLA dump: ling_forward.py --mla-layer CLI (TFLINGA1) plus mixer inputs.
-
-Random values in Ling-3.0-tiny tensor shapes, not published checkpoint weights.
-Layer 3 MLA tensors are seeded randn * initializer_range (0.02) at tiny's real widths
-(hidden 1536, 16 heads, q_lora 256, kv_lora 512). There is no Ling-3.0-tiny
-model.safetensors on disk. The CLI writes TFLINGA1 against that synth.
-"""
+"""Tiny-shape MLA dump (TFLINGA1). Random values in Ling-3.0-tiny tensor shapes, not checkpoint weights."""
 from __future__ import annotations
 
 import importlib.util

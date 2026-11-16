@@ -100,16 +100,7 @@ class Model:
         return self.lin(r(y).reshape(T, H * dk), p + "o_proj")
 
     def mla(self, x, p, pos0=0):
-        """One MLA layer. x is the pre-normed residual [T, hidden].
-
-        pos0 is the absolute index of row 0, used only for RoPE angles.
-        mla(x, pos0) attends only over the rows it is given, so with pos0 > 0 it is
-        that chunk as if it were the whole prompt, placed at pos0. It is not the same
-        rows taken out of a longer prompt (those also attend to the earlier tokens).
-        Metal-vs-reference therefore runs on whole prompts from pos0=0. Whole-vs-chunks
-        and resume-vs-fresh are Metal against Metal. Do not compare a Metal chunk
-        with mla(chunk, pos0).
-        """
+        """One MLA layer. x is the pre-normed residual [T, hidden]; attends only over the rows it is given."""
         c, r, ck = self.c, self.r, self.ck
         T, H = x.shape[0], c["num_attention_heads"]
         nope, rope, dv, lw = c["qk_nope_head_dim"], c["qk_rope_head_dim"], c["v_head_dim"], c["kv_lora_rank"]
@@ -192,10 +183,7 @@ class Model:
 
 
 def one_mla(ck, c, x, layer, r, pos0=0):
-    """One MLA layer's output [T, hidden] from its pre-normed input x. Same Model.mla, not a second copy.
-
-    pos0 is for RoPE only; see Model.mla. Do not compare a Metal chunk to one_mla(..., pos0=n).
-    """
+    """One MLA layer's output [T, hidden] from its pre-normed input x. Same Model.mla, not a second copy."""
     return Model(ck, c, r).mla(x, f"model.layers.{layer}.attention.", pos0)
 
 

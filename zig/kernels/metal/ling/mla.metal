@@ -1,6 +1,8 @@
 // Ling MLA extras around k3: RoPE (GPT-J pairs then halves) and per-head gate expand.
-// k3_mla_* kernels are unchanged. Layout matches ling_forward.py rot() and HF
-// apply_rotary_pos_emb_interleave: pair (z[2i], z[2i+1]) rotates to (out[i], out[32+i]).
+
+// k3_mla_* kernels are unchanged. Layout matches ling_forward.py rot() and HF apply_rotary_pos_emb_interleave.
+
+// Pair (z[2i], z[2i+1]) rotates to (out[i], out[32+i]).
 #include <metal_stdlib>
 using namespace metal;
 
@@ -27,8 +29,11 @@ inline device bfloat* ling_keys(constant MlaArgs& a, MlaRow r) {
   return a.cache + ulong(r.slot) * a.slot_keys * KEY;
 }
 
-// In-place GPT-J rotate of the 64 rope columns k3_mla_cache just copied. 32 threads, no early
-// return: the threadgroup temp needs every lane at the barrier. Cache address is rows[row].pos.
+// In-place GPT-J rotate of the 64 rope columns k3_mla_cache just copied.
+
+// 32 threads, no early return: the threadgroup temp needs every lane at the barrier.
+
+// Cache address is rows[row].pos.
 kernel void tf_ling_mla_rope_cache(device const MlaRow* rows [[buffer(0)]], constant MlaArgs& a [[buffer(1)]],
                                    device const float* cs [[buffer(2)]],
                                    uint row [[threadgroup_position_in_grid]],
