@@ -71,7 +71,7 @@ pub const Stack = struct {
         if (t == 0) return;
         if (t > sp.max_rows) return error.TooManyRows;
         if (x_.pos + t > sp.max_ctx) return error.ContextFull;
-        if (t <= kern.gemv_rows and kern.Kernels.few(t, sp.d, sp.d, x)) try x_.forwardFew(k, x, t, out) else try x_.forwardRows(k, x, t, out);
+        if (k.few(t, sp.d, sp.d, x)) try x_.forwardFew(k, x, t, out) else try x_.forwardRows(k, x, t, out);
         x_.pos += t;
     }
 

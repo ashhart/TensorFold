@@ -66,6 +66,8 @@ pub const Engine = struct {
     g: *Gpu,
     stream: Stream,
     k: kern.Kernels,
+    /// The codec's launches: row-exact, so any chunking of a reply gives the bytes of one whole decode.
+    kc: kern.Kernels,
     a: Arena,
     mel: *melmod.Mel,
     window: [cfg.n_fft]f32,
@@ -187,6 +189,7 @@ pub const Engine = struct {
         errdefer e.g.close();
         e.stream = .{ .g = e.g };
         e.k = .{ .g = e.g };
+        e.kc = .{ .g = e.g, .row_exact = true };
         e.a = .{ .g = e.g };
         e.mel = try gpa.create(melmod.Mel);
         errdefer gpa.destroy(e.mel);
@@ -430,7 +433,7 @@ pub const Engine = struct {
 
     /// Decodes `frames` (each 12 codes) after those already decoded; windowed frames for the overlap-add (host).
     pub fn codecChunk(e: *Engine, frames: []const [cfg.codebooks]i32, lin_out: ?[]f32) ![]const f32 {
-        const k = &e.k;
+        const k = &e.kc;
         const n = frames.len;
         if (n == 0) return &.{};
         if (n > e.o.codec_chunk) return error.CodecChunkTooLong;

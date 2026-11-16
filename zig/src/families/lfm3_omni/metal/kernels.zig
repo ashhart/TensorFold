@@ -21,6 +21,8 @@ fn blocks(n: usize, per: usize) usize {
 
 pub const Kernels = struct {
     g: *Gpu,
+    /// A row's sums never depend on the rows launched with it: the tiled product only, attention a row a launch.
+    row_exact: bool = false,
 
     fn go(k: *const Kernels, p: gpu.P, n: usize, per: usize, bufs: []const u64, args: anytype) void {
         k.g.go(p, .{ blocks(n, per), 1, 1 }, per, bufs, args);
@@ -29,8 +31,8 @@ pub const Kernels = struct {
     // ---- matrix products
 
     /// Whether `t` rows of `kdim` (rows `ldx` apart) take the few-row product.
-    pub fn few(t: usize, kdim: usize, ldx: usize, x: u64) bool {
-        return t <= gemv_rows and kdim % 8 == 0 and ldx % 8 == 0 and x % 16 == 0;
+    pub fn few(k: *const Kernels, t: usize, kdim: usize, ldx: usize, x: u64) bool {
+        return !k.row_exact and t <= gemv_rows and kdim % 8 == 0 and ldx % 8 == 0 and x % 16 == 0;
     }
 
     /// The few-row product's result: bf16 / fp32 rows, or SwiGLU of interleaved (a, c) column pairs.
@@ -68,13 +70,13 @@ pub const Kernels = struct {
 
     /// y [t, n] = x [t, k] w^T with w [n, k]; x rows `ldx` apart, y rows `ldy` apart; bf16 out, fp32 accumulate.
     pub fn linear(k: *const Kernels, w: u64, x: u64, ldx: usize, kdim: usize, n: usize, y: u64, ldy: usize, t: usize) void {
-        if (few(t, kdim, ldx, x)) return k.gemv(w, x, ldx, kdim, n, t, y, ldy, 0, 1, 0, 0, 0);
+        if (k.few(t, kdim, ldx, x)) return k.gemv(w, x, ldx, kdim, n, t, y, ldy, 0, 1, 0, 0, 0);
         k.gemm(false, true, t, n, kdim, x, ldx, w, kdim, y, ldy, .bf16, .bf16, 1, 0, 0, 0);
     }
 
     /// As `linear`, the result in fp32 (for a bias added before the one rounding).
     pub fn linearF32(k: *const Kernels, w: u64, x: u64, ldx: usize, kdim: usize, n: usize, y: u64, t: usize) void {
-        if (few(t, kdim, ldx, x)) return k.gemv(w, x, ldx, kdim, n, t, 0, n, y, 1, 0, 0, 0);
+        if (k.few(t, kdim, ldx, x)) return k.gemv(w, x, ldx, kdim, n, t, 0, n, y, 1, 0, 0, 0);
         k.gemm(false, true, t, n, kdim, x, ldx, w, kdim, y, n, .bf16, .f32, 1, 0, 0, 0);
     }
 
@@ -85,7 +87,7 @@ pub const Kernels = struct {
 
     /// `batch` products y_j [t, n] = x_j [t, kd] w_j^T, the operands `sw`, `sx`, `sy` elements apart; bf16 out.
     pub fn linearBatched(k: *const Kernels, w: u64, sw: usize, x: u64, sx: usize, kd: usize, n: usize, y: u64, sy: usize, t: usize, batch: usize) void {
-        if (few(t, kd, kd, x) and sx % 8 == 0) return k.gemv(w, x, kd, kd, n, t, y, n, 0, batch, sw, sx, sy);
+        if (k.few(t, kd, kd, x) and sx % 8 == 0) return k.gemv(w, x, kd, kd, n, t, y, n, 0, batch, sw, sx, sy);
         k.gemm(false, true, t, n, kd, x, kd, w, kd, y, n, .bf16, .bf16, batch, sx, sw, sy);
     }
 
@@ -163,7 +165,18 @@ pub const Kernels = struct {
 
     pub fn attention(k: *const Kernels, p: Attn) !void {
         if (p.hd % 32 != 0 or p.hd > 128) return error.UnsupportedHeadDim;
-        if (p.t == 1 and p.kv_len > 4096) return error.AttentionSpanTooLong;
+        if (p.t > 1 and k.row_exact) {
+            for (0..p.t) |r| {
+                var one = p;
+                one.t = 1;
+                one.q = p.q + r * p.ldq * 2;
+                one.o = p.o + r * p.ldo * 2;
+                one.pos0 = p.pos0 + r;
+                if (p.gate != 0) one.gate = p.gate + r * p.ldg * 2;
+                try k.attention(one);
+            }
+            return;
+        }
         if (p.t == 1) {
             const A = extern struct { ldkv: i32, H: i32, Hkv: i32, hd: i32, pos: i32, kv_len: i32, window: i32, causal: i32, has_gate: i32, gate_off: i32, scale: f32 };
             const span = if (p.causal and p.window > 0) @min(p.window, p.kv_len) else p.kv_len;
