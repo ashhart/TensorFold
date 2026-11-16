@@ -54,4 +54,3 @@ export function assertIncognitoThreadTransportSupported(thread: Pick<Thread, 'in
     throw new Error('Incognito requires a TensorFold API chat. This agent runtime keeps its own session history; choose an API model or start an ordinary saved task.')
   }
 }
-
