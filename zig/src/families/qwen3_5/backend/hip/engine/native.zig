@@ -100,6 +100,18 @@ fn oneRank(a: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ?[]con
     return "the joint schema head serves on one rank; drop --tp";
 }
 
+const bf16_drafter = "--drafter: the HIP engine runs its DFlash2 drafter over quantized checkpoints only; " ++
+    "serve this BF16 checkpoint without --drafter";
+
+/// Why --drafter cannot run over `dir`: the drafter's rounds are priced by timed windows, which BF16 targets skip.
+fn bf16Drafter(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) ?[]const u8 {
+    if (o.drafter == null) return null;
+    // a config that does not read is the loader's to report
+    var c = config.Config.read(gpa, io, dir) catch return null;
+    defer c.deinit();
+    return if (c.quant == .bf16) bf16_drafter else null;
+}
+
 /// A bf16 checkpoint's joint schema head on the device (null for every other checkpoint); refused by name.
 fn loadJoint(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, problem: *[]const u8) Refused!?joint.Loaded {
     if (!e.plain() or !joint.present(io, a, dir)) return null;
@@ -341,7 +353,7 @@ fn release(p: *anyopaque) void {
 
 /// The engine for `dir` on `dev`; under tensor parallelism this is rank 0, which serves.
 fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dev: hip.Device, dir: []const u8, o: Options, problem: *[]const u8) anyerror!Loaded {
-    if (decisionOnly(a, gpa, io, dir) orelse oneRank(a, io, dir, o)) |why| return refuse(a, problem, "{s}", .{why});
+    if (decisionOnly(a, gpa, io, dir) orelse oneRank(a, io, dir, o) orelse bf16Drafter(gpa, io, dir, o)) |why| return refuse(a, problem, "{s}", .{why});
     var steps: hip.Startup = .{ .link = if (dev.group) |g| g.link() else null };
     var p = try prepare(a, gpa, io, dev, dir, o, &steps, problem);
     errdefer p.e.deinit();
@@ -491,6 +503,29 @@ test "a bf16 checkpoint without a joint head serves chat when the engine reads i
     try tmp.dir.writeFile(io, .{ .sub_path = "joint_head_config.json", .data = "{}" });
     try std.testing.expect(!engine.chatBf16(std.testing.allocator, io, dir));
     try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+}
+
+test "--drafter is refused over a BF16 checkpoint before it loads; a quantized one, or no --drafter, is not" {
+    const io = std.testing.io;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    // a BF16 checkpoint the engine serves for chat: decisionOnly lets it through, --drafter does not
+    const bf16 = @embedFile("../../../fixtures/lighton-ocr-0.8b.json");
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = bf16 });
+    const drafted: Options = .{ .window = 64, .streams = 1, .drafter = "/models/drafter" };
+    try std.testing.expect(decisionOnly(a, std.testing.allocator, io, dir) == null);
+    try std.testing.expectEqualStrings(bf16_drafter, bf16Drafter(std.testing.allocator, io, dir, drafted) orelse "");
+    try std.testing.expect(bf16Drafter(std.testing.allocator, io, dir, .{ .window = 64, .streams = 1 }) == null);
+    const affine = "\"image_token_id\": 248056, \"quantization\": {\"group_size\": 64, \"bits\": 4, \"mode\": \"affine\"},";
+    const mlx = try std.mem.replaceOwned(u8, a, bf16, "\"image_token_id\": 248056,", affine);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = mlx });
+    var read = try config.Config.read(std.testing.allocator, io, dir); // it reads, so the null below is no read failure
+    defer read.deinit();
+    try std.testing.expect(read.quant != .bf16 and bf16Drafter(std.testing.allocator, io, dir, drafted) == null);
 }
 
 test "capability audit: HIP Qwen format names cover the admitted affine widths" {
