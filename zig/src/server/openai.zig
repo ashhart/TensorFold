@@ -117,7 +117,8 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     };
     input.messages = try @import("deferred_tools.zig").resolve(cx, input.messages, body.get("tools"), srv.text.deferred_native);
     const prompts: []const []const u8 = if (!is_chat and input.messages.array.len == 0) try prompt_list.texts(cx, body.get("prompt")) else &.{};
-    if (!is_chat and input.messages.array.len == 0) input.prompt = if (prompts.len > 0) .{ .text = prompts[0] } else try completion_prompt.legacyPrompt(srv, cx, body.get("prompt"));
+    const legacy: @TypeOf(input.prompt) = if (!is_chat and input.messages.array.len == 0) (if (prompts.len > 0) .{ .text = prompts[0] } else try completion_prompt.legacyPrompt(srv, cx, body.get("prompt"))) else null;
+    if (!is_chat) input.prompt = try @import("completion_fim.zig").prompt(srv, cx, body, &input, legacy);
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
     const first = body.get("max_tokens");
     const max = if (first != null and first.?.truthy()) first else body.get("max_completion_tokens");
