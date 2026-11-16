@@ -26,8 +26,8 @@ fn pagesOf(gib: ?f64, page: u64, capacity: usize) usize {
 
 /// TF_GLM_KV_HOST_GIB's host pages, else one full window's.
 pub fn hostPages(page: u64, capacity: usize) usize {
-    const v = std.c.getenv("TF_GLM_KV_HOST_GIB") orelse return pagesOf(null, page, capacity);
-    return pagesOf(std.fmt.parseFloat(f64, std.mem.span(v)) catch null, page, capacity);
+    const gib = @import("sys").environment.read(?f64, "TF_GLM_KV_HOST_GIB", null) catch null;
+    return pagesOf(gib, page, capacity);
 }
 
 /// The plan's `pages` (counted by their device keys alone), held to the host pages when the pages are in host memory.
