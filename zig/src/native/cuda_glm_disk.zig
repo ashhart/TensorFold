@@ -90,6 +90,8 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
     }
     var pieces: std.ArrayList(img.Piece) = .empty;
     defer pieces.deinit(e.gpa);
+    var out: std.ArrayList(ranks.Piece) = .empty; // at TP: the other ranks' bytes and the shared ones, in few steps
+    defer out.deinit(e.gpa);
     const sh = try ranks.shape(e);
     var o: usize = 0;
     for (ranges) |g| {
@@ -100,10 +102,12 @@ fn scatter(ptr: *anyopaque, saved: api.prompt_cache.Saved, ranges: []const rows.
             const bytes = in[o..][0..n];
             o += n;
             if (p.rank == 0 and p.off < img.Words.bytes) continue; // the words went with the seal
-            try ranks.put(e, p.rank, k.id, p.off, bytes);
-            if (p.shared) for (prefixes[1..], 1..) |q, r| try ranks.put(e, @intCast(r), k.id, p.off - prefixes[0] + q, bytes);
+            if (prefixes.len == 1 or (p.rank == 0 and !p.shared)) {
+                try ranks.copy(e, k.id, p.off, @constCast(bytes), false);
+            } else try out.append(e.gpa, .{ .to = if (p.shared) ranks.every else p.rank, .off = if (p.shared) p.off - prefixes[0] else p.off, .bytes = bytes });
         }
     }
+    if (out.items.len > 0) try ranks.rows(e, k.id, out.items);
 }
 
 fn whole(ptr: *anyopaque, saved: api.prompt_cache.Saved) bool {
