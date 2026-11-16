@@ -58,7 +58,7 @@ pub const Io = struct {
     rig: rig_.Rig,
     reg: Reg,
     op: attn.Attention,
-    tensor: bool,
+    shared: bool,
     st: ?at_.State = null,
     rd: at_.Round = .{},
     host: [3][]u16 = .{ &.{}, &.{}, &.{} },
@@ -81,7 +81,7 @@ pub const Io = struct {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         const op = try attn.Attention.init(device, lib);
-        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .tensor = tensor };
+        return .{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .reg = r, .op = op, .shared = try tf.qwen27.simd_attention.sharedPrefix(tensor) };
     }
 
     pub fn deinit(t: *Io) void {
@@ -106,7 +106,7 @@ pub const Io = struct {
     const vt = g.hooks(Io);
 
     fn geo(t: *const Io) planning.Geometry {
-        return at_.geometry(t.reg.heads, t.tensor);
+        return at_.geometry(t.reg.heads, t.shared);
     }
 
     fn bits(rng: std.Random, xs: []u16) void {

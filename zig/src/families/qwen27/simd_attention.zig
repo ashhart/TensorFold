@@ -30,6 +30,43 @@ const rewrites = [_][2][]const u8{
     },
 };
 
+/// The prefix kernels before M5: scores 16 x 64 (row half at i & 16), outputs 16 x 128, sums in the tail's order.
+const prefix_rewrites = [_][2][]const u8{
+    .{ "  const short fn = ((qid & 2) | (lane & 1)) * 4;\n", "  const short fn = ((lane & 8) >> 1) | ((lane & 1) << 1);\n" },
+    .{
+        "      const int key = kt + (i >> 3) * 16 + fn + (i & 3);\n      s[i] = key < ((i & 4) ? e1 : e0) ? S[i] * scale[0] : -INFINITY;\n",
+        "      const int key = kt + fn + (i & 1) + 8 * ((i >> 1) & 7);\n      s[i] = key < ((i & 16) ? e1 : e0) ? S[i] * scale[0] : -INFINITY;\n",
+    },
+    .{ "{ if (i & 4) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }", "{ if (i & 16) x1 = max(x1, s[i]); else x0 = max(x0, s[i]); }" },
+    .{ "fast::exp(s[i] - ((i & 4) ? nm1 : nm0));", "fast::exp(s[i] - ((i & 16) ? nm1 : nm0));" },
+    .{
+        "      y0 += (p[b * 8] + p[b * 8 + 1]) + (p[b * 8 + 2] + p[b * 8 + 3]);\n      y1 += (p[b * 8 + 4] + p[b * 8 + 5]) + (p[b * 8 + 6] + p[b * 8 + 7]);\n",
+        "      y0 += (p[b * 4] + p[b * 4 + 1]) + (p[b * 4 + 2] + p[b * 4 + 3]);\n      y1 += (p[b * 4 + 16] + p[b * 4 + 17]) + (p[b * 4 + 18] + p[b * 4 + 19]);\n",
+    },
+    .{ "    for (int i = 0; i < 64; i++) O[i] *= (i & 4) ? f1 : f0;\n", "    for (int i = 0; i < 64; i++) O[i] *= (i & 32) ? f1 : f0;\n" },
+    .{
+        "      const int b = d >> 4, u = d & 3;\n",
+        "      const int at = ((d >> 3) << 1) | (d & 1); // element 2 (d / 8) + d % 2 (+ 16) of the lane with fn = d % 8 rounded to 2\n",
+    },
+    .{
+        "        if ((i >> 2) == b && (i & 3) == u) { va = p[(i >> 2) * 8 + (i & 3)]; vb = p[(i >> 2) * 8 + 4 + (i & 3)]; }\n      const short g = (d >> 2) & 3;\n",
+        "        if (i == at) { va = p[i]; vb = p[16 + i]; }\n      const short g = (d >> 1) & 3;\n",
+    },
+    .{
+        "      for (int t = 0; t < 8; t++)\n        for (int x = 0; x < 4; x++) {\n          const float val = float(vk[t * 16 + x]);\n          if (key < e0) O[t * 8 + x] += pa * val;\n          if (key < e1) O[t * 8 + 4 + x] += pb * val;\n",
+        "      for (int t = 0; t < 16; t++)\n        for (int x = 0; x < 2; x++) {\n          const float val = float(vk[t * 8 + x]);\n          if (key < e0) O[t * 2 + x] += pa * val;\n          if (key < e1) O[32 + t * 2 + x] += pb * val;\n",
+    },
+    .{
+        "  for (int q = 0; q < 16; q++) {\n    if ((q & 1) ? q1 >= G * NQ : q0 >= G * NQ) continue;\n    device float* dst = PO + (base + tile * 16 + fm + (q & 1) * 8) * D + (hi ? 128 : 0) + (q >> 1) * 16 + fn;\n    *(device float4*)dst = float4(O[4 * q], O[4 * q + 1], O[4 * q + 2], O[4 * q + 3]);\n",
+        "  for (int q = 0; q < 32; q++) {\n    if ((q / 16) ? q1 >= G * NQ : q0 >= G * NQ) continue;\n    device float* dst = PO + (base + tile * 16 + fm + (q / 16) * 8) * D + (hi ? 128 : 0) + fn + 8 * (q % 16);\n    *(device float2*)dst = float2(O[2 * q], O[2 * q + 1]);\n",
+    },
+};
+
+/// Whether cached keys take the batched prefix kernels: M5 always; before M5 unless TF_QWEN27_SHARED_PREFIX=0.
+pub fn sharedPrefix(units: bool) !bool {
+    return units or try @import("sys").environment.read(bool, "TF_QWEN27_SHARED_PREFIX", true);
+}
+
 /// The attention kernels as this chip builds them (before M5: the tail rewritten, the prompt kernels if `prompt`).
 pub fn library(a: std.mem.Allocator, units: bool, prompt: bool) ![]u8 {
     return compose(a, units, prompt, @import("qwen_runtime_sources"));
@@ -72,19 +109,25 @@ pub fn joined(a: std.mem.Allocator, units: bool, prompt: bool, group: u32, kv_he
     return std.mem.concat(a, u8, &.{ "#define Q27_JOIN 1\n", body });
 }
 
-/// The attention source with the tail kernel's result indexing in the simdgroup-matrix layout; the caller frees it.
+/// The attention source, its prefix and tail kernels indexing results in the simdgroup-matrix layout; caller frees.
 pub fn rewrite(a: std.mem.Allocator, source: []const u8) ![]u8 {
-    const begin = std.mem.indexOf(u8, source, "kernel void q27_attn_tail(") orelse return error.AttentionSource;
-    const end = begin + (std.mem.indexOf(u8, source[begin..], "kernel void q27_attn_merge(") orelse return error.AttentionSource);
-    var tail = try a.dupe(u8, source[begin..end]);
+    const tail = try region(a, source, "kernel void q27_attn_tail(", "kernel void q27_attn_merge(", &rewrites);
     defer a.free(tail);
-    for (rewrites) |r| {
-        if (std.mem.count(u8, tail, r[0]) != 1) return error.AttentionSource;
-        const next = try std.mem.replaceOwned(u8, a, tail, r[0], r[1]);
-        a.free(tail);
-        tail = next;
+    return region(a, tail, "kernel void q27_attn_prefix(", "#define Q27_PREFIX_AS(", &prefix_rewrites);
+}
+
+fn region(a: std.mem.Allocator, source: []const u8, from: []const u8, to: []const u8, pairs: []const [2][]const u8) ![]u8 {
+    const begin = std.mem.indexOf(u8, source, from) orelse return error.AttentionSource;
+    const end = begin + (std.mem.indexOf(u8, source[begin..], to) orelse return error.AttentionSource);
+    var part = try a.dupe(u8, source[begin..end]);
+    defer a.free(part);
+    for (pairs) |r| {
+        if (std.mem.count(u8, part, r[0]) != 1) return error.AttentionSource;
+        const next = try std.mem.replaceOwned(u8, a, part, r[0], r[1]);
+        a.free(part);
+        part = next;
     }
-    return std.mem.concat(a, u8, &.{ source[0..begin], tail, source[end..] });
+    return std.mem.concat(a, u8, &.{ source[0..begin], part, source[end..] });
 }
 
 /// The tail kernel's ops (scores 16x32 over 256, outputs 16x128 over 64), each element where it is read.
@@ -100,18 +143,28 @@ pub const check_source =
     \\  threadgroup half Ps[16 * TK];
     \\  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> tK32(KV, dextents<int32_t, 2>(D, 32));
     \\  tensor<threadgroup bfloat, dextents<int32_t, 2>, tensor_inline> tVh(KV, dextents<int32_t, 2>(128, TK));
+    \\  tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tK64((device bfloat*)X, dextents<int32_t, 2>(D, TK));
     \\  tensor<threadgroup half, dextents<int32_t, 2>, tensor_inline> tP(Ps, dextents<int32_t, 2>(TK, 16));
     \\  constexpr auto dS = matmul2d_descriptor(16, 32, D, false, true, false, matmul2d_descriptor::mode::multiply);
     \\  constexpr auto dO = matmul2d_descriptor(16, 128, TK, false, false, false, matmul2d_descriptor::mode::multiply_accumulate);
+    \\  constexpr auto dW = matmul2d_descriptor(16, TK, D, false, true, false, matmul2d_descriptor::mode::multiply);
     \\  matmul2d<dS, execution_simdgroup> opS;
     \\  matmul2d<dO, execution_simdgroup> opO;
+    \\  matmul2d<dW, execution_simdgroup> opW;
     \\  auto S = opS.template get_destination_cooperative_tensor<decltype(tQ), decltype(tK32), float>();
+    \\  auto Wd = opW.template get_destination_cooperative_tensor<decltype(tQ), decltype(tK64), half>();
+    \\  auto Wp = opO.template get_left_input_cooperative_tensor<half, bfloat, float>(Wd);
     \\  auto O = opO.template get_destination_cooperative_tensor<decltype(tP), decltype(tVh), float>();
     \\  const int fm = ((lane & 16) >> 2) | ((lane >> 1) & 3), fn = ((lane & 8) >> 1) | ((lane & 1) << 1);
     \\  bool ok = true;
     \\  for (int i = 0; i < 16; i++) {
     \\    auto at = S.get_multidimensional_index(i);
     \\    ok = ok && at[1] == fm + ((i & 8) ? 8 : 0) && at[0] == fn + (i & 1) + 8 * ((i >> 1) & 3);
+    \\  }
+    \\  for (int i = 0; i < 32; i++) {
+    \\    auto at = Wd.get_multidimensional_index(i);
+    \\    auto in = Wp.get_multidimensional_index(i);
+    \\    ok = ok && at[1] == fm + ((i & 16) ? 8 : 0) && at[0] == fn + (i & 1) + 8 * ((i >> 1) & 7) && in[0] == at[0] && in[1] == at[1];
     \\  }
     \\  for (int i = 0; i < 64; i++) {
     \\    auto at = O.get_multidimensional_index(i);
@@ -129,7 +182,7 @@ pub fn check(device: mtl.Device, queue: mtl.Queue) !void {
     defer lib.deinit();
     const pipe = try mtl.Pipeline.init(device, lib, "tf_q27_attn_layout", false);
     defer pipe.deinit();
-    const x = try device.buffer(256 * 16 * 2, mtl.ResourceOptions.shared);
+    const x = try device.buffer(256 * 64 * 2, mtl.ResourceOptions.shared);
     defer x.deinit();
     const ok = try device.buffer(32 * 4, mtl.ResourceOptions.shared);
     defer ok.deinit();
@@ -160,8 +213,19 @@ test "the rewrite changes every M5-indexed line of the tail kernel once and leav
     const end = begin + std.mem.indexOf(u8, text[begin..], "kernel void q27_attn_merge(").?;
     try std.testing.expect(std.mem.indexOf(u8, text[begin..end], "(i & 4)") == null);
     try std.testing.expect(std.mem.indexOf(u8, text[begin..end], "float4(Olo") == null);
-    try std.testing.expectEqualStrings(source[0..begin], text[0..begin]);
     try std.testing.expectEqualStrings(source[source.len - (text.len - end) ..], text[end..]);
+}
+
+test "the rewrite changes every M5-indexed line of the prefix kernel once" {
+    const source = @import("qwen_runtime_sources").attention_mpp;
+    const text = try rewrite(std.testing.allocator, source);
+    defer std.testing.allocator.free(text);
+    const begin = std.mem.indexOf(u8, text, "kernel void q27_attn_prefix(").?;
+    const end = begin + std.mem.indexOf(u8, text[begin..], "#define Q27_PREFIX_AS(").?;
+    try std.testing.expect(std.mem.indexOf(u8, text[begin..end], "(i & 4)") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text[begin..end], "float4(O[") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text[begin..end], "* 16 + fn") == null);
+    try std.testing.expectEqualStrings(source[0..begin], text[0..begin]);
 }
 
 test "both attention builds, with and without the prompt kernels, open with the KV-group defines" {
