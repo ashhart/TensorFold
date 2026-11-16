@@ -179,7 +179,7 @@ async function run() {
   // --- Source pins: both spawn paths route through the resolver ------------------------
   {
     const source = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
-    const roomIpc = source('../main/host/workspace-runtime-ipc.ts')
+    const roomIpc = source('../main/host/room-tools-runtime.ts')
     const delegateStart = roomIpc.indexOf('delegate: async (args, seat)')
     const delegateEnd = roomIpc.indexOf('read_file: async', delegateStart)
     assert.ok(delegateStart >= 0 && delegateEnd > delegateStart, 'room delegate tool remains discoverable')
@@ -187,7 +187,7 @@ async function run() {
     assert.match(delegate, /resolveDelegationRoute\(store\.settings\.providers/, 'room delegate resolves the cross-model route')
     assert.match(delegate, /!routed\.route\) return `Cannot delegate:/, 'route errors surface as tool errors, not crashes')
     assert.match(delegate, /runReadOnlySubAgent\(created\.agent, prov, routed\.route\.model/, 'room delegate runs the sub-agent on the routed model')
-    assert.match(delegate, /parent: parentForRoomSeat\(room, s\)/, 'delegated sub-agent lineage stays under the delegating seat')
+    assert.match(delegate, /parent: parentForRoomSeat\(runtimeScope\.room, s\)/, 'delegated sub-agent lineage stays under the delegating seat')
 
     const threadRuntime = source('../main/host/tool-context-runtime.ts')
     assert.match(threadRuntime, /resolveDelegationRoute\(store\.settings\.providers/, 'thread sub-agent launcher resolves the cross-model route')

@@ -7,18 +7,23 @@ import ts from 'typescript'
 import * as metadata from '../../lib/provider-model-metadata'
 import type { Provider } from '../../lib/types'
 
-const source = readFileSync(new URL('./BotReasoningEffort.tsx', import.meta.url), 'utf8')
-const output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
 const jsx = (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) })
-const imports: Record<string, unknown> = { 'react/jsx-runtime': { jsx, jsxs: jsx }, '../../lib/provider-model-metadata': metadata }
-const module = { exports: {} as any }
-new Function('require', 'module', 'exports', output)((id: string) => {
-  const reviewed = reviewedLanguageImport(id, imports)
-  if (reviewed.matched) return reviewed.value
-  assert.ok(id in imports, `Reviewed component import ${id}`)
-  return imports[id]
-}, module, module.exports)
-const { BotReasoningEffort, effortForBotModel } = module.exports
+function load(file: string, imports: Record<string, unknown>) {
+  const source = readFileSync(new URL(file, import.meta.url), 'utf8')
+  const output = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText
+  const module = { exports: {} as any }
+  new Function('require', 'module', 'exports', output)((id: string) => {
+    const reviewed = reviewedLanguageImport(id, imports)
+    if (reviewed.matched) return reviewed.value
+    assert.ok(id in imports, `Reviewed component import ${id}`)
+    return imports[id]
+  }, module, module.exports)
+  return module.exports
+}
+const control = load('../ReasoningEffortSelect.tsx', {
+  'react/jsx-runtime': { jsx, jsxs: jsx }, '../lib/provider-model-metadata': metadata,
+})
+const { BotReasoningEffort, effortForBotModel } = load('./BotReasoningEffort.tsx', { '../ReasoningEffortSelect': control })
 const gemini: Provider = { id: 'gemini', name: 'Gemini API', kind: 'cloud', baseUrl: 'https://model.example.test/v1', apiKey: '', models: ['gemini-2.5-pro', 'gemini-3-pro'] }
 const choices = (provider?: Provider, model?: string) => {
   const tree = BotReasoningEffort({ provider, model, value: 'low', onChange() {} })
@@ -42,4 +47,5 @@ select.props.onChange({ target: { value: 'low' } })
 assert.equal(selected, 'low', 'changing the rendered control updates the stored bot parameter')
 select.props.onChange({ target: { value: '' } })
 assert.equal(selected, undefined)
+assert.match(renderToStaticMarkup(BotReasoningEffort({ disabled: true, onChange() {} })), /<select disabled=""/)
 console.log('Bot effort editor checks passed: fallback levels, selected-model choices, model changes and control events.')

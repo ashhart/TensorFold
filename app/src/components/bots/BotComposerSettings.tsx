@@ -1,9 +1,10 @@
 import { createContext, useContext, type ReactNode } from 'react'
 import type { BotThreadConfig } from '../../lib/types'
 
-const BotComposerContext = createContext<BotThreadConfig | undefined>(undefined)
+type CapturedComposerSettings = Pick<BotThreadConfig, 'reasoningEffort'>
+const BotComposerContext = createContext<CapturedComposerSettings | undefined>(undefined)
 
-export function BotComposerSettings({ bot, children }: { bot?: BotThreadConfig; children: ReactNode }) {
+export function BotComposerSettings({ bot, children }: { bot?: CapturedComposerSettings; children: ReactNode }) {
   return <BotComposerContext.Provider value={bot}>{children}</BotComposerContext.Provider>
 }
 
