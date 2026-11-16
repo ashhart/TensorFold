@@ -21,6 +21,11 @@ fn coldStart(row: *[C]i32, generated: usize, has_audio_prefix: bool) void {
 
 /// `engine` has run(rows, replaced, probe) and lastLogits(out): the backbone, or a stand-in under test.
 pub fn generate(gpa: std.mem.Allocator, engine: anytype, prompt: []const [W]i32, replaced: anytype, sampling: sampler.Sampling, max_frames: usize) !Result {
+    return generateWatched(gpa, engine, prompt, replaced, sampling, max_frames, null);
+}
+
+/// As generate; `watch`, when given, has row(rows so far, eos frame, finished) and sees every generated row.
+pub fn generateWatched(gpa: std.mem.Allocator, engine: anytype, prompt: []const [W]i32, replaced: anytype, sampling: sampler.Sampling, max_frames: usize, watch: anytype) !Result {
     if (prompt.len == 0 or max_frames == 0) return error.NoRows;
     const logits = try gpa.create([C][cfg.audio_vocab]f32);
     defer gpa.destroy(logits);
@@ -58,6 +63,7 @@ pub fn generate(gpa: std.mem.Allocator, engine: anytype, prompt: []const [W]i32,
             countdown -= 1;
             if (countdown == 0) finished = true;
         }
+        if (@TypeOf(watch) != @TypeOf(null)) try watch.row(rows.items, eos_frame, finished);
         if (finished) break;
         try engine.run(rows.items[generated..], &.{}, null);
     }

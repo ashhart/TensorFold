@@ -164,9 +164,11 @@ pub const Kernels = struct {
         try k.go(.ola, s, (count + 255) / 256, 1, 256, 0, &a);
     }
 
-    pub fn mix(k: *const Kernels, s: cuda.Stream, branches: u64, total: usize, w: u64, n0: usize, count: usize, out: u64) !void {
+    /// Branch rows `stride` samples apart, read as zero outside [0, total).
+    pub fn mix(k: *const Kernels, s: cuda.Stream, branches: u64, stride: usize, total: usize, w: u64, n0: usize, count: usize, out: u64) !void {
         var a: cuda.Args = .{};
         a.add(branches);
+        a.add(l(stride));
         a.add(l(total));
         a.add(w);
         a.add(l(n0));
