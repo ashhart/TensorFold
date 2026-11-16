@@ -127,7 +127,7 @@ pub const Metal = struct {
             .health = .{ .ctx = m, .read = healthy },
             .keepalive = m.keepalive(),
             .close = close,
-            // a cost table measured on this machine (TF_DSV41_CALIB_FILE), else the defaults: Metal has nothing to time
+            // a cost table measured on this machine (TF_DSV41_CALIB or TF_DSV41_CALIB_FILE), else the defaults
             .calib_id = m.opt.identity,
             .calib = knobs(),
             .steps = m.opt.steps,
@@ -162,10 +162,12 @@ pub const Metal = struct {
         return .{ .block = c.dspark_block, .noise = c.dspark_noise_token, .window = c.window, .rank = c.dspark_markov_rank, .hidden = c.hidden, .candidates = @min(candidates, c.vocab) };
     }
 
-    /// TF_DSV41_CALIB and its neighbours as the environment gives them; unset or blank: nothing is timed.
+    /// TF_DSV41_CALIB and its neighbours; unset or blank keeps TF_DSV41_CALIB_FILE when set, else defaults.
     fn knobs() host.calib_env.Knobs {
         var k = host.calib_env.Knobs.fromEnv();
-        if (std.mem.trim(u8, k.mode orelse "", " \t\r\n").len == 0) k.mode = "default";
+        const no_mode = std.mem.trim(u8, k.mode orelse "", " \t\r\n").len == 0;
+        const no_file = std.mem.trim(u8, k.file orelse "", " \t\r\n").len == 0;
+        if (no_mode and no_file) k.mode = "default";
         return k;
     }
 
