@@ -6,6 +6,11 @@ const sources = @import("kernel_sources");
 const limits = @import("contract").limits;
 const Launch = @import("metal_limits.zig").Launch;
 
+/// The tensor-unit prompt expert kernels: built only with tensor units, and the loader has no M1/M2 library.
+pub fn tensorOnly(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "dsv41 xmma units ");
+}
+
 /// The dsv41 launch's sources, or null when the name belongs to another family.
 pub fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, fun: []const u8, comptime assemble: bool) !?Launch {
     _ = device;

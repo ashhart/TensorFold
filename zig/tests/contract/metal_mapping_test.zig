@@ -37,3 +37,22 @@ test "Metal launch map: LFM2 masked prompt follows its loader on each device cla
     try launches.requireMapped(base);
     try std.testing.expect(launches.supported(.{ .units = false }, base));
 }
+
+test "Metal launch map: DeepSeek-V4.1 tensor-unit expert launches follow their loader" {
+    var units: usize = 0;
+    var simd: usize = 0;
+    for (registry.all_metal) |d| {
+        if (std.mem.startsWith(u8, d.name, "dsv41 xmma units ")) {
+            units += 1;
+            try launches.requireMapped(d);
+            try std.testing.expect(!launches.supported(.{ .units = false }, d));
+            try std.testing.expect(launches.supported(.{ .units = true }, d));
+        } else if (std.mem.startsWith(u8, d.name, "dsv41 xmma ")) {
+            simd += 1;
+            try launches.requireMapped(d);
+            try std.testing.expect(launches.supported(.{ .units = false }, d));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), units);
+    try std.testing.expectEqual(@as(usize, 4), simd);
+}
