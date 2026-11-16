@@ -73,7 +73,7 @@ pub const Target = struct {
     }
 };
 
-/// The block drafter's shape: row 0 a chain head on the anchor's own row, rows 1.. drafted in the same pass.
+/// block-drafter: row 0 a chain head on the anchor's row, rows 1.. in the same pass; eagle3: one row a pass (block 1).
 pub const Shape = struct {
     hidden: u32, // equals target.hidden: the target's head reads the drafter's rows
     heads: u32,
@@ -92,7 +92,10 @@ pub const Vocab = struct { file: []const u8, size: u32 }; // the target's ids th
 pub const Weight = enum { bf16, fp8, nvfp4 };
 pub const Serving = struct { depth: u32, body: Weight, head: Weight }; // defaults a server may override
 
-pub const Architecture = enum { @"block-drafter" };
+pub const Architecture = enum { @"block-drafter", eagle3 };
+
+/// Chain steps an eagle3 release may serve a round (its cache keeps this many rows past the context).
+pub const most_chain: u32 = 8;
 
 /// config.json, field for field.
 pub const Config = struct {
@@ -154,10 +157,16 @@ pub fn validate(c: *const Config, why: *Why) !void {
     if (s.hidden != t.hidden) return refuse(why, "drafter hidden {d} differs from the target's {d}, whose head reads it", .{ s.hidden, t.hidden });
     if (s.heads == 0 or s.head_dim == 0 or s.head_dim % 2 != 0) return refuse(why, "drafter heads {d} x head_dim {d}: both positive, head_dim even", .{ s.heads, s.head_dim });
     if (s.ffn == 0 or s.layers == 0 or s.window == 0) return refuse(why, "drafter ffn, layers and window must be positive", .{});
-    if (s.block < 2) return refuse(why, "drafter block {d}: a block drafts at least 2 positions", .{s.block});
+    const most = switch (c.architecture) {
+        .@"block-drafter" => if (s.block < 2) return refuse(why, "drafter block {d}: a block drafts at least 2 positions", .{s.block}) else s.block,
+        .eagle3 => if (s.block != 1 or s.pred_rank != 0 or s.spine_rank != 0)
+            return refuse(why, "an eagle3 drafter drafts one row a pass: block 1, no pred_rank or spine_rank", .{})
+        else
+            most_chain,
+    };
     if (!(s.eps > 0) or !std.math.isFinite(s.eps)) return refuse(why, "drafter eps {d} is not a positive number", .{s.eps});
     if (!(s.theta > 0) or !std.math.isFinite(s.theta)) return refuse(why, "drafter theta {d} is not a positive number", .{s.theta});
-    if (c.serving.depth == 0 or c.serving.depth > s.block) return refuse(why, "serving depth {d} outside 1..{d}", .{ c.serving.depth, s.block });
+    if (c.serving.depth == 0 or c.serving.depth > most) return refuse(why, "serving depth {d} outside 1..{d}", .{ c.serving.depth, most });
     if (c.draft_vocab.size == 0 or c.draft_vocab.size > t.vocab) return refuse(why, "draft vocab of {d} outside 1..{d}", .{ c.draft_vocab.size, t.vocab });
     for ([_][]const u8{ c.draft_vocab.file, c.weights }) |name| if (!plainName(name)) return refuse(why, "\"{s}\" is not a file name in the release folder", .{name});
 }
