@@ -39,12 +39,33 @@ pub fn load(a: Allocator, io: std.Io, dir: []const u8, default_voice: []const u8
     return st;
 }
 
+/// A request's own voice: 1 to 900 frames of ten codec codes, each below 4096.
+fn referenceCodes(cx: *errors.Cx, value: json.Value) errors.Refused![]const [req.config.codebooks]i32 {
+    const message = error_prefix ++ " speaker_reference_codes must be 1 to 900 frames of ten integers from 0 through 4095";
+    const frames = value.items() orelse return cx.refuse(message);
+    if (frames.len == 0 or frames.len > req.reference_frames) return cx.refuse(message);
+    const out = try cx.a.alloc([req.config.codebooks]i32, frames.len);
+    for (frames, out) |frame, *row| {
+        const codes = frame.items() orelse return cx.refuse(message);
+        if (codes.len != row.len) return cx.refuse(message);
+        for (codes, row) |code, *slot| {
+            if (code != .int) return cx.refuse(message);
+            slot.* = std.fmt.parseInt(i32, code.int, 10) catch return cx.refuse(message);
+            if (slot.* < 0 or slot.* >= req.config.codebook_size) return cx.refuse(message);
+        }
+    }
+    return out;
+}
+
 /// The request's prompt: the voice's reference codes as a delayed prefix, the condition rows, the text, the silence.
-pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, voice: []const u8) errors.Refused!Made {
-    const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice);
-    const v = chosen orelse {
-        if (st.voices.len == 0) return cx.refuse(error_prefix ++ " this release folder has no voices under gguf/voices");
-        return cx.fail(.request, error_prefix ++ " unknown voice {s}; see /v1/voices", .{try pyrepr.repr(cx.a, .{ .string = voice })});
+pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.SpeechInfo, input: []const u8, voice: []const u8, own: ?json.Value) errors.Refused!Made {
+    const reference = if (own) |value| try referenceCodes(cx, value) else blk: {
+        const chosen = if (voice.len == 0 or std.ascii.eqlIgnoreCase(voice, "default")) st.default else req.voices.find(st.voices, voice);
+        const v = chosen orelse {
+            if (st.voices.len == 0) return cx.refuse(error_prefix ++ " this release folder has no voices under gguf/voices");
+            return cx.fail(.request, error_prefix ++ " unknown voice {s}; see /v1/voices", .{try pyrepr.repr(cx.a, .{ .string = voice })});
+        };
+        break :blk v.codes;
     };
     const spoken = req.prompt.collapseLineBreaks(cx.a, input) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -54,7 +75,7 @@ pub fn plan(st: *const State, cx: *errors.Cx, text: text_mod.Text, sp: api.Speec
         error.OutOfMemory => error.OutOfMemory,
         else => cx.other("the tokenizer cannot encode this prompt"),
     };
-    const built = req.prompt.build(cx.a, ids, .{ .reference = v.codes }, st.silence, req.silence_frames) catch |e| return switch (e) {
+    const built = req.prompt.build(cx.a, ids, .{ .reference = reference }, st.silence, req.silence_frames) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(error_prefix ++ " the text has nothing to speak"),
     };
