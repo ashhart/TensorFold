@@ -46,4 +46,3 @@ export async function evaluateRunCompletion(a: Automation, run: AutomationRun, p
   })
   return { verdict: result.verdict, reason: result.reason }
 }
-

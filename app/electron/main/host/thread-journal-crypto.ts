@@ -50,4 +50,3 @@ export function decodeJournalEvent(stored: unknown, key: Buffer | null): unknown
   }
   return stored // legacy plaintext event written before journal encryption
 }
-
