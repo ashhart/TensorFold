@@ -1,5 +1,4 @@
-//! ZONOS3 Mini's backbone on one GPU: frame rows in, the next frame's logits out; the prompt and each decode row run
-//! the same row kernels in fp32, so a row's bits do not depend on how the rows before it were chunked.
+//! ZONOS3 Mini's backbone on one GPU: frame rows in, the next frame's logits out, one fp32 row path for all rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const cfg = @import("../config.zig");
@@ -205,8 +204,7 @@ pub const Engine = struct {
         return e.bank + source * e.o.max_rows * D * 4;
     }
 
-    /// The next rows (int32 [n][11]) at the current position; afterwards `logits` holds the last row's
-    /// [codebooks][audio_vocab] (every row's under a probe, which needs the rows in one pass).
+    /// The next rows at the current position; `logits` then holds the last row's (every row's under a one-pass probe).
     pub fn run(e: *Engine, rows: []const [W]i32, replaced: []const Replace, probe: ?Probe) !void {
         if (rows.len == 0) return error.NoRows;
         if (e.position + rows.len > e.o.max_ctx) return error.ContextFull;

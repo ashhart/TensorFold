@@ -1,5 +1,4 @@
-//! The codec decoder's weights as published (fp32): the generator's quantizer, semantic head and resampler, and a
-//! head checkpoint's decoder stages and iSTFT head. Weight norms and the code tables are folded once on the host.
+//! The codec decoder's published fp32 weights (generator.pt, a head checkpoint); weight norms and code tables folded.
 const std = @import("std");
 const cuda = @import("cuda");
 const pth = @import("torch_pth");

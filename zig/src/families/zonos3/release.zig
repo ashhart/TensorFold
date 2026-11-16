@@ -1,5 +1,4 @@
-//! Where a ZONOS3 Mini release keeps its parts, read from the release's own registries: the checkpoint folder is a
-//! snapshot of the Hugging Face repo, whose registries name its files by their path inside it.
+//! Where a ZONOS3 Mini release (a snapshot of its Hugging Face repo) keeps its parts, read from its own registries.
 const std = @import("std");
 const cfg = @import("config.zig");
 
