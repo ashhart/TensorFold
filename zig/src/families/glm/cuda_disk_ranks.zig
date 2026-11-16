@@ -1,5 +1,6 @@
 //! A GLM kept state's disk image across ranks: rank 0's engine thread leases, fills, reads and seals each rank's copy.
 const std = @import("std");
+const cuda = @import("cuda");
 const follow = @import("cuda_follow.zig");
 const image = @import("cuda_disk_image.zig");
 const snapshots = @import("cuda_snapshots.zig");
@@ -9,7 +10,7 @@ const Engine = @import("cuda_engine.zig").Engine;
 pub var link: ?*follow.Link = null;
 
 /// A disk step's op (Header.flags); its id is `a`, its image offset `seed`, its bytes `depth`, its rank `top_k`.
-pub const Op = enum(u32) { blank = 1, put, take, seal, prefixes };
+pub const Op = enum(u32) { blank = 1, rows, take, seal, prefixes };
 const kind = @backingInt(follow.Kind.disk); // each op crosses the follow link as a disk step, its bytes as the ids
 
 /// This rank's image shape (every sequence of the engine has the same).
@@ -28,16 +29,41 @@ pub fn wordsOf(e: *const Engine, id: u64) !image.Words {
 
 /// Bytes [off, off + host.len) of this rank's image of `id`, out (lease to host) or in; unsealed: before its head only.
 pub fn copy(e: *Engine, id: u64, off: u64, host: []u8, out: bool) !void {
+    const H = struct {
+        host: []u8,
+        out: bool,
+        fn run(h: @This(), c: image.Copy, at: u64) !void {
+            return c.run(at, h.host, h.out);
+        }
+    };
+    return through(e, id, off, host.len, H{ .host = host, .out = out });
+}
+
+/// `len` device bytes at `src` into this rank's image of `id` from `off`, queued on `stream` (the caller waits).
+pub fn copyDevice(e: *Engine, id: u64, off: u64, src: u64, len: u64, stream: cuda.Stream) !void {
+    const D = struct {
+        src: u64,
+        len: u64,
+        stream: cuda.Stream,
+        fn run(x: @This(), c: image.Copy, at: u64) !void {
+            return c.fromDevice(at, x.src, x.len, x.stream.handle);
+        }
+    };
+    return through(e, id, off, len, D{ .src = src, .len = len, .stream = stream });
+}
+
+/// `how.run` on the image of `id` for `len` bytes from `off`, refused past an unsealed state's words and front.
+fn through(e: *Engine, id: u64, off: u64, len: u64, how: anytype) !void {
     const s = e.snaps.get(id) orelse return error.NoKeptState;
     const sh = try shape(e);
     const at: u32 = @intCast(s.pos);
-    if (s.len == 0 and off + host.len > image.Words.bytes + image.front(sh, at)) return error.DiskOrder;
+    if (s.len == 0 and off + len > image.Words.bytes + image.front(sh, at)) return error.DiskOrder;
     var segs: std.ArrayList(image.Seg) = .empty;
     defer segs.deinit(e.gpa);
     try image.segments(sh, at, s.mtp_len, &segs, e.gpa);
     var w = (try wordsOf(e, id)).encode();
     const pool = if (e.snap_pages) |*p| p else return error.NoSnapshotCache;
-    try (image.Copy{ .d = e.d, .pool = pool, .lease = &s.lease, .segs = segs.items, .words = &w }).run(off, host, out);
+    try how.run(image.Copy{ .d = e.d, .pool = pool, .lease = &s.lease, .segs = segs.items, .words = &w }, off);
 }
 
 /// Rank 0's link at TP, else null (one rank: every op is local).
@@ -66,19 +92,66 @@ pub fn blank(e: *Engine, at: u32) !u64 {
     return id;
 }
 
-/// Rank 0: `bytes` into rank `rank`'s image of `id` at `off` (rank 0's own lease, or through the link in pieces).
-pub fn put(e: *Engine, rank: u32, id: u64, off: u64, bytes: []const u8) !void {
-    if (rank == 0) return copy(e, id, off, @constCast(bytes), false);
+/// A piece's rank in a `rows` step for the bytes every rank holds: each rank's image at `off` past its own prefix.
+pub const every: u32 = std.math.maxInt(u32);
+
+/// Bytes for rank `to`'s image at `off`, or for every rank's (`every`: `off` less rank 0's prefix, each adds its own).
+pub const Piece = struct { to: u32, off: u64, bytes: []const u8 };
+
+/// Rank 0 at TP: `pieces` into every rank's image of `id`, each step a table (4 words a piece) and one broadcast.
+pub fn rows(e: *Engine, id: u64, pieces: []const Piece) !void {
     const x = leader(e) orelse return error.NoRank;
-    const room = x.link.ids.len * 4;
-    var done: usize = 0;
-    while (done < bytes.len) {
-        const n = @min(room, bytes.len - done);
-        const words = (n + 3) / 4;
-        @memcpy(std.mem.sliceAsBytes(x.link.ids[0..words])[0..n], bytes[done..][0..n]);
-        try x.disk(.{ .kind = kind, .flags = @backingInt(Op.put), .a = id, .seed = off + done, .depth = @intCast(n), .top_k = rank }, x.link.ids[0..words]);
-        done += n;
+    const stage = std.mem.sliceAsBytes(x.link.ids); // the bytes on the host, then in the link's buffer after its header
+    var table: std.ArrayList(u32) = .empty;
+    defer table.deinit(e.gpa);
+    var i: usize = 0;
+    var done: usize = 0; // bytes of pieces[i] in earlier steps (a piece longer than the link goes in parts)
+    while (i < pieces.len) {
+        table.clearRetainingCapacity();
+        var n: usize = 0;
+        while (i < pieces.len and n < stage.len and table.items.len + 4 <= x.link.ids.len) {
+            const p = pieces[i];
+            const k = @min(p.bytes.len - done, stage.len - n);
+            const off = p.off + done;
+            try table.appendSlice(e.gpa, &.{ @truncate(off), @intCast(off >> 32), @intCast(k), p.to });
+            @memcpy(stage[n..][0..k], p.bytes[done..][0..k]);
+            n += k;
+            done += k;
+            if (done == p.bytes.len) {
+                i += 1;
+                done = 0;
+            }
+        }
+        try x.disk(.{ .kind = kind, .flags = @backingInt(Op.rows), .a = id, .depth = @intCast(n) }, table.items);
+        try x.link.stream.synchronize(); // the table's broadcasts read the buffer the bytes go to
+        try x.link.buf.upload(64, stage[0..n]);
+        try x.link.from(0, n);
+        try place(e, id, table.items, x.link.buf.ptr + 64, x.link.stream);
     }
+}
+
+/// A `rows` step's pieces for this rank, copied from `src` (the link's buffer) and waited for: the next step reuses it.
+fn place(e: *Engine, id: u64, table: []const u32, src: u64, stream: cuda.Stream) !void {
+    const me: u32 = @intCast(e.share.rank);
+    const own = (try shape(e)).prefix;
+    var at: u64 = 0;
+    var i: usize = 0;
+    while (i < table.len) : (i += 4) {
+        const off = @as(u64, table[i]) | @as(u64, table[i + 1]) << 32;
+        const len: u64 = table[i + 2];
+        if (table[i + 3] == every) try copyDevice(e, id, off + own, src + at, len, stream) else if (table[i + 3] == me) try copyDevice(e, id, off, src + at, len, stream);
+        at += len;
+    }
+    try stream.synchronize();
+}
+
+/// A `rows` step's table checked against its bytes and the link before a follower joins the broadcast.
+fn fits(ids: []const u32, depth: u32, room: usize) !void {
+    if (ids.len % 4 != 0 or depth > room) return error.BadStep;
+    var n: u64 = 0;
+    var i: usize = 0;
+    while (i < ids.len) : (i += 4) n += ids[i + 2];
+    if (n != depth) return error.BadStep;
 }
 
 /// Rank 0: rank `rank`'s image bytes of `id` from `off` into `out`.
@@ -152,9 +225,10 @@ pub fn step(e: *Engine, l: *follow.Link, h: follow.Header, ids: []const u32) !vo
             const w = try decode(e, x, @intCast((e.snaps.get(h.a) orelse return error.NoKeptState).pos));
             try snapshots.seal(e, h.a, w.mtp_len, .{ w.base, w.mtp_base }, w.cur);
         },
-        .put => if (h.top_k == rank) {
-            if (h.depth > ids.len * 4) return error.BadStep;
-            try copy(e, h.a, h.seed, @constCast(std.mem.sliceAsBytes(ids))[0..h.depth], false);
+        .rows => {
+            try fits(ids, h.depth, l.buf.len - 64);
+            try l.from(0, h.depth);
+            try place(e, h.a, ids, l.buf.ptr + 64, l.stream);
         },
         .take => {
             if (h.depth > l.ids.len * 4) return error.BadStep;
