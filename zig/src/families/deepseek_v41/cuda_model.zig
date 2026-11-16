@@ -246,7 +246,7 @@ pub const Model = struct {
         try load.admitPlan(io, &m.cfg, &m.pack, &m.pl);
         m.weights = .{ .gpa = gpa, .digest = false }; // no weights check reads the digests here (load.zig)
         // TF_DSV41_PREPARED (prepared.zig): each layer's host images read back instead of rebuilt from the pack
-        var cache = try prepared.Cache.fromEnv(gpa, io, &m.pack, .{ .rank = m.tcfg.rank, .world = world, .o_groups = m.cfg.o_groups, .blocks = blocks, .dspark = o.drafts });
+        var cache = try prepared.Cache.fromEnv(gpa, io, &m.pack, try prepared.keyFor(&m.cfg, m.tcfg.rank, world, blocks, o.drafts));
         defer if (cache) |*c| c.deinit();
         var t_build: i96 = 0;
         var t_upload: i96 = 0;
