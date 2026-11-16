@@ -4,7 +4,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
-- CLI: `tensorfold mcp` serves the Model Context Protocol on stdio, so AI coding assistants such as Claude Code, Codex and Cursor can describe this machine, list, describe and download models, and start, list and stop local servers through tools. Each server it starts listens on 127.0.0.1 with its own API key and stops when the session ends ([guide](docs/mcp.md)).
+- CLI: `tensorfold mcp` serves the Model Context Protocol on stdio, so AI coding assistants such as Claude Code, Codex and Cursor can describe this machine, list, describe and download models, and start, list and stop local servers through tools. Each server it starts listens on 127.0.0.1 with its own API key and stops when the session ends ([guide](docs/mcp.md)) (#3549).
 
 - Server: `tensorfold serve --router` answers for several models at one address, each a `tensorfold serve` child on loopback with a key of its own, started when a request's `model` names it and relayed byte for byte; `--max-loaded`, `--idle-unload` and each model's memory floor bound what stays loaded, and `--router-config FILE.toml` lists the models in `[[models]]` tables (see docs/router.md). Single-model `serve` is unchanged (#3540).
 
