@@ -18,8 +18,8 @@ pub const Host = struct {
     core: lanes.Engine,
     host: api.LaneHost,
     warm: mtl.keepalive.Target,
-    /// The keepalive tick's 64 bytes: inside the model's residency set, so each tick reaches the GPU.
-    scratch: mtl.Buffer,
+    /// The keepalive tick's 64 bytes, inside the model's residency set; only while a pull can make a request wait.
+    scratch: ?mtl.Buffer,
     rec: ?tf.deepseek_v41_profiler.Recorder,
     /// Kept prompt states (the retained prompt cache); null when no budget was asked for.
     cache: ?api.prompt_cache.Store = null,
@@ -146,7 +146,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .core = undefined,
         .host = undefined,
         .warm = undefined,
-        .scratch = undefined,
+        .scratch = null,
         .rec = null,
     };
     h.back = try tf.deepseek_v41_backend.Backend.init(gpa, model_ptr);
@@ -207,16 +207,20 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         h.host.keep_remote = try remote.keeps();
     }
     h.host.explain = .{ .text = words };
-    h.scratch = try model_ptr.device.buffer(64, mtl.ResourceOptions.shared);
-    errdefer h.scratch.deinit();
-    model_ptr.residency.add(h.scratch);
-    model_ptr.residency.commit();
-    // macOS unwires an idle model after 1-2 s; a tick that touches the set is what keeps it, and the first pass fast
-    h.warm = .{ .queue = model_ptr.queue, .sets = @as(*const [1]mtl.ResidencySet, &model_ptr.residency), .scratch = h.scratch };
+    h.warm = .{ .queue = model_ptr.queue };
+    if (h.link != null or h.file != null) {
+        // a request waits on a pull, and an idle model is unwired after 1-2 s: the tick touches the set
+        const b = try model_ptr.device.buffer(64, mtl.ResourceOptions.shared);
+        model_ptr.residency.add(b);
+        model_ptr.residency.commit();
+        h.scratch = b;
+        h.warm = .{ .queue = model_ptr.queue, .sets = @as(*const [1]mtl.ResidencySet, &model_ptr.residency), .scratch = b };
+    }
+    errdefer if (h.scratch) |s| s.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     errdefer h.host.stop();
-    std.log.info("DeepSeek V4.1 resident loaded in {d:.1} s, {d:.2} GB admitted, {d} lane slots, context {d} tokens", .{ model_ptr.load_seconds, @as(f64, @floatFromInt(model_ptr.admitted_bytes)) / 1e9, model_ptr.lanes, window });
+    std.log.info("DeepSeek V4.1 resident loaded in {d:.1} s, {d:.2} GB admitted, {d} lane slots, context {d} tokens, greedy only", .{ model_ptr.load_seconds, @as(f64, @floatFromInt(model_ptr.admitted_bytes)) / 1e9, model_ptr.lanes, window });
     if (std.c.getenv("TF_DSV41_HANDOFF_CHECK")) |spec| @import("deepseek_v41_handoff_check.zig").run(gpa, io, model_ptr, std.mem.span(spec), try remote.checkpointId(a, io, o.dir)) catch |err|
         std.log.err("handoff-check: did not complete: {s}", .{@errorName(err)});
     if (std.c.getenv("TF_DSV41_KROW_CHECK") != null) krowCheck(model_ptr) catch |err|
@@ -270,8 +274,10 @@ pub fn close(ctx: *anyopaque) void {
     h.core.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();
-    h.model.residency.remove(h.scratch);
-    h.scratch.deinit();
+    if (h.scratch) |b| {
+        h.model.residency.remove(b);
+        b.deinit();
+    }
     if (h.rec) |*r| r.deinit() catch {};
     h.model.deinit();
     h.gpa.destroy(h);
