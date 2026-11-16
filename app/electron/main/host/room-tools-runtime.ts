@@ -203,6 +203,7 @@ export function createRoomTools(ctx: WorkspaceRuntimeIpcDeps, runtimeScope: Room
           source: {
             roomId: runtimeScope.room.id,
             seat,
+            reasoningEffort: runtimeScope.seatEfforts.get(seatConfig.id) ?? runtimeScope.reasoningEffort,
             onSettled: ({ codeChanged, testsPassed, failed, jobId }) => {
               if (codeChanged) runtimeScope.lastCodeChangeAt = Date.now()
               if (testsPassed) runtimeScope.greenEvidenceAt = Date.now()
