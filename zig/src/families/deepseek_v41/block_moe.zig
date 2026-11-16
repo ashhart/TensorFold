@@ -136,6 +136,8 @@ pub fn postOnly(e: *E, out: ?calls.Arg) !void {
 pub fn moe(e: *E, L: u32) !void {
     const n = e.n;
     const D: i64 = e.cfg.hidden;
+    if (e.o.format == .release_fp8) // the release's MXFP4 / FP8 experts; L.moe in fp32 for exchange_f32 (no r1)
+        return @import("release_moe.zig").body(e, L, n, try e.buf("w.out", .{}, .bf16, &.{ n, D }), "bias", try e.buf("L.moe", .{}, .f32, &.{ n, D }));
     const backbone = e.cfg.isBackbone(L);
     // the router folds kit rounding + grouping into its tail when no prune follows; with `r1` it folds the prune too
     const fold = !backbone or e.o.expert_topp == null or e.o.r1;

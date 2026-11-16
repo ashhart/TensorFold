@@ -28,9 +28,23 @@ pub const Source = struct {
     }
 };
 
+const slot_prefix = "s.rel.slot_of";
+
+/// The release experts' id -> slot table for `count` experts: the rank's held ids in slot order, others -1.
+fn slotTable(a: std.mem.Allocator, p: *const plan.Plan, count: u32) ![]const u8 {
+    const held = for (p.layers) |*l| switch (l.experts[0].form) {
+        .mxfp4 => |m| if (m.count == count) break m.ids,
+        .exl3 => {},
+    } else return error.NoReleaseExperts;
+    const t = try a.alloc(i32, count);
+    for (t, 0..) |*v, id| v.* = if (id >= held.lo and id < held.lo + held.len) @intCast(id - held.lo) else -1;
+    return std.mem.sliceAsBytes(t);
+}
+
 /// A persistent role's initial bytes when it is a weight form (null: state, scratch, tables the forward fills).
 fn buildArena(a: std.mem.Allocator, s: *const Source, role: []const u8) !?[]const u8 {
     if (!std.mem.startsWith(u8, role, "s.")) return null;
+    if (std.mem.startsWith(u8, role, slot_prefix)) return try slotTable(a, s.plan, try std.fmt.parseInt(u32, role[slot_prefix.len..], 10));
     const lanes = std.mem.endsWith(u8, role, ".lanes");
     if (lanes or std.mem.endsWith(u8, role, ".T")) {
         const w = role[2 .. role.len - (if (lanes) ".lanes".len else ".T".len)];
