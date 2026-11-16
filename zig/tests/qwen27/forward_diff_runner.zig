@@ -83,7 +83,7 @@ pub fn verify(comptime S: type, r: *q.decode_round.Runner, round: *const Round, 
     const params = try r.gdn.budget.shape.params(round.ids.len, r.slots, .{ .conv = .bf16, .a_log = .bf16, .dt = .bf16, .norm = .bf16 });
     var recurrent = try round.recurrent(params, &.{&.{}});
     defer recurrent.deinit();
-    var attention = try q.attention.Plan.init(r.allocator, &.{.{ .parents = round.windows[0].parents, .start = round.windows[0].start, .capacity = r.capacity }}, .{ .shared_prefix = r.model.device.tensorUnits() });
+    var attention = try q.attention.Plan.init(r.allocator, &.{.{ .parents = round.windows[0].parents, .start = round.windows[0].start, .capacity = r.capacity }}, .{ .shared_prefix = r.geometry.shared_prefix });
     defer attention.deinit();
     try r.model.frame.setRows(round.ids, round.feed_positions);
     try r.scratch.upload(attention);
