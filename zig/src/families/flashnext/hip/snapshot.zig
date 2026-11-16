@@ -1,5 +1,6 @@
 //! A stream's state after its first `at` prompt tokens, copied to host memory and back: the prompt cache's entries.
 const std = @import("std");
+const builtin = @import("builtin");
 const hip = @import("hip");
 const cache = @import("cache.zig");
 
@@ -26,6 +27,20 @@ fn up(x: Copy, dst: u64, src: []const u8) !void {
         @memcpy(x.bounce[0..n], src[k..][0..n]);
         try hip.runtime.check(x.d.api.hipMemcpyHtoD(@ptrFromInt(dst + k), x.bounce.ptr, n));
     }
+}
+
+/// A kept state's bytes on small pages of their own (Linux): a huge-page fault per state compacted under the kernels.
+fn take(n: usize, gpa: std.mem.Allocator) ![]u8 {
+    if (comptime builtin.os.tag != .linux) return gpa.alloc(u8, n);
+    if (n == 0) return &.{};
+    const m = try std.posix.mmap(null, n, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+    _ = std.os.linux.madvise(m.ptr, m.len, std.os.linux.MADV.NOHUGEPAGE);
+    return m;
+}
+
+fn give(b: []u8, gpa: std.mem.Allocator) void {
+    if (comptime builtin.os.tag != .linux) return gpa.free(b);
+    if (b.len > 0) std.posix.munmap(@alignCast(b));
 }
 
 /// One span of a cache's device memory a state at `at` holds.
@@ -70,8 +85,8 @@ fn copyOut(x: Copy, c: *const cache.Caches, at: usize, ratio: usize, side: ?u64,
     try regions(c, at, ratio, &list, gpa);
     var n: usize = 0;
     for (list.items) |r| n += r.len;
-    const out = try gpa.alloc(u8, n);
-    errdefer gpa.free(out);
+    const out = try take(n, gpa);
+    errdefer give(out, gpa);
     var off: usize = 0;
     for (list.items, 0..) |r, i| {
         const src = if (side != null and i + 1 == list.items.len) side.? else c.mem.base() + r.offset;
@@ -147,7 +162,7 @@ fn saveFrom(
     const out = try gpa.create(Saved);
     errdefer gpa.destroy(out);
     const main = try copyOut(x, c, at, ratio, side, gpa);
-    errdefer gpa.free(main);
+    errdefer give(main, gpa);
     const h: []u8 = if (head) |hc| try copyOut(x, hc, at, ratio, null, gpa) else &.{};
     out.* = .{ .at = @intCast(at), .pooled = pooled, .history = history, .main = main, .head = h };
     return out;
@@ -203,7 +218,7 @@ fn fresh(s: hip.Stream, c: *cache.Caches, head: ?*cache.Caches, eos: i64) !void 
 }
 
 pub fn drop(gpa: std.mem.Allocator, saved: *Saved) void {
-    gpa.free(saved.main);
-    if (saved.head.len > 0) gpa.free(saved.head);
+    give(saved.main, gpa);
+    give(saved.head, gpa);
     gpa.destroy(saved);
 }
