@@ -577,6 +577,7 @@ test "vision quantized projections reject either mismatched axis before a launch
     const f: cuda.Function = .{ .d = &d, .handle = null };
     var lane: cuda.qmmf.Lane = undefined;
     lane.clusters = true;
+    lane.pdl = false;
     for (&lane.f32_fns) |*set| for (set) |*function| {
         function.* = f;
     };
@@ -591,6 +592,7 @@ test "vision quantized projections reject either mismatched axis before a launch
 test "vision MXFP8 refuses a lane requiring unowned slice partials before upload" {
     var lane: cuda.qmmf.Lane = undefined;
     lane.clusters = false;
+    lane.pdl = false;
     const p: Plan = .{ .module = "model.visual.blocks.0.attn.qkv", .format = .mxfp8, .n = 3072, .k = 1024, .codes = 0, .scales = 0 };
     try std.testing.expectError(error.SlicePartialsNotHeld, fits(.{ .lane = &lane }, p));
     lane.clusters = true;
