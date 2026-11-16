@@ -108,7 +108,27 @@ test "qwen35 rules: real configs, each entry point admits what main admitted, an
         try t.expectEqual(was, now);
         admitted += @intFromBool(now);
     };
-    try t.expectEqual(@as(usize, 44), admitted); // (config, backend) pairs whose tower passes the rows
+    try t.expectEqual(@as(usize, 46), admitted); // (config, backend) pairs whose tower passes the rows, the 35B-A3B's two with them
+}
+
+test "qwen35 rules: Qwen3.6-35B-A3B, admitted by Metal's 27B and HIP as on main, the others keep their refusal" {
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const r = try layers_host.a3b(arena.allocator());
+    // no hidden_act: CUDA and the 2B require it, Metal's 27B and HIP read it only when present
+    const want = std.EnumArray(rules.Backend, ?anyerror).init(.{
+        .metal27 = null,
+        .hip = null,
+        .metal2b = error.UnsupportedQwenConfig,
+        .cuda = error.UnsupportedActivation,
+    });
+    for (std.enums.values(rules.Backend)) |b| {
+        const was = old.run(b, r.tower);
+        const now = entry(b, r.json);
+        errdefer std.debug.print("{s}: old {any}, now {any}\n", .{ @tagName(b), was, now });
+        try t.expectEqual(std.meta.isError(was), std.meta.isError(now));
+        if (want.get(b)) |e| try t.expectError(e, now) else try now;
+    }
 }
 
 test "qwen35 rules: every row and value through every entry point admits as main did, refused by the row's word" {
