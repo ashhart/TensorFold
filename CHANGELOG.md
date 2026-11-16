@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- DeepSeek V4.1 remote prefill: the Mac prefills only the last prompt token after a pull (`TF_PREFILL_TAIL`, default 1; 0 keeps the chunk rule) (#3597).
+
 - DeepSeek V4.1 remote prefill: a failing link or pair degrades to local prefill and recovers (`TF_PREFILL_BREAKER`, `TF_PREFILL_COOLDOWN_S`), a request that ends stops its pull, and the reply reports the pull's phases (#3596).
 
 - DeepSeek V4.1 remote prefill: with `--prefill-from`, each prompt is weighed against the pair's load and the predicted pull and Mac prefill times (`TF_PREFILL_ROUTE`, default `auto`; `always` queues every prompt behind the pull as before) (#3595).
