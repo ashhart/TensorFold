@@ -31,7 +31,7 @@ test "contract image: every registered DeepSeek image selects distinct matching 
         try std.testing.expectEqualStrings(r.launch.image, try resolve(r.launch.image));
         try names.put(std.testing.allocator, r.launch.image, {});
     }
-    try std.testing.expectEqual(@as(usize, 32), names.count());
+    try std.testing.expectEqual(@as(usize, 34), names.count());
 }
 
 test "contract image: all 32 Qwen4 launches select their own embedded images" {

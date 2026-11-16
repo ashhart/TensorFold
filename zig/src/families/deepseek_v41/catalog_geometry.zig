@@ -120,6 +120,16 @@ pub fn sampling(f: dk.sampling.Functions) void {
         note(split.fin, 32, 0, 1);
     }
 }
+/// The release projections at their staged tiles' threads and shared bytes, the warp tiles and the glue.
+pub fn release(f: dk.release.Functions) void {
+    const r = dk.release;
+    for ([_]r.Form{ .fp8, .bf16 }, f.staged) |form, row| for (row, [_]r.Size{ .decode, .mid, .prompt }) |fun, size| {
+        const t = r.tile(form, size);
+        note(fun, t.threads, t.smem, 1);
+    };
+    for (f.warp) |fun| note(fun, r.warp_threads, 0, 1);
+    for ([_]cuda.Function{ f.sum, f.actq, f.rms_actq }) |fun| note(fun, r.glue_threads, 0, 1);
+}
 pub fn base(image: []const u8, symbol: []const u8) void {
     const std = @import("std");
     for (catalog.entries[0..catalog.count], 0..) |e, i| {
