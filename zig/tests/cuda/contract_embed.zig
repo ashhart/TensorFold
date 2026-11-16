@@ -45,8 +45,10 @@ pub fn spec(e: Entry) c.Spec {
         .depth = depth,
         .out = .bf16,
         .tiles = .{ .{}, .{ .size = 2048, .step = 64, .min = 64 }, .{} }, // 256 threads of 8 values a block
-        // Gemma 4 12B's and 31B's hidden
-        .served = &.{ .{ .rows = 17, .n = 3840, .k = 1 }, .{ .rows = 3, .n = 5376, .k = 1 } },
+        // Gemma 4 12B's, 31B's and E4B's hidden
+        .served = &.{ .{ .rows = 17, .n = 3840, .k = 1 }, .{ .rows = 3, .n = 5376, .k = 1 }, .{ .rows = 9, .n = 2560, .k = 1 } },
+        // the tile rows are the stored table's rows, byte for byte; check() still holds them to float64
+        .replaces = if (e.tiles) "tf_embed_rows_affine (the stored 4-bit table, bf16 scale)" else null,
     };
 }
 
@@ -59,6 +61,8 @@ pub const Embed = struct {
     ctl: ?cuda.Function = null,
     pack: ?Pack = null,
     npad: usize = 0,
+    mlx: [3]u64 = undefined, // the tile entries' MLX words, scales and biases, the replaced gather's table
+    base: u64 = 0, // and its rows
     arena: ?std.heap.ArenaAllocator = null,
     k: ec.Case = undefined,
     dev: [5]u64 = undefined,
@@ -123,6 +127,8 @@ pub const Embed = struct {
         const l = cuda.qlinear.Affine4.layout(vocab, d);
         self.npad = l.npad;
         const raw = [3]u64{ self.dev[1], self.dev[2], self.dev[3] };
+        self.mlx = raw;
+        self.base = try self.rig.scratch(self.k.rows * d * 2);
         const a = self.arena.?.allocator();
         // every byte of the tiles is written by the packers below
         for ([_]usize{ l.words, l.scales, l.scales }, 1..) |len, i| self.dev[i] = try self.rig.input(try a.alloc(u8, len));
@@ -186,6 +192,21 @@ pub const Embed = struct {
     }
 
     /// Every output bit-equal to float64's value at the rounding points (a dropped or moved point leaves it).
+    /// The replaced kernel's bytes: tf_embed_rows_affine on the stored table, first held to float64 by `verify`.
+    pub fn replaced(self: *Embed) ![]const u8 {
+        const k = self.k;
+        try self.e.affine(self.rig.s, self.dev[0], self.mlx[0], self.mlx[1], self.mlx[2], self.base, k.rows, k.d, .{ .bits = k.bits, .scale = k.scale });
+        const n = k.rows * k.d;
+        const want = try self.arena.?.allocator().alloc(u16, n);
+        @memcpy(std.mem.sliceAsBytes(want), try self.rig.bytes(self.base, n * 2));
+        var stats: ec.Stats = .{};
+        if (try ec.verify(k, want, &stats, &self.msg)) |why| {
+            std.debug.print("baseline {s}: {s}\n", .{ self.entry.name, why });
+            return error.BaselineOffItsRoundingPoints;
+        }
+        return std.mem.sliceAsBytes(want);
+    }
+
     pub fn check(self: *Embed, _: g.Gate) !?[]const u8 {
         const n = self.count();
         const out = try self.arena.?.allocator().alloc(u16, n);
