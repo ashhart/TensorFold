@@ -525,3 +525,15 @@ by measuring torch's output on the release's tables bit for bit.
 
 TensorFold ships none of these files and no Unlimited-OCR-2 weights; `tools/zig/uocr_reference.py` runs the release's
 own code as the reference.
+
+## Inkling 2 Small test fixtures
+
+`zig/src/families/inkling2/fixtures/` holds files and values taken from Thinking Machines' Inkling 2 Small release at
+revision `2ad1157016e1aac77b6ff1b770e7c05229403134`, under the Apache License 2.0 stated on its model card (see
+[the license text](LICENSES/Apache-2.0.txt)): `config.json`, `chat_template.jinja`, `mini_tokenizer.json` (its
+`tokenizer.json` cut to the added tokens, the byte alphabet and the first 1,500 merges) and the prompts and ids in
+`prompt_cases.json` and `mini_cases.json`, which the Hugging Face transformers and tokenizers libraries produced from
+those files. `tiny_config.json` and the tensor tables
+`tiny_model_header.txt` and `tiny_mtp_header.txt` describe `tiny-random/inkling-2` at revision
+`0a57c72e4e5b68aafe1d983dbb62980344a5fcd7`, a randomly initialised model whose model card names that release as its base
+model and states no licence; no weights are included. `tools/zig/inkling2_fixtures.py` rebuilds all of these files.
