@@ -3,8 +3,9 @@
 `lfm3` serves LiquidAI's ModelOpt NVFP4 text export,
 [`LiquidAI/LFM3-1.7B-NVFP4`](https://huggingface.co/LiquidAI/LFM3-1.7B-NVFP4) at revision
 `b30025bbbbcbf62f6c110b40d51d36af6579f6a2`, on one NVIDIA GPU through the lane host. Checked on a GB10 (sm_121).
-The MLX affine and FP8 exports and the VL model are not loaded on CUDA yet, and Metal refuses this export by name
-(`Lfm3ModeloptNvfp4NotOnMetal`).
+The MLX affine and FP8 exports and the VL model are not loaded on CUDA yet. Metal and the Intel GPU engine refuse this
+export by name when they open it, before any weight is read (`Lfm3ModeloptNvfp4NotOnMetal`,
+`Lfm3ModeloptNvfp4NotOnXpu`).
 
 ```bash
 hf download LiquidAI/LFM3-1.7B-NVFP4 --revision b30025bbbbcbf62f6c110b40d51d36af6579f6a2 \
