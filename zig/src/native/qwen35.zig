@@ -135,7 +135,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
             h.cache = api.prompt_cache.Store.init(gpa, .{
                 .ptr = h.metal,
                 .vtable = &.{ .bytes = S.bytes, .save = S.save, .restore = S.restore, .drop = S.drop },
-            }, .{ .planned = true, .grid = chunk, .chunk = chunk }, plan.budget_bytes);
+            }, .{ .planned = true, .grid = chunk, .chunk = chunk, .warm_usable = true }, plan.budget_bytes);
             h.host.cache = &h.cache.?;
         }
     }
