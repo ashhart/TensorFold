@@ -59,9 +59,9 @@ test "the child's environment drops the key, log, salt and token and turns off t
 }
 
 test "the port comes from serve's serving line, whose format serve.zig still prints" {
-    try std.testing.expectEqual(@as(?u16, 51234), server.servingPort("x\n[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:51234/v1 (sampling: greedy)\n"));
-    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving other at http://127.0.0.1:5/v1 ("));
-    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:"));
+    try std.testing.expectEqual(@as(?u16, 51234), server.servingPort("x\n[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:51234/v1 (sampling: greedy)\n", server.served_name));
+    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving other at http://127.0.0.1:5/v1 (", server.served_name));
+    try std.testing.expectEqual(@as(?u16, null), server.servingPort("[tensorfold] serving .tensorfold-benchmark at http://127.0.0.1:", server.served_name));
     const serve_source = @embedFile("serve.zig");
     try std.testing.expect(std.mem.indexOf(u8, serve_source, "\"serving {s} at http://{s}:{d}/v1 (") != null);
     try std.testing.expect(std.mem.indexOf(u8, serve_source, "\"serving {s} on http://{s}:{d}/v1 (") == null);
