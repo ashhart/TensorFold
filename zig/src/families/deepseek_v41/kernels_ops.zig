@@ -37,6 +37,8 @@ pub const Functions = struct {
     paced: cuda.Function,
     segments: [2]cuda.Function, // bulk false / true
     topk_keys: cuda.Function,
+    /// the release's fp32 logits: 48-bit keys (topk_keys.cu's topk_kernel_wide)
+    topk_keys_wide: cuda.Function,
     swiglu: cuda.Function,
     add: cuda.Function,
     add_bf16: cuda.Function,
@@ -105,6 +107,7 @@ pub const Functions = struct {
         f.paced = try m_pace.function("_ZN12dsv41_l2pace12paced_kernelEPKlijmm");
         f.segments = .{ try m_l2pf.function("_ZN6tfl2pf15segments_kernelILb0EEEvPKlij"), try m_l2pf.function("_ZN6tfl2pf15segments_kernelILb1EEEvPKlij") };
         f.topk_keys = try m_keys.function("_ZN15dsv41_topk_keys11topk_kernelEPKfxiiPfPx");
+        f.topk_keys_wide = try m_keys.function("_ZN15dsv41_topk_keys16topk_kernel_wideEPKfxiiPfPx");
         f.swiglu = try m_pw.function("_ZN15dsv41_pointwise13swiglu_kernelEPKfxS1_xPfxif");
         f.add = try m_pw.function("_ZN15dsv41_pointwise10add_kernelEPfPKfx");
         f.add_bf16 = try m_pw.function("_ZN15dsv41_pointwise15add_bf16_kernelEPKfS1_P13__nv_bfloat16x");
@@ -420,8 +423,8 @@ pub const Ops = struct {
         try o.go(o.f.paced, .{ ctas, 1, 1 }, 32, 0, null, &args);
     }
 
-    /// pick.top (topk_keys.cu): each row's best k of bf16-valued fp32 logits, value desc then column asc.
-    pub fn topKeys(o: Ops, lg: u64, ld: usize, rows: usize, C: usize, k: usize, vals: u64, cols: u64) !void {
+    /// pick.top (topk_keys.cu): each row's best k, value desc then column asc; `wide`: fp32 bits, else bf16-valued.
+    pub fn topKeys(o: Ops, lg: u64, ld: usize, rows: usize, C: usize, k: usize, vals: u64, cols: u64, wide: bool) !void {
         if (rows < 1 or C < 1 or C > topk_keys.max_cols or k < 1 or k > @min(C, topk_keys.max_k)) return error.Shape;
         var args: cuda.Args = .{};
         args.add(lg);
@@ -430,7 +433,7 @@ pub const Ops = struct {
         args.add(@as(c_int, @intCast(k)));
         args.add(vals);
         args.add(cols);
-        try o.go(o.f.topk_keys, .{ rows, 1, 1 }, 1024, 0, null, &args);
+        try o.go(if (wide) o.f.topk_keys_wide else o.f.topk_keys, .{ rows, 1, 1 }, 1024, 0, null, &args);
     }
 
     /// The shared expert's pointwise part: act = silu(min(g, limit)) * clamp(u, +-limit) (fp32, strides in elements).

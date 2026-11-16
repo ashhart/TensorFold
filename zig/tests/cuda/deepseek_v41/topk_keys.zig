@@ -42,12 +42,13 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels) !void {
     defer d_lg.free();
     const sorted = try a.alloc(Pick, C);
     defer a.free(sorted);
-    for ([_]usize{ 1, 50, 1024 }) |kk| {
+    // the wide kernel (the release) on every row; the narrow one (EXL3) on the bf16-valued rows it is built for
+    for ([_]bool{ true, false }) |wide| for ([_]usize{ 1, 50, 1024 }) |kk| {
         var d_vals = try cuda.DeviceBuffer.alloc(gpu.d, rows * kk * 4);
         defer d_vals.free();
         var d_cols = try cuda.DeviceBuffer.alloc(gpu.d, rows * kk * 8);
         defer d_cols.free();
-        try o.topKeys(d_lg.ptr, C, rows, C, kk, d_vals.ptr, d_cols.ptr);
+        try o.topKeys(d_lg.ptr, C, rows, C, kk, d_vals.ptr, d_cols.ptr, wide);
         try stream.synchronize();
         const vals = try check.download(gpu, d_vals);
         defer a.free(vals);
@@ -56,13 +57,14 @@ pub fn run(gpu: Gpu, k: *const dsv41.Kernels) !void {
         const gv = std.mem.bytesAsSlice(f32, vals);
         const gc = std.mem.bytesAsSlice(i64, cols);
         for (0..rows) |r| {
+            if (!wide and r % 4 < 2) continue;
             for (sorted, lg[r * C ..][0..C], 0..) |*p, v, c| p.* = .{ .v = v, .c = @intCast(c) };
             std.sort.pdq(Pick, sorted, {}, before);
             for (0..kk) |i| {
                 const want = sorted[i];
-                try check.expect(gc[r * kk + i] == want.c and @as(u32, @bitCast(gv[r * kk + i])) == @as(u32, @bitCast(want.v)), "topk_keys k {d} row {d} (kind {d}) place {d}: column {d} value {d}, want column {d} value {d}", .{ kk, r, r % 4, i, gc[r * kk + i], gv[r * kk + i], want.c, want.v });
+                try check.expect(gc[r * kk + i] == want.c and @as(u32, @bitCast(gv[r * kk + i])) == @as(u32, @bitCast(want.v)), "topk_keys ({s}) k {d} row {d} (kind {d}) place {d}: column {d} value {d}, want column {d} value {d}", .{ if (wide) "wide" else "narrow", kk, r, r % 4, i, gc[r * kk + i], gv[r * kk + i], want.c, want.v });
             }
         }
-        check.pass("topk_keys k {d}: {d} rows of {d} columns (fp32, sub-bf16 near ties, bf16 ties, flat bands) equal the host sort", .{ kk, rows, C });
-    }
+        if (wide) check.pass("topk_keys wide k {d}: {d} rows of {d} columns (fp32, sub-bf16 near ties, bf16 ties, flat bands) equal the host sort", .{ kk, rows, C }) else check.pass("topk_keys narrow k {d}: the bf16-valued rows (ties, flat bands) equal the host sort", .{kk});
+    };
 }
