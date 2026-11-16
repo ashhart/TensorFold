@@ -138,6 +138,15 @@ pub const Weight = struct {
         if (w.bias != 0) v.bias = w.bias + @as(u64, from) * 2;
         return v;
     }
+
+    /// `columns` that launches the parent's (sk, wk) as it plans for the whole matrix, so each column keeps its bits.
+    pub fn pinnedColumns(w: Weight, from: u32, n: u32) !Weight {
+        var v = try w.columns(from, n);
+        const p = planOf(w);
+        v.sk = p.sk;
+        v.wk = p.wk;
+        return v;
+    }
 };
 
 /// A weight's launch: the family's fixed (sk, wk) when given, else plan()'s; either is the shape's alone.
