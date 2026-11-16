@@ -150,6 +150,11 @@ pub const Model = struct {
         m.mm[i] = ps;
     }
 
+    /// Bytes a whole-span load held that this one does not: the linears' shard span, and the row path's copies.
+    pub fn released(m: *const Model) u64 {
+        return (m.checkpoint.selected_bytes -| m.checkpoint.residentBytes()) + m.weights.aliased;
+    }
+
     /// affine_mm's pipelines for a linear of `bits`.
     pub fn pipes(m: *const Model, bits: u8) affine_mm.Pipes {
         return m.mm[std.mem.indexOfScalar(u8, &cfg.widths.bit_widths, bits).?].?;
