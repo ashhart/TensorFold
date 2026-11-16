@@ -71,6 +71,7 @@ pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
 pub const image_rows = @import("image_rows.zig");
 pub const drafter_release = @import("drafter_release.zig");
 pub const drafter_layout = @import("drafter_layout.zig");
+pub const drafter_published = @import("drafter_published.zig");
 pub const dspine = @import("dspine.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
@@ -159,6 +160,7 @@ test {
     _ = image_rows;
     _ = @import("nvfp4_fixture_test.zig");
     _ = @import("drafter_release_test.zig");
+    _ = @import("drafter_published.zig");
     _ = kv_pool;
     _ = kv_prompts;
     _ = state_walk;
