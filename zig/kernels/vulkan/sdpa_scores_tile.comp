@@ -113,7 +113,7 @@ void main() {
     }
     barrier();
     for (uint i = 0u; i < DC; ++i) {
-      acc += s_q[ty * DC + i] * s_k[tx * DCP + i];
+      acc = fma(s_q[ty * DC + i], s_k[tx * DCP + i], acc);
     }
     barrier();
   }

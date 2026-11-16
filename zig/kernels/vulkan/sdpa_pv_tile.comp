@@ -116,7 +116,7 @@ void main() {
     }
     barrier();
     for (uint kk = 0u; kk < KC; ++kk) {
-      if (k0 + kk < bound) acc += s_p[ty * KC + kk] * s_v[kk * DT + tx];
+      if (k0 + kk < bound) acc = fma(s_p[ty * KC + kk], s_v[kk * DT + tx], acc);
     }
     barrier();
   }
