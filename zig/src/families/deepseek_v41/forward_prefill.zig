@@ -150,10 +150,7 @@ pub fn plan(f: *Forward, p: *buffers.Plan, rows: u32) !void {
 
 /// The forward's prefill programs at `rows` (`plan` without the workspace).
 pub fn planPrograms(f: *Forward, p: *buffers.Plan, rows: u32, layers: []const u32) !void {
-    // The out-of-place mHC boundary runs the second streams buffer at up to
-    // split_rows rows, so plan a program at that size too when segments reach
-    // it; otherwise the buffer is sized for 17 rows and 18- to 32-row segments
-    // write past it.
+    // The second streams buffer runs at up to split_rows rows, so plan a program there too.
     const sizes = [_]u32{ rows, @intCast(block_prefill.split_rows), 17, 16 };
     const first: usize = if (rows > 17) 0 else 1;
     for (sizes[first..], first..) |n, i| {
