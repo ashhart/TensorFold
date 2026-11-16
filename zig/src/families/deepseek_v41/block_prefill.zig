@@ -120,6 +120,7 @@ pub const Seg = struct {
     /// y = x [m, K] @ W [K, N] (`w`'s prefix): per column block, upstream's rot_in, the W_q unpack, `_gemm`.
     pub fn matmul(s: *Seg, w: []const u8, form: Form, x: Arg, k: i64, n: i64, y: Out) !void {
         const e = s.e;
+        if (e.o.format == .release_fp8) return @import("release_dense.zig").matmul(e, w, x, k, n, y.role, y.dt, y.stride, y.offset);
         const m = e.n;
         const k2: i64 = try e.w.k2(w);
         const tw = 4 * k2;

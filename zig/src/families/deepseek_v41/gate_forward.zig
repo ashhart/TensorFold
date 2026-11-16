@@ -17,15 +17,28 @@ const eh = @import("engram_host.zig");
 const Value = std.json.Value;
 
 /// The widths block.zig needs, from our loaded weights (each trellis's words) and the plan's expert layouts.
+const ReleaseForm = @import("release_dense.zig").Form;
+
 pub fn widths(a: std.mem.Allocator, w: *const load.Weights, p: *const plan.Plan) !block.Widths {
     var out: block.Widths = .{};
     var it = w.map.iterator();
     while (it.next()) |e| {
         const name = e.key_ptr.*;
+        // a release group's `<base>.w`: FP8 codes (u8) or BF16 values, both [rows][cols]; experts' are rank 3
+        if (std.mem.endsWith(u8, name, ".w") and e.value_ptr.rank == 2) {
+            const form: ReleaseForm = switch (e.value_ptr.kind) {
+                .u8 => .fp8,
+                .bf16 => .bf16,
+                else => return error.UnexpectedTensor,
+            };
+            try out.release.put(a, name[0 .. name.len - ".w".len], form);
+            continue;
+        }
         if (!std.mem.endsWith(u8, name, ".trellis") or e.value_ptr.rank != 3) continue;
         try out.dense.put(a, name[0 .. name.len - ".trellis".len], @intCast(e.value_ptr.shape[2] / 8));
     }
     for (p.layers) |*l| {
+        if (l.experts[0].form != .exl3) continue; // MXFP4 experts: no EXL3 widths (release_moe.zig)
         var r: [2][2]u32 = .{ .{ 99, 0 }, .{ 99, 0 } };
         for ([_]usize{ 0, 2, 1 }, [_]usize{ 0, 0, 1 }) |proj, slot| {
             for (l.experts[proj].form.exl3.layout.words) |words| {
