@@ -11,6 +11,7 @@ const Receipt = receipt.Receipt;
 const writeResult = receipt.writeResult;
 const free_running_mode = receipt.free_running_mode;
 const teacher_forced_mode = receipt.teacher_forced_mode;
+const decode_bench = @import("qwen35_decode_bench.zig");
 
 const Engine = engine_mod.Engine;
 
@@ -368,6 +369,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.debug.print("FAIL device: vendor 0x{x:0>4} is not the requested 0x{x:0>4}\n", .{ engine.vendorId(), want });
         return 1;
     };
+    if (std.c.getenv("TF_VK_DECODE_BENCH")) |env| return decode_bench.run(init.io, engine, prompt, std.mem.span(env));
 
     const row_len: usize = @intCast(engine.logitsLen());
     const rows_a = try a.alloc(u8, expected.len * row_len);

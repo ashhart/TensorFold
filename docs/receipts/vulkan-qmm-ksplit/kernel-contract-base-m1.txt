@@ -1,0 +1,38 @@
+qmm-contract ckb 13-inch-M1 2026-11-15T14:26:49Z kernel 7.3.0-2-20261110.1-lab-ARCH sha 8098d07bbef8b841 gpu-timeouts=0
+rc 0
+lines: out 0 err 52
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS limits qmm_q4_tile: local=256x1x1 invocations=256 shared=0
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS limits qmm_q4_tile_rows: local=256x1x1 invocations=256 shared=0
+qc-ckb-GPU-TIMEOUTS after=0 delta=0
+rr:PASS limits qmm_q4_tile_f32: local=256x1x1 invocations=256 shared=0
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS nonfinite vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: 64 non-finite and 16 finite outputs match the float64 classes
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS repeat vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS shapes vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: 17 shapes within the float64 bound (worst 0.983 of the bound), 0 edges refused by the kernel
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS sums vulkan qmm_q4_tile affine q4 g64 transposed tiled 32: exact sums at k 6144, where fp16 sums would miss by 5756x and bf16 by 256x
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS nonfinite vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: 64 non-finite and 16 finite outputs match the float64 classes
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS repeat vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: five runs byte-identical (64 bytes), inputs and guards untouched, no overlap
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS shapes vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: 17 shapes within the float64 bound (worst 0.986 of the bound), 0 edges refuse
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS sums vulkan qmm_q4_tile_rows affine q4 g64 transposed tiled 32, 4 rows and 2 columns a thread: exact sums at k 6144, where fp16 sums would miss by 4463x and bf16 by 256x
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL nonfinite control: qmm fmax drops NaN: 1 of 5 outputs differ in class; first at 0: finite where float64 gives nan
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: qmm fmax drops NaN: red at nonfinite, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL repeat control: atomic add row sum: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: atomic add row sum: red at repeat, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL repeat control: row sum scribbles input: 4 of 4 repeats differ from the first run's bytes, first at byte 0
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: row sum scribbles input: red at repeat, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL shapes control: row sum drops K tail: at 4x1x4097 output 0 is 8.023634e1 where float64 gives 8.094338e1: 224.57 of its bound
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: row sum drops K tail: red at shapes, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL sums control: dot accumulates in fp16: infx over its exact-sum bound at k 4096: not fp32 sums (fp16 would miss 33554432x, bf16 16777216x)
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: dot accumulates in fp16: red at sums, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL repeat control: qmm writes its weights: a run changed its inputs
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: qmm writes its weights: red at repeat, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL repeat control: qmm writes its biases: a run changed its inputs
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: qmm writes its biases: red at repeat, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:FAIL shapes control: qmm_q4_tile_rows skips its tail rows: at 5x257x128 output 1028 is nan where float64 gives 6.401718e-1: nan of its bound
+qc-ckb-13-inch-M1-20261115T142649Z/err:CONTROL control: qmm_q4_tile_rows skips its tail rows: red at shapes, as planted
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS nonfinite vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: 64 non-finite and 16 finite outputs match the float64 classes
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS repeat vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: five runs byte-identical (96 bytes), inputs and guards untouched, no overlap
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS shapes vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: 17 shapes within the float64 bound (worst 0.037 of the bound), 0 edges refused by the kernel
+qc-ckb-13-inch-M1-20261115T142649Z/err:PASS sums vulkan qmm_q4_tile_f32 affine q4 g64 transposed tiled 32 f32 activations: exact sums at k 6144, where fp16 sums would miss by 882128357x and bf16 by 16777216x
+qc-ckb-13-inch-M1-20261115T142649Z/err:SUMMARY Apple M1 (G13G B1) 5 kernels: 5 pass gates 1-4, 0 fail, 0 known findings; 9 controls: 9 caught, 0 missed; 0 limit failures; gates 55224 ms
+gpu-timeouts=0
+VERDICT qmm-contract FAIL
