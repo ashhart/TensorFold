@@ -39,7 +39,7 @@ pub fn argv(a: Allocator, plan: Plan) ![]const []const u8 {
     try out.appendSlice(a, &.{ plan.exe, "serve", plan.dir, "--host", "127.0.0.1", "--port", "0", "--name", served_name, "--backend", plan.backend });
     try out.appendSlice(a, &.{ "--snapshot-dir", "none", "--max-snapshots", "0", "--prompt-cache-gib", "0", "--parallel", "1", "--no-update-check" });
     try out.appendSlice(a, &.{ "--max-tokens", try std.fmt.allocPrint(a, "{d}", .{plan.tokens}) });
-    if (plan.drafter_dir) |d| try out.appendSlice(a, &.{ "--drafter", d });
+    try out.appendSlice(a, &.{ "--drafter", plan.drafter_dir orelse "none" });
     if (plan.context) |c| try out.appendSlice(a, &.{ "--context", try std.fmt.allocPrint(a, "{d}", .{c}) });
     try out.appendSlice(a, &.{ "--kv-cache", plan.kv_cache });
     if (plan.serial) try out.append(a, "--no-drafts");

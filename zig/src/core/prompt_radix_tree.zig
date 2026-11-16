@@ -10,6 +10,35 @@ pub const Saved = pc.Saved;
 pub const Snapshots = pc.Snapshots;
 pub const Pages = pc.Pages;
 pub const Counts = pc.Counts;
+pub const Identity = @import("cache_images.zig").Identity;
+
+/// What rows depend on beyond their key and images: a tree never shares a page between two of these.
+pub const Ns = struct { namespace: u64 = 0, frame: u32 = 0 };
+
+/// What a walk matches: the words from the prompt's start, the images over them in prompt order, and their Ns.
+pub const Key = struct {
+    tokens: []const u32,
+    images: []const Identity = &.{},
+    ns: Ns = .{},
+};
+
+/// The images whose rows overlap [lo, hi), of a list in prompt order.
+fn overlapping(ids: []const Identity, lo: usize, hi: usize) []const Identity {
+    var a: usize = 0;
+    while (a < ids.len and ids[a].at + ids[a].tokens <= lo) a += 1;
+    var b = a;
+    while (b < ids.len and ids[b].at < hi) b += 1;
+    return ids[a..b];
+}
+
+/// Whether the same images, exactly, overlap [lo, hi) in both lists.
+fn sameImages(x: []const Identity, y: []const Identity, lo: usize, hi: usize) bool {
+    const a = overlapping(x, lo, hi);
+    const b = overlapping(y, lo, hi);
+    if (a.len != b.len) return false;
+    for (a, b) |i, j| if (!std.meta.eql(i, j)) return false;
+    return true;
+}
 
 /// The state kept at a node's end.
 pub const Entry = struct {
@@ -50,6 +79,10 @@ pub const Node = struct {
     /// The tokens of this node's pages, a page's worth each, and the tree's `ahead` more past its last page.
     tokens: []u32,
     pages: []u32,
+    /// The images overlapping its rows and `ahead` words, at prompt positions; empty for text.
+    images: []Identity = &.{},
+    /// The Ns its rows were computed under.
+    ns: Ns = .{},
     kids: std.ArrayList(*Node) = .empty,
     entry: ?Entry = null,
     used: u64 = 0,
@@ -103,6 +136,7 @@ pub const Tree = struct {
         for (n.pages) |id| t.holds.drop(t.pages, id);
         t.gpa.free(n.tokens);
         t.gpa.free(n.pages);
+        t.gpa.free(n.images);
         t.gpa.destroy(n);
     }
 
@@ -111,46 +145,64 @@ pub const Tree = struct {
         n.used = t.clock;
     }
 
-    fn child(t: *const Tree, n: *const Node, tokens: []const u32) ?*Node {
+    /// Whether `k` repeats every word `n` holds, under its Ns and with its images (its parent's not checked).
+    pub fn repeats(n: *const Node, k: Key) bool {
+        const start = if (n.parent) |p| p.end else 0;
+        if (!std.meta.eql(n.ns, k.ns) or k.tokens.len < start + n.tokens.len) return false;
+        if (!std.mem.eql(u32, n.tokens, k.tokens[start..][0..n.tokens.len])) return false;
+        return sameImages(n.images, k.images, start, start + n.tokens.len);
+    }
+
+    /// The kid of `n` whose first page `k` repeats from `at`: its words, `ahead` more, its images, its Ns.
+    fn child(t: *const Tree, n: *const Node, k: Key, at: usize) ?*Node {
         const w = t.page + t.ahead;
-        for (n.kids.items) |k| if (std.mem.eql(u32, k.tokens[0..w], tokens[0..w])) return k;
+        for (n.kids.items) |c| {
+            if (!std.meta.eql(c.ns, k.ns) or !std.mem.eql(u32, c.tokens[0..w], k.tokens[at..][0..w])) continue;
+            if (sameImages(c.images, k.images, at, at + w)) return c;
+        }
         return null;
     }
 
-    /// Whole pages of `n` that `tokens` repeats with the `ahead` tokens past each, at most `most`.
-    fn common(t: *const Tree, n: *const Node, tokens: []const u32, most: usize) usize {
+    /// Whole pages of `n` (from `at`) that `k` repeats, words, `ahead` more and images each, at most `most`.
+    fn common(t: *const Tree, n: *const Node, k: Key, at: usize, most: usize) usize {
         const w = t.page + t.ahead;
         var p: usize = 0;
-        while (p < t.npages(n) and p < most and std.mem.eql(u32, n.tokens[p * t.page ..][0..w], tokens[p * t.page ..][0..w])) p += 1;
+        while (p < t.npages(n) and p < most) : (p += 1) {
+            const lo = at + p * t.page;
+            if (!std.mem.eql(u32, n.tokens[p * t.page ..][0..w], k.tokens[lo..][0..w])) break;
+            if (!sameImages(n.images, k.images, lo, lo + w)) break;
+        }
         return p;
     }
 
-    /// The deepest node with a state at a multiple of `step` that `prompt` repeats up to `limit_at` (a page edge).
-    pub fn deepest(t: *const Tree, prompt: []const u32, limit_at: usize, step: usize) ?*Node {
+    /// The deepest node with a state at a resume point (`ok.ok(end)`) that `prompt` repeats up to `limit_at`.
+    pub fn deepest(t: *const Tree, k: Key, limit_at: usize, ok: anytype) ?*Node {
         var node = t.root;
         var at: usize = 0;
         var best: ?*Node = null;
         while (at + t.page <= limit_at) {
-            const c = t.child(node, prompt[at..]) orelse break;
-            const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
+            const c = t.child(node, k, at) orelse break;
+            const p = t.common(c, k, at, (limit_at - at) / t.page);
             if (p < t.npages(c)) break;
             at += p * t.page;
             node = c;
-            if (c.entry != null and c.end % step == 0) best = c;
+            if (c.entry != null and ok.ok(c.end)) best = c;
         }
         return best;
     }
 
     /// The deepest page edge `prompt` repeats up to `limit_at`, inside a node too: where a page-only store resumes.
-    pub fn deepestPage(t: *const Tree, prompt: []const u32, limit_at: usize) ?Hit {
+    pub fn deepestPage(t: *const Tree, k: Key, limit_at: usize, ok: anytype) ?Hit {
         var node = t.root;
         var at: usize = 0;
         var best: ?Hit = null;
         while (at + t.page <= limit_at) {
-            const c = t.child(node, prompt[at..]) orelse break;
-            const p = t.common(c, prompt[at..], (limit_at - at) / t.page);
+            const c = t.child(node, k, at) orelse break;
+            const p = t.common(c, k, at, (limit_at - at) / t.page);
             if (p == 0) break;
-            best = .{ .node = c, .pages = p };
+            var e = p; // the deepest of its matched page edges that is a resume point
+            while (e > 0 and !ok.ok(@intCast(at + e * t.page))) e -= 1;
+            if (e > 0) best = .{ .node = c, .pages = e };
             if (p < t.npages(c)) break;
             at += p * t.page;
             node = c;
@@ -178,12 +230,12 @@ pub const Tree = struct {
     }
 
     /// Logical pages of `tokens` (`np` whole pages and `ahead` more) the tree holds, their ids into `path` if any.
-    pub fn heldPrefix(t: *const Tree, tokens: []const u32, np: usize, path: ?[]u32, last: *?*Node) usize {
+    pub fn heldPrefix(t: *const Tree, k: Key, np: usize, path: ?[]u32, last: *?*Node) usize {
         var node = t.root;
         var pi: usize = 0;
         while (pi < np) {
-            const c = t.child(node, tokens[pi * t.page ..]) orelse break;
-            const p = t.common(c, tokens[pi * t.page ..], np - pi);
+            const c = t.child(node, k, pi * t.page) orelse break;
+            const p = t.common(c, k, pi * t.page, np - pi);
             if (path) |out| @memcpy(out[pi * t.per ..][0 .. p * t.per], c.pages[0 .. p * t.per]);
             pi += p;
             node = c;
@@ -193,10 +245,10 @@ pub const Tree = struct {
         return pi;
     }
 
-    /// Pages of `tokens` (whole pages, then `ahead` tokens) the tree holds from the start.
-    pub fn have(t: *const Tree, tokens: []const u32) usize {
+    /// Pages of `k` (whole pages, then `ahead` words) the tree holds from the start.
+    pub fn have(t: *const Tree, k: Key) usize {
         var last: ?*Node = null;
-        return t.heldPrefix(tokens, (tokens.len -| t.ahead) / t.page, null, &last);
+        return t.heldPrefix(k, (k.tokens.len -| t.ahead) / t.page, null, &last);
     }
 
     /// The pages of the path to `n`, each held once more for the caller; the nodes marked used.
@@ -216,19 +268,22 @@ pub const Tree = struct {
     }
 
     /// Puts `tokens` (whole pages, `mine` the caller's ids page-major, `ahead` more) in the tree; `path` gets its ids.
-    pub fn insert(t: *Tree, tokens: []const u32, mine: []const u32, path: []u32) !*Node {
+    pub fn insert(t: *Tree, k: Key, mine: []const u32, path: []u32) !*Node {
+        const tokens = k.tokens;
         const np = mine.len / t.per;
         var node = t.root;
         var pi: usize = 0;
         while (pi < np) {
-            const c = t.child(node, tokens[pi * t.page ..]) orelse {
+            const c = t.child(node, k, pi * t.page) orelse {
                 const leaf = try t.gpa.create(Node);
                 errdefer t.gpa.destroy(leaf);
                 const own_tokens = try t.gpa.dupe(u32, tokens[pi * t.page ..]);
                 errdefer t.gpa.free(own_tokens);
                 const own_pages = try t.gpa.dupe(u32, mine[pi * t.per ..]);
                 errdefer t.gpa.free(own_pages);
-                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = own_tokens, .pages = own_pages };
+                const own_images = try t.gpa.dupe(Identity, overlapping(k.images, pi * t.page, tokens.len));
+                errdefer t.gpa.free(own_images);
+                leaf.* = .{ .parent = node, .end = @intCast(np * t.page), .tokens = own_tokens, .pages = own_pages, .images = own_images, .ns = k.ns };
                 try t.holds.reserve(t.gpa, leaf.pages.len); // before the leaf is linked: what follows cannot fail
                 try node.kids.append(t.gpa, leaf);
                 for (leaf.pages) |id| t.holds.shareAssumeCapacity(t.pages, id);
@@ -236,7 +291,7 @@ pub const Tree = struct {
                 t.touch(leaf);
                 return leaf;
             };
-            const p = t.common(c, tokens[pi * t.page ..], np - pi);
+            const p = t.common(c, k, pi * t.page, np - pi);
             const up = if (p < t.npages(c)) try t.split(c, p) else c;
             @memcpy(path[pi * t.per ..][0 .. p * t.per], up.pages);
             t.touch(up);
@@ -259,15 +314,22 @@ pub const Tree = struct {
         const tail_pages = try t.gpa.dupe(u32, c.pages[p * t.per ..]);
         errdefer t.gpa.free(tail_pages);
         const parent = c.parent.?;
-        up.* = .{ .parent = parent, .end = parent.end + @as(u32, @intCast(p * t.page)), .tokens = head_tokens, .pages = head_pages, .used = c.used };
+        const cut = parent.end + p * t.page; // each side keeps the images over its rows and `ahead` words
+        const head_images = try t.gpa.dupe(Identity, overlapping(c.images, parent.end, cut + t.ahead));
+        errdefer t.gpa.free(head_images);
+        const tail_images = try t.gpa.dupe(Identity, overlapping(c.images, cut, c.end + t.ahead));
+        errdefer t.gpa.free(tail_images);
+        up.* = .{ .parent = parent, .end = @intCast(cut), .tokens = head_tokens, .pages = head_pages, .images = head_images, .ns = c.ns, .used = c.used };
         try up.kids.append(t.gpa, c);
         errdefer up.kids.deinit(t.gpa);
         const slot = std.mem.indexOfScalar(*Node, parent.kids.items, c).?;
         parent.kids.items[slot] = up;
         t.gpa.free(c.tokens);
         t.gpa.free(c.pages);
+        t.gpa.free(c.images);
         c.tokens = tail_tokens;
         c.pages = tail_pages;
+        c.images = tail_images;
         c.parent = up;
         return up;
     }

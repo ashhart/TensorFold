@@ -50,7 +50,10 @@ fn time(m: *q.model.Model, c: Case, lin: Linear, rows: u32, reps: usize) !f64 {
     const f = &m.frame;
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (0..reps) |_| try m.kernels.quant(e, lin, source(f, c.from), sumsOf(f, c.from, rows), f.get(.dims), f.get(.logits), rows);
+    for (0..reps) |_| {
+        try m.kernels.quant(e, lin, source(f, c.from), sumsOf(f, c.from, rows), f.get(.dims), f.get(.logits), rows);
+        e.barrier();
+    }
     e.end();
     cb.commit();
     cb.wait();
@@ -170,6 +173,7 @@ pub fn main(init: std.process.Init) !void {
                         var variant = lin;
                         variant.slices = sk;
                         try m.kernels.quant(e, variant, source(f, kind.from), sumsOf(f, kind.from, 1), f.get(.dims), logits, 1);
+                        e.barrier();
                     }
                     e.end();
                     cb.commit();
@@ -216,12 +220,18 @@ pub fn main(init: std.process.Init) !void {
                 .linear => |g| &.{ .{ .name = "", .lin = g.qkv, .from = .input }, .{ .name = "", .lin = g.zba, .from = .input }, .{ .name = "", .lin = g.out, .from = .mixer_out } },
                 .attention => |x| &.{ .{ .name = "", .lin = x.q, .from = .input }, .{ .name = "", .lin = x.kv, .from = .input }, .{ .name = "", .lin = x.out, .from = .mixer_out } },
             };
-            for (mixer) |c| try m.kernels.quant(e, c.lin, source(f, c.from), sumsOf(f, c.from, 1), f.get(.dims), logits, 1);
+            for (mixer) |c| {
+                try m.kernels.quant(e, c.lin, source(f, c.from), sumsOf(f, c.from, 1), f.get(.dims), logits, 1);
+                e.barrier();
+            }
             try m.kernels.quant(e, l.gu, f.get(.input), sumsOf(f, .input, 1), f.get(.dims), logits, 1);
+            e.barrier();
             try m.kernels.quant(e, l.down, f.get(.activated), sumsOf(f, .activated, 1), f.get(.dims), logits, 1);
+            e.barrier();
             calls += mixer.len + 2;
         }
         try m.kernels.quant(e, w.head, f.get(.input), sumsOf(f, .input, 1), f.get(.dims), logits, 1);
+        e.barrier();
         e.end();
         cb.commit();
         cb.wait();

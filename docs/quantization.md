@@ -164,6 +164,17 @@ GLM-5.3-Flash's CUDA engine reads csf0_v1 for its routed experts (`mlp.experts.N
 `down_proj`), every expert of a layer in that form, and loads its block 32 kernels only for such a checkpoint
 (`Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4` is one).
 
+## NVFP4_NZ5: csf0_v1 with code 0b1000 read as +5
+
+E2M1 spends two of its sixteen codes on zero: 0b1000 is -0. An entry of `{"quant_algo": "NVFP4_NZ5", "group_size": 32,
+"weight_scale_encoding": "csf0_v1", "code_map": "e2m1_nz5"}` holds csf0_v1's tensors in the same layout and reads
+0b1000 as +5, so a weight is `v(code) × e4m3(base + offset) × weight_scale_2`, where v is e2m1 for the other fifteen
+codes and 5 for 0b1000; zero is written 0b0000. The values stay within ±6, and 5 has three significant bits, so its
+products with e4m3 scales stay exact in bf16. `code_map` may be left out; beside any other recipe it is refused by
+module, so a code map is never read as E2M1's. GLM-5.3-Flash's CUDA engine loads its block 32 kernels' NVFP4_NZ5
+entries (`tf_nvfp4_nz5_*`) for such a checkpoint (`Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4-NZ5` is one), and refuses one
+that declares both NVFP4_NZ5 and NVFP4 csf0_v1.
+
 ## Native safetensors metadata
 
 The shared Zig safetensors index retains up to five dimensions, including temporal patch convolutions

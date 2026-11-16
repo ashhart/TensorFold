@@ -92,7 +92,9 @@ pub fn offered(srv: *Server, a: Allocator) Allocator.Error!bool {
 /// ``reply.logprobs`` from its captured rows, once the route's tool policy has settled its content and calls.
 pub fn project(srv: *Server, cx: *Cx, reply: *@import("chat.zig").Reply, tools: []const Value, calls: ?[]Value) errors.Refused!void {
     const captured = reply.probability_rows orelse return;
-    reply.logprobs = try @import("logprob_parts.zig").project(srv, cx, captured, reply.content, reply.reasoning, tools, calls);
+    const parts = @import("logprob_parts.zig");
+    reply.logprobs = try parts.project(srv, cx, captured, reply.content, reply.reasoning, tools, calls, .entries);
+    if (captured.positions) reply.logprob_positions = try parts.project(srv, cx, captured, reply.content, reply.reasoning, tools, calls, .positions);
 }
 
 /// One token's entry; a token the reply shows only part of keeps its row but shows those `bytes` and its ``token_id``.

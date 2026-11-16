@@ -12,12 +12,17 @@ pub const Ring = struct {
     pub fn absorb(r: Ring, taps: mtl.Buffer, off: usize, rows: u32) !void {
         const size = @as(usize, rows) * r.stride;
         if (rows == 0 or off > taps.length() or size > taps.length() - off) return error.BadCommittedTaps;
+        return r.absorbBytes(taps.contents()[off..][0..size], rows);
+    }
+
+    pub fn absorbBytes(r: Ring, data: []const u8, rows: u32) !void {
+        if (rows == 0 or data.len != @as(usize, rows) * r.stride) return error.BadCommittedTaps;
         const end = try std.math.add(u64, r.end.*, rows);
         var first: usize = 0;
         while (first < rows) {
             const slot: usize = @intCast((r.end.* + first) % r.window);
             const count = @min(rows - first, r.window - slot);
-            @memcpy(r.buf.contents()[slot * r.stride ..][0 .. count * r.stride], taps.contents()[off + first * r.stride ..][0 .. count * r.stride]);
+            @memcpy(r.buf.contents()[slot * r.stride ..][0 .. count * r.stride], data[first * r.stride ..][0 .. count * r.stride]);
             first += count;
         }
         r.end.* = end;

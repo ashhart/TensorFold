@@ -16,6 +16,19 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
     const mapping_stub = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_mapping_host.zig") });
+    const llama_controls = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/contract/metal_llama_controls.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .imports = &.{
+            .{ .name = "contract", .module = module(b, b.graph.host, .debug) },
+            .{ .name = "metal", .module = mapping_stub },
+            .{ .name = "tensorfold", .module = mapping_stub },
+            .{ .name = "kernel_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") }) },
+        },
+    }) }));
+    b.step("test-llama-controls-host", "Llama's source controls plant one fault without a device or shader compiler").dependOn(&llama_controls.step);
+    step.dependOn(&llama_controls.step);
     const mapping_tf = b.createModule(.{ .root_source_file = b.path("zig/lfm2_mapping_tf.zig"), .imports = &.{
         .{ .name = "metal", .module = mapping_stub },
         .{ .name = "kernel_sources", .module = mapping_stub },
@@ -93,7 +106,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
-pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module, kimi_metallib: *std.Build.Module) void {
     @import("rotary_sweep.zig").steps(b, target, metal_mod);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
@@ -131,6 +144,18 @@ pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         },
     }) });
     b.step("test-ling-route-gpu", "Ling grouped route on this GPU against the host formula").dependOn(&b.addRunArtifact(ling_gpu).step);
+    const ling_kda_gpu = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/ling_kda_gpu.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "metal", .module = metal_mod },
+            .{ .name = "kda", .module = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/kda.zig") }) },
+            .{ .name = "kimi_metallib", .module = kimi_metallib },
+        },
+    }) });
+    b.step("test-ling-kda-gpu", "Ling KDA mixer on this GPU against kda.zig, using k3_kda").dependOn(&b.addRunArtifact(ling_kda_gpu).step);
 }
 
 /// Linux: `kernel-contract` runs tf-cuda-test's kernel-contract command (kernels from -Dnvcc or -Dfatbins).

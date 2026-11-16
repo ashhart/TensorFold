@@ -28,6 +28,9 @@ Shared helpers that hold the cross-family parts:
 - `zig/src/core/prompt_tail.zig`: the last layer's kept tile ([#2229]) and the chunks nothing reads ([#2432]).
 - `zig/src/core/state_walk.zig`: one walk for kept prompt states. Not on main yet: it is on [#2215].
 
+Flash Next CUDA sampled reductions: one check in top-k and batched verify/draft completions prepared (#2920);
+CUDA candidate bytes, parity and served/speed qualification are pending.
+
 ## The table
 
 Each cell is one of these:
@@ -325,8 +328,11 @@ below; these are estimates for planning a port, not results.
    what stays in RAM beside it.
 
 9. **FP8 KV cache.** `--kv-cache fp8` stores keys and values as e4m3 with a scale a row, which halves KV memory for
-   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; its quality qualification is
-   pending. DeepSeek-V4.1's compressed attention is FP8 by design.
+   longer windows or more streams ([#886] on Qwen). GLM has an opt-in FP8 latent cache; it changes tokens against
+   the BF16 cache, so it is not qualified. A diagnostic receipt on FP4-Local at TP=2 measures 6,960 cache bytes a
+   token on each rank against 13,056 (−47%, beside 231 MiB fixed a stream either way), the mean NLL within 0.06%
+   teacher-forced and cold prompts 3 to 5% slower
+   ([receipt](receipts/glm-kv-fp8-3a56d4eb/README.md)). DeepSeek-V4.1's compressed attention is FP8 by design.
 
 10. **Native FP4/FP8 pair decode.** nvcc 13.2 (PTX ISA 9.2) decodes an FP4 or FP8 pair to a bf16 pair in one
     instruction on `sm_120a`/`sm_121a`, where TF decodes in software today (`fp4pair`, `fp8pair` in `fp_pairs.cuh`,
@@ -342,7 +348,7 @@ below; these are estimates for planning a port, not results.
     | --- | --- | --- |
     | nemotron | +5.9 % (2 streams), +13.3 % (8 streams) | [#1783] |
     | qwen3_5 (27B, DFlash2) | +3.5..+5.0 % decode | [#1783] |
-    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439] |
+    | qwen3_5 (Qwen3.8, BF16) | +9.5 % prefill one stream, +8.2 % at 8 | [#1439]; large-prompt a/b pair prepared, device gate pending (#2911) |
     | gemma4 (31B), spark25 | level | [#1783] |
 
 12. **Residual add plus norm in one launch.** The residual add and the next RMS norm run as one kernel, which saves a

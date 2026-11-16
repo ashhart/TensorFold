@@ -55,18 +55,22 @@ pub const Kernels = struct {
     /// The table is whole on every rank; only the head is sliced, so the bound is its row count, not `c.vocab`.
     pub fn embedding(k: Kernels, input_encoder: mtl.ComputeEncoder, c: Config, p: projection.Triple, ids: Ref, out: Ref, rows: u32) !void {
         const vocab = try config.embedBound(&c, p.weight.shape[0]);
+        return k.embeddingShape(input_encoder, c.hidden, vocab, p, ids, out, rows);
+    }
+
+    pub fn embeddingShape(k: Kernels, input_encoder: mtl.ComputeEncoder, width: usize, vocab: usize, p: projection.Triple, ids: Ref, out: Ref, rows: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .embedding);
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
+        const a = abi.Embed{ .width = @intCast(width), .rows = rows, .vocab = @intCast(vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
         try abi.checkEmbed(a);
         e.setPipeline(k.embed);
         e.setBuffer(ids.buffer, ids.offset, 0);
         inline for (.{ p.weight, p.scales, p.biases }, 1..) |t, i| e.setBuffer(t.buffer, t.offset, i);
         e.setValue(a, 4);
         e.setBuffer(out.buffer, out.offset, 5);
-        e.dispatchThreads(mtl.Size.of(c.hidden, rows, 1), mtl.Size.of(256, 1, 1));
+        e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
         try span.end();
     }
 

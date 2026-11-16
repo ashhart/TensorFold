@@ -21,6 +21,7 @@ pub const joint_schema = @import("cuda_joint_schema");
 pub const stage = @import("cuda_stage.zig");
 
 test {
+    _ = @import("cuda_projection_many.zig");
     _ = @import("cuda_attention.zig");
     _ = @import("cuda_prompt.zig");
     _ = @import("cuda_prompt_tail.zig");
@@ -85,6 +86,16 @@ test {
 
 test "Qwen pages default: the learner's and the prefix share's refusals stop before the weights load" {
     try @import("cuda_admit_test.zig").refusals();
+}
+
+test {
+    _ = @import("cuda_shard.zig");
+}
+
+test "the shard plan's head widths are the kernels'" {
+    const plan = @import("cuda_shard.zig");
+    try @import("std").testing.expectEqual(geometry.head_dim, plan.head_dim);
+    try @import("std").testing.expectEqual(geometry.dk, plan.dk);
 }
 
 test {

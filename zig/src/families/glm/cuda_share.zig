@@ -16,11 +16,15 @@ pub fn cacheable(s: *const Stream) bool {
     return s.prompt_logprobs == null and !s.untaught and s.embedding == null and cacheKey(s) != null;
 }
 
-/// Below 4 states a stream: that many, and their slots' --prompt-cache-gib where asking it keeps all, else the most.
+/// Below 4 states a stream: that many, the --prompt-cache-gib they need beside TF_KV_SHARE (null: none), and the most.
 pub fn advice(states: usize, parallel: usize, l: kv.Layout, planned: ?kv.Budget) ?struct { states: usize, gib: ?u64, most: usize } {
     const want = 4 * parallel;
     if (states >= want) return null;
     const b = planned orelse return .{ .states = want, .gib = kv.holdingGib(want, l.snap_bytes), .most = want };
+    var named = b; // TF_KV_SHARE=want: its slots come before the windows past the engine's own (kv_pool.plan)
+    named.snaps = want;
+    if (!b.asked) named.cache = std.math.maxInt(u64); // and an unasked cache is sized after them (budgetOf)
+    if (if (kv.plan(l, named)) |p| p.snaps >= want else |_| false) return .{ .states = want, .gib = null, .most = want };
     const h = kv.holding(l, b, want);
     return .{ .states = want, .gib = h.gib, .most = h.most };
 }
@@ -30,7 +34,7 @@ pub fn tooMany(states: usize) bool {
     return states > @import("core").kv_pool.most_snaps;
 }
 
-test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a stream and, where it holds them, their cache" {
+test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a stream, and a cache only if they need it" {
     const mib: u64 = 1 << 20;
     const g: u64 = 1 << 30;
     const l: kv.Layout = .{ .fixed_bytes = 340 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 180 * mib };
@@ -44,11 +48,25 @@ test "TF_KV_SHARE: under 4 planned states a GLM stream, the advice names 4 a str
     try std.testing.expectEqual(@as(?u64, null), t.gib); // 3 GiB keeps no more there
     try std.testing.expectEqual(@as(usize, 15), t.most);
     var wide = tight;
-    wide.room = 24 * g;
-    try std.testing.expectEqual(@as(?u64, 3), advice(15, 4, l, wide).?.gib);
+    wide.room = 24 * g; // TF_KV_SHARE=16 alone keeps all 16 there: no --prompt-cache-gib is named
+    const w = advice(15, 4, l, wide).?;
+    try std.testing.expectEqual(@as(?u64, null), w.gib);
+    try std.testing.expectEqual(@as(usize, 16), w.most);
     var strip = tight;
-    strip.room = 16 * g + 11 * g / 16; // the 16 slots fit and 3 GiB doesn't: an asked 3 keeps all 16, so it is named
-    try std.testing.expectEqual(@as(?u64, 3), advice(15, 4, l, strip).?.gib);
+    strip.room = 16 * g + 11 * g / 16; // the 16 slots fit past the engine's own window, where TF_KV_SHARE's slots go
+    try std.testing.expectEqual(@as(?u64, null), advice(15, 4, l, strip).?.gib);
+    // TP=3 at Jammed XSFP4's 42.0 GiB, --parallel 8 (327 MiB fixed, a 168 MiB slot): TF_KV_SHARE=8 keeps its 8
+    const now3: kv.Layout = .{ .fixed_bytes = 327 * mib, .token_bytes = 13_056, .page_tokens = 512, .snap_bytes = 168 * mib };
+    const eight: kv.Budget = .{ .room = 41 * g + 992 * mib, .engine = 0, .lanes = 8, .fixed = true, .cache = 3 * g / 2, .snaps = 8, .window = 1_048_576 + 8, .engine_paged = true, .slots_only = true };
+    const j = advice(8, 8, now3, eight).?; // 32 take TF_KV_SHARE=32 alone, though the cache sized for 8 holds 9 slots
+    try std.testing.expectEqual(@as(?u64, null), j.gib);
+    try std.testing.expectEqual(@as(usize, 32), j.most);
+    var small = eight; // --prompt-cache-gib 2 beside TF_KV_SHARE=32 keeps 12: the advice names both settings
+    small.snaps = 32;
+    small.asked = true;
+    small.cache = 2 * g;
+    try std.testing.expectEqual(@as(usize, 12), (try kv.plan(now3, small)).snaps);
+    try std.testing.expectEqual(@as(?u64, 6), advice(12, 8, now3, small).?.gib);
 }
 
 test "TF_KV_SHARE: up to 64 states is a plan's, 65 is refused" {
@@ -67,6 +85,13 @@ test "TF_GLM_KV_SHARE: a count or anything else is refused; empty and 0 asked fo
     try std.testing.expect(!moved("0"));
 }
 
+/// The images a query carries, in the store's terms (none allocated for text); the caller frees them.
+fn images(gpa: std.mem.Allocator, s: []const @import("lanes").stream.Image) ![]kp.Image {
+    const out = try gpa.alloc(kp.Image, s.len);
+    for (s, out) |i, *o| o.* = .{ .at = i.at, .tokens = i.tokens, .gh = i.gh, .gw = i.gw, .hash = i.hash };
+    return out;
+}
+
 /// The store the server attached to rank 0's pages (null: none, or another rank).
 pub fn of(e: *const engine.Engine) ?kp.Prompts {
     const p = e.pages orelse return null;
@@ -79,7 +104,11 @@ pub const Owner = struct { pending: ?*engine.Kept = null };
 /// Before a prompt pass: the deepest kept state's pages in `adopt` (held for the stream), the state in `owner`.
 pub fn begin(e: *engine.Engine, s: *const Stream, owner: *Owner, adopt: *std.ArrayList(u32)) !kp.Plan {
     const prompts = of(e) orelse return error.NoPromptStore;
-    const plan = try prompts.begin(.of(cacheKey(s) orelse return error.ImageCacheKeyRequired), s.history_len, s.shared_prefixes, owner, adopt);
+    const ims = try images(e.gpa, s.images);
+    defer e.gpa.free(ims);
+    var q: kp.Query = .of(cacheKey(s) orelse return error.ImageCacheKeyRequired);
+    q.images = ims;
+    const plan = try prompts.begin(q, s.history_len, s.shared_prefixes, owner, adopt);
     defer prompts.free(plan.marks);
     const mine = e.gpa.dupe(u32, plan.marks) catch |err| { // the lane's own marks, freed by its allocator
         e.pages.?.give(adopt.items);
@@ -94,6 +123,7 @@ pub const Keeps = struct {
     e: *engine.Engine,
     slot: u32,
     prompt: []const u32,
+    images: []const @import("lanes").stream.Image = &.{},
 
     pub fn at(ctx: *anyopaque, mark: u32) void {
         const k: *Keeps = @ptrCast(@alignCast(ctx));
@@ -110,13 +140,17 @@ pub const Keeps = struct {
         if (n > ids.len) return;
         const path = k.e.gpa.alloc(u32, n) catch return;
         defer k.e.gpa.free(path);
+        const ims = images(k.e.gpa, k.images) catch return;
+        defer k.e.gpa.free(ims);
+        var q: kp.Query = .of(k.prompt);
+        q.images = ims;
         var owner: Owner = .{};
-        _ = prompts.keep(.of(k.prompt), mark, &owner, ids[0..n], path);
+        _ = prompts.keep(q, mark, &owner, ids[0..n], path);
     }
 };
 
 /// The same content key names lookup and every completed or interrupted keep.
 pub fn marks(e: *engine.Engine, slot: u32, s: *const Stream, at: []const u32, keeps: *Keeps) ?engine.Marks {
-    keeps.* = .{ .e = e, .slot = slot, .prompt = cacheKey(s) orelse return null };
+    keeps.* = .{ .e = e, .slot = slot, .prompt = cacheKey(s) orelse return null, .images = s.images };
     return if (at.len == 0) null else .{ .at = at, .ctx = keeps, .call = Keeps.at, .interrupted = Keeps.at };
 }

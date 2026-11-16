@@ -3,6 +3,7 @@ const std = @import("std");
 const ckpt = @import("../../core/checkpoint_metal.zig");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
+const mtl = @import("metal");
 
 const Builder = wts.Builder;
 const Weights = wts.Weights;
@@ -165,4 +166,80 @@ test "8-bit matrices read in place for the row kernels: no tiles, routed experts
         try std.testing.expectEqual(@as(u8, 8), w.head.rows.?.bits);
         try std.testing.expectEqual(@as(u8, 8), w.embed_width.bits);
     }
+}
+
+const shared = "backbone.layers.0.mixer.shared_experts.";
+/// The shared expert and the head at 4/64, the lane kernels' width.
+const four = [_]Fake{
+    .{ .name = shared ++ "up_proj.weight", .dtype = "U32", .shape = &.{ 128, 8 } },
+    .{ .name = shared ++ "up_proj.scales", .shape = &.{ 128, 1 } },
+    .{ .name = shared ++ "up_proj.biases", .shape = &.{ 128, 1 } },
+    .{ .name = shared ++ "down_proj.weight", .dtype = "U32", .shape = &.{ 64, 16 } },
+    .{ .name = shared ++ "down_proj.scales", .shape = &.{ 64, 2 } },
+    .{ .name = shared ++ "down_proj.biases", .shape = &.{ 64, 2 } },
+    .{ .name = "lm_head.weight", .dtype = "U32", .shape = &.{ 128, 8 } },
+    .{ .name = "lm_head.scales", .shape = &.{ 128, 1 } },
+    .{ .name = "lm_head.biases", .shape = &.{ 128, 1 } },
+};
+
+test "without tensor units 4/64 matrices keep their lane shape but no tiles: rows read in place, no tile job, no buffer" {
+    const a = std.testing.allocator;
+    var buf: [24]Fake = undefined;
+    var ck = try fakeCheckpoint(a, tinyTensors(&four, &buf));
+    defer ck.deinit();
+    const c = tinyMoe();
+    var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+    defer w.deinit();
+    var b = Builder{ .allocator = a, .device = undefined, .ck = &ck, .c = &c, .w = &w, .rows = true };
+    defer b.jobs.deinit(a);
+    try b.fill(null);
+    try std.testing.expectEqual(@as(usize, 0), b.jobs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), w.owned.items.len); // the row kernels read the checkpoint's own rows
+    const m = w.layers[0].moe;
+    for ([_]wts.Linear{ m.shared_up, m.shared_down, w.head }) |lin| {
+        try std.testing.expect(lin.lane() and lin.tiles == null);
+        try std.testing.expectEqual(@as(u8, 4), lin.rows.?.bits);
+    }
+}
+
+test "with tensor units every 4/64 matrix is built as on main: its tiles and a tile job, no row copy" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const a = std.testing.allocator;
+    var buf: [24]Fake = undefined;
+    var ck = try fakeCheckpoint(a, tinyTensors(&four, &buf));
+    defer ck.deinit();
+    const c = tinyMoe();
+    var w = Weights{ .allocator = a, .embed = undefined, .norm_f = undefined, .head = undefined };
+    defer w.deinit();
+    var b = Builder{ .allocator = a, .device = device, .ck = &ck, .c = &c, .w = &w, .rows = false };
+    defer b.jobs.deinit(a);
+    try b.fill(null);
+    try std.testing.expectEqual(@as(usize, 3), b.jobs.items.len); // one tile job per projection, run after load
+    try std.testing.expectEqual(@as(usize, 6), w.owned.items.len); // each projection's weight and scale tiles
+    const m = w.layers[0].moe;
+    for ([_]wts.Linear{ m.shared_up, m.shared_down, w.head }) |lin| {
+        try std.testing.expect(lin.lane() and lin.tiles != null and lin.rows == null);
+    }
+}
+
+test "a slide commit to a 4/64 projection without tiles rewrites its row copy and touches no tiles" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest;
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const n = 64;
+    const k = 128;
+    const words = n * k / 8;
+    const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const own = try device.buffer(words * 4, opts);
+    defer own.deinit();
+    const sb = try device.buffer(n * k / 64 * 2, opts);
+    defer sb.deinit();
+    @memset(own.slice(u32, words), 0);
+    const lin = wts.Linear{ .n = n, .k = k, .rows = .{ .w = own, .scales = sb, .biases = sb, .n = n, .k = k } };
+    var edited: [words]u32 = undefined;
+    for (&edited, 0..) |*x, i| x.* = @intCast(i * 2654435761 % (1 << 32));
+    wts.retile(lin, &edited); // tiles absent: the row copy alone takes the edit
+    try std.testing.expectEqualSlices(u32, &edited, own.slice(u32, words));
 }

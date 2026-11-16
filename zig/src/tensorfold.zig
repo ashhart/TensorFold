@@ -17,6 +17,8 @@ pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
 pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
 /// MOSS-Image's transformer on Metal: a denoiser driven by tf-moss-image, outside the lane engine.
 pub const moss_image = @import("families/moss_image/moss_image.zig");
+/// Unlimited-OCR-2 on Metal: document pages to text (its image encoder and decoder).
+pub const uocr = @import("families/uocr/uocr.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
@@ -68,6 +70,7 @@ pub const gemma4 = @import("families/gemma4/gemma4.zig");
 pub const step5 = @import("families/step5/step5.zig");
 pub const spark25_metal = @import("families/spark25/metal.zig");
 pub const minimax_m3 = @import("families/minimax_m3/minimax_m3.zig");
+pub const qwen3_metal = @import("families/qwen3/metal/metal.zig");
 pub const llama = @import("families/llama/llama.zig");
 pub const flint = @import("families/flint/flint.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
@@ -76,6 +79,7 @@ pub const lfm3 = @import("families/lfm3/lfm3.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("families/uocr/uocr.zig");
     _ = lora_merge;
     _ = @import("families/lfm3/backend.zig");
     _ = @import("families/lfm3/state.zig");
@@ -106,6 +110,7 @@ test {
     _ = @import("families/spark25/metal.zig");
     _ = @import("families/minimax_m3/minimax_m3.zig");
     _ = @import("families/llama/llama.zig");
+    _ = qwen3_metal;
     _ = @import("families/flint/flint.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");

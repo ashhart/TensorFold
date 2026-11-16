@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const max_rows = @import("cuda_round.zig").max_rows;
+const scratch_memory = @import("cuda_scratch.zig");
 
 pub const State = struct {
     on: bool = false,
@@ -9,6 +10,7 @@ pub const State = struct {
     buf: ?cuda.DeviceBuffer = null, // the quantized inputs, taken only when int8 is on
     flag: ?cuda.DeviceBuffer = null, // the quantizer's mark for an exceptional group
     ws: u64 = 0,
+    capacity: usize = 0,
     fell: u32 = 0, // this prompt chunk's projections that took bf16 (a non-finite input or a group's scale overflow)
     fallbacks: u64 = 0, // prompt chunks with any such projection
 
@@ -16,16 +18,41 @@ pub const State = struct {
         s.kernels = try cuda.w4a8.Kernels.resolve(m);
     }
 
-    /// Takes the quantized inputs' memory once (a chunk's rows at the widest projection input) and turns int8 on.
+    /// Enable prompt INT8; reserve its row workspace during the next startup warmup.
     pub fn enable(s: *State, e: anytype) !void {
-        if (s.buf == null) {
-            const g = e.g;
-            const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
-            s.buf = try cuda.DeviceBuffer.alloc(e.d, cuda.w4a8.Kernels.scratch(max_rows, k));
-            s.ws = s.buf.?.ptr;
+        if (s.flag == null)
             s.flag = try cuda.DeviceBuffer.alloc(e.d, 4);
-        }
         s.on = true;
+    }
+
+    /// Reserve prompt workspace before a forward starts; projection kernels never grow it.
+    pub fn ensureRows(s: *State, e: anytype, rows: usize) !void {
+        if (rows == 0 or rows > max_rows) return error.InvalidPromptRows;
+        if (rows <= s.capacity) return;
+
+        const g = e.g;
+        const k = @max(g.intermediate, g.valueWidth(), g.attnWidth(), g.hidden);
+        const capacity = scratch_memory.growthCapacity(s.capacity, rows, e.scratch_rows);
+
+        // Allocate first: a failed grow must leave the previous workspace usable.
+        const bytes = cuda.w4a8.Kernels.scratch(capacity, k);
+        var replacement = cuda.DeviceBuffer.alloc(e.d, bytes) catch {
+            std.log.warn("Qwen3.5 CUDA INT8 startup workspace allocation failed: {d} bytes for {d} rows (current capacity {d})", .{ bytes, capacity, s.capacity });
+            return error.ScratchGrowFailed;
+        };
+        errdefer replacement.free();
+
+        try e.stream.synchronize();
+        // Prompt forwards are uncaptured, so this workspace is not referenced by decode graphs.
+        const previous = s.buf;
+        s.buf = replacement;
+        s.ws = replacement.ptr;
+        s.capacity = capacity;
+        if (previous) |old_value| {
+            var old = old_value;
+            old.free();
+        }
+        replacement = undefined;
     }
 
     pub fn deinit(s: *State) void {
@@ -34,12 +61,14 @@ pub const State = struct {
         if (s.buf) |*b| b.free();
         s.buf = null;
         s.ws = 0;
+        s.capacity = 0;
         s.on = false;
     }
 };
 
 /// A prompt chunk's affine 4-bit projection (every prompt row) with int8 activations; false when it is exceptional.
 pub fn project(e: anytype, x: u64, q: cuda.qlinear.Affine4, out: u64, rows: usize) !bool {
+    // forward() prepares the full prompt workspace before any layer launches.
     var exceptional: u32 = 0;
     try e.int8.kernels.prompt(e.stream, x, q, out, rows, e.int8.ws, e.int8.flag.?.ptr, &exceptional);
     return exceptional == 0;

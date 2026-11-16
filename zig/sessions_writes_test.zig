@@ -66,14 +66,15 @@ fn mixed(root: ?[]const u8, covered: bool) !struct { counts: tier.Counts, peak: 
     cfg.policy.delta = covered;
     cfg.snapshot.layers = 4;
     cfg.policy.ram_bytes = 6 * cfg.snapshot.bytes();
-    cfg.capacity = 1 << 15;
+    cfg.capacity = 1 << 14;
     // Limit the pool to one slot's capacity so the mixed workload exercises spills.
     cfg.pool_tokens = cfg.capacity;
-    cfg.chunk = 1 << 20;
+    cfg.chunk = 1 << 19;
     cfg.staging = 4;
     const b = try tier.Bench.init(testing.allocator, testing.io, cfg);
     defer b.deinit();
-    const sh: load.Shape = .{ .requests = 150, .system = 1024, .first = .{ .lo = 256, .hi = 2048 }, .turn = .{ .lo = 128, .hi = 1536 }, .reply = .{ .lo = 64, .hi = 512 }, .cap = 16_384, .users = 20, .hot = 4, .fresh = 10, .hot_odds = 60 };
+    // 40 requests at half the token sizes still spill, park, drop, read back and write deltas, with files over a chunk
+    const sh: load.Shape = .{ .requests = 40, .system = 512, .first = .{ .lo = 128, .hi = 1024 }, .turn = .{ .lo = 64, .hi = 768 }, .reply = .{ .lo = 32, .hi = 256 }, .cap = 8192, .users = 20, .hot = 4, .fresh = 10, .hot_odds = 60 };
     const r = try load.run(testing.allocator, b, .mix, sh, 11);
     return .{ .counts = r.end, .peak = b.peak_used };
 }
@@ -88,8 +89,9 @@ test "sessions writes: on real files the tier writes and reads back exactly what
         defer gpa.free(root);
         const real = try mixed(root, covered);
         const accounted = try mixed(null, covered);
-        try testing.expect(real.counts.read > 0 and real.counts.spills > 0);
-        if (covered) try testing.expect(real.counts.deltas > 0);
+        try testing.expect(real.counts.read > 0 and real.counts.spills > 0 and real.counts.drops > 0);
+        try testing.expect(real.counts.written > real.counts.files * (1 << 19)); // files average over one chunk
+        if (covered) try testing.expect(real.counts.deltas > 0 and real.counts.covered_drops > 0);
         inline for (@typeInfo(tier.Counts).@"struct".field_names) |n| try testing.expectEqual(@field(real.counts, n), @field(accounted.counts, n));
         try testing.expectEqual(real.peak, accounted.peak);
     }

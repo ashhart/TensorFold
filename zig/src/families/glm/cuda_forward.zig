@@ -54,8 +54,8 @@ pub const Modules = struct {
     quant: quant.Kernels,
     q4: q4.Kernels,
 
-    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too (experts.wantsBlock32).
-    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: bool) !Modules {
+    /// `block32`: a csf0_v1 checkpoint's block 32 experts' image too, for its codes' values (experts.wantsBlock32).
+    pub fn load(d: *const cuda.Driver, ctx: *const cuda.Context, block32: ?cuda.experts32.Values) !Modules {
         const k = cuda.kernels;
         var m: Modules = undefined;
         var n: usize = 0;
@@ -84,7 +84,7 @@ pub const Modules = struct {
         errdefer if (m.index) |*x| x.unload();
         const mode = index_mod.Mode.read() catch return error.BadIndexSetting;
         if (mode != .off) m.index = index_mod.Kernels.load(d, k.glm_index, mode) catch |err| blk: {
-            std.log.warn("TF_GLM_INDEX_CUDA: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores", .{err});
+            std.log.warn("glm: the indexer kernels are not used ({t}); prompt chunks use tf_glm_scores, as with TF_GLM_INDEX_CUDA=0", .{err});
             break :blk null;
         };
         m.dsel = try @import("sys").environment.read(bool, "TF_GLM_DSEL", true);

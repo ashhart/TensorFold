@@ -44,6 +44,9 @@ pub const Marks = struct {
     }
 };
 
+/// A multi-stream window's batched draw: device slabs for rules, positions and tokens, its host words, its mode.
+pub const Batch = struct { rules: u64, meta: u64, tokens: u64, host_rules: []const u8, host_meta: []const i32, sampled: bool };
+
 pub const Forward = struct {
     c: Config,
     w: *const weights.Weights,
@@ -53,6 +56,7 @@ pub const Forward = struct {
     max_len: usize,
     nch: usize,
     sampled: bool, // the target draws by the bound sequence's rule (sample.cu); false: torch.argmax
+    batch: ?*const Batch = null, // a shared window's batched draw (null: a stream at a time)
     dump: ?*Dump = null,
     side: ?Side = null, // decode MoE layers run the shared expert here (null: one stream)
     marks: ?*Marks = null, // tf-cuda-test window-profile's events; null costs one check a class, no GPU work
@@ -130,6 +134,37 @@ pub const Forward = struct {
     /// Engine._forward: rows tokens at meta's position; every row samples its next token into `sampled`.
     pub fn window(f: *const Forward, rows: usize) !void {
         try f.windowSegs(&.{.{ .b = f.b, .row0 = 0, .rows = rows, .sampled = f.sampled, .slot = f.slot, .untaught = f.untaught }});
+    }
+
+    /// Every stream's rows drawn in one pass when all share a mode: the same rule, seed and position a row.
+    fn drawSegs(f: *const Forward, segs: []const Seg) !void {
+        const c = f.c;
+        const b = f.b;
+        if (segs.len == 1) return f.sample(b.logits, segs[0].rows, segs[0].b.meta, segs[0].b.sampled, segs[0].sampled, segs[0].b.rule);
+        const bat = f.batch orelse {
+            for (segs) |s| try f.sample(b.logits + s.row0 * @as(u64, c.vocab) * 2, s.rows, s.b.meta, s.b.sampled, s.sampled, s.b.rule);
+            return;
+        };
+        var total: usize = 0;
+        var sampled: usize = 0;
+        for (segs) |s| {
+            total += s.rows;
+            sampled += @intFromBool(s.sampled);
+        }
+        // the batch was built from the same streams' modes (cuda_shared_draw.batch), its rules and positions uploaded
+        if (sampled != (if (bat.sampled) segs.len else 0)) return error.BadWindow;
+        if (bat.sampled) {
+            try f.ops.drawRows(b.logits, c.vocab, bat.rules, bat.meta, bat.tokens, total, null);
+        } else try f.ops.torch().argmax(b.logits, c.vocab, c.vocab, bat.tokens, total);
+        var g: kern.ScatterRows = std.mem.zeroes(kern.ScatterRows);
+        var row0: usize = 0;
+        for (segs, 0..) |s, k| {
+            g.tok[k] = s.b.sampled;
+            g.rows[k] = @intCast(s.rows);
+            g.row0[k] = @intCast(row0);
+            row0 += s.rows;
+        }
+        try f.ops.scatterRows(g, bat.tokens, 0, total);
     }
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
@@ -239,7 +274,7 @@ pub const Forward = struct {
         try o.dense(b.y, b.xs, f.w.head, b.logits, rows);
         try f.mark(.head);
         for (segs) |s| if (s.mask.bits != 0) try o.grammarMask(b.logits + s.row0 * @as(u64, c.vocab) * 2, c.vocab, s.mask.bits, s.mask.words, s.rows);
-        for (segs) |s| try f.sample(b.logits + s.row0 * @as(u64, c.vocab) * 2, s.rows, s.b.meta, s.b.sampled, s.sampled, s.b.rule);
+        try f.drawSegs(segs);
         try f.mark(.sample);
         if (f.dump) |d| try d.tail(f.ops, b.logits, b.sampled, rows, c.vocab);
     }
@@ -294,11 +329,30 @@ pub const Forward = struct {
         const ex = m.experts;
         const K = c.top_k;
         const pairs = rows * K;
+        const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
+        const g = o.grouped();
+        // shared expert: one pair a row, its own act/out rows; a decode window forks it, joined before the add
+        const sh = lt.shared;
+        const in_window = !prompt and rows <= state.windowRows(c);
+        const sd = if (in_window) f.side else null;
+        const sh_act = if (in_window) b.sact else b.act;
+        const sh_out = if (in_window) b.sout else b.ymoe;
+        const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
+        const sh_down: cuda.experts.Rows = .{ .x = sh_act, .stride = sh.width };
+        var sh_plan = b.plan;
+        if (in_window) {
+            sh_plan = b.latentPlan(c, rows);
+            if (sd) |side| {
+                try side.fork.record(o.s);
+                try side.s.wait(side.fork);
+                try g.decode(side.s, .up, sh_up, sh, sh_plan, sh_act, kern.maxItems(rows, 1, 16), rows, 16, -1);
+                try g.decode(side.s, .down_f32, sh_down, sh, sh_plan, sh_out, kern.maxItems(rows, 1, 16), rows, 16, -1);
+                try side.join.record(side.s);
+            }
+        }
         try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, ex.experts, K, K, c.routed_scaling, c.norm_topk);
         try f.mark(.route);
         if (prompt) try o.prefillDense(b.y, lt.fc1, b.lat, rows) else try o.dense(b.y, b.xs, lt.fc1, b.lat, rows);
-        const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
-        const g = o.grouped();
         try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
         try f.mark(.plan);
         var items = kern.maxItems(pairs, ex.experts, tile);
@@ -315,20 +369,24 @@ pub const Forward = struct {
         }
         try o.latentSum(b.ymoe, b.wts, b.comb, rows, K, c.latent);
         if (prompt) try o.prefillDense(b.comb, lt.fc2, b.delta, rows) else try o.dense(b.comb, 0, lt.fc2, b.delta, rows);
-        // the shared expert: every row's pair with expert 0 of a one-expert layer, relu^2 between as the routed ones
-        const sh = lt.shared;
-        try o.plan(b.sids, rows, 1, tile, b.plan);
-        items = kern.maxItems(rows, 1, tile);
-        const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
-        const sh_down: cuda.experts.Rows = .{ .x = b.act, .stride = sh.width };
-        if (prompt) {
-            try g.prompt(o.s, .up, sh_up, sh, b.plan, b.act, items, rows, tile, -1);
-            try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, rows, tile, -1);
+        if (in_window) {
+            if (sd == null) {
+                try g.decode(o.s, .up, sh_up, sh, sh_plan, sh_act, kern.maxItems(rows, 1, 16), rows, 16, -1);
+                try g.decode(o.s, .down_f32, sh_down, sh, sh_plan, sh_out, kern.maxItems(rows, 1, 16), rows, 16, -1);
+            }
         } else {
-            try g.decode(o.s, .up, sh_up, sh, b.plan, b.act, items, rows, tile, -1);
-            try g.decode(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, rows, tile, -1);
+            try o.plan(b.sids, rows, 1, tile, b.plan);
+            items = kern.maxItems(rows, 1, tile);
+            if (prompt) {
+                try g.prompt(o.s, .up, sh_up, sh, b.plan, sh_act, items, rows, tile, -1);
+                try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, sh_out, items, rows, tile, -1);
+            } else {
+                try g.decode(o.s, .up, sh_up, sh, b.plan, sh_act, items, rows, tile, -1);
+                try g.decode(o.s, .down_f32, sh_down, sh, b.plan, sh_out, items, rows, tile, -1);
+            }
         }
-        try o.addBf16(b.delta, b.delta, b.ymoe, true, rows * c.hidden);
+        if (sd) |side| try o.s.wait(side.join);
+        try o.addBf16(b.delta, b.delta, sh_out, true, rows * c.hidden);
         try f.mark(.shared_wait);
     }
 

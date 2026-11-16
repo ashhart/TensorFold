@@ -69,6 +69,7 @@ const linux_compile = [_][]const u8{
 const linux_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-forward",
+    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 
@@ -189,6 +190,7 @@ const linux_host = [_][]const u8{
     "test-lane-halt-host",
     "test-lane-interrupted-host",
     "test-lane-lone-host",
+    "test-lane-strand-host",
     "test-lfm2-load-host",
     "test-living-shards-host",
     "test-merge",
@@ -297,6 +299,7 @@ const macos_deepseek = [_][]const u8{
     "test-dsv41-device-host",
     "test-dsv41-draft",
     "test-dsv41-forward",
+    "test-dsv41-wait-reasons-host",
     "test-sessions-writes-host",
 };
 

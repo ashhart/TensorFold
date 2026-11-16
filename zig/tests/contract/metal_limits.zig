@@ -42,6 +42,10 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;
+    if (std.mem.startsWith(u8, d.name, "qwen3 heads ")) {
+        if (!assemble) return undefined;
+        return .{ .decl = d, .function = fun, .here = sources.qwen3_heads, .pre_m5 = sources.qwen3_heads };
+    }
     if (std.mem.startsWith(u8, d.name, "qwen27 q8 ")) {
         for (@import("contract").lane_q8.sources) |v| {
             if (!std.mem.eql(u8, v.name, d.name)) continue;
@@ -188,6 +192,11 @@ fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comp
     if (std.mem.startsWith(u8, d.name, "minimax_m3 ")) {
         if (!assemble) return undefined;
         const t = try @import("metal_minimax.zig").limitsText(a, device, d.name);
+        return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
+    }
+    if (std.mem.startsWith(u8, d.name, "uocr ")) {
+        if (!assemble) return undefined;
+        const t = try @import("metal_uocr.zig").limitsText(a, device, d.name);
         return .{ .decl = d, .function = fun, .here = t.here, .pre_m5 = t.pre_m5 };
     }
     if (std.mem.startsWith(u8, d.name, "spark25 attention ")) {

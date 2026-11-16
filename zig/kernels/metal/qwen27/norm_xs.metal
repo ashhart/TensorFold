@@ -20,14 +20,18 @@ Q27_SPECIALIZE
 
   const uint t = thread_position_in_threadgroup.x;
   const uint m = threadgroup_position_in_grid.y;
+  #if Q27_XS
   const int M = dims[0], MP = dims[1];
+  #endif
   constexpr int E = 16;
   constexpr int TPG = K / E;
   threadgroup float red[TPG / 32];
+  #if Q27_XS
   if (int(m) >= M) {
     if ((t & 3) == 0) XS[(t >> 2) * MP + m] = 0.0f;
     return;
   }
+  #endif
   const int base = int(m) * K + int(t) * E;
   float hv[E];
   float ss = 0.0f;
@@ -44,12 +48,17 @@ HO[base + i] = h;
   float total = 0.0f;
   for (int i = 0; i < TPG / 32; i++) total += red[i];
   const float inv = metal::rsqrt(total / float(K) + eps[0]);
+  #if Q27_XS
   float xv[E];
+  #endif
   for (int i = 0; i < E; i++) {
     const bfloat x = bfloat(float(Wt[int(t) * E + i]) * (hv[i] * inv));
     XO[base + i] = x;
+    #if Q27_XS
     xv[i] = float(x);
+    #endif
   }
+  #if Q27_XS
   // a group's 64 values summed in order from zero, as the lane projection's sums are: its four threads take turns
   float gs = 0.0f;
   for (uint turn = 0; turn < 4; turn++) {
@@ -57,5 +66,5 @@ HO[base + i] = h;
     gs = simd_shuffle(gs, ushort((thread_index_in_simdgroup & ~3u) | turn));
   }
   if ((t & 3) == 0) XS[(t >> 2) * MP + m] = gs;
-
+  #endif
 }

@@ -125,3 +125,30 @@ test "a save is measured against the shards as they were before it: the files it
     try std.testing.expect(std.mem.indexOf(u8, text, "\"layers\":2,\"kinds\":\"ME\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "\"seconds\":3.1,\"bytes\":0,\"files\":[\"model.safetensors\"]") != null);
 }
+
+test "a failed rename leaves no temporary in the folder and keeps the old file" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "graph.json" });
+    defer gpa.free(path);
+    var g = Graph.init(gpa, io, path);
+    defer g.deinit();
+    _ = g.add("My favourite colour is teal.", "chat", 100);
+    _ = g.add("My sister is called Ana.", "chat", 101);
+
+    g.fault = .rename;
+    try std.testing.expectError(error.GraphRename, g.persist());
+
+    var dir = try tmp.dir.openDir(io, ".", .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try std.testing.expect(std.mem.indexOf(u8, entry.name, ".tmp.") == null);
+    }
+
+    var again = Graph.init(gpa, io, path);
+    defer again.deinit();
+    try std.testing.expectEqual(@as(usize, 2), again.facts.items.len);
+}

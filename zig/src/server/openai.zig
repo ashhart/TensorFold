@@ -10,6 +10,7 @@ const messages = @import("messages.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_parse = @import("tool_parse.zig");
 const tool_stream = @import("tool_stream.zig");
+const token_stream = @import("token_stream.zig");
 const ids = @import("ids.zig");
 const log = @import("log.zig");
 const request_log = @import("request_log.zig");
@@ -116,6 +117,7 @@ pub fn replyModel(srv: *const Server, body: Value) []const u8 {
 pub const Plan = struct {
     input: chat.Input,
     stream: bool,
+    token_stream: bool,
     separate_usage: bool,
     policy: tool_stream.Policy,
     named: []const u8,
@@ -133,7 +135,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
     const exact_bytes = asked and try @import("logprobs.zig").offered(srv, cx.a);
     const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
-    if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
+    if (!cx.skip_request_log) if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined, .format = format };
     if (is_chat) {
         input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, srv.media());
@@ -176,6 +178,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
     return .{
         .input = input,
         .stream = streamed,
+        .token_stream = try token_stream.requested(cx, body, streamed, srv.config.cortheon and is_chat),
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
@@ -227,14 +230,14 @@ fn promptText(srv: *Server, cx: *Cx, p: Value) errors.Refused![]const u8 {
 
 /// The chat or completion reply to ``raw`` (already decoded), written to ``out``.
 pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value) void {
-    runNamed(srv, a, out, gone, is_chat, raw, null, true);
+    runNamed(srv, a, out, gone, is_chat, raw, null, true, false);
 }
 
 /// ``run`` for a route whose client named the grammar field (Responses' text.format, Messages' output_config.format).
-pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool) void {
+pub fn runNamed(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw: Value, format: ?[]const u8, client_thinking: bool, skip_request_log: bool) void {
     const field: []const u8 = if (is_chat) "messages" else "prompt";
     const id = ids.make(a, if (is_chat) "chatcmpl-" else "cmpl-", 32) catch return;
-    var cx: Cx = .{ .a = a };
+    var cx: Cx = .{ .a = a, .skip_request_log = skip_request_log };
     var p = plan(srv, &cx, is_chat, raw, format, client_thinking) catch |e| {
         if (e == error.OutOfMemory) cx.message = "out of memory";
         logRefused(id, cx.message);
@@ -268,6 +271,7 @@ const Run = struct {
     plan: Plan,
     id: []const u8,
     created: i64,
+    token_cursor: token_stream.Cursor = .{},
     streamed_prose: bool = false,
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
     text_offset: usize = 0, // characters a completion stream's logprob rows have covered
@@ -299,6 +303,7 @@ const Run = struct {
         const list = try a.alloc(Value, 1);
         list[0] = .{ .object = choice };
         try o.put(a, "choices", .{ .array = list });
+        if (r.plan.token_stream) try token_stream.anchor(a, o, r.token_cursor, delta);
         return .{ .object = o };
     }
 
@@ -524,7 +529,7 @@ const Run = struct {
         defer if (!handed) r.srv.release(prepared.preparing, prepared.request);
         var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
-        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };
+        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin, .tokens = if (r.plan.token_stream) token_stream.sinkTokens(StreamSink) else null };
         var live = gone;
         live.out = r.out;
         live.opened = &sink_state.opened;
@@ -571,11 +576,7 @@ const Run = struct {
         }
         @import("logprobs.zig").project(r.srv, &cx, &reply, r.plan.input.tools, calls) catch |e| return r.streamFailed(if (e == error.Refused) cx.message else "out of memory");
         // the entries no chunk carried yet, once the stop and tool policies are final
-        if (reply.logprobs) |rows| if (@import("logprob_parts.zig").rest(a, rows, reply.probability_rows.?.sent) catch return) |left| {
-            const delta = json.newObject(a) catch return;
-            delta.put(a, "logprobs", left) catch return;
-            r.emit(r.chunk(.{ .object = delta }, null) catch return) catch return;
-        };
+        if (@import("logprob_parts.zig").restDelta(a, &reply) catch return) |delta| r.emit(r.chunk(delta, null) catch return) catch return;
         const last = r.chunk(.{ .string = "" }, if (reply.finish_reason.len > 0) reply.finish_reason else "length") catch return;
         if (compaction) |s| compact.stamp(&cx, &reply, s) catch return;
         r.extras(last.object, &reply) catch return;

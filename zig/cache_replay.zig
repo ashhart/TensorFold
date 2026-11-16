@@ -1,4 +1,4 @@
-//! Replay synthetic agent prompts on the real cache and two eviction alternatives; all times are modelled.
+//! Replay synthetic agent prompts on the real cache and experimental selectors; all times are modelled.
 const std = @import("std");
 const traces = @import("cache_replay_trace.zig");
 const run = @import("cache_replay_run.zig");

@@ -47,8 +47,13 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   of its 1.05 GiB), leaving rank 0 that much more room for KV pages. Checked on two RTX PRO 6000 Blackwell cards.
 - Nonstreaming `/v1/completions` requests return `prompt_logprobs`, structured output follows its schema with drafts
   on, and required and named tool calls use the model's tool markup ([1.1.1](../../CHANGELOG.md#111): #1016 to #1018).
-- `--kv-cache fp8` is an opt-in FP8 latent cache. BF16 remains the default, and its native quality and device
-  qualification are pending ([1.1.2](../../CHANGELOG.md#112)).
+- `--kv-cache fp8` is an opt-in FP8 latent cache ([1.1.2](../../CHANGELOG.md#112)); BF16 remains the default and the
+  only qualified cache. FP8 is lossy, so its replies differ from the BF16 cache's, and a mode that changes tokens is
+  not qualified. A diagnostic receipt on FP4-Local at TP=2 on two GB10
+  ([receipt](../receipts/glm-kv-fp8-3a56d4eb/README.md)) measures how far it moves: teacher-forced over 360,418
+  positions, the mean NLL within 0.06% and the best token the same at 95.5% of positions, a KL over the top 20 of
+  0.016 where NVFP4 against FP4-Local is 0.043; a token's cache 6,960 bytes a rank against 13,056 (−47%), beside the
+  231 MiB each stream holds either way; cold prompts 3 to 5% slower.
 - `TF_GLM_HOST_CACHE=1` on every rank keeps kept prompt states in pinned host memory instead of on the card, so a
   long conversation's next turn resumes when the card has no room left for its state (#1510). `--prompt-cache-gib`
   sizes the host cache on each rank (8 GiB unasked, at most half of the available memory), and the KV pool sets no
@@ -58,7 +63,8 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   prompt's rows as the pool's pages instead of copying them into the cache, and that log line names it.
 - With KV pages (the default at two or more ranks), the pool sets the windows the room holds aside before the prompt
   cache, which gets what they leave of its 16 GiB. `--prompt-cache-gib N` sets N GiB aside first, after the engine's
-  own window and a fixed part and page for each other stream, and the pool takes the rest.
+  own window and a fixed part and page for each other stream, and the pool takes the rest. `TF_KV_SHARE=n` sets its n
+  kept states' slots aside in the same place.
 - `TF_GLM_PROMPT_TAIL=1` keeps a prompt that names no history, as a `/v1/completions` request's, at its last prompt
   chunk start, as a chat keeps its history's, so the same prompt or a longer one resumes there. Those states share the
   prompt cache's budget with chat states, least recently used out first, so long raw prompts between two chat turns can
@@ -78,9 +84,11 @@ left after a 12.2 GiB reserve` and a 5.8 GiB prompt cache
   `TF_GLM_KV_HOST_GIB` sizes the host pages (one full window unasked); `TF_GLM_KV_HOST_SHARED=1` gives the ranks of
   one host a single copy in `/dev/shm`. Checked on two RTX PRO 6000 Blackwell cards at TP=2.
 - `TF_KV_SHARE=n` (with KV pages, 64 at most) keeps prompts' rows as the pool's pages, and the startup plan sets aside
-  a slot for each of the n kept states' other parts in the prompt cache, as many as the cache holds; the rest of the
-  cache goes to the pool's pages. `--prompt-cache-gib N` bounds them: the startup line names the slots, and when the
-  cache holds fewer than n, how many it holds and the `--prompt-cache-gib` that holds all n.
+  a slot for each of the n kept states' other parts first, where an asked cache goes, as many as fit there; the rest of
+  the prompt cache goes to the pool's pages after the windows. Where the room would hold one more whole window, the
+  slots come out of it, so the pool holds fewer pages than it would without them. A named `--prompt-cache-gib N`
+  bounds the slots too: the startup line names them, and when fewer than n fit, how many, and the
+  `--prompt-cache-gib` that holds all n where one does.
 - `TF_GLM_CHUNK_SOLO=4096` on every rank (opt-in) lets a prompt pass take 4,096 rows while no other stream is decoding.
   Unset or `2048`, every pass takes 2,048 rows and nothing extra is held. See [Prompt chunk size](#prompt-chunk-size).
 - `TF_GLM_REQUEST_STARTS=1` on rank 0 (opt-in, off by default) cuts each prompt pass at the request's message starts
@@ -99,8 +107,24 @@ Unset or 0 retains the existing policy. Copies use the normal target verify/part
 drafter; `--no-drafts` and `"draft": false` remain plain. MTP uses its timed window prices; DFlash2 keeps its seed
 prices. Observed copy rejections can cut an offer to zero rows. The opt-in's head confidence is a maximum prefix;
 cost may choose plain.
-See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). Device exactness and speed are
-pending, so keep the default policy until that checkpoint's complete cost and reply checks pass (#1910).
+See [copy pricing and the required TP=2 comparison](cuda-lane-copies.md#glm-on-cuda). On one checkpoint, copies kept
+every reply the same token for token, but sped some loads up and slowed others, so the default stays off (#1910).
+`Bizuayeu/GLM-5.3-Flash-Jammed-XSFP4`, greedy, two GB10s at TP=2 with `--parallel 4`, main `0fed2e4a5f`: decode
+tok/s with copies on against `TF_GLM_COPIES=0`, four fresh launches (off, on, on, off). The on launches turned copies
+on through a local default that takes the same path as `TF_GLM_COPIES=1`.
+
+| Load | 1 stream | 4 streams, per stream | 4 streams, aggregate |
+| --- | ---: | ---: | ---: |
+| A quoted document (~400 tokens back) | +8.1% faster | +0.6% faster | −0.4% slower |
+| Code | +2.3% faster | −1.0% slower | −1.5% slower |
+| One code prompt on every stream | −0.2% inside | +10.1% faster | +11.0% faster |
+| A file edited back | +9.9% faster | +1.5% faster | +2.5% faster |
+| Prose | −3.6% slower | +9.7% faster | +6.5% faster |
+| Prose after a 31K-token prompt | −0.8% inside | +6.7% faster | +4.0% faster |
+| Prose after a 56K-token prompt | −0.6% inside | +6.6% faster | +4.6% faster |
+
+Faster is a copy-on mean above both copy-off launches, slower one below the copy-off mean by more than the copy-off
+range (0.25% at least), and inside the rest. Other checkpoints and sampled replies may read differently.
 
 ## Window prices
 

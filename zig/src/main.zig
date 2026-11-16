@@ -223,7 +223,7 @@ fn generateGpu(gpa: std.mem.Allocator, metal: *nemotron.backend.Metal, prompt: [
     return r;
 }
 
-/// A GPU round handing its stream to the lane core after `after` commits, as a server does when a request arrives; a second stream joins.
+/// GPU round handing its stream to the lane core after `after` commits; a second stream joins.
 fn generateHanded(gpa: std.mem.Allocator, io: std.Io, metal: *nemotron.backend.Metal, cfg: *const lanes.Config, prompt: []const u32, max_new: u32, eos: []const u32, o: nemotron.gpu_round.Options, after: usize) ![2][]const u32 {
     var clock = nemotron.timing.RoundClock{ .b = metal, .wall = .{ .io = io } };
     var engine = lanes.Engine.init(gpa, cfg, metal.backend(), clock.clock());

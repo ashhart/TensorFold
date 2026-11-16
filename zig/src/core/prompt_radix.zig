@@ -5,6 +5,7 @@ const pc = @import("prompt_cache.zig");
 const tree_mod = @import("prompt_radix_tree.zig");
 const parts = @import("prompt_radix_parts.zig");
 const make_mod = @import("prompt_radix_make.zig");
+const sched = @import("prompt_radix_query.zig").Schedule(Query);
 const Allocator = std.mem.Allocator;
 
 pub const Saved = tree_mod.Saved;
@@ -14,6 +15,7 @@ pub const Counts = tree_mod.Counts;
 pub const Node = tree_mod.Node;
 pub const Entry = tree_mod.Entry;
 pub const Tree = tree_mod.Tree;
+pub const Key = tree_mod.Key;
 pub const Groups = parts.Groups;
 
 /// The rules of prompt_cache.zig, paged: `page` set; a planned store cuts and resumes only on `grid`, a multiple of it.
@@ -48,6 +50,9 @@ pub fn pagesOf(comptime T: type, owner: *T, bytes: u64) Pages {
     return .{ .ptr = owner, .bytes = bytes, .vtable = &.{ .retain = V.retain, .release = V.release, .holders = V.holders, .available = V.available, .hold = if (has_hold) V.hold else null } };
 }
 
+/// An image's exact identity: its position, rows, patch grid and content hash.
+pub const Identity = @import("cache_images.zig").Identity;
+
 /// Where a pass resumes and the marks it keeps at (in the caller's allocator), and its retained parts to map (C3).
 pub const Plan = struct {
     from: u32 = 0,
@@ -76,8 +81,8 @@ pub const Query = struct {
     key: []const u32,
     /// The prompt's length; a key of another length reuses nothing.
     prompt_len: u32,
-    /// The exact identities of the request's images.
-    images: []const @import("cache_images.zig").Identity = &.{},
+    /// The exact identities of the request's images, in prompt order.
+    images: []const Identity = &.{},
     /// The request's image frame.
     frame: u32 = 0,
     /// What the rows depend on beyond key, images and frame.
@@ -136,9 +141,14 @@ pub const Store = struct {
         return s.tree.per;
     }
 
-    /// Where a pass may cut and resume: a page edge, or a planned store's grid.
-    fn step(s: *const Store) u32 {
-        return if (s.rules.planned) s.rules.grid else s.rules.page;
+    /// What the tree matches of `q`: its first `len` words, its images, and its namespace and frame.
+    fn keyOf(q: Query, len: usize) Key {
+        return .{ .tokens = q.key[0..len], .images = q.images, .ns = .{ .namespace = q.namespace, .frame = q.frame } };
+    }
+
+    /// Where `q` may resume: a page edge on its chunk schedule (the tree's walks take it).
+    fn resumable(s: *const Store, q: Query) sched.Resumable {
+        return .{ .r = s.rules, .q = q };
     }
 
     /// Tokens a resume leaves past its state: the lookahead it read, and at least one to prefill.
@@ -154,7 +164,7 @@ pub const Store = struct {
     /// The tree may hold `limits` from now on: what passes them goes first.
     pub fn limit(s: *Store, limits: Limits) void {
         s.limits = limits;
-        while (s.tree.snaps > limits.snaps) s.tree.evict(s.victim(&.{}, null) orelse break);
+        while (s.tree.snaps > limits.snaps) s.tree.evict(s.victim(.{ .tokens = &.{} }, null) orelse break);
         while (s.tree.heldPages() > limits.pages) if (!s.tree.evictLeaf()) break;
     }
 
@@ -164,34 +174,40 @@ pub const Store = struct {
     }
 
     /// The least valuable thing to free: an entry, or for a store without entries an idle leaf; false when none.
-    fn evictOne(s: *Store, prompt: []const u32, skip: ?*Node) bool {
+    fn evictOne(s: *Store, k: Key, skip: ?*Node) bool {
         if (s.page_only) return s.tree.evictLeaf();
-        s.tree.evict(s.victim(prompt, skip) orelse return false);
+        s.tree.evict(s.victim(k, skip) orelse return false);
         return true;
     }
 
     /// The deepest node whose state `prompt` resumes exactly: its tokens and lookahead a prefix, a token left.
-    pub fn find(s: *const Store, prompt: []const u32) ?*Node {
+    pub fn find(s: *const Store, q: Query) ?*Node {
+        const prompt = q.key;
         if (!s.on() or prompt.len < s.past() + 1) return null;
-        return s.tree.deepest(prompt, (prompt.len - s.past()) / s.rules.page * s.rules.page, s.step());
+        return s.tree.deepest(keyOf(q, prompt.len), (prompt.len - s.past()) / s.rules.page * s.rules.page, s.resumable(q));
     }
 
     /// Restores the longest state `prompt` resumes into `owner`, its pages into `adopt` (held once more); plans marks.
     pub fn begin(s: *Store, a: Allocator, q: Query, history_len: u32, shared: []const u32, owner: ?*anyopaque, adopt: *std.ArrayList(u32)) !Plan {
         const prompt = q.key;
         if (!s.on()) return .{ .marks = try a.alloc(u32, 0) };
-        if (s.page_only) return s.beginPages(a, prompt, history_len, shared, adopt);
-        const found = s.find(prompt);
+        if (!sched.keyed(q)) { // a key that does not name the prompt's rows one word each reuses and keeps nothing
+            s.tree.counts.misses += 1;
+            note("a key of {d} words for a prompt of {d}: nothing reused or kept", .{ q.key.len, q.prompt_len });
+            return .{ .marks = try a.alloc(u32, 0) };
+        }
+        if (s.page_only) return s.beginPages(a, q, history_len, shared, adopt);
+        const found = s.find(q);
         if (found == null) s.tree.counts.misses += 1;
         const resume_at: u32 = if (found) |n| n.end else 0;
-        const planned = try s.marks(a, prompt, resume_at, history_len, shared, if (found) |n| n.entry.?.last else &.{});
+        const planned = try s.marks(a, q, resume_at, history_len, shared, if (found) |n| n.entry.?.last else &.{});
         const marks_ = try s.fitting(a, planned);
         errdefer a.free(marks_);
         for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
-            const cut = w - w % s.step();
-            if (std.mem.indexOfScalar(u32, marks_, cut) != null) s.noteShared(prompt[0 .. cut + s.rules.lookahead]);
+            const cut = sched.markAt(s.rules, q, w) orelse continue;
+            if (std.mem.indexOfScalar(u32, marks_, cut) != null) s.noteShared(keyOf(q, cut + s.rules.lookahead));
         }
-        s.reserve(prompt, found, marks_);
+        s.reserve(q, found, marks_);
         var from: u32 = 0;
         var out: Plan = .{ .marks = marks_ };
         if (found) |n| {
@@ -220,14 +236,16 @@ pub const Store = struct {
     }
 
     /// `begin` for a store with no checkpoint: the deepest matched page edge, its path adopted, nothing restored.
-    fn beginPages(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, adopt: *std.ArrayList(u32)) !Plan {
-        const hit: ?tree_mod.Hit = if (prompt.len < s.past() + 1) null else s.tree.deepestPage(prompt, (prompt.len - s.past()) / s.rules.page * s.rules.page);
+    fn beginPages(s: *Store, a: Allocator, q: Query, history_len: u32, shared: []const u32, adopt: *std.ArrayList(u32)) !Plan {
+        const prompt = q.key;
+        const limit_at = if (prompt.len < s.past() + 1) 0 else (prompt.len - s.past()) / s.rules.page * s.rules.page;
+        const hit: ?tree_mod.Hit = if (limit_at == 0) null else s.tree.deepestPage(keyOf(q, prompt.len), limit_at, s.resumable(q));
         const from: u32 = if (hit) |h| h.at(&s.tree) else 0;
-        const planned = try s.marks(a, prompt, from, history_len, shared, &.{});
+        const planned = try s.marks(a, q, from, history_len, shared, &.{});
         const marks_ = try s.fitting(a, planned);
         errdefer a.free(marks_);
         if (hit) |h| h.node.pins += 1; // the room made for the marks never prunes the path this pass resumes
-        s.reserve(prompt, null, marks_);
+        s.reserve(q, null, marks_);
         if (hit) |h| h.node.pins -= 1;
         const h = hit orelse {
             s.tree.counts.misses += 1;
@@ -274,33 +292,45 @@ pub const Store = struct {
     }
 
     /// Room for every state the pass keeps, made before it: the snapshots and the new pages of its last mark.
-    fn reserve(s: *Store, prompt: []const u32, from: ?*Node, marks_: []const u32) void {
+    fn reserve(s: *Store, q: Query, from: ?*Node, marks_: []const u32) void {
+        const prompt = q.key;
         if (marks_.len == 0) return;
         const last = marks_[marks_.len - 1];
         var parts_ids: usize = 0; // each mark's parts, as far as they are known before the keep
         for (marks_) |m| parts_ids += s.decl.planIds(&s.tree, m);
         while (true) {
-            const path_ids = (last / s.rules.page - s.tree.have(prompt[0 .. last + s.rules.lookahead])) * s.per();
+            const path_ids = (last / s.rules.page - s.tree.have(keyOf(q, last + s.rules.lookahead))) * s.per();
             const new = path_ids + parts_ids;
             if (s.tree.heldPages() + new <= s.limits.pages and (s.page_only or s.tree.snaps + marks_.len <= s.limits.snaps)) return;
-            if (!s.evictOne(prompt, from)) return;
+            if (!s.evictOne(keyOf(q, prompt.len), from)) return;
         }
     }
 
     /// A kept state a peer could not resume goes, so later prompts do not ask for it again.
-    pub fn forget(s: *Store, prompt: []const u32, at: u32) void {
-        const n = s.find(prompt[0..@min(prompt.len, at + s.past())]) orelse return;
+    pub fn forget(s: *Store, q: Query, at: u32) void {
+        var cut = q;
+        cut.key = q.key[0..@min(q.key.len, at + s.past())];
+        cut.prompt_len = @intCast(cut.key.len);
+        const n = s.find(cut) orelse return;
         if (n.end != at) return;
         s.tree.counts.failed += 1;
         s.tree.evict(n);
     }
 
-    fn sharedKey(tokens: []const u32) u64 {
-        return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
+    /// A cut's identity: its words, and its namespace, frame and images, so one identity never flags another's state.
+    fn sharedKey(k: Key) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(std.mem.sliceAsBytes(k.tokens));
+        if (k.ns.namespace != 0 or k.ns.frame != 0 or k.images.len > 0) { // text in the default Ns hashes as before
+            h.update(std.mem.asBytes(&k.ns.namespace));
+            h.update(std.mem.asBytes(&k.ns.frame));
+            for (k.images) |i| if (i.at < k.tokens.len) h.update(std.mem.asBytes(&[_]u64{ i.at, i.tokens, i.gh, i.gw, i.hash }));
+        }
+        return h.final();
     }
 
-    fn noteShared(s: *Store, tokens: []const u32) void {
-        const k = sharedKey(tokens);
+    fn noteShared(s: *Store, key: Key) void {
+        const k = sharedKey(key);
         if (std.mem.indexOfScalar(u64, s.shared_keys.items, k) != null) return;
         if (s.shared_keys.items.len == SHARED_KEYS) _ = s.shared_keys.orderedRemove(0);
         s.shared_keys.append(s.tree.gpa, k) catch {};
@@ -322,7 +352,8 @@ pub const Store = struct {
     }
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix, blocks, last page.
-    pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, previous: []const u32) ![]const u32 {
+    pub fn marks(s: *const Store, a: Allocator, q: Query, from: u32, history_len: u32, shared: []const u32, previous: []const u32) ![]const u32 {
+        const prompt = q.key;
         if (prompt.len < s.rules.min_prompt or prompt.len < 2) return a.alloc(u32, 0);
         var out: std.ArrayList(u32) = .empty;
         errdefer out.deinit(a);
@@ -336,7 +367,7 @@ pub const Store = struct {
         try want.appendSlice(a, shared);
         if (s.rules.tail and prompt.len > s.past()) try want.append(a, @intCast(prompt.len - s.past()));
         for (want.items, 0..) |w, k| {
-            const m = w - w % s.step();
+            const m = sched.markAt(s.rules, q, w) orelse continue; // its chunk start on a page edge
             if (m <= from or m >= prompt.len or m + s.rules.lookahead > prompt.len) continue;
             if (k > 0) { // the history's mark always; the others only away from it, each other and the resume point
                 if (m - from < s.rules.min_gap) continue;
@@ -361,14 +392,18 @@ pub const Store = struct {
         const prompt = q.key;
         const t = &s.tree;
         const np = at / s.rules.page; // logical pages below `at`
-        if (!s.on() or at == 0 or at % s.step() != 0 or at + s.rules.lookahead > prompt.len or mine.len != np * s.per() or path.len != mine.len) return .{ .held = false, .shared = 0 };
+        if (!s.on() or !sched.keyed(q) or !sched.usable(s.rules, q, at) or at + s.rules.lookahead > prompt.len or mine.len != np * s.per() or path.len != mine.len) return .{ .held = false, .shared = 0 };
+        if (at + s.rules.lookahead > (q.prefilled orelse q.prompt_len)) { // only prefilled rows: decoded ones need decode spans
+            note("kept nothing at {d} tokens: past the {d} rows this pass prefills", .{ at, q.prefilled orelse q.prompt_len });
+            return .{ .held = false, .shared = 0 };
+        }
         if (!s.decl.fits(at, retained)) return .{ .held = false, .shared = 0 };
         t.clock += 1;
         const tokens = prompt[0 .. at + s.rules.lookahead]; // a page past which the lookahead differs is another page
-        const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(tokens)) != null;
+        const flagged = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(keyOf(q, tokens.len))) != null;
         while (true) {
             var last: ?*Node = null;
-            const got = t.heldPrefix(tokens, np, path, &last);
+            const got = t.heldPrefix(keyOf(q, tokens.len), np, path, &last);
             // a page-only store: the path is the tree's already
             if (s.page_only and got == np) return .{ .held = true, .shared = mine.len };
             if (got == np and last != null and last.?.end == at and last.?.entry != null) {
@@ -380,13 +415,13 @@ pub const Store = struct {
             }
             const ids = (np - got) * s.per() + s.decl.ids(t, at, retained); // every id the keep adds to the holds
             if (t.heldPages() + ids <= s.limits.pages and (s.page_only or t.snaps + 1 <= s.limits.snaps)) break;
-            if (!s.evictOne(prompt, null)) {
+            if (!s.evictOne(keyOf(q, prompt.len), null)) {
                 t.counts.refused += 1;
                 note("kept nothing at {d} tokens: no room", .{at});
                 return .{ .held = false, .shared = got * s.per() };
             }
         }
-        const node = t.insert(tokens, mine, path) catch |err| return s.fail(at, err, 0);
+        const node = t.insert(keyOf(q, tokens.len), mine, path) catch |err| return s.fail(at, err, 0);
         if (s.page_only) {
             t.counts.kept += 1;
             return .{ .held = true, .shared = mine.len };
@@ -426,10 +461,10 @@ pub const Store = struct {
         return x.used < y.used;
     }
 
-    /// Whether `prompt` repeats every token `n` holds: up to its end, and its lookahead.
-    fn extends(n: *const Node, prompt: []const u32) bool {
+    /// Whether `k` repeats every word `n` and its parents hold, with their images and namespace: one conversation.
+    fn extends(n: *const Node, k: Key) bool {
         const parent = n.parent orelse return true;
-        return prompt.len >= parent.end + n.tokens.len and std.mem.eql(u32, n.tokens, prompt[parent.end..][0..n.tokens.len]) and extends(parent, prompt);
+        return Tree.repeats(n, k) and extends(parent, k); // its words, images and namespace: the same conversation
     }
 
     /// Whether a later prompt kept a state below `n`.
@@ -440,21 +475,22 @@ pub const Store = struct {
         return false;
     }
 
-    fn pick(n: *Node, prompt: []const u32, skip: ?*Node, moved: *?*Node, oldest: *?*Node) void {
+    fn pick(n: *Node, k: Key, skip: ?*Node, moved: *?*Node, oldest: *?*Node) void {
+        const prompt = k.tokens;
         if (n.entry) |e| if (n != skip and n.pins == 0) {
             // a state its conversation moved past goes first; a shared cut or a branch point only as the least valuable
-            const gone = !e.shared and !e.branched and ((prompt.len > e.born and prompt.len > n.end and extends(n, prompt)) or superseded(n, e.born));
+            const gone = !e.shared and !e.branched and ((prompt.len > e.born and prompt.len > n.end and extends(n, k)) or superseded(n, e.born));
             if (gone and (moved.* == null or e.used < moved.*.?.entry.?.used)) moved.* = n;
             if (oldest.* == null or worse(n, oldest.*.?)) oldest.* = n;
         };
-        for (n.kids.items) |k| pick(k, prompt, skip, moved, oldest);
+        for (n.kids.items) |kid| pick(kid, k, skip, moved, oldest);
     }
 
     /// The entry to free first, never `skip`: one a later prompt extends (no branch point), oldest first; else worst.
-    fn victim(s: *const Store, prompt: []const u32, skip: ?*Node) ?*Node {
+    fn victim(s: *const Store, k: Key, skip: ?*Node) ?*Node {
         var moved: ?*Node = null;
         var oldest: ?*Node = null;
-        pick(s.tree.root, prompt, skip, &moved, &oldest);
+        pick(s.tree.root, k, skip, &moved, &oldest);
         return moved orelse oldest;
     }
 
@@ -507,4 +543,6 @@ test {
     _ = @import("prompt_radix_test.zig");
     _ = @import("prompt_radix_parts.zig");
     _ = @import("prompt_radix_groups_test.zig");
+    _ = @import("prompt_radix_query.zig");
+    _ = @import("prompt_radix_query_test.zig");
 }

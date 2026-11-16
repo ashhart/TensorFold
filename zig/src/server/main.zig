@@ -5,6 +5,7 @@ const cli = @import("cli.zig");
 const cli_config = @import("cli_config.zig");
 const log = @import("log.zig");
 const hub = @import("hub.zig");
+const drafter = @import("drafter.zig");
 const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
@@ -134,9 +135,11 @@ pub fn main(init: std.process.Init) !u8 {
     };
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
-    // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
-    args.drafter_name = args.drafter;
-    if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
+    const backend = if (std.mem.eql(u8, args.backend, "auto")) @import("benchmark_server.zig").buildBackend() else args.backend;
+    const draft = try drafter.select(a, io, init.environ_map, dir, args.drafter, args.no_drafts, backend, &problem) orelse return fail(problem);
+    args.drafter = draft.dir;
+    args.drafter_name = draft.name;
+    if (draft.automatic) log.line("drafter {s}, found in the local cache (--drafter none serves without it)", .{draft.name.?});
     const model_type = modelType(a, io, dir, &problem) catch |e| {
         if (e == error.OutOfMemory) return e;
         return fail(problem);
@@ -163,7 +166,7 @@ pub fn main(init: std.process.Init) !u8 {
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
-    const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
+    const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, openEngine, .{ a, gpa, io, dir, model_type, &args, draft.automatic, &problem }) catch |e| {
         if (text_problem.len > 0) return fail(text_problem);
         if (problem.len > 0) return fail(problem); // an engine that failed after saying why
         return e;
@@ -200,6 +203,11 @@ pub fn main(init: std.process.Init) !u8 {
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) try forgetFail(init.environ_map) else 0,
         .tool_id_key = if (tool_ids) |*key| key else null,
     });
+}
+
+/// engines.open; a drafter serve paired by itself that does not open leaves the target serving alone.
+fn openEngine(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model_type: []const u8, args: *cli.Args, automatic: bool, problem: *[]const u8) !?api.Opened {
+    return drafter.openOrPlain(engines.open, .{ a, gpa, io, dir, model_type }, args, automatic, problem);
 }
 
 /// The reopen path the idle unload takes: the same open calls `main` made at startup.

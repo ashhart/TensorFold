@@ -8,6 +8,12 @@ pub fn tests(b: *std.Build, parent: *std.Build.Step) void {
     run.has_side_effects = true;
     b.step("test-nemotron-prefill-widths-host", "Actual Nemotron cut and flight completion with recording buffers").dependOn(&run.step);
     parent.dependOn(&run.step);
+    // the same cuts a chunk a call (#3021): one chunk a step, a decode between chunks, the head's rows, a cancel
+    const steps_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/prefill_steps.zig"), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const steps_run = b.addRunArtifact(b.addTest(.{ .root_module = steps_root, .filters = &.{"Nemotron Metal steps:"} }));
+    steps_run.has_side_effects = true;
+    b.step("test-nemotron-metal-steps-host", "Nemotron Metal's stepped prompt pass on recording fakes, no GPU").dependOn(&steps_run.step);
+    parent.dependOn(&steps_run.step);
 }
 
 pub fn compileHost(b: *std.Build, engine: *std.Build.Module, lanes: *std.Build.Module) void {

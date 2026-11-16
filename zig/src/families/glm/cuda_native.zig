@@ -106,7 +106,7 @@ pub fn share_states(p: *anyopaque, snaps: usize, parallel: u32, planned: ?kv.Bud
     if (n > 0) try readySnapshots(own, n * slot);
     const want = share_mod.advice(n, parallel, l, if (host) null else planned) orelse return;
     const why = "TF_KV_SHARE={d} keeps {d} states in the prompt cache's slots, under 4 a GLM stream at --parallel {d}: live streams evict each other's before a resume; ";
-    if (want.gib) |gib| std.log.warn(why ++ "{d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}", .{ own.share, n, parallel, want.states, want.states, gib }) else std.log.warn(why ++ "the room holds {d} at any --prompt-cache-gib", .{ own.share, n, parallel, want.most });
+    if (want.gib) |gib| std.log.warn(why ++ "{d} take TF_KV_SHARE={d} and --prompt-cache-gib {d}", .{ own.share, n, parallel, want.states, want.states, gib }) else if (want.most >= want.states) std.log.warn(why ++ "{d} take TF_KV_SHARE={d}", .{ own.share, n, parallel, want.states, want.states }) else std.log.warn(why ++ "the room holds {d} at any --prompt-cache-gib", .{ own.share, n, parallel, want.most });
 }
 
 /// Rank 0, its pool attached: choose the expert form and publish MTP's window prices, timed or kept.

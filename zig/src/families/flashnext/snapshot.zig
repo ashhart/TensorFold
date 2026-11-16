@@ -14,15 +14,15 @@ const TAIL = fz.PLE_TAIL * fz.WIDE * 2; // the n-gram conv tail's rows
 /// Where a state's DeltaNet rows live: the prompt pass's slot pair, the one layout snapshots are taken in today.
 pub const Layout = enum { slots };
 
-/// One kept state: its bytes, its position, the n-gram history there, the layout that wrote it, its buffer's size and pool.
+/// One kept state: its bytes, position, n-gram history, layout that wrote it, buffer size and pool.
 pub const State = struct { buf: mtl.Buffer, at: usize, hist: [2]i64, bytes: usize, layout: Layout, cap: usize = 0, pool: ?*Pool = null };
 
-/// A buffer's size for a state of `n` bytes: an eighth more, in 32 MiB steps, so the same conversation's next state fits it.
+/// Buffer size for a state of `n` bytes: an eighth more, in 32 MiB steps, so the next state of the conversation fits.
 pub fn capacity(n: usize) usize {
     return std.mem.alignForward(usize, n + n / 8, 32 << 20);
 }
 
-/// Kept states' buffers: a dropped one waits for the next save, and one is readied ahead (its pages touched) while the engine idles.
+/// Kept states' buffers: a dropped one waits for the next save; one is readied ahead (pages touched) while idle.
 pub const Pool = struct {
     bufs: [2]?mtl.Buffer = .{ null, null },
     caps: [2]usize = .{ 0, 0 },
@@ -46,7 +46,7 @@ pub const Pool = struct {
         buf.deinit();
     }
 
-    /// A new buffer's size for a state of `n` bytes: its capacity, but no more than the budget when the state itself fits.
+    /// New buffer size for a state of `n` bytes: its capacity, capped at budget when the state fits.
     pub fn size(p: *const Pool, n: usize) usize {
         return if (n <= p.max) @min(capacity(n), p.max) else capacity(n);
     }
@@ -105,7 +105,7 @@ pub const Pool = struct {
         p.caps[slot] = cap;
     }
 
-    /// Idle: a free buffer for the next state (the last one's and `more` bytes) inside `room`, paged in until a request waits.
+    /// Idle: a free buffer for the next state (last one's and `more` bytes) in `room`, paged in till a request waits.
     pub fn ready(p: *Pool, device: mtl.Device, more: usize, waiting: Waiting, room: usize) Readied {
         if (p.last == 0) return .{};
         const n = p.last + more;
@@ -152,7 +152,7 @@ pub fn bytes(at: usize) usize {
     return 36 * (CS_ROW + SO_ROW) + 13 * at * (4 * KEY_ROW + RAW_ROW) + TAIL;
 }
 
-/// The pieces in one order: DeltaNet states (from Engine.Passed past a mark), each attention layer's rows [0, at), the head's, the tail.
+/// Pieces in order: DeltaNet states (from Engine.Passed past a mark), each attention layer's rows [0,at), head, tail.
 fn parts(m: *fz.Model, at: usize, passed: ?Engine.Passed, out: *[MAX_PARTS]Part) usize {
     var n: usize = 0;
     var li: usize = 0;
@@ -203,7 +203,7 @@ fn copy(e: *Engine, buf: mtl.Buffer, at: usize, to_buf: bool, passed: ?Engine.Pa
     if (off != bytes(at)) return error.SnapshotSize;
 }
 
-/// The live state after `at` prompt tokens into a new buffer; the prompt pass stands at `at`, or its last call passed it.
+/// The live state after `at` prompt tokens into a new buffer; the pass stands at `at`, or its last call passed it.
 pub fn save(e: *Engine, gpa: std.mem.Allocator, at: usize) !*State {
     const passed: ?Engine.Passed = if (e.passed) |ps| (if (ps.at == at) ps else null) else null;
     if (at == 0 or (passed == null and e.m.pos != at)) return error.NotAtMark;

@@ -49,9 +49,12 @@ pub const Job = struct {
     remote_looked: bool = false, // queued, it was weighed for a remote fill once
     exported: bool = false, // a handoff request's state went to the exporter (or its failure did)
     cut: [1]u32 = .{0}, // a handoff request's one chunk start: its prompt's last token
+    wait_reason: @import("wait_reason.zig").Wait = .engine_busy, // while queued: the hold its last admission try met
+    fell_back: bool = false, // its saved prefix's restore fallback is counted (once a request)
 
-    /// Record first admission once, including a family planner and a background pass that later yields.
+    /// Record first admission once (a family planner's too, a yielding background pass's kept) and clear its wait.
     pub fn noteAdmission(job: *Job) void {
+        job.wait_reason = .engine_busy;
         if (job.admitted_ns == null) job.admitted_ns = std.Io.Clock.awake.now(job.host.io).toNanoseconds();
     }
 

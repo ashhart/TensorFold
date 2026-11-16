@@ -44,6 +44,83 @@ fn capped(len: usize, chunks: []const u32, f: *Fill, max_rows: u32) usize {
     return lanes.step_cap.end(f.at, f.cold, max_rows, cap_grid);
 }
 
+test "a yielded pass keeps its completed prefix and stops before the next chunk" {
+    const t = std.testing;
+    const len: usize = @as(usize, E.max_rows) + 1;
+    const ids = try t.allocator.alloc(u32, len);
+    defer t.allocator.free(ids);
+    @memset(ids, 3);
+    const Probe = struct {
+        stream: ?*lanes.Stream = null,
+        saves: usize = 0,
+        saved_at: u32 = 0,
+        fn cast(ctx: *anyopaque) *@This() {
+            return @ptrCast(@alignCast(ctx));
+        }
+        fn yielded(ctx: *anyopaque) bool {
+            const p = cast(ctx);
+            return p.stream.?.fill_at.load(.monotonic) >= E.max_rows;
+        }
+        fn kept(ctx: *anyopaque, _: *lanes.Stream, at: u32) void {
+            const p = cast(ctx);
+            p.saves += 1;
+            p.saved_at = at;
+        }
+    };
+    const FakeEngine = struct {
+        forwards: usize = 0,
+        fn forward(self: *@This(), parts: []const E.Part, ids_: []const u32, _: E.Keep) !void {
+            self.forwards += 1;
+            parts[0].cache.len += ids_.len;
+            parts[0].cache.written += ids_.len;
+        }
+    };
+    const FakePrefix = struct {
+        fn keep(_: *@This(), _: *E.Cache, _: []const u32, _: usize) !void {}
+    };
+    const FakePages = struct {
+        fn log(_: *@This(), _: usize, _: usize) void {}
+    };
+    const FakeLanes = struct {
+        gpa: std.mem.Allocator,
+        e: FakeEngine = .{},
+        cache: *E.Cache,
+        prefix: ?*FakePrefix = null,
+        pages: ?*FakePages = null,
+        fn cacheOf(self: *@This(), _: *lanes.Stream) !*E.Cache {
+            return self.cache;
+        }
+    };
+
+    var probe: Probe = .{};
+    var cache: E.Cache = undefined;
+    cache.len = 0;
+    cache.written = 0;
+    var fake: FakeLanes = .{ .gpa = t.allocator, .cache = &cache };
+    var stream = try lanes.Stream.init(t.allocator, .{
+        .id = "yielded-prefix",
+        .prompt = ids,
+        .max_new = 1,
+        .yield_check = .{ .ptr = &probe, .check = Probe.yielded },
+        .reuse = .{
+            .marks = &.{},
+            .hook = .{ .ptr = &probe, .at = Probe.kept },
+        },
+    });
+    defer stream.deinit(t.allocator);
+    probe.stream = &stream;
+    var fill: Fill = .{ .at = 0, .media = null };
+
+    try t.expect(!try chunk(&fake, &stream, &fill, 0));
+    try t.expectEqual(@as(usize, 1), fake.e.forwards);
+    try t.expectEqual(E.max_rows, fill.at);
+    try t.expectEqual(@as(usize, 0), probe.saves);
+    try t.expectError(error.Yielded, chunk(&fake, &stream, &fill, 0));
+    try t.expectEqual(@as(usize, 1), fake.e.forwards);
+    try t.expectEqual(@as(usize, 1), probe.saves);
+    try t.expectEqual(E.max_rows, probe.saved_at);
+}
+
 pub fn run(self: anytype, stream: *lanes.Stream) !void {
     var f = try opening(self, stream);
     defer f.deinit();
@@ -159,6 +236,10 @@ pub fn chunk(self: anytype, stream: *lanes.Stream, f: *Fill, max_rows: u32) !boo
     if (stream.isCancelled()) {
         stream.keepInterruptedPrefill(@intCast(f.at));
         return error.Cancelled;
+    }
+    if (stream.yields()) {
+        stream.keepInterruptedPrefill(@intCast(f.at));
+        return error.Yielded;
     }
     const cache = try self.cacheOf(stream);
     var images: ?E.Images = if (f.media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;

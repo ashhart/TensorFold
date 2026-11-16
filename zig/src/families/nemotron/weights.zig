@@ -20,6 +20,13 @@ pub const Linear = struct {
     rows: ?row.Weights = null, // the checkpoint's row layout: chips without tensor units, and every width but 4/64
     stack: [3]Member = undefined, // a fused stack not all 4/64: each member's rows into its own output columns
     stacked: usize = 0, // members in `stack` (0: one matrix)
+
+    /// A 4/64 projection the lane kernels take: its tiles, or its 4/64 rows where none are built (`Builder.tiled`).
+    pub fn lane(l: Linear) bool {
+        if (l.tiles != null) return true; // with tensor units every 4/64 projection has tiles, as on main
+        const r = l.rows orelse return false;
+        return l.stacked == 0 and r.bits == 4 and r.group == 64;
+    }
 };
 
 /// lane_qmm's 64-wide tiles of a 4/64 projection.
@@ -129,11 +136,17 @@ pub const Builder = struct {
     jobs: std.ArrayList(Tile) = .empty,
     why: cfg.Why = .{},
     rows: bool = false, // also keep each 4/64 projection's row layout (chips without tensor units)
+    pin: bool = false, // build this projection's tiles even with rows (the MTP eh, which coopParts reads directly)
 
     fn buffer(self: *Builder, bytes: usize) !mtl.Buffer {
         const b = try self.device.buffer(@max(bytes, 16), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         try self.w.owned.append(self.allocator, b);
         return b;
+    }
+
+    /// Whether a 4/64 projection gets lane tiles: with tensor units; without, the row kernels read its rows instead.
+    fn tiled(self: *const Builder) bool {
+        return !self.rows or self.pin;
     }
 
     fn get(self: *Builder, comptime fmt: []const u8, args: anytype) !Tensor {
@@ -172,11 +185,12 @@ pub const Builder = struct {
         for (parts) |p| n += p.t[0].shape[0];
         const words = parts[0].t[0].shape[1];
         const k = words * 8;
-        var lin = Linear{ .tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4) }, .n = n, .k = k };
+        var lin = Linear{ .n = n, .k = k };
+        if (self.tiled()) lin.tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(k / 64 * n * 4) };
         var row0: usize = 0;
         for (parts) |p| {
             if (p.t[0].dtype != .u32 or p.t[0].shape[1] != words or p.t[1].shape[1] != k / 64) return error.BadLinear;
-            try self.jobs.append(self.allocator, .{ .src = p.t, .dst = lin, .row0 = row0 });
+            if (lin.tiles != null) try self.jobs.append(self.allocator, .{ .src = p.t, .dst = lin, .row0 = row0 });
             row0 += p.t[0].shape[0];
         }
         if (n % 64 != 0) return error.BadLinear;
@@ -222,8 +236,11 @@ pub const Builder = struct {
         for (pick) |r| if (r >= src.t[0].shape[0]) return error.BadDraftIds;
         if (!src.w.four()) return .{ .n = n, .k = k, .rows = try self.packRows(&.{src}, pick, n, k) };
         const words = k / 8;
-        var lin = Linear{ .tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4) }, .n = n, .k = k };
-        try self.jobs.append(self.allocator, .{ .src = src.t, .dst = lin, .row0 = 0, .pick = pick });
+        var lin = Linear{ .n = n, .k = k };
+        if (self.tiled()) {
+            lin.tiles = .{ .w = try self.buffer(n * words * 4), .sbt = try self.buffer(words / 8 * n * 4) };
+            try self.jobs.append(self.allocator, .{ .src = src.t, .dst = lin, .row0 = 0, .pick = pick });
+        }
         if (self.rows) lin.rows = try self.packRows(&.{src}, pick, n, k);
         return lin;
     }
@@ -363,7 +380,11 @@ pub const Builder = struct {
         return .{
             .enorm = try self.typed("mtp.layers.0.enorm.weight", .{}, .bf16, d),
             .hnorm = try self.typed("mtp.layers.0.hnorm.weight", .{}, .bf16, d),
-            .eh = try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden }, .{})}),
+            .eh = eh: { // in main's place, so a chip with tensor units builds the head in the same order
+                self.pin = true; // mtp.zig's coopParts reads eh's tiles without the row kernels first
+                defer self.pin = false;
+                break :eh try self.linear("mtp.layers.0.eh_proj", .{}, &.{try self.quantized("mtp.layers.0.eh_proj", .{}, &.{ self.c.hidden, 2 * self.c.hidden }, .{})});
+            },
             .norm = try self.typed("mtp.layers.0.norm.weight", .{}, .bf16, d),
             .attention = try self.attention("mtp.layers.0.mixer", "mtp.fused.qkv", .{}, four),
             .norm2 = try self.typed("mtp.layers.1.norm.weight", .{}, .bf16, d),
@@ -486,15 +507,17 @@ const Tile = struct {
     }
 };
 
-/// A projection's codes ([n, k/8], row layout) rewritten into its tiles and any row copy; scales and biases kept.
+/// A projection's codes ([n, k/8], row layout) rewritten into any tiles and any row copy; scales and biases kept.
 pub fn retile(lin: Linear, words: []const u32) void {
     const per = lin.k / 8;
     const groups = lin.k / 64;
-    const tiled = lin.tiles.?.w.slice(u32, lin.n * per);
-    for (0..lin.n) |n| for (0..groups) |g| {
-        const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
-        @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
-    };
+    if (lin.tiles) |t| { // without tensor units a 4/64 projection has rows only (`Builder.tiled`)
+        const tiled = t.w.slice(u32, lin.n * per);
+        for (0..lin.n) |n| for (0..groups) |g| {
+            const at = ((n / 64 * groups + g) * 64 + n % 64) * 8;
+            @memcpy(tiled[at..][0..8], words[n * per + g * 8 ..][0..8]);
+        };
+    }
     if (lin.rows) |r| {
         const own: [*]u32 = @ptrCast(@alignCast(r.w.contents() + r.w_off));
         if (own != words.ptr) @memcpy(own[0 .. lin.n * per], words[0 .. lin.n * per]);

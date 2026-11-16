@@ -198,7 +198,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   }
 }
 
-// Decode rows: block b's `span` list entries of each row, unnormalized, into po [rows, blocks, 64, 512] fp32 and its max and sum into pm, pl [rows, blocks, 64]; grid (4 head groups, blocks, rows).
+// Decode b's unnormalized `span` rows: po [rows,blocks,64,512], max pm, sum pl [rows,blocks,64]; grid (4,blocks,rows).
 [[kernel]] void glm_sparse_split(const device bfloat* ql [[buffer(0)]], const device bfloat* keys [[buffer(1)]],
                                  const device int32_t* indices [[buffer(2)]], constant float& scale [[buffer(3)]],
                                  constant int4& meta [[buffer(4)]], device float* po [[buffer(5)]], device float* pm [[buffer(6)]],

@@ -1,4 +1,5 @@
 //! Records construction and dispatch only, without Objective-C, shader compilation or a device.
+const std = @import("std");
 const real = @import("real_metal");
 const Self = @This();
 pub const Size = real.Size;
@@ -33,9 +34,13 @@ pub const Record = struct {
     live_bytes: usize = 0,
     fail_pipeline: bool = false,
     tensor_units: bool = true,
+    virtual_ids: usize = 0,
+    barriers: usize = 0,
+    bindings: [16]?Binding = @splat(null),
+    xs: ?bool = null,
     current: usize = 0,
     rows: u32 = 0,
-    launches: [256]struct { pipeline: usize, rows: u32, grid: Size, stride: i32 } = undefined,
+    launches: [256]struct { pipeline: usize, rows: u32, grid: Size, stride: i32, barriers: usize, xs: ?bool, input: ?Binding, output: ?Binding } = undefined,
     sums_stride: i32 = 0,
     count: usize = 0,
     pub fn device(r: *Record) Device {
@@ -45,13 +50,15 @@ pub const Record = struct {
         return .{ .r = r };
     }
     pub fn virtual(r: *Record) Buffer {
-        return .{ .r = r, .bytes = 1 << 40 };
+        r.virtual_ids += 1;
+        return .{ .r = r, .bytes = 1 << 40, .id = r.virtual_ids };
     }
 };
 pub const Buffer = struct {
     r: *Record,
     bytes: usize,
     owned: bool = false,
+    id: usize = 0,
     pub fn length(b: Buffer) usize {
         return b.bytes;
     }
@@ -65,13 +72,14 @@ pub const Buffer = struct {
         if (b.owned) b.r.live_bytes -= b.bytes;
     }
 };
+pub const Binding = struct { id: usize, offset: usize };
 pub const Device = struct {
     r: *Record,
     pub fn tensorUnits(d: Device) bool {
         return d.r.tensor_units;
     }
-    pub fn generation(_: Device) usize {
-        return 17;
+    pub fn generation(d: Device) usize {
+        return if (d.r.tensor_units) 17 else 15;
     }
     pub fn buffer(d: Device, bytes: usize, _: usize) !Buffer {
         d.r.live_bytes += bytes;
@@ -82,19 +90,21 @@ pub const Device = struct {
     }
 };
 pub const Library = struct {
-    pub fn fromSource(d: Device, _: []const u8, _: CompileOptions) !Library {
+    xs: ?bool = null,
+    pub fn fromSource(d: Device, source: []const u8, _: CompileOptions) !Library {
         d.r.libraries += 1;
-        return .{};
+        return .{ .xs = if (std.mem.startsWith(u8, source, "#define Q27_XS 0\n")) false else if (std.mem.startsWith(u8, source, "#define Q27_XS 1\n")) true else null };
     }
     pub fn deinit(_: Library) void {}
 };
 pub const Pipeline = struct {
     r: *Record,
     id: usize,
-    pub fn init(d: Device, _: Library, _: []const u8, _: bool) !Pipeline {
+    xs: ?bool = null,
+    pub fn init(d: Device, lib: Library, _: []const u8, _: bool) !Pipeline {
         if (d.r.fail_pipeline) return error.PipelineBuild;
         d.r.pipelines += 1;
-        return .{ .r = d.r, .id = d.r.pipelines };
+        return .{ .r = d.r, .id = d.r.pipelines, .xs = lib.xs };
     }
     pub fn deinit(p: Pipeline) void {
         p.r.released += 1;
@@ -110,8 +120,12 @@ pub const ComputeEncoder = struct {
     r: *Record,
     pub fn setPipeline(e: ComputeEncoder, p: Pipeline) void {
         e.r.current = p.id;
+        e.r.xs = p.xs;
+        e.r.bindings = @splat(null);
     }
-    pub fn setBuffer(_: ComputeEncoder, _: Buffer, _: usize, _: usize) void {}
+    pub fn setBuffer(e: ComputeEncoder, b: Buffer, offset: usize, at: usize) void {
+        e.r.bindings[at] = .{ .id = b.id, .offset = offset };
+    }
     pub fn setValue(e: ComputeEncoder, v: anytype, at: usize) void {
         if (@TypeOf(v) == [2]i32 and at == 3) {
             e.r.rows = @intCast(v[0]);
@@ -119,11 +133,13 @@ pub const ComputeEncoder = struct {
         }
     }
     pub fn dispatchGroups(e: ComputeEncoder, grid: Size, _: Size) void {
-        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows, .grid = grid, .stride = e.r.sums_stride };
+        e.r.launches[e.r.count] = .{ .pipeline = e.r.current, .rows = e.r.rows, .grid = grid, .stride = e.r.sums_stride, .barriers = e.r.barriers, .xs = e.r.xs, .input = e.r.bindings[0], .output = e.r.bindings[5] };
         e.r.count += 1;
     }
     pub fn dispatchThreads(_: ComputeEncoder, _: Size, _: Size) void {}
-    pub fn barrier(_: ComputeEncoder) void {}
+    pub fn barrier(e: ComputeEncoder) void {
+        e.r.barriers += 1;
+    }
     pub fn end(_: ComputeEncoder) void {}
 };
 pub const Queue = struct {
