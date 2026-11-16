@@ -1,13 +1,17 @@
 //! The llama family's registrations as one set: every pipeline the loader builds, and gate 5 on this GPU.
 const std = @import("std");
 const mtl = @import("metal");
+const tf = @import("tensorfold");
 const contract = @import("contract");
+const sources = @import("kernel_sources");
 const limits_k = @import("metal_limits.zig");
 const llama = @import("metal_llama.zig");
 const dense = @import("metal_llama_dense.zig");
 const attention = @import("metal_llama_attention.zig");
 const controls = @import("metal_llama_controls.zig");
 const int4 = @import("metal_llama_int4.zig");
+const mlx = @import("metal_llama_mlx.zig");
+const affine_k = @import("metal_affine.zig");
 const g = contract.gates;
 const family = llama.family;
 
@@ -31,8 +35,20 @@ pub const Set = struct {
     decode: std.ArrayList(*attention.DecodeVec) = .empty,
     merge: std.ArrayList(*attention.MergeVec) = .empty,
     prompt: std.ArrayList(*attention.Prompt) = .empty,
+    embed_affine: std.ArrayList(*mlx.Embed) = .empty,
+    affine: std.ArrayList(*affine_k.Proj) = .empty,
 
     pub fn deinit(s: *Set, a: std.mem.Allocator) void {
+        for (s.embed_affine.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        s.embed_affine.deinit(a);
+        for (s.affine.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        s.affine.deinit(a);
         for (s.glue.items) |p| {
             p.deinit();
             a.destroy(p);
@@ -175,6 +191,27 @@ pub const Set = struct {
             try s.prompt.append(a, p);
             try kernels.append(a, p.kernel());
         }
+        functions[n] = "ll_embed_affine";
+        n += 1;
+        // both code widths and both groups the family admits, read by the one kernel
+        for ([_][2]usize{ .{ 4, 64 }, .{ 8, 32 } }) |w| {
+            var name_buf: [48]u8 = undefined;
+            if (!wanted(only, try std.fmt.bufPrint(&name_buf, "llama glue ll_embed_affine q{d} g{d}", .{ w[0], w[1] }))) continue;
+            const p = try a.create(mlx.Embed);
+            errdefer a.destroy(p);
+            p.* = try mlx.Embed.init(a, device, queue, @intCast(w[0]), w[1], .none);
+            try s.embed_affine.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
+        // the shared row kernels and affine_mm as an MLX checkpoint's projections take them, controls among them
+        for (mlx.forms) |r| {
+            if (!wanted(only, r.name) or (r.v.kind == .affine_mm and !tensor)) continue;
+            const p = try a.create(affine_k.Proj);
+            errdefer a.destroy(p);
+            p.* = try affine_k.Proj.init(a, device, queue, r.v, r.name);
+            try s.affine.append(a, p);
+            try kernels.append(a, p.kernel());
+        }
         try family.requireComplete(functions[0..n]);
         try s.plant(a, device, queue, tensor, kernels, only);
     }
@@ -257,11 +294,25 @@ pub const Set = struct {
                     try s.dequant.append(a, p);
                     try kernels.append(a, p.kernel());
                 },
+                .embed_affine_one_rounding => {
+                    const p = try a.create(mlx.Embed);
+                    errdefer a.destroy(p);
+                    p.* = try mlx.Embed.init(a, device, queue, 4, 64, m);
+                    try s.embed_affine.append(a, p);
+                    try kernels.append(a, p.kernel());
+                },
                 else => unreachable,
             }
         }
     }
 };
+
+/// Query heads a key head at most over the registered geometries: the decode attention launches a simdgroup each.
+fn widestGroup() u32 {
+    var most: u32 = 0;
+    for (family.geometries) |geo| most = @max(most, geo.heads / geo.kv_heads);
+    return most;
+}
 
 /// Gate 5 for the family's pipelines as built here: the threads each launch takes and its static threadgroup bytes.
 pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]const u8) !usize {
@@ -271,12 +322,13 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
     const Decl = struct { name: []const u8, threads: u32, tg: u32 };
     const decls = [_]Decl{
         .{ .name = "llama glue ll_embed", .threads = 256, .tg = 0 },
+        .{ .name = "llama glue ll_embed_affine", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_norm", .threads = 256, .tg = 128 },
         .{ .name = "llama glue ll_add", .threads = 256, .tg = 0 },
         .{ .name = "llama glue ll_add_norm", .threads = 256, .tg = 128 },
         .{ .name = "llama glue ll_prep", .threads = 32, .tg = 0 },
         .{ .name = "llama glue ll_silu_gu", .threads = 256, .tg = 0 },
-        .{ .name = "llama glue ll_decode_vec", .threads = 32 * (family.nanbeige43.heads / family.nanbeige43.kv_heads), .tg = 0 },
+        .{ .name = "llama glue ll_decode_vec", .threads = 32 * widestGroup(), .tg = 0 },
         .{ .name = "llama glue ll_merge_vec", .threads = 1024, .tg = 32 * 32 * 4 },
         .{ .name = "llama glue ll_argmax", .threads = 1024, .tg = 32 * 8 },
         .{ .name = "llama glue ll_matvec_1", .threads = 256, .tg = 0 },
@@ -298,6 +350,13 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
         const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
         problems += try limits_k.onThisGpu(a, device, .{ .decl = .{ .name = d.name, .threads = d.threads, .tg_memory = d.tg, .offline = false }, .function = fun, .here = glue, .pre_m5 = glue }, false);
     }
+    // an MLX checkpoint's windows: the shared row kernels' strided forms, two simdgroups a threadgroup
+    for ([_][]const u8{ "llama mlx rows tf_row_projection_strided_q4_f32", "llama mlx rows tf_row_projection_strided_q8_f32" }) |name| {
+        if (!wanted(only, name)) continue;
+        const fun = name[std.mem.lastIndexOfScalar(u8, name, ' ').? + 1 ..];
+        const src = sources.core_row_projection;
+        problems += try limits_k.onThisGpu(a, device, .{ .decl = .{ .name = name, .threads = 64, .tg_memory = 0, .offline = false }, .function = fun, .here = src, .pre_m5 = src }, false);
+    }
     if (!tensor) return problems;
     const gemm = try family.gemmSource(device, a);
     defer a.free(gemm);
@@ -315,6 +374,18 @@ pub fn limits(a: std.mem.Allocator, device: mtl.Device, tensor: bool, only: ?[]c
         defer a.free(src);
         // pt[32 x 136] floats and rowmax[2][32]
         problems += try limits_k.onThisGpu(a, device, .{ .decl = .{ .name = name, .threads = 64, .tg_memory = 32 * 136 * 4 + 2 * 32 * 4, .offline = false }, .function = family.attention_name, .here = src, .pre_m5 = src }, false);
+    }
+    // an MLX checkpoint's prompt chunks: affine_mm at each width, its tile of codes and a group's scales and biases
+    for ([_][2]u16{ .{ 4, 32 }, .{ 4, 64 }, .{ 8, 32 }, .{ 8, 64 } }) |w| {
+        const src = try tf.affine_mm.source(device, a, .{ .bits = @intCast(w[0]), .group = w[1] });
+        defer a.free(src);
+        const launches = [_]struct { []const u8, u32, u32 }{ .{ "tf_affine_row_sums", 64, 0 }, .{ "tf_affine_mm", 128, 64 * 72 * 2 + 512 * (64 / @as(u32, w[1])) } };
+        for (launches) |l| {
+            const name = try std.fmt.allocPrint(a, "llama mlx affine_mm q{d} g{d} {s}", .{ w[0], w[1], l[0] });
+            defer a.free(name);
+            if (!wanted(only, name)) continue;
+            problems += try limits_k.onThisGpu(a, device, .{ .decl = .{ .name = name, .threads = l[1], .tg_memory = l[2], .offline = false }, .function = l[0], .here = src, .pre_m5 = src }, false);
+        }
     }
     return problems;
 }

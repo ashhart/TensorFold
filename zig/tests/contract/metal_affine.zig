@@ -17,7 +17,7 @@ const lane = tf.lane_projection;
 pub const Kind = enum { row, affine_mm, simd, simd_half, simd_sums, simd_bits, lane, lane_reg };
 
 /// One variant: kernel, code width and group, output, lane K slices; control: simd_half's or simd_sums' planted fault.
-pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, glm_m3_fast: bool = false, control: bool = false, served: ?[]const c.Shape = null, inline_sums: bool = false };
+pub const Variant = struct { kind: Kind, bits: u8 = 4, group: usize = 64, f32_out: bool = false, sk: usize = 1, coop: bool = false, glm_m3_fast: bool = false, control: bool = false, served: ?[]const c.Shape = null, inline_sums: bool = false, parts: u8 = 1 };
 /// GLM-5.3-Flash's M3 fast tiles (#3921): row tile 32 a block where the plain path takes 64.
 pub const glm_m3 = [_]Reg{
     .{ .v = .{ .kind = .affine_mm, .bits = 4, .group = 64, .glm_m3_fast = true }, .name = "metal affine_mm glm m3 q4 g64" },
@@ -77,8 +77,8 @@ pub fn spec(v: Variant, name: []const u8) c.Spec {
     const out: c.Elem = if (v.f32_out) .f32 else .bf16;
     const step: usize = @max(16, v.group);
     return switch (v.kind) {
-        .row => .{ .name = name, .accum = .f32, .depth = rowDepth, .out = out, .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = step, .min = step } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } } },
-        .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4) offset_inf else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = @max(64, v.group), .min = @max(64, v.group) } }, .served = if (v.bits == 8 and v.group == 64) &router_rows else &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
+        .row => .{ .name = name, .accum = .f32, .depth = rowDepth, .out = out, .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = step, .min = step } }, .served = v.served orelse &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } } },
+        .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4) offset_inf else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = @max(64, v.group), .min = @max(64, v.group) } }, .served = v.served orelse if (v.bits == 8 and v.group == 64) &router_rows else &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
         .simd, .simd_bits => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
         // the 27B's norm-fed widths past 6,144 (8 chunks), as the prompt chunk's tiles and its 9-row tail take them
         .simd_half => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .replaces = "simd_qmm's fp32 tiles", .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 32, .n = 6240, .k = 512 }, .{ .rows = 9, .n = 12288, .k = 256 } } },
@@ -248,6 +248,10 @@ pub const Proj = struct {
         const shape = f.shape;
         const pass = p.rig.begin();
         const e = pass.e;
+        if (p.v.parts > 1) {
+            try p.runParts(e);
+            return p.rig.finish(pass);
+        }
         switch (p.v.kind) {
             .row => {
                 const cl = try row.call(&p.row_p.?, .{ .w = p.w.buf, .w_off = p.w.off, .scales = p.s.buf, .s_off = p.s.off, .biases = p.b.buf, .b_off = p.b.off, .n = shape.n, .k = shape.k, .group = p.v.group, .bits = p.v.bits }, shape.rows, false);
@@ -291,6 +295,45 @@ pub const Proj = struct {
             .lane, .lane_reg => try p.lane_p.?.encode(e, ref(p.x), ref(p.w), ref(p.s), ref(p.out), @intCast(shape.rows)),
         }
         try p.rig.finish(pass);
+    }
+
+    /// The output's columns as `parts` projections side by side (2:1:1 for three, as q|k|v), each a whole unit wide.
+    fn split(n: usize, parts: u8, unit: usize) [3]usize {
+        const first = n / 2 / unit * unit;
+        if (parts == 2) return .{ first, n - first, 0 };
+        const second = (n - first) / 2 / unit * unit;
+        return .{ first, second, n - first - second };
+    }
+
+    /// Each part its own dispatch at the row's pitch (the control: at its own width); affine_mm's group sums once.
+    fn runParts(p: *Proj, e: mtl.ComputeEncoder) !void {
+        const s = p.f.?.shape;
+        const words = s.k * p.v.bits / 32 * 4;
+        const tables = s.k / p.v.group * 2;
+        const out_size: usize = if (p.v.f32_out) 4 else 2;
+        if (p.v.kind == .affine_mm) mm.rowSums(e, p.mm_p.?, @intCast(p.v.group), .{ .buf = p.x.buf, .off = p.x.off }, .{ .buf = p.sums.buf, .off = p.sums.off }, @intCast(s.rows), @intCast(s.k));
+        var first: usize = 0;
+        for (split(s.n, p.v.parts, if (p.v.kind == .affine_mm) 64 else 8)) |n| {
+            defer first += n;
+            if (n == 0) continue;
+            const pitch = if (p.v.control) n else s.n;
+            const w = row.Weights{ .w = p.w.buf, .w_off = p.w.off + first * words, .scales = p.s.buf, .s_off = p.s.off + first * tables, .biases = p.b.buf, .b_off = p.b.off + first * tables, .n = n, .k = s.k, .group = p.v.group, .bits = p.v.bits };
+            const y = .{ .buf = p.out.buf, .off = p.out.off + first * out_size };
+            if (p.v.kind == .affine_mm) {
+                const q = .{ .w = .{ .buf = w.w, .off = w.w_off }, .s = .{ .buf = w.scales, .off = w.s_off }, .b = .{ .buf = w.biases, .off = w.b_off }, .n = @as(u32, @intCast(n)), .k = @as(u32, @intCast(s.k)) };
+                mm.denseBatch(e, p.mm_p.?, .{ .buf = p.x.buf, .off = p.x.off }, .{ .buf = p.sums.buf, .off = p.sums.off }, q, y, @intCast(s.rows), 1, .{ .x_row = @intCast(s.k), .y_row = @intCast(pitch) });
+                continue;
+            }
+            const cl = try row.callStrided(&p.row_p.?, w, s.rows, pitch);
+            e.setPipeline(cl.pipeline);
+            e.setBuffer(p.x.buf, p.x.off, 0);
+            e.setBuffer(w.w, w.w_off, 1);
+            e.setBuffer(w.scales, w.s_off, 2);
+            e.setBuffer(w.biases, w.b_off, 3);
+            e.setValue(cl.dims, 4);
+            e.setBuffer(y.buf, y.off, 5);
+            e.dispatchGroups(mtl.Size.of(cl.groups, 1, 1), mtl.Size.of(cl.threads, 1, 1));
+        }
     }
 
     fn matrix(p: *const Proj, shape: c.Shape) sq.Matrix {

@@ -319,9 +319,29 @@ Logprobs are refused by name: the release's tokenizer decodes through a `Strip` 
 not count as token-local, so the server cannot give a token's bytes on its own.
 The INT4 release was run to the 131,072-token window, not the full 524,288. After a long prompt the drafter reads
 it before drafting, which holds the reply's second token (30-47 s at 110k-129k tokens with the INT4 release). Only
-the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama`
-checkpoints, tied heads, other head sizes, Llama 3's scaled RoPE and biased projections are refused at load rather
-than served untested.
+the M5's tensor units were checked; M1-M4 Macs are refused at load, and smaller RAM is untested. Other `llama` and
+`mistral` checkpoints are refused at load until their own check adds a row ([below](#another-checkpoint-in-the-family));
+other head sizes and biased projections are refused rather than served untested.
+
+## Another checkpoint in the family
+
+The family reads more layouts than it serves. Llama 3's scaled RoPE (`rope_type: llama3`: the inverse frequencies
+transformers computes, word for word for Llama 3.1's and 3.2's configs in `core/rope_llama3.zig`; any other type is
+refused by name); tied heads (the head reads the embedding table, and a tied config beside a stored `lm_head.weight` is
+refused); `model_type: mistral`, whose `sliding_window` must be absent or null; 128-wide heads under a wider hidden
+(Mistral NeMo and Small: q, o and the caches a query row wide); and MLX affine checkpoints (`quantization`, 4 or 8
+bits in groups of 32 or 64, one width for every tensor) with bf16 scales and biases, read in place: windows on the
+shared row kernels' strided form, prompt chunks on `affine_mm` at the row's pitch, the embedding as MLX's `dequantize`
+rounds it (`bf16(bf16(scale * q) + bias)`) and a tied head on the embedding's codes, as MLX's `as_linear` reads them.
+An MLX conversion whose tables are float16 (mlx-community's 4- and 8-bit releases of the checkpoints below, by their
+safetensors headers) is refused by name: float16 tables do not narrow to bf16 without loss.
+
+A checkpoint is served once `qualified` has its row: a name, its role and whether `--drafter` pays, then every field the
+row shares with the config, each compared at admission (weights, the geometry, eps, theta, the context, the Llama 3
+stretch and the tied flag). `config_test.zig`'s `expected` holds the rows Llama 3.1 8B, 3.3 70B and 3.2 3B and Mistral
+7B v0.3, NeMo and Small 3 would take, from their published configs; none is qualified yet. A row of a new attention
+geometry also adds it to `contracts.geometries` (a host test fails until it does), so the contract registers that
+geometry's prompt attention.
 
 ## Licence
 
