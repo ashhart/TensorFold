@@ -71,6 +71,7 @@ pub const Engine = struct {
                 .mtp_step_ms = cfg.mtp_step_ms,
                 .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
+                .copy_guard = cfg.copy_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .granted_depth = cfg.granted_depth,
                 .confidence_floor = cfg.draft_confidence,
@@ -149,15 +150,19 @@ pub const Engine = struct {
             try e.roundStreams(chosen);
         } else {
             for (live.items) |s| {
-                // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
-                const windowed = (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
-                const r = if (windowed) try e.familyRound(s, null) else try e.pipelinedRound(s);
+                const r = if (e.windowed(s)) try e.familyRound(s, null) else try e.pipelinedRound(s);
                 s.min_rows = if (s.min_rows == 0) r.rows else @min(s.min_rows, r.rows);
             }
         }
         try trail.resolve(e);
         try e.sweep();
         try trail.state(e);
+    }
+
+    /// Whether a lone stream's rounds are verify windows, else one-token steps queued ahead (pipelinedRound).
+    pub fn windowed(e: *const Engine, s: *const Stream) bool {
+        // logprobs and grammars take verify windows: rows' logits are read, or bits made, before a forward
+        return (e.cfg.family_mtp and s.drafts) or !e.cfg.pipelined or s.logprobs != null or s.grammar != null;
     }
 
     /// Least recently served streams within the stream and row limits, never cutting pending or forced rows.
@@ -236,6 +241,7 @@ pub const Engine = struct {
                 lone_costs.observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
+        try @import("lone_copy.zig").time(e, s, plan.kind, rows);
         if (e.cfg.timed and s.graft_room != null and s.rounds > 1) {
             // the stream's round time beyond its window and head levels, for the lane planner
             if (e.cfg.lane_costs.get(@intCast(rows))) |w| {
