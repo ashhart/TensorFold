@@ -141,7 +141,7 @@ pub fn later(name: []const u8, _: usize) bool {
 /// The load's reader: kept tensors where they are, the linears staged from their files.
 const Src = struct {
     c: *const ckpt.Checkpoint,
-    stage: *ckpt.Stage,
+    stage: *Stage,
 
     /// A tensor's dtype and shape, kept or in its file.
     fn meta(r: Src, name: []const u8) !ckpt.Deferred {
@@ -150,6 +150,63 @@ const Src = struct {
             std.log.err("checkpoint has no tensor {s}", .{name});
             return error.MissingTensor;
         };
+    }
+};
+
+/// The linears' staging in host memory, not a Metal buffer: load makes its Metal buffers in main's order, no holes.
+pub const Stage = struct {
+    gpa: std.mem.Allocator,
+    mem: []align(ckpt.alignment) u8 = &.{},
+    used: usize = 0,
+
+    /// A staged or kept tensor's bytes, valid until `reset`.
+    pub const View = struct {
+        base: [*]const u8,
+        bytes: usize,
+        shape: @FieldType(ckpt.Deferred, "shape"),
+
+        pub fn host(v: View, comptime T: type) []const T {
+            return @as([*]const T, @ptrCast(@alignCast(v.base)))[0 .. v.bytes / @sizeOf(T)];
+        }
+    };
+
+    /// Room for the deferred tensors among `names` (a kept one is read where it is), reserved while the stage is empty.
+    pub fn reserve(s: *Stage, ck: *const ckpt.Checkpoint, names: []const []const u8) !void {
+        if (s.used != 0) return error.StageInUse;
+        var bytes: usize = 0;
+        for (names) |name| {
+            const d = ck.deferred.get(name) orelse {
+                if (!ck.tensors.contains(name)) return error.MissingTensor;
+                continue;
+            };
+            bytes = std.mem.alignForward(usize, bytes, ckpt.alignment) + d.bytes;
+        }
+        if (s.mem.len >= bytes) return;
+        s.gpa.free(s.mem);
+        s.mem = &.{};
+        s.mem = try s.gpa.alignedAlloc(u8, .fromByteUnits(ckpt.alignment), bytes);
+    }
+
+    /// `name`: a kept tensor where it is, a deferred one read into the stage.
+    pub fn read(s: *Stage, ck: *const ckpt.Checkpoint, name: []const u8) !View {
+        const d = ck.deferred.get(name) orelse {
+            const t = try ck.get(name);
+            return .{ .base = t.buffer.contents() + t.offset, .bytes = t.bytes, .shape = t.shape };
+        };
+        const at = std.mem.alignForward(usize, s.used, ckpt.alignment);
+        if (at + d.bytes > s.mem.len) return error.StageFull;
+        try ck.read(name, 0, s.mem[at..][0..d.bytes]);
+        s.used = at + d.bytes;
+        return .{ .base = s.mem[at..].ptr, .bytes = d.bytes, .shape = d.shape };
+    }
+
+    pub fn reset(s: *Stage) void {
+        s.used = 0;
+    }
+
+    pub fn deinit(s: *Stage) void {
+        s.gpa.free(s.mem);
+        s.* = .{ .gpa = s.gpa };
     }
 };
 
@@ -351,7 +408,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     w.owned = .empty;
     w.aliased = 0;
     errdefer w.deinit(gpa);
-    var stage = ckpt.Stage{ .device = device };
+    var stage = Stage{ .gpa = gpa };
     defer stage.deinit();
     const r: Src = .{ .c = c, .stage = &stage };
     const rows = !device.tensorUnits();
@@ -506,7 +563,7 @@ test "load: linears staged once, row-path prompt views alias the pack's bytes, a
     // the planted stale pointer: a Ref into a linear's shard bytes is refused, not read from freed memory
     try std.testing.expectError(error.DeferredTensor, ref(&c, pre ++ "self_attn.q_proj.weight"));
     _ = try ref(&c, pre ++ "input_layernorm.weight");
-    var stage = ckpt.Stage{ .device = device };
+    var stage = Stage{ .gpa = gpa };
     defer stage.deinit();
     const r: Src = .{ .c = &c, .stage = &stage };
     var owned: std.ArrayList(mtl.Buffer) = .empty;
