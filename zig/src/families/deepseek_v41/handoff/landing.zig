@@ -14,6 +14,8 @@ pub const Landing = struct {
     sink: p2.ShardSink,
     /// ring parts read and dropped
     dropped: u32 = 0,
+    /// time spent in `put`, ns
+    land_ns: u64 = 0,
 
     /// In place: the sink points at `imp`. `upto` tokens land in `layout` (a blank Packed slot).
     pub fn init(l: *Landing, gpa: std.mem.Allocator, upto: u64, layout: metal.Layout) !void {
@@ -36,6 +38,8 @@ pub const Landing = struct {
 
     fn put(ptr: *anyopaque, layer: *const manifest.Layer, row_start: u64, rows: u64, bytes: []const u8) anyerror!void {
         const l: *Landing = @ptrCast(@alignCast(ptr));
+        const began = fabric.words.nowNs();
+        defer l.land_ns += fabric.words.nowNs() - began;
         if (layer.index >= g.release.layers) {
             l.dropped += 1;
             return;

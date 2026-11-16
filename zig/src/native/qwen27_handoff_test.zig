@@ -22,7 +22,7 @@ const Peer = struct {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         return if (p.at > ask.cached) .remote else .small;
     }
-    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?Remote.Filled {
+    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64, _: *const std.atomic.Value(bool)) anyerror!?Remote.Filled {
         const p: *Peer = @ptrCast(@alignCast(ptr));
         p.fills += 1;
         p.kept.clearRetainingCapacity();

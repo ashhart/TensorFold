@@ -18,7 +18,7 @@ const Slow = struct {
         const s: *Slow = @ptrCast(@alignCast(ptr));
         return if (s.delay_ms > 0) .remote else .small;
     }
-    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64) anyerror!?remote.Filled {
+    fn fill(ptr: *anyopaque, prompt: []const u32, _: u64, _: *const std.atomic.Value(bool)) anyerror!?remote.Filled {
         const s: *Slow = @ptrCast(@alignCast(ptr));
         try std.Io.sleep(t.io, .fromMilliseconds(s.delay_ms), .awake);
         try s.kept.appendSlice(t.allocator, prompt[0..4]);

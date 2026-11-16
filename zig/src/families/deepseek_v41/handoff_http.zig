@@ -49,9 +49,10 @@ const Exchange = struct {
         var future = io.concurrent(run, .{x}) catch return error.Unavailable;
         while (!x.done.load(.acquire)) {
             const closing = if (x.s.closing) |c| c.load(.acquire) else false;
-            if (closing or fabric.words.nowNs() >= deadline) {
+            const gone = x.op == .get and x.expect.aborted();
+            if (closing or gone or fabric.words.nowNs() >= deadline) {
                 future.cancel(io);
-                return if (closing) error.Closed else error.TimedOut;
+                return if (closing) error.Closed else if (gone) error.Aborted else error.TimedOut;
             }
             io.sleep(.fromMilliseconds(1), .awake) catch {
                 future.cancel(io);

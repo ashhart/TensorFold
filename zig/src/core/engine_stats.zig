@@ -1,5 +1,23 @@
 //! Counters reported by an engine when one reply ends.
 
+/// What a remote prefill cost one reply (#1594): the router's last verdict on its prompt, and a pull's phases.
+pub const RemotePhases = struct {
+    /// What a remote prefill cost one reply (#1594): the route's last verdict on its prompt, and a pull's phases.
+    route: []const u8 = "",
+    /// at the gate, behind another pull or the breaker's trial
+    queue_s: f64 = 0,
+    /// the producer's prefill: the trigger's exchange
+    trigger_s: f64 = 0,
+    /// the export's transfer, landing included
+    pull_s: f64 = 0,
+    /// of the pull, the time spent landing parts in the Mac's caches
+    land_s: f64 = 0,
+    /// the Mac's own pass after the pull (the prefill_seconds the reply reports)
+    tail_s: f64 = 0,
+    /// payload bytes the pull moved
+    bytes: u64 = 0,
+};
+
 pub const Stats = struct {
     rounds: u64 = 0,
     grammar: ?@import("lanes").grammar_time.Sum = null,
@@ -23,4 +41,6 @@ pub const Stats = struct {
     remote_prefix: u32 = 0,
     /// remote_prefix again when this reply pulled its prefix over the link; 0 when a kept remote state was restored.
     pulled_prefix: u32 = 0,
+    /// The route's verdict and, for a pulled prefix, its phases.
+    remote: RemotePhases = .{},
 };

@@ -122,6 +122,10 @@ built on it are kept (marked remote). The drafter's rings are not in a Snapshot 
 `ring` parts are read and dropped; the drafter has no conditioning rows until local forwards fill the taps, which can lower
 draft acceptance and nothing else.
 
+`mcdma-rpcd connect` recreates its mailbox at every start, so a mapping taken once keeps the dead object: before each pull the link
+checks that its name still maps the mailbox it holds and, if not, maps the new one (`fabric/relink.zig`; a refused map is not tried again
+for 1 s, doubling to 30 s), so the Mac follows a daemon that restarted without a restart of its own.
+
 The source decides per prompt (`core/lane_remote_route.zig`, kept by both Mac pulls): `wants` returns a
 verdict, and `queue` passes it the number of streams decoding. The pair takes one pull at a time, kept by a try-lock gate and
 no longer by a mutex held across the pull: a prompt that finds it busy is prefilled on the Mac, unless the pull under way ends
