@@ -1,0 +1,20 @@
+info: rank 1: liveness line to rank 0 connected after 22 tries
+info: glm kv selection: pool pages; TF_KV_PAGES=auto (default); rank 1 of 2; cache bf16
+info: p2p: rank 1 of 2: NCCL's init log is at /tmp/tf-p2p-cMcgZx/nccl.log until startup diagnostics finish; if this rank stops before then, that file holds NCCL's last lines
+info: rank 1 startup: entering NCCL init
+info: rank 1: NCCL id ce1de2c6 taken
+info: rank 1 startup: entering NCCL init (2 ranks, id ce1de2c6, NCCL 2.30.7, CUDA device 0 000F:01:00.0)
+info: rank 1 startup: NCCL init done in 358 ms
+info: p2p: rank 1 of 2: GPU 0 NVIDIA GB10 (0000000F:01:00.0); driver 580.178.04, CUDA driver API 13.0, NCCL 2.30.7
+info: p2p: peer access: TensorFold enables none itself (no cuCtxEnablePeerAccess); NCCL sets up its own peers
+info: p2p: set: NCCL_PROTO=^LL128
+info: p2p: NCCL transport (this rank's connections): rank 0 NET/IB (16 connections)
+info: rank 1 startup: entering peer warm-up
+info: rank 1 startup: entering weights
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+info: weights: 16 readers read 159.1 GiB ahead of the loader
+info: TF_GLM_L2PF: 226 rows, 1066 MiB a decode window, 2 CTAs a site, the gathers' sites at 150 GB/s (0: unpaced)
+info: RoCE all-gather: 2 ranks, 1 HCA(s), shards up to 4096 KiB by RDMA writes
+info: [tensorfold] glm: rank 1 of 2 sums through the group collective (RoCE gathers on)
+info: rank 1 startup: ready to follow rank 0
+info: rank 1: rank 0 ended; leaving

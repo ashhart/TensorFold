@@ -1,0 +1,13 @@
+base: e86a0bed1d (upstream main when measured)
+head: base + 1596a09cd0 (perf(glm): absorb and expand prompt rows without lane trees); the PR's later commits add
+  only tests, records and this receipt; the branch was rebased since onto a later main, where the kernel commit is
+  b225c0f108 (the same code, its one two-line comment folded to one line)
+build: zig build native -Dnvcc=/usr/local/cuda/bin/nvcc -Dtp-nvcc=/usr/local/cuda/bin/nvcc (tools/build.sh)
+toolchain: Zig 0.17.0; nvcc 13.5 (cuda_13.5.r13.5/compiler.39125733_0); NVIDIA driver 580.178.04; NCCL 2.30.7
+binaries (sha256, the same file on both ranks):
+  base eb8bd2ba005490a71a9f394e164147cc211e5e9792ba080a83ea4ce6456f1400
+  head e8c28c271a45feb43178e51d0d1fb60f1665df9e4fceebf423713558386af753
+checkpoint: nvidia/GLM-5.3-Flash-FP4-Local at 76348ddb2be2e35e39ecfc00e75dc07703f4f3d5
+platform: two DGX Spark (GB10, sm_121, 128 GB), TP=2 over a direct RoCE link, Ubuntu 24.04.5
+contract: the runner built with nvcc 13.3 (zig build compile-cuda-tests kernel-contract-fatbins
+  -Dnvcc=/usr/local/cuda-13.3/bin/nvcc -Dsm=121), `tf-cuda-test kernel-contract tf_glm_absorb_q tf_glm_expand_v`

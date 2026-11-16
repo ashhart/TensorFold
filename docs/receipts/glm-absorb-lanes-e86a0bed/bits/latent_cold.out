@@ -1,0 +1,7 @@
+rows 1 cold L2: absorb main 37.7 us, branch 37.7 us; expand main 35.6 us, branch 35.6 us
+rows 2 cold L2: absorb main 38.8 us, branch 38.7 us; expand main 36.7 us, branch 36.5 us
+rows 4 cold L2: absorb main 39.8 us, branch 39.7 us; expand main 38.6 us, branch 37.7 us
+rows 8 cold L2: absorb main 49.0 us, branch 48.9 us; expand main 48.9 us, branch 47.9 us
+rows 16 cold L2: absorb main 62.1 us, branch 62.1 us; expand main 66.5 us, branch 65.5 us
+rows 32 cold L2: absorb main 97.0 us, branch 96.3 us; expand main 110.4 us, branch 109.6 us
+6 sizes, 0 differ; no error

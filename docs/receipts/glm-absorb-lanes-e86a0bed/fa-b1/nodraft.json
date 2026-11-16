@@ -1,0 +1,150 @@
+[
+ {
+  "label": "nodraft",
+  "prompt": "fibonacci-raw",
+  "temperature": 0.0,
+  "tokens": 128,
+  "thinking": "not applicable",
+  "thinking_off_requested": false,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 23.917435201198483,
+  "decode_tps_all": [
+   23.92,
+   23.88,
+   23.99
+  ],
+  "ttft_s_median": 0.12266300799092278,
+  "prompt_ttft_tps_median": 114.134,
+  "prefill_tps_median": 114.134,
+  "itl_mean_ms_median": 41.811,
+  "itl_p50_ms_median": 41.655,
+  "itl_p95_ms_median": 42.459,
+  "tpot_ms_median": 41.811,
+  "chunk_tpot_estimate_ms_median": 41.811,
+  "round_gap_p50_ms_median": 41.655,
+  "round_gap_p95_ms_median": 42.459,
+  "tokens_per_chunk_median": 1.0,
+  "headers_s_median": 0.001,
+  "first_payload_s_median": 0.123,
+  "first_content_s_median": 0.123,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.123,
+  "last_output_s_median": 5.433,
+  "evidence": [
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 128,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "1d7c9d905ba7",
+    "output_sha256": "75998633440b6ddc841d2159f82c84ab825a7070585c8effb8c41e858eb7acbc",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 128,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "1d7c9d905ba7",
+    "output_sha256": "75998633440b6ddc841d2159f82c84ab825a7070585c8effb8c41e858eb7acbc",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 14,
+    "cached_tokens": 0,
+    "tokens": 128,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "1d7c9d905ba7",
+    "output_sha256": "75998633440b6ddc841d2159f82c84ab825a7070585c8effb8c41e858eb7acbc",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": " Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, ... The next number is found by adding up the two numbers before it. The Fibonacci sequence i",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ },
+ {
+  "label": "nodraft",
+  "prompt": "gpu-chat-no-think",
+  "temperature": 0.0,
+  "tokens": 128,
+  "thinking": "off",
+  "thinking_off_requested": true,
+  "thinking_switch": true,
+  "thinking_applicable": true,
+  "decode_tps_median": 23.926433963951173,
+  "decode_tps_all": [
+   23.93,
+   23.95,
+   23.89
+  ],
+  "ttft_s_median": 0.1892870629671961,
+  "prompt_ttft_tps_median": 169.055,
+  "prefill_tps_median": 169.055,
+  "itl_mean_ms_median": 41.795,
+  "itl_p50_ms_median": 41.631,
+  "itl_p95_ms_median": 43.06,
+  "tpot_ms_median": 41.795,
+  "chunk_tpot_estimate_ms_median": 41.795,
+  "round_gap_p50_ms_median": 41.631,
+  "round_gap_p95_ms_median": 43.06,
+  "tokens_per_chunk_median": 1.0,
+  "headers_s_median": 0.002,
+  "first_payload_s_median": 0.002,
+  "first_content_s_median": 0.189,
+  "first_reasoning_s_median": null,
+  "first_tool_s_median": null,
+  "first_output_s_median": 0.189,
+  "last_output_s_median": 5.497,
+  "evidence": [
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 128,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "458d573f26b0",
+    "output_sha256": "80029314f57f5bcd08bdb77410fe41bf4995196990ebacd20ad0bd65ec57aaf8",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 128,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "458d573f26b0",
+    "output_sha256": "80029314f57f5bcd08bdb77410fe41bf4995196990ebacd20ad0bd65ec57aaf8",
+    "completion": "truncated",
+    "tool_sha256": null
+   },
+   {
+    "prompt_tokens": 32,
+    "cached_tokens": 0,
+    "tokens": 128,
+    "cache_state": "cold",
+    "complete": true,
+    "token_sha": "458d573f26b0",
+    "output_sha256": "80029314f57f5bcd08bdb77410fe41bf4995196990ebacd20ad0bd65ec57aaf8",
+    "completion": "truncated",
+    "tool_sha256": null
+   }
+  ],
+  "sample": "# How GPUs Do Matrix Multiplication\n\n## The Plain-English Explanation\n\nImagine you have a huge stack of homework to grade, where each problem is completely inde",
+  "deprecated_keys": {
+   "prefill_tps": "deprecated: same value as prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time",
+   "aggregate_prefill_tps": "deprecated: same value as aggregate_prompt_ttft_tps; prompt tokens over client TTFT, not the engine's prefill time"
+  }
+ }
+]

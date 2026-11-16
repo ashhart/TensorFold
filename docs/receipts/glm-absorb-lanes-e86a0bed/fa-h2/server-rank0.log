@@ -1,0 +1,85 @@
+info: rank 0: liveness lines from 1 ranks on port 29572
+info: glm kv selection: pool pages; TF_KV_PAGES=auto (default); rank 0 of 2; cache bf16
+info: p2p: rank 0 of 2: NCCL's init log is at /tmp/tf-p2p-sJySBC/nccl.log until startup diagnostics finish; if this rank stops before then, that file holds NCCL's last lines
+info: rank 0 startup: entering NCCL init
+info: rank 0: NCCL id ce1de2c6 sent
+info: rank 0 startup: entering NCCL init (2 ranks, id ce1de2c6, NCCL 2.30.7, CUDA device 0 000F:01:00.0)
+info: rank 0 startup: NCCL init done in 366 ms
+info: p2p: rank 0 of 2: GPU 0 NVIDIA GB10 (0000000F:01:00.0); driver 580.178.04, CUDA driver API 13.0, NCCL 2.30.7
+info: p2p: peer access: TensorFold enables none itself (no cuCtxEnablePeerAccess); NCCL sets up its own peers
+info: p2p: set: NCCL_PROTO=^LL128
+info: p2p: NCCL transport (this rank's connections): rank 1 NET/IB (16 connections)
+info: rank 0 startup: entering peer warm-up
+info: rank 0 startup: entering weights
+info: checkpoint digest: 0.0 GiB read in 0.2 s, 42/42 cached files
+info: weights: 16 readers read 159.1 GiB ahead of the loader
+info: TF_GLM_L2PF: 226 rows, 1066 MiB a decode window, 2 CTAs a site, the gathers' sites at 150 GB/s (0: unpaced)
+info: glm: a prompt chunk's exchanges in 3 row pieces
+info: RoCE all-gather: 2 ranks, 1 HCA(s), shards up to 4096 KiB by RDMA writes
+info: [tensorfold] glm: rank 0 of 2 sums through the group collective (RoCE gathers on)
+info: glm: windows (kept): 40.26 ms at 1 row, 62.03 at 4, 179.00 at 32, a draft 1.98 ms; experts factored
+info: KV page groups: one page 6.38 MiB, 512 rows of the full group; full: layers not named, 12.75 KiB a token, 512 rows a page, 0 B padding (0.0 %)
+info: rank 0 startup: entering calibration
+info: rank 0 startup: entering ready
+[tensorfold] chat template: the checkpoint's
+warning: libtfgrammar.so is required for structured output and required tool calls (HTTP 400 when missing); restore the matching release archive's lib/ directory or run zig build grammar -Dxgrammar=DIR; prepare DIR with git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar
+[tensorfold] CUDA sm_121 device 0 (NVIDIA GB10, memory shared with the host): model 90.22 GiB; 4 streams at once, the engine's own and 3 more taking 516 pages of 512 rows (3.21 GiB) as they need them (enough for 4 at a 65536-token window), 231 MiB fixed each, of 12.8 GiB left after a 12.3 GiB reserve; prompts in passes of up to 2048 rows, no prompt cache; own glue kernels
+[tensorfold] profile: stable; registered overrides: none
+[tensorfold] serving local-model at http://127.0.0.1:8090/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP + copies; context: 65536; loaded in 70.7s)
+[tensorfold] 127.0.0.1 "GET /health HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-df943bf91e0997d867fc7bb2455abe5f prompt=14 cached=0 thinking=False effort=none tokens=128 sha=1d7c9d905ba7 finish=length rounds=127 accepted=0/0 ttft=0.123 decode=5.145 elapsed=5.268 queued=0.000 tok/s=24.7
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-f40d3612372254d25ed34acff5fed2b4 prompt=14 cached=0 thinking=False effort=none tokens=128 sha=1d7c9d905ba7 finish=length rounds=127 accepted=0/0 ttft=0.122 decode=5.172 elapsed=5.294 queued=0.000 tok/s=24.6
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-a84c6259b8e14a7e4c93d9a31c3cb889 prompt=14 cached=0 thinking=False effort=none tokens=128 sha=1d7c9d905ba7 finish=length rounds=127 accepted=0/0 ttft=0.123 decode=5.181 elapsed=5.304 queued=0.000 tok/s=24.5
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-7d4f5855e0d225768794c89f36c9e502 prompt=14 cached=0 thinking=False effort=none tokens=128 sha=1d7c9d905ba7 finish=length rounds=127 accepted=0/0 ttft=0.124 decode=5.158 elapsed=5.282 queued=0.000 tok/s=24.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done chatcmpl-a5c8954082da32d0a527cae7e2477e22 prompt=32 cached=0 thinking=False effort=none tokens=128 sha=458d573f26b0 finish=length rounds=127 accepted=0/0 ttft=0.189 decode=5.170 elapsed=5.359 queued=0.000 tok/s=24.6
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done chatcmpl-5cd0aad2cffedc78a645e694fb1187f1 prompt=32 cached=0 thinking=False effort=none tokens=128 sha=458d573f26b0 finish=length rounds=127 accepted=0/0 ttft=0.190 decode=5.223 elapsed=5.413 queued=0.000 tok/s=24.3
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done chatcmpl-33c755a969b169ed581268297f63f859 prompt=32 cached=0 thinking=False effort=none tokens=128 sha=458d573f26b0 finish=length rounds=127 accepted=0/0 ttft=0.190 decode=5.176 elapsed=5.366 queued=0.000 tok/s=24.5
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done chatcmpl-b97854de98896bb41c33b8ccf75443a8 prompt=32 cached=0 thinking=False effort=none tokens=128 sha=458d573f26b0 finish=length rounds=127 accepted=0/0 ttft=0.189 decode=5.184 elapsed=5.373 queued=0.000 tok/s=24.5
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-d2619193ae3db9d3d4bc48c7b84a1f60 prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=43b05393cf25 finish=length rounds=6 accepted=9/14 ttft=5.474 decode=0.399 elapsed=5.873 queued=0.000 tok/s=37.6
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-49fad1350da2569012939ae34b979bf0 prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=43b05393cf25 finish=length rounds=6 accepted=9/18 ttft=5.471 decode=0.433 elapsed=5.904 queued=0.000 tok/s=34.6
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-055d62c05134f2af0d5de74aaa10660b prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=43b05393cf25 finish=length rounds=6 accepted=9/16 ttft=5.470 decode=0.420 elapsed=5.889 queued=0.000 tok/s=35.7
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-78402546db54d0bb9291b5e933ac3c6d prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=43b05393cf25 finish=length rounds=6 accepted=9/14 ttft=5.579 decode=6.298 elapsed=11.877 queued=0.000 tok/s=2.4
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-1acae93856e65762ff0bc4020c719d90 prompt=8192 cached=0 thinking=False effort=none tokens=16 sha=43b05393cf25 finish=length rounds=7 accepted=8/15 ttft=11.666 decode=0.496 elapsed=12.162 queued=2.057 tok/s=30.2
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-d3834979325b88de575e13b49f54904c prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=2e98fab70f4c finish=length rounds=6 accepted=10/21 ttft=21.497 decode=0.465 elapsed=21.962 queued=0.000 tok/s=32.3
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-c905f7efab869ca79435d2d95dc1a40c prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=2e98fab70f4c finish=length rounds=6 accepted=10/18 ttft=21.595 decode=0.441 elapsed=22.036 queued=0.000 tok/s=34.0
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-ed7f3cba7f904a784af844ba97d471be prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=2e98fab70f4c finish=length rounds=6 accepted=10/18 ttft=21.601 decode=0.443 elapsed=22.044 queued=0.000 tok/s=33.9
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] 127.0.0.1 "POST /v1/completions HTTP/1.1" 200 -
+[tensorfold] done cmpl-1e52eecb655f01187d9d23a1fd310443 prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=2e98fab70f4c finish=length rounds=6 accepted=10/19 ttft=21.513 decode=7.766 elapsed=29.279 queued=0.000 tok/s=1.9
+info: kv pool idle: promised 0, free 516 + store 0 == total 516
+[tensorfold] done cmpl-7c4f44a270597bcee44bd27f4a5e9723 prompt=32768 cached=0 thinking=False effort=none tokens=16 sha=2e98fab70f4c finish=length rounds=6 accepted=10/23 ttft=44.073 decode=0.478 elapsed=44.550 queued=2.067 tok/s=31.4
+[tensorfold] shutting down (SIGINT): draining: new requests get 503; 0 request(s) in progress may finish within 20.0 s
+[tensorfold] shutting down: drained
+[tensorfold] shutting down: stopped

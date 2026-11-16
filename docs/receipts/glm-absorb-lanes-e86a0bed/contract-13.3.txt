@@ -1,0 +1,16 @@
+PASS nonfinite cuda glm_glue tf_glm_absorb_q (q . wk into the 512-wide latent): 1536 non-finite and 80384 finite outputs match the float64 classes
+PASS repeat cuda glm_glue tf_glm_absorb_q (q . wk into the 512-wide latent): five runs byte-identical (32768 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm_glue tf_glm_absorb_q (q . wk into the 512-wide latent): 9 shapes within the float64 bound (worst 0.995 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm_glue tf_glm_absorb_q (q . wk into the 512-wide latent): exact sums at k 256, where fp16 sums would miss by infx and bf16 by 209x
+PASS nonfinite cuda glm_glue tf_glm_expand_v (latent . wv into 256-wide v heads): 768 non-finite and 40192 finite outputs match the float64 classes
+PASS repeat cuda glm_glue tf_glm_expand_v (latent . wv into 256-wide v heads): five runs byte-identical (16384 bytes), inputs and guards untouched, no overlap
+PASS shapes cuda glm_glue tf_glm_expand_v (latent . wv into 256-wide v heads): 9 shapes within the float64 bound (worst 0.994 of the bound), 0 edges refused by the kernel
+PASS sums cuda glm_glue tf_glm_expand_v (latent . wv into 256-wide v heads): exact sums at k 512, where fp16 sums would miss by infx and bf16 by 205x
+FAIL shapes control: glm_glue tf_glm_absorb_q reads each head's wk from the next head: at 1x32x256 output 0 is -6.210938e-1 where float64 gives 2.851377e0: 311.43 of its bound
+CONTROL control: glm_glue tf_glm_absorb_q reads each head's wk from the next head: red at shapes, as planted
+FAIL shapes control: glm_glue tf_glm_expand_v reads each head's wv from the next head: at 1x32x512 output 0 is 4.500000e0 where float64 gives -2.526662e0: 710.02 of its bound
+CONTROL control: glm_glue tf_glm_expand_v reads each head's wv from the next head: red at shapes, as planted
+INFO limits live: images built by nvcc 13.3, checked against nvcc 13.3's records
+PASS limits live glm_glue tf_glm_absorb_q: 128 threads launched, the driver allows 128; 96 registers, 2560 + 0 shared bytes (recorded 96, 2560)
+PASS limits live glm_glue tf_glm_expand_v: 128 threads launched, the driver allows 128; 96 registers, 4224 + 0 shared bytes (recorded 96, 4224)
+(filtered) SUMMARY 2 kernels: 2 pass gates 1-4, 0 fail, 0 known findings; 2 controls: 2 red as planted, 0 missed; 0 limit problems; gates 36930 ms, limits 3 ms
