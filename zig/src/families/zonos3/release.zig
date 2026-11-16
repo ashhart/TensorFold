@@ -3,6 +3,8 @@ const std = @import("std");
 const cfg = @import("config.zig");
 
 pub const lm_dir = "lm/zonos3_mini";
+/// The SuperBPE tokenizer params.json names, inside the language model's folder.
+pub const tokenizer_file = "tokenizer/superbpe8192.json";
 /// The reference servers' default decoder: the pruned multi-resolution iSTFT head.
 pub const default_decoder = "keep2_plain";
 /// A decoder's registry: codec_registry.json, or codec_registry_<id>.json.
@@ -39,6 +41,19 @@ fn readJson(a: std.mem.Allocator, io: std.Io, path: []const u8) !std.json.Object
     const text = try std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 22));
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
     return if (doc == .object) doc.object else error.BadRegistry;
+}
+
+/// Whether `root` is a ZONOS3 Mini release: it has no config.json, its model's params.json sits under lm/.
+pub fn present(io: std.Io, root: []const u8) bool {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&buf, "{s}/" ++ lm_dir ++ "/params.json", .{root}) catch return false;
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
+/// Where `root`'s tokenizer loads from: a release keeps it beside its language model, any other checkpoint at its root.
+pub fn tokenizerAt(a: std.mem.Allocator, io: std.Io, root: []const u8) ![]const u8 {
+    return if (present(io, root)) std.fs.path.join(a, &.{ root, lm_dir, tokenizer_file }) else root;
 }
 
 /// `decoder`: a decoder id (the folder of its head under autoencoder/heads), or null for the default.

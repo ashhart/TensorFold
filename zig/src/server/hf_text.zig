@@ -65,7 +65,7 @@ pub const HfText = struct {
             };
             return t;
         };
-        t.tok = tokenizer.loadTokenizer(io, gpa, dir) catch |e| {
+        t.tok = tokenizer.loadTokenizer(io, gpa, try @import("zonos_request").release.tokenizerAt(a, io, dir)) catch |e| {
             problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
             return error.Load;
         };
