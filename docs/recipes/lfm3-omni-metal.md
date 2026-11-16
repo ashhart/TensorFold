@@ -66,6 +66,15 @@ the reference's stages (transformers with the checkpoint's own code); `parity.sh
 reference runtime; `score_replies.py` scores replies (UTMOS22 strong through SpeechMOS, and the checkpoint's own ASR
 against each reply's text).
 
+## Margins
+
+Held to against the reference runtime on the same Mac and the same 16 turns, and stated before the receipt's runs:
+
+- UTMOS22 strong, median over the replies: no more than 0.1 below the reference's.
+- Speech against its own text (the checkpoint's own ASR), WER: no more than 1.0 percentage point above the reference's.
+- Every stage against an fp32 run of the reference: no further from it than the reference's own bf16 run is.
+- Every teacher-forced text miss: within 2 bf16 ulps of the reference's pick, by the reference's own logits.
+
 ## Receipt
 
 M5 Ultra (256 GB), macOS 27.0.1, Xcode 27.1; the reference is `transformers` 5.21.0 with the checkpoint's own code on
