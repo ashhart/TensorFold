@@ -88,12 +88,12 @@ pub fn linear(
             const st = g.c.linearAt(index);
             const conv_bytes = (d.conv - 1) * ch * 4;
             const next = try o.arena.take(conv_bytes);
-            // a kept row inside the chunk: the prep to it, its conv state aside, then on (two chunks' launches)
+            // each kept row inside the chunk: the prep to it, its conv state aside, then on (a part's launches each)
             var from: usize = 0;
             var state = st.conv;
-            if (g.mark) |mk| {
+            for (g.marks) |mk| {
                 const side = g.c.sideLinear(mk.side, index).conv;
-                try gdnPrep(o, m, l, qkv, a, b, q, k, v, gate, beta, at_row, mk.row, st.conv, side);
+                try gdnPrep(o, m, l, qkv, a, b, q, k, v, gate, beta, at_row + from, mk.row - from, state, side);
                 from = mk.row;
                 state = side;
             }
@@ -111,12 +111,12 @@ pub fn linear(
         const out = mixed + off * ch * 4;
         const conv_bytes = (d.conv - 1) * ch * 4;
         const next = try o.arena.take(conv_bytes);
-        // a kept row inside the chunk: the conv to it, its state aside, then on (the sums of two chunks split there)
+        // each kept row inside the chunk: the conv to it, its state aside, then on (the sums of chunks split there)
         var from: usize = 0;
         var state = st.conv;
-        if (g.mark) |mk| {
+        for (g.marks) |mk| {
             const side = g.c.sideLinear(mk.side, index).conv;
-            try o.convPrefill(forward.at(qkv, off * ch), l.conv, st.conv, out, side, mk.row, ch, d.conv, null);
+            try o.convPrefill(forward.at(qkv, (off + from) * ch), l.conv, state, out + from * ch * 4, side, mk.row - from, ch, d.conv, null);
             from = mk.row;
             state = side;
         }
@@ -229,19 +229,20 @@ fn recur(
         const n = g.tokens.len;
         const snaps: ?u64 = if (window) g.c.snapshot(index, 0).state else null;
         var from: usize = 0;
-        if (g.mark) |mk| {
-            // a kept row inside the chunk: the rule to it, its state aside, the rule on from there
+        for (g.marks) |mk| {
+            // each kept row inside the chunk: the rule to it, its state aside, the rule on from there
             const st = g.c.linearAt(index).state;
             const part = o.arena.mark();
+            const p0 = off + from;
             try o.gatedDelta(
-                q + off * kw * 4,
-                k + off * kw * 4,
-                v + off * vw * 4,
-                gate + off * d.value_heads * 4,
-                beta + off * d.value_heads * 4,
+                q + p0 * kw * 4,
+                k + p0 * kw * 4,
+                v + p0 * vw * 4,
+                gate + p0 * d.value_heads * 4,
+                beta + p0 * d.value_heads * 4,
                 st,
-                y + off * vw * 4,
-                mk.row,
+                y + p0 * vw * 4,
+                mk.row - from,
                 d.key_heads,
                 d.value_heads,
                 d.key_dim,
