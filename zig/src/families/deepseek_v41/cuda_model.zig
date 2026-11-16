@@ -226,10 +226,11 @@ pub const Model = struct {
         so.resident_bytes = try @import("session_budget.zig").agree(&m.session.plan, so.resident_bytes, o.prompt_cache_gib);
         m.cfg = try Config.read(gpa, io, pack_dir);
         // the release's FP8 blocks parse (Metal runs them); refused here, before any pack or launch on CUDA
-        if (@import("cuda_format.zig").problem(&m.cfg)) |text| {
+        if (@import("cuda_format.zig").problem(&m.cfg, world)) |text| {
             if (!quiet) std.log.err("{s}", .{text});
             return error.UnsupportedCheckpoint;
         }
+        if (m.cfg.format == .release_fp8) try @import("cuda_format.zig").boot(&m.kernels, &m.ctx, io, &m.cfg, m.tcfg.rank, world);
         try @import("block_admission.zig").serving(&m.cfg, world);
         if (o.own_prefill) try @import("block_admission.zig").nativePrefill(&m.cfg, world);
         m.pack = try Pack.open(gpa, io, pack_dir);
@@ -324,6 +325,10 @@ pub const Model = struct {
             m.f.opts.rope_rows = c + 2048;
         }
         try @import("serve_knobs_apply.zig").apply(&m.f, a, io, m.tcfg.rank);
+        if (m.cfg.format == .release_fp8) if (@import("cuda_format.zig").exl3Knob(m.f.opts, (try l2pf_mod.settings(m.f.opts)).mode != .off, try ex_stacks.enabled(), try forms_inplace.enabled())) |knob| {
+            if (!quiet) std.log.err("DeepSeek V4.1 CUDA: {s} is an EXL3-only setting; unset it for the release checkpoint", .{knob});
+            return error.BadKnob;
+        };
         m.slots = try slots_mod.countFromEnv();
         if (try kvs.optionsFromEnv(@intCast(m.f.opts.limit), world)) |ko_| {
             var ko = ko_;
