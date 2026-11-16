@@ -24,6 +24,7 @@ const max_attn_slices = ld.max_attn_slices;
 const ple_tail_n = ld.ple_tail_n;
 const max_tp = ld.max_tp;
 const max_verify_rows = ld.max_verify_rows;
+const attn_tile_rows = ld.attn_tile_rows;
 const Dev = ld.Dev;
 const Q4 = ld.Q4;
 const HcW = ld.HcW;
@@ -39,8 +40,14 @@ pub fn linearBf16(d: *Dev, q: Q4, x: *anyopaque, y: *anyopaque, rows: usize) !vo
     const k_i: i32 = @intCast(q.k);
     const n_i: i32 = @intCast(q.n);
     const r_i: i32 = @intCast(rows);
-    if (rows <= 16) {
-        try d.launch(d.k.qmv_bf16, .{ .x = @intCast((q.n + 15) / 16), .y = @intCast((rows + 15) / 16) }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i, r_i });
+    const groups = q.k / 32;
+    const split4 = (groups >= 16) and ((groups & 3) == 0);
+    const nb_total = (q.n + 15) / 16;
+    const gx_small: u32 = @intCast(if (split4) nb_total else (nb_total + 3) / 4);
+    if (rows == 1) {
+        try d.launch(d.k.qmv1_bf16, .{ .x = gx_small }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i });
+    } else if (rows <= 16) {
+        try d.launch(d.k.qmv16_bf16, .{ .x = gx_small, .y = 1 }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i, r_i });
     } else {
         try d.launch(d.k.qmm_bf16, .{ .x = @intCast((q.n + 63) / 64), .y = @intCast((rows + 31) / 32) }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i, r_i });
     }
@@ -51,29 +58,38 @@ pub fn linearF32(d: *Dev, q: Q4, x: *anyopaque, y: *anyopaque, rows: usize) !voi
     const k_i: i32 = @intCast(q.k);
     const n_i: i32 = @intCast(q.n);
     const r_i: i32 = @intCast(rows);
-    if (rows <= 16) {
-        try d.launch(d.k.qmv_f32, .{ .x = @intCast((q.n + 15) / 16), .y = @intCast((rows + 15) / 16) }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i, r_i });
+    const groups = q.k / 32;
+    const split4 = (groups >= 16) and ((groups & 3) == 0);
+    const nb_total = (q.n + 15) / 16;
+    const gx_small: u32 = @intCast(if (split4) nb_total else (nb_total + 3) / 4);
+    if (rows == 1) {
+        try d.launch(d.k.qmv1_f32, .{ .x = gx_small }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i });
+    } else if (rows <= 16) {
+        try d.launch(d.k.qmv16_f32, .{ .x = gx_small, .y = 1 }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i, r_i });
     } else {
         try d.launch(d.k.qmm_f32, .{ .x = @intCast((q.n + 63) / 64), .y = @intCast((rows + 31) / 32) }, .{ q.w.?, q.s.?, q.b.?, x, y, k_i, n_i, r_i });
     }
 }
 
 pub fn hcReadout(d: *Dev, a: *RankActs, hc: HcW, h_ptr: *anyopaque, br_ptr: *anyopaque, inj_in: *anyopaque, has_br: i32, rows: usize) !void {
-    try d.launch(d.k.hc_writeback_norm, .{ .x = @intCast(rows) }, .{ h_ptr, br_ptr, inj_in, hc.scale, a.norm, eps, has_br });
+    try d.launch(d.k.hc_writeback_norm, .{ .x = 4, .y = @intCast(rows) }, .{ h_ptr, br_ptr, inj_in, hc.scale, a.norm, eps, has_br });
     const ndn_i: i32 = @intCast(hc.n_down);
     const r_i: i32 = @intCast(rows);
     if (rows <= 16) {
-        try d.launch(d.k.hc_down_reduce, .{ .x = @intCast(hc.n_down), .y = @intCast((rows + 15) / 16) }, .{
-            a.norm, hc.down.w.?, hc.down.s.?, hc.down.b.?, a.act, a.inj, r_i, ndn_i, hc.has_inj,
+        try d.launch(d.k.hc_down_1, .{ .x = @intCast((hc.n_down + 15) / 16), .y = @intCast(rows) }, .{
+            a.norm, hc.down.w.?, hc.down.s.?, hc.down.b.?, a.act, a.inj, ndn_i, hc.has_inj,
+        });
+        try d.launch(d.k.hc_upmix_1, .{ .x = dims / 64, .y = @intCast(rows) }, .{
+            a.act, a.norm, hc.up.w.?, hc.up.s.?, hc.up.b.?, a.mixed,
         });
     } else {
-        try d.launch(d.k.hc_down_dpas, .{ .x = @intCast((hc.n_down + 63) / 64), .y = @intCast((rows + 31) / 32) }, .{
+        try d.launch(d.k.hc_down_wide, .{ .x = @intCast((hc.n_down + 63) / 64), .y = @intCast((rows + 31) / 32) }, .{
             a.norm, hc.down.w.?, hc.down.s.?, hc.down.b.?, a.act, a.inj, r_i, ndn_i, hc.has_inj,
         });
+        try d.launch(d.k.hc_upmix_dpas, .{ .x = dims / 64, .y = @intCast((rows + 31) / 32) }, .{
+            a.act, a.norm, hc.up.w.?, hc.up.s.?, hc.up.b.?, a.mixed, r_i,
+        });
     }
-    try d.launch(d.k.hc_upmix, .{ .x = dims / 16, .y = @intCast((rows + 15) / 16) }, .{
-        a.act, a.norm, hc.up.w.?, hc.up.s.?, hc.up.b.?, a.mixed, r_i,
-    });
 }
 
 pub fn gdnRank(r: *Runner, rk: usize, lw: *const LayerW, li: usize, rs: *RankSeq, rows: usize, inplace: bool, out_f32: *anyopaque) !void {
@@ -130,30 +146,41 @@ pub fn attnRank(r: *Runner, rk: usize, lw: *const LayerW, kc: *anyopaque, vc: *a
     }
 
     const nb_max: i32 = @intCast(@max((r.max_len + index_ratio - 1) / index_ratio, 64));
-    const complete_max = (pos0 + rows) / index_ratio;
-    if (complete_max > ld.index_top) {
-        try d.launch(d.k.qsa_scores, .{ .x = @intCast(rows), .y = @intCast((complete_max + 15) / 16) }, .{
-            a.iq, pooled, pos0_i, a.qsa_sc, nb_max,
+    var r0: usize = 0;
+    while (r0 < rows) : (r0 += attn_tile_rows) {
+        const sub = @min(attn_tile_rows, rows - r0);
+        const sub_pos0 = pos0 + r0;
+        const sub_pos0_i: i32 = @intCast(sub_pos0);
+        const iq_s = off(a.iq, r0 * index_heads * index_dim * 2);
+        const q_s = off(a.q, r0 * shp.nq * head_dim * 2);
+        const ao_s = off(a.ao, r0 * shp.nq * head_dim * 2);
+        const proj_s = off(a.proj, r0 * shp.attn_pw * 2);
+        const ag_s = off(a.agated, r0 * shp.attn_odim * 2);
+
+        const complete_max = (sub_pos0 + sub) / index_ratio;
+        if (complete_max > ld.index_top) {
+            try d.launch(d.k.qsa_scores, .{ .x = @intCast((sub + 15) / 16), .y = @intCast((complete_max + 63) / 64) }, .{
+                iq_s, pooled, sub_pos0_i, a.qsa_sc, nb_max, @as(i32, @intCast(sub)),
+            });
+        }
+        try d.launch(d.k.qsa_select, .{ .x = @intCast(sub) }, .{
+            a.qsa_sc, sub_pos0_i, a.qsa_ids, a.qsa_nkr, a.qsa_spr, nb_max,
+        });
+
+        const max_nkeys = @min(sub_pos0 + sub, 2051);
+        const ns = @max((max_nkeys + 31) / 32, 1);
+        const ns_i: i32 = @intCast(ns);
+
+        try d.launch(d.k.attn_sparse, .{ .x = @intCast(ns), .y = @intCast(shp.nq), .z = @intCast(sub) }, .{
+            q_s, kc, vc, a.qsa_ids, a.qsa_nkr, a.qsa_spr, a.pm, a.pl, a.po, ns_i, nq_i, nkv_i,
+        });
+        try d.launch(d.k.attn_merge, .{ .x = @intCast(shp.nq), .y = @intCast(sub) }, .{
+            a.pm, a.pl, a.po, a.qsa_nkr, ao_s, ns_i, nq_i,
+        });
+        try d.launch(d.k.attn_gate, .{ .x = @intCast(sub), .y = @intCast(shp.nq) }, .{
+            ao_s, proj_s, ag_s, pw_i, nq_i,
         });
     }
-
-    try d.launch(d.k.qsa_select, .{ .x = @intCast(rows) }, .{
-        a.qsa_sc, pos0_i, a.qsa_ids, a.qsa_nkr, a.qsa_spr, nb_max,
-    });
-
-    const max_nkeys = @min(pos0 + rows, 2051);
-    const ns = @max((max_nkeys + 31) / 32, 1);
-    const ns_i: i32 = @intCast(ns);
-
-    try d.launch(d.k.attn_sparse, .{ .x = @intCast(ns), .y = @intCast(shp.nq), .z = @intCast(rows) }, .{
-        a.q, kc, vc, a.qsa_ids, a.qsa_nkr, a.qsa_spr, a.pm, a.pl, a.po, ns_i, nq_i, nkv_i,
-    });
-    try d.launch(d.k.attn_merge, .{ .x = @intCast(shp.nq), .y = @intCast(rows) }, .{
-        a.pm, a.pl, a.po, a.qsa_nkr, a.ao, ns_i, nq_i,
-    });
-    try d.launch(d.k.attn_gate, .{ .x = @intCast(rows), .y = @intCast(shp.nq) }, .{
-        a.ao, a.proj, a.agated, pw_i, nq_i,
-    });
     try linearF32(d, lw.out, a.agated, out_f32, rows);
 }
 
@@ -166,32 +193,47 @@ pub fn moeRank(r: *Runner, rk: usize, lw: *const LayerW, rows: usize, out_f32: *
     const local_e: i32 = @intCast(shp.local_e);
     const sh_w_i: i32 = @intCast(shp.sh_w);
 
-    try d.launch(d.k.router_logits, .{ .x = (513 + 3) / 4, .y = @intCast(rows) }, .{ a.mixed, lw.router, a.router_l, r_i });
+    if (rows <= 16) {
+        try d.launch(d.k.router_1, .{ .x = 33, .y = @intCast(rows) }, .{ a.mixed, lw.router, a.router_l });
+    } else {
+        try d.launch(d.k.router_mm, .{ .x = 9, .y = @intCast((rows + 31) / 32) }, .{ a.mixed, lw.router, a.router_l, r_i });
+    }
     try d.launch(d.k.route_topk, .{ .x = @intCast(rows) }, .{ a.router_l, a.picks, a.wts });
     try d.launch(d.k.moe_compact, .{ .x = 1 }, .{ a.picks, a.active, a.exp_grp, a.n_act, a.row_list, r_i, first_e, local_e });
-    try d.launch(d.k.moe_routed_up, .{ .x = moe_w / 16, .y = @intCast(rows * 10) }, .{
-        a.mixed,            a.active,           a.exp_grp,          a.n_act,
-        lw.routed_gate.w.?, lw.routed_gate.s.?, lw.routed_gate.b.?, lw.routed_up.w.?,
-        lw.routed_up.s.?,   lw.routed_up.b.?,   a.moe_act,
-    });
-    if (shp.sh_w > 0) {
-        try d.launch(d.k.moe_shared_up, .{ .x = @intCast((shp.sh_w + 15) / 16), .y = @intCast((rows + 15) / 16) }, .{
-            a.mixed,
-            lw.shared_gate.w.?,
-            lw.shared_gate.s.?,
-            lw.shared_gate.b.?,
-            lw.shared_up.w.?,
-            lw.shared_up.s.?,
-            lw.shared_up.b.?,
-            a.sh_act,
-            sh_w_i,
-            r_i,
+
+    if (rows <= 16) {
+        const max_p: u32 = @intCast(rows * @min(@as(usize, 10), shp.local_e));
+        try d.launch(d.k.moe_up_1, .{ .x = moe_w / 16, .y = max_p }, .{
+            a.mixed, a.active, a.n_act, lw.routed_gate.w.?, lw.routed_gate.s.?, lw.routed_gate.b.?, lw.routed_up.w.?, lw.routed_up.s.?, lw.routed_up.b.?, a.moe_act,
+        });
+        try d.launch(d.k.moe_down_1, .{ .x = dims / 16, .y = max_p }, .{
+            a.moe_act, a.active, a.n_act, lw.routed_down.w.?, lw.routed_down.s.?, lw.routed_down.b.?, a.moe_down,
+        });
+    } else {
+        const max_grp: u32 = @intCast(@min(rows * 10, shp.local_e + (rows * 10) / 32));
+        try d.launch(d.k.moe_up_dpas, .{ .x = moe_w / 64, .y = max_grp }, .{
+            a.mixed, a.active, a.exp_grp, a.n_act, lw.routed_gate.w.?, lw.routed_gate.s.?, lw.routed_gate.b.?, lw.routed_up.w.?, lw.routed_up.s.?, lw.routed_up.b.?, a.moe_act,
+        });
+        try d.launch(d.k.moe_down_dpas, .{ .x = dims / 64, .y = max_grp }, .{
+            a.moe_act, a.exp_grp, a.n_act, lw.routed_down.w.?, lw.routed_down.s.?, lw.routed_down.b.?, a.moe_down,
         });
     }
-    try d.launch(d.k.moe_down_combine, .{ .x = dims / 16, .y = @intCast(rows) }, .{
-        a.moe_act,          a.sh_act,           a.active,           a.row_list,         a.wts,
-        lw.routed_down.w.?, lw.routed_down.s.?, lw.routed_down.b.?, lw.shared_down.w.?, lw.shared_down.s.?,
-        lw.shared_down.b.?, out_f32,            sh_w_i,             r_i,
+
+    if (shp.sh_w > 0) {
+        if (rows <= 16) {
+            try d.launch(d.k.moe_sh_up_1, .{ .x = @intCast(shp.sh_w / 16), .y = @intCast(rows) }, .{
+                a.mixed, lw.shared_gate.w.?, lw.shared_gate.s.?, lw.shared_gate.b.?, lw.shared_up.w.?, lw.shared_up.s.?, lw.shared_up.b.?, a.sh_act, sh_w_i,
+            });
+        } else {
+            try d.launch(d.k.moe_sh_up_dpas, .{ .x = @intCast((shp.sh_w + 31) / 32), .y = @intCast((rows + 31) / 32) }, .{
+                a.mixed, lw.shared_gate.w.?, lw.shared_gate.s.?, lw.shared_gate.b.?, lw.shared_up.w.?, lw.shared_up.s.?, lw.shared_up.b.?, a.sh_act, sh_w_i, r_i,
+            });
+        }
+        try linearF32(d, lw.shared_down, a.sh_act, a.sh_out, rows);
+    }
+
+    try d.launch(d.k.moe_combine, .{ .x = dims / 256, .y = @intCast(rows) }, .{
+        a.moe_down, a.sh_out, a.active, a.row_list, a.wts, out_f32, @as(i32, @intFromBool(shp.sh_w > 0)), r_i,
     });
 }
 
@@ -295,8 +337,8 @@ pub fn attnMultiRank(r: *Runner, rk: usize, lw: *const LayerW, ai: usize, seqs: 
         }
         const complete_max = (pos0 + m) / index_ratio;
         if (complete_max > ld.index_top) {
-            try d.launch(d.k.qsa_scores, .{ .x = @intCast(m), .y = @intCast((complete_max + 15) / 16) }, .{
-                iq_s, rs.pooled[ai], pos0_i, sc_s, nb_max,
+            try d.launch(d.k.qsa_scores, .{ .x = @intCast((m + 15) / 16), .y = @intCast((complete_max + 63) / 64) }, .{
+                iq_s, rs.pooled[ai], pos0_i, sc_s, nb_max, m_i,
             });
         }
         try d.launch(d.k.qsa_select, .{ .x = @intCast(m) }, .{ sc_s, pos0_i, ids_s, nkr_s, spr_s, nb_max });
