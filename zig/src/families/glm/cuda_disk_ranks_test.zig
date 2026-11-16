@@ -194,9 +194,12 @@ test "GLM disk ranks: a follower refuses a disk step rank 0 does not send, befor
         .{ .h = .{ .kind = disk, .flags = 0 }, .n = 0 }, // no op
         .{ .h = .{ .kind = disk, .flags = op(.prefixes) + 1 }, .n = 0 }, // past the last op
         .{ .h = .{ .kind = disk, .flags = op(.seal), .a = 1 }, .n = 1 }, // words of another length
-        .{ .h = .{ .kind = disk, .flags = op(.put), .a = 1, .depth = 4 * 4 + 1, .top_k = 1 }, .n = 4 }, // past its ids
+        .{ .h = .{ .kind = disk, .flags = op(.rows), .a = 1, .depth = 8 }, .n = 3 }, // a table of part pieces
+        .{ .h = .{ .kind = disk, .flags = op(.rows), .a = 1, .depth = 9 }, .n = 4 }, // pieces of other bytes than the step's
+        .{ .h = .{ .kind = disk, .flags = op(.rows), .a = 1, .depth = @intCast(room + 1) }, .n = 0 }, // past the link
         .{ .h = .{ .kind = disk, .flags = op(.take), .a = 1, .depth = @intCast(room + 1), .top_k = 0 }, .n = 0 }, // past the link
     };
+    x.ids[0..4].* = .{ image.Words.bytes, 0, 8, 1 }; // one piece of 8 bytes for rank 1
     for (bad) |b| try t.expectError(error.BadStep, ranks.step(x.e, &x.link, b.h, x.ids[0..b.n]));
     x.e.share.world = 65; // more ranks than a gather holds
     try t.expectError(error.BadStep, ranks.step(x.e, &x.link, .{ .kind = disk, .flags = op(.prefixes) }, &.{}));
@@ -229,4 +232,62 @@ test "GLM disk ranks: each other rank's shared bytes come from past its own pref
     try ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs);
     Wire.odd = 2;
     try t.expectError(error.RanksDiffer, ranks.same(x.e, 7, &prefixes, &shared, &loose, &theirs));
+}
+
+test "GLM disk ranks: rank 0 sends a block's pieces for every rank in as few steps as the link holds, and copies the shared ones itself" {
+    var x: Rig = undefined;
+    try x.init();
+    defer x.deinit();
+    ranks.link = &x.link;
+    const at: u32 = 2048;
+    const id = try ranks.blank(x.e, at);
+    const own = (try ranks.shape(x.e)).prefix;
+    var bytes: [440]u8 = undefined;
+    for (&bytes, 0..) |*b, i| b.* = Wire.byte(i);
+    const w = image.Words.bytes;
+    const pieces = [_]ranks.Piece{
+        .{ .to = ranks.every, .off = w + 16, .bytes = bytes[0..100] }, // every rank's, past its own prefix
+        .{ .to = 1, .off = w + 8, .bytes = bytes[100..140] },
+        .{ .to = 2, .off = w, .bytes = bytes[140..440] }, // longer than the link's room (256 bytes) with the rest
+    };
+    try ranks.rows(x.e, id, &pieces);
+    try t.expectEqual(@as(usize, 3), Wire.steps); // the blank, then two rows steps for the 440 bytes
+    const want = [_]struct { depth: u32, n: u32 }{ .{ .depth = 256, .n = 12 }, .{ .depth = 184, .n = 4 } };
+    for (Wire.sent[1..3], want) |h, g| {
+        try t.expectEqual(disk, h.kind);
+        try t.expectEqual(op(.rows), h.flags);
+        try t.expectEqual(id, h.a);
+        try t.expectEqual(g.depth, h.depth);
+        try t.expectEqual(g.n, h.n);
+    }
+    var got: [100]u8 = undefined;
+    try ranks.copy(x.e, id, own + w + 16, &got, true); // rank 0's own copy of the shared bytes
+    try t.expectEqualSlices(u8, bytes[0..100], &got);
+    try t.expectEqualSlices(u8, bytes[256..440], x.buf[64..][0..184]); // the last step's bytes went out whole
+}
+
+test "GLM disk ranks: a follower copies its pieces and the shared ones from the step's broadcast, and no other rank's" {
+    var x: Rig = undefined;
+    try x.init();
+    defer x.deinit();
+    x.e.share.rank = 1;
+    const at: u32 = 2048;
+    try snapshots.blankAs(x.e, 3, at);
+    const own = (try ranks.shape(x.e)).prefix;
+    const w = image.Words.bytes;
+    var before: [64]u8 = undefined;
+    try ranks.copy(x.e, 3, w, &before, true);
+    for (x.buf[64..][0..100], 0..) |*b, i| b.* = Wire.byte(i); // the bytes as rank 0's broadcast leaves them
+    const table = [_]u32{ w + 4, 0, 50, ranks.every, w + 8, 0, 30, 1, w, 0, 20, 2 };
+    @memcpy(x.ids[0..table.len], &table);
+    try ranks.step(x.e, &x.link, .{ .kind = disk, .flags = op(.rows), .a = 3, .depth = 100 }, x.ids[0..table.len]);
+    var got: [50]u8 = undefined;
+    try ranks.copy(x.e, 3, own + w + 4, &got, true);
+    try t.expectEqualSlices(u8, x.buf[64..][0..50], &got);
+    try ranks.copy(x.e, 3, w + 8, got[0..30], true);
+    try t.expectEqualSlices(u8, x.buf[64 + 50 ..][0..30], got[0..30]);
+    var after: [64]u8 = undefined;
+    try ranks.copy(x.e, 3, w, &after, true);
+    try t.expectEqualSlices(u8, before[0..8], after[0..8]); // rank 2's piece at w did not land here
+    try t.expectEqual(@as(usize, 1), Wire.casts);
 }
