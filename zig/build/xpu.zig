@@ -401,7 +401,7 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     // the LFM3 refusal goes through the real XPU open, which reaches POSIX open/dlopen: not Windows
     if (host.result.os.tag != .windows) {
         const lfm3_refusal = b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"lfm3 refusal:"} }));
-        b.step("test-lfm3-xpu-refusal-host", "The XPU open refuses LFM3's ModelOpt NVFP4 export by name, without devices").dependOn(&lfm3_refusal.step);
+        b.step("test-lfm3-xpu-refusal-host", "The XPU open refuses LFM3's ModelOpt NVFP4 and block FP8 exports by name, without devices").dependOn(&lfm3_refusal.step);
         step.dependOn(&lfm3_refusal.step);
     }
     b.step("test-slide-xpu-host", "Unsupported XPU learning refuses before device or checkpoint access").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = sources, .filters = &.{"slide admission:"} })).step);
