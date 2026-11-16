@@ -267,7 +267,7 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         if (s & Class.combine == 0) t.receiveRows(e, p.ys, out, M);
         return;
     }
-    const path = wide.routed(w.gate, w.up, w.down);
+    const path = wide.routed(w.gate, w.up, w.down, if (p.mm.wide) |pw| pw.prompt_mm8 else false);
     if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
         wide.bySorted(
             &p.mm.wide.?,
@@ -296,7 +296,11 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
         g.encode(e, p.mm.wide.?.gather[0], w.gate, w.up, .{ .x = x_in, .offsets = p.offsets, .order = p.order, .out = p.act }, n, E, c.topk, c.moe_inter, c.swiglu_limit);
         g.encode(e, p.mm.wide.?.gather[1], w.down, null, .{ .x = p.act, .offsets = p.offsets, .order = p.order, .out = p.yp }, n, E, 1, D, 0);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
-        const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
+        const mm = switch (path) {
+            .mm4 => p.mm.mm_bf16,
+            .mm8 => p.mm.wide.?.mm8,
+            else => p.mm.wide.?.mm2,
+        };
         gateUp(p, mm, x, e, w, x_in, M, n);
         affine_mm.gatherTo(e, mm, p.act, p.sums, w.down, p.offsets, p.yp, p.order, n, E);
     }

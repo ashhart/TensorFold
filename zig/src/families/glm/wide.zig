@@ -23,6 +23,7 @@ pub const PickDims = extern struct { k: i32, n: i32, group: i32, slots: i32, rep
 pub const Pipes = struct {
     rows: [nw]mtl.Pipeline, // dense, strided, by head
     rows_wide: [nw]mtl.Pipeline, // 4+ rows: eights and a four first, a kernel apart so 1-3 rows keep their registers
+    prompt_mm8: bool, // GLM_PROMPT_MM8: prompt chunks' 8/64 experts on the tensor units (Routed.mm8)
     ids: [nw]mtl.Pipeline, // a slot through its expert
     glu_ids: [nw]mtl.Pipeline, // gate and up through it, SwiGLU'd
     sorted: [nw]mtl.Pipeline, // an expert's sorted pairs (prompt chunks)
@@ -143,6 +144,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     var p: Pipes = undefined;
     const eh_tile = try @import("sys").environment.read(bool, "GLM_EHPROJ_NAX", true); // 0: no tile pipeline, `bf16` serves
     var h = std.hash.Wyhash.init(0x77);
+    const env = @import("sys").environment;
     const rows_src = try gpa.dupe(u8, gather_source);
     defer gpa.free(rows_src);
     h.update(rows_src);
@@ -183,6 +185,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
         h.update(src);
         try lib(made, device, src, &affine_mm.names, out);
     }
+    p.prompt_mm8 = try env.read(bool, "GLM_PROMPT_MM8", false);
     p.zeros = try device.buffer(64 * 4, mtl.ResourceOptions.shared);
     @memset(p.zeros.slice(i32, 64), 0);
     p.hash = h.final();
@@ -458,10 +461,15 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
 }
 
 /// Existing tensor gathers keep their dispatch; other supported formats gather with the sorted row arithmetic.
-pub const Routed = enum { mm4, mm2, gather, rows };
+pub const Routed = enum { mm4, mm2, mm8, gather, rows };
 
-pub fn routed(gate: Affine, up: Affine, down: Affine) Routed {
+/// `mm8`: one-run 8/64 experts take the tensor units' gathers (GLM_PROMPT_MM8=1; fp32 sums of exact codes, as 4/64's do).
+pub fn routed(gate: Affine, up: Affine, down: Affine, mm8: bool) Routed {
     if (native(gate) and native(up) and native(down)) return .mm4;
+    const eight = for ([_]Affine{ gate, up, down }) |q| {
+        if (q.more != 0 or q.bits != 8 or q.group != 64) break false;
+    } else true;
+    if (mm8 and eight) return .mm8;
     const two = for ([_]Affine{ gate, up, down }) |q| {
         if (q.more != 0 or q.bits != 2 or q.group != 64) break false;
     } else true;

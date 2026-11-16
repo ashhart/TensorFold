@@ -13,7 +13,7 @@ fn q(bits: u8, group: u16) affine.Affine {
 test "GLM gathers: every affine width and group has a prompt gather" {
     for (affine.row_bits) |bits| for ([_]u16{ 32, 64 }) |group| {
         const one = q(bits, group);
-        const choice = wide.routed(one, one, one);
+        const choice = wide.routed(one, one, one, false);
         try std.testing.expect(choice != .rows);
         if (group == 64 and bits == 4) try std.testing.expectEqual(wide.Routed.mm4, choice);
         if (group == 64 and bits == 2) try std.testing.expectEqual(wide.Routed.mm2, choice);
@@ -23,7 +23,7 @@ test "GLM gathers: every affine width and group has a prompt gather" {
 test "GLM gathers: gate up and down choose their own widths and groups" {
     for (affine.row_bits) |gb| for (affine.row_bits) |ub| for (affine.row_bits) |db|
         for ([_]u16{ 32, 64 }) |gg| for ([_]u16{ 32, 64 }) |ug| for ([_]u16{ 32, 64 }) |dg| {
-            try std.testing.expect(wide.routed(q(gb, gg), q(ub, ug), q(db, dg)) != .rows);
+            try std.testing.expect(wide.routed(q(gb, gg), q(ub, ug), q(db, dg), false) != .rows);
         };
 }
 
@@ -32,9 +32,9 @@ test "GLM gathers: unsupported widths groups and split projections stay on the f
     var split = good;
     split.more = 1;
     for ([_]affine.Affine{ q(7, 64), q(4, 16), q(4, 128), split }) |bad| {
-        try std.testing.expectEqual(wide.Routed.rows, wide.routed(bad, good, good));
-        try std.testing.expectEqual(wide.Routed.rows, wide.routed(good, bad, good));
-        try std.testing.expectEqual(wide.Routed.rows, wide.routed(good, good, bad));
+        try std.testing.expectEqual(wide.Routed.rows, wide.routed(bad, good, good, false));
+        try std.testing.expectEqual(wide.Routed.rows, wide.routed(good, bad, good, false));
+        try std.testing.expectEqual(wide.Routed.rows, wide.routed(good, good, bad, false));
     }
 }
 
