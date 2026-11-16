@@ -25,6 +25,12 @@ pub fn run(cache: *st.Cache, stream: *lanes.Stream, chunk: usize, ctx: anytype, 
             stream.keepInterruptedPrefill(@intCast(at));
             return error.Cancelled;
         }
+
+        // A background pass steps aside when real work waits: the kept prefix is what the next pass resumes.
+        if (stream.yields()) {
+            stream.keepInterruptedPrefill(@intCast(at));
+            return error.Yielded;
+        }
         var end = @min(ids.len, at + chunk);
         for (stream.chunks) |boundary| if (boundary > at) {
             end = @min(end, boundary);
