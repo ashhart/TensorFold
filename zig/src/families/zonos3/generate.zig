@@ -1,6 +1,7 @@
 //! zonos3-generate: ZONOS3 Mini's backbone on one CUDA GPU against the PyTorch reference's dumps.
 const std = @import("std");
 const z3 = @import("zonos3");
+const cuda = @import("cuda");
 
 const cfg = z3.config;
 const W = cfg.frame_width;
@@ -9,25 +10,30 @@ const D = cfg.dim;
 const usage =
     \\usage: zonos3-generate --model LM_DIR --check DUMP_DIR [--max-rows 64] [--max-ctx 4096]
     \\       zonos3-generate --model LM_DIR --frames-check GEN_DIR [--max-frames 2000]
+    \\       zonos3-generate --codec-check DUMP_DIR --generator GENERATOR.pt --head HEAD.pt
     \\
     \\--check runs DUMP_DIR/input_ids.npy (prompt rows [n, 11]) with DUMP_DIR/input_ids.cond.json through the backbone
     \\and compares every sublayer with the reference's .npy captures (tools/dump_golden.py lm of Zyphra/ZONOS3-Mini).
     \\--frames-check generates greedily (temperature 0, the other sampling defaults) after GEN_DIR's prompt and compares
     \\the frames with GEN_DIR/rows.npy, the reference's generation of the same request.
-    \\The last stderr line is "RESULT zonos3 check PASS|FAIL ..." or "RESULT zonos3 frames PASS|FAIL ...".
+    \\--codec-check decodes DUMP_DIR/codes.npy ([frames, 10]) with the codec decoder and compares its captures and
+    \\audio with the reference's (dump_codec.py); --generator is autoencoder/generator.pt, --head a decoder checkpoint.
+    \\The last stderr line is "RESULT zonos3 <check|frames|codec> PASS|FAIL ...".
     \\
 ;
 
 const Check = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
-    e: *z3.Engine,
+    ctx: *anyopaque,
+    get: *const fn (ctx: *anyopaque, ptr: u64, out: []u8) anyerror!void,
     dir: []const u8,
     n: usize = 0,
     fails: usize = 0,
     missing: usize = 0,
     worst: f64 = 1.0,
     worst_rel: f64 = 0,
+    audio_snr_db: f64 = 0,
 
     fn probe(ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, width: usize) anyerror!void {
         const c: *Check = @ptrCast(@alignCast(ctx));
@@ -46,7 +52,7 @@ const Check = struct {
         defer c.gpa.free(ref);
         const mine = try c.gpa.alloc(f32, rows * width);
         defer c.gpa.free(mine);
-        try c.e.download(ptr, std.mem.sliceAsBytes(mine));
+        try c.get(c.ctx, ptr, std.mem.sliceAsBytes(mine));
         var worst_row: f64 = 1;
         var at: usize = 0;
         var max_d: f64 = 0;
@@ -74,6 +80,15 @@ const Check = struct {
         c.fails += @intFromBool(!ok);
         c.worst = @min(c.worst, worst_row);
         c.worst_rel = @max(c.worst_rel, rel);
+        if (std.mem.eql(u8, name, "audio")) {
+            var noise: f64 = 0;
+            var signal: f64 = 0;
+            for (mine, ref) |x, y| {
+                noise += (@as(f64, x) - y) * (@as(f64, x) - y);
+                signal += @as(f64, y) * y;
+            }
+            c.audio_snr_db = 10.0 * @log10(signal / @max(noise, 1e-300));
+        }
         std.debug.print("  {s:<20} rows {d:>4} worst-row cos {d:.7} (row {d}) max|d| {e:.3} of {e:.3} {s}\n", .{ name, rows, worst_row, at, max_d, max_ref, if (ok) "ok" else "LOW" });
     }
 };
@@ -148,6 +163,63 @@ fn framesCheck(gpa: std.mem.Allocator, io: std.Io, e: *z3.Engine, dir: []const u
     return if (pass) 0 else 1;
 }
 
+fn codecCheck(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, generator: []const u8, head: []const u8) !u8 {
+    const path = try std.fs.path.join(gpa, &.{ dir, "codes.npy" });
+    defer gpa.free(path);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 28));
+    defer gpa.free(bytes);
+    const arr = try z3.npy.parse(bytes);
+    if (arr.rank != 2 or arr.shape[1] != 10) return error.BadCodes;
+    const flat = try arr.ints(gpa);
+    defer gpa.free(flat);
+    const codes = try gpa.alloc([10]i32, arr.shape[0]);
+    defer gpa.free(codes);
+    for (codes, 0..) |*r, j| r.* = flat[j * 10 ..][0..10].*;
+
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    var stream = try cuda.Stream.init(&driver, true);
+    defer stream.deinit();
+    const t_load = nowNs(io);
+    const codec = try z3.Codec.create(gpa, io, &driver, stream, generator, head, .{ .max_frames = codes.len, .pass_frames = codes.len });
+    defer codec.destroy();
+    const Dec = struct {
+        fn get(c: *anyopaque, ptr: u64, out: []u8) anyerror!void {
+            try @as(*z3.Codec, @ptrCast(@alignCast(c))).download(ptr, out);
+        }
+    };
+    var c: Check = .{ .gpa = gpa, .io = io, .ctx = codec, .get = Dec.get, .dir = dir };
+    std.debug.print("zonos3 codec check: {d} frames, {d} MiB of weights, loaded in {d:.1} s\n", .{ codes.len, codec.w.bytes >> 20, @as(f64, @floatFromInt(nowNs(io) - t_load)) / 1e9 });
+    const probe: z3.codec.Probe = .{ .ctx = &c, .f = Check.probe };
+    try codec.decode(codes, probe);
+    const pcm = try codec.finish(gpa, probe);
+    gpa.free(pcm);
+    // the same frames in uneven chunks, then timed whole
+    try codec.reset();
+    var at: usize = 0;
+    var step: usize = 1;
+    while (at < codes.len) : (step = step * 2 + 1) {
+        const n = @min(step, codes.len - at);
+        try codec.decode(codes[at..][0..n], null);
+        at += n;
+    }
+    const chunked = try codec.finish(gpa, null);
+    defer gpa.free(chunked);
+    try codec.reset();
+    const t0 = nowNs(io);
+    try codec.decode(codes, null);
+    const whole = try codec.finish(gpa, null);
+    defer gpa.free(whole);
+    const seconds = @as(f64, @floatFromInt(nowNs(io) - t0)) / 1e9;
+    const same = std.mem.eql(u8, std.mem.sliceAsBytes(chunked), std.mem.sliceAsBytes(whole));
+    const audio_s = @as(f64, @floatFromInt(whole.len)) / z3.codec.sample_rate;
+    const pass = c.fails == 0 and c.n > 0 and c.missing == 0 and same;
+    std.debug.print("RESULT zonos3 codec {s} probes={d} low={d} missing={d} worst_row_cos={d:.7} audio_snr_db={d:.1} chunked_equals_whole={} audio_s={d:.2} decode_s={d:.3} x_realtime={d:.1}\n", .{ if (pass) "PASS" else "FAIL", c.n, c.fails, c.missing, c.worst, c.audio_snr_db, same, audio_s, seconds, audio_s / seconds });
+    return if (pass) 0 else 1;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const arena = init.arena.allocator();
     const gpa = std.heap.c_allocator;
@@ -156,16 +228,26 @@ pub fn main(init: std.process.Init) !u8 {
     var model: []const u8 = "";
     var check: ?[]const u8 = null;
     var frames_check: ?[]const u8 = null;
+    var codec_check: ?[]const u8 = null;
+    var generator: []const u8 = "";
+    var head: []const u8 = "";
     var max_frames: usize = 2000;
     var opts: z3.Options = .{};
     var i: usize = 1;
     while (i + 1 < argv.len) : (i += 2) {
         const k = argv[i];
         const v = argv[i + 1];
-        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
+        if (std.mem.eql(u8, k, "--model")) model = v else if (std.mem.eql(u8, k, "--check")) check = v else if (std.mem.eql(u8, k, "--frames-check")) frames_check = v else if (std.mem.eql(u8, k, "--codec-check")) codec_check = v else if (std.mem.eql(u8, k, "--generator")) generator = v else if (std.mem.eql(u8, k, "--head")) head = v else if (std.mem.eql(u8, k, "--max-frames")) max_frames = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-rows")) opts.max_rows = try std.fmt.parseInt(usize, v, 10) else if (std.mem.eql(u8, k, "--max-ctx")) opts.max_ctx = try std.fmt.parseInt(usize, v, 10) else {
             std.debug.print("unknown flag {s}\n{s}", .{ k, usage });
             return 2;
         }
+    }
+    if (codec_check) |dir| {
+        if (i != argv.len or generator.len == 0 or head.len == 0) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        return codecCheck(gpa, io, dir, generator, head);
     }
     const dir = check orelse frames_check orelse {
         std.debug.print("{s}", .{usage});
@@ -181,7 +263,12 @@ pub fn main(init: std.process.Init) !u8 {
     var replaced: std.ArrayList(z3.Replace) = .empty;
     try loadPrompt(gpa, io, e, dir, &rows, &replaced);
     if (frames_check != null) return framesCheck(gpa, io, e, dir, rows, replaced.items, max_frames);
-    var c: Check = .{ .gpa = gpa, .io = io, .e = e, .dir = dir };
+    const Lm = struct {
+        fn get(ctx: *anyopaque, ptr: u64, out: []u8) anyerror!void {
+            try @as(*z3.Engine, @ptrCast(@alignCast(ctx))).download(ptr, out);
+        }
+    };
+    var c: Check = .{ .gpa = gpa, .io = io, .ctx = e, .get = Lm.get, .dir = dir };
     std.debug.print("zonos3 check: {d} prompt rows, {d} replaced, {d} MiB of weights\n", .{ rows.len, replaced.items.len, e.w.bytes >> 20 });
     try e.run(rows, replaced.items, .{ .ctx = &c, .f = Check.probe });
     const pass = c.fails == 0 and c.n > 0;
