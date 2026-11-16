@@ -115,8 +115,8 @@ zig/src/cuda/tp_watch.zig	19ed1d12bc56f804b5d207d04226e9f6131a517aaf7aec4c4b2d0b
 zig/src/cuda/triton.zig	256323865c6a4676b8b75aae9e32d2d9732cf2623efedb9462cf6f95302c3e83	raw
 zig/src/cuda/vit.zig	72c4301251f50d0f25907f0d8ad03a943281b234c506a455e413627a3ffe09c0	raw
 zig/src/families/flashnext/cuda_attn.zig	99dfe79f919a8599490f1cdba0bec20d6e73ccbeafe26d5848419a465fdfa0d0	raw
-zig/src/families/flashnext/cuda_batch.zig	7fa858c564356e9cc80ee50a86602a5d1c1c3d1ef9ef6d0d69b2ac7a8a4b4e5e	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged)
-zig/src/families/flashnext/cuda_batch_state.zig	ae9d16a76aa56cd3448b3414140cbabd2f918bfb69a094b02be82544f371603c	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged
+zig/src/families/flashnext/cuda_batch.zig	eaf08f697f93041f93d2388b345e90a788398a5cf7bfa7641c63a816c6ac5946	raw	main 42ff6c510f (disk states keyed by the resolved prompt passes; serving unchanged); #XXXX: the scratch test's ceiling restated at the 3,072-row default
+zig/src/families/flashnext/cuda_batch_state.zig	7e940f58ec4ecba11a657983375e3cfec7492989c6246f037759b8051ce70129	raw	y and moe_f32 take one spare row for a --tp 2 prompt pass's padded rank block; replies unchanged; #XXXX: the default prompt chunk is 3,072 rows
 zig/src/families/flashnext/cuda_collective.zig	bf475ffb46b3440fcad280f46e34de25cd22b79ed96a0b587d0869e7451d3519	raw	adds sumBlock, the in-place FP32 reduce-scatter with sum's peer check, deadline and abort; no served change on its own
 zig/src/families/flashnext/cuda_compare_main.zig	ade014dfec88f0b386076cdc093ea20710d7bf36c33ff566ca2caf472064695b	raw	main dfd9ac5ef4 (#2585: the TF_FLASHNEXT_* startup check), c274b45cc1 (the check through the flashnext module)
 zig/src/families/flashnext/cuda_config.zig	19366ee591270c719fa6f710af0efd4d5a55cfc3e30c923f5ed08771b5c14001	raw
