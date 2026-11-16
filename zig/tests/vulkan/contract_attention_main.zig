@@ -138,6 +138,14 @@ fn probe(a: std.mem.Allocator, clock: Elapsed, vendor: ?u32, timeout: u64) !bool
             passed += @intFromBool(bf16_ok and f32_ok);
         }
     }
+    for (ca.probe_keys) |keys| {
+        for ([_]bool{ false, true }) |uniform| {
+            total += 1;
+            const bf16_ok = try probsGate(a, &dev, &cmds, staging, &attn, keys, 0x70e7, timeout, false, uniform);
+            const f32_ok = try probsGate(a, &dev, &cmds, staging, &attn, keys, 0x70e7, timeout, true, uniform);
+            passed += @intFromBool(bf16_ok and f32_ok);
+        }
+    }
     std.debug.print("RESULT attention-contract elapsed_ms={d} on \"{s}\": passed={d} total={d}\n", .{ clock.ms(), name, passed, total });
     return passed == total;
 }
@@ -203,6 +211,109 @@ fn routeGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, st
     const ok = mismatched == 0;
     std.debug.print("{s} route keys={d} {s} data={s}: single vs tiled mismatched={d} of {d} first={d} max_abs={e}\n", .{
         if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", mismatched, row_elems, first, max_abs,
+    });
+    return ok;
+}
+
+// Split a partial-tile divergence: run the single dispatch through the long (stream) image and the tiled path at key counts past the
+// shared stream, then byte-compare the probability arrays themselves before the outputs. Tiled probs live in the score scratch; single
+// probs live in the f32 stream. A prob mismatch convicts the score/softmax stages; equal probs with differing outputs convict PV.
+fn probsGate(a: std.mem.Allocator, dev: *const vk.Device, cmds: *vk.Commands, staging: vk.Buffer, attn: *vk.Attention, keys: u64, seed: u64, timeout: u64, comptime wide: bool, uniform: bool) !bool {
+    const El = if (wide) u32 else u16;
+    const arm: []const u8 = if (wide) "f32" else "bf16";
+    const row_elems: usize = @intCast(fx.heads * fx.head_dim);
+    const cache_elems: usize = @intCast(fx.kv_heads * keys * fx.head_dim);
+    const stream_words: usize = @intCast(fx.heads * keys);
+    const q_bits = try a.alloc(u16, row_elems);
+    defer a.free(q_bits);
+    const k_bits = try a.alloc(u16, cache_elems);
+    defer a.free(k_bits);
+    const v_bits = try a.alloc(u16, cache_elems);
+    defer a.free(v_bits);
+    var prng = std.Random.DefaultPrng.init(seed ^ keys);
+    const rng = prng.random();
+    for ([_][]u16{ q_bits, k_bits, v_bits }) |bits| {
+        for (bits) |*x| x.* = if (uniform) cx.toBf16(rng.float(f32) * 2 - 1) else fx.sampleDyadic(rng, -5, 3);
+    }
+    var kbuf = try upload16(dev, cmds, staging, k_bits, timeout);
+    defer kbuf.deinit();
+    var vbuf = try upload16(dev, cmds, staging, v_bits, timeout);
+    defer vbuf.deinit();
+    var q = if (wide) wq: {
+        const words = try a.alloc(u32, row_elems);
+        defer a.free(words);
+        for (q_bits, 0..) |bits, i| words[i] = @bitCast(@as(f32, @floatCast(cx.fromBf16(bits))));
+        break :wq try upload32(dev, cmds, staging, words, timeout);
+    } else try upload16(dev, cmds, staging, q_bits, timeout);
+    defer q.deinit();
+    const zeros = try a.alloc(u32, stream_words);
+    defer a.free(zeros);
+    @memset(zeros, 0);
+    var stream_buf = try upload32(dev, cmds, staging, zeros, timeout);
+    defer stream_buf.deinit();
+    const kind: vk.tensor.Kind = if (wide) .f32 else .bf16;
+    const q_view = try vk.tensor.View.init(&q, kind, 0, @intCast(row_elems));
+    const keys_view = try vk.tensor.View.init(&kbuf, .bf16, 0, @intCast(k_bits.len));
+    const values_view = try vk.tensor.View.init(&vbuf, .bf16, 0, @intCast(v_bits.len));
+    const stream_view = try vk.tensor.View.init(&stream_buf, .f32, 0, @intCast(stream_words));
+    var got: [2][]El = undefined;
+    defer a.free(got[0]);
+    defer a.free(got[1]);
+    var probs: [2][]u32 = undefined;
+    defer a.free(probs[0]);
+    defer a.free(probs[1]);
+    for ([_]vk.Attention.Path{ .single, .tiled }, 0..) |path, i| {
+        got[i] = try a.alloc(El, row_elems);
+        const shell = try a.alloc(El, row_elems + fx.tail);
+        defer a.free(shell);
+        @memset(shell, if (wide) 0x7fc00000 else fx.poison16);
+        var out = try uploadWords(El, dev, cmds, staging, shell, timeout);
+        defer out.deinit();
+        const y_view = try vk.tensor.View.init(&out, kind, 0, @intCast(row_elems));
+        try vk.orExit(attn.attendOn(path, cmds, y_view, q_view, keys_view, values_view, if (i == 0) stream_view else null, keys - 1, 1, keys, timeout));
+        try fetch(cmds, staging, out, std.mem.sliceAsBytes(got[i]), timeout);
+        if (i == 0) {
+            probs[i] = try a.alloc(u32, stream_words);
+            try fetch(cmds, staging, stream_buf, std.mem.sliceAsBytes(probs[i]), timeout);
+        } else {
+            const view = try attn.probsScratch();
+            probs[i] = try a.alloc(u32, @intCast(view.elements));
+            try fetch(cmds, staging, attn.score_scratch, std.mem.sliceAsBytes(probs[i]), timeout);
+        }
+    }
+    var pmis: usize = 0;
+    var pfirst_h: usize = 0;
+    var pfirst_k: usize = 0;
+    var pmag: f64 = 0;
+    const nk: usize = @intCast(keys);
+    const head_stride: usize = @intCast(vk.Attention.tile_rows * ca.max_visible_keys);
+    for (0..@intCast(fx.heads)) |h| {
+        for (0..nk) |k| {
+            const s = probs[0][h * nk + k];
+            const t = probs[1][h * head_stride + k];
+            if (s == t) continue;
+            if (pmis == 0) {
+                pfirst_h = h;
+                pfirst_k = k;
+            }
+            pmis += 1;
+            pmag = @max(pmag, @abs(@as(f64, @as(f32, @bitCast(s))) - @as(f64, @as(f32, @bitCast(t)))));
+        }
+    }
+    var omis: usize = 0;
+    var ofirst: usize = 0;
+    var omag: f64 = 0;
+    for (got[0], got[1], 0..) |s, t, i| {
+        if (s == t) continue;
+        if (omis == 0) ofirst = i;
+        omis += 1;
+        const sv: f64 = if (wide) @as(f32, @bitCast(s)) else cx.fromBf16(s);
+        const tv: f64 = if (wide) @as(f32, @bitCast(t)) else cx.fromBf16(t);
+        omag = @max(omag, @abs(sv - tv));
+    }
+    const ok = pmis == 0 and omis == 0;
+    std.debug.print("{s} probs keys={d} {s} data={s}: prob_mismatched={d} of {d} first=(head {d}, key {d}) prob_max_abs={e} | out_mismatched={d} of {d} first={d} max_abs={e}\n", .{
+        if (ok) "MILESTONE" else "FAIL", keys, arm, if (uniform) "uniform" else "dyadic", pmis, @as(usize, @intCast(fx.heads * keys)), pfirst_h, pfirst_k, pmag, omis, row_elems, ofirst, omag,
     });
     return ok;
 }

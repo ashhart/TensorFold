@@ -294,6 +294,15 @@ pub const Attention = struct {
     }
 
     // Gate is bf16(ctx*bf16(sigmoid(gate))) narrow or f32(ctx*sigmoid(gate)) wide; qraw's second halves hold the gate.
+    /// Public mirror of tile_max_rows for the contract gate: the tiled probs' head stride is tile_rows * max_visible_keys.
+    pub const tile_rows: u64 = tile_max_rows;
+
+    /// The tiled path's probability buffer after a 1-row decode: probs[(qhead*tile_rows + qrow)*max_visible_keys + key].
+    /// The scores kernel writes scores and the composition softmax normalizes them in place, so keys below the causal bound hold final probabilities.
+    pub fn probsScratch(a: *Attention) Error!View {
+        return View.init(&a.score_scratch, .f32, 0, score_scratch_words);
+    }
+
     pub fn gateOutput(a: *Attention, cmds: *Commands, out: View, ctx: View, qraw: View, rows: u64, timeout_ns: u64) Error!void {
         const plan = try gatePlan(out.elements, ctx.elements, qraw.elements, rows);
         const wide = out.kind == .f32;

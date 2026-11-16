@@ -106,6 +106,10 @@ pub const tile_cases = [_]TileCase{
 /// Dense around the boundary: 496 and 512 are 16-aligned controls; 508, 510, 511, 513, 514, 1025 are partial-tile cases.
 pub const route_keys = [_]u64{ 496, 508, 510, 511, 512, 513, 514, 1024, 1025, 2048 };
 
+/// Probes past the shared stream (7168): the single dispatch's probabilities become fetchable from the f32 stream buffer, so the
+/// gate byte-compares the two paths' probability arrays themselves, not just the outputs. 7200 is 16-aligned; 7201 and 7205 are partial.
+pub const probe_keys = [_]u64{ 7200, 7201, 7205 };
+
 /// Rows 0..finiteRows-1 see only finite V; later rows legitimately read the plants and may go non-finite.
 pub fn finiteRows(case: TileCase) u64 {
     return case.poison_from - case.prefix;
