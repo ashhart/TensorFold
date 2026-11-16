@@ -25,6 +25,7 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .{ "gemm128", "zig/kernels/xpu/qwen27/gemm.cl", " -DGSZ=128" },
         .{ "gdn", "zig/kernels/xpu/qwen27/gdn_chunk.cl", "" },
         .{ "drafter", "zig/kernels/xpu/qwen27/drafter.cl", "" },
+        .{ "tp", "zig/kernels/xpu/tp.cl", "" },
         .{ "glue_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", " -I zig/kernels/xpu/gemma4" },
         .{ "glue_g4g", "zig/kernels/xpu/gemma4/glue_g4.cl", " -DHD=512 -I zig/kernels/xpu/gemma4" },
         .{ "rows_g4s", "zig/kernels/xpu/gemma4/glue_g4.cl", " -I zig/kernels/xpu/gemma4" },
@@ -94,9 +95,22 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         \\
     ) });
     const ze_mod = zeModule(b, target, optimize);
+    const tp_mod = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    tp_mod.addImport("ze", ze_mod);
     // one `core` for these trees: the Gemma 4 config, the safetensors readers, Nemotron, the CLI and server
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+    {
+        const embedded_tp = b.createModule(.{ .root_source_file = files.add("xpu_tp_kernels.zig",
+            \\pub const tp align(8) = @embedFile("tp.bin").*;
+            \\
+        ) });
+        const tpb = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/tp_bench.zig"), .target = target, .optimize = optimize, .link_libc = true });
+        tpb.addImport("xpu_tp_kernels", embedded_tp);
+        tpb.addImport("ze", ze_mod);
+        const tpb_exe = b.addExecutable(.{ .name = "tf-xpu-tp-bench", .root_module = tpb });
+        b.step("xpu-tp-bench", "Build the multi-GPU Level Zero P2P TP=2/4 collective benchmark").dependOn(&b.addInstallArtifact(tpb_exe, .{}).step);
+    }
     {
         const g4 = b.createModule(.{ .root_source_file = b.path("zig/src/families/gemma4/xpu_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
         g4.addImport("xpu_gemma4_kernels", embedded_g4);
