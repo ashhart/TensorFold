@@ -72,6 +72,21 @@ try {
   assert.ok(bind(worktreeArgv, '--bind', innerGitdir), 'the worktree gitdir stays writable for refs and objects')
   ok('a nested worktree is pinned through its gitdir and its pointer is frozen')
 
+  // A worktree inside the workspace whose shared directory resolves outside it is refused.
+  const sharedWorktree = path.join(cwd, 'shared-worktree')
+  const sharedGitdir = path.join(cwd, '.git', 'worktrees', 'shared')
+  const outsideShared = path.join(root, 'elsewhere-shared', '.git')
+  mkdirSync(path.join(outsideShared, 'hooks'), { recursive: true })
+  mkdirSync(sharedGitdir, { recursive: true })
+  mkdirSync(sharedWorktree, { recursive: true })
+  writeFileSync(path.join(sharedWorktree, '.git'), 'gitdir: ../.git/worktrees/shared\n')
+  writeFileSync(path.join(sharedGitdir, 'commondir'), `${path.relative(sharedGitdir, outsideShared)}\n`)
+  assert.throws(() => linuxSandboxArgv(cwd, { allowCwdWrite: true, allowNetwork: false }), /shared git directory is outside the workspace/)
+  rmSync(path.join(root, 'elsewhere-shared'), { recursive: true, force: true })
+  rmSync(sharedWorktree, { recursive: true, force: true })
+  rmSync(path.join(cwd, '.git', 'worktrees', 'shared'), { recursive: true, force: true })
+  ok('a worktree whose shared directory resolves outside the workspace is refused')
+
   // A worktree whose gitdir lives outside the workspace is refused, and refusal fails closed.
   const outsideWorktree = path.join(root, 'outside-worktree')
   mkdirSync(path.join(root, 'elsewhere', '.git', 'worktrees', 'outside'), { recursive: true })
