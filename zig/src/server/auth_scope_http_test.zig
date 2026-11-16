@@ -38,7 +38,7 @@ const Text = struct {
     }
 };
 
-const Engine = struct {
+pub const Engine = struct {
     calls: std.atomic.Value(u32) = .init(0),
     reads: std.atomic.Value(u32) = .init(0),
     fn engine(e: *Engine) api.Engine {
@@ -66,14 +66,14 @@ const Engine = struct {
     }
 };
 
-const Harness = struct {
+pub const Harness = struct {
     srv: *server.Server = undefined,
     listener: listener.Listener = undefined,
     accept: std.Thread = undefined,
     stop: std.atomic.Value(bool) = .init(false),
     unix_path: ?[:0]const u8 = null,
 
-    fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
+    pub fn start(h: *Harness, engine: *Engine, keys: *auth.Store) !void {
         h.srv = try server.Server.init(t.allocator, t.io, engine.engine(), Text.model(), .{
             .served_name = "m",
             .model_ids = &.{"m"},
@@ -87,7 +87,7 @@ const Harness = struct {
         errdefer h.listener.close();
         h.accept = try std.Thread.spawn(.{}, server.Server.serve, .{ h.srv, h.listener, &h.stop });
     }
-    fn deinit(h: *Harness) void {
+    pub fn deinit(h: *Harness) void {
         h.stop.store(true, .release);
         h.accept.join();
         var waited: usize = 0;
@@ -123,7 +123,7 @@ const Harness = struct {
         if (posix.errno(posix.system.connect(fd, &storage.any, len)) != .SUCCESS) return error.Connect;
         return fd;
     }
-    fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
+    pub fn exchange(h: *Harness, a: Allocator, raw: []const u8) ![]const u8 {
         const fd = try h.connect();
         defer _ = posix.system.close(fd);
         var sent: usize = 0;
