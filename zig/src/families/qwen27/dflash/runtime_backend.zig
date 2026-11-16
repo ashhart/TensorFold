@@ -90,7 +90,9 @@ pub const Backend = struct {
             for (h.owned.items) |*buf| buf.deinit();
             h.owned.deinit(a);
         };
-        if (target.shard.ranks > 1) whole = try @import("../gpu_weights.zig").fullHead(a, target.device, &target.checkpoint, &target.shard, target.head_width);
+        if (target.shard) |*sh| if (sh.ranks > 1) {
+            whole = try @import("../gpu_weights.zig").fullHead(a, target.device, checkpoint, sh, target.head_width);
+        };
         var head = try @import("runtime_head.zig").Head.init(a, target.device, if (whole) |h| h.linear else target.weights.head);
         errdefer head.deinit();
         // the trimmed head's shape is the drafter's own: compile its pipeline here, not in the first draft round
