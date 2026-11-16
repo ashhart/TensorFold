@@ -64,6 +64,17 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
 
 The API also serves completions, Responses and Anthropic Messages. `/v1/models` lists the served name.
 
+To talk to a model in the terminal in one command, `tensorfold chat MODEL` starts the server itself, streams each
+reply and stops the server when the chat ends; `/help` lists the chat's commands, and `/bye` or Ctrl-D ends it:
+
+```sh
+tensorfold chat mlx-community/Qwen3.5-2B-MLX-4bit
+```
+
+With the server above still running, `tensorfold chat --url http://127.0.0.1:8080` chats with it instead, and
+`echo "Say hello." | tensorfold chat --url http://127.0.0.1:8080` prints one reply for a script.
+See [the chat command](docs/chat.md) for its flags and the serve flags it passes on.
+
 ## Docs
 
 - [Run guide](docs/run-guide.md): platform setup, requests, parallel requests, exact decoding, context compaction,
