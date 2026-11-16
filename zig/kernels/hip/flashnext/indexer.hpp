@@ -47,10 +47,23 @@ extern "C" __global__ void __launch_bounds__(kFnThreads)
 tf_fn_idx_scores(const float* q, const void* pooled, const int* complete, float* scores, int kind, int rows, int heads,
                  int dims, int blocks, long long stride, int top) {
     constexpr int kMost = 8;
+    // the block's rows of q, staged once for its eight waves when they fit
+    constexpr int kStage = 512;
+    __shared__ float qs[8 * kStage];
     const int lane = threadIdx.x & 31;
-    const int b = blockIdx.x * kFnWaves + (threadIdx.x >> 5);
+    const int b0 = blockIdx.x * kFnWaves, b = b0 + (threadIdx.x >> 5);
     const int r0 = blockIdx.y * 8, r1 = min(rows, r0 + 8);
-    bool wanted = false;  // a graph launches over a bound of blocks: those no row scores read nothing
+    bool tile = false;  // a graph launches over a bound of blocks: those no row scores read nothing
+    if (b0 < blocks)
+        for (int r = r0; r < r1; ++r) tile = tile || (complete[r] > top && b0 < complete[r]);
+    if (!tile) return;
+    const int width = heads * dims;
+    const bool staged = width <= kStage;
+    if (staged)
+        for (int i = threadIdx.x; i < (r1 - r0) * width; i += kFnThreads)
+            qs[i] = q[static_cast<long long>(r0) * width + i];
+    __syncthreads();
+    bool wanted = false;
     for (int r = r0; r < r1; ++r) wanted = wanted || (complete[r] > top && b < complete[r]);
     if (b >= blocks || !wanted) return;
     float key[kMost];
@@ -64,7 +77,8 @@ tf_fn_idx_scores(const float* q, const void* pooled, const int* complete, float*
         if (complete[r] <= top || b >= complete[r]) continue;
         float total = 0.f;
         for (int h = 0; h < heads; ++h) {
-            const float* qh = q + (static_cast<long long>(r) * heads + h) * dims;
+            const float* qh = staged ? qs + ((r - r0) * heads + h) * dims
+                                     : q + (static_cast<long long>(r) * heads + h) * dims;
             float dot = 0.f;
 #pragma unroll
             for (int i = 0; i < kMost; ++i) {

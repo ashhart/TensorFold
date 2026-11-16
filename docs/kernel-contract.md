@@ -350,6 +350,10 @@ is bit-equal to the chain it replaces (`tf_conv_prefill`, `tf_copy_cols`, `tf_rm
 Four controls: the recurrence one row short of the prompt and with one key head, and the prework norming q with k's
 weights and writing gate and beta to each other's outputs.
 
+HIP also checks Flash Next's indexer block score kernel (`tf_fn_idx_scores`, `contract_idx_scores.zig`, record in
+`hip_records_sparse.zig`): staging each tile's rows of `q` in LDS when `heads * dims <= 512`, checked against the
+fp64 relu-summed head dots with one control leaving out each row's last head (`shapes`).
+
 On gfx12, HIP also checks the WMMA dense tile (`dense_wmma12_gemm`, both block geometries, fp32 and BF16 out). The
 small block meets its depth-k bound. The big block (64-deep K steps over swizzled LDS rows) replaces the 32-deep block
 it was before #2245's second lever, byte for byte: gate 3 runs a frozen copy of that block (`tf_ref_wmma12_k32`, in the
