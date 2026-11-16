@@ -6,6 +6,7 @@ const chat = @import("chat_cli.zig");
 const history = @import("chat_cli_history.zig");
 const stop = @import("benchmark_stop.zig");
 const fake = @import("benchmark_fake.zig");
+const stream = @import("benchmark_stream.zig");
 const Allocator = std.mem.Allocator;
 
 const Run = struct {
@@ -70,11 +71,16 @@ fn streamed(a: Allocator) ![]const fake.Write {
 
 /// A server that lists ``models`` and answers the n-th chat request with ``replies[n]`` (the last one after).
 fn world(a: Allocator, models: []const u8, replies: []const []const fake.Write) !*fake.Fake {
-    return fake.Fake.start(std.testing.allocator, try a.dupe(fake.Route, &.{
+    return worldKeyed(a, models, replies, null);
+}
+
+/// ``world`` as a keyed server, wanting the key ``key_file`` holds on every route but GET /health.
+fn worldKeyed(a: Allocator, models: []const u8, replies: []const []const fake.Write, key_file: ?[]const u8) !*fake.Fake {
+    return fake.Fake.startKeyed(std.testing.allocator, try a.dupe(fake.Route, &.{
         .{ .method = "GET", .path = "/health", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", "{\"status\": \"ok\", \"warming\": false}")}) },
         .{ .method = "GET", .path = "/v1/models", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", models)}) },
         .{ .method = "POST", .path = "/v1/chat/completions", .replies = replies },
-    }));
+    }), key_file);
 }
 
 fn posts(f: *fake.Fake) usize {
@@ -128,6 +134,7 @@ test "chat CLI: a piped message to --url asks for the server's first model and p
     try std.testing.expectEqualStrings("/v1/models", f.request(0).path);
     try std.testing.expectEqualStrings("{\"model\": \"example-model\", \"messages\": [{\"role\": \"user\", \"content\": \"Say hello.\"}], \"stream\": true}", f.request(1).body);
     try std.testing.expectEqualStrings("TensorFold-chat/1", f.header(1, "user-agent").?);
+    try std.testing.expect(f.header(0, "authorization") == null and f.header(1, "authorization") == null);
     try std.testing.expectEqualStrings("text/event-stream", f.header(1, "accept").?);
     r.input = "Say hello.";
     try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, ""), "other-model", "--show-thinking", "--system", "Be brief.", "--temperature", "0", "--max-tokens", "32" }));
@@ -156,6 +163,40 @@ test "chat CLI: a reply of hidden reasoning alone, or one cut at its token limit
     try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", try f.url(a, ""), "--show-thinking" }));
     try std.testing.expectEqualStrings("Let me think\n", r.out.written());
     try std.testing.expectEqualStrings("The reply stopped at its token limit; --max-tokens raises it.\n", r.err.written());
+}
+
+test "chat CLI: --url sends TENSORFOLD_API_KEY's first key as the bearer, and a 401 names the variable" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const key_file = try r.path("server-key");
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = key_file, .data = "example-key-1\n" });
+    const f = try worldKeyed(a, models_doc, try a.dupe([]const fake.Write, &.{try streamed(a)}), key_file);
+    defer f.stop();
+    const url = try f.url(a, "");
+    r.input = "hi";
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url }));
+    try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "tensorfold chat: no model to chat with: {s}/v1/models answered HTTP 401; " ++
+        "set TENSORFOLD_API_KEY to a key the server accepts\n", .{url}), r.err.written());
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url, "example-model" }));
+    try std.testing.expectEqualStrings("tensorfold chat: HTTP 401: A valid API key is required; set TENSORFOLD_API_KEY to a key the server accepts\n", r.err.written());
+    try r.env.put("TENSORFOLD_API_KEY", "wrong-key");
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url, "example-model" }));
+    try std.testing.expectEqualStrings("tensorfold chat: HTTP 401: A valid API key is required; the server refused the key in TENSORFOLD_API_KEY\n", r.err.written());
+    try std.testing.expectEqual(@as(usize, 5), f.refusals());
+    try std.testing.expectEqual(@as(usize, 0), f.count());
+    try r.env.put("TENSORFOLD_API_KEY", " ,example-key-1, example-key-2");
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "--url", url }));
+    try std.testing.expectEqualStrings("Hello there!\n", r.out.written());
+    try std.testing.expect(f.refusals() == 5 and f.count() == 2);
+    for (0..f.count()) |i| try std.testing.expectEqualStrings("Bearer example-key-1", f.header(i, "authorization").?);
+    try r.env.put("TENSORFOLD_API_KEY", "two words");
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "--url", url }));
+    try std.testing.expectEqualStrings("tensorfold chat: TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each\n", r.err.written());
+    try std.testing.expect(f.refusals() == 5 and f.count() == 2);
 }
 
 test "chat CLI: --no-thinking sends the documented switch, and is refused before any turn when the model has none" {
@@ -346,7 +387,8 @@ test "chat CLI: Ctrl-C at the prompt says how to end the chat and reads on" {
 fn standIn(r: *Run, port: ?u16, then: []const u8) !void {
     const script = try r.path("serve-stand-in");
     const serving = if (port) |p| try std.fmt.allocPrint(r.a, "printf '[tensorfold] serving example-checkpoint at http://127.0.0.1:%s/v1 (x)\\n' {d}\n", .{p}) else "";
-    const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\necho $$ > {s}\nprintf '%s\\n' \"$@\" > {s}\nprintf 'loading\\n'\n{s}{s}\n", .{ try r.path("pid"), try r.path("args"), serving, then });
+    const key = try std.fmt.allocPrint(r.a, "printf '%s' \"$TENSORFOLD_API_KEY\" > {s}\n", .{try r.path("key")});
+    const text = try std.fmt.allocPrint(r.a, "#!/bin/sh\necho $$ > {s}\nprintf '%s\\n' \"$@\" > {s}\n{s}printf 'loading\\n'\n{s}{s}\n", .{ try r.path("pid"), try r.path("args"), key, serving, then });
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = script, .data = text, .flags = .{ .permissions = .fromMode(0o755) } });
     try std.Io.Dir.cwd().createDirPath(std.testing.io, try r.path("example-checkpoint"));
     r.self_exe = script;
@@ -366,7 +408,7 @@ extern "c" fn getpgid(pid: std.posix.pid_t) std.posix.pid_t;
 
 const sh_models = "{\"data\": [{\"id\": \"example-checkpoint\"}]}";
 
-test "chat CLI: MODEL starts its own serve child in a process group of its own, chats through it and stops it" {
+test "chat CLI: MODEL starts its own serve child in a process group of its own, keyed, chats through it and stops it" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -374,10 +416,11 @@ test "chat CLI: MODEL starts its own serve child in a process group of its own, 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var r = try Run.init(a, &tmp);
+    try r.env.put("TENSORFOLD_API_KEY", "example-user-key");
     var gate: std.Io.Event = .unset;
     const held = try a.dupe(fake.Write, try streamed(a));
     held[0].after = &gate;
-    const f = try world(a, sh_models, try a.dupe([]const fake.Write, &.{held}));
+    const f = try worldKeyed(a, sh_models, try a.dupe([]const fake.Write, &.{held}), try r.path("key"));
     defer {
         gate.set(io);
         f.stop();
@@ -408,6 +451,17 @@ test "chat CLI: MODEL starts its own serve child in a process group of its own, 
     const args = try std.Io.Dir.cwd().readFileAlloc(io, try r.path("args"), a, .limited(4096));
     const want = try std.fmt.allocPrint(a, "serve\n{s}\n--host\n127.0.0.1\n--port\n0\n--name\nexample-checkpoint\n--parallel\n1\n", .{try r.path("example-checkpoint")});
     try std.testing.expectEqualStrings(want, args);
+    // the child's key came in its environment alone, fresh, never the user's, and the chat printed it nowhere
+    const key = try std.Io.Dir.cwd().readFileAlloc(io, try r.path("key"), a, .limited(256));
+    try std.testing.expect(key.len == 64 and !std.mem.eql(u8, key, "example-user-key"));
+    for ([_][]const u8{ r.out.written(), r.err.written(), args }) |text| try std.testing.expect(std.mem.indexOf(u8, text, key) == null);
+    const bearer = try std.mem.concat(a, u8, &.{ "Bearer ", key });
+    try std.testing.expect(f.refusals() == 0 and f.count() >= 4);
+    for (0..f.count()) |i| try std.testing.expectEqualStrings(bearer, f.header(i, "authorization").?);
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
+    defer client.deinit();
+    const anonymous = stream.fetch(a, io, &client, .{ .url = try f.url(a, "/v1/models"), .limit = 4096, .timeout_s = 5 });
+    try std.testing.expect(anonymous.failed == .none and anonymous.status == 401 and f.refusals() == 1);
 }
 
 test "chat CLI: its own server's startup failure shows the server's last line; refused flags and an uncached model start nothing" {

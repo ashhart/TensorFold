@@ -3,7 +3,7 @@ const std = @import("std");
 const e = @import("environment.zig");
 const t = std.testing;
 const a = t.allocator;
-const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true };
+const all: e.Flags = .{ .cuda = true, .metal = true, .xpu = true, .slide = true, .hooks = true, .dsv41 = true, .gemma4 = true, .drama3 = true, .glm = true, .flashnext = true, .nemotron = true, .minimax_m3 = true, .chat = true };
 const Env = struct {
     name: []const u8,
     raw: ?[]const u8,
@@ -154,6 +154,7 @@ const valid = [_]Case{
     .{ .name = "TF_DSV41_ENGRAM_DIR", .raw = "engram-rows", .n = 0 },
     .{ .name = "TF_DSV41_ENGRAM_VERIFY", .raw = "full", .n = 1 },
     .{ .name = "TF_DSV41_ENGRAM_CACHE", .raw = "0", .n = 0 },
+    .{ .name = "TENSORFOLD_API_KEY", .raw = " example-key-1, example-key-2\n", .n = 0 },
     .{ .name = "TF_NEMOTRON_RANK", .raw = "1", .n = 1 },
     .{ .name = "TF_NEMOTRON_WORLD", .raw = "2", .n = 2 },
     .{ .name = "TF_MINIMAX_RANK", .raw = "1", .n = 1 },

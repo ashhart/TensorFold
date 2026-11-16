@@ -30,7 +30,7 @@ can be sent again.
 
 | Flag | Meaning |
 | --- | --- |
-| `--url URL` | Chat with a server that is already running at this http(s) address, with or without `/v1`. MODEL then names the model to ask for; without it, the first `id` in `GET /v1/models` |
+| `--url URL` | Chat with a server that is already running at this http(s) address, with or without `/v1`. MODEL then names the model to ask for; without it, the first `id` in `GET /v1/models`. See [A running server's key](#a-running-servers-key) |
 | `--system TEXT` | The system prompt |
 | `--temperature T` | The request's `temperature`; 0 is greedy. Without it the server's default applies |
 | `--max-tokens N` | The request's `max_tokens`. Without it the server's default applies |
@@ -42,15 +42,28 @@ can be sent again.
 ## The started server
 
 The server listens on 127.0.0.1 at a free port, in a process group of its own so that a terminal's Ctrl-C reaches
-only the chat. It starts with the environment `tensorfold benchmark` gives its server: without `TENSORFOLD_API_KEY`,
+only the chat. It starts with the environment `tensorfold benchmark` gives its server: without
 `TENSORFOLD_REQUEST_LOG` or `TENSORFOLD_SEED_SALT`, with `HF_HUB_OFFLINE=1`, and with no live line or update check.
+It also gets a key of its own, so that it answers this chat and no other local user: 32 random bytes as hex, passed
+only in its environment as `TENSORFOLD_API_KEY`, never on its command line. A `TENSORFOLD_API_KEY` the chat itself
+was given is not passed on. The chat sends the key as `Authorization: Bearer` on every request to the server, the
+readiness probe's included, and never prints it or writes it to the server's log.
 Serve's own parser checks the flags after `--` before the server starts. `--host`, `--port`, `--api-key` and
-`--api-key-file` are refused there, because the chat chooses the address and sends no key; `--name` is kept.
+`--api-key-file` are refused there, because the chat chooses the address and the key; `--name` is kept.
 If the server exits while it loads, or before a later turn reaches it, the chat prints the server's last log lines
 and exits 1.
 
 Starting a server is not supported on Windows yet, and is refused by name: run `tensorfold serve`, then chat with
 `--url`. On Windows, Ctrl-C ends the chat.
+
+## A running server's key
+
+With `--url`, the chat sends the key in `TENSORFOLD_API_KEY` as `Authorization: Bearer` on every request, so it can
+chat with a server started with `--api-key`, `--api-key-file` or `TENSORFOLD_API_KEY`. When the variable lists
+several keys separated by commas, as serve reads it, the first is sent. With the variable unset or empty, no key is
+sent. A key with a space or a control character, or one over 256 bytes, is refused before any request.
+A 401 names the variable: `HTTP 401: A valid API key is required; set TENSORFOLD_API_KEY to a key the server
+accepts` when none was sent, or `...; the server refused the key in TENSORFOLD_API_KEY` when one was.
 
 ## Scripts
 

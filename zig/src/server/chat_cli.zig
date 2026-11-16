@@ -8,6 +8,7 @@ const turn = @import("chat_cli_turn.zig");
 const child = @import("chat_cli_child.zig");
 const stream = @import("benchmark_stream.zig");
 const stop = @import("benchmark_stop.zig");
+const environment = @import("sys").environment;
 const Allocator = std.mem.Allocator;
 const Sig = std.posix.SIG;
 
@@ -79,6 +80,8 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
         return 0;
     }
     if (windows and args.url == null) return fail(ctx, windows_child);
+    // a running server's key comes from TENSORFOLD_API_KEY; the server the chat starts gets a fresh one of its own
+    const key = if (args.url == null) null else envKey(ctx.environ) catch return fail(ctx, bad_key);
     if (comptime !windows) if (ctx.signals) signals.install();
     defer if (comptime !windows) if (ctx.signals) signals.restore();
     // a piped message is read before any server starts, so an empty one costs no model load
@@ -87,8 +90,29 @@ pub fn command(ctx: *const Context, argv: []const []const u8) !u8 {
         .text => |text| message = text,
         .code => |code| return code,
     };
-    if (args.url) |url| return session(ctx, args, url, args.model, null, message);
+    if (args.url) |url| return session(ctx, args, .{ .base = url, .model = args.model, .key = key, .denied = denied(key != null) }, message);
     if (comptime windows) return fail(ctx, windows_child) else return served(ctx, args, message);
+}
+
+const bad_key = "TENSORFOLD_API_KEY: expected keys without spaces or control characters, at most 256 bytes each";
+
+/// The key ``--url`` sends: TENSORFOLD_API_KEY's first, as serve splits the variable; null when it names none.
+fn envKey(environ: *const std.process.Environ.Map) error{Refused}!?[]const u8 {
+    const text = (environment.path("TENSORFOLD_API_KEY", environ.get("TENSORFOLD_API_KEY")) catch return error.Refused) orelse return null;
+    var keys = std.mem.splitScalar(u8, text, ',');
+    while (keys.next()) |raw| {
+        const key = std.mem.trim(u8, raw, " \t\r\n\x0b\x0c");
+        if (key.len == 0) continue;
+        if (key.len > 256) return error.Refused;
+        for (key) |ch| if (ch < 0x21 or ch == 0x7f) return error.Refused;
+        return key;
+    }
+    return null;
+}
+
+/// What a running server's 401 adds: whether TENSORFOLD_API_KEY gave the key it refused.
+fn denied(sent: bool) []const u8 {
+    return if (sent) "the server refused the key in TENSORFOLD_API_KEY" else "set TENSORFOLD_API_KEY to a key the server accepts";
 }
 
 /// The chat with the server it starts: loaded, then the session, then stopped whatever the session's end.
@@ -105,7 +129,7 @@ fn served(ctx: *const Context, args: args_mod.Args, message: ?[]const u8) !u8 {
         return code;
     };
     errdefer _ = own.managed.stop();
-    const code = try session(ctx, args, own.managed.base(), own.served, &own, message);
+    const code = try session(ctx, args, .{ .base = own.managed.base(), .model = own.served, .key = own.key, .own = &own }, message);
     if (own.managed.stop()) |why| {
         const failed = try fail(ctx, why);
         return if (code == 0) failed else code;
@@ -121,19 +145,22 @@ fn lastLines(ctx: *const Context, tail: []const []const u8) !void {
     try ctx.err.flush();
 }
 
+/// The server a session talks to: its address, the model to ask for, its key, and what its 401 adds.
+const Target = struct { base: []const u8, model: ?[]const u8, key: ?[]const u8 = null, denied: ?[]const u8 = null, own: ?*Child = null };
+
 const Session = struct {
     ctx: *const Context,
     /// The chat route.
     url: []const u8,
+    target: Target,
     settings: turn.Settings,
     show: turn.Show,
     history: history.History,
-    own: ?*Child,
 
     /// One message and its streamed reply, in an arena of its own that lives until the turn is kept.
     fn ask(s: *Session, a: Allocator, message: []const u8) !turn.Ended {
         const request = try turn.body(a, s.settings, &s.history, message);
-        return turn.run(a, s.ctx.io, s.url, request, s.ctx.out, s.show);
+        return turn.run(a, s.ctx.io, s.url, s.target.key, request, s.ctx.out, s.show);
     }
 
     /// A finished reply's notes: cut at its token limit, or nothing but reasoning that was hidden.
@@ -143,9 +170,10 @@ const Session = struct {
     }
 
     /// A failed turn said; a conversation goes on (null) unless the server it started has exited.
-    fn failed(s: *Session, reason: []const u8, connect: bool) !?u8 {
-        _ = try fail(s.ctx, reason);
-        if (comptime !windows) if (connect) if (s.own) |own| if (try own.managed.exitedTail(s.ctx.a)) |tail| {
+    fn failed(s: *Session, f: turn.Failure) !?u8 {
+        const hint = if (f.status == 401) s.target.denied else null;
+        _ = try fail(s.ctx, if (hint) |h| try std.fmt.allocPrint(s.ctx.a, "{s}; {s}", .{ f.reason, h }) else f.reason);
+        if (comptime !windows) if (f.connect) if (s.target.own) |own| if (try own.managed.exitedTail(s.ctx.a)) |tail| {
             try s.ctx.err.writeAll("The model server has exited.\n");
             try lastLines(s.ctx, tail);
             return 1;
@@ -169,17 +197,17 @@ const Session = struct {
                 stop.reset();
                 if (content.len > 0) try s.history.keep(text, content);
             },
-            .failed => |f| return s.failed(f.reason, f.connect),
+            .failed => |f| return s.failed(f),
         }
         return null;
     }
 };
 
 /// Finds the model and its thinking switch, then holds one exchange (a piped message) or a conversation.
-fn session(ctx: *const Context, args: args_mod.Args, base: []const u8, wanted: ?[]const u8, own: ?*Child, message: ?[]const u8) !u8 {
+fn session(ctx: *const Context, args: args_mod.Args, target: Target, message: ?[]const u8) !u8 {
     var problem: []const u8 = "";
-    const url = try stream.endpoint(ctx.a, base, true, &problem) orelse return fail(ctx, problem);
-    const found = try discover(ctx, url, wanted);
+    const url = try stream.endpoint(ctx.a, target.base, true, &problem) orelse return fail(ctx, problem);
+    const found = try discover(ctx, url, target);
     if (found.stopped) |sig| return stop.exitCode(sig);
     const model = found.model orelse return fail(ctx, found.problem);
     if (args.no_thinking and found.thinking_switch == false)
@@ -187,10 +215,10 @@ fn session(ctx: *const Context, args: args_mod.Args, base: []const u8, wanted: ?
     var s: Session = .{
         .ctx = ctx,
         .url = url,
+        .target = target,
         .settings = .{ .model = model, .temperature = args.temperature, .max_tokens = args.max_tokens, .no_thinking = args.no_thinking },
         .show = .{ .thinking = args.show_thinking, .terminal = ctx.terminal },
         .history = .{ .a = ctx.a },
-        .own = own,
     };
     if (args.system) |text| try s.history.setSystem(text);
     if (message) |text| {
@@ -202,7 +230,7 @@ fn session(ctx: *const Context, args: args_mod.Args, base: []const u8, wanted: ?
                 break :blk 0;
             },
             .stopped => stop.exitCode(stop.requested() orelse .INT),
-            .failed => |f| (try s.failed(f.reason, f.connect)) orelse 1,
+            .failed => |f| (try s.failed(f)) orelse 1,
         };
     }
     return converse(&s);
@@ -257,18 +285,20 @@ fn converse(s: *Session) !u8 {
 const Found = struct { model: ?[]const u8 = null, thinking_switch: ?bool = null, problem: []const u8 = "", stopped: ?Sig = null };
 
 /// One bounded look at ``/v1/models``: its first model when none was named, and whether thinking can be turned off.
-fn discover(ctx: *const Context, chat_url: []const u8, wanted: ?[]const u8) !Found {
+fn discover(ctx: *const Context, chat_url: []const u8, target: Target) !Found {
     var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = ctx.io };
     defer client.deinit();
     const url = try std.mem.concat(ctx.a, u8, &.{ chat_url[0 .. chat_url.len - "/chat/completions".len], "/models" });
-    const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent });
+    const got = stream.fetch(ctx.a, ctx.io, &client, .{ .url = url, .limit = 4 << 20, .timeout_s = 10, .agent = turn.user_agent, .token = target.key });
     if (got.failed == .stopped) return .{ .stopped = stop.requested() orelse .INT };
     var doc: ?json.Value = null;
     if (got.failed == .none and got.status == 200) switch (try json.parse(ctx.a, got.body)) {
         .ok => |v| doc = v,
         .err => {},
     };
-    const name = wanted orelse first(doc) orelse {
+    const name = target.model orelse first(doc) orelse {
+        if (got.failed == .none and got.status == 401) if (target.denied) |hint|
+            return .{ .problem = try std.fmt.allocPrint(ctx.a, "no model to chat with: {s} answered HTTP 401; {s}", .{ url, hint }) };
         const why = switch (got.failed) {
             .none => if (got.status != 200) try std.fmt.allocPrint(ctx.a, "answered HTTP {d}", .{got.status}) else "listed no models",
             .network => "could not connect",
