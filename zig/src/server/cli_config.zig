@@ -24,32 +24,37 @@ pub const Expanded = struct {
 };
 
 /// ``--config`` on the command line: its file, its place (`width` tokens from `at`) and whether a model is named.
-pub const Found = struct { path: []const u8, at: usize, width: usize, model: bool };
+pub const Found = struct { path: []const u8, at: usize, width: usize, model: bool, flag: []const u8 = "--config" };
 
 /// ``serve``'s arguments with ``--config FILE.toml`` replaced by the file's flags, ahead of the command line's.
 pub fn expand(a: Allocator, argv: []const []const u8, u: *cli.Usage) Error!Expanded {
     const found = try locate(a, argv, u) orelse return .{ .argv = argv };
-    const path = found.path;
+    const file = try read(a, found.path, found.flag, u);
+    const out = try merge(a, argv, found, file.text, u);
+    if (out.secret != 0 and file.mode & 0o044 != 0)
+        return cli.fail(u, a, "argument --config: {s} line {d}: api-key is set in a file other users can read (mode 0{o}); use chmod 600, or api-key-file", .{ found.path, out.secret, file.mode & 0o7777 });
+    return out;
+}
+
+/// A settings file's text and mode: opened once without following a link, a regular file others cannot write.
+pub fn read(a: Allocator, path: []const u8, flag: []const u8, u: *cli.Usage) Error!struct { text: []const u8, mode: u32 } {
     // opened once: the handle that is checked is the one that is read, and a link is not followed
     const fd = auth.openKeys(try a.dupeSentinel(u8, path, 0)) catch |e|
-        return cli.fail(u, a, "argument --config: cannot open {s} ({s}); name an existing file, not a link", .{ path, @errorName(e) });
+        return cli.fail(u, a, "argument {s}: cannot open {s} ({s}); name an existing file, not a link", .{ flag, path, @errorName(e) });
     defer _ = platform.c.close(fd);
-    const st = file_meta(fd, null) orelse return cli.fail(u, a, "argument --config: cannot read the mode of {s}", .{path});
-    if (st.mode & platform.c.S.IFMT != platform.c.S.IFREG) return cli.fail(u, a, "argument --config: {s} is not a regular file", .{path});
+    const st = file_meta(fd, null) orelse return cli.fail(u, a, "argument {s}: cannot read the mode of {s}", .{ flag, path });
+    if (st.mode & platform.c.S.IFMT != platform.c.S.IFREG) return cli.fail(u, a, "argument {s}: {s} is not a regular file", .{ flag, path });
     if (st.mode & 0o022 != 0)
-        return cli.fail(u, a, "argument --config: {s} can be written by other users (mode 0{o}): it chooses what is served; use chmod go-w", .{ path, st.mode & 0o7777 });
+        return cli.fail(u, a, "argument {s}: {s} can be written by other users (mode 0{o}): it chooses what is served; use chmod go-w", .{ flag, path, st.mode & 0o7777 });
     const text = try a.alloc(u8, limit + 1);
     var got: usize = 0;
     while (got < text.len) {
-        const n = auth.readKeys(fd, text[got..]) catch |e| return cli.fail(u, a, "argument --config: cannot read {s} ({s})", .{ path, @errorName(e) });
+        const n = auth.readKeys(fd, text[got..]) catch |e| return cli.fail(u, a, "argument {s}: cannot read {s} ({s})", .{ flag, path, @errorName(e) });
         if (n == 0) break;
         got += n;
     }
-    if (got > limit) return cli.fail(u, a, "argument --config: {s} is over 1 MiB", .{path});
-    const out = try merge(a, argv, found, text[0..got], u);
-    if (out.secret != 0 and st.mode & 0o044 != 0)
-        return cli.fail(u, a, "argument --config: {s} line {d}: api-key is set in a file other users can read (mode 0{o}); use chmod 600, or api-key-file", .{ path, out.secret, st.mode & 0o7777 });
-    return out;
+    if (got > limit) return cli.fail(u, a, "argument {s}: {s} is over 1 MiB", .{ flag, path });
+    return .{ .text = text[0..got], .mode = st.mode };
 }
 
 /// One argument of ``serve`` as ``cli.parse`` consumes it: a positional (no name), or a flag with its value.
@@ -115,8 +120,13 @@ pub fn merge(a: Allocator, argv: []const []const u8, found: Found, text: []const
     var problem: toml.Problem = .{};
     const entries = toml.parse(a, text, &problem) catch |e| switch (e) {
         error.OutOfMemory => |x| return x,
-        error.Invalid => return cli.fail(u, a, "argument --config: {s} line {d}: {s}", .{ found.path, problem.line, problem.message }),
+        error.Invalid => return cli.fail(u, a, "argument {s}: {s} line {d}: {s}", .{ found.flag, found.path, problem.line, problem.message }),
     };
+    return mergeEntries(a, argv, found, entries, u);
+}
+
+/// ``merge`` of entries already read: each key's flag, checked as it is on the command line, ahead of ``argv``.
+pub fn mergeEntries(a: Allocator, argv: []const []const u8, found: Found, entries: []const toml.Entry, u: *cli.Usage) Error!Expanded {
     var out: std.ArrayList([]const u8) = .empty;
     var seen: std.ArrayList([]const u8) = .empty;
     var model: ?[]const u8 = null;
@@ -125,7 +135,7 @@ pub fn merge(a: Allocator, argv: []const []const u8, found: Found, text: []const
     for (entries) |entry| {
         var scratch: cli.Args = .{}; // one entry's values, read as parse reads them, so its checks see the whole list
         var repeated: cli.Repeated = .{};
-        const at: Where = .{ .a = a, .u = u, .path = found.path, .line = entry.line, .scratch = &scratch, .repeated = &repeated };
+        const at: Where = .{ .a = a, .u = u, .flag = found.flag, .path = found.path, .line = entry.line, .scratch = &scratch, .repeated = &repeated };
         const key = try a.dupe(u8, entry.key);
         std.mem.replaceScalar(u8, key, '_', '-');
         if (std.mem.eql(u8, key, "model")) {
@@ -179,13 +189,14 @@ pub fn note(a: Allocator, e: Expanded) error{OutOfMemory}!?[]const u8 {
 const Where = struct {
     a: Allocator,
     u: *cli.Usage,
+    flag: []const u8,
     path: []const u8,
     line: u32,
     scratch: *cli.Args,
     repeated: *cli.Repeated,
 
     fn fail(w: Where, comptime fmt: []const u8, args: anytype) Error {
-        return cli.fail(w.u, w.a, "argument --config: {s} line {d}: " ++ fmt, .{ w.path, w.line } ++ args);
+        return cli.fail(w.u, w.a, "argument {s}: {s} line {d}: " ++ fmt, .{ w.flag, w.path, w.line } ++ args);
     }
 
     /// The flag's own check of this value, as on the command line, so its refusal names the file's line.

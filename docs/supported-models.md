@@ -93,6 +93,7 @@ It sends the token only to the hub's own host (`huggingface.co`, or the host of 
 When the hub refuses a repo, `pull` names it and says whether a token is missing or the token lacks access; without a token, Hugging Face refuses a mistyped repo name the same way.
 `models --json` prints one document for programs: `schema` 1 and `models`, each cached checkpoint's `repo`, `family` and `model_type` (`family` is a display title and `model_type` is the key to match on), plus `machine` and `catalog`, each entry's `need_bytes`, `fit`, `tok_s` (null when unmeasured), `quality` (passed, items, share, suite digest and receipt; null when unrated), `on_disk` and `install`.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
+`tensorfold serve --router` serves every cached checkpoint, or the models a `--router-config` file lists, at one address, each loaded when a request's `model` field names it; see [several models at one address](docs/router.md).
 `rm REPO` removes a cached checkpoint with all its snapshots, blobs and refs, and then the repo's folder.
 `rm REPO@REVISION` removes one snapshot, named by a ref such as `main` or by its commit, and the refs that name it. Blobs another snapshot still links to stay.
 Before deleting, it lists each snapshot and the bytes freed, counting a blob two snapshots share once, and asks.

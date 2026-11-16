@@ -232,6 +232,44 @@ test "only a child given a key gets TENSORFOLD_API_KEY and probes with it; the b
     for (probes..f.count()) |i| try std.testing.expectEqualStrings("Bearer child-key", f.header(i, "authorization").?);
 }
 
+test "a router's child: its own environment and key, no Ctrl-C guard, a stop that ends the wait, each failure named" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var s = try Setup.init(a, &tmp);
+    try s.env.put("TENSORFOLD_SEED_SALT", "parent-salt");
+    var own: std.process.Environ.Map = .init(a);
+    try own.put("PATH", "/usr/bin:/bin");
+    try own.put("TENSORFOLD_SEED_SALT", "router-salt");
+    const routes = try healthy(a, "{\"status\": \"ok\"}", "alpha");
+    const f = try fake.Fake.start(std.testing.allocator, &routes);
+    defer f.stop();
+    const seen = try std.fs.path.join(a, &.{ s.dir, "env" });
+    const ready = try std.fmt.allocPrint(a, "printf '%s %s' \"$TENSORFOLD_SEED_SALT\" \"$TENSORFOLD_API_KEY\" > {s}; printf '[tensorfold] serving alpha at http://127.0.0.1:%s/v1 (x)\\n' {d}; exec sleep 30", .{ seen, f.port });
+    var failure: server.Failure = .timeout;
+    var problem: []const u8 = "";
+    const guarded = stop.guardedChild();
+    const o: server.Options = .{ .startup_timeout_s = 10, .grace_ms = 2_000, .bench_dir = s.dir, .served = "alpha", .lock = false, .own_group = true, .key = "child-key", .environ = &own, .guard = false, .failure = &failure };
+    var m = (try server.Managed.spawn(a, std.testing.io, &s.env, try a.dupe([]const u8, &.{ "/bin/sh", "-c", ready }), o, &problem)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(failure == .none and stop.guardedChild() == guarded);
+    try std.testing.expect(m.stop() == null and gone(m.pid));
+    try std.testing.expectEqualStrings("router-salt child-key", try std.Io.Dir.cwd().readFileAlloc(std.testing.io, seen, a, .limited(256)));
+    var halt: std.atomic.Value(bool) = .init(true);
+    var early = o;
+    early.stop = &halt;
+    early.startup_timeout_s = 30;
+    try none(try server.Managed.spawn(a, std.testing.io, &s.env, try a.dupe([]const u8, &.{ "/bin/sh", "-c", "exec sleep 30" }), early, &problem));
+    try std.testing.expect(failure == .stopped and problem.len == 0);
+    try none(try server.Managed.spawn(a, std.testing.io, &s.env, try a.dupe([]const u8, &.{ "/bin/sh", "-c", "exit 3" }), o, &problem));
+    try std.testing.expect(failure == .exited);
+    var late = o;
+    late.startup_timeout_s = 0.3;
+    try none(try server.Managed.spawn(a, std.testing.io, &s.env, try a.dupe([]const u8, &.{ "/bin/sh", "-c", "exec sleep 30" }), late, &problem));
+    try std.testing.expect(failure == .timeout);
+}
+
 test "the startup timeout grows with the weights past 20 GB, 6 s per GB from 600 s, to 3600 s" {
     try std.testing.expectEqual(@as(f64, 600), server.startupTimeout(0));
     try std.testing.expectEqual(@as(f64, 600), server.startupTimeout(20_000_000_000));
