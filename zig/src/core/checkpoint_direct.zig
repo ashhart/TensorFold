@@ -79,6 +79,15 @@ pub const Layers = struct {
         l.ahead = true;
     }
 
+    /// The tensors `get` returns from the mapping again (a layer too large to read whole), after any read under way.
+    pub fn mapped(l: *Layers) void {
+        const ck = l.ck orelse return;
+        l.pair.wait() catch {};
+        l.ahead = false;
+        ck.copies = null;
+        l.current = null;
+    }
+
     /// `enter` on `fmt`'s prefix for layer `i`, with layer `next`'s read begun (none on the last).
     pub fn layerAt(l: *Layers, comptime fmt: []const u8, i: usize, next: ?usize) !void {
         if (l.ck == null) return;
@@ -266,6 +275,36 @@ test "layerAt names a layer and the next; repoint moves a map-first loader's vie
         try std.testing.expectEqual(got.bytes.ptr, m.a.bytes.ptr);
         try std.testing.expectEqual((try ck.get("head")).bytes.ptr, m.maybe.?.bytes.ptr);
     }
+}
+
+test "mapped puts a layer back on the mapping between read layers, the next one read again" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const names = [_][]const u8{ "layers.0.a", "layers.1.a", "layers.2.a" };
+    const image = try testImage(gpa, &names, 2 * 4096 + 9);
+    defer gpa.free(image);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    var mapped: [3][]const u8 = undefined;
+    for (names, &mapped) |n, *m| m.* = (try ck.get(n)).bytes;
+    var l = Layers.init(gpa, &ck, 2);
+    defer l.deinit();
+    if (!l.on()) return error.SkipZigTest;
+    // layer 0 read with layer 1's read ahead begun, then layer 1 kept on the mapping, then layer 2 read
+    try l.enter("layers.0.", "layers.1.");
+    try std.testing.expect((try ck.get("layers.0.a")).bytes.ptr != mapped[0].ptr);
+    l.mapped();
+    try std.testing.expectEqual(mapped[1].ptr, (try ck.get("layers.1.a")).bytes.ptr);
+    try l.enter("layers.2.", null);
+    const two = try ck.get("layers.2.a");
+    try std.testing.expect(two.bytes.ptr != mapped[2].ptr);
+    try std.testing.expectEqualSlices(u8, mapped[2], two.bytes);
+    l.mapped();
+    try std.testing.expectEqual(mapped[2].ptr, (try ck.get("layers.2.a")).bytes.ptr);
 }
 
 test "a shard shortened after open stops the layer it cuts with EndOfFile, the layer before it read" {
