@@ -39,8 +39,36 @@ neutral form loses nothing, and the importer packs it with scalar mirrors of eac
 exactly what the Metal engine itself applies to a bf16 row: the fp4 pool (served lane), RoPE dims of a window row to fp8
 (served lane), index keys to fp4 (both).
 
+## Shards
+
+* **Replicated KV**: one producer, `tp_size 1`, the rank-0 view.
+* **KV_SPLIT**: logical page `pg` lives on rank `pg % world`. Each rank exports a shard (`tp_rank`, `tp_size = world`):
+  shard 0 carries `swa`, `carry`, `ring` and its pages, the others only their `comp`/`ixk` pages. The decoder pulls every
+  shard into one import.
+* The CUDA snapshot must hold the rings of every layer; a state without one is an error (`MissingRing`), never zeros.
+
+## What a reader does
+
+* **Protocol 1 reader**: refuses the manifest and every header as foreign (`BadManifest` / `Protocol`); it never lands a
+  byte. Nothing falls back to a wrong layout.
+* **Protocol 2 reader** (`fabric.decoder.pull` with `protocol = 2`): receives each part as a recurrent-layer part
+  (`rows = 1`, `row_start` = part index). `p2.ShardSink` maps it to `Import.put`, which accepts exactly the parts of the
+  plan its shape implies (name, dtype, shape, byte length; duplicates and unknown parts refused; every row finite).
+  `Import.complete()` fails (`Incomplete`) until every part has landed.
+* The decoder builds the shape itself: `upto` from the prompt it pulls, `shards` from its link set, the drafter rows
+  `min(upto, 128)` or 0. `p2.check` compares a manifest with that plan exactly.
+
+## Assumptions that the library cannot prove
+
+* The Metal engines compute the same normed, roped, compressed row as CUDA for the same tokens, to bf16 noise. The
+  library converts layouts; it does not make two engines agree. A first comparison run measures it.
+* The drafter ring of a position is `p % 128`-indexed on both sides. A wrong drafter ring only lowers draft acceptance.
+* A ratio-2 carry is the projection of position `upto-1`; only the odd-`upto` case occupies a slot on Metal (the other is
+  reset: kv 0, score `-inf`).
+
 ## Tests
 
-`zig build test-dsv41-handoff` (host only): the CUDA record codec exhaustively against independent tables, the FP4 packers
-against independent f64 references and the part plan's partitions. `compile-dsv41-handoff-aarch64-linux` / `-macos` compile the
-tests for the targets.
+`zig build test-dsv41-handoff` (host only): codec exhaustively against independent tables, packers against independent
+f64 references, plan partitions, export-to-import round trips for both Metal layouts (replicated, split 2 and 3 shards,
+short, odd and even `upto`), protocol 2 end to end over the fake link, and layout guards that fail when an engine's
+constants change. `compile-dsv41-handoff-aarch64-linux` / `-macos` compile the tests for the targets.
