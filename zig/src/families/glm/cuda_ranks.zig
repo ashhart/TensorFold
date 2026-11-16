@@ -15,7 +15,7 @@ pub const Settings = struct {
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
-    kda_pad: ?bool = null, // TF_GLM_KDA_PAD: 1 or 0 (the fused KDA input padded to eight columns at load); unset: kdaPadded
+    kda_pad: ?bool = null, // TF_GLM_KDA_PAD: 1 or 0 (the fused KDA input padded to eight columns at load); unset: off
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole); unset, 8 under solo on the wire.
     solo: bool = false, // TF_GLM_CHUNK_SOLO: 4096 (prompt buffers for two chunks a pass, while no stream decodes) or 2048
     pair: bool = true, // TF_GLM_PROMPT_PAIR: 1 (while no stream decodes, a prompt step takes two chunks, each one's exchanges under the other's sites) or 0
@@ -194,9 +194,12 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
     return @import("profile").lookup(name);
 }
 
-/// The KDA input pad: TF_GLM_KDA_PAD, else on glm_mm where some rank's head count (its row width) is not 8-aligned.
+/// Whether an unset TF_GLM_KDA_PAD pads where some rank's row is not 8-aligned: off, as replies change there (#3516).
+const pad_uneven_unset = false;
+
+/// The KDA input pad: TF_GLM_KDA_PAD; unset, `pad_uneven_unset` on glm_mm where a rank's head count is not 8-aligned.
 pub fn kdaPadded(s: Settings, uneven: bool) bool {
-    return s.kda_pad orelse (s.tiled and uneven);
+    return s.kda_pad orelse (pad_uneven_unset and s.tiled and uneven);
 }
 
 /// Whether the group brings up its own RoCE path: not where TF_GLM_ROCE_MULTI=1 lends fabric/tp's wire (3+ ranks).
@@ -221,7 +224,7 @@ pub const Fingerprint = extern struct {
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
     kda_wide: u32,
-    kda_pad: u32 = 0, // TF_GLM_KDA_PAD: 0 unset (kdaPadded's rule), 1 on, 2 off: every rank's input rows one width
+    kda_pad: u32 = 0, // TF_GLM_KDA_PAD: 0 unset (off, by kdaPadded), 1 on, 2 off: every rank's input rows one width
     kv_live_half: u32 = 0, // TF_GLM_KV_LIVE_HALF: every rank keeps the live KDA half alone (1) or the head whole (0)
     pieces: u32,
     pair: u32, // TF_GLM_PROMPT_PAIR: rank 0's paired steps need the second chunk's buffers on every rank

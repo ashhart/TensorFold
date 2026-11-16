@@ -241,12 +241,13 @@ test "TF_GLM_KDA_PAD: unset by default, 1 or 0, refused otherwise and without gl
     try std.testing.expectEqual(@as(?Mismatch, .{ .field = .kda_pad, .rank = 1 }), mismatch(&all));
 }
 
-test "the KDA input pads by default on glm_mm where a rank's heads are not 8-aligned (TP=3's 22/21/21), else as set" {
+test "the KDA input stays unpadded while TF_GLM_KDA_PAD is unset, uneven worlds too (TP=3's 22/21/21), else as set" {
     const c = @import("config.zig").Config{};
     for ([_]usize{ 1, 2, 3, 4, 5, 8 }) |world| {
         var uneven = false;
         for (0..world) |q| uneven = uneven or (try @import("cuda_shard.zig").Share.of(&c, q, world)).kda.len() % 8 != 0;
-        try std.testing.expectEqual(world == 3 or world == 5, ranks.kdaPadded(.{}, uneven));
+        try std.testing.expectEqual(world == 3 or world == 5, uneven);
+        try std.testing.expect(!ranks.kdaPadded(.{}, uneven));
         try std.testing.expect(!ranks.kdaPadded(.{ .kda_pad = false }, uneven));
         try std.testing.expect(ranks.kdaPadded(.{ .kda_pad = true }, uneven));
         try std.testing.expect(!ranks.kdaPadded(.{ .tiled = false }, uneven));

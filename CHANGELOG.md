@@ -6,7 +6,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Server: temporaries a crash left beside notes and the `--slide-graph` file are cleared when the server opens their folders, only the server's own and only when their process is gone (#3132).
 
-- GLM-5.3-Flash on CUDA: where some rank's KDA input row is not 8-aligned (TP=3, 5, 6 and 7), the KDA input stack is padded by default (`TF_GLM_KDA_PAD` unset), so it tiles and, with `TF_GLM_DENSE_BITS=8`, packs. On three GB10s with dense and head bits at 8, decode is about 13% faster, and cold prompts' first tokens come 8 to 9% sooner at bf16; replies change at the reduction-order floor. `TF_GLM_KDA_PAD=0` keeps the unpadded stack; aligned worlds are unchanged (#3516).
+- GLM-5.3-Flash on CUDA: `TF_GLM_KDA_PAD` tells unset from 0, and the rank fingerprint carries all three, so every rank must set it alike. Unset still serves unpadded and replies are unchanged. Where some rank's KDA input row is not 8-aligned (TP=3, 5, 6 and 7), `TF_GLM_KDA_PAD=1` pads the stack so it tiles and, with `TF_GLM_DENSE_BITS=8`, packs; whether unset should pad there waits on #3516's ruling (#3516).
 
 - LFM2.5-24B-A2B on CUDA: the five prompt-stream writes whose state a prompt-cache keep copies (a slot clear, a prompt chunk, a one-row step, a verify round and a commit) take their stream from one helper that first waits for the keeps' copies, and a host test fails if a write skips it. Replies are unchanged (#2989, after #1503). Thanks to @jschmied.
 
