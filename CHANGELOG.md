@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- Docs: an operator guide for DeepSeek-V4.1 prefill on a GB10 pair with decode on a Mac (#3600).
+
 - DeepSeek V4.1 remote prefill: a pulled hand-off's drafter rings land in the slot when it holds them, and `TF_DSV41_HANDOFF_CHECK=synth` writes a synthetic hand-off for timing (#3599).
 
 - DeepSeek V4.1 remote prefill: `--mcdma-link` takes a comma list of up to eight links and pulls a split hand-off's shards in parallel (#3598).
