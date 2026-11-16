@@ -1,4 +1,5 @@
 import type { Project, Provider, Room, RoomEventItem, RoomManualMemoryCommand, RoomMemoryEntry, Seat, Ticket, TicketExecutionRecord, TicketRemoteLifecycleCommand, TimelineItem } from '../../agent/types'
+import { isReasoningEffortSetting } from '../../../shared/reasoning-effort'
 
 const ROOM_CONFIG_KEYS = new Set<keyof Room>([
   'seats',
@@ -106,7 +107,7 @@ function assertStringList(value: unknown, field: string, maxItems = 64, maxLengt
 function validateSeats(value: unknown): void {
   if (!Array.isArray(value) || value.length > 16) throw new Error('seats must be an array with at most 16 entries.')
   const ids = new Set<string>()
-  const allowed = new Set(['id', 'name', 'role', 'providerId', 'providerAccountId', 'model', 'lane', 'roleProfileId', 'fanOutBudget'])
+  const allowed = new Set(['id', 'name', 'role', 'providerId', 'providerAccountId', 'model', 'reasoningEffort', 'lane', 'roleProfileId', 'fanOutBudget'])
   for (const [index, candidate] of value.entries()) {
     const field = `seats[${index}]`
     assertPlainRecord(candidate, field)
@@ -116,6 +117,9 @@ function validateSeats(value: unknown): void {
     assertBoundedString(candidate.role, `${field}.role`, 2_000)
     assertBoundedString(candidate.providerId, `${field}.providerId`, 256)
     assertBoundedString(candidate.model, `${field}.model`, 512)
+    if (candidate.reasoningEffort !== undefined && !isReasoningEffortSetting(candidate.reasoningEffort)) {
+      throw new Error(`${field}.reasoningEffort has an invalid value.`)
+    }
     if (candidate.providerAccountId !== undefined && candidate.providerAccountId !== null) assertBoundedString(candidate.providerAccountId, `${field}.providerAccountId`, 256)
     if (candidate.lane !== undefined) assertEnum(candidate.lane, SEAT_LANES, `${field}.lane`)
     if (candidate.roleProfileId !== undefined) assertEnum(candidate.roleProfileId, ROLE_PROFILES, `${field}.roleProfileId`)

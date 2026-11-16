@@ -5,15 +5,19 @@
 // localOnly guard and the memory_write renderer notification.
 import assert from 'node:assert/strict'
 import os from 'node:os'
+import { randomUUID } from 'node:crypto'
+import { createSubAgentFromLaunch, parentForRoomSeat, startSubAgent } from '../../agent/subagents'
 import { createWorkspaceRuntimeIpc } from './workspace-runtime-ipc'
 
 interface HarnessOpts {
   startTicketWork: (input: any) => Promise<any>
   localOnly?: boolean
+  beforeWorkspace?: () => void
 }
 
 function buildHarness(opts: HarnessOpts) {
   const store: any = {
+    subAgents: [],
     projects: [{ id: 'p1', name: 'P', cwd: os.tmpdir(), workspace: null, localOnly: opts.localOnly === true, archivedAt: null }],
     rooms: [{
       id: 'room-1', projectId: 'p1', name: 'Room', problem: '', state: 'idle', archivedAt: null,
@@ -35,6 +39,7 @@ function buildHarness(opts: HarnessOpts) {
   }
 
   const emittedTickets: any[] = []
+  const delegated: any[] = []
   const remote: any[] = []
   let persistTicketsCalls = 0
   let runDeps: any = null
@@ -48,7 +53,12 @@ function buildHarness(opts: HarnessOpts) {
     auditPreview: (s: string) => s,
     roomAborters: new Map(),
     workspaceMutationGuard: { reserveStart: () => ({ addWorkspaceKeys: () => {}, release: () => {} }) },
-    ensureRoomWorktree: async () => os.tmpdir(),
+    ensureRoomWorktree: async () => { opts.beforeWorkspace?.(); return os.tmpdir() },
+    randomUUID, createSubAgentFromLaunch, parentForRoomSeat, startSubAgent,
+    runReadOnlySubAgent: async (agent: any, provider: any, model: string, input: any) => {
+      delegated.push({ provider: provider.id, model, ...input })
+      return { agent, output: 'Synthetic delegated result' }
+    },
     persistRooms: () => {},
     persistTickets: () => { persistTicketsCalls++ },
     emitRoom: () => {},
@@ -89,7 +99,8 @@ function buildHarness(opts: HarnessOpts) {
   })
   const api = createWorkspaceRuntimeIpc(ctx as any)
   return {
-    api, store, emittedTickets, remote,
+    api, store, emittedTickets, remote, delegated,
+    get runDeps() { return runDeps },
     get persistTicketsCalls() { return persistTicketsCalls },
     // Start the room (which captures the live room tools), then settle the run.
     run: async () => {
@@ -180,6 +191,25 @@ async function main() {
     console.log('ok - memory_write notifies the renderer on change and rejects oversize content')
   }
 
+  {
+    const h = buildHarness({ startTicketWork: async () => ({ id: 'unused' }), beforeWorkspace: () => {
+      h.store.settings.reasoningEffort = 'medium'
+      for (const seat of h.store.rooms[0].seats) seat.reasoningEffort = 'medium'
+    } })
+    h.store.settings.reasoningEffort = 'xhigh'
+    h.store.rooms[0].seats[0].reasoningEffort = 'low'
+    h.store.rooms[0].seats.push({ id: 'reviewer', name: 'Reviewer', role: 'Review', providerId: 'p-local', model: 'm1', reasoningEffort: 'high' },
+      { id: 'legacy', name: 'Legacy', role: 'Review', providerId: 'p-local', model: 'm1' })
+    await h.run()
+    assert.deepEqual(h.store.rooms[0].seats.map((seat: any) => h.runDeps.reasoningEffortForSeat(seat)), ['low', 'high', 'xhigh'],
+      'the actual host passes the same captured values into the Room turn engine')
+    await h.tool('delegate', { task: 'Review synthetic input' }, 'Builder')
+    await h.tool('delegate', { task: 'Review synthetic input', targetSeat: 'Reviewer' }, 'Builder')
+    await h.tool('delegate', { task: 'Review synthetic input', targetSeat: 'Legacy' }, 'Builder')
+    assert.deepEqual(h.delegated.map(call => call.reasoningEffort), ['low', 'high', 'xhigh'],
+      'actual Room delegation captures origin, target and legacy app effort before workspace awaits')
+    console.log('ok - actual Room delegation forwards independent captured efforts')
+  }
   console.log('room ticket work launch tests passed')
 }
 
