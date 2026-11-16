@@ -5,6 +5,7 @@ pub const host = @import("dsv41");
 pub const pipelines = @import("pipelines.zig");
 pub const glue = @import("glue.zig");
 pub const mv = @import("mv.zig");
+pub const mv_mma = @import("mv_mma.zig");
 pub const weights = @import("weights.zig");
 pub const mapped = @import("mapped.zig");
 pub const model_weights = @import("model_weights.zig");
