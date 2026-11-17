@@ -1,5 +1,4 @@
 //! The Nemotron CUDA engine (engine.py): weights, kernels and one sequence's buffers; windows and commits.
-
 const std = @import("std");
 const platform = @import("sys");
 const cuda = @import("cuda");
