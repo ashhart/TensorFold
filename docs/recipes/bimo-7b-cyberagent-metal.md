@@ -77,10 +77,15 @@ The changed kernel (`ll_prep` with the factor), the new ones (`ll_matvec_bias_*`
 and the prompt attention at this geometry are registered in `zig/tests/contract/metal_llama*.zig`, the biased row
 kernels at Bimo's q and k/v shapes and the unbiased ones at Nanbeige's as before, with five more planted controls
 (the bias dropped, the factor skipped, the fp32 GEMM untransposed, the rounding without its bias, the sum rounded
-before the bias joins it). `tf-kernel-contract --only llama` on the M5 Ultra:
+before the bias joins it). `ll_prep`'s bound allows, beside a bf16 ulp of each term and of the output, the widest
+move a cosine or sine one bf16 step off gives: Metal's `precise::cos` and `sin` are not correctly rounded, and YaRN's
+factor lifts them past 1, where a bf16 step is coarsest. Without that allowance 17 of 20 seeds failed the shapes gate
+at Bimo's geometry by up to 1.25 of the bound (and seed 19 at Nanbeige 3B's); with it seeds 1 to 20 pass, and the
+factor-skipped control stays red.
+`tf-kernel-contract --only llama` on the M5 Ultra:
 
 ```
-SUMMARY 40 kernels: 40 pass gates 1-4, 0 fail, 0 known findings; 19 controls: 19 red as planted, 0 missed; 0 limit problems; gates 694901 ms, limits 263 ms
+SUMMARY 40 kernels: 40 pass gates 1-4, 0 fail, 0 known findings; 19 controls: 19 red as planted, 0 missed; 0 limit problems; gates 711200 ms, limits 338 ms
 ```
 
 ## Measured
