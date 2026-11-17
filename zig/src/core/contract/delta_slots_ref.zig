@@ -80,15 +80,17 @@ pub fn make(comptime Planner: type, a: std.mem.Allocator, limit: usize, n: usize
         const first = stream * n;
         const parents = f.parents[first..][0..n];
         for (parents, 0..) |*p, row| p.* = if (row == 0) -1 else @intCast(if (limit == 1 or stream == 1) row - 1 else if (limit == 2) 0 else (row - 1) / 2);
-        comptime std.debug.assert(@sizeOf(Step) == @sizeOf(Planner.Step) and @alignOf(Step) == @alignOf(Planner.Step));
-        const typed_steps: []Planner.Step = @ptrCast(f.steps[first..][0..n]);
-        _ = try Planner.build(a, parents, typed_steps, @intCast(first), limit);
-        // Exercise high register indices as well as the planner's normal dense slot numbering.
-        if (stream == 1) for (f.steps[first..][0..n]) |*step| {
-            if (step.read_slot >= 0) step.read_slot = @as(i32, @intCast(limit - 1)) - step.read_slot;
-            step.write_slot = @as(i32, @intCast(limit - 1)) - step.write_slot;
-        };
-        try Planner.validate(parents, typed_steps, @intCast(first), limit);
+        if (Planner != void) {
+            comptime std.debug.assert(@sizeOf(Step) == @sizeOf(Planner.Step) and @alignOf(Step) == @alignOf(Planner.Step));
+            const typed_steps: []Planner.Step = @ptrCast(f.steps[first..][0..n]);
+            _ = try Planner.build(a, parents, typed_steps, @intCast(first), limit);
+            // Exercise high register indices as well as the planner's normal dense slot numbering.
+            if (stream == 1) for (f.steps[first..][0..n]) |*step| {
+                if (step.read_slot >= 0) step.read_slot = @as(i32, @intCast(limit - 1)) - step.read_slot;
+                step.write_slot = @as(i32, @intCast(limit - 1)) - step.write_slot;
+            };
+            try Planner.validate(parents, typed_steps, @intCast(first), limit);
+        }
     }
     try reference(a, &f, n);
     return f;
@@ -151,4 +153,17 @@ pub fn reference(a: std.mem.Allocator, f: *Fixture, n: usize) !void {
             f.bound[at * 128 + dim] = err + c.unit(.bf16) * (@abs(result) + err) + 0x1p-133;
         }
     };
+}
+
+/// An exact-integer read: unchanged state, unit queries, no key or mixing contribution.
+pub fn exactRead(f: *Fixture) void {
+    const sums = @import("q27_stack_sums.zig");
+    @memset(f.query, c.toBf16(1));
+    @memset(f.key, 0);
+    @memset(f.value, 0);
+    @memset(f.decay, 1);
+    @memset(f.mixing, 0);
+    for (f.state, 0..) |*entry, i| entry.* = @floatCast(sums.term(.columns, i % 128));
+    @memset(f.output, sums.output(.columns, 0, .none, .sequential));
+    @memset(f.bound, 0);
 }
