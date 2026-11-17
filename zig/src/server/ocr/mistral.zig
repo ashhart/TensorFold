@@ -42,7 +42,8 @@ pub const Request = struct { options: Options, source: types.Source, doc_size: u
 /// Answers one POST /v1/ocr whose body has been read; a client that leaves gets nothing.
 pub fn post(srv: *Server, conn: *Conn, a: Allocator, body: []const u8, gone: anytype) void {
     var fault: Fault = .{ .class = .internal, .message = "" };
-    const out = handle(srv, a, body, gone, &fault) catch |e| switch (e) {
+    const salt = @import("../cache_salt.zig").ofRequest(srv, 0, conn.key_digest);
+    const out = handle(srv, a, body, gone, &fault, salt) catch |e| switch (e) {
         error.Faulted => return reply.sendFault(conn, a, fault),
         error.OutOfMemory => return reply.sendFault(conn, a, .{ .class = .internal, .message = "out of memory" }),
         error.Cancelled => {
@@ -58,7 +59,7 @@ pub fn refuseBody(conn: *Conn, a: Allocator, message: []const u8) void {
     reply.sendFault(conn, a, .{ .class = .bad_input, .message = message });
 }
 
-fn handle(srv: *Server, a: Allocator, body: []const u8, gone: anytype, fault: *Fault) Step![]const u8 {
+fn handle(srv: *Server, a: Allocator, body: []const u8, gone: anytype, fault: *Fault, salt: u64) Step![]const u8 {
     try run.gate(srv, a, fault);
     const raw = switch (try json.parse(a, body)) {
         .ok => |v| v,
@@ -66,7 +67,7 @@ fn handle(srv: *Server, a: Allocator, body: []const u8, gone: anytype, fault: *F
     };
     const req = try decode(a, raw, Facts.of(srv), fault);
     var enc: reply.Encoder = .{ .o = req.options, .gpa = srv.gpa };
-    try run.run(srv, a, &.{req.source}, enc.sink(), fault, gone);
+    try run.runSalted(srv, a, &.{req.source}, enc.sink(), fault, gone, salt);
     return enc.reply(a, openai.replyModel(srv, raw), req.doc_size);
 }
 
