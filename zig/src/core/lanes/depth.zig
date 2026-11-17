@@ -19,6 +19,8 @@ pub const State = struct {
     copy_ms: ?Table = null, // a lone stream's copy rounds' times by copied rows (lanes/lone_copy.zig)
     copy_plain: ?u64 = null, // copies priced off in a row, and how many before one is tried again
     copy_wait: ?u64 = null,
+    copy_band: ?usize = null, // the context band its copy prices started from, where it leaves them (lanes/lone_copy.zig)
+    copy_rounds: u64 = 0, // its own timed copy rounds
 
     pub fn deinit(st: *State, gpa: Allocator) void {
         gpa.free(st.p);

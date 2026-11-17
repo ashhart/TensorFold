@@ -50,7 +50,8 @@ const Copier = struct {
     fn propose(ptr: *anyopaque, context: []const u32, most: i64) anyerror![]const u32 {
         const c: *Copier = @ptrCast(@alignCast(ptr));
         if (most < 2 or context.len < c.quiet_until) return &.{};
-        var history: [256]u32 = undefined;
+        const history = try gpa.alloc(u32, context.len + c.out.len);
+        defer gpa.free(history);
         @memcpy(history[0..context.len], context);
         const n: usize = @intCast(@min(c.out.len, most));
         for (c.out[0..n], 0..) |*t, k| {
@@ -343,8 +344,11 @@ test "lone copy price: copyAhead reads the price the plan takes, backoff probes 
 /// A request's reply, its first copy window's rows, and its copy windows and rows.
 const Request = struct { tokens: [160]u32 = undefined, len: usize = 0, first: ?usize = null, copies: u64 = 0, copy_rows: u64 = 0 };
 
-/// One engine serving `out.len` lone requests one after another, each copier quiet for its first `quiet` tokens.
-fn sequential(m: cfgs.Model, times: [2]f64, quiet: usize, out: []Request, max_new: u32) !void {
+/// A request `serve` sends: its prompt, the tokens its copier stays quiet for, its reply's length and its round times.
+const Ask = struct { prompt: []const u32, quiet: usize, max_new: u32, times: [2]f64, drafts: bool = true };
+
+/// One engine serving `asks` as lone requests one after another, each with its own copier and clock.
+fn serve(m: cfgs.Model, asks: []const Ask, out: []Request) !void {
     var cfg = try cfgs.Config.init(gpa, m, 16, 15);
     defer cfg.deinit(gpa);
     var target: fake.Fake = .{ .gpa = gpa };
@@ -354,16 +358,17 @@ fn sequential(m: cfgs.Model, times: [2]f64, quiet: usize, out: []Request, max_ne
     Watch.inner = table.verify;
     table.verify = Watch.verify;
     backend.vtable = &table;
-    var clock: Clock = .{ .target = &target, .times = times };
+    var clock: Clock = .{ .target = &target, .times = asks[0].times };
     var e = Engine.init(gpa, &cfg, backend, clock.clock());
     defer e.deinit();
     e.log = trail;
-    for (out, prompts[0..out.len], ids[0..out.len]) |*r, p, id| {
+    for (asks, out, ids[0..asks.len]) |ask, *r, id| {
+        clock.times = ask.times;
         Watch.copies = @splat(0);
         Watch.copy_rows = 0;
         Watch.first = null;
-        var c: Copier = .{ .land_from = 0, .quiet_until = p.len + quiet };
-        var s = try sm.Stream.init(gpa, .{ .id = id, .prompt = p, .max_new = max_new, .drafts = true, .proposer = .{ .ptr = &c, .vtable = &Copier.vtable } });
+        var c: Copier = .{ .land_from = 0, .quiet_until = ask.prompt.len + ask.quiet };
+        var s = try sm.Stream.init(gpa, .{ .id = id, .prompt = ask.prompt, .max_new = ask.max_new, .drafts = ask.drafts, .proposer = .{ .ptr = &c, .vtable = &Copier.vtable } });
         defer s.deinit(gpa);
         try e.addStream(&s);
         while (e.activeCount() > 0) try e.step();
@@ -373,6 +378,13 @@ fn sequential(m: cfgs.Model, times: [2]f64, quiet: usize, out: []Request, max_ne
         r.copies = Watch.copies[0] + Watch.copies[1];
         r.copy_rows = Watch.copy_rows;
     }
+}
+
+/// `out.len` requests of `prompts` in order on one engine, each copier quiet for its first `quiet` tokens.
+fn sequential(m: cfgs.Model, times: [2]f64, quiet: usize, out: []Request, max_new: u32) !void {
+    var asks: [prompts.len]Ask = undefined;
+    for (asks[0..out.len], prompts[0..out.len]) |*ask, p| ask.* = .{ .prompt = p, .quiet = quiet, .max_new = max_new, .times = times };
+    return serve(m, asks[0..out.len], out);
 }
 
 test "lone copy price: a request's first copies are priced from the copy rounds the request before it timed" {
@@ -388,7 +400,7 @@ test "lone copy price: a request's first copies are priced from the copy rounds 
     }
 }
 
-test "lone copy price: kept copy prices skip shared streams, keep a head's own times out, and never replace a stream's" {
+test "lone copy price: kept copy prices need two timed copies on a lone stream, leave a head's times, keep a stream's own" {
     for ([_]bool{ false, true }) |head| {
         var cfg = try cfgs.Config.init(gpa, hip(head), 16, 15);
         defer cfg.deinit(gpa);
@@ -401,6 +413,10 @@ test "lone copy price: kept copy prices skip shared streams, keep a head's own t
         defer done.deinit(gpa);
         try copy_price.observeCopy(&e.rule, 15, 11.6, false, win.who(&done));
         try copy_price.observeOwn(&e.rule, 0, 10.1, false, win.who(&done));
+        done.depth.?.copy_band = 0; // as its first priced round left it (lone_copy.zig's seed)
+        lone_copy.keep(&e, &done);
+        try std.testing.expect(e.lone_kept[0][0] == null); // one timed copy round, as a warm-up's few tokens: nothing kept
+        try copy_price.observeCopy(&e.rule, 15, 11.6, false, win.who(&done));
         done.shared_round = true;
         lone_copy.keep(&e, &done);
         try std.testing.expect(e.lone_kept[0][0] == null); // a round beside another stream: its times were not its own
@@ -451,5 +467,32 @@ test "lone copy price: engines that leave copies unpriced decide two requests in
         var got: [2]Request = @splat(.{});
         try sequential(c.m, short_context, 4, &got, 64);
         try std.testing.expectEqual(c.expected, try hashed(&log, log.events.items.len));
+    }
+}
+
+test "lone copy price: a request reads the copy prices of the one before that started in its band, not a short warm-up's" {
+    // a warm-up timing one copy at a long context's round times, then two from 8,150 tokens past 8,192 at a short one's
+    const long = try gpa.alloc(u32, 8150);
+    defer gpa.free(long);
+    for (long, 0..) |*t, i| t.* = @intCast(i % fake.vocab);
+    for ([_]bool{ false, true }) |head| {
+        var asks = [_]Ask{
+            .{ .prompt = prompts[0], .quiet = 2, .max_new = 8, .times = long_context },
+            .{ .prompt = long, .quiet = 4, .max_new = 64, .times = short_context },
+            .{ .prompt = long, .quiet = 4, .max_new = 64, .times = short_context },
+        };
+        var got: [3]Request = @splat(.{});
+        try serve(hip(head), &asks, &got);
+        try std.testing.expectEqual(@as(u64, 1), got[0].copies);
+        var alone: [2]Request = @splat(.{});
+        try serve(hip(head), asks[1..], &alone);
+        for (&asks) |*ask| ask.drafts = false;
+        var plain: [3]Request = @splat(.{});
+        try serve(hip(head), &asks, &plain);
+        for (got, plain) |r, p| try std.testing.expectEqualSlices(u32, p.tokens[0..p.len], r.tokens[0..r.len]);
+        // the warm-up's one timed copy replaces nothing: the long replies decide as on an engine that never served it
+        for (got[1..], alone) |r, x| try std.testing.expectEqual([3]u64{ x.first orelse 0, x.copies, x.copy_rows }, [3]u64{ r.first orelse 0, r.copies, r.copy_rows });
+        // the second long reply starts from the first's timed copies: its first copy whole, as the first's later ones
+        try std.testing.expectEqual(@as(?usize, 15), got[2].first);
     }
 }

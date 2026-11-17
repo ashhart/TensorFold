@@ -41,16 +41,29 @@ pub fn time(e: *Engine, s: *Stream, kind: win.Kind, window_rows: usize) !void {
     return copy_price.observeCopy(&e.rule, drafts, ms, first, win.who(s));
 }
 
-/// A stream's first priced round starts from the copy prices the engine kept for its sampling mode and context band.
+/// Copy rounds a stream times before its prices replace the kept ones: a reply of a few tokens times one at most.
+const kept_rounds = 2;
+
+/// A stream's first priced round starts from the copy prices kept for its sampling mode and its context's band.
 fn seed(e: *Engine, s: *Stream) !void {
     if (s.prices_seeded) return;
     s.prices_seeded = true;
     _ = try e.rule.rates(win.who(s));
-    try lone_costs.seedCopies(e.gpa, lone_costs.slot(&e.lone_kept, s).*, s);
+    const band = lone_costs.band(s.context.items.len);
+    s.depth.?.copy_band = band;
+    try lone_costs.seedCopies(e.gpa, slot(e, s, band).*, s);
 }
 
-/// A finished stream's copy prices for the next lone stream, its plain times too where only copy pricing reads them.
+/// A finished stream's copy prices for the next one starting in its band; plain times too when only copies read them.
 pub fn keep(e: *Engine, s: *const Stream) void {
     if (!e.cfg.copy_guard or e.cfg.lone_cost_tile > 0) return;
-    lone_costs.keepCopies(e.gpa, lone_costs.slot(&e.lone_kept, s), s, !e.cfg.plain_guard) catch {};
+    const st = s.depth orelse return;
+    const band = st.copy_band orelse return;
+    if (st.copy_rounds < kept_rounds) return;
+    lone_costs.keepCopies(e.gpa, slot(e, s, band), s, !e.cfg.plain_guard) catch {};
+}
+
+/// The kept copy prices of a stream's sampling mode at a band: those of the band it started in, read and left.
+fn slot(e: *Engine, s: *const Stream, band: usize) *?lone_costs.Kept {
+    return &e.lone_kept[@intFromBool(s.sampling != null)][band];
 }
