@@ -30,32 +30,42 @@ pub const Need = union(enum) {
     }
 };
 
-/// Class `c` as the pool reads it; one class is the pool itself.
-fn class(l: *const Ledger, p: kv.Pages, c: u32) kv.Class {
+/// Class `c` as the pool reads it (above one class only: Ledger.ofPages refuses a pool of classes without the hook).
+fn class(l: *const Ledger, c: u32) kv.Class {
     const k = l.pool.?;
-    return if (k.class) |f| f(k.ctx, c) else .{ .cap = p.total, .available = p.available };
+    return k.class.?(k.ctx, c);
+}
+
+/// A class `d` names that the pool lacks (a resume's from another pool's split): it never fits.
+fn outside(p: kv.Pages, d: Need) ?u32 {
+    const c = switch (d) {
+        .one => |o| o.in orelse return null,
+        .spread => return null,
+    };
+    return if (c >= p.classes) c else null;
 }
 
 /// Class `c`'s available pages at which `n` more fit there and in the pool's bytes (one class: exactly `want`).
 pub fn wantIn(l: *const Ledger, c: u32, n: usize) usize {
     const p = l.pages();
     if (p.classes <= 1) return l.want(n);
-    return @max(n, class(l, p, c).available +| (l.want(n) -| p.available)); // short of the bytes: past what it has
+    return @max(n, class(l, c).available +| (l.want(n) -| p.available)); // short of the bytes: past what it has
 }
 
 /// Whether `d` could be promised now: the pool's bytes, then each class it takes from.
 pub fn fitsNeed(l: *const Ledger, d: Need) bool {
     const p = l.pages();
+    if (outside(p, d) != null) return false;
     if (p.classes <= 1) return p.available + p.reclaimable >= l.want(d.total()); // one class: Pool.fits exactly
     if (p.available < l.want(d.total())) return false; // no store reclaims above one class (Pool.joinReclaim)
     switch (d) {
         .one => |o| {
-            if (o.in) |c| return class(l, p, c).available >= o.n;
-            for (0..p.classes) |c| if (class(l, p, @intCast(c)).available >= o.n) return true; // the roomiest's test
+            if (o.in) |c| return class(l, c).available >= o.n;
+            for (0..p.classes) |c| if (class(l, @intCast(c)).available >= o.n) return true; // the roomiest's test
             return false;
         },
         .spread => |s| {
-            for (0..p.classes) |c| if (class(l, p, @intCast(c)).available < Need.inClass(s, p.classes, @intCast(c))) return false;
+            for (0..p.classes) |c| if (class(l, @intCast(c)).available < Need.inClass(s, p.classes, @intCast(c))) return false;
             return true;
         },
     }
@@ -64,11 +74,12 @@ pub fn fitsNeed(l: *const Ledger, d: Need) bool {
 /// The class `d` needs more of than it holds at all, so no release makes it fit (null: none; one class: never).
 pub fn neverNeed(l: *const Ledger, d: Need) ?u32 {
     const p = l.pages();
+    if (outside(p, d)) |c| return c;
     if (p.classes <= 1) return null;
     switch (d) {
-        .one => |o| return if (o.n > class(l, p, o.in orelse 0).cap) o.in orelse 0 else null, // classes are equal
+        .one => |o| return if (o.n > class(l, o.in orelse 0).cap) o.in orelse 0 else null, // classes are equal
         .spread => |s| {
-            for (0..p.classes) |c| if (Need.inClass(s, p.classes, @intCast(c)) > class(l, p, @intCast(c)).cap) return @intCast(c);
+            for (0..p.classes) |c| if (Need.inClass(s, p.classes, @intCast(c)) > class(l, @intCast(c)).cap) return @intCast(c);
             return null;
         },
     }

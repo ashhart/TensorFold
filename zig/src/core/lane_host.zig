@@ -110,7 +110,7 @@ pub const LaneHost = struct {
     }
 
     /// A paged family's pool counts in this host's ledger, the only test its promises pass (#1943); before `start`.
-    pub fn countPool(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
+    pub fn countPool(h: *LaneHost, pool: anytype) error{ PoolHasHost, NoClassHook }!void {
         return ledger.count(h, pool);
     }
 
@@ -373,7 +373,8 @@ pub const LaneHost = struct {
     /// The next queued request a lane is free for, moved to the admitted list (`failed`: it was finished instead).
     pub fn takeJob(h: *LaneHost) Taken {
         h.lock();
-        const at = admit.pick(h) orelse { // no lane free, or none may go: a shared cache pool's head waits for room
+        // a request past a whole class is refused first: no lane need free; else none free, or a pool's head waits
+        const at = admit.refused(h) orelse admit.pick(h) orelse {
             h.unlock();
             return .none;
         };

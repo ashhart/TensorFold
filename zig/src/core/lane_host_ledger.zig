@@ -18,7 +18,7 @@ pub fn priced(h: *const LaneHost) bool {
 }
 
 /// `pool`'s pages count in this host's ledger, which alone admits them; a pool another host counts is refused.
-pub fn count(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
+pub fn count(h: *LaneHost, pool: anytype) error{ PoolHasHost, NoClassHook }!void {
     const P = @TypeOf(pool.*);
     if (pool.host != null) return error.PoolHasHost;
     std.debug.assert(h.kv == null and pool.ledger == null); // one pool a host, and never beside a priced ledger
@@ -44,7 +44,7 @@ pub fn count(h: *LaneHost, pool: anytype) error{PoolHasHost}!void {
         }
     };
     const by: ?*const fn (*const anyopaque, u32) kv.Class = if (@hasField(P, "classes") and pool.classes > 1) view.class else null;
-    h.kv = .ofPages(.{ .ctx = pool, .read = view.read, .detach = view.detach, .class = by });
+    h.kv = try .ofPages(.{ .ctx = pool, .read = view.read, .detach = view.detach, .class = by });
     pool.ledger = .{ .ctx = &h.kv.?, .want = kv.Ledger.wantOf };
     pool.host = h;
 }
@@ -97,8 +97,13 @@ pub fn outstanding(h: *const LaneHost) bool {
 /// Why `job` would wait forever: past the whole budget alone, or past a whole owner class even while others run.
 pub fn never(h: *const LaneHost, job: *const Job) ?[]const u8 {
     if (priced(h) and !outstanding(h) and !fits(h, job)) return too_big;
-    const d = need(h, job) orelse return null;
-    return if (classes.neverNeed(&h.kv.?, d) != null) too_big_class else null;
+    return if (pastClass(h, job)) too_big_class else null;
+}
+
+/// Whether `job` needs more of a class than the class holds at all (false without Admit.need), a lane free or not.
+pub fn pastClass(h: *const LaneHost, job: *const Job) bool {
+    const d = need(h, job) orelse return false;
+    return classes.neverNeed(&h.kv.?, d) != null;
 }
 
 /// The pages `job` needs a class (Admit.need), when the family names them and its pool counts here (else null).

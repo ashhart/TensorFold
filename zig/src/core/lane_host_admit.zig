@@ -1,5 +1,6 @@
 //! Which queued request a lane host admits next: the head, or one behind a head that waits for pool room.
 const std = @import("std");
+const Id = @import("engine_api.zig").Id;
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const lanes = @import("lanes");
@@ -29,6 +30,15 @@ pub fn pick(h: *LaneHost) ?usize {
 /// Every queued job waits for `why`; no job is picked.
 fn hold(h: *LaneHost, why: Wait) ?usize {
     for (h.queued.items) |j| j.wait_reason = why;
+    return null;
+}
+
+/// A queued request past a whole class, refused with every lane busy too: none read for or cancelled (lock held).
+pub fn refused(h: *LaneHost) ?usize {
+    for (h.queued.items, 0..) |j, i| {
+        if (passed(h, j) or std.mem.indexOfScalar(Id, h.cancels.items, j.id) != null) continue;
+        if (ledger.pastClass(h, j)) return i;
+    }
     return null;
 }
 
