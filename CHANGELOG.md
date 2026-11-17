@@ -10,6 +10,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 - Tests: `zig build test-tokenizer-host` runs every tokenizer test, unfiltered, on the host without a GPU or shader compiler, and is part of the nightly Linux and macOS fast checks; before, CI reached only the tokenizer's two EOS policy tests (#3082).
 - Bench: add served agent-cache traces and token-qualified A/B comparisons (#3263).
+- CI: remove the redundant nightly Linux host shard while retaining the fast, compile, HIP and DeepSeek shards (#3276).
 
 - Docs: the README is now a short quick start and docs list; setup, serve flags and model tables moved to the new run guide and supported models pages, and the Zig preview and 1.0.0 release notes moved into docs/ (#3170). Thanks to @jayleaton.
 
