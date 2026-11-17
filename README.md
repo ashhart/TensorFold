@@ -256,10 +256,15 @@ It refuses a checkpoint whose `model_type` has no native family, and fetches the
 `rm REPO@REVISION` removes one snapshot, named by a ref such as `main` or by its commit, and the refs that name it. Blobs another snapshot still links to stay.
 Before deleting, it lists each snapshot and the bytes freed, counting a blob two snapshots share once, and asks.
 `--yes` skips the question and is needed when stdin is not a terminal. `--dry-run` only lists.
+A pull or removal already using this cache causes a busy refusal. After confirmation, removal checks a fresh plan.
+If the cache changed, nothing is removed: review the new plan and retry. A snapshot held by a running server is refused by name.
+External Hugging Face clients, older TensorFold binaries and programs writing cache paths directly do not share this lock.
+Stop them before removing a checkpoint; concurrent external cache writes are not supported. The filesystem must support advisory locks.
+On Windows the persistent cache lock is `.tensorfold-lock` in the cache root.
 It takes a cached repo id, never a path, deletes only inside that repo's cache folder, and removes a link without following it.
 TensorFold's own files inside a snapshot, such as the `--slide` originals in `.tensorfold-original`, go with the snapshot.
 Flash Next packs and the learned, spilled and Recall states under `~/.cache/tensorfold` are shared rather than kept per repo, so they stay.
-Stop a server that serves the checkpoint before removing it.
+Stop a server that holds the checkpoint before removing it; `rm` refuses its leased snapshot by name.
 
 ## Context compaction
 

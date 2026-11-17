@@ -24,6 +24,7 @@ pub const Repo = struct {
     blobs: []const Blob,
     refs: []const Ref,
     files: []const Stat,
+    fingerprint: [32]u8,
 
     /// The snapshot `revision` names: a 40-hex commit with a snapshot folder, or a ref whose commit has one.
     pub fn find(r: Repo, revision: []const u8) ?usize {
@@ -85,7 +86,7 @@ pub fn scan(a: Allocator, io: Io, folder: []const u8) !Repo {
     }.lessThan);
     const snapshots = try a.alloc(Snapshot, names.items.len);
     for (snapshots, names.items) |*s, name| s.* = try snapshot(a, io, folder, real, name, all.items, blobs.items);
-    return .{ .snapshots = snapshots, .blobs = blobs.items, .refs = refs.items, .files = files.items };
+    return .{ .snapshots = snapshots, .blobs = blobs.items, .refs = refs.items, .files = files.items, .fingerprint = try fingerprint(io, dir, all.items, refs.items) };
 }
 
 /// The removal of the whole folder (`only` null), or of snapshot `only` with the blobs no other snapshot reaches.
@@ -243,4 +244,38 @@ fn sortNames(names: [][]const u8) void {
             return std.mem.lessThan(u8, l, r);
         }
     }.lessThan);
+}
+
+/// Canonical metadata plus ref/link contents detect changes while the user considers the displayed plan.
+fn fingerprint(io: Io, dir: Dir, entries: []Entry, refs: []const Ref) ![32]u8 {
+    std.mem.sort(Entry, entries, {}, struct {
+        fn lessThan(_: void, l: Entry, r: Entry) bool {
+            return std.mem.lessThan(u8, l.rel, r.rel);
+        }
+    }.lessThan);
+    var h = std.crypto.hash.sha2.Sha256.init(.{});
+    const root_stat = try dir.stat(io);
+    h.update(std.mem.asBytes(&root_stat.inode));
+    for (entries) |e| {
+        h.update(e.rel);
+        h.update(&.{0});
+        h.update(@tagName(e.stat.kind));
+        h.update(std.mem.asBytes(&e.stat.inode));
+        h.update(std.mem.asBytes(&e.stat.nlink));
+        h.update(std.mem.asBytes(&e.stat.size));
+        h.update(std.mem.asBytes(&e.stat.mtime.nanoseconds));
+        h.update(std.mem.asBytes(&e.stat.ctime.nanoseconds));
+        if (e.stat.kind == .sym_link) {
+            var buf: [4096]u8 = undefined;
+            const n = try dir.readLink(io, e.rel, &buf);
+            h.update(buf[0..n]);
+        }
+    }
+    for (refs) |ref| {
+        h.update(ref.name);
+        h.update(&.{0});
+        h.update(ref.commit orelse "");
+        h.update(&.{0});
+    }
+    return h.finalResult();
 }

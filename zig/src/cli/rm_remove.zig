@@ -18,7 +18,7 @@ pub fn apply(a: Allocator, io: Io, root: []const u8, name: []const u8, p: Plan) 
             for (p.refs) |ref| try removeBelow(io, folder, try std.fmt.allocPrint(a, "refs/{s}", .{ref}));
             for (p.snapshots) |s| try removeIn(a, io, folder, "snapshots", s.name);
             for (p.blobs) |blob| try removeBelow(io, folder, try std.fmt.allocPrint(a, "blobs/{s}", .{blob}));
-            for (p.snapshots) |s| try removeIn(a, io, folder, ".no_exist", s.name); // huggingface_hub's missing-file notes
+            for (p.snapshots) |s| try removeIn(a, io, folder, ".no_exist", s.name); // missing-file notes
             for ([_][]const u8{ "refs", "snapshots", "blobs", ".no_exist" }) |sub| _ = try prune(io, folder, sub);
         }
     }

@@ -114,6 +114,7 @@ const Cache = struct {
         var walker = try c.tmp.dir.walk(c.a);
         defer walker.deinit();
         while (try walker.next(c.io)) |e| {
+            if (std.mem.eql(u8, e.path, "hub/.tensorfold-lock") or std.mem.eql(u8, e.path, "hub\\.tensorfold-lock")) continue;
             const st = try e.dir.statFile(c.io, e.basename, .{ .follow_symlinks = false });
             try lines.append(c.a, try std.fmt.allocPrint(c.a, "{s} {t} {d}", .{ e.path, st.kind, st.size }));
         }
@@ -324,4 +325,107 @@ test "security: a repo folder that is itself a link is refused, and what it poin
     try expectRun(r, 1);
     try expectHas(r.err, "models--Org--Linked is a link, and rm deletes only inside a repo's own cache folder; remove it by hand\n");
     try std.testing.expectEqualStrings("{}", try c.read(kept));
+}
+
+/// Publishes a second snapshot with pull's real cached-blob linker while the confirmation reader is waiting.
+const Publish = struct {
+    cache: *Cache,
+    reader: Io.Reader = .{ .vtable = &.{ .stream = stream }, .buffer = &.{}, .seek = 0, .end = 0 },
+    buffer: [64]u8 = undefined,
+    done: bool = false,
+    failure: ?anyerror = null,
+
+    fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const self: *@This() = @fieldParentPtr("reader", r);
+        if (self.done) return error.EndOfStream;
+        self.done = true;
+        self.publish() catch |e| {
+            self.failure = e;
+            return error.ReadFailed;
+        };
+        const reply = "y\n";
+        const n = limit.minInt(reply.len);
+        try w.writeAll(reply[0..n]);
+        return n;
+    }
+
+    fn publish(self: *@This()) !void {
+        const c = self.cache;
+        const dir = try c.path("snapshots/cccccccccccccccccccccccccccccccccccccccc");
+        try Dir.cwd().createDirPath(c.io, dir);
+        try @import("pull_file.zig").linkIntoSnapshot(c.a, c.io, dir, "model.safetensors", only_a);
+        try c.write("refs/new", "cccccccccccccccccccccccccccccccccccccccc");
+    }
+};
+
+test "rm refuses a changed plan after a pull links a new snapshot during confirmation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try Cache.init(arena.allocator(), std.testing.io, .links);
+    defer c.deinit();
+    var input: Publish = .{ .cache = &c };
+    input.reader.buffer = &input.buffer;
+    var out: Io.Writer.Allocating = .init(c.a);
+    var err: Io.Writer.Allocating = .init(c.a);
+    const code = try rm.run(c.a, c.io, &out.writer, &err.writer, null, c.hub, .{ .spec = "Org/Name@" ++ rev_a }, .{ .interactive = true, .input = &input.reader });
+    try std.testing.expect(input.done and input.failure == null);
+    try std.testing.expectEqual(@as(u8, 1), code);
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "changed") != null);
+    try std.testing.expect(c.has("snapshots/" ++ rev_a));
+    try std.testing.expectEqualStrings(&a_body, try c.read("hub/models--Org--Name/snapshots/cccccccccccccccccccccccccccccccccccccccc/model.safetensors"));
+    const retry = try c.run(&.{ "Org/Name@" ++ rev_a, "--yes" }, null);
+    try std.testing.expectEqual(@as(u8, 0), retry.code);
+    try std.testing.expect(c.has("blobs/" ++ only_a));
+    try std.testing.expectEqualStrings(&a_body, try c.read("hub/models--Org--Name/snapshots/cccccccccccccccccccccccccccccccccccccccc/model.safetensors"));
+}
+
+test "rm refuses a snapshot held by a server lease before removing refs or files" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try Cache.init(arena.allocator(), std.testing.io, .hard_links);
+    defer c.deinit();
+    const path = try c.a.dupeSentinel(u8, try c.path("snapshots/" ++ rev_a), 0);
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, @as(platform.c.mode_t, 0));
+    try std.testing.expect(fd >= 0);
+    defer _ = platform.c.close(fd);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.flock(fd, platform.c.LOCK.SH | platform.c.LOCK.NB));
+    defer _ = platform.c.flock(fd, platform.c.LOCK.UN);
+    const before = try c.listing();
+    for ([_][]const u8{ "Org/Name@main", "Org/Name" }) |spec| {
+        const got = try c.run(&.{ spec, "--yes" }, null);
+        try std.testing.expectEqual(@as(u8, 1), got.code);
+        try std.testing.expect(std.mem.indexOf(u8, got.err, rev_a) != null);
+        try std.testing.expect(std.mem.indexOf(u8, got.err, "held") != null);
+        try std.testing.expectEqualStrings(before, try c.listing());
+    }
+}
+
+test "rm refuses a cache held by a pull without removing data" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try Cache.init(arena.allocator(), std.testing.io, .hard_links);
+    defer c.deinit();
+    var held: ?platform.folder_lock.Lease = try platform.folder_lock.hold(c.a, c.hub, true);
+    defer if (held) |l| l.release();
+    const before = try c.listing();
+    const refused = try c.run(&.{ "Org/Name", "--yes" }, null);
+    try std.testing.expectEqual(@as(u8, 1), refused.code);
+    try std.testing.expect(std.mem.indexOf(u8, refused.err, "Busy") != null);
+    try std.testing.expectEqualStrings(before, try c.listing());
+    held.?.release();
+    held = null;
+    try std.testing.expectEqual(@as(u8, 0), (try c.run(&.{ "Org/Name", "--yes" }, null)).code);
+}
+
+test "rm keeps a served snapshot and its blobs when removing another snapshot" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var c = try Cache.init(arena.allocator(), std.testing.io, .hard_links);
+    defer c.deinit();
+    const lease = try platform.folder_lock.hold(c.a, try c.path("snapshots/" ++ rev_b), false);
+    defer lease.release();
+    const got = try c.run(&.{ "Org/Name@" ++ rev_a, "--yes" }, null);
+    try std.testing.expectEqual(@as(u8, 0), got.code);
+    try std.testing.expect(c.has("blobs/" ++ shared));
+    try std.testing.expectEqualStrings(&shared_body, try c.read("hub/models--Org--Name/snapshots/" ++ rev_b ++ "/config.json"));
 }
