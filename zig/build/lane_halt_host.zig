@@ -22,6 +22,11 @@ pub fn steps(b: *std.Build) void {
     b.step("test-lane-api-host", "Shared lane host and engine API CPU regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api })).step);
     b.step("test-shared-price-learning-host", "Independent plain prices and signed row learning together without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes, .filters = &.{ "shared combined prices:", "shared price modes:" } })).step);
     b.step("test-wait-reasons-host", "Stored wait reasons in the load ledger with a fake backend and planner").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"wait reason ledger:"} })).step);
+    const spares = b.step("test-cache-spares-host", "Fallback and guarded keeps preserve cache retention");
+    for ([_][]const u8{ "lane_cache_promise_test.zig", "prompt_cache_promised_test.zig" }) |file| {
+        const m = b.createModule(.{ .root_source_file = b.path(b.fmt("zig/src/core/{s}", .{file})), .target = b.graph.host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+        spares.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"queued cache: spares:"} })).step);
+    }
     b.step("test-conversation-cache-host", "Returning conversation eviction and queued-resume regressions without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{ "newest cache:", "queued cache:" } })).step);
     b.step("test-cache-progress-host", "One-state follow-ups and new conversations keep their next endpoint").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"queued cache: progress"} })).step);
     b.step("test-snapshot-index-host", "Prompt-cache lookup index against the whole-store scan, without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api, .filters = &.{"snapshot index:"} })).step);
