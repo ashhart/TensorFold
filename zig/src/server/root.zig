@@ -96,6 +96,7 @@ test {
     _ = @import("models_input_types_test.zig");
     _ = @import("models_id_test.zig");
     _ = @import("speech.zig");
+    _ = @import("speech_encode.zig");
     _ = @import("images_generations.zig");
     if (comptime @import("builtin").os.tag != .windows) _ = @import("images_batch_test.zig"); // uses a socketpair test
     if (comptime @import("builtin").os.tag != .windows) _ = @import("images_progress_test.zig"); // the same

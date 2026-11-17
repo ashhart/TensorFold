@@ -11,6 +11,7 @@ const pyrepr = @import("pyrepr.zig");
 const reply_text = @import("reply_text.zig");
 const drama_prompt = @import("drama_prompt.zig");
 const speech_sampling = @import("speech_sampling.zig");
+const speech_encode = @import("speech_encode.zig");
 const speech_redraw = @import("speech_redraw.zig");
 const speech_register = @import("speech_register_log.zig");
 const drama_cfg = @import("drama_cfg.zig");
@@ -42,11 +43,30 @@ const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instru
 pub const Format = enum {
     wav,
     pcm,
+    mp3,
+    opus,
+    aac,
+    flac,
 
     pub fn contentType(f: Format) []const u8 {
         return switch (f) {
             .wav => "audio/wav",
             .pcm => "audio/pcm",
+            .mp3 => "audio/mpeg",
+            .opus => "audio/ogg",
+            .aac => "audio/aac",
+            .flac => "audio/flac",
+        };
+    }
+
+    /// The encoder a reply goes through after its samples are made; WAV and PCM go out as they are.
+    pub fn codec(f: Format) ?speech_encode.Codec {
+        return switch (f) {
+            .wav, .pcm => null,
+            .mp3 => .mp3,
+            .opus => .opus,
+            .aac => .aac,
+            .flac => .flac,
         };
     }
 };
@@ -106,12 +126,14 @@ fn checkFields(cx: *Cx, body: Value, inline_voices: bool, zonos: bool) errors.Re
     }
 }
 
-/// ``response_format.strip().lower()``, which must name WAV or raw PCM.
+/// ``response_format.strip().lower()``: WAV, raw PCM, FLAC, or MP3, Opus or AAC where its encoder library loads.
 fn responseFormat(cx: *Cx, value: []const u8) errors.Refused!Format {
     const name = reply_text.pyStrip(value);
-    if (std.ascii.eqlIgnoreCase(name, "wav")) return .wav;
-    if (std.ascii.eqlIgnoreCase(name, "pcm")) return .pcm;
-    return cx.refuse("response_format must be one of: pcm, wav");
+    const format: Format = for (std.enums.values(Format)) |f| {
+        if (std.ascii.eqlIgnoreCase(name, @tagName(f))) break f;
+    } else return cx.refuse("response_format must be one of: aac, flac, mp3, opus, pcm, wav");
+    if (format.codec()) |codec| if (!speech_encode.available(codec, cx.a)) return cx.refuse(speech_encode.missing(codec));
+    return format;
 }
 
 /// Every check that can refuse the request, then its prompt ids, before anything reaches the engine.
@@ -371,7 +393,12 @@ fn unused(id: []const u8, k: usize, take: Take, why_not: []const u8) Take {
 fn reply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, take: Take, metadata: Metadata) void {
     const data = quantizeInPlace(take.pcm) catch return fail(c, cx, id, metadata, .server, "the synthesized audio has non-finite samples");
     if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, metadata, .server, "the synthesized audio is too long for one reply");
-    sendAudio(c, plan.format, sp.sample_rate, data, take.reason, if (srv.config.silence_mid) @intFromBool(take.silence_mid) else null, metadata) catch {
+    const encoded: ?[]u8 = if (plan.format.codec()) |codec|
+        speech_encode.encode(c.gpa, codec, @alignCast(std.mem.bytesAsSlice(i16, data)), sp.sample_rate) catch return fail(c, cx, id, metadata, .server, "the audio could not be encoded in the requested format")
+    else
+        null;
+    defer if (encoded) |e| c.gpa.free(e);
+    sendAudio(c, plan.format, sp.sample_rate, encoded orelse data, take.reason, if (srv.config.silence_mid) @intFromBool(take.silence_mid) else null, metadata) catch {
         c.close = true; // a head already started or a client gone: nothing more can be sent on this connection
         return;
     };
@@ -418,6 +445,11 @@ fn sendAudio(c: *Conn, format: Format, sample_rate: u32, data: []const u8, reaso
     var len: [24]u8 = undefined;
     try c.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{header_len + data.len}) catch unreachable);
     try c.addHeader("X-Finish-Reason", @tagName(reason));
+    if (format == .pcm) {
+        // raw samples carry no rate of their own: clients written for 24 kHz read it here
+        var rate: [16]u8 = undefined;
+        try c.addHeader("X-Audio-Sample-Rate", std.fmt.bufPrint(&rate, "{d}", .{sample_rate}) catch unreachable);
+    }
     if (silence_mid) |trips| {
         var count: [3]u8 = undefined;
         try c.addHeader("X-Silence-Mid-Trips", std.fmt.bufPrint(&count, "{d}", .{trips}) catch unreachable);
@@ -509,11 +541,21 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
     }
 }
 
-test "response_format is WAV or PCM, stripped and case-folded as Python does" {
+test "response_format names a served format, stripped and case-folded as Python does" {
     var cx: Cx = .{ .a = std.testing.allocator };
     try std.testing.expectEqual(Format.wav, try responseFormat(&cx, " WAV\n"));
     try std.testing.expectEqual(Format.pcm, try responseFormat(&cx, "\u{3000}Pcm\x1c"));
-    for ([_][]const u8{ "mp3", "", "wave", "pcm16" }) |bad| try std.testing.expectError(error.Refused, responseFormat(&cx, bad));
+    try std.testing.expectEqual(Format.flac, try responseFormat(&cx, "FLAC"));
+    for ([_][]const u8{ "m4a", "", "wave", "pcm16" }) |bad| {
+        try std.testing.expectError(error.Refused, responseFormat(&cx, bad));
+        try std.testing.expectEqualStrings("response_format must be one of: aac, flac, mp3, opus, pcm, wav", cx.message);
+    }
+    // MP3, Opus and AAC are served where their library loads, and refused by its install line where it does not
+    for ([_]Format{ .mp3, .opus, .aac }) |f| {
+        if (responseFormat(&cx, @tagName(f))) |got| {
+            try std.testing.expectEqual(f, got);
+        } else |_| try std.testing.expectEqualStrings(speech_encode.missing(f.codec().?), cx.message);
+    }
 }
 
 test "allowed controls filters before speech input validation" {

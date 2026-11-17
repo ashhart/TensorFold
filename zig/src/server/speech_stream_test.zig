@@ -312,6 +312,7 @@ test "a complete stream carries every frame in order, converted, then the termin
     try expectHeader(head, "Content-Type: audio/pcm\r\n");
     try expectHeader(head, "Transfer-Encoding: chunked\r\n");
     try expectHeader(head, "X-Sample-Rate: 44100\r\nX-Channels: 1\r\nX-Bit-Depth: 16\r\n");
+    try expectHeader(head, "X-Audio-Sample-Rate: 44100\r\n");
     try std.testing.expect(std.mem.indexOf(u8, head, "Content-Length") == null);
     var terminated = false;
     const audio = try s.payload(&terminated); // where the route caught each publication is scheduling, not the bytes
