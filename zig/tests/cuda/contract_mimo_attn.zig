@@ -201,7 +201,7 @@ pub const Attn = struct {
         self.pos = try a.alloc(i32, n);
         for (self.pos, 0..) |*p, r| p.* = @intCast(if (prompt) sh.k - n + r else sh.k - 1 - r);
         self.len = if (self.kind == .rows_slide) W + 64 else sh.k; // a sliding layer's ring wraps
-        self.nch = if (self.kind == .rows_slide) (W + CK - 1) / CK + 1 else (sh.k - 1) / CK + 2; // one chunk past: empty
+        self.nch = if (self.kind == .rows_slide) (W + CK - 1) / CK + 1 else (sh.k - 1) / CK + 2; // a chunk past: empty
         const slots = if (prompt) 2 else n;
         self.q = try a.alloc(f64, n * H * QK);
         for (self.q) |*o| o.* = if (self.stress) 0 else mu.uni(rng, f16, -1, 1);
@@ -284,7 +284,7 @@ pub const Attn = struct {
         }
         if (self.kind == .merge_sink) {
             self.sinks = try a.alloc(f64, H);
-            for (self.sinks) |*x| x.* = if (self.stress) -std.math.inf(f64) else mu.uni(rng, f32, -4, 4); // -inf: adds 0
+            for (self.sinks) |*x| x.* = if (self.stress) -std.math.inf(f64) else mu.uni(rng, f32, -4, 4); // -inf adds 0
         }
         if (fill == .nonfinite) {
             self.part[0][3] = std.math.nan(f64); // head 0's chunk 0

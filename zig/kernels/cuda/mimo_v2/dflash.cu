@@ -23,11 +23,13 @@ extern "C" __global__ void dr_tap(const float* __restrict__ res, __half* __restr
         taps[((int64_t)r * NT + j) * D + d] = __float2half_rn(res[(int64_t)r * D + d]);
 }
 
-// _head_rms then _rope: a block per (row, head), 128 threads (head_dim 128). x = in.float(); y = x * rsqrt(mean(x^2) +
+// _head_rms then _rope: a block per (row, head), 128 threads (head_dim 128).
 
-// eps) * w; the first ROT dims rotate NEOX-style with cos / sin at the row's position. Out: fp32 [n, NH, 128] when
+// x = in.float(); y = x * rsqrt(mean(x^2) + eps) * w.
 
-// out32, else fp16 into the cache at (slot, pos % ring).
+// The first ROT dims rotate NEOX-style with cos / sin at the row's position.
+
+// Out: fp32 [n, NH, 128] when out32, else fp16 into the cache at (slot, pos % ring).
 extern "C" __global__ void dr_norm_rope(const __half* __restrict__ in, const float* __restrict__ w,
                                         const float* __restrict__ cos_t, const float* __restrict__ sin_t,
                                         const int32_t* __restrict__ pos, const int32_t* __restrict__ slot,
@@ -64,15 +66,15 @@ extern "C" __global__ void dr_store(const __half* __restrict__ in, const int32_t
     for (int i = threadIdx.x; i < NH * 128; i += blockDim.x) cache[at + i] = in[(int64_t)r * NH * 128 + i];
 }
 
-// Draft attention: a block per (row r = s * B + b, KV head), one warp per query head of the group (H / KV, <= 8). Keys
+// Draft attention: a block per (row r = s * B + b, KV head), one warp per query head of the group (H / KV, <= 8).
 
-// pos0[s] - (W - 1) + t, t < W - 1 + B, visible when >= 0 and > the query's position - W (and within the block: all
+// Keys pos0[s] - (W - 1) + t, t < W - 1 + B, are visible when >= 0 and > the query's position - W (all in the block).
 
-// are); scores q.K * scale; the head's sink logit as one more column; softmax; out fp16 [S * B, H * 128] = (p @
+// Scores q.K * scale, the head's sink logit as one more column, softmax; out fp16 [S * B, H * 128] = (p @ V).
 
-// V).to(fp16). Keys and values come through shared memory 32 at a time, read once for the group's heads; the softmax
+// Keys and values come through shared memory 32 at a time, read once for the group's heads.
 
-// runs online (max / sum rescaled per tile), so its rounding differs from torch's two-pass softmax.
+// The softmax runs online (max / sum rescaled per tile), so its rounding differs from torch's two-pass softmax.
 #define DR_TILE 32
 extern "C" __global__ void __launch_bounds__(256) dr_attn(const float* __restrict__ q, const __half* __restrict__ kc,
                                    const __half* __restrict__ vc, const float* __restrict__ sinks,
@@ -161,9 +163,9 @@ extern "C" __global__ void dr_take(const __half* __restrict__ x, __half* __restr
     for (int d = threadIdx.x; d < D; d += blockDim.x) out[(int64_t)r * D + d] = x[((int64_t)s * B + b) * D + d];
 }
 
-// logits[:, :vocab].argmax(-1) over the gathered head: recv [world, n, vr] fp32, row r = rank k's slice k * vr ..; the
+// logits[:, :vocab].argmax(-1) over the gathered head: recv [world, n, vr] fp32, rank k's slice from k * vr.
 
-// first index of the maximum (torch.argmax). out int32 [n].
+// The first index of the maximum (torch.argmax); out int32 [n].
 extern "C" __global__ void dr_argmax(const float* __restrict__ recv, int32_t* __restrict__ out, int world, int n,
                                      int vr, int vocab) {
     __shared__ float bv[256];

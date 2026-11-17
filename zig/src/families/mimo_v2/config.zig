@@ -159,7 +159,8 @@ pub fn layerCuts(full: Config, i: usize, rank: usize, world: usize, buf: *std.Ar
     }.f;
     try one(gpa, buf, out, "model.layers.{d}.self_attn.q_proj", .{i}, .n, r * hq * dq, (r + 1) * hq * dq, world);
     try one(gpa, buf, out, "model.layers.{d}.self_attn.k_proj", .{i}, .n, r * hk * dq, (r + 1) * hk * dq, world);
-    try one(gpa, buf, out, "model.layers.{d}.self_attn.v_proj", .{i}, .n, r * hk * dq, (r + 1) * hk * dq, world); // 192 a head: V + 64 pad
+    // 192 a head: V + 64 pad
+    try one(gpa, buf, out, "model.layers.{d}.self_attn.v_proj", .{i}, .n, r * hk * dq, (r + 1) * hk * dq, world);
     try one(gpa, buf, out, "model.layers.{d}.self_attn.o_proj", .{i}, .k, r * hq * dv, (r + 1) * hq * dv, world);
     if (full.moe[i]) {
         for (0..full.experts) |e| {
