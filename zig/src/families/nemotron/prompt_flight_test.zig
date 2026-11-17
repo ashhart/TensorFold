@@ -57,10 +57,34 @@ fn fill(f: *Fake, s: *lanes.Stream, cap: usize, decision: ?usize) !void {
         const n = workflow.rows(s, at, cap, decision, &next);
         try workflow.submit(f, s, .{ .rows = n });
         at += n;
+        workflow.advanced(s, at, n);
     }
 }
 
-test "Nemotron prefill widths: foreground work interrupts a warm pass with its queued flight still owned" {
+test "Nemotron prefill widths: arrival during the first warm chunk prevents a second chunk being queued" {
+    const Stop = struct {
+        f: *Fake,
+        fn ready(ptr: *anyopaque) bool {
+            const p: *@This() = @ptrCast(@alignCast(ptr));
+            return p.f.states[0].waits > 0;
+        }
+    };
+    const ids: [12]u32 = @splat(7);
+    var f: Fake = .{};
+    defer f.deinit();
+    var stop: Stop = .{ .f = &f };
+    var s = try lanes.Stream.init(a, .{ .id = "warm", .prompt = &ids, .max_new = 0, .yield_check = .{ .ptr = &stop, .check = Stop.ready } });
+    defer s.deinit(a);
+    try t.expectError(error.Yielded, fill(&f, &s, 8, null));
+    try t.expectEqual(@as(usize, 1), f.submitted);
+    try t.expectEqualSlices(u32, &.{8}, s.prefill_widths.items);
+    try t.expectEqual(@as(u32, 8), s.fill_at.load(.monotonic));
+    try t.expectEqual(@as(usize, 0), f.flights.items.len);
+    try t.expectEqual(@as(usize, 1), f.states[0].waits);
+    try t.expectEqual(@as(usize, 1), f.states[0].releases);
+}
+
+test "Nemotron prefill widths: a warm pass checks arrivals with its previous chunks landed and released" {
     const Stop = struct {
         f: *Fake,
         fn ready(ptr: *anyopaque) bool {
@@ -76,9 +100,8 @@ test "Nemotron prefill widths: foreground work interrupts a warm pass with its q
     defer s.deinit(a);
     try t.expectError(error.Yielded, fill(&f, &s, 8, null));
     try t.expectEqual(@as(usize, 2), f.submitted);
-    try t.expectEqualSlices(u32, &.{8}, s.prefill_widths.items);
-    try t.expectEqual(@as(usize, 1), f.flights.items.len);
-    try t.expect(f.flights.items[0].prompt.?.stream == &s);
+    try t.expectEqualSlices(u32, &.{ 8, 8 }, s.prefill_widths.items);
+    try t.expectEqual(@as(usize, 0), f.flights.items.len);
     try f.drain();
     try t.expectEqualSlices(u32, &.{ 8, 8 }, s.prefill_widths.items);
     for (f.states[0..2]) |cb| {
