@@ -8,6 +8,7 @@ const load = @import("cuda_prompt_load.zig");
 const batch = @import("cuda_batch.zig");
 const prompt = @import("cuda_prompt.zig");
 const gdn = @import("cuda_gdn.zig");
+const engine_widths = @import("cuda_widths.zig");
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -267,7 +268,14 @@ pub const Head = struct {
     draw_batch: @import("cuda_draw_batch.zig").Batch,
     topk_fn: cuda.Function, // fn_row_topk: a row's top_k candidates as drawRow ranks them (cuda_mtp_draw.zig)
 
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, dir: []const u8) !*Head {
+    pub fn init(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        driver: *cuda.Driver,
+        stream: *cuda.Stream,
+        dir: []const u8,
+        main: engine_widths.Widths,
+    ) !*Head {
         const batch_on = try @import("cuda_draw_batch.zig").enabled();
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
         const h = try gpa.create(Head);
@@ -301,7 +309,7 @@ pub const Head = struct {
         store.dropStaging(); // the head's experts are on the device
         errdefer h.layer.free(gpa);
         // the MTP layer: the main layers' top-k (config.json gives it none) and the shared width its own tensor has
-        if (h.layer.native_experts) |moe| if (@import("cuda_widths.zig").mtp(try @import("cuda_config.zig").widthsIn(gpa, io, dir), moe.shared_width) == null) {
+        if (h.layer.native_experts) |moe| if (engine_widths.mtp(main, moe.shared_width) == null) {
             std.log.err("flashnext: mtp.layers.0.mlp.shared_expert.gate_proj has {d} rows; neither the main layers' width nor the routed width", .{moe.shared_width});
             return error.UnexpectedTensor;
         };
