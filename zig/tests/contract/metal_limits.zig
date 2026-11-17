@@ -47,6 +47,7 @@ pub fn requireMapped(d: limits.MetalLaunch) !void {
 pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
     if (std.mem.eql(u8, d.name, "metal inkling2 vision ik2_gemm_bf16_nt_rows")) return !device.tensorUnits();
     if (std.mem.startsWith(u8, d.name, "qwen27 prompt ")) return device.tensorUnits() == (std.mem.indexOf(u8, d.name, " m5 ") != null);
+    if (std.mem.startsWith(u8, d.name, "q27 stack qk ")) return @import("metal_support.zig").tensor(device.tensorUnits(), d.name);
     if (std.mem.startsWith(u8, d.name, "lfm2 masked prompt "))
         return @import("metal_support.zig").tensor(tf.lfm2_moe.source.optionalAvailable(device), d.name);
     if (std.mem.startsWith(u8, d.name, "hy4 units "))
@@ -60,6 +61,11 @@ pub fn supported(device: mtl.Device, d: limits.MetalLaunch) bool {
 
 fn resolve(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch, comptime assemble: bool) !Launch {
     const fun = d.name[std.mem.lastIndexOfScalar(u8, d.name, ' ').? + 1 ..];
+    if (std.mem.startsWith(u8, d.name, "q27 stack ")) {
+        if (!assemble) return undefined;
+        const body = try @import("metal_q27_limits.zig").source(a, d.name);
+        return .{ .decl = d, .function = fun, .here = body, .pre_m5 = if (d.offline) body else "" };
+    }
     var text: []const u8 = undefined;
     var head: []const u8 = "";
     var frags = false;

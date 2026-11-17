@@ -46,6 +46,7 @@ Q27_SPECIALIZE
 }
 
 // The same activation and sums with 16 rows of a group in a threadgroup: one simdgroup runs their sums side by side.
+[[max_total_threads_per_threadgroup(256)]]
 [[kernel]] void q27_mlp_rows(
   const device vec<bfloat, 4>* FUSED [[buffer(0)]],
   const device int32_t* dims [[buffer(2)]],
