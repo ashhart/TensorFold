@@ -38,6 +38,8 @@ pub const Cx = struct {
     template_fields: @import("json").Value = .null,
     /// Set by a route that has already planned the same body (its first plan writes the request log).
     skip_request_log: bool = false,
+    /// The request prompt-cache salt, retained by server-created compaction requests; 0: none.
+    cache_salt: u64 = 0,
 
     pub fn fail(cx: *Cx, kind: Kind, comptime fmt: []const u8, args: anytype) Refused {
         cx.kind = kind;

@@ -63,6 +63,7 @@ pub const Turn = struct {
     research: bool,
     client_tools: bool,
     user_key: u64,
+    salt: u64 = 0, // the request's cache salt: its memory keys and the planner's own request keep apart under it
     today: []const u8,
     hidden: std.ArrayList(Value) = .empty,
     sources: std.ArrayList([]const u8) = .empty,
@@ -135,7 +136,7 @@ pub const Turn = struct {
         @memcpy(list[0 .. list.len - 1], input.messages.array);
         list[list.len - 1] = message;
         const text = json.stringify(a, .{ .array = t.hidden.items }, .{ .ascii = false }) catch return;
-        const key = memory.replyKey(a, list, list.len - 1) catch return;
+        const key = (memory.replyKey(a, list, list.len - 1) catch return) ^ t.salt;
         t.state.memory.put(key, text);
     }
 
@@ -179,7 +180,7 @@ fn utility(a: Allocator, input: *const chat.Input) bool {
 }
 
 fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat.Input) !*Turn {
-    const spliced = try memory.splice(a, &state.memory, input.messages.array);
+    const spliced = try memory.splice(a, &state.memory, input.messages.array, input.cache_salt);
     var first: ?[]const u8 = null;
     var latest: []const u8 = "";
     for (spliced) |m| if (roleIs(m, "user")) {
@@ -198,7 +199,8 @@ fn start(state: *State, srv: *Server, a: Allocator, id: []const u8, input: *chat
         .goal = latest[0..@import("html.zig").cutAt(latest, 4000)], // the cap does not split a character
         .research = fresh_turn and latest_task.frontier and std.mem.trim(u8, latest, " \t\r\n").len >= 12,
         .client_tools = input.tools.len > 0,
-        .user_key = try memory.userKey(a, spliced),
+        .user_key = try memory.userKey(a, spliced) ^ input.cache_salt,
+        .salt = input.cache_salt,
         .today = try today(a, srv.io),
     };
     for (spliced) |m| if (!roleIs(m, "assistant")) try t.seen.addFrom(a, try memory.text(a, m));

@@ -77,6 +77,7 @@ pub const Config = struct {
     silence_guard: bool = false,
     cfg: ?@import("drama_cfg.zig").Options = null,
     prompt_seed: bool = false, // --prompt-seed: historical prompt-keyed sampling when a request omits its seed
+    cache_salt_per_key: bool = false, // --cache-salt-per-key: the matched API key salts each request's prompt cache
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
     journal: ?*@import("request_journal.zig").Journal = null, // serve owns TENSORFOLD_REQUEST_JOURNAL
@@ -160,7 +161,7 @@ pub const Server = struct {
     store: responses.Store,
     background_jobs: @import("responses_background.zig").Manager = .{}, // background: true responses still running
     ws_cache_bytes: std.atomic.Value(usize) = .init(0), // Responses socket cache bytes (ws_cache.zig)
-    tool_ids: @import("ids.zig").Key, // every tool-call id's key: the config's, else this server's own
+    tool_ids: @import("ids.zig").Key, // every tool-call id's and cache salt's key: the config's, else this server's own
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
