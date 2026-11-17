@@ -259,6 +259,15 @@ the bf16 inputs widened to the fp32 rows these kernels read. On an RTX 5090 (dri
 
     (filtered) SUMMARY 4 kernels: 4 pass gates 1-4, 0 fail, 0 known findings; 0 controls: 0 red as planted, 0 missed; 0 limit problems
 
+The whole run on the same card and images (`tf-cuda-test kernel-contract`, 83 minutes of gates) ended with
+
+    SUMMARY 647 kernels: 647 pass gates 1-4, 0 fail, 8 known findings; 418 controls: 418 red as planted, 0 missed; 186 limit problems
+
+and exit code 1 for the limit problems. None of the 186 names a ZONOS3 launch: all 40 of the family's live launch
+checks pass, and the three live failures are `flashnext_mtp fn_row_topk` and `exl3_experts tf_exl3_prompt_gu` and
+`tf_exl3_prompt_down`, whose records read 0. The same run was not made on the base, so this page does not claim the
+186 are the base's.
+
 The layer norm's test adds a term to its bound: the kernel scales in fp32 and then adds the bias, so the roundings
 before the bias are a fraction of the scaled value and not of the sum, which gate 4's rows make cancel.
 
