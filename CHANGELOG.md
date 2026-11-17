@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## Unreleased
 
+- App: the built-in agent's `web_search` and `web_fetch` accept `provider: "keenable"`, an opt-in Keenable provider with no account or key; only the query or URL goes to Keenable, and the defaults are unchanged (#3637, from #2752). Thanks to @ilya-bogin-keenable.
+
 - Nemotron on Metal: row projections over windows of 4 or more rows run 8 rows at a time, then 4, 2 and 1, so each weight code is unpacked once for up to eight rows; every row's sum keeps its order, bit-equal to one row alone (#3129).
 
 - Flash Next on Metal (M1 through M4): the scale index is now the default for 4-bit experts in groups of 32, and `TF_FLASHNEXT_SCALE_INDEX=0` turns it off. Prompt passes and grouped decode windows read each group's scale and bias through the index too, and the routed experts' stored scales and biases are released once indexed; every kernel gets the same values, so replies keep their tokens. On an M3 Ultra with the MLX 4-bit checkpoint, memory in use once loaded falls from 129.6 to 122.5 GiB, drafted decode on one stream is 2.0% to 4.2% faster (prose 138.6 to 142.0 tok/s, a copy-heavy edit 282.0 to 293.8), four streams are 2.6% faster (203.1 to 208.3 tok/s) and a cold prompt's first token arrives about 1% sooner; load takes about 0.7 s longer (#2805, part of #2751).
